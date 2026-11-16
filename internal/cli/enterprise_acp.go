@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
@@ -95,7 +96,7 @@ func pinEnterpriseACPAdministratorEnv(cmd *cobra.Command) error {
 	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 	return pinManagedAdministratorEnvironment("enterprise acp", func() string {
 		return windowsManagedStandardUserViewAnswer("the ACP enrollments",
-			"enterprise acp "+cmd.Name()+" --user <name> --client <client> --agent <agent> --profile <profile>")
+			"enterprise", "acp", cmd.Name(), "--user", "<name>", "--client", "<client>", "--agent", "<agent>", "--profile", "<profile>")
 	})
 }
 
@@ -559,12 +560,66 @@ func enterpriseACPTargetCredentials(enrollment enterpriseACPEnrollment) enterpri
 	}
 }
 
-// enterpriseACPQuotePath formats a path for the shell shown to the user.
-func enterpriseACPQuotePath(path string, windows bool) string {
+// enterpriseACPPathFlags are the enterprise acp setup flags whose value is
+// a path.
+var enterpriseACPPathFlags = map[string]bool{"--data-dir": true, "--guard-binary": true, "--agent-binary": true}
+
+// enterpriseACPCommandLine is executable run with args as the user types it.
+// On Windows it is a PowerShell call from the managed renderer
+// (managed.WindowsCommandLine): the path and every argument that is not a
+// plain word are literals, the typographic quotes doubled too, and the text
+// that hands it on says PowerShell (enterpriseACPRunIn). This command built
+// `& '<path>' ...` by hand, with --client, --agent and --profile unquoted
+// (g072 review 2 M4). Elsewhere the executable and each path are POSIX
+// single-quoted, as before, and so is any other argument that is not a
+// plain word.
+func enterpriseACPCommandLine(windows bool, executable string, args ...string) string {
 	if windows {
-		return "'" + strings.ReplaceAll(path, "'", "''") + "'"
+		return managed.WindowsCommandLine(executable, args...)
 	}
-	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
+	words := []string{enterpriseACPPOSIXQuote(executable)}
+	for i, arg := range args {
+		if i > 0 && enterpriseACPPathFlags[args[i-1]] || !enterpriseACPPOSIXPlain(arg) {
+			arg = enterpriseACPPOSIXQuote(arg)
+		}
+		words = append(words, arg)
+	}
+	return strings.Join(words, " ")
+}
+
+// enterpriseACPPOSIXQuote is value as one single-quoted POSIX shell word.
+func enterpriseACPPOSIXQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+// enterpriseACPPOSIXPlain reports an argument a POSIX shell passes as typed.
+func enterpriseACPPOSIXPlain(arg string) bool {
+	return arg != "" && strings.IndexFunc(arg, enterpriseACPPOSIXSyntaxRune) < 0
+}
+
+// enterpriseACPPOSIXSyntaxRune reports a character a POSIX shell may read
+// as syntax: anything but a letter, a digit or one of - _ . : / = + , @ %.
+func enterpriseACPPOSIXSyntaxRune(r rune) bool {
+	return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("-_.:/=+,@%", r)
+}
+
+// enterpriseACPRunInstruction is "Run", or "In PowerShell, run" for a
+// command from enterpriseACPCommandLine on Windows.
+func enterpriseACPRunInstruction(windows bool) string {
+	if windows {
+		return "In PowerShell, run"
+	}
+	return "Run"
+}
+
+// enterpriseACPRunIn is where the user runs an enterpriseACPCommandLine:
+// "in PowerShell, " on Windows, where cmd.exe reads the & as a command
+// separator, and "" elsewhere.
+func enterpriseACPRunIn(windows bool) string {
+	if windows {
+		return "in PowerShell, "
+	}
+	return ""
 }
 
 // enterpriseACPCentralNote says why the central policy no longer admits an
@@ -624,7 +679,11 @@ func enterpriseACPProfileMode(profile string) string {
 // DefenseClaw command to run (GAP-0254). Secure Client has no setup
 // subcommand and reports the step of main (issue #1092).
 func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath string) string {
+	windows := runtime.GOOS == "windows"
 	executable, guard := managedHostGatewayCommand(), "defenseclaw-acp"
+	if windows {
+		executable = managedWindowsAdminCLI()
+	}
 	if path, err := os.Executable(); err == nil {
 		executable = path
 		guard = filepath.Join(filepath.Dir(path), "defenseclaw-acp"+filepath.Ext(path))
@@ -639,15 +698,12 @@ func enterpriseACPSetupCommand(enrollment enterpriseACPEnrollment, tokenPath str
 			enrollment.client, enrollment.agent, enrollment.profile, activate, enrollment.dataDir, tokenPath, guard,
 		)
 	}
-	quote := func(path string) string { return enterpriseACPQuotePath(path, runtime.GOOS == "windows") }
-	invoke := quote(executable)
-	if runtime.GOOS == "windows" {
-		invoke = "& " + invoke
+	args := []string{"enterprise", "acp", "setup", "--client", enrollment.client, "--agent", enrollment.agent, "--profile", enrollment.profile}
+	if activate != "" {
+		args = append(args, "--activate")
 	}
-	return fmt.Sprintf(
-		"%s enterprise acp setup --client %s --agent %s --profile %s%s --data-dir %s --api-port %d --guard-binary %s",
-		invoke, enrollment.client, enrollment.agent, enrollment.profile, activate, quote(enrollment.dataDir), cfg.Gateway.APIPort, quote(guard),
-	)
+	args = append(args, "--data-dir", enrollment.dataDir, "--api-port", strconv.Itoa(cfg.Gateway.APIPort), "--guard-binary", guard)
+	return enterpriseACPCommandLine(windows, executable, args...)
 }
 
 func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
@@ -718,10 +774,11 @@ func runEnterpriseACPVerify(cmd *cobra.Command, _ []string) error {
 		payload["setup_note"] = "the user has run setup (the contract lock is present)"
 		switch {
 		case !setupDone && setupMismatch != "":
-			payload["setup_note"] = "the editor entry does not match this enrollment (" + setupMismatch + "); as that user, run: " +
-				enterpriseACPSetupCommand(enrollment, tokenPath)
+			payload["setup_note"] = "the editor entry does not match this enrollment (" + setupMismatch + "); as that user, " +
+				enterpriseACPRunIn(runtime.GOOS == "windows") + "run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
 		case !setupDone:
-			payload["setup_note"] = "the user has not run setup yet; as that user, run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
+			payload["setup_note"] = "the user has not run setup yet; as that user, " + enterpriseACPRunIn(runtime.GOOS == "windows") +
+				"run: " + enterpriseACPSetupCommand(enrollment, tokenPath)
 		}
 		if note := enterpriseACPCentralNote(enrollment.client, enrollment.agent, enrollment.profile); note != "" {
 			payload["central_note"] = note

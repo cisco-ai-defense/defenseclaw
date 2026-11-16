@@ -31,7 +31,7 @@ func TestWindowsBundleSessionsCountOnlyEnabledConnectors(t *testing.T) {
 		[]byte(`{"activated_at":"`+activated.Format(time.RFC3339Nano)+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,7 +8,7 @@ IDs live only in `reference/checklist.md`. These rows add detail and carry no ID
 
 | Rule | Why | How to check | Evidence |
 |---|---|---|---|
-| Hooks and guardrail paths fail closed by default. Fail mode comes from installed policy; the agent environment cannot change it. Authenticated Secure Client legacy delivery is unchanged. A new failure mode resolves through the effective fail mode. | A path that silently opens is a policy bypass. | `go test ./internal/gateway/... -run FailMode` | `docs-site/content/docs/reference/fail-modes.mdx`, `internal/envvars/registry.json` |
+| Hook and guardrail outage behavior follows M-DEP-3 and the fail-mode table. Fail mode comes from installed policy or an explicit saved mode; the agent environment cannot change it. A new failure mode resolves through the effective fail mode. | A path that silently opens is a policy bypass. | `go test ./internal/gateway/... -run FailMode` | `docs-site/content/docs/reference/fail-modes.mdx`, `internal/envvars/registry.json` |
 | Secrets are held by reference (env var name, credential name) and stored in the owner-private key file (mode 0600, owner DACL on Windows) via the keys registry. | Config, logs and backups must not carry keys. | `pytest cli/tests/test_secure_write_permissions.py` | `internal/safefile`, `docs-site/content/docs/reference/keys.mdx` |
 | Privileged code never follows a user-controlled path: use no-follow, regular-file, size-bounded readers and bounded home roots. | A symlink or junction in a home directory becomes a privileged read or write. | `go test ./internal/enterprisehooks -run 'Home\|Bounded'` | `internal/enterprisehooks/home_bounded_unix.go` |
 | Identity comes from the kernel or OS, never from headers, payloads or env. | See `reference/identity-policy.md`. | `go test ./internal/gateway -run GuardrailProfile` | `internal/gateway/guardrail_profile.go` |
@@ -65,7 +65,7 @@ IDs live only in `reference/checklist.md`. These rows add detail and carry no ID
 
 ## Common mistakes
 
-- Removing a bridge for 0.8.x before the supported upgrade window ends.
+- Extending the legacy 0.8.x bridge, or removing it inside an unrelated change. Upgrades are supported from 1.0.0 (M-PKG-1); remove the bridge in its own PR, with the reason.
 - Silencing an audit finding instead of raising the floor.
 - Adding a toolchain directive to `go.mod`.
 - Leaving a dead key because "it is harmless".

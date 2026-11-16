@@ -22,20 +22,20 @@ import (
 // returns what it did not publish by connector and account; a folder that
 // could not be written names its connector.
 func TestPublishEnterpriseWindowsMCPServersNamesWhatItDidNotPublish(t *testing.T) {
-	previousClaude, previousKiro := enterpriseWindowsClaudeMCPSpoolWriter, enterpriseWindowsKiroMCPSpoolWriter
-	t.Cleanup(func() {
-		enterpriseWindowsClaudeMCPSpoolWriter, enterpriseWindowsKiroMCPSpoolWriter = previousClaude, previousKiro
-	})
+	previous := enterpriseWindowsMCPSpoolWriter
+	t.Cleanup(func() { enterpriseWindowsMCPSpoolWriter = previous })
+	answers := map[string]error{}
+	published := map[string]bool{}
+	enterpriseWindowsMCPSpoolWriter = func(_, connector string, _ enterprisehooks.Manifest, _ func(string) error, _ func(string, ...any)) error {
+		published[connector] = true
+		return answers[connector]
+	}
 	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{})
 	cfg.DataDir = t.TempDir()
 	alice := &enterprisehooks.MCPSpoolRecordError{Connector: "claudecode", SID: "S-1-5-21-1-1001", Home: `C:\Users\alice`,
 		Err: errors.New("S-1-5-21-1-1001.json not updated, previous record withdrawn: there is not enough space on the disk")}
-	type writer = func(string, enterprisehooks.Manifest, func(string) error, func(string, ...any)) error
-	answer := func(err error) writer {
-		return func(string, enterprisehooks.Manifest, func(string) error, func(string, ...any)) error { return err }
-	}
 
-	enterpriseWindowsClaudeMCPSpoolWriter, enterpriseWindowsKiroMCPSpoolWriter = answer(errors.Join(nil, alice)), answer(nil)
+	answers["claudecode"] = errors.Join(nil, alice)
 	var stderr bytes.Buffer
 	err := publishEnterpriseWindowsMCPServers(cfg, enterprisehooks.Manifest{}, &stderr)
 	var incomplete *mcpasuser.RefreshIncomplete
@@ -51,15 +51,25 @@ func TestPublishEnterpriseWindowsMCPServersNamesWhatItDidNotPublish(t *testing.T
 
 	// A Kiro folder that cannot be written refuses every Kiro call, and
 	// Claude Code stays decided per record.
-	enterpriseWindowsKiroMCPSpoolWriter = answer(errors.New("create kiro mcp spool: access denied"))
+	answers["kiro"] = errors.New("create kiro mcp spool: access denied")
 	err = publishEnterpriseWindowsMCPServers(cfg, enterprisehooks.Manifest{}, &stderr)
 	if !errors.As(err, &incomplete) || len(incomplete.Connectors) != 1 || incomplete.Connectors[0] != "kiro" ||
 		!incomplete.Refuses("kiro", `C:\Users\bob`) || incomplete.Refuses("claudecode", `C:\Users\bob`) {
 		t.Fatalf("publish = %+v, want every Kiro call refused and only alice's Claude Code call", err)
 	}
 
-	enterpriseWindowsClaudeMCPSpoolWriter, enterpriseWindowsKiroMCPSpoolWriter = answer(nil), answer(nil)
+	answers = map[string]error{}
 	if err := publishEnterpriseWindowsMCPServers(cfg, enterprisehooks.Manifest{}, &stderr); err != nil {
 		t.Fatalf("complete publication = %v", err)
+	}
+	// Every connector whose enrolled users the gateway knows only from a
+	// record is published, Codex included (GAP-0686).
+	for _, spool := range mcpasuser.PublishedConnectors() {
+		if !published[spool.Connector] {
+			t.Fatalf("%s MCP servers were not published: %v", spool.Connector, published)
+		}
+	}
+	if !published["codex"] {
+		t.Fatalf("Codex MCP servers were not published: %v", published)
 	}
 }

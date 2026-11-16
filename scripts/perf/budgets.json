@@ -18,8 +18,8 @@
     "source": "Claude Code PreToolUse e2e, 1.0.4, n=40 (TST-0006, perf/live/hookbench2.out)"
    },
    "hook.claudecode.idle.p95_ms": {
-    "budget": 94.4,
-    "source": "same"
+    "budget": 188.8,
+    "source": "2x the Claude Code PreToolUse e2e p95 of 94.4 ms, 1.0.4, n=40 (TST-0006, perf/live/hookbench2.out): ubuntu-latest reads 52-57 ms at the normal level but 124-182 ms on slow pools (1.0.9 CI), over the old 113.3 ms limit. The p50 and burst budgets are unchanged, so a real regression still shows in the p50."
    },
    "hook.claudecode.idle.max_ms": {
     "budget": 97.7,
@@ -51,8 +51,8 @@
     "source": "Codex PreToolUse e2e, 1.0.4, n=40 (TST-0006, hookbench2.out)"
    },
    "hook.codex.idle.p95_ms": {
-    "budget": 109.1,
-    "source": "same"
+    "budget": 218.2,
+    "source": "2x the Codex PreToolUse e2e p95 of 109.1 ms, 1.0.4, n=40 (TST-0006, hookbench2.out), widened with the Claude Code idle p95 for the same slow hosted pools"
    },
    "hook.codex.idle.max_ms": {
     "budget": 112.8,

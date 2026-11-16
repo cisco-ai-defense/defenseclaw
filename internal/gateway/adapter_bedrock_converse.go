@@ -234,7 +234,7 @@ func launderBedrockConverseHistory(raw json.RawMessage) (json.RawMessage, int, e
 					break
 				}
 			}
-			if strings.HasPrefix(firstText, defenseClawBlockBanner) {
+			if isDefenseClawBlockTurn(firstText) {
 				stripped++
 				continue
 			}

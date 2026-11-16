@@ -24,7 +24,7 @@ func VerifyPerUserConnectedTuple(local, remote string) error {
 	if err != nil {
 		return err
 	}
-	return verifyPerUserConnectedTuple(client, server)
+	return classifyUnaccepted(context.Background(), verifyPerUserConnectedTuple(client, server), server)
 }
 
 // VerifyManagedConnectedTuple checks a Python CLI's already-connected socket
@@ -116,7 +116,18 @@ var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being ch
 // which process holds it (perUserRestartWindowProof, rel-1-0-6 GAP-0295).
 type perUserPeerCheck struct {
 	pending atomic.Bool
-	ends    atomic.Pointer[perUserConnEnds]
+	// deciding is true while verifyConnected owes a decision on a connection
+	// that was not accepted: the owner scan of its listener. connectBy gives
+	// that decision ownerScanGrace past the connect deadline.
+	deciding atomic.Bool
+	// abandoned is set when ownerScanGrace ran out with the scan unfinished.
+	abandoned atomic.Bool
+	// by is the connect deadline of the try (connectBy); zero when none.
+	by   time.Time
+	ends atomic.Pointer[perUserConnEnds]
+	// owner is the sole holder of the accepted socket observed while the
+	// verified connection was still open during a fresh gateway start.
+	owner atomic.Pointer[perUserPeerProcess] //nolint:unused // read and written only by the Linux restart-window proof (gateway_fresh_start_linux.go)
 }
 
 // perUserConnEnds is the client and server address of one proven per-user
@@ -172,6 +183,22 @@ const PerUserPostRestartNoAnswerExit = 10
 // start lock was held. The shell reads it as a restart outage before a later
 // socket-table or gateway.pid look can race the new listener (GAP-0497).
 const PerUserPostRestartOutageExit = 11
+
+// PerUserPostLateOrdinaryExit is the exit status of `hook-post` for a call
+// that got no answer from its verified gateway before the deadline (like
+// PerUserPostNoAnswerExit) and that plainly names nothing a protected file
+// could be reached through (hookpaths.LateOrdinaryCall): a gateway that is up
+// but slow under a burst or a long operand list (GAP-0518). The shell hooks
+// read it as the outage status 7, so the account's outage mode decides: open
+// with the visible warning in the default and permissive tiers, closed in
+// strict and managed ones. The warning names a running gateway that did not
+// answer, not a restart. Every other no-answer keeps PerUserPostNoAnswerExit.
+//
+// It is also the status of a connection that waited unaccepted in the queue of
+// this account's recorded gateway (PerUserPostListenerUnanswered: stopped or
+// frozen, nothing sent) for any event but a Claude Code or Codex tool call
+// that does not plainly name nothing protected, which keeps status 9.
+const PerUserPostLateOrdinaryExit = 12
 
 // PerUserPostNoAnswer reports whether err, from PostPerUserHook, is a request
 // that ended at its deadline with no status: not an outage the transport
@@ -295,8 +322,17 @@ func verifiedPerUserHTTPClient(
 				if check != nil {
 					check.pending.Store(true)
 				}
-				if err := verify(conn); err != nil {
+				if err := verifyConnected(ctx, check, conn, verify); err != nil {
 					_ = conn.Close()
+					if errors.Is(err, errPerUserListenerUnanswered) {
+						// This account's recorded gateway holds the listener
+						// and took no accept: its owner is proven, so it is
+						// no foreign peer.
+						if check != nil {
+							check.pending.Store(false)
+						}
+						return nil, err
+					}
 					return nil, fmt.Errorf("%w: %w", errPerUserPeerUnverified, err)
 				}
 				if check != nil {

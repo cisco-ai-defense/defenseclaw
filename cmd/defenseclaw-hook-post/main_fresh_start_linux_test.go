@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
@@ -34,7 +35,7 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 	addr := listener.Addr().String()
 	_ = listener.Close()
 	cmd := startGAP0295FreshServer(t, addr, freshUnansweredHelperEnv)
-	identity, ok := procidentity.Of(cmd.Process.Pid)
+	identity, ok := procidentity.Recorded(cmd.Process.Pid)
 	if !ok {
 		t.Fatal("fresh listener identity unavailable")
 	}
@@ -42,9 +43,11 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clock, start := freshHookPostClock(t, cmd.Process.Pid)
+	defer requireProofBudgets(t, clock)
 	record, err := json.Marshal(map[string]any{
 		"pid": cmd.Process.Pid, "executable": executable, "data_dir": dir,
-		"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": identity,
+		"start_time": start.Add(-time.Second).Unix(), "start_identity": identity,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -53,6 +56,7 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 	if err := os.WriteFile(pidPath, record, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	dateGatewayRecord(t, pidPath, start)
 	t.Setenv(hookPostDataDirEnv, dir)
 	t.Setenv(hookPostDeadlineEnv, "800")
 	frame := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Read\"}\x00Content-Type\x00application/json\x00")
@@ -72,8 +76,13 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 	if err := os.WriteFile(pidPath, badRecord, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := runMain(args, bytes.NewReader(frame), io.Discard, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
+	dateGatewayRecord(t, pidPath, start)
+	var proof bytes.Buffer
+	if got := runMain(args, bytes.NewReader(frame), &proof, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
 		t.Fatalf("unverified gateway no-answer exit = %d, want closed", got)
+	}
+	if got := proof.String(); got != "DCPOSTPROOF1:not_fresh" {
+		t.Fatalf("unverified gateway proof result = %q, want not_fresh", got)
 	}
 }
 
@@ -143,7 +152,7 @@ func checkGAP0295FirstAnswerEndsFreshWindow(t *testing.T, publishBeforeAnswer bo
 	addr := free.Addr().String()
 	_ = free.Close()
 	cmd := startGAP0295FreshServer(t, addr, freshAnsweredHelperEnv)
-	identity, ok := procidentity.Of(cmd.Process.Pid)
+	identity, ok := procidentity.Recorded(cmd.Process.Pid)
 	if !ok {
 		t.Fatal("identity unavailable")
 	}
@@ -151,18 +160,22 @@ func checkGAP0295FirstAnswerEndsFreshWindow(t *testing.T, publishBeforeAnswer bo
 	if err != nil {
 		t.Fatal(err)
 	}
+	clock, start := freshHookPostClock(t, cmd.Process.Pid)
+	defer requireProofBudgets(t, clock)
 	record, err := json.Marshal(map[string]any{
 		"pid": cmd.Process.Pid, "executable": executable, "data_dir": dir,
-		"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": identity,
+		"start_time": start.Add(-time.Second).Unix(), "start_identity": identity,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeRecord := func() {
 		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, "gateway.pid"), record, 0o600); err != nil {
+		pidPath := filepath.Join(dir, "gateway.pid")
+		if err := os.WriteFile(pidPath, record, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		dateGatewayRecord(t, pidPath, start)
 	}
 	if publishBeforeAnswer {
 		writeRecord()
@@ -179,7 +192,35 @@ func checkGAP0295FirstAnswerEndsFreshWindow(t *testing.T, publishBeforeAnswer bo
 		writeRecord()
 	}
 	second := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf ~/.defenseclaw\"}}\x00Content-Type\x00application/json\x00")
-	if got := runMain(args, bytes.NewReader(second), io.Discard, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
+	var proof bytes.Buffer
+	if got := runMain(args, bytes.NewReader(second), &proof, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
 		t.Fatalf("post-answer no-answer exit = %d, want closed", got)
+	}
+	if got := proof.String(); got != "DCPOSTPROOF1:answered_before" {
+		t.Fatalf("post-answer proof result = %q, want answered_before", got)
+	}
+}
+
+// freshHookPostClock installs the proof clock for a test that runs hook-post
+// against a real gateway process, standing one second after the start of
+// that process: the 12 s fresh-gateway window is read on this clock, so the
+// speed of the host cannot age the gateway. It returns the process start.
+func freshHookPostClock(t *testing.T, pid int) (*proofclocktest.Clock, time.Time) {
+	t.Helper()
+	start, ok := procidentity.StartTime(pid)
+	if !ok {
+		t.Fatal("fresh listener start time unavailable")
+	}
+	clock := proofclocktest.Install(t)
+	clock.Set(start.Add(time.Second))
+	return clock, start
+}
+
+// dateGatewayRecord sets the modification time of the gateway record that the
+// native hook reads for the recency of the start.
+func dateGatewayRecord(t *testing.T, path string, at time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
 	}
 }

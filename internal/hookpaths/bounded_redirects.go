@@ -207,7 +207,7 @@ func boundedWord(word *syntax.Word, home, name, value string) (string, bool) {
 	if shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron("HOME="+home, name+"="+value)}, word)
+	fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME="+home, name+"="+value)}, word)
 	if err != nil || len(fields) != 1 {
 		return "", false
 	}

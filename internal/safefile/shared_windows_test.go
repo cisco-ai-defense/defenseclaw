@@ -113,7 +113,8 @@ func sharedWriterForTest(beforeSwap func(string)) SharedFileWriter {
 				metadata = &base.Metadata
 			}
 			published, swapped, err := PublishSharedFile(SharedPublish{
-				Base: base, CompareMetadata: true, Data: edit.Data, Metadata: metadata,
+				Class: PublishSharedWithExternalWriters,
+				Base:  base, CompareMetadata: true, Data: edit.Data, Metadata: metadata,
 				Protect: protectForTest, Limit: 1 << 20, TempPattern: ".shared-*.tmp", BeforeSwap: beforeSwap,
 			})
 			return SharedWriteResult{Published: swapped, Left: SharedFile{Path: base.Path, Exists: true, Data: edit.Data, Metadata: published}}, err
@@ -151,7 +152,7 @@ func TestCompareAndSwapFileRefusesChangedMetadata(t *testing.T) {
 				t.Fatal(err)
 			}
 			source := writeSwapSourceForTest(t, dir, "new")
-			if _, err := CompareAndSwapFile(source, path, SwapExpectation{Exists: true, Data: []byte("old"), Metadata: &read}, 16, nil); !errors.Is(err, ErrSwapRaced) {
+			if _, err := compareAndSwapOwnedForTest(source, path, SwapExpectation{Exists: true, Data: []byte("old"), Metadata: &read}, 16, nil); !errors.Is(err, ErrSwapRaced) {
 				t.Fatalf("swap over changed metadata: %v", err)
 			}
 			if _, err := RemoveFileIfUnchanged(path, SwapExpectation{Data: []byte("old"), Metadata: &read}, 16, nil); !errors.Is(err, ErrSwapRaced) {
@@ -160,7 +161,7 @@ func TestCompareAndSwapFileRefusesChangedMetadata(t *testing.T) {
 			if now, err := ReadPathMetadata(path); err != nil || now != changed {
 				t.Fatalf("the changed file was not kept: %+v err=%v", now, err)
 			}
-			if result, err := CompareAndSwapFile(source, path, SwapExpectation{Exists: true, Data: []byte("old"), Metadata: &changed}, 16, nil); err != nil || !result.Swapped {
+			if result, err := compareAndSwapOwnedForTest(source, path, SwapExpectation{Exists: true, Data: []byte("old"), Metadata: &changed}, 16, nil); err != nil || !result.Swapped {
 				t.Fatalf("swap over the expected metadata: %+v err=%v", result, err)
 			}
 		})
@@ -184,7 +185,8 @@ func TestPublishSharedFileKeepsAnAccessListChangedAtTheSwap(t *testing.T) {
 	swapBeforeReplace = func(string) { grantBackupOperatorsReadForTest(t, path) }
 	t.Cleanup(func() { swapBeforeReplace = previous })
 	published, swapped, err := PublishSharedFile(SharedPublish{
-		Base: base, CompareMetadata: true, Data: []byte("new"), Metadata: &base.Metadata,
+		Class: PublishSharedWithExternalWriters,
+		Base:  base, CompareMetadata: true, Data: []byte("new"), Metadata: &base.Metadata,
 		Protect: protectForTest, Limit: 16, TempPattern: ".shared-*.tmp",
 	})
 	if err != nil || !swapped {

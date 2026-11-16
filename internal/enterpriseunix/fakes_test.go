@@ -459,6 +459,14 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		t.Fatal(err)
 	}
 	h := &testHost{t: t, runner: &fakeRunner{versions: map[string]string{}}, healthy: true, owners: map[string][2]int{}}
+	// The fresh account-record proof reads the account database of the machine
+	// running the test, whatever the fake host claims to be: on a macOS runner
+	// it answered "gone" for fixture names and turned every missing-account
+	// miss into a confirmed removal. A fake host proves nothing unless a test
+	// replaces this after newTestHost.
+	previousRecordProof := guardianFreshAccountRecordGone
+	guardianFreshAccountRecordGone = func(context.Context, string) bool { return false }
+	t.Cleanup(func() { guardianFreshAccountRecordGone = previousRecordProof })
 	if goos == "darwin" {
 		// A fake macOS host never reads a real process's argv: the fake ps
 		// lists made-up PIDs, and kern.procargs2 of a live PID with the same
@@ -468,6 +476,11 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		darwinProcessArgv = func(int) ([]string, error) { return nil, errors.New("fake macOS host: no process argv") }
 		t.Cleanup(func() { darwinProcessArgv = previous })
 	}
+	// A fake host never asks the real directory whether an account is gone:
+	// on a macOS runner it answered "gone" for every made-up name.
+	previousGone := guardianAccountConfirmedGone
+	guardianAccountConfirmedGone = func(string, int) bool { return false }
+	t.Cleanup(func() { guardianAccountConfirmedGone = previousGone })
 	env := &Env{
 		GOOS:           goos,
 		Root:           t.TempDir(),
@@ -480,7 +493,10 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		ReadyTimeout:   200 * time.Millisecond,
 		PollInterval:   10 * time.Millisecond,
 		// No guardian runs in the fake host.
-		GuardianReportTimeout: 50 * time.Millisecond,
+		GuardianReportTimeout:    50 * time.Millisecond,
+		GuardianReconcileTimeout: 50 * time.Millisecond,
+		// Nor does its enumerator publish a record (testHost.run does).
+		InstallScanTimeout: 5 * time.Millisecond,
 	}
 	if goos == "darwin" {
 		// Nor its executable: kern.procargs2 and proc_pidpath of a live PID
@@ -599,7 +615,9 @@ func (h *testHost) run(opts Options) *enterprisestatus.Result {
 		} else if !os.IsNotExist(err) {
 			h.t.Fatal(err)
 		}
-		data, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+		// The fake enumerator's completed first scan covers the config that
+		// install just committed. An unstamped record is deliberately pending.
+		data, err := h.marshalCompletedScan(nil)
 		if err != nil {
 			h.t.Fatal(err)
 		}
@@ -608,6 +626,15 @@ func (h *testHost) run(opts Options) *enterprisestatus.Result {
 		}
 	}
 	return result
+}
+
+func (h *testHost) marshalCompletedScan(agents []enterprisehooks.UnprotectedAgent) ([]byte, error) {
+	h.t.Helper()
+	state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil || state.Generation == 0 {
+		return nil, fmt.Errorf("read installed config generation: %+v, %v", state, err)
+	}
+	return enterprisehooks.MarshalUnprotectedAgentsForConfig(agents, state.Generation, state.ConfigSHA256)
 }
 
 func (h *testHost) read(canonical string) string {

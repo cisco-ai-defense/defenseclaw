@@ -4,7 +4,14 @@
 import json
 from pathlib import Path
 
-from scripts.update_test_timings import go_timings, merge_go_timings, windows_go_timings
+from scripts.go_test_shards import partition_packages
+from scripts.update_test_timings import (
+    go_timings,
+    keep_unreached_go_tests,
+    keep_unreached_windows_packages,
+    merge_go_timings,
+    windows_go_timings,
+)
 
 STAMP = "2026-10-19T12:00:00.1234567Z"
 MODULE = "github.com/example"
@@ -72,6 +79,36 @@ def test_go_timings_reads_events_after_a_log_prefix(tmp_path: Path) -> None:
     }
 
 
+def test_go_timings_time_a_test_from_its_run_to_its_end(tmp_path: Path) -> None:
+    # Windows Native CI dispatch 43024510603: the internal/hookpaths archive
+    # table parts, whose subtests call t.Parallel, report an Elapsed of 0.01 s
+    # but run 33 to 41 s each. Weighed as fast tests, all sixteen landed in one
+    # part, which took 571 s. A test now weighs the time from its run event to
+    # its end; a test whose Elapsed covers its run (the benign twin) keeps it.
+    def at(seconds: float, action: str, test: str, elapsed: float = 0.0) -> str:
+        event = json.loads(_event(action, "pkg/a", elapsed, test))
+        event["Time"] = f"2026-11-11T13:05:{seconds:09.6f}1-05:00"
+        return json.dumps(event)
+
+    log = tmp_path / "pk6.log"
+    log.write_text(
+        "\n".join(
+            [
+                at(0.0, "run", "TestTable"),
+                at(0.2, "run", "TestTable/ditto"),
+                at(34.2, "pass", "TestTable/ditto", 34.0),
+                at(35.0, "pass", "TestTable", 0.01),
+                at(36.0, "run", "TestSerial"),
+                at(46.0, "pass", "TestSerial", 10.0),
+                _event("pass", "pkg/a", 70.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert go_timings([log], MODULE)["tests"] == {"pkg/a": {"TestSerial": 10.0, "TestTable": 35.0, "*": 0.1}}
+
+
 def test_merge_go_timings_replaces_only_the_measured_packages() -> None:
     # go-darwin.json: the darwin connector parts refresh the connector
     # package; the enterpriseunix times recorded earlier stay.
@@ -85,3 +122,102 @@ def test_merge_go_timings_replaces_only_the_measured_packages() -> None:
 
     assert data["packages"] == {f"{MODULE}/pkg/a": 120.0, f"{MODULE}/pkg/b": 50.0}
     assert data["tests"] == {"pkg/a": {"TestNew": 30.0, "*": 0.4}, "pkg/b": {"TestKept": 7.0, "*": 0.3}}
+
+
+def test_a_refresh_keeps_the_time_of_a_test_a_timed_out_shard_never_reached(tmp_path: Path) -> None:
+    # The shard ended at its -timeout before TestUnreached ran: it keeps its
+    # recorded time instead of weighing as an unlisted test. A test that ran
+    # takes its new time, and a test the package no longer defines is dropped.
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package a\n\nfunc TestRan(t *testing.T) {}\n\nfunc TestUnreached(t *testing.T) {}\n\nfunc TestFast(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    log = tmp_path / "shard.json"
+    log.write_text(
+        "\n".join(
+            [
+                _event("pass", "pkg/a", 30.0, "TestRan"),
+                _event("pass", "pkg/a", 0.5, "TestFast"),
+                _event("fail", "pkg/a", 660.0),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    old = {"tests": {"pkg/a": {"TestRan": 10.0, "TestUnreached": 90.0, "TestFast": 40.0, "TestGone": 50.0, "*": 0.2}}}
+
+    data = keep_unreached_go_tests(old, go_timings([log], MODULE), [log], MODULE, root=tmp_path)
+
+    assert data["tests"]["pkg/a"] == {"*": 0.5, "TestRan": 30.0, "TestUnreached": 90.0}
+
+
+HEAVY_PART_SECONDS = (180.492, 164.289, 244.576)
+
+
+def _heavy_package_log(tmp_path: Path) -> Path:
+    # One Windows run: the heavy package runs in three parts (one
+    # [go-package-time] line each) and a few fifty small packages run whole.
+    prefix = f"Windows x64 Go suite / shard pk4\tFull native Windows Go test\t{STAMP} "
+    lines = []
+    for seconds in HEAVY_PART_SECONDS:
+        lines.append(f"{prefix}[go-package-time] {MODULE}/pkg/heavy pass {seconds}")
+    for index in range(50):
+        lines.append(f"{prefix}[go-package-time] {MODULE}/pkg/small{index} pass 20.0")
+    log = tmp_path / "win.log"
+    log.write_text("\n".join(lines), encoding="utf-8")
+    return log
+
+
+def test_windows_go_timings_sum_the_parts_of_a_split_package(tmp_path: Path) -> None:
+    # A package run in parts prints one time per part; the record is the whole
+    # package, every part and every link, not the last part.
+    data = windows_go_timings([_heavy_package_log(tmp_path)], MODULE)
+
+    assert data["packages"][f"{MODULE}/pkg/heavy"] == round(sum(HEAVY_PART_SECONDS) + 3 * 6.0, 1)
+    assert data["packages"][f"{MODULE}/pkg/small0"] == 26.0
+
+
+def test_a_timing_refresh_keeps_a_split_package_split(tmp_path: Path) -> None:
+    # Refresh the record from a run that already split the package, then plan
+    # the next run: the package is still placed in parts, not whole in one
+    # shard (the whole package ran past the Windows step timeout).
+    (tmp_path / "go.mod").write_text(f"module {MODULE}\n", encoding="utf-8")
+    heavy = tmp_path / "pkg" / "heavy"
+    heavy.mkdir(parents=True)
+    for index in range(3):
+        (heavy / f"part{index}_test.go").write_text(
+            f"package heavy\nfunc TestPart{index}(t *testing.T) {{}}\n", encoding="utf-8"
+        )
+    refreshed = windows_go_timings([_heavy_package_log(tmp_path)], MODULE)
+    refreshed["tests"] = {"pkg/heavy": {f"TestPart{i}": s for i, s in enumerate(HEAVY_PART_SECONDS)} | {"*": 0.1}}
+    packages = [f"{MODULE}/pkg/heavy"] + [f"{MODULE}/pkg/small{index}" for index in range(50)]
+
+    shards = partition_packages(packages, 3, refreshed, root=tmp_path)
+
+    heavy_items = [(package, regex) for shard in shards for package, regex in shard if package.endswith("/heavy")]
+    assert len(heavy_items) >= 2
+    assert all(regex for _, regex in heavy_items)
+
+
+def test_a_windows_refresh_keeps_the_time_of_a_package_its_timed_out_part_never_reached(tmp_path: Path) -> None:
+    for rel in ("internal/reached", "internal/unreached"):
+        (tmp_path / rel).mkdir(parents=True)
+        (tmp_path / rel / "code.go").write_text("package p\n", encoding="utf-8")
+    old = {
+        "packages": {
+            f"{MODULE}/internal/reached": 10.0,
+            f"{MODULE}/internal/unreached": 300.0,
+            f"{MODULE}/internal/removed": 5.0,
+        },
+        "tests": {},
+    }
+    log = tmp_path / "pk0.log"
+    log.write_text(f"{STAMP} [go-package-time] {MODULE}/internal/reached pass 12.0\n", encoding="utf-8")
+
+    data = keep_unreached_windows_packages(old, windows_go_timings([log], MODULE), MODULE, root=tmp_path)
+
+    # The measured package takes its new time (with the link), the package
+    # the step timeout never reached keeps its old one, and a package that
+    # no longer exists is dropped.
+    assert data["packages"] == {f"{MODULE}/internal/reached": 18.0, f"{MODULE}/internal/unreached": 300.0}

@@ -112,6 +112,7 @@ type GuardrailProxy struct {
 	connector connector.Connector
 
 	inspector    ContentInspector
+	secureClient atomic.Bool
 	masterKey    string
 	gatewayToken string // gateway token, accepted in X-DC-Auth
 	notify       *NotificationQueue
@@ -205,6 +206,24 @@ func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 	p.notifier = n
 }
 
+// handleListenerProof answers the OpenClaw plugin's listener proof on the
+// guardrail port (writeGatewayTokenListenerProof). Secure Client serves no
+// proof.
+func (p *GuardrailProxy) handleListenerProof(w http.ResponseWriter, r *http.Request) {
+	refreshed := ""
+	if p.refreshedGatewayToken != nil {
+		refreshed = p.refreshedGatewayToken()
+	}
+	secureClient := false
+	if cfg := proxyDecisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
+		secureClient = true
+	}
+	if secureClient || ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed) {
+		p.emitProxyAuthFailure(r, "listener_proof_refused")
+		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	}
+}
+
 // SetRefreshedGatewayTokenSource wires the OpenClaw client's runtime-adopted
 // gateway token into proxy authentication (GAP-2346). Call it before the
 // proxy starts serving.
@@ -266,19 +285,17 @@ func (p *GuardrailProxy) connectorName() string {
 	return "unknown"
 }
 
-// postCallContext returns a detached context for post-stream completion
-// inspection. The HTTP request context may already be cancelled by the time
-// the final POST-CALL inspection runs, which would kill in-flight LLM judge
-// calls. We use context.WithoutCancel to preserve request-scoped values
-// (tracing, correlation IDs) while disconnecting from the request lifecycle,
-// then layer a timeout on top.
+// postCallContext bounds completion inspection by the caller's lifetime.
+// Secure Client keeps its existing detached completion context.
 func (p *GuardrailProxy) postCallContext(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := 30 * time.Second
 	if p.cfg != nil && p.cfg.Judge.Timeout > 0 {
 		timeout = time.Duration(p.cfg.Judge.Timeout * float64(time.Second))
 	}
-	detached := context.WithoutCancel(parent)
-	return context.WithTimeout(detached, timeout)
+	if p.secureClient.Load() {
+		parent = context.WithoutCancel(parent)
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, verdict *ScanVerdict, direction, model, mode string) {
@@ -541,12 +558,16 @@ func (p *GuardrailProxy) SetSecureClientIntegration(enabled bool) {
 	if p == nil {
 		return
 	}
+	p.secureClient.Store(enabled)
 	g, ok := p.inspector.(*GuardrailInspector)
 	if !ok {
 		return
 	}
 	if judge := g.currentJudge(); judge != nil && judge.secureClient != enabled {
 		judge.secureClient = enabled
+		if enabled && judge.cfg != nil && !judge.cfg.MaxParallelExplicit && judge.cfg.MaxParallel == 0 {
+			judge.calls = nil
+		}
 	}
 }
 
@@ -771,6 +792,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// mutating endpoint) to prevent a hostile local process from
 	// rolling the registry.
 	mux.HandleFunc("/v1/config/providers/reload", p.handleReloadProviders)
+	// The OpenClaw plugin proves this listener with the gateway token before
+	// it sends that token or a provider key (GAP-0594).
+	mux.HandleFunc(connector.UserScopedListenerProofPath, p.handleListenerProof)
 	// Catch-all for provider-native paths (e.g. /v1/messages for Anthropic,
 	// /v1beta/models/*/generateContent for Gemini). The fetch interceptor
 	// preserves the original path; we inspect the content then forward verbatim
@@ -782,7 +806,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// Strip /c/<connector>/ prefix so connector-routed traffic
 	// (ANTHROPIC_BASE_URL=http://proxy/c/claudecode) hits the same
 	// handlers as fetch-interceptor traffic.
-	stripped := connectorPrefixStripper(mux, p.registry)
+	stripped := connectorPrefixStripper(openClawBlockNoticeMiddleware(mux, p.openClawNoticeAuthorized), p.registry)
 	scoped := p.thresholdScopeMiddleware(stripped)
 	limited := p.rateLimitMiddleware(scoped)
 	logged := p.requestLogger(limited)
@@ -930,10 +954,17 @@ func connectorPrefixStripper(next http.Handler, reg *connector.Registry) http.Ha
 				}
 				r.URL.Path = p[3+idx:]
 				r.URL.RawPath = ""
+				r = r.WithContext(context.WithValue(r.Context(), proxyConnectorKey{}, name))
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// openClawNoticeAuthorized reports whether r carries the gateway owner's
+// credential, the one OpenClaw's fetch interceptor sends (GAP-0644).
+func (p *GuardrailProxy) openClawNoticeAuthorized(r *http.Request) bool {
+	return p.skipAuthForTest || p.presentsOwnerCredential(r)
 }
 
 func isValidConnectorName(name string) bool {
@@ -1435,9 +1466,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
-		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
+		overlay := p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
 			verdict.Action == "block" && mode == "action")
-		if verdict.Action == "block" && mode == "action" {
+		auditClosed := p.promptAuditFailedClosed(r.Context(), verdict, mode, overlay.evaluationLogErr)
+		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			// Enqueue a notification BEFORE writing the block
 			// response so the next proxy call (this client's retry,
@@ -3140,8 +3172,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		overlay := p.recordTelemetry(agentCtx, "prompt", req.Model, verdict, elapsed, mode,
 			verdict.Action == "block" && mode == "action")
 		requestTrace.AddGuardrailOverlay(overlay)
+		auditClosed := p.promptAuditFailedClosed(agentCtx, verdict, mode, overlay.evaluationLogErr)
 
-		if verdict.Action == "block" && mode == "action" {
+		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
@@ -4609,11 +4642,9 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 //
 // BREAKING for any persisted `sk-dc-…` value derived under the old
 // algorithm: those will no longer match the master key the proxy
-// recomputes at boot. Operators who cached the literal string need to
-// re-read it from the running proxy (the value is logged once at boot
-// to gateway.log) or, more commonly, simply continue using whichever
-// connector-issued bearer their tooling has — `sk-dc-` master keys are
-// an internal fallback, not the supported credential.
+// recomputes at boot. The gateway never logs or prints the value. Callers
+// use the connector-issued bearer their tooling has: `sk-dc-` master keys
+// are an internal fallback, not a supported credential.
 func deriveMasterKey(dataDir string) string {
 	keyFile := filepath.Join(dataDir, "device.key")
 	data, err := os.ReadFile(keyFile)
@@ -5303,7 +5334,7 @@ func launderChatCompletionsHistory(raw json.RawMessage) (json.RawMessage, int, e
 				case '[':
 					text = responsesTextFromContent(contentTrim)
 				}
-				if strings.HasPrefix(text, defenseClawBlockBanner) {
+				if isDefenseClawBlockTurn(text) {
 					stripped++
 					continue
 				}
@@ -5367,7 +5398,7 @@ func launderResponsesHistory(raw json.RawMessage) (json.RawMessage, int, error) 
 				stripped++
 				continue
 			}
-			if strings.HasPrefix(responsesTextFromContent(probe.Content), defenseClawBlockBanner) {
+			if isDefenseClawBlockTurn(responsesTextFromContent(probe.Content)) {
 				stripped++
 				continue
 			}

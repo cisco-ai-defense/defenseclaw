@@ -685,6 +685,10 @@ func ManagedRestartRequired(changed []string) []string {
 // is no change. Bundle verify's restart_prediction and the apply both
 // classify with it, so they agree (F03).
 func ManagedConfigRestartRequired(before, after []byte, defaults ManagedDefaults) ([]string, error) {
+	// The loader folds key case; the classification reads both documents
+	// the same way (foldConfigKeys), so a key it loads as start-only is
+	// classified start-only however it is spelled.
+	before, after = foldConfigKeys(before, "before"), foldConfigKeys(after, "after")
 	changed, err := ChangedPaths(before, after)
 	if err != nil {
 		return nil, err
@@ -800,19 +804,64 @@ func restartKeyMatches(path, key []string) bool {
 }
 
 // restartSegments splits a change path into its key segments, dropping list
-// indexes and quoting (a.b[0]["c.d"] is a, b, c.d).
+// indexes and quoting (a.b[0]["c.d"] is a, b, c.d), in lower case: the
+// config loader folds key case, so Gateway.Port is gateway.port to it and
+// must be classified as that.
 func restartSegments(path string) []string {
 	parts, err := parsePath(path)
 	if err != nil {
-		return strings.Split(path, ".")
+		return strings.Split(strings.ToLower(path), ".")
 	}
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if !part.isIdx {
-			out = append(out, part.key)
+			out = append(out, strings.ToLower(part.key))
 		}
 	}
 	return out
+}
+
+// foldConfigKeys returns raw with every mapping key in lower case, as the
+// config loader reads it. Keys inside lists stay as written: a list compares
+// as a whole, so any change in one is still a change. Two keys that fold to
+// one name hold a value marked with side, which differs from the other
+// document's, so that path is always a change. raw comes back unchanged
+// when no key needs folding or it does not parse.
+func foldConfigKeys(raw []byte, side string) []byte {
+	var document any
+	if len(bytes.TrimSpace(raw)) == 0 || yaml.Unmarshal(raw, &document) != nil {
+		return raw
+	}
+	folded, changed := foldMappingKeys(document, side)
+	if !changed {
+		return raw
+	}
+	out, err := yaml.Marshal(folded)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+func foldMappingKeys(value any, side string) (any, bool) {
+	mapping, ok := value.(map[string]any)
+	if !ok {
+		return value, false
+	}
+	out := make(map[string]any, len(mapping))
+	changed := false
+	for key, child := range mapping {
+		lower := strings.ToLower(key)
+		foldedChild, childChanged := foldMappingKeys(child, side)
+		changed = changed || childChanged || lower != key
+		if _, taken := out[lower]; taken {
+			out[lower] = "configwrite: keys that differ only in case (" + side + ")"
+			changed = true
+			continue
+		}
+		out[lower] = foldedChild
+	}
+	return out, changed
 }
 
 // pathPart is one segment of a change path: a mapping key or a list index.

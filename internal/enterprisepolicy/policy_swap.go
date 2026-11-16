@@ -25,6 +25,8 @@ const policyFileAttempts = 4
 type policyFileBase struct {
 	exists bool
 	data   []byte
+	// owned marks a reserved drop-in that only DefenseClaw publishes.
+	owned bool
 }
 
 // policyFileSwapHook runs just before a policy file write or removal
@@ -86,7 +88,7 @@ func (s *State) replaceUntrustedPolicyFile(opts Options, path string) error {
 	if s.replacing == nil {
 		s.replacing = map[string]policyFileBase{}
 	}
-	s.replacing[platformPath(opts, path)] = policyFileBase{exists: exists, data: data}
+	s.replacing[platformPath(opts, path)] = policyFileBase{exists: exists, data: data, owned: reservedDropIn(s.Connector)}
 	return nil
 }
 
@@ -96,5 +98,5 @@ func (s *State) policyFileBase(opts Options, path string, exists bool, current [
 	if base, ok := s.replacing[platformPath(opts, path)]; ok {
 		return base
 	}
-	return policyFileBase{exists: exists, data: current}
+	return policyFileBase{exists: exists, data: current, owned: reservedDropIn(s.Connector)}
 }

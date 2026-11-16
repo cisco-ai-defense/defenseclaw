@@ -24,5 +24,5 @@ func platformAuditExportCallerIsAdministrator() bool {
 }
 
 func platformAuditExportManagedLayout() (managed.StandaloneLayout, error) {
-	return managed.StandaloneWindowsLayout()
+	return windowsManagedLayout.standalone()
 }

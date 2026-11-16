@@ -121,9 +121,6 @@ def test_release_requirements_pin_the_secure_litellm_and_the_attested_scanner() 
     assert completed.stdout.count("--hash=sha256:") >= len(pins)
 
 
-def test_checker_is_shipped_to_every_dependency_check_site() -> None:
-    for rel in ("scripts/build-windows-installer.ps1", "scripts/windows-native-ci.ps1", ".github/workflows/ci.yml"):
-        text = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert "check_python_dependency_metadata.py" in text, rel
-    native = (REPO_ROOT / "scripts/windows-native-ci.ps1").read_text(encoding="utf-8")
-    assert "'pip', 'check'" not in native
+def test_checker_is_run_by_the_dependency_check_ci_job() -> None:
+    text = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "check_python_dependency_metadata.py" in text

@@ -118,14 +118,20 @@ func TestStandaloneOpenBlocksAGatewayThatAnsweredAnErrorStatus(t *testing.T) {
 		name   string
 		budget time.Duration
 		addr   func(t *testing.T) string
+		// retryAfter is how long one second of a Retry-After lasts in this
+		// case (zero: a real second); the busy gateway sends Retry-After: 1.
+		// The resend cases make it 250 ms, with the budget 650 ms past it
+		// (the 1.5 s budget was 500 ms past a whole second), so the resend
+		// still fits the budget (rel-1-0-6 GAP-0660).
+		retryAfter time.Duration
 	}
 	cases := []gatewayCase{
 		{"429 whose Retry-After outlasts the budget", 400 * time.Millisecond,
-			func(t *testing.T) string { return busyGateway(t, false, nil) }},
-		{"429, then a resend the gateway never answers", 1500 * time.Millisecond,
-			func(t *testing.T) string { return busyGateway(t, true, nil) }},
-		{"429, then a 503 whose body is cut off", 1500 * time.Millisecond,
-			func(t *testing.T) string { return busyGateway(t, false, cutOff503) }},
+			func(t *testing.T) string { return busyGateway(t, false, nil) }, 0},
+		{"429, then a resend the gateway never answers", 900 * time.Millisecond,
+			func(t *testing.T) string { return busyGateway(t, true, nil) }, 250 * time.Millisecond},
+		{"429, then a 503 whose body is cut off", 900 * time.Millisecond,
+			func(t *testing.T) string { return busyGateway(t, false, cutOff503) }, 250 * time.Millisecond},
 	}
 	// Codex gets every status; the other connectors, whose answers differ
 	// only in their output, one 5xx and one 4xx each way.
@@ -137,7 +143,7 @@ func TestStandaloneOpenBlocksAGatewayThatAnsweredAnErrorStatus(t *testing.T) {
 				how = "drops"
 			}
 			gc := gatewayCase{"HTTP " + strconv.Itoa(status) + " whose body " + how, 400 * time.Millisecond,
-				func(t *testing.T) string { return cutOffStatusGateway(t, status, drop) }}
+				func(t *testing.T) string { return cutOffStatusGateway(t, status, drop) }, 0}
 			if status == 503 || status == 404 {
 				cases = append(cases, gc)
 			} else {
@@ -164,6 +170,7 @@ func TestStandaloneOpenBlocksAGatewayThatAnsweredAnErrorStatus(t *testing.T) {
 				}
 				for _, gc := range all {
 					shortAnswerBudget(t, gc.budget)
+					shortRetryAfter(t, gc.retryAfter)
 					result, elapsed := runAgainstGateway(t, c.connector, gc.addr(t), mutate)
 					if !blocked(result) {
 						t.Errorf("%s: allowed in fail mode open: code=%d stdout=%q stderr=%q", gc.name, result.code, result.stdout, result.stderr)

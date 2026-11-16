@@ -9,7 +9,7 @@ keywords:
   - install watcher
 ---
 
-DefenseClaw scans every skill, MCP server and plugin before an agent can use it. A scan gives a severity. Your admission settings turn that severity into an action: allow it, warn, or block and quarantine it. Block and allow lists you write always come first.
+DefenseClaw scans skills, MCP servers and plugins as they appear. A scan gives a severity. Your admission settings turn that severity into an action: allow it, warn, or block and quarantine it. Block and allow lists you write always come first. MCP tool calls made while a new server's scan is pending follow the tier behavior described below.
 
 <DefenseClawDemo scenario="skill-quarantine" variant="critical" />
 
@@ -56,7 +56,7 @@ See [Skill scanner](/docs/scanning/skill-scanner) for the commands and settings.
 
 ## MCP servers
 
-An MCP server lists tools an agent can call. The MCP scanner reads each tool's name, schema and description, and flags tools whose behavior does not match what they claim. DefenseClaw scans a server when you add it with `defenseclaw mcp set`, when an agent adds it, and on every rescan. Until a new server has a verdict, the Claude Code and Codex hooks refuse its tool calls.
+An MCP server lists tools an agent can call. The MCP scanner reads each tool's name, schema and description, and flags tools whose behavior does not match what they claim. DefenseClaw scans a server when you add it with `defenseclaw mcp set`, when an agent adds it, and on every rescan. While admission is pending, per-user default and permissive hooks allow a call with a visible warning; strict and managed hooks block it with retry guidance. A scan that finds something blocks the server in every tier. A server DefenseClaw cannot scan (a launcher other than `npx` or `uvx`, or a loopback or private URL) runs with a warning in the default and permissive tiers and is blocked in strict and managed ones; an administrator's allow rule beats that block. See [Admission](/docs/policies/admission#how-a-verdict-is-reached) for the tier table.
 
 See [Scan an MCP server](/docs/scanning/mcp-scanner).
 

@@ -10,9 +10,9 @@
 
 """OpenClaw setup advisories.
 
-GAP-1958: OpenClaw shows a DefenseClaw approval only in its Control UI and on
-chat channels that forward /approve; openclaw tui and local chat do not, so
-the call is denied when the request times out. Setup with human approval, the
+GAP-1958: OpenClaw shows a DefenseClaw approval in its Control UI, on chat
+channels that forward /approve and, from 2026.10.9, in openclaw tui (GAP-0597);
+elsewhere the call is denied when the request times out. Setup with human approval, the
 interactive HILT note and doctor's Human approval row now say where to answer.
 
 GAP-1959: from OpenClaw 2026.5.12 Amazon Bedrock is the external plugin
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -105,6 +106,24 @@ def test_setup_warns_about_the_missing_bedrock_plugin_and_names_the_install(tmp_
     assert "@openclaw/amazon-bedrock-provider" in out
     assert "No API provider registered for api: bedrock-converse-stream" in out
     assert "openclaw plugins install @openclaw/amazon-bedrock-provider" in out
+    assert "openclaw plugins enable amazon-bedrock" in out
+    assert "openclaw config set plugins.allow '[\"defenseclaw\",\"amazon-bedrock\"]' --strict-json" in out
+    assert "it adds amazon-bedrock to plugins.allow" not in out
+
+
+def test_setup_names_the_openclaw_deny_list_update(tmp_path, capsys) -> None:
+    out = _setup(tmp_path, capsys, cfg=_with_plugin(deny=("amazon-bedrock", "other")), human_approval=False)
+    assert "openclaw config set plugins.deny '[\"other\"]' --strict-json" in out
+
+
+def test_setup_quotes_existing_openclaw_allow_entries(tmp_path, capsys) -> None:
+    out = _setup(tmp_path, capsys, cfg=_with_plugin(allow=("team's-plugin", "defenseclaw")), human_approval=False)
+    command = next(line.split("Then: ", 1)[1] for line in out.splitlines()
+                   if "openclaw config set plugins.allow" in line)
+    assert shlex.split(command) == [
+        "openclaw", "config", "set", "plugins.allow",
+        '["team\'s-plugin","defenseclaw","amazon-bedrock"]', "--strict-json",
+    ]
 
 
 def test_setup_is_quiet_when_the_bedrock_plugin_is_installed(tmp_path, capsys) -> None:

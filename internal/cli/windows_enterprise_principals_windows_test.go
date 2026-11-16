@@ -57,3 +57,56 @@ func TestWindowsStandaloneTrustAdvisoryNamesTheAccountAndTheFix(t *testing.T) {
 		t.Errorf("non-standalone advisory reason was rewritten: %q", got)
 	}
 }
+
+// GAP-1061: the verify message for an untrusted targets.yaml leads with the
+// account and the icacls fix, and never tells the administrator to wait.
+func TestVerifyNamesTheUntrustedManifestAccountFirst(t *testing.T) {
+	previous := windowsPrincipalName
+	t.Cleanup(func() { windowsPrincipalName = previous })
+	windowsPrincipalName = func(sid string) string { return `HOST\dcg` }
+	in := `untrusted principal S-1-5-21-1-2-3-1001 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`
+	got := windowsEnterpriseNamePrincipals(in)
+	if !strings.HasPrefix(got, `HOST\dcg (S-1-5-21-1-2-3-1001) has write access to C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`) ||
+		!strings.Contains(got, `Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml" /remove:g *S-1-5-21-1-2-3-1001`) ||
+		strings.Contains(got, "guardian's next pass") {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+// Review D3: the fix for a write-like entry on a vendor folder replaces the
+// stock reader group's entry by read and execute; /remove:g would take the
+// vendor's read entry away too. DefenseClaw's own folders, other accounts and
+// an account with no read keep /remove:g.
+func TestWindowsWriterFixKeepsTheReadOfTheStockReaderGroups(t *testing.T) {
+	originalReads, originalDirectory := managed.StandalonePrincipalReadsPath, managed.StandalonePathIsDirectory
+	t.Cleanup(func() {
+		managed.StandalonePrincipalReadsPath, managed.StandalonePathIsDirectory = originalReads, originalDirectory
+	})
+	reads, directory := true, true
+	managed.StandalonePrincipalReadsPath = func(string, string) bool { return reads }
+	managed.StandalonePathIsDirectory = func(string) bool { return directory }
+	vendor := `C:\ProgramData\OpenAI`
+	for _, tc := range []struct {
+		name, path, sid, want string
+		reads, directory      bool
+	}{
+		{"Users on a vendor folder", vendor, "S-1-5-32-545", `icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(OI)(CI)(RX)"`, true, true},
+		{"Authenticated Users on a vendor folder", vendor, "S-1-5-11", `/remove:g *S-1-5-11 /grant "*S-1-5-11:(OI)(CI)(RX)"`, true, true},
+		{"Everyone on a vendor folder", vendor, "S-1-1-0", `/remove:g *S-1-1-0 /grant "*S-1-1-0:(OI)(CI)(RX)"`, true, true},
+		{"Users on a vendor file", vendor + `\requirements.toml`, "S-1-5-32-545", `/remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(RX)"`, true, false},
+		{"Users with no read there", vendor, "S-1-5-32-545", `icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-32-545`, false, true},
+		{"another account", vendor, "S-1-5-21-1-2-3-1001", `icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-21-1-2-3-1001`, true, true},
+		{"Users on DefenseClaw's own folder", `C:\ProgramData\Cisco\DefenseClaw\etc`, "S-1-5-32-545", `icacls "C:\ProgramData\Cisco\DefenseClaw\etc" /remove:g *S-1-5-32-545`, true, true},
+	} {
+		reads, directory = tc.reads, tc.directory
+		if got := windowsWriterFix(tc.path, tc.sid); got != tc.want && !strings.Contains(got, tc.want) {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	// The rewritten verdict carries it: the read is granted again in the same command.
+	reads, directory = true, true
+	got := windowsEnterpriseNamePrincipals(vendor + `: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`)
+	if !strings.Contains(got, `Fix: icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(OI)(CI)(RX)"`) {
+		t.Errorf("a verdict on a vendor folder: %q", got)
+	}
+}

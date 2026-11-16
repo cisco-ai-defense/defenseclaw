@@ -23,7 +23,6 @@ import click
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_uninstall
-from defenseclaw.commands import windows_native_uninstall as native
 
 _LISTED = {
     "sandboxes": [
@@ -52,7 +51,6 @@ def _invoke(command, args, plan, listed):
         else patch("subprocess.run", return_value=listed)
     )
     with (
-        patch.object(native, "prepare_native_windows_uninstall", return_value=None),
         patch.object(cmd_uninstall, "_build_plan", return_value=plan),
         patch.object(cmd_uninstall, "_render_plan"),
         run_patch as run,

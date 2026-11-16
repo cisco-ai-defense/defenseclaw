@@ -236,3 +236,60 @@ func shortTempDir(t *testing.T) string {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
 }
+
+// cowork-1-0-8 GAP-0008: only an unmanaged, de-privileged Linux gateway
+// whose environment names a root helper reads homes through it; managed
+// gateways keep their own paths. An old helper is "unsupported", not down.
+func TestBrokeredHomeReaderOnlyForTheUnmanagedHelper(t *testing.T) {
+	if runtime.GOOS != "linux" || acquire.NewLocal().WideCoverage() {
+		t.Skip("the Cowork VM broker is a de-privileged Linux gateway's")
+	}
+	previousCheck, previousProbe, previousHelper := checkHelperSocket, probeHelperSocket, newBrokeredHomeHelper
+	t.Cleanup(func() {
+		checkHelperSocket, probeHelperSocket, newBrokeredHomeHelper = previousCheck, previousProbe, previousHelper
+	})
+	t.Setenv(acquire.SocketEnvVar, "")
+	if brokeredHomeReader(&config.Config{}) != nil {
+		t.Fatal("a gateway with no helper socket brokers discovery")
+	}
+	t.Setenv(acquire.SocketEnvVar, "/run/defenseclaw-cowork-sensor/sensor-helper.sock")
+	if brokeredHomeReader(&config.Config{DeploymentMode: "managed_enterprise"}) != nil {
+		t.Fatal("a managed gateway brokers discovery")
+	}
+	reader := brokeredHomeReader(&config.Config{})
+	if reader == nil {
+		t.Fatal("the Cowork VM gateway does not broker discovery")
+	}
+
+	dir, err := os.MkdirTemp("", "bhr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	checkHelperSocket = func(string) error { return nil }
+	probeHelperSocket = func(context.Context, string) error { return nil }
+	serve := func(name string, discovery func(context.Context) (any, error)) {
+		socket := filepath.Join(dir, name)
+		listener, err := net.Listen("unix", socket)
+		if err != nil {
+			t.Skipf("unix sockets unavailable: %v", err)
+		}
+		server := acquire.NewServer(acquire.ServerConfig{Discovery: discovery})
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = server.Serve(ctx, listener) }()
+		t.Cleanup(cancel)
+		newBrokeredHomeHelper = func(string) *acquire.Helper { return acquire.NewHelper(socket) }
+	}
+	serve("old", nil)
+	if _, err := reader(context.Background()); !errors.Is(err, inventory.ErrBrokeredHomesUnsupported) {
+		t.Fatalf("a helper without discovery: %v", err)
+	}
+	serve("new", func(context.Context) (any, error) {
+		return inventory.BrokeredHomeReport{Version: inventory.BrokeredHomeReportVersion,
+			Homes: []inventory.BrokeredHome{{Home: "/sessions/cwk-v1", UID: 1005, User: "cwk-v1"}}}, nil
+	})
+	report, err := reader(context.Background())
+	if err != nil || len(report.Homes) != 1 || report.Homes[0].User != "cwk-v1" {
+		t.Fatalf("report %+v err %v", report, err)
+	}
+}

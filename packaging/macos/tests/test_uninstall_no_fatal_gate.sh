@@ -42,6 +42,8 @@ EOF
   mkdir -p "${home}/.claude" "${home}/.codex" "${home}/.defenseclaw/hooks"
   printf '{"FAIL_AS_USER":1}\n' > "${home}/.claude/settings.json"
   printf '[hooks]\n' > "${home}/.codex/config.toml"
+  mkdir -p "${home}/.copilot/hooks"
+  printf '{"version":1,"hooks":{}}\n' > "${home}/.copilot/hooks/defenseclaw.json"
   printf 'DEFENSECLAW_MANAGED_HOOK=1\n' > "${home}/.defenseclaw/hooks/claude-code-hook.sh"
   chflags uchg "${home}/.defenseclaw/hooks/claude-code-hook.sh"
   printf 'keep\n' > "${b}/outside"
@@ -94,6 +96,7 @@ t_purge_completes_and_isolates_users() {
   [[ ! -e "${b}/state/com.cisco.secureclient.defenseclaw.hook-guardian" ]] || _fail "guardian booted out"
 
   assert_eq "$(cat "${b}/root/Users/${me}/.claude/settings.json")" "scrubbed" "root retry scrubbed the config"
+  assert_eq "$(cat "${b}/root/Users/${me}/.copilot/hooks/defenseclaw.json")" "scrubbed" "GitHub Copilot's hook file scrubbed"
   assert_contains "${out}" 'reason="scrub_root_retry"' "root retry logged"
   [[ ! -e "${b}/root/Users/${me}/.defenseclaw" ]] || _fail "flagged ~/.defenseclaw removed"
   assert_eq "$(cat "${b}/outside")" "keep" "symlink target inside ~/.defenseclaw untouched"

@@ -43,6 +43,9 @@ class SkillDirectory:
     path: str
     source: str
     bundled: bool = False
+    # Other entry names under the same root that resolve to this directory
+    # (symlinks to it). They are one skill; list views show them as aliases.
+    aliases: tuple[str, ...] = ()
 
 
 def _filesystem_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -323,9 +326,15 @@ def _discover_claude_skill_directories(
     except OSError:
         return []
 
-    regular: list[SkillDirectory] = []
+    # A group is held in the slot of its first member, so a folder and a
+    # same-stem Markdown command keep the order of the sorted walk.
+    regular: list[SkillDirectory | str] = []
     synced: list[SkillDirectory] = []
-    targets: set[str] = set()
+    # target -> [(entry, is_link)] in first-seen order. A link and the folder
+    # it points at are one skill: the folder, which is what is on disk, names
+    # it and the links are its aliases (GAP-0958).
+    groups: dict[str, list[tuple[str, bool]]] = {}
+    resolved_by_target: dict[str, str] = {}
     for entry in entries:
         full = os.path.join(skill_root, entry)
         if (
@@ -350,17 +359,33 @@ def _discover_claude_skill_directories(
             continue
         resolved = os.path.realpath(full)
         target_key = os.path.normcase(resolved)
-        if target_key in targets:
+        if target_key not in groups:
+            regular.append(target_key)
+        groups.setdefault(target_key, []).append((entry, is_symlink(full)))
+        resolved_by_target[target_key] = resolved
+    result: list[SkillDirectory] = []
+    for item in regular:
+        if not isinstance(item, str):
+            result.append(item)
             continue
-        targets.add(target_key)
+        members = groups[item]
+        resolved = resolved_by_target[item]
         if os.path.isfile(
             os.path.join(resolved, ".claude-plugin", "plugin.json")
         ):
             # Anthropic assigns this exact child to the @skills-dir plugin
             # namespace. It must not also appear as a plain skill.
             continue
-        regular.append(SkillDirectory(entry, resolved, skill_root))
-    return regular + synced
+        primary = next((m for m in members if not m[1]), members[0])
+        result.append(
+            SkillDirectory(
+                primary[0],
+                resolved,
+                skill_root,
+                aliases=tuple(m[0] for m in members if m is not primary),
+            )
+        )
+    return result + synced
 
 
 def _discover_markdown_commands(skill_root: str) -> list[SkillDirectory]:

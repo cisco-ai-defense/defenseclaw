@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -86,17 +85,9 @@ func claimsSandboxHookReceipt(r *http.Request) bool {
 	return r.Method == http.MethodPost && len(r.Header.Values(sandboxrelay.HookReceiptHeader)) != 0
 }
 
-// Striped locks serialize receipt retries with journal recovery. Their fixed
-// size avoids an unbounded map of one lock per hook call.
-var sandboxReceiptLocks [64]sync.Mutex
-
-func sandboxHookReceiptLock(id string) *sync.Mutex {
-	var hash uint32 = 2166136261
-	for i := 0; i < len(id); i++ {
-		hash = (hash ^ uint32(id[i])) * 16777619
-	}
-	return &sandboxReceiptLocks[hash%uint32(len(sandboxReceiptLocks))]
-}
+// The keyed lock keeps retries of one receipt together while unrelated
+// receipts can settle independently. Entries leave the map on unlock.
+var sandboxReceiptLocks keyedMutex
 
 // scheduleSandboxHookReceiptRecovery finalizes an unanswered sandbox proposal
 // after its bounded receipt window. It also removes acknowledged journal rows
@@ -141,6 +132,13 @@ func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendin
 	return nil
 }
 
+// finalizeSandboxReceiptAnswer writes the audit verdict of a receipt.
+func (a *APIServer) finalizeSandboxReceiptAnswer(ctx context.Context, connectorName string, req agentHookRequest,
+	resp agentHookResponse, p *pendingHookOccurrence) hookFinalizationResult {
+	return a.finalizeAgentHookAnswer(ctx, connectorName, req, resp, p.RawEventIDs,
+		nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
+}
+
 func (p *pendingHookOccurrence) sandboxReceiptMatches(stored audit.StoredHookVerdict) bool {
 	if p.SandboxReceipt == nil {
 		return false
@@ -157,9 +155,8 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "sandbox hook receipt is not authorized"})
 		return
 	}
-	lock := sandboxHookReceiptLock(id)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock := sandboxReceiptLocks.lock(id)
+	defer unlock()
 	if a.store == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 		return
@@ -238,16 +235,14 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 		return
 	}
-	result := a.finalizeAgentHookAnswer(ctx, connectorName, req, resp, p.RawEventIDs,
-		nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
+	result := a.finalizeSandboxReceiptAnswer(ctx, connectorName, req, resp, &p)
 	if !result.AuditPersisted {
 		// A write can return an error after it committed. Confirm its exact
 		// verdict before telling the hook to use the proposed answer.
 		stored, recorded, err = a.store.StoredHookVerdict(ctx, p.ID)
 		if err != nil || !recorded || !p.sandboxReceiptMatches(stored) {
 			if err == nil && !recorded {
-				closedResult := a.finalizeAgentHookAnswer(ctx, connectorName, req, closed, p.RawEventIDs,
-					nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
+				closedResult := a.finalizeSandboxReceiptAnswer(ctx, connectorName, req, closed, &p)
 				a.markSandboxHookReceiptSettled(ctx, &p, closedResult)
 				if closedResult.AuditPersisted {
 					a.dispatchFinalizedAgentHookNotification(ctx, req, closed, closedResult)

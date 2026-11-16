@@ -11,7 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Review loop round 4: an executable an elevated process or a service runs
@@ -157,9 +160,80 @@ func TestValidateTrustedInstallMarkerDirRefusesReplaceableAncestor(t *testing.T)
 	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err == nil || !strings.Contains(err.Error(), marker) {
 		t.Fatalf("Administrators-owned marker = %v, want SYSTEM owner refusal", err)
 	}
+	// The test tree sits in a temp folder under ProgramData, outside the
+	// operating system and platform installer roots, so a replaceable
+	// ancestor there stays fatal.
 	testenv.SetSecurity(t, cisco, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1200e9;;;BU)")
 	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err == nil || !strings.Contains(err.Error(), cisco) {
-		t.Fatalf("replaceable marker ancestor = %v, want refusal naming %s", err, cisco)
+		t.Fatalf("replaceable foreign marker ancestor = %v, want refusal naming %s", err, cisco)
+	}
+}
+
+// A replaceable Cisco folder above the marker, under a registered machine
+// base, is advisory drift: validation goes on to the marker itself and
+// refuses the Administrators-owned marker, not the ancestor. With
+// TrustStrictAncestorsEnv pinned, the same ancestor is refused.
+func TestValidateTrustedInstallMarkerDirAdvisoryInstallerAncestor(t *testing.T) {
+	cisco, root := testenv.CiscoRuntimeTree(t, "DefenseClaw")
+	// The tree's base stands for the registered ProgramData, so its Cisco
+	// folder is installer-owned as on a real host.
+	t.Cleanup(AddTrustedMachineInstallBaseForTest(filepath.Dir(cisco)))
+	if !PlatformInstallerOwnedPath(cisco) {
+		t.Fatalf("precondition: %s must be installer-owned", cisco)
+	}
+	marker := filepath.Join(root, "secure-client.install")
+	if err := os.Mkdir(marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	testenv.SetSecurity(t, marker, testenv.AdminOnlySDDL)
+	testenv.SetSecurity(t, cisco, "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1200e9;;;BU)")
+
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker")
+	if err == nil || !strings.Contains(err.Error(), marker) {
+		t.Fatalf("advisory Cisco ancestor = %v, want the Administrators-owned marker refused", err)
+	}
+	if strings.Contains(strings.ReplaceAll(err.Error(), marker, ""), cisco) {
+		t.Fatalf("advisory Cisco ancestor was refused instead of the marker: %v", err)
+	}
+
+	t.Setenv(TrustStrictAncestorsEnv, "1")
+	err = ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker")
+	if err == nil || !strings.Contains(strings.ReplaceAll(err.Error(), marker, ""), cisco) {
+		t.Fatalf("strict ancestors = %v, want the replaceable Cisco ancestor %s refused", err, cisco)
+	}
+}
+
+// The Secure Client host classification checks the install root, the marker
+// and the gateway executable together. The marker's ancestors take the same
+// scope as the other two: drift on the system drive root or the shared Cisco
+// Secure Client folders (Windows and the platform installer own their
+// permissions) is advisory, so it no longer demotes a verified Secure Client
+// host to the standalone rules. Every other ancestor stays fatal.
+func TestInstallMarkerAncestorScopeMatchesInstallRootScope(t *testing.T) {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Fatalf("TrustedProgramData: %v", err)
+	}
+	windowsDir, err := windows.GetWindowsDirectory()
+	if err != nil {
+		t.Fatalf("GetWindowsDirectory: %v", err)
+	}
+	for _, path := range []string{
+		filepath.VolumeName(windowsDir) + `\`,
+		programData,
+		filepath.Join(programData, "Cisco"),
+		filepath.Join(programData, "Cisco", "Cisco Secure Client"),
+	} {
+		if got := installMarkerAncestorScope(path); got != windowsTrustAncestor {
+			t.Errorf("installMarkerAncestorScope(%q) = %+v, want the advisory ancestor scope", path, got)
+		}
+		if got, want := installMarkerAncestorScope(path), windowsAncestorScope(path); got != want {
+			t.Errorf("installMarkerAncestorScope(%q) = %+v, want the install root scope %+v", path, got, want)
+		}
+	}
+	if got := installMarkerAncestorScope(os.TempDir()); got != windowsTrustForeignAncestor {
+		t.Errorf("installMarkerAncestorScope(%q) = %+v, want the fatal foreign ancestor scope", os.TempDir(), got)
 	}
 }
 

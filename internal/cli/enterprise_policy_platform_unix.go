@@ -116,7 +116,7 @@ func enterprisePolicyTarget(name string) (enterprisehooks.TargetCredentials, err
 	// reads (GAP-0740).
 	configureEnterpriseHooksStandaloneUnix()
 	resolver := unixidentity.Default(ctx)
-	account, err := unixidentity.LookupAccountSpelling(resolver, name, unixidentity.DirectoryFactsFunc(ctx))
+	account, err := unixidentity.LookupAdminAccountSpelling(resolver, name, unixidentity.DirectoryFactsFunc(ctx))
 	if err != nil {
 		// A uid names its account as profile-explain takes it: getent answers
 		// a uid with the account name, which is not the spelling typed. A name

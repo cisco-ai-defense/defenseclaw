@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,10 +82,12 @@ const (
 	hookCallerInFlight = 32
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
-	// at least four callers' in-flight caps (128). A caller's share of it is a
-	// quarter, so on a small host the minimum is what lets one account hold
-	// its full hookCallerInFlight: 10 calls a second for the 3.5 s answer
-	// budget. With a minimum of 32 a host of two processors let one account
+	// at least four accounts' largest sandbox class caps. A caller's share is a
+	// quarter, so on a small host the minimum lets one account hold the
+	// requests its sandbox rate bucket admits within its request window while
+	// leaving room for other accounts. It also lets one host account hold its
+	// full hookCallerInFlight: 10 calls a second for the 3.5 s answer budget.
+	// With a minimum of 32 a host of two processors let one account
 	// hold 8, so an ordinary 10 calls a second whose answers took over 0.8 s
 	// under CPU load (five agent TUIs starting beside two busy agents) were
 	// refused 429 and blocked as a gateway no-answer (GAP-1790). A request
@@ -92,7 +95,6 @@ const (
 	// hook gives up, so holding it costs nothing the answer budget does not
 	// already bound.
 	hookGlobalInFlightPerProc = 16
-	hookGlobalInFlightMin     = 4 * hookCallerInFlight
 	// hookCallerIdle is how long an idle caller's budget is kept.
 	hookCallerIdle = 5 * time.Minute
 	// hookCallerLogInterval paces the refusal log line per caller.
@@ -100,7 +102,13 @@ const (
 
 	managedHookReasonRateLimited = "enterprise_managed_rate_limited"
 	managedHookReasonOverloaded  = "enterprise_managed_overloaded"
+
+	// The readable text of each refusal; sandboxHookRefusal picks one.
+	managedHookRateLimitedMessage = "DefenseClaw is limiting the hook requests of this account; retry shortly"
+	managedHookOverloadedMessage  = "DefenseClaw is handling as many hook requests as it can; retry shortly"
 )
+
+var hookGlobalInFlightMin = 4 * max(sandboxUserHookInFlight, sandboxUserReceiptInFlight)
 
 type hookCallerLimiter struct {
 	mu        sync.Mutex
@@ -430,22 +438,40 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			"[sidecar-api] hook caller refused identity=%s route=%s reason=%s\n",
 			identity, route, refusal)
 	}
-	message := "DefenseClaw is limiting the hook requests of this account; retry shortly"
+	message := managedHookRateLimitedMessage
 	if refusal == managedHookReasonOverloaded {
-		message = "DefenseClaw is handling as many hook requests as it can; retry shortly"
+		message = managedHookOverloadedMessage
+	} else if isSandboxHookClassKey(key) {
+		message = sandboxHookBudgetMessage()
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Retry-After", "1")
-	w.WriteHeader(http.StatusTooManyRequests)
-	// retry_after_seconds mirrors Retry-After for the shell hooks, whose
-	// curl call keeps only the body and the status.
-	_ = json.NewEncoder(w).Encode(map[string]string{
+	// Take what a managed hook already sent before the 429 is written: the
+	// server discards an unread body once the response starts. The caller
+	// records the shed call from it (GAP-1029).
+	shed := a.shedHookRequest(w, r)
+	writeHookRateLimited(w, refusal, message)
+	return shed, nil
+}
+
+// writeHookRateLimited answers 429 with the stable reason and a readable
+// message. retry_after_seconds mirrors Retry-After for the shell hooks, whose
+// curl call keeps only the body and the status. The response carries its
+// length: a hook reads the whole refusal before it sends the call again, and
+// without a length the response only ends when the handler returns, so the
+// audit row a shed call is given after this answer (recordHookCallerGone)
+// would hold the retry of the hook for as long as that write takes (GAP-1065).
+func writeHookRateLimited(w http.ResponseWriter, reason, message string) {
+	body, _ := json.Marshal(map[string]string{
 		"error":               "rate_limited",
-		"reason":              refusal,
+		"reason":              reason,
 		"message":             message,
 		"retry_after_seconds": "1",
 	})
-	return r, nil
+	body = append(body, "\n"...)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "1")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write(body)
 }
 
 // hookRunSlot is the caller's run slot one admitted request holds.

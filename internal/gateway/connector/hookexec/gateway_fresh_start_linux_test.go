@@ -69,13 +69,27 @@ func TestGAP0295FreshStartRequiresCurrentPeerIdentity(t *testing.T) {
 	peer := &PerUserPeerRecord{done: make(chan struct{}), ok: true,
 		peer: perUserPeerProcess{pid: cmd.Process.Pid, identity: identity}}
 	close(peer.done)
-	writeRecord(identity)
-	if !PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
+	writeRecord(recordedStart(t, cmd.Process.Pid))
+	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, peer); !fresh {
 		t.Fatal("current peer record not recognized")
 	}
 	peer.peer.identity = "different"
 	writeRecord("different")
-	if PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
+	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, peer); fresh {
 		t.Fatal("changed peer identity recognized")
+	}
+	peer.peer.identity = identity
+	writeRecord(recordedStart(t, cmd.Process.Pid))
+	peer.at = time.Now()
+	time.Sleep(50 * time.Millisecond)
+	if err := recordPerUserGatewayAnswer(dataDir, perUserPeerProcess{pid: cmd.Process.Pid, identity: identity}); err != nil {
+		t.Fatal(err)
+	}
+	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, peer); !fresh {
+		t.Fatal("a call connected before the first completed answer lost its restart window")
+	}
+	peer.at = time.Now()
+	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, peer); fresh {
+		t.Fatal("a call connected after the first completed answer entered the restart window")
 	}
 }

@@ -42,8 +42,13 @@ func appendTrustedWriteTargetFindings(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	if request.UnknownKeyPossibleOverflow {
+		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
+		return appendUnknownKeyOverflowFinding(findings, generation, request)
+	}
 	if !actionfacts.LimitExceededWriteTool(request.Input, facts) {
-		return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
+		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
+		return appendOverLimitElidedContentFinding(findings, generation, request, facts)
 	}
 	if view, args, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
 		reduced := request
@@ -77,6 +82,54 @@ func appendTrustedWriteTargetFindings(
 			return findings
 		}
 	}
+	return appendUnverifiedWriteTargetFinding(findings, generation, request, overLimitUnverifiedWriteTitle)
+}
+
+// A count or nesting bound is Possible grade. A Named finding from a
+// completed reading remains stronger; otherwise strict blocks and balanced
+// gives a visible alert with an audit finding.
+func appendUnknownKeyOverflowFinding(findings []RuleFinding, generation *compiledRulePackCategories, request trustedActionRequest) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
+	for _, finding := range findings {
+		if finding.contributesToEnforcement() {
+			return findings
+		}
+	}
+	ruleID := "PATH-SSH-KEY"
+	if actionfacts.StructuredWriteTool(request.Input.Tool) || actionfacts.ApplyPatchTool(request.Input.Tool) {
+		ruleID = "persistence.ssh_authorized_keys_command"
+	}
+	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+	if !ok {
+		return findings
+	}
+	enforcement := findingEnforcementAlertOnly
+	if request.StrictPolicy {
+		enforcement = findingEnforcementAllowed
+	}
+	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
+		RuleID: rule.ID, Title: "Warning: file tool arguments exceed the target verification bound",
+		Severity: rule.Severity, Confidence: rule.Confidence,
+		Evidence: trustedActionInputText(request.Input, ""),
+		Tags:     append([]string(nil), rule.Tags...), LineNumber: 1,
+		enforcement: enforcement,
+	}))
+}
+
+// appendUnverifiedWriteTargetFinding adds the conservative block of the
+// persistence rule, with title, to an enforcement-capable write tool call
+// whose targets cannot all be read, unless a finding already enforces.
+func appendUnverifiedWriteTargetFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	title string,
+) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
 	for _, finding := range findings {
 		if finding.contributesToEnforcement() {
 			return findings
@@ -87,7 +140,7 @@ func appendTrustedWriteTargetFindings(
 		return findings
 	}
 	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
-		RuleID: rule.ID, Title: overLimitUnverifiedWriteTitle, Severity: rule.Severity,
+		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 		enforcement: findingEnforcementAllowed,
@@ -110,20 +163,31 @@ var overLimitContentRules = map[string]string{
 	"pam":                  "tamper.pam_permit_authentication_bypass",
 }
 
-// appendOverLimitElidedContentFinding judges an over-limit write whose
-// reduced call still left a text out and whose target is a file a content
-// rule decides on (GAP-0687): that rule cannot read the text, so the call
-// takes the rule's conservative finding. It blocks only where the call is
-// enforcement-capable and the rule pack blocks with that rule (observe and
-// alert-only profiles record it); a rule the pack does not have adds
-// nothing, and an ordinary file is never such a target.
+// appendOverLimitElidedContentFinding judges an over-limit call that names a
+// file a content rule decides on (GAP-0687, GAP-0934) and whose text that
+// rule cannot read: a write whose reduced call still left a text out, or a
+// shell command with no bounded twin that writes the file
+// (actionfacts.OverLimitCommandContentTarget). The call takes the rule's
+// conservative finding. It blocks only where the call is enforcement-capable
+// and the rule pack blocks with that rule (observe and alert-only profiles
+// record it); a rule the pack does not have adds nothing, and an ordinary
+// file is never such a target. A finding of the rule that only records is
+// replaced: the pattern match alone did not decide the call.
 func appendOverLimitElidedContentFinding(
 	findings []RuleFinding,
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
-	class, ok := actionfacts.OverLimitWriteElidedContentTarget(request.Input, facts)
+	title := overLimitElidedContentTitle
+	class, ok := actionfacts.OverLimitWriteElidedContentTarget(request.Input, facts, request.ResolvedWriteTargets)
+	if !ok && (request.StrictPolicy || request.ManagedInstall) {
+		class, ok = actionfacts.OverLimitCombinedPatchContentTarget(request.Input, facts, request.ResolvedWriteTargets)
+	}
+	if !ok {
+		title = overLimitCommandContentTitle
+		class, ok = actionfacts.OverLimitCommandContentTarget(request.Input, facts)
+	}
 	if !ok {
 		return findings
 	}
@@ -131,21 +195,26 @@ func appendOverLimitElidedContentFinding(
 	if !ok {
 		return findings
 	}
-	for _, finding := range findings {
-		if finding.RuleID == rule.ID {
-			return findings
-		}
-	}
 	enforcement := findingEnforcementAllowed
 	if !request.EnforcementCapable {
 		enforcement = findingEnforcementDetectionOnly
 	}
-	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
-		RuleID: rule.ID, Title: overLimitElidedContentTitle, Severity: rule.Severity,
+	finding := adjustConfidence(request.Input.Tool, RuleFinding{
+		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 		enforcement: enforcement,
-	}))
+	})
+	for index, existing := range findings {
+		if existing.RuleID != rule.ID {
+			continue
+		}
+		if !existing.contributesToEnforcement() {
+			findings[index] = finding
+		}
+		return findings
+	}
+	return append(findings, finding)
 }
 
 // overLimitWriteBoundedTwinRequest is the request for the bounded twin of a
@@ -160,6 +229,32 @@ func overLimitWriteBoundedTwinRequest(request trustedActionRequest, facts action
 	twin := request
 	twin.Input.Args = args
 	twin.LegacyText = string(args)
+	twin.conflictSource = nil
+	twin.record, twin.recordTelemetry = nil, nil
+	return twin, true
+}
+
+// overLimitCommandContentTitle is the reason of the conservative finding of
+// a command that names a file a content rule decides on and is too large for
+// that rule to read.
+const overLimitCommandContentTitle = "Shell command too large to verify names a file whose content rules decide on its text; split it into smaller calls"
+
+// overLimitCommandBoundedTwinRequest is the request for the bounded twin of
+// a limit-exceeded command that is over the string limit only by the white
+// space that pads it (actionfacts.OverLimitCommandBoundedTwin): the same
+// command within the limits, so every rule judges it as the unpadded
+// command (GAP-0934).
+func overLimitCommandBoundedTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
+	input, ok := actionfacts.OverLimitCommandBoundedTwin(request.Input, facts)
+	if !ok {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.Input = input
+	twin.LegacyText = string(input.Args)
+	if len(input.Args) == 0 {
+		twin.LegacyText = input.Command
+	}
 	twin.conflictSource = nil
 	twin.record, twin.recordTelemetry = nil, nil
 	return twin, true

@@ -1,0 +1,228 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package hookpaths
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// A typed patch that steps up from a directory that does not exist
+// (proj/../x from the project, which has no proj inside it) is listed twice:
+// by the clean spelling the gateway judges, and by the raw spelling, which the
+// operating system cannot open and the hook could not place. The raw spelling
+// still leading nowhere is not a change of the patch; the clean spelling is
+// the one that decides, so an ordinary file stays allowed and a protected one
+// stays refused. A raw spelling that leads somewhere after the reading is a
+// change.
+func TestPatchTargetWatchUnplacedStepUpSpellingIsNotAChange(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		changed      bool
+	}{
+		{"step up to an ordinary file", "proj/../.ssh/authorized_keys", false},
+		{"step up to an ordinary config", "proj/../.ssh/config", false},
+		{"step up to a project file", "proj/../notes.txt", false},
+		{"step up from a missing sub directory", "sub/../notes.txt", false},
+		{"step up from two missing directories", "a/b/../../notes.txt", false},
+		{"step up after a dot", "./missing/../notes.txt", false},
+		{"plain project file", "notes.txt", false},
+		{"step up out of the project to the keys file", "../.ssh/authorized_keys", true},
+		{"absolute keys file", "@HOME@/.ssh/authorized_keys", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, project := stepUpFixture(t)
+			target := tc.target
+			if len(target) > 6 && target[:6] == "@HOME@" {
+				target = home + target[6:]
+			}
+			for _, form := range []string{"typed", "heredoc"} {
+				watch := stepUpWatch(t, form, target, project)
+				if watch == nil {
+					t.Fatalf("%s: the patch is not attested complete", form)
+				}
+				if got := watch.Changed(); got != tc.changed {
+					t.Errorf("%s: changed = %v, want %v", form, got, tc.changed)
+				}
+			}
+		})
+	}
+}
+
+// The raw spelling is read again: a link made since at the missing directory
+// that leads it to the keys file reads as a change.
+func TestPatchTargetWatchUnplacedStepUpSpellingLinkedLaterIsAChange(t *testing.T) {
+	home, project := stepUpFixture(t)
+	watch := stepUpWatch(t, "typed", "proj/../.ssh/authorized_keys", project)
+	if watch.Changed() {
+		t.Fatal("the unchanged patch reads as changed")
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "proj")); err != nil {
+		t.Fatal(err)
+	}
+	if !watch.Changed() {
+		t.Error("a link made since at the missing directory, leading to the keys file, reads as unchanged")
+	}
+}
+
+func stepUpFixture(t *testing.T) (home, project string) {
+	t.Helper()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = filepath.Join(home, "proj")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(t, filepath.Join(home, ".ssh", "authorized_keys"), "k\n")
+	mustWrite(t, filepath.Join(project, "notes.txt"), "n\n")
+	t.Setenv("HOME", home)
+	return home, project
+}
+
+func stepUpWatch(t *testing.T, form, target, project string) *PatchTargetWatch {
+	t.Helper()
+	patch := "*** Begin Patch\n*** Update File: " + target + "\n@@\n k\n+x\n*** End Patch\n"
+	command := patch
+	if form == "heredoc" {
+		command = "apply_patch <<P\n" + patch + "P\n"
+	}
+	body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "apply_patch",
+		"tool_input": map[string]any{"command": command}, "cwd": project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return watchOfEvidence(ResolveConnector("codex", "", "PreToolUse", body))
+}
+
+// A spelling that stepped up from a missing directory when the patch was read
+// and that a link made since leads to a file the walk can reach but not
+// identify (a hard link to the keys file while the keys directory cannot be
+// read) is a change, as is one that leads through a link the walk cannot
+// follow. Only a spelling that still steps up from a missing directory is
+// unchanged.
+func TestPatchTargetWatchUnplacedStepUpSpellingRetargetedToUnprovedFileIsAChange(t *testing.T) {
+	t.Run("hard link to the keys file with the keys directory unreadable", func(t *testing.T) {
+		home, project := stepUpFixture(t)
+		keysDir := filepath.Join(home, ".ssh")
+		if err := os.Link(filepath.Join(keysDir, "authorized_keys"), filepath.Join(home, "notes.txt")); err != nil {
+			t.Fatal(err)
+		}
+		hop := filepath.Join(home, "hop")
+		if err := os.Mkdir(hop, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(keysDir, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(keysDir, 0o700) })
+		watch := stepUpWatch(t, "typed", "other/../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink(hop, filepath.Join(project, "other")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since onto a hard link to the keys file reads as unchanged")
+		}
+	})
+	t.Run("link the walk cannot follow", func(t *testing.T) {
+		_, project := stepUpFixture(t)
+		watch := stepUpWatch(t, "typed", "other/../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink("/proc/self/cwd", filepath.Join(project, "other")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since to the working directory of the process reads as unchanged")
+		}
+	})
+	t.Run("link loop", func(t *testing.T) {
+		_, project := stepUpFixture(t)
+		watch := stepUpWatch(t, "typed", "other/../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink("other", filepath.Join(project, "other")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since that loops reads as unchanged")
+		}
+	})
+	t.Run("directory made since", func(t *testing.T) {
+		_, project := stepUpFixture(t)
+		watch := stepUpWatch(t, "typed", "a/b/../../notes.txt", project)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.MkdirAll(filepath.Join(project, "a", "b"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("directories made since read as unchanged")
+		}
+	})
+}
+
+// A working directory reached through a link that stays as it is does not make
+// the step up from a missing directory a change: the ordinary spellings stay
+// unchanged and the keys file reached from the same working directory stays
+// changed. A link made since at the missing directory, leading to the keys
+// directory, is a change as it is without the link above it.
+func TestPatchTargetWatchUnplacedStepUpSpellingThroughLinkedWorkingDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name, target string
+		changed      bool
+	}{
+		{"step up to an ordinary config", "proj/../.ssh/authorized_keys", false},
+		{"step up to a project file", "proj/../notes.txt", false},
+		{"step up from a missing sub directory", "sub/../notes.txt", false},
+		{"step up from two missing directories", "a/b/../../notes.txt", false},
+		{"step up after a dot", "./missing/../notes.txt", false},
+		{"step up out of the project to the keys file", "../.ssh/authorized_keys", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, project := stepUpFixture(t)
+			cwd := filepath.Join(t.TempDir(), "work")
+			if err := os.Symlink(project, cwd); err != nil {
+				t.Fatal(err)
+			}
+			watch := stepUpWatch(t, "typed", tc.target, cwd)
+			if watch == nil {
+				t.Fatal("the patch is not attested complete")
+			}
+			if got := watch.Changed(); got != tc.changed {
+				t.Errorf("changed = %v, want %v", got, tc.changed)
+			}
+		})
+	}
+	t.Run("link made since at the missing directory", func(t *testing.T) {
+		home, project := stepUpFixture(t)
+		cwd := filepath.Join(t.TempDir(), "work")
+		if err := os.Symlink(project, cwd); err != nil {
+			t.Fatal(err)
+		}
+		watch := stepUpWatch(t, "typed", "proj/../.ssh/authorized_keys", cwd)
+		if watch == nil || watch.Changed() {
+			t.Fatal("the unchanged patch reads as changed or is not attested")
+		}
+		if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "proj")); err != nil {
+			t.Fatal(err)
+		}
+		if !watch.Changed() {
+			t.Error("a link made since at the missing directory reads as unchanged")
+		}
+	})
+}

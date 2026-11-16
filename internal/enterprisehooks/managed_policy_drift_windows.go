@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // RestoreWindowsClaudeManagedPolicyDrift puts DefenseClaw's own Claude Code
@@ -44,6 +45,9 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 			return false, err
 		}
 	}
+	if plain, err := windowsClaudeManagedPolicyDirPlain(); err != nil || !plain {
+		return false, err
+	}
 	restored := false
 	err := windowsClaudeManagedPolicyTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
@@ -62,6 +66,12 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 		if err := windowsManagedPolicyFileTrustCheck(statePath); err != nil {
 			return err
 		}
+		// On standalone the record's own descriptor is judged too, so a
+		// record an untrusted account can write or owns is never rendered
+		// from, whatever the guardian did before (GAP-0633).
+		if err := windowsManagedPolicySelfHealRefusal(statePath, managed.ObjectInstallFile, nil); err != nil {
+			return err
+		}
 		var record windowsClaudeManagedPolicyState
 		if err := decodeWindowsClaudeManagedPolicyState(state.data, &record); err != nil {
 			return fmt.Errorf("enterprise hooks: read the Claude Code managed policy ownership record: %w", err)
@@ -70,7 +80,16 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 			return nil
 		}
 		if record.SchemaVersion != 2 {
-			return errors.New("enterprise hooks: the Claude Code managed policy ownership record is from an earlier release; run Setup /ensure")
+			// A standalone computer has no Setup installed: name where it comes
+			// from (cowork-1-0-8 GAP-0095). Secure Client keeps its text.
+			step := "Setup /ensure"
+			if windowsEnterpriseStandaloneProcess() {
+				step = "`" + managed.WindowsSetupCommand("/ensure") + "` (" + managed.WindowsSetupSource + ")"
+			}
+			return errors.New("enterprise hooks: the Claude Code managed policy ownership record is from an earlier release; run " + step)
+		}
+		if err := requireWindowsClaudeRecordedHookExecutable(record); err != nil {
+			return err
 		}
 		body, err := renderRecordedWindowsClaudeManagedPolicy(record)
 		setAside := false
@@ -109,6 +128,28 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 	return restored, err
 }
 
+// requireWindowsClaudeRecordedHookExecutable refuses, on standalone, an
+// ownership record whose hook executable is not this install's own native
+// hook, so the restore never renders a drop-in that runs another binary for
+// every Claude Code user. The record is trusted only through its descriptor;
+// the target install and verify already require the same executable
+// (GAP-0633). Secure Client keeps the record as it is.
+func requireWindowsClaudeRecordedHookExecutable(record windowsClaudeManagedPolicyState) error {
+	if !windowsManagedPolicySelfHealRefusesContentDrift() {
+		return nil
+	}
+	hookExecutable, err := windowsEnterpriseHookExecutable()
+	if err != nil {
+		return err
+	}
+	if !sameWindowsEnterprisePath(record.HookExecutable, hookExecutable) {
+		return fmt.Errorf("enterprise hooks: the Claude Code managed policy ownership record names hook executable %s, "+
+			"not this install's %s, so the changed drop-in is left as it is; run `%s`. %s", record.HookExecutable, hookExecutable,
+			managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
+	}
+	return nil
+}
+
 // renderRecordedWindowsClaudeManagedPolicy is the Claude Code policy whose
 // digest the ownership record keeps.
 func renderRecordedWindowsClaudeManagedPolicy(record windowsClaudeManagedPolicyState) ([]byte, error) {
@@ -117,9 +158,11 @@ func renderRecordedWindowsClaudeManagedPolicy(record windowsClaudeManagedPolicyS
 	}
 	for _, contract := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{true, false} {
-			body, err := renderWindowsClaudeRecordedPolicy(record, contract, lock)
-			if err == nil && windowsManagedPolicyDigest(body) == record.PolicySHA256 {
-				return body, nil
+			for _, previousForm := range []bool{false, true} {
+				body, err := renderWindowsClaudeRecordedPolicy(record, contract, lock, previousForm)
+				if err == nil && windowsManagedPolicyDigest(body) == record.PolicySHA256 {
+					return body, nil
+				}
 			}
 		}
 	}
@@ -138,12 +181,14 @@ func windowsClaudeRecordedPolicyContracts() []string {
 
 // renderWindowsClaudeRecordedPolicy renders the drop-in for the record's hook
 // executable and gateway under contract, with or without the
-// managed-hooks-only lock.
-func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool) ([]byte, error) {
+// managed-hooks-only lock. The previous direct command remains readable so
+// an ownership record written before the guard parent can still be restored.
+func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool, previousForm ...bool) ([]byte, error) {
 	return connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
 		APIAddr:                     record.GatewayAddr,
 		HookFailMode:                "closed",
 		ManagedEnterprise:           true,
+		SecureClientHookDelivery:    secureClientHookDelivery() || len(previousForm) > 0 && previousForm[0],
 		HookExecutable:              record.HookExecutable,
 		HookContractID:              contract,
 		ClaudeAllowManagedHooksOnly: lock,
@@ -177,6 +222,9 @@ func ApplyWindowsClaudeManagedHooksOnlyLock() (bool, error) {
 			return false, err
 		}
 	}
+	if plain, err := windowsClaudeManagedPolicyDirPlain(); err != nil || !plain {
+		return false, err
+	}
 	want := windowsClaudeManagedHooksOnlyEnforced()
 	written := false
 	err := windowsClaudeManagedPolicyTransaction(func() error {
@@ -204,8 +252,15 @@ func ApplyWindowsClaudeManagedHooksOnlyLock() (bool, error) {
 		}
 		var body []byte
 		for _, contract := range windowsClaudeRecordedPolicyContracts() {
-			current, renderErr := renderWindowsClaudeRecordedPolicy(record, contract, !want)
-			if renderErr != nil || !bytes.Equal(current, policy.data) {
+			matches := false
+			for _, previousForm := range []bool{false, true} {
+				current, renderErr := renderWindowsClaudeRecordedPolicy(record, contract, !want, previousForm)
+				if renderErr == nil && bytes.Equal(current, policy.data) {
+					matches = true
+					break
+				}
+			}
+			if !matches {
 				continue
 			}
 			if body, err = renderWindowsClaudeRecordedPolicy(record, contract, want); err != nil {

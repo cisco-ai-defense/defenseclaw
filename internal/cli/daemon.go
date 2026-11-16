@@ -247,6 +247,10 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 	return err == nil && enabled
 }
 
+// refuseStartInUntrustedHome is daemon.RefuseStartInUntrustedHome. A variable
+// so a test can stand in for the root run it cannot be.
+var refuseStartInUntrustedHome = daemon.RefuseStartInUntrustedHome
+
 func runStart(cmd *cobra.Command, args []string) error {
 	coldStart := cmd != nil && hookColdStartRequested(cmd.Flags())
 	if coldStart && !hookColdStartSupported() {
@@ -256,6 +260,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	dataDir := config.DefaultDataPath()
+	// Before the login path, the start lock or any other write into the home.
+	if err := refuseStartInUntrustedHome(dataDir); err != nil {
+		return err
+	}
 	if coldStart {
 		if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
 			return fmt.Errorf("hook cold start skipped: %w", err)
@@ -324,7 +332,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	// Validate every process-identity artifact before that fast path so malformed
 	// or unreadable watchdog state can never be hidden by a valid gateway PID.
 	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return err
+		return refuseOverRootOwnedState(cmd, "start", err)
 	}
 	bootSource := configSourceDigest(config.ConfigPath())
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
@@ -386,8 +394,11 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	}
 	if !rotationTransaction {
 		if problem := foreignGatewayListener(cfg); problem != "" {
-			return fmt.Errorf("cannot start the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
+			return fmt.Errorf("cannot start the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 		}
+	}
+	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "start"); err != nil {
+		return err
 	}
 	if !coldStart {
 		upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
@@ -472,8 +483,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if !rotationTransaction {
 			err = explainForeignListenerAtReadiness(cfg, err)
 		}
-		return fmt.Errorf("start daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
-			gatewayStartFailureDiskNote(config.DefaultDataPath()))
+		return gatewayReadinessFailure("start daemon readiness", err, d.LogFile())
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 	removeRunningGatewayToken(config.DefaultDataPath())
@@ -805,6 +815,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 		return err
 	}
+	if err := refuseStartInUntrustedHome(config.DefaultDataPath()); err != nil {
+		return err
+	}
 	release, err := acquireGatewayStartLock(config.DefaultDataPath(), gatewayStartLockWait)
 	if err != nil {
 		return err
@@ -817,7 +830,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	// process-identity artifact before that first side effect so malformed or
 	// unreadable watchdog state can never authorize a partial restart.
 	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return err
+		return refuseOverRootOwnedState(cmd, "restart", err)
 	}
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	// Refuse before stopping anything: the new gateway could not start.
@@ -825,6 +838,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := gatewayDiskFullError("restart", config.DefaultDataPath()); err != nil {
+		return err
+	}
+	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "restart"); err != nil {
 		return err
 	}
 	var cfgErr error
@@ -849,7 +865,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("restart preflight: %w", err)
 	}
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("cannot restart the gateway: %s. %s", problem, foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("cannot restart the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 	}
 	upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
 	claimGatewayAPIPort(cfg)
@@ -889,8 +905,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
 		err = explainForeignListenerAtReadiness(cfg, err)
-		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
-			gatewayStartFailureDiskNote(config.DefaultDataPath()))
+		return gatewayReadinessFailure("restart daemon readiness", err, d.LogFile())
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 	removeRunningGatewayToken(config.DefaultDataPath())
@@ -1431,6 +1446,8 @@ func readDotEnv(path string) map[string]string {
 		return nil
 	}
 	env := make(map[string]string)
+	// An adopted gateway token copy never shadows the one the operator saved.
+	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -1441,6 +1458,9 @@ func readDotEnv(path string) map[string]string {
 			continue
 		}
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if shadowed.Has(key) {
+			continue
+		}
 		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 			value = value[1 : len(value)-1]
 		}
@@ -2997,6 +3017,11 @@ func printConnectorsNotStarted(snap gateway.HealthSnapshot) {
 			// their fix (GAP-0578).
 			fmt.Printf("  %s %s (%s) was skipped, so it is not enforced: %s\n",
 				Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, reason)
+			continue
+		}
+		if cause := guardrailNotStartedCause(snap.Guardrail.Details, name); cause != "" {
+			fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced: %s; then run: defenseclaw setup %s\n",
+				Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, cause, name)
 			continue
 		}
 		fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced. "+

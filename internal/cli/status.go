@@ -259,7 +259,7 @@ func runSidecarStatusJSON(w io.Writer) error {
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		doc.Error = problem
 		doc.Hint = foreignGatewayListenerFix(cfg)
-		failure = errors.New("the gateway port is held by another process")
+		failure = foreignGatewayStatusError(problem)
 	} else if clientErr != nil {
 		doc.Error = clientErr.Error()
 		failure = clientErr
@@ -282,6 +282,20 @@ func runSidecarStatusJSON(w io.Writer) error {
 		return err
 	}
 	return failure
+}
+
+func foreignGatewayStatusLabel(problem string) string {
+	if problem == daemon.RootGatewayListenerReason {
+		return "Sidecar Status: RUNNING AS ROOT"
+	}
+	return "Sidecar Status: NOT THIS ACCOUNT'S GATEWAY"
+}
+
+func foreignGatewayStatusError(problem string) error {
+	if problem == daemon.RootGatewayListenerReason {
+		return errors.New("the gateway is running as root")
+	}
+	return errors.New("the gateway port is held by another process")
 }
 
 // gatewayStatusConfigLoadError adds the daemon state and the next step when
@@ -450,11 +464,11 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	// another home's or account's gateway as this one.
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		fmt.Println()
-		Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+		Warn(foreignGatewayStatusLabel(problem))
 		printGatewayKV("Endpoint", addr)
-		Subhead(problem + ". Its status is not shown.")
+		Subhead(strings.TrimSuffix(problem, ".") + ". Its status is not shown.")
 		Subhead(foreignGatewayListenerFix(cfg))
-		return fmt.Errorf("the gateway port is held by another process")
+		return foreignGatewayStatusError(problem)
 	}
 
 	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
@@ -465,11 +479,11 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	if err != nil {
 		if problem := foreignGatewayListener(cfg); problem != "" {
 			fmt.Println()
-			Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+			Warn(foreignGatewayStatusLabel(problem))
 			printGatewayKV("Endpoint", addr)
-			Subhead(problem + ". Its status is not shown.")
+			Subhead(strings.TrimSuffix(problem, ".") + ". Its status is not shown.")
 			Subhead(foreignGatewayListenerFix(cfg))
-			return fmt.Errorf("the gateway port is held by another process")
+			return foreignGatewayStatusError(problem)
 		}
 		var requestErr *url.Error
 		if errors.As(err, &requestErr) {
@@ -501,6 +515,15 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayStatusBanner()
 	printGatewayKV("Started", snap.StartedAt.Format(time.RFC3339))
 	printGatewayKV("Uptime", formatDuration(uptime))
+	for _, problem := range cfg.CustomRulePackErrors() {
+		Warn("Config error: " + problem.Error())
+		if config.IsStalePinError(problem) {
+			Subhead("The gateway refuses this pack until its pin matches the files")
+			continue
+		}
+		// The gateway runs the built-in pack of the selection meanwhile.
+		Subhead("A setting that selects this pack loads its built-in pack until the entry is fixed")
+	}
 	if !cfg.StandaloneEnterprise() && !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
 		gatewayRunsReplacedBinary() {
 		Warn("This account's gateway is running a binary that was replaced after it started")
@@ -705,6 +728,11 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 			fmt.Printf("               %s\n", Dim("not enforced: "+reason))
 			continue
 		}
+		if cause := guardrailNotStartedCause(snap.Guardrail.Details, name); cause != "" {
+			fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced: "+
+				cause+"; then run: defenseclaw setup "+name))
+			continue
+		}
 		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
 			"see gateway.log, then run: defenseclaw setup "+name))
 	}
@@ -769,6 +797,63 @@ func guardrailAgentSettingsRefusals(details map[string]interface{}) map[string]s
 		}
 	}
 	return refused
+}
+
+// notStartedCauseMaxRunes bounds the recorded reason shown for a skipped connector.
+const notStartedCauseMaxRunes = 400
+
+// guardrailNotStartedCause returns the cause the gateway recorded for skipping
+// the connector name: its reason, bounded, followed by its repair as recorded.
+// It is empty when the gateway recorded no reason. Every place that tells a
+// user a connector is not enforced reads it from here, so none falls back to
+// "see gateway.log" while the gateway has already named the folder and the
+// command (GAP-0832). The details are typed in process and decoded JSON after
+// a round trip.
+func guardrailNotStartedCause(details map[string]interface{}, name string) string {
+	key := strings.ToLower(strings.TrimSpace(name))
+	var reason string
+	switch raw := details[gateway.GuardrailNotStartedReasons].(type) {
+	case map[string]string:
+		reason = raw[key]
+	case map[string]interface{}:
+		reason, _ = raw[key].(string)
+	}
+	reason = strings.Join(strings.Fields(reason), " ")
+	if reason == "" {
+		return ""
+	}
+	if runes := []rune(reason); len(runes) > notStartedCauseMaxRunes {
+		reason = string(runes[:notStartedCauseMaxRunes]) + "…"
+	}
+	var fix, byHand string
+	omitted := 0
+	switch raw := details[gateway.GuardrailNotStartedRepairs].(type) {
+	case map[string]gateway.NotStartedRepair:
+		repair := raw[key]
+		fix, byHand, omitted = repair.Fix, repair.ByHand, repair.OmittedBytes
+	case map[string]interface{}:
+		if repair, ok := raw[key].(map[string]interface{}); ok {
+			fix, _ = repair["fix"].(string)
+			byHand, _ = repair["by_hand"].(string)
+			if count, ok := repair["omitted_bytes"].(float64); ok && count > 0 {
+				omitted = int(count)
+			}
+		}
+	}
+	if fix != "" {
+		reason += "; fix: " + fix
+	}
+	if byHand != "" {
+		if fix != "" {
+			reason += "; then by hand: " + byHand
+		} else {
+			reason += "; by hand: " + byHand
+		}
+	}
+	if omitted > 0 {
+		reason += fmt.Sprintf("; repair omitted: it is %d bytes, too long for this field; the gateway log has it whole", omitted)
+	}
+	return reason
 }
 
 // printConnectorBody renders the per-connector since/mode/counter lines

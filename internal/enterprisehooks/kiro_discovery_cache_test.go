@@ -38,7 +38,7 @@ func TestKiroDiscoveryCacheVersionMarksTheIDE(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	writeDiscovery(`"kiro":{"version":"1.0.182","installed":true},"codex":{"version":"1.0.182","installed":true}`)
+	writeDiscovery(`"kiro":{"version":"1.0.182","installed":true,"identity":["/x",1,2,3,4,5]},"codex":{"version":"1.0.182","installed":true}`)
 	if got := cachedSetupAgentVersion(dataDir, "kiro"); got != "1.0.182"+KiroIDEVersionSuffix {
 		t.Fatalf("cached Kiro IDE = %q", got)
 	}
@@ -78,5 +78,26 @@ func TestKiroIDEMarkerAdded(t *testing.T) {
 		if got := kiroIDEMarkerAdded(tc.previous, tc.current); got != tc.want {
 			t.Errorf("kiroIDEMarkerAdded(%+v, %+v) = %t, want %t", tc.previous, tc.current, got, tc.want)
 		}
+	}
+}
+
+// A Kiro version that names no executable (a cache written before discovery
+// recorded one) is not a version an install or verify may judge: the file can
+// have changed to one below the floor since. Discovery reads it again.
+func TestKiroDiscoveryCacheVersionWithoutAnExecutableIsNotUsed(t *testing.T) {
+	dataDir := t.TempDir()
+	write := func(agents string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"), []byte(`{"version":7,"agents":{`+agents+`}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`"kiro":{"version":"kiro-cli 2.27.1","installed":true,"binary_path":"/usr/local/bin/kiro-cli"}`)
+	if got := cachedSetupAgentVersion(dataDir, "kiro"); got != "" {
+		t.Fatalf("an unidentified cached Kiro version is used: %q", got)
+	}
+	write(`"kiro":{"version":"kiro-cli 2.27.1","installed":true,"binary_path":"/usr/local/bin/kiro-cli","identity":["/usr/local/bin/kiro-cli",1,2,3,4,5]}`)
+	if got := cachedSetupAgentVersion(dataDir, "kiro"); got != "kiro-cli 2.27.1" {
+		t.Fatalf("an identified cached Kiro version = %q", got)
 	}
 }

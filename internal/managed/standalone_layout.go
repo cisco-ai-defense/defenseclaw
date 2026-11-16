@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 )
 
 // Standalone service identities. The gateway never runs as root or
@@ -104,6 +106,23 @@ func (l StandaloneLayout) KeptSandboxStatePaths() (store, key, record string) {
 	return path.Join(l.DataDir, StandaloneSandboxStoreDirName),
 		path.Join(l.DataDir, StandaloneCorrelationKeyFileName),
 		path.Join(l.LifecycleDir, StandaloneKeptOpenShellStateFile)
+}
+
+// StandaloneGatewayBinary is the file name of the standalone gateway in a
+// layout's BinDir.
+const StandaloneGatewayBinary = "defenseclaw-gateway"
+
+// StandaloneGatewayPath is the gateway of a Linux or macOS standalone install
+// by its absolute path, as an administrator types it. It is not on the PATH,
+// and sudo's secure_path leaves out the install directory, so a hint that
+// names it bare ends in "command not found" (cowork-1-0-8 GAP-0081). For any
+// other goos, which has no Unix layout, it is the bare name.
+func StandaloneGatewayPath(goos string) string {
+	layout, err := StandaloneLayoutFor(goos)
+	if err != nil {
+		return StandaloneGatewayBinary
+	}
+	return layout.BinDir + "/" + StandaloneGatewayBinary
 }
 
 func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
@@ -212,11 +231,11 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 // never walk its thousands of files. Only LocalSystem and Administrators
 // write it; the gateway service reads and runs it.
 func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
-	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
+	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\` + productlayout.WindowsScannerRuntimeFolder
 }
 
 // StandaloneWindowsHookRuntimeDirName is the Windows HookRuntimeDir folder name.
-const StandaloneWindowsHookRuntimeDirName = "DefenseClaw-HookRuntime"
+const StandaloneWindowsHookRuntimeDirName = productlayout.WindowsHookRuntimeFolder
 
 // StandaloneWindowsScannerRuntimeName is the scanner runtime executable.
 const StandaloneWindowsScannerRuntimeName = "defenseclaw-scanners.exe"

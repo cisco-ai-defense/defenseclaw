@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-1461: status and verify fail on a missing hook runtime folder when the
@@ -146,8 +147,20 @@ func TestWindowsEnterpriseHookRuntimeAccessFailsStatusInBothDirections(t *testin
 					called = path == dir
 					return nil
 				}
-				if repairWindowsEnterpriseHookRuntimeAccess() == "" || !called {
+				if change, refusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse(); change == "" || refusal != "" || !called {
 					t.Fatal("repair did not restore the drifted hook runtime directory")
+				}
+				// A standalone refusal is returned, not swallowed (GAP-0652).
+				windowsEnterpriseRepairPublicDir = func(path string) error {
+					return &managed.StandaloneContentDriftError{Err: errors.New("an untrusted principal can write or owns " + path), Recovery: "run icacls " + path}
+				}
+				change, refusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse()
+				if change != "" || !strings.Contains(refusal, dir) || !strings.Contains(refusal, "run icacls "+dir) {
+					t.Fatalf("a refused repair gave change %q refusal %q", change, refusal)
+				}
+				windowsEnterpriseRepairPublicDir = func(string) error { return errors.New("access denied") }
+				if change, refusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse(); change != "" || refusal != "" {
+					t.Fatalf("a failed write was reported as a refusal: %q %q", change, refusal)
 				}
 			}
 		})

@@ -274,8 +274,9 @@ dc_hook_script() {
 # dc_invoke_hook <connector> <event> <payload_file> — feed a golden event
 # payload into the connector's canonical contract entrypoint and echo
 # "exit:<code>" on the last line so callers can assert verdict shaping. On
-# Unix Amp dispatches through `defenseclaw-gateway hook` because its installed
-# agent entrypoint is a TypeScript plugin rather than an executable shell hook.
+# Amp dispatches through `defenseclaw-gateway hook` on every OS because its
+# installed agent entrypoint is a TypeScript plugin that posts to the gateway,
+# not an executable hook.
 # On Windows this targets the native no-console `defenseclaw-hook hook`
 # subcommand instead of a Bash script.
 #
@@ -291,13 +292,7 @@ dc_invoke_hook() {
       bound_event="PreToolUse"
       ;;
   esac
-  if dc_is_windows; then
-    if [ "${connector}" = "codex" ]; then
-      out="$(defenseclaw-hook hook --connector "${connector}" --event "${bound_event}" --hook-contract codex-hooks-v4 < "${payload}" 2>&1)" && code=0 || code=$?
-    else
-      out="$(defenseclaw-hook hook --connector "${connector}" --event "${bound_event}" < "${payload}" 2>&1)" && code=0 || code=$?
-    fi
-  elif [ "${connector}" = "amp" ]; then
+  if [ "${connector}" = "amp" ]; then
     local amp_event
     amp_event="$(jq -er '.hook_event_name | select(type == "string" and length > 0)' "${payload}")" || {
       dc_err "Amp payload is missing a non-empty hook_event_name: ${payload}"
@@ -309,7 +304,21 @@ dc_invoke_hook() {
       printf 'exit:127\n'
       return 0
     fi
-    out="$(defenseclaw-gateway hook --connector amp --event "${event}" < "${payload}" 2>&1)" && code=0 || code=$?
+    # The installed plugin posts to the address setup rendered into it; a
+    # harness that moved the gateway off its default port names it here.
+    # An empty array expands to nothing only through the ${a[@]+...} form:
+    # macOS bash 3.2 fails "${a[@]}" on an empty array under set -u.
+    local amp_addr=()
+    [ -n "${DEFENSECLAW_GATEWAY_ADDR:-}" ] && amp_addr=(--api-addr "${DEFENSECLAW_GATEWAY_ADDR}")
+    out="$(defenseclaw-gateway hook --connector amp --event "${event}" ${amp_addr[@]+"${amp_addr[@]}"} < "${payload}" 2>&1)" && code=0 || code=$?
+  elif dc_is_windows; then
+    if [ "${connector}" = "codex" ]; then
+      # The native hook takes the contract setup bound for the installed
+      # Codex version; the Windows contract harness passes it.
+      out="$(defenseclaw-hook hook --connector "${connector}" --event "${bound_event}" --hook-contract "${DC_E2E_CODEX_HOOK_CONTRACT:-codex-hooks-v4}" < "${payload}" 2>&1)" && code=0 || code=$?
+    else
+      out="$(defenseclaw-hook hook --connector "${connector}" --event "${bound_event}" < "${payload}" 2>&1)" && code=0 || code=$?
+    fi
   else
     local script; script="$(dc_hook_script "${connector}")"
     if [ ! -x "${script}" ]; then

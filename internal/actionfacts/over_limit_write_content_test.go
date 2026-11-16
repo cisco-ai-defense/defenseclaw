@@ -77,7 +77,7 @@ func TestOverLimitWriteElidedContentTarget(t *testing.T) {
 	} {
 		t.Run(c.target+"/"+c.class, func(t *testing.T) {
 			input, facts := overLimitContentInput(t, c.tool, map[string]any{c.key: c.target, "content": c.content})
-			class, ok := OverLimitWriteElidedContentTarget(input, facts)
+			class, ok := OverLimitWriteElidedContentTarget(input, facts, nil)
 			if class != c.class || ok != (c.class != "") {
 				t.Fatalf("class = %q %t, want %q", class, ok, c.class)
 			}

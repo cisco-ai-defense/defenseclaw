@@ -833,7 +833,7 @@ func movedEntriesAwayFromState(ops []renameOp, moves []findMove, home string) bo
 	for _, move := range moves {
 		for _, start := range move.starts {
 			clear := true
-			err := filepath.WalkDir(start, func(path string, entry fs.DirEntry, err error) error {
+			err := pathWalkDir(start, func(path string, entry fs.DirEntry, err error) error {
 				entries++
 				if err != nil || entries > maxLinkedTreeEntries || entries%256 == 0 && time.Now().After(deadline) {
 					clear = false
@@ -868,7 +868,7 @@ func treesAwayFromState(dirs []string, state stateReach) bool {
 		}
 		seen[dir] = true
 		clear := true
-		err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		err := pathWalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 			entries++
 			if err != nil || entries > maxLinkedTreeEntries || entries%256 == 0 && time.Now().After(deadline) {
 				clear = false

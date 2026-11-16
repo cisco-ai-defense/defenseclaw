@@ -43,13 +43,13 @@ func TestV9SchemaRefusalNamesMovedStorePathKey(t *testing.T) {
 	} {
 		err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\n"+key+": /tmp/store.db\n"))
 		var schemaErr *V8SchemaError
-		if !errors.As(err, &schemaErr) || schemaErr.Path != "$."+key || schemaErr.Suggestion != home ||
-			!strings.Contains(err.Error(), "config_version 9: "+key+" is invalid") ||
-			!strings.Contains(err.Error(), "did you mean "+home+"?") {
+		if !errors.As(err, &schemaErr) || schemaErr.Path != "$."+key || schemaErr.Suggestion != "" ||
+			!strings.Contains(err.Error(), "config_version 9: "+key+" was retired in config_version 8; use "+home) ||
+			strings.Contains(err.Error(), "did you mean") {
 			t.Errorf("top-level %s = %v (%+v)", key, err, schemaErr)
 		}
 		// The managed ensure and validate refusals add the same key (GAP-0188).
-		if hint, ok := schemaErr.MovedKeyHint(); !ok || hint != "it moved to "+home {
+		if hint, ok := schemaErr.RetiredKeyMessage(); !ok || hint != key+" was retired in config_version 8; use "+home {
 			t.Errorf("top-level %s hint = %q, %t", key, hint, ok)
 		}
 	}
@@ -58,14 +58,14 @@ func TestV9SchemaRefusalNamesMovedStorePathKey(t *testing.T) {
 	if !errors.As(err, &schemaErr) || schemaErr.Suggestion == "observability.local.path" {
 		t.Errorf("nested audit_db = %v (%+v)", err, schemaErr)
 	}
-	if hint, ok := schemaErr.MovedKeyHint(); ok {
+	if hint, ok := schemaErr.RetiredKeyMessage(); ok {
 		t.Errorf("nested audit_db hint = %q", hint)
 	}
 	err = ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\naudit_dbx: /tmp/store.db\n"))
 	if !errors.As(err, &schemaErr) {
 		t.Fatalf("typo = %v", err)
 	}
-	if hint, ok := schemaErr.MovedKeyHint(); ok {
+	if hint, ok := schemaErr.RetiredKeyMessage(); ok {
 		t.Errorf("audit_dbx hint = %q", hint)
 	}
 }

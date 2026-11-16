@@ -98,3 +98,28 @@ func TestCarryForwardKeepsTheOldestWithinTheBound(t *testing.T) {
 		t.Fatalf("nothing to carry: joined %v dropped %d", joined, dropped)
 	}
 }
+
+// cowork-1-0-8 GAP-0080: the kernel controls' hour counts follow a helper
+// restart by the epoch of its counters. A restarted helper whose total
+// already passed the old one counts from zero, not as the difference; a
+// helper that predates the epoch is told by a total that went down.
+func TestKernelHitHourCountsFollowAHelperRestartByItsEpoch(t *testing.T) {
+	service := &Service{}
+	at := time.Unix(1_790_000_000, 0)
+	for _, step := range []struct {
+		name           string
+		blocked, since int64
+		want           int64
+	}{
+		{"baseline", 5, 100, 0},
+		{"growth", 7, 100, 2},
+		{"a restarted helper whose total passed the old one", 9, 200, 11},
+		{"a helper that predates the epoch, total down", 3, 0, 14},
+		{"growth without an epoch", 4, 0, 15},
+	} {
+		at = at.Add(time.Minute)
+		if _, blocked := service.noteKernelHits(at, map[string]int64{"blocked_total": step.blocked}, step.since); blocked != step.want {
+			t.Fatalf("%s: blocked in the hour %d, want %d", step.name, blocked, step.want)
+		}
+	}
+}

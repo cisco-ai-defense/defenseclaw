@@ -6,8 +6,6 @@
 package hookpaths
 
 import (
-	"os"
-
 	"golang.org/x/sys/unix"
 )
 
@@ -16,6 +14,6 @@ import (
 // alone succeeds on a mode 0 directory that cd refuses
 // (rel-1-0-6:GAP-0320 review 5).
 func directoryEnterable(path string) bool {
-	info, err := os.Stat(path)
+	info, err := pathStat(path)
 	return err == nil && info.IsDir() && unix.Access(path, unix.X_OK) == nil
 }

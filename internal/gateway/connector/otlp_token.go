@@ -195,7 +195,7 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+	if err := ensureHookAPITokenDir(filepath.Dir(tokenPath)); err != nil {
 		return "", fmt.Errorf("create OTLP path-token dir: %w", err)
 	}
 	if err := validateOTLPPathTokenDirectory(tokenPath); err != nil {
@@ -316,7 +316,7 @@ func RemoveOTLPPathToken(dataDir string, scope OTLPPathTokenScope) error {
 	if err := validateOTLPPathTokenLocation(dataDir, path); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := ensureHookAPITokenDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	return withOTLPPathTokenLock(path, func() error {
@@ -482,7 +482,7 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 	if err := otlpValidateOwner(path, openedInfo); err != nil {
 		return "", err
 	}
-	if err := otlpValidatePerm(path, openedInfo); err != nil {
+	if err := otlpValidateCredentialPerm(path, openedInfo); err != nil {
 		return "", err
 	}
 	limited := io.LimitReader(f, otlpPathTokenMaxReadBytes+1)
@@ -504,7 +504,7 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 	if err := otlpValidateOwner(path, currentInfo); err != nil {
 		return "", err
 	}
-	if err := otlpValidatePerm(path, currentInfo); err != nil {
+	if err := otlpValidateCredentialPerm(path, currentInfo); err != nil {
 		return "", err
 	}
 	return tok, nil
@@ -527,7 +527,7 @@ func validateSecureOTLPPathTokenFile(dataDir, path string) (os.FileInfo, error) 
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("OTLP path-token %s is not a regular file", path)
 	}
-	if err := otlpValidatePerm(path, info); err != nil {
+	if err := otlpValidateCredentialPerm(path, info); err != nil {
 		return nil, err
 	}
 	if err := otlpValidateOwner(path, info); err != nil {

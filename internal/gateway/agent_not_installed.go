@@ -33,6 +33,17 @@ func setupRefusedBeforeAnyChange(err error) bool {
 		errors.Is(err, connector.ErrSetupRefusedUnchanged)
 }
 
+// connectorRefusedAtCustody reports a refusal made before Setup wrote anything
+// because another account can write where the guard of a connector lives: the
+// plugin folder chain or file (connector.PluginFolderRefusedBeforeChange), or
+// the folder of the agent executable. The user clears it with the command the
+// refusal names, so only that connector waits for a restart; failing the start
+// for it left every other connector unchecked (GAP-0798).
+func connectorRefusedAtCustody(err error) bool {
+	return connector.PluginFolderRefusedBeforeChange(err) ||
+		errors.Is(err, connector.ErrAgentInstallNotTrusted) && setupRefusedBeforeAnyChange(err)
+}
+
 // agentNotInstalledReason skips only a connector with positive absence
 // evidence. A missing selected executable at an arbitrary path can mean the
 // agent moved, so that case keeps the existing startup refusal.
@@ -288,6 +299,13 @@ func ampNPMInvokedTarget(line string) string {
 // gateway log.
 func agentNotInstalledRefusal(name, why string) string {
 	return fmt.Sprintf("the agent is not installed for this account (%s); reinstall it and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove %s", why, name)
+}
+
+// openCodeV2RequiredRefusal is the health reason of an OpenCode connector
+// skipped because the OpenCode the gateway found is not V2. The version is in
+// the gateway log.
+func openCodeV2RequiredRefusal(name string) string {
+	return fmt.Sprintf("the OpenCode the gateway found for this account is not V2, and V2 is required; put OpenCode V2 first on the PATH of the shell that starts the gateway and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove %s", name)
 }
 
 // claudeDesktopEngineMayExist reports a Claude Desktop engine folder

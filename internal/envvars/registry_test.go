@@ -300,11 +300,97 @@ func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 				return nil
 			}
 			raw, readErr := os.ReadFile(path)
-			if readErr == nil && direct.Match(raw) {
-				t.Errorf("%s reads a managed-ignored variable with os.Getenv; use envvars.Getenv", path)
+			if readErr == nil {
+				rel, _ := filepath.Rel(root, path)
+				// The exemption list below is keyed by slash paths; Windows
+				// reports the relative path with backslashes.
+				rel = filepath.ToSlash(rel)
+				for _, match := range direct.FindAllStringSubmatch(string(raw), -1) {
+					// These readers are restricted to per-user hooks or skip the
+					// value in managed mode, as checked by the hook policy test.
+					if match[2] == "DEFENSECLAW_HOOK_MAX_BODY" &&
+						(rel == "internal/cli/hook.go" || rel == "cmd/defenseclaw-hook-user/main.go") {
+						continue
+					}
+					t.Errorf("%s reads managed-ignored %s directly", path, match[2])
+				}
 			}
 			return nil
 		})
+	}
+}
+
+// TestGAP0674ManagedHookEnvironmentPoliciesMatchReaders keeps the managed hook
+// metadata aligned with the hook readers. The body cap is a per-user setting;
+// managed shell hooks clear it and the native hook skips it.
+func TestGAP0674ManagedHookEnvironmentPoliciesMatchReaders(t *testing.T) {
+	registry := MustLoad()
+	policies := map[string]string{
+		"DEFENSECLAW_HOOK_MAX_BODY":                  ManagedIgnore,
+		"DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS": ManagedTightenOnly,
+		"DEFENSECLAW_STRICT_AVAILABILITY":            ManagedTightenOnly,
+	}
+	for name, want := range policies {
+		entry, ok := registry.Get(name)
+		if !ok {
+			t.Fatalf("%s missing from registry", name)
+		}
+		if entry.Managed != want {
+			t.Errorf("%s managed policy = %q, want %q", name, entry.Managed, want)
+		}
+	}
+	for _, entry := range registry.Entries {
+		if entry.Managed == ManagedTightenOnly && policies[entry.Name] != ManagedTightenOnly {
+			t.Errorf("%s has an unreviewed tighten_only policy", entry.Name)
+		}
+	}
+
+	SetManagedStandalone(true)
+	t.Cleanup(func() {
+		SetManagedStandalone(false)
+		ignoredMu.Lock()
+		delete(ignored, "DEFENSECLAW_HOOK_MAX_BODY")
+		ignoredMu.Unlock()
+	})
+	t.Setenv("DEFENSECLAW_HOOK_MAX_BODY", "4096")
+	if got := Getenv("DEFENSECLAW_HOOK_MAX_BODY"); got != "" {
+		t.Errorf("managed body cap read %q, want unset", got)
+	}
+	SetManagedStandalone(false)
+	if got := Getenv("DEFENSECLAW_HOOK_MAX_BODY"); got != "4096" {
+		t.Errorf("per-user body cap read %q, want 4096", got)
+	}
+	SetManagedStandalone(true)
+	for _, name := range []string{"DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS", "DEFENSECLAW_STRICT_AVAILABILITY"} {
+		t.Setenv(name, "1")
+		if got := Getenv(name); got != "1" {
+			t.Errorf("%s read %q, want 1", name, got)
+		}
+	}
+
+	_, thisFile, _, _ := runtime.Caller(0)
+	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	read := func(rel string) string {
+		t.Helper()
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		return string(b)
+	}
+	native := read("internal/cli/hook.go")
+	if !strings.Contains(native, `if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" && !opts.ManagedEnterprise {`) ||
+		strings.Count(native, `os.Getenv("DEFENSECLAW_HOOK_MAX_BODY")`) != 1 {
+		t.Error("native managed hook body-cap guard changed")
+	}
+	prologue := read("internal/gateway/connector/managed_hook_prologue.go")
+	if !strings.Contains(prologue, "unset DEFENSECLAW_HOOK_MAX_BODY ") {
+		t.Error("managed shell hook body-cap guard changed")
+	}
+	perUser := read("cmd/defenseclaw-hook-user/main.go")
+	if !strings.Contains(perUser, "if managedRuntimePresent() {") ||
+		strings.Count(perUser, `os.Getenv("DEFENSECLAW_HOOK_MAX_BODY")`) != 1 {
+		t.Error("per-user native hook managed-mode guard changed")
 	}
 }
 

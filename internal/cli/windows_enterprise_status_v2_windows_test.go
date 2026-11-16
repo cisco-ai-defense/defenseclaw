@@ -291,6 +291,9 @@ func TestWindowsStatusV2CountsTheClaudeCodeDropInBeforeAnyAccountEnrolls(t *test
 	if err := os.WriteFile(opts.HookBinary, []byte("MZ"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(opts.HookBinary), "defenseclaw-hook-guard.exe"), []byte("MZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	body, err := connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
 		APIAddr: "127.0.0.1:18970", HookFailMode: "closed", ManagedEnterprise: true,
 		HookExecutable: opts.HookBinary, ClaudeAllowManagedHooksOnly: true,
@@ -467,4 +470,157 @@ func TestWindowsStatusV2MachinePolicyCoverageNeedsTheGuardianState(t *testing.T)
 		t.Fatal(err)
 	}
 	contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
+}
+
+// GAP-0856, GAP-0879. While a link sits at the machine-policy folder of Codex,
+// Cursor or Claude Code, status and verify carry one named warning per
+// connector with the command that removes it; no link, or no machine policy
+// for the connector, carries none.
+func TestWindowsStatusNamesALinkAtAVendorFolderOnce(t *testing.T) {
+	previous := windowsEnterpriseVendorFolderLink
+	t.Cleanup(func() { windowsEnterpriseVendorFolderLink = previous })
+	links := map[string]string{
+		"codex":      `C:\ProgramData\OpenAI\Codex`,
+		"cursor":     `C:\ProgramData\Cursor`,
+		"claudecode": `C:\Program Files\ClaudeCode\managed-settings.d`,
+	}
+	codes := map[string]string{"codex": "codex_machine_folder_link", "cursor": "cursor_machine_folder_link", "claudecode": "claudecode_machine_folder_link"}
+	newResult := func(connectors ...string) *enterprisestatus.Result {
+		result := &enterprisestatus.Result{Action: "status", MachinePolicy: map[string]enterprisestatus.MachinePolicyState{}}
+		for _, name := range connectors {
+			result.MachinePolicy[name] = windowsEnterpriseMachinePolicy(true)
+		}
+		return result
+	}
+	count := func(result *enterprisestatus.Result, code string) int {
+		n := 0
+		for _, warning := range result.Warnings {
+			if warning.Code == code {
+				n++
+			}
+		}
+		return n
+	}
+
+	windowsEnterpriseVendorFolderLink = func(connectorName string) string { return links[connectorName] }
+	result := newResult("codex", "cursor", "claudecode")
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	for name, code := range codes {
+		if count(result, code) != 1 {
+			t.Fatalf("%s: the link was named %d times, want once: %+v", name, count(result, code), result.Warnings)
+		}
+	}
+	for _, warning := range result.Warnings {
+		var name string
+		for connectorName, code := range codes {
+			if warning.Code == code {
+				name = connectorName
+			}
+		}
+		if !strings.Contains(warning.Message, `cmd /c rmdir "`+links[name]+`"`) || !strings.Contains(warning.Message, "link only, not its target") {
+			t.Fatalf("%s: the warning does not carry the fix: %s", name, warning.Message)
+		}
+	}
+
+	result = newResult("claudecode")
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	if count(result, codes["codex"]) != 0 || count(result, codes["cursor"]) != 0 || count(result, codes["claudecode"]) != 1 {
+		t.Fatalf("only the connector with a machine policy is warned: %+v", result.Warnings)
+	}
+
+	windowsEnterpriseVendorFolderLink = func(string) string { return "" }
+	result = newResult("codex", "cursor", "claudecode")
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	if len(result.Warnings) != 0 {
+		t.Fatalf("no link, but a warning: %+v", result.Warnings)
+	}
+}
+
+// GAP-0650 (owner decision for 1.0.9): a requirements.toml a user holds open
+// is a documented Windows platform limit. Status names the holder and says
+// the enforced policy stays in place; a file nobody holds adds nothing.
+func TestWindowsStatusV2NamesTheHolderOfTheCodexRequirements(t *testing.T) {
+	const path = `C:\ProgramData\OpenAI\Codex\requirements.toml`
+	for _, held := range []bool{true, false} {
+		fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+			cfg: windowsStatusV2Config(),
+			codexRequirementsHold: func() (string, []string, bool) {
+				return path, []string{"codex.exe (PID 4242)"}, held
+			},
+		})
+		result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.9")
+		result.Installed, result.InstalledVersion = true, "1.0.9"
+		applyWindowsEnterpriseStatusV2(result)
+		found := ""
+		for _, warning := range result.Warnings {
+			if warning.Code == windowsCodexRequirementsHeldCode {
+				found = warning.Message
+			}
+		}
+		if !held {
+			if found != "" {
+				t.Fatalf("a requirements.toml nobody holds is reported held: %s", found)
+			}
+			continue
+		}
+		for _, want := range []string{path, "codex.exe (PID 4242)", "the enforced Codex policy stays in place", "the guardian applies it at its next pass, about a minute later", "a failed Setup run needs the administrator to run it again"} {
+			if !strings.Contains(found, want) {
+				t.Fatalf("held warning = %q, want %q", found, want)
+			}
+		}
+	}
+}
+
+func TestWindowsEnterpriseStatusNamesTheLinkOfAPendingTransaction(t *testing.T) {
+	previous := windowsEnterpriseVendorFolderLink
+	t.Cleanup(func() { windowsEnterpriseVendorFolderLink = previous })
+	links := map[string]string{
+		"cursor":     `C:\ProgramData\Cursor`,
+		"claudecode": `C:\Program Files\ClaudeCode`,
+	}
+	windowsEnterpriseVendorFolderLink = func(connectorName string) string { return links[connectorName] }
+	count := func(result *enterprisestatus.Result) int {
+		n := 0
+		for _, warning := range result.Warnings {
+			if warning.Code == "transaction_pending_link" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Not pending: the link is named by the machine-folder warning only.
+	result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.9")
+	noteWindowsEnterprisePendingTransactionLink(result)
+	if count(result) != 0 {
+		t.Fatalf("no pending transaction, but a pending-link warning: %+v", result.Warnings)
+	}
+
+	// Pending: each link is named with the pending state and the rmdir fix.
+	result = enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.9")
+	result.TransactionPending = true
+	noteWindowsEnterprisePendingTransactionLink(result)
+	if count(result) != 2 {
+		t.Fatalf("pending with two links: %d warnings, want 2: %+v", count(result), result.Warnings)
+	}
+	for _, warning := range result.Warnings {
+		for _, want := range []string{"transaction is pending", "stay stopped", "cmd /c rmdir \"", "link only, not its target"} {
+			if !strings.Contains(warning.Message, want) {
+				t.Fatalf("pending-link warning lacks %q: %s", want, warning.Message)
+			}
+		}
+	}
+	if !strings.Contains(result.Warnings[0].Message, `Cursor machine-policy folder`) || !strings.Contains(result.Warnings[1].Message, `Claude Code machine-policy folder`) {
+		t.Fatalf("the links are not named by connector: %+v", result.Warnings)
+	}
+
+	// Pending, no link: nothing is added.
+	windowsEnterpriseVendorFolderLink = func(string) string { return "" }
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.9")
+	result.TransactionPending = true
+	noteWindowsEnterprisePendingTransactionLink(result)
+	if count(result) != 0 {
+		t.Fatalf("no link, but a pending-link warning: %+v", result.Warnings)
+	}
 }

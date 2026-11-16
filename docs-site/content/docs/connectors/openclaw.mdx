@@ -26,12 +26,14 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 
 On a new install, run `defenseclaw init --connector openclaw` first. Until DefenseClaw is initialized, `defenseclaw setup openclaw` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
+OpenClaw's own gateway must be running (or be a service that `openclaw gateway restart` can start) before `defenseclaw setup openclaw` changes anything. If nothing answers at the gateway address in `openclaw.json`, setup stops with `No changes made.`: start it with `openclaw gateway run` and run the same command again.
+
 ```bash
 defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
+The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings. During a gateway outage, the saved outage mode decides whether a model request continues directly to its configured provider with a warning. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
 ### Check it
 
@@ -48,6 +50,47 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 The sequence of a model call and a tool call, with approvals, is on the [OpenClaw integration page](/docs/connectors/openclaw-integration#end-to-end-flow).
 
+### Same user, own ports
+
+Run the DefenseClaw gateway and the OpenClaw gateway as the same OS user. The plugin runs inside OpenClaw and reads that user's `~/.defenseclaw`, and the DefenseClaw gateway connects to OpenClaw with that user's OpenClaw token.
+
+Use one OS account for each DefenseClaw and OpenClaw pair. On a shared machine, give each account its own ports: `gateway.api_port` and `guardrail.port` for DefenseClaw, `gateway.port` in `openclaw.json` for OpenClaw.
+
+DefenseClaw checks the listener before it sends a token. This protects against a process of another account that takes a port while a gateway restarts:
+
+- The plugin sends the DefenseClaw token and provider keys only to a loopback `gateway.host`. `localhost` means `127.0.0.1`. With any other host the plugin sends nothing, and `defenseclaw doctor` fails the **OpenClaw gateway.host** row.
+- The listener must prove it holds the same token (`/api/v1/hook-listener-proof`). The gateway answers that proof only to its own OS account. When the proof fails, nothing is sent. A listener that answers without the proof is not an outage: in every policy a tool check is blocked and a model call fails as in a closed-mode gateway outage. A proof that finds nothing listening, or times out, is an outage and follows the saved outage mode.
+- Tool checks and the plugin's other gateway calls prove the very connection that carries the token. Model calls, health checks and telemetry prove the listener right before each request. A process that takes the port in the gap between that proof and the request, well under a millisecond on loopback, could still receive that one request.
+- Before it connects to a loopback OpenClaw gateway port, the DefenseClaw gateway checks who owns the listener. On Linux it must be the same account or root; on macOS, the same account. Otherwise it sends nothing, keeps retrying, and `defenseclaw doctor` names the step.
+
+### Tested OpenClaw versions
+
+We test DefenseClaw with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. We test against new OpenClaw releases as they come out.
+
+### Device pairing
+
+DefenseClaw connects to the OpenClaw gateway as an operator device named `gateway-client`. OpenClaw approves a new device on a loopback connection by itself, so a normal single-user install needs no step. DefenseClaw never writes OpenClaw's pairing files.
+
+OpenClaw asks you to approve the device when the connection is not loopback, when `gateway.nodes.pairing.autoApproveLocal` is `false`, or when a device asks for more scopes than OpenClaw approved. DefenseClaw then keeps retrying. `defenseclaw doctor` and `defenseclaw-gateway status` show the device ID and the step:
+
+```bash
+openclaw devices list
+openclaw devices approve REQUEST_ID
+```
+
+Replace `REQUEST_ID` with the request ID the list shows. Run `openclaw devices list` right before you approve: OpenClaw gives a new request ID when the device retries with changed details.
+
+### OpenClaw operator scopes
+
+DefenseClaw asks OpenClaw for these scopes:
+
+| Scope | What DefenseClaw uses it for |
+| --- | --- |
+| `operator.read` | Read the config, tool catalog and skill status, and receive session events (`sessions.subscribe`). |
+| `operator.write` | Send DefenseClaw security notices into a session (`sessions.send`). |
+| `operator.approvals` | Answer OpenClaw exec approvals (`exec.approval.resolve`). |
+| `operator.admin` | Change OpenClaw's config to disable a blocked skill, plugin or MCP server (`config.patch`, `skills.update`). |
+
 #### What this command sets vs. leaves at defaults
 
 `defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/guardrail/aliases), [full guardrail setup](/docs/guardrail)). The flags above set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/policies/defaults)).
@@ -60,7 +103,7 @@ The sequence of a model call and a tool call, with approvals, is on the [OpenCla
 | Detection strategy | `regex_judge` if the judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | off | `--human-approval` plus `--hilt-min-severity` |
 | HITL minimum severity | `HIGH` when `--human-approval` is on | `--hilt-min-severity low\|medium\|high\|critical` |
-| Gateway outage | `closed`: no hooks, see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage); `status`, the setup summary and `guardrail fail-mode` all show it | not configurable (`guardrail.hook_fail_mode` does not apply) |
+| Gateway outage | The saved outage mode, see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage): per-user default and permissive continue with a warning, strict and managed `closed`; `status`, the setup summary and `guardrail fail-mode` all show it | `defenseclaw guardrail fail-mode open\|closed --connector openclaw` on default and permissive; strict and managed stay `closed` |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/observability/redaction)) |
@@ -129,7 +172,7 @@ DefenseClaw 1.0.5 and 1.0.6 could save the secret reference text itself in `~/.d
 | Hook scripts | `~/.defenseclaw/hooks` |
 | Subprocess shims | on `PATH`, for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` |
 
-DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and its managed entries in `openclaw.json`. DefenseClaw backs up `openclaw.json` first. Backups are byte for byte and hash-checked. Teardown restores the file, or removes only DefenseClaw's entries when the file drifted.
+DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and its managed entries in `openclaw.json`. DefenseClaw backs up `openclaw.json` first. Backups are byte for byte and hash-checked. Teardown restores the file, or removes only DefenseClaw's entries when the file drifted. OpenClaw saves `openclaw.json` itself while it runs (it keeps its own metadata there), and DefenseClaw counts that as a change: the uninstall then keeps OpenClaw's version, takes out only DefenseClaw's entries, and prints a notice that the file is not byte for byte the copy from before setup. A file nobody changed comes back exactly.
 
 ## Transport coverage
 
@@ -144,6 +187,8 @@ The plugin patches `globalThis.fetch`, Node `https.request`, `http.request` and 
 | Undici copy that OpenClaw ships | Same rule as the global dispatcher. OpenClaw sends model requests through an SSRF-guarded fetch that gives Undici a dispatcher of its own, which skips every layer above. | Passes through without guaranteed passthrough telemetry. |
 
 Raw sockets, custom transports and libraries that bypass every patched entry point are outside the boundary. An egress event proves the plugin observed a transport branch, not that the request was proxied and inspected.
+
+The plugin patches the main thread of the OpenClaw process. A model call made from a Node worker thread is not redirected and not inspected. The **OpenClaw interception** row of `defenseclaw doctor` fails when the latest model call took no proxy hop, so it reports such a call.
 
 OpenClaw `>=2026.6.8` is the range that first required the Undici dispatcher layers. `defenseclaw doctor` fails the **OpenClaw interception** row when the plugin's sentinel self-test, which never leaves the host, cannot prove a rewrite onto the guardrail proxy, even if `/health` returns 200. The gateway pairs each model call OpenClaw completes with a proxy hop of its own. Doctor fails the row when the latest call took no hop, and warns when an earlier one did not but the calls after it did. Counts restart when `defenseclaw-gateway` restarts. If turns succeed while doctor says traffic is not intercepted, restart OpenClaw so the plugin reloads, then rerun doctor. Confirm a real `INCOMING REQUEST` delta in `gateway.log` only when that log can grow.
 
@@ -175,7 +220,7 @@ Proxy connector: not gated by a hook contract version.
 ### What it can block or ask
 
 - The proxy can block a checked request, a checked response and a tool call.
-- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`) or with `/approve` on a chat channel that forwards approvals. `openclaw tui` and local `openclaw chat` do not show the request, so the call there is denied when it times out, and the OpenClaw gateway log says where to answer.
+- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`), with `/approve` on a chat channel that forwards approvals, or in `openclaw tui` from OpenClaw 2026.10.9, where **Allow once** works too. Where OpenClaw shows no request, the call is denied when it times out, and the OpenClaw gateway log says where to answer.
 - Only recognized model traffic is redirected. Other requests pass through unchecked.
 
 ### Verdict mapping
@@ -184,7 +229,11 @@ The gateway answers allow, alert, confirm or block. In action mode a block stops
 
 ### Fail mode
 
-OpenClaw is a proxy connector with no hooks. While the gateway is down, requests are blocked ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). `guardrail fail-mode` lists it as `closed (proxy-backed, no hooks ...)`. See [Fail modes](/docs/reference/fail-modes).
+OpenClaw model requests use the proxy while the gateway is running. On a classified proxy outage (nothing listens on the gateway port, or the connection times out), the per-user default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block. The plugin's tool-inspection call follows the same saved mode: a default or permissive outage lets an ordinary tool run with a warning in its result, while strict and managed block. Direct protected targets remain blocked. A listener that answers without proving it is the account's gateway is not an outage: the plugin sends it nothing and blocks model requests and tool checks in every policy. `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` is ignored by the 1.0.9 plugin. See [Fail modes](/docs/reference/fail-modes).
+
+When the gateway cannot write the audit record of a tool check or a prompt, for example on a full disk, the strict policy blocks the call. The default and permissive policies allow it and say that DefenseClaw audit is degraded. Tool results and model responses keep their verdict.
+
+On OpenClaw 2026.4.24 and later, Setup grants the DefenseClaw prompt hook access so the model outage warning reaches the agent, unless the operator already set `plugins.entries.defenseclaw.hooks.allowConversationAccess`. If an operator disables prompt injection hooks, the warning still appears in the OpenClaw log.
 
 ## Subprocess policy
 
@@ -201,11 +250,15 @@ OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox tha
 - OpenClaw 2026.5.12 and later load Amazon Bedrock from the external plugin `@openclaw/amazon-bedrock-provider`. Without it every model call fails with `No API provider registered for api: bedrock-converse-stream`, and setup warns. Run `openclaw plugins install @openclaw/amazon-bedrock-provider`, then `openclaw gateway restart`.
 - The install watcher disables an OpenClaw skill it blocks without naming a connector. `defenseclaw skill enable <name> --connector openclaw` re-enables the skill in OpenClaw and clears that record, so `skill info` and `skill list` stop saying disabled. Another connector-wide disable stays, and the command names it.
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
+- Model calls made from Node worker threads are not intercepted (see [Transport coverage](#transport-coverage)).
+- The DefenseClaw gateway and OpenClaw must run as the same OS user, one account per pair.
 - OpenClaw does not run in an OpenShell sandbox. OpenShell support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Troubleshooting
 
 If a prompt reports `Unknown model` for a still-installed provider after OpenClaw removes or disables another extension, wait for the plugin reload to finish and retry. If the error remains, run `openclaw models list --refresh --provider amazon-bedrock` (substitute your provider name) and retry.
+
+If `defenseclaw setup openclaw` fails after the OpenClaw gateway stopped, DefenseClaw does not rewrite `openclaw.json`. The failure says the file changed during setup and may still contain DefenseClaw entries. Run `defenseclaw-gateway connector teardown --connector openclaw` to remove them. The command works on `~/.openclaw/openclaw.json` whether or not OpenClaw is still a configured connector, keeps everything else in the file, and leaves a copy at another path as it is. Empty `plugins.allow` or `plugins.load.paths` arrays can remain afterwards; they are harmless.
 
 ## Disable
 

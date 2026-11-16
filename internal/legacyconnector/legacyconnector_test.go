@@ -337,3 +337,25 @@ func TestRemoveOwnedCascadeHooksMissingFileNoOp(t *testing.T) {
 		t.Fatalf("CountOwnedCascadeHooks on a missing file = %d, %v", count, err)
 	}
 }
+
+// g072 review 2 S3: the retired connector's commands quote a typographic
+// quote, and the form the builds that wrote them rendered (the quote not
+// doubled) stays owned.
+func TestOwnedCommandsKeepThePreTypographicQuoteForm(t *testing.T) {
+	// Every typographic single quote PowerShell reads (g072 review 3 N2).
+	for _, quote := range []string{"\u2018", "\u2019", "\u201a", "\u201b"} {
+		bin := `C:\Users\O` + quote + `Brien\.local\bin\defenseclaw-hook.exe`
+		if got, want := NativeHookCommand(bin), `& 'C:\Users\O`+quote+quote+`Brien\.local\bin\defenseclaw-hook.exe' hook --connector `+RetiredDesktopID; got != want {
+			t.Fatalf("NativeHookCommand = %s, want %s", got, want)
+		}
+		owned := ownedCommands(t.TempDir(), []string{bin})
+		for _, want := range []string{
+			NativeHookCommand(bin),
+			`& 'C:\Users\O` + quote + `Brien\.local\bin\defenseclaw-hook.exe' hook --connector ` + RetiredDesktopID,
+		} {
+			if !commandMatches(want, owned) {
+				t.Errorf("%s is not owned", want)
+			}
+		}
+	}
+}

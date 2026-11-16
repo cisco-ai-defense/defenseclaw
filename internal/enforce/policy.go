@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/mcpkey"
 )
 
 // PolicyEngine answers enforcement questions for skills, MCP servers,
@@ -225,7 +226,11 @@ func (e *PolicyEngine) journalInstallIs(targetType, name, connector, want string
 			return action == want, nil
 		}
 	}
-	return e.store.HasAction(targetType, name, "install", want)
+	if targetType != "mcp" || e.SecureClient() {
+		return e.store.HasAction(targetType, name, "install", want)
+	}
+	action, _, err := e.actionFieldForConnector(targetType, name, "", "install")
+	return action == want, err
 }
 
 func (e *PolicyEngine) Quarantine(targetType, name, reason string) error {
@@ -278,12 +283,12 @@ func (e *PolicyEngine) RuntimeDisableReason(targetType, name, connector string) 
 		if err != nil {
 			return "", false, err
 		}
-		if entry != nil && entry.Actions.Runtime != "" {
+		if entry != nil && entry.Actions.Runtime != "" && e.usableActionRow(targetType, name, entry) {
 			return entry.Reason, entry.Actions.Runtime == "disable", nil
 		}
 	}
 	entry, err := e.store.GetActionForConnector(targetType, name, "")
-	if err != nil || entry == nil || entry.Actions.Runtime != "disable" {
+	if err != nil || entry == nil || entry.Actions.Runtime != "disable" || !e.usableActionRow(targetType, name, entry) {
 		return "", false, err
 	}
 	return entry.Reason, true, nil
@@ -305,7 +310,26 @@ func (e *PolicyEngine) IsDisabledForConnector(targetType, name, connector string
 			return action == "disable", nil
 		}
 	}
-	return e.store.HasAction(targetType, name, "runtime", "disable")
+	if targetType != "mcp" || e.SecureClient() {
+		return e.store.HasAction(targetType, name, "runtime", "disable")
+	}
+	action, _, err := e.actionFieldForConnector(targetType, name, "", "runtime")
+	return action == "disable", err
+}
+
+// An automatic MCP journal row from an older release has no dependable
+// account scope. Current rows carry the same versioned tuple as their scan
+// snapshot. Explicit operator decisions come from asset_policy; Secure
+// Client keeps its prior journal behavior.
+func (e *PolicyEngine) usableActionRow(targetType, name string, entry *audit.ActionEntry) bool {
+	if entry == nil {
+		return false
+	}
+	if targetType != "mcp" || e.SecureClient() {
+		return true
+	}
+	identity, ok := mcpkey.Decode(entry.SourcePath)
+	return ok && identity.Name == name
 }
 
 func (e *PolicyEngine) actionFieldForConnector(targetType, name, connector, field string) (string, bool, error) {
@@ -314,6 +338,9 @@ func (e *PolicyEngine) actionFieldForConnector(targetType, name, connector, fiel
 		return "", false, err
 	}
 	if entry == nil {
+		return "", false, nil
+	}
+	if !e.usableActionRow(targetType, name, entry) {
 		return "", false, nil
 	}
 	switch field {

@@ -55,12 +55,16 @@ func OpenCodeManagedPlugin() []byte {
 	return append([]byte(nil), openCodeManagedPlugin...)
 }
 
-// openCodeManagedPluginVendorLimit is the OpenCode behavior no machine file
-// can override (observed with OpenCode 1.18.32): pure mode drops managed
-// config plugins too, and a variable release builds honor replaces the
-// managed config directory. Such a session never calls DefenseClaw, so
-// status can report the entry in place while that session runs without it.
-const openCodeManagedPluginVendorLimit = "OpenCode skips the managed plugin in pure mode (--pure or OPENCODE_PURE=1) and when OPENCODE_TEST_MANAGED_CONFIG_DIR points at another directory; a session started that way runs without DefenseClaw's hooks on either route"
+// openCodeManagedPluginVendorLimit says what an OpenCode launch can do to the
+// managed plugin. OpenCode V1 (1.18.32) skipped it in pure mode and when
+// OPENCODE_TEST_MANAGED_CONFIG_DIR moved the managed folder. OpenCode 2.2.5,
+// the supported release, has no --pure flag and reads neither variable
+// (checked in its Linux and Windows binaries, GAP-0053). Its managed folder
+// is /etc/opencode on Linux and /Library/Application Support/opencode on
+// macOS; on Windows it is ProgramData\opencode taken from the process
+// environment, so a launch with another ProgramData skips it. The launch
+// scan reports that (enterprisestatus opencode_managed_config_relocated).
+const openCodeManagedPluginVendorLimit = "OpenCode 2.2.5 has no pure mode (no --pure flag) and does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR, which made OpenCode V1 skip the managed plugin. It loads the plugin from /etc/opencode on Linux and /Library/Application Support/opencode on macOS; on Windows from %ProgramData%\\opencode as the process environment names it, so a session started with another ProgramData runs without DefenseClaw's hooks. Status and verify report a running OpenCode whose ProgramData was moved or that was started with those variables"
 
 // OpenCodeManagedPluginPath is where a standalone install places the
 // administrator-owned managed OpenCode plugin. StandaloneOptions always
@@ -381,7 +385,7 @@ func (t opencodeTarget) Reconcile(opts Options) (State, error) {
 	}
 	var created []string
 	if policy.Ownership == config.MachinePolicyOwnershipMerge {
-		if created, err = takeBackPolicyPath(opts, path, &state); err != nil {
+		if created, _, err = takeBackPolicyPathFor(opts, path, opencodeFolderUse, &state); err != nil {
 			return state, err
 		}
 		// A config an unprivileged user planted in the folder before
@@ -440,6 +444,9 @@ func (t opencodeTarget) Verify(opts Options) (State, error) {
 	state := newOpenCodeState(opts, policy, path)
 	if openCodePerUserFallback(opts, policy, &state) {
 		return state, nil
+	}
+	if err := validatePolicyLeafDir(opts, platformPath(opts, dirFor(opts, path))); err != nil {
+		state.conflict("%v; unprivileged users can add an opencode.json or opencode.jsonc there, which OpenCode loads for every user", err)
 	}
 	current, exists, err := readPolicyFile(opts, path)
 	if err != nil {

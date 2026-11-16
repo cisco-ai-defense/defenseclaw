@@ -10,12 +10,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -27,6 +27,42 @@ const nestedSkillEntryLimit = 8 * nestedSkillDirectoryLimit
 const nestedSkillDepthLimit = hermesskills.DefaultDepthLimit
 
 var watcherEvalSymlinks = filepath.EvalSymlinks
+
+// linkedRootRefusal is the error for a skill root whose link route is not
+// trusted. When a folder on the route is writable by another account it names
+// that folder and the one change that restores admission scanning (GAP-0905).
+func linkedRootRefusal(root string, cause error) error {
+	var writable *skillrootsafe.WritableAncestorError
+	if errors.As(cause, &writable) {
+		return fmt.Errorf("linked or unavailable skill root: %s: %w", root, writable)
+	}
+	return fmt.Errorf("linked or unavailable skill root: %s", root)
+}
+
+// trustedWalkRoot gives WalkDir a real starting directory when the final
+// component is a trusted link. WalkDir does not descend through a final link.
+// A link below that starting directory remains a non-directory entry.
+func trustedWalkRoot(root string) (string, error) {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return root, nil
+	}
+	return skillrootsafe.Resolve(root, watcherEvalSymlinks)
+}
+
+func logicalWalkPath(root, walkRoot, path string) (string, error) {
+	if sameWatcherPath(root, walkRoot) {
+		return path, nil
+	}
+	relative, err := filepath.Rel(walkRoot, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("walk path outside root: %s", path)
+	}
+	return filepath.Join(root, relative), nil
+}
 
 func (w *InstallWatcher) recursiveSkillRoot(path string) (root, connector string, ok bool) {
 	if w.secureClientActive() {
@@ -53,9 +89,13 @@ func (w *InstallWatcher) nestedSkillEvents(root, path, connector string) ([]Inst
 	var out []InstallEvent
 	switch connector {
 	case "hermes":
-		entries, err := hermesskills.DiscoverUnder(root, path, nestedSkillDirectoryLimit)
+		discover := hermesskills.DiscoverUnder
+		if !w.secureClientActive() {
+			discover = hermesskills.DiscoverUnderTrusted
+		}
+		entries, err := discover(root, path, nestedSkillDirectoryLimit)
 		if errors.Is(err, hermesskills.ErrDirectoryLimit) {
-			entries, err = hermesskills.DiscoverUnderFull(root, path)
+			entries, err = discover(root, path, hermesskills.FullScanDirectoryLimit)
 		}
 		if err != nil {
 			return nil, err
@@ -102,12 +142,20 @@ func cursorSkillFoldersWithLimit(root, subtree string, directoryLimit, entryLimi
 	if err := unlinkedSkillTreePath(root, subtree); err != nil {
 		return nil, err
 	}
+	walkSubtree := subtree
+	if sameWatcherPath(root, subtree) {
+		var err error
+		walkSubtree, err = trustedWalkRoot(root)
+		if err != nil {
+			return nil, err
+		}
+	}
 	var paths []string
 	visited := 0
 	entries := 0
-	err := filepath.WalkDir(subtree, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(walkSubtree, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			if !sameWatcherPath(path, subtree) && errors.Is(walkErr, fs.ErrPermission) {
+			if !sameWatcherPath(path, walkSubtree) && errors.Is(walkErr, fs.ErrPermission) {
 				return filepath.SkipDir
 			}
 			return walkErr
@@ -123,21 +171,24 @@ func cursorSkillFoldersWithLimit(root, subtree string, directoryLimit, entryLimi
 		if directoryLimit > 0 && visited > directoryLimit {
 			return hermesskills.ErrDirectoryLimit
 		}
-		if depthLimit > 0 && strings.Count(path[len(subtree):], string(filepath.Separator)) > depthLimit {
+		if depthLimit > 0 && strings.Count(path[len(walkSubtree):], string(filepath.Separator)) > depthLimit {
 			return hermesskills.ErrDirectoryLimit
 		}
-		if !sameWatcherPath(path, root) && hasSkillMarker(path) {
-			paths = append(paths, path)
+		if (!sameWatcherPath(root, subtree) || !sameWatcherPath(path, walkSubtree)) && hasSkillMarker(path) {
+			logical, err := logicalWalkPath(subtree, walkSubtree, path)
+			if err != nil {
+				return err
+			}
+			paths = append(paths, logical)
 		}
 		return nil
 	})
 	return paths, err
 }
 
-// unlinkedSkillTreePath refuses a linked skills root, a linked ancestor of
-// that root, or a linked subtree before recursive discovery or registration.
-// Comparing resolved paths also catches Windows junctions. Every directory
-// from root to subtree must be a real directory; WalkDir skips links below it.
+// unlinkedSkillTreePath permits a trusted link in the configured root path,
+// while still refusing links below that root before discovery or registration.
+// WalkDir skips links below the subtree it is given.
 func unlinkedSkillTreePath(root, subtree string) error {
 	if !watcherPathAtOrBelow(subtree, root) {
 		return fmt.Errorf("skill subtree outside watched root: %s", subtree)
@@ -146,70 +197,49 @@ func unlinkedSkillTreePath(root, subtree string) error {
 	if err != nil {
 		return fmt.Errorf("resolve skill root %s: %w", root, err)
 	}
-	resolvedRoot, ok := resolvedUnlinkedSkillPath(absoluteRoot)
-	if !ok {
-		return fmt.Errorf("linked or unavailable skill root: %s", root)
-	}
-	for dir := filepath.Clean(subtree); ; dir = filepath.Dir(dir) {
-		info, err := os.Lstat(dir)
-		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-			return fmt.Errorf("linked or unavailable skill subtree: %s", subtree)
-		}
-		if sameWatcherPath(dir, root) {
-			break
-		}
-	}
 	absoluteSubtree, err := filepath.Abs(subtree)
 	if err != nil {
 		return fmt.Errorf("resolve skill subtree %s: %w", subtree, err)
 	}
-	resolvedSubtree, ok := resolvedUnlinkedSkillPath(absoluteSubtree)
-	if !ok || !watcherPathAtOrBelow(resolvedSubtree, resolvedRoot) {
+	resolvedRoot, err := skillrootsafe.Resolve(absoluteRoot, watcherEvalSymlinks)
+	if err != nil {
+		return linkedRootRefusal(root, err)
+	}
+	for dir := filepath.Clean(absoluteSubtree); !sameWatcherPath(dir, absoluteRoot); dir = filepath.Dir(dir) {
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return fmt.Errorf("linked or unavailable skill subtree: %s", subtree)
+		}
+	}
+	relative, err := filepath.Rel(absoluteRoot, absoluteSubtree)
+	if err != nil {
+		return fmt.Errorf("resolve skill subtree %s: %w", subtree, err)
+	}
+	want := filepath.Join(resolvedRoot, relative)
+	resolvedSubtree, err := watcherEvalSymlinks(absoluteSubtree)
+	if err == nil && !sameWatcherPath(resolvedSubtree, want) {
 		return fmt.Errorf("skill subtree escapes watched root: %s", subtree)
 	}
+	if err != nil && (!errors.Is(err, fs.ErrPermission) || !skillrootsafe.UnlinkedAncestors(want)) {
+		return fmt.Errorf("skill subtree unavailable: %s", subtree)
+	}
 	return nil
-}
-
-func resolvedUnlinkedSkillPath(path string) (string, bool) {
-	canonical := canonicalSkillSystemPath(path)
-	resolved, err := watcherEvalSymlinks(path)
-	if err == nil {
-		return resolved, sameWatcherPath(canonical, resolved)
-	}
-	if !errors.Is(err, fs.ErrPermission) || !hermesskills.UnlinkedAncestors(canonical) {
-		return "", false
-	}
-	return canonical, true
-}
-
-// macOS exposes these root-owned system directories through /private. Accept
-// only the exact platform aliases; links below them still fail validation.
-func canonicalSkillSystemPath(path string) string {
-	if runtime.GOOS != "darwin" {
-		return path
-	}
-	for _, alias := range []string{"/etc", "/var", "/tmp"} {
-		if path != alias && !strings.HasPrefix(path, alias+string(filepath.Separator)) {
-			continue
-		}
-		resolved, err := filepath.EvalSymlinks(alias)
-		if err != nil || resolved != "/private"+alias {
-			return path
-		}
-		if path == alias {
-			return resolved
-		}
-		return filepath.Join(resolved, strings.TrimPrefix(path, alias+string(filepath.Separator)))
-	}
-	return path
 }
 
 func addNestedSkillWatches(ctx context.Context, fsw *fsnotify.Watcher, root, subtree string, watched map[string]struct{}, mu *sync.Mutex, progress func()) {
 	if err := unlinkedSkillTreePath(root, subtree); err != nil {
 		return
 	}
+	walkSubtree := subtree
+	if sameWatcherPath(root, subtree) {
+		var err error
+		walkSubtree, err = trustedWalkRoot(root)
+		if err != nil {
+			return
+		}
+	}
 	visited := 0
-	_ = filepath.WalkDir(subtree, func(path string, entry fs.DirEntry, err error) error {
+	_ = filepath.WalkDir(walkSubtree, func(path string, entry fs.DirEntry, err error) error {
 		if ctx.Err() != nil {
 			return fs.SkipAll
 		}
@@ -223,13 +253,17 @@ func addNestedSkillWatches(ctx context.Context, fsw *fsnotify.Watcher, root, sub
 		if visited == 1024 && progress != nil {
 			progress()
 		}
-		key := strings.ToLower(filepath.Clean(path))
+		logical, err := logicalWalkPath(subtree, walkSubtree, path)
+		if err != nil {
+			return err
+		}
+		key := strings.ToLower(filepath.Clean(logical))
 		if mu != nil {
 			mu.Lock()
 			defer mu.Unlock()
 		}
 		if _, exists := watched[key]; !exists {
-			if addErr := fsw.Add(path); addErr == nil {
+			if addErr := fsw.Add(logical); addErr == nil {
 				watched[key] = struct{}{}
 			}
 		}

@@ -52,8 +52,9 @@ The actions that set up and maintain a deployment: `install`, `upgrade`,
 
 | OS | How you run it |
 | --- | --- |
-| Linux, macOS | `defenseclaw-gateway enterprise linux <action>` or `enterprise macos <action>`, as root |
-| Windows | `defenseclaw.exe enterprise windows <action> --profile standalone` from an elevated prompt, or the Setup program (`/install`, `/ensure` and so on) |
+| Linux | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux <action>`, as root |
+| macOS | `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos <action>`, as root |
+| Windows | `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action> --profile standalone` from an elevated PowerShell prompt, or the Setup program (`/install`, `/ensure` and so on) |
 
 The packages do not put `defenseclaw-gateway` on the `PATH`, so a fresh root
 login shell answers a bare `defenseclaw-gateway` with `command not found`. Use
@@ -138,7 +139,7 @@ The one code path that writes `config.yaml`, in Go and in the `defenseclaw` CLI.
 It takes `config.yaml.lock`, validates, writes atomically and records the write
 and its actor in `config.generation.json`. On a managed standalone host it
 refuses every actor but `lifecycle` and `migration`, so a per-user `defenseclaw config set`
-exits `3` there (on Linux and macOS the packaged `defenseclaw` refuses it first, with exit `2`). See
+exits `3` there (on Linux and macOS the packaged `defenseclaw` refuses it first, with exit `2`; see [Managed command availability](/docs/enterprise/managed-commands)). See
 [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
 
 ### Config generation

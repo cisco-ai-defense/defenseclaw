@@ -513,6 +513,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertNotIn("'open' (the default", text)
         # Per-user hooks follow the policy tier during an outage (oss-outage-open).
         self.assertIn("follow the policy tier", text)
+        # A saved choice wins over the policy tier, except the two cases that stay closed.
+        self.assertIn("except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed", text)
 
     def test_fail_mode_closed_persists_to_config(self):
         result = self._invoke([

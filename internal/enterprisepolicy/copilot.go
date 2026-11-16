@@ -42,6 +42,29 @@ func copilotDropInPath(opts Options) (string, error) {
 	return joinFor(opts, dir, DefenseClawDropInName), nil
 }
 
+// copilotEffectiveDropIns lists, sorted, the policy.d entries Copilot loads as
+// machine policy: every non-hidden JSON file, not only the DefenseClaw drop-in.
+// inspectCopilot and the absence proof share it so they read the same sources.
+// A directory that does not exist has none.
+func copilotEffectiveDropIns(opts Options) (string, []string, error) {
+	dir, err := CopilotPolicyDir(opts)
+	if err != nil {
+		return "", nil, err
+	}
+	entries, err := os.ReadDir(platformPath(opts, dir))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", nil, err
+	}
+	names := []string{}
+	for _, entry := range entries {
+		if effectivePolicyDropIn(entry) {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return dir, names, nil
+}
+
 func (copilotTarget) Paths(opts Options) ([]string, error) {
 	path, err := copilotDropInPath(opts)
 	if err != nil {
@@ -281,7 +304,7 @@ func inspectCopilot(opts Options, state *State) error {
 			return err
 		}
 	}
-	dir, err := CopilotPolicyDir(opts)
+	dir, names, err := copilotEffectiveDropIns(opts)
 	if err != nil {
 		return err
 	}
@@ -289,20 +312,9 @@ func inspectCopilot(opts Options, state *State) error {
 	if err != nil {
 		return err
 	}
-	entries, err := os.ReadDir(platformPath(opts, dir))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	if err := validatePolicyLeafDir(opts, platformPath(opts, dir)); err != nil {
 		state.conflict("%v; unprivileged users can add policy files there that Copilot may load for every user", err)
 	}
-	names := []string{}
-	for _, entry := range entries {
-		if effectivePolicyDropIn(entry) {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
 	ownedPerEvent := map[string]int{}
 	timeouts := map[string]int{}
 	for _, group := range groups {
@@ -416,7 +428,7 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	case config.MachinePolicyOwnershipMerge:
-		created, err := takeBackPolicyPath(opts, paths[0], &state)
+		created, _, err := takeBackPolicyPathFor(opts, paths[0], copilotFolderUse, &state)
 		if err != nil {
 			return state, err
 		}
@@ -454,7 +466,7 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 		return state, err
 	}
 	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly && state.OwnedEntries == 0 {
-		state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector copilot` through your policy tool")
+		state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "copilot"))
 	}
 	state.finish()
 	return state, nil

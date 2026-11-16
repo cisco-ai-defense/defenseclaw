@@ -8,10 +8,10 @@ import (
 	"os"
 )
 
-// A refused access check removes the entire project, including local-scope
-// definitions already parsed from .claude.json. A missing .mcp.json keeps
-// local-scope definitions. Other read failures retain the account-wide
-// unreadable marker so a stale inventory cannot be published.
+// A refused project path check removes the entire project, including
+// local-scope definitions already parsed from .claude.json. A missing
+// .mcp.json keeps local-scope definitions. File read failures retain the
+// account-wide unreadable marker so a stale inventory cannot be published.
 type claudeProjectReadDecision uint8
 
 const (
@@ -20,17 +20,9 @@ const (
 	claudeProjectUnreadable
 )
 
-// Only a project path check or open that returns ERROR_ACCESS_DENIED under
-// the validated user token may carry this marker. Token and session failures
-// must leave the whole account unreadable.
-var errClaudeProjectAccessDenied = errors.New("Claude Code project access denied")
-
-func decideClaudeProjectRead(accessErr, readErr error) claudeProjectReadDecision {
-	if accessErr != nil {
-		if errors.Is(accessErr, errClaudeProjectAccessDenied) {
-			return claudeProjectRefused
-		}
-		return claudeProjectUnreadable
+func decideClaudeProjectRead(refusalErr, readErr error) claudeProjectReadDecision {
+	if refusalErr != nil {
+		return claudeProjectRefused
 	}
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return claudeProjectUnreadable

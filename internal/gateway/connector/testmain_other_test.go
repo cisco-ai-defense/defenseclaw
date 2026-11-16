@@ -8,3 +8,6 @@ package connector
 
 // prepareConnectorTestProcess has no helper modes or fixtures off Windows.
 func prepareConnectorTestProcess() {}
+
+// guardSecureClientTree has no Secure Client folders to watch off Windows.
+func guardSecureClientTree() func() []string { return func() []string { return nil } }

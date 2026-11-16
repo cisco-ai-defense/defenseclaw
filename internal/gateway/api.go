@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -94,13 +95,21 @@ type APIServer struct {
 	// has sent its first per-user hook verdict.
 	firstHookAnswerRecorded atomic.Bool
 	firstHookAnswerMu       sync.Mutex
+	// hookShed remembers the refused hook calls that already have a shed row.
+	hookShed hookShedLedger
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
 	projectSkills *projectSkillRoots
+	// rootCoverage reports roots whose install admission cannot scan assets.
+	rootCoverage func() []watcher.RootCoverageIssue
 	// hookMCP are the MCP servers the managed Linux and macOS hooks report,
 	// which the install watcher admits (GAP-2591); nil elsewhere.
 	hookMCP *hookReportedMCPServers
+	// mcpResolved are the MCP server definitions the hook calls resolved, so
+	// a server removed from the agent config mid-session is still judged on
+	// where it points (GAP-0861).
+	mcpResolved mcpResolvedDefinitions
 
 	// exemptAuditAt is when each exempt account and connector last got an
 	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
@@ -121,6 +130,9 @@ type APIServer struct {
 	// managedPolicyView is the published proof of the vendor machine
 	// policy managed hooks enforce (managed_policy_view.go).
 	managedPolicyView atomic.Pointer[managedPolicyView]
+	// managedHookAuthz is the authorizer the standalone hook socket decides
+	// calls with, so an account status reads the inputs the hook reads.
+	managedHookAuthz atomic.Pointer[managedHookAuthorizer]
 	// managedAlertLimits bounds the policy-view alerts per account: every
 	// call under an unproven view raises one until the view is pinned.
 	managedAlertLimits managedRefusalLimiter
@@ -146,6 +158,12 @@ type APIServer struct {
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
 	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+	// mcpAdmissionStatus also distinguishes a completed scan failure from a
+	// pending scan and carries the scan's remaining timeout.
+	mcpAdmissionStatus func(connector, server, home, cwd string) watcher.MCPAdmissionStatus
+	// mcpPublished looks for the definition, named by its launch digest, in
+	// the servers the install watcher admits for the caller (GAP-0686).
+	mcpPublished func(connector, server, home, cwd, digest string) watcher.MCPPublication
 	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
 	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
 	// Set once before serving.
@@ -421,6 +439,9 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
+	// hookCorrelationTurns holds the hooks of one session to one correlation
+	// attempt at a time (hookCorrelationSerial).
+	hookCorrelationTurns hookCorrelationSerial
 
 	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
 	// (api_sandbox.go); nil when sandboxes are off.
@@ -709,7 +730,9 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	a.otlpPathTokenLastStatAt[scope] = time.Now()
 
 	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
-	if err != nil && connector.IsManagedPermissionDrift(err) && haveCached {
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) && haveCached {
 		// Owner or writer drift on the token file is not a reason to fail
 		// every OTLP request: keep the cached token and let the guardian
 		// republish the file.
@@ -760,7 +783,9 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 		return cached != "" && constantTimeStringMatch(presented, cached)
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
-	if err != nil && connector.IsManagedPermissionDrift(err) {
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) {
 		// Owner or writer drift on the token file must not reject every hook
 		// request: keep authenticating against the cached token and let the
 		// guardian republish the file.
@@ -1200,6 +1225,24 @@ func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home,
 	a.mcpAdmissionPending = pending
 }
 
+// SetMCPAdmissionStatus wires the watcher's current admission state.
+func (a *APIServer) SetMCPAdmissionStatus(status func(connector, server, home, cwd string) watcher.MCPAdmissionStatus) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionStatus = status
+}
+
+// SetMCPPublished wires the install watcher's check that a definition the
+// caller's agent runs is one it admits (GAP-0686). Call it before the server
+// starts.
+func (a *APIServer) SetMCPPublished(published func(connector, server, home, cwd, digest string) watcher.MCPPublication) {
+	if a == nil {
+		return
+	}
+	a.mcpPublished = published
+}
+
 // SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP
 // servers before an MCP tool call (GAP-0216). Call it before the server
 // starts.
@@ -1510,6 +1553,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		Handler:     handler,
 		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
+		// A standalone hook sends the asset facts of its request in a header
+		// (assetfacts.Header) that can pass the net/http default of 1 MiB.
+		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During
@@ -1796,6 +1842,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	w.Header().Set(hookexec.HookDeliveryCapabilityHeader, "1")
 	snap := a.health.Snapshot()
 	cfg := a.runtimeConfigSnapshot()
 	// A standalone host's ordinary account reads liveness and the binary
@@ -3046,6 +3093,8 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	// Sandbox attribution comes only from an authenticated sandbox binding
 	// (audit.CorrelationEnvelope), never from a request body.
 	event.SandboxID, event.SandboxName = "", ""
+	// The same holds for the agent identity and the verified caller facts.
+	dropBodyAssignedIdentity(&event)
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
@@ -3516,11 +3565,11 @@ func windowsProfileScanNextStep(kind, target string) string {
 	}
 	review := `C:\DefenseClawReview`
 	copyTo := review + `\` + name
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	quote := managed.PowerShellLiteral
 	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
 		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
-		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `& " +
-		quote(managed.WindowsStandaloneAdminCLI()) + " scan " + kind + " " + quote(copyTo) + "`"
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `" +
+		managed.WindowsAdminCommand("scan", kind, copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -4308,6 +4357,16 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The receipt capability is a transport property. Advertise it
+		// before credential and admission work can use the hook's short
+		// compatibility wait. Authentication still decides the final answer.
+		if r.Method == http.MethodPost && connector.IsLoopback(r) {
+			if _, ok := a.hookTokenScopeForPath(r.URL.Path); ok {
+				if delivery := a.beginHookDeliveryReceipt(w, r); delivery != nil {
+					r = withHookDeliveryReceipt(r, delivery)
+				}
+			}
+		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -4318,6 +4377,20 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			// credential (user_scoped_listener_proof.go). Every other
 			// profile keeps the ordinary authentication below.
 			a.serveUserScopedListenerProof(w, r)
+			return
+		}
+		if isGatewayTokenListenerProofRequest(r) && (a.scannerCfg == nil || !a.scannerCfg.SecureClientIntegration()) {
+			// The per-user OpenClaw plugin proves this listener with the
+			// gateway token before it sends that token (GAP-0594).
+			expected := ""
+			if a.scannerCfg != nil {
+				expected = a.scannerCfg.Gateway.Token
+			}
+			if !writeGatewayTokenListenerProof(w, r, expected, a.client.RefreshedToken()) {
+				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
+					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			}
 			return
 		}
 		route := r.Pattern

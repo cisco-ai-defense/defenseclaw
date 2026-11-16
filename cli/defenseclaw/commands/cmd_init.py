@@ -30,13 +30,14 @@ from typing import TYPE_CHECKING
 
 import click
 
-from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
+from defenseclaw import connector_paths, long_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
-    from defenseclaw.bootstrap import StepResult
+    from defenseclaw.bootstrap import InitLocks, StepResult
     from defenseclaw.config import Config
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.gateway import path_gateway
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.openclaw_presence import openclaw_installed
 from defenseclaw.paths import (
@@ -44,17 +45,11 @@ from defenseclaw.paths import (
     bundled_local_observability_dir,
     bundled_splunk_bridge_dir,
 )
-from defenseclaw.process_liveness import _process_image_path_windows, _process_parent_id_windows
 from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
 _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
-_INTERNAL_SETUP_CONNECTOR_ENV = "DEFENSECLAW_INTERNAL_SETUP_CONNECTOR"
-_INTERNAL_SETUP_PARENT_ENV = "DEFENSECLAW_INTERNAL_SETUP_PARENT"
-_INSTALL_ROOT_ENV = "DEFENSECLAW_INSTALL_ROOT"
-_WINDOWS_SETUP_EXECUTABLE = "DefenseClawSetup-x64.exe"
-_WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 
 
 def refuse_first_run_when_managed() -> None:
@@ -77,7 +72,6 @@ def refuse_first_run_when_managed() -> None:
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
-@click.option("--native-setup-copilot", is_flag=True, hidden=True)
 @click.option(
     "--connector",
     type=click.Choice(
@@ -141,7 +135,8 @@ def refuse_first_run_when_managed() -> None:
     help=(
         "Saves your choice for a gateway outage: 'open' lets calls run with a warning "
         "and an audit entry, 'closed' blocks them. A saved choice wins over the policy "
-        "tier. Omitted, nothing is saved: default and permissive policy open an outage, "
+        "tier, except OpenClaw under the strict policy and ZeptoClaw model requests, "
+        "which stay closed. Omitted, nothing is saved: default and permissive policy open an outage, "
         "strict closes it. Every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."
@@ -234,6 +229,18 @@ def refuse_first_run_when_managed() -> None:
 @click.option("--verify/--no-verify", default=None, help="Run targeted readiness checks before exiting.")
 @click.option("--json-summary", is_flag=True, help="Emit the final first-run report as JSON.")
 @click.option("--verbose", is_flag=True, help="Show full subprocess/setup output.")
+@click.option(
+    "--api-port",
+    type=click.IntRange(1024, 65533),
+    default=None,
+    help="Gateway API port for a new config (default 18970, or the next free one when another account holds it).",
+)
+@click.option(
+    "--proxy-port",
+    type=click.IntRange(1024, 65535),
+    default=None,
+    help="Guardrail proxy port for a new config (default 4000, or the next free one when another account holds it).",
+)
 @pass_ctx
 def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     app: AppContext,
@@ -242,7 +249,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
-    native_setup_copilot: bool,
     connector: str | None,
     profile: str | None,
     observe_all: bool,
@@ -269,6 +275,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     verify: bool | None,
     json_summary: bool,
     verbose: bool,
+    api_port: int | None,
+    proxy_port: int | None,
 ) -> None:
     """Initialize DefenseClaw environment.
 
@@ -288,6 +296,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
     refuse_first_run_when_managed()
+
+    from defenseclaw.bootstrap import first_run_port_flags_conflict
+
+    if conflict := first_run_port_flags_conflict(api_port or 0, proxy_port or 0):
+        # Before anything is written (GAP-0053).
+        raise click.UsageError(conflict)
 
     from defenseclaw import config as config_module
 
@@ -320,39 +334,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         # Run only the CLIs of the connectors being set up (GAP-0901).
         token = agent_discovery.restrict_probes([c for c in requested_connectors if c != "none"])
         click.get_current_context().call_on_close(lambda: agent_discovery.end_probe_restriction(token))
-    installer_copilot = native_setup_copilot and _native_setup_copilot_invocation_allowed(
-        connector=connector,
-        requested_connectors=requested_connectors,
-        skip_install=skip_install,
-        non_interactive=non_interactive,
-        yes=yes,
-        observe_all=observe_all,
-        action_connectors=action_connectors,
-        start_gateway=start_gateway,
-        verify=verify,
-    )
-    if native_setup_copilot and not installer_copilot:
-        raise click.ClickException(
-            "--native-setup-copilot is reserved for the exact non-interactive native Windows Setup invocation"
-        )
-    internal_antigravity_binding = bool(
-        os.environ.get(_INTERNAL_SETUP_CONNECTOR_ENV, "").strip()
-        or os.environ.get(_INTERNAL_SETUP_PARENT_ENV, "").strip()
-    )
-    if internal_antigravity_binding and not _native_setup_antigravity_invocation_allowed(
-        connector=connector,
-        requested_connectors=requested_connectors,
-        skip_install=skip_install,
-        non_interactive=non_interactive,
-        yes=yes,
-        observe_all=observe_all,
-        action_connectors=action_connectors,
-        start_gateway=start_gateway,
-        verify=verify,
-    ):
-        raise click.ClickException(
-            "internal Antigravity Setup binding is invalid for this invocation"
-        )
     for requested in requested_connectors:
         if requested == "none":
             continue
@@ -419,8 +400,41 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 verify=verify,
                 json_summary=json_summary,
                 verbose=verbose,
+                api_port=api_port or 0,
+                proxy_port=proxy_port or 0,
             )
         return
+
+    from defenseclaw.bootstrap import InitLockError, hold_init_lock
+
+    try:
+        with hold_init_lock() as locks:
+            _run_plain_init(
+                app,
+                locks,
+                skip_install=skip_install,
+                enable_guardrail=enable_guardrail,
+                non_interactive=non_interactive,
+                yes=yes,
+                api_port=api_port,
+                proxy_port=proxy_port,
+            )
+    except InitLockError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
+    app: AppContext,
+    locks: InitLocks,
+    *,
+    skip_install: bool,
+    enable_guardrail: bool,
+    non_interactive: bool,
+    yes: bool,
+    api_port: int | None,
+    proxy_port: int | None,
+) -> None:
+    """The plain (non-guided) init; init_cmd holds the init lock around it."""
 
     from defenseclaw.config import (
         config_path,
@@ -459,12 +473,21 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             # OpenClaw that is not there (GAP-0568, as GAP-1056 for none).
             cfg.claw.mode = ""
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
-        from defenseclaw.bootstrap import choose_first_run_api_port, choose_first_run_guardrail_port
+        from defenseclaw.bootstrap import (
+            api_port_avoid,
+            apply_first_run_ports,
+            choose_first_run_api_port,
+            choose_first_run_guardrail_port,
+            proxy_port_avoid,
+        )
 
-        port_note = choose_first_run_api_port(cfg)
+        for step in apply_first_run_ports(cfg, api_port or 0, proxy_port or 0, new_config=True):
+            label = "  API port:      " if step.name == "Gateway API port" else "  Proxy port:    "
+            click.echo(label + ux._style(step.detail, fg="green" if step.status == "pass" else "yellow"))
+        port_note = "" if api_port else choose_first_run_api_port(cfg, api_port_avoid(cfg, proxy_port or 0))
         if port_note:
             click.echo("  API port:      " + ux._style(port_note, fg="yellow"))
-        proxy_note = choose_first_run_guardrail_port(cfg)
+        proxy_note = "" if proxy_port else choose_first_run_guardrail_port(cfg, proxy_port_avoid(cfg))
         if proxy_note:
             click.echo("  Proxy port:    " + ux._style(proxy_note, fg="yellow"))
     else:
@@ -475,6 +498,14 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 "; run 'defenseclaw migrate' first"
             )
         click.echo("  Config:        " + ux.dim("preserved existing"))
+        from defenseclaw.bootstrap import apply_first_run_ports
+
+        for step in apply_first_run_ports(cfg, api_port or 0, proxy_port or 0, new_config=False):
+            click.echo(f"  {step.name}: " + ux._style(f"{step.detail}; run {step.next_command}", fg="yellow"))
+
+    # The identity and the stores live in the data folder the config names, which
+    # may not be the home locked so far. Lock it before anything is changed there.
+    locks.take(cfg.data_dir)
 
     cfg.environment = env
     if cfg.claw.mode.strip():
@@ -674,6 +705,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     verify: bool | None,
     json_summary: bool,
     verbose: bool,
+    api_port: int = 0,
+    proxy_port: int = 0,
 ) -> None:
     from defenseclaw.bootstrap import (
         FirstRunOptions,
@@ -845,6 +878,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         human_approval=primary["human_approval"],
         hilt_min_severity=primary["hilt_min_severity"] or "",
         trusted_binary_prefixes=trusted_binary_prefixes,
+        api_port=api_port,
+        proxy_port=proxy_port,
     )
     # GAP-1713: first run rebuilds guardrail.connectors; keep what init does
     # not ask about (a use-pack override, levels) for re-selected connectors.
@@ -1676,53 +1711,6 @@ def _supported_action_connectors(
     return out
 
 
-def _action_downgrade_record(connector: str, discovery=None) -> dict:
-    """Structured report for an action request that had to fall back to observe."""
-    key = connector_paths.normalize(connector)
-    record = {
-        "connector": key,
-        "requested_mode": "action",
-        "actual_mode": "observe",
-        "status": "needs_attention",
-        "reason": "connector version could not be verified against a known hook contract",
-        "next_command": f"defenseclaw setup {key} --mode action",
-    }
-    from defenseclaw.bootstrap import HERMES_INSTALL_HINT, _hermes_installed
-
-    signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
-    if key == "hermes" and not getattr(signal, "binary_path", "") and not _hermes_installed():
-        # Setup alone cannot verify an agent that is not installed (GAP-2383).
-        record["reason"] = "Hermes is not installed, so its version cannot be checked yet"
-        record["next_command"] = f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes --mode action"
-        return record
-    if (
-        signal is not None
-        and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
-        and getattr(signal, "binary_path", "")
-    ):
-        resolved_bin = os.path.realpath(signal.binary_path)
-        parent = os.path.dirname(resolved_bin)
-        record.update(
-            {
-                "reason": "binary path outside trusted prefixes; version was not probed",
-                "binary_path": resolved_bin,
-                "trusted_path": parent,
-                "next_command": f"defenseclaw setup trusted-paths add {parent}",
-            }
-        )
-    elif signal is not None and getattr(signal, "error", ""):
-        record["reason"] = f"connector version could not be verified: {signal.error}"
-    elif signal is not None and getattr(signal, "version", ""):
-        from defenseclaw.connector_contracts import resolve_connector_contract
-
-        why = resolve_connector_contract(key, signal.version).reason
-        record["reason"] = (
-            f"installed version {signal.version} is not covered by a known hook contract ({why})"
-        )
-        record["installed_version"] = signal.version
-    return record
-
-
 def _fresh_action_downgrade_record(
     connector: str,
     *,
@@ -1736,15 +1724,9 @@ def _fresh_action_downgrade_record(
     untrusted-path probe error and fall back to the generic remediation. Refresh
     here too so scripted init reports the same concrete reason the gate saw.
     """
-    try:
-        discovery = agent_discovery.discover_agents(
-            use_cache=False,
-            refresh=True,
-            data_dir=data_dir,
-        )
-    except Exception:
-        discovery = fallback_discovery
-    return _action_downgrade_record(connector, discovery)
+    from defenseclaw.bootstrap import _action_downgrade_record, _downgrade_discovery
+
+    return _action_downgrade_record(connector, _downgrade_discovery(connector, data_dir, fallback_discovery))
 
 
 def _connector_mode_warnings(settings: list[dict]) -> list[dict]:
@@ -2717,94 +2699,10 @@ def _normalize_connector_arg(
     return value
 
 
-def _native_setup_copilot_invocation_allowed(
-    *,
-    connector: str | None,
-    requested_connectors: list[str],
-    skip_install: bool,
-    non_interactive: bool,
-    yes: bool,
-    observe_all: bool,
-    action_connectors: str,
-    start_gateway: bool | None,
-    verify: bool | None,
-) -> bool:
-    """Recognize only Setup's narrow, backward-compatible Copilot bootstrap."""
-
-    return (
-        platform_support.host_os() == "windows"
-        and _normalize_connector_arg(connector) == "copilot"
-        and requested_connectors == ["copilot"]
-        and skip_install
-        and non_interactive
-        and yes
-        and not observe_all
-        and not action_connectors.strip()
-        and start_gateway is False
-        and verify is False
-    )
 
 
-def _native_setup_antigravity_invocation_allowed(
-    *,
-    connector: str | None,
-    requested_connectors: list[str],
-    skip_install: bool,
-    non_interactive: bool,
-    yes: bool,
-    observe_all: bool,
-    action_connectors: str,
-    start_gateway: bool | None,
-    verify: bool | None,
-) -> bool:
-    """Recognize only Setup's parent-bound Antigravity initialization."""
-
-    return (
-        platform_support.host_os() == "windows"
-        and _internal_antigravity_setup_parent_matches()
-        and _normalize_connector_arg(connector) == "antigravity"
-        and requested_connectors == ["antigravity"]
-        and skip_install
-        and non_interactive
-        and yes
-        and not observe_all
-        and not action_connectors.strip()
-        and start_gateway is False
-        and verify is False
-    )
 
 
-def _internal_antigravity_setup_parent_matches() -> bool:
-    """Bind packaged Antigravity initialization to Setup through its launcher."""
-
-    if os.environ.get(_INTERNAL_SETUP_CONNECTOR_ENV, "").strip().lower() != "antigravity":
-        return False
-    expected = os.environ.get(_INTERNAL_SETUP_PARENT_ENV, "").strip()
-    if not expected or not os.path.isabs(expected):
-        return False
-    if os.path.basename(expected).casefold() != _WINDOWS_SETUP_EXECUTABLE.casefold():
-        return False
-    # The packaged launcher removes ambient copies and restores this value
-    # from its validated installer-owned state before starting Python.
-    install_root = os.environ.get(_INSTALL_ROOT_ENV, "").strip()
-    if not install_root or not os.path.isabs(install_root):
-        return False
-    expected_launcher = os.path.join(install_root, "bin", _WINDOWS_LAUNCHER_EXECUTABLE)
-    launcher_pid = os.getppid()
-    try:
-        actual_launcher = _process_image_path_windows(launcher_pid)
-        setup_pid = _process_parent_id_windows(launcher_pid)
-        actual_setup = _process_image_path_windows(setup_pid) if setup_pid else None
-    except OSError:
-        return False
-    if not actual_launcher or not actual_setup:
-        return False
-    return (
-        os.path.normcase(os.path.abspath(actual_launcher))
-        == os.path.normcase(os.path.abspath(expected_launcher))
-        and os.path.normcase(os.path.abspath(actual_setup))
-        == os.path.normcase(os.path.abspath(expected))
-    )
 
 
 def _describe_connector_set(report, connectors: list[str]) -> None:
@@ -2891,7 +2789,19 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
             f"  {proxy} runs alone: defenseclaw setup <connector> --replace for a hook agent"
             f" replaces {proxy}'s guardrail"
         )
-        renderer.echo(f"  {proxy} model calls fail while the DefenseClaw gateway is down (fail-closed)")
+        closed = _proxy_model_outage_closed(report, _proxy_connector_name(report, connectors))
+        if closed is None:
+            renderer.echo(
+                f"  {proxy} model calls follow the gateway-outage mode while the DefenseClaw gateway is down:"
+                " defenseclaw guardrail fail-mode"
+            )
+        elif closed:
+            renderer.echo(f"  {proxy} model calls fail while the DefenseClaw gateway is down (fail-closed)")
+        else:
+            renderer.echo(
+                f"  {proxy} model calls continue with a warning while the DefenseClaw gateway is down"
+                " (strict policy blocks them: defenseclaw guardrail use-pack strict)"
+            )
         if platform_support.host_os() in {"linux", "darwin"}:
             renderer.echo(
                 f"  Nothing starts the gateway for {proxy}: after a reboot or defenseclaw-gateway stop,"
@@ -2955,6 +2865,22 @@ def _proxy_connector_label(report, connectors: list[str] | None) -> str:
         if platform_support.is_proxy_connector(name):
             return _PROXY_LABELS.get(name, name)
     return ""
+
+
+def _proxy_connector_name(report, connectors: list[str] | None) -> str:
+    names = connectors or ([report.connector] if report.connector else [])
+    return next((name for name in names if platform_support.is_proxy_connector(name)), "")
+
+
+def _proxy_model_outage_closed(report, name: str) -> bool | None:
+    """Whether the model requests of a proxy connector are blocked while the gateway is down (None: unknown)."""
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.fail_mode import proxy_model_outage_mode
+
+    try:
+        return proxy_model_outage_mode(cfg_mod.load(data_dir=report.data_dir), name) == "closed"
+    except Exception:  # noqa: BLE001 - the line is advisory.
+        return None
 
 
 def _closed_fail_mode_connectors(report, connectors: list[str] | None) -> list[str]:
@@ -3114,7 +3040,7 @@ def _seed_guardrail_profiles(policy_dir: str) -> None:
         if os.path.isdir(dst):
             preserved.append(profile_dir.name)
             continue
-        shutil.copytree(str(profile_dir), dst)
+        long_paths.copytree(profile_dir, dst)
         seeded.append(profile_dir.name)
 
     if seeded:
@@ -3134,7 +3060,11 @@ def _seed_splunk_bridge(data_dir: str) -> None:
         click.echo(f"  Splunk bridge: preserved existing ({dest})")
         return
 
-    shutil.copytree(str(bundled), dest)
+    try:
+        long_paths.copytree(bundled, dest)
+    except OSError as exc:
+        click.echo(f"  warning: could not seed the Splunk bridge: {exc}", err=True)
+        return
     bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
     if os.path.isfile(bridge_bin):
         os.chmod(bridge_bin, 0o755)
@@ -3526,6 +3456,21 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
     _validate_device_identity_windows_path_syntax(target, identity_root)
     _validate_device_identity_artifact_layout(target, identity_root)
     if os.path.lexists(target):
+        from defenseclaw.doctor_recovery import (
+            DEVICE_KEY_UNUSABLE_REASONS,
+            inspect_device_key_usability,
+            unusable_key_message,
+        )
+
+        # An existing key is a finished identity only if the gateway can load it and its file custody holds
+        # (the one test Doctor and readiness use too). A creation stopped during the key write, or a wrong
+        # mode or a link, leaves one that is not: init never replaces it and names the manual steps.
+        reason = inspect_device_key_usability(target, data_dir=identity_root).reason_code
+        if reason in DEVICE_KEY_UNUSABLE_REASONS:
+            raise click.ClickException(
+                f"cannot safely create device identity ({reason}): "
+                + unusable_key_message(target, identity_root, reason)
+            )
         return
 
     from defenseclaw.doctor_recovery import (
@@ -3534,6 +3479,7 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
         RecoveryRefusedError,
         _device_identity_paths_equal,
         apply_device_key_recovery,
+        keyless_identity_message,
         plan_missing_device_key,
     )
     try:
@@ -3557,9 +3503,12 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
 
     plan = plan_missing_device_key(target, data_dir=identity_root)
     if plan.disposition is not RecoveryDisposition.READY:
-        raise click.ClickException(
-            f"cannot safely create device identity ({plan.reason_code})"
-        )
+        message = f"cannot safely create device identity ({plan.reason_code})"
+        if plan.reason_code == "continuity-evidence-present":
+            # A keyless identity is never replaced by init: say which files remain and the manual way out.
+            files = [path for path in plan.continuity_paths if os.path.lexists(path)]
+            message += ": " + keyless_identity_message(target, files)
+        raise click.ClickException(message)
     try:
         result = apply_device_key_recovery(plan, approved=True)
     except RecoveryRefusedError as exc:
@@ -3908,7 +3857,7 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
 
 def _start_gateway(cfg, logger) -> None:
     """Start the defenseclaw-gateway sidecar and verify it is running."""
-    gw_bin = shutil.which("defenseclaw-gateway")
+    gw_bin = path_gateway(honor_override=False)
     if not gw_bin:
         click.echo("  Sidecar:       not found (binary not installed)")
         click.echo("                 install with: make gateway-install")
@@ -3962,7 +3911,7 @@ def _start_gateway(cfg, logger) -> None:
 
 def _get_gateway_version() -> str | None:
     """Try to get the gateway binary version."""
-    gw = shutil.which("defenseclaw-gateway")
+    gw = path_gateway(honor_override=False)
     if not gw:
         return None
     try:
@@ -3981,7 +3930,7 @@ def _get_gateway_version() -> str | None:
 
 def _restart_gateway_quiet() -> None:
     """Restart the gateway sidecar silently (used after guardrail setup during init)."""
-    gw = shutil.which("defenseclaw-gateway")
+    gw = path_gateway(honor_override=False)
     if not gw:
         return
     from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT

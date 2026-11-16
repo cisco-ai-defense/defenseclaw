@@ -100,11 +100,16 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		{"claude decoy camel tool name", "claudecode", "", "", map[string]any{"tool_name": "Bash", "toolName": "Write",
 			"tool_input": shell}, true, true},
 		{"claude one spelling", "claudecode", "", "", map[string]any{"tool_name": "Bash", "tool_input": shell}, true, false},
-		// A CLI-registered hook cannot be switched to Local by body fields.
-		// The mismatched schema is incomplete and its target is not trusted.
-		{"local body from the CLI hook file", "copilot", "", "preToolUse", localBody("b", nil), false, true},
+		// The per-user CLI document is also read by the Local harness. Its
+		// command-bound Local event still describes the same write target.
+		{"local body from the CLI hook file", "copilot", "", "preToolUse", localBody("b", nil), true, false},
 		{"local body from the CLI hook file with a CLI field", "copilot", "", "preToolUse",
-			localBody("b", map[string]any{"toolName": "view"}), false, true},
+			localBody("b", map[string]any{"toolName": "view"}), true, true},
+		{"local body from the CLI hook file with CLI event", "copilot", "", "preToolUse",
+			localBody("b", map[string]any{"hookName": "preToolUse"}), true, true},
+		{"local body from the CLI hook file with null CLI event", "copilot", "", "preToolUse",
+			localBody("b", map[string]any{"hookName": nil}), true, true},
+		{"local body with a different bound event", "copilot", "", "postToolUse", localBody("b", nil), false, true},
 		// The vscode-local surface reads tool_name and tool_input: CLI-shaped
 		// decoys beside them neither hide the target nor become the call.
 		{"local surface with CLI decoys", "copilot", local, "PreToolUse", localBody("b", cliDecoys), true, true},
@@ -115,7 +120,7 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		{"local surface over-limit create_file", "copilot", local, "PreToolUse", localBody(big, nil), true, false},
 		{"local surface over-limit create_file with CLI decoys", "copilot", local, "PreToolUse",
 			localBody(big, cliDecoys), true, true},
-		{"CLI hook file over-limit local body", "copilot", "", "preToolUse", localBody(big, nil), false, true},
+		{"CLI hook file over-limit local body", "copilot", "", "preToolUse", localBody(big, nil), true, false},
 		{"cli over-limit create", "copilot", "", "preToolUse", map[string]any{"toolName": "create",
 			"toolArgs": jsonText(map[string]any{"path": target, "file_text": big})}, true, false},
 		{"cli over-limit create with a decoy tool_name", "copilot", "", "preToolUse", map[string]any{"toolName": "create",

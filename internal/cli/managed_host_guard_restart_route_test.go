@@ -24,8 +24,10 @@ import (
 )
 
 // GAP-0718: on a managed Windows computer the per-user gateway stop, start
-// and restart refusal names the restart route (Setup /repair), not only the
-// status command.
+// and restart refusal names the restart route, not only the status command.
+// GAP-0095: the route is the installed CLI's repair by its full path. Setup
+// is not installed on a managed computer, so the refusal named a file the
+// administrator did not have.
 func TestManagedWindowsGatewayRefusalNamesTheRestartRoute(t *testing.T) {
 	previous := managedHostWindowsStandalone
 	t.Cleanup(func() { managedHostWindowsStandalone = previous })
@@ -35,9 +37,19 @@ func TestManagedWindowsGatewayRefusalNamesTheRestartRoute(t *testing.T) {
 	if err == nil {
 		t.Fatal("managed Windows computer: per-user gateway not refused")
 	}
-	for _, want := range []string{"enterprise windows status --profile standalone", "DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1"} {
+	for _, want := range []string{
+		"enterprise windows status --profile standalone",
+		"and restart or repair the managed gateway with " + windowsEnterpriseAdminCommand("repair") + " from the same prompt",
+		"from an elevated PowerShell prompt",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err, want)
 		}
+	}
+	if strings.Contains(err.Error(), "DefenseClawSetup") || strings.Contains(err.Error(), "/repair JSON=1") {
+		t.Errorf("refusal %q still sends the administrator to a Setup that is not installed", err)
+	}
+	if problems := managedWindowsCommandProblems(err.Error()); len(problems) != 0 {
+		t.Errorf("refusal names commands that do not run as typed %q", problems)
 	}
 }

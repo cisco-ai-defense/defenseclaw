@@ -11,12 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -292,6 +294,70 @@ func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	enterpriseHookStandalonePlatformPrepare(&log)
 	if lockCalls != 2 || !strings.Contains(log.String(), "wrote the configured managed_hooks_only setting") {
 		t.Fatalf("a written managed_hooks_only setting must be logged: %d %q", lockCalls, log.String())
+	}
+}
+
+// GAP-0044 review: the Claude Code drop-in lock goes on before the summary
+// turns the foreign-hook guard off (to enforce) and comes off only after the
+// summary turned it on (to preserve), so no session starts without either.
+func TestWindowsGuardianOrdersTheHooksOnlyLockAndTheGuardSummary(t *testing.T) {
+	previousOptions, previousFloor, previousWSL := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL
+	previousCursor, previousProfiles := enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles
+	previousLock, previousPublish, previousCfg := enterpriseHookWindowsClaudeHooksOnlyLock, enterpriseHookWindowsPublishGoOwned, cfg
+	t.Cleanup(func() {
+		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL = previousOptions, previousFloor, previousWSL
+		enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles = previousCursor, previousProfiles
+		enterpriseHookWindowsClaudeHooksOnlyLock, enterpriseHookWindowsPublishGoOwned, cfg = previousLock, previousPublish, previousCfg
+	})
+	var order []string
+	enterpriseHookWindowsClaudeHooksOnlyLock = func() (bool, error) { order = append(order, "lock"); return true, nil }
+	enterpriseHookWindowsPublishGoOwned = func(opts enterprisepolicy.Options, _ []string) (enterprisepolicy.Result, error) {
+		// A publish without the summary path still reconciles the other
+		// connectors' machine policy.
+		if opts.PublicPolicyPath == "" {
+			order = append(order, "reconcile")
+		} else {
+			order = append(order, "summary")
+		}
+		return enterprisepolicy.Result{}, nil
+	}
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return nil, nil }
+	enterpriseHookWindowsCursorAdapterRefresh = func(string) (bool, error) { return false, nil }
+	enterpriseHookWindowsWSL = func(enterprisepolicy.Options) (enterprisepolicy.State, error) { return enterprisepolicy.State{}, nil }
+	enterpriseHookWindowsClaudeVersionFloor = func(enterprisepolicy.Options, []string) (enterprisepolicy.State, error) {
+		return enterprisepolicy.State{}, nil
+	}
+	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
+		return enterprisepolicy.Options{HookBinary: `C:\hook.exe`, PublicPolicyPath: `C:\policy\summary.json`}, []string{"claudecode"}, true, nil
+	}
+	for _, tc := range []struct{ mode, want string }{
+		{config.ManagedHooksOnlyEnforce, "lock,summary"},
+		{config.ManagedHooksOnlyPreserve, "summary,lock"},
+	} {
+		cfg = &config.Config{}
+		cfg.Enterprise.MachinePolicy.Default.ManagedHooksOnly = tc.mode
+		order = nil
+		enterpriseHookStandalonePlatformPrepare(io.Discard)
+		if got := strings.Join(order, ","); got != tc.want {
+			t.Errorf("managed_hooks_only %s: order %s, want %s", tc.mode, got, tc.want)
+		}
+	}
+	// REVIEW-2/3: a lock that fails on the way to enforce keeps the summary
+	// (and so the guard) as it was but still reconciles the other
+	// connectors; on the way to preserve the summary still turns the guard
+	// on first.
+	enterpriseHookWindowsClaudeHooksOnlyLock = func() (bool, error) { order = append(order, "lock"); return false, errors.New("drop-in busy") }
+	for _, tc := range []struct{ mode, want string }{
+		{config.ManagedHooksOnlyEnforce, "lock,reconcile"},
+		{config.ManagedHooksOnlyPreserve, "summary,lock"},
+	} {
+		cfg = &config.Config{}
+		cfg.Enterprise.MachinePolicy.Default.ManagedHooksOnly = tc.mode
+		order = nil
+		enterpriseHookStandalonePlatformPrepare(io.Discard)
+		if got := strings.Join(order, ","); got != tc.want {
+			t.Errorf("failed lock, managed_hooks_only %s: order %s, want %s", tc.mode, got, tc.want)
+		}
 	}
 }
 

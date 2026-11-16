@@ -120,8 +120,26 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("load second Guardian state: exists=%t err=%v", exists, err)
 	}
-	if second.ReconcileID == firstReconcileID {
-		t.Fatalf("two reconciles reused identity %q", second.ReconcileID)
+	if second.ReconcileID != firstReconcileID || second.UpdatedAt != activation.UpdatedAt {
+		t.Fatalf("an unchanged pass republished the generation: %+v, want %+v", second, activation)
+	}
+	changed := []enterpriseHookReconcileRow{rows[0], {User: "bob", Connector: "claudecode", OK: true}}
+	if err := writeEnterpriseHookGuardianState(
+		dir,
+		"/etc/defenseclaw/hook-guardian/targets.yaml",
+		testEnterpriseHookManifestSHA256,
+		changed,
+		0,
+		true,
+	); err != nil {
+		t.Fatalf("write changed Guardian state: %v", err)
+	}
+	third, exists, err := loadEnterpriseHookGuardianActivation(dir)
+	if err != nil || !exists {
+		t.Fatalf("load changed Guardian state: exists=%t err=%v", exists, err)
+	}
+	if third.ReconcileID == firstReconcileID || !third.OK || third.UpdatedAt == activation.UpdatedAt {
+		t.Fatalf("a changed outcome kept the old generation: %+v", third)
 	}
 }
 

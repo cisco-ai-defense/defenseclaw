@@ -11,4 +11,4 @@ func pathForDataDir(dataDir string) string {
 	return filepath.Join(dataDir, StateDirName, FileName)
 }
 
-func readStatePathTrusted(string) bool { return true }
+func readStatePathTrusted(string) (bool, error) { return true, nil }

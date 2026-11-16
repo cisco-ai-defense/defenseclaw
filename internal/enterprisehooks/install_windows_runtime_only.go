@@ -51,6 +51,38 @@ func SetWindowsCopilotVSCodeUser(apply func(home string, verify, remove bool) er
 	windowsCopilotVSCodeUser.apply = apply
 }
 
+// windowsCopilotVSCodeUserPriorRender checks, read-only, that the user's Local
+// hook file and plugin hooks are current or exactly the render releases up to
+// 1.0.6 wrote (GAP-0980). The CLI installs it with
+// SetWindowsCopilotVSCodeUserPriorRender; unset, it refuses.
+var windowsCopilotVSCodeUserPriorRender struct {
+	sync.Mutex
+	check func(home string) error
+}
+
+// SetWindowsCopilotVSCodeUserPriorRender installs the prior-render check.
+func SetWindowsCopilotVSCodeUserPriorRender(check func(home string) error) {
+	windowsCopilotVSCodeUserPriorRender.Lock()
+	defer windowsCopilotVSCodeUserPriorRender.Unlock()
+	windowsCopilotVSCodeUserPriorRender.check = check
+}
+
+func applyWindowsCopilotVSCodeUserPriorRender(connectorName, home string) error {
+	if connectorName != "copilot" {
+		return nil
+	}
+	windowsCopilotVSCodeUserPriorRender.Lock()
+	check := windowsCopilotVSCodeUserPriorRender.check
+	windowsCopilotVSCodeUserPriorRender.Unlock()
+	if check == nil {
+		return errors.New("enterprise hooks: copilot VS Code Local prior-render check is not registered")
+	}
+	if err := check(home); err != nil {
+		return fmt.Errorf("enterprise hooks: copilot VS Code Local hooks: %w", err)
+	}
+	return nil
+}
+
 func applyWindowsCopilotVSCodeUser(connectorName, home string, verify, remove bool) error {
 	if connectorName != "copilot" {
 		return nil
@@ -348,7 +380,11 @@ func verifyWindowsRuntimeOnlyManagedResult(
 	}
 	// A missing or stale Local hook file or plugin fails verify, so the
 	// guardian repairs the row.
-	if err := applyWindowsCopilotVSCodeUser(name, target.home, true, false); err != nil {
+	if opts.AcceptPriorReleaseRender {
+		if err := applyWindowsCopilotVSCodeUserPriorRender(name, target.home); err != nil {
+			return InstallResult{}, err
+		}
+	} else if err := applyWindowsCopilotVSCodeUser(name, target.home, true, false); err != nil {
 		return InstallResult{}, err
 	}
 	return InstallResult{

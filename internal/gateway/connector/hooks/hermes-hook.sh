@@ -647,7 +647,10 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
 {{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
 {{end}}
-elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+{{if .Sandbox}}elif [ "$HTTP_CODE" = 429 ]; then
+  # The gateway named the limit that refused the call: show it.
+  fail_response "$(defenseclaw_sandbox_rate_refusal_reason "$RESULT")"
+{{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 

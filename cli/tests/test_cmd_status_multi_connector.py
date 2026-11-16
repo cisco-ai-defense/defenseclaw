@@ -835,6 +835,66 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(detail, " (PID 4242, up 1h 2m, API http://127.0.0.1:19030)")
         self.assertEqual(cmd_status._sidecar_running_detail({}, "", 0), "")
 
+    def test_gap0613_status_names_unavailable_admission_connector(self):
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": {
+                "watch_roots_unavailable": 1, "admission_scanning_off": ["claudecode"]
+            }}})
+        self.assertEqual(row.call_args.args[0], "Admission scan")
+        self.assertIn("off for claudecode", row.call_args.args[1])
+
+    def test_gap0905_status_names_the_writable_folder_and_the_chmod(self):
+        details = {
+            "watch_roots_unavailable": 1,
+            "admission_scanning_off": ["claudecode"],
+            "admission_root_writable_folders": ["/home/u/my dotfiles", "/home/u/shared"],
+        }
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        text = row.call_args.args[1]
+        self.assertIn("off for claudecode", text)
+        self.assertIn("'/home/u/my dotfiles', /home/u/shared can be written by another account", text)
+        self.assertIn("chmod go-w '/home/u/my dotfiles' /home/u/shared", text)
+
+    def test_gap0905_status_warns_about_a_root_watched_closely(self):
+        details = {"admission_root_rescan_folders": ["/home/u/dotfiles"]}
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        self.assertEqual(row.call_args.args[0], "Admission scan")
+        text = row.call_args.args[1]
+        self.assertIn("on, watched closely", text)
+        self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", text)
+        self.assertIn("chmod g-w /home/u/dotfiles", text)
+        self.assertNotIn("off", text)
+
+    def test_gap0905_status_names_both_folders_when_one_root_is_off_and_another_is_watched_closely(self):
+        details = {
+            "watch_roots_unavailable": 1,
+            "admission_scanning_off": ["claudecode"],
+            "admission_root_writable_folders": ["/home/u/shared-dotfiles"],
+            "admission_root_rescan_folders": ["/home/u/dotfiles"],
+        }
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        text = " ".join(call.args[1] for call in row.call_args_list)
+        self.assertIn("chmod go-w /home/u/shared-dotfiles", text)
+        self.assertIn("chmod g-w /home/u/dotfiles", text)
+
+    def test_gap0905_status_prints_nothing_for_a_root_without_the_warning(self):
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": {"skill_dirs": 2}}})
+        row.assert_not_called()
+
+    def test_gap0905_rescan_hint_ignores_malformed_folder_lists(self):
+        for value in (None, "/home/u/x", 7, [], [None, 3, "", "/home/u/x\x1b[31m"]):
+            with self.subTest(value=value):
+                self.assertEqual(cmd_status._watch_root_rescan_hint({"admission_root_rescan_folders": value}), "")
+
+    def test_gap0905_hint_ignores_malformed_folder_lists(self):
+        for value in (None, "/home/u/x", 7, [], [None, 3, "", "/home/u/x\x1b[31m"]):
+            with self.subTest(value=value):
+                self.assertEqual(cmd_status._watch_root_fix_hint({"admission_root_writable_folders": value}), "")
+
     def test_header_names_version_and_footer_skips_status_itself(self):
         from defenseclaw import __version__
 
@@ -932,6 +992,28 @@ class TestStatusJson(unittest.TestCase):
         sidecar = json.loads(result.output)["sidecar"]
         self.assertIsNone(sidecar["running"])
         self.assertIn("port 19081 is held by a process of another account", sidecar["reason"])
+
+    def test_text_and_json_name_this_homes_root_gateway(self):
+        from defenseclaw.commands.cmd_doctor import ROOT_GATEWAY_REASON
+
+        with (
+            patch.object(cmd_status, "_fetch_runtime_bound_health", return_value=None),
+            patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value=ROOT_GATEWAY_REASON),
+        ):
+            as_json = CliRunner().invoke(status_cmd, ["--json"], obj=self.app, catch_exceptions=False)
+            as_text = CliRunner().invoke(status_cmd, [], obj=self.app, catch_exceptions=False)
+        self.assertEqual(as_json.exit_code, 0, as_json.output)
+        self.assertEqual(as_text.exit_code, 0, as_text.output)
+        reason = json.loads(as_json.output)["sidecar"]["reason"]
+        for shown in (reason, as_text.output):
+            self.assertIn(ROOT_GATEWAY_REASON, shown)
+            if sys.platform.startswith("win"):
+                # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+                self.assertIn("elevated PowerShell prompt", shown)
+                self.assertNotIn("sudo", shown)
+            else:
+                self.assertIn("sudo env DEFENSECLAW_HOME=", shown)
+            self.assertNotIn("--api-port", shown)
 
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()
@@ -1403,6 +1485,70 @@ def test_status_uses_gateway_removed_agent_reason_in_text_and_json():
     assert rows["amp"]["state"] == "not running"
     assert rows["amp"]["runtime_detail"] == reason
     assert rows["codex"]["state"] == "running"
+
+
+_CUSTODY_FOLDER = "/home/lane/.config/opencode"
+_CUSTODY_REASON = f"validate plugin directory custody: {_CUSTODY_FOLDER} is group/other writable"
+
+
+def _refused_health(name: str, reason: str, repair: dict | None) -> dict:
+    details: dict = {"connectors_not_started": [name], "connectors_not_started_reasons": {name: reason}}
+    if repair is not None:
+        details["connectors_not_started_repairs"] = {name: repair}
+    return {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": details},
+    }
+
+
+def test_status_names_the_folder_and_fix_for_an_opencode_the_gateway_refused():
+    # A custody-refused OpenCode has no connector row; status called it
+    # "DEGRADED runtime load unverified" and hid the folder and the fix.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    fix = f"chmod go-w {_CUSTODY_FOLDER}"
+    health = _refused_health("opencode", _CUSTODY_REASON, {"fix": fix})
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "NOT RUNNING" in block and "DEGRADED" not in block
+    assert "runtime load unverified" not in block
+    assert _CUSTODY_FOLDER in block and fix in block and "defenseclaw setup opencode" in block
+    rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+    assert rows["opencode"]["state"] == "not running"
+    assert _CUSTODY_FOLDER in rows["opencode"]["runtime_detail"] and fix in rows["opencode"]["runtime_detail"]
+    assert "runtime load unverified" not in rows["opencode"]["runtime_detail"]
+
+
+def test_status_gives_every_refused_connector_its_recorded_reason_and_fix():
+    # The same renderer serves every connector, not only OpenCode.
+    cfg = _cfg(["codex", "hermes"], modes={"codex": "action", "hermes": "action"})
+    health = _refused_health("hermes", "hermes config is busy", {"fix": "close Hermes", "by_hand": "then restart it"})
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("Hermes (hermes)"):]
+    assert "hermes config is busy; fix: close Hermes; then by hand: then restart it" in block
+    detail = cmd_status._connector_roster(cfg, health)
+    hermes = next(row for row in detail if row["name"] == "hermes")["runtime_detail"]
+    assert "hermes config is busy; fix: close Hermes" in hermes
+
+
+def test_status_without_a_recorded_reason_still_points_to_the_gateway_log():
+    # Benign twin: an older gateway that records no reason keeps the generic line.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    health = {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": {"connectors_not_started": ["opencode"]}},
+    }
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "NOT RUNNING" in block and "see gateway.log, then run: defenseclaw setup opencode" in block
+
+
+def test_status_still_calls_an_opencode_with_no_row_and_no_refusal_unverified():
+    # Benign twin: with no refusal recorded, the runtime truth is unchanged.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    health = {"connectors": [{"name": "codex", "state": "running"}], "guardrail": {"state": "running", "details": {}}}
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "runtime load unverified: authenticated status has no OpenCode connector row" in block
 
 
 def test_policy_row_names_the_config_generation_that_survives_a_restart(capsys) -> None:

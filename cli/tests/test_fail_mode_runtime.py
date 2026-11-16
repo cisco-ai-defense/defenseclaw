@@ -760,7 +760,7 @@ def test_windows_registration_freshness_retries_access_denied_without_accepting_
     assert validate.call_count == attempts
     assert len(waits) == attempts - 1 and sum(waits) <= 2
     if expected:
-        monkeypatch.setattr("defenseclaw.fail_mode.shutil.which", lambda _name: str(tmp_path / "gateway.exe"))
+        monkeypatch.setattr("defenseclaw.fail_mode.path_gateway", lambda **_kwargs: str(tmp_path / "gateway.exe"))
         monkeypatch.setattr(
             "defenseclaw.fail_mode.subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
         )
@@ -1734,7 +1734,11 @@ def test_doctor_never_passes_an_unverified_managed_windows_mode(
     assert not state.runtime_verified and not state.current
     assert report["runtime_verified"] is False and report["current"] is False
     assert report["provenance"] == "windows-managed-runtime-unverified"
-    assert "defenseclaw enterprise windows verify" in report["note"]
+    # cowork-1-0-8 GAP-0076: the installed CLI as typed in PowerShell; Setup
+    # puts no DefenseClaw command on PATH.
+    verify = r"`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone`"
+    assert verify + " from an elevated PowerShell prompt" in report["note"], report["note"]
+    assert "`defenseclaw enterprise windows" not in report["note"]
     emitted: list[tuple[str, str, str, str]] = []
     with (
         patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
@@ -1750,7 +1754,7 @@ def test_doctor_never_passes_an_unverified_managed_windows_mode(
         cmd_doctor._check_connector_inventory(cfg, "codex", cmd_doctor._DoctorResult())
     rows = [row for row in emitted if row[1] == "Mode"]
     assert [row[0] for row in rows] == ["warn"], rows
-    assert "unverified" in rows[0][2] and "enterprise windows verify" in rows[0][3]
+    assert "unverified" in rows[0][2] and rows[0][3] == "from an elevated PowerShell prompt run " + verify, rows
 
 
 @pytest.mark.parametrize(
@@ -2550,7 +2554,7 @@ def test_windows_codex_reconcile_waits_for_a_transient_registration_read(tmp_pat
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     with (
         patch.object(fail_mode_runtime, "_is_windows", return_value=True),
-        patch.object(fail_mode_runtime.shutil, "which", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="C:/bin/defenseclaw-gateway.exe"),
         patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
         patch.object(fail_mode_runtime, "resolve_connector_fail_mode", side_effect=(unread, current)) as check,
     ):
@@ -2563,7 +2567,7 @@ def test_windows_codex_reconcile_refuses_persistent_registration_read_denial(tmp
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     with (
         patch.object(fail_mode_runtime, "_is_windows", return_value=True),
-        patch.object(fail_mode_runtime.shutil, "which", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="C:/bin/defenseclaw-gateway.exe"),
         patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
         patch.object(fail_mode_runtime, "resolve_connector_fail_mode", return_value=unread) as check,
     ):
@@ -2891,6 +2895,136 @@ def test_claude_linux_per_user_native_registration_is_current(monkeypatch: pytes
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+def test_gap0612_status_and_quickstart_share_native_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    healthy = _claude_contract_hooks(_claude_golden_hooks(home))
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "pass"
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+    assert "DEGRADED" not in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is None
+
+    # A foreign command cannot stand in for the native registration, and a
+    # missing event must not be called healthy just because other events remain.
+    wrong_home = json.loads(json.dumps(healthy))
+    wrong_home["PreToolUse"][0]["hooks"][0]["args"][6] = str(tmp_path / "other")
+    missing_companion = json.loads(json.dumps(healthy))
+    missing_companion["PreToolUse"][0]["hooks"].pop()
+    for hooks in (
+        {"PreToolUse": [{"hooks": [{"type": "command", "command": "/usr/local/bin/audit-tool"}]}]},
+        {event: groups for event, groups in healthy.items() if event != "PreToolUse"},
+        wrong_home,
+        missing_companion,
+    ):
+        _write_claude_hooks(home, hooks)
+        assert hook_integrity.hook_registration_problems(cfg, "claudecode")
+        assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+        assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is not None
+
+    _write_claude_hooks(home, healthy)
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+@pytest.mark.parametrize("form", ["direct", "shell"])
+@pytest.mark.parametrize(
+    "edit", ["current", "matcher", "timeout", "condition", "lifecycle_matcher", "lifecycle_timeout"]
+)
+def test_gap0612_native_tool_guard_fields_share_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, form: str, edit: str
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    if form == "direct":
+        cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+        hooks = _claude_contract_hooks(_claude_golden_hooks(home))
+    else:
+        cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_post=False)
+        settings = home / ".claude" / "settings.json"
+        (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
+            json.dumps(
+                {
+                    "connectors": {
+                        "claudecode": {
+                            "contract_id": "claudecode-hooks-v1",
+                            "locations": {"hook_config_paths": [str(settings)]},
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        native = fail_mode_runtime._claude_per_user_native_registration(cfg)
+        assert native is not None
+        command = fail_mode_runtime._claude_native_shell_command(native)
+        hooks = {}
+        for event in _CLAUDE_CONTRACT_EVENTS["claudecode-hooks-v1"]:
+            matcher, timeout = _CLAUDE_REQUIRED_HOOKS[event]
+            group = {"hooks": [{"type": "command", "command": command, "timeout": timeout}]}
+            if matcher is not None:
+                group["matcher"] = matcher
+            if event == "MessageDisplay":
+                group["hooks"][0]["async"] = True
+            hooks[event] = [group]
+
+    group = hooks["PreToolUse"][0]
+    if edit == "matcher":
+        group["matcher"] = "Read"
+    elif edit == "timeout":
+        group["hooks"][0]["timeout"] = 1
+    elif edit == "condition":
+        group["if"] = "Bash(git *)"
+    elif edit == "lifecycle_matcher":
+        hooks["SessionStart"][0]["matcher"] = "startup"
+    elif edit == "lifecycle_timeout":
+        hooks["Stop"][0]["hooks"][0]["timeout"] = 1
+    _write_claude_hooks(home, hooks)
+
+    problems = hook_integrity.hook_registration_problems(cfg, "claudecode")
+    status = cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    readiness = bootstrap._connector_runtime_readiness(cfg, "claudecode")
+    doctor = _doctor_claude_hooks_row(cfg, home)
+    if edit == "current":
+        assert not problems
+        assert "DEGRADED" not in status
+        assert readiness is None
+        assert doctor["status"] == "pass"
+    else:
+        assert problems
+        assert "DEGRADED" in status
+        assert readiness is not None
+        assert doctor["status"] == "fail"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux per-user native registration")
+@pytest.mark.parametrize("edit", ["timeout", "condition"])
+def test_gap0612_native_companion_fields_share_registration_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, edit: str
+) -> None:
+    from defenseclaw import bootstrap, hook_integrity
+    from defenseclaw.commands import cmd_status
+
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    hooks = _claude_contract_hooks(_claude_golden_hooks(home))
+    companion = hooks["PreToolUse"][0]["hooks"][1]
+    if edit == "timeout":
+        companion["timeout"] = 1
+    else:
+        companion["if"] = "Bash(git *)"
+    _write_claude_hooks(home, hooks)
+
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode")
+    assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "claudecode")
+    assert bootstrap._connector_runtime_readiness(cfg, "claudecode") is not None
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "fail"
+
+
 def _doctor_claude_hooks_row(cfg: SimpleNamespace, home: Path) -> dict:
     result = cmd_doctor._DoctorResult()
     cmd_doctor._check_claudecode_hooks(
@@ -3081,14 +3215,38 @@ def test_claude_tampered_native_registration_is_drift(monkeypatch: pytest.Monkey
 def test_claude_native_registration_without_guard_uses_the_launcher_shell_form(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from defenseclaw import hook_integrity
+
     cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_post=False)
     native = str(home / ".local" / "bin" / "defenseclaw-hook-user")
     command = (
         f"{native} hook --connector claudecode --hook-home {cfg.data_dir} --api-addr 127.0.0.1:18970"
-        " || { rc=$?; echo 'DefenseClaw blocked this' >&2; exit 2; }"
+        ' || { rc=$?; [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; '
+        "echo 'DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run. "
+        "Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, "
+        "or remove the DefenseClaw hooks from ~/.claude/settings.json.' >&2; exit 2; }"
     )
-    _write_claude_hooks(home, {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}]})
+    settings = home / ".claude" / "settings.json"
+    (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
+        json.dumps({"connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}),
+        encoding="utf-8",
+    )
+    assert command == fail_mode_runtime._claude_native_shell_command(
+        fail_mode_runtime._claude_per_user_native_registration(cfg)
+    )
+    _write_claude_hooks(home, {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]})
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode") == []
+    _write_claude_hooks(
+        home,
+        {
+            "PreToolUse": [
+                {"matcher": "*", "hooks": [{"type": "command", "command": command.replace("exit 2; }", "exit 0; }"), "timeout": 30}]}
+            ]
+        },
+    )
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+    assert hook_integrity.hook_registration_problems(cfg, "claudecode")
     _write_claude_hooks(home, _claude_golden_hooks(home))
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
 
@@ -3177,7 +3335,7 @@ def test_fail_mode_change_applies_and_verifies_on_a_native_claude_registration(
     cfg, home, app = _claude_native_runtime(monkeypatch, tmp_path, start)
     calls: list[list[str]] = []
     with (
-        patch.object(fail_mode_runtime.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="/usr/bin/defenseclaw-gateway"),
         patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, mode, calls)),
     ):
         result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [mode, *scope, "--yes"], obj=app)
@@ -3203,7 +3361,7 @@ def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
     before = (settings.read_bytes(), script.read_bytes())
     calls: list[list[str]] = []
     with (
-        patch.object(fail_mode_runtime.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="/usr/bin/defenseclaw-gateway"),
         patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, "closed", calls)),
     ):
         result = CliRunner().invoke(
@@ -3215,3 +3373,23 @@ def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
     assert "registration-command-stale" in result.output
     assert (settings.read_bytes(), script.read_bytes()) == before
     assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"
+
+
+def test_managed_windows_verify_command_ignores_a_poisoned_program_files(monkeypatch):
+    """g072 review 2 S2: the verify command an administrator pastes elevated
+    names the registered Program Files, not a ProgramFiles a standard user set."""
+    from defenseclaw import fail_mode
+
+    want = r"& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone"
+    for poison in (r"C:\Users\dcw-std1\Controlled", r"D:\Apps' x"):
+        monkeypatch.setenv("ProgramFiles", poison)
+        if sys.platform == "win32":
+            from defenseclaw import windows_owner
+
+            monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "C:\\Program Files")
+        assert fail_mode.managed_windows_verify_command() == want
+    if sys.platform == "win32":
+        from defenseclaw import windows_owner
+
+        monkeypatch.setattr(windows_owner, "_program_files_dir", lambda: "D:\\O\u2019Brien Apps\\")
+        assert fail_mode.managed_windows_verify_command().startswith("& 'D:\\O\u2019\u2019Brien Apps\\Cisco\\")

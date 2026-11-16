@@ -104,8 +104,9 @@ func mcpServerDenied(pe *enforce.PolicyEngine, server, connector string) (bool, 
 // mcpAccountRuntimeBlock refuses the tool call of an enrolled account's MCP
 // server that its own admission rejected or could not scan. A managed
 // gateway journals such a server under its account key
-// (watcher.MCPJournalName: name, connector, account home and project), not
-// under the bare name, so the verdict of one account's server never refuses
+// (watcher.MCPJournalName: name, connector, account home and project) and its
+// own target type (watcher.AccountMCPJournalType), not under the bare name of
+// the "mcp" type, so the verdict of one account's server never refuses
 // another account's server of the same name, and the rescan of one never
 // releases the other (GAP-0216). The caller's home and working folder pick
 // the rows; a caller whose home is not known is matched against every
@@ -123,13 +124,13 @@ func (a *APIServer) mcpAccountRuntimeBlock(ctx context.Context, pe *enforce.Poli
 	if server == "" {
 		return false, ""
 	}
-	rows, err := a.store.ListActionsByType("mcp")
+	rows, err := a.store.ListActionsByType(watcher.AccountMCPJournalType)
 	if err != nil {
 		return true, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
 	}
 	home, _ := callerHomeForAssets(ctx)
 	for _, row := range rows {
-		if row.Actions.Runtime != "disable" || row.TargetName == server {
+		if !watcher.MCPAccountRuntimeDisabled(row) {
 			continue
 		}
 		connector := strings.ToLower(strings.TrimSpace(req.Connector))

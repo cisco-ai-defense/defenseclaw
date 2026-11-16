@@ -1583,6 +1583,8 @@ def _skill_list_json_items(
             "disabled": s.get("disabled", False),
             "bundled": s.get("bundled", False),
         }
+        if s.get("alias_of"):
+            item["alias_of"] = s["alias_of"]
         if connector:
             item["connector"] = connector
         hp = s.get("homepage", "")

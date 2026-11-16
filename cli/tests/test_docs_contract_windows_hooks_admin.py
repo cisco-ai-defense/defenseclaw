@@ -127,4 +127,7 @@ def test_cli_reference_says_how_a_windows_administrator_checks_the_hooks():
     ) in text
     # The refusal's own hint.
     hint = _go_func((CLI_GO / "managed_host_guard.go").read_text(encoding="utf-8"), "managedWindowsAdminStatusHint")
-    assert "enterprise windows status --profile standalone" in hint
+    # One argument per element since the renderer quotes them (cowork-1-0-8
+    # GAP-0076): the same command, said in an elevated PowerShell prompt.
+    assert "\"enterprise\", \"windows\", \"status\", \"--profile\", \"standalone\"" in hint
+    assert "from an elevated PowerShell prompt with " in hint

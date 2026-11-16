@@ -331,8 +331,12 @@ func (a *APIServer) auditUnenrolledRefusal(ctx context.Context, row unenrolledRe
 	identity.UserID, identity.UserIDKind, identity.UserName = sid, useridentity.KindForID(sid), verifiedAccountName(sid, name)
 	ctx = ContextWithAgentIdentity(ctx, identity)
 	ctx = attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), sid, name, unenrolledRefusalSubject)
+	refusal := "unenrolled_account"
+	if row.Report.Reason == refusalpipe.ReasonCredentialPending {
+		refusal = "credential_pending"
+	}
 	extra := map[string]string{
-		"refusal":  "unenrolled_account",
+		"refusal":  refusal,
 		"attempts": strconv.Itoa(row.Attempts),
 	}
 	if row.Report.Tool != "" {

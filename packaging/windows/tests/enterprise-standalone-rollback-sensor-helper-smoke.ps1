@@ -402,15 +402,17 @@ $failures = & $module {
 
         # A committed uninstall retires bin with the ACP bridge and the sensor
         # helper still present, on both profiles; only the standalone policy
-        # compiler is standalone-only.
+        # compiler and the standalone Claude Code hook guard are
+        # standalone-only.
         $retired = 'C:\\RetiredRoot'
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         $standaloneAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
         $standaloneFiles = @($standaloneAllowlist.files)
         $standaloneOnly = @(
-            'lib\defenseclaw\policy_compiler.py'
+            'lib\defenseclaw\policy_compiler.py',
+            'bin\defenseclaw-hook-guard.exe'
         ) | ForEach-Object { [IO.Path]::GetFullPath((Join-Path $retired $_)) }
-        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe', 'lib\defenseclaw\policy_compiler.py')) {
+        foreach ($leaf in @('bin\defenseclaw-acp.exe', 'bin\defenseclaw-sensor-helper.exe', 'bin\defenseclaw-gateway.exe', 'bin\defenseclaw-hook-guard.exe', 'lib\defenseclaw\policy_compiler.py')) {
             if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $standaloneFiles) {
                 $failures.Add("standalone retired-tree allowlist lacks $leaf")
             }
@@ -427,6 +429,11 @@ $failures = & $module {
             if ([IO.Path]::GetFullPath((Join-Path $retired $leaf)) -notin $secureClientFiles) {
                 $failures.Add("Secure Client retired-tree allowlist lacks $leaf")
             }
+        }
+        # Secure Client has no hook guard: a file of that name in its retired
+        # tree stays an unexpected file, as before the guard shipped.
+        if ([IO.Path]::GetFullPath((Join-Path $retired 'bin\defenseclaw-hook-guard.exe')) -in $secureClientFiles) {
+            $failures.Add('Secure Client retired-tree allowlist admits the standalone hook guard')
         }
         $standaloneOnlyDirectories = @(
             [IO.Path]::GetFullPath((Join-Path $retired 'lib')).TrimEnd('\'),
@@ -451,6 +458,27 @@ $failures = & $module {
         if ($start -lt 0 -or $services -lt 0 -or $policy -lt 0 -or
             -not ($start -lt $services -and $services -lt $policy)) {
             $failures.Add('the deferred managed-hook rollback restart does not bring back the sensor helper around the service restart')
+        }
+
+        # A standalone Install or Upgrade without the hook guard source is
+        # refused before any source is read: the managed Claude Code hooks
+        # start through the guard and refuse ordinary calls without it.
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        foreach ($action in @('Install', 'Upgrade')) {
+            $message = ''
+            try {
+                [void](Get-DefenseClawLifecycleSources -Action $action `
+                    -GatewayBinary 'C:\p\g.exe' -ACPBinary 'C:\p\a.exe' `
+                    -HookBinary 'C:\p\h.exe' -SensorHelperBinary 'C:\p\s.exe' `
+                    -Config 'C:\p\c.yaml' -Manifest 'C:\p\m.yaml' `
+                    -InstallerSource 'C:\p\i.ps1' -ModuleSource 'C:\p\m.psm1')
+            }
+            catch {
+                $message = $_.Exception.Message
+            }
+            if ($message -notmatch 'requires .*-HookGuardBinary') {
+                $failures.Add("standalone $action without the hook guard source was not refused: $message")
+            }
         }
     }
     finally {

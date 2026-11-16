@@ -126,7 +126,8 @@ func TestWindowsEnterpriseUnparseableRescueKeepsAConcurrentCommit(t *testing.T) 
 	// Control: with no concurrent commit the supplied config replaces the
 	// broken one, which is kept.
 	host, opts := newHotConfigHost(t, broken, candidate)
-	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+	kept := replaced.kept
 	if err != nil || kept == "" {
 		t.Fatalf("rescue = (%q, %v), want the broken config kept", kept, err)
 	}
@@ -142,7 +143,8 @@ func TestWindowsEnterpriseUnparseableRescueKeepsAConcurrentCommit(t *testing.T) 
 		}
 		return func() {}, nil
 	}
-	kept, err = installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	replaced, err = installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+	kept = replaced.kept
 	if err != nil || kept != "" {
 		t.Fatalf("rescue = (%q, %v), want nothing to do after the concurrent commit", kept, err)
 	}
@@ -190,6 +192,9 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 		// how often the proof must have run.
 		hookUnproven bool
 		proofs       int
+		// GAP-0967: a program holds a guardian state file open, so the
+		// guardian cannot publish for the undo.
+		held bool
 	}{
 		{name: "restore fails after adoption and target refresh", restoreFails: true, adopted: true, verify: true,
 			code: "config_restore_failed", installed: next, stops: 1,
@@ -219,6 +224,12 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 			code: "targets_restore_failed", installed: previous, stops: 1, proofs: 1,
 			state: "holds the previous config", targets: "published again for the previous config",
 			unprotected: "these previously enrolled targets have no DefenseClaw hook now: bob (S-1-5-21-1-2-3-1002) claudecode"},
+		// GAP-0967: the same unproven undo while a program holds the guardian's
+		// state file: the services are left running and nothing is closed; the
+		// error names the holder and the repair.
+		{name: "dropped hook not back while a guardian state file is held", hookUnproven: true, held: true, adopted: true, verify: true,
+			code: "guardian_state_held", installed: previous, stops: 0, proofs: 1,
+			unprotected: "these previously enrolled targets have no DefenseClaw hook until the repair: bob (S-1-5-21-1-2-3-1002) claudecode"},
 		{name: "targets cannot be published again nor put back", refreshFails: 2, putBackFails: true, adopted: true, verify: true,
 			code: "targets_restore_failed", installed: previous, stops: 1, putBack: 1,
 			state: "holds the previous config", targets: "a user it does not enroll has no DefenseClaw hooks",
@@ -259,6 +270,19 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 			}
 			if tc.putBackFails {
 				host.targetRestoreErr = errors.New("targets.yaml replace refused")
+			}
+			if tc.held {
+				previousHeld := windowsEnterpriseGuardianStateHeldNow
+				t.Cleanup(func() { windowsEnterpriseGuardianStateHeldNow = previousHeld })
+				// The holder arrives after the preflight: the first look finds
+				// nothing, the look the undo makes finds it.
+				looks := 0
+				windowsEnterpriseGuardianStateHeldNow = func(managed.StandaloneLayout) *windowsGuardianStateHold {
+					if looks++; looks == 1 {
+						return nil
+					}
+					return &windowsGuardianStateHold{Path: `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state\protected_targets.json`, Holders: []string{"editor.exe (PID 4242)"}}
+				}
 			}
 			host.dropped = []enterprisehooks.ManifestTarget{{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "claudecode"}}
 			if tc.hookUnproven {
@@ -346,6 +370,20 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 				t.Fatalf("installer runs %q: no upgrade transaction may follow an unproven undo", stub.calls)
 			}
 			message := fmt.Sprint(result.Errors)
+			if tc.held {
+				for _, want := range []string{"protected_targets.json", "editor.exe (PID 4242)", "services were left running", "no hook was closed", "enterprise windows repair", tc.unprotected} {
+					if !strings.Contains(message, want) {
+						t.Fatalf("errors %s do not say %q", message, want)
+					}
+				}
+				if strings.Contains(message, "gateway service was stopped") {
+					t.Fatalf("errors %s claim the gateway was stopped", message)
+				}
+				if got := windowsEnterpriseFailureCodeFor(&result); got != enterprisestatus.WindowsExitBusy {
+					t.Fatalf("exit code %d, want %d (retry)", got, enterprisestatus.WindowsExitBusy)
+				}
+				return
+			}
 			if tc.unprotected != "" && !strings.Contains(message, tc.unprotected) {
 				t.Fatalf("errors %s do not name the target without a hook (%q)", message, tc.unprotected)
 			}
@@ -408,5 +446,53 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoIsNotRestarted(t *testing.T) {
 		if !strings.Contains(message, want) {
 			t.Fatalf("stop error %v: errors %s do not say %q", stopErr, message, want)
 		}
+	}
+}
+
+// GAP-0646: Setup records the supplied config it writes over an unparseable
+// config.yaml as the lifecycle's config generation with the write. The hook
+// guardian then finds the bytes recorded and never takes the repair's own
+// write for a hand edit (it did, and the gateway refused to start on it).
+func TestWindowsEnterpriseUnparseableRescueRecordsTheSuppliedConfigAsTheLifecycleGeneration(t *testing.T) {
+	t.Cleanup(func() { managedConfigRecordDeferredTo = "" })
+	const broken = "invalid: [\n"
+	const recorded = "config_version: 9\n# the recorded generation\n"
+	candidate := strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1)
+	originalLayout, originalSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneLayoutForPreflight = originalLayout
+		windowsEnterpriseStandaloneConfigSource = originalSource
+	})
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{}, errors.New("no preflight layout in this test")
+	}
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+
+	host, opts := newHotConfigHost(t, recorded, candidate)
+	if _, err := configwrite.Locked(context.Background(), host.configPath,
+		configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure"},
+		func() (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	before, err := configwrite.ReadGenerationState(host.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(host.configPath, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+	if err != nil || replaced.kept == "" {
+		t.Fatalf("rescue = (%+v, %v), want the broken config kept", replaced, err)
+	}
+	state, err := configwrite.ReadGenerationState(host.configPath)
+	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex([]byte(candidate)) ||
+		state.Generation != before.Generation+1 || state.Reason != windowsEnterpriseSuppliedConfigRecordReason {
+		t.Fatalf("record after the rescue = %+v, %v; want generation %d by the lifecycle for the supplied config", state, err, before.Generation+1)
+	}
+	var log strings.Builder
+	recordUnrecordedManagedConfig(host.configPath, &log, nil)
+	if after, err := configwrite.ReadGenerationState(host.configPath); err != nil || after != state || log.Len() != 0 {
+		t.Fatalf("the guardian recorded the rescue's own write: %+v, %v\n%s", after, err, log.String())
 	}
 }

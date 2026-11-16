@@ -32,3 +32,40 @@ func TestCommandReportCarriesOnlyFixedWordsAndAReason(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0722: a Windows standalone call refused for credentials the gateway has
+// not accepted yet is a reportable refusal; an unknown reason is still dropped.
+func TestNormalizeAcceptsTheCredentialPendingReason(t *testing.T) {
+	report, ok := Report{Connector: "Claudecode", Reason: ReasonCredentialPending, Event: "UserPromptSubmit"}.Normalize()
+	if !ok || report.Connector != "claudecode" || report.Reason != ReasonCredentialPending {
+		t.Fatalf("Normalize = %+v, %v", report, ok)
+	}
+	if _, ok := (Report{Connector: "claudecode", Reason: "enterprise_managed_credential_other"}).Normalize(); ok {
+		t.Error("an unknown reason was accepted")
+	}
+}
+
+// Only exactly {"excluded":true} is an exclusion; an absent field, another
+// type, extra fields, trailing data and an empty answer are errors or false.
+func TestParseExcludedAnswerAcceptsOnlyAnExactExclusion(t *testing.T) {
+	for _, tc := range []struct {
+		answer  string
+		want    bool
+		wantErr bool
+	}{
+		{answer: string(ExcludedAnswer(true)), want: true},
+		{answer: string(ExcludedAnswer(false))},
+		{answer: `{"excluded":true,"extra":1}`, wantErr: true},
+		{answer: `{"excluded":"true"}`, wantErr: true},
+		{answer: `{"excluded":null}`, wantErr: true},
+		{answer: `{}`, wantErr: true},
+		{answer: `{"excluded":true}{"excluded":true}`, wantErr: true},
+		{answer: `[]`, wantErr: true},
+		{answer: ``, wantErr: true},
+	} {
+		got, err := ParseExcludedAnswer([]byte(tc.answer))
+		if got != tc.want || (err != nil) != tc.wantErr {
+			t.Errorf("ParseExcludedAnswer(%q) = %t, %v; want %t, error=%t", tc.answer, got, err, tc.want, tc.wantErr)
+		}
+	}
+}

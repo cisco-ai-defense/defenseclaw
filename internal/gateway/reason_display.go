@@ -17,13 +17,16 @@
 package gateway
 
 import (
+	"fmt"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -123,7 +126,8 @@ func trustedRefusalReason(reason string) bool {
 	return trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) ||
 		trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) ||
 		trustedHookSideRefusalReason(reason) || trustedCodexStartRegistrationRefusal(reason) ||
-		trustedDecisionModelReason(reason)
+		trustedDecisionModelReason(reason) ||
+		trustedIdentityRefusalReason(reason)
 }
 
 // decisionModelReason is the whole of a block or confirmation reason the
@@ -333,6 +337,9 @@ func agentObservedReason(action, sourceReason, displayReason string, policy reda
 	if managedEnterpriseActive.Load() || policy != redaction.SinkPolicyDefault {
 		return displayReason
 	}
+	if sentence := agentMCPAdmissionAllowedSentence(sourceReason); sentence != "" {
+		return sentence
+	}
 	if subject := agentReasonSubject(sourceReason); subject != "" {
 		return subject
 	}
@@ -421,7 +428,7 @@ var agentAssetPolicyKinds = map[string]string{"mcp": "MCP server", "skill": "ski
 // agentAssetPolicyKeys are the fields assetPolicyResponseReason emits.
 var agentAssetPolicyKeys = []string{
 	"reason_code", "source", "asset_type", "asset_name", "connector",
-	"registry_status", "registry_configured", "surface",
+	"registry_status", "registry_configured", "surface", "retry_after_s", "scan_issue", "next_step",
 }
 
 // agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
@@ -501,13 +508,26 @@ func agentAssetPolicySubject(reason string) string {
 		return ""
 	}
 	kind, name := agentAssetPolicyKinds[values["asset_type"]], values["asset_name"]
-	if kind == "" || name == "" {
+	// A failed MCP admission scan is worded without a name the agent may not
+	// be shown (mcpAdmissionAgentName); its cause and next step stay.
+	if kind == "" || (name == "" && !agentMCPAdmissionFailedReason(values)) {
 		return ""
 	}
 	switch values["reason_code"] {
 	case "mcp-admission-pending":
 		if values["asset_type"] == "mcp" {
-			return kind + " " + name + " is not scanned yet; try the call again in about a minute"
+			return kind + " " + name + " is not scanned yet; try the call again in " + agentMCPAdmissionRetryText(values)
+		}
+	case "mcp-admission-unavailable":
+		return kind + " " + name + " admission is unavailable; try the call again in " + agentMCPAdmissionRetryText(values)
+	case "mcp-admission-failed":
+		if values["asset_type"] == "mcp" {
+			return mcpAdmissionFailedText(name, values["scan_issue"], values["next_step"])
+		}
+		return kind + " " + name + " has a failed admission scan"
+	case "mcp-definition-unproven":
+		if values["asset_type"] == "mcp" {
+			return mcpDefinitionUnprovenText(name)
 		}
 	case "not-in-approved-registry":
 		return kind + " " + name + " is not in the approved registry"
@@ -572,18 +592,57 @@ func agentAssetPolicyFields(reason string) (map[string]string, bool) {
 }
 
 // agentMCPAdmissionPendingSentence words the refusal of a tool call to an MCP
-// server whose install admission has not finished (GAP-0112) as a wait: the
-// scan is running and the same call can be tried again in about a minute.
+// server whose install admission has not finished (GAP-0112) as a wait with
+// a retry estimate from the watcher.
 // The block sentence says the opposite ("Do not retry it"), and the raw
 // key=value reason read like a registry error (GAP-0210). "" for any other
 // reason.
 func agentMCPAdmissionPendingSentence(reason string) string {
 	values, ok := agentAssetPolicyFields(reason)
-	if !ok || values["reason_code"] != "mcp-admission-pending" || values["asset_type"] != "mcp" || values["asset_name"] == "" {
+	if !ok || values["asset_type"] != "mcp" || values["asset_name"] == "" {
 		return ""
 	}
-	return "DefenseClaw is still scanning MCP server " + values["asset_name"] + ", so its tools are blocked until the scan finishes. " +
-		"Try the same call again in about a minute. If the scan rejects the server, its calls stay blocked."
+	if values["reason_code"] == "mcp-admission-unavailable" {
+		return "DefenseClaw could not read admission for MCP server " + values["asset_name"] + ", so its tools are blocked. " +
+			"Try the same call again in " + agentMCPAdmissionRetryText(values) + "."
+	}
+	if values["reason_code"] != "mcp-admission-pending" {
+		return ""
+	}
+	return "DefenseClaw is still scanning the new MCP server " + values["asset_name"] + "; retry in " + agentMCPAdmissionRetryText(values) +
+		". Its tools stay blocked until the scan finishes. If the scan rejects the server, its calls stay blocked."
+}
+
+func agentMCPAdmissionRetryText(values map[string]string) string {
+	if seconds, err := strconv.Atoi(values["retry_after_s"]); err == nil && seconds >= 1 && seconds <= 300 {
+		return fmt.Sprintf("about %d s", seconds)
+	}
+	return "about a minute"
+}
+
+func agentMCPAdmissionAllowedSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["asset_type"] != "mcp" || (values["asset_name"] == "" && !agentMCPAdmissionFailedReason(values)) {
+		return ""
+	}
+	switch values["reason_code"] {
+	case "mcp-admission-pending":
+		return "DefenseClaw is still scanning MCP server " + values["asset_name"] + ". This call is allowed while admission is pending."
+	case "mcp-admission-unavailable":
+		return "DefenseClaw could not read admission for MCP server " + values["asset_name"] + ". This call is allowed with a warning."
+	case "mcp-admission-failed":
+		return mcpAdmissionAllowedWarning(values["asset_name"], values["scan_issue"], values["next_step"])
+	case "mcp-definition-unproven":
+		return "DefenseClaw cannot prove which definition MCP server " + values["asset_name"] + " runs. This call is allowed with a warning; " +
+			mcpDefinitionUnprovenStep + "."
+	}
+	return ""
+}
+
+// agentMCPAdmissionFailedReason reports the fields of a failed MCP admission
+// scan, whose reason can omit the server name.
+func agentMCPAdmissionFailedReason(values map[string]string) bool {
+	return values["asset_type"] == "mcp" && values["reason_code"] == "mcp-admission-failed"
 }
 
 // A project skill awaiting its first scan is a temporary refusal, so name
@@ -598,7 +657,8 @@ func agentProjectSkillPendingSentence(reason string) string {
 		if reasonDisplayGOOS == "windows" {
 			return prefix + "Wait for the managed skill watcher to scan it, or ask your administrator to review the scan; then retry the skill."
 		}
-		return prefix + "Ask your administrator to run `defenseclaw-gateway scan skill PATH` for its folder; then retry the skill."
+		// The gateway is not on the PATH: name it by its absolute path.
+		return prefix + "Ask your administrator to run `" + managed.StandaloneGatewayPath(reasonDisplayGOOS) + " scan skill PATH` for its folder; then retry the skill."
 	}
 	return prefix + "Run `defenseclaw skill scan --path PATH` for its folder; then retry the skill."
 }

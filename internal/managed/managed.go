@@ -37,6 +37,12 @@ const (
 	// refuse. The standalone Unix enumerator writes it with the ledger's
 	// ownership and mode; the gateway refuses those hook calls.
 	HookGuardianRefusedSurfacesFile = "refused-surfaces.json"
+	// HookGuardianUnprotectedAgentsFile, next to the ledger, is the gateway's
+	// copy of the enumerator's root-only unprotected-agents record: the same
+	// agents from the same scan, so the caller's own status says what the
+	// administrator's status says. The standalone Unix enumerator writes it
+	// with the ledger's ownership and mode.
+	HookGuardianUnprotectedAgentsFile = "unprotected-agents.json"
 	// HookGuardianCredentialTransactionFile, next to the ledger, is the
 	// root-only record of the per-user credential rotation in progress
 	// (enterprisehooks.CredentialTransaction). The standalone Unix guardian

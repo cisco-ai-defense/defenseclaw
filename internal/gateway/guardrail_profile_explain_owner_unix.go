@@ -26,7 +26,7 @@ var profileExplainAccountID = func(name, ownerID string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
-	account, err := unixidentity.LookupAccountSpelling(unixidentity.Default(ctx), name, func(uid int) (useridentity.DirectoryFacts, bool) {
+	account, err := unixidentity.LookupAdminAccountSpelling(profileExplainResolver(ctx), name, func(uid int) (useridentity.DirectoryFacts, bool) {
 		if strconv.Itoa(uid) != ownerID {
 			return useridentity.DirectoryFacts{}, false
 		}

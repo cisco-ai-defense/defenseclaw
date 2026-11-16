@@ -88,7 +88,7 @@ defenseclaw setup redaction remove-all --yes
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`; `remove` only touches operator-added entries (in `config.yaml`, or an older entry in `~/.defenseclaw/.env`). All verbs accept `--json`. |
+| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults (the folders setup admits, with `discovery default` marking any that only passive discovery uses) plus operator additions, with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`; `remove` only touches operator-added entries (in `config.yaml`, or an older entry in `~/.defenseclaw/.env`). All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
 Commands that fetch remote content fail closed when the trust boundary is
@@ -301,7 +301,7 @@ A hook does not start the gateway:
 - for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
 - when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set.
 
-While the gateway is down, a per-user install in the default or permissive policy lets agent calls run with one warning (start the gateway; `defenseclaw doctor` if it does not start) and a `hook-failures.jsonl` record; the strict policy and a managed host by default block them, in observe mode too. During an install or upgrade every hook blocks ([Fail modes](/docs/reference/fail-modes#per-user-installs)). When `gateway.watchdog.enabled` is set and the gateway process stops on its own, the watchdog starts it again after `gateway.watchdog.debounce` failed health checks. A gateway that runs but does not answer is not restarted by a hook or the watchdog: check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`.
+While the gateway is down, a per-user install in the default or permissive policy lets agent calls run with one warning (start the gateway; `defenseclaw doctor` if it does not start, per-user only: [Managed command availability](/docs/enterprise/managed-commands)) and a `hook-failures.jsonl` record; the strict policy and a managed host by default block them, in observe mode too. During an install or upgrade every hook blocks ([Fail modes](/docs/reference/fail-modes#per-user-installs)). When `gateway.watchdog.enabled` is set and the gateway process stops on its own, the watchdog starts it again after `gateway.watchdog.debounce` failed health checks. A gateway that runs but does not answer is not restarted by a hook or the watchdog: check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`.
 
 ### Verify a download
 

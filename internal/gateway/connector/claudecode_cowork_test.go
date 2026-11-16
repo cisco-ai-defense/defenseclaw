@@ -92,7 +92,6 @@ func TestCoworkPluginHooksRunClaudeCodeHandler(t *testing.T) {
 	for _, group := range hookGroups {
 		groups[group.eventType] = group
 	}
-	wantCommand := claudeCodeMissingHookGuardWith(shellSingleQuote(script), coworkMissingHookGuardMessage)
 	for event, entries := range doc.Hooks {
 		group := groups[event]
 		if len(entries) != 1 || len(entries[0].Hooks) != 1 {
@@ -103,8 +102,11 @@ func TestCoworkPluginHooksRunClaudeCodeHandler(t *testing.T) {
 			t.Fatalf("%s: matcher %q timeout %d async %v, want the Claude Code group %+v",
 				event, entries[0].Matcher, handler.Timeout, handler.Async, group)
 		}
-		if handler.Type != "command" || handler.Command != wantCommand || handler.Args != nil {
-			t.Fatalf("%s: handler %+v, want command %q", event, handler, wantCommand)
+		if handler.Type != "command" || handler.Args != nil ||
+			!strings.Contains(handler.Command, shellSingleQuote(script)) ||
+			!strings.Contains(handler.Command, dataDir+coworkRemovalMarkerSuffix) ||
+			!strings.Contains(handler.Command, coworkMissingHookGuardMessage) {
+			t.Fatalf("%s: handler %+v, want the script, removal record and installed guard", event, handler)
 		}
 	}
 }

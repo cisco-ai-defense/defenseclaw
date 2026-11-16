@@ -15,11 +15,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // hookAssetFacts is the assetfacts.Header value of a standalone managed
@@ -27,23 +30,37 @@ import (
 // in their SKILL.md, the folders a skill selected by name (or typed as a
 // Claude Code /name) exists in, and the definition of the MCP server a tool
 // call names, read as the user (GAP-0570, GAP-0576, GAP-1212, GAP-0968).
-// The gateway, a service account, may not read this home.
+// The gateway, a service account, may not read this home. Every connector
+// reports the skill folders a link or a bare operand of the call leads into,
+// since the gateway judges the folder a link ends in whatever connector's call
+// followed it; only Claude Code, Codex and Copilot also report skills selected
+// by name, MCP servers and skill text.
 func hookAssetFacts(connector string, payload []byte) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
-	if connector != "claudecode" && connector != "codex" {
-		return ""
-	}
+	selects := connector == "claudecode" || connector == "codex" || connector == "copilot"
 	var event struct {
-		ToolName      string         `json:"tool_name"`
-		ToolInput     map[string]any `json:"tool_input"`
-		CWD           string         `json:"cwd"`
-		Prompt        string         `json:"prompt"`
-		MCPServerName string         `json:"mcp_server_name"`
+		ToolName      string          `json:"tool_name"`
+		ToolNameCamel string          `json:"toolName"`
+		ToolInput     map[string]any  `json:"tool_input"`
+		ToolArgs      json.RawMessage `json:"toolArgs"`
+		CWD           string          `json:"cwd"`
+		Prompt        string          `json:"prompt"`
+		MCPServerName string          `json:"mcp_server_name"`
+		CommandName   string          `json:"command_name"`
 	}
 	if json.Unmarshal(payload, &event) != nil {
 		return ""
 	}
+	if event.ToolName == "" {
+		event.ToolName = event.ToolNameCamel
+	}
+	if event.ToolInput == nil {
+		event.ToolInput = hookToolArgs(event.ToolArgs)
+	}
 	home, _ := os.UserHomeDir()
+	// The links of the call are followed on a network share only once it has
+	// answered, within the wait this call has for shares.
+	defer hookpaths.HookCall()()
 	var facts assetfacts.Facts
 	addSkill := func(folder, dir string) {
 		declared := assetfacts.DeclaredSkillName(dir)
@@ -51,28 +68,47 @@ func hookAssetFacts(connector string, payload []byte) string {
 			facts.Skills = append(facts.Skills, assetfacts.Skill{Folder: folder, Declared: declared})
 		}
 	}
-	if name := hookInvokedSkillName(connector, event.ToolName, event.ToolInput, event.Prompt); name != "" {
-		for _, root := range assetfacts.SkillRoots(connector, home, event.CWD) {
+	if name := hookInvokedSkillName(connector, event.ToolName, event.ToolInput, event.Prompt); name != "" && selects {
+		for _, root := range hookSkillRoots(connector, home, event.CWD) {
 			dir := filepath.Join(root, name)
 			addSkill(name, dir)
-			if _, err := os.Lstat(dir); err == nil {
+			if hookPathExists(dir) {
 				facts.SkillDirs = append(facts.SkillDirs, dir)
 			}
 		}
 	}
-	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
+	refs, cut := assetfacts.SkillFolderRefsAndCut(event.ToolName, event.ToolInput, home, event.CWD, "", os.Geteuid(), os.Getegid(), false)
+	// A call that names more paths into skill folders than are read is said to
+	// be cut: the gateway refuses it when a skill is held or denied.
+	facts.SkillLinksTruncated = cut
+	inSkillRoot := hookLinkedSkillFolders(connector, home, event.CWD)
+	for _, ref := range refs {
 		addSkill(ref.Name, ref.Dir)
-		if _, err := os.Lstat(ref.Dir); errors.Is(err, os.ErrNotExist) {
-			for _, root := range assetfacts.SkillRoots(connector, home, event.CWD) {
+		if (ref.Linked || ref.BareOperand) && inSkillRoot(ref.Dir) && !slices.Contains(facts.SkillLinks, ref.Dir) {
+			// The gateway may not follow the link in this home, nor tell a
+			// bare word from a name there; say which folder the call reaches.
+			facts.SkillLinks = append(facts.SkillLinks, ref.Dir)
+		}
+		if selects && hookPathMissing(ref.Dir) {
+			for _, root := range hookSkillRoots(connector, home, event.CWD) {
 				addSkill(ref.Name, filepath.Join(root, ref.Name))
 			}
 		}
 	}
-	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" {
+	facts.SkillLinksUnproven = hookpaths.SkillLinksUnproven()
+	if !selects {
+		return assetfacts.Encode(facts)
+	}
+	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" && connector != "copilot" {
 		entry, source, ok := hookCommandLineMCPServer(connector, event.CWD, server)
 		switch {
 		case source == unprovenMCPSource:
 			facts.MCPUnproven = server
+		case !ok && connector == "codex":
+			// Codex runs a project definition only for a project its user
+			// config trusts; an untrusted project file does not override the
+			// server of that name in the user config (GAP-0686).
+			entry, ok = config.LookupEffectiveCodexMCPToolServer(event.CWD, server)
 		case !ok:
 			entry, ok = (*config.Config)(nil).LookupMCPToolServerForConnector(connector, event.CWD, server)
 		}
@@ -81,13 +117,227 @@ func hookAssetFacts(connector string, payload []byte) string {
 				Name: entry.Name, URL: entry.URL, Command: entry.Command, Args: entry.Args, Transport: entry.Transport,
 				Source: source,
 			}
+			if connector == "codex" && source == "" && !entry.Bundled {
+				facts.MCP.Relocated = entry.SourceScope == "user" && config.CodexHomeRelocated()
+				facts.MCP.ProjectScope = entry.SourceScope == "project"
+				if facts.MCP.Relocated || facts.MCP.ProjectScope {
+					facts.MCP.Digest = config.MCPLaunchDigest(entry)
+				}
+			}
 		}
 	}
+	facts.Contents = hookAssetContents(connector, home, event.ToolName, event.ToolInput, event.Prompt, event.CommandName, facts.SkillDirs)
 	return assetfacts.Encode(facts)
 }
 
-// hookAgentCommandLine reads the agent process's arguments; tests replace it.
+// hookPathExists and hookPathMissing look a path up only once a network share
+// on it has answered (assetfacts.ShareGate): a path on one that has not reads
+// as neither existing nor missing, as an unreadable one does.
+func hookPathExists(path string) bool {
+	if !assetfacts.ShareAnswers(path) {
+		return false
+	}
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+func hookPathMissing(path string) bool {
+	if !assetfacts.ShareAnswers(path) {
+		return false
+	}
+	_, err := os.Lstat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// hookLinkedSkillFolders gives the test of whether dir, where a link of the
+// call ends, is a folder directly in a skill root of the connector or of any
+// connector that loads skills from folders, spelled as the root or as the root
+// resolves: the only place the gateway takes a reported link, so the claim
+// carries nothing else. The folder a link ends in is protected whichever
+// connector's call follows the link. The roots are looked up once, at the
+// first test, not once per link: a call may name a thousand.
+func hookLinkedSkillFolders(connector, home, cwd string) func(dir string) bool {
+	var spelled, resolved []string
+	loaded := false
+	return func(dir string) bool {
+		if !loaded {
+			loaded = true
+			roots := hookSkillRoots(connector, home, cwd)
+			for _, root := range assetfacts.KnownSkillRoots(home, cwd) {
+				if !slices.Contains(roots, root) {
+					roots = append(roots, root)
+				}
+			}
+			for _, root := range roots {
+				spelled = append(spelled, filepath.Clean(root))
+				resolved = append(resolved, assetfacts.ResolveLinks(root))
+			}
+		}
+		parent := filepath.Dir(dir)
+		for i := range spelled {
+			if parent == spelled[i] || parent == resolved[i] {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// hookSkillRoots are the skill folders the agent loads from for this user:
+// the connector's own and the ones its environment adds (Copilot's
+// COPILOT_HOME and COPILOT_SKILLS_DIRS), which only a hook that runs as the
+// user can see.
+func hookSkillRoots(connector, home, cwd string) []string {
+	roots := assetfacts.SkillRoots(connector, home, cwd)
+	if connector == "copilot" && assetfacts.CopilotHomeSet() {
+		// COPILOT_HOME replaces ~/.copilot as the home of Copilot: a skill left
+		// in the default one is not loaded, and judging it would block the
+		// skill of that name the agent does load.
+		roots = slices.DeleteFunc(roots, func(root string) bool { return root == filepath.Join(home, ".copilot", "skills") })
+	}
+	for _, root := range assetfacts.EnvSkillRoots(connector, home, cwd, hookAgentWorkingDirectory) {
+		if !slices.Contains(roots, root) {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+// hookToolArgs decodes the tool arguments of a hook that spells them toolArgs:
+// Copilot CLI sends them as a JSON object or as a string holding one.
+func hookToolArgs(raw json.RawMessage) map[string]any {
+	var args map[string]any
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	if json.Unmarshal(raw, &args) == nil {
+		return args
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil && json.Unmarshal([]byte(text), &args) == nil {
+		return args
+	}
+	return nil
+}
+
+// hookAssetContents reads, as the user, the text of the skill folders a
+// request selects and of the Claude Code plugin it belongs to (a plugin
+// skill or command, or a tool of a server the plugin bundles). A managed
+// Windows gateway reads nothing in a profile and judges this text instead
+// (GAP-0699, GAP-0701). Nothing is read for a request that selects neither.
+func hookAssetContents(connector, home, toolName string, toolInput map[string]any, prompt, commandName string, skillDirs []string) []assetfacts.Content {
+	var out []assetfacts.Content
+	for _, dir := range skillDirs {
+		if content, ok := assetfacts.ReadContent(assetfacts.ContentSkill, filepath.Base(dir), dir); ok {
+			out = append(out, content)
+		} else {
+			// A folder the hook found but cannot read is still a skill that
+			// would run: say so, so the gateway refuses it as unscanned.
+			out = append(out, assetfacts.UnreadContent(assetfacts.ContentSkill, filepath.Base(dir), dir))
+		}
+	}
+	if connector != "claudecode" {
+		return out
+	}
+	claudeDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if claudeDir == "" {
+		claudeDir = filepath.Join(home, ".claude")
+	}
+	for _, plugin := range hookInvokedPluginNames(claudeDir, toolName, toolInput, prompt, commandName) {
+		roots := assetfacts.ClaudePluginRoots(claudeDir, plugin)
+		if len(roots) == 0 {
+			// The request selects a plugin the registry does not give a folder
+			// for (it is missing, unreadable, past the bound the hook reads, or
+			// does not list the plugin): the same failure state, not silence.
+			out = append(out, assetfacts.UnreadContent(assetfacts.ContentPlugin, plugin, ""))
+		}
+		for _, root := range roots {
+			if content, ok := assetfacts.ReadContent(assetfacts.ContentPlugin, plugin, root); ok {
+				out = append(out, content)
+			} else {
+				out = append(out, assetfacts.UnreadContent(assetfacts.ContentPlugin, plugin, root))
+			}
+		}
+	}
+	return out
+}
+
+// hookInvokedPluginNames are the plugins a Claude Code request belongs to: a
+// Skill call or /command spelled plugin:name, or a tool of a bundled server
+// (mcp__plugin_<plugin>_<server>__<tool>).
+func hookInvokedPluginNames(claudeDir, toolName string, toolInput map[string]any, prompt, commandName string) []string {
+	var names []string
+	add := func(name string) {
+		if name = strings.TrimSpace(name); name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	qualified := func(spelled string) {
+		if plugin, _, ok := strings.Cut(strings.TrimPrefix(strings.TrimSpace(spelled), "/"), ":"); ok {
+			add(plugin)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(toolName), "Skill") {
+		skill, _ := toolInput["skill"].(string)
+		qualified(skill)
+	}
+	qualified(commandName)
+	if fields := strings.Fields(prompt); len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
+		qualified(fields[0])
+	}
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(toolName), "mcp__plugin_"); ok {
+		server, _, _ := strings.Cut(rest, "__")
+		// A plugin name and a server name may both hold an underscore: the
+		// server kit_time of plugin r109 and the server time of plugin
+		// r109_kit are one tool name. Every registered plugin the name can
+		// start with is a candidate owner, as the gateway treats them, and
+		// the text of each is sent; the nearest alone would leave another,
+		// possibly the protected one, unjudged.
+		found := false
+		for _, plugin := range assetfacts.ClaudePluginNames(claudeDir) {
+			if strings.HasPrefix(server, plugin+"_") && len(server) > len(plugin)+1 {
+				add(plugin)
+				found = true
+			}
+		}
+		if !found {
+			// No registered plugin name starts the server name: the plugin is
+			// not known, so the whole server name stands for it and carries the
+			// failure state (a plugin the registry cannot be read for).
+			add(server)
+		}
+	}
+	return names
+}
+
+// hookAgentCommandLine reads the agent process arguments; tests replace it.
 var hookAgentCommandLine = agentprocess.CommandLine
+
+// hookAgentWorkingDirectory reads the folder the agent process runs in, or ""
+// when it cannot be read; tests replace it. The read walks the process table,
+// so it is made once for a parent process: a request asks for it from every
+// skill root list it builds, and the answer cannot change while the agent that
+// started this hook is the same process.
+var hookAgentWorkingDirectory = cachedPerParent(agentprocess.WorkingDirectory)
+
+// cachedPerParent returns read, called again only when the parent process of
+// this one is another process than at the last call.
+func cachedPerParent(read func() string) func() string {
+	var (
+		mu     sync.Mutex
+		parent int
+		value  string
+		have   bool
+	)
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if now := os.Getppid(); !have || now != parent {
+			parent, value, have = now, read(), true
+		}
+		return value
+	}
+}
 
 const unprovenMCPSource = "unproven"
 
@@ -127,17 +377,19 @@ func hookCommandLineMCPServer(connector, cwd, server string) (config.MCPServerEn
 	}
 }
 
-// hookInvokedSkillName is the skill a Claude Code Skill call or /name
-// prompt, or a Codex "$name" prompt, selects, when it is a plain folder name.
+// hookInvokedSkillName is the skill a tool call, a Claude Code or Copilot
+// /name prompt, or a Codex "$name" prompt selects, when it is a plain folder
+// name. A tool call selects a skill under every spelling the gateway's probe
+// recognizes (assetfacts.SkillNameFromInput), whatever the tool is called.
 func hookInvokedSkillName(connector, toolName string, toolInput map[string]any, prompt string) string {
-	name := ""
+	name := assetfacts.SkillNameFromInput(toolInput)
 	fields := strings.Fields(prompt)
 	switch {
+	case name != "":
 	case strings.EqualFold(strings.TrimSpace(toolName), "Skill"):
-		name, _ = toolInput["skill"].(string)
 	case len(fields) > 0 && strings.HasPrefix(fields[0], "$"):
 		name = strings.TrimPrefix(fields[0], "$")
-	case len(fields) > 0 && connector == "claudecode" && strings.HasPrefix(fields[0], "/"):
+	case len(fields) > 0 && (connector == "claudecode" || connector == "copilot") && strings.HasPrefix(fields[0], "/"):
 		name = strings.TrimPrefix(fields[0], "/")
 	}
 	name = strings.TrimSpace(name)

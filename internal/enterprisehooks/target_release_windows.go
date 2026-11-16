@@ -19,15 +19,31 @@ import (
 // target still has an active machine hook and that its selected runtime is
 // closed. A protected lock by itself cannot establish either fact.
 func WindowsProtectedTargetHasClosedMachineRegistration(opts InstallOptions) (bool, error) {
+	return windowsProtectedTargetMachineRegistration(opts, true)
+}
+
+// WindowsProtectedTargetHasMachineRegistration is
+// WindowsProtectedTargetHasClosedMachineRegistration for a deployment whose
+// administrator chose hook fail mode open for the connector (the choice is
+// honoured): the machine hook still registers the target's SID and the
+// selected runtime, if any, is the account's own valid one, but neither the
+// configuration nor the runtime has to be closed. It proves the registration,
+// never that the hook fails closed (GAP-0980).
+func WindowsProtectedTargetHasMachineRegistration(opts InstallOptions) (bool, error) {
+	return windowsProtectedTargetMachineRegistration(opts, false)
+}
+
+func windowsProtectedTargetMachineRegistration(opts InstallOptions, requireClosed bool) (bool, error) {
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
 	if name != "claudecode" && name != "codex" {
 		return false, nil
 	}
-	if canonicalHookFailModeFor(opts.HookFailMode, false) != "closed" {
+	if requireClosed && canonicalHookFailModeFor(opts.HookFailMode, false) != "closed" {
 		return false, nil
 	}
 	lock, err := windowsProtectedTargetLock(opts)
-	if err != nil || lock.Connector != name || canonicalHookFailModeFor(lock.HookFailMode, false) != "closed" {
+	if err != nil || lock.Connector != name ||
+		(requireClosed && canonicalHookFailModeFor(lock.HookFailMode, false) != "closed") {
 		return false, err
 	}
 	home, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
@@ -79,7 +95,7 @@ func WindowsProtectedTargetHasClosedMachineRegistration(opts InstallOptions) (bo
 	if err != nil || !stillExists || !bytes.Equal(first, second) {
 		return false, err
 	}
-	return bundle.FailMode == "closed", nil
+	return !requireClosed || bundle.FailMode == "closed", nil
 }
 
 // WindowsProtectedTargetFromOtherRelease reads, without writing, the

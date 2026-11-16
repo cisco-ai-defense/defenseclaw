@@ -604,17 +604,39 @@ func kiroHookInvocationCommandFor(goos, unixCommand, surface string, managed boo
 // -EncodedCommand's value. /d skips cmd.exe AutoRun commands; the command has
 // no quotes, percent signs or cmd.exe operators.
 func windowsKiroHookCommandForBinary(hookBinary, surface string, managed bool) string {
-	return windowsSystemCmdExe() + " /d /c " + windowsKiroPowerShellBridgeForBinary(hookBinary, surface, managed) + "\nexit $LASTEXITCODE"
+	return windowsKiroHookCommandForBridge(windowsKiroPowerShellBridgeForBinary(hookBinary, surface, managed))
+}
+
+// preStartAnswerWindowsKiroHookCommand is the per-user Kiro command releases
+// before 1.0.9 wrote: the bridge without the launcher-start answer. It stays
+// owned, so setup rewrites it and teardown removes it.
+func preStartAnswerWindowsKiroHookCommand(hookBinary, surface string) string {
+	return windowsKiroHookCommandForBridge(windowsKiroPowerShellBridge(hookBinary, surface, false, nil))
+}
+
+func windowsKiroHookCommandForBridge(bridge string) string {
+	return windowsSystemCmdExe() + " /d /c " + bridge + "\nexit $LASTEXITCODE"
 }
 
 // windowsKiroPowerShellBridgeForBinary renders the encoded system PowerShell
 // bridge the Kiro command runs: the shared awaited-hook bridge
 // (windowsAwaitedHookStatements), which starts the launcher with Process.Start
 // and returns a fast-exiting launcher's block, with a Constrained Language
-// mode fallback. Managed Windows writes the same bridge under the target user
-// token with managed set; there hookBinary is the standalone
+// mode fallback. Per-user, the bridge exits 2 with the guard sentence when
+// the launcher cannot start (kiroLauncherStartAnswer, rel-1-0-6 GAP-0676);
+// before, the start error ended the script with 1, which Kiro proceeds past.
+// Managed Windows writes the bridge without that answer under the target
+// user token with managed set; there hookBinary is the standalone
 // defenseclaw-hook.exe and the arguments add --enterprise-managed.
 func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string, managed bool) string {
+	var answer *launcherStartAnswer
+	if !managed {
+		answer = kiroLauncherStartAnswer()
+	}
+	return windowsKiroPowerShellBridge(hookBinary, surface, managed, answer)
+}
+
+func windowsKiroPowerShellBridge(hookBinary, surface string, managed bool, answer *launcherStartAnswer) string {
 	var extra []string
 	if managed {
 		extra = append(extra, "--enterprise-managed")
@@ -622,7 +644,7 @@ func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string, managed bo
 	if surface != "" {
 		extra = append(extra, "--hook-surface", surface)
 	}
-	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, extra...)
+	return windowsAnsweringPowerShellHookCommand("kiro", "", "", hookBinary, answer, extra...)
 }
 
 // kiroWindowsOwnedHookCommands are the Windows Kiro commands DefenseClaw
@@ -634,15 +656,23 @@ func kiroWindowsOwnedHookCommands() []string {
 	var commands []string
 	for _, binary := range nativeHookBinaryOwnershipCandidates() {
 		for _, managed := range []bool{false, true} {
-			for _, command := range []string{
+			forms := []string{
 				windowsKiroHookCommandForBinary(binary, "", managed),
 				windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3, managed),
-			} {
-				commands = append(commands, command)
+			}
+			if !managed {
+				forms = append(forms,
+					preStartAnswerWindowsKiroHookCommand(binary, ""),
+					preStartAnswerWindowsKiroHookCommand(binary, KiroHookSurfaceV3))
+			}
+			for _, command := range forms {
+				// So does the pre-1.0.9 render of a profile path with a
+				// typographic quote (g072 review 4 M1).
+				commands = appendWithPreTypographicQuoteForm(commands, command)
 				// The 1.0.x render of the bridge stays owned, so setup
 				// rewrites it and teardown removes it.
 				if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
-					commands = append(commands, legacy)
+					commands = appendWithPreTypographicQuoteForm(commands, legacy)
 				}
 			}
 		}
@@ -907,6 +937,24 @@ func migrateKiroGlobalHooksBackup(opts SetupOpts) error {
 func (c *KiroConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	command := c.hookCommand(opts)
 	v3Command := c.hookCommandForV3Surface(opts)
+	present, err := c.ownedHookContractPresentFor(opts, command, v3Command)
+	if err != nil || present || !opts.AcceptPriorReleaseRender {
+		return present, err
+	}
+	// A verification that accepts the render of releases up to 1.0.6 takes
+	// both configs when each holds exactly the bridge those releases wrote
+	// (legacyWindowsAwaitedHookCommand), and nothing else (GAP-0980).
+	legacy, ok := legacyWindowsAwaitedHookCommand(command)
+	legacyV3, okV3 := legacyWindowsAwaitedHookCommand(v3Command)
+	if !ok || !okV3 {
+		return false, nil
+	}
+	return c.ownedHookContractPresentFor(opts, legacy, legacyV3)
+}
+
+// ownedHookContractPresentFor is ownedHookContractPresent for the given CLI 2.x
+// agent command and v3 hook command.
+func (c *KiroConnector) ownedHookContractPresentFor(opts SetupOpts, command, v3Command string) (bool, error) {
 	for _, path := range c.hookConfigPaths(opts) {
 		present, err := kiroV3HooksCurrent(path, v3Command)
 		if err != nil {

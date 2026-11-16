@@ -668,13 +668,19 @@ func RemoveLinkedAsset(sourceRoots []string, targetType, path string) (string, e
 	return target, nil
 }
 
+// ErrLinkedAssetContent marks a quarantine refusal because the asset, or a file
+// or folder inside it, is a link or reparse point. Quarantine copies and hashes
+// a tree without following links, so such an asset cannot be moved; the caller
+// reports it as rejected but left in place, not as a failed move (GAP-0826).
+var ErrLinkedAssetContent = errors.New("linked or reparse-point asset")
+
 func safeAssetInfo(path string) (fs.FileInfo, error) {
 	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, fmt.Errorf("enforce: inspect asset %s: %w", path, err)
 	}
 	if fileInfoIsLinkOrReparse(info) {
-		return nil, fmt.Errorf("enforce: refusing linked or reparse-point asset %s", path)
+		return nil, fmt.Errorf("enforce: refusing %w %s", ErrLinkedAssetContent, path)
 	}
 	if !info.IsDir() && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("enforce: refusing non-regular asset %s", path)

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,13 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	if set.roots[aliceSkills] != "claudecode" || set.roots[bobSkills] != "codex" {
 		t.Fatalf("root connectors = %v", set.roots)
 	}
+	for _, name := range []string{"claudecode", "amp"} {
+		if !slices.ContainsFunc(set.consumers, func(consumer watcher.RootConsumer) bool {
+			return consumer.Kind == "skill" && consumer.Path == aliceSkills && consumer.Connector == name
+		}) {
+			t.Errorf("shared enrolled skill root missing %s consumer: %+v", name, set.consumers)
+		}
+	}
 	// Each user's server is its own watcher target, even with the same name.
 	servers, _ := set.live.list()
 	if len(servers) != 4 || servers[0].Connector != "claudecode" || servers[0].Home != alice ||
@@ -166,6 +174,28 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 		if servers[i].RunAsSID != want {
 			t.Fatalf("server %q starts as %q; want %q", servers[i].Name, servers[i].RunAsSID, want)
 		}
+	}
+}
+
+func TestGAP0613SharedEnrolledProjectRootKeepsEveryConsumer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "project", ".claude", "skills")
+	projects := []projectSkillRoot{{Path: path, Connector: "claudecode"}, {Path: path, Connector: "amp"}}
+	set := enrolledWatchSet{roots: map[string]string{path: "claudecode"}}
+	set.addProjectRoots(projects)
+	if set.roots[path] != "claudecode" {
+		t.Fatalf("shared project event owner = %q", set.roots[path])
+	}
+	for _, name := range []string{"claudecode", "amp"} {
+		if !slices.ContainsFunc(set.consumers, func(consumer watcher.RootConsumer) bool {
+			return consumer.Kind == "skill" && consumer.Path == path && consumer.Connector == name
+		}) {
+			t.Errorf("shared project root missing %s consumer: %+v", name, set.consumers)
+		}
+	}
+	next := enrolledWatchSet{roots: map[string]string{path: "claudecode"}}
+	next.addProjectRoots(projects)
+	if next.dirsKey() != set.dirsKey() {
+		t.Fatal("unchanged project consumers restarted the enrolled watcher")
 	}
 }
 

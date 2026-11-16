@@ -93,6 +93,26 @@ func TestHookOutageFailModeDecision(t *testing.T) {
 	}
 }
 
+func TestOpenClawToolOutageStrictFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name, pack, saved, want string
+	}{
+		{"default", "default", "", "open"},
+		{"permissive", "permissive", "", "open"},
+		{"strict", "strict", "", "closed"},
+		{"strict with old saved open", "strict", "open", "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Guardrail.RulePack = tc.pack
+			cfg.Guardrail.HookFailMode = tc.saved
+			if got := cfg.EffectiveHookOutageFailModeForConnector("openclaw"); got != tc.want {
+				t.Fatalf("openclaw outage mode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // A custom pack's tier is its manifest posture, else its folder name, as the
 // gateway reads it (packPosture): a strict custom pack closes the outage.
 func TestHookPolicyTierOfACustomPack(t *testing.T) {
@@ -124,5 +144,14 @@ func TestHookPolicyTierOfACustomPack(t *testing.T) {
 		if got := cfg.EffectiveHookOutageFailModeForConnector("claudecode"); got != tc.outage {
 			t.Errorf("%s: outage mode = %q, want %q", tc.dir, got, tc.outage)
 		}
+	}
+	cfg := &Config{}
+	cfg.Guardrail.RulePack = "strict"
+	cfg.Guardrail.CustomPacks = map[string]CustomRulePack{"strict": {Path: plain}}
+	if got := cfg.HookPolicyTierForConnector("claudecode"); got != "default" {
+		t.Errorf("custom pack named strict in a plain folder: tier = %q, want default", got)
+	}
+	if got := cfg.EffectiveHookOutageFailModeForConnector("claudecode"); got != "open" {
+		t.Errorf("custom pack named strict in a plain folder: outage = %q, want open", got)
 	}
 }

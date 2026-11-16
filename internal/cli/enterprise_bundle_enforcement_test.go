@@ -101,9 +101,19 @@ func TestBundleEnforcementRestorePlan(t *testing.T) {
 		in        bundleEnforcement
 		installed []byte
 		readErr   error
+		handEdit  bool
 		want      bundleConfigRestore
 		wantErr   bool
 	}{
+		// A byte-exact restore by hand leaves the guardian record calling the
+		// bundle bytes a hand edit: the lifecycle records the bundle again.
+		{name: "bundle bytes recorded as a hand edit", in: confirmed, installed: bundleConfig, handEdit: true,
+			want: bundleConfigRestore{Write: true, Rerecord: true, ExpectSHA256: configwrite.SHA256Hex(bundleConfig)}},
+		{name: "edited and recorded as a hand edit", in: confirmed, installed: edited, handEdit: true,
+			want: bundleConfigRestore{Write: true, ExpectSHA256: configwrite.SHA256Hex(edited)}},
+		{name: "hand edit record, bundle store unreadable", in: bundleEnforcement{Current: current, CurrentErr: errors.New("file_hash_mismatch")},
+			installed: bundleConfig, handEdit: true},
+		{name: "hand edit record, no bundle confirmed", installed: bundleConfig, handEdit: true},
 		{name: "edited", in: confirmed, installed: edited, want: bundleConfigRestore{Write: true, ExpectSHA256: configwrite.SHA256Hex(edited)}},
 		{name: "deleted", in: confirmed, readErr: fmt.Errorf("open config.yaml: %w", fs.ErrNotExist), want: bundleConfigRestore{Write: true, Missing: true}},
 		{name: "untampered", in: confirmed, installed: bundleConfig},
@@ -113,7 +123,7 @@ func TestBundleEnforcementRestorePlan(t *testing.T) {
 		{name: "deleted, no bundle confirmed", readErr: fs.ErrNotExist},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.in.planRestore(tc.installed, tc.readErr)
+			got, err := tc.in.planRestore(tc.installed, tc.readErr, tc.handEdit)
 			if (err != nil) != tc.wantErr || got != tc.want {
 				t.Fatalf("planRestore = %+v, %v; want %+v (error %v)", got, err, tc.want, tc.wantErr)
 			}

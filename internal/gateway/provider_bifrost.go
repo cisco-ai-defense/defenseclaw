@@ -659,7 +659,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 	bCtx := newBifrostRequestContext(ctx, req)
 	resp, bErr := client.ChatCompletionRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bp.providerKey, bErr)
+		return nil, bifrostRequestError(bCtx, bp.providerKey, bErr)
 	}
 
 	return fromBifrostChatResponse(resp), nil
@@ -675,13 +675,13 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 	bCtx := newBifrostRequestContext(ctx, req)
 	stream, bErr := client.ChatCompletionStreamRequest(bCtx, bReq)
 	if bErr != nil {
-		return nil, bifrostErrorToGo(bp.providerKey, bErr)
+		return nil, bifrostRequestError(bCtx, bp.providerKey, bErr)
 	}
 
 	var usage *ChatUsage
 	for chunk := range stream {
 		if chunk.BifrostError != nil {
-			return usage, bifrostErrorToGo(bp.providerKey, chunk.BifrostError)
+			return usage, bifrostRequestError(bCtx, bp.providerKey, chunk.BifrostError)
 		}
 		if chunk.BifrostChatResponse == nil {
 			continue
@@ -691,6 +691,9 @@ func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRe
 			usage = fromBifrostUsage(chunk.BifrostChatResponse.Usage)
 		}
 		chunkCb(sc)
+	}
+	if err := ctx.Err(); err != nil {
+		return usage, err
 	}
 
 	return usage, nil
@@ -942,6 +945,20 @@ func fromBifrostUsage(u *schemas.BifrostLLMUsage) *ChatUsage {
 		CompletionTokens: int64(u.CompletionTokens),
 		TotalTokens:      int64(u.TotalTokens),
 	}
+}
+
+// bifrostRequestError keeps the request's cancellation cause when Bifrost
+// converts a stopped transport request into a provider error. The Bifrost
+// context observes the caller deadline before the caller's Err may be set.
+// A transport timeout can also arrive just before that context marks itself done.
+func bifrostRequestError(ctx context.Context, provider schemas.ModelProvider, bErr *schemas.BifrostError) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return bifrostErrorToGo(provider, bErr)
 }
 
 // bifrostErrorToGo turns a provider failure into an error that names the

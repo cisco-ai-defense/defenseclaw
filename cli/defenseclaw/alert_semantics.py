@@ -100,3 +100,40 @@ def copilot_hook_target_spellings(target: str, connector: str = "") -> tuple[str
         local = _COPILOT_CLI_TO_LOCAL_EVENT.get(canonical.strip())
         return (canonical, local) if local else (text,)
     return (text,)
+
+
+# Agent surfaces a hook call can report (the gateway's defenseclaw.agent.surface
+# attribute, and surface= on the call's audit row). Claude Cowork is a surface
+# of the Claude Code connector, so its rows carry connector claudecode.
+_SURFACE_LABELS = {"cowork": "Cowork (Claude Code)"}
+
+
+def surface_label(surface: str) -> str:
+    """How an alert names an agent surface ("Cowork (Claude Code)")."""
+
+    surface = (surface or "").strip().lower()
+    return _SURFACE_LABELS.get(surface, surface)
+
+
+def known_surface(surface: str) -> str:
+    """``surface`` when it is an agent surface alerts label (today only
+    ``cowork``), else "". Other writers put ``surface=`` in the details with
+    other meanings, such as the asset policy's ``surface=hook``, and those are
+    not agent surfaces (cowork audit M2)."""
+
+    surface = (surface or "").strip().lower()
+    return surface if surface in _SURFACE_LABELS else ""
+
+
+def cowork_hook_target(target: str, surface: str) -> str:
+    """``claudecode:PreToolUse`` reads ``cowork:PreToolUse`` for a Cowork call
+    (GAP-0047); any other surface keeps the target."""
+
+    if (surface or "").strip().lower() != "cowork":
+        return target
+    head, sep, rest = target.partition(":")
+    if sep and head.strip().lower() == "cowork":
+        return target
+    if sep and head.strip().lower() == "claudecode":
+        return f"cowork:{rest}"
+    return f"cowork {target}" if target else "cowork"

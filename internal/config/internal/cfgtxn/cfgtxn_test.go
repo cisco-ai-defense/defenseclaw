@@ -252,3 +252,34 @@ func TestMkdirDurableMakesTheFolderAndLeavesNothingElse(t *testing.T) {
 		t.Fatalf("beside the folder: %v (%v), want only file and pins", entries, err)
 	}
 }
+
+// Each generation names the config digest it replaced, so a counter that
+// starts over cannot make an unrelated record look like the predecessor. A
+// writer that finds no readable record has no predecessor to name.
+func TestRecordGenerationLinksTheConfigItReplaced(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	txn, err := Begin(context.Background(), path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer txn.Close()
+	first, err := txn.RecordGeneration("sha-a", Writer{Actor: "first"})
+	if err != nil || first.PreviousConfigSHA256 != "" || !first.GenerationReset {
+		t.Fatalf("first record: %+v err=%v", first, err)
+	}
+	second, err := txn.RecordGeneration("sha-b", Writer{Actor: "second"})
+	if err != nil || second.PreviousConfigSHA256 != "sha-a" || second.GenerationReset {
+		t.Fatalf("second record: %+v err=%v", second, err)
+	}
+	if err := os.WriteFile(GenerationPath(path), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := txn.RecordGeneration("sha-c", Writer{Actor: "third"})
+	if err != nil || third.PreviousConfigSHA256 != "" || !third.GenerationReset {
+		t.Fatalf("record after a damaged one: %+v err=%v", third, err)
+	}
+	read, err := ReadGenerationState(path)
+	if err != nil || read.PreviousConfigSHA256 != "" || read.ConfigSHA256 != "sha-c" {
+		t.Fatalf("read back: %+v err=%v", read, err)
+	}
+}

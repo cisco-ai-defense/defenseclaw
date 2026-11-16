@@ -27,3 +27,7 @@ func enterpriseManagedHookRuntimeConnection(string) (string, string, *string, bo
 // applyStandaloneManagedHookTransport: the standalone unix hook runtime does
 // not exist on this platform.
 func applyStandaloneManagedHookTransport(*hookexec.Options, string) {}
+
+// enterpriseManagedHookRuntimeEnrolledPending: only the Windows standalone
+// hook refuses an account as enrollment pending.
+func enterpriseManagedHookRuntimeEnrolledPending(string) bool { return false }

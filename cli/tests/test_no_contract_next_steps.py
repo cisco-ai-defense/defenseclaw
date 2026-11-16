@@ -73,6 +73,39 @@ def test_setup_names_the_gateway_cause_and_a_setup_command():
         assert "Then run: defenseclaw setup claude-code." in guidance
 
 
+def test_old_claude_code_refusal_names_the_whole_supported_range():
+    # GAP-0049: for Claude Code 2.1.121 the refusal named only
+    # claudecode-hooks-v1 ("requires >=2.1.154 and <2.1.219"), as if current
+    # releases were unsupported, though claudecode-hooks-v2 covers >=2.1.219.
+    from defenseclaw.commands.cmd_setup import _connector_contract_upgrade_guidance
+
+    text = _connector_contract_upgrade_guidance("claudecode", "Claude Code", "2.1.121")
+    assert "installed version 2.1.121 is older than the validated minimum" in text
+    assert "DefenseClaw supports Claude Code >=2.1.154;" in text
+    assert "claudecode-hooks-v1 covers >=2.1.154 and <2.1.219" in text
+    assert "requires >=2.1.154 and <2.1.219" not in text
+    assert text.endswith("Then run: defenseclaw setup claude-code.")
+
+
+def test_contract_range_messages_name_the_connector_span():
+    # GAP-0049 class: every range message names the connector's whole span,
+    # as setup and doctor render it, and the latest uncapped contract is never
+    # read as a capped one ("newer than" a range that has no upper bound).
+    from defenseclaw.commands.cmd_setup import _connector_contract_upgrade_guidance
+    from defenseclaw.doctor_health import _supported_ranges, supported_range_text
+
+    assert supported_range_text(_supported_ranges("hermes")) == ">=0.19.0 and <0.22.0"
+    old = _connector_contract_upgrade_guidance("hermes", "Hermes", "0.17.0")
+    assert "DefenseClaw supports Hermes >=0.19.0 and <0.22.0; hermes-hooks-v1 covers >=0.19.0 and <0.21.0." in old
+    new = _connector_contract_upgrade_guidance("hermes", "Hermes", "0.23.0")
+    assert "newer than DefenseClaw's validated range (>=0.19.0 and <0.22.0)" in new
+    for version in ("2.1.219", "2.1.300"):
+        text = _connector_contract_upgrade_guidance("claudecode", "Claude Code", version)
+        assert "newer than" not in text and "<2.1.219" not in text, text
+    codex = _connector_contract_upgrade_guidance("codex", "Codex", "0.100.0")
+    assert "DefenseClaw supports Codex >=0.124.0;" in codex
+
+
 def test_no_upgrade_guidance_says_rerun_setup():
     # Every branch of the guidance names a command, not "rerun setup".
     source = (REPO / "cli/defenseclaw/commands/cmd_setup.py").read_text(encoding="utf-8")

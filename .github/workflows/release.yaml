@@ -36,11 +36,13 @@ name: Release
 # The Claude Cowork VM sensor packages (defenseclaw-cowork-<arch>.tar.gz, job
 # cowork-vm) are signed only when the release environment holds the Cowork-only
 # OpenPGP key (COWORK_GPG_PRIVATE_KEY, optional COWORK_GPG_PASSPHRASE). Without
-# it the release ships them unsigned and its notes say so; operation cowork-sign
-# signs an already published release's packages later. With the key, the
-# release variable COWORK_GPG_FINGERPRINT must pin its primary fingerprint:
-# sign.sh refuses any other key, and cowork-sign refuses to replace signatures
-# a release already carries from a different key.
+# it the release ships them unsigned and only the run summary says so: the
+# public release notes never name the packages (owner decision, r109 cowork
+# audit P2-1). Operation cowork-sign signs an already published release's
+# packages later. With the key, the release variable COWORK_GPG_FINGERPRINT
+# must pin its primary fingerprint: sign.sh refuses any other key, and
+# cowork-sign refuses to replace signatures a release already carries from a
+# different key.
 on:
   workflow_dispatch:
     inputs:
@@ -294,7 +296,8 @@ jobs:
   # Claude Cowork VM sensor packages (packaging/cowork-vm), one per VM
   # architecture, from the gateway and sensor helper of this release's
   # enterprise Linux archives. Signed with the Cowork-only key when the release
-  # environment has it; otherwise they ship unsigned and the notes say so.
+  # environment has it; otherwise they ship unsigned and only the run summary
+  # says so (the release notes never name them).
   cowork-vm:
     name: Build the Cowork VM sensor packages
     if: inputs.operation == 'release'
@@ -445,7 +448,7 @@ jobs:
           set -euo pipefail
           args=(--version "$VERSION" --out-dir enterprise-windows)
           if [[ -n "${WINDOWS_AUTHENTICODE_PFX_BASE64:-}" ]]; then
-            sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+            bash scripts/runner-apt-install.sh osslsigncode osslsigncode
             AUTHENTICODE_PFX="$RUNNER_TEMP/codesign.pfx"; export AUTHENTICODE_PFX
             ( umask 077; printf '%s' "$WINDOWS_AUTHENTICODE_PFX_BASE64" | base64 --decode > "$AUTHENTICODE_PFX" )
             trap 'rm -f "$AUTHENTICODE_PFX"' EXIT
@@ -495,7 +498,7 @@ jobs:
       - name: Build and sign with a throwaway self-signed certificate
         run: |
           set -euo pipefail
-          sudo apt-get update -q && sudo apt-get install -y -q osslsigncode
+          bash scripts/runner-apt-install.sh osslsigncode osslsigncode
           packaging/windows/standalone/prove-signing-path.sh --version "$VERSION" --out-dir "$RUNNER_TEMP/signing-proof"
 
   # Standalone managed-enterprise pkg for MDMs. Developer ID signing and
@@ -875,10 +878,8 @@ jobs:
             notes=(--notes-file notes.md)
           fi
           if [[ "$COWORK_SIGNED" != true ]]; then
-            # cowork-sign replaces this paragraph, marker included, once it signs them.
-            printf '%s\n\n' "<!-- cowork-vm-unsigned -->**Claude Cowork VM sensor packages:** \`defenseclaw-cowork-amd64.tar.gz\` and \`defenseclaw-cowork-arm64.tar.gz\` are unsigned (no \`.sig\`). Claude Desktop installs only a package signed with the Cisco Cowork key, so do not deploy them until the \`.sig\` files are attached to this release." >> notes.md
-            echo "The Cowork VM packages ship unsigned; the release notes say so." >> "$GITHUB_STEP_SUMMARY"
-            notes=(--notes-file notes.md)
+            # The run summary only: the public release notes never name these packages.
+            echo "defenseclaw-cowork-amd64.tar.gz and defenseclaw-cowork-arm64.tar.gz ship unsigned (no .sig); the release notes do not mention them. Sign them with operation cowork-sign once the Cowork key is set." >> "$GITHUB_STEP_SUMMARY"
           fi
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "$VERSION" --generate-notes ${notes[@]+"${notes[@]}"} --draft release/*
@@ -943,7 +944,7 @@ jobs:
   # Sign a published release's Cowork VM packages with the Cowork-only key
   # (it arrives after the release). The packages are checked against the
   # release's cosign-signed checksums.txt first; the .sig files and the public
-  # key are attached, and the unsigned paragraph leaves the notes.
+  # key are attached.
   cowork-sign:
     name: Sign the Cowork VM packages of ${{ inputs.version }}
     if: inputs.operation == 'cowork-sign' && !inputs.dry_run
@@ -1004,13 +1005,4 @@ jobs:
             defenseclaw-cowork-amd64.tar.gz defenseclaw-cowork-arm64.tar.gz
           gh release upload "$VERSION" --repo "$GITHUB_REPOSITORY" --clobber \
             defenseclaw-cowork-amd64.tar.gz.sig defenseclaw-cowork-arm64.tar.gz.sig defenseclaw-cowork-signing-key.asc
-          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
-          python3 - notes.md << 'EOF'
-          import re, sys
-          path = sys.argv[1]
-          text = open(path, encoding="utf-8").read()
-          text = re.sub(r"<!-- cowork-vm-unsigned -->[^\n]*\n*", "", text)
-          open(path, "w", encoding="utf-8").write(text)
-          EOF
-          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
           echo "Signed and attached the Cowork VM package signatures to $VERSION" >> "$GITHUB_STEP_SUMMARY"

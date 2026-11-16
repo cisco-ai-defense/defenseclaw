@@ -202,7 +202,7 @@ func provedHighWriteFindings(
 		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
 			return instructionNotProved
 		}
-		if info, err := os.Stat(filepath.FromSlash(location)); err == nil && info.Mode().IsRegular() {
+		if info, err := hookpaths.Stat(filepath.FromSlash(location)); err == nil && info.Mode().IsRegular() {
 			return instructionExistenceProved
 		}
 		return instructionNotProved
@@ -228,6 +228,10 @@ func provedHighWriteFindings(
 	// under its own path, so every target, however it was found, is judged
 	// by the same instructionTarget once.
 	seenTargets := make(map[string]bool)
+	// selfOnly limits addTarget to the rule that protects DefenseClaw's own
+	// state: the judgement of a string under a key that names no place
+	// (actionfacts.UnknownKeyTwin.SelfProtectionOnly).
+	selfOnly := false
 	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
 		if seenTargets[resolved] {
 			return
@@ -237,6 +241,9 @@ func provedHighWriteFindings(
 		instruction := instructionProof != instructionNotProved
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
+				if selfOnly && rule.ID != stateWriteRuleID {
+					continue
+				}
 				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
 					continue
 				}
@@ -356,6 +363,41 @@ func provedHighWriteFindings(
 		}
 	}
 	judgePaths(facts)
+	// A native write call with a key outside its reviewed schema stays
+	// partial and names no path; each file it may write is judged as the
+	// reviewed call that writes it (actionfacts.UnknownKeyWriteTargetViews,
+	// the readings dispatchTrustedAction judges as twins).
+	// Those under a key that names no place come last and are judged for
+	// DefenseClaw's own state only; the hook client's listing of their
+	// targets, which resolves links for any rule, is not read for another
+	// (rel-1-0-6:GAP-0729).
+	views := actionfacts.UnknownKeyWriteTargetViews(request.Input, facts)
+	named := map[string]bool{}
+	notePaths := func(view actionfacts.Facts) {
+		for _, target := range view.Paths {
+			named[firstNonEmpty(target.Resolved, target.Normalized)] = true
+		}
+	}
+	notePaths(facts)
+	for _, view := range views {
+		if !view.SelfProtectionOnly {
+			notePaths(view.Facts)
+			judgePaths(view.Facts)
+		}
+	}
+	selfOnly = true
+	selfOnlyOperands := map[string]bool{}
+	for _, view := range views {
+		if view.SelfProtectionOnly {
+			judgePaths(view.Facts)
+			for _, target := range view.Facts.Paths {
+				if operand := firstNonEmpty(target.Resolved, target.Normalized); !named[operand] {
+					selfOnlyOperands[operand] = true
+				}
+			}
+		}
+	}
+	selfOnly = false
 	// `powershell -Command "Add-Content CLAUDE.md x"` from a POSIX shell
 	// (Git Bash, Claude Code's Bash tool on Windows): the outer shell call
 	// names no path, the PowerShell body does. Its writes are judged like
@@ -378,7 +420,8 @@ func provedHighWriteFindings(
 	// the gateway cannot read the user's filesystem itself.
 	for operand, resolved := range request.ResolvedWriteTargets {
 		if strings.HasPrefix(operand, "\x00") || resolved == "" ||
-			!filepath.IsAbs(operand) || !filepath.IsAbs(resolved) {
+			!filepath.IsAbs(operand) || !filepath.IsAbs(resolved) ||
+			selfOnlyOperands[operand] || selfOnlyOperands[filepath.ToSlash(operand)] {
 			continue
 		}
 		addClientTarget(resolved, "")
@@ -438,7 +481,32 @@ func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor action
 		return instruction && activeAgentInstructionBaseMatches(
 			path.Base(strings.ReplaceAll(resolved, `\`, "/")), flavor, name)
 	}
+	if rule.ID == stateWriteRuleID && flavor == actionfacts.PathFlavorPOSIX && caseSensitiveStateHost() {
+		return exactStateDirMatch(rule, resolved)
+	}
 	return rule.Pattern.MatchString(resolved)
+}
+
+// stateWriteRuleID is the catalog rule that protects DefenseClaw state.
+const stateWriteRuleID = "tamper.detector_state_write"
+
+// caseSensitiveStateHost reports a host whose file system tells .DefenseClaw
+// from .defenseclaw (Linux), the host the path rule must read exactly. macOS
+// and Windows fold the case (pathCaseFoldHost, windowsNameFold) and keep the
+// rule's case-insensitive reading.
+func caseSensitiveStateHost() bool {
+	return runtime.GOOS == "linux" && !pathCaseFoldHost
+}
+
+// exactStateDirMatch is the state rule's pattern with the state directory
+// read in its own spelling: a path under a case-different folder
+// (~/.DefenseClaw) is another directory on a case-sensitive file system, not
+// the state. The home and the names below the state directory keep the
+// pattern's reading, so a state path of another home stays protected
+// (GAP-0607).
+func exactStateDirMatch(rule PatternRule, resolved string) bool {
+	span := rule.Pattern.FindStringIndex(resolved)
+	return span != nil && strings.Contains(resolved[span[0]:span[1]], "/.defenseclaw/")
 }
 
 // instructionLocations are the places of one call that its agent loads

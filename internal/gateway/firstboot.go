@@ -113,15 +113,12 @@ func appendEnvLine(path, key, value string) error {
 	}
 
 	var lines []string
+	var existing []byte
 	if data, err := os.ReadFile(path); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				lines = append(lines, line)
-				continue
-			}
-			if strings.HasPrefix(trimmed, key+"=") {
-				continue // drop existing — we'll append the new value
+		existing = data
+		for _, line := range envvars.DotEnvLines(data) {
+			if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+				continue // drop existing; the new value is appended
 			}
 			lines = append(lines, line)
 		}
@@ -132,7 +129,11 @@ func appendEnvLine(path, key, value string) error {
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
 		lines = lines[:len(lines)-1]
 	}
-	lines = append(lines, fmt.Sprintf("%s=%s", key, value), "")
+	lines = append(lines, fmt.Sprintf("%s=%s", key, value))
+	out := envvars.SerializeDotEnv(existing, lines)
+	if err := checkDotEnvSize(path, len(out)); err != nil {
+		return fmt.Errorf("appendEnvLine: %w", err)
+	}
 
 	// Cold-start dependency: in managed_enterprise mode the write
 	// below goes through managed.WriteServiceRuntimeFile which requires
@@ -149,7 +150,7 @@ func appendEnvLine(path, key, value string) error {
 		managed.PinnedDeploymentMode(),
 		path,
 		"gateway dotenv",
-		[]byte(strings.Join(lines, "\n")),
+		out,
 	); err != nil {
 		return fmt.Errorf(
 			"appendEnvLine: %w (cold-start note: on managed_enterprise the "+

@@ -136,6 +136,24 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 		from, to uint
 	}
 	unsafeNames := map[string]bool{}
+	// events: every binding or possible rebinding of each name, in source
+	// order. A plain assignment of a fixed value carries its node and value;
+	// any other event (a loop, an operator that can assign, an unknown or
+	// appended value) has no assign and leaves the name unknown.
+	type event struct {
+		assign *syntax.Assign
+		value  string
+	}
+	events := map[string][]event{}
+	// copies: the bindings that take their value from another name (or from
+	// the default of one no binding sets), kept only when the binding they
+	// read ran, and the copy itself runs, whatever the command does after.
+	type copiedName struct {
+		name       string
+		assign     *syntax.Assign
+		readSource *syntax.Assign
+	}
+	var copies []copiedName
 	// bound: the distinct values the bindings of each name give.
 	bound := map[string]map[string]bool{}
 	bind := func(name, value string) {
@@ -147,6 +165,10 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 	loops := map[string][]loop{}
 	after := map[string]uint{}
 	afterDirectory := map[string]bool{}
+	// settled: the plain assignments of the statements that always run (see
+	// below), and whether one follows the leading directory change.
+	settled := map[*syntax.Assign]bool{}
+	settledDirectory := map[*syntax.Assign]bool{}
 	rejected := false
 	statements := file.Stmts
 	subshellScope := false
@@ -242,11 +264,46 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				break
 			}
 			value, fixed := "", false
-			if node.Value != nil {
+			if node.Value == nil {
+				// NAME= sets the null string.
+				fixed = !node.Naked
+			} else {
 				value, fixed = StaticWord(node.Value, home)
+				if !fixed {
+					// NAME=${OTHER:-word}, NAME=${OTHER-word}, NAME=$OTHER: the
+					// shell expands the word once, where the assignment sits,
+					// so the value is that of the last binding of OTHER
+					// before it (a later rebinding of OTHER does not change
+					// NAME), or the word when no binding of OTHER precedes
+					// it. ${OTHER:-word} also takes the word for a null
+					// value. The binding must be sure to have run (settled
+					// below).
+					if param := soleParameter(node.Value); param != nil {
+						if read, fallback, hasFallback, nullToo, ok := scalarRead(param, safe); ok {
+							prior := events[read]
+							switch {
+							case len(prior) == 0 && hasFallback:
+								value, fixed = fallback, true
+								copies = append(copies, copiedName{name, node, nil})
+							case len(prior) > 0 && prior[len(prior)-1].assign != nil:
+								last := prior[len(prior)-1]
+								value, fixed = last.value, true
+								if last.value == "" && hasFallback && nullToo {
+									value = fallback
+								}
+								copies = append(copies, copiedName{name, node, last.assign})
+							}
+						}
+					}
+				}
 			}
 			if node.Append || node.Naked || node.Array != nil || node.Index != nil || !fixed || !safe(value) {
 				unsafeNames[name] = true
+			}
+			if node.Append || !fixed {
+				events[name] = append(events[name], event{})
+			} else {
+				events[name] = append(events[name], event{node, value})
 			}
 			bind(name, value)
 		case *syntax.ForClause:
@@ -260,6 +317,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				rejected = true
 				break
 			}
+			events[name] = append(events[name], event{})
 			if !iter.InPos.IsValid() || len(iter.Items) == 0 {
 				unsafeNames[name] = true
 				break
@@ -282,8 +340,12 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				rejected = true
 				break
 			}
-			if node.Param != nil && node.Exp != nil {
+			// ${NAME:-word} and ${NAME-word} only read NAME; every other
+			// operator can assign it (${NAME:=word}) or fail on it.
+			if node.Param != nil && node.Exp != nil &&
+				node.Exp.Op != syntax.DefaultUnset && node.Exp.Op != syntax.DefaultUnsetOrNull {
 				unsafeNames[node.Param.Value] = true
+				events[node.Param.Value] = append(events[node.Param.Value], event{})
 			}
 		case *syntax.CallExpr:
 			if len(node.Args) == 0 {
@@ -339,12 +401,29 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			continue
 		}
 		for _, assign := range call.Assigns {
+			settled[assign] = true
+			settledDirectory[assign] = fromDirectory
 			if assign.Name != nil {
 				if _, seen := after[assign.Name.Value]; !seen {
 					after[assign.Name.Value] = stmt.End().Offset()
 					afterDirectory[assign.Name.Value] = fromDirectory
 				}
 			}
+		}
+	}
+	// A copy is the value it read only when the copy itself is a statement
+	// that always runs, and so is the binding it read (a binding in a
+	// condition, a loop or after a failing cd may not have run, and a copy in
+	// a loop can read a binding made later in the body). Otherwise the copy is
+	// unknown. The copies are in source order, so a copy of a copy is settled
+	// after its source.
+	invalid := map[*syntax.Assign]bool{}
+	for _, copied := range copies {
+		read := copied.readSource
+		if !settled[copied.assign] || read != nil &&
+			(!settled[read] || settledDirectory[read] || invalid[read]) {
+			invalid[copied.assign] = true
+			unsafeNames[copied.name] = true
 		}
 	}
 	uses := map[*syntax.Word]bool{}
@@ -439,6 +518,47 @@ func simpleScalarParameter(param *syntax.ParamExp) bool {
 		}
 	}
 	return true
+}
+
+// soleParameter is the parameter expansion that is the whole of word, bare or
+// in double quotes.
+func soleParameter(word *syntax.Word) *syntax.ParamExp {
+	if word == nil || len(word.Parts) != 1 {
+		return nil
+	}
+	part := word.Parts[0]
+	if double, ok := part.(*syntax.DblQuoted); ok && len(double.Parts) == 1 {
+		part = double.Parts[0]
+	}
+	param, _ := part.(*syntax.ParamExp)
+	return param
+}
+
+// scalarRead is the name read by $NAME, ${NAME}, ${NAME:-word} or ${NAME-word}
+// of a plain variable name. The word of the default is returned when it is one
+// plain literal that safe accepts; any other operator, or another word, is not
+// a plain read. nullToo is set for :-, which takes the word for a null value
+// as well as an unset one.
+func scalarRead(param *syntax.ParamExp, safe func(string) bool) (name, fallback string, hasFallback, nullToo, ok bool) {
+	if param == nil {
+		return "", "", false, false, false
+	}
+	plain := *param
+	plain.Exp = nil
+	if !simpleScalarParameter(&plain) {
+		return "", "", false, false, false
+	}
+	switch {
+	case param.Exp == nil:
+		return param.Param.Value, "", false, false, true
+	case param.Exp.Word != nil && (param.Exp.Op == syntax.DefaultUnset || param.Exp.Op == syntax.DefaultUnsetOrNull):
+		literal, isLiteral := plainLiteralWord(param.Exp.Word)
+		if !isLiteral || !safe(literal) {
+			return "", "", false, false, false
+		}
+		return param.Param.Value, literal, true, param.Exp.Op == syntax.DefaultUnsetOrNull, true
+	}
+	return "", "", false, false, false
 }
 
 // staticDirectoryCall reports a directory-changing call whose words are all

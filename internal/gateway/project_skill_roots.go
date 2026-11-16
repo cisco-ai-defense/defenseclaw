@@ -37,7 +37,8 @@ type projectSkillRoots struct {
 	changed chan struct{}
 	// unverified holds, by root key, the project skill folders a managed
 	// Windows gateway could not verify (GAP-1356): they are not watched,
-	// their skills are refused, and the watcher health names them.
+	// and the watcher health names them. Guardian admission failures and
+	// caller-inspected adverse roots refuse the selected skill.
 	unverified map[string]projectSkillRootRefusal
 	// grant asks the hook guardian to let the gateway read a project skill
 	// folder; nil where no guardian grants reads.
@@ -48,8 +49,9 @@ type projectSkillRoots struct {
 }
 
 type projectSkillRootRefusal struct {
-	path, reason string
-	at           time.Time
+	path, reason    string
+	at              time.Time
+	policyModeAware bool
 }
 
 // projectSkillRootRetry is how long a project skill folder that could not
@@ -80,8 +82,8 @@ func (p *projectSkillRoots) changes() chan struct{} {
 	return p.changed
 }
 
-// add registers root for connector and tells the watcher; false when root
-// is already registered or the watcher does not use project folders.
+// add registers root for connector and tells the watcher; false when the
+// connector already registered it or the watcher does not use project folders.
 // Every registered root must remain visible to the pending-admission check;
 // a registration cap would let later project skills run without admission.
 func (p *projectSkillRoots) add(connector, root string) bool {
@@ -95,7 +97,7 @@ func (p *projectSkillRoots) add(connector, root string) bool {
 	}
 	key := projectRootKey(root)
 	for _, r := range p.roots {
-		if projectRootKey(r.Path) == key {
+		if projectRootKey(r.Path) == key && r.Connector == connector {
 			return false
 		}
 	}
@@ -164,27 +166,100 @@ func (p *projectSkillRoots) readGranter() func(targetType, path string) error {
 
 // refuse records root as a project skill folder that could not be verified.
 func (p *projectSkillRoots) refuse(root, reason string, now time.Time) {
+	p.refuseWithPolicyMode(root, reason, now, false)
+}
+
+// refuseWithPolicyMode records a caller-inspected profile root. The boolean
+// distinguishes a caller finding from a guardian admission failure so a later
+// verified caller inspection cannot clear a guardian refusal.
+func (p *projectSkillRoots) refuseWithPolicyMode(root, reason string, now time.Time, policyModeAware bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.unverified == nil {
 		p.unverified = map[string]projectSkillRootRefusal{}
 	}
-	p.unverified[projectRootKey(root)] = projectSkillRootRefusal{path: filepath.Clean(root), reason: reason, at: now}
+	key := projectRootKey(root)
+	if previous, ok := p.unverified[key]; ok && !previous.policyModeAware && policyModeAware {
+		return
+	}
+	p.unverified[key] = projectSkillRootRefusal{
+		path: filepath.Clean(root), reason: reason, at: now, policyModeAware: policyModeAware,
+	}
+}
+
+// clearCallerRefusal retires a caller finding only after a fresh inspection
+// verifies that root is an ordinary folder. Guardian refusals require their
+// own admission retry.
+func (p *projectSkillRoots) clearCallerRefusal(root string) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := projectRootKey(root)
+	if prior, ok := p.unverified[key]; ok && prior.policyModeAware {
+		delete(p.unverified, key)
+		return true
+	}
+	return false
 }
 
 // refusal returns why root could not be verified, and whether that was less
 // than projectSkillRootRetry before now.
 func (p *projectSkillRoots) refusal(root string, now time.Time) (reason string, recent bool) {
+	reason, recent, _ = p.refusalWithPolicyMode(root, now)
+	return reason, recent
+}
+
+// refusalForPath checks an unverified root and its descendants. A selected
+// path may use another link, so compare resolved paths when they are readable.
+func (p *projectSkillRoots) refusalForPath(path string) (root, reason string) {
+	if p == nil || !filepath.IsAbs(path) {
+		return "", ""
+	}
+	p.mu.Lock()
+	refusals := make([]projectSkillRootRefusal, 0, len(p.unverified))
+	for _, refusal := range p.unverified {
+		refusals = append(refusals, refusal)
+	}
+	p.mu.Unlock()
+	if len(refusals) == 0 {
+		return "", ""
+	}
+	for _, refusal := range refusals {
+		if sameProjectRootOrDescendant(refusal.path, path) {
+			return refusal.path, refusal.reason
+		}
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", ""
+	}
+	for _, refusal := range refusals {
+		resolvedRoot, err := filepath.EvalSymlinks(refusal.path)
+		if err == nil && sameProjectRootOrDescendant(resolvedRoot, resolvedPath) {
+			return refusal.path, refusal.reason
+		}
+	}
+	return "", ""
+}
+
+func sameProjectRootOrDescendant(root, path string) bool {
+	return insideHome(root, path) ||
+		(sameCleanPath(root, path) && insideHome(filepath.Dir(root), path))
+}
+
+func (p *projectSkillRoots) refusalWithPolicyMode(root string, now time.Time) (reason string, recent bool, policyModeAware bool) {
 	if p == nil {
-		return "", false
+		return "", false, false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	refusal, ok := p.unverified[projectRootKey(root)]
 	if !ok {
-		return "", false
+		return "", false, false
 	}
-	return refusal.reason, now.Sub(refusal.at) < projectSkillRootRetry
+	return refusal.reason, now.Sub(refusal.at) < projectSkillRootRetry, refusal.policyModeAware
 }
 
 // unverifiedFolders lists, sorted, the project skill folders that could

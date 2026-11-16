@@ -902,8 +902,20 @@ function Assert-NoActiveConnectorRecovery([string]$Operation, [string]$Root = $D
         throw "${Operation} refused: cannot inspect connector recovery in $Root ($($_.Exception.Message))"
     }
     if ($pending.Count) {
+        # Both paths are printed as PowerShell single-quoted literals so a valid
+        # folder name with a dollar sign or parenthesis is pasted as it is.
+        # Without a known install folder the command is the program name, which
+        # the shell finds on PATH; the refusal itself never depends on $BinDir.
+        $gatewayCommand = "defenseclaw-gateway"
+        $binFolder = Get-Variable -Name BinDir -ValueOnly -ErrorAction SilentlyContinue
+        if ($binFolder) {
+            $gatewayCommand = "& " + "'" + ((Join-Path $binFolder "defenseclaw-gateway.exe") -replace "'", "''") + "'"
+        }
+        $rootLiteral = "'" + ($Root -replace "'", "''") + "'"
         throw ("${Operation} refused: active connector recovery remains in $Root. " +
-            "Resolve it with the current DefenseClaw version before retrying; do not remove or replay its receipts.")
+            "Finish it with the current DefenseClaw version (the command names any agent config change it cannot finish), " +
+            "then retry. Do not remove or replay its receipts. Command: " +
+            "$gatewayCommand connector recover-config --data-dir $rootLiteral")
     }
 }
 
@@ -1869,6 +1881,42 @@ function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
     if (-not $PrevVersion) { Write-KeptUvCache }
     Die ("Not enough free disk space next to ${DataDir}: the install needs about {0:N0} MB ({1:N0} MB for a rollback copy of the data folder and {2:N0} MB for $ForWhat), and {3:N0} MB is free. Free up space, then run the installer again; nothing was changed" -f
         ([double]($data + $Extra + 100MB) / 1MB), ([double]$data / 1MB), ([double]$Extra / 1MB), ([double]$free / 1MB))
+}
+
+# uv builds win-unicode-console, the one locked dependency without a wheel,
+# from its source archive inside the uv cache folder. Python creates the files
+# of that build only below the 260-character Windows path limit (the ending NUL
+# counts) unless long paths are enabled, and the longest one is 151 characters
+# below the cache folder, separator included:
+#   sdists-v9\pypi\win-unicode-console\0.5\<16>\src\build\bdist.win-amd64\wheel\.\
+#   win_unicode_console-0.5-py3.12.egg-info\dependency_links.txt
+# A profile of about 98 characters stopped there with WinError 206 and no word
+# on the path (GAP-0865). The folder is not moved for the user: a cache outside
+# the profile would be shared ground that a build runs code from.
+$UvBuildPathReserve = 151
+$WindowsPathLimit = 259
+
+function Test-LongPathsEnabled {
+    try {
+        $key = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -ErrorAction Stop
+        return ([int]$key.LongPathsEnabled -eq 1)
+    } catch { return $false }
+}
+
+function Resolve-UvCacheDir([string]$CacheDir) {
+    # A relative UV_CACHE_DIR means the folder under PowerShell's location,
+    # which is where the native uv starts; [Environment]::CurrentDirectory (what
+    # GetFullPath uses) is the process folder and can differ after Set-Location.
+    # Measure and hand uv the one absolute folder (GAP-0865).
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CacheDir)
+}
+
+function Assert-UvBuildPathFits([string]$CacheDir) {
+    # Before anything is created, so a refusal changes nothing (GAP-0865).
+    $cache = [IO.Path]::GetFullPath($CacheDir).TrimEnd("\")
+    if ($cache.Length + $UvBuildPathReserve -le $WindowsPathLimit) { return }
+    if (Test-LongPathsEnabled) { return }
+    Die ("The uv cache folder $cache is {0} characters long. uv builds one package (win-unicode-console) from source in it and needs {1} more, which is past the Windows limit of 260 characters, so the install would stop with WinError 206 (the filename or extension is too long). Nothing was changed. Pick a short folder that only your account can write to, for example C:\dcuv, and run the installer again with it: `$env:UV_CACHE_DIR = 'C:\dcuv'. Windows long path support (LongPathsEnabled, set by an administrator) lifts the limit as well. Remove the folder yourself when you no longer need it" -f $cache.Length, $UvBuildPathReserve)
 }
 
 function Write-KeptUvCache {
@@ -3541,7 +3589,11 @@ function Save-HelperRecoveryCopy {
     try {
         New-Item -ItemType Directory -Path $InstallerDir -Force | Out-Null
         Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")
-        $lines = foreach ($name in @("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")) {
+        # The launcher's digest lets doctor and status tell the installed
+        # launcher from another program under its name (GAP-0810).
+        $recorded = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe") |
+            Where-Object { Test-Path -LiteralPath (Join-Path $BinDir $PSItem) -PathType Leaf }
+        $lines = foreach ($name in $recorded) {
             "$((Get-Sha256 (Join-Path $BinDir $name)).ToLowerInvariant())  $name"
         }
         $record = Join-Path $InstallerDir "binaries.sha256"
@@ -5057,20 +5109,33 @@ function Restore-HooksAfterAbortedRollback {
     }
 }
 
-function Invoke-PruneOrphanedHooks([string[]]$Gateways) {
+function Invoke-PruneOrphanedHooks([string[]]$Gateways, [string]$RollbackBackupsDir = "") {
     # GAP-0009: remove the DefenseClaw hook entries of every connector the
-    # live install does not configure, with the first gateway that has the
-    # command: a connector set up after an upgrade kept its entries after the
-    # rollback, and its agent ran a hook the restored install cannot serve.
-    # Only DefenseClaw-owned entries go. An older gateway prints its
-    # connector help for the unknown command, so the help is checked first.
+    # live install does not configure. Run every available reader: the older
+    # release can have the command without knowing connectors added later.
+    # A connector set up after an upgrade otherwise keeps its entries after
+    # rollback, and its agent can run a hook the restored install cannot serve.
+    # Only DefenseClaw-owned entries go. The newer reader restores an
+    # unchanged vendor file from its connector backup before either reader
+    # performs surgical cleanup. An older gateway prints its connector help
+    # for an unknown command or flag, so the help is checked first.
+    $readers = @()
     foreach ($gateway in $Gateways) {
         if (-not (Test-Path -LiteralPath $gateway)) { continue }
-        if ((Get-NativeOutput $gateway @("connector", "prune-orphans", "--help")) -notmatch "connector prune-orphans") { continue }
-        if ((Invoke-Native $gateway @("connector", "prune-orphans", "--data-dir", $DataDir)) -ne 0) {
-            Write-Warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see above); 'defenseclaw doctor' lists them"
+        $help = Get-NativeOutput $gateway @("connector", "prune-orphans", "--help")
+        if ($help -notmatch "connector prune-orphans") { continue }
+        $hasBackups = $RollbackBackupsDir -and $help -match '--rollback-backups-dir'
+        $readers += [pscustomobject]@{ Gateway = $gateway; HasBackups = [bool]$hasBackups }
+    }
+    foreach ($withBackups in @($true, $false)) {
+        foreach ($reader in $readers) {
+            if ($reader.HasBackups -ne $withBackups) { continue }
+            $pruneArgs = @("connector", "prune-orphans", "--data-dir", $DataDir)
+            if ($withBackups) { $pruneArgs += @("--rollback-backups-dir", $RollbackBackupsDir) }
+            if ((Invoke-Native $reader.Gateway $pruneArgs) -ne 0) {
+                Write-Warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see above); 'defenseclaw doctor' lists them"
+            }
         }
-        return
     }
 }
 
@@ -5309,7 +5374,7 @@ function Invoke-Rollback {
     # Homes upgraded before the uv folder was protected (GAP-1988).
     Protect-UvDirectory
     if (-not $toLegacy) {
-        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), (Join-Path $Previous "bin\defenseclaw-gateway.exe"))
+        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), (Join-Path $Previous "bin\defenseclaw-gateway.exe")) (Join-Path $Previous "data")
     }
     $quarantined = ""
     if ($auditDamaged) {
@@ -5622,6 +5687,8 @@ function Invoke-Install {
     # data dir, so `uninstall --all` leaves nothing of them in AppData.
     if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
     if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
+    $env:UV_CACHE_DIR = Resolve-UvCacheDir $env:UV_CACHE_DIR
+    Assert-UvBuildPathFits $env:UV_CACHE_DIR
     Protect-UvDirectory -Create
     # uv's defaults (60 s to compile one file, 30 s per download read) fail
     # on a Windows host busy with Defender and other accounts (GAP-1776).

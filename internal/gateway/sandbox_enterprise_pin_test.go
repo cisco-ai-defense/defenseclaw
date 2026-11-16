@@ -17,17 +17,15 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 )
 
-// The daemon of a host DefenseClaw 1.0.3 set up with the setup pin "0.1.3",
-// which runs no sandbox (openshell.SupportedMin), installs the release this
-// build installs, as ensure renders it; a prerequisite pin is the
-// administrator's install and is judged as it is.
-func TestSandboxEnterpriseMigratesTheOldSetupPin(t *testing.T) {
+// The daemon and managed ensure use the same effective version requirement.
+func TestGAP0608SandboxEnterpriseVersionFloor(t *testing.T) {
 	prev := sandboxRenderedGateway
 	sandboxRenderedGateway = func(string) (string, string) { return "", "" }
 	t.Cleanup(func() { sandboxRenderedGateway = prev })
@@ -35,12 +33,36 @@ func TestSandboxEnterpriseMigratesTheOldSetupPin(t *testing.T) {
 	for _, tc := range []struct{ install, pin, want string }{
 		{"setup", "0.1.3", openshell.InstallerVersion},
 		{"setup", openshell.InstallerVersion, openshell.InstallerVersion},
-		{"prerequisite", "0.1.3", "0.1.3"},
-		{"", ">=0.1.1 <0.2.0", ">=0.1.1 <0.2.0"},
+		{"prerequisite", "0.1.3", openshell.InstallerVersion},
+		{"prerequisite", "0.1.5", openshell.InstallerVersion},
+		{"prerequisite", "0.1.6", "0.1.6"},
+		{"prerequisite", "0.1.7", "0.1.7"},
+		{"", ">=0.1.1 <0.2.0", ">=0.1.6 <0.2.0"},
 	} {
 		cfg.Enterprise.OpenShell = config.EnterpriseOpenShellConfig{Install: tc.install, Driver: "docker", Version: tc.pin}
 		if got := sandboxEnterprise(cfg, config.OpenShellAdminConfig{}).Version; got != tc.want {
 			t.Errorf("install %q pin %q: daemon version %q, want %q", tc.install, tc.pin, got, tc.want)
 		}
+	}
+}
+
+func TestGAP0608ImpossibleRangeIsUnavailable(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Enterprise.OpenShell.Version = ">=0.1.1 <0.1.6"
+	if why := sandboxOpenShellPrerequisite(cfg, 0, "docker"); !strings.Contains(why, "no release at or above the OpenShell 0.1.6 floor") {
+		t.Errorf("unavailable reason = %q", why)
+	}
+}
+
+func TestGAP0608LegacyPrerequisiteRecordGuidance(t *testing.T) {
+	for _, pin := range []string{"0.1.3", "0.1.5", "0.01.5"} {
+		text := installedOpenShellPrerequisite("openshell: 0.1.6 is installed, enterprise.openshell.version pins " + pin)
+		if !strings.Contains(text, "OpenShell 0.1.6 floor") || !strings.Contains(text, "set the pin to 0.1.6 or later") || strings.Contains(text, "install the pinned release") {
+			t.Errorf("old pin %s: guidance = %q", pin, text)
+		}
+	}
+	text := installedOpenShellPrerequisite("openshell: 0.1.6 is installed, enterprise.openshell.version pins 0.1.7")
+	if !strings.Contains(text, "install the pinned release") {
+		t.Errorf("supported pin guidance = %q", text)
 	}
 }

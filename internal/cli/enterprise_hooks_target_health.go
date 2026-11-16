@@ -107,6 +107,25 @@ func enterpriseHookFailedTargetUnenrolls(protected, ledgerUnreadable bool) bool 
 	return !protected && !ledgerUnreadable
 }
 
+// enterpriseHookNoteExcusedUnenrolled records, for a row verify excuses, that
+// the Guardian left its target out of the enrollment set it published: the
+// reconcile loop leaves out a failed target that was never protected, and
+// this is the same rule (enterpriseHookFailedTargetUnenrolls) read from the
+// protection ledger verify loads. Verify then compares the published set with
+// enterpriseHookEnrollmentManifest(manifest, unenrolled), so one rule decides
+// both what is published and what is expected, and an account the lifecycle
+// left out cannot fail the machine (GAP-0790). A target the Guardian kept
+// enrolled is never noted, so its SID must still be there.
+func enterpriseHookNoteExcusedUnenrolled(
+	unenrolled map[string]struct{},
+	target enterprisehooks.ManifestTarget,
+	previouslyProtected bool,
+) {
+	if enterpriseHookFailedTargetUnenrolls(previouslyProtected, false) {
+		unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
+	}
+}
+
 // enterpriseHookEnrollmentManifest returns the manifest whose enabled rows
 // the Guardian publishes into machine policy this tick: every row except a
 // failed target that was never protected (including a signed-out user who
@@ -114,7 +133,6 @@ func enterpriseHookFailedTargetUnenrolls(protected, ledgerUnreadable bool) bool 
 // Disabled and removed rows are untouched, so revocation is unchanged.
 func enterpriseHookEnrollmentManifest(
 	manifest enterprisehooks.Manifest,
-	rows []enterpriseHookReconcileRow,
 	unenrolled map[string]struct{},
 ) enterprisehooks.Manifest {
 	drop := make(map[string]struct{}, len(unenrolled))

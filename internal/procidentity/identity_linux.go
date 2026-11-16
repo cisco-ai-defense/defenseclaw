@@ -16,6 +16,17 @@ func of(pid int) (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	ticks, ok := startTicks(pid)
+	id := strings.TrimSpace(string(boot))
+	if !ok || id == "" || strings.Trim(id, "0123456789abcdef-") != "" {
+		return "", false
+	}
+	return id + " " + ticks, true
+}
+
+// startTicks is field 22 of /proc/<pid>/stat, the clock ticks since boot at
+// which the process started, as a decimal number.
+func startTicks(pid int) (string, bool) {
 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
 		return "", false
@@ -32,9 +43,8 @@ func of(pid int) (string, bool) {
 		return "", false
 	}
 	ticks, err := strconv.ParseUint(fields[19], 10, 64)
-	id := strings.TrimSpace(string(boot))
-	if err != nil || id == "" || strings.Trim(id, "0123456789abcdef-") != "" {
+	if err != nil {
 		return "", false
 	}
-	return id + " " + strconv.FormatUint(ticks, 10), true
+	return strconv.FormatUint(ticks, 10), true
 }

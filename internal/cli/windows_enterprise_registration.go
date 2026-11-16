@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sys/windows/svc/eventlog"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -102,10 +103,34 @@ const (
 	windowsEnterpriseEventRefused     uint32 = 150
 )
 
+// windowsEnterpriseMachineRegistry is the registry root of every machine key
+// the standalone lifecycle reads and writes: the marker, the Add/Remove
+// Programs entry, the DisableSelfUpdate policy, the event log registration
+// and the bundle values on the marker. It is always HKLM; the package's
+// tests point it at a throwaway HKCU key, so no test reads or writes the
+// computer's own deployment (GAP-0079).
+var windowsEnterpriseMachineRegistry = registry.LOCAL_MACHINE
+
 var (
 	windowsEnterpriseIsElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
-	windowsEnterpriseNow        = time.Now
-	windowsEnterpriseLogLimit   = int64(windowsEnterpriseLogMaxBytes)
+	// windowsEnterpriseStagingElevated says whether the lifecycle stages its
+	// scripts and its PowerShell temp folder under the Administrators-only
+	// ProgramData root (an elevated token) or in the caller's own temp
+	// folder. The package's tests pin it to the caller's temp folder: the
+	// ProgramData staging writes the computer's own ProgramData, and only an
+	// administrator token can build it (GAP-0079).
+	windowsEnterpriseStagingElevated = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
+	// windowsEnterpriseProcessUserSID is the account of this process's
+	// token.
+	windowsEnterpriseProcessUserSID = func() (*windows.SID, error) {
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		if err != nil || user == nil {
+			return nil, err
+		}
+		return user.User.Sid, nil
+	}
+	windowsEnterpriseNow      = time.Now
+	windowsEnterpriseLogLimit = int64(windowsEnterpriseLogMaxBytes)
 )
 
 // observeWindowsEnterpriseStandaloneResult records a finished standalone
@@ -173,7 +198,7 @@ func refreshWindowsEnterpriseRegisteredVersion(result *enterprisestatus.Result) 
 		return nil
 	}
 	return refreshWindowsEnterpriseRegistrationVersion(
-		registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
+		windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey, version)
 }
 
 // windowsEnterpriseInstalledVersionToRecord is the installed version a run
@@ -272,7 +297,7 @@ func windowsEnterpriseMarkerTrustMode(opts *windowsEnterpriseLifecycleOptions) s
 }
 
 func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) error {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return err
 	}
@@ -287,7 +312,7 @@ func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *w
 	}
 	now := windowsEnterpriseNow().UTC()
 
-	marker, _, err := registry.CreateKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	marker, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return fmt.Errorf("create the enterprise marker key: %w", err)
 	}
@@ -314,7 +339,7 @@ func writeWindowsEnterpriseRegistration(result *enterprisestatus.Result, opts *w
 		return err
 	}
 
-	arp, _, err := registry.CreateKey(registry.LOCAL_MACHINE, windowsEnterpriseARPKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	arp, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, windowsEnterpriseARPKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return fmt.Errorf("create the Add/Remove Programs entry: %w", err)
 	}
@@ -361,7 +386,7 @@ func reconcileWindowsEnterpriseSelfUpdatePolicy(marker registry.Key, disable boo
 	if err != nil && !errors.Is(err, registry.ErrNotExist) {
 		return fmt.Errorf("read enterprise marker OwnsSelfUpdatePolicy: %w", err)
 	}
-	policy, _, err := registry.CreateKey(registry.LOCAL_MACHINE, windowsEnterprisePolicyKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	policy, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, windowsEnterprisePolicyKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return fmt.Errorf("open the DefenseClaw policy key: %w", err)
 	}
@@ -383,7 +408,7 @@ func reconcileWindowsEnterpriseSelfUpdatePolicy(marker registry.Key, disable boo
 }
 
 func releaseWindowsEnterpriseSelfUpdatePolicy() error {
-	marker, err := registry.OpenKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
+	marker, err := registry.OpenKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return nil
 	}
@@ -392,7 +417,7 @@ func releaseWindowsEnterpriseSelfUpdatePolicy() error {
 	if ownedErr != nil || owned != 1 {
 		return nil
 	}
-	policy, err := registry.OpenKey(registry.LOCAL_MACHINE, windowsEnterprisePolicyKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
+	policy, err := registry.OpenKey(windowsEnterpriseMachineRegistry, windowsEnterprisePolicyKey, registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return nil
 	}
@@ -417,7 +442,7 @@ func releaseWindowsEnterpriseSelfUpdatePolicy() error {
 // key, so a descriptor another account relaxed cannot survive a lifecycle
 // run.
 func ensureWindowsEnterpriseEventLog() error {
-	key, _, err := registry.CreateKey(registry.LOCAL_MACHINE, windowsEnterpriseEventLogParent+`\`+windowsEnterpriseEventLog, registry.ALL_ACCESS)
+	key, _, err := registry.CreateKey(windowsEnterpriseMachineRegistry, windowsEnterpriseEventLogParent+`\`+windowsEnterpriseEventLog, registry.ALL_ACCESS)
 	if err != nil {
 		return fmt.Errorf("register the %s event log: %w", windowsEnterpriseEventLog, err)
 	}
@@ -459,11 +484,11 @@ func removeWindowsEnterpriseEventLog() error {
 		return err == nil || errors.Is(err, registry.ErrNotExist) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND)
 	}
 	for _, name := range []string{windowsEnterpriseEventLogSource, windowsEnterpriseEventLog} {
-		if err := registry.DeleteKey(registry.LOCAL_MACHINE, path+`\`+name); !removed(err) {
+		if err := registry.DeleteKey(windowsEnterpriseMachineRegistry, path+`\`+name); !removed(err) {
 			return fmt.Errorf("unregister the %s event source: %w", name, err)
 		}
 	}
-	if err := registry.DeleteKey(registry.LOCAL_MACHINE, path); !removed(err) {
+	if err := registry.DeleteKey(windowsEnterpriseMachineRegistry, path); !removed(err) {
 		return fmt.Errorf("unregister the %s event log: %w", windowsEnterpriseEventLog, err)
 	}
 	return nil
@@ -478,7 +503,7 @@ func removeWindowsEnterpriseRegistration() error {
 		failures = append(failures, err)
 	}
 	for _, key := range []string{WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey} {
-		err := registry.DeleteKey(registry.LOCAL_MACHINE, key)
+		err := registry.DeleteKey(windowsEnterpriseMachineRegistry, key)
 		if err != nil && !errors.Is(err, registry.ErrNotExist) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 			failures = append(failures, fmt.Errorf("remove %s: %w", key, err))
 		}
@@ -495,7 +520,7 @@ func removeWindowsEnterpriseRegistration() error {
 // removeEmptyWindowsRegistryKey deletes an HKLM key that has no subkeys and
 // no values. A key that holds anything, or cannot be read, stays.
 func removeEmptyWindowsRegistryKey(path string) error {
-	key, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+	key, err := registry.OpenKey(windowsEnterpriseMachineRegistry, path, registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
 	if err != nil {
 		return nil
 	}
@@ -504,7 +529,7 @@ func removeEmptyWindowsRegistryKey(path string) error {
 	if statErr != nil || info.SubKeyCount != 0 || info.ValueCount != 0 {
 		return nil
 	}
-	if err := registry.DeleteKey(registry.LOCAL_MACHINE, path); err != nil &&
+	if err := registry.DeleteKey(windowsEnterpriseMachineRegistry, path); err != nil &&
 		!errors.Is(err, registry.ErrNotExist) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 		return fmt.Errorf("remove empty %s: %w", path, err)
 	}
@@ -512,27 +537,29 @@ func removeEmptyWindowsRegistryKey(path string) error {
 }
 
 // removeEmptyWindowsEnterpriseInstallParent removes the folder the install
-// root sits in (C:\Program Files\Cisco), which the install created, once
-// an uninstall left it empty. A folder that holds anything stays: Remove
-// fails on it.
-func removeEmptyWindowsEnterpriseInstallParent() {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+// root sits in (C:\Program Files\Cisco) once an uninstall or a rolled-back
+// first install left it empty, but only when the install recorded creating
+// it, and it takes the record with it (GAP-0091: a folder that existed
+// before the install stays, and a record goes with its folder). It used to
+// remove any empty Cisco folder there by name. A folder that holds anything,
+// or fails the purge's ownership checks, stays with its record.
+var removeEmptyWindowsEnterpriseInstallParent = func() {
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return
 	}
 	root := filepath.Clean(roots.InstallRoot)
-	parent := filepath.Dir(root)
-	if _, err := os.Lstat(root); !errors.Is(err, fs.ErrNotExist) || !strings.EqualFold(filepath.Base(parent), "Cisco") {
+	if _, err := os.Lstat(root); !errors.Is(err, fs.ErrNotExist) {
 		return
 	}
-	_ = os.Remove(parent)
+	_, _ = enterprisehooks.RemoveWindowsCreatedFolderIfEmpty(filepath.Dir(root))
 }
 
 // readWindowsEnterpriseSelfUpdateDisabled reads
 // enterprise.coexistence.disable_self_update from the installed config;
 // managed hosts disable self-update unless the administrator opts out.
 func readWindowsEnterpriseSelfUpdateDisabled() bool {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return true
 	}
@@ -709,7 +736,7 @@ func windowsEnterprisePurgeRemovedMachineDeployment(result *enterprisestatus.Res
 // windowsEnterpriseInstallRootGone reports that the standalone install root
 // does not exist. A seam for tests.
 var windowsEnterpriseInstallRootGone = func() bool {
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil || strings.TrimSpace(roots.InstallRoot) == "" {
 		return false
 	}
@@ -792,14 +819,18 @@ func windowsEnterpriseEventMessage(result *enterprisestatus.Result) string {
 }
 
 // windowsEnterpriseLogDirectory is %WINDIR%\Logs\DefenseClaw from the
-// trusted system directory, never the caller's WINDIR.
-func windowsEnterpriseLogDirectory() (string, error) {
+// trusted system directory, never the caller's WINDIR. A seam for tests.
+var windowsEnterpriseLogDirectory = func() (string, error) {
 	windowsDirectory, err := windows.GetSystemWindowsDirectory()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(windowsDirectory, "Logs", "DefenseClaw"), nil
 }
+
+// windowsEnterpriseLogDirectoryEnsurer creates and protects the lifecycle
+// log folder. A seam for tests.
+var windowsEnterpriseLogDirectoryEnsurer = ensureWindowsEnterpriseLogDirectory
 
 func ensureWindowsEnterpriseLogDirectory(directory string) error {
 	info, err := os.Lstat(directory)
@@ -867,7 +898,7 @@ func appendWindowsEnterpriseLifecycleLog(result *enterprisestatus.Result, event 
 	if err != nil {
 		return "", err
 	}
-	if err := ensureWindowsEnterpriseLogDirectory(directory); err != nil {
+	if err := windowsEnterpriseLogDirectoryEnsurer(directory); err != nil {
 		return "", err
 	}
 	return writeWindowsEnterpriseLifecycleLog(directory, result, event, diagnostics)
@@ -914,9 +945,15 @@ func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestat
 }
 
 func rotateWindowsEnterpriseLog(path string) {
+	shiftWindowsEnterpriseLogGenerations(path)
+	_ = os.Rename(path, path+".1")
+}
+
+// shiftWindowsEnterpriseLogGenerations drops the oldest generation of a log
+// and moves each of the others one up, leaving path.1 free.
+func shiftWindowsEnterpriseLogGenerations(path string) {
 	_ = os.Remove(fmt.Sprintf("%s.%d", path, windowsEnterpriseLogGenerates-1))
 	for generation := windowsEnterpriseLogGenerates - 2; generation >= 1; generation-- {
 		_ = os.Rename(fmt.Sprintf("%s.%d", path, generation), fmt.Sprintf("%s.%d", path, generation+1))
 	}
-	_ = os.Rename(path, path+".1")
 }

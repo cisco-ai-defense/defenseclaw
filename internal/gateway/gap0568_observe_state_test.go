@@ -168,7 +168,7 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"observe", "action"} {
-			api := instructionProtectionTestAPI(t, connector, mode, "HIGH")
+			api := instructionProtectionTestAPIWithPack(t, connector, mode, "HIGH", "strict")
 			for _, cell := range []struct{ client, managed bool }{{false, false}, {true, false}, {true, true}} {
 				for _, row := range rows {
 					if perUserOnly[row.name] && cell.managed {

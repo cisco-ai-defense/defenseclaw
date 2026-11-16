@@ -6,11 +6,14 @@ package hookpaths
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 )
 
 // InstructionFileNames are the agent instruction and identity files that the
@@ -72,6 +75,11 @@ type reachedInstructions struct {
 // gateway that cannot read the user's files learns the identity of a
 // directory the session created when the session reaches it through a link.
 func reachedEvidence(directories []string) string {
+	return (*scanReads)(nil).reachedEvidence(directories)
+}
+
+// reachedEvidence is reachedEvidence reading each path through r.
+func (r *scanReads) reachedEvidence(directories []string) string {
 	sighting := reachedInstructions{Directories: make(map[string]string)}
 	var read []string
 	add := func(directory string) {
@@ -82,7 +90,7 @@ func reachedEvidence(directories []string) string {
 		if _, seen := sighting.Directories[directory]; seen || len(read) == MaxReachedDirectories {
 			return
 		}
-		sighting.Directories[directory] = DirectoryIdentity(directory)
+		sighting.Directories[directory] = r.directoryIdentity(directory)
 		read = append(read, directory)
 		if info, err := pathLstat(directory); err == nil && info.IsDir() &&
 			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
@@ -100,7 +108,7 @@ func reachedEvidence(directories []string) string {
 			add(real)
 		}
 	}
-	sighting.Files = InstructionFilesIn(read)
+	sighting.Files = r.instructionFilesIn(read)
 	if len(read) == 0 || sighting.Files == nil {
 		return ""
 	}
@@ -212,14 +220,19 @@ func StartupDirectories(cwd, home string) []string {
 // files in directories. A missing file has no entry; nil means more files
 // than a snapshot holds.
 func InstructionFilesIn(directories []string) map[string]string {
+	return (*scanReads)(nil).instructionFilesIn(directories)
+}
+
+// instructionFilesIn is InstructionFilesIn reading each path through r.
+func (r *scanReads) instructionFilesIn(directories []string) map[string]string {
 	files := make(map[string]string)
 	for _, directory := range directories {
-		if !filepath.IsAbs(directory) {
+		if !filepath.IsAbs(directory) || r.absent(directory) {
 			continue
 		}
 		for _, name := range InstructionFileNames {
 			candidate := filepath.Join(directory, name)
-			if identity := FileIdentity(candidate); identity != "" {
+			if identity := r.fileIdentity(candidate); identity != "" {
 				files[candidate] = identity
 				if len(files) > maxStartupInstructionFiles {
 					return nil
@@ -354,6 +367,9 @@ type InstructionFiles struct {
 	loaded    []string
 	files     []instructionFile
 	built     bool
+	// reads is the memo the call's other instruction scans share; nil reads
+	// every path.
+	reads *scanReads
 }
 
 type instructionFile struct {
@@ -379,7 +395,7 @@ func (f *InstructionFiles) identify() {
 			return
 		}
 		seen[path] = true
-		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
+		if info, err := f.reads.stat(path); err == nil && info.Mode().IsRegular() {
 			f.files = append(f.files, instructionFile{path: path, info: info})
 		}
 	}
@@ -389,11 +405,18 @@ func (f *InstructionFiles) identify() {
 		}
 	}
 	for _, directory := range instructionDirectories(f.cwd, f.home) {
+		if f.reads.absent(directory) {
+			continue
+		}
 		for _, name := range InstructionFileNames {
 			add(filepath.Join(directory, name))
 		}
 	}
 }
+
+// instructionLinkReads counts the targets Identities reads the links of, so
+// a test can prove a long command pays that walk only when it can matter.
+var instructionLinkReads atomic.Int64
 
 // Identities reports the existing instruction files a write target names,
 // by file identity, whether through its own name or an alias: every one of
@@ -405,6 +428,17 @@ func (f *InstructionFiles) Identities(path string) []string {
 		return nil
 	}
 	path = filepath.Clean(path)
+	// A missing target has no identity, and a call with no instruction file
+	// has nothing to compare it with: neither reads the links of the path,
+	// which costs a read a folder (on Windows several) for every operand of
+	// a long command (GAP-1075).
+	if _, err := pathLstat(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if f.identify(); len(f.files) == 0 {
+		return nil
+	}
+	instructionLinkReads.Add(1)
 	real := path
 	if resolved, err := pathEvalSymlinks(path); err == nil {
 		real = resolved
@@ -413,7 +447,6 @@ func (f *InstructionFiles) Identities(path string) []string {
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
-	f.identify()
 	var files []string
 	for _, file := range f.files {
 		if os.SameFile(info, file.info) {

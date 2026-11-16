@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -54,10 +56,32 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
 		os.Exit(1)
 	}
+	// A test that moves the home but not the per-user roots (%APPDATA%)
+	// must not reach the real vendor config of the account (GAP-0887).
+	finishUserRoots, err := testenv.IsolateUserRoots()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
+		os.Exit(1)
+	}
+	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	restore := isolateTestHost()
+	// guardTestMachine first: guardTestProcessState marks the helper
+	// children it starts.
+	checkMachine := guardTestMachine()
+	checkProcess, checkSandbox := guardTestProcessState(), guardTestSandbox()
 	code := m.Run()
+	processErr, sandboxErr := checkProcess(), checkSandbox()
 	restore()
+	restoreChain()
 	cleanupHermes()
+	for _, err := range []error{processErr, sandboxErr, checkMachine(), finishUserRoots()} {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
 	os.Exit(code)
 }
 
@@ -320,6 +344,7 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	origJSON := connectorFlagJSON
 	origDir := connectorFlagDataDir
 	origConfigHome := connectorFlagConfigHome
+	origRollbackBackupsDir := connectorRollbackBackupsDir
 	origExit := connectorExit
 	origCheckPlatformSupport := connectorCheckPlatformSupportOnHost
 
@@ -334,6 +359,7 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	connectorFlagJSON = false
 	connectorFlagDataDir = dataDir
 	connectorFlagConfigHome = ""
+	connectorRollbackBackupsDir = ""
 
 	return func() {
 		cfg = origCfg
@@ -341,6 +367,7 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 		connectorFlagJSON = origJSON
 		connectorFlagDataDir = origDir
 		connectorFlagConfigHome = origConfigHome
+		connectorRollbackBackupsDir = origRollbackBackupsDir
 		connectorExit = origExit
 		connectorCheckPlatformSupportOnHost = origCheckPlatformSupport
 	}
@@ -363,7 +390,7 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 	sub := args[0]
 	tail := args[1:]
 
-	for _, candidate := range []string{"--connector", "--data-dir", "--config-home"} {
+	for _, candidate := range []string{"--connector", "--data-dir", "--config-home", "--rollback-backups-dir"} {
 		for i, a := range tail {
 			if a == candidate && i+1 < len(tail) {
 				switch candidate {
@@ -373,6 +400,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 					connectorFlagDataDir = tail[i+1]
 				case "--config-home":
 					connectorFlagConfigHome = tail[i+1]
+				case "--rollback-backups-dir":
+					connectorRollbackBackupsDir = tail[i+1]
 				}
 			}
 		}
@@ -399,6 +428,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorVerify(cmd, nil)
 	case "prune-orphans":
 		err = runConnectorPruneOrphans(cmd, nil)
+	case "recover-config":
+		err = runConnectorRecoverConfig(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
 	case "check-agent-settings":
@@ -1587,6 +1618,129 @@ func TestConnectorTeardownFailureRestoresActiveState(t *testing.T) {
 	}
 	if got := connector.LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"cursor"}) {
 		t.Fatalf("active state after failed teardown = %v, want [cursor]", got)
+	}
+}
+
+// lockedConnectorNames lists the connectors the hook contract lock in dir still names.
+func lockedConnectorNames(t *testing.T, dir string) []string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(dir, "hook_contract_lock.json"))
+	if err != nil {
+		t.Fatalf("read hook contract lock: %v", err)
+	}
+	var lock struct {
+		Connectors map[string]json.RawMessage `json:"connectors"`
+	}
+	if err := json.Unmarshal(body, &lock); err != nil {
+		t.Fatalf("parse hook contract lock: %v", err)
+	}
+	names := make([]string, 0, len(lock.Connectors))
+	for name := range lock.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func saveContractLockEntries(t *testing.T, dir string, opts connector.SetupOpts, conns ...connector.Connector) {
+	t.Helper()
+	for _, conn := range conns {
+		if err := connector.SaveHookContractLockEntry(dir, connector.NewHookContractLockEntry(opts, conn, "test-build")); err != nil {
+			t.Fatalf("save %s lock entry: %v", conn.Name(), err)
+		}
+	}
+}
+
+// A torn-down connector releases its contract-lock entry, as the gateway's own
+// teardown does; the entry used to stay and `config set data_dir` copied it to
+// a folder with no inactive mark for it (GAP-0941). The peer's entry stays.
+func TestConnectorTeardownReleasesTheConnectorsContractLockEntry(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "cursor")()
+
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	// The peer's entry is saved before Setup writes the hook runtime state its save would check.
+	saveContractLockEntries(t, dir, opts, connector.NewCodexConnector())
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("cursor setup: %v", err)
+	}
+	saveContractLockEntries(t, dir, opts, conn)
+	if got := lockedConnectorNames(t, dir); !reflect.DeepEqual(got, []string{"codex", "cursor"}) {
+		t.Fatalf("lock before teardown = %v", got)
+	}
+
+	if _, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "cursor"); exitCode != 0 {
+		t.Fatalf("teardown failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+	if got := lockedConnectorNames(t, dir); !reflect.DeepEqual(got, []string{"codex"}) {
+		t.Fatalf("lock after teardown = %v, want only the peer codex", got)
+	}
+}
+
+// A managed runtime keeps the protected contract lock: the teardown of a
+// connector does not release its entry there (Secure Client behaviour unchanged).
+func TestConnectorTeardownKeepsTheContractLockEntryOfAManagedRuntime(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "cursor")()
+	loaded, previousMode := cfg, cfg.DeploymentMode
+	loaded.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	t.Cleanup(func() { loaded.DeploymentMode = previousMode })
+
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIToken: "test-token", ManagedEnterprise: true}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := connector.SaveHookContractLockEntryForMode(dir, connector.NewHookContractLockEntry(opts, conn, "test-build"), true); err != nil {
+		t.Fatalf("save lock: %v", err)
+	}
+	if _, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "cursor"); exitCode != 0 {
+		t.Fatalf("teardown failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+	entry, err := connector.LoadHookContractLockEntryForMode(dir, "cursor", true)
+	if err != nil {
+		t.Fatalf("load managed lock: %v", err)
+	}
+	if entry.Connector == "" {
+		t.Fatal("a managed connector teardown released its protected contract lock entry")
+	}
+}
+
+// A teardown that fails keeps the entry: the connector is not removed.
+func TestConnectorTeardownFailureKeepsTheConnectorsContractLockEntry(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "cursor")()
+
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("cursor setup: %v", err)
+	}
+	opts.GuardrailMode, opts.HookFailMode = "action", "closed"
+	saveContractLockEntries(t, dir, opts, conn)
+	if err := os.WriteFile(filepath.Join(dir, "connector_backups", "cursor", "config.json"), []byte("not-json"), 0o600); err != nil {
+		t.Fatalf("corrupt managed backup: %v", err)
+	}
+
+	runConnectorCmd(t, "teardown", "--connector", "cursor")
+	if got := lockedConnectorNames(t, dir); !reflect.DeepEqual(got, []string{"cursor"}) {
+		t.Fatalf("lock after a failed teardown = %v, want [cursor]", got)
 	}
 }
 

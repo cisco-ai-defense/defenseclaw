@@ -17,6 +17,8 @@ import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from defenseclaw.winquote import powershell_literal_is_current, powershell_literal_value, split_windows_words
+
 CURSOR_HOOK_EVENTS = (
     "sessionStart",
     "sessionEnd",
@@ -58,7 +60,7 @@ def split_cursor_hook_command(command: str, *, platform_name: str | None = None)
     """Split only the narrow command shapes written to Cursor hooks.json."""
     is_windows = (platform_name or os.name) == "nt"
     try:
-        parts = shlex.split(command, posix=not is_windows)
+        parts = split_windows_words(command) if is_windows else shlex.split(command)
     except ValueError:
         return []
     if is_windows:
@@ -70,10 +72,23 @@ def split_cursor_hook_command(command: str, *, platform_name: str | None = None)
                 quote = part[0]
                 part = part[1:-1]
                 if quote == "'":
-                    part = part.replace("''", "'")
+                    part = powershell_literal_value(part)
             normalized.append(part)
         parts = normalized
     return parts
+
+
+def _call_operator_literals_current(command: str) -> bool:
+    """Whether each quoted part of a ``& '...'`` command is this release's PowerShell literal."""
+    try:
+        parts = split_windows_words(command)
+    except ValueError:
+        return True  # split_cursor_hook_command already refused it
+    if not parts or parts[0] != "&":
+        return True
+    return all(
+        powershell_literal_is_current(part[1:-1]) for part in parts[1:] if len(part) >= 2 and part[0] == part[-1] == "'"
+    )
 
 
 def _read_regular_json(path: str) -> object:
@@ -255,6 +270,17 @@ def validate_cursor_registration(
         return CursorRegistrationValidation(
             False,
             "Cursor on Windows must invoke the managed PowerShell input adapter",
+            command,
+        )
+    if is_windows and not _call_operator_literals_current(command):
+        # g072 review 3 M3: the render of a release before 1.0.9 doubled only
+        # the apostrophe. Go's Cursor setup and teardown own that form
+        # (cursorManagedHookCommands, cursorOwnedHookCommands; g072 review 4
+        # M1), so setup rewrites it and uninstall removes it.
+        return CursorRegistrationValidation(
+            False,
+            "configured Cursor hook was written before 1.0.9 and does not run: PowerShell ends its "
+            "quoted adapter path at the typographic quote in it",
             command,
         )
     if not is_windows and basename not in {"cursor-hook.sh", "defenseclaw-hook"}:

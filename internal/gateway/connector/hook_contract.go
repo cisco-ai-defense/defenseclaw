@@ -612,6 +612,7 @@ var builtinHookContracts = map[string][]HookContract{
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
 			"PostToolUse and PostToolBatch findings are advisory because their payloads are returned bytes, not typed action requests; command/path enforcement stays on PreToolUse.",
 			"ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
+			"Claude Desktop's bundled Claude Code engine is a hook host too: Claude Cowork runs the Claude Code hooks of managed settings and of account plugins as children of that engine. The DefenseClaw Cowork plugin registers ten of this contract's events (CoworkPluginHookEvents: SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop, Stop, SessionEnd), measured on Claude Desktop 4.4212.0 (engine 2.1.309) and 4.16336.0 (engine 2.1.317).",
 		},
 	}},
 	"hermes": {
@@ -886,7 +887,7 @@ var builtinHookContracts = map[string][]HookContract{
 			SupportsTraceparent: true,
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
-				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Windows Secure Client profile replaces a prompt the guardrail blocks.",
+				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Secure Client profile on Windows and macOS replaces a prompt the guardrail blocks.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
 				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",

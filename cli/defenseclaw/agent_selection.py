@@ -37,13 +37,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from defenseclaw import windows_acl
+from defenseclaw.cause_text import single_line
 from defenseclaw.connector_contracts import (
     STATUS_KNOWN,
     compare_agent_versions,
     normalize_agent_version,
     resolve_connector_contract,
 )
-from defenseclaw.file_permissions import atomic_write_private_bytes
+from defenseclaw.file_permissions import atomic_write_private_bytes, other_accounts_can_write
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
@@ -274,7 +275,7 @@ def probe_error_means_agent_did_not_run(error: str) -> bool:
 
 def agent_did_not_run_message(label: str, error: str) -> str:
     """One line naming the failed probe and the step that fixes it."""
-    detail = " ".join((error or "").split())
+    detail = single_line(error or "")
     if len(detail) > 300:
         detail = detail[:300] + "..."
     return (
@@ -293,15 +294,19 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
     else:
         rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
     untrusted_found = ""
+    untrusted_reason = NOT_IN_TRUSTED_PREFIX
     for candidate in _setup_agent_candidates(connector, spec, data_dir):
         protected_windows_opencode = connector == "opencode" and os.name == "nt"
         if protected_windows_opencode:
-            trusted = _is_windows_opencode_setup_binary(candidate)
+            trust_problem = "" if _is_windows_opencode_setup_binary(candidate) else NOT_IN_TRUSTED_PREFIX
+        elif is_setup_trusted_binary(candidate, data_dir):
+            trust_problem = ""
         else:
-            trusted = is_setup_trusted_binary(candidate, data_dir)
-        if not trusted:
-            if not trusted and not untrusted_found:
+            trust_problem = setup_binary_trust_problem(candidate, data_dir) or NOT_IN_TRUSTED_PREFIX
+        if trust_problem:
+            if not untrusted_found:
                 untrusted_found = os.path.realpath(os.path.abspath(candidate))
+                untrusted_reason = trust_problem
             continue
         executable = os.path.realpath(os.path.abspath(candidate))
         digest = ""
@@ -382,6 +387,14 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             f"{untrusted_found} is a script wrapper, not a native .exe that setup can verify; "
             f"{native} and re-run setup"
         )
+    elif (
+        untrusted_found
+        and rejection.startswith("no installed executable")
+        and untrusted_reason != NOT_IN_TRUSTED_PREFIX
+    ):
+        # The file is a candidate, but another check refused it. Naming that
+        # check is the only useful remedy: trusted-paths add cannot change it.
+        rejection = f"setup cannot trust {untrusted_found}: {untrusted_reason}; fix that and re-run setup"
     elif untrusted_found and rejection.startswith("no installed executable"):
         # Name what was found and the one command that admits it; a bare
         # "no installed executable" reads as if the agent were missing.
@@ -541,20 +554,32 @@ def _select_claude_desktop_engine(data_dir: str, spec) -> tuple[SetupAgentSelect
 
 
 
-def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "") -> bool:
-    """Admit only built-in or protected-config prefixes, never env extras."""
+#: The reason :func:`setup_binary_trust_problem` gives for a file that sits outside every admitted prefix.
+NOT_IN_TRUSTED_PREFIX = "it is not in a built-in or operator-approved trusted prefix"
+
+
+def setup_binary_trust_problem(candidate: str, data_dir: str, *, connector: str = "") -> str:
+    """Why setup refuses to trust *candidate*, or ``""`` when it admits it.
+
+    Admits only built-in or protected-config prefixes, never env extras. This
+    is the one admission predicate for selection and doctor, and a refusal
+    carries the check that failed (the prefix, the link, or the folder whose
+    permissions are unsafe) so the person is not told to trust a folder that is
+    already trusted (GAP-0866). ``trusted-paths`` takes "built-in" from the
+    same prefix list.
+    """
 
     try:
         resolved = os.path.realpath(os.path.abspath(candidate))
     except (OSError, ValueError):
-        return False
+        return "its path cannot be resolved"
     if is_link_or_reparse(candidate) or is_link_or_reparse(resolved):
-        return False
+        return "it is a link or a reparse point"
     _require, configured = agent_discovery._ai_discovery_trust_config(data_dir)
     allowed_roots = agent_discovery._expand_bin_prefixes((*_builtin_setup_trusted_prefixes(), *configured))
     matching_roots = tuple(root for root in allowed_roots if agent_discovery._path_is_within(resolved, root))
     if not matching_roots:
-        return False
+        return NOT_IN_TRUSTED_PREFIX
     if os.name == "nt":
         # Doctor starts this exact path to inspect Codex's merged policy. A
         # CMD/BAT wrapper is not executable authority: Windows dispatches it
@@ -562,24 +587,35 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
         # payload is not covered by the wrapper digest. Bind only the native
         # image that CreateProcess launches directly.
         if os.path.splitext(resolved)[1].casefold() != ".exe":
-            return False
-        return any(agent_discovery._windows_acl_chain_is_safe(resolved, root) for root in matching_roots)
+            return "it is a script wrapper, not a native .exe"
+        if any(agent_discovery._windows_acl_chain_is_safe(resolved, root) for root in matching_roots):
+            return ""
+        return agent_discovery._windows_acl_chain_error(resolved, matching_roots[0]) or NOT_IN_TRUSTED_PREFIX
     if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
-        return False
+        return "it is not an executable file"
     try:
         binary_info = os.stat(resolved)
         parent_info = os.stat(os.path.dirname(resolved))
-    except OSError:
-        return False
-    if binary_info.st_mode & 0o022:
-        return False
-    if agent_discovery._trusted_prefix_dir_mode_error(parent_info) is not None:
-        return False
+    except OSError as exc:
+        return f"its permissions cannot be read ({exc})"
+    # The binary file as well: npm and pip make it 0775 under umask 002, and
+    # group write by the owner's own private group is the owner's (GAP-0053).
+    if other_accounts_can_write(resolved, binary_info):
+        return f"{resolved}: another account can write to the file"
+    folder_problem = agent_discovery._trusted_prefix_dir_mode_error(os.path.dirname(resolved), parent_info)
+    if folder_problem is not None:
+        return f"{os.path.dirname(resolved)}: {folder_problem}"
     # Setup's built-in roots are explicit executable authority, but they still
     # receive the same per-file and parent permission checks as passive
     # discovery. Do not re-resolve them through the passive discovery registry:
     # that would discard a setup-only root after it was already validated.
-    return True
+    return ""
+
+
+def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "") -> bool:
+    """True when :func:`setup_binary_trust_problem` finds nothing wrong."""
+
+    return not setup_binary_trust_problem(candidate, data_dir, connector=connector)
 
 
 
@@ -598,7 +634,7 @@ def _posix_setup_chain_is_safe(executable: str, root: str) -> bool:
         reached_boundary = False
         while True:
             info = os.lstat(current)
-            writable = bool(info.st_mode & 0o022)
+            writable = other_accounts_can_write(current, info)
             trusted_sticky_ancestor = (
                 not leaf
                 and stat.S_ISDIR(info.st_mode)

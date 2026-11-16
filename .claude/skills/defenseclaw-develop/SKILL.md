@@ -37,7 +37,7 @@ docs: docs-site/content/docs (operator), docs/ (contributor)
 Each principle maps to requirement IDs in `reference/checklist.md`.
 
 1. **Config is the single source of truth.** `config.yaml` decides policy. Hook scripts, provider files and machine policy are derived from it. No hidden env var, side file or second writer. (CFG, DEP)
-2. **Fail closed, never silently lenient.** A failed lookup, bad pack, missing scan result or unreachable gateway resolves to the stricter outcome, with a reason code. Removed keys say what replaced them. (POL, ID, CFG)
+2. **Never silently lenient; outages follow the fail-mode table.** A failed lookup, bad pack or missing scan result resolves to the stricter outcome, with a reason code. A gateway outage follows `docs-site/content/docs/reference/fail-modes.mdx`: per-user default and permissive open, with a warning and an audit record; per-user strict closed; managed standalone closed unless an administrator sets `open`; Secure Client open unless set `closed`; a saved mode wins. Defaults stay balanced: lockdown lives in strict or action mode. (POL, ID, CFG, DEP)
 3. **Managed hosts never allow what policy denies.** Mode comes from the pinned service environment, not a user-writable file. Environment overrides on managed hosts only tighten. Local writers are refused. (DEP, SEC)
 4. **Identity-scoped policy with per-user privacy.** Only kernel- or credential-verified identity selects a profile. A user sees only their own effective policy; everything else is admin-only, enforced server side. (ID)
 5. **Everything is switchable and costs nothing when off.** Every feature has an off switch, starts no goroutine, watcher, timer or listener while off, and is covered by a test that proves it. (PERF, DEP)
@@ -45,7 +45,7 @@ Each principle maps to requirement IDs in `reference/checklist.md`.
 7. **Bundle-at-once, atomic apply with rollback.** Config, policy, rule packs and assets are one unit: pinned by digest, applied together, rolled back together. A feature that needs a second manual step breaks managed deployments. (DEP, CFG, POL)
 8. **Disclose every external requirement.** Docker, a VM, a local model, a GPU, an extra, a system package, an OS floor or new network egress is optional where possible, detected with an actionable message, documented, tested when missing, and never installed silently. Each one is tiered Required, Recommended or Optional. (REQ, SBX)
 9. **Observability and audit for every state change.** Typed audit actions, registered error codes, generated telemetry, redaction at the projection boundary. (OBS)
-10. **One upgrade path, no dead code.** The 0.8.x to 1.x upgrade keeps working. Each change removes the dead or legacy code it touches, and keeps a shim only for a named supported upgrade. (PKG, PR)
+10. **One upgrade path, no dead code.** Upgrades are supported from 1.0.0 on. The 0.8.x bridge is legacy: do not extend it, and remove what you touch. Each change removes the dead or legacy code it touches and says why. A shim stays only for a named supported upgrade, with an end version. (PKG, PR)
 
 ## Before you code
 
@@ -65,6 +65,8 @@ Each principle maps to requirement IDs in `reference/checklist.md`.
 | Rego, admission, rule packs, detections | POL, TST, PERF | `docs/GUARDRAIL_RULE_PACKS.md` |
 | Profiles, assignments, directory facts, agent identity | ID, POL, SEC | `docs-site/content/docs/guardrail/user-and-group-policies.mdx` |
 | Enterprise, MDM, guardian, lifecycle, machine policy | DEP, PKG, SEC, TST | `docs-site/content/docs/enterprise/machine-policy.mdx`, `.github/managed-paths.txt` |
+| Behavior for one mode (OSS, standalone, Secure Client) in shared code | DEP, TST | M-DEP-18 in `reference/checklist.md`, `reference/deployment-modes.md` |
+| A shared default (config default, hook answer, fail mode, installer path, telemetry routing, CI gate) | DEP, CFG, TST | M-DEP-19 in `reference/checklist.md`, `.github/managed-paths.txt` |
 | Sandboxes, OpenShell, drivers | SBX, REQ, DEP | `docs/SANDBOX.md` (contributor notes) |
 | Scanners, judges, local models | SCN, REQ | `reference/requirements-and-sandboxes.md` |
 | A new tool, model, daemon, package or network call | REQ, DEP, DOC | `internal/openshell/doctor.go` as the detection model |
@@ -97,7 +99,9 @@ Open an issue or ask in the PR before writing code when the change would:
 | Change the config schema version or the migration chain | A one-sided bump locks out upgrades |
 | Touch signing, checksums, package formats or any bundle or digest format | Operators pin these; a change breaks verification and rollback |
 | Alter identity or privacy rules (who selects a profile, who can read policy) | Policy bypass or cross-user leak |
-| Touch the Secure Client profile paths | They must stay byte-identical; maintainers run a separate invariance check |
+| Touch the Secure Client profile paths from OSS or standalone work | They must stay byte-identical; maintainers run a separate invariance check |
+| Change shared code or a shared default from Secure Client work (gateway, hook paths, hookexec, guardrails, config loading, observability plan compile, installers, CI gates) | OSS and standalone must not change; a maintainer of the other modes signs off |
+| Add a management feature | Standalone managed only, never Secure Client; DefenseClaw ships only the local management contract |
 
 ## Tier legend
 

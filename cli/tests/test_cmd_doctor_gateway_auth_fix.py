@@ -2000,6 +2000,7 @@ def test_fix_gateway_service_surfaces_only_safe_lifecycle_reason(tmp_path):
     with (
         # A gateway installed on this host's PATH would be named instead.
         patch.dict(os.environ, {"PATH": str(tmp_path)}),
+        patch("defenseclaw.gateway.canonical_install_path", return_value=str(tmp_path / "missing-gateway")),
         patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "")),
         patch(
             "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
@@ -2023,3 +2024,45 @@ def test_fix_gateway_service_surfaces_only_safe_lifecycle_reason(tmp_path):
     assert tag == "fail"
     assert "binary not found" in detail
     assert "secret-value" not in detail
+
+
+def _stopped_gateway_patches(tmp_path):
+    return (
+        patch("defenseclaw.commands.cmd_doctor._http_probe", side_effect=[(0, ""), (200, _health(api="running"))]),
+        patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
+            return_value=_GatewayTrust("missing", "managed gateway PID file is missing"),
+        ),
+        patch(
+            "defenseclaw.commands.cmd_doctor._managed_gateway_listener_evidence",
+            return_value=ListenerEvidence("missing"),
+        ),
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover repair")
+@pytest.mark.parametrize("plan_only", [False, True])
+def test_fix_gateway_service_does_not_start_over_root_owned_files(tmp_path, plan_only):
+    """GAP-0788: a start known to fail is not run; the chain is printed instead."""
+    cfg = _cfg(str(tmp_path), token="configured")
+    cfg.deployment_mode = ""
+    probes, process, listener = _stopped_gateway_patches(tmp_path)
+    with (
+        probes,
+        process,
+        listener,
+        patch(
+            "defenseclaw.commands.cmd_doctor.root_owned_start_blockers",
+            return_value=(["active_connector.json"], []),
+        ),
+        patch("defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle") as repair,
+        patch("defenseclaw.commands.cmd_doctor.click.confirm") as confirm,
+    ):
+        tag, detail = _fix_gateway_service(cfg, assume_yes=True, plan_only=plan_only)
+
+    assert tag == "fail"
+    assert "active_connector.json" in detail
+    assert "cannot repair root-owned files as this account" in detail
+    assert 'sudo chown -R "$(id -un)" ' in detail
+    repair.assert_not_called()
+    confirm.assert_not_called()

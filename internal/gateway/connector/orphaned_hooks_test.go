@@ -8,10 +8,38 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestOrphanedHookConfigPathsFindsOwnedRegistrationKeys(t *testing.T) {
+	path := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
+	previous := AntigravityHooksPathOverride
+	AntigravityHooksPathOverride = path
+	t.Cleanup(func() { AntigravityHooksPathOverride = previous })
+	opts := SetupOpts{DataDir: testenv.PrivateTempDir(t)}
+	operator := `{"operator-stop":{"Stop":[{"type":"command","command":"operator-hook"}]}}`
+	for _, tc := range []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"operator only", operator, nil},
+		{"owned registration with a different command form", `{"operator-stop":{"Stop":[{"type":"command","command":"operator-hook"}]},"defenseclaw-antigravity-pretooluse":{"PreToolUse":[{"hooks":[{"type":"command","command":"newer-hook-form"}]}]}}`, []string{path}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := OrphanedHookConfigPaths(NewAntigravityConnector(), opts)
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("OrphanedHookConfigPaths = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
 
 // rel-1-0-1:GAP-0009: an orphaned entry is found by the hook script path it
 // runs, in any wrapping, and never by a longer name that starts with it.

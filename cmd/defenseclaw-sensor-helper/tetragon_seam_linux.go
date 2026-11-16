@@ -64,12 +64,16 @@ func startKernelPolicy(ctx context.Context, logger *slog.Logger, homes []string,
 	}
 	ledger := tetragon.NewCustomerLedger()
 	controller := kernelPolicyStart(ctx, logger, intent, policyDialer(scope), manifest, customerSource(ledger))
+	// The ledger's and the controller's counts begin with this process: the
+	// epoch the gateway tells a restarted helper by (cowork-1-0-8 GAP-0080).
+	countersEpoch := kernelpolicy.NewEpoch()
 	config := &acquire.TetragonConfig{
 		Mode:             string(intent.Mode),
 		OwnObservePolicy: func(name string) bool { return controller.OwnsPolicy(name, kernelpolicy.FamilyObserve) },
 		KernelStatus: func(context.Context) (acquire.KernelStatus, error) {
 			status := kernelStatusOf(controller.Status(), intent)
 			withCustomer(&status, ledger, time.Now(), tetragonInstalled())
+			status.CountersEpoch = countersEpoch
 			return status, nil
 		},
 		Tap: hitTap(controller),
@@ -256,7 +260,7 @@ func kernelStatusOf(state kernelpolicy.State, intent kernelpolicy.Intent) acquir
 			family, _ := kernelpolicy.FamilyOfName(name)
 			status.Policies = append(status.Policies, acquire.KernelPolicyStatus{Name: name, Family: string(family), Recorded: true})
 		}
-		status.Changes = kernelChanges(state.Changes)
+		status.Changes, status.SeqEpoch = kernelChanges(state.Changes), state.SeqEpoch
 		return status
 	}
 	status := acquire.KernelStatus{
@@ -335,7 +339,7 @@ func kernelStatusOf(state kernelpolicy.State, intent kernelpolicy.Intent) acquir
 		status.Overrides = append(status.Overrides, string(family))
 	}
 	sort.Strings(status.Overrides)
-	status.Changes = kernelChanges(state.Changes)
+	status.Changes, status.SeqEpoch = kernelChanges(state.Changes), state.SeqEpoch
 	return status
 }
 

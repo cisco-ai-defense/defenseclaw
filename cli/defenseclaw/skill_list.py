@@ -199,6 +199,13 @@ def _list_skills_from_filesystem(
                 "path": full,
             }
             rows.append(row)
+            # Links to this folder are the same skill under another name: list
+            # each one beside it so none reads as removed (GAP-0958).
+            for alias in discovered.aliases:
+                if alias in seen:
+                    continue
+                seen.add(alias)
+                rows.append({**row, "name": alias, "alias_of": entry})
     return rows
 
 

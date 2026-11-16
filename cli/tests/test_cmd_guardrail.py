@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -53,6 +55,10 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
         model=model,
         hook_fail_mode=hook_fail_mode,
     )
+    guardrail_cfg.effective_hook_outage_fail_mode = lambda connector="": guardrail_cfg.hook_fail_mode
+    guardrail_cfg._managed_outage_install = lambda: False
+    guardrail_cfg.hook_fail_mode_resolution = lambda connector="": (guardrail_cfg.hook_fail_mode, "config:guardrail.hook_fail_mode")
+    guardrail_cfg.hook_policy_tier = lambda connector="": "default"
     cfg = SimpleNamespace(
         guardrail=guardrail_cfg,
         data_dir="/tmp/dc",
@@ -254,11 +260,10 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
         self.assertNotIn("use-pack strict", result.output)
 
-    def test_status_shows_a_proxy_connector_closed_whatever_hook_fail_mode_says(self):
-        # GAP-1646: ZeptoClaw and OpenClaw are proxy-backed, so their proxy
-        # refuses calls while the gateway is down; status said Fail=open and
-        # warned that "its hooks allow calls that policy blocks".
-        for connector in ("zeptoclaw", "openclaw"):
+    def test_status_shows_a_proxy_connector_by_its_outage_behaviour(self):
+        # GAP-1646, GAP-0824: ZeptoClaw model requests are refused while the gateway is down; OpenClaw
+        # follows the outage mode (here a saved open). Neither warns that "its hooks allow calls".
+        for connector, want in (("zeptoclaw", "closed"), ("openclaw", "open")):
             app = make_ctx(enabled=True, connector=connector, hook_fail_mode="open")
             app.cfg.guardrail.mode = "action"
             result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
@@ -267,8 +272,9 @@ class StatusCommandTests(unittest.TestCase):
             self.assertNotIn("hooks allow calls", result.output)
             result = CliRunner().invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn('"fail_mode": "closed"', result.output)
-            self.assertNotIn('"fail_mode": "open"', result.output)
+            self.assertIn(f'"fail_mode": "{want}"', result.output)
+            other = "open" if want == "closed" else "closed"
+            self.assertNotIn(f'"fail_mode": "{other}"', result.output)
 
     def test_status_flags_fail_open_connector_an_action_profile_enforces(self):
         # GAP-1282: base mode observe, a guardrail profile puts the connector
@@ -1168,9 +1174,10 @@ class PerConnectorToggleTests(unittest.TestCase):
         app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="LOW"
         )
-        app.cfg.guardrail.custom_packs["protected-copilot"] = dcconfig.CustomRulePack(
-            path="/packs/protected-copilot/default"
-        )
+        pack_dir = os.path.join(tempfile.mkdtemp(), "protected-copilot", "default")
+        os.makedirs(pack_dir)
+        self.addCleanup(shutil.rmtree, os.path.dirname(os.path.dirname(pack_dir)), ignore_errors=True)
+        app.cfg.guardrail.custom_packs["protected-copilot"] = dcconfig.CustomRulePack(path=pack_dir)
         app.cfg.guardrail.connectors["copilot"].rule_pack = "protected-copilot"
         app.cfg.guardrail.block_at = "HIGH"
         with patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=200):  # the table layout
@@ -1491,16 +1498,17 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("GitHub Copilot CLI will remain fail-open; closed is stored only", result.output)
         self.assertNotIn("BLOCK", result.output)
 
-    def test_connector_flag_rejected_on_single_connector_install(self):
+    def test_other_connector_flag_rejected_on_single_connector_install(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="codex")
         result = runner.invoke(
             cmd_guardrail.fail_mode_cmd,
-            ["closed", "--connector", "codex", "--yes"],
+            ["closed", "--connector", "kiro", "--yes"],
             obj=app,
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("multi-connector", result.output)
+        self.assertIn("Installed connector: codex", result.output)
 
     def test_unknown_connector_errors(self):
         runner = CliRunner()

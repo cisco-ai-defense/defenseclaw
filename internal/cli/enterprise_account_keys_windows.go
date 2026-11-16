@@ -9,15 +9,13 @@ import (
 	"errors"
 
 	"github.com/spf13/cobra"
-
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func runEnterpriseAccountKeys(cmd *cobra.Command) error {
 	if !windowsEnterpriseIsElevated() {
 		return secretFailed("not_elevated", windowsSecretExitFailure, errors.New("the account join keys require an elevated administrator prompt"))
 	}
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return secretFailed("change_failed", windowsSecretExitFailure, err)
 	}

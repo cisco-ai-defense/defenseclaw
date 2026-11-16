@@ -40,6 +40,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import click
@@ -279,8 +280,23 @@ class TestSetupCodexAlias(unittest.TestCase):
             )
             return {}, {"codex": "selection receipt is invalid or expired"}
 
+        # Reach the selection failure with the shared Windows launcher present.
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
+        launcher_identity = json.dumps({
+            "schema_version": 1,
+            "name": "defenseclaw-hook-launcher",
+            "version": "1.0.8",
+            "commit": "fixture",
+        }).encode()
         with (
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=SimpleNamespace(
+                returncode=0, stdout=launcher_identity,
+            )) as launcher_probe,
+            patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe"),
+            ),
             patch(
                 "defenseclaw.commands.cmd_setup._capture_setup_applied_runtime",
                 return_value=cmd_setup._SetupAppliedRuntimeEvidence("stopped", "", ()),
@@ -296,6 +312,11 @@ class TestSetupCodexAlias(unittest.TestCase):
             result = _invoke(["codex", "--yes"], self.app)
 
         self.assertNotEqual(result.exit_code, 0)
+        launcher_probe.assert_called_once()
+        self.assertEqual(
+            launcher_probe.call_args.args[0],
+            [os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), "--version-json"],
+        )
         self.assertIn("freshly verified selected agent executable", result.output)
         self.assertFalse(os.path.exists(self.cfg_path))
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")

@@ -40,12 +40,19 @@ func atomicTransformV2AllocationExpectedEA(dir *atomicTransformBoundDirectory, r
 	}
 	defer old.Close()
 	state, err := atomicTransformBoundStateFromOpen(old, name, atomicTransformMaxConfigBytes)
-	if err != nil || !atomicTransformV2StateMatches(receipt.Old, state, true) || !atomicTransformV2PublishedMetadataMatches(receipt, state) {
-		return nil, fmt.Errorf("prior config changed before allocation EA recovery: %w", errors.Join(err, errAtomicTransformConflict))
+	if err != nil {
+		// A failed read is not a changed prior: keep it a hard error.
+		return nil, fmt.Errorf("read prior config for allocation EA recovery: %w", err)
+	}
+	if !atomicTransformV2StateMatches(receipt.Old, state, true) || !atomicTransformV2PublishedMetadataMatches(receipt, state) {
+		return nil, fmt.Errorf("prior config changed before allocation EA recovery: %w", errAtomicTransformConflict)
 	}
 	witness, err := atomicTransformV2WindowsMetadataFromOpen(old)
-	if err != nil || witness.Digest != state.metadataDigest || witness.EACopyability != atomicTransformEACopyable {
-		return nil, fmt.Errorf("prior EA source changed during allocation recovery: %w", errors.Join(err, errAtomicTransformConflict))
+	if err != nil {
+		return nil, fmt.Errorf("read prior EA source for allocation recovery: %w", err)
+	}
+	if witness.Digest != state.metadataDigest || witness.EACopyability != atomicTransformEACopyable {
+		return nil, fmt.Errorf("prior EA source changed during allocation recovery: %w", errAtomicTransformConflict)
 	}
 	for _, stream := range witness.PreservedStreams {
 		if stream.ID == 2 {

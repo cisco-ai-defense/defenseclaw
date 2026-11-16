@@ -18,11 +18,9 @@ package gateway
 
 import (
 	"context"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
-	"weak"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -54,61 +52,26 @@ var packPostures sync.Map // directory -> posture
 // pendingPackPostures holds what builds read until a generation publishes.
 var pendingPackPostures sync.Map // directory -> posture
 
-// configPackPostures holds, for each configuration a generation build
-// resolved levels for (its base configuration and each derived profile
-// configuration), the manifest postures that build read, by directory. A
-// request deciding with that configuration resolves with them, so a
-// generation published while it is in flight does not change its levels
-// (GAP-0927). Keys are weak: an entry goes with its configuration.
-var configPackPostures sync.Map // weak.Pointer[config.Config] -> map[string]string
-
-// bindPackPostures records postures as the ones cfg resolves with.
-func bindPackPostures(cfg *config.Config, postures map[string]string) {
-	if cfg == nil || postures == nil {
-		return
-	}
-	key := weak.Make(cfg)
-	if _, loaded := configPackPostures.Swap(key, postures); !loaded {
-		runtime.AddCleanup(cfg, func(key weak.Pointer[config.Config]) { configPackPostures.Delete(key) }, key)
-	}
-}
-
-// boundPackPostures is what bindPackPostures recorded for cfg, or nil.
-func boundPackPostures(cfg *config.Config) map[string]string {
-	if cfg == nil {
-		return nil
-	}
-	if v, ok := configPackPostures.Load(weak.Make(cfg)); ok {
-		return v.(map[string]string)
-	}
-	return nil
-}
-
 // packPostureFor is packPosture for a configuration a generation build
-// bound postures to (bindPackPostures): the posture that build read for the
-// directory, else the process-wide one.
+// bound postures to: the posture that build read for the directory, else
+// the process-wide one.
 func packPostureFor(cfg *config.Config, ref config.RulePackRef, dir string) string {
-	if postures := boundPackPostures(cfg); postures != nil {
-		key := strings.TrimSpace(dir)
-		if key == "" {
-			key = strings.TrimSpace(ref.Dir)
-		}
-		if raw, ok := postures[key]; ok {
-			return postureFromManifest(ref, key, raw)
-		}
+	key := strings.TrimSpace(dir)
+	if key == "" {
+		key = strings.TrimSpace(ref.Dir)
+	}
+	if raw, ok := cfg.PinnedRulePackPosture(key); ok {
+		return postureFromManifest(key, raw)
 	}
 	return packPosture(ref, dir)
 }
 
-// postureFromManifest is the posture of ref's pack at dir whose manifest
-// posture is raw ("" for none): raw, else a built-in pack's own name, else
-// the folder-name table.
-func postureFromManifest(ref config.RulePackRef, dir, raw string) string {
+// postureFromManifest is the posture of the loaded content at dir: its
+// manifest value, else the legacy folder-name table. A custom pack may use
+// a built-in name, so the selected name cannot determine its posture.
+func postureFromManifest(dir, raw string) string {
 	if raw != "" {
 		return raw
-	}
-	if ref.Name != "" && config.IsBuiltinRulePack(ref.Name) {
-		return ref.Name
 	}
 	return guardrailProfileForDir(dir)
 }
@@ -137,8 +100,7 @@ func publishPackPostures() {
 
 // packPosture returns the posture of ref's pack at dir (its resolved
 // directory; "" uses ref.Dir): the manifest posture a generation recorded
-// for that directory, a built-in pack's own name, else the folder-name
-// table (guardrailProfileForDir).
+// for that directory, else the legacy folder-name table.
 func packPosture(ref config.RulePackRef, dir string) string {
 	if dir = strings.TrimSpace(dir); dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
@@ -149,19 +111,28 @@ func packPosture(ref config.RulePackRef, dir string) string {
 			raw = v.(string)
 		}
 	}
-	return postureFromManifest(ref, dir, raw)
+	return postureFromManifest(dir, raw)
 }
 
-// guardrailRulePackDir is the directory of ref for a caller that holds only
-// the guardrail block: a custom_packs entry's path, else ref.Dir (a built-in
-// name needs policy_dir and keeps its own posture).
-func guardrailRulePackDir(gc *config.GuardrailConfig, ref config.RulePackRef) string {
+// guardrailPackPosture is packPosture of ref for a caller that holds only the
+// guardrail block, with the verdict and fallback every other reader of the
+// configuration uses: a usable custom_packs entry takes its own folder, a
+// broken one its built-in fallback (a broken entry named like a built-in
+// pack keeps that pack's posture, any other the default posture), and a
+// built-in name its own. gc carries the verdict of the load that built it, so
+// a folder that went away since does not change a posture already loaded.
+// Under the Secure Client integration (the process-wide managed flag) the
+// loader's own refusals apply and an entry always names its folder.
+func guardrailPackPosture(gc *config.GuardrailConfig, ref config.RulePackRef) string {
 	if gc != nil && ref.Name != "" {
-		if custom, ok := gc.CustomPacks[ref.Name]; ok {
-			return strings.TrimSpace(custom.Path)
+		if _, ok := gc.CustomPacks[ref.Name]; ok && (ManagedEnterpriseActive() || !gc.CustomRulePackFallsBack(ref.Name)) {
+			return packPosture(ref, gc.CustomRulePackPath(ref.Name))
+		}
+		if name := gc.BuiltinRulePackFor(ref.Name); name != "" {
+			return name
 		}
 	}
-	return ref.Dir
+	return packPosture(ref, ref.Dir)
 }
 
 func packLabel(ref config.RulePackRef, posture string) string {
@@ -193,7 +164,7 @@ func resolveThresholdsWith(cfg *config.Config, connector string, posture func(co
 // buildingPackPostures resolves postures for the generation being built and
 // records them: what its build just read (not yet published), else what the
 // published generations read. The table and the configurations the build
-// binds them to (bindPackPostures) then decide with the same postures.
+// binds them to (Config.BindRulePackPostures) then decide with the same postures.
 type buildingPackPostures map[string]string
 
 func (b buildingPackPostures) posture(ref config.RulePackRef, dir string) string {
@@ -201,7 +172,7 @@ func (b buildingPackPostures) posture(ref config.RulePackRef, dir string) string
 		dir = strings.TrimSpace(ref.Dir)
 	}
 	if dir == "" {
-		return postureFromManifest(ref, dir, "")
+		return postureFromManifest(dir, "")
 	}
 	raw, seen := b[dir]
 	if !seen {
@@ -212,7 +183,7 @@ func (b buildingPackPostures) posture(ref config.RulePackRef, dir string) string
 		}
 		b[dir] = raw
 	}
-	return postureFromManifest(ref, dir, raw)
+	return postureFromManifest(dir, raw)
 }
 
 // ConfigThresholds is resolveThresholds for a caller outside the gateway
@@ -245,7 +216,7 @@ func resolveGuardrailThresholds(gc *config.GuardrailConfig, connector string) Re
 		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
 	}
 	ref := gc.EffectiveRulePackRef(connector)
-	return thresholdsFromLevels(gc, connector, packPosture(ref, guardrailRulePackDir(gc, ref)), ref)
+	return thresholdsFromLevels(gc, connector, guardrailPackPosture(gc, ref), ref)
 }
 
 func thresholdsFromLevels(gc *config.GuardrailConfig, connector, posture string, ref config.RulePackRef) ResolvedThresholds {
@@ -317,7 +288,7 @@ func severityName(rank int) string {
 // buildThresholdTable resolves every (profile, connector) pair of cfg: the
 // base configuration and each derived profile, for the global scope and
 // every connector either configures. It binds the postures it read to cfg
-// and each derived configuration (bindPackPostures), so a pair resolved
+// and each derived configuration (Config.BindRulePackPostures), so a pair resolved
 // later from them, and every decision made with them, uses the same ones.
 func buildThresholdTable(cfg *config.Config, profiles *guardrailProfileSet) thresholdTable {
 	table := thresholdTable{}
@@ -343,10 +314,10 @@ func buildThresholdTable(cfg *config.Config, profiles *guardrailProfileSet) thre
 	if scope, ok := applicationProtectionRulePackScope(cfg); ok {
 		postures.posture(scope.ref, scope.dir)
 	}
-	bindPackPostures(cfg, postures)
+	cfg.BindRulePackPostures(postures)
 	if profiles != nil {
 		for _, derived := range profiles.profiles {
-			bindPackPostures(derived.Config, postures)
+			derived.Config.BindRulePackPostures(postures)
 		}
 	}
 	return table

@@ -10,7 +10,6 @@ import (
 	"compress/gzip"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -150,11 +149,11 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 // is a regular file or a directory with a relative name and no ..
 // component, within the bounds.
 func tarArchivePlain(path string) bool {
-	info, err := os.Stat(path)
+	info, err := pathStat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTarPlainBytes {
 		return false
 	}
-	file, err := os.Open(path)
+	file, err := pathOpen(path)
 	if err != nil {
 		return false
 	}

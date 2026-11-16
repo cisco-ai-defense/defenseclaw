@@ -31,6 +31,60 @@ $codexParentExistedBeforeStatus = Test-Path -LiteralPath $codexMachinePolicyDire
 $installRootExistedBeforeStatus = Test-Path -LiteralPath $installRoot
 $stateRootExistedBeforeStatus = Test-Path -LiteralPath $stateRoot
 
+# The elevated lifecycle-lock block below builds its smoke roots under
+# <ProgramFiles|ProgramData>\Cisco\Cisco Secure Client\DefenseClaw-Cert\<token>,
+# and creating a managed root creates its missing parents. Record which of those
+# parent folders already exist so the cleanup removes only the ones this run
+# created, and only while they are empty. A real Secure Client tree, or a
+# DefenseClaw-Cert folder left by anything else, is never touched (GAP-0780).
+$certificationLayoutParents = @(
+    foreach ($baseRoot in @($programFiles, $programData)) {
+        $parent = $baseRoot
+        foreach ($segment in @('Cisco', 'Cisco Secure Client', 'DefenseClaw-Cert')) {
+            $parent = Join-Path $parent $segment
+            [pscustomobject]@{
+                Path = $parent
+                Existed = (Test-Path -LiteralPath $parent)
+            }
+        }
+    }
+)
+
+function Remove-CertificationLayoutParentsCreatedBySmoke {
+    $leftBehind = @()
+    for ($index = $certificationLayoutParents.Count - 1; $index -ge 0; $index--) {
+        $entry = $certificationLayoutParents[$index]
+        if ($entry.Existed) {
+            continue
+        }
+        $item = Get-Item -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item -or
+            -not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        if ($null -ne (Get-ChildItem -LiteralPath $entry.Path -Force -ErrorAction SilentlyContinue |
+                Select-Object -First 1)) {
+            # One warning per leftover; its parents are not empty because of it.
+            $coveredByChild = @($leftBehind | Where-Object {
+                $_.StartsWith($entry.Path + '\', [StringComparison]::OrdinalIgnoreCase)
+            }).Count -ne 0
+            if (-not $coveredByChild) {
+                Write-Warning "left the folder this smoke created because it is not empty: $($entry.Path)"
+            }
+            $leftBehind += $entry.Path
+            continue
+        }
+        try {
+            # Fails without a prompt if a child appeared since the check above.
+            [IO.Directory]::Delete($entry.Path, $false)
+        }
+        catch {
+            Write-Warning "could not remove the empty folder this smoke created: $($entry.Path): $($_.Exception.Message)"
+        }
+    }
+}
+
 $tokens = $null
 $parseErrors = $null
 $moduleAst = [Management.Automation.Language.Parser]::ParseFile(
@@ -498,6 +552,52 @@ namespace DefenseClaw.Windows.Tests
         if ([int]$json.schema_version -ne 1 -or -not [bool]$json.ok) {
             throw 'atomic JSON writer did not round-trip its payload'
         }
+        $previousProfile = Get-DefenseClawEnterpriseProfile
+        try {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            Write-DefenseClawJsonAtomic `
+                -Value ([ordered]@{ schema_version = 2; ok = $true }) `
+                -Path $jsonPath
+            $changed = [IO.File]::ReadAllText($jsonPath) |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+            if ([int]$changed.schema_version -ne 2 -or -not [bool]$changed.ok) {
+                throw 'standalone JSON writer did not publish changed content'
+            }
+            # GAP-0899: -Kind AdminFile publishes the file already carrying
+            # the canonical owner and a protected SYSTEM and Administrators
+            # access list, so no guardian pass can find it drifted. The plain
+            # write above keeps the folder's inherited access list.
+            $adminPath = Microsoft.PowerShell.Management\Join-Path $jsonRoot 'admin.json'
+            Write-DefenseClawJsonAtomic `
+                -Value ([ordered]@{ schema_version = 3; ok = $true }) `
+                -Path $adminPath `
+                -Kind AdminFile
+            $adminAcl = Get-Acl -LiteralPath $adminPath -ErrorAction Stop
+            $adminOwner = $adminAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if ($adminOwner -cne $script:AdministratorsSID) {
+                throw "admin JSON write published owner $adminOwner, want $($script:AdministratorsSID)"
+            }
+            if (-not $adminAcl.AreAccessRulesProtected) {
+                throw 'admin JSON write published an inherited access list'
+            }
+            $adminTrustees = @($adminAcl.Access | Microsoft.PowerShell.Core\ForEach-Object {
+                $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            } | Microsoft.PowerShell.Utility\Sort-Object -Unique)
+            $wantTrustees = @($script:SystemSID, $script:AdministratorsSID) | Microsoft.PowerShell.Utility\Sort-Object -Unique
+            if (($adminTrustees -join ';') -cne ($wantTrustees -join ';')) {
+                throw "admin JSON write published trustees $($adminTrustees -join ',')"
+            }
+            if (-not ([Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($adminPath)) |
+                    Microsoft.PowerShell.Utility\ConvertFrom-Json).ok) {
+                throw 'admin JSON write did not publish its content'
+            }
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $jsonRoot -Filter 'admin.json.new.*' -Force).Count -ne 0) {
+                throw 'admin JSON write left its staging file behind'
+            }
+        }
+        finally {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $previousProfile
+        }
     }
     finally {
         if ([IO.Directory]::Exists($jsonRoot)) {
@@ -518,6 +618,63 @@ namespace DefenseClaw.Windows.Tests
             [StringComparison]::Ordinal
         )) {
         throw "Win32 native security helper did not use a generated type: $nativeSecurityType"
+    }
+    # GAP-0655: changed-content publication preserves a held reader's old
+    # body. A supported volume may publish immediately; a refusal leaves the
+    # old name and stage available for a retry after the reader releases it.
+    $renameRoot = Join-Path ([IO.Path]::GetTempPath()) `
+        ('defenseclaw-rename-smoke-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        [void][IO.Directory]::CreateDirectory($renameRoot)
+        $renameSource = Join-Path $renameRoot 'stage.json'
+        $renameDestination = Join-Path $renameRoot 'state.json'
+        [IO.File]::WriteAllText($renameSource, 'new')
+        [IO.File]::WriteAllText($renameDestination, 'old')
+        $held = [IO.File]::Open($renameDestination, [IO.FileMode]::Open,
+            [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $publishedWhileHeld = $false
+        try {
+            $firstResult = [string]$nativeSecurityType::RenameNonImageFile(
+                $renameSource, $renameDestination)
+            if ($firstResult -ceq '' -or $firstResult -ceq 'classic') {
+                $publishedWhileHeld = $true
+                $held.Position = 0
+                $heldBytes = [byte[]]::new(3)
+                $heldLength = $held.Read($heldBytes, 0, $heldBytes.Length)
+                if ($heldLength -ne 3 -or
+                    [Text.Encoding]::UTF8.GetString($heldBytes) -cne 'old' -or
+                    [IO.File]::Exists($renameSource) -or
+                    [IO.File]::ReadAllText($renameDestination) -cne 'new') {
+                    throw 'published data did not preserve the held reader'
+                }
+            }
+            elseif ($firstResult -match '^rename:(5|32|33)$') {
+                if ([IO.File]::ReadAllText($renameDestination) -cne 'old' -or
+                    [IO.File]::ReadAllText($renameSource) -cne 'new') {
+                    throw "refused data publication changed a file: $firstResult"
+                }
+            }
+            else {
+                throw "data publication returned an unexpected result: $firstResult"
+            }
+        }
+        finally { $held.Dispose() }
+        if (-not $publishedWhileHeld) {
+            $published = [string]$nativeSecurityType::RenameNonImageFile(
+                $renameSource, $renameDestination)
+            if ($published -cne '' -and $published -cne 'classic') {
+                throw "data publication failed after release: $published"
+            }
+        }
+        if ([IO.File]::Exists($renameSource) -or
+            [IO.File]::ReadAllText($renameDestination) -cne 'new') {
+            throw 'changed data was not published'
+        }
+    }
+    finally {
+        if ([IO.Directory]::Exists($renameRoot)) {
+            [IO.Directory]::Delete($renameRoot, $true)
+        }
     }
     $failureActions = [byte[]](Get-DefenseClawFailureActionsBytes)
     if ($failureActions.Length -ne 44) {
@@ -891,209 +1048,214 @@ namespace DefenseClaw.Windows.Tests
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if ($elevated) {
-    & $module {
-        param(
-            $SmokeInstallRoot,
-            $SmokeStateRoot,
-            $SmokeGatewayService,
-            $SmokeGuardianService
-        )
-        $lockLayout = Get-DefenseClawLayout `
-            -InstallRoot $SmokeInstallRoot `
-            -StateRoot $SmokeStateRoot `
-            -GatewayServiceName $SmokeGatewayService `
-            -GuardianServiceName $SmokeGuardianService
-        $lockLayout.LifecycleLockDirectory = Join-Path `
-            $SmokeStateRoot `
-            'lifecycle-lock'
-        $lockLayout.LifecycleLockPath = Join-Path `
-            $lockLayout.LifecycleLockDirectory `
-            'lifecycle.lock'
-        Initialize-DefenseClawManagedRoot `
-            -Path $SmokeStateRoot `
-            -Label 'smoke StateRoot' `
-            -RequiredBase $script:ProgramData
-        Initialize-DefenseClawManagedRoot `
-            -Path $lockLayout.LifecycleLockDirectory `
-            -Label 'smoke lifecycle lock' `
-            -RequiredBase $script:ProgramData
-        try {
-            $lock = Enter-DefenseClawLifecycleLock `
-                -Layout $lockLayout `
-                -TimeoutSeconds 2
+try {
+    if ($elevated) {
+        & $module {
+            param(
+                $SmokeInstallRoot,
+                $SmokeStateRoot,
+                $SmokeGatewayService,
+                $SmokeGuardianService
+            )
+            $lockLayout = Get-DefenseClawLayout `
+                -InstallRoot $SmokeInstallRoot `
+                -StateRoot $SmokeStateRoot `
+                -GatewayServiceName $SmokeGatewayService `
+                -GuardianServiceName $SmokeGuardianService
+            $lockLayout.LifecycleLockDirectory = Join-Path `
+                $SmokeStateRoot `
+                'lifecycle-lock'
+            $lockLayout.LifecycleLockPath = Join-Path `
+                $lockLayout.LifecycleLockDirectory `
+                'lifecycle.lock'
+            Initialize-DefenseClawManagedRoot `
+                -Path $SmokeStateRoot `
+                -Label 'smoke StateRoot' `
+                -RequiredBase $script:ProgramData
+            Initialize-DefenseClawManagedRoot `
+                -Path $lockLayout.LifecycleLockDirectory `
+                -Label 'smoke lifecycle lock' `
+                -RequiredBase $script:ProgramData
             try {
-                if ($null -eq $lock) {
-                    throw 'protected lifecycle file lock was not returned'
+                $lock = Enter-DefenseClawLifecycleLock `
+                    -Layout $lockLayout `
+                    -TimeoutSeconds 2
+                try {
+                    if ($null -eq $lock) {
+                        throw 'protected lifecycle file lock was not returned'
+                    }
+                    $lockHandle = $lock.SafeFileHandle
                 }
-                $lockHandle = $lock.SafeFileHandle
-            }
-            finally {
-                Exit-DefenseClawLifecycleLock -Lock $lock
-            }
-            # Causal precondition for the reacquisition below: this unique
-            # StateRoot's only DefenseClaw holder is the handle just released.
-            # A leaked handle fails here, not as a lock wait.
-            if (-not $lockHandle.IsClosed) {
-                throw 'lifecycle lock handle stayed open after Exit-DefenseClawLifecycleLock'
-            }
-            $sections = (
-                [Security.AccessControl.AccessControlSections]::Access -bor
-                [Security.AccessControl.AccessControlSections]::Owner -bor
-                [Security.AccessControl.AccessControlSections]::Group
-            )
-            $beforeItem = Get-Item `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -Force `
-                -ErrorAction Stop
-            $beforeSDDL = (Get-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -ErrorAction Stop).GetSecurityDescriptorSddlForm($sections)
-            $beforeHash = (Get-FileHash `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -Algorithm SHA256).Hash
-
-            # Model an older successful AVC uninstall that retained the exact
-            # zero-byte lock but re-enabled inheritance. A fresh install must
-            # repair only this already-trusted residual object in place.
-            $legacyLockAcl = Get-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -ErrorAction Stop
-            $legacyLockAcl.SetAccessRuleProtection($false, $true)
-            [void]$legacyLockAcl.AddAccessRule(
-                [Security.AccessControl.FileSystemAccessRule]::new(
-                    [Security.Principal.SecurityIdentifier]::new(
-                        $script:UsersSID
-                    ),
-                    [Security.AccessControl.FileSystemRights]::ReadAndExecute,
-                    [Security.AccessControl.AccessControlType]::Allow
+                finally {
+                    Exit-DefenseClawLifecycleLock -Lock $lock
+                }
+                # Causal precondition for the reacquisition below: this unique
+                # StateRoot's only DefenseClaw holder is the handle just released.
+                # A leaked handle fails here, not as a lock wait.
+                if (-not $lockHandle.IsClosed) {
+                    throw 'lifecycle lock handle stayed open after Exit-DefenseClawLifecycleLock'
+                }
+                $sections = (
+                    [Security.AccessControl.AccessControlSections]::Access -bor
+                    [Security.AccessControl.AccessControlSections]::Owner -bor
+                    [Security.AccessControl.AccessControlSections]::Group
                 )
-            )
-            Set-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -AclObject $legacyLockAcl `
-                -ErrorAction Stop
-            if ((Get-Acl `
+                $beforeItem = Get-Item `
                     -LiteralPath $lockLayout.LifecycleLockPath `
-                    -ErrorAction Stop).AreAccessRulesProtected) {
-                throw 'legacy residual lifecycle lock did not inherit before reinstall'
-            }
+                    -Force `
+                    -ErrorAction Stop
+                $beforeSDDL = (Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop).GetSecurityDescriptorSddlForm($sections)
+                $beforeHash = (Get-FileHash `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -Algorithm SHA256).Hash
 
-            # The drifted descriptor is repaired, and the repair is reported
-            # on the warning stream. Keep it off stdout, which carries only the
-            # JSON report; a failed repair still throws.
-            $lock = Enter-DefenseClawLifecycleLock `
-                -Layout $lockLayout `
-                -TimeoutSeconds 2 3>$null
-            try {
-                if ($null -eq $lock) {
-                    throw 'persistent lifecycle file lock was not reusable'
-                }
-                $lockHandle = $lock.SafeFileHandle
-            }
-            finally {
-                Exit-DefenseClawLifecycleLock -Lock $lock
-            }
-            if (-not $lockHandle.IsClosed) {
-                throw 'reused lifecycle lock handle stayed open after Exit-DefenseClawLifecycleLock'
-            }
-            $afterItem = Get-Item `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -Force `
-                -ErrorAction Stop
-            $afterSDDL = (Get-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -ErrorAction Stop).GetSecurityDescriptorSddlForm($sections)
-            $afterHash = (Get-FileHash `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -Algorithm SHA256).Hash
-            $afterAcl = Get-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -ErrorAction Stop
-            if (-not $afterAcl.AreAccessRulesProtected -or
-                [int64]$beforeItem.Length -ne 0 -or
-                [int64]$afterItem.Length -ne 0 -or
-                $afterHash -cne $beforeHash -or
-                $afterSDDL -cne $beforeSDDL) {
-                throw 'persistent lifecycle file lock was not canonically repaired in place for reinstall'
-            }
-
-            # The lock holds no data, so a standard user's write entry and
-            # re-enabled inheritance are drift to repair in place, not a
-            # reason to fail every lifecycle action: the next acquisition
-            # re-stamps the canonical protected descriptor on the same inode.
-            $unsafeLockAcl = Get-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -ErrorAction Stop
-            $unsafeLockAcl.SetAccessRuleProtection($false, $true)
-            [void]$unsafeLockAcl.AddAccessRule(
-                [Security.AccessControl.FileSystemAccessRule]::new(
-                    [Security.Principal.SecurityIdentifier]::new(
-                        $script:UsersSID
-                    ),
-                    [Security.AccessControl.FileSystemRights]::FullControl,
-                    [Security.AccessControl.AccessControlType]::Allow
+                # Model an older successful AVC uninstall that retained the exact
+                # zero-byte lock but re-enabled inheritance. A fresh install must
+                # repair only this already-trusted residual object in place.
+                $legacyLockAcl = Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop
+                $legacyLockAcl.SetAccessRuleProtection($false, $true)
+                [void]$legacyLockAcl.AddAccessRule(
+                    [Security.AccessControl.FileSystemAccessRule]::new(
+                        [Security.Principal.SecurityIdentifier]::new(
+                            $script:UsersSID
+                        ),
+                        [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                        [Security.AccessControl.AccessControlType]::Allow
+                    )
                 )
-            )
-            Set-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -AclObject $unsafeLockAcl `
-                -ErrorAction Stop
-            $repairedLock = $null
-            try {
-                $repairedLock = Enter-DefenseClawLifecycleLock `
+                Set-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -AclObject $legacyLockAcl `
+                    -ErrorAction Stop
+                if ((Get-Acl `
+                        -LiteralPath $lockLayout.LifecycleLockPath `
+                        -ErrorAction Stop).AreAccessRulesProtected) {
+                    throw 'legacy residual lifecycle lock did not inherit before reinstall'
+                }
+
+                # The drifted descriptor is repaired, and the repair is reported
+                # on the warning stream. Keep it off stdout, which carries only the
+                # JSON report; a failed repair still throws.
+                $lock = Enter-DefenseClawLifecycleLock `
                     -Layout $lockLayout `
                     -TimeoutSeconds 2 3>$null
-            }
-            finally {
-                if ($null -ne $repairedLock) {
-                    Exit-DefenseClawLifecycleLock -Lock $repairedLock
+                try {
+                    if ($null -eq $lock) {
+                        throw 'persistent lifecycle file lock was not reusable'
+                    }
+                    $lockHandle = $lock.SafeFileHandle
+                }
+                finally {
+                    Exit-DefenseClawLifecycleLock -Lock $lock
+                }
+                if (-not $lockHandle.IsClosed) {
+                    throw 'reused lifecycle lock handle stayed open after Exit-DefenseClawLifecycleLock'
+                }
+                $afterItem = Get-Item `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -Force `
+                    -ErrorAction Stop
+                $afterSDDL = (Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop).GetSecurityDescriptorSddlForm($sections)
+                $afterHash = (Get-FileHash `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -Algorithm SHA256).Hash
+                $afterAcl = Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop
+                if (-not $afterAcl.AreAccessRulesProtected -or
+                    [int64]$beforeItem.Length -ne 0 -or
+                    [int64]$afterItem.Length -ne 0 -or
+                    $afterHash -cne $beforeHash -or
+                    $afterSDDL -cne $beforeSDDL) {
+                    throw 'persistent lifecycle file lock was not canonically repaired in place for reinstall'
+                }
+
+                # The lock holds no data, so a standard user's write entry and
+                # re-enabled inheritance are drift to repair in place, not a
+                # reason to fail every lifecycle action: the next acquisition
+                # re-stamps the canonical protected descriptor on the same inode.
+                $unsafeLockAcl = Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop
+                $unsafeLockAcl.SetAccessRuleProtection($false, $true)
+                [void]$unsafeLockAcl.AddAccessRule(
+                    [Security.AccessControl.FileSystemAccessRule]::new(
+                        [Security.Principal.SecurityIdentifier]::new(
+                            $script:UsersSID
+                        ),
+                        [Security.AccessControl.FileSystemRights]::FullControl,
+                        [Security.AccessControl.AccessControlType]::Allow
+                    )
+                )
+                Set-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -AclObject $unsafeLockAcl `
+                    -ErrorAction Stop
+                $repairedLock = $null
+                try {
+                    $repairedLock = Enter-DefenseClawLifecycleLock `
+                        -Layout $lockLayout `
+                        -TimeoutSeconds 2 3>$null
+                }
+                finally {
+                    if ($null -ne $repairedLock) {
+                        Exit-DefenseClawLifecycleLock -Lock $repairedLock
+                    }
+                }
+                $repairedAcl = Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop
+                $usersEntries = @($repairedAcl.GetAccessRules(
+                        $true,
+                        $true,
+                        [Security.Principal.SecurityIdentifier]
+                    ) | Where-Object {
+                        $_.IdentityReference.Value -eq $script:UsersSID
+                    })
+                if ($null -eq $repairedLock -or
+                    -not $repairedAcl.AreAccessRulesProtected -or
+                    $usersEntries.Count -ne 0 -or
+                    (Get-Item -LiteralPath $lockLayout.LifecycleLockPath -Force).Length -ne 0) {
+                    throw 'writable inherited lifecycle lock was not repaired in place'
                 }
             }
-            $repairedAcl = Get-Acl `
-                -LiteralPath $lockLayout.LifecycleLockPath `
-                -ErrorAction Stop
-            $usersEntries = @($repairedAcl.GetAccessRules(
-                    $true,
-                    $true,
-                    [Security.Principal.SecurityIdentifier]
-                ) | Where-Object {
-                    $_.IdentityReference.Value -eq $script:UsersSID
-                })
-            if ($null -eq $repairedLock -or
-                -not $repairedAcl.AreAccessRulesProtected -or
-                $usersEntries.Count -ne 0 -or
-                (Get-Item -LiteralPath $lockLayout.LifecycleLockPath -Force).Length -ne 0) {
-                throw 'writable inherited lifecycle lock was not repaired in place'
+            finally {
+                Remove-DefenseClawManagedTree `
+                    -Path $SmokeStateRoot `
+                    -RequiredBase $script:ProgramData `
+                    -Label 'smoke StateRoot'
+            }
+        } `
+            $certificationInstallRoot `
+            $certificationStateRoot `
+            "DefenseClawCertGateway_$token" `
+            "DefenseClawCertGuardian_$token"
+    }
+    else {
+        try {
+            Invoke-DefenseClawEnterpriseLifecycle `
+                -Action Install `
+                -InstallRoot $installRoot `
+                -StateRoot $stateRoot `
+                -GatewayServiceName $gatewayService `
+                -GuardianServiceName $guardianService
+            throw 'non-admin Install unexpectedly succeeded'
+        }
+        catch {
+            if ($_.Exception.Message -notmatch 'elevated administrator token') {
+                throw
             }
         }
-        finally {
-            Remove-DefenseClawManagedTree `
-                -Path $SmokeStateRoot `
-                -RequiredBase $script:ProgramData `
-                -Label 'smoke StateRoot'
-        }
-    } `
-        $certificationInstallRoot `
-        $certificationStateRoot `
-        "DefenseClawCertGateway_$token" `
-        "DefenseClawCertGuardian_$token"
+    }
 }
-else {
-    try {
-        Invoke-DefenseClawEnterpriseLifecycle `
-            -Action Install `
-            -InstallRoot $installRoot `
-            -StateRoot $stateRoot `
-            -GatewayServiceName $gatewayService `
-            -GuardianServiceName $guardianService
-        throw 'non-admin Install unexpectedly succeeded'
-    }
-    catch {
-        if ($_.Exception.Message -notmatch 'elevated administrator token') {
-            throw
-        }
-    }
+finally {
+    Remove-CertificationLayoutParentsCreatedBySmoke
 }
 
 $teardownFailurePreserved = & $module {

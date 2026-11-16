@@ -84,8 +84,8 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		reason := "has an invalid value"
 		if schemaErr.Keyword == "additionalProperties" {
 			reason = "is an unknown setting"
-			if hint, moved := schemaErr.MovedKeyHint(); moved {
-				reason += "; " + hint
+			if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+				return fmt.Sprintf("%s%s: %s. The settings reference: %s", where, lineSuffix(schemaErr.Line), retired, settingsReferenceURL), true
 			}
 		} else if schemaErr.Keyword == "pattern" {
 			switch {

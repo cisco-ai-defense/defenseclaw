@@ -26,7 +26,7 @@ if run '{"ok":false,"errors":[{"code":"uninstall_failed","message":"policy"},{"c
     exit 1
 fi
 grep -q 'uninstall_incomplete' "$work/state/last-package-result.json"
-grep -q 'package files were kept' "$work/stderr"
+grep -q 'uninstall_incomplete: the uninstall stopped before removing the binaries' "$work/stderr"
 if ! run '{"ok":false,"errors":[{"code":"uninstall_failed","message":"not uninstall_incomplete"}]}'; then
     echo "preremove refused package removal after an ordinary uninstall failure" >&2
     exit 1

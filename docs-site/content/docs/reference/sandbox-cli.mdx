@@ -109,8 +109,8 @@ commands change in these ways. Everything else on this page works as written.
 
 - **The command is a launcher.** Enterprise packages install `defenseclaw`
   (`/usr/bin/defenseclaw` on Linux, `/usr/local/bin/defenseclaw` on macOS) as
-  a root-owned link that offers only the `sandbox` commands. Any other command
-  prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits `2`. The launcher starts your own sandbox daemon
+  a root-owned link that runs only the commands in [Managed command availability](/docs/enterprise/managed-commands). Any other command
+  prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`) and exits `2`. The launcher starts your own sandbox daemon
   when it is not running. Many sandbox commands in a few seconds (a script
   that runs `sandbox pack list` in a loop) can reach your account's request
   limit: the command says so and changes nothing; run it again a few seconds
@@ -189,7 +189,9 @@ wrappers and builds the harness images (the first build downloads about
 3 GB). On a Linux host where `/dev/kvm` exists it asks the same MicroVM
 question, with a default of yes only when the kernel lacks Landlock; if the
 host cannot start a MicroVM yet (KVM access, `e2fsprogs`, the driver binary),
-it stops with the way on and installs none of those itself.
+it stops with the way on and installs none of those itself. With OpenShell
+0.1.6, Linux KVM MicroVM sandboxes do not start on per-user or managed
+computers even when setup offers them; see [MicroVMs with KVM on Linux](#microvms-with-kvm-on-linux).
 
 ```bash
 defenseclaw sandbox setup
@@ -1727,7 +1729,7 @@ Without `--sandbox` or `--harness`, a managed `policy explain` describes a
 new run of the default agent and names running sandboxes. Use `--sandbox NAME`
 to explain the policy of a running sandbox.
 
-![defenseclaw sandbox policy explain on a managed computer: Your sandbox policy in plain words with the organization profile and matched group, then the pack and its digest and a table of settings with their value, source and origin](/images/sandboxes/managed/policy-explain.png)
+![defenseclaw sandbox policy explain under an organization profile: Your sandbox policy in plain words with the organization profile and matched group, then the pack and its digest and a table of settings with their value, source and origin](/images/sandboxes/managed/policy-explain.png)
 
 ```bash
 defenseclaw sandbox policy explain
@@ -1978,7 +1980,9 @@ sudo loginctl enable-linger $USER
 
 ### MicroVMs with KVM on Linux
 
-On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) runs each sandbox as a small virtual machine with a Linux kernel of its own, as it does on a Mac. The Docker driver stays the default. MicroVMs are the way on where the host kernel has no usable Landlock, because the MicroVM's own kernel enforces it. `sandbox setup` offers the switch on a host where `/dev/kvm` exists, and the answer defaults to yes only when Landlock is missing.
+On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) is intended to run each sandbox as a small virtual machine with a Linux kernel of its own, as it does on a Mac. The Docker driver stays the default. A MicroVM can supply Landlock when the host kernel lacks it. `sandbox setup` offers the switch on a host where `/dev/kvm` exists, and the answer defaults to yes only when Landlock is missing.
+
+With OpenShell 0.1.6, Linux KVM MicroVM sandboxes do not start on per-user or managed computers, even if setup selects the driver. Until a fixed OpenShell release is supported, use Docker on a host with Landlock ABI 3 or newer. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. On a managed computer, ask your administrator to set `enterprise.openshell.driver: docker` and run `ensure`; `driver_fallback: docker` does not cover this refusal. See [the Linux sandbox guide](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm).
 
 | Needs | Details |
 | --- | --- |

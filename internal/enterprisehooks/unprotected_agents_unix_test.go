@@ -171,3 +171,81 @@ func TestKiroFloorReasonsGetSurfaceSpecificCodes(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0782: the enumerator announces a scan of a new config before it runs
+// it. The announcement carries the previous agents and is never a result.
+func TestScanStartedRecordKeepsThePreviousAgentsAndIsMarked(t *testing.T) {
+	previous := []UnprotectedAgent{{User: "alice", Connector: "codex", Code: UnprotectedCodeAgentUnprotected, Reason: "no hook contract"}}
+	data, err := MarshalUnprotectedAgentsScanStarted(previous, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !UnprotectedAgentsRecordScanInProgress(data) || UnprotectedAgentsRecordConfigGeneration(data) != 7 ||
+		UnprotectedAgentsRecordConfigSHA256(data) != "abc" || UnprotectedAgentsRecordGeneration(data) != UnprotectedAgentsGeneration() {
+		t.Fatalf("scan-started record %s lacks its marker or stamp", data)
+	}
+	agents, err := ParseUnprotectedAgents(data)
+	if err != nil || len(agents) != 1 || agents[0].Connector != "codex" {
+		t.Fatalf("agents=%+v err=%v, want the previous agents kept", agents, err)
+	}
+	done, err := MarshalUnprotectedAgentsForConfig(previous, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if UnprotectedAgentsRecordScanInProgress(done) {
+		t.Fatalf("a completed scan record %s carries the scan-in-progress marker", done)
+	}
+}
+
+// The announcement is written only when the record on disk does not already
+// name this build and config, so the cycles of an unchanged config never turn
+// a complete record pending, and keeps what the old record reported.
+func TestScanStartedRecordIsDueOnlyWhenTheRecordNamesAnotherConfig(t *testing.T) {
+	agents := []UnprotectedAgent{{User: "alice", Connector: "codex", Code: UnprotectedCodeAgentUnprotected, Reason: "no hook contract"}}
+	completed, err := MarshalUnprotectedAgentsForConfig(agents, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	announced, err := MarshalUnprotectedAgentsScanStarted(agents, 7, "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		current []byte
+		gen     uint64
+		sha     string
+		want    bool
+	}{
+		{"no record", nil, 7, "abc", true},
+		{"record of the previous generation", completed, 8, "def", true},
+		{"same number, other digest", completed, 7, "def", true},
+		{"unreadable record", []byte("{"), 7, "abc", true},
+		{"completed scan of this config", completed, 7, "abc", false},
+		{"announcement of this config", announced, 7, "abc", false},
+		{"config without a generation", completed, 0, "", false},
+		{"config without a digest", completed, 8, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := unprotectedScanStartedRecord(tc.current, tc.gen, tc.sha)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (data != nil) != tc.want {
+				t.Fatalf("announcement due=%v, want %v", data != nil, tc.want)
+			}
+			if data == nil {
+				return
+			}
+			if !UnprotectedAgentsRecordScanInProgress(data) || UnprotectedAgentsRecordConfigGeneration(data) != tc.gen {
+				t.Fatalf("announcement %s is not marked or not stamped with %d", data, tc.gen)
+			}
+			if tc.current != nil && string(tc.current) == string(completed) {
+				kept, err := ParseUnprotectedAgents(data)
+				if err != nil || len(kept) != 1 {
+					t.Fatalf("kept agents %+v err=%v, want the previous agents", kept, err)
+				}
+			}
+		})
+	}
+}

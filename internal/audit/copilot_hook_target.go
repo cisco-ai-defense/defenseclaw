@@ -50,9 +50,14 @@ func copilotHookEventSpellings(event string) ([]string, bool) {
 // alertTargetPredicateSQL is the --target filter of alert review. Alerts
 // show one Copilot hook target for both harnesses (copilot:preToolUse), so
 // that value also selects the alerts stored as copilot:PreToolUse; a bare
-// event name matches both spellings on copilot rows only (GAP-2619). Any
-// other target is compared exactly. Values are bound as SQL parameters.
+// event name matches both spellings on copilot rows only (GAP-2619). The
+// cowork:* Target of a Claude Cowork call selects its stored claudecode
+// target on Cowork rows only (cowork audit M1). Any other target is compared
+// exactly. Values are bound as SQL parameters.
 func alertTargetPredicateSQL(target string) (string, []any) {
+	if stored, ok := coworkAlertTarget(target); ok {
+		return coworkAlertTargetPredicateSQL(target, stored)
+	}
 	head, event, prefixed := strings.Cut(target, ":")
 	if prefixed && strings.EqualFold(strings.TrimSpace(head), "copilot") {
 		if spellings, ok := copilotHookEventSpellings(event); ok {

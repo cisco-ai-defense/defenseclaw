@@ -36,6 +36,7 @@ func (f Facts) EnforcementProjection() Facts {
 		Tool:                                     f.Tool,
 		CWD:                                      f.CWD,
 		ActiveHome:                               f.ActiveHome,
+		CurrentWindowsDrive:                      f.CurrentWindowsDrive,
 		ActiveAgentFiles:                         cloneSlice(f.ActiveAgentFiles),
 		ActiveAgentFilesCaseInsensitive:          cloneSlice(f.ActiveAgentFilesCaseInsensitive),
 		ActiveAgentFilesCaseInsensitiveUncertain: f.ActiveAgentFilesCaseInsensitiveUncertain,

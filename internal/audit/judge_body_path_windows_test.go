@@ -79,11 +79,17 @@ func TestJudgeBodyWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.
 
 // After an ACL reset the store's folder inherits C:\ProgramData's
 // container-only Users create-child entry; it cannot replace a child, so the
-// store opens.
+// store opens. The acceptance is for a verified Secure Client host and a
+// folder inside the platform installer's roots (GAP-0566); the temp tree
+// stands in for C:\ProgramData\Cisco here.
 func TestJudgeBodyWindowsAcceptsInheritedCreateChildOnFolder(t *testing.T) {
-	parent := filepath.Join(t.TempDir(), "parent")
+	base := t.TempDir()
+	t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
+	state := filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
+	verifySecureClientHostForAuditTest(t, true, state)
+	parent := filepath.Join(state, "parent")
 	directory := filepath.Join(parent, "store")
-	if err := os.Mkdir(parent, 0o700); err != nil {
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := secureJudgeBodyPlatformPath(parent, true); err != nil {
@@ -105,6 +111,45 @@ func TestJudgeBodyWindowsAcceptsInheritedCreateChildOnFolder(t *testing.T) {
 	}
 	if err != nil {
 		t.Fatalf("inherited container-only create-child entry refused: %v", err)
+	}
+}
+
+func TestJudgeBodyWindowsRefusesInheritedCreateChildForOSSOnSecureClientHost(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sid  func() (*windows.SID, error)
+	}{
+		{"Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinBuiltinUsersSid) }},
+		{"Authenticated Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
+			verifySecureClientHostForAuditTest(t, true, filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw"))
+			parent := filepath.Join(base, "Cisco", "oss")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := secureJudgeBodyPlatformPath(parent, true); err != nil {
+				t.Fatal(err)
+			}
+			principal, err := tc.sid()
+			if err != nil {
+				t.Fatal(err)
+			}
+			addJudgeBodyWindowsContainerOnlyGrant(t, parent, principal, 0x116)
+			directory := filepath.Join(parent, "store")
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewJudgeBodyStore(filepath.Join(directory, "judge_bodies.db"))
+			if store != nil {
+				_ = store.Close()
+			}
+			if err == nil {
+				t.Fatal("a per-user judge-body folder accepted an inherited create-child entry")
+			}
+		})
 	}
 }
 

@@ -48,6 +48,7 @@ from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 from tests.helpers import record_test_setup_agent_selections
 from tests.os_view import os_view
+from tests.test_seed_long_paths import _failing_copytree
 
 
 def test_init_health_probe_refuses_an_unverified_gateway() -> None:
@@ -458,6 +459,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         with (
             patch.object(cmd_init.platform_support, "host_os", return_value="linux"),
             patch.object(cmd_init, "_closed_fail_mode_connectors", return_value=["openclaw"]),
+            patch.object(cmd_init, "_proxy_model_outage_closed", return_value=True),
             patch.object(cmd_init, "_sandboxes_possible", return_value=False),
             patch.object(cmd_init, "_unguarded_acp_summary", return_value=""),
         ):
@@ -470,6 +472,34 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertIn("defenseclaw setup <connector> --replace", text)
         self.assertIn("OpenClaw model calls fail while the DefenseClaw gateway is down", text)
         self.assertIn("Nothing starts the gateway for OpenClaw", text)
+
+    def test_next_for_openclaw_says_the_requests_continue_when_the_outage_mode_is_open(self):
+        # GAP-0824: the default and permissive packs let OpenClaw model requests continue with a warning.
+        from types import SimpleNamespace
+
+        from defenseclaw.commands import cmd_init
+
+        report = SimpleNamespace(
+            status="ok", connector="openclaw", profile="action", setup=[], readiness=[], next_commands=[]
+        )
+        for closed, want in (
+            (False, "OpenClaw model calls continue with a warning while the DefenseClaw gateway is down"),
+            (None, "OpenClaw model calls follow the gateway-outage mode"),
+        ):
+            lines: list[str] = []
+            renderer = SimpleNamespace(
+                title=lambda *a: None, section=lambda *a: None, step=lambda *a: None, echo=lines.append
+            )
+            with (
+                patch.object(cmd_init.platform_support, "host_os", return_value="linux"),
+                patch.object(cmd_init, "_proxy_model_outage_closed", return_value=closed),
+                patch.object(cmd_init, "_sandboxes_possible", return_value=False),
+                patch.object(cmd_init, "_unguarded_acp_summary", return_value=""),
+            ):
+                cmd_init._render_first_run_report(report, renderer)
+            text = "\n".join(lines)
+            self.assertIn(want, text)
+            self.assertNotIn("model calls fail while", text)
 
     def test_header_profile_says_mixed_when_connector_modes_differ(self):
         # GAP-1224: one connector in action and the rest in observe is not "profile=observe".
@@ -969,7 +999,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(lock.read_bytes(), prior_lock)
         self.assertEqual(Path(self.tmp_dir, "config.yaml").read_bytes(), config_before)
 
-    def test_native_setup_copilot_bootstrap_remains_compatible(self):
+    def test_removed_native_setup_copilot_flag_is_rejected(self):
+        # The per-user Windows Setup that passed it is gone (cowork-1-0-8 GAP-0088).
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
             result = self._invoke([
                 "--non-interactive",
@@ -982,22 +1013,11 @@ class TestInitFirstRunBackend(unittest.TestCase):
                 "--no-start-gateway",
                 "--no-verify",
                 "--native-setup-copilot",
-                "--json-summary",
-            ])
-
-        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.assertEqual(json.loads(result.output)["connector"], "copilot")
-
-    def test_native_setup_copilot_bootstrap_rejects_non_setup_shape(self):
-        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
-            result = self._invoke([
-                "--connector",
-                "copilot",
-                "--native-setup-copilot",
             ])
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("reserved for the exact non-interactive native Windows Setup invocation", result.output)
+        self.assertIn("No such option", result.output)
+        self.assertIn("--native-setup-copilot", result.output)
 
     def test_windows_antigravity_is_available_through_ordinary_init(self):
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
@@ -1063,97 +1083,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No such option", result.output)
         self.assertIn("--native-setup-antigravity", result.output)
-
-    def test_internal_antigravity_bootstrap_requires_actual_setup_parent(self):
-        from defenseclaw.commands import cmd_init
-
-        expected = os.path.join(self.tmp_dir, "DefenseClawSetup-x64.exe")
-        install_root = os.path.join(self.tmp_dir, "installed")
-        launcher = os.path.join(install_root, "bin", "defenseclaw.exe")
-        launcher_pid = 101
-        setup_pid = 202
-        setup_args = [
-            "--non-interactive",
-            "--yes",
-            "--connector",
-            "antigravity",
-            "--profile",
-            "observe",
-            "--skip-install",
-            "--no-start-gateway",
-            "--no-verify",
-            "--json-summary",
-        ]
-        environment = {
-            cmd_init._INTERNAL_SETUP_CONNECTOR_ENV: "antigravity",
-            cmd_init._INTERNAL_SETUP_PARENT_ENV: expected,
-            cmd_init._INSTALL_ROOT_ENV: install_root,
-        }
-        with patch.dict(os.environ, environment, clear=False), patch(
-            "defenseclaw.commands.cmd_init.os.getppid",
-            return_value=launcher_pid,
-        ), patch(
-            "defenseclaw.commands.cmd_init._process_parent_id_windows",
-            return_value=setup_pid,
-        ), patch(
-            "defenseclaw.commands.cmd_init._process_image_path_windows",
-            side_effect=lambda pid: {launcher_pid: launcher, setup_pid: expected}.get(pid),
-        ):
-            self.assertTrue(cmd_init._internal_antigravity_setup_parent_matches())
-            with patch(
-                "defenseclaw.commands.cmd_init.platform_support.host_os",
-                return_value="windows",
-            ):
-                result = self.runner.invoke(
-                    init_cmd,
-                    setup_args,
-                    obj=AppContext(),
-                    env={"DEFENSECLAW_HOME": self.tmp_dir, **environment},
-                )
-            self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-            self.assertEqual(json.loads(result.output)["connector"], "antigravity")
-
-        with patch.dict(os.environ, environment, clear=False), patch(
-            "defenseclaw.commands.cmd_init.os.getppid",
-            return_value=launcher_pid,
-        ), patch(
-            "defenseclaw.commands.cmd_init._process_parent_id_windows",
-            return_value=setup_pid,
-        ), patch(
-            "defenseclaw.commands.cmd_init._process_image_path_windows",
-            side_effect=lambda pid: {
-                launcher_pid: launcher,
-                setup_pid: os.path.join(self.tmp_dir, "powershell.exe"),
-            }.get(pid),
-        ):
-            self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
-            with patch(
-                "defenseclaw.commands.cmd_init.platform_support.host_os",
-                return_value="windows",
-            ):
-                result = self.runner.invoke(
-                    init_cmd,
-                    setup_args,
-                    obj=AppContext(),
-                    env={"DEFENSECLAW_HOME": self.tmp_dir, **environment},
-                )
-            self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("internal Antigravity Setup binding is invalid", result.output)
-
-        with patch.dict(os.environ, environment, clear=False), patch(
-            "defenseclaw.commands.cmd_init.os.getppid",
-            return_value=launcher_pid,
-        ), patch(
-            "defenseclaw.commands.cmd_init._process_parent_id_windows",
-            return_value=setup_pid,
-        ), patch(
-            "defenseclaw.commands.cmd_init._process_image_path_windows",
-            side_effect=lambda pid: {
-                launcher_pid: os.path.join(self.tmp_dir, "attacker", "defenseclaw.exe"),
-                setup_pid: expected,
-            }.get(pid),
-        ):
-            self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
 
     def test_with_judge_defaults_hook_coverage_to_all(self):
         result = self._invoke([
@@ -2661,6 +2590,33 @@ class TestInitSeedsSplunkBridge(unittest.TestCase):
         self.assertTrue(os.path.isfile(seeded_bin))
         self.assertTrue(os.access(seeded_bin, os.X_OK))
 
+    @patch("defenseclaw.long_paths.shutil.copytree", side_effect=_failing_copytree("splunk-bridge"))
+    @patch("defenseclaw.commands.cmd_init._resolve_splunk_bridge_bundle")
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_warns_and_continues_when_the_splunk_runtime_cannot_be_copied(
+        self,
+        mock_path,
+        _mock_env,
+        _mock_scanners,
+        _mock_guardrail,
+        _mock_which,
+        mock_bundle,
+        _mock_copytree,
+    ):
+        mock_path.return_value = Path(self.tmp_dir)
+        mock_bundle.return_value = Path(self.bundle_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("could not seed the Splunk bridge", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "splunk-bridge")))
+
 
 class TestSeedLocalObservabilityStack(unittest.TestCase):
     """Cover the seed/refresh contract for the local observability bundle.
@@ -3197,6 +3153,9 @@ class TestInitFailModeFlag(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.assertIn("--fail-mode", result.output)
+        # A saved choice wins over the policy tier, except the two cases that stay closed.
+        text = " ".join(result.output.split())
+        self.assertIn("except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed", text)
 
     def test_fail_mode_closed_persists_to_config(self):
         result = self._invoke([

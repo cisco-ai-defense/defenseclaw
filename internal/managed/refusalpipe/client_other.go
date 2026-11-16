@@ -19,3 +19,9 @@ func Send(context.Context, Report) error { return nil }
 func OwnStatus(context.Context) ([]byte, error) {
 	return nil, errors.New("the own-status pipe is Windows only")
 }
+
+// AccountExcluded is Windows only: the Unix hook socket authenticates the
+// caller and the gateway judges the exclusion itself.
+func AccountExcluded(context.Context) (bool, error) {
+	return false, errors.New("the exclusion pipe is Windows only")
+}

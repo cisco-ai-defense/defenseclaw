@@ -65,7 +65,8 @@ func darwinCanonicalFormFor(kind ObjectKind, opts CanonicalOptions) (darwinCanon
 		form.Mode = 0o640
 	case ObjectRuntimeSecretFile:
 		form.Mode = 0o600
-	case ObjectConfigDirectory, ObjectInstallDirectory, ObjectServiceInstallDirectory, ObjectAdminDirectory:
+	case ObjectConfigDirectory, ObjectInstallDirectory, ObjectServiceInstallDirectory,
+		ObjectSecureClientMarkerDirectory, ObjectAdminDirectory:
 		form.Mode = 0o755
 	case ObjectInstallFile, ObjectServiceInstallFile:
 		form.Mode = 0o755
@@ -275,7 +276,7 @@ func canonicalizeOpenedDarwin(
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
-	if assessment.Owner == ownerUntrusted && !opts.AllowUntrustedOwnerTransfer {
+	if assessment.Owner == ownerUntrusted && !ownerTransferAllowed(result.Kind, opts) {
 		result.Outcome = CanonicalBoundary
 		result.RepairError = "owner is not trusted; not adopted"
 		reportCanonicalResult(result, opts)

@@ -21,19 +21,22 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import cowork
-from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_status, cmd_uninstall
+from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_setup_cowork, cmd_status, cmd_uninstall
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.inventory import claude_desktop
@@ -48,6 +51,26 @@ def _hooks_doc() -> dict:
     return {
         "hooks": {
             event: [{"hooks": [{"type": "command", "command": command, "timeout": 30}]}]
+            for event in sorted(cowork.COWORK_EVENTS)
+        }
+    }
+
+
+def _windows_hooks_doc(guard: Path, data_dir: Path, launcher: Path) -> dict:
+    return {
+        "hooks": {
+            event: [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": str(guard),
+                            "args": ["cowork-guard", str(data_dir), str(launcher), event],
+                            "timeout": 30,
+                        }
+                    ]
+                }
+            ]
             for event in sorted(cowork.COWORK_EVENTS)
         }
     }
@@ -81,7 +104,7 @@ def app():
         patch.object(cowork, "managed_host", return_value=""),
         patch.object(cowork, "claude_desktop_installed", return_value=True),
         patch.object(cowork, "open_claude", return_value=True),
-        patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value=GATEWAY),
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(GATEWAY, "")),
     ):
         yield ctx
     cleanup_app(ctx, db_path, tmp_dir)
@@ -98,6 +121,30 @@ def _data_dir(app) -> str:
     return str(app.cfg.data_dir)
 
 
+def test_cowork_names_found_gateway_with_unsafe_acl(app) -> None:
+    reason = "refusing to run the gateway: ACL grants write access to untrusted SID S-1-5-32-545; Restore its ACL"
+    with (
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(None, reason)),
+    ):
+        with pytest.raises(click.ClickException) as exc:
+            cmd_setup_cowork._render_hooks(app.cfg)
+
+    assert "S-1-5-32-545" in str(exc.value)
+    assert "Restore its ACL" in str(exc.value)
+    assert "was not found" not in str(exc.value)
+
+
+def test_cowork_missing_gateway_keeps_install_guidance(app) -> None:
+    with (
+        patch.object(cmd_setup, "_gateway_lifecycle_resolution", return_value=(None, "")),
+    ):
+        with pytest.raises(click.ClickException) as exc:
+            cmd_setup_cowork._render_hooks(app.cfg)
+
+    assert "was not found" in str(exc.value)
+    assert "Run the DefenseClaw installer" in str(exc.value)
+
+
 def test_plugin_zip_has_only_the_manifest_and_hooks() -> None:
     data = cowork.plugin_zip_bytes(_hooks_doc(), "1.0.3", "1.0.8")
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -112,8 +159,166 @@ def test_plugin_zip_has_only_the_manifest_and_hooks() -> None:
         cowork.validate_hooks_document(extra)
 
 
-def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
-    first, calls = _setup(app, "--yes")
+@pytest.mark.parametrize("layout", ["one-line", "native"])
+def test_windows_plugin_bundles_guard_for_every_event(tmp_path: Path, layout: str) -> None:
+    root = tmp_path / "DC %!&^() account"
+    if layout == "one-line":
+        launcher = root / "bin" / "defenseclaw-hook.exe"
+        source = root / "bin" / "defenseclaw-hook-guard.exe"
+    else:
+        launcher = root / "HookRuntime" / "defenseclaw-hook.exe"
+        source = root / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-hook-guard.exe"
+    source.parent.mkdir(parents=True)
+    guard_body = (
+        b"MZ\x00guard"
+        if os.name == "nt"
+        else b'#!/bin/sh\nif [ -f "$2.cowork-uninstalled" ]; then\n'
+        b"  printf '%s\\n' '{\"systemMessage\":\"Customize > Plugins\"}'\n"
+        b"else\n  printf '%s\\n' '{\"ordinary\":true}'\nfi\nprintf '%s\\n' \"$@\" >&2\n"
+    )
+    source.write_bytes(guard_body)
+    data_dir = root / "data"
+    rendered = _windows_hooks_doc(source, data_dir, launcher)
+    data = cowork.plugin_zip_bytes(rendered, "1.0.3", "1.0.9")
+    assert all(rendered["hooks"][event][0]["hooks"][0]["command"] == str(source) for event in cowork.COWORK_EVENTS)
+    if os.name != "nt":
+        source.chmod(0o700)
+        for event in cowork.COWORK_EVENTS:
+            args = rendered["hooks"][event][0]["hooks"][0]["args"]
+            result = subprocess.run([str(source), *args], text=True, capture_output=True, timeout=5)
+            assert result.returncode == 0 and json.loads(result.stdout) == {"ordinary": True}
+            assert result.stderr.splitlines() == args
+    source.unlink()
+    if os.name != "nt":
+        Path(str(data_dir) + ".cowork-uninstalled").write_text("removed\n", encoding="utf-8")
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        assert zf.read("hooks/defenseclaw-hook-guard.exe") == guard_body
+        assert "bin/defenseclaw-hook-guard.exe" not in zf.namelist()
+        hooks = json.loads(zf.read("hooks/hooks.json"))["hooks"]
+        plugin_root = root / "plugin"
+        if os.name != "nt":
+            zf.extract("hooks/defenseclaw-hook-guard.exe", plugin_root)
+            (plugin_root / "hooks" / "defenseclaw-hook-guard.exe").chmod(0o700)
+        for event in cowork.COWORK_EVENTS:
+            handler = hooks[event][0]["hooks"][0]
+            assert handler["command"] == "${CLAUDE_PLUGIN_ROOT}/hooks/defenseclaw-hook-guard.exe"
+            assert handler["args"] == ["cowork-guard", str(data_dir), str(launcher), event]
+            if os.name != "nt":
+                command = handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(plugin_root))
+                result = subprocess.run([command, *handler["args"]], text=True, capture_output=True, timeout=5)
+                assert result.returncode == 0 and "Customize" in result.stdout
+                assert result.stderr.splitlines() == handler["args"]
+
+
+@pytest.fixture(scope="module")
+def _windows_handler_binaries(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    if os.name != "nt":
+        pytest.skip("Windows executable runtime")
+    build_dir = tmp_path_factory.mktemp("cowork-guard-build")
+    repo = Path(__file__).resolve().parents[2]
+    guard_binary = build_dir / "built-guard.exe"
+    launcher_binary = build_dir / "built-launcher.exe"
+    launcher_source = build_dir / "launcher.go"
+    launcher_source.write_text(
+        'package main\nimport ("fmt"; "os")\nfunc main() { '
+        'if os.Getenv("DC_COWORK_TEST_DENY") == "1" { os.Exit(2) }; '
+        'fmt.Println(`{"ordinary":true}`) }\n',
+        encoding="utf-8",
+    )
+    build_env = {**os.environ, "GOTOOLCHAIN": "go1.26.4"}
+    subprocess.run(
+        ["go", "build", "-ldflags", "-H=windowsgui", "-o", str(guard_binary), "./cmd/defenseclaw-hook-guard"],
+        cwd=repo,
+        env=build_env,
+        check=True,
+        timeout=180,
+    )
+    subprocess.run(
+        ["go", "build", "-o", str(launcher_binary), str(launcher_source)],
+        cwd=repo,
+        env=build_env,
+        check=True,
+        timeout=180,
+    )
+    return guard_binary, launcher_binary
+
+
+@pytest.mark.parametrize("layout", ["one-line", "native"])
+def test_windows_packaged_handler_runs_after_binary_removal(
+    tmp_path: Path, layout: str, _windows_handler_binaries: tuple[Path, Path]
+) -> None:
+    """Start each retained handler, including the path used by PreToolUse."""
+    guard_binary, launcher_binary = _windows_handler_binaries
+    root = tmp_path / "DC %!&^() account"
+    if layout == "one-line":
+        launcher = root / "bin" / "defenseclaw-hook.exe"
+        source = root / "bin" / "defenseclaw-hook-guard.exe"
+    else:
+        launcher = root / "HookRuntime" / "defenseclaw-hook.exe"
+        source = root / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-hook-guard.exe"
+    source.parent.mkdir(parents=True)
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(guard_binary, source)
+    shutil.copyfile(launcher_binary, launcher)
+    data_dir = root / "data"
+    (data_dir / "cowork").mkdir(parents=True)
+    (data_dir / "config.yaml").write_text("installed\n", encoding="utf-8")
+    archive = cowork.plugin_zip_bytes(_windows_hooks_doc(source, data_dir, launcher), "1.0.3", "1.0.9")
+    plugin_root = root / "plugin"
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        zf.extractall(plugin_root)
+        hooks = json.loads(zf.read("hooks/hooks.json"))["hooks"]
+
+    def invoke(event: str, *, deny: bool = False) -> subprocess.CompletedProcess[str]:
+        handler = hooks[event][0]["hooks"][0]
+        command = handler["command"].replace("${CLAUDE_PLUGIN_ROOT}", str(plugin_root))
+        return subprocess.run(
+            [command, *handler["args"]],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=30,
+            env={**os.environ, "DC_COWORK_TEST_DENY": "1" if deny else "0"},
+        )
+
+    for event in sorted(cowork.COWORK_EVENTS):
+        result = invoke(event)
+        assert result.returncode == 0 and json.loads(result.stdout) == {"ordinary": True}, (event, result)
+    assert invoke("PreToolUse", deny=True).returncode == 2
+    source.unlink()
+    assert invoke("PreToolUse").returncode == 0
+    launcher.unlink()
+    assert invoke("PreToolUse").returncode == 2
+    shutil.rmtree(data_dir)
+    marker = Path(cowork.uninstalled_marker_path(str(data_dir)))
+    marker.write_text("removed\n", encoding="utf-8")
+    for event in sorted(cowork.COWORK_EVENTS):
+        for suffix in (".notice", ".context"):
+            shutil.rmtree(str(marker) + suffix, ignore_errors=True)
+        result = invoke(event)
+        assert result.returncode == 0 and "Customize" in result.stdout, (event, result)
+        if event == "UserPromptSubmit":
+            assert "additionalContext" in result.stdout
+
+
+def _built_hooks_gateway(tmp_path: Path):
+    """The gateway that builds the plugin: a Windows host builds the native guard
+    form, which is the one its status reader accepts as current, from a guard
+    and launcher that are installed."""
+    if os.name != "nt":
+        return None
+    install = tmp_path / "installed"
+    install.mkdir(exist_ok=True)
+    for name in ("defenseclaw-hook-guard.exe", "defenseclaw-hook.exe"):
+        (install / name).write_bytes(b"MZ installed fixture")
+    doc = _windows_hooks_doc(
+        install / "defenseclaw-hook-guard.exe", tmp_path / "account", install / "defenseclaw-hook.exe",
+    )
+    return _gateway(stdout=json.dumps(doc))
+
+
+def test_build_bumps_and_a_rebuild_clears_the_confirmation(app, tmp_path: Path) -> None:
+    first, calls = _setup(app, "--yes", gateway=_built_hooks_gateway(tmp_path))
     assert first.exit_code == 0, first.output
     assert calls[0][:3] == [GATEWAY, "connector", "cowork-plugin"]
     assert "observe mode: records only" in first.output and "--mode action" in first.output
@@ -124,7 +329,7 @@ def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
         return _health(last_activity_at=stamp, last_session_start_at=stamp), ""
 
     with patch("defenseclaw.commands.cmd_setup_cowork._gateway_health", side_effect=health):
-        waited, _ = _setup(app, "--yes", "--wait", "--timeout", "10")
+        waited, _ = _setup(app, "--yes", "--wait", "--timeout", "10", gateway=_built_hooks_gateway(tmp_path))
     assert waited.exit_code == 0, waited.output
     assert "Cowork is protected: a Cowork session reached" in waited.output
     assert "observe mode: records only" in waited.output
@@ -132,7 +337,7 @@ def test_build_bumps_and_a_rebuild_clears_the_confirmation(app) -> None:
     assert state["version"] > v1 and state["last_event_at"] and state["confirmed_at"]
     assert cowork.cowork_status(app.cfg, None, gateway_running=True).protected
 
-    rebuilt, _ = _setup(app, "--yes")
+    rebuilt, _ = _setup(app, "--yes", gateway=_built_hooks_gateway(tmp_path))
     assert rebuilt.exit_code == 0, rebuilt.output
     state = cowork.load_state(_data_dir(app))
     assert "last_event_at" not in state and "confirmed_at" not in state and state["previous_event_at"]
@@ -200,6 +405,16 @@ def test_claude_code_prerequisite_yes_and_decline(app) -> None:
     assert os.path.exists(cowork.zip_path(_data_dir(app)))
 
 
+@pytest.mark.parametrize(("host_os", "shown"), [("linux", True), ("darwin", False)])
+def test_setup_cowork_says_cowork_on_linux_is_a_preview(app, host_os, shown) -> None:
+    # Cowork audit P4-3: the support matrix lists Cowork on Linux as Preview.
+    notice = "Cowork on Linux is a preview: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified."
+    with patch("defenseclaw.platform_support.host_os", return_value=host_os):
+        result, _ = _setup(app, "--yes")
+    assert result.exit_code == 0, result.output
+    assert (notice in " ".join(result.output.split())) is shown, result.output
+
+
 def test_setup_cowork_refuses_beside_a_managed_install(app) -> None:
     with (
         patch.object(cowork, "managed_host", return_value="standalone"),
@@ -246,15 +461,46 @@ def test_uninstall_dry_run_names_the_cowork_removal_step(app) -> None:
     cowork.save_state(_data_dir(app), {"build": 1, "version": "1.0.1"})
     plan = cmd_uninstall.UninstallPlan(data_dir=_data_dir(app))
     with (
-        patch("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", return_value=None),
         patch.object(cmd_uninstall, "_build_plan", return_value=plan),
         patch.object(cmd_uninstall, "_render_plan"),
         patch.object(cmd_uninstall, "_execute_plan") as execute,
     ):
         result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--dry-run"])
     assert result.exit_code == 0, result.output
+    assert (
+        "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
+        in result.output
+    )
     assert "Customize > Plugins, then the ... menu > Remove" in result.output
+    assert "older plugins may block" in result.output
     execute.assert_not_called()
+
+
+def test_completed_uninstall_records_cowork_removal(app) -> None:
+    data_dir = _data_dir(app)
+    cowork.save_state(data_dir, {"build": 1, "version": "1.0.1"})
+    plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, remove_data_dir=True)
+    with (
+        patch.object(cmd_uninstall, "_build_plan", return_value=plan),
+        patch.object(cmd_uninstall, "_render_plan"),
+        patch.object(cmd_uninstall, "_execute_plan"),
+        patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+        patch.object(cmd_uninstall, "_remove_marked_native_otel_left"),
+        patch.object(cmd_uninstall, "_render_kept_and_next_steps"),
+    ):
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert Path(cowork.uninstalled_marker_path(data_dir)).read_text(encoding="utf-8") == "removed\n"
+    assert "Customize > Plugins, then the ... menu > Remove" in result.output
+
+
+def test_new_cowork_build_clears_a_previous_removal_record(app) -> None:
+    data_dir = _data_dir(app)
+    assert cowork.uninstalled_marker_path(data_dir + os.sep) == cowork.uninstalled_marker_path(data_dir)
+    cowork.mark_uninstalled(data_dir)
+    result, _ = _setup(app, "--yes")
+    assert result.exit_code == 0, result.output
+    assert not os.path.exists(cowork.uninstalled_marker_path(data_dir))
 
 
 def test_live_activity_before_the_build_is_not_protection(app) -> None:
@@ -434,6 +680,58 @@ def test_protection_survives_a_gateway_restart(app) -> None:
     assert next(c for c in r.checks if c.get("check_id") == "doctor.cowork")["status"] == "pass"
 
 
+def _with_windows_drive_paths(data: bytes) -> bytes:
+    """Give the hook arguments of a built plugin the drive-letter paths a Windows
+    host writes. The builder runs here on the host path rules, but the status
+    reader judges the archive by Windows rules, and Python 3.13 no longer reads
+    a path with one leading slash as absolute there."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            body = src.read(info.filename)
+            if info.filename == "hooks/hooks.json":
+                doc = json.loads(body)
+                for groups in doc["hooks"].values():
+                    for group in groups:
+                        for handler in group["hooks"]:
+                            handler["args"][1] = "C:\\ProgramData\\DefenseClaw"
+                            handler["args"][2] = "C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe"
+                body = (json.dumps(doc, indent=2) + "\n").encode()
+            dst.writestr(info, body)
+    return out.getvalue()
+
+
+def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch, tmp_path: Path) -> None:
+    released = Path(__file__).resolve().parents[2] / (
+        "internal/gateway/connector/testdata/released-carriers/1.0.8/cowork-plugin-hooks-windows.json"
+    )
+    archive = Path(cowork.zip_path(_data_dir(app)))
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(released, "hooks/hooks.json")
+    cowork.save_state(_data_dir(app), {"build": 8, "version": "1.0.8", "built_at": _now(-600)})
+    _write_gateway_activity(app, _now(-300))
+    monkeypatch.setattr(cowork.sys, "platform", "win32")
+    health = {"connectors": [{"name": "claudecode"}]}
+
+    row = cowork.cowork_status(app.cfg, health, gateway_running=True)
+    assert row is not None and not row.protected
+    assert row.reason_code == "cowork_plugin_stale"
+    assert row.step == "defenseclaw setup cowork"
+    check = cmd_doctor._DoctorResult()
+    with patch.object(cmd_doctor, "_authenticated_gateway_health", return_value=(health, "", True)):
+        cmd_doctor._check_cowork(app.cfg, {"gateway": {}}, check)
+    doctor_row = next(c for c in check.checks if c.get("check_id") == "doctor.cowork")
+    assert doctor_row["status"] == "warn" and doctor_row["reason_code"] == "cowork_plugin_stale"
+
+    source = tmp_path / "bin" / "defenseclaw-hook-guard.exe"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ current guard")
+    current = _windows_hooks_doc(source, tmp_path / "account", tmp_path / "bin" / "defenseclaw-hook.exe")
+    archive.write_bytes(_with_windows_drive_paths(cowork.plugin_zip_bytes(current, "1.0.9-test", "1.0.9")))
+    assert cowork.cowork_status(app.cfg, health, gateway_running=True).protected
+
+
 def test_gateway_activity_before_the_build_is_not_protection(app) -> None:
     cowork.save_state(_data_dir(app), {"build": 4, "version": "1.0.4", "built_at": _now(-60)})
     _write_gateway_activity(app, _now(-600))
@@ -458,5 +756,7 @@ def test_plugin_write_refusal_names_the_administrators_owner_and_the_fix(tmp_pat
     monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda path: ("S-1-5-32-544", False, []))
     monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: "S-1-5-21-1-2-3-1001")
     message = cowork.plugin_write_refusal(str(tmp_path), OSError("refusing"))
-    assert "belongs to the Administrators group because it was created from an elevated administrator session" in message
+    assert (
+        "belongs to the Administrators group because it was created from an elevated administrator session" in message
+    )
     assert '/setowner "*S-1-5-21-1-2-3-1001"' in message

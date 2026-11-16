@@ -108,20 +108,3 @@ def test_seeded_env_contains_only_the_current_connector_keys() -> None:
         "AWS_SESSION_TOKEN",
     ):
         assert f"write_key {alternative_secret}" not in seed_script
-
-
-def test_windows_live_provider_secrets_are_harness_and_connector_scoped() -> None:
-    windows = _jobs()["windows-live"]
-    assert _provider_references(windows.get("env", {})) == set()
-
-    harness = _step(windows, "Native Windows live harness")
-    assert harness["env"] == {
-        "OPENAI_API_KEY": _secret_expression("OPENAI_API_KEY", "codex", "opencode"),
-        "ANTHROPIC_API_KEY": _secret_expression("ANTHROPIC_API_KEY", "claudecode"),
-        "AMP_API_KEY": _secret_expression("AMP_API_KEY", "amp"),
-        "CURSOR_API_KEY": _secret_expression("CURSOR_API_KEY", "cursor"),
-    }
-
-    for step in windows["steps"]:
-        if step.get("name") != "Native Windows live harness":
-            assert _provider_references(step) == set(), step.get("name", step.get("uses"))

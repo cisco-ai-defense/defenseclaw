@@ -2706,7 +2706,17 @@ type cachedAgentSignal struct {
 	BinaryPath string `json:"binary_path"`
 	Installed  *bool  `json:"installed"`
 	Error      string `json:"error"`
+	// Identity names the executable the version was read from (the Python
+	// _executable_identity: path, size, times, file id, change time).
+	Identity []json.RawMessage `json:"identity"`
 }
+
+// cachedAgentIdentityFields is the length of a recorded executable identity.
+const cachedAgentIdentityFields = 6
+
+// unidentifiedCachedVersionError is the reason recorded for a cached version
+// that names no executable. It reads as "not probed" to the refusal text.
+const unidentifiedCachedVersionError = "version not probed: the cached version records no executable identity"
 
 // agentVersionProbeErrorMaxBytes bounds the discovery error a refusal quotes.
 const agentVersionProbeErrorMaxBytes = 400
@@ -2808,9 +2818,19 @@ func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bo
 	if payload.Agents == nil {
 		return cachedAgentSignal{}, false
 	}
-	signal, ok := payload.Agents[normalizeConnectorName(connectorName)]
+	name := normalizeConnectorName(connectorName)
+	signal, ok := payload.Agents[name]
 	if !ok {
 		return cachedAgentSignal{}, false
+	}
+	// The Kiro hook floor is judged from this version alone, so a version that
+	// names no executable (a cache written before discovery recorded one) is
+	// never admitted: the file may have changed to one below the floor since.
+	// It reads as not probed until discovery reads the agent again and rewrites
+	// the entry with its identity. Python judges the identity against the file.
+	if name == "kiro" && strings.TrimSpace(signal.Version) != "" && len(signal.Identity) != cachedAgentIdentityFields {
+		signal.Version = ""
+		signal.Error = unidentifiedCachedVersionError
 	}
 	return signal, true
 }

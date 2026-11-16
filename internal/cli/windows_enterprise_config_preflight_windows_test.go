@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows"
+
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -94,6 +96,7 @@ func TestWindowsStandaloneConfigPreflightRefusesForeignRuntimePaths(t *testing.T
 // inherited Users write ACE there is repairable drift, so it must not stop
 // a valid supplied config before Setup can do that repair.
 func TestWindowsStandaloneConfigPreflightAllowsRepairableRuntimeACLDrift(t *testing.T) {
+	requireAdministratorTestToken(t, "the fixture needs a BUILTIN\\Administrators owner on its folders, which only an administrator token can set (a standard user can create the folders under C:\\ProgramData, not give them that owner)")
 	previousLayout, previousSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
 	t.Cleanup(func() {
 		windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource = previousLayout, previousSource
@@ -116,8 +119,19 @@ func TestWindowsStandaloneConfigPreflightAllowsRepairableRuntimeACLDrift(t *test
 		"*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX").CombinedOutput(); err != nil {
 		t.Skipf("set trusted fixture ACL: %v: %s", err, output)
 	}
-	if output, err := exec.Command("icacls.exe", root, "/setowner", "*S-1-5-32-544", "/T", "/C").CombinedOutput(); err != nil {
-		t.Skipf("set fixture owner: %v: %s", err, output)
+	output, err := exec.Command("icacls.exe", root, "/setowner", "*S-1-5-32-544", "/T", "/C").CombinedOutput()
+	administrators, sidErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if sidErr != nil {
+		t.Fatal(sidErr)
+	}
+	for _, path := range []string{root, runtimeDir} {
+		sd, ownerErr := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if ownerErr != nil {
+			t.Fatal(ownerErr)
+		}
+		if owner, _, ownerErr := sd.Owner(); ownerErr != nil || !owner.Equals(administrators) {
+			t.Fatalf("icacls did not give %s the Administrators owner (owner %v, %v; icacls %v: %s)", path, owner, ownerErr, err, output)
+		}
 	}
 	const serviceUser = `NT SERVICE\DefenseClawGateway`
 	if err := managed.ValidateTrustedServiceRuntimeDir(runtimeDir, "managed data_dir", serviceUser); err != nil {

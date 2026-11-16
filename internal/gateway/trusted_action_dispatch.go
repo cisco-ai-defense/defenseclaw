@@ -22,11 +22,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/netip"
 	"os"
 	osuser "os/user"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -156,6 +158,13 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// StrictPolicy grades an unverifiable extra argument as a block.
+	StrictPolicy bool
+	// ManagedInstall is set for a call judged by a managed enterprise install:
+	// content the rules could not prove is judged as the strict tier judges it,
+	// because a managed device fails closed.
+	ManagedInstall             bool
+	UnknownKeyPossibleOverflow bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -170,8 +179,20 @@ type trustedActionRequest struct {
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
 	DowngradeReadOnlyDataArgs bool
+	// operandBounded marks the bounded reading of a call over the operand
+	// bound (operandBoundDispatch): it is judged once, not bounded again.
+	operandBounded bool
+	// statementBounded marks the statement-bounded reading of a call
+	// (operandBoundDispatch). It only adds findings to the reading judged
+	// before it, which has no path facts for the long statement, so an
+	// operand the client map leaves out does not fail it closed.
+	statementBounded bool
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
+	// CopilotSharedLocalFile marks an exact file call decoded from a Local
+	// body in the per-user CLI document. Its direct protected read has the same
+	// file-action authority as its lexical path.
+	CopilotSharedLocalFile bool
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
@@ -197,6 +218,10 @@ type trustedActionRequest struct {
 	// a line break as another file directive. Its write views require the
 	// narrower patch-target proof, including in guest-directory views.
 	patchTarget bool
+	// strictPatchLinks is set for a patch target judged in the strict policy
+	// tier: a target the managed hook resolved through a link is not trusted
+	// there (hermesClientPatchTarget).
+	strictPatchLinks bool
 	// Sandbox absolute targets are guest names; their host-directory views
 	// carry the filesystem proof.
 	patchHostView   bool
@@ -204,6 +229,10 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// stateProofOnly limits the judgment to the rule that proves a write to
+	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
+	// that proof (loginGuessProvedFinding), so no other rule needs to run.
+	stateProofOnly bool
 	// overBudgetOmission, when set, is told that the authorized-keys proof
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
@@ -213,6 +242,10 @@ type trustedActionRequest struct {
 	// resolve (an empty map value: an unreadable folder, a link loop) and
 	// this gateway cannot resolve either (rel-1-0-2:GAP-0690).
 	unresolvedTarget *bool
+	// resolvedTarget, when set, is told that the code-owned target walk
+	// confirmed a protected file rather than conservatively holding an
+	// unresolved write.
+	resolvedTarget *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -247,6 +280,40 @@ type trustedActionRequest struct {
 	// (hookpaths.TargetMemo, rel-1-0-2:GAP-0568). dispatchTrustedAction
 	// makes it; a copy of the request shares it.
 	targetMemo *hookpaths.TargetMemo
+	// simpleMemo keeps the simple commands of the call, read once for the
+	// statement budget and again for the pass of every profile member over the
+	// same input and facts. dispatchTrustedAction makes it; a copy of the
+	// request shares it, and a child command with another input reads its own.
+	simpleMemo *trustedSimpleMemo
+}
+
+// trustedSimpleMemo holds the first simple-command split asked of it.
+type trustedSimpleMemo struct {
+	mu      sync.Mutex
+	set     bool
+	input   actionfacts.Input
+	facts   actionfacts.Facts
+	simples []actionfacts.SimpleCommand
+}
+
+// commands returns actionfacts.SimpleCommands(input, facts): the split the memo
+// holds when input and facts are the ones it was made for, a fresh one
+// otherwise. The first split asked of an empty memo is kept.
+func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.SimpleCommand {
+	if memo == nil {
+		return actionfacts.SimpleCommands(input, facts)
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if memo.set {
+		if reflect.DeepEqual(memo.input, input) && reflect.DeepEqual(memo.facts, facts) {
+			return slices.Clone(memo.simples)
+		}
+		return actionfacts.SimpleCommands(input, facts)
+	}
+	memo.set, memo.input, memo.facts = true, input, facts
+	memo.simples = actionfacts.SimpleCommands(input, facts)
+	return slices.Clone(memo.simples)
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -283,23 +350,75 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	parent, endOpenedPaths := withOpenedPathScope(parent)
+	defer endOpenedPaths()
 	if ManagedEnterpriseActive() {
 		return nil
 	}
+	// A script body the hook call kept unread because its network share
+	// budget was spent is not a body that writes nothing: the strict tier
+	// judges the call as one past the evaluation limit, the others alert
+	// (shareBodyUnreadFindings, rel-1-0-6:GAP-0482). A managed gateway does
+	// not open the user home: the hook client reads the bodies and reports
+	// one it left unread in its evidence, which is judged the same way
+	// (hookpaths.ShareBodyUnreadKey, rel-1-0-9:GAP-0950).
+	defer func() {
+		budget, linkBound := hookpaths.ShareBodyUnreadCauses()
+		clientBudget, clientLinkBound := hookpaths.ClientShareBodyUnread(request.ResolvedWriteTargets)
+		budget, linkBound = budget || clientBudget, linkBound || clientLinkBound
+		if budget || linkBound {
+			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable, budget, linkBound)
+		}
+	}()
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	if request.simpleMemo == nil {
+		request.simpleMemo = &trustedSimpleMemo{}
+	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
-	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
+	// Only the strict tier judges the body of a function the text never
+	// calls; the other tiers follow the functions a call runs.
+	request.Input.StraightLineFunctions = !request.StrictPolicy
+	request.Input.ClientResolvedTargets = withLocalWriteAnswers(
+		request, clientResolvedPathTargets(request.ResolvedWriteTargets),
+		actionfacts.NativeFileWriteTargets(request.Input),
+	)
+	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
+	// Only the strict tier follows code the shell may never run into a loop
+	// binding; the other tiers follow the top-level statements before it.
+	request.Input.LoopBindsStraightLine = !request.StrictPolicy
+	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
+	bound := trustedActionCommandBound(request.Input)
+	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
+		// Past the reading bounds: no reader below parses it, and the call
+		// takes the over-limit path, which the profile decides (GAP-2537,
+		// GAP-0677). It is decided before the recovered-parse reading
+		// below, which would read the same bodies again for the same
+		// finding.
+		return trustedActionLimitFindings(request.EnforcementCapable)
+	}
+	if request.EnforcementCapable && trustedCallShellParseBound(request) {
 		return trustedActionLimitFindings(true)
 	}
-	if trustedActionCommandTooDeep(request.Input) {
-		// Past the reading bounds: no reader below parses it, and the call
-		// takes the over-limit path (GAP-2537).
-		return trustedActionLimitFindings(request.EnforcementCapable)
+	if bound == shellReadingNestedProof {
+		// The readers below read it, but past this weight they do not prove
+		// its protected targets: a call whose text may name one also gets
+		// the evaluation-limit finding the profile decides.
+		if trustedReadingBoundMayNameProtected(request) {
+			defer func() { findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable) }()
+		}
+	}
+	if bounded, handled := operandBoundDispatch(parent, request); handled {
+		// A call past actionfacts.MaxOperandsPerCall operands is unresolved
+		// (GAP-0943), and a statement of more argv words than the analysis
+		// reads has no path facts (GAP-1069): operandBoundDispatch judges
+		// the bounded readings.
+		return bounded
 	}
 	var (
 		facts     actionfacts.Facts
@@ -325,9 +444,9 @@ func dispatchTrustedAction(
 		parent = context.Background()
 	}
 	if !request.simpleCommandPass {
-		facts = actionfacts.Analyze(request.Input)
+		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
-		if trustedCallOverStatementBudget(request.Input, facts) {
+		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
 			// refused here, before the twins, the readers and the
@@ -405,9 +524,10 @@ func dispatchTrustedAction(
 	}
 
 	if !analyzed {
-		facts = actionfacts.Analyze(request.Input)
+		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
 	}
+	facts = fileToolLinkTargetFacts(facts, request)
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
 	// a text mention or an inactive .sample path needs no second reading.
@@ -421,6 +541,20 @@ func dispatchTrustedAction(
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A file-tool call with an argument key outside its reviewed schema is
+	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
+	twins, overflow := unknownKeyTwinRequests(request, facts)
+	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
+	for _, twin := range twins {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, twin.findings(parent))
 		}()
 	}
 	if conflict, ok := conflictingToolArgumentKeys(request, facts); ok {
@@ -479,20 +613,27 @@ func dispatchTrustedActionWith(
 		defer func() {
 			findings = withSSHControlFileTitle(facts, findings)
 		}()
+		// Registered with it, so it runs after every lane that adds a
+		// finding, including the pass of each simple command below.
+		defer func() {
+			findings = withProvenFindingsBeforeUnprovenKeysBlock(findings)
+		}()
 	}
 	// After every lane below, on what it returns (GAP-1469, GAP-1478).
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
 	defer func() {
-		findings = withActiveStateTargetMention(generation, request, facts, findings)
+		findings = withActiveStateTargetMention(request, facts, findings)
 	}()
 	if !request.simpleCommandPass {
 		defer func() {
 			checkedWholeWrite := false
 			wholeWriteSafe := false
+			checkedLocalOrdinary := false
+			localOrdinary := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
-			simples := actionfacts.SimpleCommands(request.Input, facts)
+			simples := request.simpleMemo.commands(request.Input, facts)
 			if len(simples) == 0 && wholeCommandKnown &&
 				(facts.Parse.Dialect != actionfacts.DialectPOSIX || facts.Parse.Status == actionfacts.StatusLimitExceeded) &&
 				trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
@@ -520,6 +661,24 @@ func dispatchTrustedActionWith(
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD
+				if simple.AbsoluteOnly {
+					// The shell directory is unknown (an eval, a cd the walk
+					// cannot read) but no operand of the command depends on
+					// it: the directory the action starts in judges it as it
+					// judges the same command written out, so a no-op eval
+					// before a write does not hide the write.
+					child.Input.CWD = request.Input.CWD
+				}
+				if simple.LoginGuess && !loginGuessReadingMayProveStateWrite(request, simple, child.Input.CWD) {
+					continue
+				}
+				if simple.UnboundUser {
+					// A name a read, loop or eval binds is not the login the
+					// home spells. The child keeps the spelling of the path
+					// as the home path it reads, but a file it reaches only
+					// through a link on disk is not a file the command names.
+					child.SkipLocalFilesystemResolution = true
+				}
 				// An earlier cd, pushd or env -C of the action moved a Git
 				// Bash shell to another native Windows directory: the
 				// child's operands resolve there (GAP-2473). The flag stays
@@ -546,6 +705,7 @@ func dispatchTrustedActionWith(
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
+				child.stateProofOnly = simple.LoginGuess
 				parent := request.Input
 				if wholeCommandKnown {
 					parent.Command = wholeCommand
@@ -555,6 +715,11 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.LoginGuess {
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return !loginGuessProvedFinding(f)
+					})
+				}
 				if child.Input.MovedWindowsShellCWD && !request.Input.MovedWindowsShellCWD {
 					// The moved-directory reading only adds findings: the
 					// child's reading without it (a hooks-dir removal or move
@@ -577,11 +742,34 @@ func dispatchTrustedActionWith(
 						wholeWriteSafe = wholeCommandKnown &&
 							request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
 								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == ""
+						if !wholeWriteSafe && wholeCommandKnown && !request.ProtectedHomeHook &&
+							(request.Connector == "claudecode" || request.Connector == "codex") &&
+							trustedPOSIXShellCall(request.Input, facts) {
+							wholeWriteSafe = hookpaths.ProvedOrdinaryVariableTargets(
+								wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+						}
 					}
 					if wholeWriteSafe {
 						// A child with a missing action-local value cannot prove a
 						// protected write by itself. The full action's class resolver
 						// has already judged that binding; retain every other rule.
+						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+							return f.RuleID == "persistence.ssh_authorized_keys_command"
+						})
+					}
+				}
+				if !simple.UnresolvedBoundVariable && wholeCommandKnown && !request.ProtectedHomeHook &&
+					(request.Connector == "claudecode" || request.Connector == "codex") &&
+					trustedPOSIXShellCall(request.Input, facts) &&
+					slices.ContainsFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "persistence.ssh_authorized_keys_command"
+					}) {
+					if !checkedLocalOrdinary {
+						checkedLocalOrdinary = true
+						localOrdinary = hookpaths.ProvedOrdinaryVariableTargets(
+							wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+					}
+					if localOrdinary {
 						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 							return f.RuleID == "persistence.ssh_authorized_keys_command"
 						})
@@ -594,6 +782,9 @@ func dispatchTrustedActionWith(
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
+	}
+	if request.stateProofOnly {
+		options.onlyRule = loginGuessProvesRule
 	}
 	if generation == nil || len(generation.semanticRules) == 0 {
 		var fallbackTelemetry trustedActionTelemetry
@@ -747,6 +938,9 @@ func dispatchTrustedActionWith(
 		for _, candidate := range generation.semanticRules {
 			if ctx.Err() != nil {
 				break
+			}
+			if request.stateProofOnly && !loginGuessProvesRule(candidate.rule.ID) {
+				continue
 			}
 			if budget.spent() && !budget.judged(candidate, viewID) {
 				// Past the budget, only an expression another member of a
@@ -907,17 +1101,13 @@ func dispatchTrustedActionWith(
 	)
 
 	options.excludedRuleIDs = excluded
-	legacyText := request.LegacyText
-	if trustedFixtureSourceInspectionAction(request.Input, facts) {
-		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
-	}
-	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
 	scanned := scanRuleGeneration(
 		generation,
-		legacyText,
+		trustedRuleScanText(request, facts),
 		request.Input.Tool,
 		options,
 	)
+	scanned = append(scanned, fileToolLinkTargetFindings(generation, request, facts, options)...)
 	fallbackLanes := func(
 		legacyFindings []RuleFinding,
 		facts actionfacts.Facts,
@@ -950,8 +1140,13 @@ func dispatchTrustedActionWith(
 	finalized := finalizeTrustedActionFindings(
 		generation, request, contextFacts, findings,
 	)
-	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
-	finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+	if !request.stateProofOnly {
+		// These two add only SSH-key, private-key and unverified-write
+		// findings, never the state-write proof a stateProofOnly reading keeps.
+		finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
+		finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+		finalized = appendWindowsPathUnverifiedFinding(finalized, request, facts)
+	}
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -974,11 +1169,16 @@ func dispatchTrustedActionWith(
 // find candidates, then requires the executing operand's mutation role and
 // physical target before adding a finding. Keep it separate from SSH keys.
 func withActiveStateTargetMention(
-	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
+	// The bounded view of a large structured write keeps its complete target
+	// facts. Use that same view for the gateway-owned state proof as the pack
+	// rules use for their path decisions.
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+		facts = view
+	}
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
 	// (GAP-2047); so is an archive extraction into it (GAP-2415).
@@ -994,6 +1194,22 @@ func withActiveStateTargetMention(
 	// that the POSIX link, pattern and xargs checks do not read as absolute:
 	// they also judge its drive view (GAP-2577).
 	driveFacts, driveRequest, driven := gitBashDriveView(facts, request)
+	// A for loop whose body writes a path that some value of its variable (or
+	// of a variable the walk cannot read) makes active state is judged by that
+	// target, whatever the list holds and whatever runs before the loop
+	// (rel-1-0-6:GAP-0880). The match is on the spelling, so a gateway that
+	// cannot open the user home reads it as a per-user one does.
+	// A gateway behind ProtectHome receives no cwd of its own; the loop scan
+	// reads the spelling only, so it is placed where the hook client ran the
+	// call (GAP-1052).
+	loopCWD := request.Input.CWD
+	if client, placed := protectedHomeReportedDirectory(request); placed {
+		loopCWD = client
+	}
+	if command, known := trustedBashCommandInput(request.Input); known && trustedPOSIXShellCall(request.Input, facts) &&
+		hookpaths.LoopWriterReachesState(command, loopCWD, request.Input.ActiveHome, request.StrictPolicy) {
+		return withProvenActiveStateMutation(request, findings)
+	}
 	hereStringMutates, hereStringJudged := hereStringStateMutation(facts, request)
 	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
 		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
@@ -1009,6 +1225,11 @@ func withActiveStateTargetMention(
 	throughLink := func(check func(actionfacts.Facts, trustedActionRequest) bool) bool {
 		return check(facts, request) || placed && check(linkFacts, linkRequest) ||
 			driven && check(driveFacts, driveRequest)
+	}
+	// Structured write tools have no shell command to scan. Their complete
+	// path facts still prove the same mutation, independently of pack rules.
+	if actionfacts.StructuredWriteTool(request.Input.Tool) && throughLink(provenStateMutationPath) {
+		return withProvenActiveStateMutation(request, findings)
 	}
 	// A write through a link the command makes to active state is proven by
 	// the link reading: the mention scan and the whole-action proof do not
@@ -1034,46 +1255,66 @@ func withActiveStateTargetMention(
 			// followed into the state tree through a link the gateway cannot
 			// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
 			if !request.ProtectedHomeHook ||
-				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) {
+				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) &&
+					!provenStaticRedirectStateMutation(facts, request) {
 				// The mention scan places files below the state directory; a
 				// cmd /c body that removes or moves the directory itself (cmd
 				// /c rd /s /q %USERPROFILE%\.defenseclaw) names none, while the
 				// cmd twin (or the PowerShell reading, GAP-2414) proves the mutation of
 				// the state root (classifier-ps checker it9 RV9-2 X02, X07).
-				if !strings.Contains(strings.ToLower(command), ".defenseclaw") ||
-					!provenCMDSlashCStateWrite(request) && !provenPowerShellStateWrite(request) {
+				// A managed PowerShell call that reaches the state through a
+				// link names no state: its reading follows the paths the hook
+				// client placed there (GAP-1023).
+				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
+				proven := spelled && provenCMDSlashCStateWrite(request) ||
+					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)
+				if !proven {
 					return findings
 				}
 			}
-		} else if !throughLink(provenStateMutationPath) && !provenBashAggregateStateWrite(request) &&
+		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
+			!provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
 			!provenPowerShellStateWrite(request) {
 			return findings
 		}
 	}
-	return withProvenActiveStateMutation(generation, request, findings)
+	return withProvenActiveStateMutation(request, findings)
+}
+
+// provenStaticRedirectStateMutation keeps an independently proved state
+// operand when an unrelated redirect target is expanded by the shell. Both
+// complete readings of the redirect reduction must prove that operand.
+func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if facts.Authoritative() {
+		return false
+	}
+	view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts)
+	return ok && provenStateMutationPath(view, request) && provenStateMutationPath(twin, request)
 }
 
 // withProvenActiveStateMutation adds (or upgrades) the
 // tamper.detector_state_write finding of a proven mutation of the active
 // state: the one finding observe mode still blocks on
 // (provenActiveStateMutation).
-func withProvenActiveStateMutation(generation *compiledRulePackCategories, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
-	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
-	if !ok {
-		return findings
-	}
+	// This protection belongs to the gateway. A selected pack may omit or
+	// relabel the rule, but a proved mutation of active state still blocks.
 	index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
-	finding := RuleFinding{
-		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
-		Confidence: rule.Confidence, Tags: append([]string(nil), rule.Tags...),
+	canonical := RuleFinding{
+		RuleID: ruleID, Title: "DefenseClaw security state mutation", Severity: "CRITICAL",
+		Confidence: 0.98, Tags: []string{"cognitive-tampering", "tampering", "security-state"},
 		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
 	}
+	finding := canonical
 	if index >= 0 && findings[index].contributesToEnforcement() && findings[index].proof.authorizes(ruleID) &&
 		(findings[index].proof.kind == findingProofActionFactsSemantic ||
 			findings[index].proof.kind == findingProofActionFactsSubgraph) {
 		// Keep the stronger ActionFacts proof of an actual state mutation.
+		findings[index].Severity = "CRITICAL"
+		findings[index].Title = canonical.Title
+		findings[index].Tags = canonical.Tags
 		return findings
 	}
 	if index >= 0 && findings[index].disposition == findingDispositionUnspecified &&
@@ -1084,6 +1325,11 @@ func withProvenActiveStateMutation(generation *compiledRulePackCategories, reque
 		// by the rule itself: the mutation is proven ($CMD > ~/f, GAP-2225).
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
+	// The selected pack's posture and severity may differ, but a proved
+	// mutation of DefenseClaw state has one enforcement level in every pack.
+	finding.Severity = "CRITICAL"
+	finding.Title = canonical.Title
+	finding.Tags = canonical.Tags
 	finding.enforcement = findingEnforcementDetectionOnly
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed
@@ -3334,6 +3580,28 @@ func protectedHomeClientDirectory(request trustedActionRequest) (string, bool) {
 	return filepath.Clean(cwd), true
 }
 
+// protectedHomeReportedDirectory is the directory a managed hook peer
+// reported for its call, as protectedHomeClientDirectory reads it, without
+// the bound of the caller home and its project root: a project may live
+// anywhere the user can reach. It places a path only to look up the evidence
+// the client keyed by that spelling, which can add a block and never walks
+// the gateway into the directory. ok is false when the call is not a managed
+// hook peer call, the gateway knows the cwd, or the directory is not an
+// absolute path without ".." and NUL.
+func protectedHomeReportedDirectory(request trustedActionRequest) (string, bool) {
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return "", false
+	}
+	cwd := request.evidenceCWD
+	if !filepath.IsAbs(cwd) {
+		cwd = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(cwd) || hasParentElement(cwd) || strings.ContainsRune(cwd, 0) {
+		return "", false
+	}
+	return filepath.Clean(cwd), true
+}
+
 // protectedHomePrivateKeyTwinRequest returns the call of a managed hook
 // peer placed in the directory the hook client ran it in
 // (protectedHomeClientDirectory), when its text names an SSH private key
@@ -3397,7 +3665,7 @@ func protectedHomeGitHookTwinRequest(request trustedActionRequest) (trustedActio
 // write targets first, then the local filesystem when the hook allows it.
 func stateLinkResolver(request trustedActionRequest) func(string) (string, bool) {
 	return func(value string) (string, bool) {
-		if physical, found := request.ResolvedWriteTargets[value]; found {
+		if physical, found := request.ResolvedWriteTargets[value]; found && physical != "" {
 			return physical, true
 		}
 		if request.SkipLocalFilesystemResolution {
@@ -3591,7 +3859,13 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 				rewritten[index], changed = spelled, true
 			}
 		}
+		if spelled, moved := copyDestinationThroughLink(command, rewritten, home, facts.CWD, root, resolve, inState); moved {
+			rewritten, changed = spelled, true
+		}
 		if changed && globbedStateCommandMutates(command, rewritten, home, facts.CWD) {
+			return true
+		}
+		if copyThroughLinkedChild(request, command, words, home, facts.CWD, root, resolve, inState) {
 			return true
 		}
 		// `cd dclink && git clean -fdx`: a directory the command runs in
@@ -3607,6 +3881,113 @@ func globbedStateMutationThroughLink(facts actionfacts.Facts, request trustedAct
 			}
 			spelled, ok := stateWordThroughLink(strings.TrimRight(dir, "/")+"/", home, facts.CWD, root, resolve, inState)
 			if ok && globbedStateCommandMutates(program, programWords, home, strings.TrimRight(spelled, "/")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// copyDestinationThroughLink spells the destination of a cp, mv or ln, which
+// the call treats as a directory when the target-directory option names it or
+// the link it names points at one, under ~/.defenseclaw when it is a link to a
+// directory of the state (`cp -t dclink /tmp/x/conf*.yaml`, `cp /tmp/x/conf*.yaml
+// dclink`, GAP-1053). Its static directory part is the word itself, not the
+// parent stateWordThroughLink reads for a plain word.
+func copyDestinationThroughLink(
+	command actionfacts.CommandFact, words []string, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) ([]string, bool) {
+	switch path.Base(command.Program) {
+	case "cp", "mv", "ln":
+	default:
+		return words, false
+	}
+	index, attached, option := actionfacts.CopyOperandRoles(words)
+	prefix := ""
+	if index < 0 && attached != "" {
+		for position, word := range words {
+			if option[position] && strings.HasSuffix(word, attached) {
+				index, prefix = position, strings.TrimSuffix(word, attached)
+				break
+			}
+		}
+	}
+	if index < 0 {
+		return words, false
+	}
+	word := strings.TrimPrefix(words[index], prefix)
+	if word == "" || stateWordExpands(word) {
+		return words, false
+	}
+	spelled, ok := stateWordThroughLink(strings.TrimRight(word, "/")+"/", home, cwd, root, resolve, inState)
+	if !ok {
+		return words, false
+	}
+	moved := slices.Clone(words)
+	moved[index] = prefix + strings.TrimRight(spelled, "/")
+	return moved, true
+}
+
+// copyThroughLinkedChild reports a cp whose destination directory has a child
+// that is a link to protected state and whose source words can name it:
+// `cp /tmp/x/conf*.yaml dir/` with dir/config.yaml a link to
+// ~/.defenseclaw/config.yaml. cp writes through the link; a move or a link
+// replaces it. The children are the destination directory read locally, and,
+// for a gateway that may not read it, the links the hook client walked
+// (hookpaths.WalkFactChildren). GAP-1053.
+func copyThroughLinkedChild(
+	request trustedActionRequest, command actionfacts.CommandFact, words []string, home, cwd, root string,
+	resolve func(string) (string, bool),
+	inState func(string) bool,
+) bool {
+	if path.Base(command.Program) != "cp" {
+		return false
+	}
+	index, directory, option := actionfacts.CopyOperandRoles(words)
+	if index >= 0 {
+		directory = words[index]
+	}
+	if directory == "" || stateWordExpands(directory) {
+		return false
+	}
+	placed, ok := stateHomePath(directory, home, cwd)
+	if !ok {
+		return false
+	}
+	placed = path.Clean(placed)
+	var patterns []string
+	for position, word := range words {
+		if position != index && !option[position] && word != "" {
+			patterns = append(patterns, expandStateBraces(path.Base(word))...)
+		}
+	}
+	if len(patterns) == 0 {
+		return false
+	}
+	children := hookpaths.WalkFactChildren(request.ResolvedWriteTargets, placed)
+	if !request.ProtectedHomeHook && !request.SkipLocalFilesystemResolution {
+		if entries, err := hookpaths.ReadDir(placed); err == nil && len(entries) <= 4096 {
+			for _, entry := range entries {
+				if entry.Type()&fs.ModeSymlink == 0 {
+					continue
+				}
+				if physical, linked := resolve(placed + "/" + entry.Name()); linked {
+					if children == nil {
+						children = map[string]string{}
+					}
+					children[entry.Name()] = physical
+				}
+			}
+		}
+	}
+	for name, physical := range children {
+		if !inState(physical) || !statePatternReaches(home+"/.defenseclaw"+strings.TrimPrefix(physical, root), home, cwd) {
+			continue
+		}
+		for _, pattern := range patterns {
+			if shellComponentMatches(pattern, name) {
 				return true
 			}
 		}
@@ -3699,7 +4080,9 @@ func stateWordThroughLink(
 // trailing separator makes the kernel follow it (`rm -rf dclink/`). Such a
 // call names no state path, so the mention check alone let it through
 // (GAP-2047); provenStateMutationPath then judges it on the physical
-// target, as it does every other operand.
+// target, as it does every other operand. The managed agent settings
+// DefenseClaw publishes are protected like the state, so an operand whose
+// place is one of them is reported the same way (GAP-1064).
 func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionRequest) bool {
 	home := facts.ActiveHome
 	if !filepath.IsAbs(home) && (!request.gitBashDrive || !path.IsAbs(home)) {
@@ -3731,13 +4114,54 @@ func stateOperandThroughLink(facts actionfacts.Facts, request trustedActionReque
 		}
 		// `rm -rf dclink/../.defenseclaw/hooks`: the parent as the kernel
 		// walks it (GAP-2047 L5).
-		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, home); ok {
+		walked, isWalked := stateWalkSpelling(candidate, request.Input.CWD, home)
+		if isWalked {
 			if physical, ok := resolve(walkParent(walked)); ok && inState(physical) {
 				return true
 			}
 		}
+		if drive {
+			continue
+		}
+		if managedSettingsReachedThroughLink(facts, candidate, value, resolve) ||
+			isWalked && managedSettingsReachedThroughLink(facts, candidate, walked, resolve) {
+			return true
+		}
 	}
 	return false
+}
+
+// managedSettingsReachedThroughLink reports a changing operand that is no
+// managed agent settings file by its spelling but is one by the file the
+// kernel opens for it: a project link to the vendor folder, to a published
+// file or to another link (GAP-1064). The operand is followed whole, so a
+// link as its last name counts; a delete removes the final name and never
+// the file a link there reaches, so only the directory of its name is
+// followed. The spelling is walked, not cleaned, so a `..` after a link
+// ascends from the target of the link.
+func managedSettingsReachedThroughLink(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	spelling string,
+	resolve func(string) (string, bool),
+) bool {
+	walk, entry := spelling, ""
+	if candidate.Access == actionfacts.PathAccessDelete {
+		walk, entry = walkParent(spelling), filepath.Base(spelling)
+	}
+	physical, ok := resolve(walk)
+	if !ok || !filepath.IsAbs(physical) {
+		return false
+	}
+	if entry != "" {
+		physical = filepath.Join(physical, entry)
+	}
+	if filepath.Clean(physical) == filepath.Clean(spelling) {
+		return false
+	}
+	linked := candidate
+	linked.Value, linked.Normalized, linked.Resolved = physical, physical, physical
+	return managedAgentSettingsCandidate(facts, linked)
 }
 
 // fileToolWriteThroughLinkToState reports a file tool write (write_file,
@@ -3873,11 +4297,7 @@ func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRe
 // placed; a command whose directory changes it cannot place is read whole
 // in its own directory.
 func placedLinkedStateWrite(request trustedActionRequest, text, home string, links hookpaths.Links) bool {
-	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
-	if !placed || len(statements) == 0 {
-		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
-	}
-	for _, statement := range statements {
+	for _, statement := range hookpaths.PlacedOrWhole(text, request.Input.CWD, home) {
 		input := request.Input
 		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
 		projected := actionfacts.Analyze(input).EnforcementProjection()
@@ -3896,7 +4316,7 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 				return true
 			}
 		}
-		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
+		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, statement.User) {
 			targets := links.AliasTargets(operand, true)
 			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
 				// The linked entry's parent can go on through an existing
@@ -3944,14 +4364,10 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 	if home == "" {
 		return false
 	}
-	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
-	if !placed || len(statements) == 0 {
-		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
-	}
 	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
-	for _, statement := range statements {
-		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home)
-		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home)
+	for _, statement := range hookpaths.PlacedOrWhole(text, request.Input.CWD, home) {
+		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
+		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
 		if len(operands) == 0 && len(entries) == 0 {
 			continue
 		}
@@ -3969,6 +4385,10 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				if physical, ok := hookpaths.ResolveWriteTarget(operand); ok {
 					targets = append(targets, physical)
 				}
+			} else if physical, ok := hookpaths.WalkFactTarget(request.ResolvedWriteTargets, operand); ok {
+				// The link walk of the hook client places a managed call
+				// the gateway cannot read (GAP-1064).
+				targets = append(targets, physical)
 			}
 			for _, target := range targets {
 				if active, same := hookpaths.ResolveActiveStateHardlinkTarget(target, projected.ActiveHome); same {
@@ -3992,6 +4412,14 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(entry)); ok {
 					targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
 				}
+			} else if state, found := request.ResolvedWriteTargets[hookpaths.InPlaceEntryFactPrefix+entry]; found {
+				// The hook client followed the directory (rel-1-0-6:GAP-0681
+				// review 2).
+				targets = append(targets, state)
+			} else if parent, ok := hookpaths.WalkFactTarget(request.ResolvedWriteTargets, filepath.Dir(entry)); ok {
+				// The link walk of the hook client reaches the directory of
+				// an entry outside the state (GAP-1064).
+				targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
 			}
 			for _, target := range targets {
 				written := actionfacts.PathFact{
@@ -4170,7 +4598,7 @@ func stateDirectoryEntryTarget(
 		return "", false
 	}
 	entry := filepath.Join(parent, path.Base(filepath.ToSlash(value)))
-	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+	if info, err := hookpaths.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
 	}
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
@@ -4390,6 +4818,79 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 	return findings
 }
 
+// loginGuessProvedFinding reports a finding a LoginGuess reading of a simple
+// command may add: the proof of a write to DefenseClaw state. The reading
+// gives USER and LOGNAME the login the home spells, a guess the shell may
+// not hold, so it never decides a rule over the words of the command: a word
+// expanded at run time stays unproven (detection-only) there, as it is in the
+// reading without the guess.
+func loginGuessProvedFinding(finding RuleFinding) bool {
+	return loginGuessProvesRule(finding.RuleID)
+}
+
+// loginGuessProvesRule reports whether ruleID is the rule whose finding a
+// LoginGuess reading may add. Only that rule is judged on the reading
+// (trustedActionRequest.stateProofOnly): the others are discarded unread.
+func loginGuessProvesRule(ruleID string) bool {
+	return trustedActionFindingKey(ruleID) == canonicalTrustedRuleID("tamper.detector_state_write")
+}
+
+// loginGuessReadingMayProveStateWrite reports whether a LoginGuess reading of
+// a simple command is worth its full judgment. The reading only proves a
+// write to DefenseClaw state (loginGuessProvedFinding), and every lane that
+// proves one starts from a command that may name the state folder however it
+// is spelled (hookpaths.MayNameState) or whose operands the mention scan
+// resolves into the state, through a link on disk too
+// (ActionStateTargetMention, the scan withActiveStateTargetMention opens
+// with). A reading that does neither would add only its cost to a command
+// that merely names USER or LOGNAME. A managed hook proves the write from
+// the client evidence instead, so its readings are all judged, except the
+// readings of one loop iteration, whose spelled path no client evidence keys.
+func loginGuessReadingMayProveStateWrite(request trustedActionRequest, simple actionfacts.SimpleCommand, cwd string) bool {
+	return request.ProtectedHomeHook && !simple.LoopReading || hookpaths.MayNameState(simple.Text) ||
+		request.targetMemo.ActionStateTargetMention(simple.Text, cwd, request.Input.ActiveHome)
+}
+
+// withProvenFindingsBeforeUnprovenKeysBlock puts the authorized-keys block
+// that no proof backs (a write the hook could not resolve, so the managed
+// gateway fails closed) after the findings a proof backs. The block names
+// the call all the same, but the first rule names its cause: a content rule
+// proved on a function body or an if block (an unrestricted sudoers grant)
+// led the label at the top level and trailed the keys rule in a compound
+// call, because the compound pass lists its own finding before the finding
+// of each simple command (GAP-1045). The decision and the set of findings
+// do not change.
+func withProvenFindingsBeforeUnprovenKeysBlock(findings []RuleFinding) []RuleFinding {
+	const keysRule = "persistence.ssh_authorized_keys_command"
+	unproven := func(finding RuleFinding) bool {
+		return finding.RuleID == keysRule && !finding.proof.authorizes(finding.RuleID)
+	}
+	first := slices.IndexFunc(findings, unproven)
+	if first < 0 {
+		return findings
+	}
+	proven := func(finding RuleFinding) bool {
+		return finding.RuleID != keysRule && finding.contributesToEnforcement() &&
+			finding.proof.authorizes(finding.RuleID)
+	}
+	if !slices.ContainsFunc(findings[first+1:], proven) {
+		return findings
+	}
+	ordered := make([]RuleFinding, 0, len(findings))
+	ordered = append(ordered, findings[:first]...)
+	for _, finding := range findings[first:] {
+		if proven(finding) {
+			ordered = append(ordered, finding)
+		}
+	}
+	for _, finding := range findings[first:] {
+		if !proven(finding) {
+			ordered = append(ordered, finding)
+		}
+	}
+	return ordered
+}
+
 // withSimpleCommandFindings adds each command's ordinary standalone result
 // beside the whole action's result. An enforcing or alert-only proof replaces
 // a weaker finding for the same rule; a sibling removes nothing.
@@ -4554,12 +5055,12 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		codeOwnedDetection:          true,
 	},
 	"tamper.pam_permit_authentication_bypass": {
-		proves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
-			_, ok := actionfacts.ExactPAMAuthenticationBypass(input)
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactPAMAuthenticationBypass(input, facts)
 			return ok
 		},
-		boundedSubgraphProves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
-			_, ok := actionfacts.ExactPAMAuthenticationBypass(input)
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactPAMAuthenticationBypass(input, facts)
 			return ok
 		},
 		requiresExactDetectionProof: true,
@@ -5947,6 +6448,18 @@ func noRecoverableCommandFacts(facts actionfacts.Facts) bool {
 	return true
 }
 
+// trustedRuleScanText is the text the legacy rule scan reads for request:
+// the call text without known fixture data and secret-store values, with the
+// active home spelled as the path rules read it.
+func trustedRuleScanText(request trustedActionRequest, facts actionfacts.Facts) string {
+	text := request.LegacyText
+	if trustedFixtureSourceInspectionAction(request.Input, facts) {
+		text = neutralizeKnownFixtureDataLiterals(text)
+	}
+	text = neutralizeTrustedSecretStoreValue(request.Input, text)
+	return activeHomeAsTilde(text, request.Input.ActiveHome)
+}
+
 // dispatchTrustedFallback judges a call with the legacy scan and the
 // recovery lanes only. A write tool call over the argument limit whose
 // over-limit view cannot be projected, or one judged by a generation with no
@@ -5958,14 +6471,9 @@ func dispatchTrustedFallback(
 	facts actionfacts.Facts,
 	options ruleScanOptions,
 ) ([]RuleFinding, trustedActionTelemetry) {
-	legacyText := request.LegacyText
-	if trustedFixtureSourceInspectionAction(request.Input, facts) {
-		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
-	}
-	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
 	scanned := scanRuleGeneration(
 		generation,
-		legacyText,
+		trustedRuleScanText(request, facts),
 		request.Input.Tool,
 		options,
 	)
@@ -6324,7 +6832,10 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings)
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
+	if !request.StrictPolicy {
+		findings = trustedActionOrdinaryCredentialCopyFindings(facts, findings)
+	}
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
@@ -6572,24 +7083,46 @@ func filterTrustedLegacyActionContext(
 	facts actionfacts.Facts,
 	downgradeReadOnlyDataArgs bool,
 ) []RuleFinding {
-	pathMatches, mutationMatches := trustedLegacyPathRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
+	// Each match set is read only by the findings of its category, and the
+	// scan that builds it is the cost of the call: build it on first use, so
+	// a call whose findings need none (or has no finding) pays for none.
+	var (
+		pathMatches, mutationMatches map[string]struct{}
+		pathMatchesKnown             bool
+		commandMatches               map[string]struct{}
+		commandMatchesKnown          bool
+		networkMatches               map[string]struct{}
+		networkMatchesKnown          bool
 	)
-	commandMatches := trustedLegacyCommandRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
-	)
-	networkMatches := trustedLegacyNetworkRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
-	)
+	loadPathMatches := func() (map[string]struct{}, map[string]struct{}) {
+		if !pathMatchesKnown {
+			pathMatches, mutationMatches = trustedLegacyPathRuleMatches(generation, input, toolName, facts)
+			pathMatchesKnown = true
+		}
+		return pathMatches, mutationMatches
+	}
+	loadPathOnly := func() map[string]struct{} {
+		path, _ := loadPathMatches()
+		return path
+	}
+	loadMutationMatches := func() map[string]struct{} {
+		_, mutation := loadPathMatches()
+		return mutation
+	}
+	loadCommandMatches := func() map[string]struct{} {
+		if !commandMatchesKnown {
+			commandMatches = trustedLegacyCommandRuleMatches(generation, input, toolName, facts)
+			commandMatchesKnown = true
+		}
+		return commandMatches
+	}
+	loadNetworkMatches := func() map[string]struct{} {
+		if !networkMatchesKnown {
+			networkMatches = trustedLegacyNetworkRuleMatches(generation, input, toolName, facts)
+			networkMatchesKnown = true
+		}
+		return networkMatches
+	}
 	var (
 		readOnlyInspectionKnown bool
 		readOnlyInspection      bool
@@ -6648,11 +7181,11 @@ func filterTrustedLegacyActionContext(
 			// Dedicated command and exfiltration owners still inspect the action.
 			continue
 		case "sensitive-path":
-			if _, ok := pathMatches[finding.RuleID]; ok {
+			if _, ok := loadPathOnly()[finding.RuleID]; ok {
 				filtered = append(filtered, finding)
 			}
 		case "cognitive-file":
-			if _, ok := mutationMatches[finding.RuleID]; ok {
+			if _, ok := loadMutationMatches()[finding.RuleID]; ok {
 				if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 					finding.RuleID,
 					facts,
@@ -6663,7 +7196,7 @@ func filterTrustedLegacyActionContext(
 				filtered = append(filtered, finding)
 			}
 		case "command":
-			if _, ok := commandMatches[finding.RuleID]; ok {
+			if _, ok := loadCommandMatches()[finding.RuleID]; ok {
 				filtered = append(
 					filtered,
 					trustedLegacyProvenCommandFinding(
@@ -6675,7 +7208,7 @@ func filterTrustedLegacyActionContext(
 				)
 			}
 		case "c2":
-			if _, ok := networkMatches[finding.RuleID]; ok {
+			if _, ok := loadNetworkMatches()[finding.RuleID]; ok {
 				if proof, proven := trustedNetworkFindingProofFromActions(
 					generation,
 					finding.RuleID,
@@ -6690,11 +7223,11 @@ func filterTrustedLegacyActionContext(
 		default:
 			switch {
 			case strings.HasPrefix(finding.RuleID, "PATH-"):
-				if _, ok := pathMatches[finding.RuleID]; ok {
+				if _, ok := loadPathOnly()[finding.RuleID]; ok {
 					filtered = append(filtered, finding)
 				}
 			case strings.HasPrefix(finding.RuleID, "COG-"):
-				if _, ok := mutationMatches[finding.RuleID]; ok {
+				if _, ok := loadMutationMatches()[finding.RuleID]; ok {
 					if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 						finding.RuleID,
 						facts,
@@ -6705,7 +7238,7 @@ func filterTrustedLegacyActionContext(
 					filtered = append(filtered, finding)
 				}
 			case strings.HasPrefix(finding.RuleID, "CMD-"):
-				if _, ok := commandMatches[finding.RuleID]; ok {
+				if _, ok := loadCommandMatches()[finding.RuleID]; ok {
 					filtered = append(
 						filtered,
 						trustedLegacyProvenCommandFinding(
@@ -6717,7 +7250,7 @@ func filterTrustedLegacyActionContext(
 					)
 				}
 			case strings.HasPrefix(finding.RuleID, "C2-"):
-				if _, ok := networkMatches[finding.RuleID]; ok {
+				if _, ok := loadNetworkMatches()[finding.RuleID]; ok {
 					if proof, proven := trustedNetworkFindingProofFromActions(
 						generation,
 						finding.RuleID,
@@ -7630,7 +8163,7 @@ func trustedBashStaticWordValue(word *syntax.Word) (string, bool) {
 	if word == nil || trustedBashWordMayExpandHome(word) || shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{}, word)
+	fields, err := shellparse.Fields(&expand.Config{}, word)
 	if err != nil || len(fields) != 1 || strings.TrimSpace(fields[0]) != fields[0] {
 		return "", false
 	}
@@ -7884,7 +8417,7 @@ func trustedBashStaticFields(call *syntax.CallExpr) ([]string, bool) {
 		if uint64(len(fields))+shellparse.MinBraceFields(word) > 256 {
 			return nil, false
 		}
-		expanded, err := expand.Fields(&expand.Config{}, word)
+		expanded, err := shellparse.Fields(&expand.Config{}, word)
 		if err != nil {
 			if len(fields) == 0 {
 				return nil, false
@@ -8796,12 +9329,12 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 	if hasTwin {
 		twinFacts = actionfacts.Analyze(twin.Input)
 	}
-	state := func(member *compiledRulePackCategories, findings []RuleFinding) []RuleFinding {
-		findings = withActiveStateTargetMention(member, request, facts, findings)
+	state := func(findings []RuleFinding) []RuleFinding {
+		findings = withActiveStateTargetMention(request, facts, findings)
 		if !hasTwin || slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "tamper.detector_state_write" }) {
 			return findings
 		}
-		for _, finding := range withActiveStateTargetMention(member, twin, twinFacts, nil) {
+		for _, finding := range withActiveStateTargetMention(twin, twinFacts, nil) {
 			if finding.RuleID == "tamper.detector_state_write" {
 				findings = append(findings, finding)
 			}
@@ -8809,10 +9342,10 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 		return findings
 	}
 	if generation == nil || len(generation.members) == 0 {
-		findings = state(generation, findings)
+		findings = state(findings)
 	} else {
-		for i, member := range generation.members {
-			found := state(member, nil)
+		for i := range generation.members {
+			found := state(nil)
 			if i < len(generation.memberNames) {
 				for j := range found {
 					found[j].profile = generation.memberNames[i]
@@ -8861,7 +9394,7 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 					}
 				}
 				proved := false
-				add := func(member *compiledRulePackCategories, profile string) {
+				add := func(profile string) {
 					// Prefer the exact child reading; one proven state finding
 					// completes this rule for the current profile.
 					for i := len(readings) - 1; i >= 0; i-- {
@@ -8872,10 +9405,10 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 						}
 						var candidateFindings []RuleFinding
 						if candidate.ProtectedHomeHook && staticFunctionLiteralStateMutation(candidateFacts) {
-							candidateFindings = withProvenActiveStateMutation(member, candidate, nil)
+							candidateFindings = withProvenActiveStateMutation(candidate, nil)
 						}
 						if len(candidateFindings) == 0 {
-							candidateFindings = withActiveStateTargetMention(member, candidate, candidateFacts, nil)
+							candidateFindings = withActiveStateTargetMention(candidate, candidateFacts, nil)
 						}
 						for _, finding := range candidateFindings {
 							if finding.RuleID != "tamper.detector_state_write" {
@@ -8891,14 +9424,14 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 					}
 				}
 				if generation == nil || len(generation.members) == 0 {
-					add(generation, "")
+					add("")
 				} else {
-					for i, member := range generation.members {
+					for i := range generation.members {
 						profile := ""
 						if i < len(generation.memberNames) {
 							profile = generation.memberNames[i]
 						}
-						add(member, profile)
+						add(profile)
 					}
 				}
 				if !proved {
@@ -8959,11 +9492,7 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 		// sent no description (review r3 finding 3, r4 finding 2). Behind
 		// ProtectHome the gateway cannot read the home to prove or rule
 		// out a state write among them, so the call is held as one.
-		generation := request.generation
-		if generation == nil {
-			generation = snapshotRulePackGenerationFor(parent, request.Connector)
-		}
-		return withProvenActiveStateMutation(generation, request, findings)
+		return withProvenActiveStateMutation(request, findings)
 	}
 	if reduced == "" || reduced == command {
 		return findings
@@ -8987,7 +9516,12 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 // stopped early is counted past the stop (rel-1-0-6:GAP-0331), so its call
 // is over the budget even where the split it made is short.
 func trustedCallOverStatementBudget(input actionfacts.Input, facts actionfacts.Facts) bool {
-	simples := actionfacts.SimpleCommands(input, facts)
+	return trustedCallOverStatementBudgetWith(input, facts, actionfacts.SimpleCommands(input, facts))
+}
+
+// trustedCallOverStatementBudgetWith is trustedCallOverStatementBudget over
+// simples, the split of input and facts.
+func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfacts.Facts, simples []actionfacts.SimpleCommand) bool {
 	if slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
 		return simple.EvaluationFailure == "limit"
 	}) {
@@ -9022,6 +9556,25 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
 }
 
+// withOmittedOperandLimitFinding adds the over-limit verdict for a named
+// write operand that the client map left out, and marks it: that finding
+// blocks in every profile, as the operand may be a link to a protected file.
+// A limit finding the call already carries is left as it is.
+func withOmittedOperandLimitFinding(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	had := slices.ContainsFunc(findings, func(finding RuleFinding) bool {
+		return finding.RuleID == "ACTION-COMPOUND-LIMIT"
+	})
+	findings = withTrustedActionLimitFinding(findings, enforcementCapable)
+	if !had {
+		for index := range findings {
+			if findings[index].RuleID == "ACTION-COMPOUND-LIMIT" {
+				findings[index].omittedOperand = true
+			}
+		}
+	}
+	return findings
+}
+
 // trustedActionLimitFindings is the over-limit verdict of a shell command
 // past the policy reading bounds.
 func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
@@ -9034,29 +9587,68 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
-// trustedActionCommandTooDeep reports whether the call's command (the
-// command input, or the top-level command argument of any tool but
-// apply_patch) nests past
-// shellparse.MaxNestingDepth. Every shell reader of the gateway, the hook
-// proofs and actionfacts recurse per nesting level; such a command
-// overflowed the Windows gateway's stack (GAP-2537).
-func trustedActionCommandTooDeep(input actionfacts.Input) bool {
+// shellReadingBound is the reading bound a command is past
+// (trustedActionCommandBound).
+type shellReadingBound uint8
+
+const (
+	shellReadingWithinBounds shellReadingBound = iota
+	// shellReadingTooDeep: it nests past shellparse.MaxNestingDepth. Every
+	// shell reader of the gateway, the hook proofs and actionfacts recurse
+	// per nesting level; such a command overflowed the Windows gateway
+	// stack (GAP-2537).
+	shellReadingTooDeep
+	// shellReadingNestedBodies: its nested shell bodies weigh more than
+	// shellparse.MaxNestedBodyBytes; the readers took seconds to read them
+	// (GAP-0677).
+	shellReadingNestedBodies
+	// shellReadingNestedProof: its nested shell bodies weigh more than
+	// shellparse.MaxNestedBodyProofBytes; the readers read it but do not
+	// prove its protected targets.
+	shellReadingNestedProof
+)
+
+// trustedActionCommandBound reports the reading bound the command of the
+// call (the command input, or the top-level command argument of any tool
+// but apply_patch) is past, as shellparse.PastReadingBounds measures it.
+func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 	// The command of an apply_patch call is a patch envelope: file text,
 	// not shell. Its targets are read from the envelope, and every shell
 	// reader parses through shellparse.Reader, so a patch of ordinary text
 	// with many unclosed (, { or [ (ANSI colour escapes) is judged by its
 	// targets, not by the shell bound (GAP-2561).
 	if actionfacts.ApplyPatchTool(input.Tool) {
-		return false
+		return shellReadingWithinBounds
 	}
-	if shellparse.TooDeep(input.Command) {
-		return true
+	command := input.Command
+	if command == "" && len(bytes.TrimSpace(input.Args)) > 0 {
+		if field, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
+			command = field
+		}
 	}
-	if input.Command != "" || len(bytes.TrimSpace(input.Args)) == 0 {
-		return false
+	if shellparse.TooDeep(command) {
+		return shellReadingTooDeep
 	}
-	command, present, valid := trustedTopLevelCommandField(input.Args)
-	return valid && present && shellparse.TooDeep(command)
+	switch weight := shellparse.NestedBodyWeight(command); {
+	case weight > shellparse.MaxNestedBodyBytes:
+		return shellReadingNestedBodies
+	case weight > shellparse.MaxNestedBodyProofBytes:
+		return shellReadingNestedProof
+	}
+	return shellReadingWithinBounds
+}
+
+// trustedCallShellParseBound reports a call whose reading ends at the
+// recovered-parse proof bound. The hook client evidence tells it; a call
+// without that evidence on a gateway that reads the home (per-user: no hook
+// client sends it) is read here with the client reader, so both take the
+// same evaluation-limit path (rel-1-0-6:GAP-0534).
+func trustedCallShellParseBound(request trustedActionRequest) bool {
+	if reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]; reason != "" || request.ProtectedHomeHook {
+		return reason == "shell-parse-bound"
+	}
+	command, ok := trustedBashCommandInput(request.Input)
+	return ok && hookpaths.ShellParseBound(request.Connector, request.Input.Tool, command, request.Input.CWD, request.Input.ActiveHome)
 }
 
 func trustedBashCommandInput(input actionfacts.Input) (string, bool) {
@@ -9114,7 +9706,7 @@ func trustedPowerShellExecutionTool(tool string) bool {
 	}
 }
 
-func trustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
+func decodeTrustedTopLevelCommandField(raw json.RawMessage) (string, bool, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	opening, err := decoder.Token()
 	if err != nil || opening != json.Delim('{') {
@@ -9922,8 +10514,12 @@ func appendTrustedWindowsPathFactFindings(
 		seen[finding.RuleID] = struct{}{}
 	}
 	for _, candidate := range facts.Paths {
+		// A path with an extended-length prefix has the device flavor, though
+		// it names the same drive path.
 		if candidate.Flavor != actionfacts.PathFlavorWindows {
-			continue
+			if _, opened, _ := windowsOpenedPathOfFact(candidate); !opened {
+				continue
+			}
 		}
 		switch candidate.Access {
 		case actionfacts.PathAccessRead,
@@ -9933,7 +10529,7 @@ func appendTrustedWindowsPathFactFindings(
 		default:
 			continue
 		}
-		values := []string{candidate.Value, candidate.Normalized, candidate.Resolved}
+		values := pathFactSpellings(candidate)
 		seenValues := make(map[string]struct{}, len(values))
 		for _, value := range values {
 			if strings.TrimSpace(value) == "" {
@@ -10276,8 +10872,11 @@ func trustedLegacyPathRuleMatches(
 		mutation := path.Access == actionfacts.PathAccessWrite ||
 			path.Access == actionfacts.PathAccessAppend ||
 			path.Access == actionfacts.PathAccessDelete
-		seenValues := make(map[string]struct{}, 3)
-		for _, value := range []string{path.Value, path.Normalized, path.Resolved} {
+		seenValues := make(map[string]struct{}, 4)
+		for _, value := range append(
+			pathFactSpellings(path),
+			typedTargetRuleTexts(pathFactSpelling(path), input.ActiveHome, windowsVerbatimOperand(path.Value))...,
+		) {
 			if strings.TrimSpace(value) == "" {
 				continue
 			}

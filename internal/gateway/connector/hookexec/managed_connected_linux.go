@@ -16,11 +16,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// managedLinuxGatewayExecutable is the one gateway binary the managed unit may
+// run, from the standalone layout.
+var managedLinuxGatewayExecutable = managed.StandaloneGatewayPath("linux")
+
 const (
-	managedLinuxGatewayService    = "defenseclaw-gateway.service"
-	managedLinuxGatewayExecutable = "/opt/defenseclaw/bin/defenseclaw-gateway"
+	managedLinuxGatewayService = "defenseclaw-gateway.service"
 	// managedLinuxPeerWait bounds the peer check when the request has no
 	// shorter deadline of its own: the gateway may still be starting under
 	// socket activation, or not yet have accepted this connection.

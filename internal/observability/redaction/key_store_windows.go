@@ -283,6 +283,25 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 	if err := validateWindowsCorrelationKeyPhysicalHandle(handle); err != nil {
 		return CorrelationKey{}, false, err
 	}
+	if windowsCorrelationStandaloneRotates() {
+		// On standalone a key another account could read is rotated, not
+		// re-stamped or accepted: the material may already have been read,
+		// and anyone holding it can compute the correlation identifiers
+		// (g582 review 4 S1). This is judged first, so a key with a null
+		// DACL, which every account can read, is rotated too instead of
+		// failing the hardening check (g582 review 5 L2).
+		readers, err := windowsCorrelationHandleUntrustedReaders(handle)
+		if err != nil {
+			return CorrelationKey{}, false, err
+		}
+		if len(readers) > 0 {
+			identity, infoErr := windowsCorrelationHandleInformation(handle)
+			if infoErr != nil {
+				return CorrelationKey{}, false, infoErr
+			}
+			return CorrelationKey{}, false, &windowsCorrelationRotation{owner: strings.Join(readers, ","), identity: identity}
+		}
+	}
 	needsHardening, err := windowsCorrelationSecurityNeedsHardening(handle)
 	if err != nil {
 		return CorrelationKey{}, false, err
@@ -292,6 +311,26 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 		untrustedOwner, err := windowsCorrelationUntrustedOwner(handle)
 		if err != nil {
 			return CorrelationKey{}, false, err
+		}
+		if windowsCorrelationStandaloneRotates() {
+			// On standalone a key another account owns or can write is never
+			// adopted or re-stamped in place: that account knows, or may
+			// have chosen, the key material. It is rotated (g582 round 4).
+			principal := untrustedOwner
+			if principal == "" {
+				writers, writersErr := windowsCorrelationHandleUntrustedWriters(handle)
+				if writersErr != nil {
+					return CorrelationKey{}, false, writersErr
+				}
+				principal = strings.Join(writers, ",")
+			}
+			if principal != "" {
+				identity, infoErr := windowsCorrelationHandleInformation(handle)
+				if infoErr != nil {
+					return CorrelationKey{}, false, infoErr
+				}
+				return CorrelationKey{}, false, &windowsCorrelationRotation{owner: principal, identity: identity}
+			}
 		}
 		if untrustedOwner != "" {
 			// Re-stamping the DACL alone leaves an untrusted owner able to
@@ -354,6 +393,50 @@ type windowsCorrelationRotation struct {
 
 func (r *windowsCorrelationRotation) Error() string {
 	return "redaction correlation key is owned by untrusted principal " + r.owner
+}
+
+// windowsCorrelationStandaloneRotates is managed.StandaloneRefusesContentDrift;
+// tests replace it.
+var windowsCorrelationStandaloneRotates = managed.StandaloneRefusesContentDrift
+
+// windowsCorrelationHandleUntrustedWriters lists the principals outside the
+// trusted set that the key's DACL lets write it.
+func windowsCorrelationHandleUntrustedWriters(handle windows.Handle) ([]string, error) {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return nil, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return nil, keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	expectedOwner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		return nil, err
+	}
+	return windowsCorrelationUntrustedWriters(dacl, expectedOwner), nil
+}
+
+// windowsCorrelationHandleUntrustedReaders returns the principals outside the
+// trusted set that the key's DACL lets read it. A null DACL lets every
+// account read it.
+func windowsCorrelationHandleUntrustedReaders(handle windows.Handle) ([]string, error) {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return nil, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return nil, keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	if dacl == nil {
+		return []string{"Everyone (null DACL)"}, nil
+	}
+	expectedOwner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		return nil, err
+	}
+	return windowsCorrelationUntrustedReaders(dacl, expectedOwner), nil
 }
 
 // windowsCorrelationUntrustedOwner returns the key's owner when it is neither

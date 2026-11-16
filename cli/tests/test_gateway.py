@@ -26,7 +26,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from defenseclaw import gateway
+from defenseclaw import gateway, gateway_path
 
 
 class ResolveGatewayBinaryTests(unittest.TestCase):
@@ -41,11 +41,11 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
         # duration of each test.  Patching a module-level constant is
         # the simplest way to redirect both canonical_install_path() and
         # the fallback lookup inside resolve_gateway_binary().
-        self._orig_install_dir = gateway._CANONICAL_INSTALL_DIR
-        gateway._CANONICAL_INSTALL_DIR = self._tmp.name
+        self._orig_install_dir = gateway_path._CANONICAL_INSTALL_DIR
+        gateway_path._CANONICAL_INSTALL_DIR = self._tmp.name
         self.addCleanup(
             lambda: setattr(
-                gateway,
+                gateway_path,
                 "_CANONICAL_INSTALL_DIR",
                 self._orig_install_dir,
             )
@@ -168,6 +168,51 @@ class ResolveGatewayBinaryTests(unittest.TestCase):
                 self.assertEqual(gateway.resolve_gateway_binary(), sibling)
             with patch.object(gateway.sys, "argv", [os.path.join(launcher_dir, "pytest")]):
                 self.assertIsNone(gateway.resolve_gateway_binary())
+
+    def test_the_gateway_beside_this_launcher_wins_over_an_older_one_on_path(self):
+        # GAP-0099: a terminal opened before the install listed the 0.8.x Setup
+        # bin first; its gateway rejected this release's config.
+        launcher_dir = os.path.join(self._tmp.name, "launcher")
+        launcher = os.path.join(launcher_dir, "defenseclaw")
+        sibling = os.path.join(launcher_dir, os.path.basename(gateway.canonical_install_path()))
+        older = os.path.join(self._tmp.name, "older", "defenseclaw-gateway")
+        for path in (launcher, sibling, older):
+            self._make_executable(path)
+        with patch.object(gateway.shutil, "which", return_value=older):
+            with patch.object(gateway.sys, "argv", [launcher, "init"]):
+                self.assertEqual(gateway.resolve_gateway_binary(), sibling)
+                self.assertEqual(gateway.path_gateway(), sibling)
+            # Not run as a defenseclaw launcher: PATH decides, as before.
+            with patch.object(gateway.sys, "argv", [os.path.join(launcher_dir, "pytest")]):
+                self.assertEqual(gateway.resolve_gateway_binary(), older)
+                self.assertEqual(gateway.path_gateway(), older)
+
+    def test_the_installer_venv_resolves_its_own_gateway_before_path(self):
+        # GAP-0099: the per-user installer's native launcher runs the CLI from
+        # <data>/.venv/Scripts/defenseclaw; the gateway stays in the bin folder.
+        canonical = gateway.canonical_install_path()
+        launcher_name = "defenseclaw" + (".exe" if os.name == "nt" else "")
+        self._make_executable(canonical)
+        self._make_executable(os.path.join(os.path.dirname(canonical), launcher_name))
+        data = os.path.join(self._tmp.name, "data")
+        os.makedirs(os.path.join(data, "installer"))
+        scripts = os.path.join(data, ".venv", "Scripts", "defenseclaw")
+        older = os.path.join(self._tmp.name, "older", "defenseclaw-gateway")
+        self._make_executable(older)
+        with (
+            patch.object(gateway.shutil, "which", return_value=older),
+            patch.object(gateway.sys, "argv", [scripts, "init"]),
+        ):
+            with patch.object(gateway.sys, "prefix", os.path.join(data, ".venv")):
+                self.assertEqual(gateway.resolve_gateway_binary(), canonical)
+            # A project's own .venv (no installer folder beside it) is not the installer's: PATH decides.
+            os.makedirs(os.path.join(self._tmp.name, "project"))
+            with patch.object(gateway.sys, "prefix", os.path.join(self._tmp.name, "project", ".venv")):
+                self.assertEqual(gateway.resolve_gateway_binary(), older)
+            # No installer launcher beside the gateway (a bare copy): PATH decides.
+            os.unlink(os.path.join(os.path.dirname(canonical), launcher_name))
+            with patch.object(gateway.sys, "prefix", os.path.join(data, ".venv")):
+                self.assertEqual(gateway.resolve_gateway_binary(), older)
 
     @unittest.skipIf(os.name == "nt", "the managed runtime descriptor is a Linux and macOS contract")
     def test_managed_host_falls_back_to_the_package_gateway(self):

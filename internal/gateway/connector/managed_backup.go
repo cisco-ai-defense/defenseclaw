@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,12 @@ import (
 
 const managedBackupVersion = 1
 const managedBackupMissingHash = "missing"
+
+// managedBackupDriftedHash is the post-setup hash of a record whose target
+// held bytes DefenseClaw did not commit when a later setup began. It is not a
+// digest, so no file ever matches it: an exact restore is off for good and
+// teardown or rollback removes only DefenseClaw-owned entries.
+const managedBackupDriftedHash = "drifted"
 
 type managedFileBackup struct {
 	Version        int    `json:"version"`
@@ -153,8 +160,10 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	existing, err := loadManagedFileBackupPath(backupPath)
 	if err == nil {
-		_, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath)
-		return err
+		if _, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath); err != nil {
+			return err
+		}
+		return retireManagedFileBackupExactRestore(backupPath, existing, boundPath)
 	}
 	if !os.IsNotExist(err) {
 		return fmt.Errorf("load managed backup: %w", err)
@@ -180,7 +189,43 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	} else {
 		b.PristineSHA256 = managedBackupMissingHash
 	}
-	return writeManagedFileBackup(backupPath, b)
+	if err := writeManagedFileBackup(backupPath, b); err != nil {
+		return err
+	}
+	beginManagedSetupSpan(boundPath, b.PristineSHA256, false)
+	return nil
+}
+
+// retireManagedFileBackupExactRestore runs when a setup finds a record from an
+// earlier setup. A target that does not hold the bytes DefenseClaw last
+// committed (the post hash, or the pre-setup bytes while no post hash was
+// published) was changed by someone else: the operator saving the file again,
+// the agent itself, or an earlier setup that stopped before it recorded its
+// output. The setup that follows merges over those bytes, and recording the
+// result as its own would make teardown restore the pre-setup copy over the
+// change. The record is marked instead, so only the DefenseClaw entries are
+// ever removed from that file. A target that still matches keeps the exact
+// restore, but only on condition: an in-memory span stays open until the
+// read-back update (see updateManagedFileBackupPostHash), so a setup that
+// rewrites nothing leaves the record file untouched. A target that is not a
+// regular file changes nothing.
+func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
+	endManagedSetupSpan(targetPath)
+	if b.PostSHA256 == managedBackupDriftedHash {
+		return nil
+	}
+	expected := managedFileBackupExpectedHash(&b)
+	data, info, err := readManagedTarget(targetPath)
+	if err != nil {
+		return nil
+	}
+	if managedFileSnapshotHash(data, info != nil) != expected {
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
+	}
+	beginManagedSetupSpan(targetPath, expected, true)
+	return nil
 }
 
 func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, targetPath string) error {
@@ -196,6 +241,12 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	if err != nil {
 		return err
 	}
+	if b.PostSHA256 == managedBackupDriftedHash {
+		// The file holds more than DefenseClaw wrote: it is never recorded
+		// as DefenseClaw own output (see retireManagedFileBackupExactRestore).
+		return nil
+	}
+	span, spanOpen := endManagedSetupSpan(boundPath)
 	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
 		return err
@@ -203,6 +254,29 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	nextHash := managedFileSnapshotHash(nil, false)
 	if info != nil {
 		nextHash = managedFileSnapshotHash(data, true)
+	}
+	if spanOpen && !span.later && (span.tainted || nextHash != span.expected) {
+		// A first setup records its output only when the target holds the
+		// bytes its writers committed on top of the bytes it began with
+		// (managedSetupSpan). An edit at any point in between stays out of
+		// the exact restore.
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
+	}
+	if spanOpen && span.later {
+		// A later setup began on the expected bytes (the committed ones, or
+		// the pre-setup ones while no post hash was published). Bytes it
+		// left unchanged are still ours, and the record is not rewritten.
+		// Anything else was merged over a base this read cannot vouch for
+		// (an edit may have landed between the capture and the merge), so
+		// it is never recorded as ours.
+		if nextHash == span.base {
+			return nil
+		}
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
 	}
 	return updateManagedFileBackupPostHashValue(dataDir, connectorName, logicalName, boundPath, nextHash)
 }
@@ -222,9 +296,13 @@ func updateManagedFileBackupPostHashValue(
 		}
 		return err
 	}
-	if _, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath); err != nil {
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
+	if err != nil {
 		return err
 	}
+	// The connector publishes its own hash: a span the capture opened has
+	// nothing left to vouch for.
+	endManagedSetupSpan(boundPath)
 	if nextHash == "" {
 		return fmt.Errorf("managed backup post hash is empty")
 	}
@@ -234,6 +312,20 @@ func updateManagedFileBackupPostHashValue(
 	b.PostSHA256 = nextHash
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
+}
+
+// managedFileBackupFor returns the record of connectorName for the agent file
+// at path. A store that cannot be read yields no record.
+func managedFileBackupFor(dataDir, connectorName, path string) (managedFileBackup, bool) {
+	var found managedFileBackup
+	ok := false
+	_ = forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		if strings.EqualFold(b.Connector, connectorName) && sameManagedTargetPath(b.Path, path) {
+			found, ok = b, true
+		}
+		return nil
+	})
+	return found, ok
 }
 
 func managedFileSnapshotHash(data []byte, exists bool) string {
@@ -663,8 +755,9 @@ func codexNativeCommandsForLauncher(oldLauncher string) map[string]struct{} {
 	add(legacyWindowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
 	for _, contract := range builtinHookContracts["codex"] {
 		for _, event := range contract.Events {
-			add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, oldLauncher))
-			add(windowsCodexHookCommandForBinaryEvent(event, contract.ContractID, oldLauncher))
+			for _, command := range windowsCodexPerUserHookCommands(event, contract.ContractID, oldLauncher) {
+				add(command)
+			}
 		}
 	}
 	return commands
@@ -879,20 +972,29 @@ func ensureManagedBackupDirRestricted(dir string) error {
 	return nil
 }
 
+// readManagedTarget reads a managed target without waiting on it. A missing
+// path is (nil, nil, nil); anything that is not a regular file (a named pipe, a
+// device, a directory) is an error, because opening a named pipe for reading
+// blocks until a writer appears and would stall the Setup that inspects it.
 func readManagedTarget(path string) ([]byte, os.FileInfo, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil
-		}
-		return nil, nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	info, err := os.Stat(path)
+	file, err := openManagedTargetForRead(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, nil
 		}
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
 		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is %s, not a regular file", path, hookConfigFileKind(info.Mode()))
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return data, info, nil
 }
@@ -927,6 +1029,161 @@ func RestoreManagedFileBackups(dataDir, home string) (restored, kept []string, e
 		return nil
 	})
 	return restored, kept, err
+}
+
+// RestoreManagedFileBackupsForRollback uses the saved newer install's
+// connector backup list after the older data directory is back in place.
+// Every connector absent from the restored configuration is eligible,
+// including one the restored gateway does not know. Each backup still
+// requires its exact post-setup file hash, so later operator
+// edits remain in place for the normal surgical prune to handle.
+func RestoreManagedFileBackupsForRollback(
+	savedDataDir, currentDataDir, home string, configured map[string]bool, onlyConnector string,
+) (restored, kept []string, err error) {
+	current := newManagedDataDir(currentDataDir)
+	err = forEachManagedFileBackup(savedDataDir, func(b managedFileBackup) error {
+		if configured[strings.ToLower(strings.TrimSpace(b.Connector))] ||
+			(onlyConnector != "" && !strings.EqualFold(b.Connector, onlyConnector)) {
+			return nil
+		}
+		if !managedBackupRollbackTargetUsable(b, current, home) {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if b.PostSHA256 == "" {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if !managedBackupDigestMatches(b) {
+			return fmt.Errorf("restore %s: connector backup does not match its saved digest", b.Path)
+		}
+		ok, restoreErr := restoreManagedFileBackupIfUnchanged(savedDataDir, b.Connector, b.LogicalName, b.Path)
+		switch {
+		case restoreErr != nil:
+			return fmt.Errorf("restore %s: %w", b.Path, restoreErr)
+		case ok:
+			restored = append(restored, b.Path)
+		default:
+			kept = append(kept, b.Path)
+		}
+		return nil
+	})
+	return restored, kept, err
+}
+
+func managedBackupDigestMatches(b managedFileBackup) bool {
+	return managedFileSnapshotHash(b.PristineBytes, b.Existed) == b.PristineSHA256
+}
+
+// managedBackupRollbackTargetUsable reports whether a rollback may act on the
+// agent file the record names: an absolute path inside the account home and
+// outside the data directory now in place. Restore and verification share it,
+// so a record the restore would not touch is never counted as proof.
+func managedBackupRollbackTargetUsable(b managedFileBackup, current *managedDataDir, home string) bool {
+	return managedBackupTargetInside(home, b.Path) && !current.contains(b.Path)
+}
+
+// managedDataDir is the data directory a rollback is putting back, resolved
+// once: as given (a relative folder is taken from the working directory),
+// with its links resolved, and as the directory it physically is.
+type managedDataDir struct {
+	abs      string
+	resolved string
+	info     os.FileInfo
+}
+
+// newManagedDataDir resolves dir once. A blank or unresolvable dir yields a
+// matcher that contains nothing; a dir that does not exist yet is compared by
+// spelling only.
+func newManagedDataDir(dir string) *managedDataDir {
+	if strings.TrimSpace(dir) == "" {
+		return &managedDataDir{}
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return &managedDataDir{}
+	}
+	d := &managedDataDir{abs: abs, resolved: resolveExistingPrefix(abs)}
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		d.info = info
+	}
+	return d
+}
+
+// contains reports whether path is inside the data directory by spelling, by
+// resolved links, or by identity: a folder the filesystem opens through a
+// different spelling (a case variant on a case-insensitive volume, a link)
+// is the same directory whatever its components are called.
+func (d *managedDataDir) contains(path string) bool {
+	if d == nil || d.abs == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	if managedBackupTargetInside(d.abs, path) ||
+		managedBackupTargetInside(d.resolved, resolveExistingPrefix(path)) {
+		return true
+	}
+	if d.info == nil {
+		return false
+	}
+	for cur := filepath.Dir(filepath.Clean(path)); ; {
+		if info, err := os.Stat(cur); err == nil && os.SameFile(info, d.info) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+}
+
+// resolveExistingPrefix resolves links in the longest existing leading part
+// of path and keeps the rest as written, so a file that does not exist yet
+// still lands in the folder its parent really is.
+func resolveExistingPrefix(path string) string {
+	path = filepath.Clean(path)
+	rest := ""
+	for cur := path; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return path
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// VerifyManagedFileBackups reads every connector backup record in dataDir and
+// returns how many name an agent file a rollback can restore: an absolute path
+// inside home and outside currentDataDir. A record that does not load, does
+// not sit where its connector and name put it, does not match its saved
+// digest, or names a path that is empty, relative or inside currentDataDir is
+// an error. A record for an absolute path outside home (a connector whose
+// config root the operator moved) is valid but is left alone by the restore,
+// so it is neither proof nor a veto: the other records decide. A nil error
+// with a positive count therefore means every record is sound and at least
+// one is usable. Rollback cleanup that has no config.yaml to go by needs that
+// proof before it removes anything.
+func VerifyManagedFileBackups(dataDir, currentDataDir, home string) (int, error) {
+	count := 0
+	current := newManagedDataDir(currentDataDir)
+	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		usable := managedBackupRollbackTargetUsable(b, current, home)
+		if !usable && (!filepath.IsAbs(b.Path) || current.contains(b.Path)) {
+			return fmt.Errorf("connector backup %q does not name an agent file a rollback can restore", b.Path)
+		}
+		if !managedBackupDigestMatches(b) {
+			return fmt.Errorf("connector backup %s does not match its saved digest", b.Path)
+		}
+		if usable {
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 // ManagedFileBackupTargets lists the agent file each connector backup record

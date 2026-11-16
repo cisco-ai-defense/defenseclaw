@@ -49,7 +49,6 @@ func TestSandboxDaemonStopsGatewayWhenNoSandboxRuns(t *testing.T) {
 		o.sweepForeign = func(context.Context) (bool, error) { return false, nil }
 	})
 	f.run(t)
-	f.settle(t)
 	ctx := context.Background()
 	f.os.holder.Store(int64(os.Getuid()))
 	f.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())

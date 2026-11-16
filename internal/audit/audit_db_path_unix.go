@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -117,9 +118,21 @@ func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, stri
 		verdict := managed.NewTrustVerdict("audit: database %s is group- or other-writable", kind)
 		advisory := !strict && managed.AdvisoryAncestorPath(path)
 		label := fmt.Sprintf("audit store database %s", kind)
-		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
+		if managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict) == nil {
+			return nil
+		}
+		// A refusal names the element and the one repair, so the operator is not
+		// left with a bare verdict (GAP-0825).
+		return managed.NewTrustVerdict(
+			"audit: database %s %s is group- or other-writable; as the account that owns it, run: chmod go-w %s, then run: defenseclaw-gateway restart",
+			kind, path, auditDBShellQuote(path))
 	}
 	return nil
+}
+
+// auditDBShellQuote quotes path for the repair command a refusal prints.
+func auditDBShellQuote(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
 }
 
 // macOS and some Unix installations expose a system directory as a

@@ -70,6 +70,12 @@ scheme instead of the gateway token:
   `X-DefenseClaw-Connector`, gets 401. The answer is a digest, never a
   credential. The Amp and OpenCode plugins use it to check
   that the listener is the gateway before they send the user's credential.
+- On a per-user install, the same route answers the OpenClaw plugin before
+  authentication, on the API port and on the guardrail port. The request
+  sends `X-DefenseClaw-Connector: openclaw`, the SHA-256 of the gateway token
+  as the key ID, and the nonce. The answer is 204 with the HMAC-SHA256 keyed
+  with the gateway token, in the format above. The gateway answers only a
+  loopback caller of its own OS account. Any other request gets 401.
 
 For every other route the shared authentication middleware accepts these
 header forms; all three are constant-time compared with the resolved gateway
@@ -547,7 +553,7 @@ On a managed Linux computer the Plane C entry of the snapshot carries a `backend
 
 ### Identity, profiles and IDE inventory
 
-Three read-only routes back `defenseclaw guardrail profile explain`, `defenseclaw agent identities` and `defenseclaw agent ide-plugins`, and the managed `enterprise <os> profile-explain`, `agent-identities` and `ide-plugins` commands (which use the deployment's service token). They answer to the gateway token on loopback. Secure Client does not register them; each returns `404` there ([Identity and authentication](/docs/enterprise/identity-and-authentication)).
+Three read-only routes back `defenseclaw guardrail profile explain`, `defenseclaw agent identities` and `defenseclaw agent ide-plugins`, and the managed `enterprise <os> profile-explain`, `agent-identities` and `ide-plugins` commands (which use the deployment's service token). They answer to the gateway token on loopback. [Managed command availability](/docs/enterprise/managed-commands) lists which of the `defenseclaw` commands a managed computer offers. Secure Client does not register them; each returns `404` there ([Identity and authentication](/docs/enterprise/identity-and-authentication)).
 
 | Method | Path | Purpose |
 | --- | --- | --- |

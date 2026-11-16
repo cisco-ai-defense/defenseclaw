@@ -150,7 +150,7 @@ func TestClientImageHashBudgetIsPerAccount(t *testing.T) {
 		if !ok {
 			t.Skip("no image key on this volume")
 		}
-		hasher.digestOf(file, key, account)
+		hasher.digestOf(file, key, account, nil)
 	}
 	queue("a1", "sid:S-1-5-21-1-1001")
 	queue("a2", "sid:S-1-5-21-1-1001")

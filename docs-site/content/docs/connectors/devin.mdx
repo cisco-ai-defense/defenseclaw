@@ -22,7 +22,7 @@ Use `devin` for both Devin CLI and Devin Desktop.
 | --- | --- | --- |
 | Devin CLI | **Yes** | DefenseClaw registers the `devin-hooks-v1` contract in the Devin CLI hook config. |
 | Devin Desktop 3.9.19 or later, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file and hooks with Devin CLI. DefenseClaw has not recorded a live Devin Desktop validation run. |
-| Devin Desktop before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile** | Devin Desktop 3.9.19 [removed Cascade](https://docs.devin.ai/desktop/changelog). Cascade used a separate hook contract DefenseClaw does not inspect. See [Cascade on older builds](#cascade-on-older-builds). |
+| Devin Desktop before 3.9.19, legacy **Cascade** agent | **No; DefenseClaw does not cover it. Keep Desktop at 3.9.19 or later.** | Devin Desktop 3.9.19 [removed Cascade](https://docs.devin.ai/desktop/changelog). Cascade used a separate hook contract DefenseClaw does not inspect. See [Cascade on older builds](#cascade-on-older-builds). |
 | Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
 On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
@@ -84,23 +84,31 @@ Devin Desktop starts its bundled Devin Local agent as `devin acp`, and Devin Loc
 | --- | --- |
 | Enrolls Desktop-only users | A user with Devin Desktop but no `devin` CLI is enrolled at the bundled CLI's version, read from its man page without running anything. Discovery looks for `Devin.app` in `/Applications` or `~/Applications` (macOS), `/usr/share/devin-desktop` or an unpacked `Devin` folder in `/opt` or the home (Linux), and `Devin.exe` in `%LOCALAPPDATA%\Programs\Devin` or `%ProgramFiles%\Devin` (Windows). From `3000.4.25` (Desktop 3.10 bundles `3000.10.x`) it is enrolled as an untested newer version. Below that, on the known-broken list, with no bundled CLI, or under `enterprise.enrollment.unverified_versions: refuse`, it goes to `unprotected-agents.json`. |
 | Checks plugin hooks | Plugins can ship hooks that run in every local session and rewrite tool input ([plugins](https://docs.devin.ai/cli/extensibility/plugins/overview)). The foreign-hook guard scans plugins in the CLI data folder (`~/.local/share/devin/cli/plugins`, `$XDG_DATA_HOME`, or `%LOCALAPPDATA%` on Windows), including `--local` installs. Cleanup reports plugin hooks and leaves them in place. |
-| Reports ACP registry entries | `defenseclaw-gateway enterprise policy show` lists Desktop ACP registry entries that start an uncovered agent, or start Devin Local with `--config` or with workspace trust off. Nothing is changed. |
+| Reports ACP registry entries | The gateway's `enterprise policy show` lists Desktop ACP registry entries that start an uncovered agent, or start Devin Local with `--config` or with workspace trust off. Nothing is changed. |
 | Tags the agent host | Each managed hook sends the process name that started the agent, recorded as `agent_host`, so audit separates Devin Local from the CLI. |
 | Explains session blocks | One Devin Local process serves every Desktop tab, so a foreign-hook block covers all tabs. The message says to quit and reopen Devin Desktop. |
 
-Devin Desktop's own enterprise policies cover extensions and updates, not hooks, and Cascade's system hook files do not apply to Devin Local. Desktop on these paths has not completed a live validation run.
+Devin Desktop's own enterprise policies cover extensions and updates, not hooks. Desktop on these paths has not completed a live validation run.
 
 ### Cascade on older builds
 
-Builds before 3.9.19 still run Cascade, which reads a machine-level hooks file and blocks on exit code 2 ([Cascade hooks](https://docs.devin.ai/desktop/cascade/hooks)). While `devin` is a standalone enterprise connector, DefenseClaw adds one entry to each blocking Cascade event (`pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use`). The entry prints a message that says to update Devin Desktop and use Devin Local, and exits `2`. It needs no enrollment, runtime or gateway. Administrator entries are kept.
+Builds before 3.9.19 still run Cascade, which reads a machine-level hooks file and blocks on exit code 2 ([Cascade hooks](https://docs.devin.ai/desktop/cascade/hooks)). DefenseClaw does not cover those builds and publishes no Cascade entry. Releases 1.0.5 to 1.0.8 added a refusal entry to each blocking Cascade event; it is withdrawn on the next `ensure` (the withdrawal goes away in 1.1).
 
-| OS | File |
+| OS | File an earlier release wrote the refusal into |
 | --- | --- |
 | Linux | `/etc/devin/hooks.json` |
 | macOS | `/Library/Application Support/Devin/hooks.json` |
 | Windows | `%ProgramData%\Devin\hooks.json` |
 
-Devin Desktop reads the pre-rename machine hooks file only when the Devin file is absent, and pre-rename apps read only the pre-rename file. DefenseClaw writes into each of the two files that exists, and creates only the Devin file when neither exists. Builds from 3.9.19 on have no Cascade and ignore the entries. Other Cascade hooks (cloud, user, workspace) still run, but a hook can only add a block, so none undoes the refusal. Also turn Cascade off in your Devin team settings. Set `enterprise.machine_policy.connectors.devincascade.ownership` to `verify_only` when your MDM owns the file (deploy `defenseclaw-gateway enterprise policy export --connector devincascade`), or `"off"` to leave Cascade running.
+Which client reads which machine file (from the Devin CLI 3000.12.17 and Devin Desktop 3.12.17 binaries and the vendor's Cascade hooks page; no signed-in run has confirmed it):
+
+| File | Read by | What DefenseClaw does |
+| --- | --- | --- |
+| Devin `hooks.json` | Desktop 3.12.17 reads it only for `post_setup_worktree` hooks. The Devin CLI and the Desktop engine never open it. No evidence shows that a build running Cascade pre-events reads it. | Writes nothing. Removes the entries an earlier release wrote. |
+| Pre-rename `hooks.json` (the folder name is in the [upgrade notes](/docs/get-started/upgrade)) | Pre-rename apps; Desktop as the fallback when the Devin file is absent; the Devin CLI and the Desktop engine import it as Devin Local hooks. | Writes nothing. A refusal here would block current Devin Local, so entries an earlier release wrote there are removed on the next `ensure`. |
+| Devin `system.json` | The Devin CLI and the Desktop engine, as enterprise policy. | Not touched. |
+
+No file DefenseClaw could write is proved to reach only builds that run Cascade, so `enterprise policy` reports `devincascade` as not covered and lists the limit; it does not report it as covered, and `enterprise policy export --connector devincascade` has nothing to render. Keep Devin Desktop at 3.9.19 or later and turn Cascade off in your Devin team settings. Devin Local stays protected by the `devin` connector. Set `enterprise.machine_policy.connectors.devincascade.ownership` to `verify_only` when your MDM owns these files (DefenseClaw then reports a refusal left by an earlier release and does not edit), or `"off"` to leave them alone.
 
 ## Lifecycle and enforcement
 
@@ -191,6 +199,7 @@ The image is **unverified**, so `defenseclaw sandbox run devin` refuses it. Devi
 ## Limits
 
 - Only exit code 2 blocks. Every other hook error lets the call run. Restricted Mode turns hooks off entirely.
+- On Windows, when `defenseclaw-hook.exe` is missing or cannot start (a folder, an empty or damaged file), a one-line install blocks each prompt, tool call and permission request in every fail mode, with `DefenseClaw blocked this: its Devin hook launcher is missing. Run the DefenseClaw installer again to repair it.` (or `cannot start`). On those events Devin starts the guard program `defenseclaw-hook-guard.exe`, which starts the launcher beside it. The other events, `Stop` included, start the launcher directly, so Devin runs them. If the guard program itself is missing or damaged, Devin runs the call; `defenseclaw doctor` and `defenseclaw status` report it. A managed Windows host starts the launcher directly on every event, and its guardian puts a missing launcher back.
 - Cloud Devin sessions run no local hooks and are not covered.
 - Devin Desktop before 3.9.19 runs the legacy Cascade agent, which DefenseClaw does not inspect. Keep Desktop at 3.9.19 or later. See [Cascade on older builds](#cascade-on-older-builds).
 - Devin Desktop coverage rests on vendor documentation. No live Devin Desktop run is recorded.

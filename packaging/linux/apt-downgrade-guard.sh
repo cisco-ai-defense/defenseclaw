@@ -26,6 +26,18 @@
 
 set -u
 state=/var/lib/defenseclaw-enterprise
+
+# refuse CODE MESSAGE [LINE...]: stop apt before dpkg runs. The refusal
+# starts with the lifecycle code, as the package preinstall's does; each
+# LINE is a next step on its own line (GAP-0582).
+refuse() {
+    echo "defenseclaw-enterprise: $1: $2" >&2
+    shift 2
+    for line in "$@"; do
+        echo "  $line" >&2
+    done
+    exit 1
+}
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 config=/etc/defenseclaw/config.yaml
 previous_config=/etc/defenseclaw/config.yaml.v8.bak
@@ -203,12 +215,11 @@ check() {
         floor_rc=$?
         if [ "$floor_rc" -ne 0 ]; then
             [ "$floor_rc" -eq 3 ] || floor_msg="the release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
-            echo "defenseclaw-enterprise: refusing to install $incoming: ${floor_msg#Error: } Nothing was changed." >&2
-            exit 1
+            floor_msg=${floor_msg#Error: }
+            refuse product_floor_refused "refusing to install $incoming: ${floor_msg#product_floor_refused: } Nothing was changed."
         fi
     elif [ -n "$unchecked" ]; then
-        echo "defenseclaw-enterprise: refusing to install $incoming: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed." >&2
-        exit 1
+        refuse product_floor_refused "refusing to install $incoming: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed."
     fi
     [ "$installed" != "-" ] || return 0
     not_older "$to" "$(product "$installed")" && return 0
@@ -220,14 +231,13 @@ check() {
         # deletes it.
         return 0
     fi
-    echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming. The older release may not read the current config. Nothing was changed." >&2
-    echo "  For a deliberate rollback create the marker first: sudo touch $marker" >&2
     if [ -f "$previous_config" ]; then
         config=$previous_config
     fi
-    echo "  Then install the older package; its postinstall applies it." >&2
-    echo "  If it refuses the config, run: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config $config" >&2
-    exit 1
+    refuse downgrade_refused "$installed is installed; refusing to downgrade to $incoming. The older release may not read the current config. Nothing was changed." \
+        "For a deliberate rollback create the marker first: sudo touch $marker" \
+        "Then install the older package; its postinstall applies it." \
+        "If it refuses the config, run: sudo $gateway enterprise linux ensure --from-package --allow-downgrade --config $config"
 }
 
 # A here-document, not a pipe: the loop runs in this shell, so a refusal in

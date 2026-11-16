@@ -45,7 +45,7 @@ func TestSkillFolderRefsKeepsDistinctPathsWithSameName(t *testing.T) {
 	home := t.TempDir()
 	first := filepath.Join(home, ".agents", "skills", "shared")
 	second := filepath.Join(home, "project", ".agents", "skills", "shared")
-	refs := SkillFolderRefs([]string{
+	refs := SkillFolderRefs("", []string{
 		filepath.Join(first, "SKILL.md"),
 		filepath.Join(second, "SKILL.md"),
 		filepath.Join(first, "other.md"),
@@ -58,7 +58,7 @@ func TestSkillFolderRefsKeepsDistinctPathsWithSameName(t *testing.T) {
 func TestSkillFolderRefsPreservesQuotedPathWithSpaces(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "Alice Smith")
 	dir := filepath.Join(home, ".codex", "skills", "blocked")
-	refs := SkillFolderRefs("cat '"+filepath.Join(dir, "SKILL.md")+"'", home, home)
+	refs := SkillFolderRefs("", "cat '"+filepath.Join(dir, "SKILL.md")+"'", home, home)
 	if len(refs) != 1 || refs[0].Dir != dir || refs[0].Name != "blocked" {
 		t.Fatalf("quoted skill path was not preserved: %#v", refs)
 	}
@@ -67,7 +67,7 @@ func TestSkillFolderRefsPreservesQuotedPathWithSpaces(t *testing.T) {
 func TestGAP0535SkillFolderRefsExpandsCallerAccount(t *testing.T) {
 	home := t.TempDir()
 	want := filepath.Join(home, ".claude", "skills", "folder")
-	refs := SkillFolderRefs("cat ~fixture/.claude/skills/folder/SKILL.md", home, t.TempDir(), "fixture")
+	refs := SkillFolderRefs("", "cat ~fixture/.claude/skills/folder/SKILL.md", home, t.TempDir(), "fixture")
 	if len(refs) != 1 || refs[0].Dir != want || !refs[0].Manifest {
 		t.Fatalf("caller skill path = %#v, want %s", refs, want)
 	}
@@ -76,7 +76,7 @@ func TestGAP0535SkillFolderRefsExpandsCallerAccount(t *testing.T) {
 func TestGAP0535SkillFolderRefsFollowsLeadingDirectory(t *testing.T) {
 	home, cwd := t.TempDir(), t.TempDir()
 	other := filepath.Join(home, "other")
-	refs := SkillFolderRefs("cd "+other+" && cat skills/folder/SKILL.md", home, cwd)
+	refs := SkillFolderRefs("", "cd "+other+" && cat skills/folder/SKILL.md", home, cwd)
 	if len(refs) != 1 || refs[0].Dir != filepath.Join(other, "skills", "folder") || !refs[0].ExplicitDirectory {
 		t.Fatalf("changed-directory skill path = %#v", refs)
 	}
@@ -86,7 +86,7 @@ func TestSkillFolderRefsResolvesParentBeforeSelectingSkill(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude", "skills", "denied")
 	input := filepath.Join(home, ".claude", "skills") + "/benign/../denied/SKILL.md"
-	refs := SkillFolderRefs(input, home, home)
+	refs := SkillFolderRefs("", input, home, home)
 	if len(refs) != 1 || refs[0].Dir != dir || refs[0].Name != "denied" {
 		t.Fatalf("skill path selected before normalization: %#v", refs)
 	}
@@ -98,7 +98,7 @@ func TestSkillFolderRefsIncludesNestedSkill(t *testing.T) {
 	home := t.TempDir()
 	outer := filepath.Join(home, "skills", "parent")
 	inner := filepath.Join(outer, ".agents", "skills", "denied")
-	refs := SkillFolderRefs(filepath.Join(inner, "SKILL.md"), home, home)
+	refs := SkillFolderRefs("", filepath.Join(inner, "SKILL.md"), home, home)
 	if len(refs) != 2 || refs[0].Dir != outer || refs[0].Name != "parent" ||
 		refs[1].Dir != inner || refs[1].Name != "denied" {
 		t.Fatalf("nested skill folders = %#v", refs)
@@ -114,7 +114,7 @@ func TestSkillFolderRefsKeepsPathOfLargeMultiEdit(t *testing.T) {
 	}
 	input := map[string]any{"edits": edits, "file_path": filepath.Join(dir, "SKILL.md")}
 	for i := 0; i < 200; i++ {
-		refs := SkillFolderRefs(input, home, home)
+		refs := SkillFolderRefs("", input, home, home)
 		if len(refs) != 1 || refs[0].Dir != dir {
 			t.Fatalf("run %d: denied skill path dropped: %#v", i, refs)
 		}

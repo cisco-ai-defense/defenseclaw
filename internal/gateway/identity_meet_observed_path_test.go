@@ -47,6 +47,9 @@ func TestUncertainProfileObservingTheRequestsPathDoesNotRefuseIt(t *testing.T) {
 				}
 				cfg := &config.Config{}
 				cfg.Guardrail.Mode = setup.inspectMode
+				if setup.samePack {
+					cfg.Guardrail.RulePack = "strict"
+				}
 				cfg.Guardrail.Connector = "codex"
 				cfg.Codex.Mode = setup.hookMode
 				cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{

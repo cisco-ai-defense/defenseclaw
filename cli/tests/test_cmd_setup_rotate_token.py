@@ -31,6 +31,7 @@ from defenseclaw.audit_actions import ACTION_SETUP_GATEWAY
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
 from defenseclaw.context import AppContext
+from defenseclaw.file_permissions import MAX_DOTENV_BYTES
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.environment import source_package_env
@@ -505,10 +506,7 @@ with locked_file_update(lock_base):
             finally:
                 os.chdir(previous)
 
-        which.assert_called_once_with(
-            "defenseclaw-gateway",
-            path=os.path.abspath(allowed),
-        )
+        which.assert_called_once_with(os.path.join(os.path.abspath(allowed), "defenseclaw-gateway"))
 
     def test_packaged_lifecycle_does_not_fall_back_when_sibling_is_missing(self) -> None:
         with (
@@ -2116,6 +2114,50 @@ with locked_file_update(lock_base):
         )
         self.assertEqual(restored, original)
         self.assertNotIn(("start", False, old_token), events)
+
+
+def test_rotation_checks_complete_dotenv_before_any_gateway_lifecycle_step() -> None:
+    from tempfile import TemporaryDirectory
+
+    for headroom in (0, 1):
+        with TemporaryDirectory() as directory:
+            app = _make_rotate_ctx(directory, ["codex"])
+            path = Path(directory, ".env")
+            token_line = b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n"
+            original = token_line + b"#" + b"x" * (MAX_DOTENV_BYTES - len(token_line) - 1 - headroom)
+            path.write_bytes(original)
+            path.chmod(0o600)
+            assert len(original) == MAX_DOTENV_BYTES - headroom
+            before = path.stat()
+            config_path = Path(directory, "config.yaml")
+            hook_path = Path(directory, "hooks", ".hook-codex.token")
+            other_mtimes = (config_path.stat().st_mtime_ns, hook_path.stat().st_mtime_ns)
+            events: list[str] = []
+
+            def lifecycle(_data_dir, action, *, token, config_file, connector_state=None, cleanup=False):
+                events.append(action)
+
+            with (
+                mock.patch.object(cmd_setup, "load_config", return_value=app.cfg),
+                mock.patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
+                mock.patch.object(cmd_setup, "_log_setup_action"),
+            ):
+                if not headroom:
+                    with unittest.TestCase().assertRaisesRegex(click.ClickException, "over the .* limit"):
+                        cmd_setup._rotate_token_transaction(app, os.fspath(path), "b" * 64, "size boundary")
+                else:
+                    cmd_setup._rotate_token_transaction(app, os.fspath(path), "b" * 64, "size boundary")
+
+            if not headroom:
+                after = path.stat()
+                assert events == []
+                assert path.read_bytes() == original
+                assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+                assert (config_path.stat().st_mtime_ns, hook_path.stat().st_mtime_ns) == other_mtimes
+            else:
+                assert events == ["stop", "start"]
+                assert path.stat().st_size == MAX_DOTENV_BYTES
 
 
 if __name__ == "__main__":

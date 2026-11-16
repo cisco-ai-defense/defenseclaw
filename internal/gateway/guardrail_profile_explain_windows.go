@@ -24,6 +24,11 @@ func init() {
 	windowsSAMNameForUPN = func(upn string) string { return useridentity.SAMNameForUPN(upn, profileExplainUPNWait) }
 }
 
+// profileExplainLocalKey is the key the OS account database is asked for the
+// explained account: the name as typed, which the LSA takes in every
+// spelling (.\name included, LookupWindowsAccount).
+func profileExplainLocalKey(name, _ string) string { return name }
+
 // LookupWindowsAccount names a user account given as a SID, DOMAIN\name,
 // bare name or UPN through the LSA (see resolveWindowsExplainAccount).
 // Entra ID accounts resolve only this way; `enterprise policy show|verify
@@ -117,7 +122,7 @@ func lsaAccount(sid *windows.SID) (windowsAccount, error) {
 	// The name the hook path gives the account, not the UPN its user signed
 	// in with (GAP-0533).
 	account = useridentity.CanonicalWindowsAccountName(sid.String(), account, domain)
-	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), User: use == windows.SidTypeUser}, nil
+	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), Domain: strings.TrimSpace(domain), User: use == windows.SidTypeUser}, nil
 }
 
 // profileExplainUPNWait is how long explain waits for TranslateNameW: for an

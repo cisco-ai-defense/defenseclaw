@@ -649,12 +649,14 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 	entry := preTool[0].(map[string]interface{})
 	handler := entry["hooks"].([]interface{})[0].(map[string]interface{})
-	if handler["command"] != fixture.hookExe {
-		t.Fatalf("managed command = %q, want %q", handler["command"], fixture.hookExe)
+	command, _ := handler["command"].(string)
+	if !strings.EqualFold(filepath.Base(command), "cmd.exe") {
+		t.Fatalf("managed command = %q, want the system command parent", command)
 	}
-	args := handler["args"].([]interface{})
-	if len(args) != 4 || args[0] != "hook" || args[1] != "--connector" || args[2] != "claudecode" || args[3] != "--enterprise-managed" {
-		t.Fatalf("managed exec args = %#v", args)
+	launcher, args, owned := connector.ClaudeCodeLauncherGuardTarget(handler)
+	if !owned || launcher != fixture.hookExe || len(args) != 4 ||
+		args[0] != "hook" || args[1] != "--connector" || args[2] != "claudecode" || args[3] != "--enterprise-managed" {
+		t.Fatalf("managed command does not carry the expected native hook: %q %#v", launcher, args)
 	}
 	tokenPath := filepath.Join(fixture.home, ".defenseclaw", "hooks", ".hook-claudecode.token")
 	if token, err := os.ReadFile(tokenPath); err != nil || strings.TrimSpace(string(token)) != opts.APIToken {
@@ -3487,4 +3489,43 @@ func TestWindowsManagedObstructionAlternateSlotIsBounded(t *testing.T) {
 		got != windowsManagedObstructionAlternatePath(path, 3) {
 		t.Fatalf("freed slot = %q, %v; want slot 3", got, err)
 	}
+}
+
+// setWindowsUserPathProtection gives a fixture path the canonical per-user
+// DACL for target, refusing a path target does not own. Only the tests call
+// it; it moved here from install_windows.go, where it had no caller
+// (GAP-0684).
+func setWindowsUserPathProtection(path string, target *windows.SID, directory bool) error {
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return err
+	}
+	owner, err := windowsPathOwnerNoFollow(path)
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(target) {
+		return fmt.Errorf(
+			"enterprise hooks: refusing to canonicalize wrong-owner path %s (owner %s, target %s)",
+			path,
+			windowsSIDString(owner),
+			windowsSIDString(target),
+		)
+	}
+	if !directory {
+		if err := validateWindowsRegularFileSingleLink(path); err != nil {
+			return err
+		}
+	}
+	if err := validateWindowsUserPathElement(path, target, directory, directory, true); err == nil {
+		return nil
+	}
+	acl, err := windowsUserPathProtectionACL(target, directory)
+	if err != nil {
+		return err
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }

@@ -17,6 +17,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 type Manifest struct {
@@ -74,70 +76,14 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	if strings.TrimSpace(path) == "" {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest path is required")
 	}
-	expected, err := pathidentity.LstatPinned(path)
+	var data []byte
+	err := safefile.RetryPublishedRead(func() error {
+		var readErr error
+		data, readErr = readManifestStableBytes(path)
+		return readErr
+	})
 	if err != nil {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
-	}
-	if !expected.Mode().IsRegular() {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest is not a regular non-link file: %s", path)
-	}
-	if expected.Size() > enterpriseHookManifestMaxBytes {
-		return Manifest{}, "", fmt.Errorf(
-			"enterprise hooks: manifest %s exceeds %d-byte limit",
-			path,
-			enterpriseHookManifestMaxBytes,
-		)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() || !os.SameFile(expected, info) {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest changed identity before open: %s", path)
-	}
-	if info.Size() > enterpriseHookManifestMaxBytes {
-		return Manifest{}, "", fmt.Errorf(
-			"enterprise hooks: manifest %s exceeds %d-byte limit",
-			path,
-			enterpriseHookManifestMaxBytes,
-		)
-	}
-	current, err := os.Lstat(path)
-	if err != nil || !current.Mode().IsRegular() || !os.SameFile(info, current) {
-		if err != nil {
-			return Manifest{}, "", fmt.Errorf("enterprise hooks: re-inspect manifest %s: %w", path, err)
-		}
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest changed identity before read: %s", path)
-	}
-	data, err := io.ReadAll(io.LimitReader(file, enterpriseHookManifestMaxBytes+1))
-	if err != nil {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
-	}
-	if int64(len(data)) > enterpriseHookManifestMaxBytes {
-		return Manifest{}, "", fmt.Errorf(
-			"enterprise hooks: manifest %s exceeds %d-byte limit",
-			path,
-			enterpriseHookManifestMaxBytes,
-		)
-	}
-	// Post-read identity confirmation. The pre-ReadAll Lstat above proves
-	// the entry we're about to read is still the same inode we opened, but
-	// nothing between there and here reproves it — a swap in the read
-	// window would silently give us bytes from a different file. Re-Lstat
-	// AFTER ReadAll and require size + inode identity to still match the
-	// open handle's Stat. Same pattern as stableManagedArtifactDigestWith in
-	// internal/gateway/connector/connector_state.go.
-	final, err := os.Lstat(path)
-	if err != nil {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: re-inspect manifest %s after read: %w", path, err)
-	}
-	if !final.Mode().IsRegular() || !os.SameFile(info, final) || final.Size() != int64(len(data)) {
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest changed identity during read: %s", path)
+		return Manifest{}, "", err
 	}
 	var manifest Manifest
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
@@ -200,6 +146,77 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	}
 	digest := sha256.Sum256(data)
 	return manifest, hex.EncodeToString(digest[:]), nil
+}
+
+// readManifestStableBytes repeats the whole checked read after a transient
+// name lookup failure. A successful retry must validate its own file identity.
+func readManifestStableBytes(path string) ([]byte, error) {
+	expected, err := pathidentity.LstatPinned(path)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
+	}
+	if !expected.Mode().IsRegular() {
+		return nil, fmt.Errorf("enterprise hooks: manifest is not a regular non-link file: %s", path)
+	}
+	if expected.Size() > enterpriseHookManifestMaxBytes {
+		return nil, fmt.Errorf(
+			"enterprise hooks: manifest %s exceeds %d-byte limit",
+			path,
+			enterpriseHookManifestMaxBytes,
+		)
+	}
+	file, err := winpath.OpenReadShared(path)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(expected, info) {
+		return nil, fmt.Errorf("enterprise hooks: manifest changed identity before open: %s", path)
+	}
+	if info.Size() > enterpriseHookManifestMaxBytes {
+		return nil, fmt.Errorf(
+			"enterprise hooks: manifest %s exceeds %d-byte limit",
+			path,
+			enterpriseHookManifestMaxBytes,
+		)
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !current.Mode().IsRegular() || !os.SameFile(info, current) {
+		if err != nil {
+			return nil, fmt.Errorf("enterprise hooks: re-inspect manifest %s: %w", path, err)
+		}
+		return nil, fmt.Errorf("enterprise hooks: manifest changed identity before read: %s", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, enterpriseHookManifestMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: read manifest %s: %w", path, err)
+	}
+	if int64(len(data)) > enterpriseHookManifestMaxBytes {
+		return nil, fmt.Errorf(
+			"enterprise hooks: manifest %s exceeds %d-byte limit",
+			path,
+			enterpriseHookManifestMaxBytes,
+		)
+	}
+	// Post-read identity confirmation. The pre-ReadAll Lstat above proves
+	// the entry we're about to read is still the same inode we opened, but
+	// nothing between there and here reproves it — a swap in the read
+	// window would silently give us bytes from a different file. Re-Lstat
+	// AFTER ReadAll and require size + inode identity to still match the
+	// open handle's Stat. Same pattern as stableManagedArtifactDigestWith in
+	// internal/gateway/connector/connector_state.go.
+	final, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: re-inspect manifest %s after read: %w", path, err)
+	}
+	if !final.Mode().IsRegular() || !os.SameFile(info, final) || final.Size() != int64(len(data)) {
+		return nil, fmt.Errorf("enterprise hooks: manifest changed identity during read: %s", path)
+	}
+	return data, nil
 }
 
 // validateManifestRow checks one row with the caller's platform rule

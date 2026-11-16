@@ -5,12 +5,17 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 )
 
@@ -87,3 +92,37 @@ var (
 	sleepHelperSocket = sleepUnlessCancelled
 	helperSocketNow   = time.Now
 )
+
+// brokeredHomeReader is AI Discovery's read of the user homes through the
+// root sensor helper of an unmanaged, de-privileged gateway: the Claude Cowork
+// VM package's gateway runs as defenseclaw-cowork and cannot read the session
+// users' homes (cowork-1-0-8 GAP-0008). It applies exactly where
+// chooseAcquirer brokers through an unmanaged helper, and each read trusts the
+// socket as that does (unmanagedHelperSocket, then the root peer check of
+// NewRootHelper on connect). nil everywhere else, so managed, standalone,
+// Secure Client and per-user gateways read homes as before.
+func brokeredHomeReader(cfg *config.Config) func(context.Context) (inventory.BrokeredHomeReport, error) {
+	if cfg == nil || runtime.GOOS != "linux" || managed.IsManagedEnterprise(cfg.DeploymentMode) ||
+		cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() ||
+		strings.TrimSpace(os.Getenv(acquire.SocketEnvVar)) == "" || acquire.NewLocal().WideCoverage() {
+		return nil
+	}
+	return func(ctx context.Context) (inventory.BrokeredHomeReport, error) {
+		var report inventory.BrokeredHomeReport
+		socket := unmanagedHelperSocket(ctx)
+		if socket == "" {
+			return report, errors.New("the sensor helper socket is not up or not trusted")
+		}
+		if err := newBrokeredHomeHelper(socket).Discovery(ctx, &report); err != nil {
+			if errors.Is(err, acquire.ErrDiscoveryUnsupported) {
+				return report, inventory.ErrBrokeredHomesUnsupported
+			}
+			return report, err
+		}
+		return report, nil
+	}
+}
+
+// newBrokeredHomeHelper is a seam for tests, which cannot serve a socket as
+// root.
+var newBrokeredHomeHelper = acquire.NewRootHelper

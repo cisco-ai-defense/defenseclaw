@@ -24,7 +24,7 @@ func TestConfigValidateOnManagedHostNamesTheKeyAMovedStorePathKeyBecame(t *testi
 		if err == nil {
 			t.Fatalf("%s: config validate accepted the candidate", key)
 		}
-		if !strings.HasPrefix(err.Error(), path) || !strings.Contains(err.Error(), key+" is an unknown setting; it moved to "+home+".") {
+		if !strings.HasPrefix(err.Error(), path) || !strings.Contains(err.Error(), key+" was retired in config_version 8; use "+home+".") {
 			t.Fatalf("%s: refusal = %q, want it to name %s", key, err, home)
 		}
 		if !strings.Contains(out, home) {

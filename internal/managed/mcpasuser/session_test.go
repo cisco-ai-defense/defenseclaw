@@ -54,11 +54,18 @@ func TestRequestArgRoundTripAndValidation(t *testing.T) {
 		func(r *Request) { r.Version = 2 },
 		func(r *Request) { r.GatewayService = `x\y` },
 		func(r *Request) { r.SID = "S-1-5-18-x" },
-		func(r *Request) { r.Connector = "codex" },
+		func(r *Request) { r.Connector = "opencode" },
 		func(r *Request) { r.Name = "" },
 		func(r *Request) { r.Name = "a\nb" },
 		func(r *Request) { r.Project = "C:\\p\x00" },
 		func(r *Request) { r.Digest = "abc" },
+	}
+	// Codex servers of an enrolled account are published, so they can be
+	// started as their user for the scan (GAP-0686).
+	codex := request
+	codex.Connector = "codex"
+	if _, err := EncodeRequestArg(codex); err != nil {
+		t.Fatalf("a published Codex server was refused: %v", err)
 	}
 	for i, mutate := range bad {
 		changed := request

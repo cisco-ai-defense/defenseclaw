@@ -46,3 +46,8 @@ const (
 // operands; the hook client then reads it with the whole-command decision
 // (GAP-0151).
 const MaxArgvItems = maxArgvItems
+
+// CommandTextOverLimit reports a command text over the string limit of the
+// analysis: it has no path facts, and the hook client reads it with the
+// whole-command decision.
+func CommandTextOverLimit(text string) bool { return len(text) > maxCommandBytes }

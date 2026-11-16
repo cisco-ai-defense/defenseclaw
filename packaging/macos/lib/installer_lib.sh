@@ -61,7 +61,7 @@ parse_connectors() {
 # is_supported_connector NAME -> exit 0 if name is auto-wireable.
 is_supported_connector() {
   case "$1" in
-    amp|codex|claudecode|cursor|opencode) return 0;;
+    amp|codex|claudecode|copilot|cursor|opencode) return 0;;
     *) return 1;;
   esac
 }
@@ -74,7 +74,7 @@ is_supported_connector() {
 # install.log can act on the right cause:
 #
 #   all-unsupported  Every requested connector is outside the auto-wire
-#                    allow-list (amp|codex|claudecode|cursor|opencode). The
+#                    allow-list (amp|codex|claudecode|copilot|cursor|opencode). The
 #                    hook-enumerator's tick will NOT fix this by itself
 #                    — the operator has to rerun with --connector picking
 #                    a supported entry.
@@ -137,8 +137,8 @@ home_perms_ok() {
 # Record layout: USER\tCONNECTOR\tREASON\tPATH\n
 #   USER      — DC_INSTALLER_TARGET_USER at the time of the failure
 #               (empty when the caller didn't scope to a user).
-#   CONNECTOR — connector token (amp / codex / claudecode / cursor /
-#               opencode).
+#   CONNECTOR — connector token (amp / codex / claudecode / copilot /
+#               cursor / opencode).
 #   REASON    — short machine-readable reason (e.g. "malformed-json").
 #   PATH      — absolute path of the metadata file that failed to
 #               parse; the operator can act on this directly.
@@ -832,6 +832,7 @@ _claude_desktop_embedded_version_from_home() {
 # fixed. Bash regex + arithmetic on the fields is portable to BSD
 # userland and short enough to keep inline here rather than growing a
 # new dependency.
+
 _semver_greater() {
   local -r core_re='^([0-9]+)\.([0-9]+)\.([0-9]+)'
   local a_major=0 a_minor=0 a_patch=0
@@ -859,6 +860,43 @@ _semver_greater() {
     return
   fi
   (( 10#${a_patch} > 10#${b_patch} ))
+}
+
+# _COPILOT_SYSTEM_PREFIXES are the system-wide prefixes whose npm global
+# package and Homebrew cask copilot discovery reads. A shell array set here,
+# not from the environment; the tests point it at fixtures.
+_COPILOT_SYSTEM_PREFIXES=(/usr/local /opt/homebrew)
+
+# _copilot_version_newer A B -> exit 0 when Copilot version A ranks above B
+# by SemVer precedence: a higher X.Y.Z core; for the same core a release
+# above its prereleases (1.0.105 over 1.0.105-rc.1), and two prereleases
+# by their dot-separated identifiers (rc.2 over rc.1, rc.10 over rc.9).
+# Build metadata (+...) is ignored.
+_copilot_version_newer() {
+  _semver_greater "$1" "$2" && return 0
+  _semver_greater "$2" "$1" && return 1
+  local a="${1%%+*}" b="${2%%+*}" ap="" bp=""
+  [[ "$a" == *-* ]] && ap="${a#*-}"
+  [[ "$b" == *-* ]] && bp="${b#*-}"
+  [[ -z "$ap" ]] && { [[ -n "$bp" ]]; return; }
+  [[ -z "$bp" ]] && return 1
+  local -a ai bi
+  IFS=. read -r -a ai <<< "$ap"
+  IFS=. read -r -a bi <<< "$bp"
+  local i x y
+  for (( i = 0; i < ${#ai[@]} || i < ${#bi[@]}; i++ )); do
+    (( i < ${#ai[@]} )) || return 1
+    (( i < ${#bi[@]} )) || return 0
+    x="${ai[i]}" y="${bi[i]}"
+    [[ "$x" == "$y" ]] && continue
+    if [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]]; then
+      (( 10#$x > 10#$y )); return
+    fi
+    [[ "$x" =~ ^[0-9]+$ ]] && return 1
+    [[ "$y" =~ ^[0-9]+$ ]] && return 0
+    [[ "$x" > "$y" ]]; return
+  done
+  return 1
 }
 
 # _codex_app_bundle_metadata_version APP_ROOT -> echoes version or "".
@@ -1127,6 +1165,53 @@ discover_agent_version() {
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;
+    copilot)
+      # GitHub Copilot CLI ships as the npm package @github/copilot and as
+      # the Homebrew cask copilot-cli. Read package metadata or the cask's
+      # versioned release folder only; never run the user-owned `copilot`
+      # from this root LaunchDaemon (its --version can start an update).
+      # A curl-script install leaves neither, so the version stays empty
+      # and connector_present_for_user decides. Of several installs (a
+      # stale npm package beside a current cask) the highest version
+      # wins, so an old one never selects the legacy contract, which has
+      # no userPromptTransformed hook.
+      local pkg v caskroom dir dname prefix best=""
+      local -a system_pkgs=() casks=()
+      for prefix in "${_COPILOT_SYSTEM_PREFIXES[@]}"; do
+        system_pkgs+=("${prefix}/lib/node_modules/@github/copilot/package.json")
+        casks+=("${prefix}/Caskroom/copilot-cli" "${prefix}/Caskroom/copilot-cli@prerelease")
+      done
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@github/copilot/package.json \
+        "${home}"/.nvm/versions/node/*/lib/node_modules/@github/copilot/package.json \
+        "${home}"/.bun/install/global/node_modules/@github/copilot/package.json \
+        "${system_pkgs[@]}"; do
+        [[ -f "${pkg}" ]] || continue
+        v="$(_probe_json_version "${pkg}" copilot "@github/copilot")"
+        [[ -n "${v}" ]] || continue
+        if ! _is_valid_opencode_version "${v}"; then
+          _record_discovery_error copilot "${pkg}" "invalid-version"
+          continue
+        fi
+        if [[ -z "${best}" ]] || _copilot_version_newer "${v}" "${best}"; then
+          best="${v}"
+        fi
+      done
+      for caskroom in "${casks[@]}"; do
+        [[ -d "${caskroom}" && ! -L "${caskroom}" ]] || continue
+        for dir in "${caskroom}"/*/; do
+          dir="${dir%/}"
+          [[ -d "${dir}" && ! -L "${dir}" ]] || continue
+          dname="$(basename -- "${dir}")"
+          [[ "${dname}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || continue
+          [[ -f "${dir}/copilot" && -x "${dir}/copilot" ]] || continue
+          if [[ -z "${best}" ]] || _copilot_version_newer "${dname}" "${best}"; then
+            best="${dname}"
+          fi
+        done
+      done
+      if [[ -n "${best}" ]]; then echo "${best}"; fi
+      ;;
     cursor)
       # Cursor.app is a signed macOS bundle; read the Info.plist rather
       # than exec'ing the binary. PlistBuddy is an Apple system tool.
@@ -1377,6 +1462,9 @@ prepare_userspace_for() {
     # creates its parent directory as the target user. Packaging must not
     # precreate a placeholder that could be mistaken for user state.
     opencode)   : ;;
+    # Copilot's hook file ~/.copilot/hooks/defenseclaw.json is DefenseClaw's
+    # own; the guardian creates its folder as the user and Setup writes it.
+    copilot)    : ;;
   esac
 }
 
@@ -1524,6 +1612,8 @@ enumerate_local_users() {
 #   claudecode: ~/.claude, ~/.claude/settings.json
 #   codex:      ~/.codex, ~/.codex/config.toml
 #   cursor:     ~/.cursor, ~/.cursor/hooks.json
+#   copilot:    ~/.copilot, ~/.copilot/hooks, ~/.copilot/mcp-config.json,
+#               ~/.copilot/config.json
 #
 # Allowed signals below are artifacts the connector's CLI itself
 # creates on first launch — never anything prepare_userspace_for nor
@@ -1567,6 +1657,18 @@ connector_present_for_user() {
       # transiently unreadable at enumeration time.
       [[ -d "${home}/.cursor/extensions" ]] && return 0
       [[ -f "${home}/.cursor/argv.json" ]] && return 0
+      ;;
+    copilot)
+      # Copilot CLI runtime state under its default home, ~/.copilot:
+      # logs/ is created on first start, session-state/ (and the older
+      # history-session-state/) once a session runs. DefenseClaw writes
+      # only hooks/defenseclaw.json and mcp-config.json there, and
+      # config.json is a legacy DefenseClaw migration input, so none of
+      # those count. A COPILOT_HOME set in the user's shell is not visible
+      # to this root LaunchDaemon.
+      [[ -d "${home}/.copilot/logs" ]] && return 0
+      [[ -d "${home}/.copilot/session-state" ]] && return 0
+      [[ -d "${home}/.copilot/history-session-state" ]] && return 0
       ;;
   esac
   return 1

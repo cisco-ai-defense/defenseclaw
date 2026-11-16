@@ -24,6 +24,9 @@
 #       ~/.codex/config.toml         (strip [hooks], [otel], notify=)
 #       ~/.claude/settings.json      (strip DC entries from hooks map)
 #       ~/.cursor/hooks.json         (strip DC entries from hooks map)
+#       ~/.copilot/hooks/defenseclaw.json
+#                                    (strip DC entries; the file is removed
+#                                     once nothing else is left in it)
 #       ~/.config/amp/plugins/defenseclaw.ts
 #                                    (restore/remove only when the structured
 #                                     backup identity + post hash still match)
@@ -49,7 +52,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # managed by scrub_agent_configs.py — restoring the pre-install
 # plugin content on uninstall requires SHA-256 verification against a
 # manifest under ~/.defenseclaw/connector_backups/amp/config.json.
-# The codex/claudecode/cursor connectors are scrubbed by the Go
+# The codex/claudecode/cursor/copilot connectors are scrubbed by the Go
 # `defenseclaw-gateway enterprise hooks scrub` subcommand (no python3
 # runtime dependency). See scrub_agent_config() below for the split.
 SCRUB_PY="${SCRIPT_DIR}/lib/scrub_agent_configs.py"
@@ -524,6 +527,7 @@ if [[ "${PURGE}" == "true" ]]; then
       if [[ "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
         printf '[uninstall] and will SCRUB DefenseClaw entries from each user'\''s:\n'
         printf '  ~/.codex/config.toml\n  ~/.claude/settings.json\n  ~/.cursor/hooks.json\n'
+        printf '  ~/.copilot/hooks/defenseclaw.json\n'
         printf '  ~/.config/amp/plugins/defenseclaw.ts (exact backup authority required)\n'
         printf '  (non-DefenseClaw entries preserved)\n'
       fi
@@ -807,7 +811,7 @@ if [[ "${PURGE}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
 fi
 
 # python3 resolver — used only by the `amp` connector's scrub path.
-# The other three connectors (codex / claudecode / cursor) route
+# The other connectors (codex / claudecode / cursor / copilot) route
 # through the Go binary at ${SCRUB_BIN} and do not need python3.
 # `amp` needs SHA-256 verification against a signed manifest to
 # restore its plugin file safely, which the Go scrubber doesn't
@@ -969,6 +973,7 @@ purge_user() {
       "codex|${home}/.codex/config.toml|" \
       "claudecode|${home}/.claude/settings.json|" \
       "cursor|${home}/.cursor/hooks.json|" \
+      "copilot|${home}/.copilot/hooks/defenseclaw.json|" \
       "amp|${home}/.config/amp/plugins/defenseclaw.ts|${home}/.defenseclaw/connector_backups/amp/config.json"; do
       connector="${spec%%|*}"
       cfg="${spec#*|}"; cfg="${cfg%%|*}"
@@ -989,6 +994,7 @@ purge_user() {
     for cfg in "${home}/.codex/config.toml" \
                "${home}/.claude/settings.json" \
                "${home}/.cursor/hooks.json" \
+               "${home}/.copilot/hooks/defenseclaw.json" \
                "${home}/.config/amp/plugins/defenseclaw.ts"; do
       if [[ -f "${cfg}" ]]; then
         warn "--keep-agent-configs: ${cfg} remains after DefenseClaw runtime deletion (its managed hook/plugin may fail closed)"

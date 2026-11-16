@@ -18,6 +18,18 @@
 # (below); nothing else stops it.
 
 set -u
+
+# refuse CODE MESSAGE: stop the package transaction before any file is
+# replaced. Every refusal starts with the lifecycle code the docs name for it
+# (troubleshooting, Lifecycle error codes), as Windows Setup and the macOS
+# package report it; rpm, dnf and apt print this text, and it is not written
+# to last-package-result.json, which keeps the result of the package that is
+# applied (GAP-0582).
+refuse() {
+    echo "defenseclaw-enterprise: $1: $2" >&2
+    exit 1
+}
+
 case "${1:-}" in
     install | upgrade | [1-9]*) ;;
     *) exit 0 ;;
@@ -52,8 +64,7 @@ if [ -f "$config" ]; then
             }
         }' "$config" 2>/dev/null)
     if [ -n "$found" ] && [ "$found" -gt "$max_config_version" ] 2>/dev/null; then
-        echo "defenseclaw-enterprise: $config has config_version $found, and this package reads up to $max_config_version: it was written for a newer DefenseClaw. Nothing was changed. Install a DefenseClaw release that reads it, or push a config with config_version: $max_config_version first." >&2
-        exit 1
+        refuse config_invalid "$config has config_version $found, and this package reads up to $max_config_version: it was written for a newer DefenseClaw. Nothing was changed. Install a DefenseClaw release that reads it, or push a config with config_version: $max_config_version first."
     fi
 fi
 
@@ -235,12 +246,11 @@ case "$package_version" in
             floor_rc=$?
             if [ "$floor_rc" -ne 0 ]; then
                 [ "$floor_rc" -eq 3 ] || floor_msg="the release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
-                echo "defenseclaw-enterprise: refusing to install $package_version: ${floor_msg#Error: } Nothing was changed." >&2
-                exit 1
+                floor_msg=${floor_msg#Error: }
+                refuse product_floor_refused "refusing to install $package_version: ${floor_msg#product_floor_refused: } Nothing was changed."
             fi
         elif [ -n "$unchecked" ]; then
-            echo "defenseclaw-enterprise: refusing to install $package_version: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed." >&2
-            exit 1
+            refuse product_floor_refused "refusing to install $package_version: the release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed."
         fi
         ;;
 esac
@@ -250,8 +260,7 @@ case "$package_version" in
         if root_owned "$record" && ! root_owned "$marker"; then
             installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" 2>/dev/null | head -n 1)
             if [ -n "$installed" ] && ! not_older "$package_version" "$installed"; then
-                echo "defenseclaw-enterprise: DefenseClaw $installed is deployed; refusing to downgrade to $package_version. Nothing was changed. For a deliberate rollback, create the rollback marker first (sudo touch $marker) and install this package again: it is then applied with 'enterprise linux ensure --from-package --allow-downgrade'." >&2
-                exit 1
+                refuse downgrade_refused "DefenseClaw $installed is deployed; refusing to downgrade to $package_version. Nothing was changed. For a deliberate rollback, create the rollback marker first (sudo touch $marker) and install this package again: it is then applied with 'enterprise linux ensure --from-package --allow-downgrade'."
             fi
         fi
         ;;
@@ -268,8 +277,7 @@ esac
 # @LEGACY_SANDBOX_GUARD@
 if command -v dc_legacy_sandbox_guard >/dev/null 2>&1; then
     if ! dc_legacy_sandbox_guard linux /opt/defenseclaw/bin/defenseclaw-gateway /usr/bin/defenseclaw; then
-        echo "$dc_guard_message" >&2
-        exit 1
+        refuse sandboxes_running "${dc_guard_message#defenseclaw-enterprise: }"
     fi
 fi
 

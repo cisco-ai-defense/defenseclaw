@@ -4,12 +4,15 @@
 package hookpaths
 
 import (
+	"io/fs"
 	"path"
 	"runtime"
 	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // WalkFactPrefix keys the hook client's walk of one directory spelling a
@@ -98,7 +101,112 @@ func LinkWalkFacts(command, cwd, home string) map[string]string {
 			facts[WalkFactPrefix+prefix] = physical
 		}
 	}
+	addCopyChildLinkFacts(file, cwd, home, facts)
 	return facts
+}
+
+// maxCopyChildEntries bounds the entries read from the destination directory
+// of one cp call.
+const maxCopyChildEntries = 4096
+
+// addCopyChildLinkFacts adds a WalkFactPrefix fact for every child of the
+// destination directory of a cp call that has a source word with a pattern or
+// brace list when the child is a link: cp writes through a link at the
+// destination, and which child a pattern names is known only after the shell
+// expands it (GAP-1053). The gateway matches the child names against the
+// pattern words it reads in the command.
+func addCopyChildLinkFacts(file *syntax.File, cwd, home string, facts map[string]string) {
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 {
+			return true
+		}
+		if program, fixed := StaticWord(call.Args[0], home); !fixed || programBase(program) != "cp" {
+			return true
+		}
+		args := call.Args[1:]
+		texts := make([]string, len(args))
+		pattern := false
+		for index, arg := range args {
+			if text, static := StaticWord(arg, home); static {
+				texts[index] = text
+			} else {
+				texts[index], _ = wordLiteralPrefix(arg)
+			}
+			pattern = pattern || wordHasPattern(arg)
+		}
+		if !pattern {
+			return true
+		}
+		index, directory, _ := actionfacts.CopyOperandRoles(texts)
+		if index >= 0 {
+			if _, static := StaticWord(args[index], home); !static {
+				return true
+			}
+			directory = texts[index]
+		}
+		if directory == "" || strings.HasPrefix(directory, "~") || strings.ContainsRune(directory, 0) {
+			return true
+		}
+		if !strings.HasPrefix(directory, "/") {
+			directory = strings.TrimRight(cwd, "/") + "/" + directory
+		}
+		directory = path.Clean(directory)
+		entries, err := pathReadDir(directory)
+		if err != nil || len(entries) > maxCopyChildEntries {
+			return true
+		}
+		for _, entry := range entries {
+			if entry.Type()&fs.ModeSymlink == 0 {
+				continue
+			}
+			child := strings.TrimRight(directory, "/") + "/" + entry.Name()
+			if _, seen := facts[WalkFactPrefix+child]; seen {
+				continue
+			}
+			physical, resolved := ResolveWriteTarget(child)
+			if !resolved || physical == child || len(child) > MaxWriteTargetPathBytes {
+				continue
+			}
+			if len(facts) >= maxWalkFacts {
+				return false
+			}
+			facts[WalkFactPrefix+child] = physical
+		}
+		return true
+	})
+}
+
+// wordHasPattern reports an unquoted filename pattern character or brace list
+// in a word.
+func wordHasPattern(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[{") {
+			return true
+		}
+	}
+	return false
+}
+
+// WalkFactChildren returns the link children of directory that the client
+// walk facts hold, by name, with the physical place of each.
+func WalkFactChildren(targets map[string]string, directory string) map[string]string {
+	if len(targets) == 0 || !strings.HasPrefix(directory, "/") {
+		return nil
+	}
+	prefix := strings.TrimRight(WalkFactPrefix+WalkKey(directory), "/") + "/"
+	var children map[string]string
+	for key, physical := range targets {
+		name, found := strings.CutPrefix(key, prefix)
+		if !found || name == "" || strings.Contains(name, "/") || !strings.HasPrefix(physical, "/") {
+			continue
+		}
+		if children == nil {
+			children = map[string]string{}
+		}
+		children[name] = physical
+	}
+	return children
 }
 
 // walkFactWord is one static word as a path spelling: the value of a

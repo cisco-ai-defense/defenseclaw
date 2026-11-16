@@ -149,17 +149,27 @@ func TestLiveProcessCreatesTheOutageMarkerAsItsUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(closeToken)
-	previous, err := token.defaultOwner()
+	current, err := token.defaultOwner()
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Cleanups run last first: the owner is restored before the token closes,
-	// so later tests see the token as the process started.
+	// so later tests see the token as TestMain left it.
 	t.Cleanup(func() {
-		if err := token.setDefaultOwner(previous); err != nil {
-			t.Errorf("restore the default owner %s: %v", previous, err)
+		if err := token.setDefaultOwner(current); err != nil {
+			t.Errorf("restore the default owner %s: %v", current, err)
 		}
 	})
+	// TestMain made the token user the default owner; start from the owner
+	// the token had at process start (BUILTIN\Administrators when elevated),
+	// so the real change below is still exercised.
+	previous := current
+	if testStartDefaultOwner != nil {
+		if err := token.setDefaultOwner(testStartDefaultOwner); err != nil {
+			t.Fatalf("restore the process start default owner %s: %v", testStartDefaultOwner, err)
+		}
+		previous = testStartDefaultOwner
+	}
 	user, err := token.GetTokenUser()
 	if err != nil {
 		t.Fatal(err)

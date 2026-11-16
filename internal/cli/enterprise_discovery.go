@@ -441,7 +441,7 @@ func enterpriseGatewayRequest(method, path string, body []byte, out any) (string
 			"that waits for the directory (SSSD or the domain controller) can take that long. Try again", host, wait.Seconds())
 	}
 	if err != nil {
-		return "", fmt.Errorf("the gateway at %s did not answer; check the deployment with: %s (the connected service peer may be unverified)", host, enterpriseDiscoveryStatusHint())
+		return "", fmt.Errorf("the gateway at %s did not answer; check the deployment with: %s (the connected service peer may be unverified)", host, enterpriseDiscoveryStatusHint(cfg.StandaloneEnterprise()))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -490,14 +490,24 @@ func writeManagedViewRefusalJSON(w io.Writer, err error) {
 	}{Errors: []enterprisestatus.Message{{Code: code, Message: message}}, ExitCode: commandExitCode(err)})
 }
 
-// enterpriseDiscoveryStatusHint is the status command for this platform.
-func enterpriseDiscoveryStatusHint() string {
+// enterpriseDiscoveryStatusHint is the status command for this platform. A
+// standalone deployment on Linux or macOS names the gateway by its absolute
+// path, as it is not on the PATH (cowork-1-0-8 GAP-0081); any other profile,
+// Secure Client included, keeps the text of release 1.0.5.
+func enterpriseDiscoveryStatusHint(standalone bool) string {
 	switch runtime.GOOS {
 	case "windows":
-		return "defenseclaw enterprise windows status"
+		// Setup puts no DefenseClaw command on PATH (cowork-1-0-8 GAP-0076).
+		return managedWindowsCommand("enterprise", "windows", "status", "--profile", "standalone") + " from an elevated PowerShell prompt"
 	case "darwin":
+		if standalone {
+			return "sudo " + managedHostGatewayCommand() + " enterprise macos status"
+		}
 		return "defenseclaw-gateway enterprise macos status"
 	default:
+		if standalone {
+			return "sudo " + managedHostGatewayCommand() + " enterprise linux status"
+		}
 		return "defenseclaw-gateway enterprise linux status"
 	}
 }

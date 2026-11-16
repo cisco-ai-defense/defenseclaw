@@ -64,6 +64,7 @@ func ConfirmLocalAccount(r Resolver, uid int, name string) error {
 const (
 	darwinDSCL   = "/usr/bin/dscl"
 	darwinODUtil = "/usr/bin/odutil"
+	darwinPlutil = "/usr/bin/plutil"
 )
 
 // platformOpenDirectoryNodeStates runs `odutil show nodenames`, which lists
@@ -125,6 +126,51 @@ func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
 // platformLocalDatabaseAccounts has no other local account database here.
 func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
 	return platformLocalAccounts(ctx)
+}
+
+// platformLocalDatabaseUIDs lists the uids of the local directory node.
+func platformLocalDatabaseUIDs(ctx context.Context) ([]int, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "UniqueID"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	var uids []int
+	for _, line := range strings.Split(string(result.stdout), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || validName(fields[0]) != nil {
+			continue
+		}
+		if uid, err := parseSignedDSCLID(fields[1]); err == nil {
+			uids = append(uids, uid)
+		}
+	}
+	return uids, nil
+}
+
+// platformDirectoryShowsUIDUnused: a Mac whose search policy lists only local
+// nodes answers from its local directory. A bound Mac answers at once, without
+// an error, while a domain is out of reach, so its node list must be readable
+// and list no node offline.
+func platformDirectoryShowsUIDUnused(ctx context.Context, uid int) error {
+	if !platformDirectoryConfigured() {
+		return nil
+	}
+	out, err := openDirectoryNodeStates(ctx)
+	if err != nil {
+		return fmt.Errorf("unixidentity: cannot read the Open Directory node states, so a miss for uid %d is no proof: %w", uid, err)
+	}
+	for name, state := range ParseODUtilNodeStates(out) {
+		if state == "offline" {
+			return fmt.Errorf("unixidentity: Open Directory node %s is offline, so a miss for uid %d is no proof", name, uid)
+		}
+	}
+	return nil
 }
 
 // dsclAccountRecordsOutputLimit bounds the plist of the local node's
@@ -233,6 +279,35 @@ func platformAccountUIDGone(ctx context.Context, name string, uid int) bool {
 			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-search", "/Users", "UniqueID", strconv.Itoa(uid)})
 		},
 		func() bool { return OpenDirectoryOffline(ctx) })
+}
+
+// homeAccountsOutputLimit bounds the plist of every account record of the
+// search policy, which is larger than the default command bound on a Mac
+// with many directory accounts. Past it the answer is an error, not a
+// shorter list.
+const homeAccountsOutputLimit = 4 << 20
+
+// platformAccountsAtHome asks Open Directory in a fresh dscl process, across
+// the search policy, for every account record as a property list, converts it
+// to JSON with plutil and keeps those with home as a home folder.
+func platformAccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	if err := validateTrustedTool(darwinPlutil); err != nil {
+		return nil, err
+	}
+	return dsclHomeAccounts(home,
+		func() (commandResult, error) {
+			return runTrustedCommandLimit(ctx, darwinDSCL,
+				[]string{"-plist", "/Search", "-readall", "/Users", "UniqueID", "NFSHomeDirectory", "RecordName"}, homeAccountsOutputLimit)
+		},
+		func(plist []byte) (commandResult, error) {
+			// A plist is never read here: the system tool converts it, and an
+			// answer it refuses is an error.
+			return runTrustedCommandInput(ctx, darwinPlutil,
+				[]string{"-convert", "json", "-o", "-", "-"}, plist, homeAccountsOutputLimit)
+		})
 }
 
 // platformLoginShell reads the UserShell of the account through the Open

@@ -69,6 +69,34 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     assert restore.index("Start-DefenseClawTransactionServices") < restore.index("Restore-DefenseClawSnapshotHookAfterActivation")
     deferred = _function_body(module, "Restore-DefenseClawTransactionWithManagedHooksRollback")
     assert deferred.index("Start-DefenseClawTransactionServices") < deferred.index("Restore-DefenseClawSnapshotHookAfterActivation")
+    # GAP-0977: a retried recovery meets the guardian running (a held rollback
+    # leaves the services up), and the guardian puts any hook that is not its
+    # recorded release back over the guard. Every caller names the guardian,
+    # and the hold stops it before it writes the guard.
+    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
+    assert hold.index("Stop-DefenseClawService -Name $GuardianServiceName") < hold.index("Install-DefenseClawFileAtomic")
+    # S-I1: a failure after the stop starts the guardian again with its start mode.
+    assert hold.index("$guardianTouched = $true") < hold.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    handler = hold[hold.index("catch {\n        $holdFailure = $_"):]
+    # GAP-0989: the exact mode comes back, a delayed-auto start included.
+    assert "$guardianPriorDelayed = [bool](Get-DefenseClawServiceDelayedAutoStart -Name $GuardianServiceName)" in hold
+    assert "-StartMode $guardianPriorMode" in handler and "-DelayedAutoStart $guardianPriorDelayed" in handler
+    assert "Restore-DefenseClawServiceStartModeExact" in handler
+    # GAP-0989: the original error is rethrown as it is (type and message prefix kept);
+    # a failed restart rides on its Data, the lifecycle log and the failure document.
+    assert 'throw "$($holdFailure' not in handler and "throw $holdFailure" in handler
+    assert "$holdFailure.Exception.Data['DefenseClaw.GuardianRestartFailure'] = $restartNote" in handler
+    assert "Write-DefenseClawLifecycleLogDiagnostic -Message $restartNote" in handler
+    installer = (ROOT / "packaging" / "windows" / "install-enterprise.ps1").read_text(encoding="utf-8")
+    assert "@('DefenseClaw.GuardianRestartFailure', 'guardian_restart_failure')" in installer
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("Set-DefenseClawServiceDelayedAutoStart -Name $Name -Enabled $DelayedAutoStart")
+    delayed = _function_body(module, "Set-DefenseClawServiceDelayedAutoStart")
+    assert "'delayed-auto'" in delayed and "'start='" in delayed
+    assert "Start-DefenseClawService -Name $GuardianServiceName" in handler
+    assert handler.rstrip().endswith("return $GuardSHA256\n}") or "throw $holdFailure" in handler
+    assert "-GuardianServiceName ([string]$snapshot.guardian_service)" in restore
+    assert "-GuardianServiceName $GuardianServiceName" in recovery
     # Install, Upgrade and Repair hand it the authenticated replacement hook.
     assert "-EarlyHookSource $earlyHookSource" in module
     assert "$earlyHookSource = $Sources['hook']" in module
@@ -78,6 +106,68 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     swap = publish_body.index("Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath")
     wait = publish_body.index("Wait-DefenseClawPriorHookCalls -HookPath $Layout.HookPath -StartedBefore ([DateTime]::Now)")
     assert swap < wait < publish_body.index("return $preimage")
+    # GAP-0656: a repair or a config-restart ensure republished the hook
+    # with the same bytes, its only hook swap, and a start in the rename's
+    # instant failed (the agent ran the call unchecked). Standalone keeps a
+    # matching hook; Secure Client is unchanged.
+    assert (
+        "Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath "
+        "-SkipIfContentMatches:(Test-DefenseClawStandaloneProfile)\n"
+    ) in publish_body
+    atomic = _function_body(module, "Install-DefenseClawFileAtomic")
+    # GAP-0656 review M2: only a healthy object is kept; a drifted one gets a
+    # fresh object that does not take over its access list (behaviour in
+    # enterprise-standalone-hook-keep-smoke.ps1).
+    # The check runs before the hashes: a writer handle refuses Get-FileHash.
+    gate = atomic.index(
+        "if ($SkipIfContentMatches -and [IO.File]::Exists($Destination) -and\n"
+        "        (Test-DefenseClawStandaloneProfile)) {"
+    )
+    drift = atomic.index("$drift = Get-DefenseClawKeptFileDrift -Path $Destination", gate)
+    assert drift < atomic.index("$keepReplacementAccess = $true", drift)
+    assert drift < atomic.index("$SkipIfContentMatches = $false", drift)
+    skip = atomic.index("if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {")
+    assert drift < skip < atomic.index("Microsoft.PowerShell.Utility\\Get-FileHash", skip)
+    assert "-KeepReplacementAccess:$keepReplacementAccess" in atomic
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    kept = native[native.index("public static string GetKeptFileDrift(") :]
+    kept = kept[: kept.index("\n        }\n")]
+    for needle in (
+        "GetRegularFileLinkCountNoFollow(path)",
+        "if (links != 1)",
+        "if (descriptor.DiscretionaryAcl == null)",
+        "if (!allowedOwners.Contains(owner))",
+        "!allowedWriters.Contains(sid) &&",
+        '!(sid == "S-1-3-4" && allowedWriters.Contains(owner))',
+        "GetReadOpenWithoutWriteSharingError(path)",
+    ):
+        assert needle in kept, needle
+    # A writer handle on the installed hook refused Copy-Item and
+    # Get-FileHash, so the repair that would replace it failed (1603).
+    # Review M3: standalone checks that read against the digest the
+    # deployment records and records that digest, never the copy's own;
+    # Secure Client keeps the earlier two-read comparison.
+    assert "$preimageSHA256 = Copy-DefenseClawRecordedHookPreimage -Layout $Layout -Destination $preimage" in publish_body
+    assert "$Intent['early_hook_preimage_sha256'] = $preimageSHA256" in publish_body
+    assert "copiedHash.ToLowerInvariant()" not in publish_body
+    secure_client = publish_body[publish_body.index("    else {\n        Microsoft.PowerShell.Management\\Copy-Item"):]
+    assert "Get-FileHash -LiteralPath $Layout.HookPath" in secure_client
+    preimage = _function_body(module, "Copy-DefenseClawHookPreimage")
+    assert "([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))" in preimage
+    recorded = _function_body(module, "Copy-DefenseClawRecordedHookPreimage")
+    assert "Get-DefenseClawRecordedHookSHA256 -Layout $Layout" in recorded
+    assert "[IO.Path]::Combine([string]$Layout.GuardianDirectory, 'payload', 'defenseclaw-hook.exe')" in recorded
+    assert recorded.index("$live -ceq $expected") < recorded.index("$guardianDigest -ceq $expected") < recorded.index("throw (\"refusing to replace")
+    # The check runs before the intent, the directory and any service change.
+    transaction = _function_body(module, "New-DefenseClawTransaction")
+    preflight = transaction.index("Assert-DefenseClawHookPreimageAvailable")
+    assert transaction.index("Assert-DefenseClawHookNotHeld -Layout $Layout") < preflight
+    assert preflight < transaction.index("New-DefenseClawDirectory -Path $directory")
+    assert preflight < transaction.index("Set-DefenseClawServiceStartMode")
+    assert preflight < transaction.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    probe = native[native.index("public static int GetReadOpenWithoutWriteSharingError(") :]
+    probe = probe[: probe.index("\n        }\n")]
+    assert "CreateFileW(path, GENERIC_READ,\n                FILE_SHARE_READ | FILE_SHARE_DELETE," in probe
 
 
 
@@ -118,7 +208,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning')) {
+foreach ($name in @('Copy-DefenseClawHookPreimage', 'Copy-DefenseClawRecordedHookPreimage', 'Assert-DefenseClawHookPreimageAvailable', 'Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning', 'Format-DefenseClawSetupAction', 'Format-DefenseClawRerunStep')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -134,12 +224,16 @@ function Write-DefenseClawJsonAtomic {
     ($Value | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $Path -Encoding utf8
 }
 function Install-DefenseClawSourceDescriptor {
-    param([hashtable]$Source, [string]$Destination)
+    param([hashtable]$Source, [string]$Destination, [switch]$SkipIfContentMatches)
     $previous = if (Test-Path -LiteralPath $Destination) { Get-Content -LiteralPath $Destination -Raw } else { '<absent>' }
     $script:events.Add('publish:' + [IO.Path]::GetFileName($Destination) + ':' + $previous)
     Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
 }
 function Test-DefenseClawStandaloneProfile { return $true }
+# The digest the deployment metadata records for the installed hook
+# (hashes.hook); set from the hook the case starts with.
+$script:recordedHook = ''
+function Get-DefenseClawRecordedHookSHA256 { param([hashtable]$Layout) return [string]$script:recordedHook }
 function Assert-DefenseClawDescendant { param([string]$Path, [string]$Root, [string]$Label) return $Path }
 function Write-DefenseClawLifecyclePhase {
     param([string]$Stage)
@@ -161,6 +255,7 @@ if ($Case -like 'held*') {
     # installed hook open: it closes after two looks (held-closes), or never
     # (held-stays).
     $script:holderLooks = 0
+    $script:probes = 0
     function Get-DefenseClawStateFileHolders {
         param([hashtable]$Layout, [string[]]$Paths, $Excluded)
         $script:holderLooks++
@@ -173,8 +268,12 @@ if ($Case -like 'held*') {
     # GAP-0789: the reader shares delete only in held-shares-delete.
     function Test-DefenseClawHookSharesDelete {
         param([string]$Path)
-        $script:events.Add('shares-delete:' + [string]($Case -eq 'held-shares-delete'))
-        return ($Case -eq 'held-shares-delete')
+        $script:probes++
+        # GAP-0656: a hook start in flight fails the probe for
+        # milliseconds; held-transient fails it twice and then succeeds.
+        $answer = ($Case -eq 'held-shares-delete') -or ($Case -eq 'held-transient' -and $script:probes -ge 3)
+        $script:events.Add('shares-delete:' + [string]$answer)
+        return $answer
     }
 }
 if ($Case -like 'restorer*') {
@@ -192,7 +291,7 @@ if ($Case -like 'restorer*') {
     }
     if ($Case -eq 'restorer-persists') {
         function Install-DefenseClawSourceDescriptor {
-            param([hashtable]$Source, [string]$Destination)
+            param([hashtable]$Source, [string]$Destination, [switch]$SkipIfContentMatches)
             $script:events.Add('publish:' + [IO.Path]::GetFileName($Destination))
             Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
             if ([IO.Path]::GetFileName($Destination) -ceq 'defenseclaw-hook.exe' -and $script:restores -gt 0) {
@@ -217,9 +316,10 @@ $hook = Join-Path $bin 'defenseclaw-hook.exe'
 $new = Join-Path $Scratch 'new-hook.exe'
 Set-Content -LiteralPath $hook -Value 'hook-1.0.2' -NoNewline
 Set-Content -LiteralPath $new -Value 'hook-1.0.4' -NoNewline
+$script:recordedHook = (Get-FileHash -LiteralPath $hook -Algorithm SHA256).Hash.ToLowerInvariant()
 # An authenticated source descriptor carries the digest it was admitted by.
 $newSource = @{ path = $new; sha256 = (Get-FileHash -LiteralPath $new -Algorithm SHA256).Hash }
-$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch }
+$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch; GuardianDirectory = (Join-Path $Scratch 'hook-guardian') }
 $intent = [ordered]@{ schema_version = 1; phase = 'quiescing' }
 $result = [ordered]@{ case = $Case; threw = '' }
 try {
@@ -231,6 +331,8 @@ try {
             $result.hook = Get-Content -LiteralPath $hook -Raw
             $result.guard = Get-Content -LiteralPath $intent['early_hook_guard_copy'] -Raw
             $result.pending = (Get-Content -LiteralPath $layout.PendingPath -Raw | ConvertFrom-Json).early_hook_preimage
+            $result.intent_sha256 = $intent['early_hook_preimage_sha256']
+            $result.recorded = $script:recordedHook
             # Recovery reads the intent back from pending.json.
             $read = Get-Content -LiteralPath $layout.PendingPath -Raw | ConvertFrom-Json
             Restore-DefenseClawEarlyHook -Layout $layout -Intent $read -TransactionDirectory $transaction
@@ -339,6 +441,10 @@ try {
             Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 30
             $script:events.Add('returned')
         }
+        'held-transient' {
+            Assert-DefenseClawHookNotHeld -Layout $layout -TimeoutSeconds 30
+            $script:events.Add('returned')
+        }
         'drain-ended' {
             Assert-DefenseClawInstalledHookCallsEnded -HookPath $hook -TimeoutSeconds 30
             $script:events.Add('returned')
@@ -355,6 +461,37 @@ try {
             $image = $self.ProcessName + '.exe'
             $result.before = @(Get-DefenseClawPriorHookProcessIds -HookPath (Join-Path $bin $image) -StartedBefore ([DateTime]::Now)) -contains $self.Id
             $result.after = @(Get-DefenseClawPriorHookProcessIds -HookPath (Join-Path $bin $image) -StartedBefore $self.StartTime.AddSeconds(-1)) -contains $self.Id
+        }
+        'drifted-guardian' {
+            # Review M3: the installed hook has other bytes than the
+            # deployment records (a user wrote them): the guardian's
+            # protected copy is the rollback copy.
+            Set-Content -LiteralPath $hook -Value 'user-bytes' -NoNewline
+            New-Item -ItemType Directory -Path (Join-Path $layout.GuardianDirectory 'payload') -Force | Out-Null
+            Set-Content -LiteralPath ([IO.Path]::Combine($layout.GuardianDirectory, 'payload', 'defenseclaw-hook.exe')) -Value 'hook-1.0.2' -NoNewline
+            $result.preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive
+            $result.preimage_bytes = Get-Content -LiteralPath $result.preimage -Raw
+            $result.intent_sha256 = $intent['early_hook_preimage_sha256']
+            $result.recorded = $script:recordedHook
+            $result.hook = Get-Content -LiteralPath $hook -Raw
+            Restore-DefenseClawEarlyHook -Layout $layout -Intent $intent -TransactionDirectory $transaction
+            $result.restored = Get-Content -LiteralPath $hook -Raw
+        }
+        { $_ -in 'drifted-refused', 'preflight-refused' } {
+            Set-Content -LiteralPath $hook -Value 'user-bytes' -NoNewline
+            try {
+                if ($Case -eq 'preflight-refused') {
+                    Assert-DefenseClawHookPreimageAvailable -Layout $layout -Source $newSource -PriorDeploymentActive
+                }
+                else {
+                    [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+                }
+            }
+            finally {
+                $result.hook = Get-Content -LiteralPath $hook -Raw
+                $result.preimage_left = Test-Path -LiteralPath (Join-Path $transaction 'early-hook.bak')
+                $result.intent_keys = @($intent.Keys)
+            }
         }
         'foreign-preimage' {
             $intent['early_hook_preimage'] = (Join-Path $Scratch 'elsewhere.exe')
@@ -384,6 +521,9 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
+        'Copy-DefenseClawHookPreimage',
+        'Copy-DefenseClawRecordedHookPreimage',
+        'Assert-DefenseClawHookPreimageAvailable',
         'Publish-DefenseClawEarlyHook',
         'Assert-DefenseClawEarlyHookPublished',
         'Hold-DefenseClawEarlyHookGuard',
@@ -427,6 +567,8 @@ function Resolve-DefenseClawFullPath {
 function Assert-DefenseClawTrustedSource { param([string]$Path, [string]$Label) return $Path }
 function Assert-DefenseClawNoReparsePath { param([string]$Path, [switch]$AllowMissingLeaf) }
 function Test-DefenseClawStandaloneProfile { return $true }
+$script:recordedHook = ''
+function Get-DefenseClawRecordedHookSHA256 { param([hashtable]$Layout) return [string]$script:recordedHook }
 function Write-DefenseClawJsonAtomic {
     param($Value, [string]$Path)
     ($Value | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $Path -Encoding utf8
@@ -457,6 +599,7 @@ $staged = Join-Path $stage 'defenseclaw-hook.exe'
 $hook = Join-Path $bin 'defenseclaw-hook.exe'
 Set-Content -LiteralPath $staged -Value 'hook-1.0.4' -NoNewline
 Set-Content -LiteralPath $hook -Value 'hook-1.0.2' -NoNewline
+$script:recordedHook = Get-TestSHA256 $hook
 $swapped = Join-Path $Scratch 'swapped.bin'
 Set-Content -LiteralPath $swapped -Value 'swapped' -NoNewline
 $script:DefenseClawAllowedSignerSHA256 = @()
@@ -474,7 +617,7 @@ switch ($Case) {
     }
     'hook-swapped' { $script:SwapLeaf = 'defenseclaw-hook.exe' }
 }
-$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch }
+$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch; GuardianDirectory = (Join-Path $Scratch 'hook-guardian') }
 $intent = [ordered]@{ schema_version = 1; phase = 'quiescing' }
 $result = [ordered]@{ case = $Case; threw = ''; pin = (Get-TestSHA256 $staged) }
 try {
@@ -541,6 +684,38 @@ def test_a_failed_snapshot_puts_the_prior_hook_back(tmp_path: Path) -> None:
     result = _run(tmp_path, "snapshot-failure")
     assert result["threw"] == "", result
     assert result["restored"] == "hook-1.0.2", result
+
+
+def test_the_rollback_copy_is_checked_against_the_recorded_digest(tmp_path: Path) -> None:
+    """GAP-0656 review M3: the digest recorded as the previous hook is the
+    deployment's, not the copy's own."""
+    result = _run(tmp_path, "publish")
+    assert result["threw"] == "", result
+    assert result["intent_sha256"] == result["recorded"], result
+
+
+def test_a_hook_that_is_not_the_recorded_one_is_never_the_rollback_copy(tmp_path: Path) -> None:
+    """GAP-0656 review M3: bytes a user wrote into the hook (or a writer
+    changed during the copy) are refused as the preimage; the guardian's
+    protected copy, which has the recorded digest, is used, and the rollback
+    restores the recorded bytes."""
+    result = _run(tmp_path, "drifted-guardian")
+    assert result["threw"] == "", result
+    assert result["preimage_bytes"] == "hook-1.0.2", result
+    assert result["intent_sha256"] == result["recorded"], result
+    assert result["hook"] == "hook-1.0.4", result
+    assert result["restored"] == "hook-1.0.2", result
+
+
+@pytest.mark.parametrize("case", ["drifted-refused", "preflight-refused"])
+def test_a_drifted_hook_without_a_matching_guardian_copy_stops_the_run_first(tmp_path: Path, case: str) -> None:
+    result = _run(tmp_path, case)
+    assert result["threw"].startswith("refusing to replace the installed hook: "), result
+    assert "Nothing was stopped or changed" in result["threw"], result
+    assert result["hook"] == "user-bytes", result
+    assert result["preimage_left"] is False, result
+    assert "early_hook_preimage" not in result["intent_keys"], result
+    assert not any(e.startswith("publish:") for e in result["events"]), result
 
 
 def test_recovery_republishes_closed_hook_until_restored_gateway_is_ready(tmp_path: Path) -> None:
@@ -657,7 +832,10 @@ def test_a_hook_call_still_running_before_the_transaction_defers_the_run(tmp_pat
     result = _run(tmp_path, "drain-deferred")
     assert result["threw"].startswith("hook_calls_running: 1 DefenseClaw hook process(es)"), result
     assert "process ids 4242" in result["threw"], result
-    assert "run the same Setup command again" in result["threw"], result
+    # The stub profile is standalone, which has no Setup installed and may have
+    # run the installed CLI: it asks for the same command (cowork-1-0-8 GAP-0095).
+    assert "then run the same command again (an MDM retries exit 1618 on its own)" in result["threw"], result
+    assert "Setup command" not in result["threw"], result
     assert "returned" not in result["events"], result
     assert not any(e.startswith("publish:") for e in result["events"]), result
     assert result["hook"] == "hook-1.0.2", result
@@ -697,7 +875,18 @@ def test_a_program_holding_the_hook_open_defers_the_run_before_anything_changes(
 def test_the_run_goes_on_once_the_program_closed_the_hook(tmp_path: Path) -> None:
     result = _run(tmp_path, "held-closes")
     assert result["threw"] == "", result
-    assert result["events"] == ["holders:1", "shares-delete:False", "holders:2", "shares-delete:False", "holders:3", "returned"], result
+    # Four delete probes (100 ms apart) before each question to Restart Manager.
+    probes = ["shares-delete:False"] * 4
+    assert result["events"] == probes + ["holders:1"] + probes + ["holders:2"] + probes + ["holders:3", "returned"], result
+
+
+def test_a_probe_failed_by_a_start_in_flight_does_not_ask_restart_manager(tmp_path: Path) -> None:
+    """GAP-0656: a program start in flight at the instant of the
+    probe fails it for milliseconds; the probe repeats before Restart Manager
+    (which itself opens the hook with no sharing) is asked."""
+    result = _run(tmp_path, "held-transient")
+    assert result["threw"] == "", result
+    assert result["events"] == ["shares-delete:False", "shares-delete:False", "shares-delete:True", "returned"], result
 
 
 def test_a_holder_that_shares_delete_does_not_defer_the_run(tmp_path: Path) -> None:
@@ -707,7 +896,18 @@ def test_a_holder_that_shares_delete_does_not_defer_the_run(tmp_path: Path) -> N
     delete sharing still is (held-stays, held-closes)."""
     result = _run(tmp_path, "held-shares-delete")
     assert result["threw"] == "", result
-    assert result["events"] == ["holders:1", "shares-delete:True", "returned"], result
+    assert result["events"] == ["shares-delete:True", "returned"], result
+
+
+def test_the_hold_check_probes_delete_sharing_before_it_asks_restart_manager() -> None:
+    """GAP-0656: Restart Manager opens the hook with no sharing for about 20
+    ms while it lists the holders, and every hook start in that moment failed
+    with a sharing violation (4 starts in one of 21 native upgrades of 1.0.8,
+    5.5 s before the swap). The delete probe blocks no start and answers the
+    same question first."""
+    body = _function_body(_text(), "Assert-DefenseClawHookNotHeld")
+    probe = body.index("Test-DefenseClawHookSharesDelete -Path ([string]$Layout.HookPath)")
+    assert probe < body.index("Get-DefenseClawStateFileHolders -Layout $Layout -Paths @([string]$Layout.HookPath)")
 
 
 def test_the_transaction_checks_for_a_hook_holder_before_it_stops_anything() -> None:
@@ -764,3 +964,57 @@ def test_the_hook_payload_trust_is_unchanged(tmp_path: Path, case: str) -> None:
     else:
         assert result["pending"] is False, result
         assert result["hook"] == "hook-1.0.2", result
+
+
+def test_the_delayed_start_flag_is_journaled_and_restored_standalone_only() -> None:
+    # GAP-0989: the flag travels in the transaction journal beside start_mode (so a
+    # recovery in any process brings back delayed-auto), is read leniently from a
+    # journal without it, and Secure Client records and restores none of it.
+    module = _text()
+    new_transaction = _function_body(module, "New-DefenseClawTransaction")
+    record = new_transaction[new_transaction.index("$record = [ordered]@{") :]
+    assert "if ((Test-DefenseClawStandaloneProfile) -and $null -ne $service -and [int]$startMode -eq 2) {" in record
+    assert record.index("Test-DefenseClawStandaloneProfile") < record.index("$record['delayed_auto_start']") < record.index("$services.Add($record)")
+    reader = _function_body(module, "Get-DefenseClawTransactionServiceDelayedAutoStart")
+    assert "if ($null -eq $property) {\n        return $false" in reader
+    assert "-isnot [bool]" in reader and "$Mode -ne 2" in reader
+    states = _function_body(module, "Get-DefenseClawTransactionServiceStates")
+    assert states.count("delayed_auto_start = ") == 3
+    restore = _function_body(module, "Restore-DefenseClawTransactionServiceStartModes")
+    assert "-DelayedAutoStart ([bool]$state.delayed_auto_start)" in restore
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("if (-not (Test-DefenseClawStandaloneProfile)) {") < exact.index("Set-DefenseClawServiceDelayedAutoStart")
+    assert "[bool]$guardian.delayed_auto_start" in module and "[bool]$gateway.delayed_auto_start" in module
+    assert "-DelayedAutoStart ([bool]$service.delayed_auto_start)" in module
+    # The forward promotion of a completed upgrade or repair is plain automatic: the
+    # hardening writes DelayedAutoStart=0 and the verifier repairs a delayed start
+    # as drift. A rollback or recovery restores the recorded flag (above).
+    promotion = _function_body(module, "Set-DefenseClawVerifiedServiceBootPolicy")
+    promotion = promotion[promotion.index("#>") :]
+    assert "Delayed" not in promotion and "Exact" not in promotion and "keepDelayedStart" not in module
+    assert promotion.count("-StartMode 2") == 5
+    forward = module[module.index("Set-DefenseClawVerifiedServiceBootPolicy `") :]
+    assert forward.startswith("Set-DefenseClawVerifiedServiceBootPolicy `\n                -Layout $Layout")
+    # A flag that cannot be put back never aborts a recovery; the guardian is started
+    # again whatever the start mode did, and the failure note is bounded.
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert "try {" in exact and "delayed start could not be put back" in exact
+    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
+    handler = hold[hold.index("catch {\n        $holdFailure = $_"):]
+    assert handler.index("start mode could not be put back") < handler.index("Start-DefenseClawService -Name $GuardianServiceName") < handler.index("could not be started again")
+    assert "ConvertTo-DefenseClawBoundedDiagnostic -Value ($restartNotes -join '; ') -MaxLength 512" in handler
+    assert "$status['service_delayed_auto_start']" in module
+    # The start-mode setter itself is unchanged: plain sc config start= auto.
+    setter = _function_body(module, "Set-DefenseClawServiceStartMode")
+    assert "delayed" not in setter.lower()
+    # Outside their own bodies the flag helpers are named only by the hold, the
+    # journal recording and the restore sites.
+    rest = module
+    for name in (
+        "Get-DefenseClawServiceDelayedAutoStart",
+        "Set-DefenseClawServiceDelayedAutoStart",
+        "Restore-DefenseClawServiceStartModeExact",
+    ):
+        rest = rest.replace(_function_body(module, name), "")
+    assert rest.count("Set-DefenseClawServiceDelayedAutoStart") == 0
+    assert "DefenseClawDelayedAutoStartSeen" not in module

@@ -251,14 +251,21 @@ func TestProvenStrictGroupCoversUncertainWeakerNamedUser(t *testing.T) {
 			t.Fatalf("assignments %+v: %+v; want proven strict group", assignments, got)
 		}
 	}
-	// If the uncertain assignment enforces something the proven one does
-	// not, only the account fact must be named in the refusal.
-	set := identityTestSet(t, p, "watch",
-		config.ProfileAssignment{Profile: "tooling", Match: group.Match},
-		config.ProfileAssignment{Profile: "strict", Match: name.Match})
-	got := set.match(&subject, profileSubjectVerified, "codex", "")
-	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
-		t.Fatalf("uncertain stronger user assignment = %+v; want account-only refusal", got)
+	// A stronger possible user assignment keeps the account warning in OSS
+	// default, while the strict tier requires the account proof.
+	for _, pack := range []string{"", "strict"} {
+		set := identityTestSet(t, p, "watch",
+			config.ProfileAssignment{Profile: "tooling", Match: group.Match},
+			config.ProfileAssignment{Profile: "strict", Match: name.Match})
+		set.base.Guardrail.RulePack = pack
+		got := set.match(&subject, profileSubjectVerified, "codex", "")
+		if pack == "strict" {
+			if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+				t.Fatalf("strict uncertain stronger user assignment = %+v; want account-only refusal", got)
+			}
+		} else if got.Name != "tooling" || got.Refused != "" || !slices.Equal(got.Unproven, []string{"account:unknown"}) {
+			t.Fatalf("OSS uncertain stronger user assignment = %+v; want warned proven group", got)
+		}
 	}
 }
 
@@ -464,9 +471,15 @@ func TestUncertainObserveProfileUsesDefaultWithoutProvenAssignment(t *testing.T)
 		t.Fatal("fixture: uncertain profile does not act on the hook")
 	}
 	got := acting.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathHook, "")
-	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
-		t.Fatalf("uncertain enforcing assignment = %+v; want account-only refusal", got)
+	if got.Name != "watch" || got.Refused != "" || !slices.Equal(got.Unproven, []string{"account:unknown"}) {
+		t.Fatalf("default-tier uncertain enforcing assignment = %+v; want warned default", got)
 	}
+	cfg.Guardrail.RulePack = "strict"
+	got = acting.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathHook, "")
+	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+		t.Fatalf("strict-tier uncertain enforcing assignment = %+v; want account-only refusal", got)
+	}
+	cfg.Guardrail.RulePack = ""
 	// The fallback itself may act. An uncertain observe profile could weaken
 	// it, so their different enforcement still needs the account fact.
 	cfg.Guardrail.Profiles["watch"] = config.GuardrailProfile{Mode: "action"}

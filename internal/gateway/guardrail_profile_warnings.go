@@ -26,6 +26,10 @@ import (
 // does not show.
 func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) []string {
 	warnings := set.assignmentWarnings(subject == nil || !subject.LookupFailed)
+	if subject != nil && subject.holderUnproven && decision.Refused == "" &&
+		slices.Contains(decision.Unproven, "account:unknown") {
+		warnings = append(warnings, "the account holder is unconfirmed; a proven assignment or the configured default applies on this OSS policy tier")
+	}
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}

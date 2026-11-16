@@ -45,6 +45,16 @@ import requests
 from urllib3.connection import HTTPConnection
 from urllib3.connectionpool import HTTPConnectionPool
 
+from defenseclaw.gateway_path import (  # noqa: F401  (re-exported: callers and tests reach them here)
+    _CANONICAL_INSTALL_DIR,
+    GATEWAY_BIN_NAME,
+    _installer_venv_gateway,
+    _is_runnable_file,
+    _launcher_sibling_gateway,
+    canonical_install_path,
+    path_gateway,
+)
+
 PLUGIN_MUTATION_TIMEOUT = 90
 ALERT_DISPOSITION_MIN_TIMEOUT_SECONDS = 30
 ALERT_DISPOSITION_MAX_TIMEOUT_SECONDS = 300
@@ -580,12 +590,27 @@ def foreign_loopback_listener(host: str, port: int) -> str:
     else:
         problem = _foreign_loopback_listener_uncached(int(port), host=str(host))
     if problem:
+        if root_reason := _root_gateway_listener_reason(int(port)):
+            return root_reason
         problem = (
             f"{_url_host(str(host))}:{port} is held by {problem}, not by this account's gateway, "
             "so the gateway token was not sent. Run `defenseclaw-gateway start` to see how to "
             "move this account's gateway to a free port"
         )
     return problem
+
+
+def _root_gateway_listener_reason(port: int) -> str:
+    """Return the root-listener diagnosis without authorizing a token send."""
+    try:
+        from defenseclaw import config
+        from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+        cfg = config.load(without_guardrail_profiles=True)
+        trust = _trusted_gateway_listener(cfg, api_port=int(port))
+    except Exception:  # noqa: BLE001 - unknown ownership stays untrusted
+        return ""
+    return trust.detail if trust.code == "root_gateway" else ""
 
 
 def _unproven_per_user_gateway_target(host: str, port: int) -> str:
@@ -807,10 +832,12 @@ def _per_user_connected_verifier() -> str:
     if packaged_windows_install_root():
         candidates = [packaged_windows_gateway_path() or ""]
     else:
+        # env, this install's own layout, PATH, canonical: a sibling that
+        # fails the custody check still lets a trusted PATH gateway be tried.
         candidates = [
             os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip(),
-            shutil.which(GATEWAY_BIN_NAME) or "",
             _launcher_sibling_gateway() or "",
+            shutil.which(GATEWAY_BIN_NAME) or "",
             canonical_install_path(),
         ]
     for candidate in dict.fromkeys(candidates):
@@ -1760,19 +1787,9 @@ class OrchestratorClient:
 # CLI stays usable in the very same shell that ran ``make all``.
 
 
-GATEWAY_BIN_NAME = "defenseclaw-gateway"
-
-_CANONICAL_INSTALL_DIR = os.path.join(os.path.expanduser("~"), ".local", "bin")
 
 
-def canonical_install_path() -> str:
-    """Return the canonical install path written by the installers.
 
-    Exposed so error messages can reference the exact same path instead of
-    each hard-coding the string.
-    """
-    name = GATEWAY_BIN_NAME + (".exe" if os.name == "nt" else "")
-    return os.path.join(_CANONICAL_INSTALL_DIR, name)
 
 
 def resolve_gateway_binary() -> str | None:
@@ -1791,16 +1808,19 @@ def resolve_gateway_binary() -> str | None:
        binary somewhere non-standard.  Returned verbatim (even when the
        file is missing) so the real ``exec`` error surfaces to the
        caller rather than a generic "not found" from here.
-    3. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
+    3. The directory of the ``defenseclaw`` launcher this process runs as,
+       where the installers put the gateway too. It comes before ``PATH``
+       because a shell opened before the install can still list an older
+       DefenseClaw (a 0.8.x Setup install, say) first, and that gateway
+       rejects this release's config (GAP-0099). A CI job with a bare
+       ``PATH`` and its own ``HOME`` finds it too.
+    4. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
        happy path for installed releases and for users whose shell has
        already sourced the updated rc file.
-    4. The directory of the ``defenseclaw`` launcher this process runs as,
-       where the installers put the gateway too: a CI job with a bare
-       ``PATH`` and its own ``HOME`` still finds it.
     5. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
-    5. The enterprise package's gateway on a managed Linux or macOS host.
+    6. The enterprise package's gateway on a managed Linux or macOS host.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
@@ -1811,20 +1831,14 @@ def resolve_gateway_binary() -> str | None:
         # never fall through to a working-directory/PATH shadow.
         return packaged_windows_gateway_path()
 
-    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
-    if override:
-        return override
-
-    via_path = shutil.which(GATEWAY_BIN_NAME)
+    # The installers put both binaries in one directory: the gateway next to
+    # this launcher is this release's own, so it wins over a PATH that lists
+    # an older install first (GAP-0099), and a CI job that runs
+    # ~/.local/bin/defenseclaw with a bare PATH (and its own HOME) still
+    # finds it (GAP-0253).
+    via_path = path_gateway()
     if via_path:
         return via_path
-
-    # The installers put both binaries in one directory: a CI job that runs
-    # ~/.local/bin/defenseclaw with a bare PATH (and its own HOME) still
-    # finds the gateway next to it (GAP-0253).
-    sibling = _launcher_sibling_gateway()
-    if sibling:
-        return sibling
 
     canonical = canonical_install_path()
     if _is_runnable_file(canonical):
@@ -1843,7 +1857,7 @@ _MANAGED_GATEWAY_BINARIES = {
 def _managed_gateway_binary() -> str | None:
     """The enterprise package's gateway on a managed Linux or macOS host.
 
-    An administrator's shell has it on no PATH, and the answer to "gateway
+    It is not on the PATH of an administrator's shell, and the answer to "gateway
     not found" there must not be ``defenseclaw upgrade``, which a managed
     device refuses (GAP-0168).
     """
@@ -1862,15 +1876,10 @@ GATEWAY_NOT_FOUND_MESSAGE = (
 )
 
 
-def _launcher_sibling_gateway() -> str | None:
-    """The gateway next to the ``defenseclaw`` launcher this process runs as, or None."""
 
-    launcher = sys.argv[0] if sys.argv else ""
-    name = os.path.basename(launcher).lower().removesuffix(".exe")
-    if name != "defenseclaw":
-        return None
-    candidate = os.path.join(os.path.dirname(os.path.abspath(launcher)), os.path.basename(canonical_install_path()))
-    return candidate if _is_runnable_file(candidate) else None
+
+
+
 
 
 def resolve_trusted_gateway_binary() -> str | None:
@@ -1943,26 +1952,60 @@ def packaged_windows_install_root() -> str | None:
     return root
 
 
-def _is_runnable_file(path: str) -> bool:
-    try:
-        return os.path.isfile(path) and os.access(path, os.X_OK)
-    except OSError:
-        return False
 
 
-def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
+#: Start of the ``failure`` reason of :func:`local_policy_digest` for each way
+#: the gateway executable itself cannot run, so a caller can tell those causes
+#: (which need the install or its permissions corrected, not the digest command
+#: run again) from a gateway that ran and failed.
+GATEWAY_EXECUTABLE_MISSING = "no trusted defenseclaw-gateway executable is installed"
+GATEWAY_EXECUTABLE_UNVERIFIED = "no trusted defenseclaw-gateway executable could be verified"
+GATEWAY_EXECUTABLE_NOT_STARTED = "the gateway executable could not be started"
+
+
+def gateway_executable_problem(reason: str) -> str | None:
+    """``"missing"``, ``"unverified"`` or ``"not-started"`` when *reason* (a
+    :func:`local_policy_digest` failure) says the gateway executable cannot
+    run at all; None for a gateway that ran and failed."""
+
+    for problem, prefix in (
+        ("missing", GATEWAY_EXECUTABLE_MISSING),
+        ("unverified", GATEWAY_EXECUTABLE_UNVERIFIED),
+        ("not-started", GATEWAY_EXECUTABLE_NOT_STARTED),
+    ):
+        if reason.startswith(prefix):
+            return problem
+    return None
+
+
+def local_policy_digest(cfg: Any, *, timeout: float = 60, failure: list[str] | None = None) -> dict | None:
     """Compute effective_policy_digest from disk with the installed gateway
-    (``defenseclaw-gateway policy digest --json``); None when it cannot."""
+    (``defenseclaw-gateway policy digest --json``); None when it cannot.
+
+    The gateway reads config.yaml from the install home, which is not the
+    data_dir once ``defenseclaw config set data_dir`` moved the store, so it
+    is started with :func:`gateway_home_for_data_dir`, the home the running
+    gateway uses (GAP-0844). When *failure* is given, the reason the digest
+    was unavailable is appended to it, for the caller to name.
+    """
+
+    def unavailable(reason: str) -> None:
+        if failure is not None:
+            failure.append(reason)
+        return None
+
     try:
         binary = resolve_trusted_gateway_binary()
-    except OSError:
-        return None
+    except OSError as exc:
+        return unavailable(f"{GATEWAY_EXECUTABLE_UNVERIFIED} ({exc})")
     if not binary:
-        return None
+        return unavailable(GATEWAY_EXECUTABLE_MISSING)
     env = dict(os.environ)
     data_dir = getattr(cfg, "data_dir", "") or ""
     if data_dir:
-        env["DEFENSECLAW_HOME"] = data_dir
+        from defenseclaw.config import gateway_home_for_data_dir
+
+        env["DEFENSECLAW_HOME"] = gateway_home_for_data_dir(data_dir)
     try:
         proc = subprocess.run(
             [binary, "policy", "digest", "--json"],
@@ -1972,12 +2015,21 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
             env=env,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except OSError as exc:
+        return unavailable(f"{GATEWAY_EXECUTABLE_NOT_STARTED}: {binary} ({exc})")
+    except subprocess.SubprocessError as exc:
+        return unavailable(f"the gateway policy digest command did not finish ({exc})")
     if proc.returncode != 0:
-        return None
+        detail = " ".join((proc.stderr or proc.stdout or "").split())[:200]
+        return unavailable(
+            f"the gateway policy digest command failed: {detail}"
+            if detail
+            else "the gateway policy digest command failed"
+        )
     try:
         report = json.loads(proc.stdout)
     except ValueError:
-        return None
-    return report if isinstance(report, dict) and report.get("effective_digest") else None
+        return unavailable("the gateway policy digest command printed no JSON")
+    if isinstance(report, dict) and report.get("effective_digest"):
+        return report
+    return unavailable("the gateway policy digest command reported no digest")

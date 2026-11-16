@@ -4,8 +4,11 @@
 package hookexec
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,23 +32,72 @@ var openHookFailureLog = os.OpenFile
 // of its answer deadline. Every copy of the call's Options shares it
 // (Options.failureLog), and the first failure line of the call takes it.
 type preparedFailureLog struct {
-	once sync.Once
-	done chan struct{}
+	once        sync.Once
+	done        chan struct{}
+	markerReady chan struct{}
+	// open and record are openHookFailureLog and managedHookDecisionRecorder
+	// as the call found them: its lines can be written by a goroutine that
+	// outlives it (the watchdog's log line past answerWatchdogLogWait, the
+	// open ahead of the deadline), and a test that replaced either after the
+	// call raced that read (rel-1-0-6 GAP-0680).
+	open   func(string, int, os.FileMode) (*os.File, error)
+	record func(source, marker, line string)
 
-	mu     sync.Mutex
-	home   string
-	file   *os.File
-	taken  bool
-	closed bool
+	mu            sync.Mutex
+	home          string
+	file          *os.File
+	marker        *os.File
+	markerEnabled bool
+	markerTaken   bool
+	fallbackFrame []byte
+	fallbackSaved bool
+	taken         bool
+	closed        bool
+	// restartReason is the bounded proof's result for a per-user no-answer.
+	restartReason string
+}
+
+func (p *preparedFailureLog) setRestartReason(reason string) {
+	if p == nil || reason == "" {
+		return
+	}
+	p.mu.Lock()
+	p.restartReason = reason
+	p.mu.Unlock()
+}
+
+func (p *preparedFailureLog) getRestartReason() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.restartReason
 }
 
 func newPreparedFailureLog() *preparedFailureLog {
-	return &preparedFailureLog{done: make(chan struct{})}
+	return &preparedFailureLog{done: make(chan struct{}), markerReady: make(chan struct{}), open: openHookFailureLog, record: managedHookDecisionRecorder}
 }
 
-// prepare opens home/logs/hook-failures.jsonl for appending, once, in the
-// background. It never creates the folder or the file: a log that does not
-// exist yet is opened the usual way when a line is written (logHookFailure).
+// opener is the call's openHookFailureLog.
+func (p *preparedFailureLog) opener() func(string, int, os.FileMode) (*os.File, error) {
+	if p == nil || p.open == nil {
+		return openHookFailureLog
+	}
+	return p.open
+}
+
+// recorder is the call's managedHookDecisionRecorder.
+func (p *preparedFailureLog) recorder() func(source, marker, line string) {
+	if p == nil || p.record == nil {
+		return managedHookDecisionRecorder
+	}
+	return p.record
+}
+
+// prepare opens the per-user marker before the ordinary failure log. The
+// marker can be used if opening or writing the ordinary log is delayed.
+// A managed call does not create either folder or file here.
 func (p *preparedFailureLog) prepare(home func() string) {
 	if p == nil || home == nil {
 		return
@@ -55,9 +107,26 @@ func (p *preparedFailureLog) prepare(home func() string) {
 			defer close(p.done)
 			h := home()
 			if h == "" {
+				close(p.markerReady)
 				return
 			}
-			f, err := openHookFailureLog(filepath.Join(h, "logs", "hook-failures.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+			if p.markerEnabled {
+				if info, err := os.Stat(h); err == nil && info.IsDir() {
+					_ = os.Mkdir(filepath.Join(h, "logs"), 0o700)
+				}
+				marker, err := p.opener()(filepath.Join(h, "logs", "hook-failures.dropped"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if err == nil {
+					p.mu.Lock()
+					if p.closed {
+						_ = marker.Close()
+					} else {
+						p.home, p.marker = h, marker
+					}
+					p.mu.Unlock()
+				}
+			}
+			close(p.markerReady)
+			f, err := p.opener()(filepath.Join(h, "logs", "hook-failures.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
 				return
 			}
@@ -72,16 +141,17 @@ func (p *preparedFailureLog) prepare(home func() string) {
 	})
 }
 
-// take hands the open log of home to the first failure line of the call, and
-// nil when it was not opened, is for another home, was taken or closed. An
-// open still in progress is waited for: it is the open the line would make.
+// take hands the ready ordinary log to the first failure line of the call.
+// An open still in progress leaves the caller free to use the marker.
 func (p *preparedFailureLog) take(home string) *os.File {
 	if p == nil || home == "" {
 		return nil
 	}
-	// Not started yet: nothing to wait for, and no later prepare.
-	p.once.Do(func() { close(p.done) })
-	<-p.done
+	select {
+	case <-p.done:
+	default:
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.taken || p.closed || p.file == nil || p.home != home {
@@ -91,11 +161,162 @@ func (p *preparedFailureLog) take(home string) *os.File {
 	return p.file
 }
 
+func (p *preparedFailureLog) ordinaryReady() bool {
+	if p == nil {
+		return false
+	}
+	select {
+	case <-p.done:
+	default:
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.file != nil && !p.taken && !p.closed
+}
+
+func (p *preparedFailureLog) fallbackRecorded() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fallbackSaved
+}
+
+func (p *preparedFailureLog) takeMarker(home string) *os.File {
+	if p == nil || home == "" || !p.markerEnabled {
+		return nil
+	}
+	select {
+	case <-p.markerReady:
+	default:
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.markerTaken || p.marker == nil || p.home != home {
+		return nil
+	}
+	p.markerTaken = true
+	return p.marker
+}
+
+func (p *preparedFailureLog) setFallbackFrame(frame []byte) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if !bytes.Contains(p.fallbackFrame, []byte(`"outcome":"fail_closed"`)) ||
+		bytes.Contains(frame, []byte(`"outcome":"fail_closed"`)) {
+		p.fallbackFrame = append(p.fallbackFrame[:0], frame...)
+	}
+	p.mu.Unlock()
+}
+
+func (p *preparedFailureLog) replaceFallbackFrame(frame []byte) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.fallbackFrame = append(p.fallbackFrame[:0], frame...)
+	p.mu.Unlock()
+}
+
+// localFailureFallbackFrame is ready before a logger can wait on a file or
+// a caller-provided clock. The watchdog writes it only when logging has not
+// finished by the answer deadline.
+func localFailureFallbackFrame(opts Options, sp spec, reason, category, failMode string, blocked bool) []byte {
+	if opts.ManagedEnterprise || opts.SecureClient || opts.Home == "" {
+		return nil
+	}
+	sessionID, callID, toolID := hookFailureCorrelation(opts.failurePayload)
+	outcome := "fail_open"
+	if blocked {
+		outcome = "fail_closed"
+	}
+	entry := hookFailureEntry{
+		TS:        time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		Connector: sp.connector,
+		Hook:      sp.hookName,
+		Event:     strings.TrimSpace(opts.Event),
+		SessionID: sessionID,
+		CallID:    callID,
+		ToolID:    toolID,
+		Reason:    reason,
+		Category:  category,
+		FailMode:  loggedFailMode(opts, sp, failMode),
+		Outcome:   outcome,
+	}
+	if len(entry.Reason) > 1024 {
+		entry.Reason = strings.ToValidUTF8(entry.Reason[:1024], "")
+	}
+	if len(entry.Event) > 128 {
+		entry.Event = strings.ToValidUTF8(entry.Event[:128], "")
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return nil
+	}
+	return append(append([]byte("DCID"), line...), '\n')
+}
+
+func (p *preparedFailureLog) promoteFallbackClosed() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !bytes.HasPrefix(p.fallbackFrame, []byte("DCID")) {
+		return
+	}
+	var entry hookFailureEntry
+	if json.Unmarshal(p.fallbackFrame[4:], &entry) != nil {
+		return
+	}
+	entry.Outcome, entry.FailMode = "fail_closed", "closed"
+	if line, err := json.Marshal(entry); err == nil {
+		p.fallbackFrame = append(append([]byte("DCID"), line...), '\n')
+	}
+}
+
+func (p *preparedFailureLog) appendFallback() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	if p.closed || p.markerTaken || p.marker == nil || len(p.fallbackFrame) == 0 {
+		p.mu.Unlock()
+		return false
+	}
+	marker := p.marker
+	frame := append([]byte(nil), p.fallbackFrame...)
+	p.markerTaken = true
+	p.mu.Unlock()
+
+	// A stalled append must leave the ordinary logger free to record the
+	// answer. This writer owns the descriptor until its write completes.
+	n, err := marker.Write(frame)
+	_ = marker.Close()
+	saved := err == nil && n == len(frame)
+	p.mu.Lock()
+	p.fallbackSaved = saved
+	p.mu.Unlock()
+	return saved
+}
+
 // close closes the log unless a failure line took it.
 func (p *preparedFailureLog) close() {
 	if p == nil {
 		return
 	}
+	// If preparation never started, close its completion channels now. A
+	// queued timer may call prepare after the hook has already finished; it
+	// must not start a file opener against a retired call.
+	p.once.Do(func() {
+		close(p.markerReady)
+		close(p.done)
+	})
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -104,6 +325,9 @@ func (p *preparedFailureLog) close() {
 	p.closed = true
 	if !p.taken && p.file != nil {
 		_ = p.file.Close()
+	}
+	if !p.markerTaken && p.marker != nil {
+		_ = p.marker.Close()
 	}
 }
 

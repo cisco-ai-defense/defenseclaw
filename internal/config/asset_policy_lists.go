@@ -83,7 +83,7 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 // mcpAllowCommandMatches binds an operator allow to the reviewed launcher and
 // complete argument list. Denied rules retain their broad basename/prefix scope.
 func mcpAllowCommandMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
-	if strings.TrimSpace(rule.Command) != strings.TrimSpace(in.Command) ||
+	if in.ArgsCut || strings.TrimSpace(rule.Command) != strings.TrimSpace(in.Command) ||
 		len(rule.ArgsPrefix) != len(in.Args) {
 		return false
 	}

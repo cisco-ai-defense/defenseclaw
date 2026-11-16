@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +29,8 @@ from defenseclaw.connector_paths import (
     normalize,
 )
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
+from defenseclaw.gateway_path import path_gateway
+from defenseclaw.winquote import powershell_command_line
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
@@ -143,6 +144,24 @@ def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
     return raw if raw in _VALID_MODES else default
 
 
+def managed_windows_verify_command() -> str:
+    """The managed Windows deployment's verify as an administrator types it.
+
+    Setup puts no DefenseClaw command on PATH, so the installed CLI is named
+    by its path under Program Files, as a PowerShell literal: the form of
+    managed.WindowsAdminCommand in the Go CLI (cowork-1-0-8 GAP-0076).
+    Program Files comes from the machine registration, never the
+    ProgramFiles variable a standard user can set (g072 review 2 S2).
+    """
+    root = ""
+    if sys.platform == "win32":
+        from defenseclaw import windows_owner
+
+        root = windows_owner._program_files_dir()
+    cli = (root.strip().rstrip("\\") or r"C:\Program Files") + r"\Cisco\DefenseClaw\bin\defenseclaw.exe"
+    return powershell_command_line(cli, "enterprise", "windows", "verify", "--profile", "standalone")
+
+
 @dataclass(frozen=True)
 class ConnectorFailModeState:
     connector: str
@@ -246,8 +265,8 @@ class ConnectorFailModeState:
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
                 "the managed native hook runs the mode of the runtime generation the guardian publishes, "
-                "which this command cannot verify: `defenseclaw enterprise windows verify` from an elevated "
-                "prompt checks it"
+                f"which this command cannot verify: `{managed_windows_verify_command()}` from an elevated "
+                "PowerShell prompt checks it"
             )
         elif not self.runtime_verified:
             default = f" (default {self.runtime})" if self.runtime else ""
@@ -264,13 +283,18 @@ class ConnectorFailModeState:
             "effective": self.effective,
             "provenance": self.provenance,
             "note": self.note,
-            "configured": self.configured,
+            # None when config.yaml saves no mode: the normalized default is
+            # no value the user chose (GAP-0719).
+            "configured": self.configured if self.configured_saved else None,
             "desired": self.desired,
             "runtime": self.runtime,
             "current": self.current,
             "runtime_verified": self.runtime_verified,
             "drift": list(self.drift),
-            "sources": [{"name": source, "mode": mode} for source, mode in self.sources],
+            "sources": [
+                {"name": source, "mode": mode if source != "config" or self.configured_saved else None}
+                for source, mode in self.sources
+            ],
         }
 
 
@@ -365,6 +389,24 @@ def _fail_mode_note_context(cfg: Any, guardrail: Any, connector: str) -> tuple[s
     return "per-user", str(tier(connector)) if callable(tier) else ""
 
 
+def _hook_fail_mode_saved(guardrail: Any, name: str) -> bool:
+    """Whether config.yaml saves a hook fail mode for *name* (or globally).
+
+    GuardrailConfig fills an unset global hook_fail_mode with closed and
+    records whether config.yaml saved one (_hook_fail_mode_saved); that
+    placeholder is never a mode the user chose.
+    """
+
+    entry = guardrail._connector_override(name) if hasattr(guardrail, "_connector_override") else None
+    if entry is None:
+        entry = (getattr(guardrail, "connectors", {}) or {}).get(name)
+    raw = getattr(entry, "hook_fail_mode", "") if entry is not None else ""
+    return str(raw or "").strip().lower() in _VALID_MODES or (
+        bool(getattr(guardrail, "_hook_fail_mode_saved", True))
+        and str(getattr(guardrail, "hook_fail_mode", "") or "").strip().lower() in _VALID_MODES
+    )
+
+
 def resolve_connector_fail_mode(
     cfg: Any,
     connector: str,
@@ -382,12 +424,7 @@ def resolve_connector_fail_mode(
     raw = getattr(entry, "hook_fail_mode", "") if entry is not None else ""
     saved_value = raw or getattr(guardrail, "hook_fail_mode", "")
     configured = normalize_fail_mode(saved_value)
-    # GuardrailConfig fills an unset global hook_fail_mode with closed and
-    # records whether config.yaml saved one (_hook_fail_mode_saved).
-    configured_saved = str(raw or "").strip().lower() in _VALID_MODES or (
-        bool(getattr(guardrail, "_hook_fail_mode_saved", True))
-        and str(getattr(guardrail, "hook_fail_mode", "") or "").strip().lower() in _VALID_MODES
-    )
+    configured_saved = _hook_fail_mode_saved(guardrail, name)
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     desired = normalize_fail_mode(resolver(name) if callable(resolver) else configured)
     deployment, policy_tier = _fail_mode_note_context(cfg, guardrail, name)
@@ -719,6 +756,99 @@ def rendered_fail_mode(report: dict[str, Any]) -> str | None:
     return None
 
 
+def proxy_model_outage_mode(cfg: Any, connector: str, *, saved: str | None = None) -> str:
+    """What the model requests of a proxy-backed connector do while the gateway is down (GAP-0824).
+
+    OpenClaw follows the outage mode its plugin asks the gateway program for
+    (Go ``Config.EffectiveHookOutageFailModeForConnector``): open on the default
+    and permissive packs, closed on strict, on a managed host and for an explicit
+    closed. ZeptoClaw model requests stay blocked. ``saved`` is a mode about to be
+    saved, judged by the same rules.
+    """
+
+    name = normalize(connector)
+    if name != "openclaw":
+        return "closed"
+    guardrail = cfg.guardrail
+    if saved is None:
+        return normalize_fail_mode(guardrail.effective_hook_outage_fail_mode(name))
+    if guardrail._managed_outage_install() or guardrail.hook_policy_tier(name) == "strict":
+        return "closed"
+    return normalize_fail_mode(saved)
+
+
+def proxy_outage_source(cfg: Any, connector: str) -> str:
+    """Say where a proxy-backed connector gets its outage mode, in the order the resolver applies it (GAP-0824).
+
+    A managed or Secure Client install takes the administrator mode (an unset one
+    is the Secure Client or managed default); a saved mode comes next, except that
+    OpenClaw under the strict policy stays closed on a per-user install; an unset
+    mode follows the policy tier. ZeptoClaw has no outage mode to explain.
+    """
+
+    if normalize(connector) != "openclaw":
+        return "model requests are always blocked while the gateway is down; no fail mode applies."
+    guardrail = cfg.guardrail
+    mode, source = guardrail.hook_fail_mode_resolution(connector)
+    effective = normalize_fail_mode(guardrail.effective_hook_outage_fail_mode(connector))
+    if source == "secure-client-default":
+        return (
+            f"set by Secure Client ({effective} unless the administrator chose otherwise); "
+            "the policy tier does not change it."
+        )
+    if source == "managed-default":
+        return (
+            "set by this managed computer (closed unless the administrator chose open); "
+            "the policy tier does not change it."
+        )
+    if source.startswith("config:"):
+        if "application_protection" in source:
+            where = "automatic-protection"
+        elif ".connectors." in source:
+            where = "per-connector"
+        else:
+            where = "global"
+        if guardrail._managed_outage_install():
+            return f"the administrator saved {where} mode ({effective}); the policy tier does not change it."
+        if effective != mode:
+            return (
+                f"closed by the strict policy: the saved {where} {mode} mode does not apply to OpenClaw "
+                "under the strict tier."
+            )
+        if where == "global":
+            return f"inherited from global default ({effective})."
+        return f"the saved {where} mode ({effective}); the policy tier does not change it."
+    return f"from the policy tier ({guardrail.hook_policy_tier(connector)} tier); no fail mode is saved."
+
+
+def proxy_outage_note(mode: str) -> str:
+    if mode == "open":
+        return "no hooks: model requests continue with a warning while the gateway is down"
+    return "no hooks: blocked while the gateway is down"
+
+
+def proxy_outage_summary(mode: str) -> str:
+    """The one-line outage behaviour of a proxy-backed connector, as every fail-mode view prints it."""
+
+    shown = "open" if mode == "open" else "closed"
+    return shown + " (proxy-backed, " + proxy_outage_note(mode) + ")"
+
+
+def proxy_requests_note(cfg: Any, connector: str, *, saved: str | None = None) -> str:
+    """What a fail-mode value does to the model requests of a proxy-backed connector."""
+
+    if normalize(connector) != "openclaw":
+        return "Its proxied model requests are blocked while the gateway is down, whatever this value says."
+    if proxy_model_outage_mode(cfg, connector, saved=saved) == "open":
+        return "Its proxied model requests continue with a warning while the gateway is down."
+    if saved == "open":
+        return (
+            "Its proxied model requests are blocked while the gateway is down: the strict policy "
+            "(or a managed host) blocks them whatever this value says."
+        )
+    return "Its proxied model requests are blocked while the gateway is down."
+
+
 def connector_fail_mode_report(
     cfg: Any,
     connector: str,
@@ -730,7 +860,9 @@ def connector_fail_mode_report(
     name = normalize(connector)
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
-    configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
+    resolved = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
+    saved = _hook_fail_mode_saved(guardrail, name)
+    configured = resolved if saved else None
     # The upstream fail-open connectors (Antigravity, Copilot, Hermes) have no
     # runtime record of their own, so they are never in this branch; outside
     # Secure Client they resolve from their rendered hooks below.
@@ -762,21 +894,21 @@ def connector_fail_mode_report(
     from defenseclaw.platform_support import is_proxy_connector
 
     if is_proxy_connector(name):
-        # The proxy connectors (OpenClaw, ZeptoClaw) have no hooks: while the
-        # gateway is down their model and tool calls are refused whatever
-        # guardrail.hook_fail_mode says, as `guardrail fail-mode` lists them
-        # (GAP-1957).
+        # The proxy connectors (OpenClaw, ZeptoClaw) have no hooks. ZeptoClaw
+        # model requests stay blocked while the gateway is down; OpenClaw
+        # follows the outage mode the gateway resolves (GAP-0824).
+        outage = proxy_model_outage_mode(cfg, name)
         return {
-            "effective": "closed",
+            "effective": outage,
             "provenance": "proxy-backed",
-            "note": "no hooks: blocked while the gateway is down",
+            "note": proxy_outage_note(outage),
             "configured": configured,
-            "desired": "closed",
+            "desired": outage,
             "runtime": None,
             "current": False if unguarded else None,
             "runtime_verified": None,
             "drift": unguarded,
-            "sources": [{"name": "proxy", "mode": "closed"}],
+            "sources": [{"name": "proxy", "mode": outage}],
         }
     if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
         # Outside Secure Client, Copilot CLI, Antigravity and Hermes follow the
@@ -787,11 +919,11 @@ def connector_fail_mode_report(
             inspect_effective_policy=inspect_effective_policy,
         ).to_report()
     return {
-        "effective": configured,
+        "effective": resolved,
         "provenance": "config",
         "note": "",
         "configured": configured,
-        "desired": configured,
+        "desired": resolved,
         "runtime": None,
         "current": False if unguarded else None,
         "runtime_verified": None,
@@ -1626,6 +1758,11 @@ class _ClaudeNativeRegistration:
 
 # claudeCodeMissingHookGuardSeparator (internal/gateway/connector/claudecode.go).
 _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR = " || { rc=$?; "
+_CLAUDE_MISSING_HOOK_GUARD_MESSAGE = (
+    "DefenseClaw blocked this: its Claude Code hook script is missing "
+    "or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, "
+    "or remove the DefenseClaw hooks from ~/.claude/settings.json."
+)
 
 
 def _claude_posix_word(value: str) -> str:
@@ -1634,6 +1771,20 @@ def _claude_posix_word(value: str) -> str:
     if value and all((ch.isascii() and ch.isalnum()) or ch in "/._-+=:,@%" for ch in value):
         return value
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _claude_native_shell_command(expected: _ClaudeNativeRegistration) -> str:
+    """The exact native launcher command Setup writes without a guard binary."""
+
+    command = " ".join(_claude_posix_word(word) for word in (expected.native, *expected.hook_args))
+    return (
+        command
+        + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
+        + '[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; '
+        + "echo '"
+        + _CLAUDE_MISSING_HOOK_GUARD_MESSAGE
+        + "' >&2; exit 2; }"
+    )
 
 
 def _claude_loopback_api_addr(addr: str) -> bool:
@@ -1748,6 +1899,39 @@ def _claude_owned_handler(handler: dict[str, Any], data_dir: str) -> bool:
     return False
 
 
+def _claude_native_primary_handler(handler: dict[str, Any], expected: _ClaudeNativeRegistration) -> bool:
+    """Whether a handler names the native invocation Setup registers for an event."""
+
+    if expected.guard:
+        return handler.get("command") == expected.guard and handler.get("args") == [
+            "guard-user-hook", expected.native, *expected.hook_args
+        ]
+    return handler.get("args") is None and handler.get("command") == _claude_native_shell_command(expected)
+
+
+def _claude_native_event_fields_current(event: str, group: dict[str, Any], handler: dict[str, Any]) -> bool:
+    """Whether a native handler keeps the fields Setup renders for its event."""
+
+    from defenseclaw.doctor_hooks import _CLAUDE_REQUIRED_HOOKS, _matcher_covers
+
+    required = _CLAUDE_REQUIRED_HOOKS.get(event)
+    if required is None:
+        return True
+    matcher, timeout = required
+    if not _matcher_covers(event, group.get("matcher"), matcher):
+        return False
+    if type(handler.get("timeout")) is not int or handler["timeout"] != timeout:
+        return False
+    if handler.get("async", False) is not (event == "MessageDisplay") or group.get("async") is True:
+        return False
+    return all(
+        item.get("asyncRewake") is not True
+        and item.get("async_rewake") is not True
+        and item.get("if", "") == ""
+        for item in (group, handler)
+    )
+
+
 def _claude_native_registration_problem(
     registration: str, expected: _ClaudeNativeRegistration, data_dir: str
 ) -> str | None:
@@ -1760,8 +1944,9 @@ def _claude_native_registration_problem(
     without the guard, the launcher's shell command behind the missing-hook
     guard. Any other DefenseClaw handler is stale: a 1.0.7 shell entry left
     behind, another binary or data directory, edited arguments or a missing
-    companion. Event coverage is claude_missing_registration's check (doctor
-    and status), matchers and timeouts are doctor's.
+    companion. Event coverage is claude_missing_registration's check. Known
+    event fields use Doctor's required-hook table; the tool-guard field matrix
+    also checks that PreToolUse covers every call for Doctor and status.
     testdata/claudecode_linux_peruser_handlers.json pins this to the Go render.
     """
 
@@ -1773,14 +1958,9 @@ def _claude_native_registration_problem(
     hooks = settings.get("hooks") if isinstance(settings, dict) else None
     if not isinstance(hooks, dict):
         return stale
-    primary_args = ["guard-user-hook", expected.native, *expected.hook_args]
     companion_args = ["fallback-guard-user-hook", expected.guard, *expected.hook_args]
-    shell_prefix = (
-        " ".join(_claude_posix_word(word) for word in (expected.native, *expected.hook_args))
-        + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
-    )
     primaries = 0
-    for groups in hooks.values():
+    for event, groups in hooks.items():
         if not isinstance(groups, list):
             continue
         for group in groups:
@@ -1791,16 +1971,15 @@ def _claude_native_registration_problem(
             for handler in handlers:
                 if not isinstance(handler, dict) or not _claude_owned_handler(handler, data_dir):
                     continue
+                if not _claude_native_event_fields_current(event, group, handler):
+                    return stale
                 command, args = handler.get("command"), handler.get("args")
                 if handler.get("type") != "command":
                     return stale
-                if not expected.guard:
-                    if args is not None or not isinstance(command, str) or not command.startswith(shell_prefix):
-                        return stale
+                if _claude_native_primary_handler(handler, expected):
                     primaries += 1
-                elif command == expected.guard and args == primary_args:
-                    primaries += 1
-                    synchronous += handler.get("async") is not True
+                    if expected.guard:
+                        synchronous += handler.get("async") is not True
                 elif command == expected.native and args == companion_args:
                     companions += 1
                 else:
@@ -1858,30 +2037,26 @@ def claude_missing_registration(cfg: Any, settings: Any) -> tuple[str, str] | No
         hooks = {}
     native = _claude_per_user_native_registration(cfg)
     if native is not None:
-        primary_args = ["guard-user-hook", native.native, *native.hook_args]
         companion_args = ["fallback-guard-user-hook", native.guard, *native.hook_args]
-        shell_prefix = (
-            " ".join(_claude_posix_word(word) for word in (native.native, *native.hook_args))
-            + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
-        )
 
-    def guard(handler: dict[str, Any], synchronous: bool) -> bool:
+    def guard(handler: dict[str, Any], group: dict[str, Any], event: str, synchronous: bool) -> bool:
         if handler.get("type") != "command" or (synchronous and handler.get("async") is True):
             return False
-        command, args = handler.get("command"), handler.get("args")
         if native is None:
             # Which copy of the script runs is the freshness and edited-hook
             # checks' question; this one asks whether the event runs it at all.
+            command = handler.get("command")
             return isinstance(command, str) and "claude-code-hook.sh" in command
-        if not native.guard:
-            return args is None and isinstance(command, str) and command.startswith(shell_prefix)
-        return command == native.guard and args == primary_args
+        return _claude_native_event_fields_current(event, group, handler) and _claude_native_primary_handler(
+            handler, native
+        )
 
-    def companion(handler: dict[str, Any]) -> bool:
+    def companion(handler: dict[str, Any], group: dict[str, Any], event: str) -> bool:
         return (
             native is not None
             and handler.get("type") == "command"
             and handler.get("async") is not True
+            and _claude_native_event_fields_current(event, group, handler)
             and handler.get("command") == native.native
             and handler.get("args") == companion_args
         )
@@ -1896,10 +2071,10 @@ def claude_missing_registration(cfg: Any, settings: Any) -> tuple[str, str] | No
             if not isinstance(handlers, list):
                 continue
             handlers = [handler for handler in handlers if isinstance(handler, dict)]
-            if not any(guard(handler, synchronous) for handler in handlers):
+            if not any(guard(handler, group, event, synchronous) for handler in handlers):
                 continue
             guarded = True
-            if not (needs_companion and synchronous) or any(companion(handler) for handler in handlers):
+            if not (needs_companion and synchronous) or any(companion(handler, group, event) for handler in handlers):
                 break
         else:
             if not guarded:
@@ -2139,7 +2314,7 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
 
 def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailModeState:
     name = normalize(connector)
-    executable = shutil.which("defenseclaw-gateway")
+    executable = path_gateway(honor_override=False)
     if not executable or (_is_windows() and Path(executable).suffix.lower() != ".exe"):
         raise OSError("native defenseclaw-gateway executable not found")
     environment = os.environ.copy()

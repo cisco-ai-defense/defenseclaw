@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -43,6 +44,11 @@ var (
 func repairEnterpriseHookManagedRuntimePlatform(path, serviceAccount string) error {
 	if strings.TrimSpace(serviceAccount) == "" {
 		return nil
+	}
+	// On standalone a data_dir another account can write or owns is refused
+	// and named, never re-stamped or adopted in place (g582 round 4).
+	if refused := managed.RefuseStandaloneInPlaceRepair(path, managed.ObjectRuntimeDirectory); refused != nil {
+		return fmt.Errorf("managed data_dir was not repaired: %w", refused)
 	}
 
 	// The shared canonical repair checks the gateway's write entry as well as
@@ -219,7 +225,7 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 }
 
 func validateEnterpriseWindowsTokenLocation(dataDir, path, label string) error {
-	serviceAccount := os.Getenv(managed.WindowsServiceAccountEnv)
+	serviceAccount := managed.GatewayServiceAccount()
 	if err := managed.ValidateTrustedServiceRuntimeDir(dataDir, "managed data_dir", serviceAccount); err != nil {
 		return fmt.Errorf("enterprise hooks: %w", err)
 	}
@@ -273,6 +279,16 @@ func alignEnterpriseWindowsTokenOwner(dataDir, path, label string) error {
 	// NTFS splits its inheritable entries, which the canonical check reads as
 	// a missing gateway write entry.
 	dir := filepath.Dir(path)
+	// On standalone a token folder or token another account can write or owns
+	// is refused and named, never re-stamped in place (GAP-0651). The shared
+	// canonical repair above refuses it too, and its refusal used to fall
+	// through to the generic stamp below.
+	if refused := managed.RefuseStandaloneInPlaceRepair(dir, managed.ObjectRuntimeDirectory); refused != nil {
+		return fmt.Errorf("enterprise hooks: %s directory was not hardened: %w", label, refused)
+	}
+	if refused := managed.RefuseStandaloneInPlaceRepair(path, managed.ObjectRuntimeSecretFile); refused != nil {
+		return fmt.Errorf("enterprise hooks: %s was not hardened: %w", label, refused)
+	}
 	if !enterpriseWindowsTokenDirectoryCanonical(dir) {
 		if err := setEnterpriseWindowsRuntimeProtection(dir, owner, serviceSID, true); err != nil {
 			return fmt.Errorf("enterprise hooks: harden %s directory: %w", label, err)
@@ -456,6 +472,11 @@ func repairEnterpriseHookGatewayDataPathsPlatform() {
 	}
 	paths.LogPaths = []string{enterpriseHookGatewayLogPath(paths.DataDir)}
 	paths.RuntimeDirs = []string{filepath.Join(paths.DataDir, "hooks")}
+	if managed.WindowsStandaloneTrustScope() {
+		// The lazily created lock files of the standalone profile; the Secure
+		// Client profile keeps the objects it listed before (GAP-0766).
+		paths.LockFiles = append(acp.EnterpriseLockFilePaths(paths.DataDir), filepath.Join(paths.DataDir, ".env.lock"))
+	}
 	_ = enterpriseWindowsManagedDataPathsRepair(paths, managed.CanonicalOptions{
 		AllowUntrustedOwnerTransfer: enterpriseHookOwnerTransferAllowed(paths.DataDir),
 	})

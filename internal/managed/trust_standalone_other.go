@@ -30,6 +30,10 @@ func ValidateTrustedServiceRuntimeFilePathStandalone(path, label, serviceAccount
 	return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
 }
 
+// standaloneContentDriftRecovery is the config.yaml recovery off Windows,
+// where no standalone reader refuses content drift.
+func standaloneContentDriftRecovery(error) string { return standaloneConfigDriftRecovery() }
+
 // StandaloneRefusesContentDrift is false off Windows: the repair-then-use
 // paths there keep their own rules.
 func StandaloneRefusesContentDrift() bool { return false }

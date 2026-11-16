@@ -51,6 +51,25 @@ func TestCompareSnapshots_NoDrift(t *testing.T) {
 	}
 }
 
+func TestGAP0034SnapshotIdentityDoesNotCreateConfigDrift(t *testing.T) {
+	baseline := &audit.SnapshotRow{
+		TargetType:       string(InstallMCP),
+		DependencyHashes: `{}`,
+		ConfigHashes:     `{"mcp.servers.notes":"hash"}`,
+		NetworkEndpoints: `[]`,
+	}
+	current := &TargetSnapshot{
+		DependencyHashes: map[string]string{},
+		ConfigHashes: map[string]string{
+			"mcp.servers.notes":    "hash",
+			mcpSnapshotIdentityKey: `{"name":"notes","connector":"claudecode"}`,
+		},
+	}
+	if deltas := compareSnapshots(baseline, current); len(deltas) != 0 {
+		t.Fatalf("identity metadata produced a drift alert: %+v", deltas)
+	}
+}
+
 func TestCompareSnapshots_DependencyChanged(t *testing.T) {
 	baseline := &audit.SnapshotRow{
 		DependencyHashes: `{"requirements.txt":"abc123"}`,
@@ -607,13 +626,13 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	}
 	if evt, ok := seen[InstallMCP]["remote-mcp"]; !ok {
 		t.Fatalf("expected remote MCP in targets, got %+v", targets)
-	} else if evt.Path != "remote-mcp" {
-		t.Fatalf("remote MCP path = %q, want server name", evt.Path)
+	} else if identity, ok := decodeMCPEventPath(evt.Path); !ok || identity != (mcpSnapshotIdentity{Name: "remote-mcp"}) {
+		t.Fatalf("remote MCP path = %q, want its server identity", evt.Path)
 	}
 	if evt, ok := seen[InstallMCP]["stdio-mcp"]; !ok {
 		t.Fatalf("expected stdio MCP in targets, got %+v", targets)
-	} else if evt.Path != "stdio-mcp" {
-		t.Fatalf("stdio MCP path = %q, want server name", evt.Path)
+	} else if identity, ok := decodeMCPEventPath(evt.Path); !ok || identity != (mcpSnapshotIdentity{Name: "stdio-mcp"}) {
+		t.Fatalf("stdio MCP path = %q, want its server identity", evt.Path)
 	}
 }
 
@@ -846,7 +865,8 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	cfg.Claw.Mode = config.ClawOpenClaw
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
-	snap, err := w.snapshotMCPServer(InstallEvent{Type: InstallMCP, Name: "remote-mcp", Path: "remote-mcp"})
+	snap, err := w.snapshotMCPServer(InstallEvent{Type: InstallMCP, Name: "remote-mcp",
+		Path: MCPEventPath(config.MCPServerEntry{Name: "remote-mcp"})})
 	if err != nil {
 		t.Fatalf("snapshotMCPServer: %v", err)
 	}

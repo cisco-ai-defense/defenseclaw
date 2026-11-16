@@ -788,11 +788,15 @@ func validateWindowsGuardianACLHandle(
 		// direct callers, target-directory and runtime-setup checks) and
 		// under LocalSystem (the guardian DACL repair thread of
 		// runWindowsEnterpriseGuardianDACLRepairWithACL, and
-		// recoverWindowsSetupRelaxedHookDirectoryPrivileged). Even with
-		// backup/restore privileges no caller transfers ownership, so
-		// accepting an admin-owned element would only hide drift. Keep
-		// the check strict: any owner that is not the exact target SID
-		// (or, for the profile root, the profile-anchor set) is fatal.
+		// recoverWindowsSetupRelaxedHookDirectoryPrivileged). The only
+		// owner transfer is the walker's explicit reclaim step: with
+		// reclaimOwner (the LocalSystem thread with backup and restore
+		// privileges), reclaimWindowsGuardianACLOwner hands an
+		// administrator-owned or orphaned-SID element to the target just
+		// before this check. Accepting an admin-owned element here would
+		// only hide drift. Keep the check strict: any owner that is not the
+		// exact target SID (or, for the profile root, the profile-anchor
+		// set) is fatal.
 		return fmt.Errorf(
 			"owner SID %s is not trusted for target SID %s",
 			windowsSIDString(owner),

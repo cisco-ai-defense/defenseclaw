@@ -17,6 +17,7 @@ import (
 // strict availability block it, and a gateway that is not proven stopped
 // blocks it in every mode.
 func TestGuardedConnectorsFollowTheManagedOutageFailMode(t *testing.T) {
+	shortRestartBudget(t)
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	calls := map[string]struct{ event, stdin string }{
 		"copilot":  {"preToolUse", `{"toolName":"bash","toolArgs":"{\"command\":\"ls\"}","sessionId":"s-1"}`},

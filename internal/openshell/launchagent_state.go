@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // LaunchAgentState contains the service fields needed to judge an on-demand
@@ -129,7 +131,7 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 		}
 		if why := state.Failure(false); why != "" {
 			c.Status, c.Detail = StatusFail, target+" failed: "+why
-			c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: "sudo defenseclaw-gateway enterprise macos repair", Sudo: true}
+			c.Fix = &Fix{Summary: "ask your administrator to repair this computer's sandbox LaunchAgent", Command: macosRepairCommand(), Sudo: true}
 			if failed == nil {
 				failed = c
 			}
@@ -164,4 +166,11 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 func launchAgentMissing(raw []byte, err error) bool {
 	message := strings.ToLower(string(raw) + " " + err.Error())
 	return strings.Contains(message, "could not find service") || strings.Contains(message, "could not find domain") || strings.Contains(message, "no such process")
+}
+
+// macosRepairCommand is the administrator's repair of a managed Mac, with the
+// gateway by its absolute path: it is not on the PATH (cowork-1-0-8
+// GAP-0081).
+func macosRepairCommand() string {
+	return "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos repair"
 }

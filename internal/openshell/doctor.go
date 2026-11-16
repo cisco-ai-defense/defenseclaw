@@ -431,6 +431,12 @@ type Doctor struct {
 	// DaemonUID is the DefenseClaw daemon's uid when known; the gateway
 	// must run as the same user.
 	DaemonUID *int
+	// DaemonPID is the process named in the sandbox daemon's status response.
+	// It is not port ownership proof without a matching ResponderPID.
+	DaemonPID int
+	// ResponderPID is the kernel-verified process that supplied that status
+	// response over the managed Unix socket.
+	ResponderPID int
 	// Managed limits the report to the checks of this account's own
 	// process (platform and user), for a managed computer: there the
 	// administrator's lifecycle owns OpenShell (its install, gateway
@@ -690,7 +696,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		// The compute driver is the administrator's: the daemon says it.
 		r.report.ConfiguredDriver, r.report.Driver, r.report.Managed = "", "", true
 		r.checkUser()
-		r.checkPorts()
+		r.checkPorts(ctx)
 		return r.report
 	}
 	if st, err := r.Gateway.Read(); err == nil {
@@ -724,7 +730,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.unmanagedService(ctx)
 	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
-	r.checkPorts()
+	r.checkPorts(ctx)
 	r.checkDockerNamespace(ctx)
 	r.deferToGatewayOwner()
 	r.report.Driver = r.driver()
@@ -2427,7 +2433,7 @@ func (r *doctorRun) applyGateway(ch GatewayChanges) func(context.Context) error 
 	}
 }
 
-func (r *doctorRun) checkPorts() {
+func (r *doctorRun) checkPorts(ctx context.Context) {
 	gatewayPort := 0
 	if r.reg != nil {
 		if _, p, err := net.SplitHostPort(r.reg.Target()); err == nil {
@@ -2452,9 +2458,18 @@ func (r *doctorRun) checkPorts() {
 			case err == nil:
 				_ = ln.Close()
 				c.Status, c.Detail = StatusPass, addr+" is free"
-			case p.ServedByDaemon:
+			case p.ServedByDaemon && !r.Managed:
 				c.Status, c.Detail = StatusPass, addr+" is served by the DefenseClaw daemon"
 			default:
+				var found daemon.PortHolder
+				var holderErr error
+				if r.Managed {
+					found, holderErr = r.PortHolder("127.0.0.1", p.Port)
+				}
+				if r.Managed && p.Holder == "" && holderErr == nil && r.ownSandboxDaemonProcess(ctx, found) {
+					c.Status, c.Detail = StatusPass, fmt.Sprintf("%s is served by the DefenseClaw daemon (PID %d)", addr, found.PID)
+					break
+				}
 				holder := "another process"
 				if r.Managed {
 					switch p.Holder {
@@ -2465,7 +2480,7 @@ func (r *doctorRun) checkPorts() {
 					case "own_process":
 						holder = "another process of your account"
 					default:
-						if found, err := r.PortHolder("127.0.0.1", p.Port); err == nil {
+						if holderErr == nil {
 							switch {
 							case found.UID == r.Geteuid():
 								holder = "another process of your account"

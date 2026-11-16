@@ -46,7 +46,7 @@ func TestMachineWideOpenCodeV1FoldsTheLaunchersUnversionedAccounts(t *testing.T)
 			agents = append(agents, enterprisehooks.UnprotectedAgent{User: "realproblem", UID: &uid, Connector: "opencode",
 				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
 				Reason: enterprisehooks.UnixAgentUnversionedReasonPrefix + "/home/realproblem/.local/bin/opencode" + enterprisehooks.UnixAgentUnversionedContractSuffix})
-			data, err := enterprisehooks.MarshalUnprotectedAgents(agents)
+			data, err := h.marshalCompletedScan(agents)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -60,6 +60,7 @@
             "config.secret.changed",
             "config.trust_anchors.changed",
             "connector-hook",
+            "connector-hook-account-removed",
             "connector-hook-repaired",
             "connector-hook-synthetic",
             "connector-hook-tampered",

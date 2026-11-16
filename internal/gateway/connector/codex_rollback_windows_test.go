@@ -17,7 +17,10 @@ import (
 // TestCodexPerUserRollbackLeavesTheBridgeTheEarlierReleaseOwns is the
 // GAP-2553 path on Windows: a per-user Setup writes the direct cmd.exe form,
 // prepare-rollback rewrites every handler as the trusted 1.0.4 bridge and
-// keeps a copy, and an aborted rollback restores the file Setup wrote.
+// keeps a copy, and an aborted rollback restores the file Setup wrote. The
+// operator edited the file after Setup, so it is converted: a file still
+// holding the bytes Setup wrote is put back as it was before Setup instead
+// (TestRollbackPutsBackAnUneditedCodexConfigByteForByte).
 func TestCodexPerUserRollbackLeavesTheBridgeTheEarlierReleaseOwns(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "codex", "config.toml")
@@ -55,7 +58,15 @@ func TestCodexPerUserRollbackLeavesTheBridgeTheEarlierReleaseOwns(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-
+	contracts := map[string]string{}
+	for _, group := range groups {
+		contracts[group.eventType] = codexHandlerContract(t, group.eventType, setup)
+	}
+	// An operator edit after Setup: the file is no longer the bytes Setup wrote.
+	setup = append([]byte("operator_after_setup = true\n"), setup...)
+	if err := os.WriteFile(configPath, setup, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	count, err := conn.ConvertHooksForRollback(opts)
 	if err != nil || count != len(groups) {
 		t.Fatalf("ConvertHooksForRollback = %d, %v; want %d handlers", count, err, len(groups))
@@ -85,7 +96,7 @@ func TestCodexPerUserRollbackLeavesTheBridgeTheEarlierReleaseOwns(t *testing.T) 
 			t.Fatalf("%s: %d owned handlers, %v; want 1", group.eventType, len(locations), err)
 		}
 		location := locations[0]
-		want := windowsNativePowerShellHookCommandForCodexEvent(group.eventType, codexHandlerContract(t, group.eventType, setup), launcher)
+		want := windowsNativePowerShellHookCommandForCodexEvent(group.eventType, contracts[group.eventType], launcher)
 		if location.handler["command"] != want || location.handler["command_windows"] != want {
 			t.Fatalf("%s handler is not the 1.0.4 bridge: %v", group.eventType, location.handler)
 		}

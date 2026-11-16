@@ -56,7 +56,7 @@ Paths are under `/opt/cisco/defenseclaw` unless shown in full.
 | Hook socket | `run/hook.sock` | Directory `_defenseclaw`, `0755` |
 | Logs | `/Library/Logs/Cisco/DefenseClaw`, gateway logs in `gateway/` | `root`, `0755`; `gateway/` is `_defenseclaw`, `0750` |
 | LaunchDaemons | `/Library/LaunchDaemons/com.cisco.defenseclaw.*.plist` | `root`, `0644` |
-| Sandbox launcher | `/usr/local/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Sandbox launcher | `/usr/local/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the commands in [Managed command availability](/docs/enterprise/managed-commands) | `root`, `0755` |
 | Sandbox LaunchAgents | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.<tag>.plist` and `com.cisco.defenseclaw.openshell-gateway.<tag>.plist`, run as each signed-in user. `<tag>` is the first 12 digits of the gateway binary's SHA-256, so each upgrade installs both agents under new labels and removes the plists of the earlier labels; releases before 1.0.4 used the labels without a tag ([Sandboxes](/docs/enterprise/sandboxes)) | `root`, `0644` |
 | Sandbox state | `runtime/sandbox/`, and `etc/openshell/gateway.toml` when `enterprise.openshell` is set | `_defenseclaw`, `0600` files; `root` |
 
@@ -307,8 +307,8 @@ A `guardrail.profile_assignments` group this Mac does not know selects nobody, s
 its members get the default profile; `status` and `verify` warn
 `profile_assignment_unmatched`, with the same list `enterprise macos profile-explain
 --user <account> --connector <connector>` shows. The gateway log is
-`/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`. The managed Mac has no
-`defenseclaw guardrail profile` commands. Monitoring is in
+`/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`. The managed launcher offers only
+`defenseclaw guardrail profile explain` ([Managed command availability](/docs/enterprise/managed-commands)). Monitoring is in
 [Status and verify](/docs/enterprise/operations).
 
 ## Claude Cowork
@@ -342,8 +342,8 @@ recipes are in [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 On a Mac with `/opt/cisco/defenseclaw/etc/managed-runtime.json` the per-user
 product refuses to run: the current `install.sh` (the one-line installer) refuses
-and changes nothing, even when the managed `defenseclaw` launcher is on the user's
-`PATH`; `defenseclaw upgrade` refuses; and the per-user gateway refuses to start.
+and changes nothing, even when the managed launcher is on the user's
+`PATH`; `defenseclaw upgrade` refuses ([Managed command availability](/docs/enterprise/managed-commands)); and the per-user gateway refuses to start.
 
 Installers from 0.8.x predate the managed marker and do not check for it, so a
 user can still run one after you deploy. It installs a per-user copy, but the
@@ -361,10 +361,12 @@ Nothing migrates a per-user install. Before you deploy, have each user run
 [Uninstall](/docs/get-started/download)). If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked.
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
-device enforces. The installed managed `defenseclaw` launcher offers only `sandbox`
-commands; its `config get`, `guardrail`, `status` and other per-user command forms
-exit `2` and name the managed computer. A separate per-user CLI, if present, exits
-`3` for these commands and `doctor` reports the device as managed.
+device enforces. The installed managed `defenseclaw` launcher shows the account's
+own connectors with `status`, and offers sandbox and guardrail profile views; the full list is in [Managed command availability](/docs/enterprise/managed-commands).
+It refuses `doctor`, `alerts`, `tui` and per-user configuration commands with exit
+`2`, naming the installed administrator status, verify and audit export commands.
+A separate per-user CLI, if present, exits `3` for per-user commands and its
+`doctor` reports the device as managed.
 
 A per-user gateway still running holds the managed port `127.0.0.1:18970` unless
 its user moved it. The pkg install then stages the package files, but the
@@ -374,7 +376,7 @@ no package receipt, so detection reports the computer as not installed. The proc
 and `kill` command appear in `/var/log/install.log`, the error is in
 `last-package-result.json`, and `enterprise macos status --json` also reports the
 holder. Stop that gateway or move it, then run `installer -pkg` again (or
-`defenseclaw-gateway enterprise macos ensure --from-package`, which records no
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --from-package`, which records no
 receipt). A per-user gateway on another port keeps running; the install, `status`
 and `verify` name each such account with `per_user_gateway_running`.
 
@@ -401,9 +403,9 @@ Run these as root from `/opt/cisco/defenseclaw/bin`.
 
 | Goal | Command |
 | --- | --- |
-| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. Each user keeps `~/.defenseclaw`. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay with the root-only records `/opt/cisco/defenseclaw/lifecycle/openshell-state.kept.json` and `/opt/cisco/defenseclaw/lifecycle/retained-state.json` and the marker `/opt/cisco/defenseclaw/runtime/.defenseclaw-retained`. They are root-owned while the service account is gone; the next `ensure` adopts them | `defenseclaw-gateway enterprise macos uninstall --json` |
-| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
-| Keep the config, secrets, data and logs (and the account) for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
+| Stop and remove the deployment, its binaries, config, secrets and logs, most of its data and lifecycle state, and the `_defenseclaw` account. Each user keeps `~/.defenseclaw`. When an account keeps sandboxes, `/opt/cisco/defenseclaw/runtime/sandbox` and `/opt/cisco/defenseclaw/runtime/redaction-correlation.key` stay with the root-only records `/opt/cisco/defenseclaw/lifecycle/openshell-state.kept.json` and `/opt/cisco/defenseclaw/lifecycle/retained-state.json` and the marker `/opt/cisco/defenseclaw/runtime/.defenseclaw-retained`. They are root-owned while the service account is gone; the next `ensure` adopts them | `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries | `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --purge --json` |
+| Keep the config, secrets, data and logs (and the account) for a reinstall | `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
 | Keep only the `_defenseclaw` account | Add `--keep-service-account` |
 
 Uninstall removes each user's DefenseClaw hook registrations and DefenseClaw's own
@@ -423,6 +425,11 @@ Terminal or MDM script that has Full Disk Access (or grant it with a PPPC profil
 A pkg has no uninstaller, so the lifecycle removes the binaries itself. The
 root-owned `lifecycle/lifecycle.lock` remains so waiting runs share one lock. For a
 pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`.
+Uninstall also removes the shared folders the deployment created, such as `/opt`,
+`/opt/cisco`, `/usr/local/bin` and `/Library/Logs/Cisco`, once they are empty. A
+folder that existed before the install stays, empty or not. A deployment installed
+before 1.0.9 did not record `/opt`, `/opt/cisco`, `/usr/local` and `/usr/local/bin`,
+so those stay until you remove them.
 launchd keeps a record for each removed label, so `launchctl print system` lists
 the labels as `enabled` while no job stays loaded. macOS also keeps any privacy
 (TCC) decision about the gateway binary, such as Full Disk Access; remove it in

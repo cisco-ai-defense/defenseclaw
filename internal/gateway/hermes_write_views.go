@@ -60,26 +60,49 @@ func (a *APIServer) inspectHermesWriteToolPolicyCtx(
 	}
 	cfg, connectorName := a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector)
 	for _, extra := range hermesWriteViewRequests(ctx, action, views) {
-		verdict = mergeSandboxShellCommandVerdict(ctx, cfg, connectorName, verdict, dispatchTrustedAction(ctx, extra))
+		found := dispatchTrustedAction(ctx, extra.request)
+		if extra.selfProtectionOnly {
+			found = selfProtectionFindings(found)
+		}
+		verdict = mergeSandboxShellCommandVerdict(ctx, cfg, connectorName, verdict, found)
 	}
 	return verdict
+}
+
+// hermesViewRequest is the request of one Hermes write view; a view of a
+// string under a key that names no place counts for DefenseClaw's own state
+// only (actionfacts.UnknownKeyTwin).
+type hermesViewRequest struct {
+	request            trustedActionRequest
+	selfProtectionOnly bool
 }
 
 // hermesWriteViewRequests are the trusted-action requests of views beyond
 // the one action judges: views[1:], and the guest-directory form of every
 // absolute sandbox target.
-func hermesWriteViewRequests(ctx context.Context, action trustedActionRequest, views []connector.HermesWriteView) []trustedActionRequest {
+func hermesWriteViewRequests(ctx context.Context, action trustedActionRequest, views []connector.HermesWriteView) []hermesViewRequest {
 	base := action
 	base.record, base.recordTelemetry = nil, nil
-	var requests []trustedActionRequest
+	var requests []hermesViewRequest
 	for i, view := range views {
 		if i > 0 {
 			request := base
-			request.Input.Tool, request.Input.Args = view.Tool, view.Args
-			requests = append(requests, request)
+			if view.PossibleOverflow {
+				request.UnknownKeyPossibleOverflow = true
+			} else {
+				request.Input.Tool, request.Input.Args = view.Tool, view.Args
+			}
+			if !view.PossibleOverflow && view.Path != "" {
+				if target := actionfacts.KnownExtraKeyPath(view.Path, base.Input.ActiveHome); target != view.Path {
+					if args, ok := view.Retarget(target); ok {
+						request.Input.Args = args
+					}
+				}
+			}
+			requests = append(requests, hermesViewRequest{request, view.SelfProtectionOnly})
 		}
 		if request, ok := hermesSandboxGuestDirRequest(ctx, base, view); ok {
-			requests = append(requests, request)
+			requests = append(requests, hermesViewRequest{request, view.SelfProtectionOnly})
 		}
 	}
 	return requests

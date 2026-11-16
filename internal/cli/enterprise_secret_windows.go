@@ -61,20 +61,19 @@ const (
 var (
 	// windowsSecretLayout resolves the standalone layout (tests use a
 	// temporary tree).
-	windowsSecretLayout = managed.StandaloneWindowsLayout
+	windowsSecretLayout = windowsManagedStandaloneLayout
 	// windowsSecretGatewayAccount is the service whose SID may read the
 	// credentials.
 	windowsSecretGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
 	// windowsSecretDeploymentInstalled reports whether an administrator
 	// recorded a standalone deployment on this host; a record a standard
 	// user planted does not count.
-	windowsSecretDeploymentInstalled = func() (bool, error) {
-		deployment, err := inspectTrustedWindowsEnterpriseDeployment(managed.ProfileStandalone)
-		if err != nil {
-			return false, err
-		}
-		return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
-	}
+	windowsSecretDeploymentInstalled = trustedWindowsSecretDeploymentInstalled
+	// windowsSecretDeploymentAbsent reports whether the trusted read finds
+	// no standalone deployment at all: no record, or the tombstone an
+	// uninstall leaves (g079 review 2 R1).
+	windowsSecretDeploymentAbsent = trustedWindowsSecretDeploymentAbsent
+
 	windowsSecretIsElevated      = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
 	windowsSecretRestartGateway  = restartWindowsStandaloneGatewayBeforeStop
 	windowsSecretSpawnRecovery   = spawnWindowsSecretGatewayRecovery
@@ -90,14 +89,10 @@ var (
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
-	windowsSecretLifecycleLockPath = func() (string, error) {
-		roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(roots.LifecycleDir, "lifecycle.lock"), nil
-	}
-	windowsSecretLifecycleLock = acquireWindowsEnterpriseLifecycleLock
+	windowsSecretLifecycleLockPath = windowsStandaloneLifecycleLockPath
+	// windowsSecretLifecycleLock takes the lock once; acquireWindowsLockWithin
+	// waits windowsSecretInstallerLockWait around it.
+	windowsSecretLifecycleLock = tryWindowsEnterpriseLifecycleLock
 	// windowsSecretInstallerLockWait is the fixed wait for the installer's
 	// lifecycle.lock: the 30 s default of Enter-DefenseClawLifecycleLock
 	// (packaging/windows/DefenseClawEnterprise.psm1).
@@ -126,14 +121,14 @@ func init() {
 // changed.
 func windowsSecretStandardUserAnswer(action string, opts *enterpriseSecretOptions) string {
 	if action == "status" {
-		return windowsManagedStandardUserViewAnswer("The protected credentials", "enterprise secret status")
+		return windowsManagedStandardUserViewAnswer("The protected credentials", "enterprise", "secret", "status")
 	}
-	command := "enterprise secret " + action
+	command := []string{"enterprise", "secret", action}
 	if opts != nil && managed.ValidCredentialName(opts.name) {
-		command += " --name " + opts.name
+		command = append(command, "--name", opts.name)
 	}
-	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
+	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with " +
+		managedWindowsCommand(command...) + ". Nothing was changed."
 }
 
 type windowsSecretState struct {
@@ -151,6 +146,55 @@ func reportWindowsSecretFailure(cmd *cobra.Command, action string, opts *enterpr
 	return err
 }
 
+// windowsSecretRecordsChange says whether a credential run records its
+// change event. A run that changed a credential, or reserved room for its
+// event, passed the deployment check under the locks and always records. A
+// refusal before that records unless the trusted deployment read finds no
+// standalone deployment at all, cleanly: no record, or the tombstone of an
+// uninstall. As for an early refusal (recordWindowsChangeRefusal), a
+// computer without a deployment gets no managed event. Before, an elevated
+// refusal there created the protected change spool in ProgramData and wrote
+// its event (g079 review F1). Every other read records, as before g079 (g079
+// review 2 R1): a record that is there but cannot be classified (it does not
+// parse, is too large or cannot be opened), a record that fails the owner or
+// DACL check, and a read that fails (the refusal is state_invalid, and its
+// document carries the error).
+func windowsSecretRecordsChange(change windowsSecretChange) bool {
+	if change.changed || change.reservation != nil || !windowsSecretIsElevated() {
+		// A caller that is not elevated records nothing either way
+		// (recordWindowsChange).
+		return true
+	}
+	absent, err := windowsSecretDeploymentAbsent()
+	return err != nil || !absent
+}
+
+// trustedWindowsSecretDeploymentInstalled reports whether the trusted read
+// finds an installed standalone deployment record.
+func trustedWindowsSecretDeploymentInstalled() (bool, error) {
+	deployment, err := inspectTrustedWindowsEnterpriseDeployment(managed.ProfileStandalone)
+	if err != nil {
+		return false, err
+	}
+	return deployment.State == winpath.EnterpriseDeploymentInstalled, nil
+}
+
+// trustedWindowsSecretDeploymentAbsent reports whether the trusted read finds
+// no standalone deployment record, or only the tombstone of an uninstall. A
+// record the read cannot classify (EnterpriseDeploymentUnknown), and one it
+// refuses as untrusted (reported as absent, with the reason), are not
+// absent.
+func trustedWindowsSecretDeploymentAbsent() (bool, error) {
+	deployment, err := inspectTrustedWindowsEnterpriseDeployment(managed.ProfileStandalone)
+	if err != nil {
+		return false, err
+	}
+	if deployment.State == winpath.EnterpriseDeploymentTombstone {
+		return true, nil
+	}
+	return deployment.State == winpath.EnterpriseDeploymentAbsent && deployment.Untrusted == "", nil
+}
+
 // runEnterpriseSecret implements `enterprise secret` on Windows.
 func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) error {
 	if action == "status" {
@@ -164,7 +208,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	change, err := changeWindowsSecret(cmd, action, opts)
 	defer func() { _ = change.reservation.Release() }()
-	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok {
+	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok && windowsSecretRecordsChange(change) {
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
 		if layoutErr == nil {
@@ -585,7 +629,8 @@ func requireWindowsSecretDeployment() error {
 		return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !installed {
-		return secretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run `enterprise windows ensure --profile standalone` first"))
+		return secretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run "+
+			windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt first"))
 	}
 	return nil
 }
@@ -972,6 +1017,10 @@ func windowsSecretStored(dir, name string) bool {
 	return !errors.Is(err, os.ErrNotExist)
 }
 
+// windowsSecretsDirStandaloneStamp is managed.StampStandaloneTrustedObject;
+// tests replace it.
+var windowsSecretsDirStandaloneStamp = managed.StampStandaloneTrustedObject
+
 func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) error {
 	if reader == nil {
 		return errors.New("the secrets directory needs the gateway service SID")
@@ -979,8 +1028,21 @@ func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) err
 	if !store.exists() {
 		return fmt.Errorf("%s does not exist", store.dir)
 	}
+	// On standalone a secrets folder another account can write or owns is
+	// refused and named, never re-stamped in place (g582 round 4).
+	if refused := managed.RefuseStandaloneInPlaceRepair(store.dir, managed.ObjectAdminDirectory); refused != nil {
+		return fmt.Errorf("the secrets folder was not repaired: %w", refused)
+	}
 	// The credential write below proves the whole chain through the
 	// gateway reader check.
+	if managed.StandaloneRefusesContentDrift() {
+		// The refusal above is a read-only check; the stamp judges the
+		// folder again on the handle it writes (g582 review 6 S1).
+		if err := windowsSecretsDirStandaloneStamp(store.dir, managed.ObjectAdminDirectory, windowsSecretDirectorySDDL(reader)); err != nil {
+			return fmt.Errorf("the secrets folder was not repaired: %w", err)
+		}
+		return nil
+	}
 	return applyWindowsSDDL(store.dir, windowsSecretDirectorySDDL(reader))
 }
 
@@ -1488,8 +1550,11 @@ func stopWindowsStandaloneGatewayFailClosed() error {
 // windowsStandaloneGatewayPID observes the SCM process identity around an
 // installer transaction. A bundle receipt records a restart only when the
 // gateway process actually changed. A starting gateway has a process
-// (windowsServiceProcessLive), so it counts as running.
-func windowsStandaloneGatewayPID() uint32 {
+// (windowsServiceProcessLive), so it counts as running. The package's
+// tests replace it.
+var windowsStandaloneGatewayPID = scmWindowsStandaloneGatewayPID
+
+func scmWindowsStandaloneGatewayPID() uint32 {
 	manager, err := mgr.Connect()
 	if err != nil {
 		return 0

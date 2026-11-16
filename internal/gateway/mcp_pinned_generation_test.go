@@ -60,16 +60,17 @@ func TestMCPAdmissionPendingReadsThePinnedGeneration(t *testing.T) {
 	pinnedCfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	pinnedCfg.Guardrail.Mode = "action"
 	pinnedCfg.Guardrail.Connector = "claudecode"
+	pinnedCfg.Guardrail.RulePack = "strict"
 	api := &APIServer{}
 	api.SetConfigRuntime(nil, func() *config.Config { return nil })
 	api.SetMCPAdmissionPending(func(_, server, _, _ string) (string, bool) { return server, true })
 	probe := mcpRuntimeProbe{ServerName: "gb05-decoy", ToolName: "mcp__gb05-decoy__ping", Surface: "hook", Matched: true}
 
 	pinned := withPinnedGeneration(context.Background(), &Generation{Config: pinnedCfg, N: 1})
-	if _, refused := api.mcpAdmissionPendingDecision(pinned, "claudecode", "PreToolUse", probe); !refused {
+	if _, refused, _ := api.mcpAdmissionPendingDecision(pinned, "claudecode", "PreToolUse", probe); !refused {
 		t.Fatal("pinned request with a pending server was not refused")
 	}
-	if _, refused := api.mcpAdmissionPendingDecision(context.Background(), "claudecode", "PreToolUse", probe); refused {
+	if _, refused, _ := api.mcpAdmissionPendingDecision(context.Background(), "claudecode", "PreToolUse", probe); refused {
 		t.Fatal("unpinned request without any config was refused")
 	}
 }

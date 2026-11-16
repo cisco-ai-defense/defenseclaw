@@ -117,6 +117,11 @@ per-user DefenseClaw data and binaries. When Setup refuses with
 `-Purge`, has a file in `C:\ProgramData\Cisco\DefenseClaw` open, such as a
 SIEM forwarder reading `runtime\audit.db`), the launcher runs it again up to 6
 times and then exits `1618`, which Intune retries, instead of `1603`.
+`privileges_required` is a different refusal: the account that ran Setup cannot
+list or remove a DefenseClaw file or folder that only SYSTEM may open. Intune
+runs the launcher as SYSTEM, so it does not see it; by hand, run the same
+uninstall as SYSTEM (a scheduled task that runs as SYSTEM, or `psexec -s`).
+Nothing was changed and the services keep running.
 
 Intune's execution contexts shape the design:
 

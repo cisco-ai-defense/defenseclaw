@@ -29,6 +29,7 @@ import (
 )
 
 const testEgressProxy = "http://dcx-0123456789abcdef:0123abcd@host.openshell.internal:18972"
+const testDefaultNoProxy = connector.SandboxIngressHost + ",localhost,127.0.0.1,127.0.0.0/8,::1"
 
 // shellEnvRecord is a shell fragment that prints the proxy variables and
 // PATH, one NAME=value per line ("<unset>" when absent).
@@ -66,7 +67,7 @@ func shellFile(t *testing.T, spec *Spec, path string) connector.SandboxFile {
 func TestScriptsParse(t *testing.T) {
 	parses := func(t *testing.T, what, sh, script string) {
 		t.Helper()
-		if _, err := os.Stat(sh); err != nil {
+		if sh == "" {
 			return
 		}
 		cmd := exec.Command(sh, "-n")
@@ -97,12 +98,12 @@ func TestScriptsParse(t *testing.T) {
 				if !strings.HasPrefix(data, "#!/bin/bash -p\n") {
 					t.Errorf("%s %s must run under bash -p", name, f.Path)
 				}
-				parses(t, name+" "+f.Path, "/bin/bash", data)
+				parses(t, name+" "+f.Path, maybeBinBash(), data)
 			default:
-				parses(t, name+" "+f.Path, "/bin/sh", data)
+				parses(t, name+" "+f.Path, maybeBinSh(), data)
 			}
 		}
-		parses(t, name+" network-binary probe", "/bin/sh", spec.Probe().NetworkBinaries)
+		parses(t, name+" network-binary probe", maybeBinSh(), spec.Probe().NetworkBinaries)
 		// The command becomes a file name and a shell function name.
 		if !regexp.MustCompile(`^[a-z][a-z0-9-]*$`).MatchString(spec.Command) {
 			t.Errorf("%s command %q is not a plain name", name, spec.Command)
@@ -119,16 +120,14 @@ func TestScriptsParse(t *testing.T) {
 // malformed one and a strict sandbox (no proxy) leave the caller's
 // environment alone, and the shim directory leads PATH once.
 func TestSandboxProfileExportsTheProxy(t *testing.T) {
-	if _, err := os.Stat("/bin/sh"); err != nil {
-		t.Skip("/bin/sh is required")
-	}
+	sh := binSh(t)
 	profile := filepath.Join(t.TempDir(), "defenseclaw-sandbox.sh")
 	if err := os.WriteFile(profile, shellFile(t, ClaudeCode, SandboxProfilePath).Data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	run := func(env ...string) map[string]string {
 		t.Helper()
-		cmd := exec.Command("/bin/sh", "-c", ". "+profile+"\n. "+profile+"\n"+shellEnvRecord)
+		cmd := exec.Command(sh, "-c", ". "+profile+"\n. "+profile+"\n"+shellEnvRecord)
 		cmd.Env = append([]string{"PATH=/usr/bin:/bin"}, env...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -152,22 +151,22 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 	}
 	// Sourcing prints nothing (a POSIX sh, or bash in POSIX mode, never sees
 	// the function definition).
-	quiet := exec.Command("/bin/sh", "-c", ". "+profile)
+	quiet := exec.Command(sh, "-c", ". "+profile)
 	quiet.Env = []string{"PATH=/usr/bin:/bin"}
 	if out, err := quiet.CombinedOutput(); err != nil || len(out) != 0 {
-		t.Errorf("sourcing the profile under /bin/sh: %v %q", err, out)
+		t.Errorf("sourcing the profile under %s: %v %q", sh, err, out)
 	}
 	// Bash: the harness command is a function that runs the shim, survives
 	// a start-up file that resets PATH, and reaches child bash shells.
-	if _, err := os.Stat("/bin/bash"); err == nil {
+	if bash := maybeBinBash(); bash != "" {
 		for _, name := range Names() {
 			spec, _ := Get(name)
 			file := filepath.Join(t.TempDir(), "profile.sh")
 			if err := os.WriteFile(file, shellFile(t, spec, SandboxProfilePath).Data, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			script := ". " + file + "\nPATH=/usr/bin:/bin\ntype -t " + spec.Command + "; /bin/bash -c 'type -t " + spec.Command + "; declare -f " + spec.Command + "'"
-			cmd := exec.Command("/bin/bash", "-c", script)
+			script := ". " + file + "\nPATH=/usr/bin:/bin\ntype -t " + spec.Command + "; " + bash + " -c 'type -t " + spec.Command + "; declare -f " + spec.Command + "'"
+			cmd := exec.Command(bash, "-c", script)
 			cmd.Env = []string{"PATH=/usr/bin:/bin"}
 			out, err := cmd.CombinedOutput()
 			if err != nil || !strings.HasPrefix(string(out), "function\nfunction\n") || !strings.Contains(string(out), spec.ShimPath()+" \"$@\"") {
@@ -175,7 +174,7 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 			}
 		}
 	}
-	if got := run(openshell.EnvEgressURL + "=" + testEgressProxy); got["NO_PROXY"] != connector.SandboxIngressHost {
+	if got := run(openshell.EnvEgressURL + "=" + testEgressProxy); got["NO_PROXY"] != testDefaultNoProxy {
 		t.Errorf("NO_PROXY without a bypass list = %q", got["NO_PROXY"])
 	}
 	for _, env := range [][]string{
@@ -195,9 +194,8 @@ func TestSandboxProfileExportsTheProxy(t *testing.T) {
 // an unknown zone, a path and a caller's TZ are left alone (cert
 // copilot:F10: the sandbox ran on UTC).
 func TestSandboxShellsTakeTheHostTimeZone(t *testing.T) {
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
+	sh := binSh(t)
+	binBash(t) // the wrapper runs under bash -p
 	if _, err := os.Stat("/usr/share/zoneinfo/UTC"); err != nil {
 		t.Skip("this system has no /usr/share/zoneinfo/UTC")
 	}
@@ -223,9 +221,9 @@ func TestSandboxShellsTakeTheHostTimeZone(t *testing.T) {
 		{nil, "<unset>"},
 	} {
 		env := append([]string{"PATH=/usr/bin:/bin"}, c.env...)
-		login := exec.Command("/bin/sh", "-c", ". "+profile+"\n"+record)
+		login := exec.Command(sh, "-c", ". "+profile+"\n"+record)
 		login.Env = env
-		wrapped := exec.Command(wrapper, "/bin/sh", "-c", record)
+		wrapped := exec.Command(wrapper, sh, "-c", record)
 		wrapped.Env = env
 		for what, cmd := range map[string]*exec.Cmd{"login shell": login, "sandbox exec": wrapped} {
 			out, err := cmd.CombinedOutput()
@@ -242,9 +240,8 @@ func TestSandboxShellsTakeTheHostTimeZone(t *testing.T) {
 // start-up or Node loader variables) and its own arguments, and the wrapper
 // refuses to run without a command.
 func TestSandboxEnvRunsTheCommand(t *testing.T) {
-	if _, err := os.Stat("/bin/bash"); err != nil {
-		t.Skip("/bin/bash is required")
-	}
+	sh := binSh(t)
+	binBash(t) // the wrapper runs under bash -p
 	dir := t.TempDir()
 	wrapper := filepath.Join(dir, "sandbox-env")
 	if err := os.WriteFile(wrapper, shellFile(t, Codex, SandboxEnvPath).Data, 0o755); err != nil {
@@ -254,7 +251,7 @@ func TestSandboxEnvRunsTheCommand(t *testing.T) {
 	if err := os.WriteFile(startup, []byte("echo sourced-startup-file\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(wrapper, "/bin/sh", "-c", shellEnvRecord+`printf 'ARGS=%s\n' "$*"`, "sh", "one", "two words")
+	cmd := exec.Command(wrapper, sh, "-c", shellEnvRecord+`printf 'ARGS=%s\n' "$*"`, "sh", "one", "two words")
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + dir, "BASH_ENV=" + startup, "NODE_OPTIONS=--require=/tmp/x.js",
 		openshell.EnvEgressURL + "=" + testEgressProxy, openshell.EnvEgressBypass + "=host.openshell.internal"}
 	out, err := cmd.CombinedOutput()

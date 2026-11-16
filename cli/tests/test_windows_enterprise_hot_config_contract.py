@@ -8,14 +8,12 @@ also runs on Linux CI, where the Windows package can only be compiled.
 """
 
 from pathlib import Path
-import shutil
-import subprocess
 
 import pytest
 
+from tests.helpers import POWERSHELL, run_powershell
 
 ROOT = Path(__file__).resolve().parents[2]
-POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 
 
 def test_unproven_undo_closes_managed_hooks_before_stopping_gateway() -> None:
@@ -60,8 +58,8 @@ $second = @(Remove-DefenseClawStandaloneHookRuntimeLeftovers -Directory $root)
 if ($second.Count -ne 0 -or (Test-Path -LiteralPath $root)) {{ throw 'completed purge kept the closure or runtime root' }}
 'OK'
 """
-    result = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+    result = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr

@@ -21,7 +21,6 @@ func TestWindowsProfileScanRefusalNamesTheAdministratorsCopyAndScan(t *testing.T
 	requireGatewayPathOutsideUserProfiles = func(string) error {
 		return errors.New("the managed gateway runs as LocalSystem and does not read inside user profiles")
 	}
-	t.Setenv("ProgramFiles", `C:\Program Files`)
 	target := `C:\Users\dcw-std1\r102-wave\wm5\bad-skill`
 	body, _ := json.Marshal(map[string]string{"target": target})
 	rec := httptest.NewRecorder()

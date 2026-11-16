@@ -39,6 +39,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"gopkg.in/yaml.v3"
@@ -71,8 +72,9 @@ type RulePack struct {
 	// manifestDigest is the sha256 of the pack's defenseclaw-pack.json, ""
 	// without one. Its posture sets the pack's default levels, so it is
 	// part of the pin and of Summary (GAP-0431).
-	manifestDigest string
-	compilation    *rulePackCompilation
+	manifestDigest  string
+	manifestPosture string
+	compilation     *rulePackCompilation
 }
 
 // rulePackCompilation is shared by a loaded pack and its in-memory variants.
@@ -448,17 +450,21 @@ func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 		if err != nil {
 			return nil, err
 		}
-		if validateManifest {
-			var parsed struct {
-				Posture string `json:"posture"`
-			}
-			if err := json.Unmarshal(data, &parsed); err != nil {
+		var parsed struct {
+			Posture string `json:"posture"`
+		}
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			if validateManifest {
 				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must be valid JSON with a known posture")
 			}
-			switch strings.ToLower(strings.TrimSpace(parsed.Posture)) {
+		} else {
+			switch posture := strings.ToLower(strings.TrimSpace(parsed.Posture)); posture {
 			case "default", "strict", "permissive":
+				rp.manifestPosture = posture
 			default:
-				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must name default, strict or permissive posture")
+				if validateManifest {
+					return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must name default, strict or permissive posture")
+				}
 			}
 		}
 		sum := sha256.Sum256(data)
@@ -495,6 +501,15 @@ func (rp *RulePack) FilesDigest() string {
 		return filesDigest(nil)
 	}
 	return rp.filesDigest
+}
+
+// Posture is the level named by the manifest bytes loaded and covered by
+// FilesDigest. An absent or unrecognized optional manifest has no posture.
+func (rp *RulePack) Posture() string {
+	if rp == nil {
+		return ""
+	}
+	return rp.manifestPosture
 }
 
 func loadEmbeddedRulePack() (*RulePack, error) {
@@ -1605,6 +1620,23 @@ func safeJudgeName(name string) string {
 		}
 	}
 	return "component"
+}
+
+func init() { config.RegisterCustomRulePackValidator(validateCustomRulePack) }
+
+// validateCustomRulePack is the config-load verdict on a guardrail.custom_packs
+// folder, made with the loader and validation the gateway uses for a
+// generation: the digest of the files it loaded and the posture its manifest
+// names. config compares the digest with the entry's pin.
+func validateCustomRulePack(dir string) (digest, posture string, err error) {
+	pack, err := LoadRulePack(dir)
+	if err != nil {
+		return "", "", err
+	}
+	if err := validateRulePack(pack); err != nil {
+		return "", "", err
+	}
+	return "sha256:" + pack.FilesDigest(), pack.Posture(), nil
 }
 
 // RulePackDigest is the FilesDigest of the valid pack in dir, the value

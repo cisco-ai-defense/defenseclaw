@@ -108,7 +108,8 @@ func CLIToolArgs(toolName string, value any) json.RawMessage {
 }
 
 // PatchText is the patch an apply_patch toolArgs string carries: the text
-// itself or a JSON string of it, starting with "*** Begin Patch".
+// itself or a JSON string of it, starting (after any white space) with
+// "*** Begin Patch".
 func PatchText(toolName string, raw []byte) (string, bool) {
 	if !strings.EqualFold(strings.TrimSpace(toolName), "apply_patch") {
 		return "", false
@@ -119,7 +120,7 @@ func PatchText(toolName string, raw []byte) (string, bool) {
 			return "", false
 		}
 	}
-	return text, strings.HasPrefix(text, "*** Begin Patch")
+	return text, strings.HasPrefix(strings.TrimSpace(text), "*** Begin Patch")
 }
 
 // localProjection maps one VS Code agent tool onto the canonical ActionFacts

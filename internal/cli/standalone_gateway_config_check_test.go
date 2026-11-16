@@ -308,16 +308,26 @@ func TestStandaloneGatewayConfigCheckGrantsOnAnExistingFolder(t *testing.T) {
 // GAP-0039: a connector that inherits the selected custom pack is not the key
 // a refusal names, and a custom_packs entry nothing selects is not loaded.
 func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
+	// A selected entry must be a valid pack its pin matches (config.CustomRulePackError).
+	acme, unused := t.TempDir(), t.TempDir()
+	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
+	if err := os.WriteFile(filepath.Join(acme, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := guardrail.RulePackDigest(acme)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePack = "acme"
 	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
-		"acme":   {Path: "/packs/acme"},
-		"unused": {Path: "/packs/unused"},
+		"acme":   {Path: acme, Digest: "sha256:" + pin},
+		"unused": {Path: unused},
 	}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}, "codex": {}}
 	got := standaloneGatewayRulePackDirs(cfg)
-	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != "/packs/acme" {
-		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack /packs/acme", got)
+	if len(got) != 1 || got[0].label != "guardrail.rule_pack" || got[0].dir != acme {
+		t.Fatalf("rule pack checks = %+v, want one guardrail.rule_pack %s", got, acme)
 	}
 }
 
@@ -433,5 +443,40 @@ func TestStandaloneGatewayConfigCheckRejectsUnknownProfileWithMissingToken(t *te
 	err := validateStandaloneGatewayConfig(writeStandaloneGatewayCheckConfig(t, body), t.TempDir(), "")
 	if err == nil || !strings.Contains(err.Error(), "guardrail.default_profile") || !strings.Contains(err.Error(), "unknown profile") {
 		t.Fatalf("unknown profile with unresolved token = %v, want profile refusal", err)
+	}
+}
+
+func TestBuiltinRulePackMissingNamesPolicyDir(t *testing.T) {
+	policyDir := t.TempDir()
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, PolicyDir: policyDir,
+		ConfigFilePath: `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`}
+	cfg.Enterprise.Profile = "standalone"
+	missing := filepath.Join(policyDir, "guardrail", "strict")
+	err := builtinRulePackMissing(cfg, "config.yaml", missing)
+	if err == nil {
+		t.Fatal("a missing strict folder under policy_dir was not refused")
+	}
+	for _, want := range []string{"directory_not_found", "policy_dir is " + policyDir, "guardrail.custom_packs", "rule_pack: default"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not contain %q", err, want)
+		}
+	}
+	if err := os.MkdirAll(missing, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := builtinRulePackMissing(cfg, "config.yaml", missing); err != nil {
+		t.Errorf("an existing folder was refused: %v", err)
+	}
+	other := filepath.Join(policyDir, "elsewhere", "strict")
+	if err := builtinRulePackMissing(cfg, "config.yaml", other); err != nil {
+		t.Errorf("a folder outside policy_dir/guardrail was claimed: %v", err)
+	}
+	if err := builtinRulePackMissing(cfg, "config.yaml", filepath.Join(policyDir, "guardrail", "default")); err != nil {
+		t.Errorf("the default pack got the strict advice: %v", err)
+	}
+	secure := *cfg
+	secure.Enterprise.Profile = "secure_client"
+	if err := builtinRulePackMissing(&secure, "config.yaml", filepath.Join(policyDir, "guardrail", "permissive")); err != nil {
+		t.Errorf("secure client got the standalone refusal: %v", err)
 	}
 }

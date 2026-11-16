@@ -386,3 +386,7 @@ func pathExists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
 }
+
+// enterpriseManagedHookRuntimeEnrolledPending: only the Windows standalone
+// hook refuses an account as enrollment pending.
+func enterpriseManagedHookRuntimeEnrolledPending(string) bool { return false }

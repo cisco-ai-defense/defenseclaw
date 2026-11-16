@@ -17,7 +17,7 @@ import (
 
 // r106Reader2Row is one Bash call of the action-mode keys reader rows: run
 // in the project or the home folder, with the verdict both a per-user and a
-// managed gateway must give. {P} is the project, {K} the keys file; the
+// managed gateway must give. {P} is the project, {H} the account home, {K} the keys file; the
 // project holds keylink, a link to the keys file.
 type r106Reader2Row struct {
 	name, where, command, want string
@@ -50,7 +50,7 @@ func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testi
 			if row.where == "home" {
 				cwd = f.home
 			}
-			command := strings.NewReplacer("{P}", f.project, "{K}", f.keys).Replace(row.command)
+			command := strings.NewReplacer("{P}", f.project, "{K}", f.keys, "{H}", f.home).Replace(row.command)
 			payload := mustJSON(t, map[string]any{"session_id": "r106", "hook_event_name": "PreToolUse", "cwd": cwd,
 				"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_r106",
 				"tool_input": map[string]any{"command": command, "description": "Run test fixture command"}})

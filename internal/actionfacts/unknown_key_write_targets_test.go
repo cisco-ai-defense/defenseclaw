@@ -44,17 +44,17 @@ func TestUnknownKeyWriteTargetViews(t *testing.T) {
 				t.Fatalf("the call itself must stay partial: %+v", facts.Parse)
 			}
 			for i, view := range views {
-				if !view.Authoritative() || view.Tool != test.tool {
-					t.Fatalf("view %d: tool=%q parse=%+v", i, view.Tool, view.Parse)
+				if !view.Facts.Authoritative() || view.Facts.Tool != test.tool {
+					t.Fatalf("view %d: tool=%q parse=%+v", i, view.Facts.Tool, view.Facts.Parse)
 				}
 				found := false
-				for _, path := range view.Paths {
+				for _, path := range view.Facts.Paths {
 					if path.Access == PathAccessWrite && path.Resolved == test.targets[i] {
 						found = true
 					}
 				}
 				if !found {
-					t.Fatalf("view %d paths=%+v, want a write of %s", i, view.Paths, test.targets[i])
+					t.Fatalf("view %d paths=%+v, want a write of %s", i, view.Facts.Paths, test.targets[i])
 				}
 			}
 		})

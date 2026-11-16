@@ -63,9 +63,13 @@ _EXEC_CONTROL_ENVIRONMENT_PREFIXES = ("LD_", "DYLD_")
 class ConfigInspectError(RuntimeError):
     """A bounded, display-safe helper invocation or protocol failure."""
 
-    def __init__(self, message: str, *, field_path: str | None = None, reason: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, field_path: str | None = None, reason: str | None = None, note: str = ""
+    ) -> None:
         self.field_path = field_path
         self.reason = reason
+        # Extra advice the plain-words rewrite of field_path/reason would drop.
+        self.note = note
         super().__init__(message)
 
 
@@ -111,12 +115,15 @@ def inspect_v8_config(
         failure = _decode_validation_failure(completed.stdout, operation)
         if failure is not None:
             field_path, reason = failure
+            note = _older_gateway_note(argv[0])
             raise ConfigInspectError(
-                f"candidate field={field_path}; reason={reason}",
+                f"candidate field={field_path}; reason={reason}{note}",
                 field_path=field_path,
                 reason=reason,
+                note=note,
             )
-        raise ConfigInspectError(_helper_failure(completed.stderr, operation))
+        note = _older_gateway_note(argv[0])
+        raise ConfigInspectError(_helper_failure(completed.stderr, operation) + note, note=note)
     try:
         payload = json.loads(completed.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -505,6 +512,52 @@ def _decode_validation_failure(value: str | None, operation: str) -> tuple[str, 
     ):
         return None
     return field_path, reason.strip()
+
+
+_GATEWAY_VERSION = re.compile(r"\bversion\s+(\d+)\.(\d+)\.(\d+)")
+
+
+def _older_gateway_note(binary: str) -> str:
+    """Name the gateway that judged the config when it is an older release than this CLI.
+
+    A terminal opened before an install can list an older DefenseClaw (a
+    0.8.x Setup install) first on PATH; its gateway then reports this release's
+    config as newer than it supports (GAP-0099). Asked only after a failure.
+    "" when the binary is this release or newer, or cannot be asked.
+    """
+    from defenseclaw import __version__
+
+    # As the check itself ran: the pinned file, without the loader variables.
+    environment = {k: v for k, v in os.environ.items() if not _is_exec_control_environment_name(k)}
+    try:
+        out = run_pinned_executable(
+            [binary, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+            env=environment,
+        ).stdout
+    except (OSError, subprocess.SubprocessError, UnsafePathError):
+        return ""
+    found = _GATEWAY_VERSION.search(out or "")
+    mine = re.match(r"(\d+)\.(\d+)\.(\d+)", __version__)
+    if not found or not mine:
+        return ""
+    theirs = tuple(int(part) for part in found.groups())
+    if theirs >= tuple(int(part) for part in mine.groups()):
+        return ""
+    version = ".".join(found.groups())
+    note = (
+        f" [the gateway that ran this check is DefenseClaw {version}, at {binary}, an older release than this "
+        f"defenseclaw ({__version__}); put the folder of this defenseclaw first on PATH or set "
+        "DEFENSECLAW_GATEWAY_BIN to the gateway beside it"
+    )
+    if theirs[0] == 0:
+        note += ", and run `defenseclaw uninstall` to remove the DefenseClaw Setup 0.8.x install"
+    return note + "]"
 
 
 def _helper_failure(stderr: str | None, operation: str) -> str:

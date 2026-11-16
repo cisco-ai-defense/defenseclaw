@@ -93,6 +93,48 @@ func shortGateWait(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { sandboxGateWait = prev })
 }
 
+func TestSandboxGateRetriesDirectoryRemovedBeforeOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		removeDir bool
+		exclusive bool
+	}{
+		{"ordinary shared", false, false},
+		{"ordinary exclusive", false, true},
+		{"removed shared", true, false},
+		{"removed exclusive", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "", sampleSandbox("box"))
+			prev := afterSessionGateDirReady
+			t.Cleanup(func() { afterSessionGateDirReady = prev })
+			attempts := 0
+			var removeErr error
+			afterSessionGateDirReady = func(dir string) {
+				attempts++
+				if tc.removeDir && attempts == 1 {
+					removeErr = os.RemoveAll(dir)
+				}
+			}
+			release, err := ta.lockSandbox(bg, "box", tc.exclusive)
+			if removeErr != nil {
+				t.Fatal(removeErr)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			wantAttempts := 1
+			if tc.removeDir {
+				wantAttempts = 2
+			}
+			if attempts != wantAttempts {
+				t.Fatalf("gate directory attempts = %d, want %d", attempts, wantAttempts)
+			}
+		})
+	}
+}
+
 // A second terminal's attach racing the first's end: the end's count and
 // its stop (or --rm delete) are one step under the sandbox's exclusive
 // gate, and the attach records its lease and checks that the sandbox runs

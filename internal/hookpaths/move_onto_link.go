@@ -257,14 +257,18 @@ func MovedOntoLinkEntries(facts actionfacts.Facts) map[string]bool {
 // destination counts only when every simple command was read and no other
 // write, append or redirect of the command names it.
 func PlainMoveDestinationsWithStatements(input actionfacts.Input, facts actionfacts.Facts) map[string]bool {
-	moved, _ := plainMoveDestinationsWithStatements(input, facts)
+	if input.Command == "" {
+		return PlainMoveDestinations(facts)
+	}
+	moved, _ := plainMoveDestinationsWithStatements(input, facts, actionfacts.SimpleCommands(input, facts))
 	return moved
 }
 
 // plainMoveDestinationsWithStatements is PlainMoveDestinationsWithStatements
 // that also lists the destinations a simple command moves onto with mv -T
-// (noTargetMoveDestinations).
-func plainMoveDestinationsWithStatements(input actionfacts.Input, facts actionfacts.Facts) (moved, noTarget map[string]bool) {
+// (noTargetMoveDestinations), from the per-command readings simples of the
+// input (actionfacts.SimpleCommands).
+func plainMoveDestinationsWithStatements(input actionfacts.Input, facts actionfacts.Facts, simples []actionfacts.SimpleCommand) (moved, noTarget map[string]bool) {
 	moved = PlainMoveDestinations(facts)
 	if input.Command == "" {
 		return moved, nil
@@ -286,7 +290,7 @@ func plainMoveDestinationsWithStatements(input actionfacts.Input, facts actionfa
 	}
 	var statements map[string]bool
 	childWriters := map[string]int{}
-	for _, simple := range actionfacts.SimpleCommands(input, facts) {
+	for _, simple := range simples {
 		if simple.EvaluationFailure != "" || !filepath.IsAbs(simple.CWD) {
 			return moved, nil
 		}

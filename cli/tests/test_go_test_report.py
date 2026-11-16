@@ -78,6 +78,34 @@ def test_a_test_still_running_at_the_end_is_named(tmp_path: Path) -> None:
     assert "::error title=shard 1 failed::TestHangs was still running" in out
 
 
+def test_a_test_the_timeout_killed_keeps_the_time_it_ran(tmp_path: Path) -> None:
+    # The timed-out test never ends, so it has no pass or fail event: it is
+    # written with the wall time up to the last event, so a timing refresh
+    # does not weigh it as an unlisted test. A parallel test still waiting
+    # for its turn and a skipped test have no time to record.
+    def at(seconds: int) -> str:
+        return f"2026-11-10T20:{seconds // 60:02d}:{seconds % 60:02d}.000000000Z"
+
+    _, timings = _run(
+        [
+            {"Action": "run", "Package": "p", "Test": "TestSkipped", "Time": at(0)},
+            {"Action": "skip", "Package": "p", "Test": "TestSkipped", "Time": at(0), "Elapsed": 0},
+            {"Action": "run", "Package": "p", "Test": "TestWaits", "Time": at(1)},
+            {"Action": "pause", "Package": "p", "Test": "TestWaits", "Time": at(1)},
+            {"Action": "run", "Package": "p", "Test": "TestSlow", "Time": at(2)},
+            {"Action": "run", "Package": "p", "Test": "TestSlow/case", "Time": at(3)},
+            _out(None, "panic: test timed out after 11m0s\n"),
+            {"Action": "fail", "Package": "p", "Time": at(662), "Elapsed": 662.0},
+        ],
+        tmp_path,
+    )
+
+    assert timings == [
+        {"Action": "fail", "Package": "p", "Elapsed": 662.0},
+        {"Action": "fail", "Package": "p", "Test": "TestSlow", "Elapsed": 660.0},
+    ]
+
+
 def test_build_errors_in_json_are_printed(tmp_path: Path) -> None:
     # Go 1.24+ reports compiler output as build-output events with an
     # ImportPath and no Package; a shard that does not compile must show why.

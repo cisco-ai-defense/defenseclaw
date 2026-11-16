@@ -64,7 +64,7 @@ func TestManagedFileBackup_RestoresExactWhenUnchanged(t *testing.T) {
 	if err := captureManagedFileBackup(dir, "codex", "config", target); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	if err := os.WriteFile(target, []byte(`{"hooks":["defenseclaw"]}`), 0o600); err != nil {
+	if err := atomicWriteFile(target, []byte(`{"hooks":["defenseclaw"]}`), 0o600); err != nil {
 		t.Fatalf("patch target: %v", err)
 	}
 	if err := updateManagedFileBackupPostHash(dir, "codex", "config", target); err != nil {
@@ -1226,7 +1226,7 @@ func TestOpenClaw_Uninstall_RemovesAllDefenseClawLoadPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := uninstallOpenClawExtension(ocHome, false); err != nil {
+	if err := uninstallOpenClawExtension(ocHome, false, openClawSetupGrant{}); err != nil {
 		t.Fatalf("uninstallOpenClawExtension: %v", err)
 	}
 
@@ -2717,28 +2717,17 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 	ClaudeCodeSettingsPathOverride = settingsPath
 	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
 
-	if err := NewClaudeCodeConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := NewClaudeCodeConnector().Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	raw, err := os.ReadFile(settingsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := map[string]interface{}{}
-	if err := json.Unmarshal(raw, &base); err != nil {
-		t.Fatal(err)
-	}
-	baseHooks := base["hooks"].(map[string]interface{})
-	// The base invocation is that of an event Setup writes unchanged; on
-	// Windows PreToolUse may differ from it (claudeCodeHandlerInvocation).
-	baseHandler := baseHooks["Stop"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	expectedCommand := baseHandler["command"].(string)
-	var expectedArgs []string
-	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
-		for _, rawArg := range rawArgs {
-			expectedArgs = append(expectedArgs, rawArg.(string))
-		}
-	}
+	// The base invocation is the one Setup renders each event from; on
+	// Windows every event's registered handler wraps it differently.
+	expectedCommand, expectedArgs := claudeCodeHookInvocation(opts, filepath.Join(dir, "hooks", "claude-code-hook.sh"))
 
 	for _, alias := range []string{"asyncRewake", "async_rewake"} {
 		t.Run(alias, func(t *testing.T) {
@@ -2749,7 +2738,7 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 			hooks := candidate["hooks"].(map[string]interface{})
 			handler := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 			handler[alias] = true
-			err := verifyClaudeCodeHookMatrix(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"))
+			err := verifyClaudeCodeHookMatrixForSetup(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"), opts)
 			if err == nil || !strings.Contains(err.Error(), "asynchronous") {
 				t.Fatalf("verification error = %v, want asynchronous-enforcement rejection", err)
 			}
@@ -2763,7 +2752,7 @@ func TestVerifyClaudeCodeHookMatrixRejectsAsyncAliasesOnEnforcingEvents(t *testi
 	hooks := candidate["hooks"].(map[string]interface{})
 	messageHandler := hooks["MessageDisplay"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 	messageHandler["async"] = false
-	if err := verifyClaudeCodeHookMatrix(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks")); err == nil || !strings.Contains(err.Error(), "must be asynchronous") {
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"), opts); err == nil || !strings.Contains(err.Error(), "must be asynchronous") {
 		t.Fatalf("verification error = %v, want MessageDisplay async requirement", err)
 	}
 }
@@ -2793,15 +2782,14 @@ func TestVerifyClaudeCodeHookMatrixRejectsMalformedUnexpectedEvent(t *testing.T)
 		t.Fatal(err)
 	}
 	hooks := settings["hooks"].(map[string]interface{})
-	// The base invocation is that of an event Setup writes unchanged; on
-	// Windows PreToolUse may differ from it (claudeCodeHandlerInvocation).
-	baseHandler := hooks["Stop"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	expectedCommand := baseHandler["command"].(string)
-	var expectedArgs []string
-	if rawArgs, exists := baseHandler["args"].([]interface{}); exists {
-		for _, rawArg := range rawArgs {
-			expectedArgs = append(expectedArgs, rawArg.(string))
-		}
+	// The base invocation is the one Setup renders each event from; on
+	// Windows every event's registered handler wraps it differently, so no
+	// registered handler is the base.
+	expectedCommand, expectedArgs := claudeCodeHookInvocation(setupOpts, filepath.Join(dir, "hooks", "claude-code-hook.sh"))
+	// The unchanged registration verifies, so each rejection below is the
+	// malformed UnexpectedEvent's own.
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, expectedCommand, expectedArgs, filepath.Join(dir, "hooks"), setupOpts); err != nil {
+		t.Fatalf("the registration Setup wrote does not verify: %v", err)
 	}
 	baseline, err := json.Marshal(hooks)
 	if err != nil {
@@ -2893,7 +2881,10 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 	if got := handler["command"]; got != installedHook {
 		t.Fatalf("PreToolUse command = %q, want the installed hook %q", got, installedHook)
 	}
-	wantGuard := []interface{}{ClaudeCodeLauncherGuardSubcommand, defenseclawHookBinaryOverride, "hook", "--connector", "claudecode"}
+	// The guard carries the event and, in the default tier, the open answer
+	// for a start that fails.
+	wantGuard := []interface{}{ClaudeCodeLauncherGuardSubcommand, defenseclawHookBinaryOverride, "hook", "--connector", "claudecode",
+		"--event", "PreToolUse", "--unavailable-mode", "open"}
 	if got := handler["args"]; !reflect.DeepEqual(got, wantGuard) {
 		t.Fatalf("PreToolUse args = %#v, want %#v", got, wantGuard)
 	}
@@ -11108,7 +11099,7 @@ func TestPatchOpenClawConfig_Concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false, false)
+			errs[idx] = patchOpenClawConfig(configPath, "/tmp/ext-"+strings.Repeat("x", idx), false, false, false)
 		}(i)
 	}
 	wg.Wait()

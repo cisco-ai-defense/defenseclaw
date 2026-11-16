@@ -55,7 +55,9 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	home := t.TempDir()
 	pidFile := filepath.Join(home, "version.pid")
 	script := filepath.Join(home, "hermes")
-	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$$\" > %s\nexec sleep 60\n", strconv.Quote(pidFile))
+	// The command says it runs by publishing its pid whole (write, then
+	// rename), so the test never reads a half-written file.
+	body := fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$$\" > %s.tmp && mv %s.tmp %s\nexec sleep 60\n", strconv.Quote(pidFile), strconv.Quote(pidFile), strconv.Quote(pidFile))
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -64,27 +66,41 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	if err := worker.Start(); err != nil {
 		t.Fatal(err)
 	}
+	exited := make(chan error, 1)
+	go func() { exited <- worker.Wait() }()
 	workerReaped := false
 	t.Cleanup(func() {
 		if !workerReaped {
 			_ = worker.Process.Kill()
-			_ = worker.Wait()
+			<-exited
 		}
 	})
+	// The pid file is the version command saying it runs: the wait is for
+	// that event, not for a wall-clock time, so a host that is slow to load the
+	// worker binary or to start the command does not fail the test (GAP-0889).
+	// A worker that ends first fails it at once; the cap only keeps a hung
+	// worker from holding the test for ever.
 	var pid int
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		data, err := os.ReadFile(pidFile)
-		if err != nil {
-			continue
+	for hung := time.Now().Add(2 * time.Minute); pid == 0; time.Sleep(10 * time.Millisecond) {
+		if data, err := os.ReadFile(pidFile); err == nil {
+			pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil || pid <= 1 {
+				t.Fatalf("version pid: %q (%v)", data, err)
+			}
+			break
 		}
-		pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
-		if err != nil || pid <= 1 {
-			t.Fatalf("version pid: %q (%v)", data, err)
+		select {
+		case err := <-exited:
+			workerReaped = true
+			t.Fatalf("the apply worker ended before the version command ran: %v", err)
+		default:
 		}
-		break
+		if time.Now().After(hung) {
+			t.Fatal("version command did not start")
+		}
 	}
-	if pid <= 1 || !versionProbeAlive(pid) {
-		t.Fatal("version command did not start")
+	if !versionProbeAlive(pid) {
+		t.Fatal("version command did not stay running")
 	}
 	t.Cleanup(func() {
 		if versionProbeAlive(pid) {
@@ -94,13 +110,18 @@ func TestGAP0540VersionProbeEndsWithApplyWorker(t *testing.T) {
 	if err := worker.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	err := worker.Wait()
+	err := <-exited
 	workerReaped = true
 	if err == nil {
 		t.Fatal("worker unexpectedly exited normally")
 	}
-	for deadline := time.Now().Add(2 * time.Second); versionProbeAlive(pid); time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(deadline) {
+	// The command ends with its worker when the kernel has carried that out,
+	// which is the event this waits for (GAP-0889): the kernel gives that no
+	// time contract, so a host that is slow to schedule the command cannot
+	// fail it. A command that is not tied to its worker keeps running for its
+	// whole 60 s, so the 30 s cap tells the two apart on any host.
+	for killed := time.Now(); versionProbeAlive(pid); time.Sleep(20 * time.Millisecond) {
+		if time.Since(killed) > 30*time.Second {
 			t.Fatal("version command outlived its apply worker")
 		}
 	}

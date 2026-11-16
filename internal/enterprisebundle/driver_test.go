@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // driverFor is a Driver over a temp store whose anchor file trusts f.key.
@@ -954,7 +955,7 @@ func TestDriverConfirmWriteOnAFullVolumeNamesTheRecoveryStep(t *testing.T) {
 	_, err = d.Finish(p, p.ConfigSHA256, nil, policy, false, nil)
 	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDiskFull ||
 		!strings.Contains(err.Error(), "recording its confirmation failed") ||
-		!strings.Contains(err.Error(), "free space on that volume, then run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it") {
+		!strings.Contains(err.Error(), "free space on that volume, then run `"+managed.WindowsAdminCommand("enterprise", "windows", "ensure", "--profile", "standalone")+"` from an elevated PowerShell prompt to finish confirming it") {
 		t.Fatalf("confirmation error = %v; want disk_full and a free-space recovery step", err)
 	}
 	if p.Receipt.State != enterprisebundle.StateApplied {

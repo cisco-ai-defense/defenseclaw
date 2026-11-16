@@ -126,6 +126,7 @@ def plugin() -> None:
     is_flag=True,
     help="Include exact first-party DefenseClaw artifacts (excluded by default)",
 )
+@click.option("--disable-vendor-identity", is_flag=True, hidden=True)
 @click.option("--lenient", is_flag=True, help="Suppress low-confidence findings (sets min_confidence=0.5)")
 @click.option(
     "--connector",
@@ -152,6 +153,7 @@ def scan(
     llm_consensus_runs: int,
     enable_meta: bool,
     include_self: bool,
+    disable_vendor_identity: bool,
     lenient: bool,
     connector_flag: str,
 ) -> None:
@@ -199,6 +201,7 @@ def scan(
             include_self,
             lenient,
             connector_flag,
+            disable_vendor_identity=disable_vendor_identity,
         )
         return
 
@@ -214,12 +217,13 @@ def scan(
         enable_meta,
         include_self,
         lenient,
+        disable_vendor_identity,
     )
 
     # Route the unified LLM config (top-level ``llm:`` + any
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
-    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
 
     matches: list[_PluginMatch] = []
     registry_cache: PluginRegistryCache = {}
@@ -352,7 +356,7 @@ def scan(
             scan_dir=scan_dir,
             connector=connector,
             as_json=as_json,
-            scan_options=scan_options,
+            scan_options=_scan_options_for_connector(app, connector, scan_options),
             policy_name=policy_name,
             use_llm=use_llm,
             llm_model=llm_model,
@@ -1114,6 +1118,7 @@ def _scan_all_plugins(
     include_self: bool,
     lenient: bool,
     connector_flag: str,
+    disable_vendor_identity: bool = False,
 ) -> None:
     """P-C: sweep every installed plugin across configured connectors.
 
@@ -1153,13 +1158,15 @@ def _scan_all_plugins(
         enable_meta,
         include_self,
         lenient,
+        disable_vendor_identity,
     )
-    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
     pack_cache: RulePackOverlayCache = {}
 
     json_groups: list[dict[str, Any]] = []
     total_targets = 0
     for connector in connectors:
+        connector_options = _scan_options_for_connector(app, connector, scan_options)
         connector_scanner = maybe_wrap(
             scanner,
             app.cfg,
@@ -1248,9 +1255,9 @@ def _scan_all_plugins(
         group_results: list[dict[str, Any]] = []
         # GAP-2643: overlap the LLM-bound scans; results keep their order.
         for (pid, scan_dir, scope, project_path), scan_result in _scan_ui.ordered_scans(
-            lambda target: connector_scanner.scan(target[1], **scan_options),
+            lambda target: connector_scanner.scan(target[1], **connector_options),
             targets,
-            workers=_scan_ui.scan_batch_workers(connector_scanner, **scan_options),
+            workers=_scan_ui.scan_batch_workers(connector_scanner, **connector_options),
         ):
             try:
                 result = scan_result()
@@ -1338,6 +1345,7 @@ def _build_scan_options(
     enable_meta: bool,
     include_self: bool,
     lenient: bool,
+    disable_vendor_identity: bool = False,
 ) -> dict:
     """Build ``PluginScannerWrapper.scan`` kwargs from CLI flags.
 
@@ -1372,6 +1380,8 @@ def _build_scan_options(
 
     if include_self:
         opts["include_self"] = True
+    if disable_vendor_identity:
+        opts["disable_vendor_identity"] = True
 
     # A configured OpenClaw home can live outside ~/.openclaw. Pass only its
     # exact DefenseClaw leaf to the scanner's identity registry; never pass a
@@ -1387,6 +1397,36 @@ def _build_scan_options(
         opts["lenient"] = True
 
     return opts
+
+
+def _scan_options_for_connector(app: AppContext, connector: str, options: dict) -> dict:
+    """Use the deployment's scan identity and effective connector tier."""
+    if asset_lists.is_secure_client(app.cfg):
+        return {**options, "disable_vendor_identity": True}
+    tier = getattr(getattr(app.cfg, "guardrail", None), "hook_policy_tier", None)
+    if callable(tier) and tier(connector) == "strict":
+        return {**options, "policy": "strict", "profile": "strict"}
+    return options
+
+
+@plugin.command("manifest-entrypoints", hidden=True)
+def manifest_entrypoints() -> None:
+    """Print the entrypoints the plugin scanner reads from manifests on stdin.
+
+    Internal: the gateway watcher sends {"manifests": {path: base64 bytes}} and
+    gets {"entrypoints": [...]}, so one loader decides what a manifest declares.
+    """
+    import base64
+    import sys
+
+    from defenseclaw.scanner.plugin_scanner.scanner import declared_entrypoints
+
+    request = json.load(sys.stdin)
+    manifests = {
+        str(name): base64.b64decode(value, validate=True)
+        for name, value in request["manifests"].items()
+    }
+    click.echo(json.dumps({"entrypoints": declared_entrypoints(manifests)}))
 
 
 @plugin.command()
@@ -1526,7 +1566,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         # a staging directory this install owns. Only a copy that stands is
         # swapped in; a refused or quarantined copy never touches the
         # installed plugin, and a rollback puts back only what was there.
-        scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+        scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
         pack_cache: RulePackOverlayCache = {}
         scan_results: dict[str, Any] = {}
         try:
@@ -1539,7 +1579,10 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                         connector,
                         pack_cache=pack_cache,
                     )
-                    result = connector_scanner.scan(staged_path)
+                    result = connector_scanner.scan(
+                        staged_path,
+                        **_scan_options_for_connector(app, connector, {}),
+                    )
                     if getattr(result, "target", None) == staged_path:
                         result.target = transaction.destination(connector)
                     scan_results[connector] = result

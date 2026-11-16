@@ -49,7 +49,7 @@ func TestWindowsPurgeAccountOwnLinkLeavesOnlyThatAccountAsWarning(t *testing.T) 
 		return gotHome == home && gotSID == sid
 	}
 	report := func() *enterprisestatus.Result {
-		remaining, purged := windowsManagedHooksStandaloneUserState(manifest, true, func(string) bool { return false })
+		remaining, purged, _ := windowsManagedHooksStandaloneUserState(manifest, true, func(string) bool { return false })
 		body, err := json.Marshal(remaining)
 		if err != nil {
 			t.Fatal(err)
@@ -82,7 +82,7 @@ func TestWindowsPurgeAccountOwnLinkLeavesOnlyThatAccountAsWarning(t *testing.T) 
 		binaries++
 		return nil, nil
 	}
-	remaining, purged := windowsManagedHooksStandaloneUserState(manifest, true, func(string) bool { return false })
+	remaining, purged, _ := windowsManagedHooksStandaloneUserState(manifest, true, func(string) bool { return false })
 	if len(remaining) != 0 || len(purged) != 1 || binaries != 2 {
 		t.Fatalf("plain folder: purged=%v remaining=%v binaries=%d", purged, remaining, binaries)
 	}

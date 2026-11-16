@@ -273,7 +273,7 @@ func TestEmitRescanResultUsesGeneratedV8AndPreservesForensics(t *testing.T) {
 			Title: "Unsafe instruction", Scanner: "skill-scanner",
 		}},
 	}
-	scanID := w.emitRescanResult(ctx, result)
+	scanID := w.emitRescanResult(ctx, InstallEvent{Type: InstallSkill, Path: result.Target}, result)
 	if scanID == "" || scanID != result.ScanID {
 		t.Fatalf("scan id = %q, result scan id = %q", scanID, result.ScanID)
 	}

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1474,6 +1475,15 @@ func TestWindowsManagedHooksTeardownReportsCommittedStandalonePrepare(t *testing
 	if report["precommit_check"] != true {
 		t.Fatalf("capabilities report does not offer the precommit check: %v", report)
 	}
+	// GAP-0773: Setup passes --uninstall to "codex-requirements remove" only
+	// when this report offers it, and the command it names has the flag.
+	if report["codex_requirements_uninstall"] != true {
+		t.Fatalf("capabilities report does not offer the Codex requirements uninstall removal: %v", report)
+	}
+	if remove, _, err := newWindowsCodexRequirementsCommand().Find([]string{"remove"}); err != nil ||
+		remove == nil || remove.Flags().Lookup("uninstall") == nil {
+		t.Fatalf("codex-requirements remove has no --uninstall flag: %v", err)
+	}
 	if child, _, err := command.Find([]string{"check"}); err != nil || child == nil || child.Name() != "check" {
 		t.Fatalf("teardown-managed-hooks has no check action: %v", err)
 	}
@@ -1497,5 +1507,528 @@ func TestWindowsManagedHooksOwnerRightsRestoreRefusesOutsideStandalone(t *testin
 	if err == nil || report.OK || report.Action != "restore-owner-rights" ||
 		!strings.Contains(err.Error(), "standalone profile") {
 		t.Fatalf("restore outside standalone: report=%+v err=%v", report, err)
+	}
+}
+
+// The rollback of a teardown (restoreWindowsCodexManagedHooks) and its clean
+// check (verifyWindowsManagedHooksCodexClean) read nothing behind a kept link:
+// the verifier, reconciler and publisher are never called, and both succeed.
+// Without the link they do call them (GAP-0773).
+func TestWindowsManagedHooksTeardownRollbackAndCleanCheckSkipAKeptLink(t *testing.T) {
+	savedKept, savedVerifier := windowsManagedHooksCodexFolderKept, windowsManagedHooksCodexVerifier
+	savedReconciler, savedPublisher := windowsManagedHooksCodexReconciler, windowsManagedHooksCodexPublisher
+	t.Cleanup(func() {
+		windowsManagedHooksCodexFolderKept, windowsManagedHooksCodexVerifier = savedKept, savedVerifier
+		windowsManagedHooksCodexReconciler, windowsManagedHooksCodexPublisher = savedReconciler, savedPublisher
+	})
+	var calls []string
+	windowsManagedHooksCodexVerifier = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		calls = append(calls, "verify")
+		return connector.WindowsCodexMachineRequirementsReport{OK: true, SafeToRemoveBinary: true}, nil
+	}
+	windowsManagedHooksCodexReconciler = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		calls = append(calls, "reconcile")
+		return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+	}
+	windowsManagedHooksCodexPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+		calls = append(calls, "publish")
+		return nil
+	}
+	opts := connector.WindowsCodexMachineRequirementsOptions{}
+	targets := []connector.WindowsCodexManagedRuntimeTarget{{SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`}}
+
+	windowsManagedHooksCodexFolderKept = func() (string, error) { return `C:\ProgramData\OpenAI\Codex`, nil }
+	for _, active := range []bool{true, false} {
+		if err := restoreWindowsCodexManagedHooks(opts, active, nil); err != nil {
+			t.Fatalf("rollback over a kept link (policy active %t): %v", active, err)
+		}
+	}
+	if surviving, err := verifyWindowsManagedHooksCodexClean(opts); err != nil || surviving != 0 {
+		t.Fatalf("clean check over a kept link: %d, %v", surviving, err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("a Codex read ran behind a kept link: %v", calls)
+	}
+
+	windowsManagedHooksCodexFolderKept = func() (string, error) { return "", nil }
+	if err := restoreWindowsCodexManagedHooks(opts, true, targets); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreWindowsCodexManagedHooks(opts, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyWindowsManagedHooksCodexClean(opts); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, ",") != "reconcile,publish,verify,verify,verify" {
+		t.Fatalf("without a link the rollback and clean check ran %v", calls)
+	}
+}
+
+// The Codex kept entry says what a kept link cannot promise, and the warning
+// still names it once as kept (GAP-0773).
+func TestWindowsCodexKeptLinkEntryNamesTheUnverifiedPolicy(t *testing.T) {
+	if !strings.HasPrefix(windowsEnterpriseCodexKeptLinkReason, windowsEnterpriseKeptLinkReason) ||
+		!strings.Contains(windowsEnterpriseCodexKeptLinkReason, "may still name the DefenseClaw hook binary") {
+		t.Fatalf("Codex kept-link reason = %q", windowsEnterpriseCodexKeptLinkReason)
+	}
+}
+
+// A link at the Codex machine-policy folder is kept and not read through
+// (GAP-0773). The teardown registry read then reports it in Kept and nothing
+// else; prepare keeps the expected policy bit, and the installed-state check
+// has no Codex enrollment to compare, whether Codex is configured with no
+// account, or has an enrolled account the manifest lists.
+func TestWindowsManagedHooksTeardownKeepsALinkAtTheCodexFolder(t *testing.T) {
+	previous := windowsManagedHooksTeardownCodexRegistryReader
+	t.Cleanup(func() { windowsManagedHooksTeardownCodexRegistryReader = previous })
+	const hook = `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	const link = `C:\ProgramData\OpenAI\Codex`
+	alice := connector.WindowsCodexManagedRuntimeTarget{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}
+	windowsManagedHooksTeardownCodexRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+		return connector.WindowsCodexManagedRuntimeRegistry{Kept: link}, nil
+	}
+	for name, targets := range map[string][]connector.WindowsCodexManagedRuntimeTarget{
+		"configured, no account": nil,
+		"enrolled account":       {alice},
+	} {
+		t.Run(name, func(t *testing.T) {
+			claude, active, codex, cursor := windowsManagedHooksTeardownExpectedEnrollment(
+				windowsManagedHooksActivated, true, nil, targets, nil,
+			)
+			identity := windowsManagedHooksTeardownJournal{
+				HookBinary:        hook,
+				ClaudeTargetSIDs:  claude,
+				CodexPolicyActive: active,
+				CodexTargets:      codex,
+				CursorTargets:     cursor,
+			}
+			if !identity.CodexPolicyActive {
+				t.Fatal("fixture: Codex must expect an active guard")
+			}
+			prepared := identity
+			if err := captureWindowsManagedHooksTeardownCodexPolicy(&prepared); err != nil {
+				t.Fatalf("prepare failed on a kept link: %v", err)
+			}
+			if prepared.CodexPolicyActive != identity.CodexPolicyActive || len(prepared.CodexTargets) != len(identity.CodexTargets) {
+				t.Fatalf("prepare changed the expected Codex enrollment over a link: %+v", prepared)
+			}
+			kept := connector.WindowsCodexManagedRuntimeRegistry{Kept: link}
+			if err := validateWindowsManagedHooksTeardownEnrollment(identity, nil, false, kept, nil, false); err != nil {
+				t.Fatalf("the installed-state check failed on a kept link: %v", err)
+			}
+			// Without the link the same registry is a mismatch: the
+			// exemption is the kept link, nothing else.
+			if err := validateWindowsManagedHooksTeardownEnrollment(
+				identity, nil, false, connector.WindowsCodexManagedRuntimeRegistry{}, nil, false,
+			); err == nil {
+				t.Fatal("an empty registry without a link matched an active Codex guard")
+			}
+		})
+	}
+}
+
+// GAP-0773 and GAP-0829. The activation-binding checks compare what the
+// manifest and the activation record say is enrolled with what the teardown
+// reads in each connector's machine folder. Where a link keeps that folder
+// nothing is read behind it, so that connector is left out of the comparison;
+// a mismatch no kept link explains still refuses.
+
+// keepConnectorFolders makes the named connectors' machine folders kept links.
+func keepConnectorFolders(t *testing.T, names ...string) {
+	t.Helper()
+	previous := windowsManagedHooksConnectorFolderKept
+	t.Cleanup(func() { windowsManagedHooksConnectorFolderKept = previous })
+	windowsManagedHooksConnectorFolderKept = func(name string) (string, error) {
+		if slices.Contains(names, name) {
+			return `C:\ProgramData\link-to-` + name, nil
+		}
+		return "", nil
+	}
+}
+
+const keptTestSID = "S-1-5-21-111-222-333-1001"
+
+func keptTestTarget(connectorName string) windowsManagedHooksTeardownTarget {
+	return windowsManagedHooksTeardownTarget{
+		Connector: connectorName, SID: keptTestSID, DataDir: `C:\Users\alice\.defenseclaw`,
+	}
+}
+
+// enrolledTeardownIdentity is an activated deployment with one enrolled account
+// for each machine-enrolled connector.
+func enrolledTeardownIdentity(t *testing.T) windowsManagedHooksTeardownJournal {
+	t.Helper()
+	targets := []windowsManagedHooksTeardownTarget{
+		keptTestTarget("claudecode"), keptTestTarget("codex"), keptTestTarget("copilot"), keptTestTarget("cursor"),
+	}
+	codex := []connector.WindowsCodexManagedRuntimeTarget{{SID: keptTestSID, DataDir: `C:\Users\alice\.defenseclaw`}}
+	cursor := []enterprisehooks.WindowsCursorManagedRuntimeTarget{{SID: keptTestSID, DataDir: `C:\Users\alice\.defenseclaw`}}
+	identity := windowsManagedHooksTeardownJournal{
+		SchemaVersion:          windowsManagedHooksTeardownJournalSchema,
+		Phase:                  "captured",
+		ManifestPath:           `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		ManifestSHA256:         strings.Repeat("a", 64),
+		ActivationState:        windowsManagedHooksActivated,
+		DeploymentGenerationID: strings.Repeat("b", 32),
+		HookBinary:             `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:            "127.0.0.1:18970",
+		GatewayServiceName:     "DefenseClawGateway",
+		Targets:                targets,
+	}
+	var err error
+	if identity.ManifestFingerprint, err = windowsManagedHooksTeardownFingerprint(targets); err != nil {
+		t.Fatal(err)
+	}
+	identity.ClaudeTargetSIDs, identity.CodexPolicyActive, identity.CodexTargets, identity.CursorTargets =
+		windowsManagedHooksTeardownExpectedEnrollment(
+			windowsManagedHooksActivated, true, []string{keptTestSID}, codex, cursor,
+		)
+	return identity
+}
+
+func TestWindowsManagedHooksTeardownSelectorExpectationLeavesOutAKeptConnector(t *testing.T) {
+	for _, name := range []string{"claudecode", "codex", "cursor", "copilot", "opencode", "devin", "antigravity", "hermes", "kiro"} {
+		t.Run(name, func(t *testing.T) {
+			target := keptTestTarget(name)
+			keepConnectorFolders(t)
+			expected, err := windowsManagedHooksTeardownSelectorExpectedLive(target, nil, windowsManagedHooksActivated)
+			if err != nil || !expected {
+				t.Fatalf("without a link an activated target expects its selector entry: %v, %v", expected, err)
+			}
+			keepConnectorFolders(t, name)
+			expected, err = windowsManagedHooksTeardownSelectorExpectedLive(target, nil, windowsManagedHooksActivated)
+			if err != nil || expected {
+				t.Fatalf("behind a kept link no selector entry is expected: %v, %v", expected, err)
+			}
+			// A link at another connector's folder does not excuse this one.
+			other := "cursor"
+			if name == other {
+				other = "codex"
+			}
+			keepConnectorFolders(t, other)
+			expected, err = windowsManagedHooksTeardownSelectorExpectedLive(target, nil, windowsManagedHooksActivated)
+			if err != nil || !expected {
+				t.Fatalf("a link at %s excused %s: %v, %v", other, name, expected, err)
+			}
+		})
+	}
+	t.Run("a probe failure is reported, not treated as plain", func(t *testing.T) {
+		previous := windowsManagedHooksConnectorFolderKept
+		t.Cleanup(func() { windowsManagedHooksConnectorFolderKept = previous })
+		windowsManagedHooksConnectorFolderKept = func(string) (string, error) { return "", errors.New("probe failed") }
+		if _, err := windowsManagedHooksTeardownSelectorExpectedLive(keptTestTarget("cursor"), nil, windowsManagedHooksActivated); err == nil {
+			t.Fatal("a failed probe was ignored")
+		}
+	})
+}
+
+func TestWindowsManagedHooksTeardownEnrollmentCheckExcludesAKeptConnector(t *testing.T) {
+	identity := enrolledTeardownIdentity(t)
+	// The reads behind a kept link come back empty, as the real ones do.
+	emptyCodex := connector.WindowsCodexManagedRuntimeRegistry{Active: true}
+	check := func(claude []string, claudeActive bool, codex connector.WindowsCodexManagedRuntimeRegistry, cursor []enterprisehooks.WindowsCursorManagedRuntimeTarget, cursorActive bool) error {
+		return validateWindowsManagedHooksTeardownEnrollment(identity, claude, claudeActive, codex, cursor, cursorActive)
+	}
+	full := connector.WindowsCodexManagedRuntimeRegistry{Active: true, Targets: identity.CodexTargets}
+	fullCursor := identity.CursorTargets
+
+	keepConnectorFolders(t)
+	if err := check([]string{keptTestSID}, true, full, fullCursor, true); err != nil {
+		t.Fatalf("a matching deployment was refused: %v", err)
+	}
+
+	// Cursor (GAP-0829): enrolled and configured, the folder replaced by a link.
+	keepConnectorFolders(t)
+	if err := check([]string{keptTestSID}, true, full, nil, false); err == nil ||
+		!strings.Contains(err.Error(), "Cursor machine enrollment does not match") {
+		t.Fatalf("an emptied Cursor registry with no link was accepted: %v", err)
+	}
+	keepConnectorFolders(t, "cursor")
+	if err := check([]string{keptTestSID}, true, full, nil, false); err != nil {
+		t.Fatalf("an enrolled Cursor behind a kept link was refused: %v", err)
+	}
+	// The link at Cursor does not excuse a Claude Code mismatch.
+	if err := check(nil, false, full, nil, false); err == nil ||
+		!strings.Contains(err.Error(), "Claude machine enrollment does not match") {
+		t.Fatalf("a link at Cursor excused a Claude Code mismatch: %v", err)
+	}
+
+	// Claude Code.
+	keepConnectorFolders(t, "claudecode")
+	if err := check(nil, false, full, fullCursor, true); err != nil {
+		t.Fatalf("an enrolled Claude Code behind a kept link was refused: %v", err)
+	}
+	if err := check([]string{keptTestSID}, true, emptyCodex, fullCursor, true); err == nil ||
+		!strings.Contains(err.Error(), "Codex machine enrollment does not match") {
+		t.Fatalf("a link at Claude Code excused a Codex mismatch: %v", err)
+	}
+}
+
+func TestWindowsManagedHooksTeardownPerUserEnrollmentCheckExcludesAKeptConnector(t *testing.T) {
+	for _, name := range []string{"copilot", "opencode", "devin", "antigravity", "hermes", "kiro"} {
+		t.Run(name, func(t *testing.T) {
+			identity := windowsManagedHooksTeardownJournal{
+				ActivationState: windowsManagedHooksActivated,
+				Targets:         []windowsManagedHooksTeardownTarget{keptTestTarget(name)},
+			}
+			// Enrolled per the manifest, and nothing is enrolled on this computer.
+			keepConnectorFolders(t)
+			if err := validateWindowsManagedHooksStandalonePerUserEnrollment(identity); err == nil {
+				t.Fatal("an enrolled connector with no machine enrollment was accepted")
+			}
+			keepConnectorFolders(t, name)
+			if err := validateWindowsManagedHooksStandalonePerUserEnrollment(identity); err != nil {
+				t.Fatalf("an enrolled %s behind a kept link was refused: %v", name, err)
+			}
+			keepConnectorFolders(t, "cursor")
+			if err := validateWindowsManagedHooksStandalonePerUserEnrollment(identity); err == nil {
+				t.Fatal("a link at Cursor excused a per-user connector")
+			}
+		})
+	}
+}
+
+func TestWindowsManagedHooksTeardownJournalAcceptsTheEmptyReadsBehindKeptLinks(t *testing.T) {
+	identity := enrolledTeardownIdentity(t)
+	for _, target := range identity.Targets {
+		identity.SelectorTargets = append(identity.SelectorTargets, enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot{
+			SchemaVersion: 1, Connector: target.Connector, TargetSID: target.SID,
+		})
+	}
+	all := []string{"claudecode", "codex", "copilot", "cursor"}
+	keepConnectorFolders(t, all...)
+	if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err != nil {
+		t.Fatalf("a journal captured behind kept links was refused: %v", err)
+	}
+	for _, left := range all {
+		var some []string
+		for _, name := range all {
+			if name != left {
+				some = append(some, name)
+			}
+		}
+		keepConnectorFolders(t, some...)
+		if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err == nil {
+			t.Fatalf("an empty snapshot for %s with no link on it was accepted", left)
+		}
+	}
+	keepConnectorFolders(t)
+	if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err == nil {
+		t.Fatal("empty snapshots with no link were accepted for an enrolled deployment")
+	}
+}
+
+func TestWindowsManagedHooksKeptLinkIsNamedOnce(t *testing.T) {
+	got := windowsManagedHooksNameKeptLinksOnce(
+		[]string{`C:\ProgramData\OpenAI\Codex`},
+		[]string{`c:\programdata\openai\codex`, `C:\ProgramData\Cursor`},
+		[]string{`C:\ProgramData\Cursor`, `C:\ProgramData\GitHub\Copilot`},
+	)
+	want := []string{
+		`C:\ProgramData\OpenAI\Codex: ` + windowsEnterpriseCodexKeptLinkReason,
+		`C:\ProgramData\Cursor: ` + windowsEnterpriseKeptLinkReason,
+		`C:\ProgramData\GitHub\Copilot: ` + windowsEnterpriseKeptLinkReason,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("kept links = %q, want %q", got, want)
+	}
+}
+
+// After the uninstall committed, the clean check
+// reads each per-user connector enrollment, and a rollback puts the enrollment
+// back. Both go through the machine folder of the connector, and the read
+// follows a link on that folder: an enrollment.json behind an administrator
+// link made the purge exit 1603. The stand-in reader fails the way that read
+// does when the decoy file is behind the link.
+func stubPerUserEnrollmentIO(t *testing.T, decoyBehind ...string) (reads, restores *[]string) {
+	t.Helper()
+	previousReader, previousRestorer := windowsManagedHooksPerUserEnrollmentReader, windowsManagedHooksPerUserEnrollmentRestorer
+	t.Cleanup(func() {
+		windowsManagedHooksPerUserEnrollmentReader, windowsManagedHooksPerUserEnrollmentRestorer = previousReader, previousRestorer
+	})
+	reads, restores = new([]string), new([]string)
+	windowsManagedHooksPerUserEnrollmentReader = func(name string) ([]enterprisehooks.WindowsPerUserManagedEnrollmentTarget, bool, error) {
+		*reads = append(*reads, name)
+		if slices.Contains(decoyBehind, name) {
+			return nil, false, errors.New(name + " enrollment is untrusted: reparse point in path")
+		}
+		return nil, false, nil
+	}
+	windowsManagedHooksPerUserEnrollmentRestorer = func(name, _ string, _ []enterprisehooks.WindowsPerUserManagedEnrollmentTarget) error {
+		*restores = append(*restores, name)
+		if slices.Contains(decoyBehind, name) {
+			return errors.New(name + " enrollment directory is a link")
+		}
+		return nil
+	}
+	return reads, restores
+}
+
+func TestWindowsManagedHooksTeardownCleanCheckDoesNotReadBehindAKeptPerUserLink(t *testing.T) {
+	names := enterprisehooks.WindowsProfilePerUserConnectorNames()
+	if len(names) == 0 {
+		t.Skip("no per-user connector on this profile")
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			reads, _ := stubPerUserEnrollmentIO(t, name)
+			keepConnectorFolders(t, name)
+			if err := verifyWindowsManagedHooksStandalonePerUserClean(); err != nil {
+				t.Fatalf("the clean check read %s behind a kept link: %v", name, err)
+			}
+			if slices.Contains(*reads, name) {
+				t.Fatalf("the clean check read the enrollment of %s behind a kept link", name)
+			}
+			// The same decoy with no link on the folder is a real read, and it still fails the check.
+			keepConnectorFolders(t)
+			if err := verifyWindowsManagedHooksStandalonePerUserClean(); err == nil {
+				t.Fatalf("an unreadable %s enrollment with no link was accepted", name)
+			}
+			// A link at another connector excuses nothing here.
+			keepConnectorFolders(t, "cursor", "claudecode", "codex")
+			if err := verifyWindowsManagedHooksStandalonePerUserClean(); err == nil {
+				t.Fatalf("a link at another connector excused %s", name)
+			}
+		})
+	}
+}
+
+func TestWindowsManagedHooksTeardownCleanCheckStillFailsOnASurvivingPerUserEnrollment(t *testing.T) {
+	names := enterprisehooks.WindowsProfilePerUserConnectorNames()
+	if len(names) == 0 {
+		t.Skip("no per-user connector on this profile")
+	}
+	previous := windowsManagedHooksPerUserEnrollmentReader
+	t.Cleanup(func() { windowsManagedHooksPerUserEnrollmentReader = previous })
+	windowsManagedHooksPerUserEnrollmentReader = func(string) ([]enterprisehooks.WindowsPerUserManagedEnrollmentTarget, bool, error) {
+		return []enterprisehooks.WindowsPerUserManagedEnrollmentTarget{{SID: keptTestSID}}, true, nil
+	}
+	keepConnectorFolders(t)
+	if err := verifyWindowsManagedHooksStandalonePerUserClean(); err == nil || !strings.Contains(err.Error(), "survived") {
+		t.Fatalf("a surviving enrollment was accepted: %v", err)
+	}
+}
+
+func TestWindowsManagedHooksTeardownRollbackDoesNotRestoreBehindAKeptPerUserLink(t *testing.T) {
+	journal := windowsManagedHooksTeardownJournal{
+		ActivationState: windowsManagedHooksActivated,
+		HookBinary:      `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		Targets:         []windowsManagedHooksTeardownTarget{keptTestTarget("copilot")},
+	}
+	_, restores := stubPerUserEnrollmentIO(t, "copilot")
+	keepConnectorFolders(t, "copilot")
+	if err := restoreWindowsManagedHooksStandalonePerUserEnrollments(journal); err != nil {
+		t.Fatalf("a rollback republished an enrollment behind a kept link: %v", err)
+	}
+	if len(*restores) != 0 {
+		t.Fatalf("a rollback wrote the enrollment of %q behind a kept link", *restores)
+	}
+	keepConnectorFolders(t)
+	if err := restoreWindowsManagedHooksStandalonePerUserEnrollments(journal); err == nil {
+		t.Fatal("a rollback with no link did not republish the enrollment")
+	}
+	if !slices.Equal(*restores, []string{"copilot"}) {
+		t.Fatalf("restores = %q, want copilot once", *restores)
+	}
+}
+
+// GAP-0999: a managed-hook teardown whose Codex step meets a Codex writer that
+// holds the lock reports the stable busy-writer code, so the rollback that
+// called it defers instead of failing with the services stopped.
+func TestWindowsManagedHooksTeardownReportsABusyCodexWriterByCode(t *testing.T) {
+	busy := fmt.Errorf("restore Codex managed hooks: timed out waiting 10s for Codex machine policy lock: %w", connector.ErrWindowsCodexWriterLockBusy)
+	for name, err := range map[string]error{
+		"direct":      busy,
+		"joined busy": errors.Join(busy, fmt.Errorf("again: %w", connector.ErrWindowsCodexWriterLockBusy)),
+	} {
+		if got := windowsManagedHooksTeardownErrorCode(err); got != "writer_lock_busy" {
+			t.Fatalf("%s: code = %q, want writer_lock_busy", name, got)
+		}
+	}
+	// A busy Codex writer next to another failure (a compensation that failed too) is not a
+	// writer-only failure: no code, so the caller throws as before.
+	for name, err := range map[string]error{
+		"busy plus compensation":                          errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied")),
+		"compensation first":                              errors.Join(errors.New("restore pre-rollback Cursor policy after Codex failure: access denied"), busy),
+		"single wrapper around a join with a plain cause": fmt.Errorf("teardown rollback: %w", errors.Join(busy, errors.New("restore pre-rollback Claude policy after Codex failure: access denied"))),
+	} {
+		if got := windowsManagedHooksTeardownErrorCode(err); got != "" {
+			t.Fatalf("%s: code = %q, want none", name, got)
+		}
+	}
+	if got := windowsManagedHooksTeardownErrorCode(errors.New("Codex machine policy is not clean after teardown rollback")); got != "" {
+		t.Fatalf("a plain failure got code %q", got)
+	}
+	if got := windowsManagedHooksTeardownErrorCode(nil); got != "" {
+		t.Fatalf("nil error got code %q", got)
+	}
+}
+
+// GAP-1062: a committed uninstall whose first attempt stopped after it took
+// the Codex policy off leaves a captured journal. The rerun puts the preimage
+// back and prepares again, so the zero-target Codex bit of the new identity
+// must be the journal's: the one read from the half-removed machine made the
+// verification of the restored state refuse it ("Codex machine enrollment does
+// not match the authenticated activation state").
+func TestWindowsManagedHooksTeardownRestoredIdentityTakesTheJournalsZeroTargetCodexBit(t *testing.T) {
+	alice := connector.WindowsCodexManagedRuntimeTarget{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}
+	journal := windowsManagedHooksTeardownJournal{Phase: "captured", CodexPolicyActive: true}
+	identity := windowsManagedHooksTeardownJournal{Phase: "prepared", CodexPolicyActive: false, GatewayAddr: "127.0.0.1:18970"}
+	got := windowsManagedHooksTeardownRestoredIdentity(identity, journal)
+	if !got.CodexPolicyActive || got.Phase != "prepared" || got.GatewayAddr != identity.GatewayAddr {
+		t.Fatalf("restored identity = %+v, want the journal's Codex bit and nothing else changed", got)
+	}
+	// The restored machine is the one the journal recorded: it passes the check
+	// the stale bit failed.
+	restoredRegistry := connector.WindowsCodexManagedRuntimeRegistry{Active: true}
+	if err := validateWindowsManagedHooksTeardownEnrollment(identity, nil, false, restoredRegistry, nil, false); err == nil {
+		t.Fatal("fixture: the stale bit no longer refuses the restored Codex policy")
+	}
+	if err := validateWindowsManagedHooksTeardownEnrollment(got, nil, false, restoredRegistry, nil, false); err != nil {
+		t.Fatalf("the restored identity refused the restored Codex policy: %v", err)
+	}
+	// A legacy zero-target preimage (inactive) comes back inactive.
+	inactive := windowsManagedHooksTeardownRestoredIdentity(
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: true},
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: false},
+	)
+	if inactive.CodexPolicyActive {
+		t.Fatal("a journal of an inactive Codex policy was read as active")
+	}
+	// Enrolled Codex accounts come from the manifest: the identity keeps its value.
+	enrolled := windowsManagedHooksTeardownRestoredIdentity(
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: true, CodexTargets: []connector.WindowsCodexManagedRuntimeTarget{alice}},
+		windowsManagedHooksTeardownJournal{CodexPolicyActive: false, CodexTargets: []connector.WindowsCodexManagedRuntimeTarget{alice}},
+	)
+	if !enrolled.CodexPolicyActive {
+		t.Fatal("an enrolled Codex account's bit was replaced by the journal's")
+	}
+}
+
+// GAP-1062: a committed uninstall that meets a teardown journal of another
+// deployment refuses, changes nothing and names the next step. No FORCE.
+func TestWindowsManagedHooksTeardownForeignJournalNamesTheNextStep(t *testing.T) {
+	const path = `C:\ProgramData\Cisco\DefenseClaw\install\managed-hooks-teardown-journal.json`
+	if windowsManagedHooksTeardownForeignJournalNextStep(nil, path) != nil {
+		t.Fatal("no error became an error")
+	}
+	other := errors.New("Codex machine enrollment does not match the authenticated activation state")
+	if got := windowsManagedHooksTeardownForeignJournalNextStep(other, path); got != other {
+		t.Fatalf("an unrelated refusal was rewritten: %v", got)
+	}
+	foreign := fmt.Errorf("%w: %s (phase captured)", errors.New("managed-hook teardown journal does not match the protected deployment"), path)
+	got := windowsManagedHooksTeardownForeignJournalNextStep(foreign, path).Error()
+	for _, want := range []string{"does not match the protected deployment", path, "deleted nothing", "Next step:", windowsEnterpriseSetupCommand("/verify"), managed.WindowsSetupSource, "lifecycle log"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the foreign journal refusal lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "FORCE") {
+		t.Fatalf("the refusal names FORCE: %s", got)
 	}
 }

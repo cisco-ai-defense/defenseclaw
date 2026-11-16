@@ -95,7 +95,8 @@ func TestWindowsRecordedDeploymentRefusalsComeBeforeAnyChange(t *testing.T) {
 		*installerRuns = 0
 		recorded, pending = tc.deployment, tc.pending
 		opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true,
-			configPath: tc.config, manifestPath: tc.manifest, deferredConfig: tc.deferred, noStart: tc.noStart}
+			configPath: tc.config, manifestPath: tc.manifest, deferredConfig: tc.deferred, noStart: tc.noStart,
+			hookGuardBinary: `C:\stage\defenseclaw-hook-guard.exe`}
 		result, err := runWindowsRefusalOrderAction(t, tc.action, opts)
 		if !tc.refused {
 			if *installerRuns != 1 {
@@ -129,7 +130,8 @@ func TestWindowsUnremovableScannerRuntimeRefusalComesBeforeAnyChange(t *testing.
 	windowsScannerRuntimeTreeCheck = func(string) error { return errors.New(`BUILTIN\Users can add files to the python folder`) }
 	// With the installer arguments a real run passes: the retire before the
 	// services start reads its action from them.
-	opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true}
+	opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true,
+		hookGuardBinary: `C:\stage\defenseclaw-hook-guard.exe`}
 	command := &cobra.Command{}
 	var stdout bytes.Buffer
 	command.SetOut(&stdout)

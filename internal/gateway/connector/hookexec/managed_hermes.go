@@ -185,6 +185,11 @@ func loggedFailMode(opts Options, sp spec, failMode string) string {
 	if !sp.failOpenOnly {
 		return failMode
 	}
+	// A local answer can close after an open configuration was read. The
+	// record must use the mode of that answer when checking native hooks.
+	if !opts.SecureClient {
+		opts.FailMode = failMode
+	}
 	if failOpenOnlyCloses(opts, sp) && !managedCopilotOpen(opts, sp, failMode) {
 		return "closed"
 	}

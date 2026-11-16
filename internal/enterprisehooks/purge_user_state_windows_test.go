@@ -153,11 +153,9 @@ func TestPurgeWindowsUserStateKeepsEveryConnectorBackup(t *testing.T) {
 	}
 }
 
-// An uninstall with purge removes an account's whole per-user folder as
-// LocalSystem: hook scripts, per-user hook tokens and the account's
-// moved-aside hooks included. A junction in the folder is removed, not
-// followed, and so is a subfolder whose access list denies the purge.
-func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
+// A purge removes managed entries as LocalSystem while retaining account
+// entries, moved-aside originals and links in the same folder.
+func TestPurgeWindowsUserStateKeepsAccountEntries(t *testing.T) {
 	original := windowsEnterpriseMutationIdentityCheck
 	t.Cleanup(func() { windowsEnterpriseMutationIdentityCheck = original })
 	windowsEnterpriseMutationIdentityCheck = func() error { return errors.New("not LocalSystem") }
@@ -169,15 +167,16 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 	rollbackDir := filepath.Join(home, ".defenseclaw.rollback-0123456789abcdef0123456789abcdef")
 	outside := filepath.Join(t.TempDir(), "outside")
 	for path, body := range map[string]string{
-		filepath.Join(dataDir, "hooks", "amp-hook.sh"):                         "#!/bin/sh\n# defenseclaw-managed-hook v5\nexec forward\n",
-		filepath.Join(dataDir, "hooks", ".hook-amp.token"):                     "token",
-		filepath.Join(dataDir, "foreign-hook-sessions", "record.json"):         "{}",
-		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"): "{}",
-		filepath.Join(dataDir, "agent_selection.json"):                         "{}",
-		filepath.Join(dataDir, "logs", "denied", "secret.txt"):                 "secret",
-		filepath.Join(rollbackDir, "hooks", "amp-hook.sh"):                     "kept aside",
-		filepath.Join(home, ".defenseclaw.rollback-notes", "keep.txt"):         "keep",
-		filepath.Join(outside, "keep.txt"):                                     "keep",
+		filepath.Join(dataDir, "hooks", "amp-plugin.ts"):                                                   "managed plugin",
+		filepath.Join(dataDir, "hooks", ".hook-amp.token"):                                                 "token",
+		filepath.Join(dataDir, "foreign-hook-sessions", "p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"): "{}",
+		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"):                             "{}",
+		filepath.Join(dataDir, "agent_selection.json"):                                                     "{}",
+		filepath.Join(dataDir, "logs", "hook-failures.jsonl"):                                              "log",
+		filepath.Join(dataDir, "personal.txt"):                                                             "account note",
+		filepath.Join(rollbackDir, "hooks", "codex-hook.sh"):                                               "managed aside",
+		filepath.Join(home, ".defenseclaw.rollback-notes", "keep.txt"):                                     "keep",
+		filepath.Join(outside, "keep.txt"):                                                                 "keep",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -190,9 +189,9 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 		t.Fatalf("create junction: %v: %s", err, output)
 	}
 	sid := currentWindowsTestSID(t)
-	// The account can deny SYSTEM on a folder it owns; the test denies its
+	// The account can deny SYSTEM on a file it owns; the test denies its
 	// own account, which the purge runs as here.
-	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "denied"), "D:P(D;OICI;FA;;;"+sid.String()+")")
+	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "hook-failures.jsonl"), "D:P(D;;FA;;;"+sid.String()+")")
 	if err := PurgeWindowsUserState(home, target, ""); err == nil {
 		t.Fatal("the purge ran without LocalSystem")
 	}
@@ -205,13 +204,25 @@ func TestPurgeWindowsUserStateRemovesEverything(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
-		entries, _ := os.ReadDir(dataDir)
-		var names []string
-		for _, entry := range entries {
-			names = append(names, entry.Name())
+	for _, path := range []string{
+		filepath.Join(dataDir, "personal.txt"),
+		filepath.Join(dataDir, "foreign-hooks-backup", "amp", "settings.json"),
+		filepath.Join(dataDir, "link"),
+	} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("the purge removed account entry %s: %v", path, err)
 		}
-		t.Fatalf("the purge left %s: %v %v", dataDir, err, names)
+	}
+	for _, path := range []string{
+		filepath.Join(dataDir, "hooks", "amp-plugin.ts"),
+		filepath.Join(dataDir, "hooks", ".hook-amp.token"),
+		filepath.Join(dataDir, "foreign-hook-sessions", "p-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"),
+		filepath.Join(dataDir, "agent_selection.json"),
+		filepath.Join(dataDir, "logs", "hook-failures.jsonl"),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the purge left managed entry %s: %v", path, err)
+		}
 	}
 	if _, err := os.Lstat(rollbackDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the purge left the rolled-back copy %s: %v", rollbackDir, err)

@@ -104,10 +104,17 @@ func (s *judgeScheduler) dispatchLocked() {
 // function, or ctx's error when ctx ends first. A nil scheduler has no
 // limit.
 func (s *judgeScheduler) acquire(ctx context.Context, class judgeCallClass) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s == nil {
 		return func() {}, nil
 	}
 	s.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	if len(s.waiting[class]) == 0 && s.canStartLocked(class) {
 		s.startLocked(class)
 		s.mu.Unlock()

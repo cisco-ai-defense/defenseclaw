@@ -70,6 +70,30 @@ type Input struct {
 	// command then resolve under it (GAP-2473); the whole action keeps its
 	// own reading.
 	MovedWindowsShellCWD bool `json:"-"`
+	// LoopBindsStraightLine is trusted caller context set by a gateway that
+	// judges the call in a tier that blocks only what the shell certainly
+	// runs (the default and permissive tiers). A function that replaces read,
+	// and an IFS assignment, then reach a loop that binds a variable only when
+	// a top-level statement before the loop runs them; code in a function body,
+	// a branch or after the loop is not followed. Left false (the strict tier
+	// and the hook client), every such code of the action counts, reached or
+	// not (rel-1-0-6:GAP-0880 review 6).
+	LoopBindsStraightLine bool `json:"-"`
+	// StraightLineFunctions is trusted caller context set by a gateway that
+	// judges the call in a tier that blocks only what the shell certainly
+	// runs (the default and permissive tiers). A function body then counts
+	// where a call on the straight-line path runs it, and a function the
+	// text never calls contributes no command, directory or variable. Left
+	// false (the strict tier and the hook client), SimpleCommands also walks
+	// such a body where it is defined and judges the apply_patch envelope
+	// in it, run or not (rel-1-0-6:GAP-0928 review 12).
+	StraightLineFunctions bool `json:"-"`
+	// CurrentWindowsDrive is trusted caller context: the drive letter of the
+	// directory the hook payload reported, for a gateway that could not place
+	// that directory itself (CWD is empty). A Windows path with no drive of
+	// its own is on it. Empty when unknown; ActionFacts never derives it from
+	// action input.
+	CurrentWindowsDrive string `json:"-"`
 	// CurlCapabilities is trusted caller context for resolved curl executables.
 	// ActionFacts never discovers capabilities from GOOS, dialect, basename,
 	// PATH, or process state. Callers must authenticate and invalidate this
@@ -88,6 +112,27 @@ type Input struct {
 	// every name as state (GAP-2404 pod check21). ActionFacts copies the map
 	// and never derives it from action input.
 	ActiveStateTreeNames map[string]string `json:"-"`
+	// ClientResolvedTargets is trusted caller context: the authenticated hook
+	// client's answers, read as the user, to where each absolute path spelling
+	// of the action really lands once links are followed (spelling -> absolute
+	// physical path). A native file-tool write through a link to a protected
+	// file is judged as a write of that file. ActionFacts copies nothing from
+	// it into Facts and never derives it from action input.
+	ClientResolvedTargets map[string]string `json:"-"`
+	// ClientWorkingDirectories is trusted caller context: the spellings of
+	// the working directory the hook client keyed its path answers in, when
+	// they differ from CWD (the gateway resolves a project reached through a
+	// link, the client keys by the name it was given). ActionFacts never
+	// derives it from action input.
+	ClientWorkingDirectories []string `json:"-"`
+	// ClientNativeFileContents is trusted caller context: the text, read when
+	// the call is judged, of the file an Edit or MultiEdit of Docker's daemon
+	// configuration changes (DockerDaemonConfigEditFiles names them), keyed by
+	// the cleaned absolute target of the call. A file that does not exist is
+	// present with empty text; a file that could not be read (permission, too
+	// large, not text, a gateway that cannot see the caller's files) is absent.
+	// ActionFacts never derives it from action input and never retains it.
+	ClientNativeFileContents map[string]string `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
@@ -97,6 +142,7 @@ type Facts struct {
 	Tool                                     string
 	CWD                                      string
 	ActiveHome                               string
+	CurrentWindowsDrive                      string `json:"-"`
 	ActiveAgentFiles                         []string
 	ActiveAgentFilesCaseInsensitive          []string `json:"-"`
 	ActiveAgentFilesCaseInsensitiveUncertain bool     `json:"-"`
@@ -1033,17 +1079,21 @@ type CommandFact struct {
 	Argv               []string
 	Arguments          []ArgumentFact
 	ArgvComplete       bool
-	// LiteralStdin is retained only for one bounded, single-quoted POSIX
-	// heredoc whose bytes cannot undergo shell expansion. It is private
-	// in-process evidence and is intentionally not part of the public semantic
-	// projection.
+	// LiteralStdin is retained only for one bounded POSIX heredoc (any
+	// delimiter quoting, <<-) whose bytes cannot undergo shell expansion.
+	// It is private in-process evidence and is intentionally not part of
+	// the public semantic projection.
 	LiteralStdin          string
 	LiteralStdinComplete  bool
 	LiteralStdinAmbiguous bool
-	Operations            []OperationKind
-	Redirects             []RedirectFact
-	Wrappers              []WrapperFact
-	curlCapability        *CurlCapability `json:"-"`
+	// LiteralStdinView is, for an apply_patch fed by a here-document the
+	// shell expands, the text the document shows with one "$" for each
+	// expansion. It is not the stdin; only applyPatchStdinText reads it.
+	LiteralStdinView string
+	Operations       []OperationKind
+	Redirects        []RedirectFact
+	Wrappers         []WrapperFact
+	curlCapability   *CurlCapability `json:"-"`
 }
 
 // CommandControlFlowOperator is a private, value-free summary of the POSIX
@@ -1178,6 +1228,28 @@ type PathFact struct {
 	Normalized string
 	Absolute   bool
 	Resolved   string
+	// Linked marks a fact the gateway adds for the file an operand reaches
+	// through an existing link. It is one more spelling of an operand the
+	// call already names, never a further operand, so a proof that counts
+	// the operands of a call counts it with OperandPaths (GAP-0819).
+	Linked bool
+	// LinkedFrom is, for a Linked fact, the resolved spelling of the operand
+	// whose link reaches this file. A proof that reads the text one write
+	// puts into a file judges it only against the files that write reaches,
+	// never against the file another operand of the same call reaches.
+	LinkedFrom string
+}
+
+// OperandPaths returns the path facts that are operands of the call: every
+// fact except those added for the file a link reaches.
+func (f Facts) OperandPaths() []PathFact {
+	operands := make([]PathFact, 0, len(f.Paths))
+	for _, candidate := range f.Paths {
+		if !candidate.Linked {
+			operands = append(operands, candidate)
+		}
+	}
+	return operands
 }
 
 type PathAccess string

@@ -91,6 +91,12 @@ type GenerationState struct {
 	// WrittenAt is RFC 3339 UTC.
 	WrittenAt       string `json:"written_at"`
 	GenerationReset bool   `json:"generation_reset,omitempty"`
+	// PreviousConfigSHA256 is the config digest the record held when this one
+	// replaced it, and is empty when there was no readable record (a reset).
+	// It links a generation to the config it followed: a counter that starts
+	// over cannot make an unrelated config look like the predecessor, which a
+	// bare "previous number plus one" would.
+	PreviousConfigSHA256 string `json:"previous_config_sha256,omitempty"`
 	// BundleID, BundleVersion and SignerKeyID name the signed policy bundle
 	// whose config the enterprise lifecycle installed in this generation;
 	// absent for every other writer.
@@ -374,6 +380,8 @@ func (t *Txn) RecordGeneration(configSHA256 string, w Writer) (GenerationState, 
 		// Preserve a salvageable counter and any live counter the lifecycle
 		// proved before stopping the gateway.
 		next.GenerationReset = true
+	} else {
+		next.PreviousConfigSHA256 = previous.ConfigSHA256
 	}
 	previousCounter := max(previous.Generation, w.GenerationFloor)
 	if previousCounter == ^uint64(0) {

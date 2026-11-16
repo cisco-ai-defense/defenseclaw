@@ -47,6 +47,23 @@ class TestJudgeMaxParallelConfig(unittest.TestCase):
         with open(os.path.join(loaded.data_dir, "config.yaml")) as f:
             self.assertNotIn("max_parallel", f.read())
 
+    def test_explicit_zero_round_trips(self):
+        cfg = default_config()
+        cfg.data_dir = tempfile.mkdtemp()
+        cfg.save()
+        path = os.path.join(cfg.data_dir, "config.yaml")
+        with open(path) as f:
+            raw = f.read()
+        raw += "guardrail:\n  judge:\n    max_parallel: 0\n"
+        with open(path, "w") as f:
+            f.write(raw)
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": cfg.data_dir}):
+            loaded = config_mod.load()
+        self.assertEqual(loaded.guardrail.judge.max_parallel, 0)
+        loaded.save()
+        with open(path) as f:
+            self.assertIn("max_parallel: 0", f.read())
+
     def test_merge_reads_an_int(self):
         gc = _merge_guardrail({"judge": {"enabled": True, "max_parallel": 3}}, "/tmp/test")
         self.assertEqual(gc.judge.max_parallel, 3)

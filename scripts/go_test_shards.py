@@ -15,7 +15,8 @@ local targets use this form instead of one process.
 Package mode (--packages-file): partition a `go list` package list (minus
 --exclude) and print one shard, a line per item: a package to test whole,
 or "<package><TAB><-run regex>" for a part of a package too slow for one
-shard.
+shard. A part whose regex would pass MAX_RUN_PATTERN_CHARS is printed as
+several lines of the same shard, one go test run each.
 
 --timings names a JSON file of recorded seconds (scripts/test-timings/,
 refreshed by scripts/update_test_timings.py). Tests stay together by file
@@ -43,6 +44,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_FUNCTION_RE = re.compile(r"^func\s+((?:Test|Fuzz|Example)[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
+# A package part's -run regex is one argument of a go test run, and Windows
+# caps a whole command line at 32,767 characters (go.exe, then the test
+# binary it starts). Windows Native CI run 42974860632 could not start
+# internal/cli parts of about 57,000 characters ("The filename or extension
+# is too long"), so a longer part runs as several patterns of at most this size.
+MAX_RUN_PATTERN_CHARS = 16_000
 
 
 def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
@@ -152,8 +159,11 @@ def partition_packages(
     root: Path = ROOT,
 ) -> list[list[tuple[str, str]]]:
     """Return each shard's (package, -run regex) items; an empty regex tests
-    the whole package. A package heavier than 60% of a shard whose tests have
-    recorded times is split into parts of at most half a shard."""
+    the whole package. A package heavier than 60% of a shard is split into
+    parts of at most half a shard: by its recorded test times, or, when its
+    tests have none, by the source size of its test files, each part weighing
+    its share of the package time. A package that outgrows its recorded time
+    then still leaves room in the step of its shard."""
     timings = timings or {}
     package_seconds = timings.get("packages", {})
     test_seconds = timings.get("tests", {})
@@ -166,18 +176,27 @@ def partition_packages(
     for package in unique:
         rel = package[len(prefix) :] if package.startswith(prefix) else ""
         recorded = test_seconds.get(rel)
-        if recorded and weights[package] > 0.6 * target:
+        if rel and weights[package] > 0.6 * target:
             files = discover_test_files(root / rel)
             parts = min(len(files), max(2, math.ceil(weights[package] / (0.5 * target))))
             if parts >= 2:
-                for index, names in enumerate(partition_test_files(files, parts, recorded)):
+                if recorded:
                     fallback = float(recorded.get("*", _median(v for k, v in recorded.items() if k != "*")))
-                    piece = sum(float(recorded.get(name, fallback)) for name in names)
-                    items[f"{package}#{index:03d}"] = (package, shard_regex(names), piece)
+                    seconds = {name: float(recorded.get(name, fallback)) for _, names in files for name in names}
+                else:
+                    size = sum(path.stat().st_size for path, _ in files)
+                    seconds = {
+                        name: weights[package] * path.stat().st_size / size / len(names)
+                        for path, names in files
+                        for name in names
+                    }
+                for index, names in enumerate(partition_test_files(files, parts, recorded)):
+                    piece = sum(seconds[name] for name in names)
+                    items[f"{package}#{index:03d}"] = ([(package, regex) for regex in bounded_regexes(names)], piece)
                 continue
-        items[package] = (package, "", weights[package])
-    shards = balance([(key, weight) for key, (_, _, weight) in items.items()], shard_count)
-    return [sorted(items[key][:2] for key in shard) for shard in shards]
+        items[package] = ([(package, "")], weights[package])
+    shards = balance([(key, weight) for key, (_, weight) in items.items()], shard_count)
+    return [sorted(run for key in shard for run in items[key][0]) for shard in shards]
 
 
 def check_exact_cover(shards: list[list[str]], expected: list[str]) -> list[str]:
@@ -199,6 +218,22 @@ def regex_names(regex: str) -> list[str]:
 
 def shard_regex(names: list[str]) -> str:
     return "^(?:" + "|".join(re.escape(name) for name in names) + ")$"
+
+
+def bounded_regexes(names: list[str]) -> list[str]:
+    """Return the -run regexes of names, in order, each at most
+    MAX_RUN_PATTERN_CHARS characters (a single longer name gets its own)."""
+    groups: list[list[str]] = []
+    length = 0
+    for name in names:
+        size = len(re.escape(name))
+        if groups and length + 1 + size <= MAX_RUN_PATTERN_CHARS:
+            groups[-1].append(name)
+            length += 1 + size
+        else:
+            groups.append([name])
+            length = len(shard_regex([])) + size
+    return [shard_regex(group) for group in groups]
 
 
 def run_shards(shards: list[list[str]], command: list[str]) -> int:

@@ -217,7 +217,7 @@ cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
 if [ -e /opt/cisco/secureclient/defenseclaw ] ||
     ls /Library/LaunchDaemons/com.cisco.secureclient.defenseclaw*.plist >/dev/null 2>&1; then
-    echo "DefenseClaw is already managed by Cisco Secure Client on this Mac; the standalone package cannot be installed beside it." >&2
+    echo "profile_conflict: DefenseClaw is already managed by Cisco Secure Client on this Mac; the standalone package cannot be installed beside it." >&2
     exit 1
 fi
 state=/opt/cisco/defenseclaw/lifecycle
@@ -333,6 +333,11 @@ fi
 refuse() {
     code=$1 said=${3:-$2}
     message=$(printf '%s' "$2" | tr -d '"\\|&')
+    # install.log names the code too, as the Linux packages print it (GAP-0582).
+    case $said in
+        "defenseclaw-enterprise: "*) said="defenseclaw-enterprise: $code: ${said#defenseclaw-enterprise: }" ;;
+        *) said="$code: $said" ;;
+    esac
     echo "$said" >&2
     umask 077
     result="$state/last-package-result.json"
@@ -474,6 +479,24 @@ if [ -n "$installed" ] && awk -v v="$installed" 'BEGIN {
             fi
         ) </dev/null >/dev/null 2>&1 &
     fi
+fi
+# GAP-0091: the shared parents the payload is about to create are DefenseClaw's
+# to remove once empty after an uninstall; one that already exists is not.
+# Listed last, after every refusal, so a refused install changes nothing.
+# The postinstall's ensure moves the list into the deployment record.
+d_created=""
+for d_parent in /opt /opt/cisco /usr/local /usr/local/bin; do
+    if [ ! -e "$d_parent" ] && [ ! -L "$d_parent" ]; then
+        d_created="$d_created$d_parent
+"
+    fi
+done
+if [ -n "$d_created" ]; then
+    # The parents get the payload's 0755 and only the lifecycle folder 0700:
+    # mkdir -p under umask 077 made /opt and /opt/cisco 0700 on a fresh Mac,
+    # and standard users could not reach /opt/cisco/defenseclaw.
+    ( (umask 022 && mkdir -p "${state%/*}") &&
+        (umask 077 && mkdir -p "$state" && printf '%s' "$d_created" >>"$state/created-parent-dirs") ) 2>/dev/null || true
 fi
 exit 0
 EOF

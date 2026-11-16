@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/spf13/cobra"
 )
 
@@ -858,5 +859,60 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	want := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)
 	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, user, false); err == nil || err.Error() != want {
 		t.Fatalf("Secure Client --user %s = %v, want %q", user, err, want)
+	}
+}
+
+// defenseclaw-gateway is not on the PATH, so the hint names it by its
+// full path (cowork-1-0-8 GAP-0081).
+func TestEnterpriseDiscoveryStatusHintNamesTheGatewayByItsFullPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows names the managed CLI; see enterprise_discovery_windows_hint_test.go")
+	}
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	want := "sudo " + managed.StandaloneGatewayPath(runtime.GOOS) + " enterprise " + platform + " status"
+	if got := enterpriseDiscoveryStatusHint(true); got != want || !strings.HasPrefix(got, "sudo /opt/") {
+		t.Fatalf("hint = %q, want %q", got, want)
+	}
+}
+
+// Any other profile, Secure Client included, keeps the text of release 1.0.5
+// (review round 4, S1): the bare gateway name, no sudo.
+func TestEnterpriseDiscoveryStatusHintOnSecureClientKeepsTheReleasedText(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows names the managed CLI for every profile; see enterprise_discovery_windows_hint_test.go")
+	}
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	want := "defenseclaw-gateway enterprise " + platform + " status"
+	for name, profile := range map[string]string{"explicit": managed.ProfileSecureClient, "default": ""} {
+		c := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		c.Enterprise.Profile = profile
+		if !c.SecureClientIntegration() || c.StandaloneEnterprise() {
+			t.Fatalf("%s: the fixture is not a Secure Client config", name)
+		}
+		if got := enterpriseDiscoveryStatusHint(c.StandaloneEnterprise()); got != want {
+			t.Errorf("%s: hint = %q, want %q", name, got, want)
+		}
+	}
+	if got := enterpriseDiscoveryStatusHint((*config.Config)(nil).StandaloneEnterprise()); got != want {
+		t.Errorf("no config: hint = %q, want %q", got, want)
+	}
+}
+
+// managedHostGatewayCommand gives the text it gave in release 1.0.5: the
+// standalone layout's gateway on Linux and macOS, the bare name elsewhere. The
+// hints that call it are the same on Secure Client (review round 4, S1).
+func TestManagedHostGatewayCommandKeepsTheReleasedValue(t *testing.T) {
+	want := "defenseclaw-gateway"
+	if layout, err := managed.StandaloneLayoutFor(runtime.GOOS); err == nil {
+		want = layout.BinDir + "/defenseclaw-gateway"
+	}
+	if got := managedHostGatewayCommand(); got != want {
+		t.Fatalf("managedHostGatewayCommand() = %q, want %q", got, want)
 	}
 }

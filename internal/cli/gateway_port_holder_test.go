@@ -223,3 +223,73 @@ func TestCheckAPIPortRefusesOnlyAnotherAccountsListener(t *testing.T) {
 		t.Fatalf("a missing config refused: %v", err)
 	}
 }
+
+// An unlisted answering listener must not be considered this account's just
+// because a PID record reports a running process. It needs the strong root
+// classification before status can name that specific cause.
+func TestForeignGatewayListenerRequiresBoundRootProof(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	oldHolder, oldAnswers, oldState := gatewayPortHolder, gatewayPortAnswers, gatewayManagedState
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers, gatewayManagedState = oldHolder, oldAnswers, oldState })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{UID: -1}, daemon.ErrNoListener
+	}
+	gatewayPortAnswers = func(string) bool { return true }
+	c := config.DefaultConfig()
+	c.Gateway.APIBind = "127.0.0.1"
+	c.Gateway.APIPort = 18970
+
+	gatewayManagedState = func() (bool, int) { return true, 36347 }
+	if problem := foreignGatewayListener(c); !strings.Contains(problem, "not by this account's verified gateway") {
+		t.Fatalf("unlisted listener without root proof = %q", problem)
+	}
+	gatewayManagedState = func() (bool, int) { return false, 0 }
+	problem := foreignGatewayListener(c)
+	if !strings.Contains(problem, "not by this account's verified gateway") || !strings.Contains(problem, "held by another process") {
+		t.Fatalf("with no record the unlisted holder is not this account's gateway: %q", problem)
+	}
+}
+
+func TestRootGatewayListenerUsesRootRemedyAcrossStatusAndStart(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	oldHolder, oldClass := gatewayPortHolder, gatewayListenerClass
+	t.Cleanup(func() { gatewayPortHolder, gatewayListenerClass = oldHolder, oldClass })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{PID: 1, UID: 0}, nil
+	}
+	c := config.DefaultConfig()
+	c.Gateway.APIBind = "127.0.0.1"
+	c.Gateway.APIPort = 18970
+	for _, kind := range []daemon.PerUserListenerClass{
+		daemon.PerUserListenerOwnGatewayRunAsRoot,
+		daemon.PerUserListenerForeign,
+		daemon.PerUserListenerOwnGateway,
+	} {
+		gatewayListenerClass = func(string, int, string, daemon.PortHolder, error, bool) daemon.PerUserListenerClass {
+			return kind
+		}
+		problem := foreignGatewayListener(c)
+		fix := foreignGatewayListenerFix(c)
+		switch kind {
+		case daemon.PerUserListenerOwnGatewayRunAsRoot:
+			if problem != daemon.RootGatewayListenerReason || fix != daemon.RootGatewayListenerRemedy(config.DefaultDataPath()) {
+				t.Fatalf("root listener = (%q, %q)", problem, fix)
+			}
+			if label := foreignGatewayStatusLabel(problem); label != "Sidecar Status: RUNNING AS ROOT" ||
+				foreignGatewayStatusError(problem).Error() != "the gateway is running as root" {
+				t.Fatalf("root status label = %q", label)
+			}
+		case daemon.PerUserListenerForeign:
+			if !strings.Contains(problem, "another account") || !strings.Contains(fix, "--api-port") {
+				t.Fatalf("foreign listener = (%q, %q)", problem, fix)
+			}
+			if label := foreignGatewayStatusLabel(problem); label != "Sidecar Status: NOT THIS ACCOUNT'S GATEWAY" {
+				t.Fatalf("foreign status label = %q", label)
+			}
+		case daemon.PerUserListenerOwnGateway:
+			if problem != "" {
+				t.Fatalf("own gateway classified foreign: %q", problem)
+			}
+		}
+	}
+}

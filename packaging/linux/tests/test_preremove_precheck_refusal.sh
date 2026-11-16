@@ -22,4 +22,4 @@ if TMPDIR="$work" sh "$work/preremove.sh" remove >"$work/stdout" 2>"$work/stderr
     exit 1
 fi
 grep -q 'uninstall_precheck_refused' "$work/state/last-package-result.json"
-grep -q 'hook-removal precheck refused' "$work/stderr"
+grep -q 'uninstall_precheck_refused: hook-removal precheck refused' "$work/stderr"

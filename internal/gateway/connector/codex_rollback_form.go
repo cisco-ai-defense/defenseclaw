@@ -13,14 +13,16 @@ import (
 // handler under hooks that is exactly a command this release renders for
 // launcher, event and hook contract, between the two forms:
 //
-//   - toBridge: the direct system cmd.exe start this release writes
-//     (windowsCmdDirectHookCommand, GAP-1908) becomes the encoded system
-//     PowerShell bridge releases 1.0.1 to 1.0.4 write and own
-//     (windowsNativePowerShellHookCommandForCodexEvent). 1.0.4 read the
-//     direct form as a foreign handler, so after a rollback its setup added
-//     its own handler beside it and doctor failed (GAP-2553).
-//   - !toBridge: the bridge becomes the direct start again (an aborted
-//     rollback, "connector prepare-rollback --restore").
+//   - toBridge: a form this release writes, the direct system cmd.exe start
+//     (windowsCmdDirectHookCommand, GAP-1908), the guarded start or the
+//     answering bridge (rel-1-0-6 GAP-0676), becomes the encoded system
+//     PowerShell bridge releases 1.0.1 to 1.0.4 write and every later
+//     release owns (windowsNativePowerShellHookCommandForCodexEvent). 1.0.4
+//     read the direct form as a foreign handler, so after a rollback its
+//     setup added its own handler beside it and doctor failed (GAP-2553);
+//     1.0.5 to 1.0.8 read the guarded start the same way.
+//   - !toBridge: the bridge becomes the form this release renders again (an
+//     aborted rollback, "connector prepare-rollback --restore").
 //
 // Ownership is byte-for-byte equality with the rendered command, in both
 // command and command_windows, for the event the handler is registered
@@ -90,21 +92,42 @@ func convertCodexWindowsHookForms(hooks map[string]interface{}, keySource, launc
 }
 
 // codexWindowsHookFormReplacement returns the other form of command when
-// command is exactly the direct start (toBridge) or the bridge (!toBridge)
-// of launcher for eventType and the hook contract it names.
+// command is exactly a form this release writes for launcher, eventType and
+// the hook contract it names (toBridge: the direct start, the guarded start
+// or the answering bridge, rel-1-0-6 GAP-0676), or the bridge (!toBridge),
+// which becomes the form this release renders now.
 func codexWindowsHookFormReplacement(command, eventType, launcher string, toBridge bool) (string, bool) {
-	if toBridge {
-		match := windowsCodexDirectBoundArgumentsPattern.FindStringSubmatch(command)
-		if match == nil || match[1] != eventType {
-			return "", false
-		}
-		direct, ok := windowsCmdDirectHookCommand(launcher, nativeHookBridgeArguments("codex", eventType, match[2], nil))
-		if !ok || direct != command {
-			return "", false
-		}
-		return windowsNativePowerShellHookCommandForCodexEvent(eventType, match[2], launcher), true
-	}
 	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+	if toBridge {
+		contract := ""
+		if match := windowsCodexDirectBoundArgumentsPattern.FindStringSubmatch(command); match != nil && match[1] == eventType {
+			contract = match[2]
+		} else if strings.HasPrefix(command, prefix) {
+			script, decoded := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
+			if !decoded {
+				return "", false
+			}
+			for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
+				if powershellLiteralValue(match[1]) == eventType {
+					contract = powershellLiteralValue(match[2])
+					break
+				}
+			}
+		}
+		if contract == "" {
+			return "", false
+		}
+		bridge := windowsNativePowerShellHookCommandForCodexEvent(eventType, contract, launcher)
+		if command == bridge {
+			return "", false
+		}
+		for _, owned := range windowsCodexPerUserHookCommands(eventType, contract, launcher) {
+			if owned == command {
+				return bridge, true
+			}
+		}
+		return "", false
+	}
 	if !strings.HasPrefix(command, prefix) {
 		return "", false
 	}
@@ -118,12 +141,13 @@ func codexWindowsHookFormReplacement(command, eventType, launcher string, toBrid
 		return "", false
 	}
 	for _, match := range windowsCodexBoundArgumentsPattern.FindAllStringSubmatch(script, -1) {
-		event := strings.ReplaceAll(match[1], "''", "'")
-		contract := strings.ReplaceAll(match[2], "''", "'")
+		event := powershellLiteralValue(match[1])
+		contract := powershellLiteralValue(match[2])
 		if event != eventType || command != windowsNativePowerShellHookCommandForCodexEvent(event, contract, launcher) {
 			continue
 		}
-		return windowsCmdDirectHookCommand(launcher, nativeHookBridgeArguments("codex", event, contract, nil))
+		current := windowsCodexHookCommandForBinaryEvent(event, contract, launcher)
+		return current, current != command
 	}
 	return "", false
 }
@@ -178,11 +202,26 @@ func convertCodexConfigHookForms(opts SetupOpts, toBridge bool, keepCopy func(da
 		launcher = defenseclawHookBinary()
 	}
 	convert := codexWindowsHookFormConversion(configPath, launcher, toBridge)
-	if _, changed, err := convert(data); err != nil || changed == 0 {
+	_, wanted, err := convert(data)
+	if err != nil || wanted == 0 {
 		return 0, err
 	}
 	converted := 0
 	err = withFileLockMode(configPath, false, func() error {
+		if toBridge {
+			// A file nobody edited since setup gets its saved bytes back and
+			// needs no conversion (restoreUneditedForRollback).
+			var keep func([]byte) error
+			if keepCopy != nil {
+				keep = func(current []byte) error { return keepCopy(opts.DataDir, current) }
+			}
+			if done, err := restoreUneditedForRollback(opts.DataDir, "codex", configPath, keep); err != nil || done {
+				if err == nil {
+					converted = wanted
+				}
+				return err
+			}
+		}
 		return atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600,
 			func(current []byte, exists bool) (atomicTransformResult, error) {
 				if !exists {

@@ -10,3 +10,7 @@ import "github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 func enterpriseHookAccountOwnedDataDirLinkPlatform(home, sid string) bool {
 	return enterprisehooks.WindowsAccountOwnedDataDirLink(home, sid)
 }
+
+func enterpriseHookForeignDataDirLinkPlatform(home, sid string) bool {
+	return enterprisehooks.WindowsForeignOwnedDataDirLink(home, sid)
+}

@@ -51,7 +51,7 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 | Configuration | `config get|set|unset` | [Configuration](#configuration) |
 | Upgrade and uninstall | `upgrade`, `uninstall` | [Upgrade](#upgrade), [Uninstall](#uninstall--disable) |
 | Sandboxes | `sandbox ...` | [Sandbox](#sandbox) |
-| Enterprise lifecycle | `defenseclaw-gateway enterprise ...` | [Enterprise](#enterprise) |
+| Enterprise lifecycle | `enterprise ...`, run by the gateway's full path | [Enterprise](#enterprise) |
 
 `config.yaml` holds every setting you choose. Every command that changes one (`config set`, `guardrail ...`, `skill|mcp|plugin|tool block|allow`, `policy activate`, the `setup` commands, the TUI) goes through the same config writer, which checks the change before it writes. A running gateway applies a valid change itself and shows a new policy generation in `defenseclaw status`; only the [restart-required keys](#restart-required-keys) need `defenseclaw-gateway restart`. Files derived from `config.yaml`, such as `custom-providers.json` and the generated hook scripts, are rewritten for you. See [Source of truth](/docs/reference/source-of-truth).
 
@@ -59,7 +59,7 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw init` | Interactive first-run wizard. On a TTY it pre-selects installed hook connectors and lets you choose observe or action for each. Scripted multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
+| `defenseclaw init` | Interactive first-run wizard. On a TTY it pre-selects installed hook connectors and lets you choose observe or action for each. Scripted multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. `--api-port` and `--proxy-port` set the gateway API and guardrail proxy ports of a new configuration. |
 | `defenseclaw quickstart` | Zero-prompt first run for one connector with safe defaults. Pass `--connector <name>` when more than one is configured or detected. See [init and quickstart](/docs/get-started/first-run). |
 | `defenseclaw doctor` | Health and repair check. See [Doctor](#doctor). |
 | `defenseclaw status` | Gateway state, the Policy line, and one block per active connector. The Policy line names the generation and the first 12 hex characters of the effective policy digest ([below](#policy-generation-and-digest)). `--json` adds a `policy` object. Secure Client has neither the Policy line nor the `policy` object. A connector whose hook files or registration drifted, or whose agent's own settings turn its hooks off (for example `disableAllHooks`), shows `DEGRADED` with the first problem and the step that fixes it. |
@@ -354,7 +354,7 @@ defenseclaw setup redaction remove-all --yes
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults plus operator additions with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`; `remove` only touches operator-added entries (in `config.yaml`, or an older entry in `~/.defenseclaw/.env`). All verbs accept `--json`. |
+| `defenseclaw setup trusted-paths list\|add\|remove` | Manage the directories trusted for connector-binary version probing (action-mode setups refuse binaries outside this allow-list). `list` shows built-in defaults (the folders setup admits, with `discovery default` marking any that only passive discovery uses) plus operator additions, with source and status; `add` validates the directory (world-writable / relative paths refused unless `--force`) and writes it to `ai_discovery.trusted_binary_prefixes` in `~/.defenseclaw/config.yaml`; `remove` only touches operator-added entries (in `config.yaml`, or an older entry in `~/.defenseclaw/.env`). All verbs accept `--json`. |
 
 <Callout title="Safety gates are intentional">
 Commands that fetch remote content fail closed when the trust boundary is
@@ -502,7 +502,7 @@ Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded 
 
 ## Guardrail
 
-Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install `--connector` is rejected because there is only one posture, except for `mode`, `block-at`, `alert-at`, `use-pack` and `protection`, which accept the one active connector and write its override block. All of these are on the Python `defenseclaw` CLI.
+Per-connector guardrail controls. `--connector X` is the explicit scope selector on a **multi-connector** install: reads narrow to one active connector, and writes land in `guardrail.connectors.<name>`. Omit `--connector` for the broad path. Reads show the full active roster; global enable/disable affects the whole guardrail; fail-mode, HILT, and block-message writes reconcile active connector posture where supported. On a single-connector install, `enable`, `disable`, `fail-mode`, `hilt` and `block-message` accept the active name and use their global path; another name is refused. `mode`, `block-at`, `alert-at`, `use-pack` and `protection` accept the active name and write its override block. All of these are on the Python `defenseclaw` CLI.
 
 | Command | Use it for |
 | --- | --- |
@@ -512,7 +512,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail block-at LEVEL [--connector X] [--json]` | Set the lowest severity the guardrail blocks at: `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` (any case) or `inherit` to clear. Writes `guardrail.block_at`, or with `--connector X` only `guardrail.connectors.X.block_at`. A connector's own level wins over the global one, which wins over the rule pack's (strict blocks MEDIUM+, default and permissive CRITICAL). It applies in action mode to prompts, completions, tool calls and tool responses, on hooks and through the proxy; `policy edit guardrail --block-threshold` sets the same key. See [Tool-call levels](#tool-call-levels). Refused on a managed standalone device ([exit 3](#managed-devices-and-exit-code-3)). |
 | `defenseclaw guardrail alert-at LEVEL [--connector X] [--json]` | The same for the lowest severity that raises an alert (`guardrail.alert_at`, pack levels: strict LOW+, default MEDIUM+, permissive HIGH+). Anything that blocks also alerts, so an alert level above the block level alerts from the block level. |
 | `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops only that connector from the active set and removes its hooks. |
-| `defenseclaw guardrail fail-mode [--connector X]` | Show each active connector's gateway-outage mode. On a per-user install `open` or `closed` saves your choice, which wins over the policy tier; with no saved value the tier decides (default and permissive run the call with a warning, strict blocks it; select strict with `guardrail use-pack strict`). An administrator sets an outage-only `open` in managed config. See [Fail modes](/docs/reference/fail-modes#per-user-installs). |
+| `defenseclaw guardrail fail-mode [--connector X]` | Show each active connector's gateway-outage mode. On a per-user install `open` or `closed` saves your choice, which wins over the policy tier (except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed despite a saved `open`); with no saved value the tier decides (default and permissive run the call with a warning, strict blocks it; select strict with `guardrail use-pack strict`). An administrator sets an outage-only `open` in managed config. See [Fail modes](/docs/reference/fail-modes#per-user-installs). |
 | `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. The running gateway applies a change without a restart; on a Secure Client computer the command restarts it (`--no-restart` to skip). |
 | `defenseclaw guardrail block-message ["<text>"] [--clear] [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. `--clear --connector X` removes that connector's override so it inherits the global message, or the built-in default when the global value is empty. Unscoped `--clear` also clears active connector overrides, returning the active roster to the built-in default. Do not pass text and `--clear` together. |
 | `defenseclaw guardrail list-packs [--json]` | Read-only. Lists the built-in rule-pack presets, custom packs found under `~/.defenseclaw/policies/guardrail/` or configured anywhere, and the pack each active connector enforces (per-connector override > global pack > built-in default). `--json` prints `{"version": 1, "global": {...}, "connectors": [...], "packs": [...]}`. |
@@ -724,8 +724,8 @@ printf '%s\n' "$VT_KEY" | defenseclaw keys set VIRUSTOTAL_API_KEY --value-stdin
 ```
 
 On a managed standalone device, `keys set`, `keys remove`, and `keys
-fill-missing` refuse with exit `3`; use `defenseclaw-gateway enterprise secret
-set --name <configured-credential> --from-stdin` as an administrator to rotate
+fill-missing` refuse with exit `3`; use `/opt/defenseclaw/bin/defenseclaw-gateway enterprise secret
+set --name <configured-credential> --from-stdin` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS) as an administrator to rotate
 a credential. See [Keys](/docs/reference/keys) for the registry, resolution
 order, and requirement states.
 
@@ -1161,7 +1161,7 @@ management plane), so there is no per-user config to create and 'defenseclaw
 init' does not apply. Nothing was changed.` and exit `3`.
 `defenseclaw doctor` in that state skips the per-user checks with the same
 notice and exits `3`; an administrator checks the device with
-`defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS).
+`/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status` on macOS).
 `guardrail ...` writers are also refused on a managed standalone device.
 For example, `guardrail block-at` prints `This device is managed: change
 config.yaml in the admin config (MDM or management plane), not on the device`
@@ -1170,9 +1170,9 @@ installed, `config get`, `config show`, `config validate` and `status` still
 work.
 
 A standard user on a Linux or macOS computer with the standalone enterprise
-package does not get the Python CLI. The `defenseclaw` command there offers
-only `sandbox` commands, `help` and `--version`. Every other command, readers
-included (`status`, `doctor`, `config get`, `skill list`), prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
+package does not get the Python CLI. The `defenseclaw` command there runs
+only the commands in [Managed command availability](/docs/enterprise/managed-commands). Every other command, readers
+included (`doctor`, `config get`, `skill list`), prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`)
 and exits `2`, not `3`. `defenseclaw-gateway` is not on that user's `PATH`.
 The administrator runs it by its packaged path, as root
 (`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on macOS).
@@ -1187,10 +1187,10 @@ exit `0`. `config set` prints `This device is managed: change config.yaml in the
 administrator's next command: `skill`, `mcp`, `plugin` and `tool` name
 `policy show`, `setup` names `enterprise windows status --profile standalone`,
 and `sandbox` (sandboxes do not run on Windows, exit `3`) names
-`defenseclaw-gateway.exe enterprise windows sandbox list --user NAME`, each from
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows sandbox list --user NAME`, each from
 an elevated PowerShell prompt. Its `guardrail` commands are
 refused with exit `3` like `config set` (`guardrail disable` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); guardrail disable did not change it`).
-It has no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
+It has no `version` command (run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' --version`) and no `policy activate`
 or `policy edit`: these return an unknown-command error and exit `2`. Its
 `policy` group has `digest`, `evaluate`, `reload`, `show`, `test` and `validate`.
 Commands that read a per-user gateway, such as `audit findings` and
@@ -1202,8 +1202,8 @@ state and its own last Cowork event (`--json` adds `deployment_mode:
 managed_enterprise`), which the gateway service answers for the account that
 asks; from an elevated prompt it gives the answer above. A standard account's
 `enterprise windows status` or `verify` only says that it needs an elevated
-prompt. The administrator runs `defenseclaw.exe enterprise ...` from an
-elevated PowerShell.
+prompt. The administrator runs `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise ...` from an
+elevated PowerShell prompt. Setup puts no DefenseClaw command on `PATH`.
 
 The Windows package's `init` and `quickstart` are not shipped: they return an
 unknown-command error and exit `2`. Its `doctor` prints administrator guidance and exits `1`,
@@ -1256,11 +1256,19 @@ The moved keys, sample output and the way back are in [Migrate to config version
 | `defenseclaw setup guardrail --disable` | Roll back guardrail. Connector files restored from backup. |
 | `defenseclaw uninstall` | Reversible by default — runs connector teardown (removes the hooks and registrations), stops the sidecar, removes the OpenClaw plugin, leaves `~/.defenseclaw/` (audit DB, config, secrets) and the binaries intact. |
 | `defenseclaw uninstall --all` | Same as above, plus deletes all of `~/.defenseclaw/` (hook scripts and `foreign-hooks-backup` included) and the local observability stack's containers and data volumes. The launcher links into `~/.defenseclaw/` go with it; the binaries stay. It also removes the MCP writer's backup files beside agent configs that no registry entry names. |
-| `defenseclaw uninstall --all --binaries` | Removes everything: all of the above, plus `defenseclaw-gateway`, `defenseclaw-acp`, the hook helpers (`defenseclaw-hook-post`, `defenseclaw-hook-user` and, on Linux, `defenseclaw-sensor-helper`), the launcher links, the `uv` the installer added (when unchanged) and its bookkeeping from `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows, where the emptied folder and its user `Path` entry go too). On a native Windows Setup install, Setup runs first and the script-install leftovers go after it. On macOS, `DefenseClawMac.app` stays; the plan says how to remove it. Run `--dry-run` first to see the plan. |
+| `defenseclaw uninstall --all --binaries` | Removes everything: all of the above, plus `defenseclaw-gateway`, `defenseclaw-acp`, the hook helpers (`defenseclaw-hook-post`, `defenseclaw-hook-user` and, on Linux, `defenseclaw-sensor-helper`), the launcher links, the `uv` the installer added (when unchanged) and its bookkeeping from `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows, where the emptied folder and its user `Path` entry go too). On macOS, `DefenseClawMac.app` stays; the plan says how to remove it. Run `--dry-run` first to see the plan. |
 | `defenseclaw uninstall --keep-openclaw` | Leave the OpenClaw config and plugin in place; the other connectors' teardown still runs. |
 | `defenseclaw uninstall --skip-sandbox-teardown` | Uninstall without the OpenShell sandbox teardown it runs first (when Docker or OpenShell are gone or broken); `defenseclaw sandbox teardown` removes the sandboxes later. `reset` takes it too. |
 | `defenseclaw uninstall --stop-sandboxes` | Stop and delete running OpenShell sandboxes during teardown, including copy-mode work not pulled back. Without it, a running sandbox stops uninstall before any change. For copy mode, use `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains the work before `defenseclaw sandbox stop NAME`. For mount mode, use `defenseclaw sandbox review NAME` before stopping it. `reset` takes this option too. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. Like `uninstall`, it prints the Cowork removal step when `setup cowork` built a plugin. |
+
+On Windows, `uninstall` also removes a DefenseClaw Setup 0.8.x install that the installer left in place because its data is in another folder (`DEFENSECLAW_HOME`). It stops that install, removes its program folder, cached Setup, Apps & Features entry, sign-in start and `PATH` entry, and turns its hook launcher off. It never runs that install's programs and keeps its data folder.
+
+If part of that removal stays, `uninstall` exits 1 and prints one next step for each reason: close the program that holds a file, ask an administrator to remove what your account cannot, or sign in as the account that owns the folder. The step names the path. For a link at or above the Setup folder it names the link and its kind (junction or symlink), and tells you to remove only that link with `cmd /c rmdir "<link>"` (this removes the link, not the folder it points to) if it is stray, or to ask an administrator to; if the link is part of how your profile is set up, leave it. DefenseClaw does not read or remove anything through a link.
+
+The same rule holds on Windows for the folders `uninstall` removes from your profile (the data folder, the install folder, the folders Setup left under `%LOCALAPPDATA%\DefenseClaw`, the connector backups it moves out of the data folder, the MCP config backups, the Copilot plugin, and uv's cache entries and folders): a link at the folder or above it keeps the folder, and `uninstall` names the link and the step above. Just before the removal `uninstall` also checks that the real path is the path written: short 8.3 names and letter case do not matter, a drive mapped to a network share (such as a home drive) is its share, and a `subst` drive is refused and named (`subst X: /d` removes the substitution). If the real path cannot be determined at all, the folder stays and the reason says so (ask an administrator). For a reparse point that is neither a junction nor a symbolic link (an online-only OneDrive folder, a deduplication or WSL point) the step is to ask an administrator; a volume mount point counts as a junction, and `rmdir` on it removes only the mount. The editor entries of an ACP setup and the empty Cowork marker folder beside the data folder are not checked this way. A link at the Setup folder whose target cannot be found (a deleted folder, or a drive or share that is not connected) is named too; if it is stray, `cmd /c rmdir "<link>"` removes only the link, and if the drive or share should be there, connect it. A link further up whose target cannot be found is named only when Setup left its entries in your registry (Apps & Features, sign-in start) or its hook launcher state; otherwise it is not a reason for `uninstall` to exit 1.
+
+After it stops the gateway, `uninstall` removes this account's port claim files (`defenseclaw-api-port-<port>` and `defenseclaw-guardrail-port-<port>`): in `C:\ProgramData` on Windows, in `/var/tmp` on Linux and macOS. The gateway leaves them so that init on another account does not take its ports. Only the ports of the gateway that was stopped, and only files that belong to this account, are removed; the next gateway start claims its ports again.
 
 `uninstall` and `reset` cannot remove the Claude Cowork plugin that `defenseclaw setup cowork` adds to your Claude account, and they say so when one was built. In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. Until you remove the plugin, Cowork tool calls are blocked. `uninstall --dry-run` lists the step. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
 
@@ -1306,8 +1314,9 @@ see also [Sandbox](/docs/sandboxes/first-session).
 ## Enterprise
 
 Commands for administrator-owned [enterprise deployments](/docs/enterprise).
-They are on the Go binary. Run them as root on Linux and macOS, and from an
-elevated prompt on Windows.
+They are on the Go binary, which is not on the `PATH`: run it by its full path
+from the table below, as root on Linux and macOS and from an elevated prompt on
+Windows.
 
 | OS | Binary |
 | --- | --- |
@@ -1317,7 +1326,7 @@ elevated prompt on Windows.
 
 ### Standalone lifecycle on Linux and macOS
 
-`defenseclaw-gateway enterprise linux|macos <action>` manages the standalone
+`/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux <action>` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos <action>` on macOS) manages the standalone
 deployment. Run `linux` on Linux and `macos` on macOS; the other one exits `2`.
 Every mutating action is a transaction that rolls back on failure. See
 [Upgrade, repair and remove](/docs/enterprise/lifecycle).
@@ -1404,9 +1413,12 @@ Use `defenseclaw sandbox kernel-feed` rather than these.
 
 ### Lifecycle on Windows
 
-`defenseclaw.exe enterprise windows <action>` manages the Windows deployment
-for both profiles. Run it from an elevated prompt. The standalone profile runs
-its transaction on PowerShell 7, which must be installed.
+`enterprise windows <action>` manages the Windows deployment for both profiles. Run the
+installed CLI by its path from an elevated PowerShell prompt: for the standalone profile
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action>`, and for
+the Secure Client profile
+`& 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action>`.
+The standalone profile runs its transaction on PowerShell 7, which must be installed.
 
 | Action | Profiles | Use it for |
 | --- | --- | --- |
@@ -1426,7 +1438,7 @@ its transaction on PowerShell 7, which must be installed.
 | `--payload-manifest <file>` | Standalone `hash_pinned` trust anchor: an administrator-owned JSON file of payload SHA-256 digests |
 | `--allowed-signer <sha256>` | Standalone: the SHA-256 thumbprint of an accepted Authenticode signer certificate. Repeatable |
 | `--product-version <v>` | Standalone: the version recorded for the deployment. Default: this CLI's version |
-| `--gateway-binary`, `--hook-binary`, `--acp-binary`, `--sensor-helper-binary`, `--cli-binary` | Source binaries for install, upgrade, repair, and ensure |
+| `--gateway-binary`, `--hook-binary`, `--hook-guard-binary`, `--acp-binary`, `--sensor-helper-binary`, `--cli-binary` | Source binaries for install, upgrade, repair, and ensure (`--hook-guard-binary` applies to the standalone profile only) |
 | `--broker-binary` | Secure Client only: the source credential broker |
 | `--installer <file>` | An explicit `install-enterprise.ps1` |
 | `--no-start` | Install, upgrade, repair, ensure: stage the services disabled and stopped |
@@ -1522,7 +1534,7 @@ Install first, then store the key. See [AI Defense key](/docs/enterprise/ai-defe
 
 ### Re-read directory facts (`enterprise identity refresh`)
 
-`defenseclaw-gateway enterprise identity refresh [--user U] [--flush-os-cache] [--max-users N] [--json]` re-reads groups and UPN now, for one account or for every account the managed gateway has cached (default at most 500), and lists the accounts whose guardrail profile changed. Hook calls use the new facts from their next call. Root, or an elevated prompt or SYSTEM on Windows; anyone else gets `not_admin`. Standalone managed deployments only.
+`/opt/defenseclaw/bin/defenseclaw-gateway enterprise identity refresh [--user U] [--flush-os-cache] [--max-users N] [--json]` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS; `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'` from an elevated PowerShell prompt on Windows) re-reads groups and UPN now, for one account or for every account the managed gateway has cached (default at most 500), and lists the accounts whose guardrail profile changed. Hook calls use the new facts from their next call. Root, or an elevated prompt or SYSTEM on Windows; anyone else gets `not_admin`. Standalone managed deployments only.
 
 | Flag | Effect |
 | --- | --- |
@@ -1545,7 +1557,7 @@ guardian's health.
 | `defenseclaw-gateway enterprise hooks watch` | Guardian service | Watch the manifest's targets and repair them, with a periodic reconcile (`--interval`, default `1m`) |
 | `defenseclaw-gateway enterprise hooks reconcile` | Guardian and lifecycle | Install or repair every enabled target once |
 | `defenseclaw-gateway enterprise hooks install`, `uninstall` | Root or a guardian on Linux and macOS; only the guardian on Windows | Install, repair, or remove one user's hook registration |
-| `defenseclaw-gateway enterprise hooks enumerate` | Enumerator service (Linux, macOS) | Publish the target manifest. The Windows enumerator service runs `defenseclaw-gateway.exe enterprise windows enumerate` |
+| `defenseclaw-gateway enterprise hooks enumerate` | Enumerator service (Linux, macOS) | Publish the target manifest. The Windows enumerator service runs `enterprise windows enumerate` of `defenseclaw-gateway.exe` |
 | `defenseclaw-gateway enterprise hooks scrub` | Uninstall scripts, or an administrator | Remove DefenseClaw's entries from one user's agent hook file (`--connector`, `--file`) |
 
 `remove-all` and `apply-target` are hidden internal commands that the
@@ -1575,7 +1587,7 @@ mutations run only in the LocalSystem guardian.
 
 ### ACP
 
-In enterprise managed mode an administrator enrolls ACP (Agent Client Protocol) editors with `defenseclaw-gateway enterprise acp enroll` (preview, not yet verified live).
+In enterprise managed mode an administrator enrolls ACP (Agent Client Protocol) editors with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS; preview, not yet verified live).
 
 ## Discoverability
 

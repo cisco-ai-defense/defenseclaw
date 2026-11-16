@@ -514,6 +514,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 	}
 
 	runes := []rune(source)
+	contentEnd := windowsContentEnd(runes)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
 		powerShellQuoteDelimiter := rune(0)
@@ -723,7 +724,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			}
 			if (r == '\n' || r == '\r') && len(lexemes) > 0 &&
 				lexemes[len(lexemes)-1].kind != windowsSeparatorLexeme &&
-				!windowsOnlyTrailingWhitespace(runes[i+1:]) {
+				i+1 < contentEnd {
 				// An unescaped physical line ending is an unconditional
 				// statement boundary in the conservative PowerShell/cmd subset.
 				// Continuations were already consumed above and retain a dynamic
@@ -966,13 +967,17 @@ func windowsCMDWordBoundary(runes []rune, index int) bool {
 	return unicode.IsSpace(runes[index]) || strings.ContainsRune("&|<>", runes[index])
 }
 
-func windowsOnlyTrailingWhitespace(runes []rune) bool {
-	for _, r := range runes {
-		if !unicode.IsSpace(r) {
-			return false
-		}
+// windowsContentEnd is the index after the last rune that is not white space.
+// A line ending at or past it ends only trailing white space, which is no
+// statement boundary. It is read once per source: asking each line ending
+// whether only white space follows rescans the tail, so a text that ends in n
+// blank lines costs n times its tail.
+func windowsContentEnd(runes []rune) int {
+	end := len(runes)
+	for end > 0 && unicode.IsSpace(runes[end-1]) {
+		end--
 	}
-	return true
+	return end
 }
 
 func windowsExtendedPathPrefixQuestion(

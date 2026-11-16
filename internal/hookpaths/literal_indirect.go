@@ -4,9 +4,12 @@
 package hookpaths
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -14,7 +17,8 @@ import (
 
 const maxIndirectSourceBytes = 16 << 10
 
-// readIndirectSource reads only one regular file under the caller's cwd.
+// readIndirectSource reads only one regular file under cwd (the volume root,
+// for readIndirectSourceAnywhere).
 // These reads occur only for an explicit source, make, or AWK -f command.
 func readIndirectSource(name, cwd string) (string, bool) {
 	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
@@ -22,23 +26,66 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	}
 	relative := name
 	if filepath.IsAbs(name) {
-		prefix := filepath.Clean(cwd) + string(filepath.Separator)
+		// A drive path spelled with forward slashes (C:/Users/..., or /c/...
+		// mapped to c:/...) is the same file as its backslash spelling; the
+		// prefix test below is on the text. Separators change, no component
+		// is cleaned, so link/.. keeps its meaning.
+		name = filepath.FromSlash(name)
+		prefix := filepath.Clean(cwd)
+		if !os.IsPathSeparator(prefix[len(prefix)-1]) {
+			prefix += string(filepath.Separator)
+		}
 		if !strings.HasPrefix(name, prefix) {
 			return "", false
 		}
 		relative = strings.TrimPrefix(name, prefix)
 	}
-	root, err := os.OpenRoot(cwd)
+	root, err := pathOpenRoot(cwd)
 	if err != nil {
 		return "", false
 	}
 	defer root.Close()
+	if pathBodyUnanswered(cwd, relative) {
+		return "", false
+	}
 	before, err := root.Lstat(relative)
+	if err != nil && strings.ContainsAny(relative, `/\`) && !errors.Is(err, fs.ErrNotExist) {
+		return readIndirectSourceThroughLinks(cwd, relative)
+	}
+	noteBodyLinkLimit(err)
+	return readIndirectSourceIn(root, relative, before, err)
+}
+
+// readIndirectSourceAnywhere reads the regular file a script operand names as
+// the system opens it, wherever it lies: a name relative to cwd is joined to
+// it unchanged (a .. climbs the physical parent, as the shell does), and the
+// read starts at the root of the volume the path is on, so a script beside
+// the project or in the user home is read as one in the project is. It is
+// the same bounded read (a regular file of at most maxIndirectSourceBytes; a
+// link past the system bound or a share that does not answer is an unread
+// body).
+func readIndirectSourceAnywhere(name, cwd string) (string, bool) {
+	if !filepath.IsAbs(cwd) || name == "" || strings.ContainsAny(name, "\x00\r\n") {
+		return "", false
+	}
+	if runtime.GOOS == "windows" {
+		name = actionMSYSDrivePath(name)
+	}
+	path := name
+	if !filepath.IsAbs(path) {
+		path = joinPathElement(cwd, name)
+	}
+	return readIndirectSource(path, filepath.VolumeName(path)+string(filepath.Separator))
+}
+
+// readIndirectSourceIn reads relative below root once its Lstat answered.
+func readIndirectSourceIn(root *os.Root, relative string, before os.FileInfo, err error) (string, bool) {
 	if err != nil || !before.Mode().IsRegular() || before.Size() > maxIndirectSourceBytes {
 		return "", false
 	}
 	file, err := root.Open(relative)
 	if err != nil {
+		noteBodyLinkLimit(err)
 		return "", false
 	}
 	defer file.Close()
@@ -53,11 +100,54 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	return string(content), true
 }
 
+// readIndirectSourceThroughLinks reads a script whose name passes folder links
+// that the Root below the working folder will not follow: os.Root follows at
+// most eight links, while the system opens as many as it opens
+// (SystemLinkLimit), and the command runs the script it opens. Declining a
+// script behind nine links left it unread without a record, judged as one
+// that writes nothing whatever it wrote (rel-1-0-9:GAP-0950). The system
+// answers first: a path it refuses for passing too many links is an unread
+// body (noteBodyLinkLimit), as for a working folder behind them. A path it
+// opens is read only if the file lies below the physical working folder, as
+// every body is; one that leaves the project stays unread, as a name with ..
+// does. The file is taken from a Root on the physical folder and checked
+// against the file opened.
+func readIndirectSourceThroughLinks(cwd, relative string) (string, bool) {
+	joined := joinPathElement(cwd, relative)
+	if _, err := pathStat(joined); err != nil {
+		noteBodyLinkLimit(err)
+		return "", false
+	}
+	physical, err := pathEvalSymlinks(joined)
+	if err != nil {
+		return "", false
+	}
+	physicalCWD, err := pathEvalSymlinks(cwd)
+	if err != nil {
+		return "", false
+	}
+	below, err := filepath.Rel(physicalCWD, physical)
+	if err != nil || below == "." || below == ".." || strings.HasPrefix(below, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	root, err := pathOpenRoot(physicalCWD)
+	if err != nil {
+		return "", false
+	}
+	defer root.Close()
+	before, err := root.Lstat(below)
+	return readIndirectSourceIn(root, below, before, err)
+}
+
+// literalSourceFileOperands reads the script a . or source command names:
+// the first word after the builtin. The words after it are the positional
+// parameters of the sourced body, not other scripts, so the same body is read
+// with or without them.
 func literalSourceFileOperands(words []string, cwd, home string, depth int) []string {
-	if depth >= 4 || len(words) != 2 {
+	if depth >= 4 || len(words) < 2 || words[1] == "" {
 		return nil
 	}
-	content, ok := readIndirectSource(words[1], cwd)
+	content, ok := readActionScript(words[1], cwd)
 	if !ok {
 		return nil
 	}

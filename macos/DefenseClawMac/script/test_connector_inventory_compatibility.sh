@@ -29,6 +29,9 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   "$ROOT/DefenseClawMac/DataLayer/ConfigStore.swift" \
   "$ROOT/DefenseClawMac/DataLayer/InstallationContext.swift" \
   "$ROOT/DefenseClawMac/DataLayer/SkillScanner.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/RuntimeV1Alerts.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/RuntimeV1Inventory.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/InventoryOutputParser.swift" \
   "$ROOT/Tests/ConnectorInventoryCompatibilityTests.swift" \
   -o "$BUILD_DIR/ConnectorInventoryCompatibilityTests"
 

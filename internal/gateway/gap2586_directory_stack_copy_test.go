@@ -24,6 +24,8 @@ func TestR106DirectoryStackCopyAfterPushdStaysAllowed(t *testing.T) {
 		{command: `pushd src && cp -r ~1/src s2`},
 		{command: `pushd src && cp -r ~1/ordinary ord2`},
 		{command: `pushd src && rsync -a ../ordinary/ out/`},
+		{command: `pushd src && rsync -a ./../ordinary/ out/`},
+		{command: `pushd src && cp -r ./../ordinary ord4b`},
 		{command: `pushd src && rsync -a ~1/ordinary/ out/`},
 		{command: `pushd src && cp -r ~-/ordinary x`},
 		{command: `pushd src && rsync -a ~-/ordinary/ out/`},

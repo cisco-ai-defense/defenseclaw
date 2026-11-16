@@ -237,6 +237,11 @@ func (s *Store) attemptGroupedTx(
 	hooks groupedTxHooks,
 	single, isolate bool,
 ) (err error, fallBack bool) {
+	release, turnErr := s.writeBaton.acquire(batchCtx)
+	if turnErr != nil {
+		return hooks.begin(turnErr), false
+	}
+	defer release()
 	tx, beginErr := s.db.BeginTx(batchCtx, nil)
 	if beginErr != nil {
 		return hooks.begin(beginErr), false

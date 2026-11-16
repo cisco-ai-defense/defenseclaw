@@ -142,6 +142,10 @@ type AssetPolicyInput struct {
 	Transport      string
 	RuntimeSurface string
 
+	// ArgsCut says Args is the start of a longer list: an allow that names
+	// the complete argument list cannot match it.
+	ArgsCut bool
+
 	// DeclaredNames are other names the asset gives itself, such as the
 	// name in a skill's SKILL.md frontmatter. A denied rule matches Name
 	// or any of them, so a copy of a denied skill in a folder with another
@@ -159,11 +163,19 @@ type AssetPolicyInput struct {
 }
 
 type AssetPolicyDecision struct {
-	Enabled            bool
-	Mode               string
-	Action             string // allow | block
-	RawAction          string // allow | block
-	WouldBlock         bool
+	Enabled           bool
+	Mode              string
+	Action            string // allow | block
+	RawAction         string // allow | block
+	WouldBlock        bool
+	RetryAfterSeconds int // bounded admission retry guidance, zero for other decisions
+	// ScanIssue says why a server whose admission scan failed cannot be
+	// scanned (launcher | address), "" when the definition does not show it.
+	ScanIssue string
+	// ScanNextStep says how the user can use such a server: the CLI allow
+	// command, the administrator's policy (a managed device refuses the
+	// command), or only where to read the cause. See MCPAdmissionNextStep.
+	ScanNextStep       string
 	Reason             string
 	Source             string
 	RegistryStatus     string // registered | unregistered | unknown
@@ -685,12 +697,12 @@ func (c *Config) AssetRegistryPinsUnknown(in AssetPolicyInput) []string {
 	return out
 }
 
-// canonicalMCPTransport folds the names of one transport together, so a
+// CanonicalMCPTransport folds the names of one transport together, so a
 // registry rule pinned to streamable-http admits the same URL server added as
 // http or with no transport at all (GAP-2122). An empty transport takes the one
 // the server's shape implies: http for a URL, stdio for a command. sse and the
 // other transports stay distinct.
-func canonicalMCPTransport(transport, url, command string) string {
+func CanonicalMCPTransport(transport, url, command string) string {
 	t := strings.ToLower(strings.TrimSpace(transport))
 	switch t {
 	case "http", "streamable-http", "streamable_http", "streamablehttp":
@@ -726,7 +738,13 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.URL != "" {
 		hasConstraint = true
-		if strings.TrimSpace(rule.URL) != strings.TrimSpace(in.URL) {
+		ruleURL, inURL := strings.TrimSpace(rule.URL), strings.TrimSpace(in.URL)
+		if !in.legacyConnectorMatch {
+			// The address the URL names, not its spelling (CanonicalMCPURL).
+			// Secure Client keeps the exact text.
+			ruleURL, inURL = CanonicalMCPURL(ruleURL), CanonicalMCPURL(inURL)
+		}
+		if ruleURL != inURL {
 			return false
 		}
 	}
@@ -749,7 +767,7 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.Transport != "" {
 		hasConstraint = true
-		if canonicalMCPTransport(rule.Transport, "", "") != canonicalMCPTransport(in.Transport, in.URL, in.Command) {
+		if CanonicalMCPTransport(rule.Transport, "", "") != CanonicalMCPTransport(in.Transport, in.URL, in.Command) {
 			return false
 		}
 	}

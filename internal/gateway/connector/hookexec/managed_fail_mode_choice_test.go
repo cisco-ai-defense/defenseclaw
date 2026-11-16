@@ -26,9 +26,8 @@ import (
 // a local event binding or contract mismatch. Strict availability still
 // closes it.
 func TestStandaloneManagedHookFollowsTheAdministratorsOpenFailMode(t *testing.T) {
-	original := hookAuthRetryDelay
-	hookAuthRetryDelay = time.Millisecond
-	t.Cleanup(func() { hookAuthRetryDelay = original })
+	shortRestartBudget(t)
+	shortAuthRetryDelay(t)
 	standaloneOpen := func(opts *Options) {
 		managedCodex(opts)
 		opts.ExplainUnenrolledAccount = true
@@ -86,6 +85,7 @@ func TestStandaloneManagedHookFollowsTheAdministratorsOpenFailMode(t *testing.T)
 // A standalone Hermes hook in fail mode open lets a tool call through on an
 // outage instead of the managed block directive; closed blocks it.
 func TestStandaloneManagedHermesFollowsTheAdministratorsFailMode(t *testing.T) {
+	shortRestartBudget(t)
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for mode, wantBlock := range map[string]bool{"open": false, "closed": true} {
 		result := run(t, "hermes", &stubRT{err: notRunning}, func(o *Options) {
@@ -106,6 +106,7 @@ func TestStandaloneManagedHermesFollowsTheAdministratorsFailMode(t *testing.T) {
 // native deny, open allows them. An unapproved hook the foreign-hook guard
 // found, and an invalid managed runtime, block in fail mode open too.
 func TestStandaloneManagedCopilotFollowsTheAdministratorsFailMode(t *testing.T) {
+	shortRestartBudget(t)
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, event := range []string{"preToolUse", "permissionRequest"} {
 		for _, tc := range []struct {
@@ -145,6 +146,7 @@ func TestStandaloneManagedCopilotFollowsTheAdministratorsFailMode(t *testing.T) 
 // (enterprisepolicy TestDocsCapabilityMatrixOutageMatchesTheHooks); the
 // per-user-route shell hook is checked in the connector package.
 func TestManagedCopilotOutageFollowsTheFailMode(t *testing.T) {
+	shortRestartBudget(t)
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, tc := range []struct {
 		mode    string
@@ -176,6 +178,7 @@ func TestManagedCopilotOutageFollowsTheFailMode(t *testing.T) {
 // run during an outage whatever the environment says. Only the installed
 // mode and strict availability decide.
 func TestManagedHookIgnoresTheEnvironmentFailMode(t *testing.T) {
+	shortRestartBudget(t)
 	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, tc := range []struct {
@@ -243,9 +246,7 @@ func TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage(t *testing.T) {
 // blocks: the status already says the credential was refused, an integrity
 // failure, closed in every fail mode.
 func TestStandaloneManagedAuthRefusalWithAnUnreadableBodyStaysClosed(t *testing.T) {
-	original := hookAuthRetryDelay
-	hookAuthRetryDelay = time.Millisecond
-	t.Cleanup(func() { hookAuthRetryDelay = original })
+	shortAuthRetryDelay(t)
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		for name, body := range map[string]func() io.ReadCloser{
 			"truncated": func() io.ReadCloser { return io.NopCloser(&failingReader{data: []byte(`{"error":"unauth`)}) },
@@ -316,6 +317,7 @@ func TestInvalidManagedCopilotEventBindingNeverAllows(t *testing.T) {
 // administrator's fail mode when the gateway service is not running, on
 // every OS: unset and closed block, open allows.
 func TestStandaloneManagedOpenCodeAndCopilotFollowTheAdministratorsFailMode(t *testing.T) {
+	shortRestartBudget(t)
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for connector, event := range map[string]string{"opencode": "tool.execute.before", "copilot": "preToolUse"} {
 		for mode, wantBlock := range map[string]bool{"": true, "open": false, "closed": true} {
@@ -391,6 +393,7 @@ func TestStandaloneManagedNoAnswerAlwaysStaysClosed(t *testing.T) {
 // standalone OpenCode hook in fail mode open answers an outage with an
 // explicit allow that carries the fail-open notice; closed keeps the deny.
 func TestStandaloneManagedOpenCodeFailOpenAnswersAnExplicitAllow(t *testing.T) {
+	shortRestartBudget(t)
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, mode := range []string{"open", "closed"} {
 		result := run(t, "opencode", &stubRT{err: notRunning}, func(o *Options) {
@@ -467,6 +470,7 @@ func TestStandaloneManagedOversizedInputBlocksUnderOpenForEveryConnector(t *test
 // failure on a standalone host under admin open blocks: oversized input, a
 // transport error that is not an outage, an error status, an unusable answer.
 func TestStandaloneManagedOpenCodeExplicitAllowOnlyOnAnOutage(t *testing.T) {
+	shortRestartBudget(t)
 	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
 	for _, tc := range []struct {
 		name    string
@@ -574,9 +578,7 @@ func TestStandaloneManagedRateLimitBlocksUnderOpen(t *testing.T) {
 // enabled. A failed retry cannot turn it into an outage allow or transport
 // log entry on a standalone managed hook.
 func TestStandaloneManagedAuthRetryKeepsAnsweredErrorClosed(t *testing.T) {
-	previousDelay := hookAuthRetryDelay
-	hookAuthRetryDelay = time.Millisecond
-	t.Cleanup(func() { hookAuthRetryDelay = previousDelay })
+	shortAuthRetryDelay(t)
 	// The budget leaves room for the request itself: a Claude Code or Codex
 	// request holds its delivery body up to hookDeliveryCapabilityWait
 	// (250 ms) for the gateway's 103, which the stub never sends, and a
@@ -637,9 +639,7 @@ func TestStandaloneManagedAuthRetryKeepsAnsweredErrorClosed(t *testing.T) {
 // 403): open lets the call run and logs fail_open, closed blocks. A
 // standalone hook blocks the same refusal in open.
 func TestSecureClientAuthRefusalFollowsTheEffectiveFailMode(t *testing.T) {
-	original := hookAuthRetryDelay
-	hookAuthRetryDelay = time.Millisecond
-	t.Cleanup(func() { hookAuthRetryDelay = original })
+	shortAuthRetryDelay(t)
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		refuse := func() *stubRT {
 			return &stubRT{onRequest: func(_ *stubRT, _ *http.Request) (*http.Response, error) {

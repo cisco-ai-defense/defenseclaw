@@ -76,7 +76,7 @@ func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
 				t.Fatal(err)
 			}
 			installNativeGatewayForHookTest(t, home, hookDir)
-			installNativeHookPostForHookTest(t, home)
+			installHeldProofHookPostForHookTest(t, home)
 			writeOutageTierConfig(t, dataDir, tc.config)
 			gateway := exec.Command(os.Args[0], "-test.run=^TestRestartBracketListener$")
 			gateway.Env = append(sanitizedTestEnv(), restartBracketListenerEnv+"="+addr)
@@ -88,7 +88,7 @@ func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
 			if line, err := bufio.NewReader(ready).ReadString('\n'); err != nil || line != "ready\n" {
 				t.Fatalf("gateway fixture not ready: %q, %v", line, err)
 			}
-			identity, ok := procidentity.Of(gateway.Process.Pid)
+			identity, ok := procidentity.Recorded(gateway.Process.Pid)
 			if !ok {
 				t.Fatal("gateway fixture identity unavailable")
 			}
@@ -96,14 +96,24 @@ func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Dated from the start of the fixture process, never from the clock
+			// at the time of writing: the host decides how long they are apart.
+			started, ok := procidentity.StartTime(gateway.Process.Pid)
+			if !ok {
+				t.Fatal("gateway fixture start time unavailable")
+			}
 			record, err := json.Marshal(map[string]any{
 				"pid": gateway.Process.Pid, "executable": executable, "data_dir": dataDir,
-				"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": identity,
+				"start_time": started.Add(-time.Second).Unix(), "start_identity": identity,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), record, 0o600); err != nil {
+			pidPath := filepath.Join(dataDir, "gateway.pid")
+			if err := os.WriteFile(pidPath, record, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(pidPath, started, started); err != nil {
 				t.Fatal(err)
 			}
 			call := exec.Command("bash", filepath.Join(hookDir, "claude-code-hook.sh"))
@@ -163,7 +173,7 @@ func TestLinuxShellHookCallBracketingRestartFollowsOutageMode(t *testing.T) {
 				t.Fatal(err)
 			}
 			installNativeGatewayForHookTest(t, home, hookDir)
-			installNativeHookPostForHookTest(t, home)
+			installHeldProofHookPostForHookTest(t, home)
 			writeOutageTierConfig(t, dataDir, tc.config)
 			if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 				t.Fatal(err)

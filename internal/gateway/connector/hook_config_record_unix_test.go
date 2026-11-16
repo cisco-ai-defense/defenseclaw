@@ -97,3 +97,53 @@ func TestPerUserRenderRecordsTheConfigItRunsUnder(t *testing.T) {
 		}
 	})
 }
+
+// The gateway also records the folder that holds its gateway.pid, apart from
+// the config path: DEFENSECLAW_CONFIG can name a file outside the install
+// home, and the hook must still find the PID record of this account.
+func TestPerUserRenderRecordsTheInstallHomeApartFromTheConfig(t *testing.T) {
+	home := t.TempDir()
+	install := filepath.Join(t.TempDir(), "dchome")
+	elsewhere := filepath.Join(t.TempDir(), "policy.yaml")
+	data := filepath.Join(t.TempDir(), "dcdata")
+	if err := os.MkdirAll(install, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(elsewhere, []byte("x: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(data, "hooks")
+	t.Setenv("HOME", home)
+	t.Setenv("DEFENSECLAW_HOME", install)
+	t.Setenv("DEFENSECLAW_CONFIG", elsewhere)
+	if err := writePerUserGatewayHelperRecord(hooks); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(hooks, perUserInstallHomeRecordName))
+	if err != nil || string(raw) != install+"\n" {
+		t.Fatalf("install home record = %q (%v), want %q", raw, err, install)
+	}
+	if info, err := os.Stat(filepath.Join(hooks, perUserInstallHomeRecordName)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("install home record mode = %v (%v), want 0600", info, err)
+	}
+	// Default layout: the account folder.
+	t.Setenv("DEFENSECLAW_HOME", "")
+	hooks = filepath.Join(home, ".defenseclaw", "hooks")
+	if err := writePerUserGatewayHelperRecord(hooks); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(filepath.Join(hooks, perUserInstallHomeRecordName))
+	if err != nil || string(raw) != filepath.Join(home, ".defenseclaw")+"\n" {
+		t.Fatalf("default install home record = %q (%v)", raw, err)
+	}
+	// A cold start with no config leaves the record as it was.
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	t.Setenv("HOME", t.TempDir())
+	cold := filepath.Join(t.TempDir(), "hooks")
+	if err := writePerUserGatewayHelperRecord(cold); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cold, perUserInstallHomeRecordName)); err == nil {
+		t.Fatal("install home record written without a config")
+	}
+}

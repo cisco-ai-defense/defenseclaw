@@ -26,6 +26,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Protected descriptors: SYSTEM and Administrators own and write; standard
@@ -112,6 +115,60 @@ var validateTrustedFile = func(path string) error {
 
 func validateTrustedPolicyFile(_ Options, path string) error {
 	return validateTrustedFile(path)
+}
+
+// validateTrustedFileItself validates a policy file itself with the leaf
+// rules, and not the folders above it; tests replace it.
+var validateTrustedFileItself = func(path string) error {
+	return managed.ValidateTrustedFileLeaf(path, "machine policy file")
+}
+
+// readUnprotectedRecordedFile reads a recorded policy file in a vendor
+// folder that does not protect it (restoreOrStripUnprotected): only a
+// regular single-link file that no account other than SYSTEM,
+// Administrators and TrustedInstaller owns or can change. The folders above
+// it are not judged; the caller knows the nearest one does not protect it.
+// It returns why the file is not trusted, or "".
+func readUnprotectedRecordedFile(opts Options, path string) ([]byte, bool, string) {
+	path = platformPath(opts, path)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, ""
+	}
+	if err != nil {
+		return nil, false, err.Error()
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, "it is not a regular file"
+	}
+	data, exists, err := readPolicyFileWith(opts, path, func(_ Options, path string) error {
+		if err := requireSingleLinkFile(path); err != nil {
+			return err
+		}
+		return validateTrustedFileItself(path)
+	})
+	if err != nil {
+		return nil, false, err.Error()
+	}
+	return data, exists, ""
+}
+
+// requireSingleLinkFile refuses a file with another hard link: another
+// account could change it through that name.
+func requireSingleLinkFile(path string) error {
+	file, err := openNoFollow(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if info.NumberOfLinks != 1 {
+		return fmt.Errorf("%s has %d hard links", path, info.NumberOfLinks)
+	}
+	return nil
 }
 
 // validateOpenCodePluginFile applies the machine policy trust rules to the
@@ -285,14 +342,31 @@ func openCodePluginLoadable(_ Options, path string) (bool, error) {
 }
 
 func openNoFollow(path string) (*os.File, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
-		return nil, fmt.Errorf("%s is a reparse point", path)
-	}
-	return os.Open(path)
+	var file *os.File
+	err := safefile.RetryTransientRead(func() error {
+		info, err := pathidentity.LstatPinned(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
+			return fmt.Errorf("%s is a reparse point", path)
+		}
+		file, err = winpath.OpenReadShared(path)
+		if err != nil {
+			return err
+		}
+		opened, err := file.Stat()
+		if err != nil || !os.SameFile(info, opened) {
+			_ = file.Close()
+			file = nil
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("%s changed identity before open: %w", path, safefile.ErrReadIdentityChanged)
+		}
+		return nil
+	})
+	return file, err
 }
 
 func applySDDL(path, sddl string) error {
@@ -463,7 +537,15 @@ func plainDirectory(info os.FileInfo) bool {
 // its place at once. Directories outside ProgramData are left alone, and an
 // object an administrator owns is refused.
 func reclaimPolicyDirs(opts Options, dir string) (policyTakeBack, error) {
+	return reclaimPolicyDirsFor(opts, dir, policyFolderUse{})
+}
+
+// reclaimPolicyDirsFor is reclaimPolicyDirs for a folder the vendor uses as
+// use says (case c below).
+func reclaimPolicyDirsFor(opts Options, dir string, use policyFolderUse) (policyTakeBack, error) {
 	var result policyTakeBack
+	// recorded is read once, at the first untrusted component on standalone.
+	var recorded *recordedPolicyPaths
 	root, rel, ok := programDataRelative(opts, dir)
 	if !ok {
 		return result, nil
@@ -495,6 +577,43 @@ func reclaimPolicyDirs(opts Options, dir string) (policyTakeBack, error) {
 				return result, fmt.Errorf("%w; it is not a plain directory, and DefenseClaw could not replace it: %v", trustErr, err)
 			}
 			continue
+		}
+		if reclaimRefusesContentDrift() {
+			if recorded == nil {
+				loaded := loadRecordedPolicyPaths(opts)
+				recorded = &loaded
+			}
+			if verdict := judgeRecordedVendorFolder(recorded, cur, index == len(parts)-1, use, trustErr); verdict.caseC {
+				if verdict.refused != nil {
+					if use.removal {
+						result.unprotected = append(result.unprotected, verdict.refused.folder())
+						return result, nil
+					}
+					// The safe transaction: the folder is put back to
+					// DefenseClaw's protected form only when nothing holds
+					// it, its recorded files are as DefenseClaw wrote them
+					// and it holds nothing else; otherwise it is refused by
+					// name with the ACL unchanged. A refusal found after the
+					// stamp is reported with the change it made.
+					healed, blocker := reprotectRecordedVendorFolder(opts, recorded, cur, index == len(parts)-1, use, verdict.refused, validate)
+					if healed.Dir != "" {
+						result.reprotected = append(result.reprotected, healed)
+					}
+					if blocker != nil {
+						verdict.refused.blocker = blocker.Error()
+						return result, verdict.refused
+					}
+					continue
+				}
+				result.left = append(result.left, fmt.Sprintf("left %s as it is: DefenseClaw did not create it and it "+
+					"holds DefenseClaw's %s; standard users may add entries there (%v), but they cannot delete or "+
+					"replace that file, which keeps its own administrator-only access list, and the vendor reads "+
+					"only that file name there", cur, verdict.file, trustErr))
+				continue
+			}
+		}
+		if refused := refuseStandaloneReclaim(cur, trustErr); refused != nil {
+			return result, refused
 		}
 		if err := reclaimDir(cur); err != nil {
 			return result, fmt.Errorf("%w; taking it back failed: %v", trustErr, err)
@@ -1063,11 +1182,318 @@ func InspectWindowsPublicDir(dir string) (WindowsPublicDirDrift, error) {
 
 // RepairWindowsPublicDir writes DefenseClaw's owner and protected access
 // list back on dir, by handle and without following a reparse point.
-func RepairWindowsPublicDir(dir string) error { return reclaimDir(dir) }
+func RepairWindowsPublicDir(dir string) error {
+	if trustErr := validateTrustedLeafDir(dir); trustErr != nil {
+		if refused := refuseStandaloneReclaim(dir, trustErr); refused != nil {
+			return refused
+		}
+	}
+	return reclaimDir(dir)
+}
+
+// reclaimRefusesContentDrift is managed.StandaloneRefusesContentDrift; tests
+// replace it.
+var reclaimRefusesContentDrift = managed.StandaloneRefusesContentDrift
+
+// refuseStandaloneReclaim is the standalone refusal of a folder takeover (the
+// g582 class rule): a vendor or hook-runtime folder that already holds a
+// DefenseClaw file and that another account can write or owns is refused
+// and named, not taken over in place, because that account may have put or
+// replaced files in it, or may hold a handle to one. A folder with no
+// DefenseClaw file (a vendor folder a user or MDM created before the first
+// install) keeps the takeover, its entries each still judged. It is nil off
+// standalone.
+func refuseStandaloneReclaim(dir string, trustErr error) error {
+	if !reclaimRefusesContentDrift() {
+		return nil
+	}
+	marker := defenseClawEntryIn(dir)
+	if marker == "" {
+		return nil
+	}
+	return managed.RefuseStandaloneMachinePolicyDrift(
+		dir,
+		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", trustErr, marker))
+}
+
+// windowsOwnershipRecordTrusted is managed.WindowsAdminOnlyRecord; tests
+// replace it.
+var windowsOwnershipRecordTrusted = managed.WindowsAdminOnlyRecord
+
+// recordedPolicyPaths is what the administrator-only ownership records in
+// opts.StateDir (<LifecycleDir>\machine-policy\<connector>.json) name: the
+// vendor files DefenseClaw published into (path) and the folders it created
+// for them (created_dirs). On standalone it decides a vendor folder takeover
+// in reclaimPolicyDirs (g582 review 6 M2, GAP-0652 E3, lead ruling):
+//
+//   - a) A folder DefenseClaw created (a created_dirs entry, or the record's
+//     path itself) is DefenseClaw's own. The repair may re-stamp it, which
+//     is not a takeover, and the marker refusals still apply. The files in
+//     it are judged one by one; a recorded file another account controls is
+//     replaced by a new file from DefenseClaw's own rendering.
+//   - b) A vendor folder DefenseClaw did not create that holds no recorded
+//     file keeps the documented takeover.
+//   - c) A vendor folder DefenseClaw did not create that holds a recorded
+//     file, at any depth, is never taken over. When no standard user can
+//     delete or replace that file there, it is left as it is and the publish
+//     goes on; otherwise the connector fails closed with
+//     recordedVendorFolderError.
+//
+// A record another account can write or owns is not read, so a planted
+// record neither protects nor refuses anything.
+type recordedPolicyPaths struct {
+	files   []string
+	created []string
+	// digests maps a recorded file (lower case) to the SHA-256 of the bytes
+	// DefenseClaw last wrote there.
+	digests map[string]string
+}
+
+func loadRecordedPolicyPaths(opts Options) recordedPolicyPaths {
+	var recorded recordedPolicyPaths
+	if strings.TrimSpace(opts.StateDir) == "" {
+		return recorded
+	}
+	entries, err := os.ReadDir(opts.StateDir)
+	if err != nil {
+		return recorded
+	}
+	for _, entry := range entries {
+		connector, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !entry.Type().IsRegular() || !recordNamePattern.MatchString(connector) {
+			continue
+		}
+		if !windowsOwnershipRecordTrusted(filepath.Join(opts.StateDir, entry.Name())) {
+			continue
+		}
+		record, err := loadRecord(opts, connector)
+		if err != nil || record == nil {
+			continue
+		}
+		if path := recordedWindowsPath(record.Path); path != "" {
+			recorded.files = append(recorded.files, path)
+			if recorded.digests == nil {
+				recorded.digests = map[string]string{}
+			}
+			recorded.digests[strings.ToLower(path)] = record.PostimageSHA256
+		}
+		for _, dir := range record.CreatedDirs {
+			if path := recordedWindowsPath(dir); path != "" {
+				recorded.created = append(recorded.created, path)
+			}
+		}
+	}
+	return recorded
+}
+
+func recordedWindowsPath(path string) string {
+	if !windowsAbsolute(path) {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
+// createdFolder reports whether DefenseClaw created dir (case a).
+func (r *recordedPolicyPaths) createdFolder(dir string) bool {
+	dir = filepath.Clean(dir)
+	for _, list := range [][]string{r.created, r.files} {
+		for _, path := range list {
+			if strings.EqualFold(path, dir) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// heldFile returns a recorded file anywhere under dir, or "".
+func (r *recordedPolicyPaths) heldFile(dir string) string {
+	prefix := strings.ToLower(strings.TrimRight(filepath.Clean(dir), `\`)) + `\`
+	for _, path := range r.files {
+		if strings.HasPrefix(strings.ToLower(path), prefix) {
+			return path
+		}
+	}
+	return ""
+}
+
+// filesUnder returns every recorded file anywhere under dir.
+func (r *recordedPolicyPaths) filesUnder(dir string) []string {
+	prefix := strings.ToLower(strings.TrimRight(filepath.Clean(dir), `\`)) + `\`
+	var out []string
+	for _, path := range r.files {
+		if strings.HasPrefix(strings.ToLower(path), prefix) {
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// namesFileIn reports whether DefenseClaw recorded a file called name
+// directly in dir.
+func (r *recordedPolicyPaths) namesFileIn(dir, name string) bool {
+	want := strings.ToLower(filepath.Join(dir, name))
+	for _, path := range r.files {
+		if strings.ToLower(path) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// recordedVendorFolderError is case c failing closed: a vendor folder
+// DefenseClaw did not create, holding a file DefenseClaw recorded, lets an
+// account other than SYSTEM, Administrators and TrustedInstaller delete or
+// replace that file, and the safe transaction (vendor_folder_judge_windows.go)
+// could not put it right. DefenseClaw does not take the folder over, so the
+// connector is not protected until an administrator fixes the folder.
+type recordedVendorFolderError struct {
+	dir, file string
+	err       error
+	// siblings is set when standard users may only add files to the folder,
+	// and says what else the vendor loads from it (policyFolderUse).
+	siblings string
+	// blocker says what stopped the safe transaction; empty for a folder
+	// seen only by the removal walk.
+	blocker string
+}
+
+func (e *recordedVendorFolderError) Error() string {
+	because := ""
+	if e.blocker != "" {
+		because = " unless it can prove nothing else holds it or has changed it, and it could not: " + e.blocker
+	}
+	return fmt.Sprintf("%s; DefenseClaw did not create this folder, so a standalone install does not take it over%s, "+
+		"and this connector is not protected until an administrator fixes the folder: from an elevated prompt run %s, "+
+		"then run `%s`. %s", e.reason(), because, e.fix(), managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
+}
+
+func (e *recordedVendorFolderError) Unwrap() error { return e.err }
+
+// reason says why the folder does not protect DefenseClaw's file.
+func (e *recordedVendorFolderError) reason() string {
+	if e.siblings != "" {
+		return fmt.Sprintf("%s lets an account other than SYSTEM, Administrators and TrustedInstaller add files to it "+
+			"(%v), and %s, so a file that account adds there applies beside or instead of DefenseClaw's %s",
+			e.dir, e.err, e.siblings, e.file)
+	}
+	return fmt.Sprintf("%s lets an account other than SYSTEM, Administrators and TrustedInstaller delete or replace "+
+		"DefenseClaw's %s in it (%v)", e.dir, e.file, e.err)
+}
+
+// fix is the administrator's commands for the folder, joined for the
+// message.
+func (e *recordedVendorFolderError) fix() string {
+	commands := recordedVendorFolderFix(e.dir, e.err)
+	rendered := make([]string, 0, len(commands))
+	for _, command := range commands {
+		rendered = append(rendered, renderWindowsCommand(command))
+	}
+	return strings.Join(rendered, ", then ")
+}
+
+func (e *recordedVendorFolderError) folder() unprotectedVendorFolder {
+	return unprotectedVendorFolder{dir: e.dir, reason: e.reason(), fix: e.fix()}
+}
+
+// recordedVendorFolderFix is the administrator's fix for a case c folder, as
+// commands to run in order from an elevated prompt. It gives the folder to
+// Administrators and replaces its access list, inherited entries included,
+// with the one DefenseClaw gives the vendor folders it holds: SYSTEM and
+// Administrators full control, Users read and execute. icacls /remove:g and
+// /setowner alone leave an inherited entry, such as ProgramData's "Users may
+// add files and folders", in place; /inheritance:r removes the inherited
+// entries and /grant:r replaces the explicit Users entry. An explicit entry
+// of another account that can change the folder survives both, so every such
+// account (the folder's own write-like allow entries, and the account the
+// check named) is removed by name. An explicit entry that only reads stays:
+// it can neither replace DefenseClaw's file nor add one beside it, and a
+// service account the vendor reads its policy as needs it (g582 round 9 L5).
+// The grants are for the folder; files inherit them, and DefenseClaw's own
+// file keeps its protected access list.
+func recordedVendorFolderFix(dir string, err error) [][]string {
+	fix := [][]string{
+		{"icacls", dir, "/setowner", "*" + adminOwnerSIDStr},
+		{"icacls", dir, "/inheritance:r", "/grant:r",
+			"*" + systemSIDStr + ":(OI)(CI)F", "*" + adminOwnerSIDStr + ":(OI)(CI)F", "*" + usersSIDStr + ":(OI)(CI)RX"},
+	}
+	others := explicitWriteLikeAllowSIDs(dir)
+	var principal *managed.UntrustedPrincipalError
+	if errors.As(err, &principal) && principal.SID != "" && !principal.Owner {
+		others = append(others, principal.SID)
+	}
+	remove := []string{"icacls", dir, "/remove:g"}
+	seen := map[string]bool{}
+	for _, sid := range others {
+		switch sid {
+		case systemSIDStr, adminOwnerSIDStr, usersSIDStr, trustedInstallerSIDStr:
+			continue
+		}
+		if !seen[sid] {
+			seen[sid] = true
+			remove = append(remove, "*"+sid)
+		}
+	}
+	if len(remove) > 3 {
+		fix = append(fix, remove)
+	}
+	return fix
+}
+
+// explicitWriteLikeAllowSIDs lists the accounts whose own (not inherited)
+// allow entry on dir lets them change it, in order. An entry that only reads
+// is not listed. It is best effort: a descriptor it cannot read adds nothing.
+func explicitWriteLikeAllowSIDs(dir string) []string {
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return nil
+	}
+	var sids []string
+	for index := uint32(0); index < uint32(dacl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, index, &ace); err != nil {
+			return sids
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERITED_ACE != 0 ||
+			!managed.WindowsWriteLikeAccess(ace.Mask) {
+			continue
+		}
+		sids = append(sids, (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String())
+	}
+	return sids
+}
+
+// renderWindowsCommand quotes every argument but the program and the
+// switches, so the command runs the same in cmd.exe and in PowerShell, where
+// an unquoted (OI) is a subexpression.
+func renderWindowsCommand(command []string) string {
+	parts := make([]string, 0, len(command))
+	for index, argument := range command {
+		if index == 0 || (strings.HasPrefix(argument, "/") && !strings.ContainsAny(argument, ` *()`)) {
+			parts = append(parts, argument)
+			continue
+		}
+		parts = append(parts, `"`+argument+`"`)
+	}
+	return strings.Join(parts, " ")
+}
+
+// defenseClawEntryIn returns why dir is a folder DefenseClaw already
+// manages, or "": the shared standalone decision
+// (managed.WindowsDefenseClawFolderMarker, g582 review 4 F2), the same one
+// the hook-side policy folder transactions use.
+func defenseClawEntryIn(dir string) string {
+	return managed.WindowsDefenseClawFolderMarker(dir)
+}
 
 const (
 	trustedInstallerSIDStr = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 	usersSIDStr            = "S-1-5-32-545"
+	systemSIDStr           = "S-1-5-18"
 
 	// Conditional (callback) ACE types; x/sys/windows names only the plain ones.
 	accessAllowedCallbackACEType = 0x9
@@ -1079,4 +1505,57 @@ const (
 func trustedWindowsPublicDirPrincipal(sid *windows.SID) bool {
 	return sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
 		sid.String() == trustedInstallerSIDStr
+}
+
+// linkedPolicyComponent returns the first component of path below ProgramData
+// that is a reparse point, or "" when there is none or the path is absent. It
+// only reads attributes: nothing is followed, created or changed.
+func linkedPolicyComponent(opts Options, path string) string {
+	root, rel, ok := programDataRelative(opts, path)
+	if !ok {
+		return ""
+	}
+	cur := root
+	for _, part := range strings.Split(rel, `\`) {
+		cur = filepath.Join(cur, part)
+		name, err := windows.UTF16PtrFromString(cur)
+		if err != nil {
+			return ""
+		}
+		attributes, err := windows.GetFileAttributes(name)
+		if err != nil {
+			return ""
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return cur
+		}
+	}
+	return ""
+}
+
+// clearOrKeepLinkedPolicyPath is the removal side of a vendor policy path
+// that has a link on it (GAP-0758). A teardown never creates, takes back or
+// fails on it: a link a standard user planted is removed, the link only
+// (displacePlanted never follows it), and what it pointed at is untouched; a
+// link an administrator, SYSTEM or TrustedInstaller owns stays, as does one
+// DefenseClaw cannot remove, and the caller leaves the target alone and names
+// it. It returns the kept path and why, or "" when nothing is left to keep.
+func clearOrKeepLinkedPolicyPath(opts Options, path string, state *State) (string, string) {
+	if opts.SkipTrustChecks {
+		return "", ""
+	}
+	link := linkedPolicyComponent(opts, path)
+	if link == "" {
+		return "", ""
+	}
+	note, err := displacePlanted(opts, link)
+	switch {
+	case err == nil:
+		state.detail("%s", note)
+		return "", ""
+	case errors.Is(err, errOwnedByAdministrator):
+		return link, "a link that an administrator, SYSTEM or TrustedInstaller owns; DefenseClaw does not follow, change or remove it"
+	default:
+		return link, "a link DefenseClaw could not remove, so it does not follow or change it: " + err.Error()
+	}
 }

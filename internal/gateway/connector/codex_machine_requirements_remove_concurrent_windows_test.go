@@ -108,7 +108,7 @@ func requireWindowsCodexGuardRemovedForTest(
 	if references, refErr := windowsCodexOwnedPathReferenceCount(requirements, opts); refErr != nil || references != 0 {
 		t.Fatalf("%d references to the DefenseClaw install remain (err %v):\n%s", references, refErr, requirements)
 	}
-	for _, path := range []string{opts.OwnershipPath, opts.ManagedStatePath} {
+	for _, path := range append([]string{opts.OwnershipPath}, windowsCodexStateFilesForTest(t, opts)...) {
 		if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
 			t.Fatalf("a committed removal left %s: %v", path, statErr)
 		}
@@ -217,10 +217,13 @@ func TestWindowsCodexMachineRemovalStopsAgainstAWriterThatNeverStops(t *testing.
 	if data, readErr := os.ReadFile(opts.RequirementsPath); readErr != nil || !bytes.Contains(data, last) || !bytes.Contains(data, []byte("allowed_sandbox_modes")) {
 		t.Fatalf("the removal did not keep the last save (err %v):\n%s", readErr, data)
 	}
-	for _, path := range []string{opts.OwnershipPath, opts.ManagedStatePath} {
+	for _, path := range []string{opts.OwnershipPath, windowsCodexStateCommittedPathForTest(opts)} {
 		if _, statErr := os.Lstat(path); statErr != nil {
 			t.Fatalf("a stopped removal dropped %s: %v", path, statErr)
 		}
+	}
+	if !windowsCodexStatePresentForTest(t, opts) {
+		t.Fatal("a stopped removal dropped the state the hook reads")
 	}
 	windowsCodexMachineTrustedFileCheck = func(string, string) error { return nil }
 	report, err = RemoveWindowsCodexMachineRequirements(opts)

@@ -2806,11 +2806,17 @@ func TestWindowsAwaitedHookLegacyFallbackRenderStaysOwned(t *testing.T) {
 	if current, ok := currentWindowsAwaitedHookCommand(encoded); ok && current == bridges["codex bridge"] {
 		t.Fatal("an edited script was recognized as the current render")
 	}
-	// The Antigravity teardown list carries both renders of every event.
+	// The Antigravity teardown list carries every render of every event: the
+	// current one, the one before 1.0.9 (no launcher-start answer, rel-1-0-6
+	// GAP-0676) and its 1.0.x render.
 	owned := antigravityOwnedHookCommandsForOS("windows", "antigravity-hook.sh")
 	for _, event := range antigravityLifecycleEvents {
 		current := antigravityHookInvocationCommandForEvent("windows", event, "antigravity-hook.sh")
-		if !slices.Contains(owned, current) || !slices.Contains(owned, legacyAwaitedForTest(t, current)) {
+		before := windowsNativePowerShellHookCommandForEvent("antigravity", event, defenseclawHookBinary())
+		if (event == "PreToolUse") == (current == before) {
+			t.Fatalf("%s: the current render answers a launcher that cannot start = %v, want %v", event, current != before, event == "PreToolUse")
+		}
+		if !slices.Contains(owned, current) || !slices.Contains(owned, before) || !slices.Contains(owned, legacyAwaitedForTest(t, before)) {
 			t.Fatalf("antigravity owned commands lack a render of %s", event)
 		}
 	}

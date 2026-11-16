@@ -30,6 +30,23 @@ func osRootAncestor(path string) bool {
 	return false
 }
 
+// macOS administrator groups: wheel and admin.
+const (
+	darwinWheelGID = 0
+	darwinAdminGID = 80
+)
+
+// administratorWriterGroup reports whether gid is a group whose write bit an
+// ancestor of the Secure Client install marker may carry: wheel and admin,
+// the principals JudgeDarwinACLOutput already trusts for a write ACL entry.
+// A standalone process (StandaloneTrustScope) accepts none.
+func administratorWriterGroup(gid uint32) bool {
+	if StandaloneTrustScope() {
+		return false
+	}
+	return gid == darwinWheelGID || gid == darwinAdminGID
+}
+
 // trustedRootAlias reports whether path is one of Apple's fixed root aliases,
 // `/etc`, `/tmp` or `/var`: a root-owned symlink in `/` to the folder of the
 // same name in `/private`. A trust walk that meets one as an ancestor accepts

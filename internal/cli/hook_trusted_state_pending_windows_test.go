@@ -1,0 +1,108 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+)
+
+// GAP-1026: the resolver tags a missing runtime selection as drift when no
+// integrity finding backs it (the real result for an account that was enrolled
+// before the guardian revoked its selection). A standalone hook names it
+// pending; Secure Client keeps the class; real drift and a boundary stay as
+// they were. Every standalone case is closed.
+func TestWindowsStandaloneHookNamesARevokedSelectionPendingNotDrift(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "closed")
+	savedSecureClient := secureClientHost
+	previousStandalone := standaloneEnterpriseHookCheck
+	t.Cleanup(func() {
+		secureClientHost = savedSecureClient
+		standaloneEnterpriseHookCheck = previousStandalone
+	})
+	pending := fmt.Errorf("enterprise hooks: registered SID is absent from the managed runtime generation selector: %w",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationPending)
+	for _, tc := range []struct {
+		name         string
+		err          error
+		standalone   bool
+		secureClient bool
+		enrolled     bool
+		want         string
+	}{
+		{"pending tagged drift, standalone, enrolled before", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), true, false, true,
+			enterprisehooks.WindowsManagedEnrollmentPendingReason},
+		{"pending tagged drift, standalone, never enrolled", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), true, false, false,
+			enterprisehooks.WindowsManagedEnrollmentPendingReason},
+		{"pending tagged drift, Secure Client", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, pending), false, true, true,
+			enterprisehooks.WindowsManagedRuntimeDriftReason},
+		{"real drift, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeDrift, errors.New("bundle ACL drifted")), true, false, true,
+			enterprisehooks.WindowsManagedRuntimeDriftReason},
+		{"pending with a boundary finding, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary, pending), true, false, false,
+			enterprisehooks.WindowsManagedEnrollmentPendingReason},
+		{"boundary without pending, standalone", fmt.Errorf("%w: %w", enterprisehooks.ErrWindowsManagedRuntimeBoundary, errors.New("reparse point")), true, false, true,
+			"enterprise_managed_runtime_state_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			standalone, err := tc.standalone, tc.err
+			standaloneEnterpriseHookCheck = func(string) bool { return standalone }
+			secureClientHost = func() bool { return tc.secureClient }
+			// The account's DefenseClaw folder exists: a missing one has its own reason.
+			dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.enrolled {
+				if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dataDir, "hooks", ".hookcfg.codex"), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+				return enterprisehooks.WindowsManagedHookRuntime{
+					Connector:    "codex",
+					DataDir:      dataDir,
+					PolicyActive: true,
+				}, err
+			})
+			if prepareEnterpriseManagedHookRuntime("codex") {
+				t.Fatal("a runtime failure was treated as a no-op")
+			}
+			opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "open", true)
+			if opts.ManagedRuntimeFailure != tc.want {
+				t.Fatalf("runtime failure %q, want %q", opts.ManagedRuntimeFailure, tc.want)
+			}
+			// Only an enrolled-before standalone account that is pending is told it is blocked.
+			wantEnrolledPending := tc.want == enterprisehooks.WindowsManagedEnrollmentPendingReason && tc.standalone && tc.enrolled
+			if opts.ManagedEnrolledPending != wantEnrolledPending {
+				t.Fatalf("ManagedEnrolledPending = %t, want %t", opts.ManagedEnrolledPending, wantEnrolledPending)
+			}
+			if tc.standalone && (opts.FailMode != "closed" || !opts.StrictAvailability) {
+				t.Fatalf("standalone refusal is not closed: fail mode %q strict %v", opts.FailMode, opts.StrictAvailability)
+			}
+		})
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -308,6 +309,28 @@ func TestStrictInstallWindowFollowsTheRequestsProfileTier(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestStrictInstallWindowInspectAnswersBeforeScanDeadline(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	dataDir := t.TempDir()
+	api := installWindowServer(t, "openclaw", "strict", "observe", dataDir, nil)
+	holdInstallLock(t, dataDir)
+	api.inspectToolScanTimeout = time.Nanosecond
+	call := `{"tool":"read_file","args":{"path":"/tmp/hello.txt"}}`
+	response, verdict := postInspectForConnector(t, api, "openclaw", call)
+	if response.Code != http.StatusOK || verdict.Action != "block" || verdict.Mode != "action" ||
+		!slices.Contains(verdict.Findings, hookInstallWindowStrictRuleID) {
+		t.Fatalf("strict install answer: status=%d verdict=%+v", response.Code, verdict)
+	}
+	if err := os.Remove(filepath.Join(dataDir, ".install.lock")); err != nil {
+		t.Fatal(err)
+	}
+	allowed := &ToolInspectVerdict{Action: "allow"}
+	api.strictInstallWindowInspect(t.Context(), "openclaw", &ToolInspectRequest{Tool: "read_file"}, allowed)
+	if allowed.Action != "allow" || slices.Contains(allowed.Findings, hookInstallWindowStrictRuleID) {
+		t.Fatalf("ordinary unlocked call changed: %+v", allowed)
 	}
 }
 

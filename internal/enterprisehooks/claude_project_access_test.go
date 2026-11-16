@@ -5,14 +5,13 @@ package enterprisehooks
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"testing"
 )
 
 func TestDecideClaudeProjectRead(t *testing.T) {
-	denied := fmt.Errorf("%w: user cannot read project", errClaudeProjectAccessDenied)
-	unexpected := errors.New("token unavailable")
+	denied := errors.New("user cannot read project")
+	unexpected := errors.New("project path is not local")
 	for _, tc := range []struct {
 		name               string
 		accessErr, readErr error
@@ -21,7 +20,7 @@ func TestDecideClaudeProjectRead(t *testing.T) {
 		{"readable", nil, nil, claudeProjectKeep},
 		{"missing file", nil, os.ErrNotExist, claudeProjectKeep},
 		{"directory denied", denied, nil, claudeProjectRefused},
-		{"token unavailable", unexpected, nil, claudeProjectUnreadable},
+		{"project path rejected", unexpected, nil, claudeProjectRefused},
 		{"file read failed", nil, denied, claudeProjectUnreadable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

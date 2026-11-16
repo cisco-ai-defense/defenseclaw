@@ -278,7 +278,7 @@ func TestVerifyDoesNotProveAnUnenrolledManagedHermes(t *testing.T) {
 				if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), []byte(`{"results":[]}`), 0o640); err != nil {
 					t.Fatal(err)
 				}
-				data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+				data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 					User:        "alice",
 					UID:         &uid,
 					Connector:   "hermes",

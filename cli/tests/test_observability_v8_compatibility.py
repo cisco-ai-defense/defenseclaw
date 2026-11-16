@@ -30,6 +30,8 @@ from defenseclaw.observability.v8_compatibility import (
     load_v7_compatibility_selection,
 )
 
+from tests.helpers import registered_audit_action_count
+
 
 def _selector(**values: list[str]) -> dict[str, list[str]]:
     return values
@@ -167,7 +169,7 @@ def test_packaged_loader_reads_the_checked_generated_artifact() -> None:
     audit_selector = next(
         selector for selector in selection.exporter_selectors("audit_sink", "logs") if selector.actions
     )
-    assert len(audit_selector.actions) == 239
+    assert len(audit_selector.actions) == registered_audit_action_count()
     assert "fleet.device.credential_provision_authorized" in audit_selector.actions
     assert "fleet.device.decommission_authorized" in audit_selector.actions
     assert "setup-redaction-policy" in audit_selector.actions

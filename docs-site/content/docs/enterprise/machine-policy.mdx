@@ -64,7 +64,7 @@ What each route does during a gateway outage is in the [gateway outage table](/d
 | GitHub Copilot CLI (`copilot`) | Machine policy, with the foreign-hook guard | Same |
 | OpenCode (`opencode`) | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard | Same |
 | Amp (`amp`) | Per user, with the gateway-backed foreign-hook guard | Per user (in-agent plugin), with a local foreign-hook session record; the plugin itself blocks gateway outages |
-| Devin (`devin`) | Per user, with the foreign-hook guard; Cascade in builds before 3.9.19 is turned off through machine policy (`devincascade`) | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
+| Devin (`devin`) | Per user, with the foreign-hook guard; builds before 3.9.19 that still run Cascade are not covered | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
 | Hermes (`hermes`) | Per user, with the foreign-hook guard | Per user (hook binary) |
 | Antigravity (`antigravity`) | Per user | Per user (hook binary) |
 | Kiro (`kiro`) | Per user: the user's global `~/.kiro/hooks/defenseclaw.json` plus the CLI 2.x `defenseclaw` agent | Per user: `%USERPROFILE%\.kiro\hooks\defenseclaw.json` plus the CLI 2.x `defenseclaw` agent, through the hook binary |
@@ -88,7 +88,7 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `/etc/cursor/hooks.json` |
 | Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
 | OpenCode | `/etc/opencode/opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `/etc/devin/hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `/etc/devin/hooks.json` |
 
   </Tab>
   <Tab value="macOS">
@@ -100,7 +100,7 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `/Library/Application Support/Cursor/hooks.json` |
 | Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
 | OpenCode | `/Library/Application Support/opencode/opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `/Library/Application Support/Devin/hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `/Library/Application Support/Devin/hooks.json` |
 
   </Tab>
   <Tab value="Windows">
@@ -112,14 +112,14 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `%ProgramData%\Cursor\hooks.json` |
 | Copilot | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` |
 | OpenCode | `%ProgramData%\opencode\opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `%ProgramData%\Devin\hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `%ProgramData%\Devin\hooks.json` |
 
   </Tab>
 </Tabs>
 
 On Linux and macOS, only root may write the folders that hold these files. `verify` and `status` report a folder above them that another account can write (group or other write in the mode, or a POSIX or macOS ACL entry that grants write), and the connector does not count as covered. `ensure`, `repair` and the guardian remove those ACL entries and the write bits; read-only entries stay.
 
-For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. The Cascade refusal goes into the pre-rename Cascade hooks file when only that file exists; see [Cascade on older builds](/docs/connectors/devin). Cascade is published while `devin` is protected and is not a connector of its own: it enrolls no user.
+For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. DefenseClaw publishes no Cascade refusal: the pre-rename Cascade hooks file is imported by the Devin CLI as Devin Local hooks, and no evidence shows that a Devin build running Cascade reads the Devin hooks file. `ensure` removes the refusal releases 1.0.5 to 1.0.8 wrote into either file, and builds before 3.9.19 are reported as not covered; see [Cascade on older builds](/docs/connectors/devin). `devincascade` is not a connector of its own: it enrolls no user.
 
 ## Who writes machine policy
 
@@ -130,7 +130,7 @@ For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode
 
 On every OS the guardian keeps each enrolled user's DefenseClaw runtime in step with the policy, and `verify` reports any drift. On Linux and macOS the guardian never writes machine policy itself: when DefenseClaw's Claude Code drop-in is edited or deleted it logs a tamper and starts the lifecycle's config-apply job, whose `ensure` puts the drop-in back within seconds.
 
-On Windows, Codex's `requirements.toml` stays installed for every enabled Codex deployment, including one with zero enrolled users. The lifecycle writes it at install, upgrade or repair, and the guardian repairs it. `status` reports a Codex install it could not enroll and names missing policy; treat that warning as a protection failure and stop Codex use until repair succeeds.
+On Windows, Codex's `requirements.toml` stays installed for every enabled Codex deployment, including one with zero enrolled users. The lifecycle writes it at install, upgrade or repair, and the guardian repairs it. If `%ProgramData%\OpenAI\Codex`, or the `OpenAI` folder above it, is deleted, the standalone guardian recreates it on its next pass with the protection Setup gives it, and logs that it did. A link on that path is not followed or changed: the guardian names the link once, with the `cmd /c rmdir` command that removes it, and keeps refusing until it is gone. `status` reports a Codex install it could not enroll and names missing policy; treat that warning as a protection failure and stop Codex use until repair succeeds.
 
 On Windows, Claude Code's `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` stays installed for every enabled Claude Code deployment, including one with zero enrolled users. Its protected state records enrolled SIDs; removing the last SID leaves the hook policy enforcing. A missing drop-in is drift: Claude Code then runs without DefenseClaw hooks. `enterprise windows status` may still show the generic unenrolled-user refusal text; `status` does not name a missing Claude Code machine policy and cannot establish protection. `enterprise policy verify` fails on a missing machine hook. Stop Claude Code use, repair the machine policy, and resume only after `enterprise policy verify` passes.
 
@@ -165,7 +165,58 @@ On Windows, Codex, Claude Code and Cursor policy is written with Windows-specifi
 - **Claude Code registry policy.** While `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` holds a non-empty value, DefenseClaw does not publish its Claude Code drop-in and reports an error for each Claude Code target. DefenseClaw does not merge with that value. Keep it empty on hosts where DefenseClaw manages Claude Code. Setup install, ensure, upgrade and repair check this before they change anything: with the value set and Claude Code enabled in the config they stop at once with `claude_registry_policy`, name the value and change nothing. Delete the value and run Setup again, or set `guardrail.connectors.claudecode.enabled: false` if the registry policy must stay.
 - **Codex.** DefenseClaw parses `requirements.toml` and writes it back whole, so comments and key order are not kept. It always sets `allow_managed_hooks_only = true` and `[features] hooks = true`; if your file sets either to `false`, the transaction fails.
 - **Settings.** `ownership` and `higher_precedence_sources` do not change how Codex, Claude Code or Cursor policy is written. `enterprise policy verify` checks their configured machine hooks even with `ownership: "off"` and zero enrolled users. `managed_hooks_only` changes only the Claude Code lock, and decides whether the foreign-hook guard covers Codex and Claude Code. `ownership` applies to Copilot and OpenCode, and `connectors.claudecode.ownership` also applies to the [version floor](#claude-code-version-floor) drop-in, but not to `90-defenseclaw.json`.
-- **Vendor folders under `%ProgramData%`.** Standard users may create folders there. A vendor folder a standard user created first gets DefenseClaw's owner and protected DACL. A file, junction, symbolic link or folder a standard user left at a vendor path or at DefenseClaw's drop-in name is removed (a link, never its target) or moved aside to a hidden `.<name>.defenseclaw-displaced-<time>-<id>` name, and the folder is created in its place. A `*.json` a standard user left in Copilot's `policy.d` is moved aside the same way. Install, reconcile and uninstall all do this. Objects owned by Administrators, LocalSystem or TrustedInstaller are never removed; DefenseClaw reports them.
+- **Vendor folders under `%ProgramData%`.** Standard users may create folders there. A vendor folder a standard user created first gets DefenseClaw's owner and protected DACL.
+
+  On a standalone deployment three cases differ. DefenseClaw tells them apart from its administrator-only ownership records (`<lifecycle folder>\machine-policy\<connector>.json`):
+
+  - A folder DefenseClaw created is its own, and its access list is put back. A folder that also holds a DefenseClaw-named file is refused and named instead, as for every managed folder.
+  - A vendor folder DefenseClaw did not create that holds no file DefenseClaw recorded is taken over as described here.
+  - A vendor folder DefenseClaw did not create that holds a file DefenseClaw recorded is not taken over on sight. An example is a `C:\ProgramData\Devin` the vendor made, holding DefenseClaw's `hooks.json`.
+
+  In that last case the recorded file keeps its own administrator-only access list. The folder is left as it is while no standard user can delete or replace that file there and the vendor reads only that file name there. Devin reads only `hooks.json`, in both of its folders, so the inherited "Users may add files" entry of `%ProgramData%` does no harm there.
+
+  The folder stops protecting the file when a standard user gains delete-child, change-permissions or ownership. If the vendor loads more than one file from the folder, it also stops protecting it when a standard user can add a file: GitHub Copilot loads every `*.json` in `policy.d`, and OpenCode prefers an `opencode.jsonc` over DefenseClaw's `opencode.json`. The next reconcile (the guardian pass, Setup `/ensure`, `/repair`, `/upgrade` or `/reconcile`) then puts the folder back to DefenseClaw's owner and protected access list in one safe transaction, and says so once.
+
+  The transaction opens the folder and every file DefenseClaw recorded in it and keeps them open until it is done. It puts the access list back only if all of this holds:
+
+  - No other program has the folder open with delete access, or a recorded file open with write or delete access or without sharing read access.
+  - Each recorded file is a regular file with one link, only administrators can change it, and it still has the bytes DefenseClaw recorded.
+  - For a vendor that loads every file in the folder, nothing else is in the folder.
+
+  A file a standard user adds between these checks and the new access list is moved aside right after it. A file an administrator adds then stays, and the folder is refused by name. A handle that another program opened before the transaction only to change the access list or the owner is not seen by these checks. The next guardian pass sees what that handle changes and puts the folder back again or refuses it.
+
+  Setup lists the change in its result. The gateway writes a HIGH `connector-hook-repaired` audit row with the connector, the folder, the access list before and after, and who did it (Setup or the hook guardian).
+
+  If a check fails, nothing is changed. Something holds the folder or a file open, a file has a second link, a file was changed, renamed or removed, or the folder holds a file DefenseClaw did not write. Then:
+
+  - Setup `/ensure`, `/repair`, `/upgrade` and `/reconcile` stop with `1603` before any service stops.
+  - The guardian pass reports the refusal and does not finish clean.
+  - Setup and the guardian write a HIGH `managed_vendor_folder_not_protected` alert.
+  - `Setup /verify` and `enterprise policy verify` report the connector not covered.
+  - One message names the folder, what blocked the transaction and the fix.
+
+  The fix also removes inherited entries such as ProgramData's "Users may add files". From an elevated prompt run, in order:
+
+  1. `icacls "<folder>" /setowner "*S-1-5-32-544"`
+  2. `icacls "<folder>" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-32-545:(OI)(CI)RX"`
+  3. `icacls "<folder>" /remove:g` for any other account that the message names and that can change the folder. An account that only reads stays.
+  4. Setup `/ensure`
+
+  A policy file DefenseClaw has no record of is judged the same way. A purge that keeps a file another account can change leaves the next install in this state: the folder holds no recorded file, so it is taken over, but DefenseClaw cannot read the file, merge into it or move it aside. This covers OpenCode's `opencode.json` and `opencode.jsonc`, any Copilot `*.json` in `policy.d` other than DefenseClaw's own drop-in, and a link or other entry that is not a regular file. Setup `/status` warns, `/verify` fails, and `/ensure`, `/repair`, `/upgrade` and `/reconcile` stop with `1603` before anything changes. The message names the file, says that DefenseClaw has no record of writing it and why another account can change it, and gives one fix that works whatever the cause (an inherited or explicit entry, several accounts, no access list at all). From an elevated PowerShell prompt run, in order:
+
+  1. `icacls '<file>' /setowner '*S-1-5-32-544'`
+  2. `icacls '<file>' /reset`
+  3. `icacls '<file>' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-32-545:RX'`
+
+  The paths are single-quoted PowerShell literals, so a `$` or a backtick in a file name does not expand. For a link or other entry, the fix is `Rename-Item -LiteralPath '<entry>' -NewName '<name>.moved-aside'`. It fails when that name already exists; `Move-Item` would move the entry into a folder or junction planted there. Check the file, then run Setup `/ensure`. The guardian pass writes the same HIGH `managed_vendor_folder_not_protected` alert once for the file and does not finish clean while it stands. A file a standard account owns is moved aside by the next reconcile, so it blocks nothing, but Setup reports it as not covered until it has been (under `ownership: verify_only` nothing moves it, and the message gives the fix above). An empty folder passes, and so does a file only administrators can change.
+
+  `/status` and `/verify` also carry every other reason `enterprise policy verify` calls a connector uncovered, for each connector on the machine policy route (Codex, Claude Code, Cursor, Copilot, OpenCode): a conflict such as an administrator's `*.json` that is not valid JSON, an error, a source of higher precedence, or no DefenseClaw hook entry published. They appear under the code `machine_policy_not_covered` and make `coverage_complete` false. Both commands ask the same function, so Setup never reports coverage that `enterprise policy verify` denies. These reasons do not stop `/ensure`, which repairs what it can.
+
+  Removing that connector does not fail on such a folder and does not take it over. The uninstall removes DefenseClaw's entries only from a file that only administrators can change, and keeps their own changes. It leaves any file another account can change as it is, drops DefenseClaw's record, and names the folder and the fix in a warning. For a file it leaves, the warning also says that DefenseClaw's hook entries now name binaries the uninstall removed. Delete the entries whose command names DefenseClaw's hook.
+
+  The same holds for a recorded file in a folder that does protect it. An uninstall no longer fails on a file another account can change. It leaves the file byte for byte, drops the record and warns once. The warning names the account and the access-list fix, says what the agent does with a hook whose program is gone (the call fails, and depending on the agent it can be blocked until the entries are removed), and says how to remove the entries.
+
+  A file, junction, symbolic link or folder a standard user left at a vendor path or at DefenseClaw's drop-in name is removed (a link, never its target) or moved aside to a hidden `.<name>.defenseclaw-displaced-<time>-<id>` name, and the folder is created in its place. A `*.json` a standard user left in Copilot's `policy.d` is moved aside the same way. Install, reconcile and uninstall all do this. Objects owned by Administrators, LocalSystem or TrustedInstaller are never removed; DefenseClaw reports them.
 - **`policy show`** checks Claude Code with the same rules as on Linux and macOS, including the lock under `enforce`.
 
 ## Locks on Linux and macOS
@@ -300,7 +351,7 @@ Some policy sources outrank the files DefenseClaw writes.
 
 `higher_precedence_sources` decides what happens when a visible source does not include DefenseClaw's hooks. Visible sources exist on macOS and on Windows (the Claude Code HKLM `Settings` value). On Windows the setting changes only what `policy show` and `verify` report: the lifecycle never publishes the Claude Code drop-in while that value is set.
 
-- **`fail` (default).** The source is recorded as a conflict and the connector counts as not covered. `ensure` and `status` report the warning `machine_policy_incomplete`, which names the source, with `security_complete: false`. `defenseclaw-gateway enterprise macos verify` exits 1. Enrollment continues.
+- **`fail` (default).** The source is recorded as a conflict and the connector counts as not covered. `ensure` and `status` report the warning `machine_policy_incomplete`, which names the source, with `security_complete: false`. `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify` exits 1. Enrollment continues.
 - **`warn`.** The source is reported as a note, and the connector can still count as covered.
 
 ## Inspect, export and verify
@@ -336,7 +387,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
 | `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/index.js`. Deploy it only where that plugin is installed. |
-| `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
+| `devincascade` | None: DefenseClaw publishes no Cascade entry, so export returns an error |
 | `wsl` | Windows. `reg` (default), `json`, `intune`: the Claude Desktop `disableWslSessions` gate and, with `platform: disable`, `AllowWSL=0`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 
 - **`verify`** checks coverage and exits 1 when any machine-policy connector is not covered, or when `--user` finds a foreign hook that would be blocked.
@@ -365,7 +416,7 @@ The other agent-specific limits are:
 - **Older Claude Code releases (Linux and macOS).** Releases that do not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77) ignore both DefenseClaw drop-ins. A standard user can run one from a private `npm --prefix` install without a hook decision or tool-call audit. The enumerator reports a copy in a known npm root or any npm prefix below the user's home, and a Claude Code extension or desktop engine below that floor, by version and path, makes managed completeness false and audits the coverage finding. That audit reports the gap; it cannot reconstruct the uninspected tool call. Renamed, copied and self-built clients, or clients started and removed between scans, need application control. Allow only approved Claude Code versions at or above 2.1.154. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
 - **Older Copilot CLI releases.** A Copilot CLI below its 1.0.18 floor can skip machine policy: 1.0.15, installed under a home and run with `--no-auto-update`, does not load `/etc/github-copilot/policy.d`, and its tool calls run with no audit record.
 - **Copilot.** The vendor hook reference says a timed-out `preToolUse` command hook is non-blocking, including policy hooks. A later `PermissionRequest` hook may still deny: Copilot CLI 1.0.91 denied the managed Linux stop drill ("hook errored"), while earlier releases ran the call. Re-check each release. On Windows, Copilot also loads policy hooks from `HKLM\Software\Policies\GitHub\Copilot`; those run beside DefenseClaw's drop-in.
-- **OpenCode.** The order in which OpenCode runs plugins is not a documented contract, so the foreign-hook guard stays on. OpenCode pure mode (`opencode --pure` or a true `OPENCODE_PURE` value) loads no plugins, and `OPENCODE_TEST_MANAGED_CONFIG_DIR` can replace the managed config directory with another path. A session started either way never calls DefenseClaw's hooks, so its tool calls are not inspected. `OPENCODE_PURE=0/false` does not enable pure mode. `OPENCODE_CONFIG_DIR` adds another config directory and does not remove the enrolled managed plugin. Managed `status` and `verify` scan running OpenCode processes on Linux, macOS and Windows: they report the process and mark coverage incomplete when they find a bypass or cannot establish its launch environment. The observation is written to the gateway audit; Windows also records the coverage code in the enterprise event log and the process detail in its protected lifecycle log. An audit delivery failure is reported. `policy show` describes the installed registration; it cannot prove how a running client was launched. A session that ends before a process scan cannot be observed by that scan. Use application control to prevent pure-mode launches where inspection is required. `OPENCODE_CONFIG_CONTENT` and `OPENCODE_DISABLE_DEFAULT_PLUGINS` do not remove the managed plugin.
+- **OpenCode.** The order in which OpenCode runs plugins is not a documented contract, so the foreign-hook guard stays on. OpenCode 2.2.5 has no pure mode (no `--pure` flag) and does not read `OPENCODE_PURE` or `OPENCODE_TEST_MANAGED_CONFIG_DIR`, the two ways OpenCode V1 skipped the managed plugin. It loads that plugin from `/etc/opencode` on Linux and `/Library/Application Support/opencode` on macOS. On Windows it uses `%ProgramData%\opencode` as the process environment names `ProgramData`, so a session started with another `ProgramData` runs without DefenseClaw's hooks. `OPENCODE_CONFIG_DIR` adds another config directory and does not remove the enrolled managed plugin. Managed `status` and `verify` scan running OpenCode processes on Linux, macOS and Windows: they report the process and mark coverage incomplete when its `ProgramData` was moved (Windows), when it was started with `OPENCODE_PURE` or `OPENCODE_TEST_MANAGED_CONFIG_DIR` (in case a later release reads them again), or when they cannot establish its launch environment. The observation is written to the gateway audit; Windows also records the coverage code in the enterprise event log and the process detail in its protected lifecycle log. An audit delivery failure is reported. `policy show` describes the installed registration; it cannot prove how a running client was launched. A session that ends before a process scan cannot be observed by that scan. Use application control to prevent launches with a moved `ProgramData` where inspection is required. `OPENCODE_CONFIG_CONTENT` and `OPENCODE_DISABLE_DEFAULT_PLUGINS` do not remove the managed plugin.
 - **Per-user connectors.** Amp has no machine-wide plugin location. A changed `HOME`, `USERPROFILE` (Windows) or `XDG_CONFIG_HOME` can move Amp, Devin, Antigravity or Hermes away from the config the guardian repairs. On Windows, redirected `APPDATA` can move Devin's config and redirected `LOCALAPPDATA` can move Hermes' config. `devin --config` selects another file; Hermes `--safe-mode` or `HERMES_SAFE_MODE` skips its user hooks, and `HERMES_HOME` or `HERMES_MANAGED_DIR` can move them. Kiro CLI can select another agent with `--agent`, start a cloud session with `--cloud`, resume a session of unverified placement with `--resume-id`, or move its agent files with `KIRO_HOME`, `KIRO_AGENT_CONFIG_DIR` or `KIRO_TEST_AGENTS_DIR`. Managed `status` and `verify` inspect selected launch variables and report bypasses or unreadable process environments as incomplete coverage. On Windows, the elevated CLI reads these variables from the process and resolves its profile through the owner SID; a process it cannot read stays unverified. A value Hermes reads from a `.env` file after process start, or a session that ends before a scan, may not be recoverable from the process table; use application control where those launches must be prohibited.
 - **Hermes.** Reviewed Hermes 0.21 supports `fail_closed: true` on `pre_tool_call`. Setup and guardian reconciliation now write it; `verify` rejects an entry missing it, and existing Hermes sessions must restart to load the repaired registration. Hermes 0.19/0.20 do not support it and can run a tool after hook process failure. Hermes 0.21 still treats a killed hook (non-2 exit with empty stdout) as no decision, so status and verify keep `hook_process_fail_open` for it.
 - **Devin.** A killed pre-tool hook may let the call run.

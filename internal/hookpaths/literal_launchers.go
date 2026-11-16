@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"maps"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,22 +52,37 @@ func simpleShellParameter(word *syntax.Word) string {
 // literalProgramOperands descends only through launchers with known argument
 // positions. An unknown option does not turn an option value into a program.
 func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool) []string {
+	return literalProgramOperandsKnown(words, stmt, cwd, home, depth, allowFileRead, nil, nil)
+}
+
+func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool, environment actionValues, include func(string) bool) []string {
 	for wrapper := 0; wrapper < 8 && len(words) > 0; wrapper++ {
 		program := programBase(words[0])
 		switch program {
 		case "env":
 			index := 1
+			environment = maps.Clone(environment)
 			for index < len(words) {
 				word := words[index]
 				switch {
 				case word == "--":
 					index++
 					goto nextProgram
-				case word == "-i" || word == "--ignore-environment" || word == "-v" || word == "--debug":
+				case word == "-i" || word == "--ignore-environment":
+					environment = nil
+					index++
+				case word == "-v" || word == "--debug":
 					index++
 				case word == "-u" || word == "--unset":
+					if index+1 < len(words) {
+						delete(environment, words[index+1])
+					}
 					index += 2
-				case strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "-u") && len(word) > 2:
+				case strings.HasPrefix(word, "--unset="):
+					delete(environment, strings.TrimPrefix(word, "--unset="))
+					index++
+				case strings.HasPrefix(word, "-u") && len(word) > 2:
+					delete(environment, word[2:])
 					index++
 				case word == "-C" || word == "--chdir":
 					if index+1 >= len(words) {
@@ -81,6 +97,11 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 					cwd = OperandPath(word[2:], cwd)
 					index++
 				case strings.Contains(word, "=") && !strings.HasPrefix(word, "-"):
+					name, value, _ := strings.Cut(word, "=")
+					if environment == nil {
+						environment = actionValues{}
+					}
+					environment[name] = value
 					index++
 				case strings.HasPrefix(word, "-"):
 					return nil
@@ -125,6 +146,10 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 					index++
 					goto execDone
 				case "-a":
+					// exec -a NAME: a missing name leaves no program to read.
+					if index+1 >= len(words) {
+						return nil
+					}
 					index += 2
 				case "-c", "-l":
 					index++
@@ -176,20 +201,33 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 				if redirects, parsed, _ := ShellWriteOperands(words[body], cwd, home); parsed {
 					operands = append(operands, redirects...)
 				}
-				operands = append(operands, literalWriteOperandsDepth(words[body], cwd, home, depth+1)...)
-				if len(words) >= body+3 {
-					operands = append(operands, literalPositionalShellRedirects(words[body], words[body+2], cwd, home)...)
+				writes, _ := literalWriteOperandsWithParsedKnown(words[body], cwd, home, depth+1, nil, environment, include)
+				operands = append(operands, writes...)
+				if len(words) >= body+2 {
+					operands = append(operands, literalPositionalShellRedirects(words[body], words[body+1:], cwd, home)...)
 				}
 				return operands
 			}
 			if allowFileRead {
-				if script, ok := shellScriptOperand(words); ok && actionScriptInsideCWD(script, cwd) {
-					return literalLocalShellScriptOperands(script, cwd, home, depth)
+				if script, ok := shellScriptOperand(words); ok {
+					operands, _ := literalLocalShellScriptOperands(script, cwd, home, depth)
+					return operands
 				}
 			}
 			return nil
+		case "eval":
+			if include == nil || len(words) < 2 || len(words) > 8 {
+				return nil
+			}
+			body := strings.Join(words[1:], " ")
+			writes, _ := literalWriteOperandsWithParsedKnown(body, cwd, home, depth+1, nil, environment, include)
+			return writes
 		case "find":
-			return literalFindOperands(words, cwd, home, depth)
+			operands := literalFindOperands(words, cwd, home, depth)
+			if include != nil {
+				operands = append(operands, knownFindChangeOperands(words, cwd)...)
+			}
+			return operands
 		case ".", "source":
 			if allowFileRead {
 				return literalSourceFileOperands(words, cwd, home, depth)
@@ -208,22 +246,30 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
 		default:
-			if allowFileRead && strings.HasSuffix(program, ".sh") && actionScriptInsideCWD(words[0], cwd) {
-				return literalLocalShellScriptOperands(words[0], cwd, home, depth)
+			if allowFileRead && strings.HasSuffix(program, ".sh") {
+				if operands, read := literalLocalShellScriptOperands(words[0], cwd, home, depth); read {
+					return operands
+				}
 			}
-			return directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
+			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
+			if include != nil {
+				operands = append(operands, knownEntryChangeOperands(words, cwd)...)
+			}
+			return operands
 		}
 	}
 	return nil
 }
 
-func literalLocalShellScriptOperands(script, cwd, home string, depth int) []string {
-	content, read := readIndirectSource(script, cwd)
+// literalLocalShellScriptOperands is the write operands of the script a shell
+// or a .sh program runs, and whether the script was read.
+func literalLocalShellScriptOperands(script, cwd, home string, depth int) ([]string, bool) {
+	content, read := readActionScript(script, cwd)
 	if !read {
-		return nil
+		return nil, false
 	}
 	writes, _, _ := ShellWriteOperands(content, cwd, home)
-	return append(writes, literalWriteOperandsDepth(content, cwd, home, depth+1)...)
+	return append(writes, literalWriteOperandsDepth(content, cwd, home, depth+1)...), true
 }
 
 func literalInteger(value string) bool {
@@ -665,9 +711,9 @@ func literalFindOperands(words []string, cwd, home string, depth int) []string {
 	return nil
 }
 
-func literalPositionalShellRedirects(command, value, cwd, home string) []string {
+func literalPositionalShellRedirects(command string, arguments []string, cwd, home string) []string {
 	file, ok := parseShell(command)
-	if !ok || value == "" || strings.HasPrefix(value, "-") {
+	if !ok {
 		return nil
 	}
 	var operands []string
@@ -676,12 +722,16 @@ func literalPositionalShellRedirects(command, value, cwd, home string) []string 
 			return false
 		}
 		redirect, ok := node.(*syntax.Redirect)
-		if !ok || redirect.Word == nil || simpleShellParameter(redirect.Word) != "1" {
+		if !ok || redirect.Word == nil {
+			return true
+		}
+		index, err := strconv.Atoi(simpleShellParameter(redirect.Word))
+		if err != nil || index < 0 || index >= len(arguments) || arguments[index] == "" || strings.HasPrefix(arguments[index], "-") {
 			return true
 		}
 		switch redirect.Op {
 		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
-			operands = append(operands, OperandPath(value, cwd))
+			operands = append(operands, OperandPath(arguments[index], cwd))
 		}
 		return true
 	})
@@ -692,7 +742,7 @@ func literalPipelineOperands(file *syntax.File, called map[string]bool, cwd, hom
 	var operands []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
-			return declaration.Name != nil && called[declaration.Name.Value]
+			return declaration.Name != nil && (called[declaration.Name.Value] || called[knownUnshadowed(declaration.Name.Value)])
 		}
 		binary, ok := node.(*syntax.BinaryCmd)
 		if !ok || binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {
@@ -781,4 +831,212 @@ func literalGeneratedScriptOperands(file *syntax.File, cwd, home string, depth i
 		return nil
 	}
 	return append(redirects, literalWriteOperandsDepth(script, cwd, home, depth+1)...)
+}
+
+// entryChangeOptions is the option grammar of a command that removes,
+// renames or changes the mode, owner or times of its operands. short lists
+// the short options that take a value; long maps each long option to 1 when
+// it takes a value and 2 when its value is optional (only the --name=value
+// form). target names the options whose value is the directory that
+// receives the entries. A value of any other option is read, not changed.
+type entryChangeOptions struct {
+	short, target string
+	long          map[string]int
+	// leading: the first operand is a mode or owner, unless a reference
+	// file stands in for it.
+	leading bool
+	// lastOnly: the command reads its sources and changes only its last
+	// operand, unless it names a target directory or creates directories.
+	lastOnly bool
+}
+
+var (
+	entryChangeOwnerOptions = entryChangeOptions{leading: true, long: map[string]int{
+		"changes": 0, "dereference": 0, "no-dereference": 0, "from": 1, "no-preserve-root": 0,
+		"preserve-root": 0, "quiet": 0, "silent": 0, "reference": 1, "recursive": 0, "verbose": 0, "help": 0, "version": 0,
+	}}
+	entryChangeGrammars = map[string]entryChangeOptions{
+		"rm": {long: map[string]int{
+			"force": 0, "interactive": 2, "one-file-system": 0, "no-preserve-root": 0, "preserve-root": 2,
+			"recursive": 0, "dir": 0, "verbose": 0, "help": 0, "version": 0,
+		}},
+		"unlink": {long: map[string]int{"help": 0, "version": 0}},
+		"rmdir":  {long: map[string]int{"ignore-fail-on-non-empty": 0, "parents": 0, "verbose": 0, "help": 0, "version": 0}},
+		"chmod": {leading: true, long: map[string]int{
+			"changes": 0, "silent": 0, "quiet": 0, "verbose": 0, "no-preserve-root": 0, "preserve-root": 0,
+			"reference": 1, "recursive": 0, "help": 0, "version": 0,
+		}},
+		"chown": entryChangeOwnerOptions,
+		"chgrp": entryChangeOwnerOptions,
+		"shred": {short: "ns", long: map[string]int{
+			"force": 0, "iterations": 1, "random-source": 1, "remove": 2, "size": 1, "exact": 0, "zero": 0,
+			"verbose": 0, "help": 0, "version": 0,
+		}},
+		"mv": {short: "St", target: "t", long: map[string]int{
+			"backup": 2, "force": 0, "interactive": 0, "no-clobber": 0, "no-copy": 0, "strip-trailing-slashes": 0,
+			"suffix": 1, "target-directory": 1, "no-target-directory": 0, "update": 2, "verbose": 0, "context": 0,
+			"exchange": 0, "debug": 0, "help": 0, "version": 0,
+		}},
+		"touch": {short: "drt", long: map[string]int{
+			"date": 1, "no-create": 0, "no-dereference": 0, "reference": 1, "time": 1, "help": 0, "version": 0,
+		}},
+		"install": {short: "gmoSt", target: "t", lastOnly: true, long: map[string]int{
+			"backup": 2, "compare": 0, "directory": 0, "group": 1, "mode": 1, "owner": 1, "preserve-timestamps": 0,
+			"strip": 0, "strip-program": 1, "suffix": 1, "target-directory": 1, "no-target-directory": 0,
+			"verbose": 0, "preserve-context": 0, "context": 2, "debug": 0, "help": 0, "version": 0,
+		}},
+	}
+)
+
+// entryChangeLongOption resolves a long option name, or its unambiguous
+// prefix, the way getopt_long does.
+func entryChangeLongOption(long map[string]int, name string) (string, int, bool) {
+	if kind, ok := long[name]; ok {
+		return name, kind, true
+	}
+	match, kind, matches := "", 0, 0
+	for option, optionKind := range long {
+		if strings.HasPrefix(option, name) {
+			match, kind, matches = option, optionKind, matches+1
+		}
+	}
+	return match, kind, matches == 1
+}
+
+// chmodModeWord reports a chmod mode written like an option (-w, -x+r).
+func chmodModeWord(word string) bool {
+	return len(word) > 1 && strings.HasPrefix(word, "-") && strings.Trim(word, "rwxXstugoa,+-=01234567") == ""
+}
+
+// knownEntryChangeOperands lists the operands a command changes without
+// writing content: it removes or renames the entry, or changes its mode,
+// owner or times. The known-environment reader judges these operands like
+// writer targets, so a protected file named through a known value is read
+// the same as the literal name. The options are read with the grammar of
+// the command, so a value an option only reads (a reference file, a random
+// source) and the leading mode or owner are not listed.
+func knownEntryChangeOperands(words []string, cwd string) []string {
+	if len(words) < 2 {
+		return nil
+	}
+	program := programBase(words[0])
+	if program == "sed" || program == "gsed" {
+		names := sedInPlaceFiles(words)
+		for i, name := range names {
+			names[i] = OperandPath(name, cwd)
+		}
+		return names
+	}
+	grammar, ok := entryChangeGrammars[program]
+	if !ok {
+		// The GNU g-prefixed names of a BSD system.
+		program = strings.TrimPrefix(program, "g")
+		if grammar, ok = entryChangeGrammars[program]; !ok {
+			return nil
+		}
+	}
+	var operands, targets []string
+	reference, directories, mode := false, false, false
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "--":
+			operands = append(operands, words[i+1:]...)
+			i = len(words)
+		case program == "chmod" && !mode && !reference && chmodModeWord(word):
+			// GNU chmod takes -w and the like as its mode operand.
+			mode = true
+		case strings.HasPrefix(word, "--"):
+			name, value, attached := strings.Cut(word[2:], "=")
+			option, kind, known := entryChangeLongOption(grammar.long, name)
+			if !known {
+				continue
+			}
+			if kind == 1 && !attached && i+1 < len(words) {
+				i++
+				value = words[i]
+			}
+			switch option {
+			case "reference":
+				reference = true
+			case "directory":
+				directories = true
+			case "target-directory":
+				targets = append(targets, value)
+			}
+		case len(word) > 1 && strings.HasPrefix(word, "-"):
+			for j := 1; j < len(word); j++ {
+				letter := word[j : j+1]
+				if !strings.Contains(grammar.short, letter) {
+					if program == "install" && letter == "d" {
+						directories = true
+					}
+					continue
+				}
+				value := word[j+1:]
+				if value == "" && i+1 < len(words) {
+					i++
+					value = words[i]
+				}
+				if strings.Contains(grammar.target, letter) {
+					targets = append(targets, value)
+				}
+				if program == "touch" && letter == "r" {
+					reference = true
+				}
+				break
+			}
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if grammar.leading && !mode && !reference && len(operands) > 0 {
+		operands = operands[1:]
+	}
+	if grammar.lastOnly && !directories {
+		if len(targets) > 0 {
+			operands = nil
+		} else if len(operands) > 1 {
+			operands = operands[len(operands)-1:]
+		}
+	}
+	operands = append(operands, targets...)
+	for i, name := range operands {
+		operands[i] = OperandPath(name, cwd)
+	}
+	return operands
+}
+
+// knownFindChangeOperands lists the start points of a find that removes
+// or changes what it finds, through -delete or an -exec entry change.
+func knownFindChangeOperands(words []string, cwd string) []string {
+	var roots []string
+	index := 1
+	for index < len(words) && !strings.HasPrefix(words[index], "-") && words[index] != "(" && words[index] != "!" {
+		roots = append(roots, words[index])
+		index++
+	}
+	var operands []string
+	for i := index; i < len(words); i++ {
+		switch words[i] {
+		case "-delete":
+			for _, root := range roots {
+				operands = append(operands, OperandPath(root, cwd))
+			}
+		case "-exec", "-execdir", "-ok", "-okdir":
+			end := i + 1
+			for end < len(words) && words[end] != ";" && words[end] != "+" {
+				end++
+			}
+			for _, root := range roots {
+				child := append([]string(nil), words[i+1:end]...)
+				for j := range child {
+					child[j] = strings.ReplaceAll(child[j], "{}", root)
+				}
+				operands = append(operands, knownEntryChangeOperands(child, cwd)...)
+			}
+			i = end
+		}
+	}
+	return operands
 }

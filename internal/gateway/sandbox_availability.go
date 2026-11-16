@@ -290,6 +290,11 @@ type sandboxPrerequisitesRecord struct {
 // the host's (install mode, driver, version, binaries, devices); the
 // account's own access to the driver's devices is judged by the probe.
 var sandboxOpenShellPrerequisite = func(cfg *config.Config, _ int, driver string) string {
+	if cfg != nil && strings.Contains(cfg.Enterprise.OpenShell.Version, "<") {
+		if _, _, possible := openshell.ManagedVersionPin(cfg.Enterprise.OpenShell.Version); !possible {
+			return "enterprise.openshell.version has no release at or above the OpenShell " + openshell.SupportedMin + " floor; ask your administrator to set a supported range"
+		}
+	}
 	record, ok := readSandboxPrerequisites(sandboxPrerequisitesPath(runtime.GOOS))
 	why := sandboxPrerequisiteWhy(cfg, runtime.GOOS, driver, record, ok)
 	return sandboxSetupSwitches.bound(why, sandboxSetupSwitchKey(cfg, runtime.GOOS, record), time.Now())
@@ -446,6 +451,14 @@ func installedOpenShellPrerequisite(detail string) string {
 		(strings.Contains(detail, " runs no DefenseClaw sandbox") || strings.Contains(detail, " is not supported")):
 		return detail + "; ask your administrator to upgrade OpenShell"
 	case strings.Contains(detail, " is installed, enterprise.openshell.version pins "):
+		if _, pin, ok := strings.Cut(detail, " is installed, enterprise.openshell.version pins "); ok {
+			if fields := strings.Fields(pin); len(fields) > 0 {
+				if _, raised, _ := openshell.ManagedVersionPin(fields[0]); raised {
+					return "OpenShell " + detail + "; enterprise.openshell.version is below the OpenShell " + openshell.SupportedMin +
+						" floor; ask your administrator to set the pin to " + openshell.InstallerVersion + " or later"
+				}
+			}
+		}
 		return "OpenShell " + detail + "; ask your administrator to install the pinned release"
 	}
 	return ""

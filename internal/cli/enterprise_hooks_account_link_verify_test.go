@@ -27,4 +27,11 @@ func TestGAP0193VerifyAccountLinkGuidance(t *testing.T) {
 	if note := enterpriseHookVerifyExcusedNote(run, removed); note != enterpriseHookRemovedAccountNote {
 		t.Fatalf("removed-account note = %q, want %q", note, enterpriseHookRemovedAccountNote)
 	}
+
+	foreign := row
+	foreign.Error = enterpriseHookAccountForeignLinkFailure
+	const wantForeign = " (the account stays unprotected until an administrator removes the link at its DefenseClaw folder)"
+	if note := enterpriseHookVerifyExcusedNote(run, foreign); note != wantForeign {
+		t.Fatalf("foreign-link verify note = %q, want %q", note, wantForeign)
+	}
 }

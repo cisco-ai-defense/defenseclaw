@@ -187,8 +187,7 @@ func serviceReadGrantScript(path, serviceAccount string, tree bool) string {
 	if !tree {
 		inherit = "'None'"
 	}
-	quoted := strings.ReplaceAll(filepath.Clean(path), "'", "''")
-	return "$ErrorActionPreference = 'Stop'; $d = [IO.DirectoryInfo]::new('" + quoted + "'); $a = $d.GetAccessControl(); " +
+	return "$ErrorActionPreference = 'Stop'; $d = [IO.DirectoryInfo]::new(" + PowerShellLiteral(filepath.Clean(path)) + "); $a = $d.GetAccessControl(); " +
 		"$a.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('" + sid + "'), " +
 		"'ReadAndExecute', " + inherit + ", 'None', 'Allow')); $d.SetAccessControl($a)"
 }

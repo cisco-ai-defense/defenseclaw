@@ -30,3 +30,20 @@ func TestHookPanicExitNotifyIsBestEffort(t *testing.T) {
 		t.Fatalf("notify panic exit = %d, want 0", code)
 	}
 }
+
+// GAP-0074: the panic sentence follows the hook's Secure Client host check;
+// a check that panics keeps the Secure Client sentence.
+func TestHookPanicSecureClientHost(t *testing.T) {
+	saved := secureClientHost
+	t.Cleanup(func() { secureClientHost = saved })
+	for _, want := range []bool{false, true} {
+		secureClientHost = func() bool { return want }
+		if got := hookPanicSecureClientHost(); got != want {
+			t.Fatalf("secure client host = %t, want %t", got, want)
+		}
+	}
+	secureClientHost = func() bool { panic("host check") }
+	if !hookPanicSecureClientHost() {
+		t.Fatal("a panicking host check must keep the Secure Client sentence")
+	}
+}

@@ -294,6 +294,184 @@ try {
             if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
                 $failures.Add("one account's folder link refused adoption: $($adoption.reason)")
             }
+            # GAP-0585: a link another principal (an administrator) owns at the
+            # account's folder fails only that account, counted the same way.
+            $foreignLink = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                error = 'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $foreignLink) -AccountLinkFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("a link another principal owns refused adoption: $($adoption.reason)")
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $foreignLink)
+            Assert-TestSyncRefuses 'foreign link without trusted count' 'failure-free reconcile'
+            Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $foreignLink, [pscustomobject]@{
+                    user = 'carol'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                }) -AccountLinkFailures 1
+            Assert-TestSyncRefuses 'foreign link next to another failure' 'failure-free reconcile'
+            # GAP-0773, GAP-0829: a machine vendor folder (Codex, Cursor, Claude
+            # Code, a per-user connector's) that a link replaced fails its
+            # enrolled targets' reconcile for as long as the link is there. The
+            # uninstall keeps that link, so only that refusal, only for a link
+            # that is still there under a vendor root, is explained.
+            $vendorRoot = [IO.Path]::Combine($Root, 'vendor')
+            $vendorTarget = [IO.Path]::Combine($Root, 'vendor-target')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendorRoot, 'OpenAI'))
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendorRoot, 'Cisco', 'DefenseClaw'))
+            [void][IO.Directory]::CreateDirectory($vendorTarget)
+            $codexLink = [IO.Path]::Combine($vendorRoot, 'OpenAI', 'Codex')
+            $cursorLink = [IO.Path]::Combine($vendorRoot, 'Cursor')
+            $ciscoLink = [IO.Path]::Combine($vendorRoot, 'Cisco', 'DefenseClaw', 'etc')
+            $outsideRoot = [IO.Path]::Combine($Root, 'outside')
+            [void][IO.Directory]::CreateDirectory($outsideRoot)
+            $outsideLink = [IO.Path]::Combine($outsideRoot, 'Codex')
+            foreach ($link in @($codexLink, $cursorLink, $ciscoLink, $outsideLink)) {
+                & cmd.exe /c mklink /J "$link" "$vendorTarget" | Out-Null
+            }
+            $previousVendorRoots = $script:DefenseClawVendorFolderRoots
+            $script:DefenseClawVendorFolderRoots = @($vendorRoot)
+            $previousVendorExcuse = $script:DefenseClawVendorLinkExcuse
+            $script:DefenseClawVendorLinkExcuse = $true
+            try {
+                $codexRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reconcile Codex machine requirements: reparse points are not allowed in Codex machine path: $codexLink"
+                }
+                $cursorRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                    error = "enterprise hooks: prepare Cursor enterprise directory: enterprise hooks: reparse point in path: $cursorLink"
+                }
+                $otherFailure = [pscustomobject]@{
+                    user = 'carol'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $codexRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                    $failures.Add("a Codex folder link refused adoption: $($adoption.reason)")
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $cursorRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok) {
+                    $failures.Add("a Cursor folder link refused adoption: $($adoption.reason)")
+                }
+                # Only an uninstall keeps a link. Upgrade, Repair, Reconcile and Ensure still
+                # refuse the adoption of a manifest while a guardian row fails on a vendor-folder
+                # link: the same rows as above, with the uninstall flag off.
+                $script:DefenseClawVendorLinkExcuse = $false
+                foreach ($vendorRow in @($codexRow, $cursorRow)) {
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $vendorRow)
+                    Assert-TestSyncRefuses "vendor folder link outside an uninstall ($($vendorRow.connector))" failure-free reconcile
+                    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                        -Layout $layout -GatewayServiceName DefenseClawGateway `
+                        -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                    if ([bool]$adoption.ok) {
+                        $failures.Add("a $($vendorRow.connector) folder link was explained outside an uninstall")
+                    }
+                }
+                $script:DefenseClawVendorLinkExcuse = $true
+                Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $codexRow, $otherFailure)
+                Assert-TestSyncRefuses 'machine folder link next to another failure' 'failure-free reconcile'
+                # The refusal must be the whole message. A second failure in the same row
+                # (a failure before it, a rollback failure after it, a newline from
+                # errors.Join) is not explained by the link.
+                $codexRefusal = "reparse points are not allowed in Codex machine path: $codexLink"
+                $joinedRefusals = [ordered]@{
+                    'an earlier failure in the prefix' = "write failed: access denied; $codexRefusal"
+                    'a rollback failure after the path' = "enterprise hooks: reconcile Codex machine requirements: $codexRefusal; rollback failed: access denied"
+                    'a second line after the path' = "$codexRefusal`nrollback failed: access denied"
+                    'a failure line before the refusal' = "write failed`n$codexRefusal"
+                }
+                # A tail on the same line must not become part of the path. The link is an
+                # ancestor of the path they name, so a pattern that took the tail into the path
+                # would have walked to the link and explained the row.
+                $cursorHooksPath = [IO.Path]::Combine($cursorLink, 'hooks.json')
+                $tailedRefusals = [ordered]@{
+                    'a colon tail after the path' = "enterprise hooks: reparse point in path: ${cursorHooksPath}: rollback failed: access denied"
+                    'a parenthesized tail after the path' = "enterprise hooks: reparse point in path: $cursorHooksPath (access denied)"
+                }
+                foreach ($tailed in $tailedRefusals.GetEnumerator()) {
+                    $tailedRow = [pscustomobject]@{
+                        user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                        error = $tailed.Value
+                    }
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $tailedRow)
+                    Assert-TestSyncRefuses "machine folder link with $($tailed.Key)" 'failure-free reconcile'
+                }
+                # The same path alone, below the link, is the refusal the gate explains.
+                $belowRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $cursorHooksPath"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $belowRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok) {
+                    $failures.Add("a path below the Cursor folder link refused adoption: $($adoption.reason)")
+                }
+                foreach ($joined in $joinedRefusals.GetEnumerator()) {
+                    $joinedRow = [pscustomobject]@{
+                        user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                        error = $joined.Value
+                    }
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $joinedRow)
+                    Assert-TestSyncRefuses "machine folder link with $($joined.Key)" 'failure-free reconcile'
+                }
+                # The same refusal for a path that is no link now is a stale failure.
+                & cmd.exe /c rmdir "$codexLink" | Out-Null
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $codexRow)
+                Assert-TestSyncRefuses 'machine folder refusal with no link there' 'failure-free reconcile'
+                # DefenseClaw's own trees and paths outside the vendor roots are never explained by a link.
+                $ciscoRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $ciscoLink"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $ciscoRow)
+                Assert-TestSyncRefuses 'a link in the DefenseClaw tree' 'failure-free reconcile'
+                # The first link on the path can be above the vendor root (the root itself a link, as
+                # ProgramData can be): that is no kept vendor folder, and the row stays unexplained.
+                $linkedRootTarget = [IO.Path]::Combine($Root, 'linked-root-target')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($linkedRootTarget, 'vendor', 'OpenAI'))
+                $linkedRoot = [IO.Path]::Combine($Root, 'linked-root')
+                & cmd.exe /c mklink /J "$linkedRoot" "$linkedRootTarget" | Out-Null
+                $rootLinkRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $([IO.Path]::Combine($linkedRoot, 'vendor', 'OpenAI', 'Codex'))"
+                }
+                $script:DefenseClawVendorFolderRoots = @([IO.Path]::Combine($linkedRoot, 'vendor'))
+                try {
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $rootLinkRow)
+                    Assert-TestSyncRefuses 'a link above the vendor root' 'failure-free reconcile'
+                }
+                finally {
+                    $script:DefenseClawVendorFolderRoots = @($vendorRoot)
+                    & cmd.exe /c rmdir "$linkedRoot" | Out-Null
+                }
+                # A link that is there, but not under a vendor root (an account folder, say), is not explained.
+                $profileRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $outsideLink"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $profileRow)
+                Assert-TestSyncRefuses 'a link outside the vendor roots' 'failure-free reconcile'
+            }
+            finally {
+                $script:DefenseClawVendorFolderRoots = $previousVendorRoots
+                $script:DefenseClawVendorLinkExcuse = $previousVendorExcuse
+                foreach ($link in @($cursorLink, $ciscoLink, $outsideLink)) {
+                    & cmd.exe /c rmdir "$link" | Out-Null
+                }
+            }
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $accountLink)
             Assert-TestSyncRefuses 'account link without trusted count' 'failure-free reconcile'
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, [pscustomobject]@{
@@ -469,8 +647,46 @@ try {
 
             if ($canRewrite) {
                 $script:TestAclWrites.Clear()
-                if (-not (Invoke-TestSync)) {
+                # The manifest rebind changes the metadata body and must use
+                # the same protected publication path as other metadata writes.
+                $script:TestMetadataPath = $layout.MetadataPath
+                $script:TestMetadataPublicationCalls = 0
+                $script:TestMetadataPublicationBytes = $null
+                $beforePublication = Get-TestMetadataText
+                $script:TestOriginalMetadataWriter = (
+                    Microsoft.PowerShell.Core\Get-Command `
+                        -Name Write-DefenseClawDeploymentMetadataBytes `
+                        -CommandType Function
+                ).ScriptBlock
+                $metadataWriterProbe = {
+                    param([string]$Path, [byte[]]$Bytes)
+                    if ($Path -cne $script:TestMetadataPath) {
+                        throw 'manifest rebind selected another metadata path'
+                    }
+                    $script:TestMetadataPublicationCalls++
+                    $script:TestMetadataPublicationBytes = [byte[]]$Bytes.Clone()
+                    & $script:TestOriginalMetadataWriter -Path $Path -Bytes $Bytes
+                }
+                Microsoft.PowerShell.Management\Set-Item `
+                    -Path Function:\Write-DefenseClawDeploymentMetadataBytes `
+                    -Value $metadataWriterProbe
+                try {
+                    $didRebind = Invoke-TestSync
+                }
+                finally {
+                    Microsoft.PowerShell.Management\Set-Item `
+                        -Path Function:\Write-DefenseClawDeploymentMetadataBytes `
+                        -Value $script:TestOriginalMetadataWriter
+                }
+                if (-not $didRebind) {
                     $failures.Add('guardian-activated republication was not rebound')
+                }
+                if ($script:TestMetadataPublicationCalls -ne 1 -or
+                    $null -eq $script:TestMetadataPublicationBytes -or
+                    $beforePublication -ceq (Get-TestMetadataText) -or
+                    [Text.Encoding]::UTF8.GetString($script:TestMetadataPublicationBytes) -cne
+                        (Get-TestMetadataText)) {
+                    $failures.Add('manifest rebind did not publish its changed metadata through the protected writer')
                 }
                 $rebound = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
                 $record = $rebound.managed_hooks_activation

@@ -19,35 +19,39 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
-// The Cascade bridge. Devin Desktop removed its Cascade agent in 3.9.19;
+// The Cascade companion. Devin Desktop removed its Cascade agent in 3.9.19;
 // earlier builds still run it, under a hook contract DefenseClaw does not
-// inspect. Cascade reads a machine-level hooks.json that standard users
-// cannot change, runs every hook in it through bash -c (Unix) or
-// powershell -Command (Windows), and blocks a pre-event when a hook exits 2
-// (https://docs.devin.ai/desktop/cascade/hooks). The bridge puts one
-// self-contained entry on each blocking pre-event that prints why and
-// exits 2, so an old build's Cascade refuses every prompt, read, write,
-// command and MCP call while Devin Local stays protected by the devin
-// connector. The entry does not run DefenseClaw, so the block needs no
-// runtime, enrollment row or gateway.
+// inspect. Releases 1.0.5 to 1.0.8 published one self-contained entry per
+// blocking Cascade pre-event (print why, exit 2) into a machine-level hooks
+// file, so an old build's Cascade refused every prompt, read, write, command
+// and MCP call (https://docs.devin.ai/desktop/cascade/hooks).
 //
-// The bridge is a companion of the devin connector: it is published while
-// devin is a standalone connector, unless
-// enterprise.machine_policy.connectors.devincascade.ownership is off. It is
-// not a connector of its own: it enrolls nobody, is not recorded in the
-// runtime descriptor and is not in the foreign-hook guard summary.
+// DefenseClaw no longer publishes it, because no file it could go into is
+// proved to be read only by builds that run Cascade:
+//   - the pre-rename hooks file is imported as Devin Local hooks by
+//     the Devin CLI and the engine inside Devin Desktop, so an exit-2 entry
+//     there refuses current Devin Local too;
+//   - the Devin hooks file is opened by no current CLI, and Desktop 3.12.17
+//     reads it only for post_setup_worktree; no evidence shows a build that
+//     runs Cascade pre-events reads it, so an entry there is inert.
+//
+// The companion is kept only to withdraw what those releases wrote, from
+// both files, and to say that builds before 3.9.19 are not covered. The
+// withdrawal can go in 1.1, when no upgrade from 1.0.5 to 1.0.8 remains
+// supported. It is not a connector of its own: it enrolls nobody, is not
+// recorded in the runtime descriptor and is not in the foreign-hook guard
+// summary.
 const (
 	ConnectorDevinCascade    = "devincascade"
 	devinCascadeLegacyRecord = ConnectorDevinCascade + "-legacy"
 	devinCascadeParent       = "devin"
-	devinCascadeMessage      = "DefenseClaw: the Cascade agent is turned off on this managed device. Update Devin Desktop to 3.9.19 or later and use Devin Local."
+	// devinCascadeMessage is the text of the refusal those releases wrote.
+	// It must not change: it identifies their entries.
+	devinCascadeMessage = "DefenseClaw: the Cascade agent is turned off on this managed device. Update Devin Desktop to 3.9.19 or later and use Devin Local."
 )
 
-// devinCascadeEvents are Cascade's blocking pre-events. Post-events cannot
-// block and are not registered.
-var devinCascadeEvents = []string{"pre_user_prompt", "pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use"}
-
-// DevinSystemHooksPath is Devin Desktop's machine-level Cascade hooks file.
+// DevinSystemHooksPath is the machine-level Devin hooks file an earlier
+// release wrote the refusal into.
 func DevinSystemHooksPath(opts Options) (string, error) {
 	return machinePath(opts,
 		"/etc/devin/hooks.json",
@@ -55,9 +59,8 @@ func DevinSystemHooksPath(opts Options) (string, error) {
 		func(_, programData string) string { return programData + `\Devin\hooks.json` })
 }
 
-// devinCascadeLegacyHooksPath is the pre-rename machine-level hooks file
-// Devin Desktop reads when the Devin one is absent; pre-rename apps read
-// only it.
+// devinCascadeLegacyHooksPath is the pre-rename machine-level hooks file an
+// earlier release wrote the refusal into when it existed.
 func devinCascadeLegacyHooksPath(opts Options) (string, error) {
 	return machinePath(opts,
 		"/etc/"+legacyconnector.CascadeMachineFolderUnix+"/hooks.json",
@@ -83,10 +86,9 @@ func (devinCascadeTarget) Paths(opts Options) ([]string, error) {
 	return []string{devin, legacy}, nil
 }
 
-// devinCascadeScript is the entry's command (Unix) or powershell (Windows)
-// string. It drains the event payload so Cascade's write never fails, then
-// refuses. Under PowerShell's Constrained Language Mode the try blocks
-// swallow errors and exit 2 still runs.
+// devinCascadeScript is the command (Unix) or powershell (Windows) string of
+// an entry an earlier release wrote. Only its field and value identify an
+// entry as DefenseClaw's.
 func devinCascadeScript(opts Options) (field, script string) {
 	if opts.goos() == "windows" {
 		return "powershell", "try { $null = [Console]::In.ReadToEnd() } catch { }; try { [Console]::Error.WriteLine('" + devinCascadeMessage + "') } catch { }; exit 2"
@@ -94,68 +96,9 @@ func devinCascadeScript(opts Options) (field, script string) {
 	return "command", "IFS= read -r -d '' -t 2 _ || true; printf '%s\\n' '" + devinCascadeMessage + "' >&2; exit 2"
 }
 
-// devinCascadeEntry is the entry for the hooks file at path. Its working
-// directory is that file's folder, which only administrators can write, so
-// a current-directory-first command lookup finds nothing a user planted.
-func devinCascadeEntry(opts Options, path string) *object {
-	field, script := devinCascadeScript(opts)
-	entry := newObject()
-	entry.set(field, script)
-	entry.set("show_output", true)
-	entry.set("working_directory", dirFor(opts, path))
-	return entry
-}
-
 func devinCascadeEntryIsOwned(opts Options, raw any) bool {
 	field, script := devinCascadeScript(opts)
 	return stringField(raw, field) == script
-}
-
-// mergeDevinCascadeHooks returns the file with exactly one DefenseClaw
-// entry per event, every other key, event and entry kept in order, and
-// whether it was already exact.
-func mergeDevinCascadeHooks(opts Options, path string, current []byte) ([]byte, bool, error) {
-	doc, err := decodeOrderedObject(current)
-	if err != nil {
-		return nil, false, fmt.Errorf("parse %s: %w", path, err)
-	}
-	hooksValue, _ := doc.get("hooks")
-	hooks, ok := hooksValue.(*object)
-	if hooksValue != nil && !ok {
-		return nil, false, fmt.Errorf("%s: hooks has unsupported type %T", path, hooksValue)
-	}
-	if hooks == nil {
-		hooks = newObject()
-	}
-	want := devinCascadeEntry(opts, path)
-	exact := true
-	for _, event := range devinCascadeEvents {
-		existing, _ := hooks.get(event)
-		list, _ := existing.([]any)
-		if existing != nil && list == nil {
-			return nil, false, fmt.Errorf("%s: hooks.%s has unsupported type %T", path, event, existing)
-		}
-		kept := make([]any, 0, len(list)+1)
-		found := false
-		for _, item := range list {
-			if devinCascadeEntryIsOwned(opts, item) {
-				if !found && string(canonicalJSON(item)) == string(canonicalJSON(want)) {
-					kept, found = append(kept, item), true
-				} else {
-					exact = false
-				}
-				continue
-			}
-			kept = append(kept, item)
-		}
-		if !found {
-			kept, exact = append(kept, want), false
-		}
-		hooks.set(event, kept)
-	}
-	doc.set("hooks", hooks)
-	rendered, err := encodeOrdered(doc)
-	return rendered, exact, err
 }
 
 // stripDevinCascadeHooks removes DefenseClaw's entries; a file without
@@ -166,8 +109,7 @@ func stripDevinCascadeHooks(opts Options) stripFunc {
 		if err != nil {
 			return nil, false, err
 		}
-		hooksValue, _ := doc.get("hooks")
-		hooks, _ := hooksValue.(*object)
+		hooks := devinCascadeHooks(doc)
 		owned := false
 		if hooks != nil {
 			for _, event := range append([]string(nil), hooks.keys...) {
@@ -201,13 +143,19 @@ func stripDevinCascadeHooks(opts Options) stripFunc {
 	}
 }
 
-// devinCascadeFile is one hooks file and the ownership record it is
-// published under.
+// devinCascadeFile is one hooks file and the ownership record an earlier
+// release published it under.
 type devinCascadeFile struct {
 	path, record string
 	current      []byte
 	exists       bool
-	created      []string
+	// untrusted is why an unprivileged principal controls the file; current
+	// and exists then hold the file as it is, read without the trust rules.
+	untrusted error
+	// unreadable is why an untrusted file could not be read at all (size,
+	// access, change during the read); current and exists are then empty and
+	// say nothing about the file.
+	unreadable error
 }
 
 func devinCascadeFiles(opts Options) ([]devinCascadeFile, error) {
@@ -218,27 +166,25 @@ func devinCascadeFiles(opts Options) ([]devinCascadeFile, error) {
 	return []devinCascadeFile{{path: paths[0], record: ConnectorDevinCascade}, {path: paths[1], record: devinCascadeLegacyRecord}}, nil
 }
 
-// load reads the file. When write is set the file's vendor folders are
-// taken back first (Windows ProgramData), and a file there that an
-// unprivileged principal controls is neither DefenseClaw's nor the
-// administrator's, so it is replaced.
-func (f *devinCascadeFile) load(opts Options, write bool, state *State) error {
-	if write {
-		created, err := takeBackPolicyPath(opts, f.path, state)
-		f.created = created
-		if err != nil {
-			return err
-		}
-	}
+// read loads the file. A file an unprivileged principal controls is neither
+// DefenseClaw's nor the administrator's, so DefenseClaw does not edit it. Its
+// content is read as it is, only to report whether it still carries the
+// refusal an earlier release wrote.
+func (f *devinCascadeFile) read(opts Options, state *State) error {
+	f.unreadable = nil
 	current, exists, err := readPolicyFile(opts, f.path)
 	var untrusted *untrustedPolicyFileError
 	if errors.As(err, &untrusted) {
-		if !write || validateTrustedAncestors(opts, platformPath(opts, f.path)) != nil {
-			state.conflict("%s is not administrator-controlled, so a standard user can change the Cascade hooks every user's Devin Desktop runs: %v", f.path, untrusted.err)
-			return nil
+		f.untrusted = untrusted.err
+		current, exists, err = readPolicyFileWith(opts, f.path, func(Options, string) error { return nil })
+		if err != nil {
+			// The file cannot be inspected at all; inspect reports it as a
+			// conflict, never as an empty file.
+			f.unreadable = err
+			current, exists, err = nil, false, nil
 		}
-		state.detail("replacing %s: %v", f.path, untrusted.err)
-		current, exists, err = nil, true, state.replaceUntrustedPolicyFile(opts, f.path)
+	} else {
+		f.untrusted = nil
 	}
 	f.current, f.exists = current, exists
 	return err
@@ -262,101 +208,118 @@ func (t devinCascadeTarget) Reconcile(opts Options) (State, error) {
 		state.Route = RouteUnsupported
 		return state, nil
 	}
-	merge := policy.Ownership == config.MachinePolicyOwnershipMerge
 	for index := range files {
-		if err := files[index].load(opts, merge, &state); err != nil {
+		if err := files[index].read(opts, &state); err != nil {
 			return state, err
 		}
 	}
-	if merge {
-		devin, legacy := &files[0], &files[1]
-		// Devin Desktop reads the legacy file only when the Devin one is
-		// absent, and pre-rename apps read only the legacy one: publish
-		// into every file that exists, and create the Devin file when
-		// neither does.
-		write := map[*devinCascadeFile]bool{devin: devin.exists || !legacy.exists, legacy: legacy.exists}
-		for _, file := range []*devinCascadeFile{devin, legacy} {
-			strip := stripDevinCascadeHooks(opts)
-			if !write[file] {
-				// A record left from an earlier pass whose file is gone.
-				if err := restoreOrStrip(opts, file.record, file.path, strip, false, &state); err != nil {
-					return state, err
-				}
-				continue
-			}
-			rendered, exact, err := mergeDevinCascadeHooks(opts, file.path, file.current)
-			if err != nil {
-				state.conflict("%v; DefenseClaw cannot merge into this file (use ownership: verify_only)", err)
-				continue
-			}
-			changed, err := publishWithRecord(opts, file.record, file.path, file.current, file.exists, rendered, exact, strip, &state, file.created...)
-			if err != nil {
-				return state, err
-			}
-			state.Changed = state.Changed || changed
-			file.current, file.exists = rendered, true
+	if policy.Ownership == config.MachinePolicyOwnershipMerge {
+		if err := withdrawDevinCascade(opts, files, &state); err != nil {
+			return state, err
 		}
 	}
 	inspectDevinCascade(opts, files, &state)
-	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly && state.OwnedEntries == 0 {
-		state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector devincascade` through your policy tool")
-	}
 	state.finish()
 	return state, nil
 }
 
-// inspectDevinCascade checks that every hooks file present carries exactly
-// one DefenseClaw entry per event.
-func inspectDevinCascade(opts Options, files []devinCascadeFile, state *State) {
-	present := 0
-	for _, file := range files {
-		if !file.exists {
+// withdrawDevinCascade removes the refusal an earlier release wrote, from
+// the Devin hooks file and from the pre-rename one, and keeps every
+// administrator entry. Records that name a file DefenseClaw created restore
+// the file's earlier state.
+func withdrawDevinCascade(opts Options, files []devinCascadeFile, state *State) error {
+	strip := stripDevinCascadeHooks(opts)
+	for index := range files {
+		file := &files[index]
+		if file.untrusted != nil {
 			continue
 		}
-		present++
+		if err := restoreOrStrip(opts, file.record, file.path, strip, false, state); err != nil {
+			return err
+		}
+		if err := file.read(opts, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// devinCascadeHooks is the hooks object of a parsed hooks file, or nil.
+func devinCascadeHooks(doc *object) *object {
+	value, _ := doc.get("hooks")
+	hooks, _ := value.(*object)
+	return hooks
+}
+
+// countDevinCascadeEntries counts the DefenseClaw entries of a hooks object.
+func countDevinCascadeEntries(opts Options, hooks *object) int {
+	owned := 0
+	if hooks == nil {
+		return owned
+	}
+	for _, event := range hooks.keys {
+		value, _ := hooks.get(event)
+		list, _ := value.([]any)
+		for _, item := range list {
+			if devinCascadeEntryIsOwned(opts, item) {
+				owned++
+			}
+		}
+	}
+	return owned
+}
+
+// inspectDevinCascade reports the refusals an earlier release left in either
+// file and the coverage limit. The state is Unsupported (nothing to cover)
+// unless an entry is left: a leftover in the pre-rename file refuses current
+// Devin Local, and one in the Devin file is inert.
+func inspectDevinCascade(opts Options, files []devinCascadeFile, state *State) {
+	for _, file := range files {
+		if file.unreadable != nil {
+			state.conflict("%s is not administrator-controlled (%v) and DefenseClaw cannot read it (%v), so it cannot tell whether a Cascade refusal from an earlier release is still in it; an administrator must restore its owner and mode and keep it readable, or remove it", file.path, file.untrusted, file.unreadable)
+			continue
+		}
+		if !file.exists && file.untrusted == nil {
+			continue
+		}
 		doc, err := decodeOrderedObject(file.current)
 		if err != nil {
-			state.conflict("%s is not valid JSON: %v", file.path, err)
+			if file.untrusted != nil {
+				state.conflict("%s is not administrator-controlled (%v) and DefenseClaw cannot read it, so it cannot tell whether a Cascade refusal from an earlier release is still in it; an administrator must restore its owner and mode, or remove it", file.path, file.untrusted)
+				continue
+			}
+			state.detail("%s is not valid JSON: %v", file.path, err)
 			continue
 		}
-		hooksValue, _ := doc.get("hooks")
-		hooks, _ := hooksValue.(*object)
-		for _, event := range devinCascadeEvents {
-			count := 0
-			if hooks != nil {
-				value, _ := hooks.get(event)
-				list, _ := value.([]any)
-				for _, item := range list {
-					if devinCascadeEntryIsOwned(opts, item) {
-						count++
-					}
-				}
+		owned := countDevinCascadeEntries(opts, devinCascadeHooks(doc))
+		if file.untrusted != nil {
+			if owned > 0 {
+				state.OwnedEntries += owned
+				state.conflict("%s still carries DefenseClaw Cascade refusals an earlier release wrote and is not administrator-controlled (%v), so DefenseClaw will not edit it; the Devin CLI and Devin Desktop engine can import it, so they can refuse current Devin; an administrator must restore its owner and mode and run ensure, or remove the file", file.path, file.untrusted)
+			} else {
+				state.detail("%s is not administrator-controlled (%v); it carries no Cascade refusal from an earlier release, and DefenseClaw publishes nothing to it", file.path, file.untrusted)
 			}
-			if count != 1 {
-				state.conflict("%s: Cascade event %s has %d DefenseClaw entries, want exactly one", file.path, event, count)
-			}
+			continue
 		}
-		if hooks != nil {
-			for _, event := range hooks.keys {
-				value, _ := hooks.get(event)
-				list, _ := value.([]any)
-				for _, item := range list {
-					if devinCascadeEntryIsOwned(opts, item) {
-						state.OwnedEntries++
-					} else {
-						state.ForeignEntries++
-					}
-				}
-			}
+		if owned == 0 {
+			continue
+		}
+		state.OwnedEntries += owned
+		fix := "run ensure to withdraw them"
+		if state.Ownership == config.MachinePolicyOwnershipVerifyOnly {
+			fix = "remove them from the file your policy tool manages (ownership: verify_only keeps DefenseClaw from editing it)"
+		}
+		if file.record == devinCascadeLegacyRecord {
+			state.conflict("%s still carries DefenseClaw Cascade refusals an earlier release wrote; the Devin CLI and Devin Desktop engine import this file as Devin Local hooks, so they refuse current Devin; %s", file.path, fix)
+		} else {
+			state.conflict("%s still carries DefenseClaw Cascade refusals an earlier release wrote; no current Devin client runs them; %s", file.path, fix)
 		}
 	}
-	if present == 0 {
-		state.conflict("%s does not exist", files[0].path)
+	if len(state.Conflicts) == 0 {
+		state.Route = RouteUnsupported
 	}
-	state.EffectiveLock = ""
-	state.detail("Cascade has no managed-only lock and needs none: other Cascade hooks (cloud, user, workspace) run too, but a hook can only block, never approve or rewrite, so none undoes DefenseClaw's refusal; turn Cascade off in the team settings as well")
-	state.detail("applies to Devin Desktop builds before 3.9.19, which still have Cascade; later builds removed it and ignore these entries")
-	state.detail("residual: on Linux and macOS Cascade runs hooks through bash -c, so a user who controls the app's environment (BASH_ENV, a bash earlier on PATH) can skip the refusal")
+	state.detail("not published: the pre-rename hooks file is imported as Devin Local hooks by current Devin clients, so a refusal there would block current Devin, and no evidence shows that a build which runs Cascade pre-events reads the Devin hooks file")
+	state.detail("not covered: Devin Desktop builds before 3.9.19 still run Cascade, which DefenseClaw does not inspect; keep Desktop at 3.9.19 or later and turn Cascade off in your Devin team settings; Devin Local stays protected by the devin connector")
 }
 
 func (t devinCascadeTarget) Verify(opts Options) (State, error) {
@@ -374,7 +337,7 @@ func (t devinCascadeTarget) Verify(opts Options) (State, error) {
 		return state, nil
 	}
 	for index := range files {
-		if err := files[index].load(opts, false, &state); err != nil {
+		if err := files[index].read(opts, &state); err != nil {
 			return state, err
 		}
 	}
@@ -391,24 +354,22 @@ func (t devinCascadeTarget) RemoveOwned(opts Options) (State, error) {
 	state := State{Connector: ConnectorDevinCascade, Route: RouteMachinePolicy, Paths: []string{files[0].path, files[1].path}}
 	var errs []error
 	for _, file := range files {
+		if opts.linkKept(file.path) {
+			// A link sits on this file's folder (GAP-0758): nothing is read
+			// through it. The other folder's entry is removed as usual.
+			continue
+		}
 		errs = append(errs, restoreOrStrip(opts, file.record, file.path, stripDevinCascadeHooks(opts), false, &state))
 	}
 	return state, errors.Join(errs...)
 }
 
-func (devinCascadeTarget) Export(opts Options, format string) ([]byte, error) {
+// Export has nothing to render: DefenseClaw publishes no Cascade entry.
+func (devinCascadeTarget) Export(opts Options, _ string) ([]byte, error) {
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
-	if format != "" && format != "json" {
-		return nil, fmt.Errorf("devincascade policy export supports format json, not %q", format)
-	}
-	path, err := DevinSystemHooksPath(opts)
-	if err != nil {
-		return nil, err
-	}
-	rendered, _, err := mergeDevinCascadeHooks(opts, path, nil)
-	return rendered, err
+	return nil, fmt.Errorf("%w: devincascade publishes nothing (no file is proved to reach only Devin Desktop builds that run Cascade); keep Devin Desktop at 3.9.19 or later", ErrUnsupported)
 }
 
 // companionTargets are machine-policy targets published beside a connector

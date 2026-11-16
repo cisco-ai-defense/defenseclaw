@@ -40,6 +40,12 @@ type TargetMemo struct {
 	// (newProtectedFiles).
 	keys  map[string][]string
 	files map[string]protectedFiles
+	// resolved are the answers of resolveWriteTarget by the exact path: the
+	// scans of one call ask for the same operands again (GAP-0483).
+	resolved map[string]resolvedTarget
+	// The shared reach reader keeps complete names and per-parent answers.
+	reachNames   map[string]reachNames
+	reachParents map[reachParentKey]reachParentAnswer
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
@@ -59,7 +65,13 @@ func NewTargetMemo() *TargetMemo {
 		homes:    make(map[string]*actionStateHome),
 		keys:     make(map[string][]string),
 		files:    make(map[string]protectedFiles),
+		resolved: make(map[string]resolvedTarget),
 	}
+}
+
+type resolvedTarget struct {
+	path string
+	ok   bool
 }
 
 // protectedFiles is newProtectedFiles of home, once per memo.
@@ -223,6 +235,17 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 		return ResolveWriteTarget(path)
 	}
 	writeTargetWalks.Add(1)
+	m.mu.Lock()
+	known, found := m.resolved[path]
+	m.mu.Unlock()
+	if found {
+		return known.path, known.ok
+	}
 	resolved, _, _, ok := walkWritePathMemo("", path, 0, false, false, m)
+	m.mu.Lock()
+	if len(m.resolved) < maxTargetMemoEntries {
+		m.resolved[path] = resolvedTarget{path: resolved, ok: ok}
+	}
+	m.mu.Unlock()
 	return resolved, ok
 }

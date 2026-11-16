@@ -35,6 +35,11 @@ const (
 var (
 	hookAPITokenMu      sync.Mutex
 	hookAPITokenScopeRE = lazyregexp.New(`^[a-z0-9][a-z0-9_-]*$`)
+	// ErrCredentialDisclosed marks a token file every local account could
+	// read (Windows, outside a verified Secure Client process and state
+	// tree). It is not permission drift: the gateway stops authenticating
+	// its cached copy and Ensure rotates the value (GAP-0566).
+	ErrCredentialDisclosed = errors.New("credential is readable by every local account")
 	// errHookAPITokenMalformed marks a trusted token file (location, owner and
 	// permissions checked) whose content is not a token.
 	errHookAPITokenMalformed = errors.New("malformed hook API token")
@@ -103,7 +108,10 @@ func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 		// A damaged credential in a trusted file is replaced with a fresh one,
 		// as if it were absent (GAP-1244): keeping it disabled the connector's
 		// scoped credential and left the hook with no token at all.
-		if !errors.Is(readErr, errHookAPITokenMalformed) {
+		// A credential every local account could read is rotated: the old
+		// value may already be copied (GAP-0566). Callers that render it
+		// into hook registrations read the new value from the return.
+		if !errors.Is(readErr, errHookAPITokenMalformed) && !errors.Is(readErr, ErrCredentialDisclosed) {
 			return "", fmt.Errorf("read hook API token %s: %w", tokenPath, readErr)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -119,7 +127,7 @@ func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return "", fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		if err := os.Mkdir(hooksDir, 0o700); err == nil {
+		if err := mkdirHookAPITokenDir(hooksDir); err == nil {
 			hooksDirCreated = true
 		} else if !errors.Is(err, os.ErrExist) {
 			return "", fmt.Errorf("create hook API token dir: %w", err)
@@ -189,6 +197,73 @@ func LoadHookAPIToken(dataDir, connectorName string) (string, error) {
 	return tok, nil
 }
 
+// HookAPITokenInstallSnapshot holds the token state before a managed install.
+// A failed install may restore it only while the token still equals the one
+// this install published. The value stays in memory and is never logged.
+type HookAPITokenInstallSnapshot struct {
+	dataDir   string
+	tokenPath string
+	published []byte
+	before    hookAPITokenPublishSnapshot
+}
+
+// SnapshotHookAPITokenForInstall records a connector token before Setup can
+// replace it. An absent data directory is a fresh install with no old token.
+func SnapshotHookAPITokenForInstall(dataDir, connectorName, published string) (*HookAPITokenInstallSnapshot, error) {
+	tokenPath, err := HookAPITokenFilePath(dataDir, connectorName)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := &HookAPITokenInstallSnapshot{
+		dataDir: dataDir, tokenPath: tokenPath, published: []byte(strings.TrimSpace(published) + "\n"),
+	}
+	if _, err := os.Lstat(dataDir); errors.Is(err, os.ErrNotExist) {
+		return snapshot, nil
+	} else if err != nil {
+		return nil, err
+	}
+	if err := hookAPIValidateDirectory(dataDir); err != nil {
+		return nil, err
+	}
+	err = withOwnedFileLock(hookAPITokenPublishLockPath(dataDir), func() error {
+		hookAPITokenMu.Lock()
+		defer hookAPITokenMu.Unlock()
+		var captureErr error
+		snapshot.before, captureErr = captureHookAPITokenPublishSnapshot(dataDir, tokenPath)
+		return captureErr
+	})
+	return snapshot, err
+}
+
+// RestoreIfPublished puts back the previous token after a proven
+// prepublication install rollback. It refuses to replace a token that changed
+// independently while the install was running.
+func (s *HookAPITokenInstallSnapshot) RestoreIfPublished() error {
+	if s == nil {
+		return nil
+	}
+	if _, err := os.Lstat(s.dataDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return withOwnedFileLock(hookAPITokenPublishLockPath(s.dataDir), func() error {
+		hookAPITokenMu.Lock()
+		defer hookAPITokenMu.Unlock()
+		current, err := captureHookAPITokenPublishSnapshot(s.dataDir, s.tokenPath)
+		if err != nil {
+			return err
+		}
+		if hookAPITokenPublishSnapshotsEqual(s.before, current) {
+			return nil
+		}
+		if !current.existed || !hookAPITokenPublishedStateMatches(current, s.published, current.protection) {
+			return fmt.Errorf("connector-scoped token changed before install rollback")
+		}
+		return restoreHookAPITokenPublishSnapshot(s.dataDir, s.tokenPath, s.before, s.published, current.protection)
+	})
+}
+
 // PublishHookAPIToken atomically publishes an authoritative connector-scoped
 // credential into dataDir. Managed-enterprise installers use it to copy the
 // gateway's service-owned credential into a target user's private hook
@@ -235,7 +310,7 @@ func publishHookAPITokenLocked(dataDir, tokenPath, token string) (returnErr erro
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		if err := os.Mkdir(hooksDir, 0o700); err == nil {
+		if err := mkdirHookAPITokenDir(hooksDir); err == nil {
 			hooksDirCreated = true
 		} else if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("create hook API token dir: %w", err)
@@ -298,6 +373,9 @@ type hookAPITokenPublishSnapshot struct {
 func captureHookAPITokenPublishSnapshot(dataDir, tokenPath string) (hookAPITokenPublishSnapshot, error) {
 	snapshot := hookAPITokenPublishSnapshot{}
 	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
+		if errors.Is(err, errHookAPITokenDirectoryAbsent) {
+			return snapshot, nil
+		}
 		return snapshot, err
 	}
 	pathInfo, err := pathidentity.LstatPinned(tokenPath)
@@ -748,7 +826,7 @@ func readSecureHookAPITokenFile(dataDir, path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("hook API token %s is not a regular file", path)
 	}
-	if err := otlpValidatePerm(path, info); err != nil {
+	if err := otlpValidateCredentialPerm(path, info); err != nil {
 		return "", err
 	}
 	if err := hookAPIValidateOwner(path, info); err != nil {
@@ -778,6 +856,11 @@ func validateHookAPITokenLocation(dataDir, tokenPath string) error {
 	return validateHookAPITokenLocationWith(dataDir, tokenPath, hookAPIValidateDirectoryElement, hookAPIValidateDirectory)
 }
 
+// The data-directory chain was validated, but Setup has not created its
+// hooks directory yet. Snapshot callers may treat this as an empty prior
+// token; other missing or untrusted path elements remain errors.
+var errHookAPITokenDirectoryAbsent = fmt.Errorf("hook API token directory absent: %w", os.ErrNotExist)
+
 func validateHookAPITokenLocationWith(
 	dataDir, tokenPath string,
 	validateElement, validateDirectory func(string) error,
@@ -794,7 +877,7 @@ func validateHookAPITokenLocationWith(
 		if err := validateDirectory(dataDir); err != nil {
 			return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		return os.ErrNotExist
+		return errHookAPITokenDirectoryAbsent
 	}
 	// Check dataDir as the named, protected directory. The hooks directory
 	// walk below includes its full ancestor chain, so walking all of those
@@ -804,6 +887,28 @@ func validateHookAPITokenLocationWith(
 	}
 	if err := validateDirectory(hooksDir); err != nil {
 		return fmt.Errorf("hook API token directory %s is not trusted: %w", hooksDir, err)
+	}
+	return nil
+}
+
+// ensureHookAPITokenDir makes sure the hooks directory exists, creating a
+// missing one through mkdirHookAPITokenDir like the hook token does, so the
+// OTLP token paths never create it first with an ordinary mkdir. A missing
+// data directory above it is made first, except inside the managed tree of a
+// standalone deployment, where a missing parent is the installer's to create
+// (mkdirHookAPITokenParents); an existing directory is left for the caller
+// trust check.
+func ensureHookAPITokenDir(hooksDir string) error {
+	if _, err := os.Lstat(hooksDir); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := mkdirHookAPITokenParents(filepath.Dir(hooksDir)); err != nil {
+		return err
+	}
+	if err := mkdirHookAPITokenDir(hooksDir); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
 	}
 	return nil
 }

@@ -13,7 +13,7 @@ import (
 )
 
 func TestStandaloneEnterpriseHookExecutableMatchesOnlyTheStandaloneBinary(t *testing.T) {
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		t.Skipf("trusted enterprise roots unavailable: %v", err)
 	}

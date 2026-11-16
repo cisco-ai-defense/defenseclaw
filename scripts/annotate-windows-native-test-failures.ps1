@@ -41,8 +41,8 @@ foreach ($log in $logs) {
             # the failing engine and script. Admit only the fixed, non-secret
             # engine/script shape; arbitrary pytest parameter values remain hidden.
             if ($Matches[3] -and
-                $Matches[1] -eq 'cli/tests/test_windows_enterprise_standalone_contract.py' -and
-                $Matches[2] -eq 'test_standalone_smokes_run_on_every_engine') {
+                $Matches[1] -in @('cli/tests/test_windows_enterprise_standalone_smokes_a.py', 'cli/tests/test_windows_enterprise_standalone_smokes_b.py', 'cli/tests/test_windows_enterprise_standalone_smokes_c.py') -and
+                $Matches[2] -in @('test_standalone_smokes_a_run_on_every_engine', 'test_standalone_smokes_b_run_on_every_engine', 'test_standalone_smokes_c_run_on_every_engine')) {
                 $name += $Matches[3]
             }
         }

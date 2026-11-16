@@ -4,8 +4,10 @@
 package hookpaths
 
 import (
+	"maps"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
@@ -41,6 +43,28 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 	return literalWriteOperandsDepth(command, cwd, home, 0)
 }
 
+// KnownWriteOperands reads concrete writer targets with the values supplied
+// by a tool's execution environment. include lets the caller retain targets
+// in an active state root outside the account's default protected file set.
+// It is consulted only for resolved writer operands, never for assignments
+// or read-only arguments.
+func KnownWriteOperands(command, cwd, home string, environment map[string]string, include func(string) bool) []string {
+	operands, _ := literalWriteOperandsWithParsedKnown(command, cwd, home, 0, nil, actionValues(environment), include)
+	return operands
+}
+
+// KnownProtectedWriteTarget applies the shared writer readers to a tool
+// command with its known environment. include checks the active protected
+// root in addition to the hook's built-in protected file set.
+func KnownProtectedWriteTarget(command, cwd, home string, environment map[string]string, include func(string) bool) bool {
+	for _, path := range KnownWriteOperands(command, cwd, home, environment, include) {
+		if include != nil && include(path) {
+			return true
+		}
+	}
+	return false
+}
+
 // LiteralWriteOperandsWithCopies is LiteralWriteOperands that also lists,
 // once for each call, the operands a plain cp call of the command names as
 // its own destination. Only that write of the cp may skip the own copy
@@ -61,6 +85,10 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 // literalWriteOperandsWithParsed reuses a shell tree already parsed for this
 // command. Nested interpreter bodies still get their own parse.
 func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *syntax.File) (operands, copies []string) {
+	return literalWriteOperandsWithParsedKnown(command, cwd, home, depth, file, nil, nil)
+}
+
+func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, file *syntax.File, initial actionValues, include func(string) bool) (operands, copies []string) {
 	if depth > 4 {
 		return nil, nil
 	}
@@ -86,6 +114,13 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 	// candidates are immutable until this statement has been walked, so
 	// there is no per-statement snapshot of cloned candidate maps.
 	values := actionValues{"HOME": home, "PWD": cwd}
+	if initial != nil {
+		values = maps.Clone(initial)
+		if _, ok := values["HOME"]; !ok {
+			values["HOME"] = home
+		}
+		values["PWD"] = cwd
+	}
 	// The gateway blocks a command past this statement limit regardless of
 	// its concrete target. Keep the forgetting reading, but do not expand
 	// candidates for a command already over the limit. Short calls take the
@@ -93,7 +128,11 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 	trackKept := len(command) < 1024 || !actionfacts.ShellStatementsOverBudget(command)
 	var kept []actionValues
 	if trackKept {
-		kept = []actionValues{{"HOME": home, "PWD": cwd}}
+		if initial == nil {
+			kept = []actionValues{{"HOME": home, "PWD": cwd}}
+		} else {
+			kept = []actionValues{maps.Clone(values)}
+		}
 	}
 	steps := 0
 	protected := newProtectedFiles(home)
@@ -101,25 +140,94 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
-	var noEffectCopies map[*syntax.CallExpr]bool
-	if strings.Contains(command, "for") && strings.Contains(command, "cp") {
-		noEffectCopies = actionClientLoopCopyNoEffectCalls(file, cwd, home)
+	functions := map[string]*syntax.FuncDecl{}
+	redefined := map[string]bool{}
+	if include != nil {
+		for _, root := range file.Stmts {
+			if function, ok := root.Cmd.(*syntax.FuncDecl); ok && function.Name != nil {
+				redefined[function.Name.Value] = functions[function.Name.Value] != nil
+				functions[function.Name.Value] = function
+			}
+		}
+	}
+	// A call is read where it runs: the effective directory goes into the
+	// launcher descent (a shell -c body, eval), so a script the body names is
+	// the file of that name where the call stands, not in the folder the hook
+	// started in. Where the call runs in no other folder, the starting folder
+	// is the only reading (rel-1-0-9:GAP-1038).
+	placed := newPlacedCalls(file, command, cwd, home)
+	programOperands := func(words []string, stmt *syntax.Stmt, call *syntax.CallExpr, environment actionValues) []string {
+		readFiles := len(file.Stmts) == 1
+		dirs := placed.of(call)
+		if len(dirs) == 1 && dirs[0] == cwd {
+			return literalProgramOperandsKnown(words, stmt, cwd, home, depth, readFiles, environment, include)
+		}
+		var names []string
+		for _, dir := range dirs {
+			names = append(names, literalProgramOperandsKnown(words, stmt, dir, home, depth, readFiles, environment, include)...)
+		}
+		return names
 	}
 	var knownValues map[*syntax.Word]string
 	knownValuesRead := false
+	var shadow *knownShadow
+	if include != nil {
+		shadow = newKnownShadow(file, home)
+	}
 	for _, root := range file.Stmts {
+		if depth >= 4 || !knownReachedCompound(root) {
+			// The reader scans the statements of a compound command as it
+			// reaches them.
+			shadow.scan(root)
+		}
 		candidates := append([]actionValues{values}, kept...)
+		if initial != nil && len(kept) > 0 {
+			candidates = kept
+		}
 		saturated := actionKeptSaturated(kept)
 		if saturated {
 			candidates = candidates[:1]
+		}
+		if include != nil && depth < 4 && knownReachedCompound(root) {
+			// A compound command with known values is read in the order the
+			// shell runs it, so a target only an unreached statement names is
+			// not a write. Past a reader bound other than the reading count,
+			// the whole statement is read below as if every part may run.
+			writes, after, complete, continues := knownReachedWrites(root, file, candidates, cwd, home, depth, include, shadow)
+			for _, name := range writes {
+				add(name)
+			}
+			if complete {
+				if !continues {
+					break
+				}
+				actionUpdateValues(root, values, cwd, home)
+				if trackKept {
+					// The reader followed every statement, so its states are the
+					// ones a later statement sees; the whole-statement tracker
+					// forgets a value at a call of a function the command defines.
+					if len(after) != 0 && !actionKeptSaturated(after) {
+						kept = after
+					} else {
+						kept = actionUpdateValuesKept(root, kept, cwd, home, &steps)
+					}
+				}
+				continue
+			}
 		}
 		for _, redirect := range root.Redirs {
 			if redirect.Word == nil || !actionOutputRedirect(redirect.Op) {
 				continue
 			}
 			for _, candidate := range candidates {
+				if include != nil {
+					if value, known := actionClientRedirectWordValue(redirect.Word, candidate, cwd, home); known &&
+						include(OperandPath(value, cwd)) {
+						add(value)
+					}
+				}
 				if value, possible := actionOptionalEmptyPrefix(redirect.Word, candidate, cwd, home); possible &&
-					protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+					(protectedReachPath(OperandPath(value, cwd), protected, ssh) || include != nil && include(OperandPath(value, cwd))) {
 					add(value)
 					break
 				}
@@ -127,7 +235,7 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 		}
 		syntax.Walk(root, func(node syntax.Node) bool {
 			if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
-				return declaration.Name != nil && called[declaration.Name.Value]
+				return declaration.Name != nil && (called[declaration.Name.Value] || called[knownUnshadowed(declaration.Name.Value)])
 			}
 			stmt, ok := node.(*syntax.Stmt)
 			if !ok {
@@ -135,9 +243,6 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 			}
 			call, ok := stmt.Cmd.(*syntax.CallExpr)
 			if !ok || len(call.Args) == 0 {
-				return true
-			}
-			if noEffectCopies[call] {
 				return true
 			}
 			// A copy operand with one known parameter value can also be a
@@ -166,7 +271,7 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 			positiveOnly := false
 			addCall := func(name string) bool {
 				path := OperandPath(name, cwd)
-				if positiveOnly && !protectedReachPath(path, protected, ssh) {
+				if positiveOnly && !protectedReachPath(path, protected, ssh) && (include == nil || !include(path)) {
 					return false
 				}
 				if added[path] || !add(name) {
@@ -193,7 +298,7 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 					}
 				}
 				if unknown {
-					for _, name := range literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1) {
+					for _, name := range programOperands(words, stmt, call, initial) {
 						if samePathName(OperandPath(name, cwd), probe) {
 							addCall(probe)
 							break
@@ -204,6 +309,20 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 		candidate:
 			for index, known := range callCandidates {
 				positiveOnly = index > 0
+				callEnvironment := initial
+				if initial != nil && len(call.Assigns) > 0 {
+					callEnvironment = maps.Clone(initial)
+					for _, assignment := range call.Assigns {
+						if assignment.Name == nil {
+							continue
+						}
+						if value, fixed := actionWordValue(assignment.Value, known, cwd, home); fixed {
+							callEnvironment[assignment.Name.Value] = value
+						} else {
+							delete(callEnvironment, assignment.Name.Value)
+						}
+					}
+				}
 				words := make([]string, len(call.Args))
 				// The brace words of a plain cp call, or of another writer, are
 				// the fixed words bash makes of them, so its real targets are
@@ -232,6 +351,11 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 					if braces[i] != nil {
 						continue
 					}
+					if i == 0 && !static {
+						if value, known := actionWordValue(shellUnescapedWord(arg), known, cwd, home); known {
+							words[i], static = value, true
+						}
+					}
 					if i == 0 && !static && simpleShellParameter(arg) == boundName {
 						words[i], static = boundValue, true
 					}
@@ -245,7 +369,7 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 								positiveOnly = true
 							}
 						} else if value, possible := actionOptionalEmptyPrefix(arg, known, cwd, home); possible &&
-							protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+							(protectedReachPath(OperandPath(value, cwd), protected, ssh) || include != nil && include(OperandPath(value, cwd))) {
 							// Only the protected empty-prefix possibility contributes
 							// a write. An unknown parameter proves no safe target.
 							words[i], static, positiveOnly = value, true, true
@@ -255,7 +379,7 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 						// Interpreter arguments after fixed code do not change that
 						// code. Keep its write operands even though argv is dynamic.
 						if i > 0 && fixedInterpreterCodePrefix(words[:i]) {
-							for _, name := range literalProgramOperands(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1) {
+							for _, name := range programOperands(words[:i], stmt, call, callEnvironment) {
 								addCall(name)
 							}
 						} else if i > 0 && awkProgramName(words[0]) {
@@ -263,7 +387,13 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 							// literal print targets stay targets (GAP-2197).
 							if text, rendered := awkRenderedProgram(arg); rendered {
 								prefix := append(append([]string(nil), words[:i]...), text)
-								for _, name := range literalProgramOperands(prefix, stmt, cwd, home, depth, len(file.Stmts) == 1) {
+								for _, name := range programOperands(prefix, stmt, call, callEnvironment) {
+									addCall(name)
+								}
+							}
+						} else if include != nil && i > 0 {
+							if _, shell := shellCommandBodyIndex(words[:i]); shell {
+								for _, name := range programOperands(words[:i], stmt, call, callEnvironment) {
 									addCall(name)
 								}
 							}
@@ -272,7 +402,48 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 					}
 				}
 				_, words, _ = spliceCopyBraceWords(call.Args, words, argStatic, braces)
-				names := literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1)
+				if include != nil && len(words) > 0 && len(call.Args[0].Parts) == 1 {
+					if _, parameter := call.Args[0].Parts[0].(*syntax.ParamExp); parameter {
+						if _, changedIFS := known["IFS"]; !changedIFS && strings.ContainsAny(words[0], " \t\n") {
+							fields := strings.Fields(words[0])
+							if len(fields) > 0 && len(fields) <= 8 {
+								words = append(fields, words[1:]...)
+							}
+						}
+					}
+				}
+				if include != nil && depth < 4 && len(words) > 0 {
+					if function := functions[words[0]]; function != nil && function.Body != nil {
+						if body, block := function.Body.Cmd.(*syntax.Block); block {
+							var source strings.Builder
+							if syntax.NewPrinter().Print(&source, &syntax.File{Stmts: body.Stmts}) == nil {
+								bindings := maps.Clone(known)
+								if bindings == nil {
+									bindings = actionValues{}
+								}
+								for _, assignment := range call.Assigns {
+									if assignment.Name == nil {
+										continue
+									}
+									if value, fixed := actionWordValue(assignment.Value, known, cwd, home); fixed {
+										bindings[assignment.Name.Value] = value
+									} else {
+										delete(bindings, assignment.Name.Value)
+									}
+								}
+								for i, argument := range words[1:] {
+									bindings[strconv.Itoa(i+1)] = argument
+								}
+								writes, _ := literalWriteOperandsWithParsedKnown(source.String(), cwd, home, depth+1, nil, bindings, include)
+								for _, target := range writes {
+									addCall(target)
+								}
+								continue candidate
+							}
+						}
+					}
+				}
+				names := programOperands(words, stmt, call, callEnvironment)
 				// A plain cp call lists only its own destination; a literal shell
 				// body (sh -c BODY) lists the own destinations of its cp calls.
 				var own []string
@@ -281,7 +452,7 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 					own = names
 				case "sh", "bash", "dash", "ash", "zsh", "ksh":
 					if body, ok := shellCommandBodyIndex(words); ok {
-						_, own = literalWriteOperandsWithCopies(words[body], cwd, home, depth+1)
+						_, own = literalWriteOperandsWithParsedKnown(words[body], cwd, home, depth+1, nil, callEnvironment, include)
 					}
 				}
 				credit := make(map[string]int, len(own))
@@ -297,9 +468,24 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 			}
 			return true
 		})
+		if include != nil && knownExitStatement(root, home) {
+			break
+		}
 		actionUpdateValues(root, values, cwd, home)
 		if trackKept {
-			kept = actionUpdateValuesKept(root, kept, cwd, home, &steps)
+			next := actionUpdateValuesKept(root, kept, cwd, home, &steps)
+			if include != nil {
+				next = actionKeepAcrossFunctionCall(root, kept, next, func(name string) *syntax.FuncDecl {
+					if _, known := functions[name]; !known {
+						name = knownUnshadowed(name)
+					}
+					if redefined[name] {
+						return nil
+					}
+					return functions[name]
+				}, cwd, home, &steps)
+			}
+			kept = next
 		}
 	}
 	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
@@ -428,25 +614,38 @@ func sedLongOption(word string) string {
 
 // InPlaceEditOperands lists the files a sed -i or perl -i call of the
 // command edits in place, as absolute paths read in cwd, whatever their
-// parent directory. The editor replaces the directory entry; a caller that
-// follows the name through a link the same command makes to a directory
-// reads the file the edit replaces (GAP-2522).
-func InPlaceEditOperands(command, cwd, home string) []string {
-	return inPlaceEditOperands(command, cwd, home, false)
+// parent directory, with the known values expanded (knownValueWord; user
+// is the login of the statement, PlacedStatement.User). The editor replaces the
+// directory entry; a caller that follows the name through a link the same
+// command makes to a directory reads the file the edit replaces (GAP-2522).
+func InPlaceEditOperands(command, cwd, home string, user KnownUser) []string {
+	return inPlaceEditOperands(command, cwd, home, user, false)
 }
 
 // FollowedInPlaceEditOperands lists the files a sed -i --follow-symlinks
 // (or gsed) call of the command edits, as absolute paths read in cwd. GNU
 // sed then rewrites the file a link names instead of replacing the link,
 // so a caller follows the operand name itself (GAP-2529).
-func FollowedInPlaceEditOperands(command, cwd, home string) []string {
-	return inPlaceEditOperands(command, cwd, home, true)
+func FollowedInPlaceEditOperands(command, cwd, home string, user KnownUser) []string {
+	return inPlaceEditOperands(command, cwd, home, user, true)
 }
 
-func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands []string) {
+func inPlaceEditOperands(command, cwd, home string, user KnownUser, followedOnly bool) (operands []string) {
+	readInPlaceEdits(command, cwd, home, user, func(name string, followed bool) {
+		if followed || !followedOnly {
+			operands = append(operands, name)
+		}
+	})
+	return operands
+}
+
+// readInPlaceEdits calls edit with each in-place editor operand of command
+// (InPlaceEditOperands), and whether sed follows its links
+// (FollowedInPlaceEditOperands).
+func readInPlaceEdits(command, cwd, home string, user KnownUser, edit func(name string, followed bool)) {
 	file, ok := parseShell(command)
 	if !ok || !filepath.IsAbs(cwd) {
-		return nil
+		return
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
@@ -456,7 +655,7 @@ func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands
 		words := make([]string, len(call.Args))
 		static := make([]bool, len(call.Args))
 		for i, arg := range call.Args {
-			words[i], static[i] = StaticWord(arg, home)
+			words[i], static[i] = knownValueWord(arg, home, user)
 		}
 		if index, wrapped := plainWrappedChild(words, static); wrapped {
 			words, static = words[index:], static[index:]
@@ -465,24 +664,20 @@ func inPlaceEditOperands(command, cwd, home string, followedOnly bool) (operands
 			return true
 		}
 		var files []string
+		followed := false
 		switch programBase(words[0]) {
 		case "sed", "gsed":
-			if !followedOnly || sedFollowsInPlaceLinks(words) {
-				files = sedInPlaceFiles(words)
-			}
+			files, followed = sedInPlaceFiles(words), sedFollowsInPlaceLinks(words)
 		case "perl":
-			if !followedOnly {
-				files = perlInPlaceFiles(words)
-			}
+			files = perlInPlaceFiles(words)
 		}
 		for _, name := range files {
 			if name != "" && !strings.ContainsAny(name, "\x00\r\n") {
-				operands = append(operands, OperandPath(name, cwd))
+				edit(OperandPath(name, cwd), followed)
 			}
 		}
 		return true
 	})
-	return operands
 }
 
 // perlInPlaceFiles lists the file operands of perl -i (-pi -e CODE FILE,

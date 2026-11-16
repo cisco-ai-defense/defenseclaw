@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -254,6 +255,11 @@ func readDevinJSONObject(path string) (map[string]interface{}, error) {
 		}
 		return nil, err
 	}
+	return parseDevinJSONObject(path, data)
+}
+
+// parseDevinJSONObject parses the bytes of the Devin hooks file at path.
+func parseDevinJSONObject(path string, data []byte) (map[string]interface{}, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]interface{}{}, nil
 	}
@@ -288,36 +294,71 @@ func devinHooksObject(path string, cfg map[string]interface{}) map[string]interf
 }
 
 func patchDevinHooks(path, hookScript string, ownedHookScripts ...string) error {
+	return patchDevinHooksForEvents(path, func(string) string { return hookScript }, ownedHookScripts...)
+}
+
+// patchDevinHooksForEvents writes one DefenseClaw group per Devin event, the
+// command of each from commandFor (devinHookCommandForEvent), and replaces
+// the groups that run an owned command.
+func patchDevinHooksForEvents(path string, commandFor func(event string) string, ownedHookScripts ...string) error {
 	cfg, err := readDevinJSONObject(path)
 	if err != nil {
 		return err
 	}
 	hooks := devinHooksObject(path, cfg)
-	ownedHookScripts = uniqueNonEmptyStrings(append([]string{hookScript}, ownedHookScripts...))
+	commands := make(map[string]string, len(devinHookEvents))
+	owned := append([]string(nil), ownedHookScripts...)
+	for _, event := range devinHookEvents {
+		commands[event] = commandFor(event)
+		owned = append(owned, commands[event])
+	}
+	ownedHookScripts = uniqueNonEmptyStrings(owned)
 	for _, event := range devinHookEvents {
 		entry := map[string]interface{}{
 			"matcher": "",
 			"hooks": []interface{}{
 				map[string]interface{}{
 					"type":    "command",
-					"command": hookScript,
+					"command": commands[event],
 					"timeout": json.Number("10"),
 				},
 			},
 		}
 		hooks[event] = replaceManagedDevinHooks(hooks[event], ownedHookScripts, entry)
 	}
+	return writeDevinHooksFile(path, cfg)
+}
+
+// writeDevinHooksFile writes cfg to the Devin hooks file at path: a project
+// hooks.v1.json keeps the operator comments and other events, any other
+// file is written back as JSON.
+func writeDevinHooksFile(path string, cfg map[string]interface{}) error {
+	var existing []byte
 	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") {
-		// The project file is the operator's: keep its comments and foreign
-		// hook lists byte for byte, and edit only DefenseClaw's events
-		// (GAP-0192).
-		if data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			if spliced, ok := spliceDevinProjectHooks(data, devinHookEvents, cfg); ok {
-				return atomicWriteFile(path, spliced, 0o600)
-			}
+		existing, _ = safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
+	}
+	data, err := renderDevinHooksFile(path, existing, cfg)
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, data, 0o600)
+}
+
+// renderDevinHooksFile returns the bytes of the Devin hooks file at path for
+// cfg, given the bytes the file holds now. The project hooks.v1.json is the
+// operator own: keep its comments and foreign hook lists byte for byte, and
+// edit only DefenseClaw events (GAP-0192).
+func renderDevinHooksFile(path string, existing []byte, cfg map[string]interface{}) ([]byte, error) {
+	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") && len(bytes.TrimSpace(existing)) > 0 {
+		if spliced, ok := spliceDevinProjectHooks(existing, devinHookEvents, cfg); ok {
+			return spliced, nil
 		}
 	}
-	return writeJSONObject(path, cfg)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, "\n"...), nil
 }
 
 func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry map[string]interface{}) []interface{} {
@@ -388,16 +429,9 @@ func removeDevinHookReferences(path string, hookScripts ...string) error {
 	if !strings.EqualFold(filepath.Base(path), "hooks.v1.json") && len(hooks) == 0 {
 		delete(cfg, "hooks")
 	}
-	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") {
-		// Teardown keeps the operator's comments and other events, like
-		// Setup (GAP-0192, GAP-1944).
-		if data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			if spliced, ok := spliceDevinProjectHooks(data, devinHookEvents, cfg); ok {
-				return atomicWriteFile(path, spliced, 0o600)
-			}
-		}
-	}
-	return writeJSONObject(path, cfg)
+	// Teardown keeps the operator's comments and other events, like Setup
+	// (GAP-0192, GAP-1944).
+	return writeDevinHooksFile(path, cfg)
 }
 
 func devinConfigReferencesHook(path string, hookScripts ...string) (bool, error) {
@@ -436,11 +470,34 @@ func devinOwnedHookCommandsForOS(goos string, opts SetupOpts, hookScript string)
 		return uniqueNonEmptyStrings(commands)
 	}
 	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
-		commands = append(commands,
-			windowsDevinBashHookCommand(hookBinary),
-		)
+		commands = append(commands, windowsDevinOwnedHookCommands(hookBinary)...)
 	}
 	return uniqueNonEmptyStrings(commands)
+}
+
+// devinHookCommandForEvent is the command Setup registers for one Devin
+// event: hookScript, except on per-user Windows, where a block event
+// (hookguard.DevinBlockEvent) starts the guard program beside the launcher
+// when it is there (windowsDevinGuardedHookCommand), so a launcher that
+// cannot start blocks instead of letting the call run (rel-1-0-6 GAP-0676).
+// Stop and the other events, a managed install and an install without the
+// guard program keep hookScript.
+func devinHookCommandForEvent(goos string, opts SetupOpts, hookScript, event string) string {
+	if goos != "windows" || opts.ManagedEnterprise || !hookguard.DevinBlockEvent(event) {
+		return hookScript
+	}
+	launcher := defenseclawHookBinary()
+	if hookScript == "" || hookScript != windowsDevinBashHookCommand(launcher) {
+		return hookScript
+	}
+	guard := windowsSiblingLauncherGuard(launcher)
+	if guard == "" {
+		return hookScript
+	}
+	if guarded := windowsDevinGuardedHookCommand(guard, event); guarded != "" {
+		return guarded
+	}
+	return hookScript
 }
 
 // devinManagedHookCommand is the hook command a Unix standalone managed
@@ -503,9 +560,10 @@ func devinOwnedHooksPresent(conn *hookOnlyConnector, opts SetupOpts) (bool, erro
 		hooks := devinHooksObject(path, cfg)
 		for _, event := range devinHookEvents {
 			list, _ := hooks[event].([]interface{})
+			command := devinHookCommandForEvent(runtime.GOOS, opts, hookScript, event)
 			managed := 0
 			for _, item := range list {
-				if devinHookGroupReferences(item, hookScript) {
+				if devinHookGroupReferences(item, command) {
 					managed++
 				}
 			}

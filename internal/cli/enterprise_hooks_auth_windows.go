@@ -16,8 +16,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -81,6 +83,30 @@ func repairEnterpriseHookGuardianLedgerObjectPlatform(path string, directory boo
 	return enterprisehooks.RunWithWindowsOwnerRestorePrivilege(func() error {
 		return enterpriseHookAuthorizationOwnershipSetter(path)
 	})
+}
+
+// enterpriseHookGuardianLedgerRefusesContentDrift is
+// managed.StandaloneRefusesContentDrift; tests replace it.
+var enterpriseHookGuardianLedgerRefusesContentDrift = managed.StandaloneRefusesContentDrift
+
+// enterpriseHookGuardianLedgerStandaloneRefusalPlatform judges only the
+// object's own descriptor (managed.AssessCanonical): a boundary is an
+// untrusted writer or owner. A structural problem is left to the repairer,
+// which refuses it, and to the strict validation after it.
+func enterpriseHookGuardianLedgerStandaloneRefusalPlatform(path string, directory bool) error {
+	if !enterpriseHookGuardianLedgerRefusesContentDrift() {
+		return nil
+	}
+	kind := managed.ObjectAdminFile
+	if directory {
+		kind = managed.ObjectAuthorizationDirectory
+	}
+	result, err := managed.AssessCanonical(path, kind, managed.CanonicalOptions{Quiet: true})
+	if err != nil || result.Outcome != managed.CanonicalBoundary {
+		return nil
+	}
+	return managed.RefuseStandaloneContentDrift(fmt.Errorf(
+		"an untrusted principal can write or owns %s: %s", path, strings.Join(result.Drift, "; ")))
 }
 
 func enterpriseWindowsLedgerLinkCount(path string) (uint32, error) {

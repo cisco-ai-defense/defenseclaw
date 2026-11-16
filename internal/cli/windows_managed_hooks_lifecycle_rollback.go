@@ -112,7 +112,13 @@ func rollbackWindowsStandaloneFirstInstallFootprint(ctx windowsManagedHooksLifec
 		note("Copilot and OpenCode machine policy and the Claude Code version floor: %v", err)
 	} else {
 		opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
-		if _, err := enterprisepolicy.RemoveWindowsGoOwned(opts); err != nil {
+		removed, err := enterprisepolicy.RemoveWindowsGoOwned(opts)
+		for _, state := range removed.States {
+			for _, warning := range state.Warnings {
+				note("%s machine policy: %s", state.Connector, warning)
+			}
+		}
+		if err != nil {
 			note("Copilot and OpenCode machine policy: %v", err)
 		}
 		if _, err := enterprisepolicy.RemoveWindowsClaudeVersionFloor(opts); err != nil {

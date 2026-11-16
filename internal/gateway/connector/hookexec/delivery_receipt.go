@@ -15,10 +15,10 @@ import (
 	"time"
 )
 
-// The managed hook and gateway use the same HTTP request for the verdict and
-// its delivery receipt. An old gateway does not send 103 Early Hints, so the
-// body ends with HookDeliveryReleased after this compatibility wait. A 1.0.4
-// gateway whose 103 comes later reads the same marker in place of a receipt.
+// The hook and gateway use the same HTTP request for the verdict and its
+// delivery receipt. A legacy reader signals 100 before it needs the body end;
+// a current gateway signals 103 before it reads the receipt. The compatibility
+// wait applies to transports that cannot report the legacy read signal.
 const hookDeliveryCapabilityWait = 250 * time.Millisecond
 
 // The agent has its answer before this wait starts. Limit a missing HTTP
@@ -27,11 +27,15 @@ const hookDeliveryCapabilityWait = 250 * time.Millisecond
 const hookDeliveryReceiptTimeout = hookResponseGrace
 
 type hookDeliveryRequest struct {
-	writer *io.PipeWriter
-	ready  chan struct{}
-	once   sync.Once
-	mu     sync.Mutex
-	closed bool
+	writer      *io.PipeWriter
+	cancel      context.CancelFunc
+	ready       chan struct{}
+	reading     chan struct{}
+	payloadDone chan struct{}
+	once        sync.Once
+	readOnce    sync.Once
+	mu          sync.Mutex
+	closed      bool
 	// released: the capability wait passed first and the body ended with
 	// HookDeliveryReleased. The answer is ordinary, with no receipt.
 	released bool
@@ -73,19 +77,24 @@ func DeliveryReceiptEvent(connector, event string) bool {
 }
 
 func wantsHookDeliveryReceipt(opts Options) bool {
-	return opts.ManagedEnterprise && !opts.SecureClient && opts.answerWatch != nil && !opts.answerBy.IsZero()
+	return !opts.SecureClient && opts.answerWatch != nil && !opts.answerBy.IsZero()
 }
 
-func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool) (*http.Request, *hookDeliveryRequest) {
+func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool, legacyReadSignal bool) (*http.Request, *hookDeliveryRequest) {
 	reader, writer := io.Pipe()
-	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{})}
+	delivery := &hookDeliveryRequest{writer: writer, ready: make(chan struct{}), reading: make(chan struct{}), payloadDone: make(chan struct{})}
 	req.Body = reader
 	req.ContentLength = -1
 	req.GetBody = nil
 	req.Header.Set(HookDeliveryReceiptHeader, "1")
 	req.Header.Set(HookDeliveryPayloadBytesHeader, strconv.Itoa(len(payload)))
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
-		if code == http.StatusEarlyHints {
+		switch code {
+		case http.StatusContinue:
+			// Earlier Go gateways send 100 when they begin reading the
+			// body. They need its end before they can return an answer.
+			delivery.readOnce.Do(func() { close(delivery.reading) })
+		case http.StatusEarlyHints:
 			delivery.once.Do(func() { close(delivery.ready) })
 		}
 		return nil
@@ -95,19 +104,32 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 	// round trip waits for that loop: the body ends with the request, also
 	// after the gateway advertised the receipt.
 	context.AfterFunc(req.Context(), delivery.close)
+	// Read now: the goroutine below outlives the call by a moment (GAP-0680).
+	poll := hookDeliveryStartPoll
 	go func() {
-		if _, err := writer.Write(payload); err != nil {
+		_, err := writer.Write(payload)
+		if err != nil {
 			delivery.close()
+			close(delivery.payloadDone)
 			return
 		}
-		timer := time.NewTimer(wait)
+		close(delivery.payloadDone)
+		if wait <= 0 && !legacyReadSignal {
+			delivery.release()
+			return
+		}
+		timer := time.NewTimer(max(wait, 0))
 		defer timer.Stop()
-		// seenStarting: the gateway was still starting when the wait
-		// passed; once it runs it gets the capability wait again.
+		// A 100 is evidence that the accepted legacy POST has begun reading.
+		// A 103 is evidence that this POST can carry the delivered receipt.
+		// The health of a separate request proves neither fact.
 		seenStarting := false
 		for {
 			select {
 			case <-delivery.ready:
+				return
+			case <-delivery.reading:
+				delivery.release()
 				return
 			case <-req.Context().Done():
 				return
@@ -116,7 +138,7 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 			if starting != nil && starting(req.Context()) {
 				seenStarting = true
 				delivery.markHeldForStart()
-				timer.Reset(hookDeliveryStartPoll)
+				timer.Reset(poll)
 				continue
 			}
 			if seenStarting {
@@ -124,11 +146,47 @@ func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Dur
 				timer.Reset(wait)
 				continue
 			}
+			if legacyReadSignal {
+				// With a read signal, keep the accepted POST writable until it
+				// advertises 103 or the request's own deadline ends it.
+				select {
+				case <-delivery.ready:
+				case <-delivery.reading:
+					delivery.release()
+				case <-req.Context().Done():
+				}
+				return
+			}
 			delivery.release()
 			return
 		}
 	}()
 	return req, delivery
+}
+
+// hookDeliveryContinueClient sends the request body immediately while still
+// asking an earlier Go gateway to signal when it begins reading it. A custom
+// transport with unknown Expect handling keeps the bounded release window.
+func hookDeliveryContinueClient(client *http.Client) (*http.Client, bool) {
+	if client == nil {
+		return nil, false
+	}
+	transport := client.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return client, false
+	}
+	if base.ExpectContinueTimeout == 0 {
+		return client, true
+	}
+	copyClient := *client
+	copyTransport := base.Clone()
+	copyTransport.ExpectContinueTimeout = 0
+	copyClient.Transport = copyTransport
+	return &copyClient, true
 }
 
 // hookDeliveryStartPoll is how often a hook whose capability wait passed
@@ -147,13 +205,19 @@ var hookDeliveryStartPoll = 100 * time.Millisecond
 // probe only runs after the capability wait passed without a 103, and the
 // request deadline bounds the wait. Elsewhere no probe is wired and the
 // release comes at the capability wait, as before.
-var hookDeliveryGatewayStarting = func(ctx context.Context, opts Options) bool {
+// It returns the look of the call opts makes (nil: none); the call reads
+// the service probe when it prepares the request, because the look runs on
+// the request body's goroutine, which outlives the call by a moment: a test
+// that replaced the probe after it raced that read (rel-1-0-6 GAP-0680).
+var hookDeliveryGatewayStarting = func(opts Options) func(context.Context) bool {
 	probe := standaloneGatewayServiceProbe
 	if !opts.ManagedEnterprise || !opts.ManagedStandalone || opts.SecureClient || probe == nil {
-		return false
+		return nil
 	}
-	state, err := probe(ctx)
-	return err == nil && gatewayServiceNotServing(state)
+	return func(ctx context.Context) bool {
+		state, err := probe(ctx)
+		return err == nil && gatewayServiceNotServing(state)
+	}
 }
 
 // gatewayServiceNotServing reports a unit state in which the gateway does not
@@ -171,6 +235,15 @@ func gatewayServiceNotServing(state gatewayServiceState) bool {
 
 func hookDeliveryWait(opts Options) time.Duration {
 	wait := hookDeliveryCapabilityWait
+	if !opts.ManagedEnterprise && !opts.answerBy.IsZero() {
+		// Preserve the short-window retry reserve. A peer that answers
+		// without receipt support gets its original body-release budget.
+		remaining := max(time.Until(opts.answerBy), 0)
+		wait = min(hookDeliveryCapabilityWait, remaining/2)
+		if remaining <= 2*hookDeliveryCapabilityWait {
+			wait = remaining / 4
+		}
+	}
 	if deadline := gatewayRestartDeadline(opts, opts.StartedAt); !deadline.IsZero() {
 		remaining := time.Until(deadline) / 4
 		if remaining < wait {
@@ -181,12 +254,27 @@ func hookDeliveryWait(opts Options) time.Duration {
 }
 
 func (d *hookDeliveryRequest) close() {
+	// A receipt write can be waiting for the transport to read the pipe
+	// while holding mu. Close the pipe first so that write can return.
+	_ = d.writer.Close()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if !d.closed {
 		d.closed = true
-		_ = d.writer.Close()
 	}
+	if d.cancel != nil {
+		d.cancel()
+	}
+}
+
+func (d *hookDeliveryRequest) setCancel(cancel context.CancelFunc) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		cancel()
+		return
+	}
+	d.cancel = cancel
 }
 
 // release ends the body with HookDeliveryReleased unless the gateway's 103
@@ -230,6 +318,44 @@ func (d *hookDeliveryRequest) acknowledge(localBlock bool) error {
 	return err
 }
 
+// deadline reports the watchdog's committed answer on the same request the
+// gateway is evaluating. A closed or unadvertised request has no in-band
+// witness; its local failure line remains available to the reporter.
+func (d *hookDeliveryRequest) deadline(blocked bool) bool {
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return false
+	}
+	d.mu.Unlock()
+	readyWait := time.NewTimer(answerWatchdogLogWait)
+	defer readyWait.Stop()
+	select {
+	case <-d.payloadDone:
+	case <-readyWait.C:
+		return false
+	}
+	select {
+	case <-d.ready:
+	case <-readyWait.C:
+		return false
+	}
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		return false
+	}
+	d.closed = true
+	d.mu.Unlock()
+	token := HookDeliveryReceiptOpen
+	if blocked {
+		token = HookDeliveryReceiptLate
+	}
+	_, err := io.WriteString(d.writer, token)
+	_ = d.writer.Close()
+	return err == nil
+}
+
 func (d *hookDeliveryRequest) capabilityReceived() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -247,6 +373,11 @@ func (d *hookDeliveryRequest) capabilityReceived() bool {
 type hookDeliveryResponseBody struct {
 	io.ReadCloser
 	delivery *hookDeliveryRequest
+}
+
+func (b *hookDeliveryResponseBody) Close() error {
+	b.delivery.close()
+	return b.ReadCloser.Close()
 }
 
 func hookDeliveryResponse(body io.ReadCloser) *hookDeliveryRequest {

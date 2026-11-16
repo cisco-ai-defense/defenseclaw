@@ -7,6 +7,7 @@ import (
 	"context"
 	"math"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -47,6 +48,18 @@ func normalizeManagedAIDFailOpenDirection(direction string) string {
 	}
 }
 
+// managedAIDFailOpenAvailabilityDecisions counts, for the life of the
+// process, the fail-open decisions taken because managed AID inspection was
+// unwired or gave no verdict. The benign no-content skip is not counted. The
+// endpoint health report takes the difference between two reads as the
+// fail-open count since its previous report.
+var managedAIDFailOpenAvailabilityDecisions atomic.Uint64
+
+// managedAIDFailOpenAvailabilityDecisionCount is the running total above.
+func managedAIDFailOpenAvailabilityDecisionCount() uint64 {
+	return managedAIDFailOpenAvailabilityDecisions.Load()
+}
+
 // recordManagedAIDFailOpenMetricV8 records exactly one decision counter for
 // every managed AID fail-open branch. The reason is normalized to a closed
 // four-value set before it reaches the generated bounded label contract.
@@ -56,6 +69,9 @@ func recordManagedAIDFailOpenMetricV8(
 	runtime hookLifecycleMetricV8Runtime,
 	reason string,
 ) error {
+	if managedAIDFailOpenAvailabilityFailure(normalizeManagedAIDFailOpenReason(reason)) {
+		managedAIDFailOpenAvailabilityDecisions.Add(1)
+	}
 	if runtime == nil {
 		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
 	}

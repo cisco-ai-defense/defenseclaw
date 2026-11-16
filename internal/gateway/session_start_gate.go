@@ -53,6 +53,9 @@ type sessionStartEntry struct {
 	// there is no start payload, only the checks a start runs and a call
 	// does not. A call does not wait for it past its answer window.
 	inPlace bool
+	// pinned is the identity refusal text this entry holds trusted
+	// (identityRefusalWatch.pin) for as long as the gate keeps the entry.
+	pinned string
 }
 
 // sessionStartTicket is one session start being judged.
@@ -61,6 +64,18 @@ type sessionStartTicket struct {
 	key   string
 	entry *sessionStartEntry
 	once  sync.Once
+	// watch records the identity refusals issued while this start is judged,
+	// so finish can pin the one the start ends with (watchIdentityRefusals).
+	// Each start has its own.
+	watch *identityRefusalWatch
+}
+
+// adopt records the identity refusal the start's own request was resolved to
+// before the start began (see identityRefusalWatch.adopt).
+func (t *sessionStartTicket) adopt(refusal string) {
+	if t != nil {
+		t.watch.adopt(refusal)
+	}
 }
 
 const (
@@ -163,9 +178,10 @@ func (g *sessionStartGate) beginLocked(key string) *sessionStartTicket {
 	if len(g.entries) >= sessionStartGateLimit {
 		g.evictLocked(time.Now())
 	}
+	g.dropLocked(key)
 	g.entries[key] = entry
 	g.seenLocked(key, entry.at)
-	return &sessionStartTicket{gate: g, key: key, entry: entry}
+	return &sessionStartTicket{gate: g, key: key, entry: entry, watch: watchIdentityRefusals()}
 }
 
 // evictLocked drops expired blocks, then the oldest finished ones until the
@@ -180,7 +196,7 @@ func (g *sessionStartGate) evictLocked(now time.Time) {
 			continue
 		}
 		if now.Sub(entry.at) > sessionStartGateTTL {
-			delete(g.entries, key)
+			g.dropLocked(key)
 			continue
 		}
 		if oldestKey == "" || entry.at.Before(oldest) {
@@ -188,8 +204,18 @@ func (g *sessionStartGate) evictLocked(now time.Time) {
 		}
 	}
 	if len(g.entries) >= sessionStartGateLimit && oldestKey != "" {
-		delete(g.entries, oldestKey)
+		g.dropLocked(oldestKey)
 	}
+}
+
+// dropLocked forgets the entry of key and releases the identity refusal it
+// pinned.
+func (g *sessionStartGate) dropLocked(key string) {
+	if entry := g.entries[key]; entry != nil && entry.pinned != "" {
+		unpinIdentityRefusal(entry.pinned)
+		entry.pinned = ""
+	}
+	delete(g.entries, key)
 }
 
 // seenLocked records that key's start was seen or judged, and wakes the calls waiting for it. It keeps at most
@@ -224,9 +250,16 @@ func (t *sessionStartTicket) finish(blocked bool, reason string) {
 		g := t.gate
 		g.mu.Lock()
 		t.entry.blocked, t.entry.reason, t.entry.at = blocked, reason, time.Now()
-		if !blocked && g.entries[t.key] == t.entry {
-			delete(g.entries, t.key)
+		if g.entries[t.key] == t.entry {
+			if !blocked {
+				g.dropLocked(t.key)
+			} else if t.watch.pin(reason) {
+				// A live blocked session keeps its readable cause however
+				// many other refusals are issued meanwhile (GAP-0718).
+				t.entry.pinned = reason
+			}
 		}
+		t.watch.close()
 		g.mu.Unlock()
 		close(t.entry.done)
 	})
@@ -308,7 +341,7 @@ func (g *sessionStartGate) await(ctx context.Context, key string, wait, arrival 
 				if time.Since(entry.at) > sessionStartGateTTL {
 					g.mu.Lock()
 					if g.entries[key] == entry {
-						delete(g.entries, key)
+						g.dropLocked(key)
 					}
 					g.mu.Unlock()
 					return "", false
@@ -507,10 +540,17 @@ func (a *APIServer) sessionStartCheck(connectorName string) func(context.Context
 const (
 	sessionStartBlockedPrefix = "DefenseClaw blocked this agent session when it started ("
 	sessionStartBlockedSuffix = "), so it blocks this call. Restart the agent."
+	// A start refused for an identity the directory had not confirmed
+	// stays blocked after the directory answers: the verdict belongs to the
+	// session, and only a new session is judged again (GAP-0718).
+	sessionStartBlockedIdentitySuffix = "), so it blocks this call: the session began before the identity could be confirmed, and a later answer does not reopen it. Restart the agent."
 )
 
 func sessionStartBlockedReason(reason string) string {
 	reason = strings.TrimSpace(reason)
+	if trustedIdentityRefusalReason(reason) {
+		return sessionStartBlockedPrefix + reason + sessionStartBlockedIdentitySuffix
+	}
 	if len(reason) > 400 {
 		reason = reason[:400]
 	}
@@ -523,9 +563,9 @@ func sessionStartBlockedReason(reason string) string {
 // trustedSessionStartGateReason reports a session-start gate refusal made
 // of DefenseClaw text only: the pending refusal, or the blocked-start
 // sentence around an unfinished check or a ship-authored start reason (a
-// Codex registration refusal after a Codex update, a catalog rule match).
-// A start reason with free-form text (a path, a scanner title) fails the
-// match and stays redacted (GAP-2643).
+// Codex registration refusal after a Codex update, a catalog rule match, an
+// identity refusal). A start reason with free-form text (a path, a scanner
+// title) fails the match and stays redacted (GAP-2643).
 func trustedSessionStartGateReason(reason string) bool {
 	if reason == sessionStartPendingReason {
 		return true
@@ -533,6 +573,9 @@ func trustedSessionStartGateReason(reason string) bool {
 	inner, ok := strings.CutPrefix(reason, sessionStartBlockedPrefix)
 	if !ok {
 		return false
+	}
+	if identity, ok := strings.CutSuffix(inner, sessionStartBlockedIdentitySuffix); ok {
+		return trustedIdentityRefusalReason(identity)
 	}
 	if inner, ok = strings.CutSuffix(inner, sessionStartBlockedSuffix); !ok {
 		return false

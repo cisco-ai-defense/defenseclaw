@@ -102,8 +102,15 @@ func TestPerUserGatewayDecidesGroupsFromItsOwnCredentials(t *testing.T) {
 		t.Fatalf("not a member: %+v; want watch, not refused", got)
 	}
 	byName := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"t7ar-u1"}}}
-	got := identityTestSet(t, p, "watch", byName).match(&subject, profileSubjectProcessOwner, "claudecode", "")
+	set := identityTestSet(t, p, "watch", byName)
+	got := set.match(&subject, profileSubjectProcessOwner, "claudecode", "")
+	if got.Name != "watch" || got.Refused != "" || !slices.Equal(got.Unproven, []string{"account:unknown"}) {
+		t.Fatalf("default-tier users entry: %+v; want warned default", got)
+	}
+	strict := identityTestSet(t, p, "watch", byName)
+	strict.base.Guardrail.RulePack = "strict"
+	got = strict.match(&subject, profileSubjectProcessOwner, "claudecode", "")
 	if !strings.Contains(got.Refused, "account holder is unconfirmed") || !slices.Equal(got.Unproven, []string{"account:unknown"}) {
-		t.Fatalf("users entry: %+v; want a refusal naming the account holder only", got)
+		t.Fatalf("strict-tier users entry: %+v; want a refusal naming the account holder only", got)
 	}
 }

@@ -226,14 +226,21 @@ TOML
   # Mirror prepare_cursor_userspace exactly.
   mkdir -p "${test_home}/.cursor"
   printf '{"version":1,"hooks":{}}\n' > "${test_home}/.cursor/hooks.json"
+  # What the guardian and Setup write for Copilot: its hook file, the MCP
+  # config, and the legacy config.json migration input.
+  mkdir -p "${test_home}/.copilot/hooks"
+  printf '{"version":1,"hooks":{}}\n' > "${test_home}/.copilot/hooks/defenseclaw.json"
+  printf '{}\n' > "${test_home}/.copilot/mcp-config.json"
+  printf '{}\n' > "${test_home}/.copilot/config.json"
 
   local users="fresh:501:20:${test_home}"
   local out
-  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex,claudecode,cursor" "${users}")"
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex,claudecode,cursor,copilot" "${users}")"
 
   assert_not_contains "${out}" 'connector: "claudecode"' "prepare_claudecode_userspace state alone must not trigger fallback"
   assert_not_contains "${out}" 'connector: "codex"'      "prepare_codex_userspace state alone must not trigger fallback"
   assert_not_contains "${out}" 'connector: "cursor"'     "prepare_cursor_userspace state alone must not trigger fallback"
+  assert_not_contains "${out}" 'connector: "copilot"'    "DefenseClaw's own Copilot files alone must not trigger fallback"
   local count
   count="$(printf '%s\n' "${out}" | grep -c "^  - user:" || true)"
   assert_eq "${count}" "0" "no target rows emitted from DefenseClaw-only bootstrap state"
@@ -246,6 +253,8 @@ TOML
   assert_status "$?" "1" "helper rejects codex when only ~/.codex + config.toml present"
   connector_present_for_user cursor "${test_home}"
   assert_status "$?" "1" "helper rejects cursor when only ~/.cursor + hooks.json present"
+  connector_present_for_user copilot "${test_home}"
+  assert_status "$?" "1" "helper rejects copilot when only DefenseClaw's ~/.copilot files are present"
 }
 
 t_legacy_prepared_dir_then_cli_use_triggers_fallback() {
@@ -366,6 +375,18 @@ t_connector_present_for_user_signals() {
   : > "${cursor_argv_home}/.cursor/argv.json"
   connector_present_for_user cursor "${cursor_argv_home}"
   assert_status "$?" "0" "cursor detected via ~/.cursor/argv.json"
+
+  # Copilot CLI runtime state.
+  local copilot_logs_home copilot_session_home
+  copilot_logs_home="$(mktemp -d "${TMPROOT}/home.copilotlogs.XXXXXX")"
+  mkdir -p "${copilot_logs_home}/.copilot/logs"
+  connector_present_for_user copilot "${copilot_logs_home}"
+  assert_status "$?" "0" "copilot detected via ~/.copilot/logs"
+
+  copilot_session_home="$(mktemp -d "${TMPROOT}/home.copilotsession.XXXXXX")"
+  mkdir -p "${copilot_session_home}/.copilot/session-state"
+  connector_present_for_user copilot "${copilot_session_home}"
+  assert_status "$?" "0" "copilot detected via ~/.copilot/session-state"
 
   # Empty home arg is a hard "not present" — must not scan the invoking
   # user's real dotfiles.

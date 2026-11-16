@@ -215,6 +215,33 @@ func TestManagedDataPathsTargets(t *testing.T) {
 	}
 }
 
+// GAP-0766: the lock files the product creates lazily under the data
+// directory are repaired as runtime files, with their folder, so the Guardian
+// removes an entry an untrusted principal added.
+func TestManagedDataPathsLockFilesAreRepairTargets(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "data")
+	locks := []string{
+		filepath.Join(root, "acp", ".enterprise-credentials.lock"),
+		filepath.Join(root, "acp", ".enterprise-enrollment.lock"),
+		filepath.Join(root, ".env.lock"),
+		"",
+	}
+	var got []string
+	for _, target := range (ManagedDataPaths{DataDir: root, LockFiles: locks}).targets() {
+		got = append(got, string(target.kind)+":"+target.path)
+	}
+	want := []string{
+		"RuntimeDirectory:" + root,
+		"RuntimeDirectory:" + filepath.Join(root, "acp"),
+		"RuntimeFile:" + locks[0],
+		"RuntimeFile:" + locks[1],
+		"RuntimeFile:" + locks[2],
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("targets:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 func TestReportCanonicalResultMarkersAndDedupe(t *testing.T) {
 	advisoryLogDedupe.reset()
 	t.Cleanup(advisoryLogDedupe.reset)
@@ -246,5 +273,21 @@ func TestRepairManagedDataPathsUnsupportedOffWindows(t *testing.T) {
 	results := RepairWindowsManagedDataPaths(ManagedDataPaths{DataDir: t.TempDir()}, CanonicalOptions{})
 	if len(results) != 1 || results[0].Outcome != CanonicalUnsupported {
 		t.Fatalf("results = %+v", results)
+	}
+}
+
+// GAP-0762: the descriptor a directory is created with is the one the
+// Guardian stamps: protected, owned by Administrators, with explicit
+// inheritable entries and no inherited-flag entry.
+func TestRuntimeDirectoryCreationDescriptorIsProtectedAndExplicit(t *testing.T) {
+	const gateway = "S-1-5-80-1"
+	sddl := canonicalSpecFor(ObjectRuntimeDirectory, gateway).canonicalSDDL()
+	if !strings.HasPrefix(sddl, "O:"+sidAdministrators+"G:BAD:P") {
+		t.Fatalf("descriptor must be administrator-owned and protected: %s", sddl)
+	}
+	for _, sid := range []string{sidLocalSystem, sidAdministrators, gateway} {
+		if !strings.Contains(sddl, "OICI;") || !strings.Contains(sddl, ";;;"+sid+")") {
+			t.Fatalf("entry for %s must be explicit and inheritable: %s", sid, sddl)
+		}
 	}
 }

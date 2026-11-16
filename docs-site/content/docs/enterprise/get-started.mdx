@@ -41,8 +41,8 @@ ACP (Agent Client Protocol) editors are a separate route, in preview, and not a
 `guardrail.connectors` key. The central config needs `acp.enabled: true`, a
 binding for each editor and agent pair, and an ACP profile that allows both
 ([ACP configuration](/docs/acp-guard#configuration)). Then enroll each
-user with `defenseclaw-gateway enterprise acp enroll --user --client --agent
---profile` ([Managed computers](/docs/acp-guard)).
+user with `/opt/defenseclaw/bin/defenseclaw-gateway enterprise acp enroll --user --client --agent
+--profile` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS; [Managed computers](/docs/acp-guard)).
 Enrollment refuses a pair the config does not allow.
 
 ## 3. Pick your MDM

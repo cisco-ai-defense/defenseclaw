@@ -11,6 +11,10 @@ package gateway
 // pointer load and two map lookups to a call (review loop round 1, P1).
 type managedPolicyView struct {
 	connectors map[string]managedPolicyViewConnector
+	// admitted is the descriptor connector set the hook authorizer actually
+	// accepted for this config generation. Nil is reserved for standalone
+	// proof fixtures that do not run an authorizer.
+	admitted map[string]bool
 }
 
 type managedPolicyViewConnector struct {
@@ -36,4 +40,27 @@ func (v *managedPolicyView) unproven(connector, account string) bool {
 	}
 	state, ok := v.connectors[connector]
 	return ok && (state.shared || state.allAccounts || state.accounts[account])
+}
+
+// provenHook reports whether the view proves the vendor machine hook of
+// connector for account: the connector is in the view and its vendor sources
+// are pinned. A nil view, or one without the connector, proves nothing, for
+// the authorizer keeps an admitted connector after the descriptor or the
+// published hook is gone.
+func (v *managedPolicyView) provenHook(connector, account string) bool {
+	if v == nil {
+		return false
+	}
+	state, ok := v.connectors[connector]
+	return ok && !state.shared && !state.allAccounts && !state.accounts[account]
+}
+
+// hasConnector reports whether the view lists connector at all, proven or
+// not: a vendor machine policy source exists for it.
+func (v *managedPolicyView) hasConnector(connector string) bool {
+	if v == nil {
+		return false
+	}
+	_, ok := v.connectors[connector]
+	return ok
 }

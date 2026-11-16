@@ -21,7 +21,10 @@ func TestGAP0404CompactionGuardsFourCell(t *testing.T) {
 		}
 	}
 	rows := []struct{ name, command, want string }{
-		{"future-read-protected", `f=a.txt; ` + hp3r3Conds(9) + `while read -r f; do break; done < names.txt; echo m >> "$f"`, "block"},
+		// The target is a variable the call rebinds by a read: the reader
+		// proves none, so the verdict is the evaluation limit alone: an alert
+		// outside strict, a block in strict (checked below).
+		{"future-read-protected", `f=a.txt; ` + hp3r3Conds(9) + `while read -r f; do break; done < names.txt; echo m >> "$f"`, "alert"},
 		{"pwd-protected", hp3r4IfDefaults(10, `echo m >> "$PWD/keylink"`), "block"},
 		{"pwd-benign", hp3r4IfDefaults(10, `echo m >> "$PWD/out.txt"`), "allow"},
 		{"home-protected", hp3r4IfDefaults(10, `echo m >> "$HOME/project/keylink"`), "block"},
@@ -42,6 +45,13 @@ func TestGAP0404CompactionGuardsFourCell(t *testing.T) {
 		t.Logf("GAP0404ROW %s | %s | want %s", call.name, call.verdict, want)
 		if call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.200s", call.name, call.verdict, want, call.body)
+		}
+	}
+	strictCalls := everyMode("GAP0404/future-read-protected strict", payloads[0], headers[0])
+	f.strict(t).answerAll(t, strictCalls)
+	for _, call := range strictCalls {
+		if call.verdict != "block" {
+			t.Errorf("%s: verdict %s, want block; body %.200s", call.name, call.verdict, call.body)
 		}
 	}
 	if data, err := os.ReadFile(f.keys); err != nil || string(data) != "# decoy\n" {

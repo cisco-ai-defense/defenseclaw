@@ -439,7 +439,12 @@ while ($true) {
     }
     [Console]::Error.WriteLine("DefenseClaw uninstall attempt $attempt of $($script:UninstallAttempts) refused, retrying: $inUse")
     $blockers = @([regex]::Matches($inUse, '\(pid (\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
-    for ($second = 0; $second -lt $script:UninstallRetrySeconds; $second++) {
+    if ($blockers.Count -eq 0) {
+        # The refusal names no pid (a SYSTEM program holding a SYSTEM-only file, GAP-0878): there is no process
+        # to wait for, so back off for the full interval instead of retrying at once.
+        Start-Sleep -Seconds $script:UninstallRetrySeconds
+    }
+    for ($second = 0; $second -lt $script:UninstallRetrySeconds -and $blockers.Count -gt 0; $second++) {
         if (@($blockers | Where-Object { $null -ne (Get-Process -Id $_ -ErrorAction SilentlyContinue) }).Count -eq 0) { break }
         Start-Sleep -Seconds 1
     }

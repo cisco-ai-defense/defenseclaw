@@ -12,23 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 const (
 	darwinPSPath    = "/bin/ps"
 	darwinPSTimeout = 2 * time.Second
 )
-
-func darwinProcessStartIdentity(pid int) (string, error) {
-	info, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil {
-		return "", err
-	}
-	start := info.Proc.P_starttime
-	return fmt.Sprintf("%d.%06d", start.Sec, start.Usec), nil
-}
 
 func darwinProcessInspectionCommand(ctx context.Context, pid int) *exec.Cmd {
 	return darwinPSInspectionCommand(ctx, pid, "comm=")

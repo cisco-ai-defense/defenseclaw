@@ -118,6 +118,18 @@ def detection_only_hook_label(event: str) -> str:
     return ""
 
 
+def allowed_finding_hook_label(target: str, mode: str) -> str:
+    """Label a finding on a hook call that the agent was allowed to run.
+
+    The hook's audit action stays ``allow``. An action-mode finding is an
+    alert to the operator, while a completed or display-only event retains
+    its more precise detection label.
+    """
+    if str(mode or "").strip().lower() != "action":
+        return ""
+    return detection_only_hook_label(target) or "alert"
+
+
 def would_block_hook_label(target: str, mode: str) -> str:
     """Decision label of a would-block finding on a connector:Event target.
 

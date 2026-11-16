@@ -42,7 +42,7 @@ var ClaudeCode = register(&Spec{
 	verification:   Verification{Status: VerifiedLive, Note: "test/e2e/openshell TestSandboxDaemon: hooks at the ingress, a DefenseClaw-blocked command denied, egress blocklist and OpenShell deny"},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/claude", "--version"},
-		VersionRE:   regexp.MustCompile(`^([0-9]+\.[0-9]+\.[0-9]+) \(Claude Code\)`),
+		VersionRE:   regexp.MustCompile(`^v?([0-9]+\.[0-9]+\.[0-9]+) \(Claude Code\)`),
 		// The native Claude Code build is one ELF; an npm build is a node
 		// script, whose interpreter is then the network binary.
 		NetworkBinaries: `p="$(readlink -f "$(command -v claude)")"
@@ -70,7 +70,7 @@ esac`,
 				`src="$(readlink -f /usr/local/bin/claude)"; ` +
 				`case "$src" in "$root"/*) ;; *) install -o root -g root -m 0755 "$src" "$root/bin/claude"; ln -sfn "$root/bin/claude" /usr/local/bin/claude ;; esac; ` +
 				`got="$(DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 /usr/local/bin/claude --version 2>/dev/null | awk 'NR==1{print $1}')"; ` +
-				`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Claude Code '$got' is not the pinned ` + version + `" >&2; exit 1; }`,
+				pinVersionCheck("Claude Code", version),
 		}}, nil
 	},
 	launcher: claudeCodeLauncher,

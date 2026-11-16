@@ -195,6 +195,46 @@ func TestAccountRemovedWarningNeedsAConfirmedMiss(t *testing.T) {
 	}
 }
 
+func TestGAP0693FreshMacRemovalWarnsBeforeEnumeratorMiss(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	ledger, _ := json.Marshal(map[string]any{
+		"version": 1, "updated_at": h.env.Now().UTC().Format(time.RFC3339),
+		"ok": false, "target_count": 1, "success_count": 0, "failure_count": 1,
+	})
+	h.publishLedger(ledger)
+	writeEnumeratorState(t, h, map[string]string{"removed": "directory"}, nil)
+	state, _ := json.Marshal(map[string]any{"results": []map[string]any{{
+		"user": "removed", "connector": "hermes", "ok": false,
+		"error": `enterprise hooks: target account "removed" does not exist: no such account`,
+	}}})
+	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), state, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	receipt, _ := json.Marshal(map[string]any{
+		"updated_at":    time.Now().Add(time.Minute).UTC().Format(time.RFC3339Nano),
+		"failure_count": 1,
+	})
+	if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.GuardianAuthDir, guardianActivationFile)), receipt, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	previousProof := guardianFreshAccountRecordGone
+	t.Cleanup(func() { guardianFreshAccountRecordGone = previousProof })
+	guardianFreshAccountRecordGone = func(_ context.Context, user string) bool { return user == "removed" }
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		requireOK(t, result)
+		if !hasWarning(result, codeGuardianTargetAccountRemoved) || hasWarning(result, codeGuardianTargetFailed) {
+			t.Fatalf("%s did not report confirmed removal as one warning: %+v", action, result.Warnings)
+		}
+	}
+	guardianFreshAccountRecordGone = func(context.Context, string) bool { return false }
+	result := h.run(Options{Action: ActionStatus})
+	if !hasWarning(result, codeGuardianTargetFailed) || hasWarning(result, codeGuardianTargetAccountRemoved) {
+		t.Fatalf("unconfirmed account was excused: %+v", result.Warnings)
+	}
+}
+
 // writeEnumeratorState writes the hook enumerator state beside targets.yaml.
 func writeEnumeratorState(t *testing.T, h *testHost, sources map[string]string, misses map[string]int) {
 	t.Helper()

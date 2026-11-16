@@ -124,6 +124,12 @@ func TestDiscoverUnixClaudeLocalIsMainProbeCandidate(t *testing.T) {
 	previousExtended := unixUserDiscoveryExtended
 	unixUserDiscoveryExtended = func() bool { return true } // managed per-user worker
 	t.Cleanup(func() { unixUserDiscoveryExtended = previousExtended })
+	// Machine-wide prefixes are probed before the vendor local copy: a host
+	// with its own root-owned Claude Code under /usr/local would answer
+	// instead of the fixture.
+	previousPrefixes := machinePrefixes
+	machinePrefixes = func() []string { return nil }
+	t.Cleanup(func() { machinePrefixes = previousPrefixes })
 	home := makeHome(t, trustedTestDir(t), "alice")
 	dir := filepath.Join(home, ".claude", "local", "node_modules", "@anthropic-ai", "claude-code")
 	if err := os.MkdirAll(dir, 0o700); err != nil {

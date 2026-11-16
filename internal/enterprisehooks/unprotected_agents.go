@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -187,15 +189,67 @@ type UnprotectedAgent struct {
 }
 
 type unprotectedAgentsFile struct {
-	Version    int                `json:"version"`
-	Generation string             `json:"generation,omitempty"`
-	Agents     []UnprotectedAgent `json:"agents"`
+	Version          int    `json:"version"`
+	Generation       string `json:"generation,omitempty"`
+	ConfigGeneration uint64 `json:"config_generation,omitempty"`
+	ConfigSHA256     string `json:"config_sha256,omitempty"`
+	// ScanInProgress marks the record the enumerator writes when a cycle
+	// starts on a config the previous record does not name: the stamp is the
+	// new config's, the agents are the previous scan's, and the scan of the new
+	// config has not finished. It is never a completed scan; the cycle's
+	// final record replaces it (GAP-0782).
+	ScanInProgress bool               `json:"scan_in_progress,omitempty"`
+	Agents         []UnprotectedAgent `json:"agents"`
 }
 
 // UnprotectedAgentsPath is the unprotected-agents record for manifestPath.
 func UnprotectedAgentsPath(manifestPath string) string {
 	return filepath.Join(filepath.Dir(filepath.Clean(manifestPath)), UnprotectedAgentsFileName)
 }
+
+// ReadUnprotectedAgentsRecord reads the record at path as status reads it:
+// a regular file within UnprotectedAgentsMaxBytes that carries the platform
+// record protection (unprotectedAgentsRecordTrusted), and the time of the
+// scan it holds (the file modification time the writer refreshes every
+// cycle). A record status would refuse is refused here, so nothing derived
+// from it is trusted either. The enumerator mirrors these bytes for the
+// gateway.
+func ReadUnprotectedAgentsRecord(path string) ([]byte, time.Time, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, time.Time{}, fmt.Errorf("enterprise hooks: %s is not a regular file", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if !os.SameFile(info, opened) {
+		return nil, time.Time{}, fmt.Errorf("enterprise hooks: %s changed while it was read", path)
+	}
+	if err := unprotectedAgentsRecordTrusted(path, opened); err != nil {
+		return nil, time.Time{}, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, UnprotectedAgentsMaxBytes+1))
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if len(data) > UnprotectedAgentsMaxBytes {
+		return nil, time.Time{}, fmt.Errorf("enterprise hooks: %s exceeds %d bytes", path, UnprotectedAgentsMaxBytes)
+	}
+	return data, opened.ModTime(), nil
+}
+
+// UnprotectedUnknownAccount is the user of an entry for an agent whose account
+// could not be identified in the cycle (Windows running-agent scan).
+const UnprotectedUnknownAccount = "(unknown account)"
 
 // UnprotectedCodeForReason classifies an admission reason.
 func UnprotectedCodeForReason(reason string) string {
@@ -250,12 +304,68 @@ func (a UnprotectedAgent) Message() string {
 // entry per user and connector, except separate Kiro CLI and IDE surfaces)
 // so an unchanged set rewrites nothing.
 func MarshalUnprotectedAgents(agents []UnprotectedAgent) ([]byte, error) {
+	return MarshalUnprotectedAgentsForConfig(agents, 0, "")
+}
+
+// MarshalUnprotectedAgentsForConfig binds a completed Unix scan to the
+// config generation and config digest the enumerator observed before
+// loading its inputs. The digest is the identity: a generation number can be
+// reused when the generation record is rebuilt, a digest cannot name another
+// config. Zero and empty keep older records and platforms without a
+// lifecycle generation readable; status cannot infer their config freshness
+// from these fields.
+func MarshalUnprotectedAgentsForConfig(agents []UnprotectedAgent, configGeneration uint64, configSHA256 string) ([]byte, error) {
+	return marshalUnprotectedAgents(agents, configGeneration, configSHA256, false)
+}
+
+// MarshalUnprotectedAgentsScanStarted is the record of a scan of the config
+// (generation, digest) that has started and not finished: it carries the
+// previous scan's agents so status keeps reporting them, and reads as pending
+// until the cycle's final record replaces it.
+func MarshalUnprotectedAgentsScanStarted(previous []UnprotectedAgent, configGeneration uint64, configSHA256 string) ([]byte, error) {
+	return marshalUnprotectedAgents(previous, configGeneration, configSHA256, true)
+}
+
+func marshalUnprotectedAgents(agents []UnprotectedAgent, configGeneration uint64, configSHA256 string, scanInProgress bool) ([]byte, error) {
 	normalized := normalizeUnprotectedAgents(agents)
-	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), Agents: normalized}, "", "  ")
+	data, err := json.MarshalIndent(unprotectedAgentsFile{Version: 1, Generation: UnprotectedAgentsGeneration(), ConfigGeneration: configGeneration, ConfigSHA256: configSHA256, ScanInProgress: scanInProgress, Agents: normalized}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
+}
+
+// UnprotectedAgentsRecordScanInProgress reports a record written when a scan
+// started and not yet replaced by its result.
+func UnprotectedAgentsRecordScanInProgress(data []byte) bool {
+	var record struct {
+		ScanInProgress bool `json:"scan_in_progress"`
+	}
+	return json.Unmarshal(data, &record) == nil && record.ScanInProgress
+}
+
+// UnprotectedAgentsRecordConfigGeneration is the config generation a
+// completed scan covered, or zero for a legacy record.
+func UnprotectedAgentsRecordConfigGeneration(data []byte) uint64 {
+	var record struct {
+		ConfigGeneration uint64 `json:"config_generation"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return 0
+	}
+	return record.ConfigGeneration
+}
+
+// UnprotectedAgentsRecordConfigSHA256 is the config digest a completed scan
+// covered, or empty for a legacy record.
+func UnprotectedAgentsRecordConfigSHA256(data []byte) string {
+	var record struct {
+		ConfigSHA256 string `json:"config_sha256"`
+	}
+	if json.Unmarshal(data, &record) != nil {
+		return ""
+	}
+	return record.ConfigSHA256
 }
 
 // ParseUnprotectedAgents decodes a record written by MarshalUnprotectedAgents.

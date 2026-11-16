@@ -27,7 +27,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The status v2 blocks (enterprisestatus connector_block.go,
@@ -59,7 +58,16 @@ type windowsEnterpriseStatusV2Inputs struct {
 	// accountJoin computes the account join keys (nil: omitted); the
 	// result carries only their summary.
 	accountJoin func() *accountjoin.Report
+	// codexRequirementsHold reports a requirements.toml another process
+	// holds open (nil: not checked).
+	codexRequirementsHold func() (path string, holders []string, held bool)
 }
+
+// windowsCodexRequirementsHeldCode is the status warning for a held Codex
+// requirements.toml, a documented Windows platform limit (GAP-0650): the
+// enforced policy stays in place and DefenseClaw writes the update as soon
+// as the file is released.
+const windowsCodexRequirementsHeldCode = "codex_requirements_held"
 
 // windowsEnterpriseStatusV2Read reads the inputs of an installed deployment;
 // tests replace it.
@@ -73,9 +81,10 @@ var windowsManagedHermesCoverageAudit = func() error {
 
 func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	in := windowsEnterpriseStatusV2Inputs{
-		machinePolicy:       enterprisehooks.WindowsStandaloneMachinePolicyHook,
-		machinePolicyStates: inspectWindowsEnterpriseMachinePolicy,
-		gatewayHealth:       windowsStandaloneGatewayHealth,
+		machinePolicy:         enterprisehooks.WindowsStandaloneMachinePolicyHook,
+		machinePolicyStates:   inspectWindowsEnterpriseMachinePolicy,
+		gatewayHealth:         windowsStandaloneGatewayHealth,
+		codexRequirementsHold: connector.WindowsCodexRequirementsHold,
 	}
 	registry := connector.NewDefaultRegistry()
 	in.knownConnector = func(name string) bool {
@@ -83,7 +92,7 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 		return ok
 	}
 	in.cfg, in.configErr = loadWindowsEnterpriseStandaloneConfig("")
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		in.manifestErr = err
 		return in
@@ -104,6 +113,72 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 		}
 	}
 	return in
+}
+
+// windowsEnterpriseVendorFolderLink is the link that sits on the path of the
+// machine-policy folder of a connector, "" when none. A seam for tests.
+var windowsEnterpriseVendorFolderLink = func(connectorName string) string {
+	link, _ := enterprisehooks.WindowsManagedConnectorFolderLink(connectorName)
+	return link
+}
+
+// windowsEnterpriseLinkedConnectors are the connectors whose machine-policy
+// folder a link can keep, with the name used in the warning.
+var windowsEnterpriseLinkedConnectors = []struct{ connector, label, code string }{
+	{"codex", "Codex", "codex_machine_folder_link"},
+	{"cursor", "Cursor", "cursor_machine_folder_link"},
+	{"claudecode", "Claude Code", "claudecode_machine_folder_link"},
+}
+
+// windowsEnterpriseRemoveLinkFix is the command that removes only a link a
+// DefenseClaw step will not follow; status, verify and the uninstall result use
+// the same words (GAP-0900).
+func windowsEnterpriseRemoveLinkFix(link string) string {
+	return fmt.Sprintf("as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target)", link)
+}
+
+// noteWindowsEnterpriseVendorFolderLinks names, for status and verify, a link at
+// the machine-policy folder of Codex, Cursor or Claude Code with the command
+// that removes it. The hook guardian never writes through the link: it fails
+// the targets of that connector and cannot recreate or repair the folder until
+// an administrator removes it (GAP-0856, GAP-0879).
+func noteWindowsEnterpriseVendorFolderLinks(result *enterprisestatus.Result) {
+	for _, entry := range windowsEnterpriseLinkedConnectors {
+		if _, configured := result.MachinePolicy[entry.connector]; !configured || windowsEnterpriseResultHasWarning(result, entry.code) {
+			continue
+		}
+		link := windowsEnterpriseVendorFolderLink(entry.connector)
+		if link == "" {
+			continue
+		}
+		result.AddWarning(entry.code, fmt.Sprintf("a link or a non-folder sits at %s on the path of the %s machine-policy folder; "+
+			"DefenseClaw does not follow, change or remove it, so the hook guardian cannot recreate or repair the folder and %s is not protected until it is gone; "+
+			"%s; the guardian then recreates the folder on its next pass",
+			link, entry.label, entry.label, windowsEnterpriseRemoveLinkFix(link)))
+	}
+}
+
+// noteWindowsEnterprisePendingTransactionLink is for status and verify of a
+// deployment whose lifecycle transaction is pending: when a link sits on the path
+// of the Codex, Cursor or Claude Code machine-policy folder, it is named as the
+// likely cause, with the command that removes it. DefenseClaw never writes
+// through the link, so the rollback or the recovery stops at it and the services
+// stay stopped until an administrator removes the link and runs the recovery step
+// (GAP-0900). No pending transaction or no link: nothing is added.
+func noteWindowsEnterprisePendingTransactionLink(result *enterprisestatus.Result) {
+	if !result.TransactionPending {
+		return
+	}
+	for _, entry := range windowsEnterpriseLinkedConnectors {
+		link := windowsEnterpriseVendorFolderLink(entry.connector)
+		if link == "" {
+			continue
+		}
+		result.AddWarning("transaction_pending_link", fmt.Sprintf("a lifecycle transaction is pending and the DefenseClaw services stay stopped until it is recovered; "+
+			"a link or a non-folder at %s on the path of the %s machine-policy folder is the likely cause, because DefenseClaw does not write through it; "+
+			"%s, then run the recovery step named above",
+			link, entry.label, windowsEnterpriseRemoveLinkFix(link)))
+	}
 }
 
 // readWindowsEnterpriseStatusV2Manifest lists the manifest's targets without
@@ -138,6 +213,9 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 // (as on Linux and macOS).
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	publish := result.Action == "status" || result.Action == "verify"
+	if publish {
+		noteWindowsEnterpriseVendorFolderLinks(result)
+	}
 	in := windowsEnterpriseStatusV2Read()
 	applyWindowsEnterpriseCoworkStatus(result, in.cfg)
 	var coverage map[string]string
@@ -148,6 +226,11 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	result.AddHookProcessFailureWarnings(block)
 	if !publish {
 		return
+	}
+	if in.codexRequirementsHold != nil {
+		if path, holders, held := in.codexRequirementsHold(); held {
+			result.AddWarning(windowsCodexRequirementsHeldCode, connector.WindowsCodexRequirementsHoldLine(path, holders))
+		}
 	}
 	// Enterprise OpenShell runs on Linux and macOS only.
 	result.OpenShell = enterprisestatus.OpenShellUnsupportedCapability()

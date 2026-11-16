@@ -187,7 +187,7 @@ defenseclaw guardrail status
 defenseclaw-gateway policy show
 ```
 
-`guardrail status` prints the result per connector in its **Block/alert** column (`MEDIUM+/LOW+`: blocks MEDIUM and above, alerts LOW and above). `defenseclaw-gateway policy show` prints what the running binary compiles from `config.yaml`, under `guardrail`. It is the one to use on a managed host, where the `defenseclaw` Python CLI is not installed.
+`guardrail status` prints the result per connector in its **Block/alert** column (`MEDIUM+/LOW+`: blocks MEDIUM and above, alerts LOW and above). `defenseclaw-gateway policy show` prints what the running binary compiles from `config.yaml`, under `guardrail`. It is the one to use on a managed host, where the `defenseclaw` Python CLI is not installed ([Managed command availability](/docs/enterprise/managed-commands)).
 
 ## Set the levels
 
@@ -208,7 +208,7 @@ defenseclaw-gateway policy show
 `policy activate` writes `guardrail.block_at` and `guardrail.alert_at` from the preset, but only when the preset's level differs from the default of the globally selected rule pack. Activating `default` on the default pack writes neither key. `strict` writes `block_at: MEDIUM` and `alert_at: LOW`. `permissive` writes `alert_at: HIGH` and `cisco_trust_level: advisory`. See [Defaults](/docs/policies/defaults) for the full preset table.
 
 <Callout type="warn" title="Managed devices refuse local changes">
-On a device managed by MDM or a management plane, the config writer refuses. A per-user `defenseclaw config set` exits with status 3 (the packaged Linux and macOS `defenseclaw` refuses it with status 2) and the message `This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device`, and the commands built on the writer refuse too. Set the levels in the admin config instead.
+On a device managed by MDM or a management plane, the config writer refuses. A per-user `defenseclaw config set` exits with status 3 (the packaged Linux and macOS `defenseclaw` refuses it with status 2; see [Managed command availability](/docs/enterprise/managed-commands)) and the message `This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device`, and the commands built on the writer refuse too. Set the levels in the admin config instead.
 </Callout>
 
 

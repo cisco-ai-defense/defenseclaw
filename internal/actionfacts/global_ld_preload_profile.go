@@ -11,45 +11,114 @@ import (
 
 const globalLDPreloadProfileDirectory = "/etc/profile.d/"
 
-// ExactGlobalLDPreloadProfileWrite proves that one closed-schema structured
-// file write installs a system-wide LD_PRELOAD assignment in one direct
-// /etc/profile.d shell fragment. It retains neither the path nor file content.
-func ExactGlobalLDPreloadProfileWrite(input Input, facts Facts) bool {
-	if input.Command != "" || len(input.Argv) != 0 ||
-		!facts.Authoritative() || !facts.EnforcementEligible() ||
-		facts.Tool != input.Tool || len(facts.Paths) != 1 {
-		return false
-	}
+const globalLDPreloadFilePath = "/etc/ld.so.preload"
 
-	object, problem := exactJSONObject(input.Args)
-	if problem.status != "" || len(object) != 2 {
+// ExactGlobalLDPreloadFileWrite proves that the text one native file-tool call
+// or shell apply_patch here-document writes (nativeCallWrites: a whole-file
+// write, an edit, a multi-edit or a patch, whatever the tool calls its
+// arguments) installs a system-wide loader
+// injection: an absolute shared-object path in /etc/ld.so.preload, or one
+// active `export LD_PRELOAD=/absolute/library.so` line in a direct
+// /etc/profile.d shell fragment, in the file the call names or the file an
+// existing link reaches (nativeReachedFiles). It retains neither the path nor
+// the text.
+func ExactGlobalLDPreloadFileWrite(input Input, facts Facts) bool {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return false
 	}
-	pathKey := ""
-	switch input.Tool {
-	case "Write":
-		pathKey = "file_path"
-	case "write_file", "write-file", "writefile":
-		pathKey = "path"
-	default:
-		return false
-	}
-	for key := range object {
-		if key != pathKey && key != "content" {
-			return false
+	writes, facts := nativeCallWrites(input, facts)
+	for _, write := range writes {
+		for _, file := range nativeWriteFiles(input, facts, writes, write, true) {
+			switch {
+			case EtcSpelling(file) == globalLDPreloadFilePath:
+				if addsGlobalLDPreloadEntry(write) {
+					return true
+				}
+			case ExactGlobalLDPreloadProfilePath(file):
+				if addsGlobalLDPreloadExport(write) {
+					return true
+				}
+			}
 		}
 	}
-	target, targetOK := object[pathKey].(string)
-	content, contentOK := object["content"].(string)
-	if !targetOK || !contentOK || !ExactGlobalLDPreloadProfilePath(target) ||
-		!ExactGlobalLDPreloadProfileContent(content) {
+	return false
+}
+
+// addsGlobalLDPreloadEntry reports whether the written text of
+// /etc/ld.so.preload is only comments and literal shared-object paths and adds
+// a path the text it replaces did not hold.
+func addsGlobalLDPreloadEntry(write nativeFileWrite) bool {
+	added, ok := globalLDPreloadFileEntries(write.added)
+	if !ok || len(added) == 0 {
 		return false
 	}
+	if write.whole {
+		return true
+	}
+	had := map[string]int{}
+	for _, entry := range ldPreloadFileTokens(write.replaced) {
+		had[entry]++
+	}
+	for _, entry := range added {
+		if had[entry] == 0 {
+			return true
+		}
+		had[entry]--
+	}
+	return false
+}
 
-	candidate := facts.Paths[0]
-	return candidate.Access == PathAccessWrite && candidate.Flavor == PathFlavorPOSIX &&
-		candidate.Value == target && candidate.Normalized == target &&
-		candidate.Resolved == target && candidate.Absolute
+// addsGlobalLDPreloadExport reports whether the written fragment of a profile
+// fragment is the one literal LD_PRELOAD export (and comments) and the text it
+// replaces did not already hold that line.
+func addsGlobalLDPreloadExport(write nativeFileWrite) bool {
+	if !ExactGlobalLDPreloadProfileContent(write.added) {
+		return false
+	}
+	if write.whole {
+		return true
+	}
+	for _, line := range strings.Split(write.added, "\n") {
+		line = strings.Trim(line, " \t")
+		if !strings.HasPrefix(line, "export ") {
+			continue
+		}
+		for _, had := range strings.Split(write.replaced, "\n") {
+			if strings.Trim(had, " \t") == line {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// globalLDPreloadFileEntries returns the shared-object paths of text that is
+// only comments, blank lines and literal absolute shared-object paths.
+func globalLDPreloadFileEntries(text string) ([]string, bool) {
+	if len(text) > maxCommandBytes || !utf8.ValidString(text) || strings.ContainsRune(text, 0) {
+		return nil, false
+	}
+	var entries []string
+	for _, entry := range ldPreloadFileTokens(text) {
+		if !exactGlobalLDPreloadSharedObject(entry) {
+			return nil, false
+		}
+		entries = append(entries, entry)
+	}
+	return entries, true
+}
+
+// ldPreloadFileTokens are the whitespace-separated entries of the lines of
+// /etc/ld.so.preload text that are not comments.
+func ldPreloadFileTokens(text string) []string {
+	var tokens []string
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if line = strings.TrimSpace(line); line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		tokens = append(tokens, strings.Fields(line)...)
+	}
+	return tokens
 }
 
 // ExactGlobalLDPreloadProfilePath accepts only one canonical direct shell
@@ -58,8 +127,11 @@ func ExactGlobalLDPreloadProfileWrite(input Input, facts Facts) bool {
 func ExactGlobalLDPreloadProfilePath(value string) bool {
 	if value == "" || len(value) > maxScalarBytes || !utf8.ValidString(value) ||
 		strings.TrimSpace(value) != value || strings.IndexByte(value, 0) >= 0 ||
-		path.Clean(value) != value || hasUnresolvedPathSyntax(value) ||
-		!strings.HasPrefix(value, globalLDPreloadProfileDirectory) {
+		path.Clean(value) != value || hasUnresolvedPathSyntax(value) {
+		return false
+	}
+	value = EtcSpelling(value)
+	if !strings.HasPrefix(value, globalLDPreloadProfileDirectory) {
 		return false
 	}
 	leaf := strings.TrimPrefix(value, globalLDPreloadProfileDirectory)

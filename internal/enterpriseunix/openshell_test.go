@@ -1146,11 +1146,14 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		if hasWarning(r, codeOpenShellPrerequisite) {
 			t.Errorf("warnings = %+v", r.Warnings)
 		}
-		// An exact pin that differs is named.
+		// An old exact pin is raised to the supported floor.
 		r = h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "version": "0.1.2"}))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox openshell cli"); !strings.Contains(state, "pins 0.1.2") {
+		if state, _ := rowState(r, "sandbox openshell cli"); !strings.HasPrefix(state, "ok: "+openshell.SupportedMin) {
 			t.Errorf("cli row = %q", state)
+		}
+		if warning := messagesOf(r.Warnings, "openshell_pin_raised"); !strings.Contains(warning, "pins 0.1.2") {
+			t.Errorf("floor warning = %q", warning)
 		}
 	})
 	// A release below SupportedMin runs no sandbox, whatever the pin allows:
@@ -1168,8 +1171,8 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.3")}},
 			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.3")}}}
 		for pin, fix := range map[string]string{
-			">=0.1.1 <0.2.0": "install a release that satisfies enterprise.openshell.version version=>=0.1.1 <0.2.0",
-			"0.1.3":          "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SupportedMin + ") and install that release",
+			">=0.1.1 <0.2.0": "install a release that satisfies enterprise.openshell.version version=>=0.1.6 <0.2.0",
+			"0.1.3":          "install a release that satisfies enterprise.openshell.version version=0.1.6",
 		} {
 			r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "version": pin}))
 			requireOK(t, r)

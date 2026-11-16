@@ -729,10 +729,13 @@ func TestLargeUploadBlockCutsAndRefuses(t *testing.T) {
 	if n := len(e.events("upbox", sandboxapi.ActivityEgressLargeUpload, "")); n != 0 {
 		t.Fatalf("the cut was also reported as %d unblocked large uploads", n)
 	}
-	eventually(t, "the finding and the blocked record", func() bool {
-		return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 &&
-			egressRecords(e, "upbox", func(r audit.SandboxEgressEvent) bool { return r.Blocked }) == 1
+	eventually(t, "the finding", func() bool {
+		return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1
 	})
+	e.m.sink.flushProxyAudit(t.Context(), e.m.now().Add(proxyOpenWindow), false)
+	if got := egressRecords(e, "upbox", func(r audit.SandboxEgressEvent) bool { return r.Blocked }); got != 1 {
+		t.Fatalf("blocked egress records = %d, want one", got)
+	}
 	finding := e.tel.findingsOf(audit.SandboxFindingLargeUpload)[0]
 	if finding.Severity != "HIGH" || !strings.Contains(finding.Title, "blocked") || !strings.Contains(finding.Description, "more than 1 MiB") ||
 		!strings.Contains(finding.Remediation, "defenseclaw sandbox unblock example.org --sandbox upbox") {
@@ -823,12 +826,16 @@ func TestEgressSinkMapping(t *testing.T) {
 	for _, ev := range []egress.Event{first, again, blocked, upload, {Kind: egress.EventAllowed, SandboxName: "unknown-box", Host: "x.example"}} {
 		sink.EgressEvent(ev)
 	}
-	// The sink publishes the large upload to the feed after recording its finding.
-	eventually(t, "egress telemetry and the large upload in the feed", func() bool {
-		return len(where(&e.tel.mu, &e.tel.egress, nil)) == 3 && len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 &&
+	// The sink publishes the large upload after recording its finding.
+	eventually(t, "the large upload in the feed", func() bool {
+		return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) == 1 &&
 			len(e.events(sb.Name, sandboxapi.ActivityEgressLargeUpload, "")) == 1
 	})
+	e.m.sink.flushProxyAudit(t.Context(), e.m.now().Add(proxyOpenWindow), false)
 	recs, finding := where(&e.tel.mu, &e.tel.egress, nil), e.tel.findingsOf(audit.SandboxFindingLargeUpload)[0]
+	if len(recs) != 3 {
+		t.Fatalf("egress telemetry = %+v, want three records", recs)
+	}
 	if a := recs[0]; a.Source != audit.SandboxEgressSourceProxy || a.Blocked || a.Scheme != "https" || a.ResolvedIP != "104.16.0.1" ||
 		a.DecisionCode != "SANDBOX_EGRESS_ALLOWED" || a.Sandbox.Name != sb.Name {
 		t.Fatalf("allowed = %+v", a)

@@ -14,13 +14,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"golang.org/x/sys/windows"
-
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // bundleNotAppliedCode is the lifecycle error of a bundle-mode device whose
@@ -190,16 +187,20 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	if e.CurrentErr != nil || e.CurrentConfig == nil {
 		return fail("bundle_restore_failed", e.Problem())
 	}
-	if !e.ConfigReplaced() && e.InstalledConfig != nil {
+	// Bytes that are already the confirmed bundle config, with a generation
+	// record that calls them a hand edit (a byte-exact restore by hand),
+	// still need the lifecycle to record the bundle generation again.
+	handEdit := bundleHandEditRecorded(layout.ConfigPath)
+	if !e.needsRestore(handEdit) && e.InstalledConfig != nil {
 		return out
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
 		return fail("bundle_restore_failed", "cannot resolve the trusted enterprise roots to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
 	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 	if err != nil {
-		if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		if windowsLifecycleLockBusy(err) {
 			return fail("lifecycle_busy", "another DefenseClaw lifecycle run holds lifecycle.lock; "+label+" was not re-applied and the run can be retried")
 		}
 		return fail("bundle_restore_failed", "cannot open lifecycle.lock to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
@@ -211,7 +212,7 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		return out
 	}
 	previous, err := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
-	plan, err := e.planRestore(previous, err)
+	plan, err := e.planRestore(previous, err, handEdit)
 	if err != nil {
 		return fail("bundle_restore_failed", "cannot read the installed config.yaml to re-apply "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
@@ -238,12 +239,15 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		if err != nil {
 			detail = windowsEnterpriseBoundedDiagnostic(err.Error())
 		}
-		return fail("bundle_restore_failed", "cannot prove the confirmed bundle principal ("+detail+"); run defenseclaw.exe enterprise windows ensure --profile standalone from an elevated prompt")
+		return fail("bundle_restore_failed", "cannot prove the confirmed bundle principal ("+detail+"); run "+windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt")
 	}
 	writeOptions.ExpectSHA256 = plan.ExpectSHA256
 	missing := plan.Missing
 	kept, was := "", "missing"
-	if !missing {
+	switch {
+	case plan.Rerecord:
+		was = "the config of " + label + " recorded as a hand edit"
+	case !missing:
 		kept, was = keepWindowsEnterpriseRejectedConfig(layout, previous), "not the config of "+label
 	}
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, e.CurrentConfig, writeOptions); err != nil {
@@ -251,7 +255,9 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 			windowsEnterpriseBoundedDiagnostic(err.Error()))
 	}
 	change := "config.yaml had been changed outside the lifecycle; re-applied " + label + " from the bundle store"
-	if missing {
+	if plan.Rerecord {
+		change = "config.yaml already held " + label + " but config.generation.json recorded it as a hand edit; recorded " + label + " from the bundle store as its generation again"
+	} else if missing {
 		change = "config.yaml was missing; re-applied " + label + " from the bundle store"
 	} else if replacing != "" {
 		change = "config.yaml was the config of " + replacing + ", which an interrupted run installed and the gateway never confirmed; re-applied " + label + " from the bundle store"
@@ -260,7 +266,10 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		change += " and kept the edited file at " + kept
 	}
 	out.changes = append(out.changes, change)
-	if missing {
+	if plan.Rerecord {
+		out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_config_restored",
+			Message: "config.yaml already held " + label + " but its config generation recorded a hand edit; ensure recorded the bundle generation again"})
+	} else if missing {
 		out.warnings = append(out.warnings, enterprisestatus.Message{Code: "bundle_config_restored",
 			Message: "config.yaml was missing; ensure re-applied " + label + " from the bundle store"})
 	} else {

@@ -9,6 +9,7 @@ import io
 import json
 import ntpath
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -54,8 +55,13 @@ from defenseclaw.doctor_hooks import (
     resolve_windows_command,
     validate_windows_hook_registration,
 )
+from defenseclaw.winquote import powershell_literal_before_typographic_quotes, powershell_literal_body
 
 from tests.os_view import os_view
+
+
+def _decoded_bridge(command: str) -> str:
+    return base64.b64decode(command.rsplit(" ", 1)[1]).decode("utf-16-le")
 
 
 class WindowsHookDoctorTests(unittest.TestCase):
@@ -85,6 +91,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-hooks-")
+        # The version row probes the agent it finds; a real one on the PATH of this host must not be run.
+        candidates = patch("defenseclaw.inventory.agent_discovery._binary_candidates_for_agent", return_value=())
+        candidates.start()
+        self.addCleanup(candidates.stop)
         self.root = Path(self.temp.name)
         self.profile = self.root / "Disposable Profile"
         self.install = self.profile / "DefenseClaw Install"
@@ -174,9 +184,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
         unqualified: bool = False,
         start_process: bool = False,
         constrained_fail_open: bool = False,
+        start_answer: str = "",
     ) -> str:
-        literal = str(runtime).replace("'", "''")
-        if legacy + unqualified + start_process + constrained_fail_open > 1:
+        literal = powershell_literal_body(str(runtime))
+        if legacy + unqualified + start_process + constrained_fail_open + bool(start_answer) > 1:
             raise ValueError("launcher fixture flags are mutually exclusive")
         arguments = ["hook", "--connector", connector]
         if event:
@@ -194,6 +205,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
             # before the Constrained Language fail-closed exit lack it.
             quoted = " ".join(f"'{argument}'" for argument in arguments)
             fail_closed = "" if constrained_fail_open else "if ($null -eq $LASTEXITCODE) { exit 1 }; "
+            start = "$hookProcess=[System.Diagnostics.Process]::Start($hookStart); "
+            end = "exit $hookProcess.ExitCode"
+            if start_answer:
+                # The per-user bridge since 1.0.9 answers a launcher that
+                # cannot start (rel-1-0-6 GAP-0676).
+                fail_closed = f"if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -lt 0) {{ {start_answer} }}; "
+                start = f"try {{ $hookProcess=[System.Diagnostics.Process]::Start($hookStart) }} catch {{ {start_answer} }}; "
+                end = f"if ($hookProcess.ExitCode -lt 0) {{ {start_answer} }}; exit $hookProcess.ExitCode"
             script = (
                 "$ErrorActionPreference='Stop'; "
                 "$env:NoDefaultCurrentDirectoryInExePath='1'; "
@@ -203,10 +222,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new('{literal}','{' '.join(arguments)}'); "
                 "$hookStart.UseShellExecute=$false; "
                 "$hookStart.RedirectStandardError=$true; "
-                "$hookProcess=[System.Diagnostics.Process]::Start($hookStart); "
-                "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError()); "
+                + start
+                + "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError()); "
                 "$hookProcess.WaitForExit(); "
-                "exit $hookProcess.ExitCode"
+                + end
             )
         else:
             start_process = "Start-Process" if unqualified else r"Microsoft.PowerShell.Management\Start-Process"
@@ -1946,6 +1965,78 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(raised.exception.state, "malformed")
         self.assertIn("explicitly disabled", raised.exception.detail)
 
+    def test_codex_bridge_under_a_typographic_quote_profile(self) -> None:
+        """g072 review 3 M3: the bridge for a profile like C:\\Users\\O\u2019Brien is current and owned.
+
+        Go doubles every PowerShell single quote of the launcher path (the
+        fixture renders the same text: tests/test_powershell_quote_golden.py).
+        The render of releases before 1.0.9, the typographic quote not
+        doubled, stays DefenseClaw's and is stale, so doctor says run setup
+        rather than calling it foreign.
+        """
+        for quote in "\u2018\u2019\u201a\u201b":
+            with self.subTest(quote=f"U+{ord(quote):04X}"):
+                self.profile = self.root / f"O{quote}Brien {ord(quote):04X}"
+                self.install = self.profile / "DefenseClaw Install"
+                self.data = self.profile / ".defenseclaw"
+                self.install.mkdir(parents=True)
+                self.data.mkdir()
+                runtime = self._runtime()
+                command = self._encoded_hook_command(runtime)
+                self.assertIn(quote * 2, _decoded_bridge(command))
+
+                check = self._validate("codex", self._config("codex", command, codex_features=False))
+                self.assertEqual(check.state, "healthy", check.detail)
+
+                script = powershell_literal_before_typographic_quotes(_decoded_bridge(command))
+                before = command.rsplit(" ", 1)[0] + " " + base64.b64encode(script.encode("utf-16-le")).decode()
+                check = self._validate("codex", self._config("codex", before, codex_features=False))
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn("written before 1.0.9", check.detail)
+                self.assertEqual(ntpath.normcase(check.target), ntpath.normcase(str(runtime)))
+
+    def test_codex_file_with_one_pre_typographic_quote_entry_is_stale(self) -> None:
+        """g072 review 4 S1: every hook command is checked, not only the first.
+
+        A hand-merged or partly rewritten file whose first entry is current and
+        whose last entry is the pre-1.0.9 render does not read healthy.
+        """
+        quote = "\u2019"
+        self.profile = self.root / f"O{quote}Brien mixed"
+        self.install = self.profile / "DefenseClaw Install"
+        self.data = self.profile / ".defenseclaw"
+        self.install.mkdir(parents=True)
+        self.data.mkdir()
+        runtime = self._runtime()
+        last_event = list(doctor_hooks._codex_hook_specs("codex-hooks-v1"))[-1]
+        bind_current = self._bind_codex_fixture_command
+        rewritten: list[str] = []
+
+        def bind(command: str, event: str, contract: str) -> str:
+            bound = bind_current(command, event, contract)
+            if event != last_event:
+                return bound
+
+            def before(match: re.Match[str]) -> str:
+                script = base64.b64decode(match.group(1)).decode("utf-16-le")
+                self.assertIn(quote * 2, script)
+                old = powershell_literal_before_typographic_quotes(script)
+                rewritten.append(event)
+                return "-EncodedCommand " + base64.b64encode(old.encode("utf-16-le")).decode()
+
+            return re.sub(r"-EncodedCommand ([A-Za-z0-9+/=]+)", before, bound)
+
+        self._bind_codex_fixture_command = bind  # type: ignore[method-assign]
+        try:
+            config = self._config("codex", self._encoded_hook_command(runtime), codex_features=False)
+        finally:
+            del self._bind_codex_fixture_command
+        self.assertTrue(rewritten, "the last event holds the pre-1.0.9 render")
+
+        check = self._validate("codex", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("written before 1.0.9", check.detail)
+
     def test_healthy_codex_synchronous_encoded_invocation(self) -> None:
         runtime = self._runtime()
         command = self._encoded_hook_command(runtime)
@@ -2093,6 +2184,228 @@ class WindowsHookDoctorTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertNotEqual(command, current)
                 self.assertFalse(doctor_hooks._managed_hook_command(command, "codex"))
+
+    def test_codex_guarded_cmd_invocation_reads_as_the_launcher_beside_the_guard(self) -> None:
+        # rel-1-0-6 GAP-0676: on the events Codex can block, Setup starts the
+        # one-line guard program, which runs the defenseclaw-hook.exe beside it
+        # and answers Codex's block when that launcher cannot start.
+        runtime = self._runtime()
+        guard = self._runtime("defenseclaw-hook-guard.exe")
+        bound = ["hook", "--connector", "codex", "--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"]
+        command = (
+            doctor_hooks._windows_system_cmd_path()
+            + " /d /v:off /c \""
+            + str(guard)
+            + "\" launcher-guard-sibling "
+            + " ".join(bound)
+        )
+        self.assertTrue(doctor_hooks._managed_hook_command(command, "codex"))
+        target, args, kind = doctor_hooks._command_target(command, "codex")
+        self.assertEqual((target, args, kind), (str(runtime), bound, "direct"))
+        for name, lookalike in {
+            "other guard program": command.replace("defenseclaw-hook-guard.exe", "other-guard.exe", 1),
+            "launcher-guard argv": command.replace("launcher-guard-sibling", "launcher-guard", 1),
+        }.items():
+            with self.subTest(name=name):
+                try:
+                    observed = doctor_hooks._command_target(lookalike, "codex")[:2]
+                except _InspectionError:
+                    continue
+                self.assertNotEqual(observed, (str(runtime), bound))
+
+    @staticmethod
+    def _devin_bash(program: Path | str, *args: str) -> str:
+        """windowsDevinBashHookCommand of program, and the guarded form's argv (rel-1-0-6 GAP-0676)."""
+        word = "'" + str(program).replace("\\", "/").replace("'", "'\\''") + "'"
+        return " ".join([word, *args, "hook", "--connector", "devin"])
+
+    def _devin_guarded_config(self, commands: dict[str, str] | None = None) -> tuple[Path, Path, Path]:
+        """A Devin config whose block events start the guard beside the launcher, as per-user Setup writes it."""
+        runtime = self._runtime()
+        guard = self._runtime("defenseclaw-hook-guard.exe")
+        events: dict[str, list[dict[str, object]]] = {}
+        for event in doctor_hooks._DEVIN_EVENTS:
+            if commands and event in commands:
+                command = commands[event]
+            elif event in {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}:
+                command = self._devin_bash(guard, "launcher-guard-devin", event)
+            else:
+                command = self._devin_bash(runtime)
+            events[event] = [{"matcher": "", "hooks": [{"type": "command", "command": command, "timeout": 10}]}]
+        config = self.profile / ".devin" / "hooks.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"hooks": events}), encoding="utf-8")
+        self._lock("devin", config)
+        return config, runtime, guard
+
+    def test_devin_guarded_matrix_is_healthy_and_reads_as_the_launcher(self) -> None:
+        # rel-1-0-6 GAP-0676: PreToolUse, PermissionRequest and UserPromptSubmit
+        # start the guard beside the launcher the other events start.
+        config, runtime, guard = self._devin_guarded_config()
+        guarded = self._devin_bash(guard, "launcher-guard-devin", "PreToolUse")
+
+        check = self._validate("devin", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("entries=8", check.detail)
+        self.assertEqual(check.command, self._devin_bash(runtime))
+        self.assertTrue(doctor_hooks._managed_hook_command(guarded, "devin"))
+        # The guarded start names the launcher in Devin's forward-slash bash
+        # word; compare it as a path, as the other Devin target tests do.
+        target, args, kind = doctor_hooks._command_target(guarded, "devin")
+        self.assertEqual(os.path.normcase(target), os.path.normcase(str(runtime)))
+        self.assertEqual((args, kind), (["hook", "--connector", "devin"], "direct"))
+
+    def test_devin_guarded_matrix_refuses_other_events_tokens_folders_and_launchers(self) -> None:
+        other = self.install / "Other"
+        other.mkdir()
+        (other / "defenseclaw-hook.exe").write_bytes(b"MZfixture")
+        (other / "defenseclaw-hook-guard.exe").write_bytes(b"MZguard")
+        guard = self.install / "defenseclaw-hook-guard.exe"
+        for name, commands, expected in (
+            ("guard on Stop", {"Stop": self._devin_bash(guard, "launcher-guard-devin", "Stop")}, "Devin Stop starts"),
+            (
+                "event token",
+                {"PreToolUse": self._devin_bash(guard, "launcher-guard-devin", "PermissionRequest")},
+                "for event 'PermissionRequest'",
+            ),
+            (
+                "guard in another folder",
+                {
+                    "PreToolUse": self._devin_bash(
+                        other / "defenseclaw-hook-guard.exe", "launcher-guard-devin", "PreToolUse"
+                    )
+                },
+                "inconsistent commands",
+            ),
+            ("mixed launchers", {"Stop": self._devin_bash(other / "defenseclaw-hook.exe")}, "inconsistent commands"),
+        ):
+            with self.subTest(name=name):
+                config, _runtime, _guard = self._devin_guarded_config(commands)
+
+                check = self._validate("devin", config)
+
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn(expected, check.detail)
+
+    def _codex_guarded_config(self) -> tuple[Path, Path]:
+        guard = self._runtime("defenseclaw-hook-guard.exe")
+        self._runtime()
+        command = (
+            doctor_hooks._windows_system_cmd_path()
+            + " /d /v:off /c \""
+            + str(guard)
+            + '" launcher-guard-sibling hook --connector codex'
+        )
+        return self._config("codex", command, codex_features=False), guard
+
+    def test_unusable_hook_guard_of_a_guarded_entry_fails_doctor(self) -> None:
+        # rel-1-0-6 GAP-0676 S4: a missing, non-regular or altered guard lets
+        # the calls it starts run uninspected while doctor said healthy.
+        for connector in ("codex", "devin"):
+            with self.subTest(connector=connector, case="present"):
+                if connector == "codex":
+                    config, guard = self._codex_guarded_config()
+                else:
+                    config, _runtime, guard = self._devin_guarded_config()
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "healthy", check.detail)
+            shown = str(guard) if connector == "codex" else str(guard).replace("\\", "/")
+            agent = {"codex": "Codex", "devin": "Devin"}[connector]
+            record = self.data / "installer" / "binaries.sha256"
+            record.parent.mkdir(exist_ok=True)
+            with self.subTest(connector=connector, case="recorded digest"):
+                record.write_text(f"{hashlib.sha256(guard.read_bytes()).hexdigest()}  defenseclaw-hook-guard.exe\n")
+                self.assertEqual(self._validate(connector, config).state, "healthy")
+            with self.subTest(connector=connector, case="altered"):
+                record.write_text(f"{'0' * 64}  defenseclaw-gateway.exe\n{'ab' * 32}  defenseclaw-hook-guard.exe\n")
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "guard-unusable", check.detail)
+                self.assertIn(
+                    f"the DefenseClaw hook guard {shown} does not match the copy the installer recorded, "
+                    f"so {agent} prompts and tool calls may run without DefenseClaw",
+                    check.detail,
+                )
+                self.assertIn("installer again", check.repair)
+            record.unlink()
+            guard.unlink()
+            with self.subTest(connector=connector, case="missing"):
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "guard-unusable", check.detail)
+                self.assertIn(
+                    f"the DefenseClaw hook guard {shown} is missing, "
+                    f"so {agent} prompts and tool calls run without DefenseClaw",
+                    check.detail,
+                )
+                self.assertIn("defenseclaw-gateway restart", check.repair)
+                self.assertIn(f"defenseclaw setup {connector}", check.repair)
+                result = _DoctorResult(passive=True, quiet=True)
+                with patch.object(cmd_doctor, "_windows_native_hook_check", return_value=check):
+                    cmd_doctor._check_windows_native_hooks(self.cfg, connector, f"{agent} hooks", result)
+                self.assertEqual(result.checks[-1]["status"], "fail")
+                self.assertEqual(result.checks[-1]["remediation"], check.repair)
+            guard.mkdir()
+            with self.subTest(connector=connector, case="folder"):
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "guard-unusable", check.detail)
+                self.assertIn(f"the DefenseClaw hook guard {shown} is not a regular file", check.detail)
+                self.assertIn("installer again", check.repair)
+            guard.rmdir()
+
+    def test_bridge_that_answers_a_launcher_that_cannot_start_is_owned_and_exact(self) -> None:
+        # rel-1-0-6 GAP-0676: the per-user bridge answers a launcher that
+        # cannot start with the agent's block; doctor accepts only the exact
+        # answer Setup renders.
+        runtime = self._runtime()
+        for connector, event, contract in (
+            ("codex", "PreToolUse", "codex-hooks-v4"),
+            ("codex", "UserPromptSubmit", "codex-hooks-v1"),
+            ("antigravity", "PreToolUse", ""),
+        ):
+            with self.subTest(connector=connector, event=event):
+                answer = doctor_hooks._launcher_start_answer(connector, event, contract)
+                self.assertIsNotNone(answer)
+                self.assertIn("hook launcher cannot start", answer)
+                command = self._encoded_hook_command(
+                    runtime, connector, event=event, contract=contract, start_answer=answer
+                )
+                target, args, kind = doctor_hooks._command_target(command, connector)
+                self.assertEqual((target, kind), (str(runtime), "direct"))
+                self.assertIn(event, args)
+                edited = self._encoded_hook_command(
+                    runtime, connector, event=event, contract=contract, start_answer=answer.replace("exit 0", "exit 2")
+                )
+                with self.assertRaises(_InspectionError) as raised:
+                    doctor_hooks._command_target(edited, connector)
+                self.assertEqual(raised.exception.state, "malformed")
+        # The answer Go Setup renders (the shared Antigravity/Devin golden) is
+        # the one doctor expects, byte for byte.
+        golden = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "internal"
+                / "gateway"
+                / "connector"
+                / "testdata"
+                / "antigravity_devin_hooks.json"
+            ).read_text(encoding="utf-8")
+        )
+        hooks = golden["files"]["antigravity_windows"]["healthy"]
+        rendered = hooks["defenseclaw-antigravity-pretooluse"]["PreToolUse"][0]["hooks"][0]["command"]
+        encoded = rendered.rsplit(" ", 1)[1]
+        script = base64.b64decode(encoded).decode("utf-16-le")
+        match = doctor_hooks._awaited_hook_bridge_match(script, "antigravity")
+        self.assertIsNotNone(match, script)
+        self.assertEqual(match.group("answer"), doctor_hooks._launcher_start_answer("antigravity", "PreToolUse", ""))
+        self.assertIsNone(doctor_hooks._launcher_start_answer("codex", "Stop", "codex-hooks-v4"))
+        self.assertIsNone(doctor_hooks._launcher_start_answer("antigravity", "Stop", ""))
+        self.assertEqual(
+            doctor_hooks._launcher_start_answer("kiro", "", ""),
+            "try { [Console]::Error.WriteLine('DefenseClaw blocked this: its Kiro hook launcher cannot start. "
+            "Run the DefenseClaw installer again to repair it.') } catch { Microsoft.PowerShell.Utility\\Write-Error "
+            "-Message 'DefenseClaw blocked this: its Kiro hook launcher cannot start. "
+            "Run the DefenseClaw installer again to repair it.' -ErrorAction Continue }; exit 2",
+        )
 
     @unittest.skipUnless(os.name == "nt", "Windows Codex registration root proof")
     def test_setup_finds_direct_cmd_codex_hooks_as_root_proof(self) -> None:
@@ -3085,19 +3398,22 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         result = _DoctorResult()
 
+        paths = {
+            "platform_name": "nt",
+            "config_path": str(config),
+            "install_root": str(self.install),
+            "search_path": str(self.install),
+            "pathext": ".EXE;.CMD",
+        }
+
         # A Hermes host that may be running keeps the pending-reload state;
-        # an idle Hermes is healthy (GAP-1298).
-        with patch.object(cmd_doctor, "_hermes_host_running", return_value=None):
-            _check_hook_contract_lock(
-                self.cfg,
-                "hermes",
-                result,
-                platform_name="nt",
-                config_path=str(config),
-                install_root=str(self.install),
-                search_path=str(self.install),
-                pathext=".EXE;.CMD",
-            )
+        # an idle Hermes is healthy (GAP-1298). Without an execution probe
+        # that proves the registered hook runs, that state stays a failure.
+        with (
+            patch.object(cmd_doctor, "_hermes_host_running", return_value=None),
+            patch.object(cmd_doctor, "_hermes_windows_execution_probe", side_effect=lambda check: check),
+        ):
+            _check_hook_contract_lock(self.cfg, "hermes", result, **paths)
 
         self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
         self.assertIn("pending-reload", result.checks[-1]["detail"])
@@ -3105,6 +3421,35 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("close every Hermes", result.checks[-1]["remediation"])
         self.assertIn(f"agent_executable={executable}", result.checks[-1]["detail"])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
+
+        # Once the probe proves the registered hook runs, the running host is
+        # a warning that names it (GAP-0586); a failed probe stays a failure.
+        class WindowsOS:
+            name = "nt"
+
+            def __getattr__(self, key):
+                return getattr(os, key)
+
+        host = ("Hermes PID(s) 4300; loaded hooks cannot be verified; live=false", "close Hermes PID 4300")
+        outcomes = {}
+        for label, answer in (("proven", (0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE)), ("failed", (1, b""))):
+            outcomes[label] = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "os", WindowsOS()),
+                patch.object(cmd_doctor, "_hermes_host_running", return_value=None),
+                patch.object(cmd_doctor, "_run_hermes_execution_probe", return_value=answer),
+                patch.object(cmd_doctor, "_hermes_running_host_warning", return_value=host),
+            ):
+                _check_hook_contract_lock(self.cfg, "hermes", outcomes[label], **paths)
+
+        proven = outcomes["proven"].checks[-1]
+        self.assertEqual(proven["status"], "warn", proven)
+        self.assertIn("pending-reload", proven["detail"])
+        self.assertIn("Hermes PID(s) 4300", proven["detail"])
+        self.assertIn(f"agent_executable={executable}", proven["detail"])
+        self.assertNotIn("99.0.0", proven["detail"])
+        self.assertIn("close Hermes PID 4300", proven["remediation"])
+        self.assertEqual(outcomes["failed"].checks[-1]["status"], "fail", outcomes["failed"].checks[-1])
 
     def test_windows_hermes_pending_reload_is_a_passive_warning(self) -> None:
         # --passive does not list processes, so a Hermes that may be idle is
@@ -3119,7 +3464,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "pathext": ".EXE;.CMD",
         }
 
-        with patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")):
+        # On Windows the execution probe runs first; this registration passes it.
+        with (
+            patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")),
+            patch.object(
+                cmd_doctor, "_run_hermes_execution_probe",
+                return_value=(0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE),
+            ),
+        ):
             _check_hook_contract_lock(self.cfg, "hermes", result, platform_name="nt", **paths)
             cmd_doctor._check_windows_native_hooks(self.cfg, "hermes", "Hermes hooks", result, **paths)
 

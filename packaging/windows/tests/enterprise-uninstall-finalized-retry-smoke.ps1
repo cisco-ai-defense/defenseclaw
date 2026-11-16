@@ -191,7 +191,7 @@ if ($script:goCalls -ne 0) {
 function Test-DefenseClawStandaloneProfile { return $true }
 function Get-DefenseClawTombstonePurgeUserStateRequested { param($Metadata) return $false }
 function Test-DefenseClawManagedHooksCommittedTeardownSupported {
-    param([hashtable]$Layout, [string]$GatewayServiceName)
+    param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Capability = 'committed_standalone_prepare')
     return $true
 }
 $layout.ManagedHooksTeardownJournalPath = Microsoft.PowerShell.Management\Join-Path `

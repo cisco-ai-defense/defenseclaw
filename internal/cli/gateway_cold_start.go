@@ -123,6 +123,14 @@ func recordGatewayLoginPath(dataDir string) {
 	}
 	if err != nil {
 		_ = os.Remove(tmp.Name())
+		return
+	}
+	// A root start for the account's home gives the file back to the home's
+	// owner, as every private file it writes there is. When the owner cannot
+	// be proven, nothing of this refused start stays behind to stop the
+	// account's own start (GAP-0714).
+	if safefile.ReclaimToDirectoryOwner(target) != nil {
+		_ = os.Remove(target)
 	}
 }
 

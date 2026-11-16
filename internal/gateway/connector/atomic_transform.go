@@ -470,7 +470,7 @@ func stageAtomicTransformFile(
 	perm os.FileMode,
 ) (string, atomicTransformArtifactState, error) {
 	dir := filepath.Dir(writePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atomicMkdirAll(dir, 0o755); err != nil {
 		return "", atomicTransformArtifactState{}, fmt.Errorf("create directory for %s: %w", writePath, err)
 	}
 	tmp, err := os.CreateTemp(dir, ".tmp-cas-provisional-*")
@@ -482,6 +482,9 @@ func stageAtomicTransformFile(
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return "", atomicTransformArtifactState{}, cause
+	}
+	if err := atomicStageKeepOwner(tmpPath, writePath); err != nil {
+		return cleanup(fmt.Errorf("keep owner of compare-and-swap temp file: %w", err))
 	}
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
 		if err := safefile.ProtectFile(tmpPath); err != nil {

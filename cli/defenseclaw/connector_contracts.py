@@ -38,6 +38,9 @@ _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+
 # gitBuildReleaseDateRE.
 _GIT_BUILD_RE = re.compile(r"(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)")
 _GIT_BUILD_RELEASE_DATE_RE = re.compile(r"\(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})(?:\.[0-9]+)?\)")
+# Stands in for a git build when it is compared with release-style (non-date)
+# tested bounds; mirrors Go gitBuildCompareVersion.
+_GIT_BUILD_COMPARE_VERSION = "999.999.999"
 # A Hermes git install prints only the release date it is on, in this exact
 # vendor form; mirrors Go hermesGitReleaseRE (GAP-0232, GAP-2052).
 _HERMES_GIT_RELEASE_RE = re.compile(r"^Hermes Agent vunknown \(([0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2})\)$")
@@ -665,6 +668,43 @@ def resolve_connector_contract(
             reason="OpenCode git build has no release version; install a versioned OpenCode V2 release",
             contract=None,
         )
+    if _GIT_BUILD_RE.search(raw):
+        # A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
+        # version: its digits are a commit hash or a date. Mirrors Go
+        # ResolveHookContract, so the preflight here and the protected lock the
+        # gateway writes read one version (GAP-1043): newer than every tested
+        # range, with no normalized version, unless the release date it
+        # prints is known broken.
+        broken, broken_date = known_broken_entry(name, raw)
+        if broken is not None:
+            return ConnectorCompatibility(
+                connector=name,
+                raw_version=raw,
+                normalized_version=broken_date,
+                status=STATUS_UNKNOWN,
+                reason=(
+                    f"agent version {broken_date} is known broken: "
+                    f"{broken['reason']} ({broken['issue']})"
+                ),
+                contract=None,
+            )
+        newest_git = _newest_contract_below(contracts, _GIT_BUILD_COMPARE_VERSION)
+        if newest_git is not None:
+            contract, label = newest_git
+            return ConnectorCompatibility(
+                connector=name,
+                raw_version=raw,
+                normalized_version="",
+                status=STATUS_KNOWN,
+                reason=(
+                    f"{UNTESTED_NEWER_VERSION}: git build with no release version, treated as newer than "
+                    f"the tested versions ({label}); no known problems; using hook contract {contract.contract_id}"
+                ),
+                contract=contract,
+                untested=True,
+                newest_tested=label,
+                warning=known_version_warning(name, raw),
+            )
     normalized = normalize_agent_version(raw)
     if not normalized:
         return ConnectorCompatibility(
@@ -979,15 +1019,25 @@ def openclaw_needs_interception_advisory(raw_version: str | None) -> bool:
 OPENCLAW_PLUGIN_APPROVALS_SINCE = "2026.3.28"
 
 
-# Where OpenClaw shows a plugin approval request: the Control UI and chat
-# channels that forward /approve. openclaw tui and local openclaw chat do not
-# show it, so a confirm verdict asked there is denied when the request times
+# Where OpenClaw shows a plugin approval request: the Control UI, chat
+# channels that forward /approve, and openclaw tui in OpenClaw 2026.10.9,
+# where Allow once works too (GAP-0597, TST-17954, TST-17958). A confirm
+# verdict asked where no request is shown is denied when the request times
 # out (GAP-1958).
+OPENCLAW_TUI_APPROVALS_SINCE = "2026.10.9"
 OPENCLAW_APPROVAL_SURFACES = (
-    "OpenClaw shows DefenseClaw approval requests in its Control UI (openclaw dashboard) "
-    "and on chat channels that forward /approve; openclaw tui and local openclaw chat do "
-    "not show them, so a call that needs approval there is denied when the request times out"
+    "OpenClaw shows DefenseClaw approval requests in its Control UI (openclaw dashboard), "
+    "on chat channels that forward /approve, and in openclaw tui from OpenClaw 2026.10.9; "
+    "a call that needs approval where no request is shown is denied when the request times out"
 )
+
+
+def openclaw_tui_shows_approvals(raw_version: str | None) -> bool:
+    """Return True for an OpenClaw whose openclaw tui shows DefenseClaw
+    approval requests (OPENCLAW_TUI_APPROVALS_SINCE or later)."""
+
+    normalized = normalize_agent_version(raw_version or "")
+    return bool(normalized) and compare_agent_versions(normalized, OPENCLAW_TUI_APPROVALS_SINCE) >= 0
 
 # First OpenClaw release that no longer bundles the Amazon Bedrock provider:
 # from it, Bedrock models need the external plugin (GAP-1959).

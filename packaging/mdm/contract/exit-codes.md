@@ -21,7 +21,7 @@ them with their default return-code tables.
 | --- | --- | --- | --- |
 | `0` | success | Installed, upgraded, repaired, removed, or nothing to do (`noop: true`). | Success |
 | `1603` | `ERROR_INSTALL_FAILURE` | The action failed. Mutating actions have already rolled back to the previous deployment. | Failure; read `errors[].code` |
-| `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock, or a signed policy bundle did not finish applying to the running deployment (`bundle_apply_failed`), or `bundle apply --defer-restart` refused a bundle that would restart the gateway (`restart_deferred`). | Retry later (Intune's default table retries 1618); for `restart_deferred`, apply without the flag in a maintenance window |
+| `1618` | `ERROR_INSTALL_ALREADY_RUNNING` | Another lifecycle run holds the lock, or a signed policy bundle did not finish applying to the running deployment (`bundle_apply_failed`), or `bundle apply --defer-restart` refused a bundle that would restart the gateway (`restart_deferred`), or a program holds the installed hook or a Codex file open (`hook_in_use`, `codex_state_held`, `codex_requirements_held`), or a program holds one of the hook guardian's state files open (`guardian_state_held`): before the run changed anything, or, when it met the program during a rollback, with the transaction still pending and the restored services running (Setup `/repair` finishes it). The same ending, with `codex_state_unsettled`, when a Codex writer keeps its transaction open and the rollback could not judge the Codex state; `codex_state_unsettled` with a clean rollback exits `1603`. | Retry later (Intune's default table retries 1618); for `restart_deferred`, apply without the flag in a maintenance window |
 | `1639` | `ERROR_INVALID_COMMAND_LINE` | Invalid arguments, for example a first install without a config. Retrying will not help. | Failure; fix the assignment |
 | `5` | `ERROR_ACCESS_DENIED` | A standard account ran the installed CLI's `enterprise windows status` or `verify`, or `enterprise secret`, which need an elevated administrator or SYSTEM token (`elevation_required`). `enterprise secret` exits `5` only on a managed computer and `1603` with the same code on a computer without the standalone deployment marker. Setup and the wrappers report an unelevated token as `1603` instead. | Failure; run the command as SYSTEM |
 | `3010` | `ERROR_SUCCESS_REBOOT_REQUIRED` | Reserved. The standalone lifecycle does not require reboots today. | Soft reboot |
@@ -29,6 +29,33 @@ them with their default return-code tables.
 Intune's default Win32 return codes are `0` Success, `1707` Success, `3010`
 Soft reboot, `1641` Hard reboot and `1618` Retry. `1603` and `1639` report
 as Failed, which is correct. You don't need to add any codes.
+
+`guardian_state_held` (exit `1618`) means a program holds one of the hook
+guardian's critical state files open without delete sharing, so the guardian
+cannot publish its coverage. The critical files are the ones whose hold was
+measured to break a run: the ledger `protected_targets.json` and
+`activation.json` and the cleanup ledger `user-cleanup.json` (a failed save
+aborts a guardian pass) in `hook-guardian-state`, and `hook_guardian_state.json`
+in `runtime`. Every other file the guardian or its enumerator publishes (the
+removed-connectors record, the startup, notices and restores records, the
+OpenCode port warnings, the enumerator's folder, the off-roster markers) did not
+stop a repair when held and is not checked. A file a standard account can open
+(an access list with an Allow entry, for any access, for any principal other
+than SYSTEM, Administrators and a service SID: Users, Everyone, or a user SID
+named directly) is never checked either: that account could hold it and block
+every ensure and repair. Before a lifecycle run changes anything the check stops it with
+nothing changed. An uninstall or a purge is not held up by it. A holder that
+arrives during the upgrade transaction, including one that arrives while the
+rollback waits for the guardian, ends the run with the restored services
+running and the transaction pending; Setup `/repair` finishes it once the
+program lets go. A holder that arrives during a hot config change leaves the
+restored config and the running gateway. What this does not cover: a program
+that holds a critical file but shares delete does not stop the guardian and is
+not reported; a file outside the list is not looked at; and between the failure
+and the repair the accounts whose roster change was undone wait for it, shown
+as pending ("not proven") by `enterprise windows status` and `verify`, which
+warn `guardian_state_held` for as long as the program holds the file. Secure
+Client is not changed.
 
 The standalone Setup can also refuse before the lifecycle starts:
 

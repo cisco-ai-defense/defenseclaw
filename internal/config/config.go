@@ -1984,6 +1984,13 @@ type GuardrailConfig struct {
 	// derived configuration ("" when it inherits). ProfileModeForConnector
 	// reads it. Unexported like profileConnectors.
 	profileMode string
+	// customPackBase is the directory of the config file that declares
+	// custom_packs: the base of a relative custom_packs path. customRulePackChecks
+	// is each custom_packs entry as the loader checked it, once. Both are
+	// recorded by the loader and carried by every copy of the configuration
+	// (DeepCopy), so one load has one verdict for every reader.
+	customPackBase       string
+	customRulePackChecks map[string]customRulePackCheck
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -2466,7 +2473,9 @@ type JudgeConfig struct {
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
 
 	// MaxParallel bounds how many judge calls the gateway sends to the
-	// judge model at once; 0 (the default) sets no bound. With a bound,
+	// judge model at once; an explicit 0 sets no bound. When omitted,
+	// local and private judge endpoints use 1, and public endpoints use 0.
+	// With a bound,
 	// tool-call judging goes ahead of prompt judging and keeps one of the
 	// slots when there are two or more, so a slow local model does not
 	// queue a pending tool call behind a turn's prompt checks (#1395).
@@ -2474,6 +2483,8 @@ type JudgeConfig struct {
 	// ExtraBody adds top-level fields to OpenAI-compatible judge chat requests.
 	// Judge-owned request fields and authentication settings are refused at load.
 	ExtraBody map[string]any `mapstructure:"extra_body" yaml:"extra_body,omitempty"`
+	// MaxParallelExplicit distinguishes an explicit 0 from an omitted key.
+	MaxParallelExplicit bool `mapstructure:"-" yaml:"-"`
 
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
@@ -3157,6 +3168,7 @@ func loadConfigSourceCheckedWithLayout(
 			}
 		}
 	}
+	cfg.Guardrail.Judge.MaxParallelExplicit = viper.InConfig("guardrail.judge.max_parallel")
 	foldV8ScannerKeys(&cfg)
 	cleanCustomPackPaths(&cfg)
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
@@ -3171,13 +3183,12 @@ func loadConfigSourceCheckedWithLayout(
 	cfg.ConfigFilePath = configFile
 	cfg.offlineInspection = inspection
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.CheckCustomRulePacks()
 	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
-	migrateLegacyConnectorIDs(&cfg)
-	dropRetiredConnectorSettings(&cfg)
-	canonicalizeConnectorSelection(&cfg)
+	migrateConnectorSelection(&cfg, resolvesToSecureClient(&cfg, pinnedDeploymentMode))
 
 	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err

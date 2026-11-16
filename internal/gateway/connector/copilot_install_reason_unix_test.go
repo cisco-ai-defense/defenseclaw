@@ -22,6 +22,36 @@ import (
 	"testing"
 )
 
+// hookWithPrivateListenerTable points the pre-send listener check of a released
+// per-user hook script (Copilot, Cursor or Antigravity, 1.0.0 to 1.0.3) at a
+// private socket table in place of the host /proc/net.
+// The 1.0.0 to 1.0.3 check walks the table one row at a time in Bash, and Linux
+// answers each backward seek in /proc/net/tcp by replaying the table from its
+// start, so one hook run costs time quadratic in the host's socket count (the
+// current helper reads it once through grep, GAP-1756). On a host with many
+// sockets, such as a shared build box running other test packages, the run
+// passed the hook's own 5 CPU-second bound, was ended by SIGXCPU, and the test
+// read that as "exit -1". The check takes the table directory as an argument
+// for tests; the held port is bound and never listens, so on the host's table
+// and on this one the check finds no listener and the hook goes on to deny.
+func hookWithPrivateListenerTable(t *testing.T, hook []byte, netDir string) []byte {
+	t.Helper()
+	const call = `defenseclaw_api_listener_foreign "$API_ADDR"`
+	if bytes.Count(hook, []byte(call)) != 1 {
+		t.Fatalf("the released hook no longer calls %s exactly once", call)
+	}
+	if err := os.MkdirAll(netDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// One listener on another port, so the check still reads a row to skip.
+	table := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0\n"
+	if err := os.WriteFile(filepath.Join(netDir, "tcp"), []byte(table), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Replace(hook, []byte(call), []byte(call+" "+shellSingleQuote(netDir)), 1)
+}
+
 // TestRefreshedReleasedCopilotHookNamesTheInstallWhileTheLockIsHeld: the
 // installer's hold refreshes a published 1.0.0 to 1.0.3 per-user
 // copilot-hook.sh to fail closed before it stops the gateway. While the lock
@@ -53,6 +83,9 @@ func TestRefreshedReleasedCopilotHookNamesTheInstallWhileTheLockIsHeld(t *testin
 					t.Fatal(err)
 				}
 				body = bytes.ReplaceAll(body, []byte(`API_ADDR="127.0.0.1:9"`), []byte(`API_ADDR="`+addr+`"`))
+				if name == "copilot-hook.sh" {
+					body = hookWithPrivateListenerTable(t, body, filepath.Join(home, "proc-net"))
+				}
 				if err := os.WriteFile(filepath.Join(hookDir, name), body, 0o700); err != nil {
 					t.Fatal(err)
 				}
@@ -75,7 +108,10 @@ func TestRefreshedReleasedCopilotHookNamesTheInstallWhileTheLockIsHeld(t *testin
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+dataDir, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 				out, err := cmd.Output()
 				if code := exitCodeOf(err); code != 0 {
-					t.Fatalf("%s: exit %d stdout=%q", event, code, out)
+					// exitCodeOf reports -1 both for a hook killed by a signal
+					// and for a hook that never started; the error tells them
+					// apart from a hook that really exited non-zero.
+					t.Fatalf("%s: exit %d (%v) stdout=%q", event, code, err, out)
 				}
 				var answer map[string]any
 				if err := json.Unmarshal(bytes.TrimSpace(out), &answer); err != nil {

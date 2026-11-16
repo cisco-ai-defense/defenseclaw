@@ -106,7 +106,9 @@ func TestSimpleCommandsActionBoundVariableProofBoundary(t *testing.T) {
 	}{
 		{"loop item", `for f in build/item.txt; do echo ok >> "$f"; done`, `echo ok >> "$f"`, true},
 		{"command substitution", `out="$(mktemp -d)"; printf ok > "$out/probe.txt"`, `printf ok > "$out/probe.txt"`, true},
-		{"export assignment", `export OUTPUT_DIR=out; printf ready > "$OUTPUT_DIR/status.txt"`, `printf ready > "$OUTPUT_DIR/status.txt"`, true},
+		// export NAME=value binds NAME as NAME=value does (gas-ux-r1 GAP-0076).
+		{"export assignment", `export OUTPUT_DIR=out; printf ready > "$OUTPUT_DIR/status.txt"`, `printf ready > 'out/status.txt'`, false},
+		{"export with an attribute option", `export -i OUTPUT_DIR=out; printf ready > "$OUTPUT_DIR/status.txt"`, `printf ready > "$OUTPUT_DIR/status.txt"`, true},
 		{"printf assignment", `printf -v f '%s' out/report.txt; echo ok >> "$f"`, `echo ok >> "$f"`, true},
 		{"read assignment", `read f < report.txt; printf ok > "out/$f"`, `printf ok > "out/$f"`, true},
 		{"function parameter", `stage_file() { cp "$1" "build/$2"; }; stage_file payload staged.bin`, `cp "$1" "build/$2"`, true},

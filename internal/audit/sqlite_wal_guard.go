@@ -134,8 +134,9 @@ var (
 var walClock = time.Now
 
 // A fixed emergency hold permits a slow final copy to finish before the WAL
-// reaches its hard ceiling. It never escalates after a missed pass.
-const walEmergencyCatchUpCap = time.Second
+// reaches its hard ceiling. Leave room for scheduler and rollback time inside
+// the 500 ms writer wait bound, even on a busy Windows runner.
+const walEmergencyCatchUpCap = 470 * time.Millisecond
 
 // Above the limit, a pass takes the writer without settling the backlog. A
 // missed pass may wait longer to acquire it next time. Before the emergency

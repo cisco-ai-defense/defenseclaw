@@ -3,21 +3,119 @@
 
 package managed
 
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
 // StandaloneContentDriftError is the refusal of a drifted standalone policy
 // or data file (StandaloneRefusesContentDrift). It wraps the strict verdict,
 // so errors.As still finds the UntrustedPrincipalError that names the path
 // and the account, and adds what to do: DefenseClaw does not repair the file
 // in place, because an account that could write it may have changed it and
-// may still hold a handle to it. Setup writes a fresh file from the
-// administrator's source and replaces the old one (GAP-0561).
+// may still hold a handle to it (GAP-0561). For config.yaml and the guardian
+// manifest, Setup writes a fresh file from the administrator's source and
+// replaces the old one; for a file Setup has no administrator source for,
+// the administrator removes the entry and checks the file (GAP-0590).
 type StandaloneContentDriftError struct {
 	Err error
+	// Recovery replaces the recovery chosen from the refused path when set.
+	Recovery string
+}
+
+// Recovery texts of a StandaloneContentDriftError, by file. Setup is not
+// installed on a managed computer, so each names the commands through the
+// renderer and says where Setup comes from (cowork-1-0-8 GAP-0095).
+func standaloneConfigDriftRecovery() string {
+	return "from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure", "CONFIG=<the approved administrator-only config>") +
+		"` so Setup writes a new config.yaml from it, then `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
+		"`. " + WindowsSetupSource
+}
+
+// standaloneMachinePolicyDriftRecovery is the way out of a drifted Claude
+// Code, Codex or Cursor machine policy folder or DefenseClaw file in it,
+// which the hook guardian does not re-stamp (GAP-0633). A file is deleted,
+// not fixed with icacls: an identical rewrite keeps the old object, and a
+// handle the account opened while it could write the file keeps working on
+// it (g582 review 3 S2).
+func standaloneMachinePolicyDriftRecovery(path string, cause error) string {
+	verify := "`" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+	var writers, drift []string
+	var principal interface{ untrustedSID() (string, bool) }
+	if errors.As(cause, &principal) {
+		if sid, _ := principal.untrustedSID(); sid != "" {
+			writers = []string{sid}
+		}
+	} else if cause != nil {
+		// A verdict that reached here as text (wrapped without its type) still
+		// names its accounts: "untrusted principal S-1-... has write access",
+		// "owner S-1-... is not trusted".
+		for _, match := range standaloneCauseWriterSID.FindAllStringSubmatch(cause.Error(), -1) {
+			writers = append(writers, match[1])
+		}
+		for _, match := range standaloneDriftOwnerSID.FindAllStringSubmatch(cause.Error(), -1) {
+			drift = append(drift, "owner "+match[1]+" is not trusted")
+		}
+	}
+	// A verdict on a folder above the object ("<folder>: untrusted Windows
+	// principal S-1-... has write-like access mask 0x...") is a fix for that
+	// folder, not for the object: the account is the one the verdict names,
+	// and only its write-like grant goes (standaloneWriterAboveFix).
+	var above []string
+	if cause != nil {
+		text := cause.Error()
+		for _, match := range standaloneCauseFolderVerdict.FindAllStringSubmatch(text, -1) {
+			if folderAbove(match[1], path) {
+				above = append(above, standaloneWriterFix(match[1], match[2], true))
+				writers = removeSID(writers, match[2])
+			}
+		}
+	}
+	info, statErr := os.Lstat(path)
+	fix := standaloneExactFix(path, statErr == nil && info.IsDir(), writers, drift)
+	if len(above) > 0 {
+		if len(writers) == 0 && len(drift) == 0 {
+			fix = strings.Join(above, " and ")
+		} else {
+			fix += " and " + strings.Join(above, " and ")
+		}
+	} else if len(writers) == 0 && len(drift) == 0 && cause != nil && strings.Contains(cause.Error(), "untrusted writer above") {
+		// The verdict says a folder above the object has a writer but does not
+		// name the account. Say how to see it, and what to leave alone: only
+		// the write-like grant of that account goes, and BUILTIN\Users read
+		// stays (a vendor folder that lost it breaks every standard user).
+		parent := filepath.Dir(path)
+		fix += ` and, for the folder above it, run icacls "` + parent + `" to see which account can write it, then take away only that account's ` +
+			`write-like grant and keep its read: for BUILTIN\Users, if it already reads a vendor folder, that is icacls "` + parent + `" /remove:g *` + sidUsers + ` /grant "*` + sidUsers + `:(OI)(CI)(RX)"`
+	}
+	if statErr == nil && info.IsDir() {
+		return "the hook guardian leaves it as it is and every DefenseClaw reader keeps refusing it: from an elevated PowerShell prompt run " +
+			fix + ` (for an inherited entry first run icacls "` + path + `" /inheritance:d, ` +
+			"which keeps copies of the inherited entries), which gives the folder back to Administrators, check what is in it, then run `" +
+			WindowsSetupCommand("/ensure") + "` and " + verify
+	}
+	return "the hook guardian leaves it as it is and every DefenseClaw reader keeps refusing it: " +
+		`from an elevated PowerShell prompt delete the file (Remove-Item -LiteralPath "` + path + `" -Force; for the ownership record .defenseclaw-managed-hooks.state delete the ` +
+		"DefenseClaw policy file beside it too, 90-defenseclaw.json or requirements.toml; for Cursor delete the record, " +
+		".defenseclaw-managed-hooks.receipt and defenseclaw-hook.ps1 together), then run `" + WindowsSetupCommand("/ensure") +
+		"`, which writes them new from Setup's own state, and " + verify +
+		" Removing the entry alone is not enough, because a program that opened the file while it could write it can still change it; it only takes the account's access away: " + fix
 }
 
 func (e *StandaloneContentDriftError) Error() string {
 	return e.Err.Error() + "; a standalone install does not repair this file in place, because an account that could " +
-		"write it may have changed it: from an elevated prompt run Setup /ensure with the approved CONFIG= and " +
-		"MANIFEST= sources so Setup writes fresh files, then Setup /verify"
+		"write it may have changed it: " + e.recovery()
+}
+
+func (e *StandaloneContentDriftError) recovery() string {
+	if e.Recovery != "" {
+		return e.Recovery
+	}
+	return standaloneContentDriftRecovery(e.Err)
 }
 
 func (e *StandaloneContentDriftError) Unwrap() error { return e.Err }
@@ -29,4 +127,201 @@ func RefuseStandaloneContentDrift(err error) error {
 		return nil
 	}
 	return &StandaloneContentDriftError{Err: err}
+}
+
+// RefuseStandaloneMachinePolicyDrift is RefuseStandaloneContentDrift for a
+// vendor machine policy folder or a DefenseClaw file in it, which the hook
+// guardian refuses to re-stamp on standalone (GAP-0633).
+func RefuseStandaloneMachinePolicyDrift(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &StandaloneContentDriftError{Err: err, Recovery: standaloneMachinePolicyDriftRecovery(path, err)}
+}
+
+// standaloneExactFix is the elevated-prompt icacls command that takes back
+// what makes path untrusted: one /remove:g for each account that can write
+// it, and /setowner when an untrusted account owns it (or when the account
+// is not known). Every refusal names these with the real path and accounts,
+// never a template (GAP-0602 class rule: a refusal names the exact command).
+func standaloneExactFix(path string, directory bool, writers, drift []string) string {
+	quoted := `"` + path + `"`
+	var commands []string
+	seen := map[string]bool{}
+	remove := func(sid string) {
+		if sid != "" && !seen[sid] {
+			seen[sid] = true
+			commands = append(commands, "icacls "+quoted+" /remove:g *"+sid)
+		}
+	}
+	// Only a real SID is a command: the assessment also names an entry it
+	// cannot read ("object-ace-N") and Everyone for a null access list, which
+	// /remove:g can do nothing with. Those are put right by writing the
+	// administrator-only access list again.
+	needsReset := false
+	for _, entry := range drift {
+		if strings.Contains(entry, "DACL is null") {
+			needsReset = true
+		}
+	}
+	for _, sid := range writers {
+		if standaloneSIDPattern.MatchString(sid) && (!needsReset || sid != sidEveryone) {
+			remove(sid)
+		} else {
+			needsReset = true
+		}
+	}
+	// An untrusted owner is named in the drift ("owner S-1-5-... is not
+	// trusted"); its own entry goes too, and Administrators take the object
+	// back whoever owned it.
+	for _, entry := range drift {
+		if match := standaloneDriftOwnerSID.FindStringSubmatch(entry); match != nil {
+			remove(match[1])
+		}
+	}
+	if len(commands) == 0 {
+		needsReset = true
+	}
+	if needsReset {
+		inherit := ""
+		if directory {
+			inherit = "(OI)(CI)"
+		}
+		commands = append(commands, "icacls "+quoted+" /inheritance:r /grant:r \"*"+sidLocalSystem+":"+inherit+"(F)\" \"*"+sidAdministrators+":"+inherit+"(F)\"")
+	}
+	commands = append(commands, "icacls "+quoted+" /setowner *S-1-5-32-544")
+	return strings.Join(commands, " and ")
+}
+
+// StandalonePrincipalReadsPath reports whether an account already holds a
+// read entry on a path; tests replace it.
+var StandalonePrincipalReadsPath = principalReadsPath
+
+// StandalonePathIsDirectory reports whether path is a folder; tests replace it.
+var StandalonePathIsDirectory = func(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// standaloneDefenseClawOwnedPath matches a path inside a folder named
+// DefenseClaw (the install and state folders), which are administrator-only
+// by design: nobody gets read back there.
+var standaloneDefenseClawOwnedPath = regexp.MustCompile(`(?i)\\DefenseClaw(\\|$)`)
+
+// StandaloneWriterFix is the icacls command that takes the write-like entries
+// of one account off path (review D3, D5). The stock reader groups (Users,
+// Authenticated Users, Everyone) get read and execute back, but only where
+// the account already held a read entry on the path and the path is not
+// DefenseClaw's own: the command removes the account's entries and grants
+// read again in one step, so a vendor folder keeps being readable and nothing
+// is granted that was not there. Any other account, and any DefenseClaw path,
+// loses its entries (/remove:g).
+func StandaloneWriterFix(path, sid string) string {
+	return standaloneWriterFix(path, sid, StandalonePathIsDirectory(path))
+}
+
+func standaloneWriterFix(path, sid string, directory bool) string {
+	remove := "icacls \"" + path + "\" /remove:g *" + sid
+	switch sid {
+	case sidUsers, sidAuthenticatedUser, sidEveryone:
+		if !standaloneDefenseClawOwnedPath.MatchString(path) && StandalonePrincipalReadsPath(path, sid) {
+			inherit := ""
+			if directory {
+				inherit = "(OI)(CI)"
+			}
+			return remove + ` /grant "*` + sid + `:` + inherit + `(RX)"`
+		}
+	}
+	return remove
+}
+
+// folderAbove reports whether folder is a folder above path (any depth), by
+// Windows rules: case-insensitive, either separator.
+func folderAbove(folder, path string) bool {
+	norm := func(s string) string {
+		return strings.TrimRight(strings.ToLower(strings.ReplaceAll(s, "/", `\`)), `\`)
+	}
+	folder, path = norm(folder), norm(path)
+	return folder != "" && folder != path && strings.HasPrefix(path, folder+`\`)
+}
+
+func removeSID(sids []string, sid string) []string {
+	var kept []string
+	for _, s := range sids {
+		if s != sid {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+var (
+	// "<path>: untrusted Windows principal <SID> has write-like access mask 0x..."
+	standaloneCauseFolderVerdict = regexp.MustCompile(`([A-Za-z]:\\[^:]*?): untrusted (?:Windows )?principal (S-1-[0-9]+(?:-[0-9]+)+)`)
+	standaloneDriftOwnerSID      = regexp.MustCompile(`\bowner (S-1-[0-9-]+) is not trusted`)
+	standaloneSIDPattern         = regexp.MustCompile(`^S-1-[0-9]+(-[0-9]+)+$`)
+	standaloneCauseWriterSID     = regexp.MustCompile(`untrusted (?:Windows )?principal (S-1-[0-9]+(?:-[0-9]+)+)`)
+)
+
+// standaloneInPlaceRecovery is the recovery text of a managed file or folder
+// that another account can write or owns, with the exact commands: the
+// icacls fix, then Setup and verify. An inherited entry cannot be removed
+// from the object itself, so its fix is named too.
+func standaloneInPlaceRecovery(path string, directory bool, writers, drift []string) string {
+	what, check := "file", "check it"
+	if directory {
+		what, check = "folder", "check what is in it"
+	}
+	return "from an elevated prompt run " + standaloneExactFix(path, directory, writers, drift) +
+		` (for an inherited entry first run icacls "` + path + `" /inheritance:d, which keeps copies of the inherited entries), ` +
+		"which gives the " + what + " back to Administrators; " + check + ", then run `" + WindowsSetupCommand("/ensure") +
+		"` and `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+}
+
+// standaloneStructuralRecovery is the recovery text of a managed object that
+// is a link, a second hard link or the wrong kind of object: it is not judged
+// by its access list at all.
+func standaloneStructuralRecovery(path string) string {
+	return `from an elevated prompt check where "` + path + `" leads, remove it (Remove-Item -LiteralPath "` + path + `" -Force), then run ` +
+		"`" + WindowsSetupCommand("/ensure") + "` and `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+}
+
+// RefuseStandaloneInPlaceRepair is the standalone refusal of an in-place
+// owner or DACL repair of a managed object (the g582 class rule: on a
+// standalone install a managed file or folder another account can write or
+// owns is never given a trusted descriptor back in place). It reads the
+// object's own descriptor (AssessCanonical as kind) without writing and
+// returns a StandaloneContentDriftError that names the object and the way
+// out when an untrusted principal can write or owns it, or when the object
+// cannot be judged at all (an assessment error other than a missing object:
+// a descriptor nobody can read, a reparse point, a hard link), because a
+// repair of what was not judged would trust it blind (g582 review 4 F1). It
+// is nil off standalone, for trusted-only drift, and for a missing object.
+func RefuseStandaloneInPlaceRepair(path string, kind ObjectKind) error {
+	return RefuseStandaloneInPlaceRepairAs(path, kind, "")
+}
+
+// RefuseStandaloneInPlaceRepairAs is RefuseStandaloneInPlaceRepair for a
+// process that carries no gateway service pin (Setup's staged CLI): the
+// gateway's NT SERVICE account is named, so the gateway's own write entry on
+// a runtime folder is not taken for an untrusted writer. With no account it
+// resolves the pinned one, as before.
+func RefuseStandaloneInPlaceRepairAs(path string, kind ObjectKind, gatewayServiceAccount string) error {
+	if !StandaloneRefusesContentDrift() {
+		return nil
+	}
+	result, err := AssessCanonical(path, kind, CanonicalOptions{Quiet: true, GatewayServiceAccount: gatewayServiceAccount})
+	if err != nil {
+		return &StandaloneContentDriftError{
+			Err:      fmt.Errorf("cannot judge who can write or owns %s: %w", path, err),
+			Recovery: standaloneInPlaceRecovery(path, kind.Directory(), nil, nil),
+		}
+	}
+	if result.Outcome != CanonicalBoundary {
+		return nil
+	}
+	return &StandaloneContentDriftError{
+		Err:      fmt.Errorf("an untrusted principal can write or owns %s: %s", path, strings.Join(result.Drift, "; ")),
+		Recovery: standaloneInPlaceRecovery(path, kind.Directory(), result.UntrustedWriters, result.Drift),
+	}
 }

@@ -295,9 +295,18 @@ func TestConfigThresholdsReadTheCustomPackManifestPosture(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, guardrail.PackManifestFile), []byte(`{"posture":"strict"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A pack needs a recognized component to be a pack its pin can name.
+	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
+	if err := os.WriteFile(filepath.Join(dir, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := guardrail.RulePackDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePack = "acme-manifest-posture"
-	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"acme-manifest-posture": {Path: dir}}
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"acme-manifest-posture": {Path: dir, Digest: "sha256:" + pin}}
 	got := ConfigThresholds(cfg, "")
 	if got.Block != "MEDIUM" || got.Source != "pack-default:acme-manifest-posture" {
 		t.Fatalf("policy show levels = %+v, want block MEDIUM from the strict manifest posture", got)

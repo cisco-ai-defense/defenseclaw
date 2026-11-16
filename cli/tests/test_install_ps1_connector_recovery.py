@@ -15,17 +15,16 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
-import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from tests.helpers import POWERSHELL, run_powershell
+
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts" / "install.ps1"
-POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 WINDOWS_POWERSHELL = pytest.mark.skipif(
     os.name != "nt" or POWERSHELL is None, reason="requires native Windows directory ACLs and PowerShell"
 )
@@ -137,8 +136,8 @@ exit 0
     with tempfile.TemporaryDirectory(prefix="dc-cas-test-") as case:
         script_path = Path(case) / "case.ps1"
         script_path.write_text(script, encoding="utf-8-sig")
-        result = subprocess.run(
-            [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        result = run_powershell(
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
             capture_output=True,
             text=True,
             check=False,
@@ -172,6 +171,90 @@ def _assert_active_unchanged(external: Path, active: Path) -> None:
     assert active.read_bytes() == b"restored active receipt"
     assert (external / "settings.json").read_bytes() == b'{"unchanged":"external"}'
     assert (external / ".tmp-cas-v2-old-external").read_bytes() == b"external old config"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("folder", ["data", "d$x$(1+1) it's ($y)"])
+def test_recovery_refusal_names_the_command_that_finishes_it(tmp_path, folder: str) -> None:
+    # A valid folder name can hold a dollar sign, a sub-expression and a quote
+    # (DEFENSECLAW_HOME is user-chosen), so the printed command carries both
+    # paths as literals and its effective arguments are the real paths.
+    data = tmp_path / folder
+    data.mkdir()
+    receipt = data / (".defenseclaw-cas-v2-" + "b" * 24 + ".allocation")
+    receipt.write_bytes(b"retained recovery")
+    _run(
+        data,
+        r"""
+$BinDir = 'C:\dc-test\bin $dollar'
+try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpectedly passed' } catch {
+    $text = $_.Exception.Message
+    if ($text -notlike '*Rollback to 1.0.5 refused: active connector recovery remains*') { throw }
+    if ($text -notlike '*do not remove or replay its receipts*') { throw }
+    $marker = ' Command: '
+    $at = $text.IndexOf($marker)
+    if ($at -lt 0) { throw 'the refusal names no command' }
+    $command = $text.Substring($at + $marker.Length)
+    $errors = $null
+    $tree = [Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$errors)
+    if ($errors.Count) { throw 'the printed command does not parse' }
+    if ($tree.EndBlock.Statements.Count -ne 1 -or $tree.EndBlock.Statements[0].PipelineElements.Count -ne 1) { throw 'not one command' }
+    $invocation = $tree.EndBlock.Statements[0].PipelineElements[0]
+    if ($invocation -isnot [Management.Automation.Language.CommandAst] -or
+        $invocation.InvocationOperator -ne [Management.Automation.Language.TokenKind]::Ampersand) { throw 'not a call-operator invocation' }
+    # The effective arguments: every element is a constant, so pasting runs
+    # exactly these values and nothing is expanded.
+    $values = @()
+    foreach ($element in $invocation.CommandElements) {
+        if ($element -is [Management.Automation.Language.StringConstantExpressionAst]) { $values += $element.Value }
+        elseif ($element -is [Management.Automation.Language.CommandParameterAst]) { $values += $element.Extent.Text }
+        else { throw ("not a literal: " + $element.Extent.Text) }
+    }
+    $expected = @('C:\dc-test\bin $dollar\defenseclaw-gateway.exe', 'connector', 'recover-config', '--data-dir', $DataDir)
+    if ($values.Count -ne $expected.Count) { throw ("arguments: " + ($values -join '|')) }
+    for ($n = 0; $n -lt $expected.Count; $n++) {
+        if ($values[$n] -cne $expected[$n]) { throw ("argument " + $n + " is " + $values[$n] + ", want " + $expected[$n]) }
+    }
+}
+""",
+    )
+    assert receipt.read_bytes() == b"retained recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
+def test_recovery_refusal_without_a_known_install_folder_still_refuses_and_names_the_command(tmp_path) -> None:
+    # Callers that never set the install folder (the guard runs from a few
+    # flows that only know the data folder) get the same refusal; the command
+    # then starts with the program name, found on PATH.
+    data = tmp_path / "data"
+    data.mkdir()
+    receipt = data / (".defenseclaw-cas-v2-" + "c" * 24 + ".intent")
+    receipt.write_bytes(b"retained recovery")
+    _run(
+        data,
+        r"""
+Remove-Variable -Name BinDir -Scope Script -ErrorAction SilentlyContinue
+Remove-Variable -Name BinDir -ErrorAction SilentlyContinue
+try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpectedly passed' } catch {
+    $text = $_.Exception.Message
+    if ($text -notlike '*Rollback to 1.0.5 refused: active connector recovery remains*') { throw }
+    $marker = ' Command: '
+    $at = $text.IndexOf($marker)
+    if ($at -lt 0) { throw 'the refusal names no command' }
+    $command = $text.Substring($at + $marker.Length)
+    $errors = $null
+    $tree = [Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$errors)
+    if ($errors.Count) { throw 'the printed command does not parse' }
+    $invocation = $tree.EndBlock.Statements[0].PipelineElements[0]
+    $values = @($invocation.CommandElements | ForEach-Object { $_.Extent.Text.Trim("'") })
+    $expected = @('defenseclaw-gateway', 'connector', 'recover-config', '--data-dir', $DataDir)
+    if (($values -join '|') -cne ($expected -join '|')) { throw ("command: " + ($values -join '|')) }
+}
+""",
+    )
+    assert receipt.read_bytes() == b"retained recovery"
 
 
 @WINDOWS_POWERSHELL
@@ -1229,6 +1312,8 @@ function Wait-UninstallCleanup {{}}
 function Resume-InterruptedRun {{}}
 function Save-BinarySnapshot {{}}
 function Protect-UvDirectory {{}}
+function Resolve-UvCacheDir([string]$CacheDir) {{ return $CacheDir }}
+function Assert-UvBuildPathFits([string]$CacheDir) {{}}
 function Get-Cosign {{ return '' }}
 function Assert-InstallRoom([long]$Bytes, [string]$Purpose) {{
     if ($Purpose -eq 'the final Python environment') {{ throw 'verified local target ready' }}

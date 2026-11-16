@@ -88,6 +88,9 @@ const (
 	secureClientShortAnnotation  = "defenseclaw.secure-client-short"
 	secureClientLongAnnotation   = "defenseclaw.secure-client-long"
 	secureClientUsageAnnotation  = "defenseclaw.secure-client-usage"
+	// secureClientExampleAnnotation holds the example of release 1.0.5 for a
+	// command whose example now names the standalone gateway by its path.
+	secureClientExampleAnnotation = "defenseclaw.secure-client-example"
 )
 
 // keepCommandTreeOfMainOnSecureClient gives a Secure Client computer the
@@ -116,6 +119,9 @@ func keepCommandTreeOfMainOnSecureClient(root *cobra.Command) {
 			}
 			if long := cmd.Annotations[secureClientLongAnnotation]; long != "" {
 				cmd.Long = long
+			}
+			if example := cmd.Annotations[secureClientExampleAnnotation]; example != "" {
+				cmd.Example = example
 			}
 			if cmd.Annotations[secureClientHiddenAnnotation] != "" {
 				cmd.Hidden = true

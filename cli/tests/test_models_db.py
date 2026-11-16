@@ -122,6 +122,41 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(len(action_selects), 1)
         self.assertEqual(action_selects[0].count("SUM(CASE"), 4)
 
+    def test_runtime_write_or_clear_drops_the_runtime_provenance(self):
+        # The gateway records a runtime disable together with its deciding
+        # path (runtime_source); a CLI runtime write or clear never keeps it.
+        def stored():
+            row = self.store.db.execute(
+                "SELECT actions_json FROM actions WHERE target_type = 'mcp' AND target_name = 'key' AND connector = 'claudecode'"
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+
+        self.store.db.execute(
+            """INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
+               VALUES ('r', 'mcp', 'key', 'key', '{"install":"block","runtime":"disable","runtime_source":"key"}', 'failed',
+                       CURRENT_TIMESTAMP, 'claudecode')"""
+        )
+        self.store.db.commit()
+        self.store.set_action_field("mcp", "key", "install", "allow", "operator", connector="claudecode")
+        self.assertEqual(stored()["runtime_source"], "key")
+        self.store.set_action_field("mcp", "key", "runtime", "disable", "operator", connector="claudecode")
+        self.assertEqual(stored(), {"install": "allow", "runtime": "disable"})
+        self.store.db.execute(
+            "UPDATE actions SET actions_json = json_set(actions_json, '$.runtime_source', 'key') WHERE id = 'r'"
+        )
+        self.store.db.commit()
+        self.store.clear_action_field("mcp", "key", "runtime", connector="claudecode")
+        self.assertEqual(stored(), {"install": "allow"})
+
+    def test_counts_include_blocked_account_mcp_rows(self):
+        # An enrolled account MCP server keeps its decision under its own
+        # target type; it is still a blocked MCP server.
+        self.store.set_action_field("mcp", "plain", "install", "block", "scan")
+        self.store.set_action_field("mcp-account", "account-key", "install", "block", "scan")
+
+        for counts in (self.store.get_counts(), self.store.get_enforcement_counts()):
+            self.assertEqual((counts.blocked_mcps, counts.allowed_mcps), (2, 0))
+
     def test_counts_include_the_operator_lists_of_asset_policy(self):
         from defenseclaw.config import AssetPolicyRule, default_config
 

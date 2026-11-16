@@ -26,7 +26,7 @@ func TestWindowsEnterpriseSetupBelowProductFloorIsRefusedBeforeAnyChange(t *test
 	setup := func(version string) *windowsEnterpriseLifecycleOptions {
 		return &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true,
 			productVersion: version, gatewayBinary: `C:\payload\defenseclaw-gateway.exe`, acpBinary: `C:\payload\defenseclaw-acp.exe`,
-			hookBinary: `C:\payload\defenseclaw-hook.exe`, sensorHelperBinary: `C:\payload\defenseclaw-sensor-helper.exe`}
+			hookBinary: `C:\payload\defenseclaw-hook.exe`, hookGuardBinary: `C:\payload\defenseclaw-hook-guard.exe`, sensorHelperBinary: `C:\payload\defenseclaw-sensor-helper.exe`}
 	}
 	for _, action := range []string{"install", "upgrade", "repair", "ensure"} {
 		err := refuseWindowsEnterpriseBelowProductFloor(action, setup("1.0.6"))

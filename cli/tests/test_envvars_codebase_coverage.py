@@ -475,24 +475,86 @@ class CoverageExtractionTests(unittest.TestCase):
 
 
 class RegistryAndDocsInSyncTests(unittest.TestCase):
-    """Run the generator check for the bundle and canonical website catalog."""
+    """Run the generator check for the bundle and canonical website catalog.
 
-    def test_docs_in_sync_with_registry(self) -> None:
+    The check runs in a private copy of what the generator reads. The package
+    mirror ``cli/defenseclaw/_data/envvars/registry.json`` is an ignored build
+    product of ``make _bundle-data``: it is absent in a fresh checkout and is
+    rewritten by any packaging run in the same tree. A check that read it in
+    place failed (GAP-0794) whenever a parallel worker, or another job on the
+    same tree, held it empty, stale or absent, though neither the registry nor
+    the page had changed. The copy gets the mirror the way ``_bundle-data``
+    makes it, so the check answers only for the tracked registry, the
+    generator and the tracked page. The wheel's registry is held equal to the
+    tracked one by ``test_dependency_contract``.
+    """
+
+    _INPUTS = (
+        "scripts/gen_envvars_docs.py",
+        "internal/envvars/registry.json",
+        "cli/defenseclaw/__init__.py",
+        "cli/defenseclaw/envvars.py",
+        "docs-site/content/docs/reference/env-vars.mdx",
+    )
+    _MIRROR = "cli/defenseclaw/_data/envvars/registry.json"
+    _PAGE = "docs-site/content/docs/reference/env-vars.mdx"
+
+    def _generator_copy(self) -> Path:
+        import shutil
+        import tempfile
+
+        root = Path(tempfile.mkdtemp(prefix="envvars-sync-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        for relative in self._INPUTS:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(_REPO_ROOT / relative, target)
+        return root
+
+    @staticmethod
+    def _run(root: Path, *flags: str):
         import subprocess
         import sys
 
-        script = _REPO_ROOT / "scripts" / "gen_envvars_docs.py"
-        self.assertTrue(script.is_file(), "scripts/gen_envvars_docs.py missing")
-        result = subprocess.run(
-            [sys.executable, str(script), "--check"],
+        return subprocess.run(
+            [sys.executable, str(root / "scripts" / "gen_envvars_docs.py"), *flags],
             capture_output=True,
             text=True,
         )
+
+    def _published_copy(self) -> Path:
+        root = self._generator_copy()
+        published = self._run(root, "--bundle-only")
+        self.assertEqual(published.returncode, 0, published.stderr)
+        return root
+
+    def test_docs_in_sync_with_registry(self) -> None:
+        self.assertTrue((_REPO_ROOT / "scripts" / "gen_envvars_docs.py").is_file())
+        result = self._run(self._published_copy(), "--check")
         if result.returncode != 0:
             self.fail(
-                f"env-var generated artifacts are out of date. Regenerate with "
+                "env-var generated artifacts are out of date. Regenerate with "
                 f"`python scripts/gen_envvars_docs.py`.\nstderr:\n{result.stderr}"
             )
+
+    def test_check_names_a_stale_mirror_and_a_stale_page(self) -> None:
+        for relative, damage in ((self._MIRROR, b"{}"), (self._MIRROR, b""), (self._PAGE, b"stale")):
+            with self.subTest(relative=relative, damage=damage):
+                root = self._published_copy()
+                (root / relative).write_bytes(damage)
+                result = self._run(root, "--check")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(str(root / relative), result.stderr)
+
+    def test_a_missing_mirror_is_published_not_reported(self) -> None:
+        root = self._published_copy()
+        mirror = root / self._MIRROR
+        mirror.unlink()
+        self.assertEqual(self._run(root, "--check").returncode, 1)
+        self.assertEqual(self._run(root, "--bundle-only").returncode, 0)
+        self.assertEqual(mirror.read_bytes(), (root / "internal/envvars/registry.json").read_bytes())
+        self.assertEqual(self._run(root, "--check").returncode, 0)
+        self.assertEqual([p.name for p in mirror.parent.iterdir()], ["registry.json"])
 
 
 if __name__ == "__main__":

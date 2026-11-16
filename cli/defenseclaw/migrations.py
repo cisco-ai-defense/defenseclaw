@@ -61,6 +61,7 @@ from defenseclaw.file_permissions import (
     copy_windows_dacl,
     delete_file_durable,
     replace_file_durable,
+    serialize_dotenv,
     set_file_mode,
 )
 
@@ -1377,9 +1378,13 @@ def _atomic_write_dotenv(path: str, kv: dict[str, str]) -> bool:
     operator's chosen key order. Reserved for the rare path where we
     are creating a brand-new .env from scratch.
     """
-    lines = [f"{k}={v}" for k, v in sorted(kv.items())]
-    body = "\n".join(lines) + "\n"
-    return _atomic_write_text(path, body, mode=0o600)
+    try:
+        with open(path, "rb") as f:
+            existing = f.read()
+    except OSError:
+        existing = b""
+    lines = [f"{k}={v}".encode() for k, v in sorted(kv.items())]
+    return _atomic_write_text(path, serialize_dotenv(lines, existing).decode("utf-8"), mode=0o600)
 
 
 def _dotenv_update_keys(
@@ -1442,8 +1447,8 @@ def _dotenv_update_keys_locked(
         return _atomic_write_dotenv(path, upd)
 
     try:
-        with open(path) as f:
-            raw_lines = f.readlines()
+        with open(path, "rb") as f:
+            existing = f.read()
     except OSError as exc:
         ux.warn(f"could not read {path}: {exc}", indent="    ")
         return False
@@ -1452,21 +1457,9 @@ def _dotenv_update_keys_locked(
     consumed: set[str] = set()
     changed = False
 
-    for raw in raw_lines:
-        # Preserve the original line ending style (LF vs CRLF) so a
-        # CRLF-terminated .env from a Windows operator doesn't
-        # silently flip to LF on a partial rewrite.
-        if raw.endswith("\r\n"):
-            terminator = "\r\n"
-            body = raw[:-2]
-        elif raw.endswith("\n"):
-            terminator = "\n"
-            body = raw[:-1]
-        else:
-            terminator = ""
-            body = raw
-
-        stripped = body.strip()
+    for raw_bytes in existing.splitlines():
+        raw = raw_bytes.decode("utf-8")
+        stripped = raw.strip()
         if not stripped or stripped.startswith("#"):
             out_lines.append(raw)
             continue
@@ -1481,8 +1474,7 @@ def _dotenv_update_keys_locked(
             changed = True
             continue  # drop the line entirely
         if key in upd:
-            new_value = upd[key]
-            new_line = f"{key}={new_value}{terminator}"
+            new_line = f"{key}={upd[key]}"
             if new_line != raw:
                 changed = True
             out_lines.append(new_line)
@@ -1490,15 +1482,11 @@ def _dotenv_update_keys_locked(
             continue
         out_lines.append(raw)
 
-    # Append keys that weren't already in the file. Use a final newline
-    # if the file didn't end with one, so the appended block doesn't
-    # glue itself onto the previous line.
+    # Append keys that weren't already in the file; the serializer ends every
+    # line, so the appended block never glues itself onto the previous line.
     pending = [k for k in upd if k not in consumed]
-    if pending:
-        if out_lines and not out_lines[-1].endswith(("\n", "\r\n")):
-            out_lines[-1] = out_lines[-1] + "\n"
-        for key in pending:
-            out_lines.append(f"{key}={upd[key]}\n")
+    for key in pending:
+        out_lines.append(f"{key}={upd[key]}")
         changed = True
 
     if not changed:
@@ -1510,7 +1498,8 @@ def _dotenv_update_keys_locked(
             pass
         return True
 
-    return _atomic_write_text(path, "".join(out_lines), mode=0o600)
+    body = serialize_dotenv([line.encode("utf-8") for line in out_lines], existing)
+    return _atomic_write_text(path, body.decode("utf-8"), mode=0o600)
 
 
 def _atomic_write_config(path: str, body: str, *, mode: int = 0o644) -> bool:

@@ -31,9 +31,13 @@ package guardianstate
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // State names — the exact bytes the guardian writes and the sidecar
@@ -102,36 +106,47 @@ func PathForPlatform(standaloneUnix bool, dataDir, authDir string) string {
 // a mistake or an attempt to consume unbounded RAM in the sidecar's
 // hot path; discard it.
 func ReadState(path string) string {
-	if !readStatePathTrusted(path) {
-		return StateUnknown
-	}
-	f, err := os.Open(path) // #nosec G304 — path derives from install-time layout, not user input.
+	var state string
+	err := safefile.RetryPublishedRead(func() error {
+		var readErr error
+		state, readErr = readStateOnce(path)
+		return readErr
+	})
 	if err != nil {
 		return StateUnknown
 	}
+	return state
+}
+
+func readStateOnce(path string) (string, error) {
+	trusted, err := readStatePathTrusted(path)
+	if err != nil {
+		return StateUnknown, err
+	}
+	if !trusted {
+		return StateUnknown, nil
+	}
+	f, err := winpath.OpenReadShared(path) // #nosec G304 — path derives from install-time layout, not user input.
+	if err != nil {
+		return StateUnknown, err
+	}
 	defer f.Close()
-
-	var buf [128]byte
-	n, err := f.Read(buf[:])
-	if err != nil && n == 0 {
-		return StateUnknown
+	data, err := io.ReadAll(io.LimitReader(f, 129))
+	if err != nil {
+		return StateUnknown, err
 	}
-	// Reject a state file that exceeded the 128-byte read: if there is
-	// another byte after our buffer, the file is oversized and we
-	// don't want to trust its contents.
-	var extra [1]byte
-	if m, _ := f.Read(extra[:]); m > 0 {
-		return StateUnknown
+	if len(data) > 128 {
+		return StateUnknown, nil
 	}
 
-	body := strings.TrimSpace(string(buf[:n]))
+	body := strings.TrimSpace(string(data))
 	switch body {
 	case StateWaitingForTargets:
-		return StateWaitingForTargets
+		return StateWaitingForTargets, nil
 	case StateReady:
-		return StateReady
+		return StateReady, nil
 	default:
-		return StateUnknown
+		return StateUnknown, nil
 	}
 }
 
@@ -172,7 +187,7 @@ func WriteState(path, state string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("guardianstate: close temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := safefile.ReplaceFileAtomically(tmpPath, path); err != nil {
 		return fmt.Errorf("guardianstate: rename %s -> %s: %w", tmpPath, path, err)
 	}
 	return nil

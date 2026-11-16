@@ -289,6 +289,23 @@ func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context
 	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
 }
 
+// A receipt-capable per-user call has already offered its answer before its
+// terminal records are written. Its pending occurrence is durable, so give
+// finalization a fresh window after earlier telemetry used the ordinary 10 s
+// window. Writes queued in that window finish after its deadline. This does
+// not extend the hook's answer deadline or Secure Client's path.
+func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receiptBacked bool) (context.Context, context.CancelFunc) {
+	if !receiptBacked {
+		return ctx, nil
+	}
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil || cfg.SecureClientIntegration() || !perUserHookInstall(cfg) {
+		return ctx, nil
+	}
+	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	return audit.WithCallWriteAfterCancel(durableCtx), cancel
+}
+
 // contextWithCancelGrace keeps parent's values and is cancelled grace after
 // parent is done, or when the returned cancel runs.
 func contextWithCancelGrace(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
@@ -310,10 +327,13 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The request is one hook call: its reads wait for network shares
+		// one answer wait in all, its own (rel-1-0-6:GAP-0482).
+		defer hookpaths.HookCall()()
 		chargeBudget := func(receipt bool) bool {
 			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
-				w.Header().Set("Retry-After", "1")
-				a.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+				reason, message := sandboxHookRefusal(err)
+				writeHookRateLimited(w, reason, message)
 				return false
 			}
 			return true
@@ -333,6 +353,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		delivery := hookDeliveryReceiptForRequest(r)
 		if delivery == nil {
 			delivery = a.beginHookDeliveryReceipt(w, r)
+		}
+		if delivery != nil {
+			delivery.bindBody(r.Body)
 		}
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
@@ -439,8 +462,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
-			// The registered hook surface and event own the dialect. Body
-			// fields cannot select a different parser.
+			// The registered surface selects the profile and the command
+			// binds the event. The per-user CLI profile reads either body
+			// shape under the same CLI policy.
 			var vscodeLocal bool
 			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event)
 			if vscodeLocal {
@@ -462,6 +486,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event", "reason": hookexec.MalformedHookPayloadReason})
 				return
+			} else {
+				// The per-user CLI document is read by both harnesses. Its
+				// shared parser accepts two disjoint body shapes under the
+				// command-bound event and keeps the same CLI policy for each.
+				// Strict, managed and Secure Client keep their exact schemas.
+				cfg := a.decisionConfig(r.Context())
+				if cfg != nil && !cfg.SecureClientIntegration() &&
+					!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+					cfg.HookPolicyTierForConnector("copilot") != config.HookPolicyTierStrict {
+					r = r.WithContext(withCopilotCLISharedEvent(r.Context(), event))
+				}
 			}
 			if hookName := payloadString(payload, "hookName"); hookName != "" && hookName != event {
 				a.recordConnectorHookRejection(r.Context(), connectorName, event, "bound_event_mismatch", int64(len(b)))
@@ -528,9 +563,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// A conflicting event is not a valid policy boundary. Return the
 				// native block even if an administrator chose open for outages.
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "conflicting_event", int64(len(b)))
+				resp := agentHookResponse{
+					Action: "block", Reason: "Hermes hook event fields disagree",
+					HookOutput: map[string]interface{}{"action": "block", "message": "DefenseClaw blocked this tool call because its hook event could not be verified."},
+				}
+				resp = a.hermesWireBlockText(r.Context(), connectorName,
+					agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"}, resp)
 				a.writeJSON(w, http.StatusOK, map[string]interface{}{
-					"action": "block", "reason": "Hermes hook event fields disagree",
-					"hook_output": map[string]string{"action": "block", "message": "DefenseClaw blocked this tool call because its hook event could not be verified."},
+					"action": resp.Action, "reason": resp.Reason, "hook_output": resp.HookOutput,
 				})
 				return
 			}
@@ -576,7 +616,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					}).Output
 				}
 				resp.RuleIDs = []string{"CONNECTOR-NOT-STARTED"}
-				a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, resp, ""))
+				a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req,
+					a.hermesWireBlockText(r.Context(), connectorName, req, resp), ""))
 				return
 			}
 		}
@@ -594,6 +635,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		structuredToolRoute := toolRoute == connector.ToolEventRouteStructuredAction ||
 			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName)
 		if structuredToolRoute {
+			copilotCLILocalBody := false
+			if connectorName == "copilot" {
+				_, copilotCLILocalBody = copilotargs.CLIHookLocalEvent(
+					copilotCLISharedEventFromContext(r.Context()), payloadString(payload, "hook_event_name"))
+			}
 			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
 				req.ToolCallUnparsed = true
 			}
@@ -604,8 +650,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && !copilotVSCodeLocalFromContext(r.Context()) &&
+				!copilotCLILocalBody &&
 				(payload["hook_event_name"] != nil || payload["tool_name"] != nil ||
 					payload["tool_input"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && copilotCLILocalBody &&
+				(copilotCLIMixedLocalFields(payload) ||
+					payload["tool_name"] == nil || payload["tool_input"] == nil ||
+					req.ToolName == "" || req.ToolArgsProjectionUncertain) {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && req.HookEventName == "permissionRequest" {
@@ -659,6 +712,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
 		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
 			startTicket = a.sessionStartGate.begin(startGateKey)
+			// The refusal this request was resolved to was issued before the
+			// start began; the start is expected to end with it.
+			startTicket.adopt(profileRefusal(r.Context()))
 			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
@@ -691,7 +747,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
 			dedupedResp := copilotDedupedResponse(profile, req, earlier)
 			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
-			a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp, ""))
+			a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req,
+				a.hermesWireBlockText(r.Context(), connectorName, req, dedupedResp), ""))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -826,6 +883,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
 					}
 					if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+						if answered != nil {
+							if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+								if cancelPersist != nil {
+									defer cancelPersist()
+								}
+								persistCtx = durableCtx
+								cancelPersist = cancelDurable
+							}
+						}
 						finalPersistenceCtx = persistCtx
 						if cancelPersist != nil {
 							cancelFinalPersistence = cancelPersist
@@ -854,7 +920,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					// the HTTP server's serving goroutine.
 					func() {
 						defer func() { _ = recover() }()
-						body := a.hookAnswerBody(ctx, profile, connectorName, req, resp, "")
+						body := a.hookAnswerBody(ctx, profile, connectorName, req,
+							a.hermesWireBlockText(ctx, connectorName, req, resp), "")
 						attemptedWrite = true
 						a.writeHookAnswer(w, body)
 					}()
@@ -1045,7 +1112,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// already warns and audits its own finding).
 			// The field only tightens a verdict, so any sender may set it.
 			if mode := a.agentHookMode(ctx, connectorName); resp.Action == "allow" || mode == "action" {
-				resp = oversizeUninspectedHookResponse(profile, req, mode, resp)
+				secureClient := false
+				if cfg := a.decisionConfig(ctx); cfg != nil {
+					secureClient = cfg.SecureClientIntegration()
+				}
+				resp = oversizeUninspectedHookResponse(profile, req, mode, resp,
+					secureClient || sandboxHookForConnector(ctx, connectorName))
 			}
 		}
 		if payload["bounded_prefix_review"] == true && (resp.Action == "allow" || resp.Action == "alert") {
@@ -1150,7 +1222,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[gateway] sandbox tool-call chain finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, pending.ID)
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), pending.ID)
 			a.scheduleSandboxHookReceiptRecovery(pending.ID)
 			// The first request is done; a later authenticated receipt owns
 			// this journal row. The bounded recovery pass may now inspect it.
@@ -1167,9 +1240,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		var preKey preToolDecisionKey
 		preNoted := false
 		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
+		unreceipted := func(proposal agentHookResponse) agentHookResponse {
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !shellBridge &&
+				r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
+				hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
+				return a.deliveredHookDecision(connectorName, proposal, "")
+			}
+			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
+		}
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), "")
 			attemptedWrite = true
 			receipt := func() string {
 				resume := pauseHookRunSlot(ctx)
@@ -1179,7 +1261,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				})
 			}()
 			if receipt == hookexec.HookDeliveryReleased {
-				resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+				resp = unreceipted(resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
 			}
@@ -1187,7 +1269,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			answered = &delivered
 			hookStageForTest(ctx, "delivered")
 		} else {
-			resp = a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
+			resp = unreceipted(resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -1197,6 +1279,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
 		}
 		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+				if cancelPersist != nil {
+					defer cancelPersist()
+				}
+				persistCtx = durableCtx
+				cancelPersist = cancelDurable
+			}
 			finalPersistenceCtx = persistCtx
 			if cancelPersist != nil {
 				cancelFinalPersistence = cancelPersist
@@ -1265,7 +1354,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// connector → field-name mapping. hookAnswerBody cannot
 		// panic, so the native hook always gets the finalized answer.
 		if delivery == nil {
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), "")
 			// Mark the write attempt BEFORE writing. A panic from the
 			// writer then signals "do not retry from the defer"; the
 			// response stream may already be partially written, and a
@@ -1286,6 +1376,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 // does not change the answer, which may already be finalized. It cannot
 // panic.
 func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
 	resp = a.withHookAnswerAgentIDs(ctx, resp)
 	counted := false
 	onPanic := func(recovered any) {
@@ -1301,9 +1394,6 @@ func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookPr
 	}
 	fmt.Fprintf(os.Stderr, "[gateway] hook answer render failed connector=%s event=%s action=%s: %v; answering with its native fallback output\n",
 		connectorName, req.HookEventName, resp.Action, err)
-	if req.ConnectorName == "" {
-		req.ConnectorName = connectorName
-	}
 	fallback := resp
 	fallback.HookOutput = func() (output map[string]interface{}) {
 		defer func() {
@@ -1398,6 +1488,26 @@ func validAntigravityHookEvent(event string) bool {
 	}
 }
 
+// hookReplayWritesNoRow reports an exact replay of an allowed delivery whose
+// audit row is already persisted, answered allow again: the one case that
+// collapses into the earlier row. Everything else has its own row and decision
+// export: a block, an alert or an unconfirmed answer, and an allow whose
+// earlier record is a block, an alert or a record that does not say allow (a
+// block answered by an allow on a re-sent id keeps both rows, GAP-1060). A
+// lookup that fails proves nothing, so it writes; an event with no linked hook
+// record has nothing to contradict and stays silent. A hook whose correlation
+// ledger write failed is not a replay (GAP-1536).
+func (a *APIServer) hookReplayWritesNoRow(ctx context.Context, req agentHookRequest, resp agentHookResponse) bool {
+	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable || resp.Action != "allow" {
+		return false
+	}
+	if a.store == nil || req.SemanticEventID == "" {
+		return true
+	}
+	earlier, found, err := a.store.LatestHookVerdictOfEvent(ctx, req.SemanticEventID)
+	return err == nil && (!found || earlier.Action == "allow")
+}
+
 // hookLLMEventExportable reports whether the hook's prompt/tool/response
 // event (the invoke_agent and execute_tool spans Galileo receives) is
 // exported. A hook whose correlation ledger write failed (disk full) is
@@ -1447,18 +1557,12 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	delivered bool,
 ) hookFinalizationResult {
 	receipted, _ := ctx.Value(hookDeliveryReceiptContextKey{}).(bool)
-	if client, ok := ctx.Value(hookClientContextKey{}).(context.Context); ok && client.Err() != nil && resp.Action != "block" &&
-		resp.Action != hookActionUnconfirmed && !receipted {
-		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-			failed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, hookCheckFailure{
-				base:  agentHookResponse{Severity: "WARN", Reason: "hook client disconnected before the gateway decision was delivered"},
-				cause: "because the hook client disconnected before it received the gateway decision",
-			})
-			if failed.Action == "block" {
-				failed.EvaluationID = resp.EvaluationID
-				resp = failed
-			}
-		}
+	// clientLeft: a script caller that left without a delivery receipt. No
+	// answer reaches it, so what is recorded is only what the gateway can prove.
+	client, hasClient := ctx.Value(hookClientContextKey{}).(context.Context)
+	clientLeft := hasClient && client.Err() != nil && !receipted
+	if clientLeft && resp.Action != hookActionUnconfirmed {
+		resp = a.clientLeftHookDecision(ctx, connectorName, req, rawBody, resp)
 	}
 	// Treat a block response as enforced unless identity stamping proves
 	// otherwise. If identity stamping itself panics, notification stays
@@ -1564,10 +1668,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// enforcement companion that #850 wanted to persist here is not
 	// forward-ported; the primary hook_decision log + audit row are the
 	// only durable artefacts of this decision in Part 1.
-	replay := req.SuppressCorrelationEmit && !req.CorrelationUnavailable
-	// Every verdict has its audit row, save the exact replay of a delivery
-	// whose row is already persisted: a hook whose correlation failed is
-	// audited too. The row is written first, so the export, the status
+	replay := a.hookReplayWritesNoRow(ctx, req, resp)
+	// Every verdict has its audit row, save the exact replay of an allowed
+	// delivery whose row is already persisted: a hook whose correlation
+	// failed is audited too, and a block always has its own row (GAP-1060). The row is written first, so the export, the status
 	// counters, the sandbox's record, the managed hook join and the span all
 	// carry the verdict the agent gets: a call whose row could not be written
 	// gets the fail-mode verdict instead of its computed allow, unless that
@@ -1613,7 +1717,15 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// report a retroactive block the agent did not receive (s2-obs). An
 			// answer already on the wire (delivered) is never replaced either.
 			if !delivered && !recoverable && req.pendingOccurrenceID == "" {
-				adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				if !clientLeft || resp.Action != hookActionUnconfirmed {
+					// An unconfirmed call whose client left stays unconfirmed:
+					// an audit fault must not turn a proposal nobody delivered
+					// into a block (GAP-1028, GAP-1031).
+					adjusted, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
+				}
+				// The answer goes out with no row; keep the call's record
+				// outside the store for the failure report (GAP-1031).
+				a.recordUnauditedHookCall(connectorName, req, adjusted)
 			}
 			resp = adjusted
 			env.adoptVerdict(resp)
@@ -1694,10 +1806,17 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			}
 		}
 		if !result.DecisionSettled {
-			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(ctx)
+			decisionBaseCtx := ctx
+			if ctx.Err() != nil {
+				if renewed, cancel := a.hookDeliveredPersistenceContext(ctx, req.pendingOccurrenceID != "" && delivered); cancel != nil {
+					decisionBaseCtx = renewed
+					defer cancel()
+				}
+			}
+			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)
 			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
 			// The hook_decision record is committed before the answer.
-			audit.FlushCallWrites(ctx)
+			audit.FlushCallWrites(decisionBaseCtx)
 			result.DecisionSettled = decision.settled() && decisionOutcome.Err() == nil
 			if decision == hookDecisionLogUnbuildable && req.pendingOccurrenceID != "" {
 				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
@@ -1735,9 +1854,13 @@ func (a *APIServer) hookAuditFailureResponse(
 		return resp, false
 	}
 	cfg := a.decisionConfig(ctx)
-	if resp.Action == "allow" && cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+	if (resp.Action == "allow" || resp.Action == hookActionUnconfirmed && resp.RawAction == "allow") &&
+		cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
 		cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
 		!sandboxHookForConnector(ctx, connectorName) {
+		// A missing receipt leaves a decision unconfirmed, but an audit
+		// failure still gives a balanced caller its visible allow answer.
+		resp.Action = "allow"
 		resp.RawAction = "alert"
 		resp.Severity = "WARN"
 		resp.WouldBlock = false
@@ -1805,6 +1928,17 @@ func (a *APIServer) hookDecisionMeta(
 	ctx context.Context,
 	req agentHookRequest,
 ) (llmEventMeta, string, bool) {
+	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" {
+		// A plugin load comes before any session, so it has no agent
+		// instance: it is a lifecycle event, and its connector audit row
+		// stays, rather than a hook decision that cannot name the instance
+		// (GAP-0577). A load that does carry an instance, and Secure Client,
+		// keep their decision.
+		cfg := a.decisionConfig(ctx)
+		if (cfg == nil || !cfg.SecureClientIntegration()) && AgentIdentityFromContext(ctx).AgentInstanceID == "" {
+			return llmEventMeta{}, "", false
+		}
+	}
 	source := strings.TrimSpace(req.ConnectorName)
 	if source == "" {
 		return llmEventMeta{}, "", false
@@ -2084,11 +2218,13 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// Keep observability and audit row gated by the same replay classification
 	// so a suppressed replay stays silent on both; the enforcement companion
 	// that #850 wanted here is not forward-ported in Part 1.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	silent := a.hookReplayWritesNoRow(ctx, req, resp)
+	if !silent {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 	}
-	// As in finalizeAgentHookAnswer: only an exact replay goes without its row.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
+	// As in finalizeAgentHookAnswer: only an exact replay of an allow goes
+	// without its row.
+	if !silent {
 		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
@@ -2344,6 +2480,9 @@ func (a *APIServer) safeEvaluateHook(
 	payload map[string]interface{},
 	runtime hookProfileRuntime,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -2370,6 +2509,9 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	connectorName string,
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -3555,8 +3697,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     trustedArgs,
-			CWD:                      agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD),
+			CWD:                      agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD),
 			ActiveHome:               hookActiveHome(ctx),
+			CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
@@ -3575,10 +3718,14 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			LegacyText:              string(req.ToolArgs),
 			conflictSource:          conflictSource,
 			Connector:               req.ConnectorName,
+			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 			EnforcementCapable:      enforcementCapable,
+			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
+			ManagedInstall:          a.managedInstallForHook(ctx),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
 			patchTarget:             hermesV4APatch,
+			strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			windowsShellDialect:     dialectHint,
 			record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
@@ -3595,7 +3742,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	effectiveMode := mode
-	if mode != "action" && a.provenActiveStateMutation(ctx, verdict) {
+	if mode != "action" && a.provenHookActionMustEnforce(ctx, verdict) {
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
@@ -3612,7 +3759,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// by returning advisory-only changes (action stays allow,
 	// rawAction promoted to block, wouldBlock=true). For events
 	// the connector itself does not declare blockable, we further
-	// downgrade through mapHookAction so we never tell the agent
+	// downgrade through its capability map so we never tell the agent
 	// to block on a surface it cannot honor.
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -3620,7 +3767,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", effectiveMode, req.HookEventName, caps, profile, req.Payload)
+			capable, capableWouldBlock := mapAssetBlockForProfile(
+				effectiveMode, req.HookEventName, caps, profile, req.Payload,
+				a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration(),
+			)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {
@@ -3716,7 +3866,9 @@ func oversizeUninspectedPayload(payload map[string]any) bool {
 // in the connector's mode: observe warns and audits, action blocks. A
 // would-block finding the gateway made on the bounded review (observe mode)
 // stays in the answer and the audit row next to it.
-func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse) agentHookResponse {
+// The caller suppresses Hermes display text for verified Secure Client and
+// sandbox routes, which keep their existing response contracts.
+func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse, suppressDisplayText ...bool) agentHookResponse {
 	action, wouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	findings, ruleIDs := []string{hookOversizeUninspectedRuleID}, []string{hookOversizeUninspectedRuleID}
 	if prior.WouldBlock || prior.RawAction == "block" {
@@ -3726,6 +3878,72 @@ func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHoo
 	resp := agentHookResponseForProfile(profile, req, action, "block", "HIGH", oversizeUninspectedReason,
 		findings, mode, wouldBlock, profile.Capabilities)
 	resp.RuleIDs = ruleIDs
+	if len(suppressDisplayText) > 0 && suppressDisplayText[0] {
+		return resp
+	}
+	return hermesBlockText(req, resp)
+}
+
+// hermesWireBlockText changes only the native model-facing field. The
+// canonical verdict reason remains the one used by audit and accounting.
+func (a *APIServer) hermesWireBlockText(ctx context.Context, connectorName string, req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if sandboxHookForConnector(ctx, connectorName) {
+		return resp
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return resp
+	}
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
+	return hermesBlockText(req, resp)
+}
+
+// hermesBlockText gives every blocked Hermes tool-call answer the same
+// model-facing reason, including blocks produced after the main evaluator.
+func hermesBlockText(req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if req.ConnectorName != "hermes" || canonicalEvent(req.HookEventName) != "pretoolcall" || resp.Action != "block" {
+		return resp
+	}
+	rule := "policy"
+	for _, id := range resp.RuleIDs {
+		if agentRuleIDPattern.MatchString(id) {
+			rule = id
+			break
+		}
+	}
+	if rule == "policy" {
+		source := resp.SourceReason
+		if source == "" {
+			source = resp.Reason
+		}
+		matched := strings.TrimPrefix(agentMatchedRules(source), "rule ")
+		matched = strings.TrimPrefix(matched, "rules ")
+		candidate, _, _ := strings.Cut(matched, ",")
+		candidate, _, _ = strings.Cut(candidate, ":")
+		if agentRuleIDPattern.MatchString(candidate) {
+			rule = candidate
+		}
+	}
+	field := "reason"
+	if resp.HookOutput["action"] == "block" {
+		field = "message"
+	}
+	message := resp.Reason
+	if native, ok := resp.HookOutput[field].(string); ok && native != "" {
+		message = native
+	}
+	if !strings.HasPrefix(message, "DefenseClaw blocked this call: ") {
+		message = "DefenseClaw blocked this call: " + rule + ": " + message
+	}
+	if resp.HookOutput != nil {
+		output := make(map[string]interface{}, len(resp.HookOutput)+1)
+		for key, value := range resp.HookOutput {
+			output[key] = value
+		}
+		output[field] = message
+		resp.HookOutput = output
+	}
 	return resp
 }
 
@@ -3830,8 +4048,9 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // belong at this server-owned boundary, without trusting a payload-supplied
 // dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
-	if strings.EqualFold(strings.TrimSpace(connectorName), "opencode") && toolName == "patch" {
-		return "apply_patch"
+	// The hook client describes the call under the same name (GAP-0073).
+	if mapped := hookpaths.ConnectorActionTool(connectorName, toolName); mapped != toolName {
+		return mapped
 	}
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)
@@ -3958,7 +4177,7 @@ func agentHookConflictSource(
 			candidate := base
 			args, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, raw)
 			candidate.Args = args
-			candidate.CWD = agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD)
+			candidate.CWD = agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD)
 			if dialectHint {
 				candidate.DialectHint = agentHookWindowsShellDialect(candidate)
 			}
@@ -3967,20 +4186,16 @@ func agentHookConflictSource(
 	}
 }
 
-// agentHookTrustedActionCWD is the working directory of a structured tool
-// call: the one the call names, mapped like the request's (host-sanitized,
-// or to the host directory a sandbox path is mounted from, "" when it has
-// none), else the request's. A relative directory is resolved against the
-// session's first; one the gateway cannot place ("~" or no session
-// directory) is none.
-func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) string {
-	return agentHookTrustedActionCWDReported(ctx, requestCWD, "", toolCWD)
-}
-
-// agentHookTrustedActionCWDReported is agentHookTrustedActionCWD with the
-// directory the hook payload reported (before the gateway resolved it), for
-// a managed peer whose directory the service account cannot resolve.
-func agentHookTrustedActionCWDReported(ctx context.Context, requestCWD, reportedCWD, toolCWD string) string {
+// agentHookTrustedActionCWDReported is the working directory of a structured
+// tool call: the one the call names, mapped like the request cwd
+// (host-sanitized, or to the host directory a sandbox path is mounted from,
+// "" when it has none), else the request cwd. A relative directory is
+// resolved against the session cwd first; one the gateway cannot place ("~"
+// or no session directory) is none. reportedCWD is the directory the hook
+// payload reported (before the gateway resolved it), for a managed peer whose
+// directory the service account cannot resolve.
+func agentHookTrustedActionCWDReported(ctx context.Context, connectorName, requestCWD, reportedCWD, toolCWD string) string {
+	toolCWD = agentCleanedToolCWD(ctx, connectorName, requestCWD, reportedCWD, toolCWD)
 	if toolCWD == "" && requestCWD != "" {
 		return requestCWD
 	}
@@ -3994,6 +4209,32 @@ func agentHookTrustedActionCWDReported(ctx context.Context, requestCWD, reported
 		base = reportedCWD
 	}
 	return managedPeerLexicalCWD(ctx, base, toolCWD)
+}
+
+// agentCleanedToolCWD is the directory a tool call starts in when its agent
+// cleans the directory it was given as text before it starts the process:
+// Codex exec_command resolves workdir "lnk/.." to the folder that holds lnk,
+// whatever lnk is (observed on Codex 0.159, GAP-0903 review 1). The call is
+// then placed there, not in the folder the file system reaches through lnk;
+// a directory whose agent hands it to the system unchanged keeps its spelling
+// and is read by the file system (agentHookToolCWD). A directory the text
+// join cannot place (no absolute base, or a base that itself has a parent
+// step) is returned as given.
+func agentCleanedToolCWD(ctx context.Context, connectorName, requestCWD, reportedCWD, toolCWD string) string {
+	if !hookpaths.WorkdirCleanedByAgent(connectorName) || toolCWD == "" || strings.HasPrefix(toolCWD, "~") {
+		return toolCWD
+	}
+	if _, sandboxed := sandboxHookView(ctx); sandboxed {
+		return toolCWD
+	}
+	base := requestCWD
+	if base == "" {
+		base = reportedCWD
+	}
+	if !filepath.IsAbs(toolCWD) && (!filepath.IsAbs(base) || hasParentElement(base)) {
+		return toolCWD
+	}
+	return hookpaths.CleanedDirectory(base, toolCWD)
 }
 
 // managedPeerLexicalCWD is the directory a managed hook peer's tool call
@@ -4018,7 +4259,15 @@ func managedPeerLexicalCWD(ctx context.Context, requestCWD, toolCWD string) stri
 	}
 	if dir == "" {
 		dir = strings.TrimSpace(requestCWD)
-	} else if !filepath.IsAbs(dir) {
+	}
+	// The gateway cannot follow links in the home, so a directory with a
+	// parent step (project/lnk/.. is the folder lnk points out of) is not
+	// placed here: the hook client resolved it as the user and keyed its
+	// evidence there (hookpaths.CWDKey).
+	if hasParentElement(dir) {
+		return ""
+	}
+	if toolCWD = strings.TrimSpace(toolCWD); toolCWD != "" && !filepath.IsAbs(dir) {
 		base := strings.TrimSpace(requestCWD)
 		if base == "" || !filepath.IsAbs(base) || hasParentElement(base) {
 			return ""
@@ -4052,7 +4301,7 @@ func agentHookToolCWD(ctx context.Context, requestCWD, toolCWD string) string {
 			}
 			return hookCWDForContext(ctx, path.Join(sandboxCWD, toolCWD))
 		}
-		toolCWD = filepath.Join(requestCWD, toolCWD)
+		toolCWD = hookpaths.JoinDirectoryText(requestCWD, toolCWD)
 	}
 	return hookCWDForContext(ctx, toolCWD)
 }
@@ -4084,10 +4333,12 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 	toolInput := decodeAgentHookToolInput(req.ToolArgs)
 	if strings.EqualFold(req.ConnectorName, "cursor") && canonicalEvent(req.HookEventName) == "beforemcpexecution" {
 		probe := cursorMCPProbeFromPayload(req.Payload, req.ToolName)
+		probe.SessionID = req.SessionID
 		return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
 	probe.WorkspaceDir = req.CWD
+	probe.SessionID = req.SessionID
 	// Kiro's servers on a managed Windows gateway are known only from the
 	// record the hook enumerator publishes: they are read again before a
 	// call about to run is decided, and a changed one waits for its own
@@ -4103,9 +4354,7 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 		return decision, true
 	}
 	if published {
-		if decision, refused := a.mcpAdmissionPendingDecision(ctx, req.ConnectorName, req.HookEventName, probe); refused {
-			return decision, true
-		}
+		return a.mcpAdmissionAndAssetDecision(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
@@ -4364,6 +4613,34 @@ func (a *APIServer) provenActiveStateMutation(ctx context.Context, verdict *Tool
 			(finding.proof.kind == findingProofActionFactsSemantic ||
 				finding.proof.kind == findingProofActionFactsSubgraph ||
 				finding.proof.kind == findingProofActiveStateMutation) {
+			return true
+		}
+	}
+	return false
+}
+
+// A holder-uncertain OSS fallback keeps ordinary work on the profile selected
+// by proven facts. It cannot turn a code-proven action finding into an
+// observe-only result while a possible account assignment would enforce it.
+func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *ToolInspectVerdict) bool {
+	if a.provenActiveStateMutation(ctx, verdict) {
+		return true
+	}
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || !resolved.decision.holderFallback || verdict == nil ||
+		normalizeCodexAction(verdict.Action) != "block" {
+		return false
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return false
+	}
+	for _, finding := range verdict.DetailedFindings {
+		if !finding.contributesToEnforcement() || !finding.proof.authorizes(finding.RuleID) {
+			continue
+		}
+		switch finding.proof.kind {
+		case findingProofActionFactsSemantic, findingProofActionFactsSubgraph,
+			findingProofExactFallback, findingProofResolvedTarget, findingProofActiveStateMutation:
 			return true
 		}
 	}

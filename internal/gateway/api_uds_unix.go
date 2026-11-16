@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
@@ -59,6 +60,7 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 	authorizer := newManagedHookAuthorizer(a.scannerCfg.Enterprise.Enrollment, nil, ledger.Load)
 	authorizer.loadRefused = newManagedHookRefusedLoader(filepath.Join(
 		managed.HookGuardianAuthorizationDir(a.configDataDir()), managed.HookGuardianRefusedSurfacesFile)).Load
+	a.managedHookAuthz.Store(authorizer)
 
 	listener, inherited, err := inheritedHookListener()
 	if err != nil {
@@ -92,6 +94,9 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 		Handler:     a.managedHookSocketHandler(authorizer, base),
 		BaseContext: apiRequestBaseContext(ctx),
 		ConnContext: managedHookConnContext,
+		// The asset facts header of a hook request can pass the net/http
+		// default of 1 MiB (assetfacts.Header).
+		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
 	}
 	return server, listener, nil
 }

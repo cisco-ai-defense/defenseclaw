@@ -1,0 +1,177 @@
+{
+  "about": "Written by TestWindowsCommandLineMatchesThePythonGolden (internal/managed); read by cli/tests/test_powershell_quote_golden.py. Regenerate with DEFENSECLAW_UPDATE_GOLDEN=1.",
+  "rows": [
+    {
+      "executable": "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+      "args": [
+        "enterprise",
+        "acp",
+        "setup",
+        "--client",
+        "zed",
+        "--agent",
+        "kiro",
+        "--profile",
+        "default",
+        "--activate",
+        "--data-dir",
+        "C:\\Users\\O'Brien\\AppData\\Local\\DefenseClaw\\acp",
+        "--api-port",
+        "18970",
+        "--guard-binary",
+        "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe"
+      ],
+      "line": "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' enterprise acp setup --client zed --agent kiro --profile default --activate --data-dir 'C:\\Users\\O''Brien\\AppData\\Local\\DefenseClaw\\acp' --api-port 18970 --guard-binary 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe'"
+    },
+    {
+      "executable": "C:\\Users\\O'Brien\\bin\\defenseclaw.exe",
+      "args": [
+        "status"
+      ],
+      "line": "& 'C:\\Users\\O''Brien\\bin\\defenseclaw.exe' status"
+    },
+    {
+      "executable": "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+      "args": [
+        "enterprise",
+        "acp",
+        "setup",
+        "--client",
+        "zed",
+        "--agent",
+        "kiro",
+        "--profile",
+        "default",
+        "--activate",
+        "--data-dir",
+        "C:\\Users\\O‘Brien\\AppData\\Local\\DefenseClaw\\acp",
+        "--api-port",
+        "18970",
+        "--guard-binary",
+        "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe"
+      ],
+      "line": "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' enterprise acp setup --client zed --agent kiro --profile default --activate --data-dir 'C:\\Users\\O‘‘Brien\\AppData\\Local\\DefenseClaw\\acp' --api-port 18970 --guard-binary 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe'"
+    },
+    {
+      "executable": "C:\\Users\\O‘Brien\\bin\\defenseclaw.exe",
+      "args": [
+        "status"
+      ],
+      "line": "& 'C:\\Users\\O‘‘Brien\\bin\\defenseclaw.exe' status"
+    },
+    {
+      "executable": "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+      "args": [
+        "enterprise",
+        "acp",
+        "setup",
+        "--client",
+        "zed",
+        "--agent",
+        "kiro",
+        "--profile",
+        "default",
+        "--activate",
+        "--data-dir",
+        "C:\\Users\\O’Brien\\AppData\\Local\\DefenseClaw\\acp",
+        "--api-port",
+        "18970",
+        "--guard-binary",
+        "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe"
+      ],
+      "line": "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' enterprise acp setup --client zed --agent kiro --profile default --activate --data-dir 'C:\\Users\\O’’Brien\\AppData\\Local\\DefenseClaw\\acp' --api-port 18970 --guard-binary 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe'"
+    },
+    {
+      "executable": "C:\\Users\\O’Brien\\bin\\defenseclaw.exe",
+      "args": [
+        "status"
+      ],
+      "line": "& 'C:\\Users\\O’’Brien\\bin\\defenseclaw.exe' status"
+    },
+    {
+      "executable": "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+      "args": [
+        "enterprise",
+        "acp",
+        "setup",
+        "--client",
+        "zed",
+        "--agent",
+        "kiro",
+        "--profile",
+        "default",
+        "--activate",
+        "--data-dir",
+        "C:\\Users\\O‚Brien\\AppData\\Local\\DefenseClaw\\acp",
+        "--api-port",
+        "18970",
+        "--guard-binary",
+        "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe"
+      ],
+      "line": "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' enterprise acp setup --client zed --agent kiro --profile default --activate --data-dir 'C:\\Users\\O‚‚Brien\\AppData\\Local\\DefenseClaw\\acp' --api-port 18970 --guard-binary 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe'"
+    },
+    {
+      "executable": "C:\\Users\\O‚Brien\\bin\\defenseclaw.exe",
+      "args": [
+        "status"
+      ],
+      "line": "& 'C:\\Users\\O‚‚Brien\\bin\\defenseclaw.exe' status"
+    },
+    {
+      "executable": "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+      "args": [
+        "enterprise",
+        "acp",
+        "setup",
+        "--client",
+        "zed",
+        "--agent",
+        "kiro",
+        "--profile",
+        "default",
+        "--activate",
+        "--data-dir",
+        "C:\\Users\\O‛Brien\\AppData\\Local\\DefenseClaw\\acp",
+        "--api-port",
+        "18970",
+        "--guard-binary",
+        "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe"
+      ],
+      "line": "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' enterprise acp setup --client zed --agent kiro --profile default --activate --data-dir 'C:\\Users\\O‛‛Brien\\AppData\\Local\\DefenseClaw\\acp' --api-port 18970 --guard-binary 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe'"
+    },
+    {
+      "executable": "C:\\Users\\O‛Brien\\bin\\defenseclaw.exe",
+      "args": [
+        "status"
+      ],
+      "line": "& 'C:\\Users\\O‛‛Brien\\bin\\defenseclaw.exe' status"
+    },
+    {
+      "executable": "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe",
+      "args": [
+        "enterprise",
+        "windows",
+        "status",
+        "<account>",
+        "<path to scan>",
+        "",
+        "John Smith",
+        "svc$",
+        "a`b",
+        "<a'b>",
+        "x=1",
+        "--opt=v:1/2+3"
+      ],
+      "line": "& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-gateway.exe' enterprise windows status <account> <path to scan> '' 'John Smith' 'svc$' 'a`b' '<a''b>' x=1 --opt=v:1/2+3"
+    },
+    {
+      "executable": "defenseclaw-gateway",
+      "args": [
+        "enterprise",
+        "acp",
+        "setup"
+      ],
+      "line": "& 'defenseclaw-gateway' enterprise acp setup"
+    }
+  ]
+}

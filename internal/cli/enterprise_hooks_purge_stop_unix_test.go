@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -101,7 +102,7 @@ func TestEnterpriseHookWorkerPurgeStopsThePerUserGatewayFirst(t *testing.T) {
 	}
 	// The worker reports only what it found: here the data folder, but no
 	// running gateway and no per-user binaries (GAP-1444).
-	if got := response.Targets[0].Purged; got == nil || *got != (enterpriseHookPurgeDetail{Data: true}) {
+	if got := response.Targets[0].Purged; got == nil || !reflect.DeepEqual(*got, enterpriseHookPurgeDetail{Data: true}) {
 		t.Fatalf("purge detail %+v", got)
 	}
 	want := "stop " + filepath.Join(home, ".defenseclaw") + ",purge " + filepath.Join(home, ".defenseclaw")

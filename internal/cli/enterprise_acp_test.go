@@ -627,10 +627,22 @@ func TestEnterpriseACPResultMarkIsASCIIWhenRedirected(t *testing.T) {
 	}
 }
 
+// g072 review 2 M4: on Windows the setup an enrollment reports is a
+// PowerShell call from the managed renderer: the path, each path flag and
+// any argument that is not a plain word are literals, the typographic quotes
+// doubled (a profile path of O’Brien ended the literal early).
 func TestEnterpriseACPSetupPathQuotesForPowerShell(t *testing.T) {
-	got := enterpriseACPQuotePath(`C:\Program Files\DefenseClaw\bin\gateway.exe`, true)
-	if got != `'C:\Program Files\DefenseClaw\bin\gateway.exe'` {
-		t.Fatalf("PowerShell path = %q", got)
+	got := enterpriseACPCommandLine(true, `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe`,
+		"enterprise", "acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "team a", "--activate",
+		"--data-dir", "C:\\Users\\O\u2019Brien\\.defenseclaw", "--api-port", "18970", "--guard-binary", `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-acp.exe`)
+	want := `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise acp setup --client zed --agent kiro --profile 'team a' --activate ` +
+		"--data-dir 'C:\\Users\\O\u2019\u2019Brien\\.defenseclaw' --api-port 18970 --guard-binary 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-acp.exe'"
+	if got != want {
+		t.Fatalf("PowerShell setup = %s, want %s", got, want)
+	}
+	if enterpriseACPRunIn(true) != "in PowerShell, " || enterpriseACPRunIn(false) != "" ||
+		enterpriseACPRunInstruction(true) != "In PowerShell, run" || enterpriseACPRunInstruction(false) != "Run" {
+		t.Fatal("the PowerShell setup is not handed on as a PowerShell command")
 	}
 }
 
@@ -641,12 +653,19 @@ func TestEnterpriseACPSetupPathQuotesForUnixShell(t *testing.T) {
 		t.Skip("requires a POSIX shell")
 	}
 	path := "/home/person$group/O'Brien data/.defenseclaw"
-	quoted := enterpriseACPQuotePath(path, false)
-	output, err := exec.Command("sh", "-c", "set -- "+quoted+"; printf %s \"$1\"").Output()
+	line := enterpriseACPCommandLine(false, "/opt/defenseclaw/bin/defenseclaw-gateway", "enterprise", "acp", "setup", "--client", "zed",
+		"--profile", "team a", "--data-dir", path, "--api-port", "18970")
+	output, err := exec.Command("sh", "-c", "set -- "+line+"; printf '%s\\n' \"$@\"").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(output) != path {
-		t.Fatalf("shell parsed %q as %q, want %q", quoted, output, path)
+	if want := "/opt/defenseclaw/bin/defenseclaw-gateway\nenterprise\nacp\nsetup\n--client\nzed\n--profile\nteam a\n--data-dir\n" + path + "\n--api-port\n18970\n"; string(output) != want {
+		t.Fatalf("shell parsed %q as %q, want %q", line, output, want)
+	}
+	// A plain path keeps its single quotes, and a plain word stays bare: the
+	// command keeps its shape.
+	if got, want := enterpriseACPCommandLine(false, "/opt/x/gw", "--client", "zed", "--data-dir", "/home/a/.defenseclaw"),
+		"'/opt/x/gw' --client zed --data-dir '/home/a/.defenseclaw'"; got != want {
+		t.Fatalf("plain POSIX setup = %s, want %s", got, want)
 	}
 }

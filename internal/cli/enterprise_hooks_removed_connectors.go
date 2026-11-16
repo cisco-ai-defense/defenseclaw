@@ -1,0 +1,189 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+)
+
+// The removed-connectors record (managed.HookGuardianRemovedConnectorsFile)
+// says which accounts had a connector the administrator then took off the
+// roster. The hook guardian writes it as LocalSystem, in the protected
+// guardian state beside the authorization ledger, once the account's
+// per-user files of the connector are gone; status, verify, the account's own
+// status, doctor and the TUI answer render it as managed.NotManagedRemovedFromRoster.
+//
+// It ages out on the guardian pass after either of these: the connector is on
+// the roster again for that account (the manifest admits it, or the config
+// publishes the connector again), so the connector's own state replaces the
+// record; or the account is gone (its profile was removed with the account,
+// so nothing can read the answer). It never ages out by time: an account that
+// has not signed in for months still has the connector removed.
+
+// loadEnterpriseHookRemovedConnectors reads the record; a missing file is an
+// empty record.
+func loadEnterpriseHookRemovedConnectors(dataDir string) ([]managed.RemovedConnector, error) {
+	return loadEnterpriseHookRemovedConnectorsAt(managed.RemovedConnectorsPath(dataDir))
+}
+
+// loadEnterpriseHookRemovedConnectorsAt reads the record at path: the status
+// commands name the guardian's protected state folder from the installed
+// layout, not from the service environment pin the guardian runs with.
+func loadEnterpriseHookRemovedConnectorsAt(path string) ([]managed.RemovedConnector, error) {
+	info, err := pathidentity.LstatPinned(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect removed connectors record %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("removed connectors record is not a regular file: %s", path)
+	}
+	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+		return nil, err
+	}
+	data, err := readEnterpriseHookBoundedFile(path, info, managed.RemovedConnectorsMaxBytes, "removed connectors record")
+	if err != nil {
+		return nil, fmt.Errorf("read removed connectors record %s: %w", path, err)
+	}
+	return managed.ParseRemovedConnectors(data)
+}
+
+// saveEnterpriseHookRemovedConnectors publishes the record (administrator
+// owned, not writable by the gateway service); an empty list removes the file.
+func saveEnterpriseHookRemovedConnectors(dataDir string, entries []managed.RemovedConnector, now time.Time) error {
+	path := managed.RemovedConnectorsPath(dataDir)
+	if len(entries) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove empty removed connectors record: %w", err)
+		}
+		return nil
+	}
+	if len(entries) > managed.RemovedConnectorsMax {
+		entries = entries[:managed.RemovedConnectorsMax]
+	}
+	data, err := managed.MarshalRemovedConnectors(entries, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	if _, err := prepareEnterpriseHookAuthorizationDir(dataDir); err != nil {
+		return err
+	}
+	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		return fmt.Errorf("protect removed connectors record: %w", err)
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+		return fmt.Errorf("set removed connectors record ownership: %w", err)
+	}
+	return enterpriseHookAuthorizationFileTrustCheck(path)
+}
+
+// planEnterpriseHookRemovedConnectors adds to the record each account's
+// machine-scope connector (machineScope) that the loaded config no longer
+// publishes and the manifest no longer admits, for every row the guardian's
+// last pass or its authorization ledger held for it: protected, pending or
+// failed. The rows are the fact that the account had the connector; a record
+// made only when a cleanup finished lost it when a failed change was undone
+// and then applied again, because the undone pass brought the rows back as
+// pending and nothing was left to clean. It returns the new list and whether
+// it differs from existing.
+func planEnterpriseHookRemovedConnectors(
+	existing []managed.RemovedConnector,
+	rows []enterpriseHookReconcileRow,
+	manifest enterprisehooks.Manifest,
+	published func(connector string) bool,
+	machineScope func(connector string) bool,
+	now time.Time,
+) ([]managed.RemovedConnector, bool) {
+	admitted := enterpriseHookManifestAdmits(manifest)
+	planned := append([]managed.RemovedConnector(nil), existing...)
+	known := map[string]bool{}
+	for _, entry := range existing {
+		known[managed.RemovedConnectorKey(entry.Connector, entry.SID)] = true
+	}
+	changed := false
+	for _, row := range rows {
+		name := strings.ToLower(strings.TrimSpace(row.Connector))
+		if name == "" && row.Result != nil {
+			name = strings.ToLower(strings.TrimSpace(row.Result.Connector))
+		}
+		sid := strings.TrimSpace(row.SID)
+		key := managed.RemovedConnectorKey(name, sid)
+		if name == "" || sid == "" || row.Removed || known[key] || !machineScope(name) ||
+			(published != nil && published(name)) || admitted(name, sid) {
+			continue
+		}
+		known[key] = true
+		changed = true
+		planned = append(planned, managed.RemovedConnector{
+			Connector: name, SID: sid, User: strings.TrimSpace(row.User), UserHome: strings.TrimSpace(row.UserHome),
+			RemovedAt: now.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return planned, changed
+}
+
+// recordEnterpriseHookRemovedConnectors loads the record, adds what
+// planEnterpriseHookRemovedConnectors finds and publishes it. An unreadable
+// record is replaced: it holds no secret and is rebuilt from the rows.
+func recordEnterpriseHookRemovedConnectors(
+	dataDir string,
+	rows []enterpriseHookReconcileRow,
+	manifest enterprisehooks.Manifest,
+	published func(connector string) bool,
+	machineScope func(connector string) bool,
+	now time.Time,
+) error {
+	existing, err := loadEnterpriseHookRemovedConnectors(dataDir)
+	damaged := err != nil
+	if damaged {
+		existing = nil
+	}
+	planned, changed := planEnterpriseHookRemovedConnectors(existing, rows, manifest, published, machineScope, now)
+	if !changed && !damaged {
+		return nil
+	}
+	return saveEnterpriseHookRemovedConnectors(dataDir, planned, now)
+}
+
+// pruneEnterpriseHookRemovedConnectors drops the entries whose connector is on
+// the roster again for the account (the manifest admits it, or the loaded
+// config publishes the connector again) or whose account is gone.
+func pruneEnterpriseHookRemovedConnectors(
+	dataDir string,
+	manifest enterprisehooks.Manifest,
+	published func(connector string) bool,
+	accountGone func(sid string) bool,
+	now time.Time,
+) error {
+	entries, err := loadEnterpriseHookRemovedConnectors(dataDir)
+	if err != nil || len(entries) == 0 {
+		return nil
+	}
+	admitted := enterpriseHookManifestAdmits(manifest)
+	kept := make([]managed.RemovedConnector, 0, len(entries))
+	for _, entry := range entries {
+		if admitted(entry.Connector, entry.SID) || (published != nil && published(entry.Connector)) ||
+			(accountGone != nil && accountGone(entry.SID)) {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if len(kept) == len(entries) {
+		return nil
+	}
+	return saveEnterpriseHookRemovedConnectors(dataDir, kept, now)
+}

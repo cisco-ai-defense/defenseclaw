@@ -335,7 +335,7 @@ ai_discovery:
 
 Each entry is a DNS domain of at least two labels, compared without regard to
 case and a trailing dot. On a managed Linux host, the administrator runs
-`sudo /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml`; per-user installs use `defenseclaw config validate`. Validation refuses a wildcard
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway config validate ./config.yaml`; per-user installs use `defenseclaw config validate` ([Managed command availability](/docs/enterprise/managed-commands)). Validation refuses a wildcard
 (`*.corp.example.com`), a NetBIOS name (`EMEA`), an account (`alice@...` or
 `EMEA\alice`) and an entry listed twice. The gateway applies a changed list
 at reload and looks every account up again; the guardian uses it at its next
@@ -367,8 +367,8 @@ LDAP account of that name.
 `profile-explain` also names a sandbox refusal that a hook call does not make: `refused_paths`
 lists `sandbox`, with `sandbox_refused_reason` and a warning. The profile decision itself does not change.
 On a managed host, a refusal with no verified ID (for example `--user` of a name no account holds)
-points to `defenseclaw-gateway enterprise <os> profile-explain --user <user>`; the per-user
-`defenseclaw guardrail profile` commands exit `2` there.
+points to the administrator's `enterprise <os> profile-explain --user <user>`, run by the gateway's full path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS); the per-user
+`defenseclaw guardrail profile` commands exit `2` there ([Managed command availability](/docs/enterprise/managed-commands)).
 
 ### Windows
 

@@ -37,7 +37,7 @@ every name listed here):
 
 Everything else is treated as private to OpenClaw flows; the test
 suite still reaches in for ``_backup`` /
-``_register_plugin_in_config`` etc. via the back-compat
+``_preserve_ownership`` etc. via the back-compat
 re-export, so the leading-underscore helpers below stay public to
 the package.
 """
@@ -54,6 +54,27 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
+
+
+def _remove_defenseclaw_entry_keys(entries: dict) -> bool:
+    """Take back what setup wrote under ``plugins.entries.defenseclaw``.
+
+    Removes only ``enabled`` and drops the entry when nothing an operator
+    wrote (hooks, config) is left, or when it is not an object. Same rule as
+    ``removeDefenseClawEntryKeys`` in the Go OpenClaw connector, so the Go
+    ``VerifyClean`` never sees an ``enabled`` residue. Returns True when an
+    entry was present.
+    """
+    if "defenseclaw" not in entries:
+        return False
+    entry = entries["defenseclaw"]
+    if not isinstance(entry, dict):
+        del entries["defenseclaw"]
+        return True
+    entry.pop("enabled", None)
+    if not entry:
+        del entries["defenseclaw"]
+    return True
 
 
 def patch_openclaw_config(
@@ -87,6 +108,11 @@ def patch_openclaw_config(
     except (OSError, json.JSONDecodeError):
         return None
 
+    from defenseclaw.openclaw_plugin_config import openclaw_plugin_config_issue
+
+    if issue := openclaw_plugin_config_issue(path, os.path.dirname(path)):
+        raise ValueError(f"OpenClaw setup cannot keep plugin config: {issue}")
+
     # Record pristine backup BEFORE any writes so we always capture the
     # untouched file. ``record_pristine_backup`` is idempotent — once a
     # pristine copy exists for this config path it will not be
@@ -106,12 +132,17 @@ def patch_openclaw_config(
     if "defenseclaw" not in allow:
         allow.append("defenseclaw")
 
-    # Re-enable plugin entry (may have been disabled by restore_openclaw_config).
-    entries = plugins.setdefault("entries", {})
-    if "defenseclaw" not in entries:
-        entries["defenseclaw"] = {"enabled": True}
+    # Merge plugins.entries.defenseclaw: set enabled=true and keep any other
+    # key an operator wrote (hooks, config). A null or non-object entry is
+    # treated as absent (GAP-0598, matches the Go connector).
+    entries = plugins.get("entries")
+    if not isinstance(entries, dict):
+        entries = plugins["entries"] = {}
+    entry = entries.get("defenseclaw")
+    if isinstance(entry, dict):
+        entry["enabled"] = True
     else:
-        entries["defenseclaw"]["enabled"] = True
+        entries["defenseclaw"] = {"enabled": True}
 
     oc_home = os.path.dirname(path)
     install_path = os.path.join(oc_home, "extensions", "defenseclaw")
@@ -128,11 +159,22 @@ def patch_openclaw_config(
     return prev_model or original_model
 
 
-def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> bool:
+def restore_openclaw_config(
+    openclaw_config_file: str,
+    original_model: str,
+    keep_disabled_if_plugin_present: bool = False,
+) -> bool:
     """Remove the DefenseClaw plugin registration from openclaw.json.
 
     The fetch interceptor required no model or provider changes, so there is
     nothing to revert — just remove the plugin entries.
+
+    ``keep_disabled_if_plugin_present`` is for a revert that leaves the plugin
+    folder in place (``defenseclaw reset``). The entry then keeps
+    ``enabled: false`` (other keys stay) rather than being dropped, because
+    without it OpenClaw would load the still-present plugin (its manifest is
+    ``enabledByDefault``). Without the flag the entry follows the Go teardown
+    rule: only ``enabled`` is removed.
     """
     _ = original_model  # unused — kept for API compat
     path = _expand(openclaw_config_file)
@@ -155,11 +197,19 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
         allow = plugins.get("allow", [])
         if "defenseclaw" in allow:
             allow.remove("defenseclaw")
-        entries = plugins.get("entries", {})
-        if "defenseclaw" in entries:
-            entries["defenseclaw"]["enabled"] = False
         oc_home = os.path.dirname(path)
         install_path = os.path.join(oc_home, "extensions", "defenseclaw")
+        entries = plugins.get("entries")
+        if keep_disabled_if_plugin_present and (os.path.isdir(install_path) or os.path.islink(install_path)):
+            if not isinstance(entries, dict):
+                entries = plugins["entries"] = {}
+            entry = entries.get("defenseclaw")
+            if isinstance(entry, dict):
+                entry["enabled"] = False
+            else:
+                entries["defenseclaw"] = {"enabled": False}
+        elif isinstance(entries, dict):
+            _remove_defenseclaw_entry_keys(entries)
         paths = plugins.get("load", {}).get("paths", [])
         if install_path in paths:
             paths.remove(install_path)
@@ -228,11 +278,14 @@ def uninstall_openclaw_plugin(openclaw_home: str) -> str:
 def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
     """Read the current model from openclaw.json. Returns
     ``(model_id, provider_prefix)``."""
+    from defenseclaw import openclaw_json5
+
     path = _expand(openclaw_config_file)
     try:
-        with open(path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        cfg = openclaw_json5.load_file(path)
+    except (OSError, ValueError):
+        return "", ""
+    if not isinstance(cfg, dict):
         return "", ""
 
     primary = (
@@ -262,9 +315,8 @@ def _unregister_plugin_from_config(openclaw_config: str) -> None:
     plugins = cfg.get("plugins", {})
     changed = False
 
-    entries = plugins.get("entries", {})
-    if "defenseclaw" in entries:
-        del entries["defenseclaw"]
+    entries = plugins.get("entries")
+    if isinstance(entries, dict) and _remove_defenseclaw_entry_keys(entries):
         changed = True
 
     installs = plugins.get("installs", {})
@@ -282,61 +334,6 @@ def _unregister_plugin_from_config(openclaw_config: str) -> None:
             with open(path, "w") as f:
                 json.dump(cfg, f, indent=2, ensure_ascii=False)
                 f.write("\n")
-
-
-def _register_plugin_in_config(openclaw_config: str, source_dir: str) -> None:
-    """Register the defenseclaw plugin in openclaw.json (manual fallback).
-
-    Mirrors what ``openclaw plugins install`` does: adds entries to
-    plugins.load.paths, plugins.installs, and plugins.entries so
-    OpenClaw discovers and loads the plugin.
-    """
-    path = _expand(openclaw_config)
-    try:
-        with open(path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return
-
-    plugins = cfg.setdefault("plugins", {})
-
-    entries = plugins.setdefault("entries", {})
-    if "defenseclaw" not in entries:
-        entries["defenseclaw"] = {"enabled": True}
-
-    oc_home = os.path.dirname(path)
-    install_path = os.path.join(oc_home, "extensions", "defenseclaw")
-    load = plugins.setdefault("load", {})
-    paths = load.setdefault("paths", [])
-    if install_path not in paths:
-        paths.append(install_path)
-
-    allow = plugins.setdefault("allow", [])
-    if "defenseclaw" not in allow:
-        allow.append("defenseclaw")
-
-    version = "0.0.0"
-    try:
-        pkg_json = os.path.join(source_dir, "package.json")
-        with open(pkg_json) as f:
-            version = json.load(f).get("version", version)
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    from datetime import datetime, timezone
-    installs = plugins.setdefault("installs", {})
-    installs["defenseclaw"] = {
-        "source": "path",
-        "sourcePath": source_dir,
-        "installPath": install_path,
-        "version": version,
-        "installedAt": datetime.now(timezone.utc).isoformat(),
-    }
-
-    with _preserve_ownership(path):
-        with open(path, "w") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-            f.write("\n")
 
 
 def _remove_from_plugins_allow(openclaw_config: str, plugin_id: str) -> None:

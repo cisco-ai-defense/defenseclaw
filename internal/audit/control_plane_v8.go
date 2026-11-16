@@ -101,6 +101,15 @@ type RuntimeV8LogBatchEmitter interface {
 	) ([]RuntimeV8EmitOutcome, error)
 }
 
+// RuntimeV8AtomicLogBatchEmitter commits a bounded set of local log records
+// together. A failed batch can be replayed from its first source position.
+type RuntimeV8AtomicLogBatchEmitter interface {
+	EmitRuntimeV8AtomicLogBatch(
+		context.Context,
+		[]RuntimeV8LogOperation,
+	) ([]RuntimeV8EmitOutcome, error)
+}
+
 // RuntimeV8AssetScanTraceEmitter is the optional cycle-free trace capability
 // used after a scanner result has been forensically persisted. The concrete
 // runtime owns collection, sampling, W3C identity, resource fields, generated

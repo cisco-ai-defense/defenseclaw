@@ -502,19 +502,24 @@ type sandboxDaemonFixture struct {
 	running atomic.Int64
 	exe     string
 	// counted closes on the daemon's first count of its running sandboxes:
-	// its pass at start, under the lifecycle (settle).
+	// its pass at start, under the lifecycle (settle). exited closes when
+	// Run returns, so a daemon that never reached the pass does not hold
+	// the test for the minute.
 	counted     chan struct{}
 	countedOnce sync.Once
+	exited      chan struct{}
 }
 
 // settle waits until the daemon's pass at start (Run's look at the
 // listeners of sandboxes left running, which holds the lifecycle) is over:
 // a supervision pass the test makes meanwhile finds the lifecycle taken and
-// does nothing (GAP-1062).
+// does nothing (GAP-1062). run calls it, so a test never races that pass.
 func (f *sandboxDaemonFixture) settle(t *testing.T) {
 	t.Helper()
 	select {
 	case <-f.counted:
+	case <-f.exited:
+		return
 	case <-time.After(time.Minute):
 		t.Fatal("the daemon made no pass at start")
 	}
@@ -540,7 +545,7 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 		t.Fatal(err)
 	}
 	f := &sandboxDaemonFixture{relay: &fakeRelay{}, os: &fakeOpenShell{}, socket: socket, exe: filepath.Join(dir, "defenseclaw-gateway"),
-		counted: make(chan struct{})}
+		counted: make(chan struct{}), exited: make(chan struct{})}
 	if err := os.WriteFile(f.exe, []byte("v1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -557,11 +562,8 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 		PollInterval:   time.Hour,
 		Executable:     f.exe,
 		Logf:           func(string, ...any) {},
-		countRunning: func(context.Context) (int, error) {
-			f.countedOnce.Do(func() { close(f.counted) })
-			return int(f.running.Load()), nil
-		},
-		openShell: f.os,
+		countRunning:   func(context.Context) (int, error) { return int(f.running.Load()), nil },
+		openShell:      f.os,
 		// The fixture runs the Linux daemon on every platform: a Mac daemon
 		// probes the account Docker and selects the MicroVM driver before
 		// a create (dockerReady, selectDriver); tests of that set goos.
@@ -580,11 +582,25 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 }
 
 // run runs the daemon until the test ends and returns its result channel.
+// It returns once the daemon's pass at start is over (settle): the
+// supervision passes a test makes with check would otherwise find the
+// lifecycle taken by that pass and do nothing, which a loaded runner turned
+// into an idle exit that did not happen (GAP-0864).
 func (f *sandboxDaemonFixture) run(t *testing.T) <-chan error {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- f.d.Run(ctx) }()
+	// The count the test installed (or the fixture's) signals the first
+	// pass; the daemon is not running yet, so this write is unshared.
+	count := f.d.opts.countRunning
+	f.d.opts.countRunning = func(c context.Context) (int, error) {
+		f.countedOnce.Do(func() { close(f.counted) })
+		return count(c)
+	}
+	go func() {
+		done <- f.d.Run(ctx)
+		close(f.exited)
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -599,6 +615,7 @@ func (f *sandboxDaemonFixture) run(t *testing.T) <-chan error {
 		started := f.d.runCtx != nil
 		f.d.listenMu.Unlock()
 		if started || time.Now().After(deadline) {
+			f.settle(t)
 			return done
 		}
 		time.Sleep(10 * time.Millisecond)

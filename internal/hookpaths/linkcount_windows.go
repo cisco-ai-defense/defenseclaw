@@ -24,6 +24,9 @@ func directoryIdentityForPath(path string, _ os.FileInfo) string {
 }
 
 func handleIdentity(path string, flags uint32) string {
+	if networkPathUnanswered(path) {
+		return ""
+	}
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return ""
@@ -47,6 +50,9 @@ func handleIdentity(path string, flags uint32) string {
 // linkCount returns the number of hard links to a file. An unknown count is
 // reported as more than one so the caller fails closed.
 func linkCount(path string, _ os.FileInfo) uint64 {
+	if networkPathUnanswered(path) {
+		return 2
+	}
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return 2

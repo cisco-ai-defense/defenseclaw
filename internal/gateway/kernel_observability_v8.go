@@ -98,9 +98,10 @@ var (
 // across the per-poll adapters: the helper's change ring is read on every
 // poll and must not be reported twice.
 type kernelChangeCursor struct {
-	mu   sync.Mutex
-	seq  uint64
-	seen bool
+	mu    sync.Mutex
+	seq   uint64
+	epoch int64
+	seen  bool
 }
 
 // defaultKernelChangeCursor is shared by the adapters of one gateway process.
@@ -110,9 +111,12 @@ var defaultKernelChangeCursor = &kernelChangeCursor{}
 // cursor past them.
 //
 // On first sight only changes within kernelChangeFirstSightWindow are
-// returned. When the helper's sequence restarted below the cursor (its state
-// was removed), the same window applies to the new sequence.
-func (cursor *kernelChangeCursor) take(changes []acquire.KernelChange, now time.Time) []acquire.KernelChange {
+// returned. When the helper's sequence restarted (its state was removed or
+// unreadable), the same window applies to the new sequence: a new epoch
+// (KernelStatus.SeqEpoch) says so, and without epochs a sequence below the
+// cursor. The epoch also catches a new sequence that already passed the
+// cursor, whose first changes were skipped (cowork-1-0-8 GAP-0080).
+func (cursor *kernelChangeCursor) take(changes []acquire.KernelChange, epoch int64, now time.Time) []acquire.KernelChange {
 	if cursor == nil || len(changes) == 0 {
 		return nil
 	}
@@ -124,9 +128,10 @@ func (cursor *kernelChangeCursor) take(changes []acquire.KernelChange, now time.
 			highest = change.Seq
 		}
 	}
-	windowed := !cursor.seen || highest < cursor.seq
+	restarted := highest < cursor.seq || (cursor.seen && epoch != 0 && cursor.epoch != 0 && epoch != cursor.epoch)
+	windowed := !cursor.seen || restarted
 	last := cursor.seq
-	if highest < cursor.seq {
+	if restarted {
 		last = 0
 	}
 	var out []acquire.KernelChange
@@ -140,7 +145,7 @@ func (cursor *kernelChangeCursor) take(changes []acquire.KernelChange, now time.
 		}
 		out = append(out, change)
 	}
-	cursor.seq, cursor.seen = highest, true
+	cursor.seq, cursor.epoch, cursor.seen = highest, epoch, true
 	return out
 }
 
@@ -614,7 +619,7 @@ func (adapter *aiRuntimeV8Adapter) emitKernelPolicyChanges(ctx context.Context, 
 	if cursor == nil {
 		cursor = defaultKernelChangeCursor
 	}
-	changes := cursor.take(snapshot.Kernel.Status.Changes, time.Now())
+	changes := cursor.take(snapshot.Kernel.Status.Changes, snapshot.Kernel.Status.SeqEpoch, time.Now())
 	var firstErr error
 	emitted := 0
 	for _, change := range changes {
@@ -873,35 +878,40 @@ type kernelFleet struct {
 	installedValue                 *bool
 }
 
-// kernelDeltaCursor remembers the helper's counters at the previous cycle,
-// so plane_health reports their growth. Process-wide, like the change
-// cursor: an adapter is built per poll.
+// kernelDeltaCursor remembers the helper's counters at the previous cycle
+// and their epoch, so plane_health reports their growth. Process-wide, like
+// the change cursor: an adapter is built per poll.
 type kernelDeltaCursor struct {
-	mu   sync.Mutex
-	last map[string]int64
+	mu    sync.Mutex
+	last  map[string]int64
+	epoch int64
 }
 
 var defaultKernelDeltaCursor = &kernelDeltaCursor{}
 
 // deltas returns each counter's growth since the previous call. The first
-// call is a baseline (zero), and a counter that went down (the helper
-// restarted) counts from zero.
-func (cursor *kernelDeltaCursor) deltas(current map[string]int64) map[string]int64 {
+// call is a baseline (zero). A restarted helper counts from zero: a new
+// epoch of its counters (KernelStatus.CountersEpoch) says so
+// exactly, and without epochs a counter that went down; a restart whose new
+// count already passed the old one was counted short before (cowork-1-0-8
+// GAP-0080).
+func (cursor *kernelDeltaCursor) deltas(current map[string]int64, epoch int64) map[string]int64 {
 	cursor.mu.Lock()
 	defer cursor.mu.Unlock()
+	restarted := cursor.epoch != 0 && epoch != 0 && cursor.epoch != epoch
 	out := make(map[string]int64, len(current))
 	for key, value := range current {
 		previous, seen := cursor.last[key]
 		switch {
 		case cursor.last == nil || !seen:
 			out[key] = 0
-		case value < previous:
+		case restarted || value < previous:
 			out[key] = value
 		default:
 			out[key] = value - previous
 		}
 	}
-	cursor.last = current
+	cursor.last, cursor.epoch = current, epoch
 	return out
 }
 
@@ -953,7 +963,7 @@ func (adapter *aiRuntimeV8Adapter) kernelFleetOf(snapshot sensor.Snapshot, now t
 	if cursor == nil {
 		cursor = defaultKernelDeltaCursor
 	}
-	deltas := cursor.deltas(current)
+	deltas := cursor.deltas(current, status.CountersEpoch)
 	fleet.wouldBlockDelta = observability.Present(runtimeCount(deltas["would_block"], kernelDeltaMax))
 	fleet.blockedDelta = observability.Present(runtimeCount(deltas["blocked"], kernelDeltaMax))
 	if _, ok := current["customer"]; ok {

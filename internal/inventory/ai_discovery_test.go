@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -1346,8 +1347,8 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
 	}
 	spool := filepath.Join(tmp, "spool")
-	// The guardian names an SSSD account as NSS does; its records carry the
-	// bare name, as its hook records do (GAP-0447).
+	// The guardian names an SSSD account as NSS does. Inventory retains the
+	// qualified name for the gateway's current-holder check.
 	for uid, user := range map[int]string{1001: "alice@corp.example.com", 1002: "bob"} {
 		userReport := report
 		if uid == 1002 {
@@ -1380,13 +1381,13 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		if sig.Source != AISourceUserScan {
 			t.Fatalf("the gateway's own scan reported %+v", sig)
 		}
-		want := map[string]string{"1001": "alice", "1002": "bob"}[sig.UserID]
+		want := map[string]string{"1001": "alice@corp.example.com", "1002": "bob"}[sig.UserID]
 		if want == "" || sig.UserName != want {
 			t.Fatalf("signal attributed to %q/%q, want the record's account: %+v", sig.UserID, sig.UserName, sig)
 		}
 		if sig.Runtime != nil {
 			processes++
-			if sig.Runtime.PID != 10 || sig.Runtime.User != want {
+			if sig.Runtime.PID != 10 || sig.Runtime.User != useridentity.BareAccountName(want) {
 				t.Fatalf("process signal %+v, want alice's own process attributed to %s", sig.Runtime, want)
 			}
 		}
@@ -1399,7 +1400,7 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		t.Fatalf("signals = %+v, want a config, a process, an editor extension and a model file signal per user", got.Signals)
 	}
 	ide := svc.IDEInventory()
-	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice" ||
+	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice@corp.example.com" ||
 		ide.Plugins[0].Enabled != "client_side_unknown" || !ide.Plugins[0].IsAI {
 		t.Fatalf("IDE inventory = %+v, want alice's remote-server plugin", ide)
 	}
@@ -2877,19 +2878,22 @@ func TestAIStoredSignalModelProvenanceHubResolvedAtJSON(t *testing.T) {
 
 func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 	cases := []struct {
-		name    string
-		managed bool
-		input   time.Duration
-		want    time.Duration
+		name         string
+		managed      bool
+		secureClient bool
+		input        time.Duration
+		want         time.Duration
 	}{
-		{"unmanaged_default_stays_60s", false, 60 * time.Second, 60 * time.Second},
-		{"unmanaged_zero_falls_back_to_60s", false, 0, 60 * time.Second},
-		{"managed_default_60s_promoted_to_30m", true, 60 * time.Second, 30 * time.Minute},
-		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
-		{"managed_below_floor_promoted", true, 90 * time.Second, 30 * time.Minute},
-		{"managed_previous_5m_floor_promoted", true, 5 * time.Minute, 30 * time.Minute},
-		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
-		{"managed_above_floor_preserved", true, 45 * time.Minute, 45 * time.Minute},
+		{"unmanaged_default_stays_60s", false, false, 60 * time.Second, 60 * time.Second},
+		{"unmanaged_zero_falls_back_to_60s", false, false, 0, 60 * time.Second},
+		{"standalone_default_stays_60s", true, false, 60 * time.Second, 60 * time.Second},
+		{"standalone_configured_stays_90s", true, false, 90 * time.Second, 90 * time.Second},
+		{"secure_client_default_60s_promoted_to_30m", true, true, 60 * time.Second, 30 * time.Minute},
+		{"secure_client_zero_promoted_to_30m", true, true, 0, 30 * time.Minute},
+		{"secure_client_below_floor_promoted", true, true, 90 * time.Second, 30 * time.Minute},
+		{"secure_client_previous_5m_floor_promoted", true, true, 5 * time.Minute, 30 * time.Minute},
+		{"secure_client_at_floor_preserved", true, true, 30 * time.Minute, 30 * time.Minute},
+		{"secure_client_above_floor_preserved", true, true, 45 * time.Minute, 45 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2898,6 +2902,7 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 				HomeDir:           t.TempDir(),
 				ProcessInterval:   tc.input,
 				ManagedEnterprise: tc.managed,
+				SecureClient:      tc.secureClient,
 			})
 			if opts.ProcessInterval != tc.want {
 				t.Fatalf("ProcessInterval = %s, want %s (managed=%t, input=%s)",
@@ -2907,25 +2912,26 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 	}
 }
 
-// TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor pins the 30 min
-// managed_enterprise floor on the FULL-scan cadence — the field that
-// gates every AI Defense publish through fanoutReport. Non-managed
-// installs preserve the historical 5-min default so local dev / OSS
-// behavior does not shift.
+// TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor pins the Secure
+// Client fleet floor and the configured cadence of standalone managed and
+// non-managed inventory consumers.
 func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
 	cases := []struct {
-		name    string
-		managed bool
-		input   time.Duration
-		want    time.Duration
+		name         string
+		managed      bool
+		secureClient bool
+		input        time.Duration
+		want         time.Duration
 	}{
-		{"unmanaged_default_zero_falls_back_to_5m", false, 0, 5 * time.Minute},
-		{"unmanaged_configured_preserved", false, 5 * time.Minute, 5 * time.Minute},
-		{"managed_zero_promoted_to_30m", true, 0, 30 * time.Minute},
-		{"managed_previous_5m_default_promoted", true, 5 * time.Minute, 30 * time.Minute},
-		{"managed_below_floor_promoted", true, 15 * time.Minute, 30 * time.Minute},
-		{"managed_at_floor_preserved", true, 30 * time.Minute, 30 * time.Minute},
-		{"managed_above_floor_preserved", true, 60 * time.Minute, 60 * time.Minute},
+		{"unmanaged_default_zero_falls_back_to_5m", false, false, 0, 5 * time.Minute},
+		{"unmanaged_configured_preserved", false, false, 5 * time.Minute, 5 * time.Minute},
+		{"standalone_default_zero_falls_back_to_5m", true, false, 0, 5 * time.Minute},
+		{"standalone_configured_preserved", true, false, 5 * time.Minute, 5 * time.Minute},
+		{"secure_client_zero_promoted_to_30m", true, true, 0, 30 * time.Minute},
+		{"secure_client_previous_5m_default_promoted", true, true, 5 * time.Minute, 30 * time.Minute},
+		{"secure_client_below_floor_promoted", true, true, 15 * time.Minute, 30 * time.Minute},
+		{"secure_client_at_floor_preserved", true, true, 30 * time.Minute, 30 * time.Minute},
+		{"secure_client_above_floor_preserved", true, true, 60 * time.Minute, 60 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2934,6 +2940,7 @@ func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
 				HomeDir:           t.TempDir(),
 				ScanInterval:      tc.input,
 				ManagedEnterprise: tc.managed,
+				SecureClient:      tc.secureClient,
 			})
 			if opts.ScanInterval != tc.want {
 				t.Fatalf("ScanInterval = %s, want %s (managed=%t, input=%s)",
@@ -2950,19 +2957,21 @@ func TestNormalizeAIDiscoveryOptionsScanIntervalManagedFloor(t *testing.T) {
 // Non-managed installs get zero jitter and keep the fixed-cadence tick.
 func TestNormalizeAIDiscoveryOptionsPublishJitter(t *testing.T) {
 	cases := []struct {
-		name    string
-		managed bool
-		scan    time.Duration
-		input   time.Duration
-		want    time.Duration
+		name         string
+		managed      bool
+		secureClient bool
+		scan         time.Duration
+		input        time.Duration
+		want         time.Duration
 	}{
-		{"unmanaged_default_zero", false, 5 * time.Minute, 0, 0},
-		{"unmanaged_configured_preserved", false, 5 * time.Minute, 15 * time.Second, 15 * time.Second},
-		{"unmanaged_negative_clamped_to_zero", false, 5 * time.Minute, -1 * time.Second, 0},
-		{"managed_default_ten_percent_of_scan", true, 30 * time.Minute, 0, 3 * time.Minute},
-		{"managed_default_tracks_promoted_scan", true, 5 * time.Minute, 0, 3 * time.Minute},
-		{"managed_configured_preserved", true, 30 * time.Minute, 45 * time.Second, 45 * time.Second},
-		{"managed_negative_falls_back_to_default", true, 30 * time.Minute, -5 * time.Second, 3 * time.Minute},
+		{"unmanaged_default_zero", false, false, 5 * time.Minute, 0, 0},
+		{"unmanaged_configured_preserved", false, false, 5 * time.Minute, 15 * time.Second, 15 * time.Second},
+		{"unmanaged_negative_clamped_to_zero", false, false, 5 * time.Minute, -1 * time.Second, 0},
+		{"standalone_default_tracks_configured_scan", true, false, 5 * time.Minute, 0, 30 * time.Second},
+		{"managed_default_ten_percent_of_scan", true, true, 30 * time.Minute, 0, 3 * time.Minute},
+		{"secure_client_default_tracks_promoted_scan", true, true, 5 * time.Minute, 0, 3 * time.Minute},
+		{"managed_configured_preserved", true, true, 30 * time.Minute, 45 * time.Second, 45 * time.Second},
+		{"managed_negative_falls_back_to_default", true, true, 30 * time.Minute, -5 * time.Second, 3 * time.Minute},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2972,6 +2981,7 @@ func TestNormalizeAIDiscoveryOptionsPublishJitter(t *testing.T) {
 				ScanInterval:      tc.scan,
 				PublishJitter:     tc.input,
 				ManagedEnterprise: tc.managed,
+				SecureClient:      tc.secureClient,
 			})
 			if opts.PublishJitter != tc.want {
 				t.Fatalf("PublishJitter = %s, want %s (managed=%t, scan=%s, input=%s)",

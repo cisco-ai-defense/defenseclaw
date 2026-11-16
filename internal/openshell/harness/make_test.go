@@ -96,7 +96,7 @@ func TestWorkloadMakeStep(t *testing.T) {
 	}
 
 	shim, wrapper := filepath.Join(dir, "lib", "spawn.so"), filepath.Join(dir, "make")
-	if out, err := exec.Command("sh", "-c", workloadMakeRun(shim, wrapper, real)).CombinedOutput(); err != nil {
+	if out, err := exec.Command(binSh(t), "-c", workloadMakeRun(shim, wrapper, real)).CombinedOutput(); err != nil {
 		t.Fatalf("step = %v:\n%s", err, out)
 	}
 	if out, err := exec.Command(deny, wrapper, "-s", "-f", mk).CombinedOutput(); err != nil || !strings.Contains(string(out), "dccert-make-ok") {
@@ -106,7 +106,7 @@ func TestWorkloadMakeStep(t *testing.T) {
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	out, err = exec.Command("sh", "-c", workloadMakeRun(shim, wrapper, real)).CombinedOutput()
+	out, err = exec.Command(binSh(t), "-c", workloadMakeRun(shim, wrapper, real)).CombinedOutput()
 	if got, _ := os.ReadFile(wrapper); err != nil || string(got) != "#!/bin/sh\n" || !strings.Contains(string(out), "the base image has its own "+wrapper) {
 		t.Fatalf("a base image's own make: %v, %q:\n%s", err, got, out)
 	}

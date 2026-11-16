@@ -69,6 +69,7 @@ func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 		blockMid  bool
 		wantKept  bool
 		typeSkill bool
+		strict    bool
 	}{
 		{name: "default timeout is kept", err: timeout, wantKept: true},
 		{name: "default unresolved host is kept", err: unresolved, wantKept: true},
@@ -77,8 +78,10 @@ func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 		{name: "warn on managed standalone is kept", setting: "warn", managed: true, err: timeout, wantKept: true},
 		{name: "block is blocked", setting: "block", err: timeout},
 		{name: "unset on managed standalone is kept", managed: true, err: timeout, wantKept: true},
-		{name: "scanner refusal is blocked", err: refusal},
-		{name: "child refusal text is blocked", err: fmt.Errorf("scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server %q: node is not npx or uvx", "context7")},
+		{name: "scanner refusal is blocked in the strict tier", err: refusal, strict: true},
+		{name: "scanner refusal is kept with a warning in the default tier", err: refusal, wantKept: true},
+		{name: "scanner refusal is blocked on managed standalone", managed: true, err: refusal},
+		{name: "child refusal text is blocked in the strict tier", strict: true, err: fmt.Errorf("scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server %q: node is not npx or uvx", "context7")},
 		{name: "partial scan with findings is blocked", err: fmt.Errorf("mcp-scanner exited 3"),
 			findings: []scanner.Finding{{ID: "f1", RuleID: "MCP-001", Severity: scanner.SeverityHigh, Title: "coercive"}}},
 		{name: "block added during the scan is blocked", err: timeout, blockMid: true},
@@ -88,6 +91,9 @@ func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 			cfg, store, logger, skillDir := setupTestEnv(t)
 			rows := auditRows(t, logger)
 			cfg.Scanners.MCPScanner.UnverifiedServer = tc.setting
+			if tc.strict {
+				cfg.Guardrail.RulePack = "strict"
+			}
 			if tc.managed {
 				cfg.DeploymentMode = "managed_enterprise"
 				cfg.Enterprise.Profile = "standalone"
@@ -120,7 +126,7 @@ func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 			blocked := entry != nil && entry.Actions.Install == "block"
 			if tc.wantKept {
 				if res.Verdict != VerdictScanError || res.RuntimeAction != "" || blocked ||
-					!strings.HasPrefix(res.Reason, unverifiedMCPReason) {
+					!keptUnscannedMCPReason(res.Reason) {
 					t.Fatalf("result %+v journal %+v, want the server kept unverified", res, entry)
 				}
 				got := strings.Join(rows(), "\n")

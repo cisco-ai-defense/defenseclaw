@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +32,7 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		providerLibrary:               `C:\Program Files\Cisco\Cisco Secure Client\CM\x64\cmidapi.dll`,
 		gatewayBinary:                 `C:\stage\defenseclaw-gateway.exe`,
 		hookBinary:                    `C:\stage\defenseclaw-hook.exe`,
+		hookGuardBinary:               `C:\stage\defenseclaw-hook-guard.exe`,
 		sensorHelperBinary:            `C:\stage\defenseclaw-sensor-helper.exe`,
 		cliBinary:                     `C:\stage\defenseclaw.exe`,
 		configPath:                    `C:\stage\config.yaml`,
@@ -54,6 +56,7 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		"-ProviderLibrary", opts.providerLibrary,
 		"-GatewayBinary", opts.gatewayBinary,
 		"-HookBinary", opts.hookBinary,
+		"-HookGuardBinary", opts.hookGuardBinary,
 		"-SensorHelperBinary", opts.sensorHelperBinary,
 		"-CLIBinary", opts.cliBinary,
 		"-Config", opts.configPath,
@@ -1261,6 +1264,7 @@ func TestPrepareWindowsEnterprisePowerShellTempUsesCurrentUserKnownFolderWithout
 	if windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("non-elevated branch requires a limited process token")
 	}
+	useTokenUserTempDirectory(t)
 	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		t.Fatalf("resolve token-bound LocalAppData: %v", err)
@@ -1717,6 +1721,7 @@ func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorRepairAndCleanu
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("protected ProgramData temp creation requires an elevated process token")
 	}
+	useTestTokenForStaging(t)
 	path, cleanup, err := prepareWindowsEnterprisePowerShellTemp()
 	if err != nil {
 		t.Fatalf("prepareWindowsEnterprisePowerShellTemp: %v", err)
@@ -2016,6 +2021,24 @@ func TestWindowsEnterpriseLeaveInstallRootMovesTheWorkingDirectoryOut(t *testing
 	}
 }
 
+// windowsTestProcessState says whether a child process still runs, or the
+// status it exited with.
+func windowsTestProcessState(pid int) string {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return fmt.Sprintf("process %d cannot be opened: %v", pid, err)
+	}
+	defer windows.CloseHandle(handle)
+	var code uint32
+	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
+		return fmt.Sprintf("process %d exit code unreadable: %v", pid, err)
+	}
+	if code == 259 { // STILL_ACTIVE
+		return fmt.Sprintf("process %d still runs", pid)
+	}
+	return fmt.Sprintf("process %d exited with %#x", pid, code)
+}
+
 // GAP-1794: a self-uninstall typed into cmd.exe whose folder is inside
 // InstallRoot is refused before anything changes, and says how to proceed.
 func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testing.T) {
@@ -2027,8 +2050,22 @@ func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testin
 	if windowsDirectoryOpenWithoutDeleteSharing(bin) {
 		t.Fatal("a folder nobody uses was reported in use")
 	}
+	// g079 review F6: the prompt inherits what the test binary carries. A
+	// class an earlier test left raised starves the prompt's start on a
+	// small host, and a lowered one passes to cmd.exe; either would show
+	// as a 10 s timeout below, not as a cause. The harness picks the class
+	// the binary starts at (a CI runner starts it below normal), so the
+	// check is against the start class, not a fixed one. The prompt is the
+	// system cmd.exe, not whichever one PATH finds first.
+	if class := testProcessPriority(); class != testProcessStartPriority {
+		t.Fatalf("an earlier test moved the test binary from priority class %s to %s", testProcessStartPriority, class)
+	}
+	system, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// An idle interactive prompt in bin, reading commands from a pipe.
-	prompt := exec.Command("cmd.exe", "/d", "/q", "/k")
+	prompt := exec.Command(filepath.Join(system, "cmd.exe"), "/d", "/q", "/k")
 	prompt.Dir = bin
 	input, err := prompt.StdinPipe()
 	if err != nil {
@@ -2042,10 +2079,24 @@ func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testin
 		_ = prompt.Process.Kill()
 		_ = prompt.Wait()
 	})
+	// Windows gives a child the parent's class when it is idle or below
+	// normal, and normal otherwise (above normal and high do not pass down).
+	wantClass := uint32(windows.NORMAL_PRIORITY_CLASS)
+	switch start, err := testProcessClassOf(os.Getpid()); {
+	case err != nil:
+		t.Fatalf("the test binary's priority class is unreadable: %v", err)
+	case start == windows.IDLE_PRIORITY_CLASS, start == windows.BELOW_NORMAL_PRIORITY_CLASS:
+		wantClass = start
+	}
+	if got, err := testProcessClassOf(prompt.Process.Pid); err != nil {
+		t.Fatalf("the prompt's priority class is unreadable: %v", err)
+	} else if got != wantClass {
+		t.Fatalf("the prompt runs at priority class %#x, the test binary's start class %s passes down %#x", got, testProcessStartPriority, wantClass)
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for !windowsDirectoryOpenWithoutDeleteSharing(bin) {
 		if time.Now().After(deadline) {
-			t.Fatal("a prompt's working folder was not reported in use")
+			t.Fatalf("a prompt's working folder was not reported in use (%s)", windowsTestProcessState(prompt.Process.Pid))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

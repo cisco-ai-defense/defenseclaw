@@ -212,12 +212,15 @@ def test_windows_reports_the_platform_limit(monkeypatch) -> None:
                                                "openshell.enabled has no effect here")
 
 
-def test_a_missing_gateway_fails_with_the_upgrade_hint(monkeypatch) -> None:
+def test_a_missing_gateway_fails_with_a_repair_that_reinstalls_at_the_current_version(monkeypatch) -> None:
     monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: None)
     result = _DoctorResult()
     _check_sandbox(_cfg(True), result)
     assert result.failed == 1
-    assert "defenseclaw upgrade" in result.checks[0]["remediation"]
+    remediation = result.checks[0]["remediation"]
+    # `defenseclaw upgrade` changes nothing when the install is already current.
+    assert "defenseclaw upgrade" not in remediation
+    assert "defenseclaw-upgrade.sh --yes" in remediation or "install command again" in remediation
 
 
 def test_each_go_check_becomes_one_row(tmp_path: Path, monkeypatch, capsys) -> None:

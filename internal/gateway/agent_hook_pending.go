@@ -598,14 +598,37 @@ func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurre
 }
 
 // pendingHookRecovery runs one recovery pass at a time in this process: a
-// config reload starts a new server beside the old one. It guards
-// pendingHookUnrecordedTries.
+// config reload starts a new server beside the old one.
 var pendingHookRecovery sync.Mutex
 
 // pendingHookUnrecordedTries counts, by journal row, the tries recovery
 // could not record in the row because the store refused the update. With
 // the recorded Attempts they bound the tries of a row in this process.
-var pendingHookUnrecordedTries = map[string]int{}
+// pendingHookTriesMu guards it: besides the one recovery pass, each sandbox
+// receipt window recovers its own row from a timer
+// (scheduleSandboxHookReceiptRecovery), so rows are recovered concurrently.
+var (
+	pendingHookTriesMu         sync.Mutex
+	pendingHookUnrecordedTries = map[string]int{}
+)
+
+func pendingHookUnrecordedTriesOf(id string) int {
+	pendingHookTriesMu.Lock()
+	defer pendingHookTriesMu.Unlock()
+	return pendingHookUnrecordedTries[id]
+}
+
+func notePendingHookUnrecordedTry(id string) {
+	pendingHookTriesMu.Lock()
+	defer pendingHookTriesMu.Unlock()
+	pendingHookUnrecordedTries[id]++
+}
+
+func forgetPendingHookUnrecordedTries(id string) {
+	pendingHookTriesMu.Lock()
+	defer pendingHookTriesMu.Unlock()
+	delete(pendingHookUnrecordedTries, id)
+}
 
 // pendingHookDrainAt is when a full journal last started a recovery pass,
 // and pendingHookDraining whether that pass still runs.
@@ -768,9 +791,11 @@ func (a *APIServer) recoverPendingHooks(ctx context.Context) pendingHookPass {
 	}
 	pendingHookRecovery.Lock()
 	defer pendingHookRecovery.Unlock()
+	pendingHookTriesMu.Lock()
 	if len(pendingHookUnrecordedTries) > pendingHookJournalLimits.Rows {
 		clear(pendingHookUnrecordedTries) // rows another process deleted
 	}
+	pendingHookTriesMu.Unlock()
 	var after audit.HookDeliveryJournalEntry
 	taken, left := 0, pendingHookPassDone
 	for {
@@ -835,8 +860,8 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 			case <-wait.C:
 			}
 		}
-		sandboxHookReceiptLock(p.ID).Lock()
-		defer sandboxHookReceiptLock(p.ID).Unlock()
+		unlockReceipt := sandboxReceiptLocks.lock(p.ID)
+		defer unlockReceipt()
 		latest, found, err := a.store.HookDelivery(ctx, p.ID)
 		if err != nil {
 			return err
@@ -851,7 +876,7 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 			return a.forgetPendingHook(ctx, p.ID)
 		}
 	}
-	tries := p.Attempts + pendingHookUnrecordedTries[p.ID]
+	tries := p.Attempts + pendingHookUnrecordedTriesOf(p.ID)
 	if tries >= pendingHookRecoveryAttempts {
 		return a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil, fmt.Sprintf("not audited in %d recovery attempts", tries))
 	}
@@ -878,7 +903,7 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 	held := err != nil && newVerdict
 	switch {
 	case err != nil:
-		pendingHookUnrecordedTries[p.ID]++
+		notePendingHookUnrecordedTry(p.ID)
 	case !found:
 		return nil // another pass took it
 	}
@@ -1014,7 +1039,7 @@ func (a *APIServer) forgetPendingHook(ctx context.Context, id string) error {
 	if err := a.store.ForgetHookDelivery(ctx, id); err != nil {
 		return err
 	}
-	delete(pendingHookUnrecordedTries, id)
+	forgetPendingHookUnrecordedTries(id)
 	return nil
 }
 

@@ -45,6 +45,9 @@ type proxyGuardrailV8Overlay struct {
 	// guardrail is the enforced block or alert, stamped on the span the
 	// events go to (GAP-2332).
 	guardrail hookGuardrailOutcome
+	// evaluationLogErr is the failed write of the evaluation record, the
+	// proxy's decision record (GAP-0593).
+	evaluationLogErr error
 }
 
 type proxyGuardrailV8Facts struct {
@@ -540,6 +543,7 @@ func (p *GuardrailProxy) emitProxyGuardrailObservabilityV8(
 
 	if err := facts.emitEvaluationLog(signalCtx, runtime); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] generated proxy evaluation log failed: %v\n", err)
+		overlay.evaluationLogErr = err
 	}
 	if facts.enforced {
 		if err := facts.emitEnforcementLog(signalCtx, runtime); err != nil {

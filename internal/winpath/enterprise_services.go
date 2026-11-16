@@ -14,7 +14,7 @@ type EnterpriseService struct {
 // registers. The lifecycle status and the refusals of Setup and of the CLI
 // read the same roster.
 var EnterpriseStandaloneServices = []EnterpriseService{
-	{Name: "DefenseClawGateway", Kind: "gateway"},
+	{Name: EnterpriseGatewayServiceName, Kind: "gateway"},
 	{Name: "DefenseClawHookGuardian", Kind: "guardian"},
 	{Name: "DefenseClawHookEnumerator", Kind: "enumerator"},
 	{Name: "DefenseClawSensorHelper", Kind: "sensor_helper"},

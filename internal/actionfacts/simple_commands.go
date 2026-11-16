@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
@@ -33,10 +34,38 @@ type SimpleCommand struct {
 	// body. Zsh history is fc -l, so Bash's history -c clear grammar does not
 	// apply to this child.
 	ZshHistoryBuiltin bool
+	// ResolvedVariable means the walk replaced a parameter of the statement by
+	// the value it followed (d=ordinary; cp a build/$d.txt reads
+	// build/ordinary.txt). A gateway judges the resolved path, which the
+	// command text of a hook client does not spell.
+	ResolvedVariable bool
 	// UnresolvedBoundVariable means a parameter in Text is bound elsewhere
 	// in the action but this walk could not carry its value into Text. The
 	// original action decides the protected-write class for that value.
 	UnresolvedBoundVariable bool
+	// LoginGuess means this reading holds a value USER or LOGNAME has only as
+	// the guess that the login is the last element of the home, or the value
+	// one word of a for or while-read list gives its variable in one iteration
+	// (simpleForkLoopBind). A rule over the words of the command must not read
+	// it (the shell may hold another login or run another iteration); it only
+	// proves a write to protected state.
+	LoginGuess bool
+	// LoopReading marks a LoginGuess reading that is one iteration of a loop
+	// variable. Its path is spelled in the reading, so a managed hook client
+	// has no evidence keyed for it: the text decides whether it can name state.
+	LoopReading bool
+	// UnboundUser means Text names USER or LOGNAME after a binding the walk
+	// cannot follow (read, a loop, eval): the value is unknown, not the
+	// login the home spells. A reader may keep the guess that the name is
+	// that login for the spelling of the path, but a file it reaches only
+	// through a link on disk is not a file the command names
+	// (rel-1-0-6:GAP-0601 review 5).
+	UnboundUser bool
+	// AbsoluteOnly means the directory of the command is unknown (an eval,
+	// an unreadable cd) and no operand of Text depends on it: CWD is empty,
+	// and the directory the action starts in judges the command as well as
+	// any other (rel-1-0-6:GAP-0630 review 5).
+	AbsoluteOnly bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced. A parse gap is not an action refusal.
 	EvaluationFailure string
@@ -47,16 +76,19 @@ type simpleShellState struct {
 	cwdUnknown bool
 	dirStack   []string
 	vars       map[string]string
-	// homeLocals holds, innermost last, the HOME of the caller of each
-	// function body that made HOME local; the body end restores it.
-	homeLocals []simpleHomeLocal
+	// locals holds, innermost last, the caller value of each name a
+	// function body made local; the body end restores it.
+	locals []simpleLocal
+	// forked holds the forked loop variables that hold the value of one list
+	// word (simpleForkLoopBind) in this state, until their loop ends.
+	forked []string
 }
 
-// simpleHomeLocal is the caller HOME saved by a local HOME in the function
-// body of scope.
-type simpleHomeLocal struct {
-	scope, home string
-	known       bool
+// simpleLocal is the caller value of name saved by a local declaration in
+// the function body of scope.
+type simpleLocal struct {
+	scope, name, value string
+	known              bool
 }
 
 const (
@@ -68,11 +100,32 @@ const (
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
-		homeLocals: slices.Clone(s.homeLocals)}
+		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked)}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
 	return copy
+}
+
+// simplePieces holds the commands a walk reads from the text of the call as it
+// is written: no variable of them resolved, no word of them changed. A nil
+// pointer records nothing.
+type simplePieces []SimpleCommand
+
+func (pieces *simplePieces) add(command SimpleCommand) {
+	if pieces != nil {
+		*pieces = append(*pieces, command)
+	}
+}
+
+// has reports a command that is one of the pieces. A reading marked
+// LoginGuess is judged as the piece it repeats.
+func (pieces *simplePieces) has(command SimpleCommand) bool {
+	command.LoginGuess = false
+	return slices.ContainsFunc(*pieces, func(piece SimpleCommand) bool {
+		piece.LoginGuess = false
+		return piece == command
+	})
 }
 
 // SimpleCommands flattens an action with the full parser used by the hook
@@ -81,10 +134,61 @@ func (s simpleShellState) clone() simpleShellState {
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
-	return simpleCommands(input, facts, 0, "")
+	argsOnly := input.Command == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax)
+	var pieces *simplePieces
+	if argsOnly && argsExecutionTool(input.Tool) {
+		pieces = new(simplePieces)
+	}
+	result := simpleCommandsOfCall(input, facts, pieces)
+	if argsOnly {
+		// The POSIX reader rejected the call (a construct only Bash has) and
+		// the shell parse reads it only to add readings (simpleCommands): a
+		// call it cannot read in full keeps the judgment it had without them.
+		if slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.EvaluationFailure != "" }) {
+			return nil
+		}
+		// A command that is a piece of the call as written adds nothing: the
+		// call is judged as written, with the rules and the enforcement it had
+		// before this reading. Only a reading with a variable resolved is new.
+		// The walk records the pieces as it reads them, so a text that merely
+		// occurs elsewhere in the call (a comment, a quoted word) is no piece.
+		if pieces != nil {
+			result = slices.DeleteFunc(result, pieces.has)
+		}
+	}
+	return result
 }
 
-func simpleCommands(input Input, facts Facts, depth int, interpreter string) []SimpleCommand {
+func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []SimpleCommand {
+	result := simpleCommands(input, facts, 0, "", nil, false, pieces)
+	// USER and LOGNAME carry a value from the home only as the guess that the
+	// login is the home's last element, and the shell may hold another. A
+	// second walk reads the action with that guess, to prove a write to state
+	// spelled through the names. Only a reading the first walk did not make is
+	// added, marked LoginGuess: a rule over the words of the command reads the
+	// first walk (an unproven $USER is a runtime-expanded word), and the
+	// guess reading only proves a protected write (rel-1-0-6:GAP-0630
+	// integration: a word expanded at run time keeps its detection-only
+	// outcome). An action that names neither has no second reading.
+	if input.Command != "" && !strings.Contains(input.Command, "USER") && !strings.Contains(input.Command, "LOGNAME") {
+		return result
+	}
+	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true, pieces) {
+		if !slices.Contains(result, guessed) {
+			guessed.LoginGuess = true
+			result = append(result, guessed)
+		}
+	}
+	return result
+}
+
+// simpleCommands reads the commands of input. guess gives USER and LOGNAME
+// the value the home spells where the action has not assigned one; without
+// it a name has a value only where the action assigns one, or a caller
+// hands one to a shell body. inherited holds the values USER and LOGNAME
+// have where a shell body starts (simpleChildUserVars); nil is the start of
+// the action, where guess gives both the home base name.
+func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool, pieces *simplePieces) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -98,6 +202,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	if source == "" {
 		_, capture := analyzeWithRedirectTargets(input, "")
 		source = capture.source
+		if source == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) &&
+			argsExecutionTool(input.Tool) {
+			// The POSIX reader rejects a construct only Bash has (select, a
+			// here-string), so it kept no source; the shell parse below reads
+			// it, and each command of it is judged as any other is.
+			if command := extractArgsForTool(input.Args, input.Tool).command; utf8.ValidString(command) && !strings.ContainsRune(command, 0) {
+				source = command
+			}
+		}
 	}
 	if len(source) > maxCommandBytes {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
@@ -110,7 +223,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 		!strings.Contains(source, " -") {
 		return nil
 	}
-	parts, reduced, ok := sequenceStatementDetails(source, true, true)
+	parts, reduced, ok := sequenceStatementDetails(source, true, true, input.LoopBindsStraightLine, !input.StraightLineFunctions)
 	if !ok {
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
@@ -128,7 +241,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	var futureSafe []bool
 	var checkedCases, tooManyCases bool
 	compact := func(states []simpleShellState, index int) []simpleShellState {
-		if len(states) <= maxSimpleStates {
+		if !simpleOverStateBound(states) {
 			return states
 		}
 		if !checkedCases {
@@ -159,12 +272,34 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			return redirect.Op == syntax.DplIn || redirect.Op == syntax.DplOut
 		})
 		_, _, nested, _ := simpleNestedScript(call, nil, nil, nil)
-		if !prefix && !duplication && !nested {
+		// A body that names USER or LOGNAME is read with the values its
+		// caller hands over (inherited).
+		inheritsUser := inherited != nil && (strings.Contains(parts[0].text, "USER") || strings.Contains(parts[0].text, "LOGNAME"))
+		if !prefix && !duplication && !nested && !inheritsUser && !simpleRedirectDefaultExpansion(stmt) {
 			return nil
 		}
 	}
 	home, _ := normalizeActiveHome(input.ActiveHome)
 	initialVars := map[string]string{"HOME": home}
+	// USER and LOGNAME are two names, each with the value it has where the
+	// shell is: the last element of a POSIX home at the start of the action
+	// (the trusted home rewrite reads <parent>/$USER, userHomeRewriteWord,
+	// and the hook target scans read both names), changed in order by the
+	// assignments below and handed to a shell body by the call that starts
+	// it. A child command spelled with them is judged as its literal
+	// spelling (rel-1-0-6:GAP-0601, GAP-0681, GAP-0630 review 3). A loop,
+	// read or eval that binds a name takes its value away from the point
+	// where it runs (the statements before it still read the value the
+	// name has there, review 4).
+	login := map[string]string{}
+	if guess {
+		login = simpleInitialUserVars(home, nil)
+	}
+	if guess || inherited != nil {
+		for name, value := range simpleInitialUserVars(home, inherited) {
+			initialVars[name] = value
+		}
+	}
 	if simplePathAbs(input.CWD) {
 		initialVars["PWD"] = simplePathClean(input.CWD)
 	}
@@ -175,6 +310,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	changed := reduced || len(parts) != 1
 	unproven := false
 	previousScope := "0"
+	unreadLoops := make(map[string]bool)
+	var plainWords simplePlainWords
 	for partIndex, part := range parts {
 		// A conditional or loop body runs in its parent's shell when selected.
 		// Keep both its resulting state and the path that skipped the body.
@@ -186,9 +323,41 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			parent := previousScope[:index]
 			body, ran := states[previousScope]
 			switch previousScope[index+1] {
-			case 'c':
+			case 'c', 'u', 'o', forkedLoopScopeKind:
 				if ran {
-					states[parent] = uniqueSimpleStates(append(simpleScopeStates(states, parent), body...))
+					merged := append(simpleScopeStates(states, parent), body...)
+					merged = simpleJoinForgottenUserVars(merged, body)
+					if previousScope[index+1] == forkedLoopScopeKind {
+						// Like USER and LOGNAME, the name of such a loop has the
+						// value of its last iteration, which the walk does not
+						// read. Only this loop's name goes: any other variable,
+						// also one that a later loop binds, keeps its value here.
+						name := simpleForkedScopeName(previousScope)
+						reading := func(state simpleShellState) bool { return slices.Contains(state.forked, name) }
+						unread := slices.DeleteFunc(slices.Clone(merged), reading)
+						for i := range merged {
+							merged[i] = merged[i].clone()
+							merged[i].forked = slices.DeleteFunc(merged[i].forked, func(forked string) bool { return forked == name })
+							simpleForgetUserVars(merged[i].vars, []string{name})
+						}
+						if simpleOverStateBound(uniqueSimpleStates(merged)) {
+							// Values the readings gave other variables of the
+							// body would not fit: keep the states of the walk
+							// that left the name unread.
+							merged = unread
+						}
+					}
+					for name, kind := range loopScopeKinds {
+						if previousScope[index+1] == kind {
+							// A loop leaves its name the value of its last
+							// iteration, which the walk does not follow.
+							for i := range merged {
+								merged[i] = merged[i].clone()
+								simpleForgetUserVars(merged[i].vars, []string{name})
+							}
+						}
+					}
+					states[parent] = uniqueSimpleStates(merged)
 				}
 			case 'f':
 				// A called function body always runs; its local HOME ends
@@ -203,12 +372,19 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			if parentStates, present := states[parent]; present {
 				states[parent] = compact(parentStates, partIndex)
 			}
-			if len(states[parent]) > maxSimpleStates {
+			if simpleOverStateBound(states[parent]) {
 				return []SimpleCommand{{EvaluationFailure: "limit"}}
 			}
 			previousScope = parent
 		}
 		previousScope = part.scope
+		var reads []string
+		if slices.ContainsFunc(part.binds, func(bind simpleLoopBind) bool { return bind.fork }) {
+			reads = simpleParamNames(part.text)
+		}
+		if !simpleEnterForkedLoops(states, part, unreadLoops, &plainWords) {
+			return []SimpleCommand{{EvaluationFailure: "parse"}}
+		}
 		variants := simpleScopeStates(states, part.scope)
 		if variants == nil {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
@@ -221,15 +397,24 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 		nextVariants := make([]simpleShellState, 0, len(variants))
 		emitted := make(map[SimpleCommand]bool)
 		for _, prior := range variants {
+			if simpleReboundReading(prior, part) {
+				continue
+			}
 			state := prior.clone()
+			simpleApplyLoopBinds(state.vars, part.binds, login)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
 				updateSimpleVariables(state.vars, call.Assigns)
 				changed = true
 				nextVariants = append(nextVariants, state)
+				if part.maySkip && len(prior.forked) != 0 {
+					// The assignment may not run: the word of the loop stays.
+					nextVariants = append(nextVariants, prior)
+				}
 				continue
 			}
 			text := part.text
 			effective := state.vars
+			loopRead := slices.ContainsFunc(state.forked, func(name string) bool { return slices.Contains(reads, name) })
 			// unprefixed is the call without prefix assignments that can
 			// change which program runs (PATH=/x aws ...). The policy facts
 			// are the command's argv, so the call is also judged without
@@ -250,6 +435,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				}
 				if simplePrefixChangesResolution(call.Assigns) {
 					unprefixed = text[start:]
+				} else if simplePrefixBindsUser(call, effective) {
+					// The shell body inherits USER and LOGNAME from the
+					// prefix: the call without it names other files.
 				} else {
 					text = text[start:]
 					changed = true
@@ -259,10 +447,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			// it applies the prefix assignments, so HOME=/tmp cp a ~/f
 			// writes the previous ~/f (GAP-2476). The prefixes set only the
 			// environment of the program (effective, used for nested scripts).
+			resolvedVariable := false
 			resolve := func(text string) string {
 				if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
 					text = resolved
-					changed = true
+					changed, resolvedVariable = true, true
 				}
 				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
 					text = resolved
@@ -278,13 +467,22 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			if strings.TrimSpace(text) == "" {
 				return []SimpleCommand{{EvaluationFailure: "parse"}}
 			}
-			if state.cwdUnknown && simpleRelativePathOperand(text) {
+			relative := state.cwdUnknown && simpleRelativePathOperand(text)
+			if relative {
 				unproven = true
 			}
 			call, _ := stmt.Cmd.(*syntax.CallExpr)
 			command := SimpleCommand{Text: text, CWD: state.cwd,
 				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
-				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound)}
+				LoginGuess:              loopRead,
+				LoopReading:             loopRead,
+				ResolvedVariable:        resolvedVariable,
+				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
+				UnboundUser:             simpleUnboundUser(text, effective, bound),
+				AbsoluteOnly:            state.cwdUnknown && !relative}
+			if text == part.text {
+				pieces.add(command)
+			}
 			if !emitted[command] {
 				result = append(result, command)
 				emitted[command] = true
@@ -296,7 +494,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				if reading := resolve(unprefixed); strings.TrimSpace(reading) != "" {
 					alone := SimpleCommand{Text: reading, CWD: state.cwd,
 						ZshHistoryBuiltin:       command.ZshHistoryBuiltin,
-						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound)}
+						LoginGuess:              command.LoginGuess,
+						LoopReading:             command.LoopReading,
+						ResolvedVariable:        resolvedVariable,
+						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
+						UnboundUser:             simpleUnboundUser(reading, effective, bound),
+						AbsoluteOnly:            command.AbsoluteOnly}
+					if reading == unprefixed {
+						pieces.add(alone)
+					}
 					if !emitted[alone] {
 						result = append(result, alone)
 						emitted[alone] = true
@@ -333,12 +539,22 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 					if innerInterpreter == "" {
 						innerInterpreter = interpreter
 					}
-					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter)
+					// The commands of a script the call spells as it is are pieces of
+					// the call; those of a script with a variable resolved are not.
+					innerPieces := pieces
+					if innerInput.Command != script {
+						innerPieces = nil
+					}
+					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
+						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"
 						inner = []SimpleCommand{{Text: innerInput.Command, CWD: innerInput.CWD,
 							ZshHistoryBuiltin: zshHistory}}
+						if innerInput.Command == script {
+							pieces.add(inner[0])
+						}
 					}
 					changed = changed || len(inner) != 0
 					for _, child := range inner {
@@ -348,6 +564,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 						}
 						child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
+						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
 						result = append(result, child)
 						if len(result) > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
@@ -368,6 +585,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				// export HOME=v sets HOME for the commands after it, as
 				// HOME=v; export HOME does (GAP-2476).
 				updateSimpleDeclVariables(&state, decl, part.scope)
+			}
+			if call != nil {
+				simpleForgetUserVars(state.vars, CallBindsUserNames(call))
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
@@ -398,15 +618,26 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			if changedDirectory {
 				state.cwdUnknown = nextCWD == ""
 			}
+			if part.read != nil {
+				state.vars[part.read.name] = part.read.word
+			}
 			nextVariants = append(nextVariants, state)
+			if part.maySkip && len(prior.forked) != 0 {
+				// The statement may not run: the word of the loop stays.
+				nextVariants = append(nextVariants, prior)
+			}
 		}
 		states[part.scope] = compact(uniqueSimpleStates(nextVariants), partIndex+1)
-		if len(states[part.scope]) > maxSimpleStates {
+		if simpleOverStateBound(states[part.scope]) {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}
 	if !changed {
 		return nil
+	}
+	result, fits := simpleExpandPlainWords(result, &plainWords)
+	if !fits {
+		return []SimpleCommand{{EvaluationFailure: "limit"}}
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
@@ -741,7 +972,7 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 		if !slices.ContainsFunc(result, func(previous simpleShellState) bool {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
 				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
-				slices.Equal(previous.homeLocals, state.homeLocals)
+				slices.Equal(previous.locals, state.locals)
 		}) {
 			result = append(result, state)
 		}
@@ -834,21 +1065,23 @@ func simpleTooManyCompactionCases(source string) bool {
 	return cases > maxCompactionCases
 }
 
-// updateSimpleDeclVariables applies a HOME=value word of an export,
+// updateSimpleDeclVariables applies each NAME=value word of an export,
 // readonly, declare, typeset or local statement to vars, as
-// updateSimpleVariables applies a bare HOME=value: every later ~ and $HOME
-// then names value. HOME with no value keeps its value. An option other
-// than -x, -r and -g (export -n also assigns) can change what the value
-// means (a reference, an integer, a case or an array attribute): HOME then
-// keeps its previous value, so a later ~ or $HOME write is still judged
-// against a home the call can reach (GAP-2476, RV-pc11-1). Other names
-// keep the bound-variable reading the action-level resolver judges.
+// updateSimpleVariables applies a bare NAME=value: a later $NAME, and for
+// HOME every later ~, then names value. A name with no value keeps its
+// value. An option other than -x, -r and -g (export -n also assigns) can
+// change what the value means (a reference, an integer, a case or an array
+// attribute): HOME then keeps its previous value, so a later ~ or $HOME
+// write is still judged against a home the call can reach (GAP-2476,
+// RV-pc11-1), and any other name is unknown. export F=<file> names the
+// file for a later "$F" as F=<file> does; it was left unbound, so a write
+// through it named no file for any path rule (gas-ux-r1 GAP-0076).
 //
-// local HOME=v counts only in a function body, until the body ends: bash
-// refuses local outside a function (HOME is unchanged), and the caller
-// HOME is back once the function returns (RV-pod2-2). declare and typeset
-// without -g in a function body are local too; export, readonly and
-// declare -g there set the caller HOME (checker p3i3 D01-D21).
+// local NAME=v counts only in a function body, until the body ends: bash
+// refuses local outside a function (the name is unchanged), and the
+// caller value is back once the function returns (RV-pod2-2). declare and
+// typeset without -g in a function body are local too; export, readonly
+// and declare -g there set the caller value (checker p3i3 D01-D21).
 func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause, scope string) {
 	if decl == nil || decl.Variant == nil {
 		return
@@ -871,24 +1104,23 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 	}
 	if local {
 		body := simpleFunctionBodyScope(scope)
-		declaresHome := slices.ContainsFunc(decl.Args, func(assign *syntax.Assign) bool {
-			return assign != nil && assign.Name != nil && assign.Name.Value == "HOME"
-		})
-		if declaresHome && (len(state.homeLocals) == 0 || state.homeLocals[len(state.homeLocals)-1].scope != body) {
-			home, known := vars["HOME"]
-			state.homeLocals = append(state.homeLocals, simpleHomeLocal{scope: body, home: home, known: known})
+		for _, assign := range decl.Args {
+			if assign == nil || assign.Name == nil {
+				continue
+			}
+			name := assign.Name.Value
+			if slices.ContainsFunc(state.locals, func(saved simpleLocal) bool {
+				return saved.scope == body && saved.name == name
+			}) {
+				continue
+			}
+			value, known := vars[name]
+			state.locals = append(state.locals, simpleLocal{scope: body, name: name, value: value, known: known})
 		}
 	}
 	known := true
-	for _, assign := range decl.Args {
-		if assign == nil || assign.Name != nil {
-			continue
-		}
-		if assign.Value == nil {
-			known = false
-			continue
-		}
-		option := projectPOSIXWord(assign.Value)
+	options, strays := simpleDeclOptions(decl)
+	for _, option := range options {
 		if decl.Variant.Value == "export" && !option.Expands && option.Value == "-n" {
 			continue
 		}
@@ -896,29 +1128,65 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 			known = false
 		}
 	}
+	// A word after the first name that is no option (declare IFS=x -p) is a
+	// name too: it sets nothing unless it expands or spells an assignment.
+	for _, stray := range strays {
+		if stray.Expands || strings.Contains(stray.Value, "=") {
+			known = false
+		}
+	}
 	for _, assign := range decl.Args {
-		if assign == nil || assign.Name == nil || assign.Naked || assign.Name.Value != "HOME" {
+		if assign == nil || assign.Name == nil || assign.Naked {
 			continue
 		}
 		if !known || assign.Index != nil || assign.Array != nil {
+			if assign.Name.Value != "HOME" {
+				delete(vars, assign.Name.Value)
+			}
 			continue
 		}
 		updateSimpleVariables(vars, []*syntax.Assign{assign})
 	}
 }
 
-// simpleDeclGlobal reports a static -g option word of a declaration.
-func simpleDeclGlobal(decl *syntax.DeclClause) bool {
+// simpleDeclOptions splits the words of a declaration (export, readonly,
+// declare, typeset, local) that are no assignment, as bash reads them: the
+// options are the words in front of the first name, up to and with --, and
+// every later word is a stray, a name bash rejects (declare d=x -g sets d
+// and reports -g; it is no option). This one scan serves every reader of a
+// declaration option, so no two of them can order the options differently.
+func simpleDeclOptions(decl *syntax.DeclClause) (options, strays []ArgumentFact) {
+	leading := true
 	for _, assign := range decl.Args {
-		if assign == nil || assign.Name != nil || assign.Value == nil {
-			continue
-		}
-		option := projectPOSIXWord(assign.Value)
-		if !option.Expands && strings.HasPrefix(option.Value, "-") && strings.ContainsRune(option.Value[1:], 103) {
-			return true
+		switch {
+		case assign == nil || assign.Value == nil && assign.Name == nil:
+		case assign.Name != nil:
+			leading = false
+		case !leading:
+			strays = append(strays, projectPOSIXWord(assign.Value))
+		default:
+			word := projectPOSIXWord(assign.Value)
+			if !word.Expands && !strings.HasPrefix(word.Value, "-") && !strings.HasPrefix(word.Value, "+") {
+				// Not an option: the first name, and the options end.
+				leading = false
+				strays = append(strays, word)
+				continue
+			}
+			options = append(options, word)
+			if !word.Expands && word.Value == "--" {
+				leading = false
+			}
 		}
 	}
-	return false
+	return options, strays
+}
+
+// simpleDeclGlobal reports a static -g option of a declaration.
+func simpleDeclGlobal(decl *syntax.DeclClause) bool {
+	options, _ := simpleDeclOptions(decl)
+	return slices.ContainsFunc(options, func(option ArgumentFact) bool {
+		return !option.Expands && strings.HasPrefix(option.Value, "-") && strings.ContainsRune(option.Value[1:], 103)
+	})
 }
 
 // simpleScopeStates returns the states of scope: its own, or copies of
@@ -958,19 +1226,19 @@ func simpleFunctionBodyScope(scope string) string {
 	}
 }
 
-// simpleEndFunctionBody restores the caller HOME that a local HOME of the
-// function body of scope saved.
+// simpleEndFunctionBody restores the caller values that the local
+// declarations of the function body of scope saved.
 func simpleEndFunctionBody(states []simpleShellState, scope string) []simpleShellState {
 	ended := make([]simpleShellState, 0, len(states))
 	for _, state := range states {
 		state = state.clone()
-		if last := len(state.homeLocals) - 1; last >= 0 && state.homeLocals[last].scope == scope {
-			saved := state.homeLocals[last]
-			state.homeLocals = state.homeLocals[:last]
+		for last := len(state.locals) - 1; last >= 0 && state.locals[last].scope == scope; last-- {
+			saved := state.locals[last]
+			state.locals = state.locals[:last]
 			if saved.known {
-				state.vars["HOME"] = saved.home
+				state.vars[saved.name] = saved.value
 			} else {
-				delete(state.vars, "HOME")
+				delete(state.vars, saved.name)
 			}
 		}
 		ended = append(ended, state)
@@ -1000,8 +1268,8 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
 
 // The full action may bind a value that the simple-command walk cannot
 // resolve. Record only shell bindings, using the shared shell parser.
-func simpleBoundVariables(file *syntax.File) map[string]bool {
-	bound := make(map[string]bool)
+func simpleBoundVariables(file *syntax.File) (bound map[string]bool) {
+	bound = make(map[string]bool)
 	if file == nil {
 		return bound
 	}
@@ -1055,6 +1323,228 @@ func simpleBoundVariables(file *syntax.File) map[string]bool {
 	return bound
 }
 
+// CallBindsUserNames returns the names of USER and LOGNAME that the call
+// binds where a walk cannot follow the value: read and mapfile (readarray)
+// name them as variables, not as the value of an option such as read -p, a
+// printf -v names one, and the text of an eval, trap or source may bind any
+// it spells (any when it is not static). The statements after the call read
+// no value for them; the statements before it do.
+func CallBindsUserNames(call *syntax.CallExpr) []string {
+	if call == nil || len(call.Args) == 0 {
+		return nil
+	}
+	program, known := simpleStaticWord(call.Args[0], nil)
+	if !known {
+		return nil
+	}
+	var names []string
+	add := func(name string) {
+		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	switch program {
+	case "printf":
+		if len(call.Args) >= 3 && call.Args[1].Lit() == "-v" {
+			if name, known := simpleStaticWord(call.Args[2], nil); known {
+				add(name)
+			}
+		}
+	case "read", "mapfile", "readarray":
+		// An option that takes a value takes the next word: read -p USER
+		// OTHER binds OTHER (and the array of read -a), not USER. A word the
+		// walk cannot read may be any name.
+		valued := "dinNptu"
+		if program != "read" {
+			valued = "dnOsuC"
+		}
+		options := true
+		for index := 1; index < len(call.Args); index++ {
+			name, known := simpleStaticWord(call.Args[index], nil)
+			switch {
+			case !known:
+				for _, user := range simpleUserNames {
+					add(user)
+				}
+			case options && name == "--":
+				options = false
+			case options && len(name) > 1 && name[0] == '-':
+				for at := 1; at < len(name); at++ {
+					if strings.ContainsRune(valued, rune(name[at])) {
+						if at == len(name)-1 {
+							index++
+						}
+						break
+					}
+					if program == "read" && name[at] == 'a' && at == len(name)-1 && index+1 < len(call.Args) {
+						// read -a names the array it fills.
+						array, _ := simpleStaticWord(call.Args[index+1], nil)
+						add(array)
+						index++
+					}
+				}
+			default:
+				options = false
+				add(name)
+			}
+		}
+	case ".", "source":
+		// The sourced file is code the walk does not read.
+		for _, name := range simpleUserNames {
+			add(name)
+		}
+	case "eval", "trap":
+		// The code an eval or trap runs binds the names it binds itself: a
+		// no-op, or code that only mentions USER, binds nothing.
+		code := call.Args[1:]
+		if program == "trap" {
+			code = code[:min(len(code), 1)]
+			if len(code) != 0 && simpleStaticWordOrEmpty(code[0], '-') {
+				code = nil
+			}
+		}
+		var words []string
+		for _, arg := range code {
+			text, known := simpleStaticWord(arg, nil)
+			if !known {
+				for _, name := range simpleUserNames {
+					add(name)
+				}
+				return names
+			}
+			words = append(words, text)
+		}
+		for _, name := range evalCodeBindsUser(strings.Join(words, " "), 0) {
+			add(name)
+		}
+	}
+	return names
+}
+
+// simpleStaticWordOrEmpty reports a static word that starts with prefix.
+func simpleStaticWordOrEmpty(word *syntax.Word, prefix byte) bool {
+	text, known := simpleStaticWord(word, nil)
+	return known && text != "" && text[0] == prefix
+}
+
+// evalCodeBindsUser returns the names of USER and LOGNAME that the shell
+// code text binds: an assignment, a loop name, or a call that binds one
+// (CallBindsUserNames). Code that does not parse may bind any.
+func evalCodeBindsUser(text string, depth int) []string {
+	file, ok := shellparse.Parse(text)
+	if !ok || depth >= 4 {
+		return simpleUserNames
+	}
+	var names []string
+	add := func(name string) {
+		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			if node.Name != nil {
+				add(node.Name.Value)
+			}
+		case *syntax.WordIter:
+			if node.Name != nil {
+				add(node.Name.Value)
+			}
+		case *syntax.CallExpr:
+			for _, name := range CallBindsUserNames(node) {
+				add(name)
+			}
+		}
+		return true
+	})
+	return names
+}
+
+// simpleApplyLoopBinds gives each name a for or select loop binds the value
+// it has in the iteration that matters. A list that can hold the login the
+// home spells (an empty list, the login or a name that holds it, a word the
+// walk cannot read or that has a pattern) gives the name that login in the
+// iteration that has it: the statement in the body is read with it, as the
+// shell runs it. A list of other logins only leaves the name without a
+// value the walk can follow (rel-1-0-6:GAP-0630, GAP-0681 review 7).
+func simpleApplyLoopBinds(vars map[string]string, binds []simpleLoopBind, login map[string]string) {
+	for _, bind := range binds {
+		if bind.fork {
+			continue
+		}
+		active, hasLogin := login[bind.name]
+		reads := hasLogin && len(bind.items) == 0
+		for _, word := range bind.items {
+			value, known := simpleStaticWord(word, vars)
+			reads = reads || hasLogin && (!known || value == active || strings.ContainsAny(value, "*?["))
+		}
+		if reads {
+			vars[bind.name] = active
+		} else {
+			delete(vars, bind.name)
+		}
+	}
+}
+
+// simpleForgetUserVars drops the value of each name from vars.
+func simpleForgetUserVars(vars map[string]string, names []string) {
+	for _, name := range names {
+		delete(vars, name)
+	}
+}
+
+// simpleJoinForgottenUserVars is merged less the USER and LOGNAME values
+// that a conditional or loop body forgot: a name that a read or a loop
+// binds in the body has no value the walk can follow after it.
+func simpleJoinForgottenUserVars(merged, body []simpleShellState) []simpleShellState {
+	var forgotten []string
+	for _, name := range simpleUserNames {
+		if slices.ContainsFunc(body, func(state simpleShellState) bool {
+			_, has := state.vars[name]
+			return !has
+		}) {
+			forgotten = append(forgotten, name)
+		}
+	}
+	if len(forgotten) == 0 {
+		return merged
+	}
+	for index := range merged {
+		merged[index] = merged[index].clone()
+		simpleForgetUserVars(merged[index].vars, forgotten)
+	}
+	return merged
+}
+
+// simpleRedirectDefaultExpansion reports a ${NAME:-word} or ${NAME-word} word
+// in a redirect target of stmt. A lone statement is read on its own only when
+// a word of it changes with the values the walk holds; a default is read from
+// the static word when the walk holds no value for NAME
+// (simpleStaticWordWithNewline).
+func simpleRedirectDefaultExpansion(stmt *syntax.Stmt) bool {
+	for _, redirect := range stmt.Redirs {
+		if redirect.Word != nil && simpleDefaultExpansion(redirect.Word) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleDefaultExpansion reports a ${NAME:-word} or ${NAME-word} in node.
+func simpleDefaultExpansion(node syntax.Node) bool {
+	found := false
+	syntax.Walk(node, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil && param.Exp != nil &&
+			(param.Exp.Op == syntax.DefaultUnset || param.Exp.Op == syntax.DefaultUnsetOrNull) &&
+			simpleVariableName(param.Param.Value) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 func simpleVariableName(name string) bool {
 	if name == "" {
 		return false
@@ -1091,6 +1581,29 @@ func simpleUnresolvedBoundVariable(source string, vars map[string]string, bound 
 	return unresolved
 }
 
+// simpleUnboundUser reports a USER or LOGNAME parameter of source that the
+// action binds and vars carries no value for.
+func simpleUnboundUser(source string, vars map[string]string, bound map[string]bool) bool {
+	if !strings.ContainsRune(source, '$') || !bound["USER"] && !bound["LOGNAME"] {
+		return false
+	}
+	file, ok := shellparse.Parse(source)
+	if !ok {
+		return false
+	}
+	unbound := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil &&
+			slices.Contains(simpleUserNames, param.Param.Value) && bound[param.Param.Value] {
+			if _, known := vars[param.Param.Value]; !known {
+				unbound = true
+			}
+		}
+		return !unbound
+	})
+	return unbound
+}
+
 func simpleStaticWord(word *syntax.Word, vars map[string]string) (string, bool) {
 	return simpleStaticWordWithNewline(word, vars, false)
 }
@@ -1122,6 +1635,13 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 	if word == nil {
 		return "", false
 	}
+	if len(word.Parts) == 1 {
+		// A word of one literal made of plain characters is its own value; the
+		// expansion below would only return it.
+		if lit, ok := word.Parts[0].(*syntax.Lit); ok && simplePlainLiteral(lit.Value) {
+			return lit.Value, true
+		}
+	}
 	safe := true
 	syntax.Walk(word, func(node syntax.Node) bool {
 		switch part := node.(type) {
@@ -1135,8 +1655,13 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 				return false
 			}
 			_, known := vars[part.Param.Value]
-			if !known || part.Excl || part.Length || part.Width || part.IsSet || part.Index != nil ||
-				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil ||
+			// ${NAME:-word} and ${NAME-word} read NAME, or the static word
+			// when the walk holds no value for NAME (unset in the walk): the
+			// default of an unset name is what the shell expands.
+			defaulted := part.Exp != nil && simpleVariableName(part.Param.Value) &&
+				(part.Exp.Op == syntax.DefaultUnset || part.Exp.Op == syntax.DefaultUnsetOrNull)
+			if !known && !defaulted || part.Excl || part.Length || part.Width || part.IsSet || part.Index != nil ||
+				part.Slice != nil || part.Repl != nil || part.Names != 0 || part.Exp != nil && !defaulted ||
 				part.Flags != nil || part.NestedParam != nil || len(part.Modifiers) != 0 {
 				safe = false
 			}
@@ -1160,12 +1685,30 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 	if shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(env...)}, word)
+	fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron(env...)}, word)
 	if err != nil || len(fields) != 1 || strings.ContainsRune(fields[0], 0) ||
 		!allowNewline && strings.ContainsAny(fields[0], "\r\n") {
 		return "", false
 	}
 	return fields[0], true
+}
+
+// simplePlainLiteral reports text of letters, digits and . / _ : @ % + , = -
+// only: no quote, escape, expansion, glob, brace or tilde, so the shell
+// reads it as it is.
+func simplePlainLiteral(text string) bool {
+	if text == "" {
+		return false
+	}
+	for index := 0; index < len(text); index++ {
+		char := text[index]
+		letter := char >= 0x41 && char <= 0x5a || char >= 0x61 && char <= 0x7a
+		digit := char >= 0x30 && char <= 0x39
+		if !letter && !digit && strings.IndexByte("._/:@%+,=-", char) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func simpleResolvedVariables(source string, vars map[string]string) (string, bool) {
@@ -1178,14 +1721,25 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 		text       string
 	}
 	var replacements []replacement
+	redirectTargets := map[*syntax.Word]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if redirect, ok := node.(*syntax.Redirect); ok &&
-			(redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc) {
-			return false
+		if redirect, ok := node.(*syntax.Redirect); ok {
+			if redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc {
+				return false
+			}
+			redirectTargets[redirect.Word] = true
+			return true
 		}
 		word, ok := node.(*syntax.Word)
 		if !ok {
 			return true
+		}
+		// A default in an operand word stays a runtime-expanded word, as it
+		// was: only the target of a redirect is read through the default,
+		// which is where the hook client lists the file it names. A name the
+		// walk holds a value for through an earlier binding is read as that.
+		if !redirectTargets[word] && simpleDefaultExpansion(word) {
+			return false
 		}
 		hasParam := false
 		hasTilde := false
@@ -1703,7 +2257,8 @@ func simpleRelativePathOperand(source string) bool {
 		}
 	}
 	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok {
+	if !ok || len(call.Args) == 0 {
+		// No program word, so no path operand: a redirect-only or assignment-only statement.
 		return false
 	}
 	for _, arg := range call.Args[1:] {
@@ -1852,4 +2407,141 @@ func simplePathClean(value string) string {
 // keeps its native (UNC) meaning on Windows.
 func simplePOSIXAbs(value string) bool {
 	return strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//")
+}
+
+// simpleUserNames are the two names of the login a POSIX home spells.
+var simpleUserNames = []string{"USER", "LOGNAME"}
+
+// simpleInitialUserVars is the value of each of USER and LOGNAME where a
+// walk starts: the base name of a POSIX home at the start of the action,
+// the values inherited where a shell body starts.
+func simpleInitialUserVars(home string, inherited map[string]string) map[string]string {
+	vars := make(map[string]string, len(simpleUserNames))
+	user := path.Base(home)
+	for _, name := range simpleUserNames {
+		if inherited != nil {
+			if value, ok := inherited[name]; ok {
+				vars[name] = value
+			}
+		} else if strings.HasPrefix(home, "/") && user != "/" && user != "." {
+			vars[name] = user
+		}
+	}
+	return vars
+}
+
+// simpleChildUserVars is USER and LOGNAME as the shell (shell, bash when
+// empty) that call starts sees them: the caller values in effective (prefix
+// assignments applied), changed in order by what an env wrapper puts before
+// the shell. NAME=value sets a name; env -u NAME or -i unsets it, which a
+// bash or sh child reads as empty and a zsh child as the login name again
+// (login holds those values); the other names stay what they are. A name is
+// left out when another wrapper option, sudo, or a word the walk cannot read
+// may change the environment: the body then reads it as an unknown name. A
+// shared body (eval, trap) runs in the caller itself.
+func simpleChildUserVars(call *syntax.CallExpr, effective map[string]string, shared bool, shell string, login map[string]string) map[string]string {
+	child := make(map[string]string, len(simpleUserNames))
+	for _, name := range simpleUserNames {
+		if value, ok := effective[name]; ok {
+			child[name] = value
+		}
+	}
+	if shared || call == nil {
+		return child
+	}
+	unset := func(name string) {
+		if !slices.Contains(simpleUserNames, name) {
+			return
+		}
+		if value, ok := login[name]; ok && shell == "zsh" {
+			child[name] = value
+		} else if shell == "zsh" {
+			delete(child, name)
+		} else {
+			child[name] = ""
+		}
+	}
+	env := false
+	for index := 0; index < len(call.Args); index++ {
+		word, static := simpleStaticWord(call.Args[index], effective)
+		if !static {
+			clear(child)
+			return child
+		}
+		if index == 0 {
+			env = filepath.Base(word) == "env"
+		} else if env {
+			switch {
+			case word == "-i" || word == "--ignore-environment" || word == "-":
+				for _, name := range simpleUserNames {
+					unset(name)
+				}
+				continue
+			case word == "-u" || word == "--unset":
+				index++
+				name, known := "", false
+				if index < len(call.Args) {
+					name, known = simpleStaticWord(call.Args[index], effective)
+				}
+				if !known {
+					clear(child)
+					return child
+				}
+				unset(name)
+				continue
+			case strings.HasPrefix(word, "--unset="):
+				unset(strings.TrimPrefix(word, "--unset="))
+				continue
+			case strings.HasPrefix(word, "-u") && !strings.HasPrefix(word, "--") && len(word) > 2:
+				unset(word[2:])
+				continue
+			case word == "-0" || word == "--null" || word == "-v" || word == "--debug":
+				continue
+			}
+		}
+		if index != 0 && strings.HasPrefix(word, "-") {
+			clear(child)
+			return child
+		}
+		if name, value, cut := strings.Cut(word, "="); cut && slices.Contains(simpleUserNames, name) {
+			child[name] = value
+			continue
+		}
+		switch filepath.Base(word) {
+		case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
+			return child
+		}
+	}
+	return child
+}
+
+// simplePrefixBindsUser reports a prefix assignment of USER or LOGNAME on a
+// call that starts a shell body: the body reads the assigned value, so the
+// call is read with its prefix.
+func simplePrefixBindsUser(call *syntax.CallExpr, effective map[string]string) bool {
+	if !slices.ContainsFunc(call.Assigns, func(assign *syntax.Assign) bool {
+		return assign != nil && assign.Name != nil && slices.Contains(simpleUserNames, assign.Name.Value)
+	}) {
+		return false
+	}
+	_, _, nested, _ := simpleNestedScript(call, effective, nil, nil)
+	return nested
+}
+
+// simpleReboundReading reports a state that holds a word of a forked loop for
+// a statement that runs after code that can bind the variable again. The
+// state that left the variable unread stays, so the statement is read as it
+// was before the loop, and the statements before the binding keep the word.
+func simpleReboundReading(state simpleShellState, part sequenceStatement) bool {
+	for _, name := range state.forked {
+		for index := len(part.binds) - 1; index >= 0; index-- {
+			if bind := part.binds[index]; bind.fork && bind.name == name {
+				if bind.reboundAt(part.sourceStart) {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
 }

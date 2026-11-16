@@ -1740,6 +1740,10 @@ class OverviewPanelModel:
                 count = details[key]
                 # "1 plugin dir", not "1 plugin dirs" (GAP-2526).
                 parts.append(f"{count} {noun}" if str(count).strip() == "1" else f"{count} {noun}s")
+        if details.get("watch_roots_unavailable"):
+            names = details.get("admission_scanning_off")
+            connectors = ", ".join(name for name in names if isinstance(name, str)) if isinstance(names, list) else ""
+            parts.append(f"admission scanning off for {connectors or 'configured connectors'}")
         return ", ".join(parts)
 
     def guardrail_mode_label(self, connector: str = "") -> str:

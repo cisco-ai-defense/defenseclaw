@@ -53,6 +53,18 @@ def _set_windows_identity(setenv, home: Path) -> None:
         setenv(name, value)
 
 
+@pytest.fixture
+def own_pids_outside_fake_listings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the pid and parent pid of this test process out of any fake process listing.
+
+    The Windows Hermes probe skips its own pid and parent pid, and the tests
+    feed it listings with small fixed pids; a runner whose pytest process or
+    parent holds one of them would see that row skipped.
+    """
+    monkeypatch.setattr(os, "getpid", lambda: 900001)
+    monkeypatch.setattr(os, "getppid", lambda: 900002)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     """Keep tests away from the developer's real Windows profile.
@@ -83,6 +95,27 @@ def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch
     yield
 
 
+# The modules that test the Windows launcher preflight, or fake the launcher it probes.
+_LAUNCHER_PREFLIGHT_MODULES = frozenset({
+    "test_cmd_setup_multi_connector",
+    "test_cmd_setup_codex_claudecode_alias",
+    "test_cmd_setup_fu_phase2",
+})
+
+
+@pytest.fixture(autouse=True)
+def _setup_tests_need_no_installed_hook_launcher(request, monkeypatch: pytest.MonkeyPatch):
+    """Setup refuses a per-user restart on a Windows host that has no usable
+    defenseclaw-hook.exe; a CI runner has none, so the tests of setup flows
+    that are about something else run past the preflight. The tests of the
+    preflight itself keep it."""
+    if os.name != "nt" or request.module.__name__.rpartition(".")[2] in _LAUNCHER_PREFLIGHT_MODULES:
+        return
+    from defenseclaw.commands import cmd_setup
+
+    monkeypatch.setattr(cmd_setup, "_windows_hook_launcher_setup_refusal", lambda *_args, **_kwargs: "")
+
+
 @pytest.fixture(autouse=True)
 def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
     """Run platform-neutral connector behavior tests on an explicit host."""
@@ -106,6 +139,21 @@ def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
             expand_connector_choices(child)
 
     expand_connector_choices(cmd_setup.setup)
+
+
+@pytest.fixture(autouse=True)
+def _doctor_run_scope_closed():
+    """The Doctor run scope is module state that a test calling the command body
+    directly (no Click context to close it) leaves open; the next test to read the
+    discovery evidence would then be handed what an earlier test cached for its folder."""
+    def close() -> None:
+        module = sys.modules.get("defenseclaw.doctor_health")
+        if module is not None:
+            module.end_installed_version_run()
+
+    close()
+    yield
+    close()
 
 
 @pytest.fixture(autouse=True)
@@ -228,3 +276,36 @@ def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
         raise requests.ConnectionError("test isolation: no gateway")
 
     monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _unreachable)
+
+
+@pytest.fixture(autouse=True)
+def _no_installed_rule_loader(monkeypatch: pytest.MonkeyPatch):
+    """Keep an installed Go rule loader out of tests that only read a custom pack entry.
+
+    ``policy_catalog.custom_pack_check`` asks ``defenseclaw-gateway rulepack
+    validate`` (through ``policy_catalog._loader_verdict``) whether a
+    ``guardrail.custom_packs`` folder loads and matches its pin. A gateway
+    binary installed on the test host must not decide those tests; they see
+    an unavailable verdict unless they install a stand-in
+    (``tests/test_gap0632_custom_pack_error.py``). Only that one reader is
+    replaced: ``rulepack_validation`` itself stays real for its own bridge tests.
+    """
+    from defenseclaw import policy_catalog
+
+    monkeypatch.setattr(policy_catalog, "_loader_verdict", lambda _path: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_package_registry(monkeypatch: pytest.MonkeyPatch):
+    """Keep the provider identity check off the real npm registry.
+
+    A release without a pinned digest is confirmed against the registry; tests
+    that exercise that path serve their own answers through ``_registry_get``.
+    """
+    from defenseclaw.scanner.plugin_scanner import vendor_identity
+
+    def _offline(url, limit):
+        raise OSError("test isolation: no package registry")
+
+    monkeypatch.setattr(vendor_identity, "_registry_get", _offline)
+    monkeypatch.setattr(vendor_identity, "_registry_digests", {})

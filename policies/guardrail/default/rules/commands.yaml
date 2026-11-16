@@ -998,13 +998,13 @@ rules:
     tags: [authentication, privilege, linux, pam, tampering, exact-actionfacts]
   - id: tamper.docker_insecure_http_registry
     tool_call_only: true
-    # Code-owned proof accepts only an authoritative full daemon.json write
-    # whose sole setting names a literal, non-loopback HTTP registry.
+    # Code-owned proof accepts only an authoritative native file-tool write of
+    # daemon.json that lists a non-loopback insecure registry (see below).
     pattern: 'a^'
     title: "Configure Docker to trust an insecure HTTP registry"
-    # Adopts the strict-profile posture in default: the proof requires a full
-    # daemon.json write whose sole setting names a literal non-loopback HTTP
-    # registry, which opens the image supply chain to on-path substitution.
+    # Adopts the strict-profile posture in default: the registry may be spelled
+    # any way Docker accepts, in a whole-file write or in the text an edit or
+    # patch adds, and opens the image supply chain to on-path substitution.
     severity: CRITICAL
     confidence: 0.99
     tags: [container, supply-chain, docker, tampering, exact-actionfacts]

@@ -46,6 +46,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -261,6 +262,13 @@ func ownedCommands(dataDir string, hookBinaries []string) []string {
 		}
 		out = append(out, NativeHookCommand(bin))
 	}
+	// The builds that wrote these doubled only the apostrophe: a path with a
+	// typographic quote keeps that form owned too (g072 review 2 S3).
+	for _, command := range out {
+		if old, ok := managed.PowerShellLiteralBeforeTypographicQuotes(command); ok {
+			out = append(out, old)
+		}
+	}
 	return out
 }
 
@@ -268,8 +276,10 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// powershellQuote is managed.PowerShellLiteral, the one PowerShell quoting
+// rule, typographic quotes included.
 func powershellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	return managed.PowerShellLiteral(s)
 }
 
 func commandMatches(command string, owned []string) bool {

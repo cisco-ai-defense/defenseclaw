@@ -68,7 +68,7 @@ func actionMovedDiskLinkWrite(command, cwd, home string, writes []string) bool {
 			}
 			for _, source := range op.sources {
 				from := absolutePath(source, dir)
-				if info, err := os.Lstat(from); err != nil || info.Mode()&os.ModeSymlink == 0 {
+				if info, err := pathLstat(from); err != nil || info.Mode()&os.ModeSymlink == 0 {
 					continue
 				}
 				target, resolved := ResolveWriteTarget(from)
@@ -83,7 +83,7 @@ func actionMovedDiskLinkWrite(command, cwd, home string, writes []string) bool {
 			// the link as a backup entry beside it (rel-1-0-6:GAP-0144).
 			if op.backup && op.dest != "" && op.targetDir == "" && len(op.sources) == 1 {
 				dest := absolutePath(op.dest, dir)
-				if info, err := os.Lstat(dest); err == nil && info.Mode()&os.ModeSymlink != 0 {
+				if info, err := pathLstat(dest); err == nil && info.Mode()&os.ModeSymlink != 0 {
 					if protectedReachPath(dest, protected, keysDir) {
 						backups = append(backups, movedBackup{dest: dest, suffix: op.suffix})
 					}

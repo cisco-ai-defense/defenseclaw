@@ -63,7 +63,7 @@ func TestWindowsManagedHooksStandaloneUserStatePlainUninstallRemovesManagedRunti
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
 
 	// The cleaned folder is gone and not named; B keeps its folder.
-	remaining, purged := windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
+	remaining, purged, _ := windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
 	if calls[userCleanupSIDA] != 1 || calls[userCleanupSIDB] != 0 || len(purged) != 0 ||
 		len(remaining) != 1 || !strings.HasPrefix(remaining[0], userCleanupSIDB+": ") ||
 		!strings.HasSuffix(remaining[0], `\.defenseclaw`) {
@@ -72,14 +72,14 @@ func TestWindowsManagedHooksStandaloneUserStatePlainUninstallRemovesManagedRunti
 
 	// A folder that keeps the account's own files is named with why.
 	kept = "kept: it still holds notes.txt, which DefenseClaw's managed runtime did not write"
-	remaining, _ = windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
+	remaining, _, _ = windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
 	if len(remaining) != 2 || !strings.HasSuffix(remaining[0], `\.defenseclaw: `+kept) {
 		t.Fatalf("kept folder: remaining=%v", remaining)
 	}
 
 	// A cleanup that fails names the folder with the error.
 	kept, removeErr = "", errors.New("remove hooks: access denied")
-	remaining, _ = windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
+	remaining, _, _ = windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
 	if len(remaining) != 2 || !strings.HasSuffix(remaining[0], `\.defenseclaw: remove hooks: access denied`) {
 		t.Fatalf("failed cleanup: remaining=%v", remaining)
 	}
@@ -88,7 +88,7 @@ func TestWindowsManagedHooksStandaloneUserStatePlainUninstallRemovesManagedRunti
 	removeErr = nil
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
 	before := calls[userCleanupSIDA]
-	remaining, _ = windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
+	remaining, _, _ = windowsManagedHooksStandaloneUserState(manifest, false, keepsB)
 	if calls[userCleanupSIDA] != before || len(remaining) != 2 ||
 		!strings.HasSuffix(remaining[0], `\.defenseclaw`) || !strings.HasSuffix(remaining[1], `\.defenseclaw`) {
 		t.Fatalf("not LocalSystem: calls=%v remaining=%v", calls, remaining)

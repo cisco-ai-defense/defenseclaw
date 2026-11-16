@@ -208,8 +208,8 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 				return true
 			}
 		}
-	case "mv", "cp":
-		destination, sources := copyMoveStateOperands(operands, options)
+	case "mv", "cp", "ln":
+		destination, sources := copyMoveStateOperands(words)
 		if command.Program == "mv" {
 			for _, source := range sources {
 				if expanded(source) && statePatternReaches(source, home, cwd) {
@@ -490,21 +490,23 @@ func splitStateOperands(words []string) (operands, options []string) {
 	return operands, options
 }
 
-// copyMoveStateOperands returns the destination and the sources of a cp or
-// mv: the -t/--target-directory value, else the last operand.
-func copyMoveStateOperands(operands, options []string) (string, []string) {
-	for _, option := range options {
-		if value, ok := strings.CutPrefix(option, "--target-directory="); ok {
-			return value, operands
-		}
-		if value, ok := strings.CutPrefix(option, "-t"); ok && value != "" {
-			return value, operands
+// copyMoveStateOperands returns the destination and the sources of a cp, mv
+// or ln: the value of the target-directory option in any spelling (-t DIR,
+// -tDIR, --target-directory DIR, --target-directory=DIR), else the last
+// operand (GAP-1053).
+func copyMoveStateOperands(words []string) (string, []string) {
+	index, attached, option := actionfacts.CopyOperandRoles(words)
+	destination := attached
+	if index >= 0 {
+		destination = words[index]
+	}
+	var sources []string
+	for position, word := range words {
+		if position != index && !option[position] {
+			sources = append(sources, word)
 		}
 	}
-	if len(operands) < 2 {
-		return "", nil
-	}
-	return operands[len(operands)-1], operands[:len(operands)-1]
+	return destination, sources
 }
 
 // stateWordExpands reports a word with a pathname pattern or a brace list.

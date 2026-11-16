@@ -126,7 +126,7 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation 
 		}
 	}
 
-	if err := e.ensureDir(e.P(e.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
+	if err := e.ensureLifecycleDir(); err != nil {
 		return refuse(anchorsWriteCode(err), "%v%s", err, stateWriteAction(err))
 	}
 	lock, err := e.acquireLock(ctx)

@@ -49,17 +49,11 @@ func TestEnterpriseHookEnrollmentManifestDropsOnlyUnprotectedFailures(t *testing
 		{Connector: "claudecode", SID: "S-1-5-21-1-2-3-1004"},                     // signed out, never protected
 		{Connector: "claudecode", SID: "S-1-5-21-1-2-3-1002", Enabled: &disabled}, // disabled stays for revocation
 	}}
-	rows := []enterpriseHookReconcileRow{
-		{Connector: "codex", SID: "S-1-5-21-1-2-3-1001", OK: true},
-		{Connector: "codex", SID: "S-1-5-21-1-2-3-1002", Error: "boom"},
-		{Connector: "cursor", SID: "S-1-5-21-1-2-3-1003", Error: "boom"},
-		{Connector: "claudecode", SID: "S-1-5-21-1-2-3-1004", Error: "pending: signed out"},
-	}
 	unenrolled := map[string]struct{}{
 		"codex@S-1-5-21-1-2-3-1002":      {},
 		"claudecode@S-1-5-21-1-2-3-1004": {},
 	}
-	reduced := enterpriseHookEnrollmentManifest(manifest, rows, unenrolled)
+	reduced := enterpriseHookEnrollmentManifest(manifest, unenrolled)
 	var kept []string
 	for _, target := range reduced.Targets {
 		kept = append(kept, enterpriseHookUnit(target.Connector, target.SID))
@@ -83,7 +77,7 @@ func TestEnterpriseHookEnrollmentManifestKeysSIDLessTargetsApart(t *testing.T) {
 	unenrolled := map[string]struct{}{
 		enterpriseHookEnrollmentUnit(manifest.Targets[1]): {},
 	}
-	reduced := enterpriseHookEnrollmentManifest(manifest, nil, unenrolled)
+	reduced := enterpriseHookEnrollmentManifest(manifest, unenrolled)
 	if len(reduced.Targets) != 1 || reduced.Targets[0].User != "alice" {
 		t.Fatalf("kept = %+v, want only alice", reduced.Targets)
 	}
@@ -106,14 +100,11 @@ func TestEnterpriseHookFailedTargetKeepsEnrollmentWhenLedgerIsUnreadable(t *test
 	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
 		{Connector: "codex", SID: "S-1-5-21-1-2-3-1001"},
 	}}
-	rows := []enterpriseHookReconcileRow{
-		{Connector: "codex", SID: "S-1-5-21-1-2-3-1001", Error: "read hook guardian authorization: access is denied"},
-	}
 	unenrolled := map[string]struct{}{}
 	if enterpriseHookFailedTargetUnenrolls(false, true) {
 		unenrolled[enterpriseHookEnrollmentUnit(manifest.Targets[0])] = struct{}{}
 	}
-	reduced := enterpriseHookEnrollmentManifest(manifest, rows, unenrolled)
+	reduced := enterpriseHookEnrollmentManifest(manifest, unenrolled)
 	if len(reduced.Targets) != 1 {
 		t.Fatalf("kept = %+v, want the target with the unreadable ledger", reduced.Targets)
 	}

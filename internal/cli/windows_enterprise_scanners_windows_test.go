@@ -240,7 +240,7 @@ func TestWindowsScannerRuntimeIsAdmittedByThePayloadTrustPolicy(t *testing.T) {
 		// with a warning while every install stays blocked.
 		if !errors.Is(statErr, os.ErrNotExist) || len(result.Errors) != 1 || result.Errors[0].Code != "scanner_runtime_unavailable" ||
 			!strings.Contains(result.Errors[0].Message, "not admitted by the standalone payload trust policy") ||
-			!strings.Contains(result.Errors[0].Message, "/repair JSON=1 as LocalSystem") {
+			!strings.Contains(result.Errors[0].Message, windowsEnterpriseSetupCommand("/repair", "JSON=1")+" as LocalSystem to prepare it. "+managed.WindowsSetupSource) {
 			t.Fatalf("trust mode %s: installed=%v, errors %+v", opts.trustMode, statErr == nil, result.Errors)
 		}
 	}

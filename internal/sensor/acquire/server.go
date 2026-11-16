@@ -55,6 +55,10 @@ type ServerConfig struct {
 	// everywhere else: the per-user gateway's Local acquirer never builds a
 	// Tetragon source, even when it runs as root.
 	Tetragon *TetragonConfig
+	// Discovery answers OpDiscovery with the discovery read of HomeDirs
+	// (inventory.ReadBrokeredHomes). nil -- every managed helper -- answers
+	// "unsupported operation".
+	Discovery func(ctx context.Context) (any, error)
 }
 
 // TetragonConfig is the helper's Tetragon intent: the values the enterprise
@@ -100,6 +104,11 @@ type Server struct {
 	listener net.Listener
 	closed   bool
 	wg       sync.WaitGroup
+
+	// discoveryMu runs one discovery read at a time: a client that asks
+	// again before the last read finished is told to wait, so it cannot
+	// multiply the reads' memory.
+	discoveryMu sync.Mutex
 }
 
 // NewServer returns a helper serving from direct reads.
@@ -208,6 +217,15 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		s.serveDNS(ctx, conn, request)
 	case OpKernelStatus:
 		s.serveKernelStatus(ctx, conn, request)
+	case OpDiscovery:
+		if s.config.Discovery == nil {
+			_ = writeFrame(conn, Response{
+				Version: protocolVersion, Op: request.Op,
+				Error: errUnsupportedOperation,
+			}, responseDeadline)
+			return
+		}
+		s.serveDiscovery(ctx, conn, request)
 	default:
 		// An unknown op is a protocol error, not something to guess at.
 		_ = writeFrame(conn, Response{
@@ -256,22 +274,27 @@ func (s *Server) serveConnections(ctx context.Context, conn net.Conn, request Re
 }
 
 // eventStreamFrame is one frame on an OpEvents subscription: the coverage
-// header, a single event, or a single event of one of the host's own
-// Tetragon policies. That one has a member of its own so a gateway that
-// predates it skips it rather than reading it as a file or connect event of
-// DefenseClaw's.
+// header, a single event, a single event of one of the host's own Tetragon
+// policies, or the image digest of an earlier exec (plane.KindImageDigest).
+// The last two have members of their own so a gateway that predates them
+// skips them rather than reading them as events of DefenseClaw's: an image
+// digest read as an exec would be a second exec of the process.
 type eventStreamFrame struct {
 	Coverage    *wireCoverage `json:"coverage,omitempty"`
 	Event       *wireEvent    `json:"event,omitempty"`
 	PolicyEvent *wireEvent    `json:"policy_event,omitempty"`
+	ImageDigest *wireEvent    `json:"image_digest,omitempty"`
 	Error       string        `json:"error,omitempty"`
 }
 
 // eventFrame is the stream frame of one event.
 func eventFrame(event plane.Event) eventStreamFrame {
 	encoded := encodeEvent(event)
-	if event.PolicyOwner == plane.PolicyOwnerCustomer {
+	switch {
+	case event.PolicyOwner == plane.PolicyOwnerCustomer:
 		return eventStreamFrame{PolicyEvent: &encoded}
+	case event.Kind == plane.KindImageDigest:
+		return eventStreamFrame{ImageDigest: &encoded}
 	}
 	return eventStreamFrame{Event: &encoded}
 }
@@ -333,7 +356,11 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 	}
 	lastSent, sent := time.Now(), coverage
 	var pending <-chan time.Time
-	sendCoverage := func() bool {
+	// broken is a stream a frame write failed on (a deadline, EPIPE): part
+	// of that frame may have gone out, so nothing more is written to it,
+	// not even the last coverage frame (cowork-1-0-8 GAP-0080 review L1).
+	broken := false
+	sendCoverageWithin := func(deadline time.Duration) bool {
 		current := encodeCoverage(source.Coverage())
 		if reflect.DeepEqual(current, sent) {
 			return true
@@ -344,12 +371,25 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 		}
 		if err := writeFrame(conn, Response{
 			Version: protocolVersion, Op: request.Op, Body: body,
-		}, responseDeadline); err != nil {
+		}, deadline); err != nil {
+			broken = true
 			return false
 		}
 		sent, lastSent = current, time.Now()
 		return true
 	}
+	sendCoverage := func() bool { return sendCoverageWithin(responseDeadline) }
+	// The stream's last frame is its coverage, before the source closes: a
+	// helper that stops (a package upgrade, a config push) or a source that
+	// ends would otherwise take the losses counted since the last coverage
+	// frame with it, and the gateway carries only the losses it was told
+	// (cowork-1-0-8 GAP-0080). Best effort and brief: a gateway that went
+	// away is not waited for, and a broken stream is not written to.
+	defer func() {
+		if !broken {
+			sendCoverageWithin(finalCoverageDeadline)
+		}
+	}()
 
 	events := source.Events()
 	for {
@@ -391,6 +431,7 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 			if err := writeFrame(conn, Response{
 				Version: protocolVersion, Op: request.Op, Body: body,
 			}, responseDeadline); err != nil {
+				broken = true
 				return
 			}
 		}
@@ -399,6 +440,9 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 
 // coverageUpdateInterval bounds coverage-update frames to one per interval.
 var coverageUpdateInterval = 10 * time.Second
+
+// finalCoverageDeadline bounds the write of a stream's last coverage frame.
+const finalCoverageDeadline = 2 * time.Second
 
 // planeSource is the event stream's source. The managed Linux helper with a
 // Tetragon mode other than off reads Tetragon (falling back to the native
@@ -459,6 +503,35 @@ func (s *Server) serveKernelStatus(ctx context.Context, conn net.Conn, request R
 		} else {
 			response.Error = err.Error()
 		}
+	}
+	_ = writeFrame(conn, response, responseDeadline)
+}
+
+// discoveryDeadline bounds one discovery read, inside the client's
+// responseDeadline so a slow read is answered, not abandoned.
+const discoveryDeadline = 45 * time.Second
+
+// errDiscoveryBusy answers a discovery request made while another runs.
+const errDiscoveryBusy = "a discovery read is already running"
+
+// serveDiscovery answers OpDiscovery from the configured homes.
+func (s *Server) serveDiscovery(ctx context.Context, conn net.Conn, request Request) {
+	response := Response{Version: protocolVersion, Op: request.Op}
+	if !s.discoveryMu.TryLock() {
+		response.Error = errDiscoveryBusy
+		_ = writeFrame(conn, response, responseDeadline)
+		return
+	}
+	defer s.discoveryMu.Unlock()
+	readCtx, cancel := context.WithTimeout(ctx, discoveryDeadline)
+	defer cancel()
+	report, err := s.config.Discovery(readCtx)
+	if err != nil {
+		response.Error = err.Error()
+	} else if body, marshalErr := json.Marshal(report); marshalErr == nil {
+		response.Body = body
+	} else {
+		response.Error = marshalErr.Error()
 	}
 	_ = writeFrame(conn, response, responseDeadline)
 }

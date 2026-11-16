@@ -18,11 +18,12 @@ package connector
 
 import (
 	"encoding/json"
-	"regexp"
+	"maps"
+	"slices"
 	"strings"
-	"unicode"
 
-	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hermesargs"
 )
 
 // HermesUnverifiedPatchArgs is the projection of a Hermes patch call whose
@@ -43,8 +44,14 @@ const HermesMaxPatchTargets = 256
 type HermesWriteView struct {
 	Tool string
 	Args json.RawMessage
+	// PossibleOverflow marks extra-key values past the count or depth bound.
+	PossibleOverflow bool
 	// Path is the target as the call names it ("" for the unverified view).
 	Path string
+	// SelfProtectionOnly marks the view of a string under a key that names
+	// no place: only the findings that protect DefenseClaw's own state
+	// count (actionfacts.UnknownKeyTwin).
+	SelfProtectionOnly bool
 
 	fields  map[string]any
 	pathKey string
@@ -117,15 +124,62 @@ func HermesTrustedWriteViews(toolName string, args json.RawMessage) (views []Her
 		if !ok {
 			return nil, false
 		}
-		return []HermesWriteView{view}, true
+		return withHermesHiddenTargets("write_file", []HermesWriteView{view}, args), true
 	case "patch":
 		if views, ok := hermesPatchViews(args); ok {
-			return views, true
+			return withHermesHiddenTargets("patch", views, args), true
 		}
 		return []HermesWriteView{hermesUnverifiedView()}, true
 	default:
 		return nil, false
 	}
+}
+
+// hermesReviewedKeys are the keys Hermes' handlers read, per tool
+// (tools/file_tools.py: WRITE_FILE_SCHEMA, PATCH_SCHEMA).
+var hermesReviewedKeys = map[string][]string{
+	"write_file": {"path", "content", "cross_profile"},
+	"patch":      {"mode", "path", "old_string", "new_string", "replace_all", "patch", "cross_profile"},
+}
+
+// withHermesHiddenTargets adds to the views of a Hermes write call one view
+// of the first per path-shaped value the call holds under a key Hermes does
+// not read: Hermes ignores such a key, but a key outside the reviewed
+// schema must not become a place to name a target the rules never see
+// (gas-ux-r1 GAP-0076, actionfacts.UnknownKeyTwins). Past the bound the
+// gateway receives a Possible overflow marker.
+func withHermesHiddenTargets(tool string, views []HermesWriteView, args json.RawMessage) []HermesWriteView {
+	if len(views) == 0 || views[0].pathKey == "" {
+		return views
+	}
+	fields, ok := hermesWriteFields(args)
+	if !ok {
+		return views
+	}
+	reviewed := hermesReviewedKeys[tool]
+	count, possible := 0, false
+	for _, key := range slices.Sorted(maps.Keys(fields)) {
+		if slices.Contains(reviewed, key) {
+			continue
+		}
+		targets, overflow := actionfacts.PathShapedArgumentValues(key, fields[key])
+		possible = possible || overflow
+		for _, target := range targets {
+			count++
+			if count > 16 {
+				possible = true
+				continue
+			}
+			if retargeted, ok := views[0].Retarget(target.Value); ok {
+				views = append(views, HermesWriteView{Tool: views[0].Tool, Args: retargeted, Path: target.Value,
+					SelfProtectionOnly: !target.Destination, fields: views[0].fields, pathKey: views[0].pathKey})
+			}
+		}
+	}
+	if possible {
+		views = append(views, HermesWriteView{PossibleOverflow: true})
+	}
+	return views
 }
 
 func hermesWriteFileView(args json.RawMessage) (HermesWriteView, bool) {
@@ -154,7 +208,7 @@ func hermesPatchViews(args json.RawMessage) ([]HermesWriteView, bool) {
 	}
 	path := ""
 	if raw, present := fields["path"]; present && !hermesJSONNull(raw) {
-		if json.Unmarshal(raw, &path) != nil || !hermesPlainPath(path) {
+		if json.Unmarshal(raw, &path) != nil || !hermesargs.PlainPath(path) {
 			return nil, false
 		}
 	}
@@ -183,7 +237,7 @@ func hermesPatchViews(args json.RawMessage) ([]HermesWriteView, bool) {
 		if !bodyOK || body == "" {
 			return nil, false
 		}
-		targets, parsed := hermesV4ATargets(body)
+		targets, parsed := hermesargs.V4ATargets(body)
 		if !parsed {
 			return nil, false
 		}
@@ -213,22 +267,23 @@ const hermesMaxViewArgsBytes = 256 << 10
 // hermesTargetViews is one view per distinct target, kind of change and
 // written text. An Add view carries the text Hermes writes, so the content
 // rules judge it as they judge a write_file call of that text.
-func hermesTargetViews(targets []hermesV4ATarget) ([]HermesWriteView, bool) {
+func hermesTargetViews(targets []hermesargs.Target) ([]HermesWriteView, bool) {
 	type viewKey struct {
-		target  HermesPatchTarget
+		path    string
+		write   bool
 		content string
 	}
 	seen := make(map[viewKey]bool, len(targets))
 	views := make([]HermesWriteView, 0, len(targets))
 	for _, target := range targets {
-		if !hermesPlainPath(target.Path) {
+		if !hermesargs.PlainPath(target.Path) {
 			return nil, false
 		}
 		content := hermesWriteStandIn
-		if target.add {
-			content = hermesAddContent(target.lines)
+		if target.Add {
+			content = hermesAddContent(target.Lines)
 		}
-		key := viewKey{target: target.HermesPatchTarget, content: content}
+		key := viewKey{path: target.Path, write: target.Write, content: content}
 		if seen[key] {
 			continue
 		}
@@ -267,14 +322,6 @@ func hermesAddContent(lines []string) string {
 	return content
 }
 
-// hermesPlainPath reports a path with no control character and no line or
-// paragraph separator.
-func hermesPlainPath(path string) bool {
-	return !strings.ContainsFunc(path, func(r rune) bool {
-		return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
-	})
-}
-
 // hermesWriteFields decodes a tool argument object whose keys do not repeat
 // (Hermes reads a repeated key's last value; the parser must not guess).
 func hermesWriteFields(args json.RawMessage) (map[string]json.RawMessage, bool) {
@@ -303,148 +350,3 @@ func hermesString(fields map[string]json.RawMessage, key string) (string, bool) 
 }
 
 func hermesJSONNull(raw json.RawMessage) bool { return strings.TrimSpace(string(raw)) == "null" }
-
-// HermesPatchTarget is one file a Hermes V4A patch changes: written (Update,
-// Add, a Move destination) or removed (Delete, a Move source).
-type HermesPatchTarget struct {
-	Path  string
-	Write bool
-}
-
-// hermesV4ATarget is a HermesPatchTarget with, for an Add, the contents of
-// its "+" lines as Hermes' parser keeps them (the line after the "+", up to
-// but not including its "\n").
-type hermesV4ATarget struct {
-	HermesPatchTarget
-	add   bool
-	lines []string
-}
-
-// hermesSpace is Python's str whitespace (re's \s for a str pattern and
-// str.strip), which the Hermes V4A markers and paths use.
-const hermesSpace = `[\t\n\v\f\r\x1c-\x1f \x{85}\x{a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}]`
-
-// The Hermes V4A markers (tools/patch_parser.py), matched at the start of a
-// line as Python's re.match does.
-var (
-	hermesV4ABegin = lazyregexp.New(`^\*\*\*` + hermesSpace + `*Begin` + hermesSpace + `+Patch` + hermesSpace + `*$`)
-	hermesV4AEnd   = lazyregexp.New(`^\*\*\*` + hermesSpace + `*End` + hermesSpace + `+Patch` + hermesSpace + `*$`)
-	hermesV4AOps   = []struct {
-		re    *regexp.Regexp
-		write bool
-		add   bool
-		move  bool
-	}{
-		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Update` + hermesSpace + `+File:` + hermesSpace + `*(.+)`), write: true},
-		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Add` + hermesSpace + `+File:` + hermesSpace + `*(.+)`), write: true, add: true},
-		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Delete` + hermesSpace + `+File:` + hermesSpace + `*(.+)`)},
-		{re: regexp.MustCompile(`^\*\*\*` + hermesSpace + `*Move` + hermesSpace + `+File:` + hermesSpace + `*(.+?)` +
-			hermesSpace + `*->` + hermesSpace + `*(.+)`), move: true},
-	}
-)
-
-func hermesStrip(text string) string {
-	return strings.TrimFunc(text, func(r rune) bool {
-		switch {
-		case r == '\t', r == '\n', r == '\v', r == '\f', r == '\r', r >= 0x1c && r <= 0x1f, r == ' ',
-			r == 0x85, r == 0xa0, r == 0x1680, r >= 0x2000 && r <= 0x200a, r == 0x2028, r == 0x2029,
-			r == 0x202f, r == 0x205f, r == 0x3000:
-			return true
-		}
-		return false
-	})
-}
-
-// HermesV4ATargets lists the files a Hermes V4A patch changes, read as
-// Hermes' parse_v4a_patch reads them: the lines after the last Begin marker
-// before the first End marker (from the top without one) up to that End
-// marker; an operation header starts its line; an Update needs a hunk line.
-// parsed is false when Hermes would refuse the patch (an empty path, an
-// Update without hunks, a Move without a destination, a ".." component,
-// which _collect_v4a_header_paths rejects) or when it names no file.
-func HermesV4ATargets(body string) ([]HermesPatchTarget, bool) {
-	parsedTargets, parsed := hermesV4ATargets(body)
-	if !parsed {
-		return nil, false
-	}
-	targets := make([]HermesPatchTarget, len(parsedTargets))
-	for i, target := range parsedTargets {
-		targets[i] = target.HermesPatchTarget
-	}
-	return targets, true
-}
-
-// hermesV4ATargets is HermesV4ATargets with the "+" lines of each Add: the
-// lines up to the next operation header that start with "+", read on the
-// line as Hermes splits it (at "\n" only, so a "\r" before it is kept).
-func hermesV4ATargets(body string) (targets []hermesV4ATarget, parsed bool) {
-	raw := strings.Split(body, "\n")
-	lines := make([]string, len(raw))
-	for i := range raw {
-		lines[i] = strings.TrimSuffix(raw[i], "\r")
-	}
-	start, end := -1, len(lines)
-	for i, line := range lines {
-		if hermesV4ABegin.MatchString(line) {
-			start = i
-		} else if hermesV4AEnd.MatchString(line) {
-			end = i
-			break
-		}
-	}
-	update, hunk, add := false, false, -1
-	for i, line := range lines[start+1 : end] {
-		matched := false
-		for _, op := range hermesV4AOps {
-			groups := op.re.FindStringSubmatch(line)
-			if groups == nil {
-				continue
-			}
-			if update && !hunk {
-				return nil, false
-			}
-			matched, update, hunk, add = true, false, false, -1
-			source := hermesStrip(groups[1])
-			if source == "" || hermesTraversal(source) {
-				return nil, false
-			}
-			switch {
-			case op.move:
-				destination := hermesStrip(groups[2])
-				if destination == "" || hermesTraversal(destination) {
-					return nil, false
-				}
-				targets = append(targets, hermesV4ATarget{HermesPatchTarget: HermesPatchTarget{Path: source}},
-					hermesV4ATarget{HermesPatchTarget: HermesPatchTarget{Path: destination, Write: true}})
-			default:
-				targets = append(targets, hermesV4ATarget{HermesPatchTarget: HermesPatchTarget{Path: source, Write: op.write}, add: op.add})
-				update = op.re == hermesV4AOps[0].re
-				if op.add {
-					add = len(targets) - 1
-				}
-			}
-			break
-		}
-		if !matched && update && line != "" && !strings.HasPrefix(line, `\`) {
-			// A hunk header or any other line of an Update's hunk.
-			hunk = hunk || !strings.HasPrefix(line, "@@")
-		}
-		if rawLine := raw[start+1+i]; !matched && add >= 0 && strings.HasPrefix(rawLine, "+") {
-			targets[add].lines = append(targets[add].lines, rawLine[1:])
-		}
-	}
-	if update && !hunk || len(targets) == 0 {
-		return nil, false
-	}
-	return targets, true
-}
-
-// hermesTraversal reports a ".." path component, under either separator.
-func hermesTraversal(path string) bool {
-	for _, part := range strings.FieldsFunc(path, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if part == ".." {
-			return true
-		}
-	}
-	return false
-}

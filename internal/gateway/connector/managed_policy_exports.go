@@ -288,16 +288,18 @@ func perUserOwnedHookCommands(connectorName, dataDir, hookBinary string) []strin
 			resolve := func() string { return binary }
 			if owner, ok := conn.(HookScriptOwner); ok {
 				for _, script := range owner.HookScriptNames(opts) {
-					commands = append(commands, hookInvocationCommandWith("windows", name, filepath.Join(dataDir, "hooks", script), resolve))
+					// A pre-1.0.9 render of a typographic-quote profile is
+					// ours too, not a foreign hook (g072 review 4 M1).
+					commands = appendWithPreTypographicQuoteForm(commands, hookInvocationCommandWith("windows", name, filepath.Join(dataDir, "hooks", script), resolve))
 				}
 			}
 			if name == "antigravity" {
 				for _, event := range antigravityLifecycleEvents {
 					command := windowsNativePowerShellHookCommandForEvent(name, event, binary)
-					commands = append(commands, command)
+					commands = appendWithPreTypographicQuoteForm(commands, command)
 					// The 1.0.x render stays DefenseClaw's own.
 					if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
-						commands = append(commands, legacy)
+						commands = appendWithPreTypographicQuoteForm(commands, legacy)
 					}
 				}
 			}

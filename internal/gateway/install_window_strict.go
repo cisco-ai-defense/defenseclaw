@@ -87,6 +87,15 @@ func (a *APIServer) strictPolicyTierForHook(ctx context.Context, connectorName s
 	return cfg != nil && cfg.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict
 }
 
+// managedInstallForHook reports whether the gateway judging a hook call is a
+// managed enterprise install: the rpm, pkg or Setup install and every managed
+// profile. A managed device fails closed where the default tier of a per-user
+// install opens.
+func (a *APIServer) managedInstallForHook(ctx context.Context) bool {
+	cfg := a.decisionConfig(ctx)
+	return cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode)
+}
+
 // installWindowStrict reports whether a per-user call of connectorName meets
 // an install window (perUserInstallWindowHeld) in the strict tier. In the
 // default and permissive tiers it logs one warning per install window and

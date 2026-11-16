@@ -28,7 +28,7 @@ import (
 func TestUnprotectedAgentsAreVisible(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+	data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 		User:      "alice",
 		Connector: "opencode",
 		Code:      enterprisehooks.UnprotectedCodeAgentUnprotected,
@@ -62,7 +62,7 @@ func TestUnprotectedAgentsAreVisible(t *testing.T) {
 	}
 
 	// An empty record (every agent enrolled again) clears the finding.
-	empty, _ := enterprisehooks.MarshalUnprotectedAgents(nil)
+	empty, _ := h.marshalCompletedScan(nil)
 	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), empty, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestPrivateClaudeInstallMakesUnixStatusAndVerifyIncomplete(t *testing.T) {
 			if platform == "darwin" {
 				install = "/Users/alice/private/node_modules/@anthropic-ai/claude-code"
 			}
-			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+			data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 				User: "alice", UID: &uid, Connector: "claudecode", Version: "2.0.77", InstallPath: install,
 				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
 				Reason: "version 2.0.77 has no managed hook contract",
@@ -142,7 +142,7 @@ func TestManifestModeStatusAndVerifyWaitForPrivateInstallScan(t *testing.T) {
 					t.Fatalf("%s %s claimed complete coverage before its scan: %+v", platform, action, result)
 				}
 			}
-			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+			data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 				User: "alice", Connector: "claudecode", Version: "2.0.77",
 				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
 				Reason: "version 2.0.77 has no managed hook contract",
@@ -300,7 +300,7 @@ func TestPendingUnprotectedRecordKeepsRealVerifyFailures(t *testing.T) {
 				path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
 				old := time.Now().Add(-time.Hour)
 				for _, record := range records {
-					data, _ := enterprisehooks.MarshalUnprotectedAgents(record.agents)
+					data, _ := h.marshalCompletedScan(record.agents)
 					if err := os.WriteFile(path, data, 0o600); err != nil {
 						t.Fatal(err)
 					}
@@ -339,7 +339,7 @@ func TestEnrolledKiroCLIBelowHookFloorIsUncoveredInStatusAndVerify(t *testing.T)
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	writeFreshLedger(t, h)
-	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+	data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 		User: "alice", Connector: "kiro", Version: "2.24.1", Code: "kiro_cli_below_hook_floor",
 		Reason: "kiro-cli 2.24.1 is below 2.27.1: non-interactive runs do not load hooks; the earlier enrollment remains installed",
 	}})
@@ -369,7 +369,7 @@ func TestKiroIDEBelowGlobalHookFloorFailsVerify(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	writeFreshLedger(t, h)
-	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+	data, err := h.marshalCompletedScan([]enterprisehooks.UnprotectedAgent{{
 		User: "alice", Connector: "kiro", Version: "1.0.181", Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
 		Reason: "Kiro IDE 1.0.181 cannot read the global hooks file",
 	}})

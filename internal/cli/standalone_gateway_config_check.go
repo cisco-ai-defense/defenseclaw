@@ -54,8 +54,8 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			var schemaErr *config.V8SchemaError
 			if errors.As(err, &schemaErr) {
 				// The same words as the Linux and macOS refusal (GAP-0188).
-				if hint, moved := schemaErr.MovedKeyHint(); moved {
-					reason = strings.TrimPrefix(schemaErr.Path, "$.") + " is an unknown setting; " + hint
+				if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+					reason = retired
 				}
 			}
 			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, location, reason)
@@ -128,6 +128,9 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		return nil
 	}
 	serviceAccount := strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))
+	if err := gateway.CheckSelectedCustomRulePacks(runtimeConfig); err != nil {
+		return fmt.Errorf("the gateway cannot use the guardrail rule packs that %s selects: %w", configPath, err)
+	}
 	for _, pack := range standaloneGatewayRulePackDirs(runtimeConfig) {
 		// The check runs as an administrator or LocalSystem, who read any
 		// folder, so the gateway service account's own access is checked
@@ -135,6 +138,9 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		// install then failed with only "Failed to start service" (GAP-0095).
 		if err := standaloneServiceCanReadTree(pack.dir, pack.label, serviceAccount); err != nil {
 			return fmt.Errorf("%s that %s names: %v", standaloneRulePackUnreadableText, configPath, err)
+		}
+		if missing := builtinRulePackMissing(runtimeConfig, configPath, pack.dir); missing != nil {
+			return missing
 		}
 		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v%s",
@@ -234,7 +240,13 @@ func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*
 		return nil, err
 	}
 	if loaded.runtime.Guardrail.Enabled {
+		if err := gateway.CheckSelectedCustomRulePacks(loaded.runtime); err != nil {
+			return nil, fmt.Errorf("the gateway cannot use the guardrail rule packs that %s selects: %w", configPath, err)
+		}
 		for _, pack := range standaloneGatewayRulePackDirs(loaded.runtime) {
+			if missing := builtinRulePackMissing(loaded.runtime, configPath, pack.dir); missing != nil {
+				return nil, missing
+			}
 			if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 				return nil, fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %w",
 					pack.dir, configPath, err)
@@ -424,6 +436,28 @@ func rulePackNestedCopyHint(dir string, err error) string {
 		return fmt.Sprintf("; %s is a copy of the pack inside itself (copying the pack folder onto an existing one creates it): remove that folder and run again", nested)
 	}
 	return fmt.Sprintf("; the stray folder is %s: move it out of the pack folder or remove it, then run again", nested)
+}
+
+// builtinRulePackMissing is the refusal of a built-in rule pack other than
+// default whose folder is not under the config's policy_dir on a managed
+// Windows install: the Setup ships no such pack, so the message names the
+// property to set (GAP-1041). It is nil for any other folder or install.
+func builtinRulePackMissing(cfg *config.Config, configPath, dir string) error {
+	if cfg == nil {
+		return nil
+	}
+	policyDir := strings.TrimSpace(cfg.PolicyDir)
+	name := filepath.Base(filepath.Clean(dir))
+	advice := cfg.WindowsBuiltinRulePackAdvice(name)
+	if advice == "" || policyDir == "" || filepath.Clean(dir) != filepath.Join(policyDir, "guardrail", name) {
+		return nil
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	_, loadErr := guardrail.LoadRulePack(dir)
+	return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v; policy_dir is %s and has no guardrail\\%s folder: %s",
+		dir, configPath, loadErr, policyDir, name, advice)
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can

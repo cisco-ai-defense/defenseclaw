@@ -30,7 +30,70 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// The golden creates thousands of short-lived hook installations. Each one
+// uses the production atomic writer, including file and directory syncs. A
+// private tmpfs root keeps those syncs local when the build host's disk is
+// busy, while preserving the same renderer and executed hook files.
+func hookGoldenScratchDir(t *testing.T) string {
+	t.Helper()
+	var fs unix.Statfs_t
+	gw, gwErr := os.Stat(nativeGatewayForHookTests.path)
+	post, postErr := os.Stat(nativeHookPostForHookTests.path)
+	if err := unix.Statfs("/dev/shm", &fs); err == nil && fs.Type == unix.TMPFS_MAGIC &&
+		gwErr == nil && postErr == nil && gw.Size() > 0 && post.Size() > 0 &&
+		uint64(fs.Bavail)*uint64(fs.Bsize) >= uint64(gw.Size()+post.Size()+64<<20) {
+		if dir, err := os.MkdirTemp("/dev/shm", "dcg"); err == nil {
+			probe := filepath.Join(dir, "probe.sh")
+			if os.WriteFile(probe, []byte("#!/bin/sh\nexit 0\n"), 0o700) == nil && exec.Command(probe).Run() == nil {
+				_ = os.Remove(probe)
+				helpers := filepath.Join(dir, ".helpers")
+				if os.Mkdir(helpers, 0o700) == nil &&
+					stageGoldenBinary(nativeGatewayForHookTests.path, filepath.Join(helpers, "defenseclaw-gateway")) == nil &&
+					stageGoldenBinary(nativeHookPostForHookTests.path, filepath.Join(helpers, "defenseclaw-hook-post")) == nil {
+					t.Cleanup(func() { _ = os.RemoveAll(dir) })
+					return dir
+				}
+			}
+			_ = os.RemoveAll(dir)
+		}
+	}
+	dir, err := os.MkdirTemp("/tmp", "dcg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func stageGoldenBinary(source, target string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
+}
+
+func goldenBinarySource(base, name, original string) string {
+	staged := filepath.Join(base, ".helpers", name)
+	if info, err := os.Stat(staged); err == nil && info.Mode().IsRegular() {
+		return staged
+	}
+	return original
+}
 
 // TestShellHookBehaviourMatchesGolden pins what every connector shell hook
 // decides, prints and sends (sandbox-visibility:GAP-0028, issue #1130): for
@@ -129,11 +192,8 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 	if v, err := strconv.Atoi(os.Getenv("DC_HOOK_GOLDEN_WORKERS")); err == nil && v > 0 {
 		workers = v
 	}
-	base, err := os.MkdirTemp("/tmp", "dcg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	base := hookGoldenScratchDir(t)
+	t.Logf("golden scratch root: %s", base)
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func() {
@@ -797,10 +857,10 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		addr = "127.0.0.1:" + strconv.Itoa(port)
 	}
 	if !c.mode.managed {
-		if err := os.Link(nativeGatewayForHookTests.path, filepath.Join(home, ".local", "bin", "defenseclaw-gateway")); err != nil {
+		if err := os.Link(goldenBinarySource(base, "defenseclaw-gateway", nativeGatewayForHookTests.path), filepath.Join(home, ".local", "bin", "defenseclaw-gateway")); err != nil {
 			return obs, err
 		}
-		if err := os.Link(nativeHookPostForHookTests.path, filepath.Join(home, ".local", "bin", "defenseclaw-hook-post")); err != nil {
+		if err := os.Link(goldenBinarySource(base, "defenseclaw-hook-post", nativeHookPostForHookTests.path), filepath.Join(home, ".local", "bin", "defenseclaw-hook-post")); err != nil {
 			return obs, err
 		}
 		if c.mode.config != "" {
@@ -935,6 +995,11 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 				if k == "X-Defenseclaw-Hook-Answer-Within-Ms" {
 					value = "<MS>"
 				}
+				// curl names its own version in the header it sends, and the
+				// computer the test runs on decides which curl that is.
+				if k == "User-Agent" {
+					value = hookGoldenCurlAgent(value)
+				}
 				// The body carries this case's folder, whose name varies in
 				// length: pin that the length is the body's.
 				if k == "Content-Length" {
@@ -956,6 +1021,25 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 		return obs, err
 	}
 	return obs, nil
+}
+
+// hookGoldenRecordedCurlAgent is the User-Agent of the curl the golden was
+// recorded with (curl 8.5.0).
+const hookGoldenRecordedCurlAgent = "curl/8.5.0"
+
+var hookGoldenCurlAgentPattern = regexp.MustCompile(`^curl/[0-9]+(\.[0-9]+)*$`)
+
+// hookGoldenCurlAgent maps the User-Agent of any curl release to the one the
+// golden was recorded with, so that the digest of a case does not depend on
+// the curl of the computer that runs it (a hosted runner image changes it:
+// every case of the golden differed on curl 8.18.0). A User-Agent that is not
+// a bare curl release stays as it is, so a hook that sends another program
+// name or a changed User-Agent still fails its case.
+func hookGoldenCurlAgent(value string) string {
+	if hookGoldenCurlAgentPattern.MatchString(value) {
+		return hookGoldenRecordedCurlAgent
+	}
+	return value
 }
 
 // hookGoldenOwnRejected returns an error when the gateway refused a request

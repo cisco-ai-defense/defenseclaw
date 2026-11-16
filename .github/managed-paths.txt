@@ -51,7 +51,6 @@ internal/*secure-client*
 # Cowork host delivery uses a shared configuration package.
 internal/config/cowork_vm_sensor*.go
 cmd/*enterprise*
-cmd/*managed*
 cmd/*standalone*
 
 # Secure Client gRPC contract.
@@ -121,13 +120,19 @@ internal/gateway/api.go
 internal/gateway/config_manager.go
 internal/gateway/api_sandbox_ingress.go
 internal/gateway/sandbox_daemon_runtime.go
+internal/gateway/sandbox_authority_routes.go
+internal/gateway/sandbox_availability.go
 internal/gateway/connector/hookexec/
+internal/gateway/connector/user_state_ownership.go
+internal/gateway/connector/user_state_purge.go
+internal/gateway/connector/user_state_purge_windows.go
 internal/hookpaths/hookpaths.go
 internal/hookpaths/action_client_overwritten.go
 internal/hookpaths/action_client_loop_copy.go
 internal/config/config.go
 internal/config/migrate_v9.go
 internal/openshell/doctor.go
+internal/openshell/version.go
 internal/openshell/manager/lifecycle.go
 internal/openshell/sandboxapi/types.go
 internal/openshell/sandboxcli/doctor.go
@@ -155,3 +160,7 @@ docs-site/
 policies/*enterprise-data.yaml
 # The manifest's own checker; its tests run through name references.
 scripts/check_managed_paths.py
+# Renders the managed command-availability page under docs-site/ from
+# internal/cli/testdata/managed_commands.json; the Go table behind that file
+# is Go code and already runs the enterprise lanes.
+scripts/gen_managed_commands_docs.py

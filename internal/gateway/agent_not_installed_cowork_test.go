@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // An account with Claude Desktop (whose bundled Claude Code engine runs
@@ -22,13 +23,8 @@ import (
 // GAP-0002).
 func TestClaudeDesktopEngineKeepsClaudeCodeInstalled(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	testenv.SetHome(t, home)
 	t.Setenv("PATH", t.TempDir())
-	if runtime.GOOS == "windows" {
-		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
-		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
-	}
 	dataDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"),
 		[]byte(`{"agents":{"claudecode":{"installed":false}}}`), 0o600); err != nil {

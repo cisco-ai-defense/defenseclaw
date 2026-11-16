@@ -4,31 +4,30 @@
 package hookpaths
 
 import (
-	"maps"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// A fixed for-word list gives each copy destination one concrete value.
+// A fixed for-word list gives each writer destination one concrete value.
 // This positive client fact lets a managed gateway judge a link it cannot
 // follow through ProtectHome. Earlier statements and other body calls must
-// leave the current directory, iterator and link unchanged.
+// leave the current directory, iterator and link unchanged. The scan itself
+// continues across earlier statements and other body calls: it judges the
+// loop by its word list and the writer names in its body alone.
 func actionClientLoopCopyDestinationProtected(command, cwd, home string) bool {
-	return loopCopyDestinationProtected(command, cwd, home, false)
+	return LoopCopyDestinationProtected(command, cwd, home)
 }
 
-// LoopCopyDestinationProtected checks fixed loop destinations of copy calls
-// in the gateway's own filesystem view. Move and install calls have different
-// destination-link behavior and are left to their existing readers.
+// LoopCopyDestinationProtected checks fixed loop destinations of the calls
+// named cp, mv, install, ln and tee in the gateway filesystem view. The
+// destination is judged by the program name alone, whatever its spelling,
+// options and source words hold (rel-1-0-6:GAP-0880, GAP-0885). Per call the
+// order is fixed: read the program name from the parsed word, then read the
+// destination operand and judge it; nothing else decides before that.
 func LoopCopyDestinationProtected(command, cwd, home string) bool {
-	return loopCopyDestinationProtected(command, cwd, home, true)
-}
-
-func loopCopyDestinationProtected(command, cwd, home string, copyOnly bool) bool {
 	if !filepath.IsAbs(cwd) || home == "" || !strings.Contains(command, "for") {
 		return false
 	}
@@ -36,381 +35,322 @@ func loopCopyDestinationProtected(command, cwd, home string, copyOnly bool) bool
 	if !ok {
 		return false
 	}
-	protected := newProtectedFiles(home)
-	ssh := filepath.Join(home, ".ssh")
-	assignments := actionValues{"HOME": home, "PWD": cwd}
+	scan := actionClientLoopScan{home: home, protected: newProtectedFiles(home), keyDir: filepath.Join(home, ".ssh")}
 	for _, top := range file.Stmts {
-		loop, ok := actionClientLoopCopyTop(top, cwd, home)
-		if !ok {
-			if name, value, assigned := actionClientLoopCopyAssignment(top, home); assigned {
-				assignments[name] = value
-			} else if !actionClientLoopCopyNoop(top, cwd, home) {
-				return false
-			}
-			continue
-		}
-		iter, ok := loop.Loop.(*syntax.WordIter)
-		if !ok || iter.Name == nil || len(iter.Items) == 0 {
-			return false
-		}
-		loopAssignments := maps.Clone(assignments)
-		delete(loopAssignments, iter.Name.Value)
-		var destination *syntax.Word
-		for _, stmt := range loop.Do {
-			call, ok := stmt.Cmd.(*syntax.CallExpr)
-			if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || len(call.Args) == 0 {
-				return false
-			}
-			if candidate, ok := actionClientLoopCopyDestination(call, loopAssignments, cwd, home, copyOnly); ok {
-				if destination != nil {
-					return false
-				}
-				destination = candidate
-			} else if !actionClientLoopCopyNoop(stmt, cwd, home) {
-				return false
-			}
-		}
-		if destination == nil {
-			return false
-		}
-		usesLoopName := false
-		syntax.Walk(destination, func(part syntax.Node) bool {
-			if param, ok := part.(*syntax.ParamExp); ok && param.Param != nil && param.Param.Value == iter.Name.Value {
-				usesLoopName = true
-			}
+		cwd = scan.statement(top, cwd)
+		if scan.found {
 			return true
-		})
-		if !usesLoopName {
-			return false
 		}
-		for _, item := range iter.Items {
-			value, fixed := StaticWord(item, home)
-			if !fixed || value == "" || strings.ContainsAny(value, "*?[]\x00\x1f") {
-				return false
-			}
-			loopValues := actionValues{"HOME": home, "PWD": cwd, iter.Name.Value: value}
-			if target, known := actionWordValue(destination, loopValues, cwd, home); known &&
-				actionClientProtectedPath(target, cwd, protected, ssh) {
-				return true
-			}
-		}
-		// A preceding copy loop does not replace a destination link. Keep
-		// checking later loops, and forget the iterator's final value.
-		delete(assignments, iter.Name.Value)
 	}
 	return false
 }
 
-func actionClientLoopCopyAssignment(stmt *syntax.Stmt, home string) (string, string, bool) {
-	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
-		return "", "", false
-	}
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) != 0 || len(call.Assigns) != 1 {
-		return "", "", false
-	}
-	assign := call.Assigns[0]
-	if assign.Name == nil || assign.Append || assign.Array != nil || assign.Index != nil ||
-		assign.Name.Value == "HOME" || assign.Name.Value == "PWD" {
-		return "", "", false
-	}
-	if assign.Value == nil {
-		return assign.Name.Value, "", true
-	}
-	value, fixed := StaticWord(assign.Value, home)
-	return assign.Name.Value, value, fixed && !strings.ContainsAny(value, "*?[]\x00\x1f")
+type actionClientLoopScan struct {
+	home      string
+	protected protectedFiles
+	keyDir    string
+	found     bool
 }
 
-func actionClientLoopCopyTop(stmt *syntax.Stmt, cwd, home string) (*syntax.ForClause, bool) {
-	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
+// statement judges every for loop in one statement and returns the directory
+// the next statement starts in. A loop is judged by its word list and the
+// writer names in its body alone: what runs before it or inside it (eval, an
+// assignment, a directory change the walk cannot read) never ends the scan,
+// because none of it is proved harmless (rel-1-0-6:GAP-0880). A directory
+// change that is not read leaves the last known directory in place.
+func (s *actionClientLoopScan) statement(stmt *syntax.Stmt, cwd string) string {
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		if cmd.Op == syntax.AndStmt {
+			next := s.statement(cmd.X, cwd)
+			if s.found {
+				return next
+			}
+			return s.statement(cmd.Y, next)
+		}
+	case *syntax.CallExpr:
+		if dir, ok := actionClientLoopCopyChdir(cmd, cwd, s.home); ok {
+			return dir
+		}
+	}
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		if loop, ok := node.(*syntax.ForClause); ok && s.loop(loop, cwd) {
+			s.found = true
+		}
+		return !s.found
+	})
+	return cwd
+}
+
+// loop reports whether a writer in the loop body has a destination that names
+// the loop variable and reaches a protected path for one of its fixed values.
+func (s *actionClientLoopScan) loop(loop *syntax.ForClause, cwd string) bool {
+	iter, ok := loop.Loop.(*syntax.WordIter)
+	if !ok || iter.Name == nil || len(iter.Items) == 0 {
+		return false
+	}
+	var named []*syntax.Word
+	for _, stmt := range loop.Do {
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			if call, ok := node.(*syntax.CallExpr); ok {
+				for _, destination := range actionClientLoopWriterDestinations(call, s.home) {
+					if actionClientWordNamesVariable(destination, iter.Name.Value) {
+						named = append(named, destination)
+					}
+				}
+			}
+			return true
+		})
+	}
+	// A destination that does not name the iterator is a direct name that the
+	// other readers judge.
+	for _, item := range iter.Items {
+		value, fixed := StaticWord(item, s.home)
+		if !fixed || value == "" || strings.ContainsAny(value, "*?[]\x00\x1f") {
+			continue
+		}
+		loopValues := actionValues{"HOME": s.home, "PWD": cwd, iter.Name.Value: value}
+		for _, destination := range named {
+			if target, known := actionWordValue(destination, loopValues, cwd, s.home); known &&
+				actionClientProtectedPath(target, cwd, s.protected, s.keyDir) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func actionClientWordNamesVariable(word *syntax.Word, name string) bool {
+	named := false
+	syntax.Walk(word, func(part syntax.Node) bool {
+		if param, ok := part.(*syntax.ParamExp); ok && param.Param != nil && param.Param.Value == name {
+			named = true
+		}
+		return !named
+	})
+	return named
+}
+
+// actionClientLoopCopyChdir reads a plain cd to one fixed directory.
+func actionClientLoopCopyChdir(call *syntax.CallExpr, cwd, home string) (string, bool) {
+	if len(call.Assigns) != 0 || len(call.Args) != 2 {
+		return "", false
+	}
+	program, args, fixed := actionClientLoopCallProgram(call, home)
+	if !fixed || program != "cd" || len(args) != 2 {
+		return "", false
+	}
+	value, fixed := StaticWord(args[1], home)
+	if !fixed || value == "" || strings.HasPrefix(value, "-") {
+		return "", false
+	}
+	return OperandPath(value, cwd), true
+}
+
+// actionClientLoopCallProgram reads the program a call runs from its parsed
+// words, as Bash reads them (quotes and backslashes removed), after any
+// command or builtin prefix. It returns the name and the words from the
+// program on.
+func actionClientLoopCallProgram(call *syntax.CallExpr, home string) (string, []*syntax.Word, bool) {
+	args := call.Args
+	for len(args) != 0 {
+		program, fixed := staticProgramWord(args[0], home)
+		if !fixed {
+			return "", nil, false
+		}
+		if program != "command" && program != "builtin" {
+			return program, args, true
+		}
+		args = args[1:]
+		for len(args) != 0 {
+			text, whole := wordLiteralPrefix(args[0])
+			if !whole || text != "-p" && text != "--" {
+				break
+			}
+			args = args[1:]
+			if text == "--" {
+				break
+			}
+		}
+	}
+	return "", nil, false
+}
+
+// actionClientLoopWriterDestinations returns the destination operands of a
+// call named cp, mv, install, ln or tee. The destination is read first and
+// alone: no option and no source word decides whether it is judged. A
+// target-directory option names the destination; otherwise it is the last
+// operand (every operand of tee).
+func actionClientLoopWriterDestinations(call *syntax.CallExpr, home string) []*syntax.Word {
+	program, words, fixed := actionClientLoopCallProgram(call, home)
+	if !fixed || len(words) < 2 {
+		return nil
+	}
+	base := programBase(program)
+	switch base {
+	case "cp", "gcp", "mv", "install", "ln", "tee":
+	default:
+		return nil
+	}
+	args := words[1:]
+	var operands, directories []*syntax.Word
+	for i := 0; i < len(args); i++ {
+		text, whole := wordLiteralPrefix(args[i])
+		if text == "--" && whole {
+			operands = append(operands, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(text, "-") || len(text) == 1 && whole {
+			operands = append(operands, args[i])
+			continue
+		}
+		if base == "tee" {
+			continue
+		}
+		directory, next := actionClientTargetDirectoryOption(args, i, text, whole)
+		if directory != nil {
+			directories = append(directories, directory)
+		}
+		if next {
+			i++
+		}
+	}
+	switch {
+	case len(directories) != 0:
+		return directories
+	case base == "tee":
+		return operands
+	case len(operands) != 0:
+		return operands[len(operands)-1:]
+	}
+	return nil
+}
+
+// actionClientTargetDirectoryOption reads the option word args[i] of cp, mv,
+// install or ln, given the literal text its word starts with. It returns the
+// target directory the word names, and whether the option takes the next
+// word as its argument.
+func actionClientTargetDirectoryOption(args []*syntax.Word, i int, text string, whole bool) (*syntax.Word, bool) {
+	if strings.HasPrefix(text, "--") {
+		name, _, attached := strings.Cut(text[2:], "=")
+		if name == "" || !strings.HasPrefix("target-directory", name) {
+			return nil, false
+		}
+		if attached {
+			return wordTrimPrefix(args[i], 2+len(name)+1), false
+		}
+		if whole && i+1 < len(args) {
+			return args[i+1], true
+		}
 		return nil, false
 	}
-	if loop, ok := stmt.Cmd.(*syntax.ForClause); ok {
-		return loop, true
-	}
-	if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt &&
-		actionClientLoopCopyNoop(pair.X, cwd, home) {
-		return actionClientLoopCopyTop(pair.Y, cwd, home)
+	for k := 1; k < len(text); k++ {
+		switch text[k] {
+		case 't':
+			if k+1 < len(text) || !whole {
+				return wordTrimPrefix(args[i], k+1), false
+			}
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return nil, false
+		case 'S', 'm', 'o', 'g':
+			// The rest of the word, or the next word, is this option's argument.
+			return nil, k+1 == len(text) && whole
+		}
 	}
 	return nil, false
 }
 
-func actionClientLoopCopyNoop(stmt *syntax.Stmt, cwd, home string) bool {
-	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
-		return false
-	}
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
-		return false
-	}
-	program, fixed := staticProgramWord(call.Args[0], home)
-	if !fixed {
-		return false
-	}
-	switch program {
-	case "true", ":":
-		return len(call.Args) == 1
-	case "cd":
-		if len(call.Args) != 2 {
-			return false
-		}
-		value, fixed := StaticWord(call.Args[1], home)
-		return fixed && samePathName(OperandPath(value, cwd), cwd)
-	case "echo":
-		for _, arg := range call.Args[1:] {
-			if _, fixed := StaticWord(arg, home); !fixed {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-func actionClientLoopCopyDestination(call *syntax.CallExpr, assignments actionValues, cwd, home string, copyOnly bool) (*syntax.Word, bool) {
-	if len(call.Args) < 3 {
-		return nil, false
-	}
-	program, fixed := staticProgramWord(call.Args[0], home)
-	if !fixed {
-		return nil, false
-	}
-	base := programBase(program)
-	if base != "cp" && base != "gcp" && base != "mv" && base != "install" {
-		return nil, false
-	}
-	if copyOnly && base != "cp" && base != "gcp" {
-		return nil, false
-	}
-	if !copyOnly && len(assignments) > 2 && base != "cp" && base != "gcp" {
-		// Earlier assignments are only tracked for copy sources. Keep move
-		// and install on their existing entry semantics.
-		return nil, false
-	}
-	for i := 1; i < len(call.Args)-2; i++ {
-		option, fixed := StaticWord(call.Args[i], home)
-		if !fixed {
-			return nil, false
-		}
-		if base == "install" && option == "-m" && i+1 < len(call.Args)-2 {
-			i++
-			mode, fixed := StaticWord(call.Args[i], home)
-			if !fixed || mode == "" || strings.Trim(mode, "01234567") != "" {
-				return nil, false
-			}
-			continue
-		}
-		switch option {
-		case "--":
-			if i != len(call.Args)-3 {
-				return nil, false
-			}
-		case "-f", "-i", "--force", "--interactive":
-			if base == "install" {
-				return nil, false
-			}
-		default:
-			return nil, false
-		}
-	}
-	sourceWord := call.Args[len(call.Args)-2]
-	source, fixed := StaticWord(sourceWord, home)
-	endOfOptions := false
-	if len(call.Args) > 3 {
-		option, fixed := StaticWord(call.Args[len(call.Args)-3], home)
-		endOfOptions = fixed && option == "--"
-	}
-	if !fixed {
-		if base != "cp" && base != "gcp" || len(sourceWord.Parts) != 1 {
-			return nil, false
-		}
-		if _, quoted := sourceWord.Parts[0].(*syntax.DblQuoted); !quoted {
-			return nil, false
-		}
-		if !actionClientLoopCopySourceVariableMayChange(sourceWord) && !actionClientLoopCopySourceStartupUnknown() {
-			value, known := actionWordValue(sourceWord, assignments, cwd, home)
-			if !known && actionClientLoopCopyKnownEmptySource(sourceWord, assignments) {
-				value, known = "", true
-			}
-			if known && (value == "" || strings.HasPrefix(value, "-") && !endOfOptions) {
-				return nil, false
-			}
-		}
-		return call.Args[len(call.Args)-1], true
-	}
-	if source == "" || strings.HasPrefix(source, "-") && !endOfOptions || strings.ContainsAny(source, "*?[]\x00\x1f") {
-		return nil, false
-	}
-	return call.Args[len(call.Args)-1], true
-}
-
-// Only a quoted expansion of an assigned empty scalar can establish a
-// source that cp will not open. Keep this narrower than the general word
-// evaluator: other expansion operators can supply a source or run a command.
-func actionClientLoopCopyKnownEmptySource(word *syntax.Word, assignments actionValues) bool {
-	if len(word.Parts) != 1 {
-		return false
-	}
-	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
-	if !ok || len(quoted.Parts) != 1 {
-		return false
-	}
-	param, ok := quoted.Parts[0].(*syntax.ParamExp)
-	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
-		param.Index != nil || param.Repl != nil || param.NestedParam != nil || param.Flags != nil ||
-		len(param.Modifiers) != 0 {
-		return false
-	}
-	value, assigned := assignments[param.Param.Value]
-	if !assigned || value != "" {
-		return false
-	}
-	if param.Slice != nil {
-		if param.Exp != nil {
-			return false
-		}
-		if !actionClientPlainSliceIndex(param.Slice.Offset) {
-			return false
-		}
-		return param.Slice.Length == nil || actionClientPlainSliceIndex(param.Slice.Length)
-	}
-	if param.Exp == nil {
-		return true
-	}
-	switch param.Exp.Op {
-	case syntax.AlternateUnsetOrNull, syntax.ErrorUnset, syntax.DefaultUnset:
-		return true
-	case syntax.AlternateUnset:
-		return actionClientPlainEmptyWord(param.Exp.Word)
-	case syntax.RemSmallPrefix, syntax.RemLargePrefix, syntax.RemSmallSuffix, syntax.RemLargeSuffix:
-		return actionClientPlainPatternWord(param.Exp.Word)
-	default:
-		return false
-	}
-}
-
-func actionClientPlainSliceIndex(expr syntax.ArithmExpr) bool {
-	if expr == nil {
-		return false
-	}
-	var printed strings.Builder
-	if syntax.NewPrinter().Print(&printed, expr) != nil {
-		return false
-	}
-	value := printed.String()
-	if value == "" || strings.Trim(value, "0123456789") != "" {
-		return false
-	}
-	_, err := strconv.ParseUint(value, 10, 32)
-	return err == nil
-}
-
-func actionClientPlainEmptyWord(word *syntax.Word) bool {
-	if word == nil || len(word.Parts) == 0 {
-		return true
-	}
-	if len(word.Parts) != 1 {
-		return false
-	}
-	switch part := word.Parts[0].(type) {
-	case *syntax.Lit:
-		return part.Value == ""
-	case *syntax.SglQuoted:
-		return part.Value == ""
-	case *syntax.DblQuoted:
-		for _, inner := range part.Parts {
-			literal, ok := inner.(*syntax.Lit)
-			if !ok || literal.Value != "" {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
-}
-
-func actionClientPlainPatternWord(word *syntax.Word) bool {
-	if word == nil {
-		return true
-	}
-	for _, part := range word.Parts {
-		switch part := part.(type) {
-		case *syntax.Lit, *syntax.SglQuoted:
-		case *syntax.DblQuoted:
-			for _, inner := range part.Parts {
-				if _, ok := inner.(*syntax.Lit); !ok {
+// wordLiteralPrefix is the text of the literal parts a word starts with, and
+// whether the whole word is literal.
+func wordLiteralPrefix(word *syntax.Word) (string, bool) {
+	var out strings.Builder
+	var walk func([]syntax.WordPart) bool
+	walk = func(parts []syntax.WordPart) bool {
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				out.WriteString(unescapedLiteral(part.Value))
+			case *syntax.SglQuoted:
+				out.WriteString(part.Value)
+			case *syntax.DblQuoted:
+				if !walk(part.Parts) {
 					return false
 				}
+			default:
+				return false
 			}
-		default:
-			return false
 		}
+		return true
 	}
-	return true
+	whole := walk(word.Parts)
+	return out.String(), whole
 }
 
-// A plain copy in a fixed loop with one assigned empty source cannot open a
-// source file. The literal operand reader uses this narrow proof before it
-// lists the destination; other statements keep their usual write readings.
-func actionClientLoopCopyNoEffectCalls(file *syntax.File, cwd, home string) map[*syntax.CallExpr]bool {
-	if file == nil || !filepath.IsAbs(cwd) || home == "" || actionClientLoopCopySourceStartupUnknown() {
-		return nil
+func unescapedLiteral(raw string) string {
+	if !strings.Contains(raw, `\`) {
+		return raw
 	}
-	assignments := actionValues{"HOME": home, "PWD": cwd}
-	noEffect := map[*syntax.CallExpr]bool{}
-	for _, top := range file.Stmts {
-		loop, ok := actionClientLoopCopyTop(top, cwd, home)
-		if !ok {
-			if name, value, assigned := actionClientLoopCopyAssignment(top, home); assigned {
-				assignments[name] = value
-			} else if !actionClientLoopCopyNoop(top, cwd, home) {
-				break
-			}
-			continue
+	var out strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			i++
 		}
-		iter, ok := loop.Loop.(*syntax.WordIter)
-		if !ok || iter.Name == nil || len(iter.Items) == 0 || len(loop.Do) != 1 {
-			break
-		}
-		stmt := loop.Do[0]
-		call, ok := stmt.Cmd.(*syntax.CallExpr)
-		if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 ||
-			len(call.Assigns) != 0 || len(call.Args) != 3 {
-			break
-		}
-		program, fixed := staticProgramWord(call.Args[0], home)
-		if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" {
-			break
-		}
-		loopAssignments := maps.Clone(assignments)
-		delete(loopAssignments, iter.Name.Value)
-		if actionClientLoopCopyKnownEmptySource(call.Args[1], loopAssignments) &&
-			!actionClientLoopCopySourceVariableMayChange(call.Args[1]) {
-			noEffect[call] = true
-		}
-		break
+		out.WriteByte(raw[i])
 	}
-	return noEffect
+	return out.String()
 }
 
-func actionClientLoopCopySourceVariableMayChange(word *syntax.Word) bool {
-	mayChange := false
-	syntax.Walk(word, func(node syntax.Node) bool {
-		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil {
-			// These values can be refreshed by Bash after a plain assignment.
-			// Other assigned shell variables keep their known empty value
-			// throughout the admitted straight-line loop.
-			switch param.Param.Value {
-			case "_", "BASHPID", "BASH_ARGC", "BASH_COMMAND", "BASH_SUBSHELL", "COLUMNS", "DIRSTACK",
-				"EPOCHREALTIME", "EPOCHSECONDS", "EUID", "GROUPS", "HISTCMD", "LINENO", "LINES",
-				"OPTIND", "PIPESTATUS", "PPID", "RANDOM", "SECONDS", "SHELLOPTS", "SRANDOM", "UID":
-				mayChange = true
+// wordTrimPrefix is the word without its first n literal characters.
+func wordTrimPrefix(word *syntax.Word, n int) *syntax.Word {
+	var trim func([]syntax.WordPart) []syntax.WordPart
+	trim = func(parts []syntax.WordPart) []syntax.WordPart {
+		var out []syntax.WordPart
+		for i, part := range parts {
+			if n == 0 {
+				return append(out, parts[i:]...)
+			}
+			switch part := part.(type) {
+			case *syntax.Lit:
+				kept := *part
+				kept.Value = dropLiteralCharacters(part.Value, &n)
+				if kept.Value != "" {
+					out = append(out, &kept)
+				}
+			case *syntax.SglQuoted:
+				kept := *part
+				kept.Value = dropLiteralCharacters(part.Value, &n)
+				out = append(out, &kept)
+			case *syntax.DblQuoted:
+				kept := *part
+				kept.Parts = trim(part.Parts)
+				out = append(out, &kept)
+			default:
+				n = 0
+				out = append(out, part)
 			}
 		}
-		return !mayChange
-	})
-	return mayChange
+		return out
+	}
+	trimmed := *word
+	trimmed.Parts = trim(word.Parts)
+	return &trimmed
+}
+
+// dropLiteralCharacters removes up to *n characters from the start of raw,
+// a backslash and the character it escapes counting as one, and lowers *n by
+// the number it removed.
+func dropLiteralCharacters(raw string, n *int) string {
+	i := 0
+	for i < len(raw) && *n > 0 {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			i++
+		}
+		i++
+		*n--
+	}
+	return raw[i:]
 }
 
 func actionClientLoopCopySourceStartupUnknown() bool {

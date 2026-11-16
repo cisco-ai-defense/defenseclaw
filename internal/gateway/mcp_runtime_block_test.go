@@ -171,12 +171,18 @@ func TestMCPServerRuntimeBlock_NonMCPAndUnblocked(t *testing.T) {
 	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "claudecode", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.SetSourcePathForConnector("mcp", "wiki-rogue", "claudecode", watcher.MCPEventPath(config.MCPServerEntry{Name: "wiki-rogue", Connector: "claudecode"})); err != nil {
+		t.Fatal(err)
+	}
 	if deny, _, reason := mcpServerRuntimeBlock(pe, "mcp__wiki-rogue__count_words", "claudecode", ""); !deny ||
 		!strings.Contains(reason, "install admission rejected it (scanner failure (fail-closed): loopback)") {
 		t.Errorf("disabled mcp server: deny=%v reason=%q, want the admission verdict named", deny, reason)
 	}
 	// Codex passes the configured name its hook resolved (GAP-0939).
 	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "codex", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetSourcePathForConnector("mcp", "wiki-rogue", "codex", watcher.MCPEventPath(config.MCPServerEntry{Name: "wiki-rogue", Connector: "codex"})); err != nil {
 		t.Fatal(err)
 	}
 	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__wiki_rogue__count_words", "codex", "wiki-rogue"); !deny || server != "wiki-rogue" {
@@ -280,8 +286,20 @@ func TestInspectToolEnrolledAccountMCPVerdictIsThatAccountsOnly(t *testing.T) {
 	u1 := config.MCPServerEntry{Name: "gb05-benign", Connector: "claudecode",
 		Home: filepath.Join(base, "dcw-std1"), Project: filepath.Join(base, "dcw-std1", "proj")}
 	u2Home := filepath.Join(base, "dcw-std2")
-	if err := store.SetActionFieldForConnector("mcp", watcher.MCPJournalName(u1), "claudecode", "runtime", "disable",
+	if err := store.SetRuntimeDisableForConnector(watcher.MCPJournalType(u1), watcher.MCPJournalName(u1), "claudecode", watcher.MCPEventPath(u1),
 		"scanner failure (fail-closed): dcw-std1 is not signed in"); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := json.Marshal(map[string]string{"name": u1.Name, "connector": u1.Connector,
+		"home": u1.Home, "project": u1.Project})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes, err := json.Marshal(map[string]string{"mcp.servers." + u1.Name: "hash", "mcp.snapshot.identity.v1": string(identity)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTargetSnapshot("mcp", watcher.MCPEventPath(u1), "hash", "{}", string(hashes), "[]", "", "fingerprint"); err != nil {
 		t.Fatal(err)
 	}
 	call := func(home, cwd string) *ToolInspectVerdict {

@@ -597,7 +597,10 @@ def judge_list(app: AppContext) -> None:
     click.echo(f"  {ux.bold('guardrail.judge.hook_timeout:')}    {ux.accent(timeout_label)}")
     max_parallel = int(getattr(gc.judge, "max_parallel", 0) or 0)
     parallel_label = (
-        f"{max_parallel} (tool-call judging first)" if max_parallel else "no limit"
+        f"{max_parallel} (tool-call judging first)"
+        if max_parallel
+        else "no limit" if getattr(gc.judge, "_max_parallel_explicit_zero", False)
+        else "automatic (1 for local/private endpoints; no limit for public)"
     )
     click.echo(f"  {ux.bold('guardrail.judge.max_parallel:')}    {ux.accent(parallel_label)}")
     click.echo()

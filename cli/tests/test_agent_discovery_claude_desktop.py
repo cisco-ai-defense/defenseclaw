@@ -50,6 +50,14 @@ def host(monkeypatch, tmp_path):
 
     def pick(platform: str) -> dict[str, Path]:
         monkeypatch.setattr(ad, "_is_windows_host", lambda: platform == "windows")
+        if platform == "windows" and os.name != "nt":
+            # The change time Windows gives is the one this system keeps (a
+            # Windows host reads its own).
+            monkeypatch.setattr(
+                ad,
+                "_windows_change_time",
+                lambda path: os.lstat(path).st_ctime_ns // 100 + ad._WINDOWS_TICKS_AT_UNIX_EPOCH,
+            )
         monkeypatch.setattr(ad, "_is_macos_host", lambda: platform == "darwin")
         # Windows file-version metadata of the fake claude.exe: the version of
         # the folder it sits in, unless a test says otherwise.

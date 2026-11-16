@@ -55,6 +55,17 @@ func runAsTarget(target TargetCredentials, fn func() error) error {
 	return withWindowsEnterpriseTargetImpersonation(sid, home, fn)
 }
 
+// RunAsTargetWithS4U lets the standalone guardian update an enrolled
+// account's own OpenCode configuration while the account is signed out,
+// when Windows can provide an S4U token. It still pins the SID and home.
+func RunAsTargetWithS4U(target TargetCredentials, fn func() error) error {
+	home, sid, err := validateWindowsEnterpriseHome(target.UserHome, strings.TrimSpace(target.SID))
+	if err != nil {
+		return err
+	}
+	return withWindowsEnterpriseTargetTokenImpersonation(sid, home, resolveWindowsEnterpriseAnyTargetToken, fn)
+}
+
 func chmodOwnedPath(path string, mode os.FileMode) error {
 	return errEnterpriseHooksUnsupportedWindows
 }

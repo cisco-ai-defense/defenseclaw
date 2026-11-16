@@ -62,6 +62,10 @@ func everyConnectorGuardedError(cfg *config.Config, snap gateway.HealthSnapshot)
 			causes = append(causes, fmt.Sprintf("%s: %s", name, reason))
 			continue
 		}
+		if cause := guardrailNotStartedCause(snap.Guardrail.Details, name); cause != "" {
+			causes = append(causes, fmt.Sprintf("%s: its setup failed: %s; then run: defenseclaw setup %s", name, cause, name))
+			continue
+		}
 		causes = append(causes, fmt.Sprintf("%s: its setup failed (see gateway.log), then run: defenseclaw setup %s", name, name))
 	}
 	return withExitCode(fmt.Errorf(

@@ -53,7 +53,7 @@ var Codex = register(&Spec{
 	verification:   Verification{Status: VerifiedLive, Note: "OpenShell 0.1.1 harness spike (hooks fired, deny honoured, Bedrock Mantle gpt-oss-20b) and the image hook-fire probe (allow, BLOCKME, hostile settings)"},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/codex", "--version"},
-		VersionRE:   regexp.MustCompile(`^codex-cli ([0-9]+\.[0-9]+\.[0-9]+)`),
+		VersionRE:   regexp.MustCompile(`^codex-cli v?([0-9]+\.[0-9]+\.[0-9]+)`),
 		// codex is a node wrapper that spawns the platform-native binary;
 		// that binary makes every model request.
 		NetworkBinaries: `find ` + InstallRootBase + `/codex -type f -path '*/vendor/*/bin/codex' -exec readlink -f {} \; | sort -u`,
@@ -68,7 +68,7 @@ var Codex = register(&Spec{
 			Comment: "Replace the base image's Codex with the pinned " + version + " in a root-owned prefix (registry integrity and native sha256 checked)",
 			Run: run + "; " +
 				`got="$(/usr/local/bin/codex --version 2>/dev/null | awk 'NR==1{print $NF}')"; ` +
-				`[ "$got" = ` + shellQuote(version) + ` ] || { echo "Codex '$got' is not the pinned ` + version + `" >&2; exit 1; }`,
+				pinVersionCheck("Codex", version),
 		}}, nil
 	},
 	launcher: codexLauncher,

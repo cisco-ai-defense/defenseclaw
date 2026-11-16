@@ -22,13 +22,14 @@ const (
 	managedHookOversizedReason              = "stdin body exceeded cap"
 	managedHookRecordEventMaxBytes          = 128
 	managedHookRecordReasonMaxBytes         = 512
+	managedHookRecordIDMaxBytes             = 128
 	managedHookDecisionRecordDefaultSource  = "DefenseClawGateway"
 	managedHookDecisionRecordComponentValue = "hook"
 )
 
 // managedHookDecisionRecorder persists one formatted managed hook decision
 // line under source. It is a seam for tests; the platform default writes the
-// Windows Application event log and is a no-op elsewhere.
+// Windows Application event log, and the local syslog elsewhere.
 var managedHookDecisionRecorder = writeManagedHookDecisionRecord
 
 // recordManagedHookDecision leaves a durable record of every fail-open and
@@ -44,6 +45,9 @@ func recordManagedHookDecision(opts Options, sp spec, reason, category, failMode
 	if blocked {
 		decision = "block"
 	}
+	// The call's own ids, so the record joins the audit row of the same tool
+	// call: a managed account may have no hook-failures.jsonl to hold them.
+	sessionID, _, toolID := hookFailureCorrelation(opts.failurePayload)
 	fields := map[string]string{
 		"component": managedHookDecisionRecordComponentValue,
 		"connector": sp.connector,
@@ -56,10 +60,16 @@ func recordManagedHookDecision(opts Options, sp spec, reason, category, failMode
 		"fail_mode": failMode,
 		"decision":  decision,
 	}
+	if sessionID != "" {
+		fields["session_id"] = boundedManagedRecordField(sessionID, managedHookRecordIDMaxBytes)
+	}
+	if toolID != "" {
+		fields["tool_id"] = boundedManagedRecordField(toolID, managedHookRecordIDMaxBytes)
+	}
 	// Written straight to the durable recorder, never through the standard
 	// logger: agents surface hook stderr, and Claude Code turns it into the
 	// block message shown to the user and the model.
-	managedHookDecisionRecorder(
+	opts.failureLog.recorder()(
 		managedHookDecisionRecordSource(opts.ManagedGatewayServiceName),
 		marker,
 		managed.FormatResilienceEvent(marker, fields),

@@ -80,6 +80,9 @@ type ToolInspectRequest struct {
 	Direction       string          `json:"direction,omitempty"`
 	SessionID       string          `json:"session_id,omitempty"`
 	ApprovalSurface string          `json:"approval_surface,omitempty"`
+	// ToolCallID is the OpenClaw id of the call, sent by the OpenClaw plugin so
+	// an enforced block can be tied to the result message of that call (GAP-0644).
+	ToolCallID string `json:"tool_call_id,omitempty"`
 	// Connector is an optional assertion. The authenticated server route
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
@@ -980,6 +983,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	req *ToolInspectRequest,
 	action trustedActionRequest,
 ) *ToolInspectVerdict {
+	action.StrictPolicy = a.strictPolicyTierForHook(ctx, action.Connector)
+	action.ManagedInstall = a.managedInstallForHook(ctx)
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip static block/allow + MCP-server block, connector regex packs,
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
@@ -1060,7 +1065,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if allowed {
 		cfg := a.decisionConfig(ctx)
 		if (cfg == nil || !cfg.SecureClientIntegration()) &&
-			len(provedHighWriteFindings(ctx, action, nil)) != 0 {
+			(len(provedHighWriteFindings(ctx, action, nil)) != 0 ||
+				len(agentHookConfigFindings(ctx, action, nil)) != 0) {
 			allowed = false
 		}
 	}
@@ -1108,6 +1114,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	}
 	ruleFindings := inspectDispatchTrustedAction(ctx, action)
 	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
+	// A Secure Client install keeps its own tool policy (GAP-0048 adds no
+	// finding there).
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+		ruleFindings = agentHookConfigFindings(ctx, action, ruleFindings)
+	}
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()
@@ -1992,20 +2003,28 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
 	}
 
-	// A bounded hook fails closed when its answer is late (GAP-2625). The
-	// judge runs apart from the answer and records its verdict (the judge
-	// event) when it arrives. In observe mode the answer does not wait for
-	// it: nothing is enforced, and a benign call must never be denied for a
-	// slow judge. In action mode the answer waits for the judge only up to
-	// hookJudgeAnswerWindow, then keeps the rule/AID verdict: a rule block
-	// stays a block, and a judge that is late cannot make one.
+	// A bounded action hook cancels the model request when its answer
+	// window closes. An observe hook returns immediately while its judge
+	// runs until that same window; it still records an answer in time.
+	observe := sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action"
+	var callCtx context.Context
+	var cancel context.CancelFunc
+	if observe {
+		callCtx, cancel = context.WithDeadline(context.WithoutCancel(ctx), answerEnd)
+	} else {
+		callCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
 	done := make(chan *ScanVerdict, 1)
 	go func() {
 		defer func() { <-a.hookJudgeSem }()
-		done <- call(context.WithoutCancel(ctx))
+		if observe {
+			defer cancel()
+		}
+		done <- call(callCtx)
 	}()
-	if sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action" {
-		fmt.Fprintf(os.Stderr, "[inspect] hook judge runs after the answer (observe) connector=%s direction=%s; its verdict is recorded when it arrives\n",
+	if observe {
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge does not hold the answer (observe) connector=%s direction=%s\n",
 			connector, strategyDirection)
 		return nil
 	}
@@ -2026,7 +2045,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	case <-wait.C:
 	case <-ctx.Done():
 	}
-	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict, the judge verdict is recorded when it arrives\n",
+	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict\n",
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
 	return nil
@@ -2191,6 +2210,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
+	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
 
 	scanTimeout := inspectScanTimeout
 	if a.inspectToolScanTimeout > 0 {
@@ -2209,23 +2229,33 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		v *ToolInspectVerdict
 	}
 	ch := make(chan verdictResult, 1)
-	workerDone := a.inspectToolWorkerDone
-	go func() {
-		if workerDone != nil {
-			defer workerDone()
-		}
-		var v *ToolInspectVerdict
-		if strings.EqualFold(req.Tool, "message") {
-			v = a.inspectMessageContent(workerCtx, &req)
-		} else {
-			// Pass the 200ms-capped ctx so the tool-call judge lane's
-			// deadline guard short-circuits on this generic endpoint
-			// (mirroring the message lane); native hook callers go
-			// through inspectToolPolicy with a deadline-free context.
-			v = a.inspectToolPolicyCtx(workerCtx, &req)
-		}
-		ch <- verdictResult{v}
-	}()
+	// The strict install-window decision is independent of the scanner.
+	// Decide it on the request goroutine so a saturated scanner cannot turn
+	// this required refusal into a scan timeout.
+	installVerdict := &ToolInspectVerdict{}
+	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, installVerdict)
+	installBlocked := installVerdict.Action == "block"
+	if installBlocked {
+		ch <- verdictResult{installVerdict}
+	} else {
+		workerDone := a.inspectToolWorkerDone
+		go func() {
+			if workerDone != nil {
+				defer workerDone()
+			}
+			var v *ToolInspectVerdict
+			if strings.EqualFold(req.Tool, "message") {
+				v = a.inspectMessageContent(workerCtx, &req)
+			} else {
+				// Pass the 200ms-capped ctx so the tool-call judge lane's
+				// deadline guard short-circuits on this generic endpoint
+				// (mirroring the message lane); native hook callers go
+				// through inspectToolPolicy with a deadline-free context.
+				v = a.inspectToolPolicyCtx(workerCtx, &req)
+			}
+			ch <- verdictResult{v}
+		}()
+	}
 
 	var verdict *ToolInspectVerdict
 	select {
@@ -2245,14 +2275,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.BoundedPrefixReview {
-		verdict.markOversizeUninspected()
+	if !installBlocked {
+		if req.BoundedPrefixReview {
+			verdict.markOversizeUninspected()
+		}
+		verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
+		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
+		// A lock that appeared during the scan still decides this request.
+		a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 	}
-	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
-	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
-	// The strict tier refuses a call while an install or upgrade holds this
-	// account's data directory, as on the hook route (GAP-1438).
-	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 
 	// Count the check against the authenticated connector so /health (and the
 	// TUI's "0 requests ... verify your agent is dialing the gateway port"
@@ -2361,7 +2392,42 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// A block, confirm or alert row carries the verdict's severity.
 		toolEvent.Severity = verdict.Severity
 	}
-	_ = a.logger.LogEventCtx(r.Context(), toolEvent)
+	// A server built without an audit logger (the deterministic benchmark
+	// harness and unit servers; a running gateway always has one) has no
+	// audit record to lose, so its verdict stands: the hook routes skip
+	// errHookAuditNotConfigured and a proxy without an observability
+	// runtime reports no evaluation-log error, for the same reason.
+	var auditErr error
+	if a.logger != nil {
+		auditErr = a.logger.LogEventCtx(r.Context(), toolEvent)
+	}
+	if auditErr != nil {
+		// The tier rule of the hook routes (GAP-0593): strict, managed and
+		// sandbox calls fail closed; a default or permissive allow stays
+		// allowed with the degraded-audit warning.
+		denied := a.inspectAuditFailureVerdict(r.Context(), serverConnector, &req, verdict)
+		if denied && a.recordsConnectorHealth(r.Context()) {
+			a.health.RecordToolBlockFor(serverConnector)
+		}
+		fmt.Fprintf(os.Stderr, "[inspect] inspect audit persistence failed tool=%q action=%s denied_for_audit=%t: %v\n",
+			req.Tool, verdict.Action, denied, auditErr)
+	}
+
+	// The proxy shows an enforced OpenClaw block on the reply that follows it,
+	// whichever tool made the call and whichever step made the block, so this
+	// is decided on the final verdict, after a failed audit write may have
+	// turned an allow into a block (GAP-0644). Secure Client answers stay as
+	// they were.
+	if strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
+		openClawNoticeAllowed(a.decisionConfig(r.Context())) {
+		if session := strings.TrimSpace(req.SessionID); verdict.Action == "block" && verdict.Mode == "action" {
+			rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, session, evalCtx.RuleIDs, verdict.Reason)
+		} else {
+			// Not a block: the call id is noted so that a block under the
+			// same id is known to be ambiguous.
+			observeOpenClawToolCall(req.ToolCallID)
+		}
+	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 
@@ -2454,6 +2520,11 @@ func (a *APIServer) inspectAuditEvent(r *http.Request, route, action, target, de
 		structured["connector"] = connectorName
 	}
 	auditCallerIdentity(ctx).addTo(structured)
+	if identityFactsEnabled.Load() {
+		if id, verified := agentIdentityFromContext(ctx); verified {
+			structured["defenseclaw.agent.identity.id"] = id
+		}
+	}
 	return audit.Event{
 		Action:     action,
 		Target:     target,

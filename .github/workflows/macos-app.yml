@@ -123,12 +123,10 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - name: Test connector onboarding
-        run: macos/DefenseClawMac/script/test_connector_onboarding.sh
-      - name: Test installer download verification
-        run: macos/DefenseClawMac/script/test_update_checker_verification.sh
-      - name: Test main window lifecycle contract
-        run: macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+      # Every script behind `make macos-app-test` (the build below is the
+      # release build, so the target itself is not repeated here).
+      - name: Run macOS app test scripts
+        run: make macos-app-test-scripts
       - name: Build ad-hoc release artifacts
         run: |
           set -euo pipefail

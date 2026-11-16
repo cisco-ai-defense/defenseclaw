@@ -34,10 +34,9 @@ def _text_blocks(text: str) -> list[str]:
     return re.findall(r"```text\n(.*?)```", text, flags=re.S)
 
 
-# GAP-0567: the Hermes page said doctor reports no failed check, but doctor
-# fails the Hermes hooks row while any Hermes host runs and passes once all
-# are closed. The page quotes both rows as doctor prints them.
-@pytest.mark.parametrize(("running", "tag"), [(True, "[FAIL]"), (False, "[PASS]")])
+# GAP-0567 and GAP-0579: the page quotes the running-host warning and the
+# idle-host pass exactly as doctor prints them.
+@pytest.mark.parametrize(("running", "tag"), [(True, "[WARN]"), (False, "[PASS]")])
 def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
     hook = tmp_path / ".hermes" / "config.yaml"
     hook.parent.mkdir()
@@ -46,9 +45,15 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
     cfg.data_dir = str(tmp_path)
     r = _DoctorResult()
     out = io.StringIO()
+
+    def host_running(pids=None):
+        if running and pids is not None:
+            pids.append("4242")
+        return running
+
     with (
         mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]),
-        mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=running),
+        mock.patch.object(cmd_doctor, "_hermes_host_running", side_effect=host_running),
         # A registration the execution probe proves (W5b): the page quotes the
         # host-state rows, not the probe's own setup failure.
         mock.patch.object(cmd_doctor, "hermes_config_path", return_value=str(hook)),
@@ -64,7 +69,7 @@ def test_hermes_page_quotes_the_doctor_row(tmp_path, running, tag):
     ):
         cmd_doctor._check_hook_health(cfg, "hermes", r)
     row = r.checks[-1]
-    assert row["status"] == ("fail" if running else "pass")
+    assert row["status"] == ("warn" if running else "pass")
     page = _flat(_page("connectors/hermes.mdx"))
     example = "/home/alice/.hermes/config.yaml"
     detail = _flat(row["detail"].replace(str(hook), example))

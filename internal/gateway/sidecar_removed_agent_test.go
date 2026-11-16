@@ -26,6 +26,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+// isolateAgentHome points HOME (and the config folder Claude Desktop's
+// engine is found under) at an empty folder, next to the test's own PATH, so
+// whether an agent "may exist now" reads only this test's files, never an
+// agent binary or Claude Desktop engine in the runner's real home.
+func isolateAgentHome(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		// The Windows layout reads the profile and AppData folders; those
+		// tests keep their current environment.
+		return
+	}
+	t.Setenv("HOME", testenv.PrivateTempDir(t))
+	t.Setenv("XDG_CONFIG_HOME", "")
+}
+
 // GAP-0492: an agent removed outside DefenseClaw (discovery no longer finds
 // it) must stop only its own connector. The start keeps the other connector
 // guarding, names the missing agent and its fix, keeps the earlier hooks and
@@ -35,6 +50,9 @@ func TestRunGuardrailMultiRemovedAgentKeepsOtherConnectors(t *testing.T) {
 		t.Skip("per-user Codex setup on Windows needs protected executable evidence")
 	}
 	f := newAgentSettingsRefusalFixture(t)
+	// The skip needs proof that no agent is left in the account, and that proof
+	// reads the account home. This test owns that home.
+	testenv.SetHome(t, testenv.PrivateTempDir(t))
 	// Only Claude Code's pack knows this marker. A skipped connector has no
 	// fresh per-connector publication, so an accidental global-rule fallback
 	// would allow its hook when the agent returns in the same process.
@@ -63,6 +81,7 @@ func TestRunGuardrailMultiRemovedAgentKeepsOtherConnectors(t *testing.T) {
 	RemoveConnectorRulePackOverrides("claudecode")
 	binDir := testenv.PrivateTempDir(t)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+"/usr/bin"+string(os.PathListSeparator)+"/bin")
+	isolateAgentHome(t)
 	s, err = f.boot(t)
 	if err != nil {
 		t.Fatalf("one removed agent stopped the gateway for every connector: %v", err)
@@ -234,11 +253,13 @@ func TestSetupConnectorsIsolatedSkipsAnActiveConnectorWhoseAgentExecutableIsGone
 			if (tc.lstatError || tc.knownDir) && runtime.GOOS == "windows" {
 				t.Skip("the home-directory and symlink-loop fixtures are Unix-only")
 			}
+			testenv.SetHome(t, testenv.PrivateTempDir(t))
 			s := multiBootSidecar(t)
 			s.cfg.DataDir = testenv.PrivateTempDir(t)
 			s.health = NewSidecarHealth()
 			binDir := testenv.PrivateTempDir(t)
 			t.Setenv("PATH", binDir)
+			isolateAgentHome(t)
 			executable := filepath.Join(testenv.PrivateTempDir(t), "npm", "node_modules", "agent", "claude")
 			if tc.lstatError {
 				loop := filepath.Join(testenv.PrivateTempDir(t), "loop")
@@ -370,11 +391,13 @@ func (b *waitingAbsentConnector) Setup(ctx context.Context, _ connector.SetupOpt
 }
 
 func TestPendingAbsentConnectorRetainedHookIsDenied(t *testing.T) {
+	testenv.SetHome(t, testenv.PrivateTempDir(t))
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)
 	s.cfg.Guardrail.HookFailMode = "closed"
 	s.health = NewSidecarHealth()
 	t.Setenv("PATH", testenv.PrivateTempDir(t))
+	isolateAgentHome(t)
 	lock := stageAdmissionFixture(t, s.cfg.DataDir)
 	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, lock); err != nil {
 		t.Fatal(err)

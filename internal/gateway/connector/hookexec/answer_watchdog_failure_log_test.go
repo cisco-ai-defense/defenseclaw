@@ -4,6 +4,8 @@
 package hookexec
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +14,47 @@ import (
 	"testing"
 	"time"
 )
+
+func TestGAP0407FailedOrdinaryAppendKeepsToolID(t *testing.T) {
+	home := t.TempDir()
+	logDir := filepath.Join(home, "logs")
+	if err := os.Mkdir(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(logDir, "hook-failures.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := withDefaults(Options{Home: home, Event: "PreToolUse", Stderr: io.Discard})
+	opts.failurePayload = []byte(`{"session_id":"s","tool_call_id":"g407-recorded"}`)
+	logHookFailure(opts, spec{connector: "claudecode", hookName: "claude-code-hook"},
+		"gateway did not answer", "transport", "closed", true)
+	data, err := os.ReadFile(filepath.Join(logDir, "hook-failures.dropped"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(data, []byte("DCID")) || !bytes.Contains(data, []byte(`"tool_id":"g407-recorded"`)) ||
+		!bytes.Contains(data, []byte(`"outcome":"fail_closed"`)) {
+		t.Fatalf("local record missing tool decision: %q", data)
+	}
+}
+
+func TestGAP0407BenignOrdinaryAppendFailureHasNoBlockMarker(t *testing.T) {
+	home := t.TempDir()
+	logDir := filepath.Join(home, "logs")
+	if err := os.Mkdir(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(logDir, "hook-failures.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	opts := withDefaults(Options{Home: home, Event: "PreToolUse", Stderr: io.Discard})
+	opts.failurePayload = []byte(`{"session_id":"s","tool_call_id":"g407-benign"}`)
+	logHookFailure(opts, spec{connector: "claudecode", hookName: "claude-code-hook"},
+		"gateway did not answer", "transport", "open", false)
+	if _, err := os.Stat(filepath.Join(logDir, "hook-failures.dropped")); !os.IsNotExist(err) {
+		t.Fatalf("benign call wrote a block marker: %v", err)
+	}
+}
 
 // rel-1-0-6 GAP-0407: under an overload where the call misses its budget,
 // the watchdog denies it at the deadline and has answerWatchdogLogWait for

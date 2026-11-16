@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -84,6 +85,10 @@ type windowsManagedHooksLifecycleReport struct {
 	// removed (#1105, GAP-0211).
 	Collected int    `json:"collected,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// KeptLinks are the links on a vendor machine folder (Codex, Cursor, Claude
+	// Code) that a restore did not read or write through; the connector's part of
+	// the restore was skipped and the rollback went on (GAP-0900).
+	KeptLinks []string `json:"kept_links,omitempty"`
 	// Orphaned-selector pruning evidence. selector_paths is reported whenever
 	// it resolved, including on failure, so the installer's fallback can act
 	// on exactly these files and nothing else.
@@ -233,7 +238,7 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 		action != "prune-orphaned-selectors" {
 		return fail(fmt.Errorf("unsupported managed-hook lifecycle snapshot action %q", action))
 	}
-	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+	if err := enterpriseHooksPlatformPreflight(); err != nil {
 		return fail(err)
 	}
 	ctx, err := resolveWindowsManagedHooksLifecycleContext(stagedRetire)
@@ -340,6 +345,9 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fail(err)
 		}
+		if err := windowsManagedHooksRefuseLinkedVendorFolders(); err != nil {
+			return fail(err)
+		}
 		if err := windowsManagedHooksVendorFolderTakeBack(); err != nil {
 			return fail(err)
 		}
@@ -435,54 +443,72 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 				journal.Phase,
 			))
 		}
+		// A link that appeared on a vendor machine folder after the capture is not
+		// read or written through: that connector's part of the restore is skipped,
+		// named in the report, and the rest of the rollback goes on, so the services
+		// come back (GAP-0900). Standalone only; nothing is kept elsewhere.
+		kept := windowsManagedHooksKeptVendorFolderLinks()
+		report.KeptLinks = windowsManagedHooksKeptLinkList(kept)
 		priorClaudeOpts := windowsManagedHooksPriorClaudeOptions(journal)
-		currentSelectors, err := captureWindowsManagedHooksLifecycleSelectors()
+		currentSelectors, err := captureWindowsManagedHooksLifecycleSelectorsKeeping(kept, journal.RuntimeSelectors)
 		if err != nil {
 			return fail(err)
 		}
-		publishedSelectors, err := restoreWindowsManagedHooksLifecycleSelectors(
+		publishedSelectors, err := restoreWindowsManagedHooksLifecycleSelectorsKept(
 			journal.RuntimeSelectors,
 			currentSelectors,
+			kept,
 		)
 		if err != nil {
 			return fail(err)
 		}
-		currentClaude, err := captureWindowsManagedHooksLifecycleClaude(ctx, journal)
-		if err != nil {
-			_, selectorErr := restoreWindowsManagedHooksLifecycleSelectorsExpecting(
-				currentSelectors,
-				journal.RuntimeSelectors,
-				publishedSelectors,
-			)
-			return fail(errors.Join(err, selectorErr))
+		var currentClaude windowsManagedHooksClaudeLifecycleCapture
+		if kept["claudecode"] == "" {
+			currentClaude, err = captureWindowsManagedHooksLifecycleClaude(ctx, journal)
+			if err != nil {
+				_, selectorErr := restoreWindowsManagedHooksLifecycleSelectorsExpectingKept(
+					currentSelectors,
+					journal.RuntimeSelectors,
+					publishedSelectors,
+					kept,
+				)
+				return fail(errors.Join(err, selectorErr))
+			}
+		}
+		keepStep := func(connectorName string, step func() error) func() error {
+			if kept[connectorName] != "" {
+				return func() error { return nil }
+			}
+			return step
 		}
 		if err := restoreWindowsManagedHooksLifecycleComposite(
-			func() error {
+			keepStep("claudecode", func() error {
 				return enterprisehooks.RestoreWindowsClaudeManagedPolicySnapshot(
 					priorClaudeOpts,
 					currentClaude.opts,
 					journal.Claude,
 				)
-			},
-			func() error {
+			}),
+			keepStep("cursor", func() error {
 				return enterprisehooks.RestoreWindowsCursorManagedPolicySnapshot(
 					windowsManagedHooksPriorCursorOptions(journal),
 					windowsManagedHooksCursorOptions(ctx.opts, ctx.cursorTargets),
 					journal.Cursor,
 				)
-			},
-			func() error {
+			}),
+			keepStep("claudecode", func() error {
 				return enterprisehooks.RestoreWindowsClaudeManagedPolicySnapshot(
 					currentClaude.opts,
 					priorClaudeOpts,
 					currentClaude.snapshot,
 				)
-			},
+			}),
 		); err != nil {
-			_, selectorErr := restoreWindowsManagedHooksLifecycleSelectorsExpecting(
+			_, selectorErr := restoreWindowsManagedHooksLifecycleSelectorsExpectingKept(
 				currentSelectors,
 				journal.RuntimeSelectors,
 				publishedSelectors,
+				kept,
 			)
 			return fail(errors.Join(err, selectorErr))
 		}
@@ -907,27 +933,51 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 		acceptWindowsManagedHooksActivationDrift(*activation, manifestSHA256, len(ctx.targets))
 	} else if activation.ManifestSHA256 != manifestSHA256 {
 		return "", errors.New(
-			"deployment managed-hook activation manifest_sha256 does not match the current protected manifest; run Setup /ensure again to reconcile the target roster",
+			"deployment managed-hook activation manifest_sha256 does not match the current protected manifest; run " +
+				windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt again to reconcile the target roster",
 		)
 	}
 	return activation.DeploymentGenerationID, nil
 }
 
+// windowsManagedHooksStandaloneProcess is a seam for the tests: the managed
+// hooks lifecycle serves Secure Client too, whose text stays as it was.
+var windowsManagedHooksStandaloneProcess = enterprisehooks.WindowsStandaloneProcess
+
+// windowsManagedHooksRepairStep is what an administrator runs to put the
+// deployment's records right: on the standalone profile the installed CLI's
+// repair by its full path (Setup is not installed there, cowork-1-0-8
+// GAP-0095), "Setup /repair" on Secure Client.
+func windowsManagedHooksRepairStep() string {
+	if windowsManagedHooksStandaloneProcess() {
+		return windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt"
+	}
+	return "Setup /repair"
+}
+
+// windowsManagedHooksEnsureStep is windowsManagedHooksRepairStep for ensure.
+func windowsManagedHooksEnsureStep() string {
+	if windowsManagedHooksStandaloneProcess() {
+		return windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt"
+	}
+	return "Setup /ensure"
+}
+
 func validateWindowsManagedHooksLifecycleActivationBinding(activation *windowsManagedHooksActivationRecord, targetCount int) error {
 	if activation.SchemaVersion != 1 {
-		return fmt.Errorf("deployment managed-hook activation schema_version is %d, expected 1; run Setup /repair", activation.SchemaVersion)
+		return fmt.Errorf("deployment managed-hook activation schema_version is %d, expected 1; run %s", activation.SchemaVersion, windowsManagedHooksRepairStep())
 	}
 	if !validWindowsManagedHooksLifecycleTransactionID(activation.DeploymentGenerationID) {
-		return errors.New("deployment managed-hook activation deployment_generation_id is invalid; run Setup /repair")
+		return errors.New("deployment managed-hook activation deployment_generation_id is invalid; run " + windowsManagedHooksRepairStep())
 	}
 	if activation.State != "never_activated" && activation.State != "activated" {
-		return fmt.Errorf("deployment managed-hook activation state %q is invalid; run Setup /repair", activation.State)
+		return fmt.Errorf("deployment managed-hook activation state %q is invalid; run %s", activation.State, windowsManagedHooksRepairStep())
 	}
 	if !validWindowsManagedHooksLifecycleHex(activation.ManifestSHA256, sha256.Size) {
-		return errors.New("deployment managed-hook activation manifest_sha256 is invalid; run Setup /repair")
+		return errors.New("deployment managed-hook activation manifest_sha256 is invalid; run " + windowsManagedHooksRepairStep())
 	}
 	if activation.TargetCount != targetCount {
-		return fmt.Errorf("deployment managed-hook activation target_count is %d, current protected manifest has %d; run Setup /ensure again to reconcile the target roster", activation.TargetCount, targetCount)
+		return fmt.Errorf("deployment managed-hook activation target_count is %d, current protected manifest has %d; run %s again to reconcile the target roster", activation.TargetCount, targetCount, windowsManagedHooksEnsureStep())
 	}
 	return nil
 }
@@ -1424,6 +1474,13 @@ var errWindowsManagedHooksDeletedLocalAccount = errors.New(
 		"the hook enumerator revokes its rows on its next pass",
 )
 
+// errWindowsManagedHooksGuardianNotBound is the refusal when the Guardian's
+// activation, authorization and state records do not bind the deployment
+// manifest exactly. The lifecycle module recognizes its text.
+var errWindowsManagedHooksGuardianNotBound = errors.New(
+	"protected Guardian activation does not exactly bind the legacy deployment manifest and authorization",
+)
+
 // windowsManagedHooksLifecycleDeletedLocalAccount is replaceable in tests.
 var windowsManagedHooksLifecycleDeletedLocalAccount = enterprisehooks.WindowsDeletedLocalAccount
 
@@ -1605,8 +1662,8 @@ func validateWindowsManagedHooksGuardianActivation(
 	); err != nil {
 		return nil, nil, err
 	}
-	// writeEnterpriseHookGuardianState rewrites all three records on every
-	// reconcile, failures included, with the same counts and timestamp, and
+	// writeEnterpriseHookGuardianState publishes all three records together,
+	// failures included, with the same counts and timestamp, and
 	// OK=false whenever a target failed. Its ProtectedTargets is every active
 	// target (waiting rows included) plus each failed target that was
 	// protected before (the prior successful row is kept, see
@@ -1631,32 +1688,53 @@ func validateWindowsManagedHooksGuardianActivation(
 	healthy := failures == 0
 	maxProtected := len(active) + len(failedTargets)
 	reportedCount := len(reported)
-	if activation.Version != enterpriseHookGuardianActivationVersion ||
-		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
-		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
-		activation.OK != healthy || activation.FailureCount != failures ||
-		activation.SuccessCount != len(active)-awaitingSignIn ||
-		activation.PendingCount != len(pendingTargets) ||
-		activation.TargetCount != reportedCount ||
-		len(activation.ProtectedTargets) < len(active) || len(activation.ProtectedTargets) > maxProtected ||
-		authorization.OK != healthy || authorization.FailureCount != failures ||
-		authorization.SuccessCount != len(active)-awaitingSignIn ||
-		authorization.PendingCount != len(pendingTargets) ||
-		authorization.TargetCount != reportedCount ||
-		len(authorization.ProtectedTargets) < len(active) || len(authorization.ProtectedTargets) > maxProtected ||
-		state.OK != healthy || state.FailureCount != failures ||
-		state.SuccessCount != len(active)-awaitingSignIn || state.PendingCount != len(pendingTargets) ||
-		state.TargetCount != reportedCount ||
-		len(state.Results) != reportedCount ||
-		activation.UpdatedAt == "" || activation.UpdatedAt != authorization.UpdatedAt ||
-		activation.UpdatedAt != state.UpdatedAt ||
-		!sameEnterpriseHookPath(activation.Manifest, ctx.manifestPath) ||
-		!sameEnterpriseHookPath(state.Manifest, ctx.manifestPath) ||
-		!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size) ||
-		len(activationIssues) != 0 || len(authorizationIssues) != 0 ||
-		len(stateIssues) != 0 {
-		return nil, nil, errors.New(
-			"protected Guardian activation does not exactly bind the legacy deployment manifest and authorization",
+	// rel-1-0-6:GAP-0994: the refusal says which input disagreed. The three
+	// records are published one after the other, so a reader can meet them
+	// from two generations; the bare refusal gave no way to tell that from a
+	// record that does not match its rows.
+	var mismatch []string
+	note := func(bad bool, reason string) {
+		if bad {
+			mismatch = append(mismatch, reason)
+		}
+	}
+	note(activation.Version != enterpriseHookGuardianActivationVersion, "activation version")
+	note(!validEnterpriseHookHex(activation.ReconcileID, 16), "activation reconcile ID")
+	note(authorization.Version != 1 || state.Version != 1, "authorization or state version")
+	note(activationTimeErr != nil, "activation time")
+	note(activation.OK != healthy, fmt.Sprintf("activation ok=%t, its rows say ok=%t", activation.OK, healthy))
+	note(activation.FailureCount != failures, "activation failure count")
+	note(activation.SuccessCount != len(active)-awaitingSignIn, "activation success count")
+	note(activation.PendingCount != len(pendingTargets), "activation pending count")
+	note(activation.TargetCount != reportedCount, "activation target count")
+	note(len(activation.ProtectedTargets) < len(active) || len(activation.ProtectedTargets) > maxProtected,
+		"activation protected target count")
+	note(authorization.OK != healthy, fmt.Sprintf("authorization ok=%t, the rows say ok=%t", authorization.OK, healthy))
+	note(authorization.FailureCount != failures, "authorization failure count")
+	note(authorization.SuccessCount != len(active)-awaitingSignIn, "authorization success count")
+	note(authorization.PendingCount != len(pendingTargets), "authorization pending count")
+	note(authorization.TargetCount != reportedCount, "authorization target count")
+	note(len(authorization.ProtectedTargets) < len(active) || len(authorization.ProtectedTargets) > maxProtected,
+		"authorization protected target count")
+	note(state.OK != healthy, fmt.Sprintf("state ok=%t, its rows say ok=%t", state.OK, healthy))
+	note(state.FailureCount != failures, "state failure count")
+	note(state.SuccessCount != len(active)-awaitingSignIn, "state success count")
+	note(state.PendingCount != len(pendingTargets), "state pending count")
+	note(state.TargetCount != reportedCount, "state target count")
+	note(len(state.Results) != reportedCount, "state row count")
+	note(activation.UpdatedAt == "" || activation.UpdatedAt != authorization.UpdatedAt ||
+		activation.UpdatedAt != state.UpdatedAt,
+		fmt.Sprintf("the records are from different publications (activation %q, authorization %q, state %q)",
+			activation.UpdatedAt, authorization.UpdatedAt, state.UpdatedAt))
+	note(!sameEnterpriseHookPath(activation.Manifest, ctx.manifestPath) ||
+		!sameEnterpriseHookPath(state.Manifest, ctx.manifestPath), "manifest path")
+	note(!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size), "activation manifest digest")
+	note(len(activationIssues) != 0, "activation protected targets: "+strings.Join(activationIssues, "; "))
+	note(len(authorizationIssues) != 0, "authorization protected targets: "+strings.Join(authorizationIssues, "; "))
+	note(len(stateIssues) != 0, "state rows: "+strings.Join(stateIssues, "; "))
+	if len(mismatch) != 0 {
+		return nil, nil, fmt.Errorf(
+			"%w (%s)", errWindowsManagedHooksGuardianNotBound, strings.Join(mismatch, "; "),
 		)
 	}
 	// The manifest digest is advisory. The enumerator republishes the
@@ -2312,12 +2390,105 @@ var windowsManagedHooksVendorFolderTakeBack = func() error {
 	} {
 		if _, err := enterprisepolicy.TakeBackVendorPolicyFolder(opts, dir); err != nil {
 			return fmt.Errorf(
-				"%s or a folder above it was created by a standard user before DefenseClaw and could not be taken back (rename it aside as an administrator and run Setup again): %w",
+				"%s or a folder above it was created by a standard user before DefenseClaw and could not be taken back (rename it aside as an administrator and run the same command again): %w",
 				dir, err,
 			)
 		}
 	}
 	return nil
+}
+
+// windowsManagedHooksRefuseLinkedVendorFolders refuses a capture while a link
+// sits on the path of the machine folder of Codex, Cursor or Claude Code. Setup
+// refuses the same links before it stops anything (the module's
+// Assert-DefenseClawVendorMachineFoldersNotLinked); this is the snapshot's own
+// answer for a link that appears after that, so the run fails on a named link
+// with the command that removes it and not on a trust error about the folder
+// (GAP-0900). Nothing is opened or followed. Standalone only; replaceable in
+// tests.
+var windowsManagedHooksRefuseLinkedVendorFolders = func() error {
+	if !windowsManagedHooksStandaloneProcess() {
+		return nil
+	}
+	var found, fixes []string
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		link := enterpriseHookVendorFolderLink(connectorName)
+		if link == "" {
+			continue
+		}
+		label := enterpriseHookConnectorLabels[connectorName]
+		if label == "" {
+			label = connectorName
+		}
+		found = append(found, fmt.Sprintf("%s: %s", label, link))
+		fixes = append(fixes, fmt.Sprintf("cmd /c rmdir \"%s\"", link))
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"DefenseClaw does not follow a link in the machine-policy folder of an agent. A link sits on the path of: %s. "+
+			"As an administrator, remove only the link (the folder it points to is not changed) with: %s, then run the same command again",
+		strings.Join(found, "; "), strings.Join(fixes, "; "),
+	)
+}
+
+// windowsManagedHooksKeptVendorFolderLinks maps each connector whose machine
+// folder a link keeps now (found without opening or following anything) to the
+// link. Empty off the standalone profile and when nothing is linked.
+var windowsManagedHooksKeptVendorFolderLinks = func() map[string]string {
+	kept := map[string]string{}
+	if !windowsManagedHooksStandaloneProcess() {
+		return kept
+	}
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		if link := enterpriseHookVendorFolderLink(connectorName); link != "" {
+			kept[connectorName] = link
+		}
+	}
+	return kept
+}
+
+// windowsManagedHooksKeptLinkList is the sorted, distinct list of kept links.
+func windowsManagedHooksKeptLinkList(kept map[string]string) []string {
+	var links []string
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		link := kept[connectorName]
+		if link == "" || slices.Contains(links, link) {
+			continue
+		}
+		links = append(links, link)
+	}
+	return links
+}
+
+// captureWindowsManagedHooksLifecycleSelectorsKeeping is the capture of the
+// restore: a connector whose folder a link keeps is not read, and its journaled
+// snapshot stands in for it, so the restore finds nothing to change there.
+func captureWindowsManagedHooksLifecycleSelectorsKeeping(
+	kept map[string]string,
+	journaled []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+) ([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, error) {
+	if len(kept) == 0 {
+		return captureWindowsManagedHooksLifecycleSelectors()
+	}
+	snapshots := make(
+		[]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+		0,
+		len(windowsManagedHooksLifecycleSelectorConnectors),
+	)
+	for index, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		if kept[connectorName] != "" && index < len(journaled) {
+			snapshots = append(snapshots, journaled[index])
+			continue
+		}
+		snapshot, err := windowsManagedHooksLifecycleSelectorCapture(connectorName)
+		if err != nil {
+			return nil, fmt.Errorf("capture %s managed runtime selector: %w", connectorName, err)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
 }
 
 func captureWindowsManagedHooksLifecycleSelectors() (
@@ -2387,9 +2558,10 @@ func validateWindowsManagedHooksLifecycleSelectors(
 // restoreWindowsManagedHooksLifecycleSelectors publishes desired over the
 // selectors captured in current and returns the CAS of each selector it
 // actually published.
-func restoreWindowsManagedHooksLifecycleSelectors(
+func restoreWindowsManagedHooksLifecycleSelectorsKept(
 	desired []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
 	current []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	kept map[string]string,
 ) ([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
 	if err := validateWindowsManagedHooksLifecycleSelectors(current); err != nil {
 		return nil, err
@@ -2398,7 +2570,7 @@ func restoreWindowsManagedHooksLifecycleSelectors(
 	for index := range current {
 		expected[index] = current[index].CAS
 	}
-	return restoreWindowsManagedHooksLifecycleSelectorsExpecting(desired, current, expected)
+	return restoreWindowsManagedHooksLifecycleSelectorsExpectingKept(desired, current, expected, kept)
 }
 
 // restoreWindowsManagedHooksLifecycleSelectorsExpecting publishes desired over
@@ -2406,10 +2578,11 @@ func restoreWindowsManagedHooksLifecycleSelectors(
 // publishes a selector that differs from its snapshot, so a compensating
 // restore passes the CAS that restore returned, not the snapshot's. If one
 // connector fails, the connectors already restored are put back to current.
-func restoreWindowsManagedHooksLifecycleSelectorsExpecting(
+func restoreWindowsManagedHooksLifecycleSelectorsExpectingKept(
 	desired []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
 	current []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
 	expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS,
+	kept map[string]string,
 ) ([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
 	if err := validateWindowsManagedHooksLifecycleSelectors(desired); err != nil {
 		return nil, err
@@ -2427,6 +2600,12 @@ func restoreWindowsManagedHooksLifecycleSelectorsExpecting(
 	published := make([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, len(desired))
 	restored := 0
 	for index := range desired {
+		if kept[desired[index].Connector] != "" {
+			// A link keeps this folder: nothing is read or published through it.
+			published[index] = expected[index]
+			restored++
+			continue
+		}
 		cas, err := windowsManagedHooksLifecycleSelectorRestore(
 			enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions{
 				Snapshot:        desired[index],
@@ -2444,6 +2623,9 @@ func restoreWindowsManagedHooksLifecycleSelectorsExpecting(
 			err,
 		)}
 		for rollbackIndex := restored - 1; rollbackIndex >= 0; rollbackIndex-- {
+			if kept[current[rollbackIndex].Connector] != "" {
+				continue
+			}
 			_, rollbackErr := windowsManagedHooksLifecycleSelectorRestore(
 				enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions{
 					Snapshot:        current[rollbackIndex],
@@ -2473,6 +2655,21 @@ func restoreWindowsManagedHooksLifecycleSelectorsExpecting(
 // foreign one, used to fail the retire and roll back the whole upgrade with
 // 1603 (#1105, GAP-0781). Every other failure still fails the retire. It
 // also returns how many generations it removed.
+func restoreWindowsManagedHooksLifecycleSelectors(
+	desired []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	current []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+) ([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+	return restoreWindowsManagedHooksLifecycleSelectorsKept(desired, current, nil)
+}
+
+func restoreWindowsManagedHooksLifecycleSelectorsExpecting(
+	desired []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	current []enterprisehooks.WindowsManagedRuntimeSelectorSnapshot,
+	expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS,
+) ([]enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+	return restoreWindowsManagedHooksLifecycleSelectorsExpectingKept(desired, current, expected, nil)
+}
+
 func garbageCollectWindowsManagedHooksLifecycleGenerations(
 	journal windowsManagedHooksLifecycleJournal,
 	ctx windowsManagedHooksLifecycleContext,
@@ -2564,12 +2761,12 @@ func collectWindowsManagedHooksLifecycleGenerations(
 ) ([]string, int, error) {
 	if pendingExists {
 		return nil, 0, errors.New(
-			"managed-hook lifecycle collect refused: a lifecycle transaction is pending; Setup /ensure finishes it and collects the old runtime copies",
+			"managed-hook lifecycle collect refused: a lifecycle transaction is pending; " + windowsManagedHooksEnsureStep() + " finishes it and collects the old runtime copies",
 		)
 	}
 	if _, err := os.Lstat(ctx.journalPath); err == nil {
 		return nil, 0, errors.New(
-			"managed-hook lifecycle collect refused: a committed lifecycle journal is waiting for its retire; Setup /ensure retires it and collects the old runtime copies",
+			"managed-hook lifecycle collect refused: a committed lifecycle journal is waiting for its retire; " + windowsManagedHooksEnsureStep() + " retires it and collects the old runtime copies",
 		)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, 0, err

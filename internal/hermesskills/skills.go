@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 )
 
 const (
@@ -155,6 +156,69 @@ func DiscoverUnder(root, subtree string, directoryLimit int) ([]Entry, error) {
 // its budget. Callers run it off the event reader.
 func DiscoverUnderFull(root, subtree string) ([]Entry, error) {
 	return DiscoverUnder(root, subtree, FullScanDirectoryLimit)
+}
+
+// DiscoverTrusted lists a root whose account-owned link path has already
+// passed the shared ownership check. The ordinary Discover entry points keep
+// their existing no-link behavior for callers outside the install watcher.
+func DiscoverTrusted(root string, directoryLimit int) ([]Entry, error) {
+	if !IsRoot(root) && !IsProfileRoot(root) {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	return discoverTrusted(root, root, directoryLimit)
+}
+
+// DiscoverUnderTrusted applies the same root proof to an event subtree. A
+// link below the root remains unavailable, as in DiscoverUnder.
+func DiscoverUnderTrusted(root, subtree string, directoryLimit int) ([]Entry, error) {
+	if !IsRoot(root) && !IsProfileRoot(root) {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	if _, err := skillrootsafe.Resolve(root, evalSymlinks); err != nil ||
+		!pathAtOrBelow(subtree, root) || samePath(subtree, root) {
+		return nil, fmt.Errorf("invalid Hermes skill subtree: %s", subtree)
+	}
+	for dir := filepath.Clean(subtree); !samePath(dir, root); dir = filepath.Dir(dir) {
+		if !plainDirectory(dir) {
+			return nil, fmt.Errorf("linked or unavailable Hermes skill subtree: %s", subtree)
+		}
+	}
+	return discoverTrusted(root, subtree, directoryLimit)
+}
+
+// Discover through the validated physical root so the vendor digest proof
+// sees ordinary paths even when a configured ancestor is linked. Keep the
+// configured spelling in returned entries for watcher identity and events.
+func discoverTrusted(root, subtree string, directoryLimit int) ([]Entry, error) {
+	walkRoot, err := skillrootsafe.Resolve(root, evalSymlinks)
+	if err != nil {
+		return nil, err
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	absoluteSubtree, err := filepath.Abs(subtree)
+	if err != nil {
+		return nil, err
+	}
+	relative, err := filepath.Rel(absoluteRoot, absoluteSubtree)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("hermes subtree outside skills root: %s", subtree)
+	}
+	walkSubtree := filepath.Join(walkRoot, relative)
+	entries, err := discover(walkRoot, walkSubtree, directoryLimit)
+	if err != nil {
+		return nil, err
+	}
+	for i := range entries {
+		relative, err := filepath.Rel(walkRoot, entries[i].Path)
+		if err != nil {
+			return nil, err
+		}
+		entries[i].Path = filepath.Join(root, relative)
+	}
+	return entries, nil
 }
 
 // profileRootUnlinked is canonicalPath for a profile's skills root. The

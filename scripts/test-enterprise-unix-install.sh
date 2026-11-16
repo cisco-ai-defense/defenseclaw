@@ -470,28 +470,128 @@ sandbox_files_gone() {
     echo "no sandbox launcher or user service definition is left"
 }
 
-# launcher_offers_only_sandbox: an unprivileged account that runs the launcher
-# is told the computer is managed, sees only its own protection state in
-# `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the sandbox tree and that
-# status in its help, and is refused every administrator command.
+# launcher_refusal_text: the sentence the launcher prints for a command it
+# does not offer on this platform. It is read from the fixture that
+# TestLauncherRefusalGoldenMatchesTheLauncher keeps equal to launcherRefusalFor
+# and that the docs gate (docs-site/scripts/test-docs-claims.ts) reads, so this
+# lane holds no copy of the wording.
+launcher_refusal_text() {
+    "$python" -c "import json, sys; sys.stdout.write(json.load(open(sys.argv[1]))[sys.argv[2]])" \
+        "$repo/internal/cli/testdata/launcher_refusal.json" "$platform"
+}
+
+# own_status_roster_check TEXT JSON CONNECTOR...: the standard user status
+# (TEXT) and status --json (JSON) show the account own protection state: an
+# account row, a Cowork row and one row per ENROLLED connector (cowork-1-0-8
+# GAP-0053, rel-1-0-9 GAP-0635). The roster is the connectors the installed
+# config enrolls, not a fixed one, so the caller names exactly that roster.
+# Fails unless the JSON roster has exactly those connectors, each with a
+# protection state that agrees with its protected flag, and the text shows
+# exactly those connectors (by label) with the same state as the JSON.
+own_status_roster_check() {
+    local text=$1 answer=$2
+    shift 2
+    if [ "$#" = 0 ]; then
+        echo "no expected connector was given"
+        return 1
+    fi
+    DC_OWN_TEXT=$text DC_OWN_JSON=$answer "$python" - "$@" <<\PYCHECK
+import json, os, re, sys
+
+text, answer = os.environ["DC_OWN_TEXT"], json.loads(os.environ["DC_OWN_JSON"])
+expected = sorted(set(sys.argv[1:]))
+problems = []
+roster = answer.get("connectors")
+if not isinstance(roster, dict):
+    roster = {}
+if sorted(roster) != expected:
+    problems.append("the JSON roster is %s, want %s" % (sorted(roster), expected))
+# The states the gateway emits for a connector row (managed_own_status.go).
+valid_states = ("protected", "not protected", "not confirmed", "excluded")
+states = {}
+for name, row in roster.items():
+    if not isinstance(row, dict) or not isinstance(row.get("protected"), bool) or not isinstance(row.get("state"), str) or not row["state"]:
+        problems.append("connector %s has no protection state in the JSON answer" % name)
+    elif row["state"] not in valid_states:
+        problems.append("connector %s has the unknown state %r in the JSON answer, want one of %s" % (name, row["state"], list(valid_states)))
+    elif (row["state"] == "protected") != row["protected"]:
+        problems.append("connector %s has protected=%s but state %r in the JSON answer" % (name, row["protected"], row["state"]))
+    elif not isinstance(row.get("reason", ""), str) or not isinstance(row.get("next_step", ""), str) or not isinstance(row.get("reason_code", ""), str):
+        problems.append("connector %s has a reason, reason_code or next_step that is not text in the JSON answer" % name)
+    elif row["protected"] != (not row.get("reason")) or (row.get("reason") and not row.get("next_step")):
+        problems.append("connector %s is %s with reason %r and next step %r in the JSON answer, want a reason and a next step exactly when it is not protected" % (name, row["state"], row.get("reason"), row.get("next_step")))
+    else:
+        # The text row is the state, then the reason and the next step (showOwnStatus).
+        shown = row["state"]
+        if row.get("reason"):
+            shown += ": " + row["reason"].strip().rstrip(". ") + ". " + row["next_step"].strip().rstrip(". ")
+        states[name] = shown
+lines = text.splitlines()
+first = next((i for i, line in enumerate(lines) if re.match(r"  Account +\S", line)), None)
+last = next((i for i, line in enumerate(lines) if re.match(r"  Cowork +\S", line)), None)
+if first is None or last is None or last < first:
+    problems.append("the text has no Account row followed by a Cowork row")
+else:
+    # A connector row is two spaces, the label padded to 13 columns, a space
+    # and the state (showOwnStatus). The label must be the exact one the CLI
+    # prints (ownConnectorLabel); Claude Code comes first, the rest by key.
+    special = {"opencode": "OpenCode", "openclaw": "OpenClaw", "claudecode": "Claude Code"}
+    labels = {special.get(key, key[:1].upper() + key[1:]): key for key in expected}
+    rows = {}
+    for line in lines[first + 1:last]:
+        if not line.strip():
+            continue
+        label, state = line[2:15].strip(), line[16:].strip()
+        if not line.startswith("  ") or line[15:16] != " " or not label or not state:
+            problems.append("the text has an unreadable connector row %r" % line)
+            continue
+        key = labels.get(label)
+        if key is None:
+            problems.append("the text shows the label %r, want one of %s" % (label, sorted(labels)))
+            continue
+        if key in rows:
+            problems.append("the text shows %s twice" % label)
+        rows[key] = state
+    if sorted(rows) != expected:
+        problems.append("the text shows connectors %s, want %s" % (sorted(rows), expected))
+    elif list(rows) != [k for k in expected if k == "claudecode"] + [k for k in expected if k != "claudecode"]:
+        problems.append("the text lists connectors in the order %s, want Claude Code first and the rest by name" % list(rows))
+    for key, state in sorted(rows.items()):
+        if key in states and states[key] != state:
+            problems.append("the text shows %s as %r, the JSON answer says %r" % (key, state, states[key]))
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PYCHECK
+}
+
+# launcher_offers_only_sandbox CONNECTOR...: an unprivileged account that
+# runs the launcher is told the computer is managed, sees only its own
+# protection state in `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the
+# sandbox tree and that status in its help, and is refused every administrator
+# command with the sentence the launcher builds for this platform. CONNECTOR
+# names the connectors the config in force enrolls: package_default_connectors
+# before any administrator config, admin_connectors once write_admin_config has
+# applied it.
 launcher_offers_only_sandbox() {
-    local output rc=0 text="This computer is managed; use \`defenseclaw status\` for your protection state, \`defenseclaw sandbox status\` for your sandboxes and \`defenseclaw sandbox policy explain\` for your policy. Other commands require an administrator."
+    local output answer check rc=0 text
+    text=$(launcher_refusal_text) || die "cannot read the launcher refusal for $platform from internal/cli/testdata/launcher_refusal.json"
     output=$(as_standard_user "$launcher" status 2>&1) || rc=$?
-    [ "$rc" = 0 ] || die "defenseclaw status exited $rc as a standard user, want 0 (the user's own status): $output"
+    [ "$rc" = 0 ] || die "defenseclaw status exited $rc as a standard user, want 0 (the own status of the user): $output"
     [ "$(head -n 1 <<<"$output")" = "This computer is managed by your organization." ] ||
         die "defenseclaw status as a standard user does not say the computer is managed: $output"
-    grep -Eq '^  Account +' <<<"$output" && grep -Eq '^  Claude Code +(protected|not protected)$' <<<"$output" &&
-        grep -Eq '^  Cowork +' <<<"$output" ||
-        die "defenseclaw status as a standard user does not show its own protection state: $output"
+    answer=$(as_standard_user "$launcher" status --json 2>&1) || die "defenseclaw status --json failed as a standard user: $answer"
+    check=$(own_status_roster_check "$output" "$answer" "$@" 2>&1) ||
+        die "defenseclaw status as a standard user does not show its own protection state ($check): $output"
     rc=0
     output=$(as_standard_user "$launcher" setup 2>&1) || rc=$?
     [ "$rc" = 2 ] || die "defenseclaw setup exited $rc as a standard user, want 2: $output"
     [ "$output" = "$text" ] || die "defenseclaw setup printed '$output', want '$text'"
     output=$(as_standard_user "$launcher" --help 2>&1) || die "defenseclaw --help failed as a standard user: $output"
     grep -Fq "defenseclaw sandbox" <<<"$output" || die "the launcher help does not offer the sandbox commands: $output"
-    grep -Eq '^[[:space:]]+status[[:space:]]' <<<"$output" || die "the launcher help does not offer the user's own status: $output"
+    grep -Eq '^[[:space:]]+status[[:space:]]' <<<"$output" || die "the launcher help does not offer the own status of the user: $output"
     ! grep -Eq '^[[:space:]]+(enterprise|setup)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
-    echo "defenseclaw offers only the sandbox commands and the user's own status to a standard user"
+    echo "defenseclaw offers only the sandbox commands and the own status of the user to a standard user"
 }
 
 policy_entries() {
@@ -636,7 +736,22 @@ admin_config_version() {
     fi
 }
 
+# package_default_connectors: the roster of a package install before any
+# administrator config, which is the product default connector. A change of
+# that default turns the status check red here on purpose.
+package_default_connectors=(openclaw)
+
+# write_admin_config: stage the administrator config. It sets admin_connectors,
+# the connectors that config enrolls, in the same step that writes them, so the
+# config and the roster a standard user must see once it is applied
+# (launcher_offers_only_sandbox) come from one list that cannot be left empty.
 write_admin_config() {
+    admin_connectors=(claudecode codex)
+    local connector_lines="" connector
+    for connector in "${admin_connectors[@]}"; do
+        connector_lines+="    $connector: {enabled: true}"$'\n'
+    done
+    connector_lines=${connector_lines%$'\n'}
     local config_version=9 rule_pack='  rule_pack: default'
     if [ -n "$upgrade_from" ]; then
         config_version=$(admin_config_version "$previous_version")
@@ -659,8 +774,7 @@ guardrail:
   mode: observe
 $rule_pack
   connectors:
-    claudecode: {enabled: true}
-    codex: {enabled: true}
+$connector_lines
 EOF
     chmod 0600 "$stage/config.yaml"
 }
@@ -802,7 +916,7 @@ upgrade_lane() {
         --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"} \
         --policy-applied --config-generation-above "$generation_floor"
     sandbox_files_present
-    launcher_offers_only_sandbox
+    launcher_offers_only_sandbox "${admin_connectors[@]}"
     if [ "$config_version" = 8 ]; then
         [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
         [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
@@ -857,7 +971,7 @@ else
     fi
     step "the sandbox launcher and the user service definitions are installed"
     sandbox_files_present
-    launcher_offers_only_sandbox
+    launcher_offers_only_sandbox "${package_default_connectors[@]}"
 
     # ---- reconfigure ---------------------------------------------------------------
     step "ensure with an administrator config that enables Claude Code and Codex"
@@ -872,6 +986,8 @@ else
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
+    # The administrator config changes the roster the user sees: the connectors it enrolls.
+    launcher_offers_only_sandbox "${admin_connectors[@]}"
 fi
 
 if [ -e "$install_root/lib/defenseclaw/policy_compiler.py" ]; then

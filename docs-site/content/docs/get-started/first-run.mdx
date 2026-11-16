@@ -22,7 +22,7 @@ On a terminal, `init` runs local agent discovery, prints the **Agent discovery**
 5. **Do you want to use a decision model?** (default no). Asked when a connector is in action mode. A [decision model](/docs/guardrail/decision-model) is an optional fast model for tool calls, in front of the LLM judge or on its own; yes asks for its endpoint and model name and covers the action-mode connectors.
 6. **Start gateway after setup?** (default yes), then **Run targeted readiness checks?** (default yes).
 
-`init` does not ask for an outage mode and saves none: while the gateway is not running, the default and permissive policies let a call run with a warning and strict blocks it. Pass `--fail-mode` to save a choice; a saved choice wins over the policy, also over `use-pack strict`. When a saved `open` decides, the `Next` lines say `While the gateway is not running, hooks let calls run with a warning (your saved fail mode; to block them: ...)` and name the command that saves `closed` instead. A later `init` run keeps the fail modes already saved for your connectors.
+`init` does not ask for an outage mode and saves none: while the gateway is not running, the default and permissive policies let a call run with a warning and strict blocks it. Pass `--fail-mode` to save a choice; a saved choice wins over the policy, also over `use-pack strict` (except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed despite a saved `open`). When a saved `open` decides, the `Next` lines say `While the gateway is not running, hooks let calls run with a warning (your saved fail mode; to block them: ...)` and name the command that saves `closed` instead. A later `init` run keeps the fail modes already saved for your connectors.
 
 Proxy connectors are detected but left out of the observe-all set, because they own the single LLM proxy port. Use `defenseclaw setup <proxy>` for them.
 
@@ -61,6 +61,7 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--start-gateway` / `--no-start-gateway` | Answer the gateway prompt in advance. Without either flag, `--non-interactive` alone leaves a stopped gateway stopped, and `defenseclaw doctor` fails its gateway and hook rows until you run `defenseclaw-gateway start`. |
 | `--verify` / `--no-verify` | Run readiness checks before exiting. |
 | `--rescan-agents` | Refresh cached agent discovery. |
+| `--api-port <port>`, `--proxy-port <port>` | The gateway API port and the guardrail proxy port of a new configuration. Without them `init` uses 18970 and 4000, or the next free port when another account on the machine holds one, and says so. An existing configuration keeps its ports; `init` then names `defenseclaw setup gateway --api-port <port>` or `defenseclaw setup guardrail --port <port>`, which move them. The gateway also listens on the two ports after the API port (sandboxes), so `init`, `setup gateway` and `setup guardrail` refuse a proxy port that is one of those three, or OpenClaw's gateway port 18789, and the automatic pick skips a port you gave; `defenseclaw config validate` warns about such a layout. |
 | `--json-summary` | Print the report as JSON. |
 | `--verbose` | Show full subprocess output. |
 | `--skip-install` | Skip the scanner and built-in guardrail availability checks. |
@@ -79,7 +80,7 @@ Quickstart configures **one** connector, with the `observe` profile, the `local`
 
 <include>../../snippets/first-run-report.mdx</include>
 
-The first line holds the `status` (`ready`, `partial` or `needs_attention`), the connector (or `connectors=N`) and the profile. **Setup** lists what the command did, **Readiness** what it checked, and **Next** up to five commands to run. A `Gateway API port` line appears in Setup when another account on the machine uses the default port.
+The first line holds the `status` (`ready`, `partial` or `needs_attention`), the connector (or `connectors=N`) and the profile. **Setup** lists what the command did, **Readiness** what it checked, and **Next** up to five commands to run. A `Gateway API port` or `Guardrail proxy port` line appears in Setup when another account on the machine uses the default port, or when you gave `--api-port` or `--proxy-port`.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -134,7 +135,7 @@ In CI, check the `status` field of `--json-summary`, because `partial` also exit
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Saves your choice for a gateway outage; a saved choice wins over the policy. Omitted, nothing is saved: the default and permissive policies let a call run with a warning, strict blocks it.",
+      description: "Saves your choice for a gateway outage; a saved choice wins over the policy, except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed. Omitted, nothing is saved: the default and permissive policies let a call run with a warning, strict blocks it.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",

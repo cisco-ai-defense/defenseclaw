@@ -229,13 +229,21 @@ func ensurePolicyDir(opts Options, dir string) ([]string, error) {
 	return created, nil
 }
 
-// reclaimPolicyDirs, clearPolicyFileName, displaceUntrustedPolicyFiles and
+// reclaimPolicyDirsFor, clearPolicyFileName, displaceUntrustedPolicyFiles and
 // displaceUntrustedPolicyFile are Windows-only: every unix ancestor must already be root-owned and not
 // group/other-writable, so no unprivileged user can create or occupy a
 // vendor path and there is nothing to take back.
-func reclaimPolicyDirs(Options, string) (policyTakeBack, error) { return policyTakeBack{}, nil }
+func reclaimPolicyDirsFor(Options, string, policyFolderUse) (policyTakeBack, error) {
+	return policyTakeBack{}, nil
+}
 
 func clearPolicyFileName(Options, string) (string, error) { return "", nil }
+
+// readUnprotectedRecordedFile is Windows-only: no unix removal finds an
+// unprotected vendor folder.
+func readUnprotectedRecordedFile(Options, string) ([]byte, bool, string) {
+	return nil, false, "unprotected vendor folders are Windows-only"
+}
 
 func displaceUntrustedPolicyFiles(Options, string, string, *State) {}
 
@@ -939,3 +947,48 @@ func adminOwnedLink(info os.FileInfo) bool {
 func openGuardAppend(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 }
+
+// A link on a vendor policy path is a Windows ProgramData matter: no unix
+// ancestor is writable by an unprivileged user.
+func linkedPolicyComponent(Options, string) string { return "" }
+
+func clearOrKeepLinkedPolicyPath(Options, string, *State) (string, string) { return "", "" }
+
+// VendorFolderProblem is the Windows vendor folder that does not protect a
+// recorded file; no folder is judged off Windows.
+type VendorFolderProblem struct {
+	Connector     string
+	Dir           string
+	File          string
+	Message       string
+	Reprotectable bool
+	Blocker       string
+	// UnrecordedFile marks a problem that is a file, not a folder (windows).
+	UnrecordedFile bool
+	// PendingMoveAside: the next reconcile moves the file aside (windows).
+	PendingMoveAside bool
+	// Conflict marks a machine-policy verify conflict that is not a vendor
+	// folder or file problem (windows).
+	Conflict bool
+}
+
+// InspectRecordedVendorFolders reports nothing off Windows.
+func InspectRecordedVendorFolders(Options, []string) []VendorFolderProblem { return nil }
+
+// MachinePolicyProblems reports nothing off Windows.
+func MachinePolicyProblems(Options, []string) []VendorFolderProblem { return nil }
+
+// ReprotectRecordedVendorFolders does nothing off Windows.
+func ReprotectRecordedVendorFolders(Options, []string) ([]ReprotectedFolder, []VendorFolderProblem) {
+	return nil, nil
+}
+
+// reclaimRefusesContentDrift is the Windows standalone rule for vendor
+// folders; no unix vendor folder is taken over or kept, so it is false.
+var reclaimRefusesContentDrift = func() bool { return false }
+
+// StaleHookKept is the reason of a KeptUntrustedPolicyFiles entry.
+const StaleHookKept = "stale hook: "
+
+// KeptUntrustedPolicyFiles lists nothing off Windows.
+func KeptUntrustedPolicyFiles(Options) []string { return nil }

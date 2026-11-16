@@ -76,7 +76,7 @@ No test checks these. Review each one. They are the pages that name most connect
 | Features | `ai-discovery.mdx`, `hitl.mdx`, `stories/hitl-approvals.mdx`, `guardrail/llm-judge-benchmark.mdx`, `policies/cel/tool-call-state.mdx` |
 | Windows | `get-started/windows/telemetry-security.mdx`, `get-started/windows/paths-troubleshooting.mdx` |
 | Enterprise | `enterprise/index.mdx`, `concepts.mdx`, `machine-policy.mdx`, `foreign-hook-guard.mdx`, `threat-model.mdx`, `windows.mdx`, `rollout.mdx`, `enrollment.mdx`, `operations.mdx`, `troubleshooting.mdx` |
-| Repository docs | `docs/ENTERPRISE-THREAT-MODEL.md`, `docs/LINUX-ENTERPRISE-THREAT-MODEL.md`, `docs/MACOS-ENTERPRISE-THREAT-MODEL.md`, `docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md`, `docs/WINDOWS-NATIVE-INSTALLER.md`, `docs/WINDOWS-NATIVE-CI.md` |
+| Repository docs | `docs/ENTERPRISE-THREAT-MODEL.md`, `docs/LINUX-ENTERPRISE-THREAT-MODEL.md`, `docs/MACOS-ENTERPRISE-THREAT-MODEL.md`, `docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md`, `docs/WINDOWS-NATIVE-CI.md` |
 
 All `docs-site` pages above are under `docs-site/content/docs/`.
 
@@ -106,7 +106,6 @@ All `docs-site` pages above are under `docs-site/content/docs/`.
 | `test_unix_contract_matrix_covers_executable_shell_hook_connectors` (`expected`) | `cli/tests/test_connector_live_e2e_path_policy.py` |
 | `test_every_file_opened_was_declared` | `cli/tests/test_connector_paths.py` |
 | `TEN_CONNECTORS` / exact roster | `cli/tests/test_cmd_setup_connector_readiness.py` |
-| `wizardConnectorChoices` pin | `cmd/defenseclaw-setup/wizard_windows_test.go` |
 | `TestWindowsStandalonePerUserConnectorMappings` (the managed-runtime names) | `internal/enterprisehooks/peruser_managed_windows_test.go` |
 
 These hand-kept lists don't fail when a connector is missing, so nothing reminds you to add it. Add a row so the new connector is covered:
@@ -159,18 +158,16 @@ The per-layer references list these. Keep the PR lean: add a row to an existing 
 | File | What to add |
 |---|---|
 | `scripts/live-connector-e2e/run.sh` `ALL_CONNECTORS` | only for an executable shell-hook contract (plugins and policy bridges have their own gates) |
-| `scripts/live-connector-e2e/golden/<id>/pre_tool_allow.json`, `pre_tool_block.json` (+ `_windows` variants) | stdin payloads fed to the installed entrypoint by `contract-smoke.sh`. Allow means exit 0; block means exit 2 or a block/deny decision. The block payload uses a command the shipped rules deny with complete typed proof; the harness never executes it. |
+| `scripts/live-connector-e2e/golden/<id>/pre_tool_allow.json`, `pre_tool_block.json` (+ `pre_tool_block_windows.json` where the Windows block command differs; `contract-smoke.sh` uses it on Windows) | stdin payloads fed to the installed entrypoint by `contract-smoke.sh`. Allow means exit 0; block means exit 2 or a block/deny decision. The block payload uses a command the shipped rules deny with complete typed proof; the harness never executes it. |
 | `scripts/live-connector-e2e/lib/setup.sh` `dc_setup_subcommand`, `dc_connector_config_file` | the setup subcommand, and the vendor config file used by the teardown assertion |
 | `scripts/live-connector-e2e/drivers/<id>.sh` | a Layer B live driver, only if the agent has a headless mode that fires hooks; contract-only connectors skip it |
 | `.github/workflows/connector-live-e2e.yml` | the `workflow_dispatch` `connector` options, the `full=` matrix JSON, and live `include:` cells with connector-scoped secrets (`matrix.connector == '<id>' && secrets.X \|\| ''`) |
-| `.github/workflows/windows-native.yml` + `scripts/windows-native-ci.ps1` `ValidateSet` | the native Windows connector matrix and any pinned-download admission step |
 | `.github/workflows/macos-app.yml` | nothing per connector; it runs `macos/DefenseClawMac/script/test_connector_onboarding.sh`. The other macOS app parity scripts run only through `make macos-app-test` (cli-tui.md step 15). |
-| `scripts/live-connector-e2e/run-windows.ps1`, `test-windows.ps1` | the Windows contract harness |
 
 The workflows are pinned by these tests:
 - `cli/tests/test_connector_live_e2e_path_policy.py`: the full-matrix set must equal `ALL_CONNECTORS` and the dispatch options, and the path allowlist is fixed.
 - `test_connector_live_secret_scoping.py`: secrets are connector-scoped.
-- `test_connector_live_package_provenance.py`.
+- `test_windows_connector_contract.py`: the Windows `connector-contract` matrix must equal the Windows connector set, and the job must be in `windows-native-required.needs`.
 - `test_live_connector_upgrade_harness.py`.
 - `test_ci_workflow_efficiency.py`.
 - `test_windows_release_claims.py`.
@@ -190,7 +187,7 @@ go test -count=1 ./internal/config -run 'ReadMCPServersForConnector|ConnectorHom
 go test -count=1 ./internal/telemetry -run NormalizeHookEventTypeLabel
 go test -count=1 ./internal/enterprisepolicy ./internal/enterprisehooks ./internal/cli -run 'Route|Guard|Standalone|Hook'
 go test -count=1 ./test/e2e -run 'TestConnectorLifecycle_Matrix|TestGoldenPerConnectorLayout|TestConnectorVerifyCleanOnFreshDataDir'
-GOOS=windows go vet ./internal/gateway/connector/... ./internal/enterprisehooks/... ./internal/enterprisepolicy/... ./internal/cli/... ./cmd/defenseclaw-setup/...
+GOOS=windows go vet ./internal/gateway/connector/... ./internal/enterprisehooks/... ./internal/enterprisepolicy/... ./internal/cli/...
 
 # Python: parity, paths, discovery, setup, TUI, docs, tripwire
 pytest -q cli/tests/test_connector_surface_parity.py cli/tests/test_platform_support.py \

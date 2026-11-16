@@ -55,7 +55,7 @@ Quit and reopen Claude Code so it loads the hooks, ask it to list the files in t
 defenseclaw guardrail mode action --connector claudecode
 ```
 
-This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it. A mode you saved with `defenseclaw guardrail fail-mode` wins over the policy: with a saved `open` the call still runs under strict, and `defenseclaw guardrail fail-mode closed` (add `--connector <name>` when the mode was saved for one agent) blocks it ([fail modes](/docs/reference/fail-modes)).
+This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it. A mode you saved with `defenseclaw guardrail fail-mode` wins over the policy: with a saved `open` the call still runs under strict, and `defenseclaw guardrail fail-mode closed` (add `--connector <name>` when the mode was saved for one agent) blocks it. Two cases stay closed even with a saved `open`: OpenClaw under the strict policy, and ZeptoClaw model requests ([fail modes](/docs/reference/fail-modes)).
 
 </Step>
 
@@ -193,7 +193,7 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
 
 1. Observe first. Never switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes to that exact change.
 2. Never print a key, token or the contents of `.env`.
-3. Stop on a managed computer: if a command prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `defenseclaw status --json` shows `"deployment_mode": "managed_enterprise"`, tell the user to contact their administrator.
+3. Stop on a managed computer: if a command prints `This computer is managed` or `This device is managed` (exit `2` or `3`; see [Managed command availability](/docs/enterprise/managed-commands)), or `defenseclaw status --json` shows `"deployment_mode": "managed_enterprise"`, tell the user to contact their administrator.
 
 ### Steps
 

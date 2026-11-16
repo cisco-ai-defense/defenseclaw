@@ -99,7 +99,7 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-linux-enterprise packaging-macos-enterprise packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-test-scripts macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-lint-analyzers go-mod-no-toolchain check-quiet-startup repro-flags-parity assemble-parity ts-test rego-test clean \
@@ -1078,7 +1078,7 @@ macos-app-build: macos-app-license-check
 	    CODE_SIGNING_ALLOWED=NO \
 	    build
 
-macos-app-test:
+macos-app-test-scripts:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
@@ -1093,6 +1093,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_installation_context.sh
 	macos/DefenseClawMac/script/test_local_model_discovery.sh
 	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
+	macos/DefenseClawMac/script/test_cowork_status.sh
 	macos/DefenseClawMac/script/test_gateway_auto_start.sh
 	macos/DefenseClawMac/script/test_gateway_administrator.sh
 	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
@@ -1100,6 +1101,8 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
 	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
 	macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+
+macos-app-test: macos-app-test-scripts
 	$(MAKE) macos-app-build
 
 macos-app-release: macos-app-license-check
@@ -1140,12 +1143,16 @@ go-test-cov: sync-openclaw-extension
 	@rm -f coverage-go-*.out
 
 CONNECTOR_MATRIX_RUN := Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix
-# The connector package alone runs about 16 minutes of the matrix, so CI
-# splits it to stay inside the 20-minute job budget: CONNECTOR_MATRIX_PART=
-# packages runs the other packages and the Python matrix, and 0 .. N-1 run
-# that part of the connector package's matrix tests (N =
-# CONNECTOR_MATRIX_CONNECTOR_PARTS, balanced on go-linux.json). The default,
-# all, runs everything in one go test.
+# The connector package alone runs about 24 minutes of the matrix on a hosted
+# runner, so CI splits it to stay inside the 20-minute job budget:
+# CONNECTOR_MATRIX_PART= packages runs the other packages and the Python
+# matrix, and 0 .. N-1 run that part of the matrix tests of the connector
+# package (N = CONNECTOR_MATRIX_CONNECTOR_PARTS). The parts are balanced on
+# go-linux-connector-matrix.json, the times of this run (no -race). go-linux.json
+# holds the -race times of the remaining-package shards; the shell-hook tests
+# wait on the scripts they spawn, so without -race they are most of the run,
+# and balanced on those times one part ran more than twice as long as the
+# others (GAP-0834). The default, all, runs everything in one go test.
 CONNECTOR_MATRIX_PART ?= all
 CONNECTOR_MATRIX_CONNECTOR_PARTS ?= 4
 
@@ -1169,7 +1176,7 @@ else ifeq ($(CONNECTOR_MATRIX_PART),packages)
 		-run '$(CONNECTOR_MATRIX_RUN)'
 else
 	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector \
-		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux.json \
+		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux-connector-matrix.json \
 		--shard-count $(CONNECTOR_MATRIX_CONNECTOR_PARTS) --shard-index $(CONNECTOR_MATRIX_PART))" && \
 		go test -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run"
 endif

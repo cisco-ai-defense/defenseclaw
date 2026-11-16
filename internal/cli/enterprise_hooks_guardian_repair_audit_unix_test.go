@@ -43,7 +43,7 @@ func TestStandaloneGuardianReportsRepairedHookToAuditSocket(t *testing.T) {
 		response := enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion}
 		for _, target := range request.Targets {
 			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{
-				Index: target.Index, OK: true, Repaired: true,
+				Index: target.Index, OK: true, Repaired: true, RestoredElements: entryElement,
 				Result: &enterprisehooks.InstallResult{
 					Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome,
 					HookContractLockUpdatedAt: "lock", HookContractEntryUpdatedAt: "entry",

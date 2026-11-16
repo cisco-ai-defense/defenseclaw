@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-0172: status, verify and ensure name an admin llm.model the judge
@@ -33,7 +34,8 @@ func TestWindowsEnterpriseWarnsAnUnroutableLLMModel(t *testing.T) {
 			continue
 		}
 		if len(result.Warnings) != 1 || result.Warnings[0].Code != enterprisestatus.CodeLLMModelUnroutable ||
-			!strings.Contains(result.Warnings[0].Message, tc.want) || !strings.Contains(result.Warnings[0].Message, "Setup /ensure") {
+			!strings.Contains(result.Warnings[0].Message, tc.want) || !strings.Contains(result.Warnings[0].Message, windowsEnterpriseSetupCommand("/ensure", "CONFIG=<corrected config path>")) ||
+			!strings.Contains(result.Warnings[0].Message, managed.WindowsSetupSource) {
 			t.Fatalf("%s: warnings %+v", tc.name, result.Warnings)
 		}
 	}

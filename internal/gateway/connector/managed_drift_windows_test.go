@@ -81,7 +81,7 @@ func TestEnsureWindowsCodexMachineFileTrustStandaloneRefusesDrift(t *testing.T) 
 		true,
 	)
 	if err := ensureWindowsCodexMachineFileTrust(path, "Codex machine requirements", true); !errors.Is(err, verdict) ||
-		!strings.Contains(err.Error(), "Setup /ensure") {
+		!strings.Contains(err.Error(), `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
 		t.Fatalf("standalone drift = %v, want %v and the Setup step", err, verdict)
 	}
 	if len(*markers) != 0 {

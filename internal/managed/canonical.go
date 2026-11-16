@@ -51,6 +51,13 @@ const (
 	ObjectServiceInstallDirectory ObjectKind = "ServiceInstallDirectory"
 	// ObjectServiceInstallFile is the gateway executable.
 	ObjectServiceInstallFile ObjectKind = "ServiceInstallFile"
+	// ObjectSecureClientMarkerDirectory is InstallRoot\secure-client.install,
+	// the empty folder that marks a Secure Client install: owned by SYSTEM,
+	// SYSTEM and Administrators full control and Users read, as
+	// Set-DefenseClawSecureClientInstallMarker stamps it (no gateway entry).
+	// Only a SYSTEM-owned marker is the installer's; another owner is a
+	// boundary, never adopted, even by a repair that may transfer owners.
+	ObjectSecureClientMarkerDirectory ObjectKind = "SecureClientMarkerDirectory"
 	// ObjectStateDirectory is StateRoot: gateway read and traverse.
 	ObjectStateDirectory ObjectKind = "StateDirectory"
 	// ObjectAdminDirectory is a SYSTEM and Administrators only directory: the
@@ -73,8 +80,8 @@ const (
 func (kind ObjectKind) Directory() bool {
 	switch kind {
 	case ObjectRuntimeDirectory, ObjectConfigDirectory, ObjectInstallDirectory,
-		ObjectServiceInstallDirectory, ObjectStateDirectory, ObjectAdminDirectory,
-		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
+		ObjectServiceInstallDirectory, ObjectSecureClientMarkerDirectory, ObjectStateDirectory,
+		ObjectAdminDirectory, ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
 		return true
 	}
 	return false
@@ -159,6 +166,19 @@ type CanonicalOptions struct {
 	// UnixMode overrides a kind's macOS canonical permission bits, for
 	// per-user objects whose mode depends on the file (a hook script, a token).
 	UnixMode os.FileMode
+	// inPlaceOutOfClass keeps the plain in-place repair on standalone for an
+	// object outside the g582 class (the installed binaries and the two
+	// service logs of RepairWindowsManagedInstall): nothing reads them as
+	// policy, and the installer replaces the binaries.
+	inPlaceOutOfClass bool
+}
+
+// ownerTransferAllowed reports whether a repair may replace an untrusted
+// owner of kind. The Secure Client install marker is never transferred: its
+// SYSTEM owner is the fact that this is a Secure Client install, so a repair
+// must not create that fact for a folder someone else made.
+func ownerTransferAllowed(kind ObjectKind, opts CanonicalOptions) bool {
+	return opts.AllowUntrustedOwnerTransfer && kind != ObjectSecureClientMarkerDirectory
 }
 
 // UnixOwnership is a uid and gid pair for CanonicalOptions.UnixOwner.
@@ -332,6 +352,8 @@ func canonicalSpecFor(kind ObjectKind, gatewaySID string) canonicalSpec {
 		return gatewayRead(withGateway(maskReadAndExecute))
 	case ObjectServiceInstallDirectory, ObjectServiceInstallFile:
 		return gatewayRead(withUsers(withGateway(maskReadAndExecute)))
+	case ObjectSecureClientMarkerDirectory:
+		return canonicalSpec{Forms: []canonicalForm{{Owner: sidLocalSystem, ACEs: withUsers(base)}}}
 	case ObjectInstallDirectory, ObjectInstallFile:
 		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: withUsers(base)}}}
 	case ObjectAdminDirectory, ObjectAdminFile, ObjectLogDirectory:
@@ -491,6 +513,13 @@ func assessCanonicalDescriptor(
 		default:
 			a.Drift = append(a.Drift, fmt.Sprintf("owner %s is not trusted", ownerText(desc.Owner)))
 		}
+	}
+	if kind == ObjectSecureClientMarkerDirectory && desc.Owner != sidLocalSystem {
+		// The marker is the SYSTEM-owned fact that this is a Secure Client
+		// install; an Administrators-owned folder is not that fact
+		// (GAP-0461), so a repair never makes it one.
+		a.Owner = ownerUntrusted
+		a.Drift = append(a.Drift, fmt.Sprintf("Secure Client install marker owner %s is not SYSTEM", ownerText(desc.Owner)))
 	}
 
 	if !desc.Protected {
@@ -714,6 +743,10 @@ type ManagedDataPaths struct {
 	// RuntimeDirs are further gateway-writable directories below DataDir,
 	// such as the hooks directory.
 	RuntimeDirs []string
+	// LockFiles are product-owned lock files below DataDir that are created
+	// lazily (the ACP credential and enrollment locks). They are repaired as
+	// runtime files, so an entry an untrusted principal added is removed.
+	LockFiles []string
 }
 
 // sqliteSideFileSuffixes are the SQLite side files repaired with each
@@ -775,6 +808,13 @@ func (paths ManagedDataPaths) targets() []managedDataTarget {
 		addDir(filepath.Dir(logPath))
 		addFile(logPath, ObjectRuntimeFile)
 	}
+	for _, lockPath := range paths.LockFiles {
+		if strings.TrimSpace(lockPath) == "" {
+			continue
+		}
+		addDir(filepath.Dir(lockPath))
+		addFile(lockPath, ObjectRuntimeFile)
+	}
 	// Parents before children.
 	sort.SliceStable(dirs, func(i, j int) bool {
 		return strings.Count(dirs[i].path, string(filepath.Separator)) <
@@ -789,13 +829,28 @@ func (paths ManagedDataPaths) targets() []managedDataTarget {
 // (the hook guardian, the CMID broker, the installer) may call it; inside the
 // gateway service it degrades to AssessWindowsManagedDataPaths. On other
 // platforms every result is CanonicalUnsupported.
+//
+// On standalone an object an untrusted principal can write or owns (data_dir,
+// its hooks folder and tokens, the audit and judge databases, the redaction
+// key, the log) is not repaired: it is reported as a boundary finding with
+// the way out and left as it is, whatever AllowUntrustedOwnerTransfer says,
+// as RepairWindowsManagedInstall does (g582 round 4). The redaction key is
+// rotated by the gateway instead. Trusted-only drift keeps the repair.
 func RepairWindowsManagedDataPaths(paths ManagedDataPaths, opts CanonicalOptions) []CanonicalResult {
 	targets := paths.targets()
 	if !windowsDescriptorPlatform() {
 		return unsupportedCanonicalResults(targets)
 	}
+	refuseDrift := managedInstallRefusesContentDrift()
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
+		if refuseDrift {
+			if refused, ok := refuseStandaloneDataPathRepair(target, opts); ok {
+				results = append(results, refused)
+				continue
+			}
+		}
+		standaloneRepairAfterCheck(target.path)
 		result, _ := EnsureCanonical(target.path, target.kind, opts)
 		results = append(results, result)
 	}

@@ -118,6 +118,10 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	}
 	row("openshell", fmt.Sprintf("enabled, install=%s driver=%s%s gateway=127.0.0.1:%d%s", settings.Install, settings.Driver,
 		fallbackNote(settings), settings.GatewayPort, versionNote(settings.Version)))
+	if settings.RaisedFrom != "" {
+		r.AddWarning(codeOpenShellPinRaised, fmt.Sprintf("enterprise.openshell.version pins %s below the OpenShell %s floor; the effective requirement is %s. Set the pin to %s; an account with a running sandbox keeps its current runtime until that sandbox stops",
+			settings.RaisedFrom, openshell.SupportedMin, settings.Version, settings.Version))
+	}
 	primary, fallback := env.checkOpenShellDrivers(ctx, settings)
 	l.noteOpenShellCapability(ctx, settings, true, primary, fallback)
 	fallbackReady := fallback != nil && rowsReady(fallback)
@@ -473,15 +477,15 @@ var versionRange = lazyregexp.New(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9
 // supports.
 func versionAllowed(spec string, have openshell.Version) (bool, string) {
 	spec = strings.TrimSpace(spec)
-	if err := openshell.CheckSandboxRelease(have); err != nil && openshell.Legacy(have) {
-		// Whatever the pin allows: each user's daemon starts no sandbox on it.
+	if err := openshell.CheckSandboxRelease(have); err != nil {
+		// The floor applies independently of the administrator's pin.
+		return false, err.Error()
+	}
+	if err := openshell.CheckSupported(have); err != nil {
 		return false, err.Error()
 	}
 	switch {
 	case spec == "":
-		if err := openshell.CheckSupported(have); err != nil {
-			return false, err.Error()
-		}
 		return true, ""
 	case versionRange.MatchString(spec):
 		m := versionRange.FindStringSubmatch(spec)

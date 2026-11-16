@@ -130,6 +130,12 @@ observability: {}
 	if !strings.Contains(startOutput, "OK (PID") || strings.Contains(startOutput, "STARTING") {
 		t.Fatalf("successful start did not render READY-only completion:\n%s", startOutput)
 	}
+	// The start claimed its API port in the test home's ProgramData, not the
+	// computer's (PR #1427 stress, GAP-0079 follow-up).
+	claim := filepath.Join(executableTestProgramData(home), gatewayPortClaimPrefix+strconv.Itoa(port))
+	if got, own := gatewayPortClaimSID(claim), currentAccountSID(); own == "" || got != own {
+		t.Fatalf("the start's port claim %s names %q, want this account %q", claim, got, own)
+	}
 
 	running, managedPID := d.IsRunning()
 	if !running || !d.HasManagedProcessIdentity(managedPID) {
@@ -474,6 +480,9 @@ $code = $LASTEXITCODE
 [Console]::Out.Write($output)
 [Console]::Out.WriteLine("` + executableExitMarker + `$code")
 exit 0`
+	if err := os.MkdirAll(executableTestProgramData(home), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.Env = executableTestEnv(home, binary, command)
 	outputBytes, err := cmd.CombinedOutput()
@@ -497,8 +506,9 @@ func executableTestEnv(home, binary, command string) []string {
 	removed := []string{
 		"DEFENSECLAW_HOME", "DEFENSECLAW_CONFIG", "DEFENSECLAW_TEST_EXE", "DEFENSECLAW_TEST_COMMAND",
 		"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "CODEX_HOME", "PSModuleAnalysisCachePath",
+		"ProgramData",
 	}
-	env := make([]string, 0, len(os.Environ())+9)
+	env := make([]string, 0, len(os.Environ())+10)
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
 		if !ok {
@@ -525,9 +535,18 @@ func executableTestEnv(home, binary, command string) []string {
 		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
 		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
 		"CODEX_HOME="+filepath.Join(home, ".codex"),
+		// The built gateway claims its API port in %ProgramData%
+		// (claimGatewayAPIPort): keep the claim in the test home, as
+		// isolateTestHost does in this process (PR #1427 stress, GAP-0079
+		// follow-up).
+		"ProgramData="+executableTestProgramData(home),
 		"PSModuleAnalysisCachePath="+filepath.Join(home, "AppData", "Local", "Microsoft", "Windows", "PowerShell", "ModuleAnalysisCache"),
 	)
 }
+
+// executableTestProgramData is the built gateway's %ProgramData% in its
+// test home.
+func executableTestProgramData(home string) string { return filepath.Join(home, "ProgramData") }
 
 func assertExecutableTestListenerOwner(t *testing.T, port, wantPID int) {
 	t.Helper()

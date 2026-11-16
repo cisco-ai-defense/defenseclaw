@@ -189,7 +189,15 @@ def test_first_run_refuses_the_leftover_as_its_rollback_source(tmp_path):
     report = _first_run(data_dir)
     assert report.status == "needs_attention"
     step = next(s for s in report.setup if s.name == "First-run transaction")
-    assert "hook_contract_lock.json rollback source is not private" in step.detail
+    lock = data_dir / "hook_contract_lock.json"
+    # GAP-0074: the first run names the file and the command that fixes it.
+    assert step.detail == (
+        "could not establish the protected first-run rollback point: "
+        "hook_contract_lock.json rollback source is not private: "
+        f"other accounts can read or change {lock}; make it owner-only (chmod 600 {lock}) "
+        "and run defenseclaw init again"
+    )
+    assert lock.stat().st_mode & 0o777 == 0o666
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the unprotected stand-in lock uses POSIX modes")
@@ -211,30 +219,135 @@ def test_first_run_moves_the_managed_leftover_aside_before_its_rollback_point(tm
     assert not lock.exists() or "2026-11-04T07:25:38Z" not in lock.read_text(encoding="utf-8")
 
 
+ACCOUNT = "S-1-5-21-4053867087-1811248452-1158138866-1001"
+_FA, _M, _M_DC, _RC = 0x1F01FF, 0x1301BF, 0x1301FF, 0x20000
+
+
+def _ace(sid: str, mask: int, flags: int = 0) -> tuple[int, int, int, str]:
+    return (mask, 1, flags, sid)
+
+
+@pytest.mark.parametrize(
+    ("entries", "locked"),
+    [
+        # hook_contract_lock.json as a 1.0.8 managed uninstall left it (vm-dc-cowork-win11).
+        ([_ace("S-1-3-4", _RC), _ace(ACCOUNT, _M), _ace("S-1-5-18", _FA), _ace("S-1-5-32-544", _FA)], True),
+        # hooks\: the same lock on a folder, with inherit-only copies for its children.
+        (
+            [
+                _ace("S-1-3-4", _RC),
+                _ace(ACCOUNT, _M_DC),
+                _ace(ACCOUNT, 0xE0010040, 0x0B),
+                _ace("S-1-5-18", _FA),
+                _ace("S-1-5-18", 0x10000000, 0x0B),
+                _ace("S-1-5-32-544", _FA),
+                _ace("S-1-5-32-544", 0x10000000, 0x0B),
+            ],
+            True,
+        ),
+        # foreign-hook-env.json: written by the runtime in the locked folder, no OWNER RIGHTS entry.
+        ([_ace(ACCOUNT, _M_DC), _ace("S-1-5-18", _FA), _ace("S-1-5-32-544", _FA)], True),
+        # logs\\hook-failures.jsonl: a file the hook created later, inheriting the folder's lock.
+        ([_ace(ACCOUNT, _M_DC, 0x10), _ace("S-1-5-18", _FA, 0x10), _ace("S-1-5-32-544", _FA, 0x10)], True),
+        # The profile's own access list (GAP-0069): the account has full control.
+        ([_ace("S-1-5-18", _FA, 0x10), _ace("S-1-5-32-544", _FA, 0x10), _ace(ACCOUNT, _FA, 0x10)], False),
+        # The per-user private writer: SYSTEM and OWNER RIGHTS full control.
+        ([_ace("S-1-5-18", _FA), _ace("S-1-3-4", _FA)], False),
+    ],
+    ids=["lock-file", "hooks-folder", "foreign-hook-env", "inherited-child", "profile-inherited", "per-user-private"],
+)
+def test_field_lock_is_the_managed_runtime_access_list(entries, locked):
+    assert managed_leftovers.field_locked(entries, ACCOUNT) is locked
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows access lists")
 def test_managed_custody_reads_the_windows_access_list(tmp_path):
     user = os.environ.get("USERDOMAIN", "") + "\\" + getpass.getuser()
-    own = tmp_path / "own.json"
+    administrators, system, owner_rights = "*S-1-5-32-544", "*S-1-5-18", "*S-1-3-4"
+    plain = tmp_path / "plain.json"
     managed = tmp_path / "managed.json"
     other = tmp_path / "other.json"
-    for path in (own, managed, other):
+    # One icacls call per file: once OWNER RIGHTS is read-only, a standard
+    # account can no longer change the access list.
+    grants = {
+        # The profile's access list, set as explicit entries.
+        plain: [f"{user}:(F)", f"{system}:(F)", f"{administrators}:(F)"],
+        # The field lock: the account Modify and a read-only OWNER RIGHTS entry.
+        managed: [f"{user}:(M)", f"{system}:(F)", f"{administrators}:(F)", f"{owner_rights}:(RC)"],
+        # The same, but every user can write it: not DefenseClaw's custody.
+        other: [f"{user}:(M)", f"{system}:(F)", f"{administrators}:(F)", f"{owner_rights}:(RC)", "*S-1-5-32-545:(M)"],
+    }
+    for path, grant in grants.items():
         path.write_text("{}", encoding="utf-8")
         subprocess.run(["icacls", str(path), "/setowner", user], check=True, capture_output=True)
-        subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(F)", "*S-1-5-18:(F)"],
-            check=True,
-            capture_output=True,
-        )
-        # icacls /inheritance:r can keep the profile's inherited entries as
-        # explicit ones (SYSTEM, Administrators, the account), so drop the
-        # Administrators entry: "own" is only this account and SYSTEM.
-        subprocess.run(["icacls", str(path), "/remove:g", "*S-1-5-32-544"], check=True, capture_output=True)
-    # The field lock: Administrators full control and a read-only OWNER RIGHTS entry.
-    subprocess.run(
-        ["icacls", str(managed), "/grant", "*S-1-5-32-544:(F)", "*S-1-3-4:(RC)"], check=True, capture_output=True
-    )
-    # Writable by every user: not DefenseClaw's custody.
-    subprocess.run(["icacls", str(other), "/grant", "*S-1-5-32-545:(M)"], check=True, capture_output=True)
-    assert managed_leftovers.managed_custody(str(own)) is False
+        subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", *grant], check=True, capture_output=True)
+    from defenseclaw.file_permissions import windows_acl_write_error
+
+    # The per-user rule refuses the plain entry too, so only the lock tells them apart.
+    assert windows_acl_write_error(str(plain)) is not None
+    assert managed_leftovers.managed_custody(str(plain)) is False
     assert managed_leftovers.managed_custody(str(managed)) is True
     assert managed_leftovers.managed_custody(str(other)) is False
+
+
+class _WindowsOs:
+    """``os`` as cmd_setup sees it on Windows; everything else is the real module."""
+
+    name = "nt"
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
+
+
+_MOVE_OR_DELETE = "Move it out of the folder, or delete it if you did not create it, then"
+
+
+def _plain_lock(tmp_path: Path) -> Path:
+    lock = Path(os.path.realpath(tmp_path)) / "hook_contract_lock.json"
+    lock.write_text("{}", encoding="utf-8")
+    return lock
+
+
+def test_an_unprotected_windows_rollback_source_names_the_file_and_the_way_out(tmp_path):
+    # cowork-1-0-8 GAP-0074: a plain hook_contract_lock.json the user made is
+    # still refused; the first run now says which file and what to do.
+    from defenseclaw.commands import cmd_setup
+
+    lock = _plain_lock(tmp_path)
+    with (
+        patch.object(cmd_setup, "os", _WindowsOs()),
+        patch.object(
+            cmd_setup, "windows_acl_write_error", return_value="owner SID S-1-5-32-544 is not the current user"
+        ),
+        pytest.raises(cmd_setup.RollbackSourceRefusedError) as raised,
+    ):
+        cmd_setup._capture_protected_setup_file(str(lock), 1 << 20, "hook_contract_lock.json")
+    assert raised.value.for_user("defenseclaw init") == (
+        f"hook_contract_lock.json rollback source is not protected: {lock} is not protected the way "
+        f"DefenseClaw writes its files. {_MOVE_OR_DELETE} run defenseclaw init again"
+    )
+    # Setup commands wrap and record the plain message, which names no path.
+    assert str(raised.value) == (
+        "hook_contract_lock.json rollback source is not protected: the file is not protected the way "
+        f"DefenseClaw writes its files. {_MOVE_OR_DELETE} run the command again"
+    )
+    assert lock.read_text(encoding="utf-8") == "{}"  # never moved or deleted for the user
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owners")
+def test_a_foreign_owned_rollback_source_is_worded_the_same(tmp_path):
+    from defenseclaw.commands import cmd_setup
+
+    lock = _plain_lock(tmp_path)
+    lock.chmod(0o600)
+    with (
+        patch.object(cmd_setup, "trusted_runtime_owner", return_value=False),
+        pytest.raises(cmd_setup.RollbackSourceRefusedError) as raised,
+    ):
+        cmd_setup._capture_protected_setup_file(str(lock), 1 << 20, "hook_contract_lock.json")
+    assert raised.value.for_user("defenseclaw init") == (
+        f"hook_contract_lock.json rollback source is not owned by a trusted principal: {lock} is not "
+        f"protected the way DefenseClaw writes its files. {_MOVE_OR_DELETE} run defenseclaw init again"
+    )
+    assert str(lock) not in str(raised.value)
+    assert lock.exists()

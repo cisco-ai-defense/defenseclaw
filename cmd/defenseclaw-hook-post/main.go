@@ -18,15 +18,23 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const maxInput = hookexec.MaxPerUserPluginRequest
+
+// peerRefusalOutput is the root-gateway diagnosis printed after a refused
+// listener (a seam for tests: the listener a real refusal needs belongs to
+// another account).
+var peerRefusalOutput = hookexec.PerUserPeerRefusalOutput
 
 const userGuardCapability = "defenseclaw-hook-post guard-user-hook v1\n"
 
@@ -43,6 +51,14 @@ func run(args []string, input io.Reader, output io.Writer) error {
 // runWithPeer is run; peer, when set, receives the process behind the
 // request's connection (hookexec.WithPerUserPeerRecord).
 func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexec.PerUserPeerRecord) error {
+	return runCall(args, input, output, peer, nil)
+}
+
+// postedCall is the path and body of the request a run sent (runCall).
+type postedCall struct{ path, body string }
+
+// runCall is runWithPeer; call, when set, receives the request that was sent.
+func runCall(args []string, input io.Reader, output io.Writer, peer *hookexec.PerUserPeerRecord, call *postedCall) error {
 	if len(args) == 1 && args[0] == "--version" {
 		_, err := fmt.Fprintf(output, "defenseclaw-hook-post version %s (commit=%s, built=%s)\n", version, commit, date)
 		return err
@@ -65,19 +81,9 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 		_, err = output.Write(review)
 		return err
 	}
-	if len(args) == 0 || args[0] != "hook-post" {
-		return fmt.Errorf("expected hook-post subcommand")
-	}
-	flags := flag.NewFlagSet("hook-post", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	apiAddr := flags.String("api-addr", "", "gateway loopback host:port")
-	maxTime := flags.Int("max-time", 10, "maximum request time in seconds")
-	curlOutput := flags.Bool("curl-output", false, "print response body and trailing HTTP code")
-	if err := flags.Parse(args[1:]); err != nil {
+	opts, err := parseHookPostFlags(args)
+	if err != nil {
 		return err
-	}
-	if flags.NArg() != 0 || *apiAddr == "" || *maxTime < 1 || *maxTime > 30 {
-		return fmt.Errorf("invalid per-user hook transport arguments")
 	}
 	data, err := io.ReadAll(io.LimitReader(input, maxInput+1))
 	if err != nil {
@@ -87,7 +93,7 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 		return fmt.Errorf("native hook input is invalid or too large")
 	}
 	var request hookexec.PerUserPluginRequest
-	if *curlOutput {
+	if opts.curlOutput {
 		if !bytes.HasPrefix(data, []byte("DCPOST1\x00")) {
 			return fmt.Errorf("native hook input is invalid or too large")
 		}
@@ -99,25 +105,60 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 	} else if request, err = hookexec.DecodePerUserPluginRequest(data); err != nil {
 		return err
 	}
-	timeout := requestTimeout(*maxTime)
+	timeout := requestTimeout(opts.maxTime)
+	if call != nil {
+		*call = postedCall{path: request.Path, body: request.Body}
+	}
 	if request.Headers == nil {
 		request.Headers = map[string]string{}
 	}
 	// Tell the gateway how long this request waits for its answer, so a
 	// tool-call judge answers inside it (#1395).
 	request.Headers[hookexec.HookAnswerWithinHeader] = strconv.FormatInt(timeout.Milliseconds(), 10)
-	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(context.Background(), peer), timeout)
+	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(
+		hookexec.WithPerUserGatewayDataDir(context.Background(), os.Getenv(hookPostDataDirEnv)), peer), timeout)
 	defer cancel()
-	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
+	response, err := hookexec.PostPerUserHook(ctx, opts.apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
 		return err
 	}
 	hookexec.PerUserGatewayRecordObservedAnswer(os.Getenv(hookPostDataDirEnv), peer)
-	if !*curlOutput {
+	if !opts.curlOutput {
 		return json.NewEncoder(output).Encode(response)
 	}
 	_, err = fmt.Fprintf(output, "%s\n%d", response.Body, response.Status)
 	return err
+}
+
+// hookPostFlags are the parsed arguments of the hook-post subcommand.
+type hookPostFlags struct {
+	apiAddr    string
+	maxTime    int
+	curlOutput bool
+}
+
+// parseHookPostFlags is the one reading of the hook-post arguments: the
+// request, and the diagnosis printed after a refused listener, take the
+// address and output mode from it, so every spelling the flag package
+// accepts (name value, name=value, a repeated flag, --curl-output=true)
+// reaches both the same way (rel-1-0-6 GAP-0712).
+func parseHookPostFlags(args []string) (hookPostFlags, error) {
+	if len(args) == 0 || args[0] != "hook-post" {
+		return hookPostFlags{}, fmt.Errorf("expected hook-post subcommand")
+	}
+	flags := flag.NewFlagSet("hook-post", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var opts hookPostFlags
+	flags.StringVar(&opts.apiAddr, "api-addr", "", "gateway loopback host:port")
+	flags.IntVar(&opts.maxTime, "max-time", 10, "maximum request time in seconds")
+	flags.BoolVar(&opts.curlOutput, "curl-output", false, "print response body and trailing HTTP code")
+	if err := flags.Parse(args[1:]); err != nil {
+		return hookPostFlags{}, err
+	}
+	if flags.NArg() != 0 || opts.apiAddr == "" || opts.maxTime < 1 || opts.maxTime > 30 {
+		return hookPostFlags{}, fmt.Errorf("invalid per-user hook transport arguments")
+	}
+	return opts, nil
 }
 
 // hookPostDeadlineEnv is the shell hook's time left for this request in
@@ -132,6 +173,30 @@ const hookPostDeadlineEnv = "_DC_HOOK_POST_DEADLINE_MS"
 // helper (the parent of its own hooks folder), where a gateway start or
 // restart holds its start lock.
 const hookPostDataDirEnv = "_DC_HOOK_POST_DATA_DIR"
+
+// hookPostAccountHomeEnv is the account home the shell hook saved before it
+// replaced HOME with a scratch folder for its own run (_hardening.sh). The
+// late-call scan tells the protected folders and files against it
+// (GAP-0850).
+const hookPostAccountHomeEnv = "_DC_HOOK_POST_ACCOUNT_HOME"
+
+// accountHome is the home of the account the hook runs for, not the scratch
+// HOME the shell hook gives this process: the home the shell saved, exactly
+// as it got it, else the account database entry of the user. The saved value
+// is not rewritten here. The scan resolves it by file system rules (a parent
+// step through a link, a trailing slash). A value that is no folder holds no
+// protected file; the scan then tells the account database home and indexes
+// the other homes the call can mean (hookpaths.LateOrdinaryCallAt). Empty
+// (the home of the process) only when neither is known.
+func accountHome() string {
+	if home := os.Getenv(hookPostAccountHomeEnv); home != "" {
+		return home
+	}
+	if current, err := user.Current(); err == nil && filepath.IsAbs(current.HomeDir) {
+		return current.HomeDir
+	}
+	return ""
+}
 
 func requestTimeout(maxTime int) time.Duration {
 	limit := time.Duration(maxTime) * time.Second
@@ -243,7 +308,8 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 	dataDir := os.Getenv(hookPostDataDirEnv)
 	peer := hookexec.NewPerUserPeerRecord()
 	stopObservingStart := observeGatewayStartDuringCall(dataDir, peer)
-	err := runWithPeer(args, input, output, peer)
+	var call postedCall
+	err := runCall(args, input, output, peer, &call)
 	startObservation := stopObservingStart()
 	if err == nil {
 		return 0
@@ -258,9 +324,24 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 			return hookexec.PerUserPostRestartOutageExit
 		}
 		return hookexec.PerUserPostOutageExit
+	case hookexec.PerUserPostListenerUnanswered(err):
+		// This account's recorded gateway holds the listener and took no
+		// accept for the whole wait (a stopped or frozen gateway): nothing was
+		// sent, and it is no process of another account. The shell reads it
+		// as the outage, as the native hook does, for every event but a tool
+		// call that does not plainly name nothing protected.
+		if lateOrdinary(call) || nonToolGateEvent(call) {
+			return hookexec.PerUserPostLateOrdinaryExit
+		}
+		return hookexec.PerUserPostNoAnswerExit
 	case hookexec.PerUserPostPeerUnverified(err):
 		// Nothing of the call was sent: the one failure the OpenCode and
-		// Amp plugins send again (GAP-2083).
+		// Amp plugins send again (GAP-2083). The shell hook reads the
+		// root-gateway diagnosis from stdout, as it does from the gateway
+		// CLI hook-post (rel-1-0-6 GAP-0712).
+		if opts, perr := parseHookPostFlags(args); perr == nil && opts.curlOutput {
+			_, _ = io.WriteString(output, peerRefusalOutput(err, opts.apiAddr, dataDir))
+		}
 		return hookexec.PerUserPostPeerUnverifiedExit
 	case hookexec.PerUserPostNoAnswer(err):
 		// A local deadline before the verified connection is not an
@@ -275,13 +356,65 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		// no-answer, or as the restart outage when this account's start lock
 		// was held after the call reached its gateway and that gateway gave
 		// up the port during the call (rel-1-0-6 GAP-0498).
-		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) ||
-			hookexec.PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
+		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) {
 			return hookexec.PerUserPostRestartNoAnswerExit
+		}
+		if fresh, reason := hookexec.PerUserGatewayFreshStartNoAnswer(dataDir, peer); fresh {
+			return hookexec.PerUserPostRestartNoAnswerExit
+		} else {
+			// The shell consumes this fixed token only for exit 9. It never
+			// reaches the agent or changes the no-answer decision.
+			if opts, perr := parseHookPostFlags(args); perr == nil && opts.curlOutput {
+				_, _ = fmt.Fprint(output, "DCPOSTPROOF1:"+reason)
+			}
+		}
+		if lateOrdinary(call) {
+			// A gateway that is up and late with a call that names nothing
+			// protected is no reason to deny it (GAP-0518): the shell reads
+			// this status as the outage and follows the outage mode.
+			return hookexec.PerUserPostLateOrdinaryExit
 		}
 		return hookexec.PerUserPostNoAnswerExit
 	}
 	return 1
+}
+
+// lateOrdinary reports a sent Claude Code or Codex tool call that the scan
+// finds ordinary (hookpaths.LateOrdinaryCall). The connector is named by the
+// request path; any other path is not scanned.
+func lateOrdinary(call postedCall) bool {
+	var connector string
+	switch {
+	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
+		connector = "claudecode"
+	case strings.Contains(call.path, "codex"):
+		connector = "codex"
+	default:
+		return false
+	}
+	return hookpaths.LateOrdinaryCallAt(accountHome(), connector, []byte(call.body))
+}
+
+// nonToolGateEvent reports a Claude Code or Codex call that names an event
+// which is not a tool gate (a post-tool batch, a prompt, a session event).
+// Any other connector, or an event it cannot read, is not one.
+func nonToolGateEvent(call postedCall) bool {
+	var connector string
+	switch {
+	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
+		connector = "claudecode"
+	case strings.Contains(call.path, "codex"):
+		connector = "codex"
+	default:
+		return false
+	}
+	var event struct {
+		Name string `json:"hook_event_name"`
+	}
+	if json.Unmarshal([]byte(call.body), &event) != nil || strings.TrimSpace(event.Name) == "" {
+		return false
+	}
+	return !hookexec.ToolGateEvent(connector, event.Name)
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {

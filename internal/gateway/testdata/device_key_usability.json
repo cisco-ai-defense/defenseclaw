@@ -1,0 +1,175 @@
+{
+ "about": "Device key file bytes and whether the gateway parseIdentity (internal/gateway/device.go) accepts them. The Go test device_key_usability_fixtures_test.go and cli/tests/test_device_key_usability.py read this file; both must reach these verdicts.",
+ "cases": [
+  {
+   "name": "canonical",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": true
+  },
+  {
+   "name": "alternate type PRIVATE KEY",
+   "file_base64": "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCkFRSURCQVVHQndnSkNnc01EUTRQRUJFU0V4UVZGaGNZR1JvYkhCMGVIeUE9Ci0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0K",
+   "usable": true
+  },
+  {
+   "name": "no trailing newline",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0t",
+   "usable": true
+  },
+  {
+   "name": "CRLF line endings",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0NCkFRSURCQVVHQndnSkNnc01EUTRQRUJFU0V4UVZGaGNZR1JvYkhCMGVIeUE9DQotLS0tLUVORCBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0NCg==",
+   "usable": true
+  },
+  {
+   "name": "text before the block",
+   "file_base64": "ZGV2aWNlIGtleSB3cml0dGVuIGJ5IGEgdG9vbApzZWNvbmQgbGluZQotLS0tLUJFR0lOIEVEMjU1MTkgUFJJVkFURSBLRVktLS0tLQpBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVNFeFFWRmhjWUdSb2JIQjBlSHlBPQotLS0tLUVORCBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0K",
+   "usable": true
+  },
+  {
+   "name": "junk on the BEGIN line",
+   "file_base64": "anVuay0tLS0tQkVHSU4gRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCkFRSURCQVVHQndnSkNnc01EUTRQRUJFU0V4UVZGaGNZR1JvYkhCMGVIeUE9Ci0tLS0tRU5EIEVEMjU1MTkgUFJJVkFURSBLRVktLS0tLQo=",
+   "usable": false
+  },
+  {
+   "name": "byte order mark before the block",
+   "file_base64": "77u/LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": false
+  },
+  {
+   "name": "NUL bytes then a line break then the block",
+   "file_base64": "AAAKLS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": true
+  },
+  {
+   "name": "header lines before the body",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KTm90ZToga2VwdApPdGhlcjogMQpBUUlEQkFVR0J3Z0pDZ3NNRFE0UEVCRVNFeFFWRmhjWUdSb2JIQjBlSHlBPQotLS0tLUVORCBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0K",
+   "usable": true
+  },
+  {
+   "name": "body split over two lines",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFAKRUJFU0V4UVZGaGNZR1JvYkhCMGVIeUE9Ci0tLS0tRU5EIEVEMjU1MTkgUFJJVkFURSBLRVktLS0tLQo=",
+   "usable": true
+  },
+  {
+   "name": "line break inside a base64 group",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFCkJFU0V4UVZGaGNZR1JvYkhCMGVIeUE9Ci0tLS0tRU5EIEVEMjU1MTkgUFJJVkFURSBLRVktLS0tLQo=",
+   "usable": true
+  },
+  {
+   "name": "spaces and tabs in the body",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCdyBnSkNnc01EUTRQRUJFU0V4UVZGaAljWUdSb2JIQjBlSHlBPQotLS0tLUVORCBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0K",
+   "usable": true
+  },
+  {
+   "name": "trailing blanks after the END line",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tICAJCg==",
+   "usable": true
+  },
+  {
+   "name": "text after the block",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCnRyYWlsaW5nIG5vdGUK",
+   "usable": true
+  },
+  {
+   "name": "second block usable after a first with a bad body",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KISEhIQotLS0tLUVORCBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KLS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": true
+  },
+  {
+   "name": "second block ignored after a first of wrong length",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhnPT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCi0tLS0tQkVHSU4gRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCkFRSURCQVVHQndnSkNnc01EUTRQRUJFU0V4UVZGaGNZR1JvYkhCMGVIeUE9Ci0tLS0tRU5EIEVEMjU1MTkgUFJJVkFURSBLRVktLS0tLQo=",
+   "usable": false
+  },
+  {
+   "name": "two BEGIN lines before one END",
+   "file_base64": "LS0tLS1CRUdJTiBBLS0tLS0KLS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": true
+  },
+  {
+   "name": "last-bits of the final group not zero",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5Qj0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": true
+  },
+  {
+   "name": "empty file",
+   "file_base64": "",
+   "usable": false
+  },
+  {
+   "name": "blank lines only",
+   "file_base64": "CgogIAo=",
+   "usable": false
+  },
+  {
+   "name": "plain text",
+   "file_base64": "aGVsbG8gd29ybGQK",
+   "usable": false
+  },
+  {
+   "name": "31-byte seed",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhnPT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": false
+  },
+  {
+   "name": "33-byte seed",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOGcKLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": false
+  },
+  {
+   "name": "64-byte body",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQUFFQ0F3UUZCZ2NJQ1FvTERBME9EeEFSRWhNVUZSWVhHQmthR3h3ZEhoOGdJU0lqSkNVbUp5Z3BLaXNzTFM0dk1ERXlNelExTmpjNE9UbzdQRDArUHc9PQotLS0tLUVORCBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0K",
+   "usable": false
+  },
+  {
+   "name": "empty body",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": false
+  },
+  {
+   "name": "cut short before the END line",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0K",
+   "usable": false
+  },
+  {
+   "name": "cut short in the body",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KTUM0Q0FRQXdCUVlESzJWdw==",
+   "usable": false
+  },
+  {
+   "name": "END type differs from BEGIN type",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgUFJJVkFURSBLRVktLS0tLQo=",
+   "usable": false
+  },
+  {
+   "name": "lower-case BEGIN",
+   "file_base64": "LS0tLS1iZWdpbiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": false
+  },
+  {
+   "name": "missing padding",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QQotLS0tLUVORCBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0K",
+   "usable": false
+  },
+  {
+   "name": "URL-safe alphabet",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0tQT09Ci0tLS0tRU5EIEVEMjU1MTkgUFJJVkFURSBLRVktLS0tLQo=",
+   "usable": false
+  },
+  {
+   "name": "character outside the alphabet",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCdyFKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0KLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tCg==",
+   "usable": false
+  },
+  {
+   "name": "padding then more body",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0KQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT1BQUFBCi0tLS0tRU5EIEVEMjU1MTkgUFJJVkFURSBLRVktLS0tLQo=",
+   "usable": false
+  },
+  {
+   "name": "bare carriage returns as line ends",
+   "file_base64": "LS0tLS1CRUdJTiBFRDI1NTE5IFBSSVZBVEUgS0VZLS0tLS0NQVFJREJBVUdCd2dKQ2dzTURRNFBFQkVTRXhRVkZoY1lHUm9iSEIwZUh5QT0NLS0tLS1FTkQgRUQyNTUxOSBQUklWQVRFIEtFWS0tLS0tDQ==",
+   "usable": false
+  }
+ ]
+}

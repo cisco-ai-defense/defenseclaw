@@ -179,6 +179,7 @@ $script:SourceDigests = [ordered]@{}
 $script:PowerShellSelection = $null
 $script:PowerShellPrerequisite = $null
 $script:FailureEvidence = $null
+$script:CertificationParentRootPaths = @()
 $script:CertificationParentRoots = @()
 $script:LifecycleLockPreinstallBaseline = $null
 $script:LifecycleLockCleanupBaseline = $null
@@ -2830,7 +2831,10 @@ function Start-ActiveUserFileLockHolder(
     [string]$Path,
     [string]$Label,
     [ValidateRange(30, 600)]
-    [int]$TimeoutSeconds = 90
+    [int]$TimeoutSeconds = 90,
+    # The holder must be refused: it opens the file with no sharing and
+    # reports the denial instead of a lock (GAP-0650).
+    [switch]$ExpectDenied
 ) {
     $safeLabel = ($Label -replace '[^A-Za-z0-9_.-]', '_')
     $nonce = [Guid]::NewGuid().ToString('N')
@@ -2851,6 +2855,7 @@ function Start-ActiveUserFileLockHolder(
         evidence = $evidence
         type_name = "FileLockHolder_$($script:RunToken)_$($nonce.Substring(0, 8))"
         timeout_seconds = $TimeoutSeconds
+        expect_denied = [bool]$ExpectDenied
     }
     $inputBase64 = [Convert]::ToBase64String(
         [Text.Encoding]::UTF8.GetBytes(
@@ -2918,7 +2923,42 @@ $overlapped = [Activator]::CreateInstance($overlappedType)
 $stream = $null
 $locked = $false
 $unlocked = $false
+$denied = $false
 try {
+    if ([bool]$inputObject.expect_denied) {
+        try {
+            $stream = [IO.File]::Open(
+                $path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::None
+            )
+        } catch [UnauthorizedAccessException] {
+            $denied = $true
+        }
+        [IO.File]::WriteAllText(
+            [string]$inputObject.ready,
+            ([pscustomobject]@{
+                sid = $sid
+                pid = [Diagnostics.Process]::GetCurrentProcess().Id
+                path = $path
+                locked = $false
+                denied = $denied
+                delete_sharing_enabled = $false
+            } | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        if (-not $denied) {
+            $deadline = [DateTimeOffset]::UtcNow.AddSeconds(
+                [int]$inputObject.timeout_seconds
+            )
+            while (-not (Test-Path -LiteralPath ([string]$inputObject.release)) -and
+                [DateTimeOffset]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 50
+            }
+        }
+        return
+    }
     $stream = [IO.File]::Open(
         $path,
         [IO.FileMode]::Open,
@@ -2977,6 +3017,7 @@ try {
             path = $path
             locked = $locked
             unlocked = $unlocked
+            denied = $denied
             delete_sharing_enabled = $false
             final = $true
         } | ConvertTo-Json -Compress),
@@ -3031,11 +3072,17 @@ try {
             (ConvertTo-CanonicalPath $Path),
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        -not [bool]$readyJSON.locked -or
         $null -eq $readyJSON.PSObject.Properties[
             'delete_sharing_enabled'
         ] -or
         [bool]$readyJSON.delete_sharing_enabled) {
+        throw "$Label file-lock holder did not run against the exact path as target SID"
+    }
+    if ($ExpectDenied) {
+        if ([bool]$readyJSON.locked -or -not [bool]$readyJSON.denied) {
+            throw "$Label standard user opened the protected lock with no sharing; it must be refused"
+        }
+    } elseif (-not [bool]$readyJSON.locked) {
         throw "$Label file-lock holder did not lock the exact path as target SID"
     }
     return [pscustomobject]@{
@@ -3046,6 +3093,7 @@ try {
         Path = ConvertTo-CanonicalPath $Path
         PID = [uint32]$readyJSON.pid
         DeleteSharingEnabled = $false
+        Denied = [bool]$ExpectDenied
     }
 }
 
@@ -3079,8 +3127,11 @@ function Stop-ActiveUserFileLockHolder([object]$Holder) {
             [string]$Holder.Path,
             [StringComparison]::OrdinalIgnoreCase
         ) -or
-        -not [bool]$evidence.locked -or
-        -not [bool]$evidence.unlocked -or
+        ($(if ([bool]$Holder.Denied) {
+                [bool]$evidence.locked -or -not [bool]$evidence.denied
+            } else {
+                -not [bool]$evidence.locked -or -not [bool]$evidence.unlocked
+            })) -or
         $null -eq $evidence.PSObject.Properties[
             'delete_sharing_enabled'
         ] -or
@@ -6552,7 +6603,7 @@ function Get-NormalModeEnterpriseMachineSnapshot {
         $script:CodexMachinePolicyDirectory,
         $script:CodexRequirementsPath,
         $script:CodexMachineLockPath,
-        $script:CodexManagedStatePath,
+        $script:CodexManagedStateCommittedPath,
         $script:ClaudeManagedPolicyDirectory,
         $script:ClaudeManagedPolicyPath,
         $script:ClaudeManagedStatePath,
@@ -8486,11 +8537,26 @@ function Get-CodexMachinePolicySnapshot {
     $paths = [ordered]@{
         requirements = $script:CodexRequirementsPath
         transaction_lock = $script:CodexMachineLockPath
-        managed_state = $script:CodexManagedStatePath
+        managed_state = $script:CodexManagedStateCommittedPath
         ownership = $script:CodexRequirementsOwnershipPath
         acl_preimage = $script:CodexRequirementsAclBackupPath
         application_control_attestation =
             $script:AgentApplicationControlAttestationPath
+    }
+    # The hook copy of the state holds the writer copy bytes and is
+    # Administrators-owned with a protected DACL that only lets users read.
+    $hookCopy = Get-CodexManagedStateHookCopy
+    $hookSecurity = Get-ManagedUserPathSecurityFingerprint $hookCopy
+    if ((Get-FileDigest $hookCopy) -cne (Get-FileDigest $script:CodexManagedStateCommittedPath) -and
+        (Get-CodexManagedStateHookCopy) -ceq $hookCopy) {
+        throw "the Codex state hook copy $hookCopy does not hold the writer copy"
+    }
+    if ([string]$hookSecurity.owner_sid -ne 'S-1-5-32-544' -or
+        -not [bool]$hookSecurity.access_rules_protected) {
+        throw "the Codex state hook copy $hookCopy is not Administrators-owned with a protected DACL"
+    }
+    foreach ($sid in @($script:PrimarySID, $script:HostileSID)) {
+        Assert-NoStandardUserAccess -Path $hookCopy -SID $sid -DenyWrite
     }
     $snapshot = [ordered]@{}
     foreach ($entry in $paths.GetEnumerator()) {
@@ -8723,7 +8789,7 @@ function Assert-ClaudeOnlyWindowsSecurityContract([string]$Label) {
         $script:CodexManagedStatePath,
         $script:CodexRequirementsOwnershipPath,
         $script:CodexRequirementsAclBackupPath
-    )) {
+    ) + @(Get-CodexManagedStateCopies)) {
         if (Test-Path -LiteralPath $path) {
             throw "$Label Claude-only deployment created a Codex artifact: $path"
         }
@@ -9109,37 +9175,31 @@ function Test-CodexMachineLockSquattingBoundaries {
         }
     }
 
+    # GAP-0650: a standard user can no longer hold the Codex writer lock.
+    # Opening it for data with no sharing is refused, and verification runs
+    # to completion while that user is signed in, policy unchanged.
     $fileLockHolder = $null
     $contention = $null
     try {
         $fileLockHolder = Start-ActiveUserFileLockHolder `
             -Path $script:CodexMachineLockPath `
-            -Label 'codex-machine-protected-file-lock-contention'
+            -Label 'codex-machine-protected-file-lock-denied' `
+            -ExpectDenied
         $stopwatch = [Diagnostics.Stopwatch]::StartNew()
         $verify = Invoke-GatewayJSON `
             -Arguments @(
                 'enterprise', 'windows',
                 'codex-requirements', 'verify'
             ) `
-            -Label 'codex-machine-protected-file-lock-held-verify' `
-            -AllowedExitCodes @(1)
+            -Label 'codex-machine-protected-file-lock-denied-verify'
         $stopwatch.Stop()
-        if ([bool]$verify.JSON.ok -or
-            $verify.Process.ExitCode -eq 0) {
-            throw 'held protected Codex file lock did not fail closed'
-        }
-        $diagnostic = [string]$verify.JSON.error
-        if ($diagnostic -notmatch
-            '(?i)lock|timed out|sharing violation|used by another process') {
-            throw (
-                'held protected Codex file lock omitted a causal diagnostic: ' +
-                (Protect-SensitiveDisplayText $diagnostic)
-            )
+        if (-not [bool]$verify.JSON.ok -or
+            $verify.Process.ExitCode -ne 0) {
+            throw 'Codex verification failed while a standard user tried to hold the writer lock'
         }
         if ($stopwatch.Elapsed.TotalSeconds -gt 30) {
             throw (
-                'protected Codex file-lock contention exceeded the bounded ' +
-                "30-second fail-closed window: " +
+                'Codex verification waited on a standard user: ' +
                 "$($stopwatch.Elapsed.TotalSeconds)s"
             )
         }
@@ -9147,20 +9207,19 @@ function Test-CodexMachineLockSquattingBoundaries {
         Assert-SameDigests `
             $deploymentBefore `
             $deploymentAfter `
-            'held protected Codex file lock deployment'
+            'denied Codex file lock deployment'
         $machineAfter = Get-CodexMachinePolicySnapshot
         Assert-SameObjectJSON `
             $machineBefore `
             $machineAfter `
-            'held protected Codex file lock machine policy'
+            'denied Codex file lock machine policy'
         $contention = [pscustomobject]@{
             path = $script:CodexMachineLockPath
             holder_sid = $script:PrimarySID
             holder_pid = [uint32]$fileLockHolder.PID
             elapsed_ms = [int64]$stopwatch.ElapsedMilliseconds
             exit_code = [int]$verify.Process.ExitCode
-            diagnostic = Protect-SensitiveDisplayText $diagnostic
-            bounded_fail_closed = $true
+            standard_user_denied = $true
             policy_unchanged = $true
             deployment_unchanged = $true
         }
@@ -9185,7 +9244,7 @@ function Test-CodexMachineLockSquattingBoundaries {
         legacy_mutex_cases = @($legacyCases.ToArray())
         legacy_named_objects_ignored = $true
         protected_file_lock = $contention
-        protected_file_lock_bounded_fail_closed = $true
+        standard_user_cannot_hold_file_lock = $true
         unauthorized_machine_policy_read_or_mutation = $false
     }
 }
@@ -9196,7 +9255,8 @@ function Test-StandardUsersCannotTamperCodexMachinePolicy {
         paths = @(
             $script:CodexRequirementsPath,
             $script:CodexMachineLockPath,
-            $script:CodexManagedStatePath
+            $script:CodexManagedStateCommittedPath,
+            (Get-CodexManagedStateHookCopy)
         )
         icacls = Join-Path $script:System32 'icacls.exe'
     }
@@ -9352,8 +9412,8 @@ function Test-CodexMachinePolicyAutoHeal {
     $baseline = Get-CodexMachinePolicySnapshot
     $requirementsBytes = [IO.File]::ReadAllBytes($script:CodexRequirementsPath)
     $requirementsACL = Get-Acl -LiteralPath $script:CodexRequirementsPath
-    $managedStateBytes = [IO.File]::ReadAllBytes($script:CodexManagedStatePath)
-    $managedStateACL = Get-Acl -LiteralPath $script:CodexManagedStatePath
+    $managedStateBytes = [IO.File]::ReadAllBytes($script:CodexManagedStateCommittedPath)
+    $managedStateACL = Get-Acl -LiteralPath $script:CodexManagedStateCommittedPath
     $observations = [Collections.Generic.List[object]]::new()
     foreach ($case in @(
         'managed-hook-removal',
@@ -9412,8 +9472,14 @@ function Test-CodexMachinePolicyAutoHeal {
                         -Label 'drift-codex-requirements-dacl'
                 }
                 'managed-enrollment-state-delete' {
+                    # Both copies: the writer copy alone would come back
+                    # from the hook copy no transaction reads.
                     Remove-Item `
-                        -LiteralPath $script:CodexManagedStatePath `
+                        -LiteralPath $script:CodexManagedStateCommittedPath `
+                        -Force `
+                        -ErrorAction Stop
+                    Remove-Item `
+                        -LiteralPath (Get-CodexManagedStateHookCopy) `
                         -Force `
                         -ErrorAction Stop
                 }
@@ -9484,12 +9550,14 @@ function Test-CodexMachinePolicyAutoHeal {
             Set-Acl `
                 -LiteralPath $script:CodexRequirementsPath `
                 -AclObject $requirementsACL
+            # The writer copy is where every transaction starts; the next
+            # one writes the hook copy from it.
             [IO.File]::WriteAllBytes(
-                $script:CodexManagedStatePath,
+                $script:CodexManagedStateCommittedPath,
                 $managedStateBytes
             )
             Set-Acl `
-                -LiteralPath $script:CodexManagedStatePath `
+                -LiteralPath $script:CodexManagedStateCommittedPath `
                 -AclObject $managedStateACL
             throw
         }
@@ -10821,7 +10889,7 @@ function Assert-EnterpriseMachinePolicyAbsent([string]$Label) {
         $script:CodexRequirementsPath,
         $script:CodexManagedStatePath,
         $script:CodexMachineLockPath
-    )
+    ) + @(Get-CodexManagedStateCopies)
     $claudePaths = @(
         $script:ClaudeManagedPolicyPath,
         $script:ClaudeManagedStatePath,
@@ -11446,7 +11514,7 @@ function Test-CodexSharedDirectoriesPersistThroughPurge {
         foreach ($owned in @(
             $script:CodexRequirementsPath,
             $script:CodexManagedStatePath
-        )) {
+        ) + @(Get-CodexManagedStateCopies)) {
             if (Test-Path -LiteralPath $owned) {
                 throw "Uninstall -Purge left DefenseClaw-owned Codex policy: $owned"
             }
@@ -16108,7 +16176,7 @@ function Get-ManagedCodexArtifactSet([object]$GuardianJSON) {
         throw "guardian emitted data_dir $dataDir, want exact $($script:PrimaryDataDir)"
     }
     $requirements = $script:CodexRequirementsPath
-    $managedState = $script:CodexManagedStatePath
+    $managedState = $script:CodexManagedStateCommittedPath
     $ownership = $script:CodexRequirementsOwnershipPath
     $reportedConfigs = @(
         $result.hook_config_paths |
@@ -19634,12 +19702,7 @@ function Remove-EmptyCertificationParentRoot([object]$State) {
         -not (Test-Path -LiteralPath ([string]$State.path))) {
         return
     }
-    $expected = @(
-        $script:ProgramFilesCertificationRoot,
-        $script:ProgramDataCertificationRoot,
-        $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot
-    ) | Where-Object {
+    $expected = @($script:CertificationParentRootPaths) | Where-Object {
         [string]::Equals(
             (ConvertTo-CanonicalPath $_),
             (ConvertTo-CanonicalPath ([string]$State.path)),
@@ -20836,6 +20899,21 @@ $script:ProgramDataStagingRoot = ConvertTo-CanonicalPath (
 $script:ProgramDataWorkRoot = ConvertTo-CanonicalPath (
     Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert-Work'
 )
+# The two folders above the certification roots. Creating a certification root
+# creates them when the host has no Secure Client, so they are recorded too and
+# removed only when this run created them and they are empty (GAP-0780).
+$script:ProgramFilesSecureClientRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client'
+)
+$script:ProgramFilesCiscoRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramFiles 'Cisco'
+)
+$script:ProgramDataSecureClientRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client'
+)
+$script:ProgramDataCiscoRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramData 'Cisco'
+)
 $script:InstallRoot = Assert-PathBelow `
     (Join-Path $script:ProgramFilesCertificationRoot $script:RunToken) `
     $script:ProgramFilesCertificationRoot `
@@ -20847,16 +20925,60 @@ $script:StateRoot = Assert-PathBelow `
 $script:CodexRequirementsPath = ConvertTo-CanonicalPath (
     Join-Path $script:CodexMachinePolicyDirectory 'requirements.toml'
 )
+# The Codex writer lock (GAP-0650); standard users can read only its
+# attributes, so none of them can hold it against a transaction.
 $script:CodexMachineLockPath = ConvertTo-CanonicalPath (
     Join-Path `
         $script:CodexMachinePolicyDirectory `
-        '.defenseclaw-managed-hooks.lock'
+        '.defenseclaw-managed-hooks.writer.lock'
 )
 $script:CodexManagedStatePath = ConvertTo-CanonicalPath (
     Join-Path `
         $script:CodexMachinePolicyDirectory `
         '.defenseclaw-managed-hooks.state'
 )
+# GAP-0650: the Codex state lives in the writer copy (Administrators and
+# SYSTEM only) and in the hook copy <state>.<n> the writer lock counter n
+# names; the fixed name above is the logical identity the reports carry.
+$script:CodexManagedStateCommittedPath = $script:CodexManagedStatePath + '.committed'
+
+function Get-CodexManagedStateCopyPath {
+    $lock = [IO.FileInfo]::new($script:CodexMachineLockPath)
+    if (-not $lock.Exists -or $lock.Length -le 0) {
+        return $script:CodexManagedStatePath
+    }
+    $counter = [int64]$lock.Length
+    if (($counter % 2) -ne 0) {
+        $counter++
+    }
+    return ('{0}.{1}' -f $script:CodexManagedStatePath, $counter)
+}
+
+# Get-CodexManagedStateHookCopy returns the hook copy of the Codex state that
+# exists now. A guardian transaction can replace the copy between the counter
+# read and the file read, so it reads again a few times.
+function Get-CodexManagedStateHookCopy {
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $path = Get-CodexManagedStateCopyPath
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return $path
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "the Codex managed runtime state the hook reads is missing: $(Get-CodexManagedStateCopyPath)"
+}
+
+# Get-CodexManagedStateCopies lists every copy of the Codex state.
+function Get-CodexManagedStateCopies {
+    if (-not (Test-Path -LiteralPath $script:CodexMachinePolicyDirectory -PathType Container)) {
+        return @()
+    }
+    return @(
+        Get-ChildItem -LiteralPath $script:CodexMachinePolicyDirectory -Force -File |
+            Where-Object { $_.Name -match '^\.defenseclaw-managed-hooks\.state\.(committed|[1-9][0-9]{0,7})$' } |
+            ForEach-Object { $_.FullName }
+    )
+}
 $script:CodexRequirementsOwnershipPath = Assert-PathBelow `
     (Join-Path $script:StateRoot 'install\codex-requirements-ownership.json') `
     $script:StateRoot `
@@ -20877,13 +20999,20 @@ $script:WorkRoot = Assert-PathBelow `
     (Join-Path $script:ProgramDataWorkRoot $script:RunToken) `
     $script:ProgramDataWorkRoot `
     'work root'
+# One list feeds the cleanup allowlist (Remove-EmptyCertificationParentRoot) and
+# the recorded parent states, so the two cannot drift apart.
+$script:CertificationParentRootPaths = @(
+    $script:ProgramFilesCertificationRoot,
+    $script:ProgramDataCertificationRoot,
+    $script:ProgramDataStagingRoot,
+    $script:ProgramDataWorkRoot,
+    $script:ProgramFilesSecureClientRoot,
+    $script:ProgramFilesCiscoRoot,
+    $script:ProgramDataSecureClientRoot,
+    $script:ProgramDataCiscoRoot
+)
 $script:CertificationParentRoots = @(
-    foreach ($parentRoot in @(
-        $script:ProgramFilesCertificationRoot,
-        $script:ProgramDataCertificationRoot,
-        $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot
-    )) {
+    foreach ($parentRoot in $script:CertificationParentRootPaths) {
         [pscustomobject]@{
             path = ConvertTo-CanonicalPath $parentRoot
             existed_before = Test-Path -LiteralPath $parentRoot
@@ -21500,7 +21629,8 @@ targets:
                 $script:CodexMachinePolicyDirectory,
                 $script:CodexRequirementsPath,
                 $script:CodexMachineLockPath,
-                $script:CodexManagedStatePath,
+                $script:CodexManagedStateCommittedPath,
+                (Get-CodexManagedStateHookCopy),
                 $script:CodexRequirementsOwnershipPath,
                 $script:CodexRequirementsAclBackupPath,
                 $script:AgentApplicationControlAttestationPath

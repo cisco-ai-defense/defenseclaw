@@ -14,6 +14,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
+from defenseclaw.file_permissions import serialize_dotenv
 from defenseclaw.observability.presets import SPLUNK_HEC, Preset
 from defenseclaw.observability.v8_activation import update_private_file
 from defenseclaw.safety import sanitize_dotenv_value
@@ -152,7 +153,7 @@ def apply_secret(
     def merge(payload: bytes) -> bytes:
         existing = _load_dotenv(payload)
         existing[preset.token_env] = secret_value
-        return _write_dotenv(existing)
+        return _write_dotenv(existing, payload)
 
     update_private_file(
         path,
@@ -234,7 +235,7 @@ def restore_secret(
             existing.pop(key, None)
         else:
             existing[key] = previous
-        return _write_dotenv(existing)
+        return _write_dotenv(existing, payload)
 
     update_private_file(os.path.join(data_dir, DOTENV_FILE_NAME), owner_directory=data_dir, transform=merge)
     if os.environ.get(key) == written:
@@ -284,11 +285,12 @@ def _load_dotenv(payload: bytes) -> dict[str, str]:
     return result
 
 
-def _write_dotenv(entries: dict[str, str]) -> bytes:
+def _write_dotenv(entries: dict[str, str], existing: bytes) -> bytes:
     # Validate and render every value before the secure transaction stages any
     # bytes. Rejected values leave the exact snapshotted file untouched.
-    return "".join(f"{key}={sanitize_dotenv_value(value, key=key)}\n" for key, value in sorted(entries.items())).encode(
-        "utf-8"
+    return serialize_dotenv(
+        [f"{key}={sanitize_dotenv_value(value, key=key)}".encode() for key, value in sorted(entries.items())],
+        existing,
     )
 
 

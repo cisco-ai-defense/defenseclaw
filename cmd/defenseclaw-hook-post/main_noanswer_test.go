@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 const listenHelperEnv = "R107NA_HOOKPOST_HELPER_LISTEN"
@@ -61,6 +62,11 @@ func TestHookPostListenHelper(t *testing.T) {
 // decides nothing: removed, naming a dead pid, garbage or a link before the
 // call, the same gateway up and slow is 9.
 func TestHookPostNoAnswerExitNamesOnlyAProvenRestart(t *testing.T) {
+	// The proof after the deadline runs on a clock the test controls: it ends
+	// on its result, never on the speed of the host, and asks for its product
+	// budget (checked below).
+	clock := proofclocktest.Install(t)
+	defer requireProofBudgets(t, clock)
 	writePIDRecord := func(dir, data string) { _ = os.WriteFile(filepath.Join(dir, "gateway.pid"), []byte(data), 0o600) }
 	for _, tc := range []struct {
 		name     string
@@ -121,6 +127,23 @@ func TestHookPostNoAnswerExitNamesOnlyAProvenRestart(t *testing.T) {
 				t.Fatalf("exit %d, want %d (stderr %q)", got, tc.want, errOut.String())
 			}
 		})
+	}
+}
+
+// requireProofBudgets checks that the restart proofs a hook-post run started
+// on clock asked for the 300 ms proof budget and for nothing longer than the
+// longest proof budget, 500 ms.
+func requireProofBudgets(t *testing.T, clock *proofclocktest.Clock) {
+	t.Helper()
+	budget := false
+	for _, d := range clock.Requested() {
+		if d > 500*time.Millisecond {
+			t.Errorf("a proof started a timer of %v, longer than any proof budget", d)
+		}
+		budget = budget || d == 300*time.Millisecond
+	}
+	if !budget {
+		t.Errorf("no proof started its 300 ms budget (timers %v)", clock.Requested())
 	}
 }
 

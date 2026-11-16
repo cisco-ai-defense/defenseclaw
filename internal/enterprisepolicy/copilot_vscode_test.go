@@ -498,8 +498,9 @@ func TestCopilotVSCodeUserFilesLeftSeesTheWindowsRender(t *testing.T) {
 // record, and the Copilot CLI then warned at every start that the
 // marketplace "defenseclaw" is not found, even after an uninstall. The
 // reconcile drops that key while no VS Code reads it, and the removal takes
-// it out with the file and its folder once empty; the administrator's keys
-// stay.
+// it out with the file once empty; the administrator's keys stay. Without a
+// record DefenseClaw cannot know it created the folder, so the folder stays
+// (GAP-0091).
 func TestCopilotManagedSettingsRemovesARecordlessPluginKey(t *testing.T) {
 	opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
 		p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
@@ -519,8 +520,11 @@ func TestCopilotManagedSettingsRemovesARecordlessPluginKey(t *testing.T) {
 	if err := removeCopilotManagedSettings(opts, &State{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Dir(settings)); !os.IsNotExist(err) {
-		t.Fatalf("the emptied managed settings file or its folder stayed: %v", err)
+	if _, err := os.Lstat(settings); !os.IsNotExist(err) {
+		t.Fatalf("the emptied managed settings file stayed: %v", err)
+	}
+	if info, err := os.Lstat(filepath.Dir(settings)); err != nil || !info.IsDir() {
+		t.Fatalf("the folder of a recordless managed settings file was removed: %v", err)
 	}
 }
 

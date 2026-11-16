@@ -12,9 +12,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// On the Windows Secure Client profile a GitHub Copilot prompt that the
-// guardrail blocks in action mode cannot be blocked: Copilot drops the output
-// of a config-file userPromptSubmitted hook. Its mutation-only
+// On the Secure Client profile (Windows and macOS) a GitHub Copilot prompt
+// that the guardrail blocks in action mode cannot be blocked: Copilot drops
+// the output of a config-file userPromptSubmitted hook. Its mutation-only
 // userPromptTransformed event can replace the content the model receives, so
 // the gateway answers that event with DefenseClaw's notice in place of the
 // prompt. The verdict accounting is unchanged (raw block, effective allow,
@@ -22,9 +22,15 @@ import (
 // other profile keeps the no-modification contract.
 
 // copilotSecureClientPromptRewriteActive reports a gateway serving the
-// Windows Secure Client profile. Replaced in tests.
+// Secure Client profile. Replaced in tests.
 var copilotSecureClientPromptRewriteActive = func(cfg *config.Config) bool {
-	return runtime.GOOS == "windows" && cfg != nil && cfg.SecureClientIntegration()
+	return copilotSecureClientPromptRewriteOS(runtime.GOOS) && cfg != nil && cfg.SecureClientIntegration()
+}
+
+// copilotSecureClientPromptRewriteOS reports the platforms Secure Client
+// deploys GitHub Copilot on.
+func copilotSecureClientPromptRewriteOS(goos string) bool {
+	return goos == "windows" || goos == "darwin"
 }
 
 // copilotSecureClientPromptOutput returns the hook output for req: the

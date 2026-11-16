@@ -24,6 +24,7 @@ package agentprocess
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strconv"
@@ -181,6 +182,12 @@ func agentFrom(lookup func(int) (Process, error), self int) (Process, bool) {
 	if err != nil {
 		return Process{}, false
 	}
+	return agentAbove(lookup, child)
+}
+
+// agentAbove is agentFrom from the entry of the process whose ancestors are
+// walked.
+func agentAbove(lookup func(int) (Process, error), child Process) (Process, bool) {
 	for hop := 0; hop < maxHops; hop++ {
 		pid := child.Parent
 		if pid <= 1 || pid == child.PID {
@@ -225,6 +232,35 @@ func CommandLine() ([]string, string, error) {
 		return nil, "", ErrNoAgent
 	}
 	return commandLine(agent.PID)
+}
+
+// WorkingDirectory returns the current directory of the agent process that
+// runs this process, or "" when there is no agent ancestor or the platform
+// does not report it (macOS). Copilot CLI resolves a relative
+// COPILOT_SKILLS_DIRS entry against the folder it runs in, which a hook event
+// names only as its own cwd, possibly a folder below it.
+func WorkingDirectory() string {
+	lookup, done := newLookup()
+	defer done()
+	self := os.Getpid()
+	var (
+		agent Process
+		ok    bool
+	)
+	if runtime.GOOS == "linux" {
+		// The kernel names the parent of this process, and an orphan is
+		// adopted by an ancestor, which started before it: a read of this
+		// process entry (the dearest of the walk) would only repeat that and
+		// supply the start time that guards against a reused process ID.
+		// Each ancestor above is still checked against the one below it.
+		agent, ok = agentAbove(lookup, Process{PID: self, Parent: os.Getppid(), Start: math.MaxInt64})
+	} else {
+		agent, ok = agentFrom(lookup, self)
+	}
+	if !ok {
+		return ""
+	}
+	return workingDirectory(agent.PID)
 }
 
 // CommandLineForPID reads an agent process's arguments for a privileged

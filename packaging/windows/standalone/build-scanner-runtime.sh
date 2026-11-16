@@ -14,13 +14,16 @@
 #                                 win-unicode-console source and this
 #                                 checkout's DefenseClaw wheel (plugin scanner)
 #
-# These are the inputs and pins of the per-user Windows installer
-# (scripts/build-windows-installer.ps1), so a managed host scans with the same
-# scanner versions a per-user host does. Runs on Linux or macOS: uv installs
-# the Windows wheels for the target platform without running them.
+# The pins come from uv.lock, the same lock the release's requirements file
+# (make dist-requirements) that install.ps1 installs from is exported from, so
+# a managed host scans with the same scanner versions a per-user host does.
+# Runs on Linux or macOS: uv installs the Windows wheels for the target
+# platform without running them.
 #
 # Usage: build-scanner-runtime.sh --out-dir <dir>
-#   writes <dir>/runtime.zip and <dir>/runtime.json
+#   writes <dir>/runtime.zip, <dir>/runtime.json and <dir>/runtime.sha256 (the
+#   SHA-256 of every archive entry, which prepare checks the unpacked files
+#   against)
 set -euo pipefail
 
 die() { printf 'build-scanner-runtime: %s\n' "$*" >&2; exit 1; }
@@ -174,14 +177,21 @@ for key, dist in (("skill-scanner", "cisco_ai_skill_scanner"), ("mcp-scanner", "
     versions[key] = re.match(rf"{dist}-(.+)\.dist-info$", found[0].name).group(1)
 archive = out / "runtime.zip"
 files = sorted(p for p in rt.rglob("*") if p.is_file())
+digests = []
 with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
     for path in files:
-        info = zipfile.ZipInfo(path.relative_to(rt).as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+        name = path.relative_to(rt).as_posix()
+        if "\n" in name or "\r" in name:
+            sys.exit(f"runtime file name {name!r} has a line break")
+        data = path.read_bytes()
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
         info.compress_type = zipfile.ZIP_DEFLATED
         info.external_attr = 0o644 << 16
-        z.writestr(info, path.read_bytes(), compresslevel=6)
+        z.writestr(info, data, compresslevel=6)
+        digests.append(f"{hashlib.sha256(data).hexdigest()}  {name}")
 sha = hashlib.sha256(archive.read_bytes()).hexdigest()
 (out / "runtime.json").write_text(json.dumps({"schema_version": 1, "runtime_sha256": sha, "versions": versions}, indent=2) + "\n")
+(out / "runtime.sha256").write_text("\n".join(digests) + "\n")
 print(f"    {len(files)} files, {archive.stat().st_size // (1 << 20)} MiB, sha256 {sha[:16]}")
 print("    " + ", ".join(f"{k} {v}" for k, v in versions.items()))
 PYCODE

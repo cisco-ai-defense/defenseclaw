@@ -374,13 +374,16 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		// Tool output is completion-shaped (matches the proxy lane's
 		// inspectToolResult). This is the J3-3c timeout split: the regex
 		// scan above keeps the 200ms inspectScanTimeout cap, while the judge
-		// runs on a deadline-free context bounded only by its own
-		// HookTimeout. WithoutCancel keeps the request's caller identity and
-		// correlation so the judge span stays attributable (GAP-2641). The
+		// runs on the request context bounded by its own HookTimeout.
+		// Secure Client keeps its existing detached request context. The
 		// shipped default (regex_only) ⇒ no judge call.
 		// ToolResponseInspectRequest carries no connector field, so the gate
 		// resolves the process connector via connectorName().
-		if jv := a.runHookJudge(context.WithoutCancel(r.Context()), "completion", "completion",
+		judgeCtx := r.Context()
+		if cfg := a.decisionConfig(judgeCtx); cfg != nil && cfg.SecureClientIntegration() {
+			judgeCtx = context.WithoutCancel(judgeCtx)
+		}
+		if jv := a.runHookJudge(judgeCtx, "completion", "completion",
 			a.connectorName(), outputStr, req.Tool, verdict); jv != nil {
 			verdict = mergeWithJudgeVerdict(verdict, jv)
 		}

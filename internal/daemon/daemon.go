@@ -20,17 +20,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -69,6 +72,10 @@ var (
 	ErrNotRunning            = errors.New("daemon is not running")
 	ErrStopTimeout           = errors.New("daemon did not stop within timeout")
 	ErrUnsafeProcessIdentity = errors.New("daemon process identity file is unsafe")
+	// ErrOtherAccountProcess: this home's gateway runs as another account
+	// (an administrator started it, as the macOS app's privileged helper
+	// does), so this account cannot signal it.
+	ErrOtherAccountProcess = errors.New("the gateway runs as another account")
 )
 
 const (
@@ -197,8 +204,26 @@ func (d *Daemon) IsRunning() (bool, int) {
 		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
+	if !processSignalable(info.PID) && !d.recordBindsThisHome(info) {
+		// Another account's process can be this home's gateway only on a
+		// record that carries its kernel start identity and names this data
+		// directory (every record since 1.0.0 does). Any other record keeps
+		// the answer it had before 1.0.9 read EPERM as alive: not running,
+		// and the record is stale.
+		d.removePIDFileIfStarted(info)
+		return false, 0
+	}
 	if !d.verifyProcess(info) && !d.verifyProcessForAuthenticatedMigration(info) &&
 		!d.verifyReplacedExecutable(info) {
+		if !processSignalable(info.PID) {
+			// A live process this account may not signal is another
+			// account's. Its record (start identity and this data
+			// directory, checked above) may name the gateway an
+			// administrator started for this home whose identity this
+			// account could not read; that is not stale evidence this
+			// account may discard.
+			return false, 0
+		}
 		// Closes (chain ): a stale gateway.pid
 		// pointing at a reused PID must NOT keep status/stop/restart
 		// pinned to the unrelated process. Treat the file as garbage
@@ -297,6 +322,16 @@ func (d *Daemon) verifyProcess(info pidInfo) bool {
 		return false
 	}
 	return true
+}
+
+// recordBindsThisHome reports whether info can name a process of another
+// account as this home's gateway: it carries the kernel start identity that
+// verifyStartIdentity compares, and it names this data directory. Without
+// both, nothing this account can read ties that process to this home.
+func (d *Daemon) recordBindsThisHome(info pidInfo) bool {
+	return strings.TrimSpace(info.StartIdentity) != "" &&
+		strings.TrimSpace(info.DataDir) != "" &&
+		pathidentity.Same(info.DataDir, d.dataDir)
 }
 
 // verifyProcessForControl authorizes lifecycle mutations only for a record
@@ -416,12 +451,12 @@ func (d *Daemon) verifyStartIdentityForAuthenticatedMigration(info pidInfo) bool
 	// it cannot always be reproduced after upgrade. Its StartTime was captured
 	// immediately before cmd.Start. Bind that launch lower bound to the native
 	// kernel start second within a five-second window.
-	nativeIdentity, err := darwinProcessStartIdentity(info.PID)
-	if err != nil {
+	nativeIdentity, ok := procidentity.Recorded(info.PID)
+	if !ok {
 		return false
 	}
-	secondsText, _, ok := strings.Cut(nativeIdentity, ".")
-	if !ok {
+	secondsText, _, cut := strings.Cut(nativeIdentity, ".")
+	if !cut {
 		return false
 	}
 	nativeSeconds, err := strconv.ParseInt(secondsText, 10, 64)
@@ -437,6 +472,16 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 	case "linux":
 		exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
 		if err != nil {
+			if errors.Is(err, fs.ErrPermission) && !processSignalable(info.PID) && d.recordBindsThisHome(info) {
+				// Another account's process: /proc/<pid>/exe is readable
+				// only by that account, while /proc/<pid>/comm names its
+				// program to everyone. comm is the process's own choice, so
+				// it counts only on a record that binds this home and
+				// carries the kernel start identity verifyStartIdentity
+				// checks next. The gateway an administrator started for
+				// this home is verified by that name and that identity.
+				return linuxCommNamesExecutable("/proc", info.PID, info.Executable)
+			}
 			// /proc/<pid>/exe should be readable for any LIVE process the
 			// caller can signal (we already passed processExists). Failing
 			// here means the process is a zombie or has a permission
@@ -472,6 +517,27 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 	default:
 		return true
 	}
+}
+
+// linuxCommNamesExecutable reports whether /proc/<pid>/comm under procRoot
+// names executable. The kernel keeps the first 15 bytes of the program's
+// base name there, readable by every account, where /proc/<pid>/exe is
+// readable only by the process's own account. An empty recorded executable
+// names nothing.
+func linuxCommNamesExecutable(procRoot string, pid int, executable string) bool {
+	base := filepath.Base(strings.TrimSpace(executable))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "comm"))
+	if err != nil {
+		return false
+	}
+	comm := strings.TrimSpace(string(raw))
+	if len(base) > 15 {
+		base = base[:15]
+	}
+	return comm != "" && comm == base
 }
 
 func (d *Daemon) verifyStartIdentity(info pidInfo) bool {
@@ -554,7 +620,31 @@ func (d *Daemon) ValidateStartIdentityFiles() error {
 	return nil
 }
 
+// RefuseStartInUntrustedHome is the first step of a start. A root run writes
+// the lock, log, PID record and login path into the home before the ownership
+// step that gives them back, so a home whose owner it cannot prove must be
+// refused before the first write: a refusal after it leaves root-owned files
+// that stop the account's own start (GAP-0714). It is the check
+// safefile.ReclaimToDirectoryOwner makes, run early. A managed install keeps
+// its own trust model.
+func RefuseStartInUntrustedHome(dataDir string) error {
+	if managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) {
+		return nil
+	}
+	if err := preflightStartHome(dataDir); err != nil {
+		return fmt.Errorf("daemon: refusing to start: %w", err)
+	}
+	return nil
+}
+
+// preflightStartHome is the ownership check RefuseStartInUntrustedHome runs. A
+// variable so a test can stand in for the root run it cannot be.
+var preflightStartHome = safefile.PreflightReclaimDirectory
+
 func (d *Daemon) Start(args []string) (int, error) {
+	if err := RefuseStartInUntrustedHome(d.dataDir); err != nil {
+		return 0, err
+	}
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return 0, err
 	}
@@ -832,6 +922,8 @@ func readGatewayTokenDotenv(path string) map[string]string {
 	if err != nil {
 		return values
 	}
+	// An adopted gateway token copy never shadows the one the operator saved.
+	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -843,7 +935,7 @@ func readGatewayTokenDotenv(path string) map[string]string {
 		}
 		key = strings.TrimSpace(key)
 		canonicalKey, ok := canonicalGatewayTokenEnvironmentKey(key)
-		if !ok {
+		if !ok || shadowed.Has(canonicalKey) {
 			continue
 		}
 		value = strings.TrimSpace(value)
@@ -963,6 +1055,13 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 		if waitForProcessExit(proc, pid, forcedStopWait) {
 			d.removePIDFileIfStarted(started)
 			return nil
+		}
+		if errors.Is(err, syscall.EPERM) {
+			return fmt.Errorf(
+				"%w: PID %d was started with administrator rights for %s; stop it the same way "+
+					"(the app that started it, or %s)",
+				ErrOtherAccountProcess, pid, d.dataDir, rootGatewayStopCommand(d.dataDir),
+			)
 		}
 		return fmt.Errorf("daemon: send term signal: %w", err)
 	}
@@ -1104,40 +1203,40 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 	info, readErr := d.readPIDInfo()
 	if readErr == nil {
 		if info.PID <= 0 {
-			return 0, 0, fmt.Errorf(
+			return 0, 0, &pidRecordError{record: PIDFileName, err: fmt.Errorf(
 				"%w: gateway PID file %s contains an invalid PID",
 				ErrUnsafeProcessIdentity,
 				d.pidFile,
-			)
+			)}
 		}
 		trackedPID = info.PID
 	} else if !errors.Is(readErr, os.ErrNotExist) {
-		return 0, 0, fmt.Errorf(
+		return 0, 0, &pidRecordError{record: PIDFileName, rootDenied: deniedByRoot(d.pidFile, readErr), err: fmt.Errorf(
 			"%w: gateway PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			d.pidFile,
 			readErr,
-		)
+		)}
 	}
 
 	watchdogPID, readErr = d.readWatchdogPID()
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		if managedIdentityHeldByWriter(readErr) {
-			return 0, 0, fmt.Errorf(
+			return 0, 0, &pidRecordError{record: WatchdogPIDFileName, err: fmt.Errorf(
 				"%w: watchdog PID file %s is held by a legacy or live writer; "+
 					"safely stop the previous watchdog and complete the upgrade before retrying "+
 					"(do not delete the PID file while its process may be live): %w",
 				ErrUnsafeProcessIdentity,
 				filepath.Join(d.dataDir, WatchdogPIDFileName),
 				readErr,
-			)
+			)}
 		}
-		return 0, 0, fmt.Errorf(
+		return 0, 0, &pidRecordError{record: WatchdogPIDFileName, rootDenied: deniedByRoot(filepath.Join(d.dataDir, WatchdogPIDFileName), readErr), err: fmt.Errorf(
 			"%w: watchdog PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			filepath.Join(d.dataDir, WatchdogPIDFileName),
 			readErr,
-		)
+		)}
 	}
 	return trackedPID, watchdogPID, nil
 }
@@ -1189,10 +1288,22 @@ func (d *Daemon) writePIDInfoAt(pid int, executable string, startIdentity string
 	if err != nil {
 		return err
 	}
-	return managed.WriteServiceRuntimeFile(
+	if err := writeGatewayPIDFile(
 		managed.PinnedDeploymentMode(), d.pidFile, "gateway pid file", data,
-	)
+	); err != nil {
+		// The write can land and the ownership step after it fail: a root
+		// start for an account whose owner it cannot prove leaves a root-owned
+		// record that stops the account's own start (GAP-0714). Take back the
+		// record this call wrote, and only it.
+		d.removePIDFileIfStarted(info)
+		return err
+	}
+	return nil
 }
+
+// writeGatewayPIDFile writes gateway.pid. A variable so a test can fail the
+// step after the write.
+var writeGatewayPIDFile = managed.WriteServiceRuntimeFile
 
 func IsDaemonChild() bool {
 	return os.Getenv(EnvDaemon) == "1"

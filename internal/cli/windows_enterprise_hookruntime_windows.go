@@ -33,7 +33,7 @@ import (
 // Seams for tests.
 var (
 	windowsEnterpriseHookRuntimeDir = func() (string, error) {
-		layout, err := managed.StandaloneWindowsLayout()
+		layout, err := windowsManagedLayout.standalone()
 		return layout.HookRuntimeDir, err
 	}
 	windowsEnterpriseInspectPublicDir = enterprisepolicy.InspectWindowsPublicDir
@@ -106,7 +106,7 @@ func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy
 	}
 	return dir + ": " + strings.Join(parts, "; ") +
 		". Every enrolled user's agent hook refuses the machine policy summary in it (enterprise_machine_policy_summary_untrusted) and fails closed." +
-		" Fix: run " + windowsEnterpriseAdminCommand("repair") + ", which writes the folder's permissions back, or " + fix
+		" Fix: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + ", which writes the folder's permissions back, or " + fix
 }
 
 // applyWindowsEnterpriseHookRuntimeAccess fails status and verify on a
@@ -140,18 +140,29 @@ func windowsEnterpriseHookRuntimeMissing() string {
 	}
 	return dir + " is missing. It holds the machine policy summary (" + enterprisepolicy.PublicPolicyFileName +
 		") every enrolled user's agent hook reads; without it the hook skips its foreign-hook check." +
-		" Fix: run " + windowsEnterpriseAdminCommand("repair") + "; the hook guardian writes the folder and the summary back"
+		" Fix: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + "; the hook guardian writes the folder and the summary back"
 }
 
 // repairWindowsEnterpriseHookRuntimeAccess writes the hook runtime folder's
 // owner and access list back before a repair, and says so.
-func repairWindowsEnterpriseHookRuntimeAccess() string {
+// repairWindowsEnterpriseHookRuntimeAccessOrRefuse is that repair. On
+// a standalone host a folder another account can write or owns that already
+// holds a DefenseClaw file is not written back in place: that account may
+// have put or replaced files in it, or may hold a handle to one. The repair
+// then returns that refusal, which names the folder and the exact commands,
+// and the caller stops before the lifecycle; a run that swallowed it went on
+// and reported ok with the folder as the other account left it (GAP-0652).
+func repairWindowsEnterpriseHookRuntimeAccessOrRefuse() (change, refusal string) {
 	dir, problem := windowsEnterpriseHookRuntimeDrift()
 	if problem == "" {
-		return ""
+		return "", ""
 	}
 	if err := windowsEnterpriseRepairPublicDir(dir); err != nil {
-		return ""
+		var refused *managed.StandaloneContentDriftError
+		if errors.As(err, &refused) {
+			return "", dir + ": " + err.Error()
+		}
+		return "", ""
 	}
-	return "re-applied the permissions of " + dir + " (SYSTEM and Administrators full control, BUILTIN\\Users read and execute)"
+	return "re-applied the permissions of " + dir + " (SYSTEM and Administrators full control, BUILTIN\\Users read and execute)", ""
 }

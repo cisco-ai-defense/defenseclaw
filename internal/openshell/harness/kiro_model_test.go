@@ -143,7 +143,7 @@ func TestZipModelInstallChecksEveryFile(t *testing.T) {
 				interp = tc.python
 			}
 			target := filepath.Join(dir, "home", ".semantic_search", "models", "m")
-			cmd := exec.Command("/bin/sh", "-c", pin.installRun(target, interp))
+			cmd := exec.Command(binSh(t), "-c", pin.installRun(target, interp))
 			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "TMPDIR=" + dir}
 			out, err := cmd.CombinedOutput()
 			if err != nil {

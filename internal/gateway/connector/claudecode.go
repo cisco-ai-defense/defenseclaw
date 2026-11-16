@@ -1401,57 +1401,93 @@ func claudeCodePerUserNativeGuard(native string) string {
 }
 
 func claudeCodePerUserGuardTarget(hook map[string]interface{}, hooksDir string) bool {
-	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
-		return false
-	}
-	home := filepath.Dir(hooksDir)
-	if filepath.Base(home) != ".defenseclaw" {
-		return false
-	}
-	account := filepath.Dir(home)
-	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
-	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
-	command, _ := hook["command"].(string)
-	args, ok := claudeCodeNativeExecArguments(hook)
-	if !ok || command != guard || (len(args) != 7 && len(args) != 9) {
-		return false
-	}
-	want := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", home}
-	for i, value := range want {
-		if args[i] != value {
-			return false
-		}
-	}
-	return len(args) == 7 || (args[7] == "--api-addr" &&
-		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
+	home, ok := claudeCodePerUserNativeOwnerHome(hook, false)
+	return ok && filepath.Base(hooksDir) == "hooks" && filepath.Dir(hooksDir) == home
 }
 
 // claudeCodePerUserFallbackTarget recognizes the companion native handler
 // that serves a call when the registered guard is unavailable.
 func claudeCodePerUserFallbackTarget(hook map[string]interface{}, hooksDir string) bool {
-	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
-		return false
+	home, ok := claudeCodePerUserNativeOwnerHome(hook, true)
+	return ok && filepath.Base(hooksDir) == "hooks" && filepath.Dir(hooksDir) == home
+}
+
+// claudeCodePerUserNativeOwnerHome identifies the pair Setup renders from the
+// registration itself. A moved account retains these exact paths and argv even
+// after its former home no longer exists. Current-runtime checks additionally
+// compare the returned home with the active hooks directory.
+func claudeCodePerUserNativeOwnerHome(hook map[string]interface{}, fallback bool) (string, bool) {
+	if runtime.GOOS == "windows" {
+		return "", false
 	}
-	home := filepath.Dir(hooksDir)
-	if filepath.Base(home) != ".defenseclaw" {
-		return false
+	if kind, present := hook["type"]; present && kind != "command" {
+		return "", false
 	}
-	account := filepath.Dir(home)
-	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
-	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
 	command, _ := hook["command"].(string)
-	args, ok := claudeCodeNativeExecArguments(hook)
-	if !ok || command != native || (len(args) != 7 && len(args) != 9) {
-		return false
+	if !filepath.IsAbs(command) || filepath.Clean(command) != command ||
+		strings.ContainsAny(command, "\x00\r\n") {
+		return "", false
 	}
-	want := []string{"fallback-guard-user-hook", guard, "hook", "--connector", "claudecode", "--hook-home", home}
+	bin := filepath.Dir(command)
+	if filepath.Base(bin) != "bin" || filepath.Base(filepath.Dir(bin)) != ".local" {
+		return "", false
+	}
+	account := filepath.Dir(filepath.Dir(bin))
+	home := filepath.Join(account, ".defenseclaw")
+	guard := filepath.Join(bin, "defenseclaw-hook-post")
+	native := filepath.Join(bin, "defenseclaw-hook-user")
+	op := "guard-user-hook"
+	companion := native
+	wantCommand := guard
+	if fallback {
+		op = "fallback-guard-user-hook"
+		companion = guard
+		wantCommand = native
+	}
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || command != wantCommand || (len(args) != 7 && len(args) != 9) {
+		return "", false
+	}
+	want := []string{op, companion, "hook", "--connector", "claudecode", "--hook-home", home}
 	for i, value := range want {
 		if args[i] != value {
-			return false
+			return "", false
 		}
 	}
-	return len(args) == 7 || (args[7] == "--api-addr" &&
-		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
+	if len(args) == 9 && (args[7] != "--api-addr" ||
+		!claudeCodeLoopbackGatewayEndpoint("http://"+args[8])) {
+		return "", false
+	}
+	return home, true
+}
+
+// claudeCodePerUserNativeShellOwnerHome recognizes the shell form emitted when
+// the companion guard binary is unavailable. Both the launcher and hook home
+// must name the same account, and the command must have only Setup's flags.
+func claudeCodePerUserNativeShellOwnerHome(command string) (string, bool) {
+	if runtime.GOOS != "linux" {
+		return "", false
+	}
+	command = claudeCodeUnguardedHookCommand(command)
+	launcher, rest, ok := posixHookCommandSplit(command)
+	if !ok || !filepath.IsAbs(launcher) || filepath.Clean(launcher) != launcher ||
+		strings.ContainsAny(launcher, "\x00\r\n") || filepath.Base(launcher) != "defenseclaw-hook-user" {
+		return "", false
+	}
+	bin := filepath.Dir(launcher)
+	if filepath.Base(bin) != "bin" || filepath.Base(filepath.Dir(bin)) != ".local" {
+		return "", false
+	}
+	home := filepath.Join(filepath.Dir(filepath.Dir(bin)), ".defenseclaw")
+	want := " hook --connector claudecode --hook-home " + posixHookCommandWord(home)
+	if rest == want {
+		return home, true
+	}
+	if !strings.HasPrefix(rest, want+" --api-addr ") {
+		return "", false
+	}
+	address, tail, ok := posixHookCommandSplit(strings.TrimPrefix(rest, want+" --api-addr "))
+	return home, ok && tail == "" && claudeCodeLoopbackGatewayEndpoint("http://"+address)
 }
 
 // claudeCodePerUserNativeHook selects the installed native launcher only for
@@ -1601,11 +1637,46 @@ func (c *ClaudeCodeConnector) ManagedHookPolicy(opts SetupOpts) ([]byte, error) 
 	if opts.ClaudeAllowManagedHooksOnly {
 		policy["allowManagedHooksOnly"] = true
 	}
-	body, err := json.MarshalIndent(policy, "", "  ")
+	body, err := marshalClaudeCodeManagedPolicy(policy, claudeCodeManagedPolicyIsCompact(opts))
 	if err != nil {
 		return nil, fmt.Errorf("marshal Claude Code managed hook policy: %w", err)
 	}
-	return append(body, '\n'), nil
+	return body, nil
+}
+
+// claudeCodeManagedPolicyIsCompact reports whether the policy carries the
+// Windows guard wrapper, which holds about 130 arguments for each of the 29
+// hook events. One argument to a line, indented nine levels deep, made that
+// document 105 KB, over the 64 KiB bound the managed state record is read
+// under, so the guardian refused the file and /ensure ended 1603 (GAP-1050).
+// Without whitespace and without HTML escapes (every & and > became a six
+// byte \u0026 or \u003e) it is a little over a third of that. Every other
+// managed policy, including the Secure Client exec form, keeps the indented
+// form byte for byte.
+func claudeCodeManagedPolicyIsCompact(opts SetupOpts) bool {
+	return claudeCodeWindowsHost() && opts.ManagedEnterprise && !opts.SecureClientHookDelivery
+}
+
+// claudeCodeWindowsHost reports whether the managed Claude Code hooks are
+// rendered for a Windows host. A test replaces it to render the Windows form
+// on any OS.
+var claudeCodeWindowsHost = func() bool { return runtime.GOOS == "windows" }
+
+func marshalClaudeCodeManagedPolicy(policy map[string]interface{}, compact bool) ([]byte, error) {
+	if !compact {
+		body, err := json.MarshalIndent(policy, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		return append(body, '\n'), nil
+	}
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(policy); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
 }
 
 // VerifyManagedHookPolicy verifies the exact persisted managed-policy shape.
@@ -1674,17 +1745,23 @@ func appendClaudeCodeHookMatrix(hooks map[string]interface{}, hookCommand string
 func appendClaudeCodeHookMatrixForSetup(
 	hooks map[string]interface{}, hookCommand string, hookArgs []string, opts SetupOpts,
 ) error {
+	if err := claudeCodeChainAdmission(opts, hookCommand, hookArgs, runtime.GOOS); err != nil {
+		return err
+	}
 	groups, err := claudeCodeHookGroupsForSetup(opts)
 	if err != nil {
 		return err
 	}
-	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups)
+	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups, claudeCodeUnavailableOpen(opts),
+		opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
 	return nil
 }
 
 func appendClaudeCodeHookGroups(
-	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup,
+	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup, unavailableOpen ...bool,
 ) {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
+	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
 	fallback := false
 	if len(hookArgs) == 7 || len(hookArgs) == 9 {
 		fallback = claudeCodePerUserGuardTarget(
@@ -1693,7 +1770,10 @@ func appendClaudeCodeHookGroups(
 		)
 	}
 	for _, group := range groups {
-		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs)
+		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs, open)
+		if managedWindows {
+			command, args = claudeManagedGuardWrapperInvocation(group.eventType, hookCommand, hookArgs)
+		}
 		handler := map[string]interface{}{
 			"type":    "command",
 			"command": command,
@@ -1729,6 +1809,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// On Windows Claude Code's exec form invokes the native launcher directly,
 	// without Git Bash or PowerShell parsing an absolute path that may contain
 	// spaces. Older shell-form commands are still recognized during migration.
+	if err := EnsureClaudeCodeChain(opts); err != nil {
+		return err
+	}
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
 	return withFileLock(settingsPath, func() error {
@@ -2962,11 +3045,17 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if command == "" {
 		return false
 	}
+	kind, hasKind := hook["type"]
+	if _, hasArgs := hook["args"]; !hasArgs && (!hasKind || kind == "command") {
+		if _, ok := claudeCodePerUserNativeShellOwnerHome(command); ok {
+			return true
+		}
+	}
 	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
-	if claudeCodePerUserGuardTarget(hook, hooksDir) {
+	if _, ok := claudeCodePerUserNativeOwnerHome(hook, false); ok {
 		return true
 	}
-	if claudeCodePerUserFallbackTarget(hook, hooksDir) {
+	if _, ok := claudeCodePerUserNativeOwnerHome(hook, true); ok {
 		return true
 	}
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
@@ -3149,7 +3238,8 @@ func verifyClaudeCodeHookMatrixForSetup(
 	if err != nil {
 		return err
 	}
-	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups)
+	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups,
+		claudeCodeUnavailableOpen(opts), opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
 }
 
 // verifyClaudeCodeHookGroups validates the exact DefenseClaw-owned effective
@@ -3163,11 +3253,17 @@ func verifyClaudeCodeHookGroups(
 	expectedArgs []string,
 	hooksDir string,
 	groups []claudeCodeHookGroup,
+	unavailableOpen ...bool,
 ) error {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
+	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
-		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs)
+		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs, open)
+		if managedWindows {
+			expectedCommand, expectedArgs = claudeManagedGuardWrapperInvocation(expected.eventType, expectedCommand, expectedArgs)
+		}
 		locations, err := ownedClaudeCodeHookLocations(
 			hooks[expected.eventType], hooksDir, expectedCommand, expectedArgs,
 		)
@@ -3727,7 +3823,7 @@ func parseLegacyClaudeCodeNativeHookCommand(command string) (string, bool) {
 			return "", false
 		}
 		quoted = '\''
-		executable = strings.ReplaceAll(executable[1:len(executable)-1], `''`, `'`)
+		executable = powershellLiteralValue(executable[1 : len(executable)-1])
 	}
 	if executable == "" || strings.Contains(executable, `"`) {
 		return "", false

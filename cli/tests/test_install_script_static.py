@@ -40,6 +40,8 @@ from pathlib import Path
 import pytest
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 
+from tests.native_programs import native_program
+
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
 HANDOFF_SH = ROOT / "scripts" / "defenseclaw-upgrade.sh"
@@ -977,7 +979,7 @@ def _rollback_to_0_8_with_a_damaged_store(tmp_path: Path, starts: bool) -> tuple
     (dc_home / ".venv" / "bin").mkdir(parents=True)
     (dc_home / ".venv" / "bin" / "python").symlink_to(sys.executable)
     bin_dir.mkdir(parents=True)
-    shutil.copy(shutil.which("sleep") or "/bin/sleep", tmp_path / "defenseclaw-sleep")
+    native_program(tmp_path / "defenseclaw-sleep", "sleep")
     calls = tmp_path / "calls.txt"
     log = f"echo \"$V $*\" >> '{calls}'"
     pid = '"$DEFENSECLAW_HOME/gateway.pid"'
@@ -1611,7 +1613,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     upgrade_guard = source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false")
     assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
-    sleep, home, path = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", []
+    sleep, home, path = str(native_program(tmp_path / "native-sleep", "sleep")), tmp_path / "home", []
     env: dict[str, str] = {}
     node = _program(tmp_path / "nodejs" / "bin" / "node", BASH)
     script_body = "sleep 60\n"
@@ -1894,7 +1896,7 @@ def test_manifest_names_never_establish_a_live_entry(tmp_path: Path, manifest: s
 def test_the_installed_agents_are_those_of_the_native_installers(tmp_path: Path) -> None:
     # Only a native fixed path or a package manager's launcher link records an
     # entry. An unrelated PATH name and a package manifest never do.
-    sleep, home, tools = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", tmp_path / "tools"
+    sleep, home, tools = str(native_program(tmp_path / "native-sleep", "sleep")), tmp_path / "home", tmp_path / "tools"
     _program(tools / "opencode", sleep)
     _program(tools / "amp", sleep)
     native = _program(home / ".amp" / "bin" / "amp", sleep)
@@ -2698,10 +2700,74 @@ def test_rollback_and_upgrade_prune_hook_entries_of_connectors_no_longer_configu
     rollback = text[text.index('if [[ "${ROLLBACK}" == true ]]; then') : text.index("# ── Stage: nothing live changes")]
     # Run after the swap, for a 1.x install; a 0.x one gets its own teardown first.
     assert rollback.index("swap_with_previous || swapped=$?") < rollback.index(
-        'if ! version_lt "${back_to}" 1.0.0; then\n        prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"'
+        'if ! version_lt "${back_to}" 1.0.0; then\n        PRUNE_ROLLBACK_BACKUPS_DIR="${PREVIOUS}/data" prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway" "${PREVIOUS}/bin/defenseclaw-gateway"'
     )
     swap = text[text.index("swap_in() {") : text.index("swap_app() {")]
     assert 'prune_orphaned_hooks "${BIN_DIR}/defenseclaw-gateway"' in swap  # an upgrade heals a host already hit
+
+
+def _run_prune_orphaned_hooks(tmp_path: Path, backups_dir: str, *gateways: Path) -> tuple[subprocess.CompletedProcess[str], Path]:
+    home = tmp_path / "dc"
+    script = tmp_path / "prune_run.sh"
+    quoted = " ".join(f'"{g}"' for g in gateways)
+    script.write_text(
+        'set -euo pipefail\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("prune_orphaned_hooks")
+        + f'DEFENSECLAW_HOME="{home}" LOG="{tmp_path / "log"}"\n'
+        + (f'PRUNE_ROLLBACK_BACKUPS_DIR="{backups_dir}" ' if backups_dir else "")
+        + f"prune_orphaned_hooks {quoted}\n",
+        encoding="utf-8",
+    )
+    return _run([str(script)], tmp_path), home
+
+
+def test_rollback_prune_restores_vendor_files_from_the_saved_install_backups_before_surgical_cleanup(tmp_path: Path) -> None:
+    # GAP-0813: install.sh never passed the saved newer install folder, so on
+    # Linux and macOS a vendor file that did not exist before setup stayed
+    # behind as an empty shell after a rollback (install.ps1 passed it). The
+    # gateway that takes --rollback-backups-dir runs first with the folder;
+    # every other gateway that has the command still runs after it.
+    calls = tmp_path / "calls"
+    plain = _fake_gateway(tmp_path / "plain", "defenseclaw-gateway connector prune-orphans [flags]", calls)
+    backups = _fake_gateway(
+        tmp_path / "backups",
+        "defenseclaw-gateway connector prune-orphans [flags] --rollback-backups-dir string",
+        calls,
+    )
+    saved = tmp_path / "previous" / "data"
+
+    proc, home = _run_prune_orphaned_hooks(tmp_path, str(saved), plain, backups)
+
+    assert proc.returncode == 0, proc.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "connector prune-orphans --help",
+        "connector prune-orphans --help",
+        f"connector prune-orphans --data-dir {home} --rollback-backups-dir {saved}",
+        f"connector prune-orphans --data-dir {home}",
+    ]
+
+
+def test_upgrade_prune_passes_no_backup_folder_and_an_older_reader_still_runs(tmp_path: Path) -> None:
+    # Benign twin of the rollback case: an upgrade has no saved newer install,
+    # so no gateway gets the flag; a reader without the flag is never skipped
+    # because another gateway in the list has the command.
+    calls = tmp_path / "calls"
+    first = _fake_gateway(tmp_path / "first", "defenseclaw-gateway connector prune-orphans [flags]", calls)
+    second = _fake_gateway(
+        tmp_path / "second",
+        "defenseclaw-gateway connector prune-orphans [flags] --rollback-backups-dir string",
+        calls,
+    )
+
+    proc, home = _run_prune_orphaned_hooks(tmp_path, "", first, second)
+
+    assert proc.returncode == 0, proc.stderr
+    assert calls.read_text(encoding="utf-8").splitlines() == [
+        "connector prune-orphans --help",
+        "connector prune-orphans --help",
+        f"connector prune-orphans --data-dir {home}",
+        f"connector prune-orphans --data-dir {home}",
+    ]
 
 
 def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_left(tmp_path: Path) -> None:
@@ -3898,7 +3964,7 @@ def test_waiting_for_cli_calls_waits_for_a_call_from_the_old_venv(tmp_path: Path
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     sleeper = venv / "bin" / "defenseclaw-sleep"
-    sleeper.symlink_to(shutil.which("sleep"))
+    sleeper.symlink_to(native_program(tmp_path / "native-sleep", "sleep"))
     body = f"""
 VENV={shlex.quote(str(venv))}
 t0=$SECONDS; wait_cli_calls_done; echo "idle=$((SECONDS - t0))"

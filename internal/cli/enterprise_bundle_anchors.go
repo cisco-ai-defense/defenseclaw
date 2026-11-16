@@ -89,7 +89,7 @@ install that cannot be recorded is refused (state_invalid) before the file is
 written. The result also carries sha256, previous_sha256 and key_ids. Exit codes: 0, 1
 (errors[].code names the refusal), 2 usage, 75 busy. On Windows, use enterprise windows ensure --profile standalone
 --trust-anchors <file>.`,
-		Example:      `  defenseclaw-gateway enterprise bundle anchors install --file /var/lib/acme-agent/trust/bundle-anchors.json --lock-wait 10m --json`,
+		Example:      "  sudo " + managedHostGatewayCommand() + " enterprise bundle anchors install --file /var/lib/acme-agent/trust/bundle-anchors.json --lock-wait 10m --json",
 		SilenceUsage: true,
 		Annotations:  map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {

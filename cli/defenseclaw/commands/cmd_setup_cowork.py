@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 import click
 
-from defenseclaw import cowork, ux
+from defenseclaw import cowork, platform_support, ux
 from defenseclaw.context import AppContext, pass_ctx
 
 _POLL_SECONDS = 3.0
@@ -85,16 +85,20 @@ def _render_hooks(cfg, *, allow_not_set_up: bool = False) -> dict | None:
     is not set up" returns None: it can build the plugin once that connector
     runs. Every other refusal stops setup before anything is written.
     """
-    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable
+    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_resolution
+    from defenseclaw.config import gateway_home_for_data_dir
     from defenseclaw.pinned_exec import UnsafePathError, run_pinned_executable
 
-    executable = _gateway_lifecycle_executable()
+    executable, refused = _gateway_lifecycle_resolution()
     if not executable:
+        if refused:
+            raise click.ClickException(f"The Cowork plugin was not built: {refused}. Nothing was changed.")
         raise click.ClickException(
             "defenseclaw-gateway was not found, so the Cowork plugin cannot be built. "
             "Run the DefenseClaw installer, then defenseclaw setup cowork again."
         )
     data_dir = str(cfg.data_dir)
+    # The gateway reads the install-home config.yaml, which names a moved data_dir (GAP-0844).
     try:
         result = run_pinned_executable(
             [executable, "connector", "cowork-plugin", "--data-dir", data_dir, "--json"],
@@ -103,7 +107,7 @@ def _render_hooks(cfg, *, allow_not_set_up: bool = False) -> dict | None:
             shell=False,
             stdin=subprocess.DEVNULL,
             timeout=60,
-            env={**os.environ, "DEFENSECLAW_HOME": data_dir},
+            env={**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)},
         )
     except (UnsafePathError, subprocess.TimeoutExpired, OSError) as exc:
         raise click.ClickException(f"defenseclaw-gateway could not render the Cowork hooks ({exc}).") from exc
@@ -227,6 +231,11 @@ def setup_cowork(
     from defenseclaw import __version__
 
     _refuse_on_managed_host(app.cfg)
+    if platform_support.host_os() == "linux":
+        # The support matrix lists Cowork on Linux as Preview (cowork audit P4-3).
+        ux.warn(
+            "Cowork on Linux is a preview: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified."
+        )
     if not cowork._claudecode_enabled(app.cfg):
         # Ask the gateway first: one that cannot build the plugin must not
         # leave the Claude Code connector switched on for nothing.
@@ -241,7 +250,14 @@ def setup_cowork(
     started = datetime.now(timezone.utc)
     build, version = cowork.next_version(state, started, data_dir)
     try:
-        path, digest = cowork.write_plugin_zip(data_dir, cowork.plugin_zip_bytes(hooks_doc, version, __version__))
+        archive = cowork.plugin_zip_bytes(hooks_doc, version, __version__)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(
+            f"The Cowork plugin could not copy its installed Windows guard ({exc}). "
+            "Run the DefenseClaw installer, then defenseclaw setup cowork again."
+        ) from exc
+    try:
+        path, digest = cowork.write_plugin_zip(data_dir, archive)
     except OSError as exc:
         # No traceback: name the folder, the cause and the fix (GAP-0054).
         raise click.ClickException(cowork.plugin_write_refusal(data_dir, exc)) from exc
@@ -261,6 +277,7 @@ def setup_cowork(
         }
     )
     cowork.save_state(data_dir, state)
+    cowork.clear_uninstalled_marker(data_dir)
 
     ux.ok(f"Built the DefenseClaw Cowork plugin {version}: {path}")
     ux.echo(f"    Cowork calls will run in the Claude Code connector's {cowork.mode_text(cfg)}.")

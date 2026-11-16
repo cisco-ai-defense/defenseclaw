@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,11 +139,11 @@ func runEnterpriseACPSetup(cmd *cobra.Command, _ []string) error {
 	agentBinary := strings.TrimSpace(enterpriseACPAgentBinary)
 	windows := runtime.GOOS == "windows"
 	invoke := managedHostGatewayCommand()
-	if executable, execErr := os.Executable(); execErr == nil {
-		invoke = enterpriseACPQuotePath(executable, windows)
-	}
 	if windows {
-		invoke = "& " + invoke
+		invoke = managedWindowsAdminCLI()
+	}
+	if executable, execErr := os.Executable(); execErr == nil {
+		invoke = executable
 	}
 	result, err := setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
 		client:      client,
@@ -154,16 +155,15 @@ func runEnterpriseACPSetup(cmd *cobra.Command, _ []string) error {
 		agentBinary: agentBinary,
 		gatewayURL:  fmt.Sprintf("http://127.0.0.1:%d/api/v1/acp/evaluate", enterpriseACPAPIPort),
 		rerun: func(profile string, mode acp.Mode) string {
-			command := fmt.Sprintf("%s enterprise acp setup --client %s --agent %s --profile %s", invoke, client, agent, profile)
+			args := []string{"enterprise", "acp", "setup", "--client", client, "--agent", agent, "--profile", profile}
 			if mode == acp.ModeAction {
-				command += " --activate"
+				args = append(args, "--activate")
 			}
-			command += fmt.Sprintf(" --data-dir %s --api-port %d --guard-binary %s", enterpriseACPQuotePath(dataDir, windows),
-				enterpriseACPAPIPort, enterpriseACPQuotePath(guard, windows))
+			args = append(args, "--data-dir", dataDir, "--api-port", strconv.Itoa(enterpriseACPAPIPort), "--guard-binary", guard)
 			if agentBinary != "" {
-				command += " --agent-binary " + enterpriseACPQuotePath(agentBinary, windows)
+				args = append(args, "--agent-binary", agentBinary)
 			}
-			return command
+			return enterpriseACPCommandLine(windows, invoke, args...)
 		},
 	})
 	if err != nil {
@@ -239,7 +239,8 @@ func setupEnterpriseACPUserFilesLocked(in enterpriseACPUserSetup) (result enterp
 			next = in.rerun(note.Profile, acp.Mode(note.Mode))
 		}
 		return result, fmt.Errorf("this setup command is for profile %s, but your administrator enrolled you for %s/%s in profile %s "+
-			"(%s), which replaced it; nothing was changed. Run: %s", in.profile, in.client, in.agent, note.Profile, note.EnrolledAt, next)
+			"(%s), which replaced it; nothing was changed. %s: %s", in.profile, in.client, in.agent, note.Profile, note.EnrolledAt,
+			enterpriseACPRunInstruction(runtime.GOOS == "windows" && in.rerun != nil), next)
 	}
 	guard, err := resolveACPExecutable(in.guard, "DefenseClaw ACP guard")
 	if err != nil {

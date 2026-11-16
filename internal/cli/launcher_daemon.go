@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -37,13 +38,16 @@ import (
 // package arrived has not started it, so the launcher starts it on demand,
 // and applies a daemon update the lifecycle deferred while sandboxes ran.
 const (
-	launcherSocketUnit    = "defenseclaw-sandbox.socket"
-	launcherServiceUnit   = "defenseclaw-sandbox.service"
-	launcherRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
+	launcherSocketUnit  = "defenseclaw-sandbox.socket"
+	launcherServiceUnit = "defenseclaw-sandbox.service"
 
 	launcherSystemctl = "/usr/bin/systemctl"
 	launcherLaunchctl = "/bin/launchctl"
 )
+
+// launcherRepairCommand is the administrator's repair of a managed Mac, with
+// the gateway by its absolute path: it is not on the PATH.
+var launcherRepairCommand = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos repair"
 
 // launcherAgentsDir holds the LaunchAgent plists; a var for tests.
 var launcherAgentsDir = openshell.LaunchAgentsDir

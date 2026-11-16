@@ -10,7 +10,12 @@
 
 package winpath
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
+)
 
 func TestEnterpriseRootsForProfiles(t *testing.T) {
 	secureClient, err := EnterpriseRootsFor("secure_client", `C:\Program Files\`, `C:\ProgramData`)
@@ -90,6 +95,35 @@ func TestValidateEnterpriseInstallRoot(t *testing.T) {
 	}
 }
 
+func TestEnterpriseGatewayServiceForRoot(t *testing.T) {
+	roots, err := EnterpriseRootsFor("standalone", `C:\Program Files`, `C:\ProgramData`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for root, want := range map[string]string{
+		`C:\Program Files\Cisco\DefenseClaw`:                  "DefenseClawGateway",
+		`c:\program files\cisco\defenseclaw\`:                 "DefenseClawGateway",
+		`C:\Program Files\Cisco\DefenseClaw-Cert\0a1b2c3d4e`:  "DefenseClawCertGateway_0a1b2c3d4e",
+		`c:\program files\cisco\defenseclaw-cert\ffffffffff\`: "DefenseClawCertGateway_ffffffffff",
+	} {
+		got, err := EnterpriseGatewayServiceForRoot(roots, root)
+		if err != nil || got != want {
+			t.Fatalf("EnterpriseGatewayServiceForRoot(%q) = %q, %v; want %q", root, got, err, want)
+		}
+	}
+	for _, rejected := range []string{
+		`C:\Program Files\Cisco\DefenseClaw-Cert`,
+		`C:\Program Files\Cisco\DefenseClaw-Cert\0A1B2C3D4E`,
+		`C:\Program Files\Cisco\DefenseClaw-Cert\0a1b2c3d4e\x`,
+		`C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
+		`C:\Users\Public\DefenseClaw`,
+	} {
+		if got, err := EnterpriseGatewayServiceForRoot(roots, rejected); err == nil {
+			t.Fatalf("EnterpriseGatewayServiceForRoot(%q) = %q, want an error", rejected, got)
+		}
+	}
+}
+
 func TestClassifyEnterpriseMetadata(t *testing.T) {
 	for _, tc := range []struct {
 		body    string
@@ -142,6 +176,24 @@ func TestEnterpriseMetadataDeferredConfigPending(t *testing.T) {
 	} {
 		if got := enterpriseMetadataDeferredConfigPending([]byte(tc.body)); got != tc.want {
 			t.Fatalf("%q: deferred config pending %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+// Every DefenseClaw-named folder an enterprise root builds is a registered
+// product folder, so the audit redaction detector knows it is not a secret.
+func TestEnterpriseRootsUseRegisteredProductFolders(t *testing.T) {
+	for _, profile := range []string{EnterpriseProfileSecureClient, EnterpriseProfileStandalone} {
+		roots, err := EnterpriseRootsFor(profile, `C:\Program Files`, `C:\ProgramData`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{roots.InstallRoot, roots.StateRoot, roots.CertificationInstallBase, roots.CertificationStateBase, roots.ManagedIPCDir, roots.LifecycleDir, roots.MetadataPath} {
+			for _, segment := range strings.Split(path, `\`) {
+				if strings.HasPrefix(strings.ToLower(segment), "defenseclaw") && !productlayout.IsFolderName(segment) {
+					t.Errorf("%s: %q in %q is not a registered product folder", profile, segment, path)
+				}
+			}
 		}
 	}
 }

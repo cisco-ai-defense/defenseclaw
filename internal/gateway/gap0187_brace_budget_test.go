@@ -19,7 +19,7 @@ import (
 // well under a second and without growing memory, per-user and managed,
 // for both connectors. Small brace forms stay allowed.
 func TestGAP0187BraceExpansionBudget(t *testing.T) {
-	f := newB36ManagedHookFixture(t)
+	f := newB36ManagedHookFixture(t).strict(t)
 	heavy := []string{
 		"echo {1..100000} > out.txt",
 		"echo {1..100000000} > out.txt",

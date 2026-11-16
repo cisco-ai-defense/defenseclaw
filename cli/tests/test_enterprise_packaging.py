@@ -622,45 +622,8 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         assert f"include {name}" in manifest
 
     bundle_builder = (ROOT / "scripts/build-macos-bundle.sh").read_text(encoding="utf-8")
-    windows_builder = (ROOT / "scripts/windows-native-ci.ps1").read_text(encoding="utf-8-sig")
-    windows_installer = (ROOT / "scripts/build-windows-installer.ps1").read_text(
-        encoding="utf-8-sig"
-    )
-    windows_gateway_license_staging = """\
-    foreach ($file in @('LICENSE', 'NOTICE', 'THIRD_PARTY_LICENSES.txt')) {
-        foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
-            Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) -Destination $targetRoot -Force
-        }
-    }"""
     for name in ("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"):
         assert f'cp {name} ' in bundle_builder
-    assert windows_gateway_license_staging in windows_builder
-    assert (
-        "foreach ($file in @('pyproject.toml', 'README.md', 'LICENSE', 'NOTICE', "
-        "'THIRD_PARTY_LICENSES.txt', 'MANIFEST.in'))"
-    ) in windows_builder
-    assert (
-        "Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) "
-        "-Destination $packageStage -Force"
-    ) in windows_builder
-    assert (
-        """\
-        '--source', $stage,
-        '--output', $gatewayArchive,"""
-        in windows_builder
-    )
-    assert (
-        """\
-        '--source', $gatewayVerificationStage,
-        '--output', $gatewayArchiveVerification,"""
-        in windows_builder
-    )
-    assert "gateway ZIP must contain exactly one root $file file" in windows_builder
-    assert "gateway ZIP $file differs from the canonical source file" in windows_builder
-    assert "Expand-Archive -LiteralPath $gatewayZip -DestinationPath $gatewayPayloadDir" in (
-        windows_installer
-    )
-    assert "Write-ZipFromDirectory $gatewayPayloadDir $embeddedGatewayZip" in windows_installer
 
 
 @pytest.mark.skipif(os.name == "nt", reason="launchd installer POSIX ownership and executable-bit contract")
@@ -1233,6 +1196,7 @@ def test_linux_preinstall_refuses_a_config_newer_than_the_package(tmp_path: Path
     result = host.run(_rooted(script, rooting), "2")
     assert result.returncode == 1
     assert "Nothing was changed" in result.stderr
+    assert result.stderr.startswith(f"defenseclaw-enterprise: config_invalid: {config} has config_version ")  # GAP-0582
     assert host.calls() == []
 
 
@@ -1257,7 +1221,11 @@ def test_linux_preinstall_refuses_a_downgrade_without_the_rollback_marker(tmp_pa
     refused = host.run(script.replace("@DC_PKG_VERSION@", older), "2")
     assert refused.returncode == 1
     assert "Nothing was changed" in refused.stderr and "--allow-downgrade" in refused.stderr
+    # GAP-0582: rpm and dnf print the lifecycle code the docs name for every
+    # lifecycle; the refusal changes nothing, the package result included.
+    assert f"downgrade_refused: DefenseClaw {deployed} is deployed; refusing to downgrade to {older}." in refused.stderr
     assert host.calls() == []
+    assert sorted(p.name for p in host.state.iterdir()) == ["deployment.json"]
     assert host.run(script.replace("@DC_PKG_VERSION@", deployed), "2").returncode == 0
     marker = host.state / "allow-downgrade"
     marker.write_text("", encoding="utf-8")
@@ -1297,6 +1265,7 @@ def test_linux_preinstall_refuses_a_package_below_the_bundle_release_floor(
     assert (result.returncode == 1) == refused, (result.stdout, result.stderr)
     if refused:
         assert "Nothing was changed" in result.stderr
+        assert result.stderr.startswith("defenseclaw-enterprise: product_floor_refused: refusing to install 1.0.5: ")  # GAP-0582
         assert len([c for c in host.calls() if not c.startswith("gateway ")]) == 0
 
 
@@ -1440,7 +1409,7 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     assert result.returncode == exit_code, (result.stdout, result.stderr)
     assert allow.exists() == marker  # left for the older package's preinstall and postinstall (GAP-1115)
     if exit_code:
-        assert f"refusing to downgrade to {line.split()[3]}" in result.stderr
+        assert f"downgrade_refused: {line.split()[1]} is installed; refusing to downgrade to {line.split()[3]}." in result.stderr
         assert f"sudo touch {allow}" in result.stderr
         assert "postinstall applies it" in result.stderr
         assert f"--config {previous_config if backup else config}" in result.stderr
@@ -1497,6 +1466,7 @@ def test_linux_apt_hook_refuses_a_downgrade_below_the_bundle_release_floor(
     assert host.calls() == [f"gateway enterprise bundle floor-check --product-version {version}"]
     if exit_code:
         assert "Nothing was changed" in result.stderr
+        assert result.stderr.startswith(f"defenseclaw-enterprise: product_floor_refused: refusing to install {line.split()[3]}: ")  # GAP-0582
 
 
 def test_enterprise_deb_ships_the_apt_downgrade_hook_and_rpm_does_not() -> None:
@@ -1576,6 +1546,7 @@ def test_macos_pkg_preinstall_records_a_refused_downgrade(tmp_path: Path, versio
         return
     assert result.returncode == 1
     assert str(result_path) in result.stderr
+    assert result.stderr.startswith("downgrade_refused: DefenseClaw 1.0.1 is installed; refusing to downgrade to 1.0.0")  # GAP-0582
     document = json.loads(result_path.read_text(encoding="utf-8"))
     assert document["ok"] is False and document["installed_version"] == "1.0.1"
     assert document["errors"][0]["code"] == "downgrade_refused"
@@ -1588,6 +1559,58 @@ def test_macos_pkg_preinstall_records_a_refused_downgrade(tmp_path: Path, versio
     validator = jsonschema.Draft202012Validator(json.loads(SCHEMA.read_text(encoding="utf-8")))
     assert not sorted(validator.iter_errors(document), key=str)
 
+
+
+def _documented_lifecycle_codes() -> set[str]:
+    # The codes the enterprise troubleshooting table and lifecycle page name.
+    docs = ROOT / "docs-site" / "content" / "docs" / "enterprise"
+    text = "".join((docs / name).read_text(encoding="utf-8") for name in ("troubleshooting.mdx", "lifecycle.mdx"))
+    return set(re.findall(r"`([a-z][a-z0-9]*(?:_[a-z0-9]+)+)`", text))
+
+
+# GAP-0582: rpm --oldpackage and dnf downgrade refused without the code the
+# lifecycle docs name for every channel. Every refusal of a Linux package
+# script (preinstall for rpm %pre and deb preinst, and the apt hook) goes
+# through one helper that starts the text with a documented lifecycle code,
+# so a new refusal path cannot leave it out; each expected path is named.
+@pytest.mark.parametrize(
+    ("script", "codes"),
+    [
+        ("preinstall.sh", {"config_invalid", "product_floor_refused", "downgrade_refused", "sandboxes_running"}),
+        ("apt-downgrade-guard.sh", {"product_floor_refused", "downgrade_refused"}),
+    ],
+)
+def test_every_linux_package_refusal_names_a_documented_lifecycle_code(script: str, codes: set[str]) -> None:
+    text = (LINUX / script).read_text(encoding="utf-8")
+    helper = text.split("\nrefuse() {\n", 1)[1].split("\n}\n", 1)[0]
+    assert 'echo "defenseclaw-enterprise: $1: $2" >&2' in helper
+    refusals = [line.strip() for line in text.splitlines() if re.fullmatch(r"\s*exit 1", line)]
+    assert refusals == ["exit 1"] and "    exit 1" in helper, refusals  # only the helper refuses
+    used = re.findall(r"^\s*refuse ([a-z_]+) ", text, re.M)
+    assert set(used) == codes, used
+    assert codes <= _documented_lifecycle_codes()
+    outside = text.replace(helper, "")
+    assert not re.search(r'echo "defenseclaw-enterprise: [^"]*(?:refusing|Nothing was changed)', outside)
+
+
+# The macOS package records the code in last-package-result.json; its
+# install.log text names it too, and the package removal refusals on Linux
+# name theirs, so every package channel reads the same codes (GAP-0582).
+def test_macos_and_removal_refusals_name_documented_lifecycle_codes() -> None:
+    documented = _documented_lifecycle_codes()
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    preinstall = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
+    assert preinstall
+    body = preinstall.group(1)
+    assert set(re.findall(r"^\s*refuse ([a-z_]+) ", body, re.M)) == {
+        "product_floor_refused", "downgrade_refused", "sandboxes_running"
+    } <= documented
+    assert '*) said="$code: $said" ;;' in body
+    assert 'echo "profile_conflict: DefenseClaw is already managed by Cisco Secure Client' in body
+    assert "profile_conflict" in documented
+    removal = (LINUX / "preremove.sh").read_text(encoding="utf-8")
+    for code in ("lifecycle_busy", "uninstall_precheck_refused", "uninstall_incomplete"):
+        assert f'echo "defenseclaw-enterprise: {code}: ' in removal and code in documented
 
 def _validate_lifecycle_result(document: dict) -> None:
     try:
@@ -1659,6 +1682,7 @@ def test_macos_pkg_preinstall_refuses_below_the_bundle_release_floor(
         assert not result_path.exists()
         return
     assert "Nothing was changed" in result.stderr
+    assert result.stderr.startswith("product_floor_refused: Refusing to install DefenseClaw 1.0.5: ")  # GAP-0582
     document = json.loads(result_path.read_text(encoding="utf-8"))
     assert [e["code"] for e in document["errors"]] == ["product_floor_refused"]
     assert document["installed"] is record and document["installed_version"] == ("1.0.6" if record else "")
@@ -2792,6 +2816,7 @@ def test_linux_preinstall_refuses_while_an_earlier_daemon_runs_a_sandbox(tmp_pat
     result = host.run(_linux_guarded_preinstall(host, tmp_path, launcher), "2")
     assert result.returncode == 1, result.stderr
     assert "this install was refused, and nothing was changed" in result.stderr
+    assert result.stderr.startswith("defenseclaw-enterprise: sandboxes_running: this install was refused")  # GAP-0582
     assert "alice: web (ready): save the work you need, then `defenseclaw sandbox stop web`" in result.stderr
     assert "alice: vm1 (completed MicroVM, which OpenShell does not stop): `defenseclaw sandbox delete vm1`" in result.stderr
     for free in ("gone", "dk", "st", "nested"):
@@ -2948,3 +2973,47 @@ def test_scanner_runtime_build_sets_every_mode() -> None:
     assert "path.chmod(0o755)" in script
     assert "path.chmod(0o755 if mode & 0o111 else 0o644)" in script
     assert 'sys.exit(f"{path} is not a file or folder")' in script
+
+
+def test_macos_pkg_preinstall_lists_only_the_parents_it_will_create(tmp_path: Path) -> None:
+    """GAP-0091: the pkg preinstall lists, after every refusal, the shared
+    payload parents that do not exist yet; the lifecycle moves the list into
+    the deployment record (internal/enterpriseunix created_parent_dirs.go), so
+    an uninstall removes those folders once empty and never one that existed."""
+    builder = (ROOT / "scripts" / "build-macos-enterprise-pkg.sh").read_text(encoding="utf-8")
+    match = re.search(r"cat >\"\$SCRIPTS/preinstall\" <<'EOF'\n(.*?)\nEOF\n", builder, re.DOTALL)
+    assert match, "the pkg preinstall heredoc was not found"
+    preinstall = match.group(1)
+    start = preinstall.index("# GAP-0091:")
+    assert preinstall.rstrip().endswith("exit 0") and start > preinstall.rindex("refuse ")
+    snippet = preinstall[start:]
+    go = (ROOT / "internal" / "enterpriseunix" / "created_parent_dirs.go").read_text(encoding="utf-8")
+    assert 'createdParentDirsName = "created-parent-dirs"' in go
+    assert '"$state/created-parent-dirs"' in snippet
+    parents = ("/opt", "/opt/cisco", "/usr/local", "/usr/local/bin")
+    for parent in parents:
+        assert f'"{parent}": true' in go
+    root = tmp_path / "root"
+    rooted = snippet.replace(
+        "for d_parent in /opt /opt/cisco /usr/local /usr/local/bin; do",
+        "for d_parent in " + " ".join(f"{root}{p}" for p in parents) + "; do",
+    )
+    assert rooted != snippet
+    state = root / "opt/cisco/defenseclaw/lifecycle"
+    (root / "usr/local").mkdir(parents=True)
+    # The Installer runs the script with a 077 umask; the parents it creates
+    # still get the payload's 0755, and only the lifecycle folder 0700.
+    script = f"umask 077\nstate={state}\n" + rooted
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    listed = (state / "created-parent-dirs").read_text(encoding="utf-8").split()
+    assert listed == [f"{root}/opt", f"{root}/opt/cisco", f"{root}/usr/local/bin"]
+    for parent in ("opt", "opt/cisco", "opt/cisco/defenseclaw"):
+        assert (root / parent).stat().st_mode & 0o777 == 0o755, parent
+    assert state.stat().st_mode & 0o777 == 0o700
+    # Everything present: nothing is listed again.
+    (root / "usr/local/bin").mkdir()
+    (state / "created-parent-dirs").unlink()
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert not (state / "created-parent-dirs").exists()

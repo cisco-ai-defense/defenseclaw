@@ -77,6 +77,11 @@ type UnixEnumeratorState struct {
 	// accounts that stall cannot keep the same later accounts uninspected
 	// cycle after cycle (GAP-1586).
 	DiscoveryDeferred map[string]string `json:"discovery_deferred,omitempty"`
+	// VerifiedAgents is, per (user, connector), the last version read that
+	// worked and the stamp of the CLI it came from. A later failed read of
+	// the same unchanged CLI keeps that version for a few cycles instead of
+	// reporting the account unprotected (see carryVerifiedAgentVersions).
+	VerifiedAgents map[string]UnixVerifiedAgent `json:"verified_agents,omitempty"`
 }
 
 const (
@@ -113,8 +118,12 @@ type UnixDiscoverFunc func(ctx context.Context, account unixidentity.Account, co
 // reasons for connectors without one, and the connector's app and
 // extension installs.
 type UnixDiscovery struct {
-	Versions        map[string]string
-	Reasons         map[string]string
+	Versions map[string]string
+	Reasons  map[string]string
+	// VersionSources names, per connector, the CLI whose live run supplied
+	// its version. A version with no entry here came from package metadata
+	// or a stamp and is bound to no executable.
+	VersionSources  map[string]string
 	Surfaces        map[string][]connector.AgentSurface
 	PrivateInstalls []PrivateAgentInstall
 }
@@ -642,7 +651,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				User: name, UID: account.UID, GID: account.GID, Home: home, HomeInode: check.Inode,
 			})
 		}
-		var versions, reasons map[string]string
+		var versions, reasons, sources map[string]string
 		var surfaces map[string][]connector.AgentSurface
 		var privateInstalls []PrivateAgentInstall
 		discoveryFailed := false
@@ -655,7 +664,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
-			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+			versions, reasons, sources, surfaces = found.Versions, found.Reasons, found.VersionSources, found.Surfaces
 			privateInstalls = found.PrivateInstalls
 			surfacesKnown = err == nil
 		} else if check.State == HomeAvailable && opts.Discover != nil {
@@ -667,6 +676,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
+		}
+		if check.State == HomeAvailable && !discoveryFailed && (opts.DiscoverSurfaces != nil || opts.Discover != nil) {
+			versions = carryVerifiedAgentVersions(opts.State, name, home, UnixAgentOwner{UID: account.UID, Home: home, HomeInode: check.Inode},
+				append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...), versions, reasons, sources, opts.Logger)
 		}
 		if discoveryFailed {
 			// The worker also owns the private-install scan for per-user
@@ -1995,6 +2008,14 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 				state.ACPSources = map[string]string{}
 			}
 			state.ACPSources[principal] = source
+		}
+	}
+	for key, verified := range parsed.VerifiedAgents {
+		if key != "" && verified.valid() && len(state.VerifiedAgents) < unixVerifiedAgentsMax {
+			if state.VerifiedAgents == nil {
+				state.VerifiedAgents = map[string]UnixVerifiedAgent{}
+			}
+			state.VerifiedAgents[key] = verified
 		}
 	}
 	for user, why := range parsed.DiscoveryDeferred {

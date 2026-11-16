@@ -14,7 +14,6 @@ package cli
 
 import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // windowsAgentSettingsNotRestoredCode is the Linux and macOS warning code
@@ -30,7 +29,7 @@ const windowsNativeOTLPConfigUncheckedCode = "native_otlp_config_unchecked"
 // windowsEnterpriseNativeOTLPNotices reads the standalone guardian's
 // native_otlp_unchecked notices (a seam for tests).
 var windowsEnterpriseNativeOTLPNotices = func() []string {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil
 	}
@@ -40,7 +39,7 @@ var windowsEnterpriseNativeOTLPNotices = func() []string {
 // windowsEnterpriseAgentSettingsNotices reads the standalone guardian's
 // agent config notices (a seam for tests).
 var windowsEnterpriseAgentSettingsNotices = func() []string {
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		return nil
 	}

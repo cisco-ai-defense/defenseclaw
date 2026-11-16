@@ -122,11 +122,30 @@ In `default` and `permissive`, a world-writable `chmod` and a Windows Run-key ad
 **Known limit.** The rule reads the text of the command. A write made by a program the command starts (a nested shell, a generated script, a build tool, a tool option that runs another command) is not visible in that text, so it is not caught when it goes through an already existing link to the protected file. Rely on the OpenShell sandbox and file permissions for containment.
 
 **Evaluation limit.** DefenseClaw judges each command of a shell call on its own, up to 128 commands
-in one call (commands joined with `;`, `&&`, `||` or `|`, and the commands inside bodies). In action
-mode a call with more commands is blocked with rule `ACTION-COMPOUND-LIMIT` ("Shell command exceeds
-policy evaluation limit"), whatever its length, up to the 1 MiB hook payload cap. In observe mode it
-raises the alert and runs. Split such a command into several calls, or put it in a script file and
-run the script.
+in one call (commands joined with `;`, `&&`, `||` or `|`, and the commands inside bodies). A call
+with more commands, or one the reader cannot analyse (for example a PowerShell statement it cannot
+parse before the rest), raises rule `ACTION-COMPOUND-LIMIT` ("Shell command exceeds policy
+evaluation limit"), whatever its length, up to the 1 MiB hook payload cap. Such a call proves no
+target. With the `default` and `permissive` packs, per-user and managed, the call runs with a visible
+alert that names the rule, an audit record with `decision=alert`, and the LLM judge decides where it
+is configured. With the `strict` pack, managed strict included, action mode blocks it. A finding that
+proves a protected target in the same call (a DefenseClaw state write, a file the call names) decides
+on its own in every profile; a write the reader resolves into DefenseClaw's own state folder
+(`~/.defenseclaw`) is self-protection and always blocks. A call that only mentions the folder name, next to
+a statement the reader cannot analyse, proves no target and is judged like any other limit-only call. **Known limit:** with `default` and `permissive`, a statement the reader
+cannot analyse can hide a write to a protected file in the same call; use `strict` where that
+matters. In observe mode the call raises the alert and runs. Split a long command into several
+calls, or put it in a script file and run the script.
+
+**Operand limit.** DefenseClaw also resolves at most 1024 operands and redirection targets of one command,
+counted over all its statements, with the file system. A command with more operands is unresolved. Every
+word is still matched as text, as the shell decodes it (quotes and backslashes removed): a protected file or
+link that the command names, directly or through a value DefenseClaw knows, or among the first 1024
+operands, is blocked in every profile, and so is a later name that is a link or a second name of a keys
+file. The other plain file names past the bound (a name with no protected part, no variable, glob or
+dot-dot, outside the system folders, that is no link) are not resolved further: the `default` and `permissive` profiles allow the
+call and raise the alert `ACTION-OPERAND-BOUND`, which names the bound, and the `strict` profile (and managed
+strict) blocks it with `ACTION-COMPOUND-LIMIT`. Pass such a list through a file (`xargs -a list.txt`) or split it.
 
 ## What `setup guardrail` actually writes
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -116,7 +117,10 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 	if err != nil {
 		return result, err
 	}
-	err = windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		return result, keptErr
+	}
+	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -262,6 +266,9 @@ func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string
 	if err != nil {
 		return nil, false, err
 	}
+	if kept, keptErr := windowsManagedPolicyLinkKept(filepath.Dir(path)); keptErr != nil || kept {
+		return nil, false, keptErr
+	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
 	policyInfo, policyErr := os.Lstat(path)
 	stateInfo, stateErr := os.Lstat(statePath)
@@ -292,12 +299,12 @@ func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string
 
 	var targets []string
 	active := false
-	err = windowsClaudeManagedPolicyTransaction(func() error {
-		policy, err := snapshotWindowsManagedFile(path)
+	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
+		policy, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		state, err := snapshotWindowsManagedFile(
+		state, err := snapshotWindowsManagedState(
 			statePath,
 		)
 		if err != nil {
@@ -337,17 +344,25 @@ func PublishWindowsClaudeManagedPolicyTargets(rawTargets []string) error {
 			return err
 		}
 	}
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		if keptErr == nil && len(targets) != 0 {
+			return errors.New(
+				"enterprise hooks: refusing to enroll Claude targets without an existing verified managed policy",
+			)
+		}
+		return keptErr
+	}
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
 		}
 		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-		policySnapshot, err := snapshotWindowsManagedFile(path)
+		policySnapshot, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+		stateSnapshot, err := snapshotWindowsManagedState(statePath)
 		if err != nil {
 			return err
 		}
@@ -454,17 +469,17 @@ func DeactivateWindowsClaudeManagedPolicy() error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
 		}
 		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-		policy, err := snapshotWindowsManagedFile(path)
+		policy, err := snapshotWindowsManagedPolicy(path)
 		if err != nil {
 			return err
 		}
-		state, err := snapshotWindowsManagedFile(statePath)
+		state, err := snapshotWindowsManagedState(statePath)
 		if err != nil {
 			return err
 		}
@@ -508,7 +523,13 @@ func PrepareWindowsClaudeManagedPolicyTeardown(
 	if err != nil {
 		return result, err
 	}
-	err = windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		if keptErr != nil {
+			return result, keptErr
+		}
+		return result, persistJournal(result)
+	}
+	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -597,7 +618,7 @@ func VerifyWindowsClaudeManagedPolicyTeardown() error {
 	if err := requireWindowsClaudeTeardownAdministrator(); err != nil {
 		return err
 	}
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -742,7 +763,12 @@ func RestoreWindowsClaudeManagedPolicySnapshot(
 		return err
 	}
 
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	if !snapshot.PolicyExisted && !snapshot.StateExisted {
+		if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+			return keptErr
+		}
+	}
+	return windowsClaudeManagedPolicyTransactionFor(snapshot)(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -1244,11 +1270,11 @@ func resolveWindowsClaudeManagedPolicyTarget() (windowsClaudeManagedPolicyTarget
 		return target, policyErr
 	}
 	statePath := filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile)
-	policySnapshot, policyErr := snapshotWindowsManagedFile(policyPath)
+	policySnapshot, policyErr := snapshotWindowsManagedPolicy(policyPath)
 	if policyErr != nil {
 		return target, policyErr
 	}
-	stateSnapshot, stateErr := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, stateErr := snapshotWindowsManagedState(statePath)
 	if stateErr != nil {
 		return target, stateErr
 	}
@@ -1446,6 +1472,75 @@ func WithWindowsClaudeManagedPolicyTransaction(fn func(policyDir string) error) 
 	})
 }
 
+// windowsClaudeManagedPolicyLinkKept reports, on the standalone profile, that a
+// link or a non-folder sits at the managed-settings.d folder or on its path
+// (GAP-0758). A teardown or a read then treats the Claude machine policy as
+// absent: nothing behind the link is read, changed or removed.
+func windowsClaudeManagedPolicyLinkKept() (bool, error) {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return false, err
+	}
+	return windowsManagedPolicyLinkKept(filepath.Dir(path))
+}
+
+// WindowsClaudeManagedPolicyFolderKept reports (standalone only) that a link
+// or a non-folder sits at the Claude Code managed-settings.d folder or on its
+// path, and names it. The version-floor teardown in the policy package keeps it
+// and drops only DefenseClaw's own record (GAP-0758).
+func WindowsClaudeManagedPolicyFolderKept() (bool, error) {
+	return windowsClaudeManagedPolicyLinkKept()
+}
+
+// windowsClaudeManagedPolicyDirPlain reports whether the managed-settings.d
+// folder exists as a real folder. The guardian's every-pass helpers (the drift
+// restore, the hooks-only lock) have nothing to restore or lock without one, so
+// they must not create it, and a link kept there is named and left (GAP-0758).
+// Secure Client reports true and keeps its earlier preparation.
+func windowsClaudeManagedPolicyDirPlain() (bool, error) {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return false, err
+	}
+	state, err := windowsManagedPolicyTeardownState(filepath.Dir(path))
+	return err == nil && state == windowsManagedPolicyDirPlain, err
+}
+
+// withWindowsClaudeManagedPolicyTeardownTransaction is the transaction of a
+// teardown, a read and the publication of an enrollment: it creates no folder
+// (an absent folder holds no policy, so fn runs without a lock) and skips fn
+// when a link is kept at the folder. A real folder takes the usual
+// transaction. Secure Client always takes the usual transaction.
+func withWindowsClaudeManagedPolicyTeardownTransaction(fn func() error) error {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return err
+	}
+	state, err := windowsManagedPolicyTeardownState(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect Claude Code managed policy directory: %w", err)
+	}
+	switch state {
+	case windowsManagedPolicyDirKept:
+		return nil
+	case windowsManagedPolicyDirAbsent:
+		return fn()
+	}
+	return windowsClaudeManagedPolicyTransaction(fn)
+}
+
+// windowsClaudeManagedPolicyTransactionFor picks the transaction that restores
+// snapshot: an empty snapshot puts nothing back, so it must not create the
+// folder; one that held the policy writes it.
+func windowsClaudeManagedPolicyTransactionFor(
+	snapshot WindowsClaudeManagedPolicyTeardownSnapshot,
+) func(func() error) error {
+	if !snapshot.PolicyExisted && !snapshot.StateExisted {
+		return withWindowsClaudeManagedPolicyTeardownTransaction
+	}
+	return windowsClaudeManagedPolicyTransaction
+}
+
 func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 	policyPath, err := windowsClaudeManagedPolicyPath()
 	if err != nil {
@@ -1460,7 +1555,7 @@ func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("enterprise hooks: refusing non-regular managed policy transaction lock: %s", lockPath)
 		}
-		if _, err := repairWindowsManagedMachineFile(lockPath, false, windowsManagedPolicyFileTrustCheck); err != nil {
+		if _, err := repairWindowsManagedLockFile(lockPath, false, windowsManagedPolicyFileTrustCheck); err != nil {
 			return fmt.Errorf("enterprise hooks: managed policy transaction lock is untrusted: %w", err)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -1599,11 +1694,11 @@ func installWindowsClaudeManagedPolicyUnlocked(
 	if err := reclaimOrphanClaudeManagedPolicy(path, statePath); err != nil {
 		return "", nil, err
 	}
-	policySnapshot, err := snapshotWindowsManagedFile(path)
+	policySnapshot, err := snapshotWindowsManagedPolicy(path)
 	if err != nil {
 		return "", nil, err
 	}
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1633,8 +1728,8 @@ func installWindowsClaudeManagedPolicyUnlocked(
 		*bodyRef = body
 	}
 	// A configured connector needs a guard before any account enrolls. An
-	// ensure pass must not replace a newer contract another reconcile already
-	// published while it waited for this transaction lock.
+	// ensure pass keeps the published contract, but upgrades an authenticated
+	// direct command even when every enrolled account is signed out.
 	if targetSID == nil && policySnapshot.existed {
 		if existingState.SchemaVersion != 2 ||
 			!sameWindowsEnterprisePath(existingState.HookExecutable, opts.HookExecutable) ||
@@ -1642,22 +1737,41 @@ func installWindowsClaudeManagedPolicyUnlocked(
 			existingState.GatewayServiceName != os.Getenv(connector.WindowsGatewayServiceNameEnv) {
 			return "", nil, errors.New("enterprise hooks: existing Claude machine policy belongs to another protected deployment")
 		}
-		return path, nil, nil
-	}
-	policyDir := filepath.Dir(path)
-	policyRoot := filepath.Dir(policyDir)
-	createdPolicyDir := !windowsPathExists(policyDir)
-	createdPolicyRoot := !windowsPathExists(policyRoot)
-	removeCreatedDirs := func() {
-		if createdPolicyDir {
-			_ = os.Remove(policyDir)
+		upgrade := false
+	searchPolicy:
+		for _, contract := range windowsClaudeRecordedPolicyContracts() {
+			for _, lock := range []bool{true, false} {
+				current, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock)
+				if renderErr != nil {
+					return "", nil, renderErr
+				}
+				if bytes.Equal(policySnapshot.data, current) {
+					return path, nil, nil
+				}
+				previous, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock, true)
+				if renderErr != nil {
+					return "", nil, renderErr
+				}
+				if bytes.Equal(policySnapshot.data, previous) {
+					body = current
+					*bodyRef = body
+					upgrade = true
+					break searchPolicy
+				}
+			}
 		}
-		if createdPolicyRoot {
-			_ = os.Remove(policyRoot)
+		if !upgrade {
+			return "", nil, errors.New("enterprise hooks: existing Claude machine policy has an unrecognized registered command")
 		}
 	}
-	if err := ensureWindowsManagedPolicyDirectory(policyDir); err != nil {
-		removeCreatedDirs()
+	// The transaction (withWindowsClaudeManagedPolicyTransaction) has
+	// already created managed-settings.d and ClaudeCode, and recorded the
+	// ones it created (GAP-0091), before it took its lock file in there;
+	// this only checks them again. A rollback below leaves both folders, and
+	// their records with them: the lock files stay in managed-settings.d, so
+	// neither folder is empty, and a purge removes both once it is
+	// (GAP-0091 review 2 S1).
+	if err := ensureWindowsManagedPolicyDirectory(filepath.Dir(path)); err != nil {
 		return "", nil, err
 	}
 
@@ -1704,7 +1818,6 @@ func installWindowsClaudeManagedPolicyUnlocked(
 				failures = append(failures, err.Error())
 			}
 		}
-		removeCreatedDirs()
 		if len(failures) > 0 {
 			return fmt.Errorf("%s", strings.Join(failures, "; "))
 		}
@@ -1729,7 +1842,7 @@ func installWindowsClaudeManagedPolicyUnlocked(
 }
 
 func removeWindowsClaudeManagedPolicyTarget(targetSID *windows.SID) error {
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		return removeWindowsClaudeManagedPolicyTargetUnlocked(targetSID)
 	})
 }
@@ -1743,11 +1856,11 @@ func removeWindowsClaudeManagedPolicyTargetUnlocked(targetSID *windows.SID) erro
 		return err
 	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
-	policySnapshot, err := snapshotWindowsManagedFile(path)
+	policySnapshot, err := snapshotWindowsManagedPolicy(path)
 	if err != nil {
 		return err
 	}
-	stateSnapshot, err := snapshotWindowsManagedFile(statePath)
+	stateSnapshot, err := snapshotWindowsManagedState(statePath)
 	if err != nil {
 		return err
 	}
@@ -2078,45 +2191,78 @@ func validateExistingWindowsManagedPolicyDirectory(path string) (bool, error) {
 }
 
 func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
+	var data []byte
+	var seen bool
+	read := func() error {
+		var readErr error
+		data, readErr = readTrustedWindowsManagedPolicyFileOnce(path, &seen)
+		return readErr
+	}
+	err := safefile.RetryTransientRead(read)
+	if seen && safefile.IsTransientReadError(err) {
+		err = safefile.RetryPublishedRead(read)
+	}
+	if errors.Is(err, os.ErrNotExist) && !seen {
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: inspect Claude Code managed policy %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, false, fmt.Errorf("enterprise hooks: refusing non-regular Claude Code managed policy: %s", path)
-	}
-	if info.Size() > windowsClaudeManagedPolicyLimit {
-		return nil, false, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
-	}
-	if err := rejectWindowsReparseChain(path); err != nil {
 		return nil, false, err
 	}
-	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: untrusted Claude Code managed policy source %s: %w", path, err)
-	}
-	file, err := os.Open(path)
+	return data, true, nil
+}
+
+// Each retry rechecks the pathname, protection, and opened file together.
+func readTrustedWindowsManagedPolicyFileOnce(path string, seen *bool) ([]byte, error) {
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect Claude Code managed policy %s: %w", path, err)
+	}
+	*seen = true
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("enterprise hooks: refusing non-regular Claude Code managed policy: %s", path)
+	}
+	if info.Size() > windowsClaudeManagedPolicyLimit {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
+	}
+	if err := rejectWindowsReparseChain(path); err != nil {
+		return nil, err
+	}
+	if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+		return nil, fmt.Errorf("enterprise hooks: untrusted Claude Code managed policy source %s: %w", path, err)
+	}
+	file, err := winpath.OpenReadShared(path)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: open Claude Code managed policy %s: %w", path, err)
 	}
 	defer file.Close()
 	openedInfo, err := file.Stat()
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: inspect opened Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: inspect opened Claude Code managed policy %s: %w", path, err)
 	}
 	if !openedInfo.Mode().IsRegular() || openedInfo.Size() > windowsClaudeManagedPolicyLimit {
-		return nil, false, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type or exceeds the size limit: %s", path)
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type or size: %s", path)
+	}
+	if !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity: %s: %w", path, safefile.ErrReadIdentityChanged)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, windowsClaudeManagedPolicyLimit+1))
 	if err != nil {
-		return nil, false, fmt.Errorf("enterprise hooks: read Claude Code managed policy %s: %w", path, err)
+		return nil, fmt.Errorf("enterprise hooks: read Claude Code managed policy %s: %w", path, err)
 	}
 	if len(data) > windowsClaudeManagedPolicyLimit {
-		return nil, false, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy is too large: %s", path)
 	}
-	return data, true, nil
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: re-inspect Claude Code managed policy %s: %w", path, err)
+	}
+	if !current.Mode().IsRegular() {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed type during read: %s", path)
+	}
+	if !os.SameFile(openedInfo, current) {
+		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy changed identity during read: %s: %w", path, safefile.ErrReadIdentityChanged)
+	}
+	return data, nil
 }
 
 func ensureWindowsManagedPolicyDirectory(path string) error {
@@ -2230,6 +2376,10 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: verify managed policy directory %s: %w", directory, err))
 		}
 	}
+	// A purge removes these folders once they are empty, and only these
+	// (GAP-0091): a folder that already existed is never recorded. Best
+	// effort; an unrecorded folder just stays after a purge.
+	_ = windowsCreatedFolderRecorder(created)
 	return nil
 }
 
@@ -2263,6 +2413,12 @@ func isWindowsManagedPolicyAncestorOf(folder, path string) bool {
 // reparse point anywhere on its path. Ownership is taken whatever the current
 // owner, because a folder squatted by a standard user would otherwise block
 // every user's enforcement. Files inside are still validated individually.
+//
+// On standalone the takeover is only for a folder created before DefenseClaw
+// managed it (by MDM, the vendor installer or a user): a folder that already
+// holds a DefenseClaw marker and that an untrusted account can write or owns
+// is refused and named, never re-stamped in place, by every transaction and
+// reader that prepares it (GAP-0633, g582 review 3 M3).
 func repairWindowsManagedPolicyFolder(path string, validate func(string) error) error {
 	drift := validate(path)
 	if drift == nil {
@@ -2280,6 +2436,9 @@ func repairWindowsManagedPolicyFolder(path string, validate func(string) error) 
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("managed policy folder is not a plain directory: %s", path)
+	}
+	if refused := refuseWindowsManagedPolicyFolderTakeover(path); refused != nil {
+		return errors.Join(drift, refused)
 	}
 	previousOwner, _ := windowsPathOwnerNoFollow(path)
 	// The re-stamp goes through one no-follow handle whose type and reparse
@@ -2300,6 +2459,42 @@ func repairWindowsManagedPolicyFolder(path string, validate func(string) error) 
 		"reason":         "machine policy folder protection drifted or folder was pre-created: " + drift.Error(),
 	})
 	return nil
+}
+
+// windowsManagedPolicyFolderMarker returns why folder is one DefenseClaw
+// already manages, or "". It is the shared standalone decision
+// (managed.WindowsDefenseClawFolderMarker, g582 review 4 F2): an
+// administrator-only record outside the folder names it, or it holds a
+// DefenseClaw-named entry, a hook runtime file or the per-user enrollment
+// registry owned by SYSTEM, Administrators or TrustedInstaller; a folder it
+// cannot list counts too. A marker a user planted does not count, and
+// deleting one does not turn a recorded folder into a takeover.
+func windowsManagedPolicyFolderMarker(folder string) string {
+	return managed.WindowsDefenseClawFolderMarker(folder, windowsPerUserManagedEnrollmentFile)
+}
+
+// refuseWindowsManagedPolicyFolderTakeover is the standalone refusal of a
+// folder takeover (GAP-0633, g582 review 3 M3), read without writing
+// anything: the folder holds a DefenseClaw marker and its own descriptor lets
+// an untrusted account write it or makes one its owner. It is nil off
+// standalone, for trusted-only drift, and for a folder with no DefenseClaw
+// file, which keeps the takeover.
+func refuseWindowsManagedPolicyFolderTakeover(path string) error {
+	if !windowsManagedPolicySelfHealRefusesContentDrift() {
+		return nil
+	}
+	marker := windowsManagedPolicyFolderMarker(path)
+	if marker == "" {
+		return nil
+	}
+	leaf := windowsManagedPolicyLeafTrust(managed.ObjectInstallDirectory)(path)
+	if leaf == nil {
+		return nil
+	}
+	return managed.RefuseStandaloneMachinePolicyDrift(
+		path,
+		fmt.Errorf("%w (the folder already holds DefenseClaw's %s)", leaf, marker),
+	)
 }
 
 func windowsManagedPolicyDirectorySecurityAttributes() (*windows.SecurityAttributes, error) {
@@ -2460,18 +2655,12 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 	if err := rejectWindowsReparseChain(path); err != nil {
 		return err
 	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("enterprise hooks: refusing non-regular managed policy file: %s", path)
-		}
-		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
-			return err
-		}
-		if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
-			return nil
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	matched, err := windowsManagedFileMatchesExisting(path, data)
+	if err != nil {
 		return err
+	}
+	if matched {
+		return nil
 	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".defenseclaw-policy-*.tmp")
 	if err != nil {
@@ -2494,9 +2683,8 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 	if err := setWindowsManagedPolicyProtection(tempPath, false, userReadable); err != nil {
 		return err
 	}
-	// One rename: a reader (Cursor loads the adapter its hooks.json names)
-	// finds the old file or the new one, never none (GAP-2572). The temp file
-	// already carries the protection, so nothing is merged from the old one.
+	// Publish the protected stage with one rename. The unchanged-content
+	// check above avoids replacing a stable name during an ordinary ensure.
 	if err := safefile.ReplaceFileAtomically(tempPath, path); err != nil {
 		return fmt.Errorf("enterprise hooks: publish managed policy %s: %w", path, err)
 	}
@@ -2504,6 +2692,39 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 		return err
 	}
 	return windowsManagedPolicyFileTrustCheck(path)
+}
+
+func windowsManagedFileMatchesExisting(path string, data []byte) (bool, error) {
+	var seen, matched bool
+	err := safefile.RetryTransientRead(func() error {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		seen = true
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("enterprise hooks: refusing non-regular managed policy file: %s", path)
+		}
+		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+			return err
+		}
+		current, err := winpath.ReadFileShared(path)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: read existing managed policy %s: %w", path, err)
+		}
+		if !bytes.Equal(current, data) {
+			return nil
+		}
+		if err := windowsManagedPolicyFileTrustCheck(path); err != nil {
+			return err
+		}
+		matched = true
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) && !seen {
+		return false, nil
+	}
+	return matched, err
 }
 
 func setWindowsManagedPolicyProtection(path string, directory, userReadable bool) error {
@@ -2768,7 +2989,13 @@ func reclaimOrphanClaudeManagedPolicy(policyPath, statePath string) error {
 	return nil
 }
 
-func snapshotWindowsManagedFile(path string) (windowsManagedFileSnapshot, error) {
+// The policy and its state record are bounded apart: the policy carries the
+// 29 hook handlers of the guarded Windows form, far over the state limit.
+func snapshotWindowsManagedPolicy(path string) (windowsManagedFileSnapshot, error) {
+	return snapshotWindowsManagedFileWithLimit(path, windowsClaudeManagedPolicyLimit)
+}
+
+func snapshotWindowsManagedState(path string) (windowsManagedFileSnapshot, error) {
 	return snapshotWindowsManagedFileWithLimit(path, windowsClaudeManagedStateLimit)
 }
 

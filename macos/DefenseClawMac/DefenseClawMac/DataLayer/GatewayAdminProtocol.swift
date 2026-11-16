@@ -20,8 +20,10 @@
 import Foundation
 import Security
 
-/// The privileged boundary is deliberately limited to gateway lifecycle
-/// operations. No executable, arguments, environment or password crosses XPC.
+/// The privileged boundary is deliberately limited to one repair: moving a
+/// gateway that an earlier app version ran as root for this account's home
+/// back to the account. It never starts a gateway. No executable, arguments,
+/// environment or password crosses XPC.
 @objc protocol GatewayAdminProtocol {
     func perform(
         action: String,
@@ -33,9 +35,10 @@ import Security
 }
 
 enum GatewayAdminAction: String, Sendable, CaseIterable {
-    case start
-    case stop
-    case restart
+    /// Stop the root gateway the helper started for this account, return
+    /// root-owned files in the selected home to the account, and delete the
+    /// helper's private gateway copy.
+    case repair
 }
 
 enum GatewayAdminPolicy {
@@ -88,7 +91,6 @@ enum GatewayAdminPolicy {
 
     static let appRequirement = requirement(identifier: appIdentifier, teamIdentifier: teamIdentifier)
     static let helperRequirement = requirement(identifier: helperIdentifier, teamIdentifier: teamIdentifier)
-    static let gatewayRequirement = requirement(identifier: "com.cisco.defenseclaw.gateway", teamIdentifier: teamIdentifier)
 
     static func isTeamIdentifier(_ value: String) -> Bool {
         value.utf8.count == 10 && value.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) }
