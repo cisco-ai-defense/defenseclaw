@@ -925,7 +925,14 @@ func dispatchTrustedAction(
 	placed := placedReading{}
 	if input, ok := sandboxGuestPlacedInput(request, facts); ok {
 		analyzed := actionfacts.Analyze(input)
-		placed = placedReading{facts: &analyzed, everyOwner: true, children: sandboxGuestPlacedChildren(input, analyzed)}
+		children, cut := sandboxGuestPlacedChildren(input, analyzed)
+		placed = placedReading{facts: &analyzed, everyOwner: true, children: children}
+		if cut.Any() {
+			// More placed commands than the reading takes: the call is
+			// truncated, judged at the unknown tier of the pack, never a
+			// clean allow of what was not read (substrate-1 GAP-0304).
+			defer func() { findings = withBoundedTruncation(findings, cut, request) }()
+		}
 	} else if hasGitHookMutationCandidate(facts) || hasGitReadOutputWrite(facts) {
 		if input, ok := protectedHomeCWDPlacedInput(request); ok {
 			analyzed := actionfacts.Analyze(input)
@@ -4170,8 +4177,9 @@ type placedReading struct {
 // the dispatch's own views are 0 to 5 (evaluateSemanticRules).
 const placedReadingFirstView = 6
 
-// maxSandboxGuestPlacedChildren bounds the simple-command readings of one
-// sandbox call; they share the call's semantic budget.
+// maxSandboxGuestPlacedChildren bounds the distinct simple-command readings
+// of one sandbox call; they share the call's semantic budget. A call with
+// more is truncated (sandboxGuestPlacedChildren).
 const maxSandboxGuestPlacedChildren = 16
 
 // views returns the placed facts, then each child's.
@@ -4203,22 +4211,35 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 // guest home's .profile. The dispatch's own simple-command pass places the
 // command in the request's working directory, which a copy-mode actor does
 // not have, so the cd led nowhere there.
-func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.Facts {
-	var children []actionfacts.Facts
+//
+// A command repeated in the same directory is read once: its reading is the
+// same, so a chain padded with the same static cd steps reads as the short
+// chain. More distinct commands than maxSandboxGuestPlacedChildren leave the
+// rest unread, and cut reports it (bounded.Items): the caller adds the
+// evaluation-limit finding, so a padded chain is never a silent allow
+// (substrate-1 GAP-0304).
+func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) (children []actionfacts.Facts, cut bounded.CapSet) {
+	type placement struct{ text, cwd string }
+	seen := map[placement]bool{}
 	for _, simple := range actionfacts.SimpleCommands(input, facts) {
 		if simple.EvaluationFailure != "" || simple.OpaqueValueAssignment || simple.LiteralOutputOnly ||
 			simple.LoginGuess || !path.IsAbs(simple.CWD) || simple.CWD == input.CWD {
 			continue
 		}
-		if len(children) == maxSandboxGuestPlacedChildren {
-			break
+		key := placement{simple.Text, simple.CWD}
+		if seen[key] {
+			continue
 		}
+		if len(children) == maxSandboxGuestPlacedChildren {
+			return children, bounded.Of(bounded.Items)
+		}
+		seen[key] = true
 		child := input
 		child.Command, child.CWD = simple.Text, simple.CWD
 		child.Args, child.Argv = nil, nil
 		children = append(children, actionfacts.Analyze(child))
 	}
-	return children
+	return children, bounded.CapSet{}
 }
 
 // sandboxGuestPlacedInput is a sandbox call (every Substrate actor, an

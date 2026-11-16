@@ -1300,7 +1300,54 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		}
 		return "", "", ""
 	}
-	facts := actionfacts.Analyze(input)
+	if target := sandboxAgentHookConfigWrite(actionfacts.Analyze(input), input.ActiveHome); target != "" {
+		return agentHookConfigWriteRuleID, "", target
+	}
+	// Each top-level statement read alone in the directory a static cd
+	// leaves it in, as the laptop guard places them (TopLevelStatements;
+	// a lexical parse, and actionfacts.Analyze reads no files): the reading
+	// of the whole call stops placing operands at its own bound, and a chain
+	// padded with cd steps past it hid the write from the sandbox while the
+	// laptop still alerted (substrate-1 GAP-0304). A statement repeated in
+	// one directory is read once; the read stops at the call's statement
+	// budget, past which the call already carries the evaluation-limit
+	// finding (trustedCallOverStatementBudget).
+	command := agentHookConfigRawShellCommand(input)
+	if command == "" || !path.IsAbs(input.CWD) ||
+		!strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
+		return "", "", ""
+	}
+	statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome)
+	if !ok {
+		return "", "", ""
+	}
+	type placement struct{ command, dir string }
+	seen := map[placement]bool{}
+	for _, statement := range statements {
+		key := placement{statement.Command, statement.Dir}
+		if seen[key] || !path.IsAbs(statement.Dir) {
+			continue
+		}
+		if len(seen) == maxSandboxHookConfigStatements {
+			break
+		}
+		seen[key] = true
+		placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: input.ActiveHome})
+		if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
+			return agentHookConfigWriteRuleID, "", target
+		}
+	}
+	return "", "", ""
+}
+
+// maxSandboxHookConfigStatements bounds the placed statements the sandbox
+// hook-config guard reads: the trusted-action statement budget (128), past
+// which the call is judged as truncated whatever the guard finds.
+const maxSandboxHookConfigStatements = 128
+
+// sandboxAgentHookConfigWrite is the first hook file a reading writes,
+// appends or deletes, by its lexical path in the guest's namespace, or "".
+func sandboxAgentHookConfigWrite(facts actionfacts.Facts, home string) string {
 	for _, candidate := range facts.Paths {
 		switch candidate.Access {
 		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
@@ -1311,11 +1358,11 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		if target == "" {
 			target = strings.TrimSpace(candidate.Value)
 		}
-		if sandboxAgentHookConfigFormat(target, input.ActiveHome) != "" {
-			return agentHookConfigWriteRuleID, "", target
+		if sandboxAgentHookConfigFormat(target, home) != "" {
+			return target
 		}
 	}
-	return "", "", ""
+	return ""
 }
 
 // sandboxAgentHookConfigFormat is the hook-file format of a sandbox path by
