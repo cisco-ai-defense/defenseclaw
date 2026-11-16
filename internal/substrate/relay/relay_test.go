@@ -34,8 +34,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
-// The test binary is the relay's run-agent wrapper in the tmux tests, as the
-// relay binary is in an actor.
 // The test binary doubles as a probe of hardenProcess: run with
 // "harden-probe" it hardens itself and prints its dumpable flag.
 func TestMain(m *testing.M) {
@@ -48,7 +46,8 @@ func TestMain(m *testing.M) {
 		fmt.Println("dumpable", d, err)
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	markLeaks()
+	os.Exit(checkLeaks(m.Run()))
 }
 
 func TestFramesRoundTrip(t *testing.T) {

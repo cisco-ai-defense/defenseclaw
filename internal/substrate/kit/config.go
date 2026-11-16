@@ -99,7 +99,7 @@ type Config struct {
 type RelayConfig struct {
 	// Listen is the actor ingress port the relay serves.
 	Listen string `json:"listen"`
-	// Connector is the agent the relay starts in its tmux session.
+	// Connector is the agent the relay starts on its PTY.
 	Connector string `json:"connector"`
 	// Interactive is the agent's interactive argv.
 	Interactive []string `json:"interactive"`

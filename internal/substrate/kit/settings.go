@@ -353,7 +353,7 @@ func versionAtLeast(v, min string) bool {
 var claudeCodeModelSlots = []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 	"ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"}
 
-// InteractiveArgv is the agent the relay starts in its tmux session.
+// InteractiveArgv is the agent the relay starts on its PTY.
 var InteractiveArgv = map[string][]string{
 	"claudecode": {"/usr/local/bin/claude"},
 	// Codex's own bubblewrap/Landlock sandbox cannot nest in a gVisor or

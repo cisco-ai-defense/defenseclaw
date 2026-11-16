@@ -5,8 +5,8 @@
 // Agent Substrate actor. Substrate ingress (atenet-router) carries HTTP and
 // WebSocket but no raw TCP, and there is no exec or attach, so the launcher
 // reaches the agent's terminal through this relay: a WebSocket PTY server
-// that holds the agent in a tmux session surviving reconnects, suspends and
-// resumes, with an HTTP long-poll fallback for networks that block WebSocket
+// that holds the agent's PTY itself, so the session survives reconnects,
+// suspends and resumes, with an HTTP long-poll fallback for networks that block WebSocket
 // (E27) and a headless mode for --task runs.
 //
 // Protocol dcrelay/1. A WebSocket client asks for subprotocol "dcrelay.v1".
@@ -65,7 +65,7 @@ const (
 	CtlPing   = "ping"
 	CtlPong   = "pong"
 	// CtlReset tells a long-poll client that output it had not read yet was
-	// dropped; the relay has asked tmux to redraw the screen.
+	// dropped; the relay has asked the agent to redraw the screen.
 	CtlReset = "reset"
 )
 

@@ -33,7 +33,7 @@ func TestR11HeadSilentAgentEnds(t *testing.T) {
 }
 
 func TestR11HeadChildHoldsStdoutEnds(t *testing.T) {
-	end, took := r11Run(t, `sleep 30 & echo hi; exit 0`, HeadlessOptions{Stall: time.Minute}, 15*time.Second)
+	end, took := r11Run(t, `sleep 30 & echo $! > `+stopAfter(t)+`; echo hi; exit 0`, HeadlessOptions{Stall: time.Minute}, 15*time.Second)
 	t.Logf("R11 head held stdout: %+v after %s", end, took)
 	if end.ExitCode != 0 || end.Stalled {
 		t.Fatalf("held stdout: %+v", end)
