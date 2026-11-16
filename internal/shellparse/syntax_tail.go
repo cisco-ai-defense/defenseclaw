@@ -57,6 +57,15 @@ type SyntaxTailHereDoc struct {
 	// and the rest of the line after the delimiter word (a pipe into another
 	// program stays in it). It is empty when the start was not found.
 	Consumer string
+	// Script is the text that runs before Consumer in the same script, as
+	// the shell that runs it reads it: for an opener inside a quoted
+	// argument (a script passed as one argument), the value of that
+	// argument up to the command; for an opener outside quotes, empty.
+	// ScriptKnown is false when the value cannot be read (an expansion in
+	// it, a quote the split cannot follow): the caller cannot tell what the
+	// script binds before the consumer (rel-1-0-10:GAP-0913).
+	Script      string
+	ScriptKnown bool
 	// Statements are the runs of the body that parse on their own, in order.
 	Statements []string
 }
@@ -160,11 +169,16 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	// The here-documents are found from the statement with the error on: a
 	// statement the parser completed before it closed its own quotes and
 	// here-documents.
-	docs := quotedHereDocs(command, end)
-	docRuns := make([][]string, len(docs))
 	var trunc bounded.Truncated
 	budget := bounded.NewCounter(&trunc, bounded.Bytes, 4*len(command)+(64<<10))
 	statements := bounded.NewCounter(&trunc, bounded.Items, MaxSyntaxTailStatements)
+	// The work on the here-document openers has a budget of its own, of the
+	// same size, so a text of many openers is TRUNCATED without starving the
+	// reading of its statements (rel-1-0-10:GAP-0928, GAP-0930).
+	var openerTrunc bounded.Truncated
+	openers := bounded.NewCounter(&openerTrunc, bounded.Bytes, 4*len(command)+(64<<10))
+	docs := quotedHereDocs(command, end, &openers)
+	docRuns := make([][]string, len(docs))
 	add := func(statement string, doc int) {
 		if !statements.Take() {
 			return
@@ -219,10 +233,18 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	}
 	for index, runs := range docRuns {
 		if len(runs) > 0 {
-			tail.HereDocs = append(tail.HereDocs, SyntaxTailHereDoc{Consumer: docs[index].consumer, Statements: runs})
+			doc := SyntaxTailHereDoc{Consumer: docs[index].consumer,
+				Script: docs[index].script, ScriptKnown: docs[index].scriptKnown, Statements: runs}
+			// The consumer reading parses the script of each of these
+			// documents again: that work is counted, so the sum of the
+			// scripts handed on stays within the opener budget (GAP-0928).
+			if !openers.TakeN(len(doc.Script)) {
+				doc.Script, doc.ScriptKnown = "", false
+			}
+			tail.HereDocs = append(tail.HereDocs, doc)
 		}
 	}
-	tail.Truncated = trunc.Set(&budget, &statements)
+	tail.Truncated = trunc.Set(&budget, &statements).Union(openerTrunc.Set(&openers))
 	return tail, true
 }
 
@@ -231,6 +253,10 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 type quotedHereDoc struct {
 	from, to int
 	consumer string
+	// script and scriptKnown are SyntaxTailHereDoc.Script and ScriptKnown
+	// (readHereDocScripts).
+	script      string
+	scriptKnown bool
 }
 
 // quotedHereDocs finds the here-documents with a quoted delimiter word
@@ -249,8 +275,11 @@ type quotedHereDoc struct {
 // body. An opener spelled in a string that closes on its own line (echo
 // "a <<'X'") is text, and the lines after it stay statements
 // (rel-1-0-10:GAP-0890).
-func quotedHereDocs(command string, from int) []quotedHereDoc {
-	const unread = 0xff
+// unreadQuote marks an offset tokenScan did not read (quotedHereDocs).
+const unreadQuote byte = 0xff
+
+func quotedHereDocs(command string, from int, budget *bounded.Counter) []quotedHereDoc {
+	const unread = unreadQuote
 	quotes := make([]byte, len(command)-from)
 	for index := range quotes {
 		quotes[index] = unread
@@ -258,6 +287,7 @@ func quotedHereDocs(command string, from int) []quotedHereDoc {
 	tokenScan(command[from:], func(at int, quote byte) { quotes[at] = quote })
 	quoteAt := func(at int) byte { return quotes[at-from] }
 	var docs []quotedHereDoc
+	var starts []int
 	for at := from; at+2 < len(command); at++ {
 		index := strings.Index(command[at:], "<<")
 		if index < 0 {
@@ -282,14 +312,29 @@ func quotedHereDocs(command string, from int) []quotedHereDoc {
 		}
 		bodyFrom := lineEnd + 1
 		bodyTo, closed := quotedHereDocClose(command, bodyFrom, word, dash)
+		// The search for the closing line reads the text after the opener
+		// (to the end of the text when none closes): the bytes it read are
+		// counted, so a text of many openers that one late line closes, or
+		// that nothing closes, stops at the budget and is TRUNCATED
+		// (rel-1-0-10:GAP-0928, GAP-0930).
+		read := len(command) - bodyFrom
+		if closed {
+			read = bodyTo - bodyFrom
+		}
+		if !budget.TakeN(read) {
+			break
+		}
 		if !closed {
 			at++
 			continue
 		}
+		start := hereDocConsumerStart(command, at)
 		docs = append(docs, quotedHereDoc{from: bodyFrom, to: bodyTo,
 			consumer: hereDocConsumer(command, at, afterWord, lineEnd)})
+		starts = append(starts, start)
 		at++
 	}
+	readHereDocScripts(command, from, quoteAt, docs, starts, budget)
 	return docs
 }
 
@@ -350,15 +395,252 @@ func quotedHereDocClose(command string, from int, word string, dash bool) (int, 
 // the rest of the opener line after the delimiter word (afterWord to
 // lineEnd). It is empty when no command text is found before the opener.
 func hereDocConsumer(command string, at, afterWord, lineEnd int) string {
-	start := at
-	for start > 0 && strings.IndexByte("\n;&|(){}`'\"", command[start-1]) < 0 {
-		start--
-	}
+	start := hereDocConsumerStart(command, at)
 	before := strings.TrimSpace(command[start:at])
 	if before == "" {
 		return ""
 	}
 	return strings.TrimSpace(before + " " + strings.TrimSpace(command[afterWord:lineEnd]))
+}
+
+// hereDocConsumerStart is the offset where the command of a here-document
+// opened at offset at starts (hereDocConsumer).
+func hereDocConsumerStart(command string, at int) int {
+	start := at
+	for start > 0 && strings.IndexByte("\n;&|(){}`'\"", command[start-1]) < 0 {
+		start--
+	}
+	return start
+}
+
+// hereDocScriptStart finds, for the consumer starts of the openers in
+// ascending order, the offset where the argument that holds each one begins
+// (hereDocScripts). It scans the text once, forward: the argument starts
+// after the last blank or operator outside quotes before the consumer, and
+// is not readable (ok false) when the split did not read a byte between that
+// blank and the consumer.
+type hereDocScriptStart struct {
+	command string
+	from    int
+	quoteAt func(int) byte
+	// next is the first offset not scanned yet; stop is the last offset at
+	// or after from that ends the argument (a blank or operator outside
+	// quotes, or a byte the split did not read), or -1; stopUnread says
+	// which.
+	next, stop int
+	stopUnread bool
+}
+
+func (s *hereDocScriptStart) wordStart(start int) (word int, ok bool) {
+	for ; s.next < start; s.next++ {
+		state := s.quoteAt(s.next)
+		switch {
+		case state == unreadQuote:
+			s.stop, s.stopUnread = s.next, true
+		case state == 0 && strings.IndexByte(" \t\n;&|()<>", s.command[s.next]) >= 0:
+			s.stop, s.stopUnread = s.next, false
+		}
+	}
+	if s.stop < 0 {
+		return s.from, true
+	}
+	return s.stop + 1, !s.stopUnread
+}
+
+// readHereDocScripts sets the script and scriptKnown of each of docs, whose
+// consumers start at starts (SyntaxTailHereDoc.Script). quoteAt is the quote
+// the split is in at an offset at or after from (unreadQuote where it did
+// not read). The argument that holds the script starts after the last blank
+// or operator outside quotes; its raw text up to the consumer, closed with
+// the quote it is in, is parsed as one word and unquoted. An opener outside
+// quotes has no script of its own.
+//
+// The openers of one argument share one parse: the argument is parsed once
+// up to its last opener, and the script of each opener is the head of that
+// value up to its consumer (a substring, not a copy). The parse is counted
+// against budget; past the budget the scripts left are not known, and the
+// reading is TRUNCATED (rel-1-0-10:GAP-0928). An earlier version parsed the
+// argument again for every opener, so the time grew with the square of the
+// text.
+func readHereDocScripts(command string, from int, quoteAt func(int) byte, docs []quotedHereDoc, starts []int, budget *bounded.Counter) {
+	scan := &hereDocScriptStart{command: command, from: from, quoteAt: quoteAt, next: from, stop: -1}
+	type opener struct {
+		doc, start int
+		quote      byte
+	}
+	var group []opener
+	groupWord := -1
+	flush := func() {
+		if len(group) == 0 {
+			return
+		}
+		defer func() { group, groupWord = group[:0], -1 }()
+		last := group[len(group)-1]
+		if !budget.TakeN(last.start - groupWord) {
+			return
+		}
+		file, ok := Parse("x " + command[groupWord:last.start] + string(last.quote))
+		if !ok || len(file.Stmts) != 1 {
+			return
+		}
+		call, isCall := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		if !isCall || len(call.Args) != 2 {
+			return
+		}
+		cuts := make([]int, len(group))
+		for index, o := range group {
+			cuts[index] = 2 + o.start - groupWord
+		}
+		value, ends, known := wordPrefixValues(call.Args[1], cuts)
+		for index, o := range group {
+			if known[index] {
+				docs[o.doc].script, docs[o.doc].scriptKnown = value[:ends[index]], true
+			}
+		}
+	}
+	for index, start := range starts {
+		if start <= from || start >= len(command) {
+			docs[index].script, docs[index].scriptKnown = "", true
+			continue
+		}
+		quote := quoteAt(start)
+		if quote == 0 {
+			docs[index].script, docs[index].scriptKnown = "", true
+			continue
+		}
+		if quote != '\'' && quote != '"' {
+			continue
+		}
+		word, ok := scan.wordStart(start)
+		if !ok {
+			continue
+		}
+		if len(group) > 0 && (word != groupWord || quote != group[0].quote) {
+			flush()
+		}
+		groupWord = word
+		group = append(group, opener{doc: index, start: start, quote: quote})
+	}
+	flush()
+}
+
+// wordPrefixValues is the value of word (literalWordValue) up to each of
+// cuts, offsets in the text word was parsed from, ascending. value is the
+// value of the literal text of the word; ends[i] is the length of the value
+// of the text before cuts[i], so value[:ends[i]] is the value of that text,
+// and known[i] is false when that text holds a part that is not literal, a
+// literal whose text is not its source (a line continuation), or a cut that
+// splits an escape. The prefix values are heads of one string.
+func wordPrefixValues(word *syntax.Word, cuts []int) (value string, ends []int, known []bool) {
+	var out strings.Builder
+	ends, known = make([]int, len(cuts)), make([]bool, len(cuts))
+	next, unknown := 0, false
+	set := func(ok bool) {
+		ends[next], known[next] = out.Len(), ok && !unknown
+		next++
+	}
+	// literal writes text as literalWordValue does, which starts at source
+	// offset textFrom, and sets every cut it reaches.
+	literal := func(text string, textFrom int, verbatim, double bool) {
+		for index := 0; index < len(text); index++ {
+			for next < len(cuts) && cuts[next] <= textFrom+index {
+				set(true)
+			}
+			if !verbatim && text[index] == '\\' && index+1 < len(text) && (!double || strings.IndexByte("$`\"\\\n", text[index+1]) >= 0) {
+				for next < len(cuts) && cuts[next] == textFrom+index+1 {
+					set(false)
+				}
+				index++
+				if text[index] == '\n' {
+					continue
+				}
+			}
+			out.WriteByte(text[index])
+		}
+	}
+	// atom is one piece of the word: literal text of source length n at
+	// from, or any other part (text ignored, opaque).
+	atom := func(from, to int, text string, textFrom, textLen int, verbatim, double, opaque bool) {
+		for next < len(cuts) && cuts[next] <= from {
+			set(true)
+		}
+		if opaque || textLen != len(text) {
+			unknown = true
+			return
+		}
+		literal(text, textFrom, verbatim, double)
+	}
+	for _, part := range word.Parts {
+		pos, end := int(part.Pos().Offset()), int(part.End().Offset())
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			atom(pos, end, typed.Value, pos, end-pos, false, false, false)
+		case *syntax.SglQuoted:
+			atom(pos, end, typed.Value, pos+1, end-pos-2, true, false, typed.Dollar)
+		case *syntax.DblQuoted:
+			if typed.Dollar {
+				atom(pos, end, "", pos, 0, false, true, true)
+				continue
+			}
+			for _, inner := range typed.Parts {
+				from, to := int(inner.Pos().Offset()), int(inner.End().Offset())
+				if lit, isLit := inner.(*syntax.Lit); isLit {
+					atom(from, to, lit.Value, from, to-from, false, true, false)
+				} else {
+					atom(from, to, "", from, 0, false, true, true)
+				}
+			}
+		default:
+			atom(pos, end, "", pos, 0, false, false, true)
+		}
+	}
+	for next < len(cuts) {
+		set(true)
+	}
+	return out.String(), ends, known
+}
+
+// literalWordValue is the value of a word with no expansion: literal text
+// (a backslash escapes the next character), single-quoted text and
+// double-quoted literal text. ok is false for any other part.
+func literalWordValue(word *syntax.Word) (string, bool) {
+	var value strings.Builder
+	unescape := func(text string, double bool) {
+		for index := 0; index < len(text); index++ {
+			if text[index] == '\\' && index+1 < len(text) && (!double || strings.IndexByte("$`\"\\\n", text[index+1]) >= 0) {
+				index++
+				if text[index] == '\n' {
+					continue
+				}
+			}
+			value.WriteByte(text[index])
+		}
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			unescape(typed.Value, false)
+		case *syntax.SglQuoted:
+			if typed.Dollar {
+				return "", false
+			}
+			value.WriteString(typed.Value)
+		case *syntax.DblQuoted:
+			if typed.Dollar {
+				return "", false
+			}
+			for _, inner := range typed.Parts {
+				lit, isLit := inner.(*syntax.Lit)
+				if !isLit {
+					return "", false
+				}
+				unescape(lit.Value, true)
+			}
+		default:
+			return "", false
+		}
+	}
+	return value.String(), true
 }
 
 // hereDocAt is the index of the body of docs that holds offset at, or -1.

@@ -100,10 +100,10 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // here-document body are statements only when its command runs its standard
 // input as shell code; another command's body is its data and stays unread
 // text, and a command that is not known is the unknown tier
-// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). source is the text
-// the tail was read from: the consumer reading looks in it for a function,
-// alias, hash entry or PATH assignment that renames a data program (GAP-0902).
-func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, source string, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). The consumer
+// reading takes the readable statements for the bindings that may rename a
+// data program (hereDocCallBindings, GAP-0902, GAP-0913).
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
 	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
 	capped := tail.Truncated.Any()
@@ -145,7 +145,7 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, source string, 
 	statements := slices.Clone(tail.Statements)
 	unknownBody := false
 	for _, doc := range tail.HereDocs {
-		switch syntaxTailHereDocConsumerIn(doc.Consumer, source) {
+		switch syntaxTailHereDocConsumerIn(doc, tail.Statements) {
 		case hereDocRunsCode:
 			statements = append(statements, doc.Statements...)
 		case hereDocUnknown:
@@ -351,7 +351,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// for its tail, so a call that parses pays no second parse.
 	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
 		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
-			return syntaxTailCommands(input, tail, source, depth, interpreter, inherited, guess)
+			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
 		}
 	}
 	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
@@ -1499,6 +1499,16 @@ func simpleBoundVariables(file *syntax.File) (bound map[string]bool) {
 // it spells (any when it is not static). The statements after the call read
 // no value for them; the statements before it do.
 func CallBindsUserNames(call *syntax.CallExpr) []string {
+	return callBindsNames(call, func(name string) bool { return slices.Contains(simpleUserNames, name) }, simpleUserNames)
+}
+
+// callBindsNames is CallBindsUserNames for the names match accepts: read,
+// mapfile and printf -v name one; eval and trap code binds the names it binds
+// itself (evalCodeBindsNames); a sourced file, or code that is not static,
+// may bind any, which is every. The here-document consumer reading uses it
+// for PATH and the other names that change what a word runs
+// (hereDocCallBindings, rel-1-0-10:GAP-0913).
+func callBindsNames(call *syntax.CallExpr, match func(string) bool, every []string) []string {
 	if call == nil || len(call.Args) == 0 {
 		return nil
 	}
@@ -1508,7 +1518,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 	}
 	var names []string
 	add := func(name string) {
-		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+		if match(name) && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -1532,7 +1542,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 			name, known := simpleStaticWord(call.Args[index], nil)
 			switch {
 			case !known:
-				for _, user := range simpleUserNames {
+				for _, user := range every {
 					add(user)
 				}
 			case options && name == "--":
@@ -1559,7 +1569,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 		}
 	case ".", "source":
 		// The sourced file is code the walk does not read.
-		for _, name := range simpleUserNames {
+		for _, name := range every {
 			add(name)
 		}
 	case "eval", "trap":
@@ -1576,14 +1586,14 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 		for _, arg := range code {
 			text, known := simpleStaticWord(arg, nil)
 			if !known {
-				for _, name := range simpleUserNames {
+				for _, name := range every {
 					add(name)
 				}
 				return names
 			}
 			words = append(words, text)
 		}
-		for _, name := range evalCodeBindsUser(strings.Join(words, " "), 0) {
+		for _, name := range evalCodeBindsNames(strings.Join(words, " "), 0, match, every) {
 			add(name)
 		}
 	}
@@ -1600,13 +1610,19 @@ func simpleStaticWordOrEmpty(word *syntax.Word, prefix byte) bool {
 // code text binds: an assignment, a loop name, or a call that binds one
 // (CallBindsUserNames). Code that does not parse may bind any.
 func evalCodeBindsUser(text string, depth int) []string {
+	return evalCodeBindsNames(text, depth, func(name string) bool { return slices.Contains(simpleUserNames, name) }, simpleUserNames)
+}
+
+// evalCodeBindsNames is evalCodeBindsUser for the names match accepts
+// (every, when the code does not parse).
+func evalCodeBindsNames(text string, depth int, match func(string) bool, every []string) []string {
 	file, ok := shellparse.Parse(text)
 	if !ok || depth >= 4 {
-		return simpleUserNames
+		return every
 	}
 	var names []string
 	add := func(name string) {
-		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+		if match(name) && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -1621,7 +1637,7 @@ func evalCodeBindsUser(text string, depth int) []string {
 				add(node.Name.Value)
 			}
 		case *syntax.CallExpr:
-			for _, name := range CallBindsUserNames(node) {
+			for _, name := range callBindsNames(node, match, every) {
 				add(name)
 			}
 		}
