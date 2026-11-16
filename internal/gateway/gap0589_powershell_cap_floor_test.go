@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -33,7 +34,7 @@ import (
 //   - an ordinary script of 70 or 127 lines (over the command cap, under the
 //     statement budget) is exactly the unknown tier: an alert in default and
 //     permissive, a block in strict; one of 30 lines is read to its end and
-//     allowed;
+//     judged at the GAP-0988 floor if its reading is partial;
 //   - a call over the statement budget keeps its refusal (GAP-0426 rows), and
 //     a POSIX call past
 //     the command cap (the control, TestGAP0589POSIXOverCapControl) is at
@@ -178,6 +179,17 @@ func TestGAP0589PowerShellCappedReadingFiveTiers(t *testing.T) {
 				want := bounded.Allow
 				if benign.truncated {
 					want = floor
+				}
+				if !benign.truncated {
+					reading := actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell",
+						Command: gap0589Join(gap0589Filler(benign.lines)), CWD: cwd,
+						DialectHint: actionfacts.DialectPowerShell})
+					if reading.Parse.Status == actionfacts.StatusPartial {
+						want = floor
+						if tier.managed {
+							want = bounded.Block
+						}
+					}
 				}
 				if got := boundedParse(action); got != want {
 					t.Errorf("%s/%s benign %d lines: action %s, want %s; findings %v", tier.name, route.name, benign.lines, action, want, findings)

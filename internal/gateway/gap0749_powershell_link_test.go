@@ -14,7 +14,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	managedconfig "github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // powerShellProtectedRoute sends one PowerShell command through the Windows
@@ -24,6 +26,10 @@ func powerShellProtectedRoute(t *testing.T, home, cwd, connector, posture string
 	t.Helper()
 	installToolCallCorpusProfileConnector(t, connector, posture)
 	cfg := &config.Config{}
+	if managed {
+		cfg.DeploymentMode = managedconfig.DeploymentModeManagedEnterprise
+		cfg.Enterprise.Profile = managedconfig.ProfileStandalone
+	}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
 	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), posture)
@@ -58,7 +64,7 @@ func powerShellProtectedRoute(t *testing.T, home, cwd, connector, posture string
 // with drive paths and backslashes. A link to the keys file or to the .ssh
 // folder, a link made in a protected name, a move onto the keys file, and a
 // link the call makes from a dynamic operand keep the verdict they have on
-// rel 52df5211d7 in every cell.
+// rel 52df5211d7 in every cell, with the GAP-0988 floor for a partial reading.
 func TestGAP0749PowerShellLinkAndMoveAreNotAKeyWrite(t *testing.T) {
 	previous := windowsHookHost
 	windowsHookHost = func() bool { return true }
@@ -129,14 +135,31 @@ func TestGAP0749PowerShellLinkAndMoveAreNotAKeyWrite(t *testing.T) {
 				}
 				t.Run(fmt.Sprintf("%s %s %s", connector, cell, row.name), func(t *testing.T) {
 					action, rules := powerShellProtectedRoute(t, home, proj, connector, posture, managed, row.command)
-					if want := row.want[cell]; action != want {
+					want := row.want[cell]
+					reading := actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell", Command: row.command,
+						CWD: proj, ActiveHome: home, DialectHint: actionfacts.DialectPowerShell})
+					partial := reading.Parse.Status == actionfacts.StatusPartial
+					if partial {
+						floor := "alert"
+						if managed || posture == "strict" {
+							floor = "block"
+						}
+						if shapeParityRank[floor] > shapeParityRank[want] {
+							want = floor
+						}
+					}
+					if action != want {
 						t.Fatalf("action = %q (rules %v), want %q", action, rules, want)
 					}
 					if row.rule != "" && !slices.Contains(rules, row.rule) {
 						t.Fatalf("rules = %v, want %s", rules, row.rule)
 					}
-					if row.rule == "" && len(rules) != 0 {
-						t.Fatalf("rules = %v, want none", rules)
+					if row.rule == "" {
+						for _, id := range rules {
+							if !partial || id != evaluationLimitRuleID {
+								t.Fatalf("rules = %v, want no semantic finding (a partial floor may remain)", rules)
+							}
+						}
 					}
 				})
 			}

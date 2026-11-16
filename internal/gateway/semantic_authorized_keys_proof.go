@@ -1710,12 +1710,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// proof that it opens before the call can make a link
 		// (SafeShellRedirectOccurrences): PowerShell, like a POSIX shell and
 		// cmd.exe, opens a >, >>, n> or *> target before the command it
-		// redirects runs (rel-1-0-10:GAP-0946, checked natively on Windows
+		// redirects runs only when its own words run no inner command
+		// (GAP-0988; rel-1-0-10:GAP-0946, checked natively on Windows
 		// PowerShell 5.1 and pwsh 7). The cmdlets Set-Content, Add-Content
 		// and Tee-Object open their file at the first input instead; they
 		// are no redirect operator, so they are never matched here.
-		if integrityCommandOwnsStaticRedirect(command, candidate) && slices.ContainsFunc(operands, func(operand string) bool {
-			return filepath.Clean(filepath.FromSlash(operand)) == filepath.Clean(filepath.FromSlash(target))
+		if integrityCommandOwnsStaticRedirect(command, candidate) && slices.ContainsFunc(safeRedirects, func(redirect hookpaths.RedirectOccurrence) bool {
+			return redirect.NoInnerCommand && filepath.Clean(filepath.FromSlash(redirect.Path)) == filepath.Clean(filepath.FromSlash(target))
 		}) {
 			continue
 		}

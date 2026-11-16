@@ -5705,6 +5705,9 @@ func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
 type RedirectOccurrence struct {
 	Path string
 	Safe bool
+	// NoInnerCommand proves that this redirect's own statement evaluates no
+	// nested command before opening the file. Earlier statements are separate.
+	NoInnerCommand bool
 	// OwnCopy: the write is a copy call writing its own destination, which
 	// may skip that call own copy scope (GAP-2579).
 	OwnCopy bool
@@ -5738,6 +5741,15 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	}
 	seenLink, moved, index := false, false, 0
 	for _, stmt := range statements {
+		inner := false
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst:
+				inner = true
+				return false
+			}
+			return true
+		})
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
@@ -5750,7 +5762,8 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			}
 			path = OperandPath(path, cwd)
 			if index < len(result) && result[index].Path == path {
-				result[index].Safe = !seenLink
+				result[index].NoInnerCommand = !inner
+				result[index].Safe = !seenLink && !inner
 			}
 			index++
 		}
