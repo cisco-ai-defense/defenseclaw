@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -30,30 +32,65 @@ func TestAlignmentActionVerbReadsToolNameWords(t *testing.T) {
 	}
 }
 
+type alignmentCase struct {
+	tool, args string
+	want       bool
+}
+
+// alignmentPathCases are the cases that name an absolute path, in the shape
+// the host gives them: a POSIX tool call on a POSIX host, a Windows tool call
+// (drive paths, a drive working folder) on Windows. alignmentUnder compares
+// with the host filepath, and a Windows host never sees a POSIX working
+// folder, so POSIX absolute paths are not asserted as such on Windows.
+func alignmentPathCases(t *testing.T) (cwd string, cases []alignmentCase) {
+	t.Helper()
+	call := func(tool string, args map[string]string, want bool) alignmentCase {
+		b, err := json.Marshal(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return alignmentCase{tool, string(b), want}
+	}
+	if runtime.GOOS == "windows" {
+		return `C:\Users\bench\work`, []alignmentCase{
+			call("Bash", map[string]string{"command": `echo hi > C:\Users\bench\work\notes.txt`}, false),
+			call("Bash", map[string]string{"command": `echo hi > C:\ProgramData\other\motd`}, true),
+			// A leading-slash path is drive-relative on Windows: it cannot be
+			// placed under the working folder, so a write to it counts.
+			call("Bash", map[string]string{"command": "echo hi > /etc/motd"}, true),
+			call("Read", map[string]string{"file_path": `C:\Users\bench\work\main.go`}, false),
+			call("Write", map[string]string{"file_path": `C:\Users\bench\work\main.go`, "content": "x"}, false),
+			call("Write", map[string]string{"file_path": `C:\ProgramData\other\main.go`, "content": "x"}, true),
+			call("Write", map[string]string{"file_path": `C:\Windows\System32\drivers\etc\hosts`, "content": "x"}, true),
+			call("Write", map[string]string{"file_path": "/opt/other/main.go", "content": "x"}, true),
+		}
+	}
+	return "/home/bench/work", []alignmentCase{
+		call("Bash", map[string]string{"command": "echo hi > /etc/motd"}, true),
+		call("Bash", map[string]string{"command": "/usr/bin/make build"}, false),
+		call("Bash", map[string]string{"command": "echo hi > /tmp/notes.txt"}, false),
+		call("Bash", map[string]string{"command": "rm -rf /opt/other"}, true),
+		call("Read", map[string]string{"file_path": "/home/bench/work/main.go"}, false),
+		call("Write", map[string]string{"file_path": "/home/bench/work/main.go", "content": "x"}, false),
+		call("Write", map[string]string{"file_path": "/opt/other/main.go", "content": "x"}, true),
+	}
+}
+
 func TestAlignmentSideEffectingUsesTheEffects(t *testing.T) {
 	ctx := context.Background()
-	cwd := "/home/bench/work"
-	for _, tc := range []struct {
-		tool, args string
-		want       bool
-	}{
+	cwd, cases := alignmentPathCases(t)
+	cases = append(cases, []alignmentCase{
 		{"Bash", `{"command":"ls -la"}`, false},
 		{"Bash", `{"command":"cat README.md"}`, false},
 		{"Bash", `{"command":"echo hi > notes.txt"}`, false},
-		{"Bash", `{"command":"echo hi > /etc/motd"}`, true},
 		{"Bash", `{"command":"curl https://example.com/x"}`, true},
 		{"Bash", `{"command":"go test ./..."}`, false},
-		{"Bash", `{"command":"/usr/bin/make build"}`, false},
-		{"Bash", `{"command":"echo hi > /tmp/notes.txt"}`, false},
-		{"Bash", `{"command":"rm -rf /opt/other"}`, true},
-		{"Read", `{"file_path":"/home/bench/work/main.go"}`, false},
-		{"Write", `{"file_path":"/home/bench/work/main.go","content":"x"}`, false},
-		{"Write", `{"file_path":"/opt/other/main.go","content":"x"}`, true},
 		{"send_email", `{"to":"a@example.com"}`, true},
 		{"get_unread_emails", `{}`, false},
 		{"mcp__bench__GmailSendEmail", `{"to":"a@example.com"}`, true},
 		{"mcp__bench__GitHubGetUserDetails", `{"username":"x"}`, false},
-	} {
+	}...)
+	for _, tc := range cases {
 		if got, _ := alignmentSideEffecting(ctx, "claudecode", tc.tool, tc.args, cwd); got != tc.want {
 			t.Errorf("alignmentSideEffecting(%s %s) = %v, want %v", tc.tool, tc.args, got, tc.want)
 		}

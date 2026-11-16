@@ -17,7 +17,7 @@ import (
 // finding and is never excused as a read (ActionMentionsNoWriteRole false),
 // so no tier downgrades it: default and permissive block as rel does, and
 // strict and managed never downgrade (rel-1-0-10:GAP-0910, GAP-0925; the
-// rows of review s7-d4t2rev).
+// rows of review s7-d4t2rev; a shell named at run time, GAP-0975).
 func TestWrappedProtectedWriteIsNotExcused(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -37,7 +37,14 @@ func TestWrappedProtectedWriteIsNotExcused(t *testing.T) {
 		"xargs -0 ",
 	}
 	shellForms := []string{"flock /tmp/l -c '%s'", "flock -x /tmp/l --command '%s'", "flock /tmp/l sh -c '%s'",
-		"sudo flock /tmp/l -c '%s'", "taskset 0x1 flock -n /tmp/l -c '%s'"}
+		"sudo flock /tmp/l -c '%s'", "taskset 0x1 flock -n /tmp/l -c '%s'",
+		// A shell named at run time runs its -c text as code (rel-1-0-10:GAP-0975).
+		"\"$SHELL\" -c '%s'", "time \"$SHELL\" -c '%s'", "time -p \"$SHELL\" -c '%s'",
+		"FOO=$BAR \"$SHELL\" -c '%s'", "$BASH -lc '%s'", "\"$SHELL\" --norc -ec '%s'",
+		// Its options before -c follow the shell's grammar (rel-1-0-10:GAP-0979).
+		"\"$SHELL\" -o pipefail -c '%s'", "\"$SHELL\" +o posix -c '%s'", "\"$SHELL\" -O extglob -c '%s'",
+		"\"$SHELL\" --rcfile f -c '%s'", "\"$SHELL\" --init-file f -c '%s'", "\"$SHELL\" -o errexit -ec '%s'",
+		"\"$SHELL\" +e -c '%s'", "\"$SHELL\" -e +x -c '%s'", "\"$SHELL\" -eo pipefail -c '%s'"}
 	for _, write := range writes {
 		commands := make([]string, 0, len(prefixes)+len(shellForms))
 		for _, prefix := range prefixes {
@@ -52,6 +59,29 @@ func TestWrappedProtectedWriteIsNotExcused(t *testing.T) {
 			}
 			if ActionMentionsNoWriteRole(command, cwd, home, actionfacts.DialectPOSIX, nil) {
 				t.Errorf("%q: the protected write is excused as a read", command)
+			}
+		}
+		// A program named at run time without a -c option hands the text to
+		// something the scan cannot know: its operands stay data of unknown
+		// role (rel-1-0-10:GAP-0018), also when an option cluster has no c.
+		// On a Windows home the Git Bash reading judges a path in the Windows
+		// spelling as rel does and excuses no unknown role, so that spelling
+		// keeps the rel block in every tier there (as d4 and rel do); a ~/
+		// spelling takes the GAP-0018 reading on every OS.
+		tildeWrite := strings.Replace(write, target, "~/.ssh/authorized_keys", 1)
+		for _, form := range []string{"$T send '%s'", "\"$TOOL\" -v '%s'", "\"$TOOL\" -- -c '%s'", "\"$TOOL\" -o out -v '%s'"} {
+			for _, text := range []string{write, tildeWrite} {
+				command := strings.Replace(form, "%s", text, 1)
+				if got := ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got != "protected-target" {
+					t.Errorf("%q: decision %q, want protected-target", command, got)
+				}
+				unknown := text == tildeWrite || !actionWindowsHome(home)
+				switch got := ActionMentionsNoWriteRole(command, cwd, home, actionfacts.DialectPOSIX, nil); {
+				case unknown && !got:
+					t.Errorf("%q: a run-time program without -c is no longer data of unknown role", command)
+				case !unknown && got:
+					t.Errorf("%q: the Windows spelling on a Windows home is excused, below the rel block", command)
+				}
 			}
 		}
 	}
