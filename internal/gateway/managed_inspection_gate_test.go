@@ -98,7 +98,7 @@ func TestManagedInspectorMarksInspectionObserved(t *testing.T) {
 		t.Fatalf("after a token failure: available=%t detail=%q, want unavailable with the failure", available, detail)
 	}
 
-	s.setInspectionAvailability(nil) // a rebuild replaces the client
+	s.setInspectionAvailability(nil) // a provider rebuild (ensureCMIDProvider) starts a new epoch
 	inspector.notifyAvailability(errors.New("late failure from the replaced client"))
 	if available, _ := s.inspectionAvailability(); !available {
 		t.Fatal("a replaced client's late outcome overwrote its successor's state")

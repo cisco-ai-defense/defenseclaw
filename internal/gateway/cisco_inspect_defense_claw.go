@@ -277,10 +277,9 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		c.notifyAvailability(err)
 		return nil
 	}
-	// Token available — publish healthy on the availability channel so a
-	// recovered lane (e.g. after a transient CMID Refresh failure) is
-	// reflected in /health without waiting for reload.
-	c.notifyAvailability(nil)
+	// A token alone proves nothing about AI Defense: the request's final
+	// outcome (onOutcome below) is what tells /health and the endpoint
+	// health report whether inspection works, as for the standalone client.
 
 	// Body: messages[].content is the DefenseClaw MessageContent shape
 	// ({"text": ...}), matching the proto and the sample curl in the
@@ -328,6 +327,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 			req.Header.Set("Authorization", "Bearer "+currentToken)
 		},
 		onValidationError: defenseClawInspectUserFallback(sentUser, payload, c.endpoint),
+		onOutcome:         c.notifyAvailability,
 		onUnauthorized: func(retryCtx context.Context) bool {
 			c.provider.Invalidate()
 			ctx, cancel := context.WithTimeout(retryCtx, c.timeout)
