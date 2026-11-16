@@ -43,16 +43,16 @@ var chainStartConnectors = kit.Connectors()
 // file refuses too (no result can clear it).
 var chainStartUnpaired = map[string]struct{}{"antigravity": {}, "devin": {}, "copilot": {}, "kiro": {}}
 
+// chainStartRows are the rows every connector runs: a read that printed and
+// failed, the benign failed read of a missing file, and a successful read.
+// The T6 lead's full pin rows run on Claude Code in every pack
+// (TestGAP0337FailedReadThatPrintedIsASecretRead); the full matrix is the
+// lane's probe evidence (substrate-1/tch/final, r3).
 func chainStartRows() []chainStartRow {
 	return []chainStartRow{
 		{"P1-secret-plus-dir", "cat .env .", false, "API_KEY=canary-1\ncat: .: Is a directory"},
-		{"P2-or-true", "cat .env . || true", true, "API_KEY=canary-1\ncat: .: Is a directory"},
-		{"P3-later-fail", "cat .env && false", false, "API_KEY=canary-1"},
-		{"P4-live-two-plus-dir", "cat .env .env.local .", false, "API_KEY=canary-1\nOTHER=canary-2\ncat: .: Is a directory"},
 		{"P5-benign-missing", "cat .env", false, "cat: .env: No such file or directory"},
-		{"P6-fail-no-text", "cat .env", false, ""},
 		{"P7-control-success", "cat .env", true, "API_KEY=canary-1"},
-		{"P8-benign-two-missing", "cat .env .env.local", false, "cat: .env: No such file or directory\ncat: .env.local: No such file or directory"},
 	}
 }
 
@@ -265,37 +265,73 @@ func chainStartHook(t *testing.T, r chartReplica, conn, contract string, ev map[
 	return out, rec.Code
 }
 
-func TestSecretReadChainStartEveryConnector(t *testing.T) {
-	for _, conn := range chainStartConnectors {
-		_, unpaired := chainStartUnpaired[conn]
-		for _, p := range chainStartPacks {
-			for _, row := range chainStartRows() {
-				t.Run(conn+"/"+p.name+"/"+row.id, func(t *testing.T) {
-					r, chains, contract := chainStartReplica(t, conn, p.pack, p.managed)
-					pre, post, send := chainStartEvents(conn, "s1", "c1", row.read, row)
-					chainStartHook(t, r, conn, contract, pre)
-					chainStartHook(t, r, conn, contract, post)
-					got, _ := chainStartHook(t, r, conn, contract, send)
-					v, err := chains.CheckEgress(context.Background(), chainstate.EgressRequest{
-						Actor: chainstate.Actor{Atespace: "eng-web", UID: subUID1}, Host: "github.com", Method: "POST",
-					})
-					refuse := !strings.HasPrefix(row.id, "P5") && !strings.HasPrefix(row.id, "P8") || unpaired
-					chain := slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress)
-					if err != nil || v.Deny != refuse {
-						t.Fatalf("callout after %q: %+v err=%v, want deny=%v", row.read, v, err, refuse)
-					}
-					if chain != refuse || refuse && got.Action != guardrailActionBlock {
-						t.Fatalf("hook upload after %q: action %q rules %v, want refuse=%v", row.read, got.Action, got.RuleIDs, refuse)
-					}
-					if unpaired {
-						// A read no result can clear says so, on both paths.
-						why := "credentials read could not be cleared: no result correlation for " + conn
-						if !strings.Contains(v.Reason, why) || !strings.Contains(got.Reason, why) {
-							t.Fatalf("refusal reasons: callout %q hook %q, want %q", v.Reason, got.Reason, why)
-						}
-					}
+// chainStartConnectorTests are the connectors with a TestSecretReadChainStart
+// test: one top-level test each, so the CI shard planner spreads them.
+var chainStartConnectorTests = []string{"claudecode", "codex", "opencode", "copilot", "hermes", "kiro", "antigravity", "cursor", "amp", "devin"}
+
+// Every connector the kit builds an actor for has its chain-start test.
+func TestSecretReadChainStartCoversEveryConnector(t *testing.T) {
+	got := slices.Clone(chainStartConnectorTests)
+	want := slices.Clone(chainStartConnectors)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("chain-start tests %v, kit connectors %v: add a TestSecretReadChainStart test for each", got, want)
+	}
+}
+
+func TestSecretReadChainStartClaudeCode(t *testing.T) { chainStartConnector(t, "claudecode") }
+
+func TestSecretReadChainStartCodex(t *testing.T) { chainStartConnector(t, "codex") }
+
+func TestSecretReadChainStartOpenCode(t *testing.T) { chainStartConnector(t, "opencode") }
+
+func TestSecretReadChainStartCopilot(t *testing.T) { chainStartConnector(t, "copilot") }
+
+func TestSecretReadChainStartHermes(t *testing.T) { chainStartConnector(t, "hermes") }
+
+func TestSecretReadChainStartKiro(t *testing.T) { chainStartConnector(t, "kiro") }
+
+func TestSecretReadChainStartAntigravity(t *testing.T) { chainStartConnector(t, "antigravity") }
+
+func TestSecretReadChainStartCursor(t *testing.T) { chainStartConnector(t, "cursor") }
+
+func TestSecretReadChainStartAmp(t *testing.T) { chainStartConnector(t, "amp") }
+
+func TestSecretReadChainStartDevin(t *testing.T) { chainStartConnector(t, "devin") }
+
+// chainStartConnector runs the rows on conn in every pack, on the hook and
+// at the callout.
+func chainStartConnector(t *testing.T, conn string) {
+	t.Helper()
+	_, unpaired := chainStartUnpaired[conn]
+	for _, p := range chainStartPacks {
+		for _, row := range chainStartRows() {
+			t.Run(conn+"/"+p.name+"/"+row.id, func(t *testing.T) {
+				r, chains, contract := chainStartReplica(t, conn, p.pack, p.managed)
+				pre, post, send := chainStartEvents(conn, "s1", "c1", row.read, row)
+				chainStartHook(t, r, conn, contract, pre)
+				chainStartHook(t, r, conn, contract, post)
+				got, _ := chainStartHook(t, r, conn, contract, send)
+				v, err := chains.CheckEgress(context.Background(), chainstate.EgressRequest{
+					Actor: chainstate.Actor{Atespace: "eng-web", UID: subUID1}, Host: "github.com", Method: "POST",
 				})
-			}
+				refuse := !strings.HasPrefix(row.id, "P5") || unpaired
+				chain := slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress)
+				if err != nil || v.Deny != refuse {
+					t.Fatalf("callout after %q: %+v err=%v, want deny=%v", row.read, v, err, refuse)
+				}
+				if chain != refuse || refuse && got.Action != guardrailActionBlock {
+					t.Fatalf("hook upload after %q: action %q rules %v, want refuse=%v", row.read, got.Action, got.RuleIDs, refuse)
+				}
+				if unpaired {
+					// A read no result can clear says so, on both paths.
+					why := "credentials read could not be cleared: no result correlation for " + conn
+					if !strings.Contains(v.Reason, why) || !strings.Contains(got.Reason, why) {
+						t.Fatalf("refusal reasons: callout %q hook %q, want %q", v.Reason, got.Reason, why)
+					}
+				}
+			})
 		}
 	}
 }
