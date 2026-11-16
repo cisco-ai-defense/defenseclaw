@@ -237,9 +237,14 @@ type credentialReaderForm uint8
 const (
 	// Every operand is a file the command reads.
 	credentialReadsOperands credentialReaderForm = iota + 1
-	// Operands are files or program text; program text is read for path
-	// words. An in-place edit (-i) writes the file instead of printing it.
+	// awk and sed: operands are files or program text; program text is read
+	// for path words. An in-place edit (-i) writes the file instead of
+	// printing it.
 	credentialReadsProgram
+	// Interpreters: only the inline program (-c, -e, -r, eval) is read for
+	// path words, and, for perl and ruby -n or -p, the input file operands.
+	// A script's own arguments are not reads.
+	credentialReadsInterpreter
 	// grep and rg: the first operand is the pattern unless an option gives it.
 	credentialReadsSearch
 	// cp and rsync: every operand but the destination is a source.
@@ -260,9 +265,10 @@ func credentialReaderFormOf(program string) credentialReaderForm {
 		"lzma", "unlzma", "zstd", "unzstd", "zstdcat", "lz4", "lz4cat", "brotli",
 		"source", ".":
 		return credentialReadsOperands
-	case "awk", "gawk", "mawk", "nawk", "sed", "gsed", "perl", "ruby", "php",
-		"node", "nodejs", "deno", "bun", "python", "python2", "python3":
+	case "awk", "gawk", "mawk", "nawk", "sed", "gsed":
 		return credentialReadsProgram
+	case "perl", "ruby", "php", "node", "nodejs", "deno", "bun", "python", "python2", "python3":
+		return credentialReadsInterpreter
 	case "grep", "egrep", "fgrep", "rg", "ripgrep":
 		return credentialReadsSearch
 	case "cp", "rsync":
@@ -273,7 +279,7 @@ func credentialReaderFormOf(program string) credentialReaderForm {
 		return credentialReadsJSON
 	}
 	if strings.HasPrefix(program, "python3.") || strings.HasPrefix(program, "python2.") {
-		return credentialReadsProgram
+		return credentialReadsInterpreter
 	}
 	return 0
 }
@@ -476,7 +482,7 @@ func credentialPathResolveNeeded(words []credentialPathWord, commands []CommandF
 		}
 	}
 	for _, command := range commands {
-		if command.Dialect == DialectPOSIX && credentialReaderFormOf(command.Program) != 0 {
+		if command.Dialect == DialectPOSIX && (credentialReaderFormOf(command.Program) != 0 || command.Program == "find") {
 			return true
 		}
 	}
@@ -526,6 +532,38 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 			readerParents[command.ParentCommandID] = true
 		}
 	}
+	// A reader's operand built by a substitution (cat "$(echo .env)") reads
+	// what the substituted echo or printf prints, and a find whose -exec runs
+	// a reader reads the files its name tests match: which file, the call
+	// does not say.
+	for _, command := range r.commands {
+		if r.stopped() {
+			return
+		}
+		if !credentialPathCommandReadable(command) {
+			continue
+		}
+		switch {
+		case (command.Program == "echo" || command.Program == "printf") && readOperands[command.ParentCommandID] != nil:
+			operands := credentialOperandIndexes(command.Argv, nil)
+			if command.Program == "printf" && len(operands) > 0 {
+				operands = operands[1:] // the format
+			}
+			for _, index := range operands {
+				r.argument(command.ID, command.Arguments[index], true)
+			}
+		case command.Program == "find" && credentialFindExecReads(command.Argv):
+			for i := 1; i+1 < len(command.Argv); i++ {
+				switch command.Argv[i] {
+				case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename":
+					i++
+					if value := command.Arguments[i]; !value.Expands {
+						r.candidate(command.ID, value.Value, strings.ContainsAny(value.Value, "*?["), true)
+					}
+				}
+			}
+		}
+	}
 	// Input redirects read their file, whatever the command.
 	referenced := make(map[string]bool)
 	for _, word := range words {
@@ -557,6 +595,20 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 			r.argument(word.commandID, word.argument, true)
 		}
 	}
+}
+
+// credentialFindExecReads reports a find whose -exec, -execdir, -ok or -okdir
+// runs a reader on the files it finds.
+func credentialFindExecReads(argv []string) bool {
+	for i := 1; i+1 < len(argv); i++ {
+		switch argv[i] {
+		case "-exec", "-execdir", "-ok", "-okdir":
+			if credentialReaderFormOf(path.Base(argv[i+1])) != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func credentialPathCommandReadable(command CommandFact) bool {
@@ -595,6 +647,18 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 			operands = append(operands, index)
 		}
 		return operands
+	case credentialReadsInterpreter:
+		if credentialProgramEditsInPlace(command.Program, argv) {
+			return nil
+		}
+		code, inputs := credentialInterpreterWords(command.Program, argv)
+		for _, index := range code {
+			r.programWord(command.ID, command.Arguments[index])
+		}
+		for _, index := range inputs {
+			r.argument(command.ID, command.Arguments[index], false)
+		}
+		return append(code, inputs...)
 	case credentialReadsSearch:
 		program := command.Program
 		switch program {
@@ -688,6 +752,80 @@ func (r *credentialPathResolver) jsonOperands(command CommandFact) []int {
 		}
 	}
 	return operands
+}
+
+// credentialInterpreterWords is the argv indexes of an interpreter's inline
+// program (python -c, node -e/-p, perl and ruby -e/-E, php -r, deno eval,
+// bun -e) and, for perl and ruby with -n or -p, of its input files. Words
+// after a script or module name are its arguments: no reads.
+func credentialInterpreterWords(program string, argv []string) (code, inputs []int) {
+	codeLetters, loopLetters := "c", ""
+	switch {
+	case program == "node" || program == "nodejs" || program == "bun":
+		codeLetters = "ep"
+	case program == "perl" || program == "ruby":
+		codeLetters, loopLetters = "eE", "np"
+	case program == "php":
+		codeLetters = "r"
+	case program == "deno":
+		for i := 1; i+1 < len(argv); i++ {
+			if argv[i] == "eval" {
+				return []int{i + 1}, nil
+			}
+		}
+		return nil, nil
+	}
+	loop := false
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		switch {
+		case arg == "--":
+			if loop {
+				for j := i + 1; j < len(argv); j++ {
+					inputs = append(inputs, j)
+				}
+			}
+			return code, inputs
+		case arg == "--eval" || arg == "--print":
+			if i+1 < len(argv) {
+				code = append(code, i+1)
+			}
+			i++
+			if program != "node" && program != "nodejs" && program != "bun" {
+				return code, inputs
+			}
+		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 1:
+			takesCode := false
+			for j, letter := range arg[1:] {
+				if strings.ContainsRune(loopLetters, letter) {
+					loop = true
+				}
+				if strings.ContainsRune(codeLetters, letter) {
+					takesCode = j == len(arg)-2 // the code is the next word
+					break
+				}
+				if letter == 'm' && (program == "python" || strings.HasPrefix(program, "python")) {
+					return code, inputs // a module: the rest are its arguments
+				}
+			}
+			if takesCode && i+1 < len(argv) {
+				code = append(code, i+1)
+				i++
+				if strings.HasPrefix(program, "python") || program == "php" {
+					return code, inputs // the rest are the program's arguments
+				}
+			}
+		case strings.HasPrefix(arg, "--"):
+		default:
+			if len(code) == 0 {
+				return code, inputs // a script: the rest are its arguments
+			}
+			if loop {
+				inputs = append(inputs, i)
+			}
+		}
+	}
+	return code, inputs
 }
 
 // credentialProgramEditsInPlace: sed -i, perl -i and ruby -i write the file

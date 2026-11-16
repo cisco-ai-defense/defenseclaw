@@ -95,6 +95,8 @@ func TestGAP1030NonReadWordsLeaveTheRecordEmpty(t *testing.T) {
 		"cp build/* out/", "for f in *; do wc -l \"$f\"; done", "echo \"$PATH\"", "cat \"$LOG\"", "git add src/*",
 		"printf '%s\\n' *.md", "tar czf a.tgz docs/*", "go test ./...", "ls -la", "grep -n 'x.*y' main.go",
 		"cat *", "head -n 5 *", "grep -n TODO *", "cat */*", "cat src/*.go",
+		`python3 helper.py ps "Test-Path C:\Users\u\.defenseclaw\.env"`, "node app.js .env", "python3 -m json.tool .env.example",
+		"find . -name .env -delete", "find . -name .env -exec rm {} +", "echo $(echo .env) >> .gitignore", "grep --color=auto KEY .",
 	}
 	dir := t.TempDir()
 	for i, form := range forms {
@@ -144,6 +146,7 @@ func TestGAP0341CredentialPathIdentity(t *testing.T) {
 	}{
 		{"sed -n p .env", false}, {"cat .en?", true}, {"cat .env*", true}, {"F=.env; cat $F", true},
 		{`cat "$D/.env"`, true}, {"ln -s .env notes.txt && cat notes.txt", false},
+		{"cat $(echo .env)", true}, {"find . -name .env -exec cat {} +", true}, {"find . -name '.env*' -exec head {} +", true},
 	} {
 		t.Run(fmt.Sprintf("identity-%02d", i), func(t *testing.T) {
 			facts := Analyze(Input{Tool: "exec", Command: row.command, CWD: "/work"})
