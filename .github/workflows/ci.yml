@@ -219,8 +219,9 @@ jobs:
         # 54 shards would plan 505 s each; 72 shards plan at most 384 s (a 636 s -timeout).
         # 2026-11-16 push 5 (rel-1-0-10:GAP-0941, lead ruling): with every timing of push 5 (td327fix7, chainmerge,
         # the per-tier parity tests and the untimed tests INT timed) 72 shards plan up to 460 s and 76 just pass the
-        # 440 s budget; 84 shards plan at most 395 s, 90% of the budget, so the next untimed test has headroom.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83]
+        # 440 s budget. With the 37 tests over 4 s that no timing covered added, 84 shards plan up to 405 s, 86 exactly
+        # 396 s (90%), and 88 shards plan at most 391 s: the largest single test (TestGAP0980Round2ReviewRows), the floor.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -236,7 +237,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 84
+          GO_TEST_SHARDS: 88
         run: |
           set -euo pipefail
           plan=(python3 scripts/go_test_shards.py
@@ -689,9 +690,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 84 gateway + 4 audit + 19 remaining-package shards, plus the
+          # 88 gateway + 4 audit + 19 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 108
+          test "${#coverage_parts[@]}" -eq 112
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
