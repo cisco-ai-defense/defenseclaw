@@ -353,6 +353,15 @@ func nonShellContentOf(raw json.RawMessage) string {
 // CEL budget is spent). Like the MCP lane, outside the strict tier and
 // managed installs a finding is an alert. A call without a word any rule
 // needs is not parsed again.
+//
+// A list (&&, ||, ;) is judged as a whole and statement by statement, and
+// the findings are the union. The facts of the whole list leave a "~/"
+// operand dynamic, because an earlier statement may change HOME, so a read
+// of a home file by one statement had no path fact there and adding any
+// other statement dropped its finding (rel-1-0-10:GAP-0951). The statements
+// come from the walk the rule dispatch judges its children with
+// (actionfacts.SimpleCommands), which follows HOME, cd and the variables of
+// the list, and each is judged as the same statement sent alone.
 func shellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	if !request.EnforcementCapable || ManagedEnterpriseActive() || nonShellLaneShadow(ctx) {
 		return findings
@@ -385,43 +394,68 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	facts := actionfacts.Analyze(request.Input)
 	hard := request.StrictPolicy || request.ManagedInstall
 	out := append([]RuleFinding(nil), findings...)
+	// A finding of the lane is merged as the dispatch merges the finding of a
+	// statement (withSimpleCommandFindings): it replaces a weaker finding of
+	// the same rule and never a stronger one. Skipping every rule id already
+	// in the findings let a detection-only finding of the dispatch hide the
+	// lane's enforcing one (rel-1-0-10:GAP-0995).
 	add := func(ruleID, note string) {
-		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
-			return
-		}
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
+		out = withSimpleCommandFindings(out, []RuleFinding{nonShellFinding(rule, note, request.Input.Tool, hard)})
 	}
-	if isShell {
-		for _, id := range toolshape.TextRules(command) {
-			add(id, "")
-		}
-		for _, c := range facts.Commands {
-			for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
+	judge := func(facts actionfacts.Facts, command, text string) {
+		if isShell {
+			for _, id := range toolshape.TextRules(command) {
 				add(id, "")
+			}
+			for _, c := range facts.Commands {
+				for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
+					add(id, "")
+				}
+			}
+		}
+		for _, p := range facts.Paths {
+			path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
+			text := text
+			if fileText, ok := patchTexts[p.Value]; ok {
+				text = fileText
+			}
+			for _, id := range toolshape.PathRules(string(p.Access), path, text) {
+				add(id, "")
+			}
+			// The developer-token files of an account's home (the credentials
+			// table's class of PATH-GIT-CREDS) are read by the native file tools as
+			// the shell and MCP lanes read them (rel-1-0-10:GAP-0816). The class
+			// comes from the one table, so each branch's table decides which names
+			// are in it; the home is found by position.
+			if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
+				add("PATH-GIT-CREDS", "")
 			}
 		}
 	}
-	for _, p := range facts.Paths {
-		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
-		text := text
-		if fileText, ok := patchTexts[p.Value]; ok {
-			text = fileText
+	judge(facts, command, text)
+	if !isShell {
+		return out
+	}
+	for _, simple := range request.simpleMemo.commands(request.Input, facts) {
+		// A failed or capped reading is the dispatch's to judge (the unknown
+		// tier), an opaque value or an inert output adds no evidence, and a
+		// login guess only proves a state write, never a rule over its words
+		// (actionfacts.SimpleCommand).
+		if simple.EvaluationFailure != "" || simple.OpaqueValueAssignment ||
+			simple.LiteralOutputOnly || simple.LoginGuess {
+			continue
 		}
-		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
-			add(id, "")
+		child := request.Input
+		child.Command, child.Args, child.Argv = simple.Text, nil, nil
+		child.CWD = simple.CWD
+		if simple.AbsoluteOnly || child.CWD == "" {
+			child.CWD = request.Input.CWD
 		}
-		// The developer-token files of an account's home (the credentials
-		// table's class of PATH-GIT-CREDS) are read by the native file tools as
-		// the shell and MCP lanes read them (rel-1-0-10:GAP-0816). The class
-		// comes from the one table, so each branch's table decides which names
-		// are in it; the home is found by position.
-		if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
-			add("PATH-GIT-CREDS", "")
-		}
+		judge(actionfacts.Analyze(child), simple.Text, simple.Text)
 	}
 	return out
 }
