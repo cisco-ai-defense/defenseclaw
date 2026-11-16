@@ -35,6 +35,9 @@ for an admin to apply.
 | NetworkPolicies | default deny; actor listener and callout from atenet-egress only; admin from this namespace (not worker pods) and `networkPolicy.adminFrom`; leader from the release |
 | Hook Jobs | bootstrap (post-install/upgrade), pre-upgrade, pre-rollback, pre-delete |
 
+Never renumber a container port in this chart. The goldens pin the ports, and `helm rollback` across a changed
+port number fails with `Duplicate value: actor` and leaves the actor Service with both ports.
+
 ## Values
 
 Every value is checked by `values.schema.json`. The main ones:

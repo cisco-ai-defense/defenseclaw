@@ -53,6 +53,13 @@ Each connector has a headless command; a connector that cannot run one is intera
 
 The "skip permissions" flags only silence the agent's own prompts, because a headless run has nobody to answer them. DefenseClaw's hooks still decide every tool call, and a hook deny holds even under `--yolo`.
 
+**Pinned versions.** The kit's agent images use a fixed version of each agent, not the newest one. Two are older than the version on the lab hosts, for reasons outside DefenseClaw:
+
+- **Kiro CLI stays on 2.35.1.** The headless Linux archive of Kiro CLI 3.3.0 holds only `kiro-cli`. The `kiro-cli-chat` program that the kit's launch command and sandbox rules use is missing from it.
+- **Hermes stays on 0.19.0.** Hermes 0.23.1 is a GitHub tag only. The newest release on PyPI is 0.19.0, and the image's shims were written against it.
+
+Each moves when the vendor ships a package the kit can install. The fleet view lists the agent version of each template.
+
 **Images.** `template build --connector NAME` builds the image for any of the ten agents (`claudecode`, `codex`, `opencode`, `copilot`, `hermes`, `kiro`, `antigravity`, `cursor`, `amp`, `devin`) and refuses any other name. An agent needs its kit image before it can run.
 
 **Model replies.** OpenAI-style models on Bedrock (Codex, OpenCode, Copilot CLI, Hermes) get prompt inspection and the model allowlist. The proxy does not yet inspect the tool calls in the model's reply; the hook stops them when they run. See [the threat model](/docs/substrate/threat-model).

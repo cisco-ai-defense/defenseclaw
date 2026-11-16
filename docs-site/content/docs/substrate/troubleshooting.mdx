@@ -32,7 +32,31 @@ Start with `defenseclaw substrate doctor`. It checks your computer and your sign
 the cluster has no free worker for a new agent right now; nothing was started. 2 of your agents are running (claude-b66c97d1, codex-2c9e41a7). Free a worker with: defenseclaw substrate delete NAME (see them all with defenseclaw substrate list), or ask your administrator for more workers.
 ```
 
-Substrate answers `503` with the reason `no_free_worker` when no worker has room for the actor. `run` starts nothing and says which of your agents hold workers. Delete the ones you don't need (`list` has a `STATE` column), or add workers to the pool. A finished `--task` agent gives its worker back about a minute after its task ends (it is suspended, not deleted), and a batch task waits up to 15 minutes for a free worker before it reports this. If none of your agents are running, other work holds the pool. A golden-snapshot build also takes a worker. Lowering a worker pool's replica count while it hosts a running actor crashes that actor. Revert it with `kubectl ate revert`.
+Substrate answers `503` with the reason `no_free_worker` when no worker has room for the actor. `run` starts nothing and says which of your agents hold workers. Delete the ones you don't need (`list` has a `STATE` column), or add workers to the pool. A finished `--task` agent gives its worker back about a minute after its task ends (it is suspended, not deleted), and a batch task waits up to 15 minutes for a free worker before it reports this. DefenseClaw suspends an agent that has been idle for `substrate.idle_suspend_after` (30 minutes by default), because Substrate itself never suspends an idle actor and a running one holds its worker. If none of your agents are running, other work holds the pool. A golden-snapshot build also takes a worker. Lowering a worker pool's replica count while it hosts a running actor crashes that actor. Revert it with `kubectl ate revert`.
+
+### New connections from an agent are slow
+
+Each new connection out of an actor goes through Substrate's egress gateway. Measured on Substrate 1.0.0, a new plain HTTP connection took about 6 ms, with a second mode of about 46 ms. A new HTTPS connection took about 30 ms, because the gateway inspects the TLS. The callout added no measurable time. A hook pays the same cost when it opens a new connection. This is Substrate's path, not DefenseClaw's, and there is no setting for it. Every hook is a new process, so it can't keep a connection open between hooks.
+
+### Claude Code makes model calls you did not set
+
+Claude Code on Bedrock calls model ids besides the one in `ANTHROPIC_MODEL`, at the start of a session (for example an Opus and a Sonnet id), even when every model variable is set. It also sends `GET /llm/bedrock/inference-profiles` first. Both are fixed in Claude Code. The kit sets every Claude Code model variable. For the extra ids, `substrate.llm.bedrock_models` sends a model that is not in the list to its first entry, through the same guardrails (see [the reference](/docs/substrate/reference)). The gateway answers the `inference-profiles` request with `404`, because only model calls are served on `/llm`. Claude Code goes on with its model calls. If an agent's model records show an id you did not expect, this is the reason.
+
+### A start-up network call in a template fails and keeps failing
+
+A template made in the default golden-snapshot mode runs the agent process once before any actor exists. That golden actor has no egress policy, so a network call made at process start gets no answer, and the failed result is saved in the snapshot that every actor starts from. Do start-up network work after the actor resumes, not at process start. The golden actor's missing policy is by design: it keeps the actor from getting access before DefenseClaw has written its allow list.
+
+### Hermes prints `Auxiliary title generation failed: HTTP 401 missing_token`
+
+After a turn, Hermes tries to title the chat and probes model-list routes, and it sends no actor header. The gateway refuses those calls with `401`, so the title fails and the gateway log shows tens of `401` lines for each session. The main model route works and the agent is not affected. The message is harmless.
+
+### `copilot update` takes more than a minute to fail
+
+The command can't reach GitHub, because the actor's allow list doesn't name it. Copilot retries with back-off and then reports `Circuit breaker api.github.com is open`. The version doesn't change. Auto-update is off in the kit, so a start isn't affected. Update Copilot by rebuilding the template.
+
+### A person with no group can start an agent
+
+The gateway signs in anyone the OIDC issuer signs in. It doesn't read `email_verified` and it doesn't require a group. A person with no matching assignment gets `default_profile` and the launcher atespace that profile names. Control who may sign in at the identity provider (the realm or the application's assignment), because that is the access control. If you want fewer people to use the cluster, make `default_profile` a restrictive profile and give groups the profiles that allow more.
 
 ### A request to a new site hangs for several seconds after I approved it
 

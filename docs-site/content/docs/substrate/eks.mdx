@@ -113,6 +113,8 @@ The default issuer is the same on every cluster, so an actor token of one cluste
 - In zsh, `"$ACCT:role"` is a history modifier and builds a broken ARN. EKS then says "Cross-account pass role is not allowed". Use `${ACCT}`.
 - `create-cluster` has no dry run. Check subnets, roles and versions first.
 - A worker pool that asks for more actors than there is room for answers "no worker has room for the actor". A golden-snapshot build also takes a worker.
+- Plan memory for the sandbox class. A microVM actor keeps its guest memory after the program exits. Claude Code in a terminal held about 380 MB while running and about 384 MB after it exited, against about 124 MB for a fresh idle actor. Allow about 400 MB for each microVM Claude Code actor. A gVisor actor gave memory back (about 150 MB running, about 34 MB after exit), so allow about 150 MB. Measured on Substrate 1.0.0; the memory returns when the actor is suspended.
+- Lowering a worker pool's replica count removes a worker pod, even if it hosts a running actor. That actor crashes, and `kubectl ate revert` brings it back from its last snapshot. Suspend or delete the agents first.
 - Deleting the instances of a managed node group by hand makes the autoscaling group recreate them. Delete the node group.
 
 Then continue with the [open-source walkthrough](/docs/substrate/open-source).

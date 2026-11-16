@@ -60,7 +60,7 @@ Policy lives in the chart values (`config:`) and in the profiles. Change them th
 
 - **The change is checked first.** `helm upgrade` checks the new config and refuses one that does not load.
 - **Running agents.** The controller rewrites their allow lists within about 5 seconds, without a restart. Suspended agents get the new policy before they resume. [When a config change takes effect](/docs/substrate/reference#when-a-config-change-takes-effect) lists every setting, and the few that wait for a pod restart.
-- **Rollback.** `helm rollback`, or revert the commit. Nothing on a laptop needs to change.
+- **Rollback.** `helm rollback`, or revert the commit. Nothing on a laptop needs to change. A rollback fails part-way if the two releases use different container port numbers for the same port name (`Duplicate value: actor`), and it leaves the actor Service with both ports. No released chart does this, and a later chart must not renumber a port.
 - **Trust anchors.** Who may sign policy for the cluster is set at install and held in a Secret only platform admins can change. Staged, signed rollouts per atespace are for administrators and are described in the management documentation, not here.
 
 ## Upgrades
