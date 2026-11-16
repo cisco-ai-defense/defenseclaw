@@ -323,7 +323,7 @@ def relevant(row, spec):
     extra = getattr(CONNECTORS.get(spec.get("name")), "extra_indicator", None)
     edits = "\n".join(line[1:] for line in patch.splitlines() if line.startswith(("+", "-")))
     return (
-        any(re.search(spec["paths"], path, re.I) for path in paths)
+        any(re.search(spec[key], path, re.I) for path in paths for key in ("paths", "priority_paths"))
         or bool(
             re.search(
                 r"hook|settings\.json|config\.toml|requirements\.toml|tool_use_id|"

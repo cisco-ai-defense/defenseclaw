@@ -52,19 +52,38 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p monitor
-          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/connector-delta-monitor.yml/runs?branch=main&status=completed&per_page=20" > monitor/runs.json
-          jq '[.workflow_runs[] | select((.event == "schedule" or .event == "workflow_dispatch") and .conclusion != "skipped")]' monitor/runs.json > monitor/prior.json
-          if [ "$(jq length monitor/prior.json)" = 0 ]; then exit 0; fi
-          while read -r run_id; do
-            found=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq '[.artifacts[] | select(.name == "connector-delta-state-v2" and .expired == false)] | length')
-            if [ "$found" != 0 ]; then
-              gh run download "$run_id" --name connector-delta-state-v2 --dir monitor/checkpoint
-              test -s monitor/checkpoint/state.json
-              exit 0
-            fi
-          done < <(jq -r '.[].id' monitor/prior.json)
-          echo '::error::Prior monitor runs exist but no checkpoint is recoverable. Restore state; do not reset history.'
-          exit 1
+          workflow_id=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/connector-delta-monitor.yml" --jq .id)
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=connector-delta-state-v2&per_page=100" > monitor/artifacts.json
+          jq -r '[.[].artifacts[] | select(.name == "connector-delta-state-v2" and .workflow_run.head_branch == "main")] | sort_by(.created_at, .id) | reverse | .[] | [.workflow_run.id, .expired] | @tsv' monitor/artifacts.json > monitor/candidates.tsv
+          had_checkpoint=false
+          while IFS=$'\t' read -r run_id expired; do
+            [[ "$run_id" =~ ^[0-9]+$ ]] || exit 1
+            [[ "$expired" == true || "$expired" == false ]] || exit 1
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}" > monitor/run.json
+            trusted=$(jq --argjson workflow "$workflow_id" --arg repo "$GITHUB_REPOSITORY" '.workflow_id == $workflow and .head_branch == "main" and .head_repository.full_name == $repo and (.event == "schedule" or .event == "workflow_dispatch")' monitor/run.json)
+            if [ "$trusted" != true ]; then continue; fi
+            had_checkpoint=true
+            if [ "$expired" = true ]; then continue; fi
+            gh run download "$run_id" --name connector-delta-state-v2 --dir monitor/checkpoint
+            test -s monitor/checkpoint/state.json
+            exit 0
+          done < monitor/candidates.tsv
+          if [ "$had_checkpoint" = false ]; then
+            # Deleted artifacts must not look like a first run. Early failures
+            # and all-skipped runs, however, never committed a checkpoint.
+            gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_id}/runs?branch=main&status=completed&per_page=100" > monitor/runs.json
+            jq -r --arg repo "$GITHUB_REPOSITORY" '.[].workflow_runs[] | select(.head_repository.full_name == $repo and (.event == "schedule" or .event == "workflow_dispatch")) | .id' monitor/runs.json > monitor/prior.tsv
+            while read -r run_id; do
+              [[ "$run_id" =~ ^[0-9]+$ ]] || exit 1
+              gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?filter=all&per_page=100" > monitor/jobs.json
+              published=$(jq 'any(.[].jobs[]; .name == "publish" and (.conclusion == "success" or any(.steps[]?; .conclusion == "success" and (.name | startswith("Run actions/upload-artifact@")))))' monitor/jobs.json)
+              if [ "$published" = true ]; then had_checkpoint=true; break; fi
+            done < monitor/prior.tsv
+          fi
+          if [ "$had_checkpoint" = true ]; then
+            echo '::error::Committed checkpoints expired or were deleted. Restore state; do not reset history.'
+            exit 1
+          fi
       - name: Assume the SRE Bedrock role with GitHub OIDC
         id: bedrock
         if: ${{ vars.CONNECTOR_DELTA_AI_ENABLED == 'true' }}
