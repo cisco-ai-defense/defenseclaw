@@ -697,14 +697,18 @@ func shadowContentAccessPrerequisite(facts actionfacts.Facts) bool {
 			return true
 		}
 		if candidate.Access == actionfacts.PathAccessRead &&
-			!exactTargetedShadowAccountLookup(command) {
+			!exactTargetedShadowAccountLookup(command, candidate) {
 			return true
 		}
 	}
 	return false
 }
 
-func exactTargetedShadowAccountLookup(command actionfacts.CommandFact) bool {
+// exactTargetedShadowAccountLookup reports a grep for one literal account in
+// the shadow file named by candidate. The file operand is the absolute path or
+// the operand the path fact was resolved from, so a lookup after a cd (cd
+// /etc && grep -q '^name:' shadow) is the same lookup (rel-1-0-10:GAP-1069).
+func exactTargetedShadowAccountLookup(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
 	switch strings.ToLower(path.Base(strings.ReplaceAll(command.Program, `\`, "/"))) {
 	case "grep", "egrep", "fgrep":
 	default:
@@ -715,9 +719,10 @@ func exactTargetedShadowAccountLookup(command actionfacts.CommandFact) bool {
 	}
 	var patternValue string
 	shadowOperands := 0
+	operand := strings.Trim(strings.TrimSpace(candidate.Value), `"'`)
 	for _, argument := range command.Argv[1:] {
 		value := strings.Trim(strings.TrimSpace(argument), `"'`)
-		if canonicalSemanticPath(value) == "/etc/shadow" {
+		if canonicalSemanticPath(value) == "/etc/shadow" || operand != "" && value == operand {
 			shadowOperands++
 			continue
 		}
