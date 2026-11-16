@@ -203,6 +203,8 @@ refreshes local process state between full scans, but it does not republish the
 `ai_discovery` snapshot or the companion managed connector/MCP inventory to AI
 Defense.
 
+On macOS and Linux, a managed scan reports each install of an agent binary as its own signal: it looks in every scanned user's bin folders and the machine prefixes the hook enumerator searches. `defenseclaw.ai.component.location` says where: `~/.local/bin/claude` under a home, so no account name is sent, or the absolute path of a system location such as `/opt/homebrew/bin/codex`. A copy in the folder that holds the homes but outside the scanned ones, such as another account's, is reported without a location, and a per-user scan sends none.
+
 ### Claude Desktop and Cowork
 
 Cowork is the agent mode of Claude Desktop. For each user who has run Claude Desktop, a full scan adds one `desktop_app` signal with detector `claude_desktop` and a `claude_desktop` block. A machine with the app but no data folder (never started) only shows the plain application signal.
