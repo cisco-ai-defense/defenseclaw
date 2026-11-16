@@ -23,6 +23,7 @@ type parseOutput struct {
 	dialect          Dialect
 	issues           []IssueCode
 	commands         []CommandFact
+	credentialWords  []credentialPathWord
 	paths            []PathFact
 	network          []NetworkFact
 	dataFlows        []DataFlowFact
@@ -195,6 +196,7 @@ func (o *parseOutput) merge(other parseOutput) {
 	for _, command := range o.commands {
 		validCommandIDs[command.ID] = struct{}{}
 	}
+	o.credentialWords = append(o.credentialWords, other.credentialWords...)
 	for _, fact := range other.paths {
 		if fact.CommandID != 0 {
 			if _, ok := validCommandIDs[fact.CommandID]; !ok {
@@ -311,15 +313,16 @@ func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, wind
 	artifacts := cloneSlice(o.artifacts)
 	normalizeArtifactFactsForCommands(artifacts, cwd, activeHome, commands)
 	return Facts{
-		Tool:       tool,
-		CWD:        cwd,
-		ActiveHome: activeHome,
-		Parse:      ParseResult{Status: status, Dialect: dialect, Issues: cloneSlice(o.issues)},
-		Commands:   commands,
-		Paths:      paths,
-		Network:    network,
-		DataFlows:  cloneSlice(o.dataFlows),
-		Artifacts:  artifacts,
+		Tool:                tool,
+		CWD:                 cwd,
+		ActiveHome:          activeHome,
+		Parse:               ParseResult{Status: status, Dialect: dialect, Issues: cloneSlice(o.issues)},
+		Commands:            commands,
+		Paths:               paths,
+		CredentialPathReads: resolveCredentialPathWords(o.credentialWords, cwd, activeHome, commands),
+		Network:             network,
+		DataFlows:           cloneSlice(o.dataFlows),
+		Artifacts:           artifacts,
 	}
 }
 

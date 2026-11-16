@@ -87,6 +87,31 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		}
 
 		switch typed := node.(type) {
+		case *syntax.Word:
+			id := int64(0)
+			for i := len(stack) - 1; i >= 0; i-- {
+				if stmt, ok := stack[i].(*syntax.Stmt); ok && statementIDs[stmt] != 0 {
+					id = statementIDs[stmt]
+					break
+				}
+			}
+			argument := projectPOSIXWord(typed)
+			value := argument.Value
+			if argument.StaticGlob != "" {
+				value = argument.StaticGlob
+			}
+			out.credentialWords = append(out.credentialWords, credentialPathWord{id, value, argument.Expands})
+			if argument.Expands {
+				syntax.Walk(typed, func(part syntax.Node) bool {
+					switch literal := part.(type) {
+					case *syntax.Lit:
+						out.credentialWords = append(out.credentialWords, credentialPathWord{id, literal.Value, true})
+					case *syntax.SglQuoted:
+						out.credentialWords = append(out.credentialWords, credentialPathWord{id, literal.Value, true})
+					}
+					return true
+				})
+			}
 		case *syntax.FuncDecl:
 			// A definition is inert until invoked. Do not project its body as
 			// an executed action.

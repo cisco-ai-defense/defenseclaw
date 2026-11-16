@@ -149,9 +149,11 @@ type Facts struct {
 	ActiveAgentFilesUncertain                bool
 	Parse                                    ParseResult
 	Commands                                 []CommandFact
-	Paths                                    []PathFact
-	Network                                  []NetworkFact
-	DataFlows                                []DataFlowFact
+	// CredentialPathReads is private chain evidence, never ordinary path-policy input.
+	CredentialPathReads []PathFact `json:"-"`
+	Paths               []PathFact
+	Network             []NetworkFact
+	DataFlows           []DataFlowFact
 	// sendSources are the shell values and argv of a call whose projection
 	// is not complete, for the sender reader (ReadSenders) to read what the
 	// projection did not. Private, in process only.
