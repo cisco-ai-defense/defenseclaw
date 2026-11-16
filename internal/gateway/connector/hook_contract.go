@@ -1554,6 +1554,16 @@ func resolveHookContractForOptions(
 			resolution.Contract = pinned
 		default:
 			resolution.Contract = pinned
+			if resolution.Status == HookCompatibilityNotGated && opts.GOOS != "" {
+				// A connector with no host gate (Kiro) whose sandbox image
+				// pins a reviewed build: the binding's contract is that
+				// build's, so its lifecycle feeds the tool chains like any
+				// gated contract's (substrate-1 GAP-0339).
+				if sandbox := ResolveSandboxHookContract(connectorName, opts.AgentVersion); sandbox.Status == HookCompatibilityKnown &&
+					sandbox.Contract.ContractID == pinnedID {
+					resolution.Status, resolution.Reason = HookCompatibilityKnown, sandbox.Reason
+				}
+			}
 		}
 	}
 	if resolution.Status != HookCompatibilityKnown && resolution.Contract.DefaultForUnversioned {

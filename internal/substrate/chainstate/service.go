@@ -250,6 +250,15 @@ type actorState struct {
 	Forked bool `json:"forked,omitempty"`
 	// Task is the launcher-registered --task text.
 	Task string `json:"task,omitempty"`
+	// UnrecordedUnixNano is the actor's running time of its last tool step
+	// a gateway could not record (0 for none), UnrecordedWhy the reason
+	// (GAP-0339).
+	UnrecordedUnixNano int64  `json:"unrecorded_unix_nano,omitempty"`
+	UnrecordedWhy      string `json:"unrecorded_why,omitempty"`
+	// UnclearedUnixNano and UnclearedWhy are the same for the last
+	// credentials read that started the chain uncleared (GAP-0338).
+	UnclearedUnixNano int64  `json:"uncleared_unix_nano,omitempty"`
+	UnclearedWhy      string `json:"uncleared_why,omitempty"`
 	// Egress is the egress memo (GAP-0179), filled when the file is
 	// written. A state file without it is from an older leader.
 	Egress *egressSnapshot `json:"egress,omitempty"`
@@ -362,6 +371,7 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(leader.MethodIntentPut, s.logged(leader.MethodIntentPut, leader.Typed(s.IntentPut)))
 	srv.Handle(MethodChainLifecycle, s.logged(MethodChainLifecycle, leader.Typed(s.Lifecycle)))
 	srv.Handle(MethodChainEgress, s.logged(MethodChainEgress, leader.Typed(s.Egress)))
+	srv.Handle(MethodChainUnrecorded, s.logged(MethodChainUnrecorded, leader.Typed(s.Unrecorded)))
 	srv.Handle(MethodHistorySeen, s.logged(MethodHistorySeen, leader.Typed(s.HistorySeen)))
 	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
 }
@@ -1478,7 +1488,17 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		return EgressVerdict{}, err
 	}
 	s.touch(e)
-	v, ok := e.memo.verdict(s.stamp(e, s.opts.Now()), s.EgressAction())
+	now := s.stamp(e, s.opts.Now())
+	v, ok := e.memo.verdict(now, s.EgressAction())
+	if ok {
+		st := s.stateOf(e)
+		v.Unrecorded = noteWithin(st.UnrecordedUnixNano, st.UnrecordedWhy, now)
+		if v.Rule == guardrail.ToolChainSecretReadThenEgress {
+			if why := noteWithin(st.UnclearedUnixNano, st.UnclearedWhy, now); why != "" {
+				v.Reason += " The " + why + "."
+			}
+		}
+	}
 	switch {
 	case !ok:
 		s.egress.push(egressRecord{actor: e.actor, sync: true})
@@ -1703,4 +1723,53 @@ func (s *Service) SetEgressAction(action string) error {
 	}
 	s.action.Store(&action)
 	return nil
+}
+
+// Unrecorded keeps that a gateway could not record one of the actor's tool
+// steps in its chain window, at the actor's running time, for the egress
+// checks of the chain window (GAP-0339).
+func (s *Service) Unrecorded(ctx context.Context, in UnrecordedRequest) (struct{}, error) {
+	if err := in.Actor.Validate(); err != nil {
+		return struct{}{}, bad(err)
+	}
+	why := strings.TrimSpace(in.Why)
+	if why == "" {
+		why = "a tool step was not recorded"
+	}
+	if len(why) > maxUnrecordedWhy {
+		why = why[:maxUnrecordedWhy]
+	}
+	e, release, err := s.acquire(in.Actor)
+	if err != nil {
+		return struct{}{}, err
+	}
+	defer release()
+	defer s.lock(in.Actor)()
+	s.touch(e)
+	st := s.stateOf(e)
+	at := s.stamp(e, s.opts.Now()).UnixNano()
+	if in.Uncleared {
+		st.UnclearedUnixNano, st.UnclearedWhy = at, why
+	} else {
+		st.UnrecordedUnixNano, st.UnrecordedWhy = at, why
+	}
+	return struct{}{}, s.setState(e, st)
+}
+
+// unrecordedWindow is how long, in running time, an unrecorded step counts
+// for egress: the secret-read chain's window.
+var unrecordedWindow = func() time.Duration {
+	if d, ok := guardrail.ToolChainDefinitionByID(guardrail.ToolChainSecretReadThenEgress); ok {
+		return d.TimeWindow
+	}
+	return 30 * time.Minute
+}()
+
+// noteWithin is why when its step at (running time) is within the window
+// at running time now, else "".
+func noteWithin(at int64, why string, now time.Time) string {
+	if at == 0 || now.UnixNano()-at > int64(unrecordedWindow) {
+		return ""
+	}
+	return why
 }

@@ -109,6 +109,10 @@ func newSubstrateFixture(t *testing.T, mutate ...func(*SubstrateConfig)) *substr
 	t.Cleanup(func() { liveGuardrailProfiles.Store(prevProfiles) })
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
 	liveGuardrailProfiles.Store(api.guardrailProfileSet())
+	// SetSubstrate points the judges' intent store and the proxy history at
+	// the leader process-wide: restore the process-local ones, or a later
+	// test's judge reads the leader's.
+	t.Cleanup(func() { useSubstrateChains(nil) })
 	regs, err := registry.OpenFileStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

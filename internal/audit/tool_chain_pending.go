@@ -1917,17 +1917,11 @@ func unsuccessfulSecretReadProjection(
 	if !input.UnsuccessfulMayHaveRead || pending.ruleset != input.RulesetFingerprint {
 		return guardrail.ToolChainProjection{}, false
 	}
-	index, indexOK := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
-	definition, definitionOK := guardrail.ToolChainDefinitionByID(guardrail.ToolChainSecretReadThenEgress)
-	if !indexOK || !definitionOK || pending.detectionSteps&definition.Step1Bit == 0 {
-		return guardrail.ToolChainProjection{}, false
-	}
-	projection := guardrail.ToolChainProjection{
-		ParseStatus:         actionfacts.ParseStatus(pending.parseStatus),
-		DetectionStepMask:   definition.Step1Bit,
-		EnforcementStepMask: pending.enforcementSteps & definition.Step1Bit,
-	}
-	projection.EnforcementJoinDigests[index] = pending.enforcementJoinDigests[index]
-	projection.EnforcementOutputJoinDigests[index] = pending.enforcementOutputJoinDigests[index]
-	return projection, true
+	return guardrail.ToolChainProjectionStep(guardrail.ToolChainProjection{
+		ParseStatus:                  actionfacts.ParseStatus(pending.parseStatus),
+		DetectionStepMask:            pending.detectionSteps,
+		EnforcementStepMask:          pending.enforcementSteps,
+		EnforcementJoinDigests:       pending.enforcementJoinDigests,
+		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
+	}, guardrail.ToolChainSecretReadThenEgress, 1)
 }

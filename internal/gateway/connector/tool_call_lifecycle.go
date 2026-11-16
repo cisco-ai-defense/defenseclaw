@@ -852,6 +852,44 @@ func devinToolCallLifecycle() ToolCallLifecycleContract {
 	}
 }
 
+// kiroSandboxToolCallLifecycle is the tool-call lifecycle of the pinned Kiro
+// CLI 2.x sandbox build (kiro-cli-hooks-v1). Without one no Kiro tool call
+// reached a tool chain on a Substrate actor or in an OpenShell image: the
+// zero lifecycle routes no event (substrate-1 GAP-0338). Kiro names no tool
+// invocation in its hooks, so, as for Devin, a call's result is never tied
+// to it and the secret-read chain starts at the proposal.
+func kiroSandboxToolCallLifecycle() ToolCallLifecycleContract {
+	return ToolCallLifecycleContract{
+		Version:                           ToolCallLifecycleContractVersion,
+		PreProposalEvents:                 []string{"preToolUse"},
+		AuthoritativeSuccessEvents:        []string{"postToolUse"},
+		AuthoritativeFailureEvents:        []string{"postToolUse"},
+		AuthoritativeDenialEvents:         []string{},
+		AuthoritativePendingDiscardEvents: []string{"stop"},
+		AuthoritativeTerminalEvents:       []string{},
+		InvocationIDAuthority:             ToolInvocationIDNone,
+		OutcomeAuthority:                  ToolOutcomeResultPayload,
+		StatefulEnforcementLevel:          StatefulToolDetectionOnly,
+		Routing: ToolEventRouting{
+			StructuredActionEvents: []string{"preToolUse"},
+			ResultContentEvents:    []string{"postToolUse"},
+			StateTransitionEvents:  []string{},
+			AuditOnlyEvents:        []string{"userPromptSubmit", "stop"},
+		},
+		CoveredToolSurfaces: []ToolSurface{
+			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
+			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+		},
+		OfficialSourceURLs: []string{
+			"https://kiro.dev/docs/cli/hooks/",
+		},
+		Limitations: []string{
+			"Kiro CLI 2.x hooks name no tool invocation, so preToolUse and postToolUse are not paired: chain state is detection-only and a credentials read starts the secret-read chain at preToolUse.",
+			"Only exit 2 from preToolUse vetoes a call; other exit codes are warnings and the tool runs.",
+		},
+	}
+}
+
 func copilotToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
 		Version:                           ToolCallLifecycleContractVersion,

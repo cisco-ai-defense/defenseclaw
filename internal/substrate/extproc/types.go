@@ -131,6 +131,11 @@ type ChainVerdict struct {
 	// does not refuse (chain_egress_action alert, or a chain that only
 	// alerts): the request is allowed with an alert (GAP-0250).
 	Detected []string
+	// Unrecorded is why one of the actor's tool steps in the chain window
+	// was not recorded: the request is checked against an incomplete
+	// window, so it is refused where unchecked egress is (chainFailClosed),
+	// else allowed with an alert (substrate-1 GAP-0339).
+	Unrecorded string
 }
 
 // ChainChecker reports an egress-type chain (a secret read, then egress)

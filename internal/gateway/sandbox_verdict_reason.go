@@ -360,6 +360,9 @@ func (a *APIServer) sandboxVerdictWithReason(
 	// The verb follows what the harness does: a block DefenseClaw cannot
 	// enforce on this event (a tool result) is flagged, not blocked.
 	plain := sandboxVerdictReason(ctx, connectorName, action, resp.RuleIDs, findings)
+	if action == "block" {
+		plain = withUnclearedReadNote(plain, resp.Reason)
+	}
 	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
 }
 

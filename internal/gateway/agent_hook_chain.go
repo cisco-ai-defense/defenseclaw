@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 )
 
 const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v12-sqlite-database-table-lineage"
@@ -340,10 +341,18 @@ func (a *APIServer) applyAgentHookToolChains(
 	// the leader: the callout's egress check reads it (GAP-0201). A step
 	// that can't is reported, never skipped silently: rootMissed says why.
 	_, substrateActor := substrateActorFrom(ctx)
+	// A tool call on an event the connector's lifecycle routes nowhere (a
+	// contract with no lifecycle, or an event it does not name) is a step
+	// too: it is reported, never skipped silently (GAP-0339).
+	unroutedToolCall := route == connector.ToolEventRouteUnknown &&
+		strings.TrimSpace(req.ToolName) != "" && !req.ToolNameIsLabel
 	substrateStep := substrateActor &&
-		(structuredAction || route == connector.ToolEventRouteResultContent)
+		(structuredAction || route == connector.ToolEventRouteResultContent || unroutedToolCall)
 	rootMissed := ""
-	if substrateStep && !lifecycleEligible {
+	switch {
+	case substrateStep && unroutedToolCall:
+		rootMissed = "the actor's hook contract routes no tool-call lifecycle event " + strconv.Quote(req.HookEventName)
+	case substrateStep && !lifecycleEligible:
 		rootMissed = "the hook contract is not one this gateway reviewed for the actor's agent version (" +
 			profile.CompatibilityReason + ")"
 	}
@@ -499,6 +508,19 @@ func (a *APIServer) applyAgentHookToolChains(
 	}
 
 	invocationDigest := exactToolChainInvocationDigest(lifecycle, req)
+	if structuredAction && invocationDigest == "" &&
+		lifecycle.IsPreProposalEvent(req.HookEventName) &&
+		resp.Action != guardrailActionBlock {
+		// No result can be tied to this call (the connector names no tool
+		// invocation, or this call carries none): nothing will ever say
+		// what it printed, so its credentials read starts the chain here,
+		// at the proposal (the secret-read chain start, GAP-0338).
+		started := withSecretReadStart(observationProjection, predecessorProjection)
+		if started.DetectionStepMask != observationProjection.DetectionStepMask {
+			a.noteUnclearedRead(ctx, req.ConnectorName)
+		}
+		observationProjection = started
+	}
 	var result, rootResult audit.ToolChainObserveResult
 	resolvedSuccess := false
 	resolvedInvocation := false
@@ -552,11 +574,8 @@ func (a *APIServer) applyAgentHookToolChains(
 			SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
 		}
 		if outcome == connector.ToolLifecycleOutcomeFailure || outcome == connector.ToolLifecycleOutcomeUnknown {
-			// The call ran (or may have) and did not succeed. A read that
-			// printed a credentials file is a secret read whatever its
-			// exit code (owner decision 2026-11-13, substrate-1 GAP-0337):
-			// the store promotes the proposal's secret-read step 1 unless
-			// the result proves nothing was read.
+			// The call ran (or may have) and did not succeed: the secret-read
+			// chain start decides by what it printed (GAP-0337).
 			resolveInput.UnsuccessfulMayHaveRead = !toolResultProvesNothingRead(req)
 		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
@@ -769,6 +788,11 @@ func (a *APIServer) applyAgentHookToolChains(
 		// a deny on exact replay even if the live mode later changes to observe.
 		resp = committedAgentHookChainBlock(profile, req, resp)
 	}
+	if slices.Contains(result.DetectedChainIDs, guardrail.ToolChainSecretReadThenEgress) &&
+		!lifecycle.SupportsExactInvocationJoin() {
+		// The read may be one no result could clear: say so (GAP-0338).
+		resp.Reason = strings.TrimSpace(resp.Reason + " The " + unclearedReadWhy(req.ConnectorName) + ".")
+	}
 	if result.Status == audit.ToolChainObserveFresh &&
 		len(result.ReceiptIDs) != 0 {
 		finalization.repository = repository
@@ -827,6 +851,9 @@ func (a *APIServer) applyAgentHookToolChains(
 // step that did not reach its actor window (GAP-0201).
 const substrateChainUnrecordedRule = "SUBSTRATE-CHAIN-UNRECORDED"
 
+// substrateUnrecordedTimeout bounds telling the leader of an unrecorded step.
+const substrateUnrecordedTimeout = 2 * time.Second
+
 // substrateChainWarned bounds the gateway log warning to one per actor and
 // reason.
 var substrateChainWarned sync.Map
@@ -846,8 +873,21 @@ func (a *APIServer) substrateChainUnrecorded(ctx context.Context, profile connec
 		fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: a tool step is not in the actor's chain window, so the egress check can't link it: %s\n",
 			actor.Atespace, actor.Name, why)
 	}
+	// The leader keeps it for the actor's egress checks: the callout refuses
+	// a request checked against an incomplete window where it refuses
+	// unchecked egress, and alerts elsewhere (GAP-0339). A leader that can't
+	// be reached fails the egress check itself (the chain failure mode).
+	if st := a.substrateState(); st != nil && st.cfg.Chains != nil {
+		uctx, cancel := context.WithTimeout(ctx, substrateUnrecordedTimeout)
+		if err := st.cfg.Chains.Unrecorded(uctx, chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, why); err != nil {
+			why += "; the leader was not told either: " + err.Error()
+		}
+		cancel()
+	}
+	// Refused on a managed install and with a strict pack, an alert
+	// elsewhere (refuse-by-default for what can't be checked, GAP-0339).
 	intent := guardrailActionAlert
-	if strictPackPosture(a.decisionConfig(ctx), req.ConnectorName) {
+	if ManagedEnterpriseActive() || strictPackPosture(a.decisionConfig(ctx), req.ConnectorName) {
 		intent = guardrailActionBlock
 	}
 	findings := []RuleFinding{{
@@ -3470,6 +3510,65 @@ func writeToolChainDigestPart(writer toolChainHashWriter, value string) {
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	_, _ = writer.Write(length[:])
 	_, _ = writer.Write([]byte(value))
+}
+
+// The secret-read chain start (owner decision 2026-11-13; substrate-1
+// GAP-0337, GAP-0338). A tool call that reads a credentials file starts
+// chain.secret_read_then_egress unless DefenseClaw proves it read nothing,
+// whatever its exit code and whatever the connector:
+//   - a call whose result is tied to it (a paired tool invocation id) keeps
+//     the read as a pending proposal. Its result decides by what it printed:
+//     a success, or a failed or unknown result that toolResultProvesNothingRead
+//     does not clear, promotes it (ResolvePending, UnsuccessfulMayHaveRead);
+//     a denied or cancelled call never ran;
+//   - a call whose result cannot be tied to it (no invocation id: Devin,
+//     Copilot, Antigravity's step index, or a call that carries none) starts
+//     the chain at the proposal (withSecretReadStart): no result will say
+//     what it printed, so nothing can clear it.
+// Both keep the read's step 1 alone (guardrail.ToolChainProjectionStep).
+
+// withSecretReadStart adds the secret-read step 1 of a proposal's
+// predecessor projection to its observation. A call that also uploads keeps
+// the one join identity the projection has for the chain.
+func withSecretReadStart(observation, predecessor guardrail.ToolChainProjection) guardrail.ToolChainProjection {
+	start, ok := guardrail.ToolChainProjectionStep(predecessor, guardrail.ToolChainSecretReadThenEgress, 1)
+	if !ok {
+		return observation
+	}
+	index, _ := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
+	observation.DetectionStepMask |= start.DetectionStepMask
+	observation.EnforcementStepMask |= start.EnforcementStepMask
+	if observation.EnforcementJoinDigests[index] == "" {
+		observation.EnforcementJoinDigests[index] = start.EnforcementJoinDigests[index]
+	}
+	if observation.EnforcementOutputJoinDigests[index] == "" {
+		observation.EnforcementOutputJoinDigests[index] = start.EnforcementOutputJoinDigests[index]
+	}
+	if observation.ParseStatus == "" {
+		observation.ParseStatus = start.ParseStatus
+	}
+	return observation
+}
+
+// unclearedReadWhy says why a connector's credentials read started the
+// secret-read chain at its proposal (GAP-0338).
+func unclearedReadWhy(connectorName string) string {
+	return "credentials read could not be cleared: no result correlation for " + connectorName
+}
+
+// noteUnclearedRead tells the leader, for a verified actor, that its
+// credentials read started the chain uncleared, so the callout's refusal of
+// the chain's egress says why (GAP-0338). A failure changes nothing: the
+// read is in the window either way.
+func (a *APIServer) noteUnclearedRead(ctx context.Context, connectorName string) {
+	actor, ok := substrateActorFrom(ctx)
+	st := a.substrateState()
+	if !ok || st == nil || st.cfg.Chains == nil {
+		return
+	}
+	uctx, cancel := context.WithTimeout(ctx, substrateUnrecordedTimeout)
+	defer cancel()
+	_ = st.cfg.Chains.Uncleared(uctx, chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, unclearedReadWhy(connectorName))
 }
 
 // readOnlyPrograms are the plain readers whose own error lines can prove a
