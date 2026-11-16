@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -153,9 +154,10 @@ func LoadRouteEpoch(dataDir string) (*RouteEpoch, error) {
 		return nil, fmt.Errorf("route epoch %s is not a small regular file", path)
 	}
 	// Integrity: the epoch decides every route credential, so a file
-	// another account can write or own is refused (the key file trust
-	// rule; S1 REVIEW-code-slice4 P3-3).
-	if err := safefile.ValidatePrivateFile(path); err != nil {
+	// another account can write or own is refused (S1 REVIEW-code-slice4
+	// P3-3): the managed runtime trust walk, with the pinned gateway service
+	// SID as the one writer besides LocalSystem and Administrators.
+	if err := routeEpochValidateFile(path, "route epoch", os.Getenv(managed.WindowsServiceAccountEnv)); err != nil {
 		return nil, fmt.Errorf("route epoch %s: %w", path, err)
 	}
 	raw, err := safefile.ReadRegularFileBounded(path, routeEpochMaxBytes)
@@ -172,7 +174,16 @@ func LoadRouteEpoch(dataDir string) (*RouteEpoch, error) {
 	return &epoch, nil
 }
 
-// WriteRouteEpoch publishes epoch atomically (temp file + rename).
+// WriteRouteEpoch publishes epoch atomically under the managed service
+// runtime contract: the gateway runs as LocalSystem with a write-restricted
+// service SID token and owns what it writes as that SID
+// (adoptGatewayFileOwner), so the file keeps the runtime DACL the installer
+// set (LocalSystem, Administrators and the pinned gateway service SID). The
+// owner-only protection it used before resets the owner to LocalSystem,
+// which needs WRITE_OWNER that token does not hold: every publication failed
+// with Access is denied and no route-only target was ever rendered
+// (rel-1-0-10:GAP-0937). Only the managed Windows gateway publishes an epoch
+// (routeEpochPlatform), so there is no other writer.
 func WriteRouteEpoch(dataDir string, epoch RouteEpoch) error {
 	if err := epoch.Validate(); err != nil {
 		return err
@@ -185,27 +196,14 @@ func WriteRouteEpoch(dataDir string, epoch RouteEpoch) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".route-epoch-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	// Owner-only DACL on Windows (a temp file inherits the directory ACL),
-	// so LoadRouteEpoch accepts what the gateway wrote.
-	if err := safefile.ProtectFile(name); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+	return routeEpochWriteFile(managed.DeploymentModeManagedEnterprise, path, "route epoch", raw)
 }
+
+// routeEpochWriteFile and routeEpochValidateFile are the managed service
+// runtime writer and the reader trust check, which allows the pinned gateway
+// service SID as the one writer besides LocalSystem and Administrators.
+// Replaceable in tests.
+var (
+	routeEpochWriteFile    = managed.WriteServiceRuntimeFile
+	routeEpochValidateFile = managed.ValidateTrustedServiceRuntimeFilePathStandalone
+)

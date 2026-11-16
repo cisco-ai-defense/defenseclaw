@@ -50,6 +50,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-recovery-gateway-smoke.ps1",
     "enterprise-standalone-record-recovery-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
+    "enterprise-standalone-route-epoch-render-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-runtime-env-acl-smoke.ps1",
     "enterprise-standalone-w2b-lifecycle-smoke.ps1",

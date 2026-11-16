@@ -4,10 +4,9 @@
 package gateway
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -229,13 +228,14 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 	bobRow := managedHookLedgerTarget{User: "bob", SID: bob, Connector: "codex", OK: true}
 	ledger.set(aliceRow, bobRow)
 	api, _, _ := newUserScopedTestServer(t, true, ledger, nil)
-	if err := os.MkdirAll(filepath.Join(api.scannerCfg.DataDir, "hooks"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	// The published epoch, in memory: on the managed Windows gateway it is a
+	// service runtime file (connector.WriteRouteEpoch), which a test temp
+	// folder cannot be.
+	published := &testPublishedRouteEpoch{}
 	store := api.userScopedCredentialStore()
-	store.routeEpoch = newRouteEpochState(api.configDataDir)
+	store.routeEpoch = published.state(api.configDataDir)
 	token := func(identity string) string {
-		epoch, err := connector.LoadRouteEpoch(api.scannerCfg.DataDir)
+		epoch, err := published.load(api.scannerCfg.DataDir)
 		if err != nil || epoch == nil {
 			t.Fatalf("published epoch = %v, %v", epoch, err)
 		}
@@ -260,7 +260,7 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 	}
 	// A normal restart (a new gateway process, nothing held the port)
 	// keeps the published epoch: running agents keep working (P2-3).
-	store.routeEpoch = newRouteEpochState(api.configDataDir)
+	store.routeEpoch = published.state(api.configDataDir)
 	store.invalidate()
 	if valid(first) {
 		t.Fatal("before the restarted gateway owns its port no route credential may authenticate")
@@ -276,18 +276,13 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 		t.Fatal("a restart after another process held the port must refuse the old credential at once")
 	}
 	// An unusable published epoch is never adopted.
-	path, _ := connector.RouteEpochPath(api.scannerCfg.DataDir)
-	saved, _ := os.ReadFile(path)
-	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	other := newRouteEpochState(api.configDataDir)
+	saved := published.raw
+	published.raw = []byte("not json")
+	other := published.state(api.configDataDir)
 	if rotated, err := other.start(false); !rotated || err != nil {
 		t.Fatalf("start over a corrupt published epoch = %v, %v; want a new epoch", rotated, err)
 	}
-	if err := os.WriteFile(path, saved, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	published.raw = saved
 	bobSecond := token(bob)
 	ledger.set(bobRow)
 	if valid(second) {
@@ -316,6 +311,42 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 	if !valid(third) || token(alice) != third {
 		t.Fatal("a failed apply and its recovery must keep the route credential")
 	}
+}
+
+// testPublishedRouteEpoch is the published route epoch of a test gateway,
+// held in memory with the decoding and validation of the real file.
+type testPublishedRouteEpoch struct{ raw []byte }
+
+func (p *testPublishedRouteEpoch) state(dataDir func() string) *routeEpochState {
+	st := newRouteEpochState(dataDir)
+	st.write, st.load = p.write, p.load
+	return st
+}
+
+func (p *testPublishedRouteEpoch) write(_ string, epoch connector.RouteEpoch) error {
+	if err := epoch.Validate(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(epoch)
+	if err != nil {
+		return err
+	}
+	p.raw = raw
+	return nil
+}
+
+func (p *testPublishedRouteEpoch) load(string) (*connector.RouteEpoch, error) {
+	if p.raw == nil {
+		return nil, nil
+	}
+	var epoch connector.RouteEpoch
+	if err := json.Unmarshal(p.raw, &epoch); err != nil {
+		return nil, err
+	}
+	if err := epoch.Validate(); err != nil {
+		return nil, err
+	}
+	return &epoch, nil
 }
 
 func TestRouteOnlySetupManagedVsOSS(t *testing.T) {
