@@ -39,7 +39,7 @@ func tdCodexVerdict(t *testing.T, a *APIServer, session, cwd, command string) st
 // TestUnresolvedFolderCurrentFolderSpellingOnEveryRoute is
 // rel-1-0-10:GAP-1042, the residual of GAP-1023 (cells of the s7-td327r3rev3
 // probe TestRV3Probe, built from the operands and heads of
-// TestUnresolvedFolderCurrentFolderSpellingIsThePlainOne). After a cd to a
+// TestUnresolvedFolderCurrentFolderSpellingIsThePlainOne*). After a cd to a
 // folder the call does not give, a current-folder head before a protected
 // operand gets at least the verdict of the plain spelling of the same form
 // in each of the 5 packs: on the Codex hook (its client sends the folder the
@@ -52,7 +52,10 @@ func tdCodexVerdict(t *testing.T, a *APIServer, session, cwd, command string) st
 func TestUnresolvedFolderCurrentFolderSpellingOnEveryRoute(t *testing.T) {
 	_, project := cdFirstFixture(t)
 	dot := "."
-	operands := []string{dot + "ssh/id_rsa", dot + "aws/credentials", dot + "ssh/id_*"}
+	// A key file and a key pattern: the AWS file and the other operands of
+	// the GAP-1023 tables take the same reading (TestRV3Probe), and the
+	// matrix stays within one CI shard under -race.
+	operands := []string{dot + "ssh/id_rsa", dot + "ssh/id_*"}
 	forms := []string{"cat %s", `bash -c "cat %s"`, `X=%s; cat "$X"`, `export X=%s; cp "$X" /tmp/staged`}
 	type route struct {
 		name    string

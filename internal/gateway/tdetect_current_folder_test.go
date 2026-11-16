@@ -52,8 +52,31 @@ func tdCurrentFolderVerdict(t *testing.T, a *APIServer, session, cwd, command st
 // blocks a state write spelled from a variable outside strict, where the
 // plain one is the unknown tier (the same at 1f15b84781 and rel
 // 4269debe92). The plain verdict is the oracle, read at run time; the rows
-// below pin that it is the tier.
-func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOne(t *testing.T) {
+// below pin that it is the tier. One test per pack: the five take 556 s
+// under -race together, more than one CI shard's budget can hold.
+func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOneDefault(t *testing.T) {
+	tdCurrentFolderSpellingIsThePlainOne(t, "default")
+}
+
+func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOneStrict(t *testing.T) {
+	tdCurrentFolderSpellingIsThePlainOne(t, "strict")
+}
+
+func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOnePermissive(t *testing.T) {
+	tdCurrentFolderSpellingIsThePlainOne(t, "permissive")
+}
+
+func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOneManaged(t *testing.T) {
+	tdCurrentFolderSpellingIsThePlainOne(t, "managed")
+}
+
+func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOneManagedStrict(t *testing.T) {
+	tdCurrentFolderSpellingIsThePlainOne(t, "managed-strict")
+}
+
+// tdCurrentFolderSpellingIsThePlainOne runs the cells of
+// TestUnresolvedFolderCurrentFolderSpellingIsThePlainOne* in one pack.
+func tdCurrentFolderSpellingIsThePlainOne(t *testing.T, pack string) {
 	_, project := cdFirstFixture(t)
 	dot := "."
 	reads := []string{dot + "ssh/id_rsa", dot + "aws/credentials", dot + "ssh/*", dot + "ssh/id_*", dot + "aws/cred*",
@@ -88,7 +111,12 @@ func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOne(t *testing.T) {
 			}
 		}
 	}
+	judged := false
 	for _, p := range gap0437Packs {
+		if p.name != pack {
+			continue
+		}
+		judged = true
 		a := gap0437Server(t, p, "claudecode", "action")
 		tier := "L"
 		if strings.Contains(p.name, "strict") {
@@ -121,6 +149,9 @@ func TestUnresolvedFolderCurrentFolderSpellingIsThePlainOne(t *testing.T) {
 		if capped := plain[project+"|cd \"$TD327_UNSET\" && cat "+dot+"*/*"][1]; capped != true {
 			t.Errorf("%s: the plain wide pattern does not name the cap", p.name)
 		}
+	}
+	if !judged {
+		t.Fatalf("no pack %q", pack)
 	}
 }
 
