@@ -359,7 +359,7 @@ func TestStreamToolCallDeltasReachTheToolRules(t *testing.T) {
 							// findings alert. A server call: what the rules make of
 							// it is theirs. Logged only.
 							return
-						case kind == "good" && !((c.end == "cut" || c.end == "late-cut") && tier.failClosed):
+						case kind == "good" && ((c.end != "cut" && c.end != "late-cut") || !tier.failClosed):
 							want = "pass"
 						}
 						if got != want {
