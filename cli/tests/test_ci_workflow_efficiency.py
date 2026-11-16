@@ -450,3 +450,23 @@ def test_go_unix_test_pattern_selects_the_unix_and_darwin_tests() -> None:
     open_loop = names(gateway / "gap0490_open_loop_test.go")
     assert open_loop and not open_loop & selected
     assert subprocess.run([*script], cwd=ROOT, capture_output=True).returncode == 2
+
+
+def test_connector_matrix_runs_the_gateway_matrix_tests_in_guarded_parts() -> None:
+    # Connector Matrix (packages and CLI) ran the internal/gateway matrix tests
+    # beside cli, config and e2e: 950 s of its 1,200 s, cancelled when a
+    # checkout took 308 s (PR #1456). They run in four guarded parts.
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    job = yaml.safe_load(workflow)["jobs"]["connector-matrix"]
+    include = job["strategy"]["matrix"]["include"]
+    assert include[0] == {"part": "packages", "label": "packages and CLI"}
+    assert include[1:5] == [{"part": f"gateway-{i}", "label": f"gateway {i + 1} of 4"} for i in range(4)]
+    assert [entry["part"] for entry in include[5:]] == ["0", "1", "2", "3"]
+    run = next(step["run"] for step in job["steps"] if "connector-matrix-test" in step.get("run", ""))
+    assert "CONNECTOR_MATRIX_GATEWAY_PARTS=4" in run
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    packages = makefile.split("else ifeq ($(CONNECTOR_MATRIX_PART),packages)", 1)[1].split("else ifneq", 1)[0]
+    assert "./internal/gateway" not in packages
+    assert "--package-dir internal/gateway --built-files" in makefile
+    assert '--expect-run "$$run"' in makefile
+    assert "go-connector-matrix-test: .SHELLFLAGS := -o pipefail -c" in makefile

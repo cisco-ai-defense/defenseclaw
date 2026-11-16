@@ -1326,14 +1326,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # The connector package runs longer than the PR job budget as one job.
-    # Its matrix tests run in four parts beside the other packages
-    # (Makefile CONNECTOR_MATRIX_PART).
+    # Its matrix tests run in four parts, and those of internal/gateway in
+    # four more, beside the other packages (Makefile CONNECTOR_MATRIX_PART).
+    # With the gateway in it, packages and CLI ran 950 s of its 1,200 s and
+    # was cancelled when a checkout took 308 s (PR #1456).
     strategy:
       fail-fast: false
       matrix:
         include:
           - part: packages
             label: packages and CLI
+          - part: gateway-0
+            label: gateway 1 of 4
+          - part: gateway-1
+            label: gateway 2 of 4
+          - part: gateway-2
+            label: gateway 3 of 4
+          - part: gateway-3
+            label: gateway 4 of 4
           - part: "0"
             label: connector 1 of 4
           - part: "1"
@@ -1365,7 +1375,7 @@ jobs:
       # the goroutine dump that names its test, and its log is kept. The
       # Makefile default of 60 minutes outlived the job, so a hung connector
       # part left no log at all (GAP-0834).
-      - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=4 GO_TEST_TIMEOUT=14m
+      - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=4 CONNECTOR_MATRIX_GATEWAY_PARTS=4 GO_TEST_TIMEOUT=14m
         timeout-minutes: 18
 
   # The Secure Client profile hook hardening flow (a synthetic target home and
