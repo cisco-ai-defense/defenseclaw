@@ -129,6 +129,14 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				ids = append(ids, toolshape.HomePathRules(access, relative, content)...)
 			}
 			for _, id := range ids {
+				// Outside the strict tier and managed installs a pack_typed rule
+				// is the native twin's to judge (below), as the shell lane
+				// judges it as the pack's typed finding: a lane alert at the
+				// rule's severity judged the MCP call harder than the native
+				// tool (rel-1-0-10:GAP-1058).
+				if !hard && toolshape.PackTypedPathRule(id) {
+					continue
+				}
 				add(id, "path in MCP tool arguments", false)
 			}
 			if twins >= maxNonShellPathTwins {
