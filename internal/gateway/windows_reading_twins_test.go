@@ -134,7 +134,7 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 	}
 	hook := trustedActionRequest{Input: input, windowsDialectReadings: true}
 	twins, cut := windowsReadingTwinRequests(hook, partial)
-	if len(twins) != 1 || cut.Any() {
+	if len(twins) != 2 || cut.Any() {
 		t.Fatalf("got %d twins, want the readable-statements one", len(twins))
 	}
 	twin := twins[0]
@@ -159,7 +159,7 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 	unplaced.Input.DialectHint = ""
 	ambiguous := partial
 	ambiguous.Parse.Status = actionfacts.StatusAmbiguous
-	if got, _ := windowsReadingTwinRequests(unplaced, ambiguous); len(got) != 1 ||
+	if got, _ := windowsReadingTwinRequests(unplaced, ambiguous); len(got) != 2 ||
 		got[0].Input.Command != twin.Input.Command || got[0].Input.DialectHint != actionfacts.DialectPowerShell {
 		t.Fatalf("an unplaced call with an ambiguous PowerShell reading got %d twins, want the readable-statements one", len(got))
 	}
@@ -202,12 +202,12 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 	if facts := actionfacts.Analyze(noneHinted); facts.Parse.Status != actionfacts.StatusPartial {
 		t.Fatalf("fixture is not a partial PowerShell reading: %+v", facts.Parse)
 	}
-	if got, cut := windowsReadingTwinRequests(none, ambiguous); len(got) != 1 || cut.Any() ||
+	if got, cut := windowsReadingTwinRequests(none, ambiguous); len(got) != 2 || cut.Any() ||
 		got[0].Input.Command != none.Input.Command || got[0].Input.DialectHint != actionfacts.DialectPowerShell || !got[0].readingTwin {
 		t.Fatalf("an unplaced call with no readable statement got %d twins, want its whole PowerShell reading", len(got))
 	}
 	// The readable-statements reading counts its statements against the
-	// reading's bound (internal/guardrail/bounded): past it there is no twin
+	// reading's bound (internal/guardrail/bounded): past it there is no readable-statements twin
 	// and the cap is returned for the call's findings.
 	many := make([]string, 0, 130)
 	for range 129 {
@@ -215,7 +215,7 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 	}
 	long := hook
 	long.Input.Command = strings.Join(append(many, unreadable), "\n")
-	if got, cut := windowsReadingTwinRequests(long, partial); len(got) != 0 || !cut.Has(bounded.Items) {
-		t.Fatalf("a call past the statement bound got %d twins and cut %v, want none and the items cap", len(got), cut.Reason())
+	if got, cut := windowsReadingTwinRequests(long, partial); len(got) != 1 || !cut.Has(bounded.Items) {
+		t.Fatalf("a call past the statement bound got %d twins and cut %v, want the argument reading and the items cap", len(got), cut.Reason())
 	}
 }

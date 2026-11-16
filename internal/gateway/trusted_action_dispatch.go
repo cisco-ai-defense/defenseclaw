@@ -882,6 +882,9 @@ func dispatchTrustedAction(
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
 		}()
 	}
+	defer func() {
+		findings = withUnreadPowerShellFloor(findings, request, facts)
+	}()
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
 	for _, twin := range windowsTwins {
 		defer func() {

@@ -998,6 +998,16 @@ type ParseResult struct {
 	Status  ParseStatus
 	Dialect Dialect
 	Issues  []IssueCode
+	// Unread is set when part of the source was skipped without being read:
+	// the PowerShell reader stopped lexing at a construct it could not
+	// balance, or passed over a --% remainder. No reader tokenized that text,
+	// so it may run a command no fact shows (GAP-0988, GAP-1015). A command
+	// whose operand grammar is not modeled, a dynamic word, an opaque value
+	// the reader balanced (a subexpression, an array, a hashtable, a
+	// here-string) or a dynamic call target leaves it unset: the text was
+	// read, and the argument-command reading (psparse.ArgumentCommandReading)
+	// reads the commands in those values.
+	Unread bool
 }
 
 // ParseStatus is a closed set of parser outcomes.
