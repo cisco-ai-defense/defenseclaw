@@ -538,17 +538,23 @@ func (r *capFloorConsumerReader) read(command string, stmt, i int) (program stri
 	return program, args, known, true
 }
 
-// shellDashC is capFloorDashC of the reading of command[stmt:i]. joined reports that
-// the text since the last reading of the same statement continues its last
-// word (no unquoted blank or redirect): the command word and every word but
-// the last are those of that reading, and the last word only grows. When
-// that reading already rules a shell -c out for any growth of the word (the
-// program is no shell, or the word is no -c option and adding to it cannot
-// make one), the answer is false without a new parse; this keeps a statement
-// of thousands of joined quotes (the GAP-0984 shape) one parse. ok is false
-// past the budget.
-func (r *capFloorConsumerReader) shellDashC(command string, stmt, i int, joined bool) (dashC, ok bool) {
-	if l := r.last; joined && l.valid && l.stmt == stmt && l.end <= i && l.known && len(l.args) > 0 &&
+// shellDashC is capFloorDashC of the reading of command[stmt:i]. grows
+// reports that the text since the last reading of the same statement
+// continues its last word (no unquoted blank or redirect) and that the word
+// is plain from its start (capFloorPlainByte characters and plain single and
+// double quotes, see capFloorCut): the command word and every word but the
+// last are those of that reading, and the value of the last word is the value
+// that reading saw with text appended. When that reading already rules a
+// shell -c out for any growth of the word (the program is no shell, or the
+// word is no -c option and adding to it cannot make one), the answer is false
+// without a new parse; this keeps a statement of thousands of joined quotes
+// (the GAP-0984 shape) one parse. Any other word is read again, charged to
+// the budget: a $'...' or $"..." quote, an escape, a brace, a tilde, a glob
+// or an expansion can change what the text before it reads as once the word
+// goes on (bash $'-c'... reads $ before the quote and -c after it). ok is
+// false past the budget.
+func (r *capFloorConsumerReader) shellDashC(command string, stmt, i int, grows bool) (dashC, ok bool) {
+	if l := r.last; grows && l.valid && l.stmt == stmt && l.end <= i && l.known && len(l.args) > 0 &&
 		(!slices.Contains(capFloorShells, l.program) || capFloorNeverDashC(l.args[len(l.args)-1])) {
 		return false, true
 	}
@@ -571,6 +577,16 @@ func capFloorNeverDashC(word string) bool {
 	return word != "" && (!strings.HasPrefix(word, "-") || strings.HasPrefix(word, "--") || strings.ContainsAny(word, "=/"))
 }
 
+// capFloorPlainByte reports an unquoted byte that is itself in the value of
+// its word and starts no expansion, quote or escape (the plain path
+// characters of hookpaths.StaticWord): a word of such bytes and plain quotes
+// has the value of its text, so text appended to it only appends to that
+// value.
+func capFloorPlainByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		strings.IndexByte("_./-,:@%+=", c) >= 0
+}
+
 // capFloorHeredoc is a here-document whose body starts after the next line
 // end.
 type capFloorHeredoc struct {
@@ -587,6 +603,11 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 	// broken is set by an unquoted blank or redirect since the last
 	// consumer reading: the word that reading ended in is complete.
 	broken := false
+	// plain is cleared by any part of the word in progress that is not a
+	// capFloorPlainByte or a plain quote: a $'...' or $"..." quote, an
+	// escape, a $, a backquote, a glob, brace or tilde character, a
+	// command substitution. A plain word only grows (shellDashC).
+	plain := true
 	var pending []capFloorHeredoc
 	// open holds the open double quotes (") and subshells or command
 	// substitutions (() around i: a $( inside a double-quoted string is
@@ -615,6 +636,7 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
 		start, stmt = next, next
+		plain = true
 	}
 	cutPipe := func(end, next int) {
 		if pipeFrom < 0 {
@@ -624,6 +646,7 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
 		start, stmt = next, next
+		plain = true
 	}
 	// enter opens a $( or ( at i whose statement starts at next.
 	enter := func(i, next int) {
@@ -643,6 +666,10 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 	for i := from; i < to; {
 		c := command[i]
 		if n := len(open); n > 0 && open[n-1] == '"' {
+			if c == '\\' || c == '$' || c == '`' {
+				// An escape or an expansion inside the double quotes.
+				plain = false
+			}
 			switch {
 			case c == '\\':
 				i += 2
@@ -660,8 +687,13 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 			}
 			continue
 		}
-		if c == ' ' || c == '\t' || c == '<' || c == '>' || c == ')' {
+		switch {
+		case c == ' ' || c == '\t' || c == '<' || c == '>':
+			broken, plain = true, true
+		case c == ')':
 			broken = true
+		case c != '\'' && c != '"' && !capFloorPlainByte(c):
+			plain = false
 		}
 		switch {
 		case c == '\\':
@@ -676,9 +708,12 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 			}
 			// Past the reader's budget the quoted word is not judged as a
 			// script: the cut is a cap of the call (the unknown tier).
-			if dashC, _ := reader.shellDashC(command, stmt, i, !broken); dashC {
+			if dashC, _ := reader.shellDashC(command, stmt, i, !broken && plain); dashC {
 				pieces = append(pieces, capFloorPiece{start: i, end: end, body: body})
 			}
+			// The helper also folds escaped quote joins. Those are not
+			// plain quotes: the next quote must get a fresh reading.
+			plain = plain && len(body) == end-i-2
 			broken = false
 			i = end
 			continue
@@ -758,6 +793,9 @@ func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) [
 				stmt = stmtOpen[len(stmtOpen)-1]
 				stmtOpen = stmtOpen[:len(stmtOpen)-1]
 			}
+			// What follows the ) in the word around it holds the
+			// substitution: not a plain word.
+			plain = false
 		case c == '|' || c == '&':
 			if i > from && (command[i-1] == '>' || command[i-1] == '<') || i+1 < to && command[i+1] == '>' {
 				// A redirect (2>&1, &>, >|), not a list operator.

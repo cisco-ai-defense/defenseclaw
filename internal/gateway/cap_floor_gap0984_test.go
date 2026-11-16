@@ -67,3 +67,57 @@ func TestGAP0984CapFloorConsumerBudgetIsACap(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP0984CapFloorPlainWordReuse covers the review's ANSI-C scratch
+// case and words whose earlier reading can or cannot safely be reused.
+func TestGAP0984CapFloorPlainWordReuse(t *testing.T) {
+	for _, tc := range []struct {
+		name, prefix string
+		wantBody     bool
+		wantReads    int
+	}{
+		{"review-ANSI-C", "bash $'-c'", true, 2},
+		{"plain-option", "bash '-c'", true, 2},
+		{"plain-data", "tool arg'data'", false, 1},
+		{"plain-double", "tool arg'one'\"data\"", false, 1},
+		{"plain-joined", "tool arg'data'\"more\"", false, 1},
+		{"escaped-join", "tool arg'a'\\''b'", false, 2},
+		{"ANSI-C-data", "tool $'data'", false, 2},
+		{"locale-data", "tool arg'one'$\"data\"", false, 2},
+		{"escaped-data", "tool \\x'data'", false, 2},
+		{"expanded-data", "tool $HOME'data'", false, 2},
+		{"tilde-data", "tool ~'data'", false, 2},
+		{"glob-data", "tool *'data'", false, 2},
+		{"brace-data", "tool {x,y}'data'", false, 2},
+		{"double-expansion", "tool arg'one'\"$HOME\"", false, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := tc.prefix + "'true'"
+			reader := &capFloorConsumerReader{budget: capFloorConsumerBytes}
+			pieces := capFloorCut(command, reader, 0, len(command))
+			found := false
+			for _, piece := range pieces {
+				if piece.body == "true" {
+					found = true
+				}
+			}
+			if found != tc.wantBody {
+				t.Errorf("script piece=%v, want %v", found, tc.wantBody)
+			}
+			// Every case starts its first quoted word at the same offset
+			// as its first quote. Nonplain words must also read the prefix
+			// at the final quote, even if it previously ruled a shell out.
+			first := strings.IndexAny(command, "'\"")
+			want := first
+			if tc.wantReads == 2 {
+				want += len(tc.prefix)
+			}
+			if got := capFloorConsumerBytes - reader.budget; got != want {
+				t.Errorf("charged=%d, want %d", got, want)
+			}
+			if reader.unread {
+				t.Fatal("unexpected budget refusal")
+			}
+		})
+	}
+}
