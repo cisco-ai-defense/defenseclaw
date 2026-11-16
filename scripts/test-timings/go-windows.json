@@ -296,6 +296,7 @@
    "TestGAP0589PowerShellCappedReadingFiveTiers": 34.0,
    "TestGAP0632PinnedPackIdentityKeepsStateProtection": 9.7,
    "TestGAP0700GAP0721OrdinaryCommandsAreDecidedWithoutHangOrPanic": 6.1,
+   "TestGAP1060DefaultStreamWriteNativeEveryTier": 153.7,
    "TestHandlePassthrough_SSRFHardening": 2.8,
    "TestHandleSkillScanRejectsJudgeFailure": 3.2,
    "TestHookCallWALFramesBounded": 2.3,
