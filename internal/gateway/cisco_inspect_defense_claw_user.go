@@ -76,19 +76,29 @@ func attachDefenseClawInspectUser(ctx context.Context, payload map[string]interf
 
 // defenseClawInspectUserFallback is the validation-error handler of a
 // request that carried the identity fields: it removes them, so the
-// request is sent once more exactly as before this feature, and stops
-// sending them to the endpoint for defenseClawInspectUserRejectedTTL. A
-// request without them has no handler, which keeps the 400/422 handling it
-// had.
-func defenseClawInspectUserFallback(sent bool, payload map[string]interface{}, endpoint string) func() *ScanVerdict {
+// request is sent once more exactly as before this feature, and sets
+// *retried. A request without them has no handler, which keeps the 400/422
+// handling it had.
+func defenseClawInspectUserFallback(sent bool, payload map[string]interface{}, retried *bool) func() *ScanVerdict {
 	if !sent {
 		return nil
 	}
 	return func() *ScanVerdict {
 		delete(payload, "metadata")
 		delete(payload, "dc_metadata")
-		defenseClawInspectUserRejected.Store(endpoint, time.Now())
+		*retried = true
 		fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] HTTP 400/422 with the end-user fields, retrying without them\n")
 		return nil
+	}
+}
+
+// recordDefenseClawInspectUserRejection stops sending the identity fields
+// to the endpoint for defenseClawInspectUserRejectedTTL, but only when the
+// request without them got a verdict: that proves the fields were what AI
+// Defense refused. A retry that also fails was refused for another reason,
+// which must not turn attribution off.
+func recordDefenseClawInspectUserRejection(retried bool, verdict *ScanVerdict, endpoint string) {
+	if retried && verdict != nil {
+		defenseClawInspectUserRejected.Store(endpoint, time.Now())
 	}
 }

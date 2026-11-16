@@ -312,6 +312,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// gets the request again without them (onValidationError below), so
 	// they can never cost an inspection.
 	sentUser := attachDefenseClawInspectUser(ctx, payload, c.endpoint)
+	userRetried := false
 
 	// currentToken is captured by both setAuth and onUnauthorized so
 	// the retry can attach the refreshed token without re-invoking
@@ -326,7 +327,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 		setAuth: func(req *http.Request) {
 			req.Header.Set("Authorization", "Bearer "+currentToken)
 		},
-		onValidationError: defenseClawInspectUserFallback(sentUser, payload, c.endpoint),
+		onValidationError: defenseClawInspectUserFallback(sentUser, payload, &userRetried),
 		onOutcome:         c.notifyAvailability,
 		onUnauthorized: func(retryCtx context.Context) bool {
 			c.provider.Invalidate()
@@ -341,6 +342,7 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 			return true
 		},
 	})
+	recordDefenseClawInspectUserRejection(userRetried, verdict, c.endpoint)
 	if verdict == nil {
 		// Any nil verdict from doInspectHTTP means the AID call did
 		// not produce an enforceable decision (marshal error, request

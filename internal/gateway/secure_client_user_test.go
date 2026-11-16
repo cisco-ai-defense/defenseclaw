@@ -328,6 +328,36 @@ func TestDefenseClawInspectRetriesWithoutRejectedUser(t *testing.T) {
 	}
 }
 
+// A 400 that is not about the identity fields (the retry without them is
+// refused too) must not stop attribution for the endpoint.
+func TestDefenseClawInspectUnrelatedValidationErrorKeepsTheUser(t *testing.T) {
+	withSecureClientUserAttribution(t, kernelAccount(testSCSID), "")
+	var requests, withUser atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		raw, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(raw), "dc_metadata") {
+			withUser.Add(1)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"message":"invalid message content"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000}, newFakeCloudProvider("tok"))
+	ctx := attachSecureClientUser(claimedRequestContext(testSCSID, `CORP\alice`))
+	if verdict := c.Inspect(ctx, []ChatMessage{{Role: "user", Content: "hi"}}); verdict != nil {
+		t.Fatalf("verdict = %+v, want none", verdict)
+	}
+	if defenseClawInspectUserRejectedRecently(srv.URL, time.Now()) {
+		t.Fatal("a 400 the retry without the user also got was recorded as an identity rejection")
+	}
+	before := withUser.Load()
+	_ = c.Inspect(ctx, []ChatMessage{{Role: "user", Content: "again"}})
+	if withUser.Load() != before+1 {
+		t.Fatalf("the next request was sent without the user (requests=%d, with user=%d)", requests.Load(), withUser.Load())
+	}
+}
+
 func TestDefenseClawInspectUserRejectionExpires(t *testing.T) {
 	withSecureClientUserAttribution(t, kernelAccount(testSCSID), "")
 	defenseClawInspectUserRejected.Store("https://aid.example", time.Now().Add(-2*defenseClawInspectUserRejectedTTL))
