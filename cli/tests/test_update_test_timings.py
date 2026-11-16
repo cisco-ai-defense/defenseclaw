@@ -155,6 +155,59 @@ def test_a_refresh_keeps_the_time_of_a_test_a_timed_out_shard_never_reached(tmp_
     assert data["tests"]["pkg/a"] == {"*": 0.5, "TestRan": 30.0, "TestUnreached": 90.0}
 
 
+def test_a_refresh_weighs_the_test_a_timeout_cut_off_at_least_its_recorded_time(tmp_path: Path) -> None:
+    # go_test_report.py writes the test a -timeout cut off after the end of
+    # its package, with the time it had run: a lower bound. Shard 12 of run
+    # 43831888457 recorded 21 s for a test of 116.6 s that way, and the
+    # refresh took the 21 s. Now the test keeps its recorded time when that
+    # is longer, a test with no recorded time keeps the lower bound, and a
+    # run that took a test to its end still sets that time.
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package a\n\nfunc TestCut(t *testing.T) {}\n\nfunc TestCutNew(t *testing.T) {}\n\n"
+        "func TestCutLonger(t *testing.T) {}\n\nfunc TestEndedElsewhere(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    shard = tmp_path / "shard"
+    shard.mkdir()
+    (shard / "t.json").write_text(
+        "\n".join(
+            [
+                _event("pass", "pkg/a", 5.0, "TestEndedElsewhere"),
+                _event("fail", "pkg/a", 720.0),
+                _event("fail", "pkg/a", 21.0, "TestCut"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "t.json").write_text(
+        "\n".join(
+            [
+                _event("fail", "pkg/a", 720.0),
+                _event("fail", "pkg/a", 259.0, "TestCutNew"),
+                _event("fail", "pkg/a", 300.0, "TestCutLonger"),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    runs = runs_of([shard, other])
+    files = [file for run in runs for file in run]
+    old = {"tests": {"pkg/a": {"TestCut": 116.6, "TestCutLonger": 200.0, "TestEndedElsewhere": 90.0, "*": 0.2}}}
+
+    data = keep_unreached_go_tests(old, go_timings(files, MODULE, runs), files, MODULE, root=tmp_path)
+
+    assert data["tests"]["pkg/a"] == {
+        "*": 0.1,
+        "TestCut": 116.6,
+        "TestCutLonger": 300.0,
+        "TestCutNew": 259.0,
+        "TestEndedElsewhere": 5.0,
+    }
+
+
 HEAVY_PART_SECONDS = (180.492, 164.289, 244.576)
 
 

@@ -30,9 +30,11 @@ spans overlap: internal/actionfacts summed 653 s of test time in a package
 run of 165 s, run 43229287498). The shares of a package add up to the time
 its tests ran, which is what a shard of them takes. A top-level test still
 running when the stream ends (the package -timeout killed it) is written as
-a fail with the share it had until the last event: a refresh then weighs
-the slowest test of a timed-out shard by at least that time, not as an
-unlisted test. An event without a Time keeps go test's Elapsed.
+a fail with the share it had until the last event, after the end event
+of its package: a refresh (scripts/update_test_timings.py) reads that
+place as a cut-off and weighs the test by at least that time and at least
+its recorded time, never as an unlisted test. An event without a Time keeps
+go test's Elapsed.
 
 --annotate TITLE prints a GitHub error annotation per failed top-level test
 (at most 20). The exit status is always 0; the caller keeps go test's.

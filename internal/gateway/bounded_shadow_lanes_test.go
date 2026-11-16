@@ -19,8 +19,8 @@ import (
 // floor standing without the judge; both would be false of a lane that does not
 // decide, and registering such a lane there only to satisfy the table says nothing
 // about the bound. A shadow lane registers here instead, with its own contract
-// (boundedCheckShadowLanes, TestBoundRuleShadowLaneNeverDecides, and as a sub-test
-// of TestBoundRuleEveryLaneCap), in every tier the hook route judges in:
+// (boundedCheckShadowLanes, TestBoundRuleShadowLaneNeverDecides), in every tier the
+// hook route judges in:
 //
 //   - the live verdict past a cap (limit+1, 2*limit), in every shape the lane has,
 //     is exactly the verdict with the lane off: action and findings;
