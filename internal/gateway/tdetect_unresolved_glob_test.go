@@ -6,9 +6,13 @@
 package gateway
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // TestUnresolvedFolderPatternsAndFolderSpellingsAreTheUnknownTier is
@@ -103,4 +107,58 @@ var unresolvedFolderPendingGlobCopyRows = []struct {
 	// (= rel); on this branch alone: allow in every pack.
 	{"cd \"$TD327_UNSET\" && cp ./* /tmp/staged", "LBLBB",
 		"GAP-0966: glob-copy FP removal reverted for push 4; restored by the s7/wred2-widen redesign in push 5"},
+}
+
+// TestUnresolvedFolderWidePatternIsTruncatedNotNothing is rel-1-0-10:GAP-1003
+// (cells of the s7-td327rev3 probe TestTD3R3GlobCap): a dot-folder pattern
+// wide enough to match more protected spellings than the twin reads
+// (actionfacts maxStateGlobMatches) is read as its first matches and is
+// TRUNCATED (bounded.Items) through the one bound rule, never "names
+// nothing": after a cd to an unset variable a read or a move of it is at
+// least the unknown tier in every pack (alert in default, permissive and
+// managed, block in strict and managed-strict), and the answer names the
+// cap. A listing of the same pattern opens no file and stays allowed.
+func TestUnresolvedFolderWidePatternIsTruncatedNotNothing(t *testing.T) {
+	_, project := cdFirstFixture(t)
+	dot := "."
+	patterns := []string{dot + "*/*", dot + "[a-z]*/*"}
+	for _, pattern := range patterns {
+		reading := actionfacts.RelativeGlobTwinsNamed("cat "+pattern, "/home/alice", unresolvedFolderGlobNames())
+		if !reading.Truncated.Has(bounded.Items) || len(reading.Twins) == 0 {
+			t.Fatalf("%q: %d twins, truncated %q; the probe needs a pattern past the cap", pattern, len(reading.Twins), reading.Truncated.Reason())
+		}
+	}
+	capReason := bounded.ReasonCode + " cap=" + bounded.Items.String()
+	for _, p := range gap0437Packs {
+		a := gap0437Server(t, p, "claudecode", "action")
+		tier := "L"
+		if strings.Contains(p.name, "strict") {
+			tier = "B"
+		}
+		serve := func(command string) (string, string) {
+			out := gap0437Serve(t, a.handleAgentHook("claudecode"), "/api/v1/claude-code/hook", map[string]any{
+				"hook_event_name": "PreToolUse", "session_id": "td-cap-" + p.name, "cwd": project,
+				"tool_name": "Bash", "tool_use_id": "tu-" + command, "tool_input": map[string]any{"command": command},
+			})
+			raw, _ := json.Marshal(out)
+			action, _ := out["action"].(string)
+			return map[string]string{"allow": "A", "alert": "L", "block": "B"}[action], string(raw)
+		}
+		for _, pattern := range patterns {
+			for _, verb := range []string{"cat %s", "mv %s /tmp/staged"} {
+				command := "cd \"$TD327_UNSET\" && " + strings.Replace(verb, "%s", pattern, 1)
+				got, raw := serve(command)
+				if cdFirstRank[got] < cdFirstRank[tier] {
+					t.Errorf("%s: %q is %s, want at least %s", p.name, command, got, tier)
+				}
+				if !strings.Contains(raw, capReason) {
+					t.Errorf("%s: %q does not name the cap (%s): %.400s", p.name, command, capReason, raw)
+				}
+			}
+			command := "cd \"$TD327_UNSET\" && ls -d " + pattern
+			if got, raw := serve(command); got != "A" || strings.Contains(raw, capReason) {
+				t.Errorf("%s control %q is %s (cap named %v), want allow", p.name, command, got, strings.Contains(raw, capReason))
+			}
+		}
+	}
 }

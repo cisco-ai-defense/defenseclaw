@@ -4,8 +4,11 @@
 package actionfacts
 
 import (
+	"fmt"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // TestRelativeGlobTwinsNamed is the reading of a pathname pattern in a folder
@@ -34,8 +37,41 @@ func TestRelativeGlobTwinsNamed(t *testing.T) {
 		{"cat /root/.ssh/id_*", nil},
 		{"cat *.go", nil},
 	} {
-		if got := RelativeGlobTwinsNamed(tc.command, "/home/alice", names); !slices.Equal(got, tc.want) {
-			t.Errorf("RelativeGlobTwinsNamed(%q) = %q; want %q", tc.command, got, tc.want)
+		got := RelativeGlobTwinsNamed(tc.command, "/home/alice", names)
+		if !slices.Equal(got.Twins, tc.want) || got.Truncated.Any() {
+			t.Errorf("RelativeGlobTwinsNamed(%q) = %q truncated %v; want %q", tc.command, got.Twins, got.Truncated.Reason(), tc.want)
+		}
+	}
+}
+
+// TestRelativeGlobTwinsNamedCap: a pattern that may match more names than
+// maxStateGlobMatches is read as its first maxStateGlobMatches matches and
+// reports bounded.Items, never no twin (rel-1-0-10:GAP-1003); at the cap it
+// is read whole and not truncated. The names are synthetic.
+func TestRelativeGlobTwinsNamedCap(t *testing.T) {
+	names := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("n%03d", i)
+		}
+		return out
+	}
+	at := RelativeGlobTwinsNamed("cat n*", "/home/alice", names(maxStateGlobMatches))
+	if len(at.Twins) != maxStateGlobMatches || at.Truncated.Any() || len(at.Capped) != 0 {
+		t.Fatalf("at the cap: %d twins, truncated %q, %d capped; want %d, none, 0",
+			len(at.Twins), at.Truncated.Reason(), len(at.Capped), maxStateGlobMatches)
+	}
+	for _, size := range []int{maxStateGlobMatches + 1, 2 * maxStateGlobMatches} {
+		past := RelativeGlobTwinsNamed("cat n* other.txt", "/home/alice", names(size))
+		if len(past.Twins) != maxStateGlobMatches || !past.Truncated.Has(bounded.Items) {
+			t.Fatalf("past the cap (%d names): %d twins, truncated %q; want %d and items",
+				size, len(past.Twins), past.Truncated.Reason(), maxStateGlobMatches)
+		}
+		if len(past.Capped) != maxStateGlobMatches || !slices.Contains(past.Capped, "n000") || slices.Contains(past.Capped, "other.txt") {
+			t.Fatalf("past the cap (%d names): capped words %q", size, past.Capped)
+		}
+		if past.Twins[0] != "cat 'n000' other.txt" {
+			t.Fatalf("past the cap (%d names): first twin %q", size, past.Twins[0])
 		}
 	}
 }

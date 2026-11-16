@@ -27,6 +27,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -117,15 +118,23 @@ func stateGlobTwin(command, activeHome string, stateNames []string) (twin string
 // pattern with no literal character in any component (*, */*, ./*) names
 // nothing, as the hook-path walk reads a pattern in a folder it cannot list
 // (GlobHasLiteral). None when no pattern matched a name.
-func RelativeGlobTwinsNamed(command, activeHome string, names []string) []string {
+//
+// A pattern that may match more than maxStateGlobMatches names is read as
+// its first maxStateGlobMatches matches and the result is truncated
+// (bounded.Items, the one bound rule): the caller judges what was read and
+// gives the call at least the unknown tier, never "names nothing"
+// (rel-1-0-10:GAP-1003).
+func RelativeGlobTwinsNamed(command, activeHome string, names []string) RelativeGlobTwins {
 	if len(names) == 0 || !strings.ContainsAny(command, "*?[") {
-		return nil
+		return RelativeGlobTwins{}
 	}
 	home, _ := normalizeActiveHome(activeHome)
 	home = strings.TrimRight(home, "/")
 	if home == "" || !posixShellHome(home) || strings.ContainsAny(home, "\x00\r\n") {
-		return nil
+		return RelativeGlobTwins{}
 	}
+	var trunc bounded.Truncated
+	var capped []string
 	edits, ok := globWordEdits(command, home, func(pattern string) []string {
 		if strings.HasPrefix(pattern, "/") || DriveSlashPath(pattern) {
 			// A home word (~, $HOME) or an absolute pattern: its folder is
@@ -163,17 +172,19 @@ func RelativeGlobTwinsNamed(command, activeHome string, names []string) []string
 				}
 				match = strings.Join(append(prefix, name), "/")
 			}
-			if !slices.Contains(matches, match) {
-				matches = append(matches, match)
+			if slices.Contains(matches, match) {
+				continue
 			}
-			if len(matches) > maxStateGlobMatches {
-				return nil
+			if !trunc.Within(bounded.Items, len(matches)+1, maxStateGlobMatches) {
+				capped = append(capped, matches...)
+				break
 			}
+			matches = append(matches, match)
 		}
 		return matches
 	})
 	if !ok {
-		return nil
+		return RelativeGlobTwins{}
 	}
 	count := 0
 	for _, change := range edits {
@@ -185,7 +196,20 @@ func RelativeGlobTwinsNamed(command, activeHome string, names []string) []string
 			return globQuotedWord(words[min(index, len(words)-1)])
 		}))
 	}
-	return twins
+	return RelativeGlobTwins{Twins: twins, Truncated: trunc.Set(), Capped: capped}
+}
+
+// RelativeGlobTwins is the reading RelativeGlobTwinsNamed gives a command.
+type RelativeGlobTwins struct {
+	// Twins are the readings, one per match.
+	Twins []string
+	// Truncated is bounded.Items when a pattern may match more names than
+	// maxStateGlobMatches: Twins spell its first maxStateGlobMatches
+	// matches only.
+	Truncated bounded.CapSet
+	// Capped are the words a capped pattern is read as in Twins, so a caller
+	// can tell the operand the cap cut short from the other words.
+	Capped []string
 }
 
 // globWordEdit is one pathname pattern word of a command (its byte span)

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -135,23 +136,37 @@ var unresolvedFolderGlobNames = sync.OnceValue(func() []string {
 // pattern, in a folder the call does not give, may match a named protected
 // file there: the twin that spells each protected name the pattern may
 // match (as if each existed, one reading per match) has an operand the
-// unknown tier reads.
-func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, facts actionfacts.Facts, noFolder bool) bool {
+// unknown tier reads. truncated is the cap the reading hit when a pattern
+// that is such an operand may match more names than the twin reads
+// (rel-1-0-10:GAP-1003); a capped pattern the call only lists or never
+// opens is no truncated operand.
+func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, facts actionfacts.Facts, noFolder bool) (names bool, truncated bounded.CapSet) {
 	if facts.Parse.Dialect != actionfacts.DialectPOSIX || !noFolder && !facts.MayRunInUnresolvedFolder() {
-		return false
+		return false, truncated
 	}
 	command, known := trustedBashCommandInput(request.Input)
 	if !known {
-		return false
+		return false, truncated
 	}
-	for _, twin := range actionfacts.RelativeGlobTwinsNamed(command, request.Input.ActiveHome, unresolvedFolderGlobNames()) {
+	reading := actionfacts.RelativeGlobTwinsNamed(command, request.Input.ActiveHome, unresolvedFolderGlobNames())
+	cappedOperand := false
+	for _, twin := range reading.Twins {
 		input := request.Input
 		input.Command, input.Args, input.Argv = twin, nil, nil
-		if unresolvedFolderMayNameProtectedFile(actionfacts.Analyze(input), noFolder) {
-			return true
+		twinFacts := actionfacts.Analyze(input)
+		names = names || unresolvedFolderMayNameProtectedFile(twinFacts, noFolder)
+		cappedOperand = cappedOperand || reading.Truncated.Any() && slices.ContainsFunc(twinFacts.Paths, func(candidate actionfacts.PathFact) bool {
+			return (noFolder || candidate.UnresolvedFolder()) && unresolvedFolderOperand(candidate) &&
+				slices.Contains(reading.Capped, strings.TrimPrefix(candidate.Value, "./"))
+		})
+		if names && (cappedOperand || !reading.Truncated.Any()) {
+			break
 		}
 	}
-	return false
+	if cappedOperand {
+		truncated = reading.Truncated
+	}
+	return names, truncated
 }
 
 // unresolvedFolderOperand reports a path fact the unknown tier reads: a
@@ -202,15 +217,22 @@ func withUnresolvedFolderTier(findings []RuleFinding, request trustedActionReque
 		// A proven finding decides on its own; the unknown tier adds nothing.
 		return findings
 	}
-	if !unresolvedFolderMayNameProtectedFile(facts, noFolder || statement) &&
-		!unresolvedFolderGlobMayNameProtectedFile(request, facts, noFolder || statement) {
-		return findings
+	names := unresolvedFolderMayNameProtectedFile(facts, noFolder || statement)
+	var truncated bounded.CapSet
+	if !names {
+		names, truncated = unresolvedFolderGlobMayNameProtectedFile(request, facts, noFolder || statement)
 	}
-	unknown := trustedActionLimitFindings(request.EnforcementCapable)
-	if len(unknown) == 0 {
-		return findings
+	if names {
+		unknown := trustedActionLimitFindings(request.EnforcementCapable)
+		if len(unknown) == 0 {
+			return findings
+		}
+		unknown[0].Title = unresolvedFolderTitle
+		unknown[0].Evidence = unresolvedFolderReason
+		findings = withUnknownFinding(findings, unknown[0])
 	}
-	unknown[0].Title = unresolvedFolderTitle
-	unknown[0].Evidence = unresolvedFolderReason
-	return withUnknownFinding(findings, unknown[0])
+	// A pattern the twin read only up to its cap is TRUNCATED: at least the
+	// unknown tier, with the cap named, beside what was read before it (the
+	// one bound rule, rel-1-0-10:GAP-1003).
+	return withBoundedTruncation(findings, truncated, request)
 }
