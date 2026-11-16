@@ -83,6 +83,22 @@ def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]
     return discovered
 
 
+def built_test_files(files: list[tuple[Path, tuple[str, ...]]], package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
+    """Keep the files `go list` builds into the package's test binary on this
+    GOOS/GOARCH: a guarded run (go_test_report.py --expect-run) then expects
+    only tests the binary has, not those of a _windows_test.go file or of a
+    //go:build line that leaves this platform out."""
+    listing = subprocess.run(
+        ["go", "list", "-f", "{{range .TestGoFiles}}{{println .}}{{end}}{{range .XTestGoFiles}}{{println .}}{{end}}", "."],
+        cwd=package_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    built = set(listing.split())
+    return [(path, names) for path, names in files if path.name in built]
+
+
 def match_test_files(files: list[tuple[Path, tuple[str, ...]]], pattern: str) -> list[tuple[Path, tuple[str, ...]]]:
     """Keep the tests `go test -run pattern` runs (a pattern without "/"
     selects top-level names by unanchored search); drop files left empty."""
@@ -352,6 +368,11 @@ def main() -> int:
     )
     parser.add_argument("--check", action="store_true", help="print every shard and verify the exact cover")
     parser.add_argument("--match", help="test mode: keep only the tests this go test -run pattern selects")
+    parser.add_argument(
+        "--built-files",
+        action="store_true",
+        help="test mode: keep only the test files go list builds on this GOOS/GOARCH (for go_test_report.py --expect-run)",
+    )
     parser.add_argument("--split-tests", action="store_true", help="test mode: balance each test separately")
     parser.add_argument(
         "--bounded",
@@ -384,6 +405,8 @@ def main() -> int:
             shards, expected, problems = _package_mode(args, timings[0] if timings else {})
         else:
             files = discover_test_files(args.package_dir)
+            if args.built_files:
+                files = built_test_files(files, args.package_dir)
             if args.match is not None:
                 files = match_test_files(files, args.match)
             package_dir = args.package_dir.resolve()

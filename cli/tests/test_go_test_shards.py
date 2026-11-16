@@ -672,3 +672,49 @@ def test_windows_gateway_and_connector_shards_fit_the_command_line() -> None:
             patterns = bounded_regexes(names)
             assert all(len(pattern) <= MAX_RUN_PATTERN_CHARS for pattern in patterns), package
             assert sorted(name for pattern in patterns for name in regex_names(pattern)) == sorted(names)
+
+
+def test_connector_matrix_gateway_parts_balance_on_the_times_of_the_matrix_run() -> None:
+    # The internal/gateway matrix tests (about 600 s on the hosted runner) left
+    # Connector Matrix (packages and CLI) at 950 s of its 1,200 s job (PR
+    # #1456). They run in four parts, balanced on their own times (a run of
+    # the matrix tests on 4 CPUs, 510.8 s).
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux-connector-matrix.json").read_text(encoding="utf-8"))
+    seconds = timings["tests"]["internal/gateway"]
+    pattern = "Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix"
+    files = match_test_files(discover_test_files(root / "internal/gateway"), pattern)
+    parts = partition_test_files(files, 4, seconds)
+
+    expected = sorted({name for _, names in files for name in names})
+    assert check_exact_cover(parts, expected) == []
+    default = seconds["*"]
+    weights = [sum(seconds.get(name, default) for name in part) for part in parts]
+    assert max(weights) < 1.25 * (sum(weights) / len(weights))
+    assert max(weights) < 240
+
+
+@pytest.mark.parametrize("goos", ["linux", "darwin", "windows"])
+def test_built_files_keeps_the_test_files_go_list_builds(goos: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A guarded part (go_test_report.py --expect-run) must not expect the tests
+    # of a file its platform does not build, such as a _windows_test.go file
+    # on Linux.
+    import shutil
+    import subprocess
+
+    if shutil.which("go") is None:
+        pytest.skip("needs the go command")
+    gateway = Path(__file__).resolve().parents[2] / "internal/gateway"
+    monkeypatch.setenv("GOOS", goos)
+    listing = subprocess.run(["go", "list", "-json", "."], cwd=gateway, check=True, capture_output=True, text=True)
+    package = json.loads(listing.stdout)
+    listed = set(package.get("TestGoFiles", [])) | set(package.get("XTestGoFiles", []))
+    discovered = discover_test_files(gateway)
+    built = {path.name for path, _ in go_test_shards.built_test_files(discovered, gateway)}
+
+    assert built == {path.name for path, _ in discovered} & listed
+    left_out = {"linux": "_windows_test.go", "darwin": "_linux_test.go", "windows": "_darwin_test.go"}[goos]
+    assert not any(name.endswith(left_out) for name in built)
+    assert any(name.endswith(f"_{goos}_test.go") for name in built)
+    # Without --built-files every file stays (the connector parts).
+    assert len(discovered) > len(built)
