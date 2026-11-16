@@ -311,9 +311,16 @@ func TestCapFloorPieces(t *testing.T) {
 		{"cat <<EOF > notes\np; q\nEOF\nr", []string{"cat <<EOF > notes", "r"}},
 		{"bash script.sh <<EOF\np\nEOF", []string{"bash script.sh <<EOF"}},
 		{"cat <<< 'p; q'", []string{"cat <<< 'p; q'"}},
+		// A -c option or a shell name built of joined quotes is read when
+		// its word is complete (GAP-0984 keeps a reading only for a word that
+		// cannot become one).
+		{"bash -'c' 'p; q'", []string{"bash -'c' 'p; q'", "body:p; q"}},
+		{"bash -'l''c' 'p'", []string{"bash -'l''c' 'p'", "body:p"}},
+		{"ba'sh' -c 'p; q'", []string{"ba'sh' -c 'p; q'", "body:p; q"}},
+		{"echo 'a'\"'\"'b' -'c' 'p'", []string{"echo 'a'\"'\"'b' -'c' 'p'"}},
 	} {
 		var got []string
-		head, _ := capFloorPieces(tc.command, "")
+		head, _, _ := capFloorPieces(tc.command, "")
 		for _, piece := range head {
 			text := piece.text(tc.command)
 			switch {
