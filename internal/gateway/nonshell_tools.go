@@ -394,15 +394,17 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	facts := actionfacts.Analyze(request.Input)
 	hard := request.StrictPolicy || request.ManagedInstall
 	out := append([]RuleFinding(nil), findings...)
+	// A finding of the lane is merged as the dispatch merges the finding of a
+	// statement (withSimpleCommandFindings): it replaces a weaker finding of
+	// the same rule and never a stronger one. Skipping every rule id already
+	// in the findings let a detection-only finding of the dispatch hide the
+	// lane's enforcing one (rel-1-0-10:GAP-0995).
 	add := func(ruleID, note string) {
-		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
-			return
-		}
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
+		out = withSimpleCommandFindings(out, []RuleFinding{nonShellFinding(rule, note, request.Input.Tool, hard)})
 	}
 	judge := func(facts actionfacts.Facts, command, text string) {
 		if isShell {
