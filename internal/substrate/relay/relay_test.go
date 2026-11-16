@@ -35,7 +35,8 @@ import (
 )
 
 // The test binary doubles as a probe of hardenProcess: run with
-// "harden-probe" it hardens itself and prints its dumpable flag.
+// "harden-probe" it hardens itself and prints its dumpable flag; with
+// "hold-probe" it holds signals as the relay does.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "harden-probe" {
 		if err := hardenProcess(); err != nil {
@@ -44,6 +45,13 @@ func TestMain(m *testing.M) {
 		}
 		d, err := dumpable()
 		fmt.Println("dumpable", d, err)
+		os.Exit(0)
+	}
+	// "hold-probe" holds signals as the relay does and waits (GAP-0116).
+	if len(os.Args) > 1 && os.Args[1] == "hold-probe" {
+		holdSignals()
+		fmt.Println("holding")
+		time.Sleep(time.Minute)
 		os.Exit(0)
 	}
 	markLeaks()
