@@ -230,6 +230,20 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert '(cd "$pkg" && go tool test2json -t -p "github.com/defenseclaw/defenseclaw/$pkg"' in run
     assert '"$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1' in run
     assert '-test.timeout=10m -test.run="$pattern"' in run
+    # A part, and the darwin cli and hookcli step, fail when a selected test
+    # reported no result (rel-1-0-10:GAP-1051): a -run name the binary does
+    # not have runs nothing and passes.
+    assert '--annotate "darwin gateway part $GO_TEST_SHARD failed" --expect-run "$pattern"' in run
+    assert 'exit "${statuses[1]}"' in run
+    unix_step = next(
+        s["run"]
+        for s in jobs["unix-standalone-lifecycle"]["steps"]
+        if s.get("name") == "Go tests of the darwin paths in the CLI and hookcli packages"
+    )
+    assert '--annotate "darwin $UNIX_PACKAGE failed" --expect-run "$pattern"' in unix_step
+    assert 'exit "${statuses[1]}"' in unix_step
+    upload = next(s for s in build["steps"] if s.get("with", {}).get("name") == "darwin-gateway-test-binary")
+    assert upload["with"]["retention-days"] == 7
     assert "go test" not in run.replace("go test -json", "")
     assert not any(
         "internal/gateway" == entry.get("package")

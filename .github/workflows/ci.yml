@@ -1585,7 +1585,15 @@ jobs:
           export TMPDIR
           pattern="$(scripts/go-unix-test-pattern.sh "$UNIX_PACKAGE")"
           echo "$UNIX_PACKAGE: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
-          go test -count=1 -timeout 10m -run "$pattern" "./$UNIX_PACKAGE"
+          # go_test_report.py prints the quiet log and fails the step when a
+          # selected test reported no result, as in the darwin-gateway parts.
+          set +e
+          go test -json -count=1 -timeout 10m -run "$pattern" "./$UNIX_PACKAGE" 2>&1 |
+            python3 scripts/go_test_report.py --annotate "darwin $UNIX_PACKAGE failed" --expect-run "$pattern"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          [ "${statuses[0]}" -eq 0 ] || exit "${statuses[0]}"
+          exit "${statuses[1]}"
       - name: Go tests of the darwin connector package, part ${{ matrix.shard }}
         # One of four time-balanced parts of the connector package's tests
         # (go_test_shards.py covers every test exactly once). The package
@@ -1691,7 +1699,8 @@ jobs:
         with:
           name: darwin-gateway-test-binary
           path: ${{ runner.temp }}/darwin-gateway-test.tar
-          retention-days: 1
+          # A week, so that re-running only the failed parts finds it.
+          retention-days: 7
           if-no-files-found: error
           # A re-run of this job replaces the binary of its first attempt.
           overwrite: true
@@ -1765,10 +1774,14 @@ jobs:
             "$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1 \
             -test.timeout=10m -test.run="$pattern") 2>&1 |
             python3 scripts/go_test_report.py --timings "go-test-timings-darwin-gateway-$GO_TEST_SHARD.json" \
-              --annotate "darwin gateway part $GO_TEST_SHARD failed"
-          test_status=${PIPESTATUS[0]}
+              --annotate "darwin gateway part $GO_TEST_SHARD failed" --expect-run "$pattern"
+          statuses=("${PIPESTATUS[@]}")
           set -e
-          exit "$test_status"
+          # The binary's status, then the report's: the report fails the part
+          # when a selected test reported no result (a -run name the binary
+          # does not have runs nothing, and the binary passes).
+          [ "${statuses[0]}" -eq 0 ] || exit "${statuses[0]}"
+          exit "${statuses[1]}"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         # The test times scripts/update_test_timings.py go --update reads.
         if: ${{ !cancelled() }}
