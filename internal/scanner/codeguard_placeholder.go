@@ -17,6 +17,7 @@
 package scanner
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 
@@ -27,40 +28,132 @@ import (
 // value of 16 or more characters. Group 2 is the value.
 var hardcodedCredentialAssignment = lazyregexp.New(`(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*["']([^\s"']{16,})["']`)
 
-// placeholderCredentialValue reports a value that is plainly not a secret by
-// its shape. A secret is one random string; a stand-in a test fixture or a
-// document names its fake key ("SG.fake.sendgrid.test.token",
-// "your-api-key-example-0000") reads as words: three or more pieces, split at
-// anything but a letter or a digit, each made of letters only or of one
-// repeated character. A value that repeats one character (xxxxxxxxxxxxxxxx)
-// is a stand-in too. No word is looked up. Other values stay findings: a
-// random string, a vendor key with a test prefix, a single long word.
+// placeholderCredentialWords are the stand-in words a test fixture or a
+// document names its fake key with ("SG.fake.sendgrid.test.token",
+// "your-api-key-example-0000"). A word counts only as a whole piece of the
+// value, so "fakirjewelry" or "examplesys" do not.
+var placeholderCredentialWords = []string{
+	"changeme", "dummy", "example", "fake", "mock", "notreal", "placeholder",
+	"redacted", "sample", "test", "tests", "your", "xxx",
+}
+
+// placeholderPieceMax is the longest single-case letters piece a placeholder
+// holds beside its stand-in: measured on the corpora (GAP-0942), the longest
+// non-stand-in letters piece of a value d4's shape rule called a placeholder
+// is 10 ("production" in "changeme-before-production"). A longer single-case
+// run beside a stand-in reads as random, so the stand-in does not excuse it
+// (GAP-0957). The cut matters only beside a stand-in: a value without one is
+// a finding anyway.
+const placeholderPieceMax = 10
+
+// standInRunLength is the length from which a repeated or sequential piece
+// (qqqqqqqq, 12345678) marks the value a stand-in on its own; a shorter run
+// (0000 in "your-api-key-example-0000") is only neutral.
+const standInRunLength = 8
+
+// placeholderCredentialValue reports a value that is plainly not a secret: a
+// low-entropy shape only. A run of one repeated character, unit or alphabet
+// sequence (xxxxxxxx, abcabcabc, abcdefghijklmnop, 0123456789), or a value
+// that names itself a stand-in (a whole placeholder word, a long low-entropy
+// piece, or a <...> / ${...} template slot) and holds no random-looking piece.
+// Any other value stays a finding, a random string of letters only included
+// (GAP-0942). A stand-in excuses a value only when no other piece reads as
+// random: a stand-in word or a template beside a random piece is a finding
+// (GAP-0957).
 func placeholderCredentialValue(value string) bool {
-	pieces := strings.FieldsFunc(value, func(r rune) bool {
+	inner, template := templateCredentialInner(value)
+	pieces := strings.FieldsFunc(inner, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	compact := strings.Join(pieces, "")
-	if compact != "" && strings.Trim(compact, compact[:1]) == "" {
+	if compact == "" {
+		return template
+	}
+	if lowEntropyRun(strings.ToLower(compact)) {
 		return true
 	}
-	if len(pieces) < 3 {
+	standIn := template
+	for _, piece := range pieces {
+		switch {
+		case slices.Contains(placeholderCredentialWords, strings.ToLower(piece)):
+			standIn = true
+		case lowEntropyRun(strings.ToLower(piece)):
+			standIn = standIn || len(piece) >= standInRunLength
+		case randomPiece(piece):
+			return false
+		}
+	}
+	return standIn
+}
+
+// templateCredentialInner returns the text inside a template slot (<...> or
+// ${...}) and whether the value is one. The slot marks the value a stand-in,
+// but its inner text is still read, so a random key inside the brackets is a
+// finding (GAP-0957).
+func templateCredentialInner(value string) (string, bool) {
+	switch {
+	case strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}"):
+		return value[2 : len(value)-1], true
+	case strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">"):
+		return value[1 : len(value)-1], true
+	}
+	return value, false
+}
+
+// lowEntropyRun reports a run that repeats a unit of one to four runes
+// (xxxx, 0000, abab, abcabc) or steps through the alphabet or the digits one
+// at a time, up or down (abcdef, 123456, zyxw).
+func lowEntropyRun(s string) bool {
+	r := []rune(s)
+	if len(r) < 2 {
 		return false
 	}
-	for _, piece := range pieces {
-		if !onlyLetters(piece) && strings.Trim(piece, piece[:1]) != "" {
+	for unit := 1; unit <= 4 && unit*2 <= len(r); unit++ {
+		repeats := true
+		for i := unit; i < len(r); i++ {
+			if r[i] != r[i-unit] {
+				repeats = false
+				break
+			}
+		}
+		if repeats {
+			return true
+		}
+	}
+	if len(r) < 4 {
+		return false
+	}
+	step := r[1] - r[0]
+	if step != 1 && step != -1 {
+		return false
+	}
+	for i := 2; i < len(r); i++ {
+		if r[i]-r[i-1] != step {
 			return false
 		}
 	}
 	return true
 }
 
-func onlyLetters(piece string) bool {
+// randomPiece reports a piece that reads as random: letters and digits mixed,
+// a capital after a small letter three or more times (KqvZmXbT, not
+// SendGrid or SG), or a letters run longer than placeholderPieceMax.
+func randomPiece(piece string) bool {
+	letters, digits, rises := 0, 0, 0
+	var prev rune
 	for _, r := range piece {
-		if !unicode.IsLetter(r) {
-			return false
+		switch {
+		case unicode.IsDigit(r):
+			digits++
+		case unicode.IsLetter(r):
+			letters++
+			if unicode.IsUpper(r) && unicode.IsLower(prev) {
+				rises++
+			}
 		}
+		prev = r
 	}
-	return piece != ""
+	return (letters > 0 && digits > 0) || rises >= 3 || letters > placeholderPieceMax
 }
 
 // hardcodedCredentialView is the line CG-CRED-001 reads: an assignment whose
