@@ -151,12 +151,13 @@ func TestHealthRouteOnlyNamesNothingToAnOrdinaryAccount(t *testing.T) {
 		goos          string
 		cfg           *config.Config
 		cause, warned string
+		adminNames    []string // names the administrator row must still carry
 	}{
-		"custody credential named but not stored": {"darwin", build(openai, named, nil), routeCauseCredentialStored, ""},
-		"custody credential not configured":       {"windows", build(openai, nil, nil), routeCauseNoCredential, ""},
-		"upstream not set":                        {"linux", build(config.RoutingUpstreamConfig{}, nil, nil), routeCauseUpstreamNotSet, ""},
-		"allowed alias without a key":             {"linux", build(openai, bedrockKeyless, connectorRule), routeCauseAliasNoCredential, ""},
-		"scoped rule is a warning":                {"linux", build(openai, bedrockKeyless, groupRule), "", routeCauseAliasNoCredential},
+		"custody credential named but not stored": {"darwin", build(openai, named, nil), routeCauseCredentialStored, "", []string{secretName}},
+		"custody credential not configured":       {"windows", build(openai, nil, nil), routeCauseNoCredential, "", nil},
+		"upstream not set":                        {"linux", build(config.RoutingUpstreamConfig{}, nil, nil), routeCauseUpstreamNotSet, "", nil},
+		"allowed alias without a key":             {"linux", build(openai, bedrockKeyless, connectorRule), routeCauseAliasNoCredential, "", []string{ruleID, aliasName}},
+		"scoped rule is a warning":                {"linux", build(openai, bedrockKeyless, groupRule), "", routeCauseAliasNoCredential, []string{ruleID, aliasName}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -188,14 +189,66 @@ func TestHealthRouteOnlyNamesNothingToAnOrdinaryAccount(t *testing.T) {
 			if tc.warned != "" && !strings.Contains(ordinary, `"warning":"`+tc.warned+`"`) {
 				t.Fatalf("no closed warning %s: %s", tc.warned, ordinary)
 			}
-			if !strings.Contains(get("fixture-gateway-token"), "route_only") {
+			adminBody := get("fixture-gateway-token")
+			if !strings.Contains(adminBody, "route_only") {
 				t.Fatal("the administrator lost the route-only rows")
+			}
+			for _, want := range tc.adminNames {
+				if !strings.Contains(adminBody, want) {
+					t.Fatalf("the administrator body lost %q: %s", want, adminBody)
+				}
 			}
 		})
 	}
+	// routing.last_error of an ordinary account is a closed text, not the start error.
+	t.Run("routing last_error", func(t *testing.T) {
+		store, logger := testStoreAndLogger(t)
+		health := NewSidecarHealth()
+		health.SetRouting(StateError, "open /etc/defenseclaw/"+secretName+": fixture start error", nil)
+		cfg := build(openai, nil, nil)
+		api := NewAPIServer("127.0.0.1:0", health, nil, store, logger, cfg)
+		rec := httptest.NewRecorder()
+		api.handleHealth(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		if strings.Contains(rec.Body.String(), secretName) || strings.Contains(rec.Body.String(), "fixture start error") {
+			t.Fatalf("an ordinary account reads the routing start error: %s", rec.Body)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.Header.Set("Authorization", "Bearer fixture-gateway-token")
+		rec = httptest.NewRecorder()
+		api.handleHealth(rec, req)
+		if !strings.Contains(rec.Body.String(), "fixture start error") {
+			t.Fatalf("the administrator lost the routing start error: %s", rec.Body)
+		}
+	})
 	// The administrator row keeps the names that doctor shows.
 	admin := routeOnlyReadinessFor(cases["custody credential named but not stored"].cfg, "darwin", &signers, nil)
 	if len(admin) != 1 || !strings.Contains(admin[0].Problem, secretName) {
 		t.Fatalf("the administrator row lost the credential name: %+v", admin)
+	}
+}
+
+// routrev3 GAP-0989/0986: the administrator row names every allowed model the
+// gateway cannot call, including a credential that is named but not stored and
+// a Bedrock model whose base_url is loopback (no key can serve it).
+func TestRouteOnlyReadinessNamesNamedNotStoredAndBedrockLoopbackModels(t *testing.T) {
+	cfg := readinessConfig(config.RoutingUpstreamConfig{BaseURL: "https://api.openai.com", API: config.RoutingAPIResponses})
+	cfg.Routing.RouteOnly.Connectors = []string{"codex"}
+	cfg.Routing.RouteOnly.Upstreams = map[string]config.RoutingUpstreamConfig{"codex": {BaseURL: "https://api.openai.com", API: config.RoutingAPIResponses}}
+	cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
+	cfg.Routing.Models = []config.RoutingModelBackend{
+		{Name: "fixture-named", Provider: "openai", Model: "m", Credential: "fixture-key"},
+		{Name: "fixture-loopback", Provider: "bedrock", Model: "m", BaseURL: "http://127.0.0.1:9999"},
+	}
+	cfg.Routing.Admin = &config.RoutingAdminConfig{Rules: []config.RoutingAdminRule{{ID: "fixture-rule", Match: config.RoutingAdminMatch{Connectors: []string{"codex"}}, Allow: []string{"fixture-named", "fixture-loopback"}}}}
+	useRoutingCredentials(t, map[string]string{})
+	var signers bedrockSigners
+	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, nil))
+	if r.Ready || !strings.Contains(r.Problem, "fixture-named") || !strings.Contains(r.Problem, "fixture-loopback") {
+		t.Fatalf("the administrator row must name both models: %+v", r)
+	}
+	for _, m := range cfg.Routing.Models {
+		if !routeOnlyAliasWithoutKey(cfg, m, "openai") {
+			t.Fatalf("%s counts as having a key", m.Name)
+		}
 	}
 }

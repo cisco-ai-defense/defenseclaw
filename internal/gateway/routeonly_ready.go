@@ -322,6 +322,11 @@ func publicRouteOnly(in routeOnlyReadiness) routeOnlyReadiness {
 // routing subsystem with their public form (a copy; the stored details are
 // never written).
 func healthRoutingForOrdinaryAccount(routing SubsystemHealth) SubsystemHealth {
+	if routing.LastError != "" {
+		// The start error can quote a path, a credential or a model of the
+		// policy; an ordinary account reads a closed text, like config.
+		routing.LastError = "routing did not start; an administrator can read the cause in defenseclaw doctor"
+	}
 	rows, ok := routing.Details["route_only"].([]routeOnlyReadiness)
 	if !ok {
 		return routing

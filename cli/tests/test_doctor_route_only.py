@@ -405,3 +405,85 @@ def test_a_scoped_rule_warning_is_shown_with_its_detail(tmp_path: Path) -> None:
     assert warn.tag == "warn" and "fixture-rule" in warn.detail and "fixture-model" in warn.detail
     quiet = _health({"connector": "claudecode", "ready": True, "credential": "agent", "provider": "anthropic"})
     assert "Route-only claudecode allowed models" not in _by_label(dro.route_only_rows(cfg, quiet, platform="linux"))
+
+
+class _FakeClient:
+    """OrchestratorClient stand-in: the authenticated /health of a managed gateway."""
+
+    token_seen: list[str] = []
+
+    def __init__(self, host="", port=0, timeout=0, token=""):
+        _FakeClient.token_seen.append(token)
+
+    def health(self):
+        return _health(
+            {
+                "connector": "codex",
+                "ready": False,
+                "cause": "allowed_alias_no_credential",
+                "problem": "routing.admin rule fixture-rule applies to every codex caller and allows only "
+                "fixture-named, fixture-loopback, which has no gateway credential on this host",
+                "fix": "name a protected credential for fixture-named, fixture-loopback",
+            }
+        )
+
+
+def _managed_cfg(tmp_path: Path, token: str) -> SimpleNamespace:
+    cfg = _cfg(tmp_path, {"codex": {"base_url": "https://api.openai.com", "api": "responses"}})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.enterprise = SimpleNamespace(profile="standalone")
+    cfg.gateway = SimpleNamespace(api_port=18970, resolved_token=lambda: token)
+    return cfg
+
+
+_PUBLIC = _health(
+    {
+        "connector": "codex",
+        "ready": False,
+        "cause": "allowed_alias_no_credential",
+        "problem": "a routing.admin rule that applies to every caller allows only models with no gateway credential",
+        "fix": "run defenseclaw doctor as an administrator for the cause and the fix",
+    }
+)
+
+
+def test_doctor_as_administrator_reads_the_authenticated_rows_and_names_the_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _FakeClient)
+    _FakeClient.token_seen.clear()
+    cfg = _managed_cfg(tmp_path, "fixture-gateway-token")
+    live = cmd_doctor._administrator_route_only_health(cfg, _PUBLIC)
+    assert _FakeClient.token_seen == ["fixture-gateway-token"]
+    rows = _by_label(dro.route_only_rows(cfg, live, profile="standalone", platform="linux"))
+    row = rows["Route-only codex"]
+    assert row.tag == "fail" and "fixture-named" in row.detail and "fixture-loopback" in row.detail
+    assert "fixture-gateway-token" not in row.detail + row.fix
+
+
+def test_doctor_without_a_readable_token_keeps_the_public_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _FakeClient)
+    _FakeClient.token_seen.clear()
+    cfg = _managed_cfg(tmp_path, "")
+    assert cmd_doctor._administrator_route_only_health(cfg, _PUBLIC) is _PUBLIC
+    assert _FakeClient.token_seen == []
+
+    class _Refused(_FakeClient):
+        def health(self):
+            raise RuntimeError("401")
+
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _Refused)
+    cfg = _managed_cfg(tmp_path, "fixture-gateway-token")
+    live = cmd_doctor._administrator_route_only_health(cfg, _PUBLIC)
+    assert live is _PUBLIC
+    row = _by_label(dro.route_only_rows(cfg, live, profile="standalone", platform="linux"))["Route-only codex"]
+    assert row.tag == "fail" and "run defenseclaw doctor as an administrator" in row.fix
+    # An unmanaged account never asks.
+    plain = _cfg(tmp_path, {"codex": {"base_url": "https://api.openai.com", "api": "responses"}})
+    assert cmd_doctor._administrator_route_only_health(plain, _PUBLIC) is _PUBLIC

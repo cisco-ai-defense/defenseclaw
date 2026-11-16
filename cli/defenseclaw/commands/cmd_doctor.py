@@ -13718,6 +13718,46 @@ def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None =
         )
 
 
+def _administrator_route_only_health(cfg, live_health: dict | None) -> dict | None:
+    """live_health with the route_only rows of the AUTHENTICATED /health.
+
+    On a managed (standalone) host the unauthenticated /health gives an ordinary
+    account closed codes and generic text only, so a doctor run by an
+    administrator would read "run doctor as an administrator" back to itself
+    (GAP-0989). With the gateway token, which only an administrator can read,
+    the gateway answers the full rows: the rule, the model and the credential
+    to store. The token is never printed. When it cannot be read, or the call
+    fails, the public rows stay, so the answer is the one an ordinary account
+    gets (its text says to run doctor as an administrator), never a better one.
+    """
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    routing = live_health.get("routing") if isinstance(live_health, dict) else None
+    details = routing.get("details") if isinstance(routing, dict) else None
+    if not isinstance(details, dict) or not isinstance(details.get("route_only"), list):
+        return live_health
+    if _enterprise_profile(cfg) != "standalone":
+        return live_health
+    try:
+        token = cfg.gateway.resolved_token()
+        if not token:
+            return live_health
+        from defenseclaw.gateway import OrchestratorClient
+
+        full = OrchestratorClient(
+            host=_gateway_api_host(cfg), port=int(cfg.gateway.api_port), timeout=3, token=token
+        ).health()
+    except Exception:  # noqa: BLE001 - no token, no gateway, a refusal: keep the public rows
+        return live_health
+    rows = ((full.get("routing") or {}).get("details") or {}).get("route_only") if isinstance(full, dict) else None
+    if not isinstance(rows, list):
+        return live_health
+    merged = dict(live_health)
+    merged["routing"] = dict(routing)
+    merged["routing"]["details"] = {**details, "route_only": rows}
+    return merged
+
+
 def _check_route_only(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Route-only rows per connector (S1 DESIGN 7.2, 7.4, 17.1): readiness the
     gateway reports in /health (custody without a gateway key fails), the
@@ -13737,6 +13777,8 @@ def _check_route_only(cfg, r: _DoctorResult, *, live_health: dict | None = None)
     elif r.sidecar_unverified and r.gateway_down != "stopped":
         gateway = dro.GATEWAY_UNVERIFIED
     holder = r.gateway_holder if gateway == dro.GATEWAY_FOREIGN else ""
+    if not gateway:
+        live_health = _administrator_route_only_health(cfg, live_health)
     try:
         rows = dro.route_only_rows(
             cfg,
