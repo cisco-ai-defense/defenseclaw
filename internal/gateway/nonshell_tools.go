@@ -442,31 +442,39 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// the same rule and never a stronger one. Skipping every rule id already
 	// in the findings let a detection-only finding of the dispatch hide the
 	// lane's enforcing one (rel-1-0-10:GAP-0995).
-	add := func(ruleID, note string) {
+	// merge adds the lane's finding of ruleID; ownToken marks a finding the
+	// lane derives from a developer-token file of the active home itself
+	// (ownDeveloperTokenFile).
+	merge := func(ruleID, note string, ownToken bool) {
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
 		finding := nonShellFinding(rule, note, request.Input.Tool, hard)
-		// When the call names a credential file in another account's home, a
-		// finding of the same rule that is stronger by enforcement or severity
-		// replaces the one the call carries: the regex fallback judges that
-		// home at a lower severity and alert-only, so an upload of another
-		// account's .git-credentials or .netrc was weaker than an upload of
-		// one's own (rel-1-0-10:GAP-0834, GAP-0835). Every other finding is
-		// merged by enforcement only (withSimpleCommandFindings, GAP-0995), so a
-		// read of the active home's own .git-credentials, .netrc or .pgpass is
-		// judged like a read of one's own AWS or kube credentials
-		// (rel-1-0-10:GAP-0888).
-		if otherAccount {
-			if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 &&
-				nonShellFindingStronger(finding, out[index]) {
+		if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 {
+			// When the call names a credential file in another account's
+			// home, a finding of the same rule that is stronger by
+			// enforcement or severity replaces the one the call carries: the
+			// regex fallback judges that home at a lower severity and
+			// alert-only, so an upload of another account's .git-credentials
+			// or .netrc was weaker than an upload of one's own
+			// (rel-1-0-10:GAP-0834, GAP-0835).
+			if otherAccount && nonShellFindingStronger(finding, out[index]) {
 				out[index] = finding
+				return
+			}
+			// A read of the active home's own .git-credentials, .netrc or
+			// .pgpass keeps the alert the call carries, the tier of a read
+			// of one's own AWS or kube credentials, in every pack
+			// (rel-1-0-10:GAP-0888). The rank merge below would make it a
+			// block in strict and managed installs.
+			if ownToken && !otherAccount && out[index].contributesToAlertOnly() {
 				return
 			}
 		}
 		out = withSimpleCommandFindings(out, []RuleFinding{finding})
 	}
+	add := func(ruleID, note string) { merge(ruleID, note, false) }
 	judge := func(facts actionfacts.Facts, command, text string) {
 		if isShell {
 			for _, id := range toolshape.TextRules(command) {
@@ -484,6 +492,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			if fileText, ok := patchTexts[p.Value]; ok {
 				text = fileText
 			}
+			own := ownDeveloperTokenFile(facts, p, path)
 			ids := append(toolshape.PathRules(string(p.Access), path, text), homePathRuleIDs(facts, p, text)...)
 			for _, id := range ids {
 				// A link to /dev/null in a unit folder masks the unit: it stops
@@ -491,7 +500,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 				if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(facts, p.CommandID) {
 					continue
 				}
-				add(id, "")
+				merge(id, "", own)
 			}
 			// The developer-token files of an account's home (the credentials
 			// table's class of PATH-GIT-CREDS) are read by the native file tools as
@@ -499,7 +508,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			// comes from the one table, so each branch's table decides which names
 			// are in it; the home is found by position.
 			if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
-				add("PATH-GIT-CREDS", "")
+				merge("PATH-GIT-CREDS", "", own)
 			}
 		}
 	}
@@ -571,6 +580,17 @@ func linksToDevNull(facts actionfacts.Facts, commandID int64) bool {
 		}
 	}
 	return false
+}
+
+// ownDeveloperTokenFile reports a path fact that names a file of the
+// developer-token class (developerTokenFileOfAccountHome) in the active home
+// of the call itself (activeHomeRelative), not in another account's home.
+func ownDeveloperTokenFile(facts actionfacts.Facts, p actionfacts.PathFact, path string) bool {
+	if !developerTokenFileOfAccountHome(path) {
+		return false
+	}
+	_, own := activeHomeRelative(facts, p)
+	return own
 }
 
 // developerTokenFileOfAccountHome reports an absolute path that is a file of
