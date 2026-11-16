@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -39,7 +40,7 @@ dc_install() {
   local chart="$ROOT/deploy/helm/defenseclaw-substrate" ns=$E2E_DC_NAMESPACE image repo tag digest
   log "DefenseClaw: gateway image and chart"
   if ! image=$(dc_image); then fail "build and push the DefenseClaw gateway image"; return 1; fi
-  pass "the DefenseClaw gateway image is available ($(echo "$image" | sed 's/@.*//'))"
+  pass "the DefenseClaw gateway image is available (${image%%@*})"
   digest=${image#*@}; repo=${image%@*}; tag=${repo##*:}; repo=${repo%:*}
   K create namespace "$ns" >/dev/null 2>&1 || true
   # ate-api-server admits clients only from namespaces with this label (its NetworkPolicy); the bootstrap Job and the
@@ -184,6 +185,7 @@ YAML
   retry 300 5 bash -c "kubectl $(kctx) -n $E2E_NAMESPACE get workerpool lp -o jsonpath='{.status.readyReplicas}' | grep -qx $E2E_POOL_REPLICAS" || { fail "launcher worker pool is ready"; return 1; }
 
   (umask 077; printf 'Authorization: Bearer %s\n' "$E2E_KUBE_TOKEN" >"$hdr")
+  # shellcheck disable=SC2046
   setsid nohup kubectl $(kctx) -n "$ns" port-forward svc/defenseclaw-admin "$port:443" >"$E2E_ARTIFACTS/port-forward.log" 2>&1 </dev/null &
   PROXY_PIDS+=("$!")
   if ! retry 30 1 bash -c "curl -sk -m 3 -o /dev/null https://127.0.0.1:$port/"; then fail "the admin listener answers through a port-forward"; return 1; fi

@@ -173,6 +173,7 @@ kube_user_setup() {
   rm -f "$csv"
   # kubelet restarts the API server pod from the changed manifest.
   sleep 5
+  # shellcheck disable=SC2046
   if ! retry 240 4 kubectl $(kctx) get --raw /readyz; then fail "the kind API server is ready after adding the test user"; return 1; fi
   export E2E_KUBE_TOKEN="$tok"
   pass "the kind API server knows a Kubernetes user for the launcher create flow"
@@ -309,6 +310,7 @@ YAML
 
 # proxy_actor <actor> <local-port>: forward the stub agent's port 8080.
 proxy_actor() {
+  # shellcheck disable=SC2046
   setsid nohup kubectl-ate $(kctx) proxy actor "$1" "$2:8080" -a "${3:-$E2E_ATESPACE}" >"$E2E_ARTIFACTS/proxy-$1.log" 2>&1 </dev/null &
   PROXY_PIDS+=("$!")
   retry 60 1 curl -sf -m 2 "http://127.0.0.1:$2/readyz"
