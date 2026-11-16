@@ -80,6 +80,17 @@ func appendTrustedPrivateKeyReaderFinding(
 	if !proved {
 		return findings
 	}
+	return withProvedPrivateKeyRead(findings, generation, request)
+}
+
+// withProvedPrivateKeyRead gives findings the PATH-SSH-KEY finding of a
+// proved private-key content read: the call's own finding takes the rule's
+// severity and enforcement, else the rule is added.
+func withProvedPrivateKeyRead(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+) []RuleFinding {
 	_, rule, ok := trustedActionCatalogRule(generation, "PATH-SSH-KEY")
 	if !ok {
 		return findings

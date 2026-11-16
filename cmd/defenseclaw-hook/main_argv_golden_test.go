@@ -173,6 +173,15 @@ func runArgvCase(t *testing.T, binary string, tc argvCase) argvResult {
 	}
 	var cmd *exec.Cmd
 	env := argvEnv(dir)
+	// A binary built with coverage (CI runs go test -coverprofile, and the
+	// helper below is this test binary) warns on stderr when GOCOVERDIR is
+	// unset, so the child always gets a coverage folder and the golden still
+	// compares the hook's own output exactly.
+	coverDir := os.Getenv("GOCOVERDIR")
+	if coverDir == "" {
+		coverDir = t.TempDir()
+	}
+	env = append(env, "GOCOVERDIR="+coverDir)
 	if binary == "" {
 		self, err := os.Executable()
 		if err != nil {
@@ -202,6 +211,31 @@ func runArgvCase(t *testing.T, binary string, tc argvCase) argvResult {
 		result.Stdout = "<masked>"
 	}
 	return result
+}
+
+// argvRecordedLine and argvUnrecordedLine are the two answers a managed hook
+// gives about the hook-failures.jsonl row of a refusal. A managed hook takes
+// the account home from the account database, not from HOME, and never
+// creates the DefenseClaw folder there (GAP-0154, GAP-0593): the row is
+// written only when <account home>/.defenseclaw already is a folder. The
+// golden is recorded on a host whose account has one; on a host whose
+// account has none (a CI runner) the hook rightly says the refusal is not
+// recorded, so the expected line follows that one fact and the compare stays
+// exact.
+const (
+	argvRecordedLine   = "this refusal is recorded in <HOME>/.defenseclaw/logs/hook-failures.jsonl"
+	argvUnrecordedLine = "this refusal is not recorded on this computer (this account has no DefenseClaw folder); quote the id to your administrator"
+)
+
+func argvRecordLineForThisAccount(want string) string {
+	account, err := user.Current()
+	if err != nil || len(account.HomeDir) <= 1 {
+		return want
+	}
+	if info, err := os.Stat(filepath.Join(account.HomeDir, ".defenseclaw")); err == nil && info.IsDir() {
+		return want
+	}
+	return strings.ReplaceAll(want, argvRecordedLine, argvUnrecordedLine)
 }
 
 // argvEventID is the per-refusal event id a hook prints.
@@ -290,6 +324,7 @@ func TestArgvGoldenMatchesTheFullCLIMain(t *testing.T) {
 			t.Errorf("%s: no golden entry", got.Name)
 			continue
 		}
+		w.Stderr = argvRecordLineForThisAccount(w.Stderr)
 		if got != w {
 			t.Errorf("%s:\n got exit %d stdout %q stderr %q\nwant exit %d stdout %q stderr %q", got.Name, got.Exit, got.Stdout, got.Stderr, w.Exit, w.Stdout, w.Stderr)
 		}

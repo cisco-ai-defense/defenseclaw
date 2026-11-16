@@ -130,6 +130,13 @@ type Config struct {
 	// with the bundled stack name is the administrator collector and dials
 	// like any operator destination (GAP-2608).
 	ManagedService bool
+	// DeferProhibitedAnswer starts the destination deferred, as a DNS failure
+	// does, when its endpoint's DNS answer is an address the policy refuses,
+	// rather than failing Prepare: config validate cannot see DNS answers, so the
+	// refusal crashed a gateway on a config validate accepted (GAP-0272).
+	// Every dial still re-resolves and refuses the address, and
+	// Factory.Deferred says why. Secure Client keeps the refusal.
+	DeferProhibitedAnswer bool
 }
 
 type Dependencies struct {
@@ -165,6 +172,8 @@ type signalConfig struct {
 	// destination: its loopback collector gets no byte until
 	// verifyBundledCollector proves the listener's account (GAP-1087).
 	bundledStack bool
+	// deferred is why activation-time resolution did not pass (Factory.Deferrals).
+	deferred error
 }
 
 // Factory is immutable after Prepare. Exporter/adapter constructors are
@@ -173,8 +182,29 @@ type signalConfig struct {
 type Factory struct {
 	config  Config
 	signals map[observability.Signal]signalConfig
-	mu      sync.Mutex
-	created map[observability.Signal]bool
+	// deferrals are the endpoints that started deferred (Deferrals).
+	deferrals []Deferral
+	mu        sync.Mutex
+	created   map[observability.Signal]bool
+}
+
+// Deferral is one endpoint of the destination that started deferred: its
+// host (the main endpoint's, or a signal override's) and why, a
+// netguard.ErrV8ResolutionFailed or netguard.ErrV8AddressProhibited
+// (V8ProhibitedOption names the fix). It never holds an address.
+type Deferral struct {
+	Host  string
+	Cause error
+}
+
+// Deferrals returns every endpoint that started deferred, one per host and
+// cause (an override on another host is checked on its own, GAP-0287), or
+// nil when every signal resolved.
+func (factory *Factory) Deferrals() []Deferral {
+	if factory == nil {
+		return nil
+	}
+	return append([]Deferral(nil), factory.deferrals...)
 }
 
 // Prepare performs offline validation, exact TLS preparation, and guarded
@@ -214,6 +244,7 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 	}
 	seen := make(map[observability.Signal]bool, len(config.Selected))
 	signals := make(map[observability.Signal]signalConfig, len(config.Selected))
+	var deferrals []Deferral
 	for _, signal := range config.Selected {
 		if seen[signal] || (signal != observability.SignalLogs && signal != observability.SignalTraces && signal != observability.SignalMetrics) {
 			return nil, newError(ErrorInvalidConfig, nil)
@@ -224,9 +255,17 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 		if override.Endpoint != "" {
 			endpoint = override.Endpoint
 		}
-		resolved, resolveErr := resolveSignal(ctx, protocol, endpoint, override.Path, config.TLS.Insecure, policy, dependencies)
+		resolved, resolveErr := resolveSignal(
+			ctx, protocol, endpoint, override.Path, config.TLS.Insecure, policy, config.DeferProhibitedAnswer, dependencies,
+		)
 		if resolveErr != nil {
 			return nil, resolveErr
+		}
+		if resolved.deferred != nil {
+			deferral := Deferral{Host: resolved.url.Hostname(), Cause: resolved.deferred}
+			if !containsDeferral(deferrals, deferral) {
+				deferrals = append(deferrals, deferral)
+			}
 		}
 		resolved.signal = signal
 		resolved.tls = cloneTLS(tlsConfig)
@@ -257,7 +296,17 @@ func Prepare(ctx context.Context, config Config, dependencies Dependencies) (*Fa
 	config.Headers = cloneHeaders(config.Headers)
 	config.SignalOverride = cloneOverrides(config.SignalOverride)
 	config.TLS.CABundle = append([]byte(nil), config.TLS.CABundle...)
-	return &Factory{config: config, signals: signals, created: make(map[observability.Signal]bool)}, nil
+	return &Factory{config: config, signals: signals, deferrals: deferrals, created: make(map[observability.Signal]bool)}, nil
+}
+
+func containsDeferral(deferrals []Deferral, candidate Deferral) bool {
+	for _, deferral := range deferrals {
+		if deferral.Host == candidate.Host && deferral.Cause.Error() == candidate.Cause.Error() &&
+			netguard.V8ProhibitedOption(deferral.Cause) == netguard.V8ProhibitedOption(candidate.Cause) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeProtocol(value string) (string, bool) {
@@ -276,6 +325,7 @@ func resolveSignal(
 	protocol, endpoint, overridePath string,
 	insecure bool,
 	policy netguard.V8NetworkSafetyPolicy,
+	deferProhibitedAnswer bool,
 	dependencies Dependencies,
 ) (signalConfig, error) {
 	if endpoint == "" || len(endpoint) > maxEndpointBytes || strings.ContainsAny(endpoint, "\x00\r\n\t ") {
@@ -314,18 +364,28 @@ func resolveSignal(
 			resolvedPath = u.EscapedPath()
 		}
 	}
+	var activation error
 	if err := netguard.ResolveV8PushURL(ctx, u, policy, dependencies.Resolver); err != nil {
 		// A temporary/no-answer DNS failure cannot prove the endpoint unsafe.
 		// Keep the optional signal pipeline inactive-but-constructible and let
-		// the guarded dial path re-resolve on every attempt. Prohibited/mixed
-		// answers, invalid endpoints, and cancellation remain activation errors.
-		if !errors.Is(err, netguard.ErrV8ResolutionFailed) {
+		// the guarded dial path re-resolve on every attempt. A prohibited or
+		// mixed DNS answer does the same when the caller asks for it
+		// (DeferProhibitedAnswer, GAP-0272); the dial path still refuses the
+		// address on every attempt. Literal addresses were checked by
+		// ParseV8PushURL above; invalid endpoints and cancellation remain
+		// activation errors.
+		switch {
+		case errors.Is(err, netguard.ErrV8ResolutionFailed):
+			activation = netguard.ErrV8ResolutionFailed
+		case errors.Is(err, netguard.ErrV8AddressProhibited) && deferProhibitedAnswer:
+			activation = err
+		default:
 			return signalConfig{}, networkError(err)
 		}
 	}
 	return signalConfig{
 		protocol: protocol, url: cloneURL(u), path: resolvedPath, policy: policy,
-		resolver: dependencies.Resolver, dialer: dependencies.Dialer,
+		resolver: dependencies.Resolver, dialer: dependencies.Dialer, deferred: activation,
 	}, nil
 }
 

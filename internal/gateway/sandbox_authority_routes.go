@@ -573,6 +573,13 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		refuse(sandboxrelay.ReasonDaemonOutdated, sandboxTextDaemonOutdated, access)
 		return
 	}
+	// runtimes without openshell (E26): the caller's agents run on Agent
+	// Substrate, so no sandbox starts on this computer, whatever OpenShell
+	// could do here.
+	if !floor.AllowsRuntime(config.SandboxRuntimeOpenShell) {
+		refuse(sandboxrelay.ReasonNotAllowed, sandboxapi.SandboxRunSubstrateOnly(req.Harness, match.decision.Name), access)
+		return
+	}
 	// Where sandboxes can run for the caller, and on which driver: the
 	// gateway's view under the caller's floor (a profile's driver_fallback:
 	// none applies here), then the driver the daemon chose at sandbox start.
@@ -1169,7 +1176,7 @@ func (a *APIServer) handleSandboxExplain(w http.ResponseWriter, r *http.Request)
 		Profile: label, PinnedProfile: pinned, Description: description,
 		Match: scope.match.decision.Match, MatchedGroup: scope.match.decision.MatchedGroup,
 		Provisional: scope.match.provisional, Allowed: floor.Allowed == nil || *floor.Allowed,
-		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable,
+		RequiredFor: slices.Clone(floor.RequiredFor), WhenUnavailable: floor.WhenUnavailable, Runtimes: slices.Clone(floor.Runtimes),
 		AllowedHarnesses: slices.Clone(floor.AllowedHarnesses), AllowedCredentials: slices.Clone(floor.AllowedCredentials),
 		EgressAllowOnly: slices.Clone(floor.EgressAllowOnly), EgressBlock: slices.Clone(floor.EgressBlock),
 		UserApprovals: floor.UserApprovals, AllowUnblock: floor.AllowUnblock == nil || *floor.AllowUnblock,

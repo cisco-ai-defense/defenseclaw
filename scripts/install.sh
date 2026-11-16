@@ -867,8 +867,8 @@ installed_version() {
 # gateway swap only when the process is the exact entry installed for that
 # agent. Unproven candidates are audited and do not block the upgrade. The
 # audit line goes to the install log only: the console shows the installer's
-# own steps, and a process that exits between the listing and the lookup (the
-# listing's own ps, say) is not something the user can act on (GAP-0103).
+# own steps (GAP-0103). A process that exits between the listing and the
+# lookup is not audited at all: it cannot hold a plugin (GAP-0916).
 # Without a log (a unit test, a sourced call) it falls back to stderr.
 agent_identity_audit() {
     local line
@@ -1176,10 +1176,13 @@ loaded_plugin_agents() {
     [[ -n "${installed}" ]] || return 0
     while IFS=$'\t' read -r pid program; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
-        if [[ -z "${program}" ]]; then
-            kill -0 "${pid}" 2>/dev/null || agent_identity_audit "${pid}" 'process vanished during lookup'
-            continue
-        fi
+        # No program path: the process exited after the listing (the listing's
+        # own ps and the subshells of this scan are in it), or it is alive but
+        # its path is unreadable to this account (a privileged or unrelated
+        # process). Neither can be one of the agents this scan looks for, which
+        # all run as this account with a readable path, so there is nothing to
+        # audit (GAP-0916).
+        [[ -n "${program}" ]] || continue
         argv=()
         word="${program% (deleted)}"
         case "${word##*/}" in

@@ -1,0 +1,9 @@
+# Bundle mode: the anchors Secret mount on the controller and the gateway,
+# substrate.bundles in config.yaml and the bundle ConfigMap rights.
+bundles:
+  enabled: true
+  anchorsSecret: acme-bundle-anchors
+config:
+  substrate:
+    identity:
+      issuer: https://idp.cluster-a.example

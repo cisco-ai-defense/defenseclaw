@@ -637,7 +637,14 @@ func fingerprintTestTree(snapshot map[string]string, root string, skip []string)
 			snapshot["file "+path] = "unreadable: " + err.Error()
 			return nil
 		}
-		info, err := entry.Info()
+		// The entry's own record, not the copy in its parent's directory
+		// listing (entry.Info): NTFS updates that copy lazily, and the walk
+		// itself refreshed it, so an untouched folder read as changed and
+		// the package exited 1 with every test passing (rel-1-0-10 GAP-0881).
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			snapshot["file "+path] = "unreadable: " + err.Error()
 			return nil

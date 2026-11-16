@@ -1,0 +1,17 @@
+# Written by `defenseclaw substrate setup`; pass it to ate-setup with --config.
+apiVersion: install.ate.dev/v1alpha1
+kind: SubstrateInstall
+atenet:
+  dataplane: envoy
+  egress:
+    additionalExtprocService: defenseclaw-system/defenseclaw-callout:9443
+images:
+  repo: ghcr.io/agent-substrate
+  tag: "0.10"
+ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/demo/sa/client,spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+kindCluster:
+  enabled: "true"
+  name: substrate
+cluster:
+  context: kind-substrate
+  outcome: succeeded

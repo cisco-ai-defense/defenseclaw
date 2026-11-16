@@ -75,6 +75,9 @@ func TestGAP0493GitHookWriteThroughHookEntry(t *testing.T) {
 						{"tee", "Bash", "echo x | tee .git/hooks/pre-commit", "persistence.git_hook_write"},
 						{"copy", "Bash", "cp src/in .git/hooks/pre-commit", "persistence.git_hook_write"},
 						{"absolute patch", "apply_patch", "*** Begin Patch\n*** Add File: " + filepath.Join(project, ".git", "hooks", "post-commit") + "\n+x\n*** End Patch\n", "persistence.git_hook_write"},
+						// The --output reading of the active .git/config is placed by
+						// the same client CWD (cwdPlacedRule, GAP-0264).
+						{"config show output", "Bash", "git show HEAD:README --output=.git/config", "source.git_config_exec"},
 						{"shell profile control", "Bash", "echo x >> " + filepath.Join(home, ".zshrc"), "persistence.shell_profile_write"},
 						{"sample control", "Bash", "echo x > .git/hooks/pre-commit.sample", ""},
 						{"project control", "Bash", "echo x > src/out", ""},

@@ -343,6 +343,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"update",
 		"fleet",
 		"connectors",
+		"substrate",
 	}
 	if len(properties) != len(allowedTopLevel) {
 		t.Errorf("top-level property count = %d, want %d", len(properties), len(allowedTopLevel))

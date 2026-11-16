@@ -39,7 +39,7 @@ func TestHermesRegistrationRequiresExecutableProbe(t *testing.T) {
 	if err := patchHermesHooks(configPath, script, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := patchHermesAllowlist(filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName),
+	if err := patchHermesAllowlist(filepath.Join(filepath.Dir(configPath), HermesAllowlistFileName),
 		hermesConfiguredHookCommand(script, ""), script); err != nil {
 		t.Fatal(err)
 	}

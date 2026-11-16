@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -33,7 +34,11 @@ import (
 // administrator before that rollback, writes bin\hooks\.retired (every writer
 // then names the transition set again), has the Codex requirements and the
 // guardian rewrite every config, and waits until no DefenseClaw-written file
-// names a launch folder. The folders stay on disk: sessions that read their
+// names a launch folder: the machine files the older Setup compares and the
+// enrolled accounts' own agent configs, which the older guardian owns only
+// in the form it renders itself (rel-1-0-10 GAP-0794: it failed a Copilot,
+// Hermes and OpenCode account that still named a launch folder, and the
+// older Setup /upgrade ended 1603 with every service stopped). The folders stay on disk: sessions that read their
 // hook command earlier still start them. This release's next stage removes
 // the marker.
 
@@ -57,6 +62,37 @@ const (
 type windowsHookImageNamedFile struct {
 	File   string `json:"file"`
 	Folder string `json:"folder"`
+	// Account marks an enrolled account's own file: only the guardian,
+	// in that account's Windows session, rewrites it.
+	Account bool `json:"account,omitempty"`
+	// Cause is, for a machine file retire left pending on, the writer error
+	// that kept it from being rewritten (rel-1-0-10 GAP-0856), and for an
+	// unreadable account file why it could not be read.
+	Cause string `json:"cause,omitempty"`
+	// Unreadable marks an account file retire could not read or vouch for:
+	// it may name a launch folder (Folder is "unknown"), so retire does not
+	// end ok over it (rel-1-0-10 GAP-0882).
+	Unreadable bool `json:"unreadable,omitempty"`
+}
+
+// windowsHookImageSignedOutProfile is an enrolled account whose runtime
+// selections named a launch folder while it was signed out: the guardian
+// cannot rewrite them before it signs in, so retire dropped them
+// (enterprisehooks.DeselectWindowsStandaloneSignedOutLaunchSelections).
+type windowsHookImageSignedOutProfile struct {
+	SID        string   `json:"sid"`
+	Account    string   `json:"account,omitempty"`
+	Connectors []string `json:"connectors"`
+}
+
+// windowsHookImageDeselection is the result of retire's runtime selector
+// step: the signed-out accounts whose launch-folder selections it dropped
+// and, by selector file (lower case), why one could not be dropped; Error is
+// a failure that kept the step from reading any selector.
+type windowsHookImageDeselection struct {
+	Profiles []windowsHookImageSignedOutProfile
+	Errors   map[string]string
+	Error    string
 }
 
 type windowsHookImageRetireReport struct {
@@ -67,7 +103,41 @@ type windowsHookImageRetireReport struct {
 	Marker        string                      `json:"marker"`
 	Rewritten     []string                    `json:"rewritten"`
 	StillNamed    []windowsHookImageNamedFile `json:"still_named"`
-	Notes         []string                    `json:"notes,omitempty"`
+	// SkippedProfiles are the enrolled profiles the administrator skipped
+	// (--skip-profile) whose own configs still name a launch folder; each
+	// is audited and recorded in the marker.
+	SkippedProfiles []windowsHookImageSkippedProfile `json:"skipped_profiles"`
+	// SignedOutProfiles are the enrolled accounts that were signed out and
+	// whose runtime selections retire took off the launch folder; each is
+	// pending until it signs in. They do not hold retire back.
+	SignedOutProfiles []windowsHookImageSignedOutProfile `json:"signed_out_profiles"`
+	Notes             []string                           `json:"notes,omitempty"`
+}
+
+// windowsHookImageProfile is an enrolled account of the guardian's manifest.
+type windowsHookImageProfile struct {
+	Account string
+	Home    string
+}
+
+// windowsHookImageSkippedProfile is one profile retire skipped: who skipped
+// it and when, and its files that still named a launch folder then.
+type windowsHookImageSkippedProfile struct {
+	SID       string                      `json:"sid"`
+	Account   string                      `json:"account,omitempty"`
+	Home      string                      `json:"home"`
+	SkippedBy string                      `json:"skipped_by"`
+	SkippedAt string                      `json:"skipped_at"`
+	Files     []windowsHookImageNamedFile `json:"files"`
+}
+
+// windowsHookImageRetireMarker is the body of bin\hooks\.retired. Status
+// and verify read SkippedProfiles (windowsHookImageSkippedProfilesNotRetired);
+// the next stage of this release removes the marker.
+type windowsHookImageRetireMarker struct {
+	SchemaVersion   int                              `json:"schema_version"`
+	RetiredAt       string                           `json:"retired_at"`
+	SkippedProfiles []windowsHookImageSkippedProfile `json:"skipped_profiles,omitempty"`
 }
 
 // windowsHookImageRetireSteps are the effects retire uses; the Windows
@@ -77,24 +147,42 @@ type windowsHookImageRetireSteps struct {
 	Bin string
 	// RecordedSHA256 is the deployment record's digest of an artifact
 	// ("hook", "hook_guard"); "" when the record has none.
-	RecordedSHA256  func(artifact string) (string, error)
-	WriteMarker     func(path string, body []byte) error
-	ReconcileCodex  func() error
-	RestartGuardian func() error
-	Scan            func() windowsHookImageConfigScan
+	RecordedSHA256 func(artifact string) (string, error)
+	WriteMarker    func(path string, body []byte) error
+	ReconcileCodex func() error
+	// DeselectSignedOut drops the launch-folder runtime selections of the
+	// enrolled accounts the guardian cannot repair now (signed out); nil
+	// skips the step.
+	DeselectSignedOut func() windowsHookImageDeselection
+	RestartGuardian   func() error
+	// GuardianFailures are the guardian's failed rows of its last reconcile,
+	// as status words them; nil when unknown.
+	GuardianFailures func() []string
+	Scan             func() windowsHookImageConfigScan
 	// RouteOnlyRouted lists the agents the installed config routes with
 	// route-only (managedRouteOnlyConnectors); nil skips the check.
 	RouteOnlyRouted func() ([]string, error)
-	Now             func() time.Time
-	Sleep           func(time.Duration)
-	Wait, Poll      time.Duration
+	// SkipProfiles are the SIDs the administrator named with --skip-profile.
+	// Profiles lists the enrolled profiles by SID; Actor names who runs
+	// retire; Audit writes the audit row of one skip; ReadMarker reads the
+	// marker. Only used when SkipProfiles is not empty.
+	SkipProfiles []string
+	Profiles     func() (map[string]windowsHookImageProfile, error)
+	Actor        func() string
+	Audit        func(windowsHookImageSkippedProfile) error
+	ReadMarker   func(path string) ([]byte, error)
+	Now          func() time.Time
+	Sleep        func(time.Duration)
+	Wait, Poll   time.Duration
 }
 
 func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImageRetireReport {
 	report := windowsHookImageRetireReport{
-		SchemaVersion: windowsHookImageReportSchema,
-		Rewritten:     []string{},
-		StillNamed:    []windowsHookImageNamedFile{},
+		SchemaVersion:     windowsHookImageReportSchema,
+		Rewritten:         []string{},
+		StillNamed:        []windowsHookImageNamedFile{},
+		SkippedProfiles:   []windowsHookImageSkippedProfile{},
+		SignedOutProfiles: []windowsHookImageSignedOutProfile{},
 	}
 	fail := func(reason, format string, args ...any) windowsHookImageRetireReport {
 		report.OK = false
@@ -162,13 +250,14 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		}
 	}
 	before := steps.Scan()
+	skip, profiles, err := windowsHookImageRetireSkipSet(steps, before)
+	if err != nil {
+		return fail(windowsHookImageRetireRefused, "%v. Nothing was changed", err)
+	}
 	marker := windowsHookImageJoin(root, winpath.EnterpriseHookImagesRetiredMarker)
 	report.Marker = marker
 	if _, err := steps.FS.Lstat(marker); errors.Is(err, fs.ErrNotExist) {
-		body, _ := json.Marshal(struct {
-			SchemaVersion int    `json:"schema_version"`
-			RetiredAt     string `json:"retired_at"`
-		}{1, steps.Now().UTC().Format(time.RFC3339)})
+		body, _ := json.Marshal(windowsHookImageRetireMarker{SchemaVersion: 1, RetiredAt: steps.Now().UTC().Format(time.RFC3339)})
 		if err := steps.WriteMarker(marker, append(body, '\n')); err != nil {
 			return fail(windowsHookImageRetireRefused, "write %s: %v", marker, err)
 		}
@@ -176,14 +265,38 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		return fail(windowsHookImageRetireRefused, "inspect %s: %v", marker, err)
 	}
 	// From here the writers name the transition set: have them write. A
-	// writer that failed is named in the report's error (and the scan below
-	// still decides ok or pending).
+	// writer that failed is named in the report's error and, for each file
+	// it left naming a launch folder, in that file's cause (the scan below
+	// still decides ok or pending). The Codex requirements go first: the
+	// guardian's pass refuses a requirements file that names another managed
+	// folder than the one it resolves. Then the selections of signed-out
+	// accounts, which only the account's own install publishes, so the
+	// guardian's pass after the restart finds them pending, not failed
+	// (rel-1-0-10 GAP-0856).
 	var writerErrors []string
+	var codexErr, guardianErr string
 	if err := steps.ReconcileCodex(); err != nil {
-		writerErrors = append(writerErrors, "Codex requirements reconcile: "+err.Error())
+		codexErr = err.Error()
+		writerErrors = append(writerErrors, "Codex requirements reconcile: "+codexErr)
+	}
+	var deselection windowsHookImageDeselection
+	if steps.DeselectSignedOut != nil {
+		deselection = steps.DeselectSignedOut()
+		for _, profile := range deselection.Profiles {
+			report.SignedOutProfiles = append(report.SignedOutProfiles, profile)
+			account := profile.Account
+			if account == "" {
+				account = profile.SID
+			}
+			report.Notes = append(report.Notes, fmt.Sprintf("signed_out: %s (%s): its %s runtime selection named a launch folder, "+
+				"and the guardian cannot rewrite it while the account is signed out. Retire dropped it: the account has no runtime "+
+				"selected until it signs in, and the guardian then installs the transition hook in its session (under an older "+
+				"release, that release's guardian does)", account, profile.SID, strings.Join(profile.Connectors, ", ")))
+		}
 	}
 	if err := steps.RestartGuardian(); err != nil {
-		writerErrors = append(writerErrors, "guardian restart: "+err.Error())
+		guardianErr = err.Error()
+		writerErrors = append(writerErrors, "guardian restart: "+guardianErr)
 	}
 	report.Notes = append(report.Notes, writerErrors...)
 	withWriterErrors := func(text string) string {
@@ -196,7 +309,8 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 	var after windowsHookImageConfigScan
 	for {
 		after = steps.Scan()
-		if len(after.Incomplete) == 0 && len(after.NamedBySystem()) == 0 {
+		if len(after.Incomplete) == 0 && len(windowsHookImageBlockingNamedFiles(after, skip)) == 0 &&
+			windowsHookImageBlockingUnverified(after, skip) == 0 {
 			break
 		}
 		if !steps.Now().Before(deadline) {
@@ -204,23 +318,72 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		}
 		steps.Sleep(steps.Poll)
 	}
-	// Only the machine files decide: the older release's Setup reads those.
-	// An account file that still names a folder is the guardian's to
-	// rewrite when it reaches that account; it is reported, not waited for.
+	// Every file decides: the older release's Setup compares the machine
+	// files, and its guardian refuses an account's agent config that names a
+	// launch folder (a Copilot hook file it did not write, a tampered Hermes
+	// command), fails that account and so the older Setup (GAP-0794).
 	still := map[string]bool{}
+	accountFiles, unreadable := 0, 0
+	skipped := map[string][]windowsHookImageNamedFile{}
 	for folder, files := range after.Named {
 		for _, file := range files {
-			still[strings.ToLower(file)] = true
-			if after.UserFiles[strings.ToLower(file)] {
-				report.Notes = append(report.Notes, fmt.Sprintf("still_named_by_account_file: %s names %s (the guardian rewrites it at that account's next pass)", file, folder))
+			key := strings.ToLower(file)
+			still[key] = true
+			account := after.UserFiles[key]
+			named := windowsHookImageNamedFile{File: file, Folder: folder, Account: account}
+			if sid := after.FileSIDs[key]; account && skip[sid] {
+				skipped[sid] = append(skipped[sid], named)
 				continue
 			}
-			report.StillNamed = append(report.StillNamed, windowsHookImageNamedFile{File: file, Folder: folder})
+			if account {
+				accountFiles++
+			}
+			report.StillNamed = append(report.StillNamed, named)
 		}
 	}
-	for _, note := range after.Skipped {
-		report.Notes = append(report.Notes, "skipped_unsafe: "+note)
+	// An account file the scan could not read or vouch for may name a
+	// launch folder: it holds retire back like one that does, and a skip of
+	// its profile covers it (rel-1-0-10 GAP-0882).
+	for _, file := range after.Unverified {
+		key := strings.ToLower(file.File.Path)
+		if still[key] {
+			continue
+		}
+		still[key] = true
+		named := windowsHookImageNamedFile{File: file.File.Path, Folder: windowsHookImageUnknownFolder, Account: true, Unreadable: true,
+			Cause: windowsHookImageUnverifiedCause(file)}
+		if sid := file.File.SID; sid != "" && skip[sid] {
+			skipped[sid] = append(skipped[sid], named)
+			continue
+		}
+		unreadable++
+		report.StillNamed = append(report.StillNamed, named)
 	}
+	// Each skip is audited before it is recorded; one the audit store did
+	// not take blocks retire like any other account file.
+	var auditErrors []string
+	if len(skipped) > 0 {
+		recorded, failures := windowsHookImageRecordSkips(steps, marker, skipped, profiles)
+		report.SkippedProfiles = recorded
+		for sid, failure := range failures {
+			auditErrors = append(auditErrors, fmt.Sprintf("the skip of %s was not recorded: %s", sid, failure))
+			report.StillNamed = append(report.StillNamed, skipped[sid]...)
+			for _, named := range skipped[sid] {
+				if named.Unreadable {
+					unreadable++
+				} else {
+					accountFiles++
+				}
+			}
+		}
+		sort.Strings(auditErrors)
+	}
+	for sid := range skip {
+		if _, ok := skipped[sid]; !ok {
+			report.Notes = append(report.Notes, "skip_not_needed: "+sid+" no longer names a launch folder (the guardian rewrote its configs while retire waited); it was not skipped")
+		}
+	}
+	sort.Strings(report.Notes)
 	sort.Slice(report.StillNamed, func(i, j int) bool {
 		if report.StillNamed[i].File != report.StillNamed[j].File {
 			return report.StillNamed[i].File < report.StillNamed[j].File
@@ -241,12 +404,293 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		report.Notes = append(report.Notes, "scan_incomplete: "+note)
 	}
 	if len(after.Incomplete) > 0 {
-		return fail(windowsHookImageRetirePending, "%s", withWriterErrors("some machine files could not be read, so it is not known whether they still name a launch folder; fix the reason in notes, then run retire again"))
+		return fail(windowsHookImageRetirePending, "%s", withWriterErrors("some machine files could not be read, so it is not known whether they still name a launch folder; fix the reason in notes, then run retire again")+". "+windowsHookImageRetirePendingNextStep())
 	}
 	if len(report.StillNamed) > 0 {
-		return fail(windowsHookImageRetirePending, "%s", withWriterErrors(fmt.Sprintf("%d machine file(s) still name a launch folder after %s; run retire again before the older Setup", len(report.StillNamed), steps.Wait)))
+		var guardianFailures []string
+		if steps.GuardianFailures != nil {
+			guardianFailures = steps.GuardianFailures()
+		}
+		var machineLines []string
+		for i := range report.StillNamed {
+			if report.StillNamed[i].Account {
+				continue
+			}
+			report.StillNamed[i].Cause = windowsHookImageBlockCause(report.StillNamed[i].File, codexErr, guardianErr, deselection, guardianFailures, steps.Wait)
+			machineLines = append(machineLines, report.StillNamed[i].File+" ("+report.StillNamed[i].Cause+")")
+		}
+		var parts []string
+		if len(machineLines) > 0 {
+			parts = append(parts, fmt.Sprintf("%d machine file(s) still name a launch folder after %s: %s", len(machineLines), steps.Wait, strings.Join(machineLines, "; ")))
+		}
+		if accountFiles > 0 {
+			parts = append(parts, fmt.Sprintf("%d agent config(s) of enrolled accounts still name a launch folder after %s (still_named entries with account true). "+
+				"The guardian rewrites an account's own configs only in that account's Windows session, and the older release's guardian "+
+				"refuses a hook config that names a launch folder, fails that account and stops the older Setup with 1603. "+
+				"Have each of those accounts sign in (the guardian rewrites its configs within about a minute), or remove the account with its profile, "+
+				"then run retire again", accountFiles, steps.Wait))
+		}
+		if unreadable > 0 {
+			parts = append(parts, fmt.Sprintf("%d agent config(s) of enrolled accounts could not be read or verified (still_named entries with unreadable true; "+
+				"each cause says why), so it is not known whether they name a launch folder. An elevated administrator is denied some "+
+				"account folders: run retire as LocalSystem, or fix the cause, then run retire again", unreadable))
+		}
+		if accountFiles > 0 || unreadable > 0 {
+			parts[len(parts)-1] += "; an administrator who accepts that a profile stays unconverted can name it with --skip-profile <SID> (audited, and listed by enterprise windows status and verify until it is converted)"
+		}
+		parts = append(parts, auditErrors...)
+		return fail(windowsHookImageRetirePending, "%s", strings.Join(parts, "; ")+". "+windowsHookImageRetirePendingNextStep())
 	}
 	report.OK = true
 	report.Error = strings.Join(writerErrors, "; ")
 	return report
+}
+
+// windowsHookImageRetirePendingNextStep is what an administrator does when
+// retire ends pending. An older Setup run now fails with 1603 and leaves the
+// DefenseClaw services stopped and disabled (rel-1-0-10 GAP-0794, GAP-0856).
+func windowsHookImageRetirePendingNextStep() string {
+	return "Do NOT run an older release's Setup while retire reports pending: it fails with 1603 and leaves the DefenseClaw services " +
+		"stopped and disabled. Fix the cause named for each file, then run retire again until it ends ok. If an older Setup already " +
+		"failed, recover with this release's `" + managed.WindowsSetupCommand("/ensure") + "`"
+}
+
+// windowsHookImageMachineFileWriter names the step that rewrites a machine
+// file retire scans: the runtime selector step ("selector"), the Codex
+// requirements reconcile ("codex"), or the guardian ("guardian").
+func windowsHookImageMachineFileWriter(path string) string {
+	lower := strings.ToLower(strings.ReplaceAll(path, "/", `\`))
+	base := lower[strings.LastIndex(lower, `\`)+1:]
+	switch {
+	case base == ".defenseclaw-managed-runtime-selector.state":
+		return "selector"
+	case base == "codex-requirements-ownership.json" || strings.Contains(lower, `\openai\codex\`):
+		return "codex"
+	}
+	return "guardian"
+}
+
+// windowsHookImageBlockCause is why a machine file still names a launch
+// folder: the error of the step that rewrites it, else the guardian's.
+func windowsHookImageBlockCause(file, codexErr, guardianErr string, deselection windowsHookImageDeselection,
+	guardianFailures []string, wait time.Duration) string {
+	switch windowsHookImageMachineFileWriter(file) {
+	case "selector":
+		if err := deselection.Errors[strings.ToLower(file)]; err != "" {
+			return "the runtime selection of a signed-out account could not be dropped: " + err
+		}
+		if deselection.Error != "" {
+			return "the runtime selections of signed-out accounts could not be dropped: " + deselection.Error
+		}
+	case "codex":
+		if codexErr != "" {
+			return "Codex requirements reconcile: " + codexErr
+		}
+	}
+	if guardianErr != "" {
+		return "guardian restart: " + guardianErr
+	}
+	if len(guardianFailures) > 0 {
+		shown := guardianFailures
+		more := ""
+		if len(shown) > 3 {
+			more = fmt.Sprintf("; and %d more (enterprise windows status)", len(shown)-3)
+			shown = shown[:3]
+		}
+		return fmt.Sprintf("the guardian did not rewrite it within %s: %s%s", wait, strings.Join(shown, "; "), more)
+	}
+	return fmt.Sprintf("the guardian did not rewrite it within %s and recorded no failed target; read the guardian log "+
+		"and enterprise windows status, then run retire again", wait)
+}
+
+// windowsHookImageUnverifiedCause is the still_named cause of an account
+// file the scan could not read or vouch for.
+func windowsHookImageUnverifiedCause(file windowsHookImageUnverifiedFile) string {
+	cause := "could not be read or verified, so it may name a launch folder: " + file.Err
+	if file.File.Note != "" {
+		cause += " (" + file.File.Note + ")"
+	}
+	return cause
+}
+
+// windowsHookImageRetireSkipSet checks the --skip-profile SIDs before
+// anything changes: each must be a SID, an enrolled profile of the
+// guardian's manifest, and one whose own agent configs name a launch folder
+// now (before), or could not be read, so it is what holds retire back. There
+// is no blanket skip.
+func windowsHookImageRetireSkipSet(steps windowsHookImageRetireSteps, before windowsHookImageConfigScan) (map[string]bool, map[string]windowsHookImageProfile, error) {
+	if len(steps.SkipProfiles) == 0 {
+		return nil, nil, nil
+	}
+	if steps.Profiles == nil || steps.Audit == nil || steps.Actor == nil || steps.ReadMarker == nil {
+		return nil, nil, errors.New("--skip-profile is not available here")
+	}
+	profiles, err := steps.Profiles()
+	if err != nil {
+		return nil, nil, fmt.Errorf("--skip-profile needs the enrolled profiles of the guardian's manifest, which could not be read: %w", err)
+	}
+	blocking := map[string]bool{}
+	for key := range windowsHookImageBlockingNamedFiles(before, nil) {
+		if sid := before.FileSIDs[key]; sid != "" && before.UserFiles[key] {
+			blocking[strings.ToUpper(sid)] = true
+		}
+	}
+	for _, file := range before.Unverified {
+		if sid := strings.TrimSpace(file.File.SID); sid != "" {
+			blocking[strings.ToUpper(sid)] = true
+		}
+	}
+	skip := map[string]bool{}
+	for _, raw := range steps.SkipProfiles {
+		sid := strings.ToUpper(strings.TrimSpace(raw))
+		if !windowsHookImageSIDPattern.MatchString(sid) {
+			return nil, nil, fmt.Errorf("--skip-profile %q is not a Windows SID (S-1-5-21-...); name each profile by its SID, as still_named and enterprise windows status show it", raw)
+		}
+		canonical := ""
+		for enrolled := range profiles {
+			if strings.EqualFold(enrolled, sid) {
+				canonical = enrolled
+			}
+		}
+		if canonical == "" {
+			return nil, nil, fmt.Errorf("--skip-profile %s is not an enrolled profile of this computer's guardian manifest", sid)
+		}
+		if !blocking[sid] {
+			return nil, nil, fmt.Errorf("--skip-profile %s does not hold retire back: none of its own agent configs names a launch folder; run retire without it", canonical)
+		}
+		skip[canonical] = true
+	}
+	return skip, profiles, nil
+}
+
+var windowsHookImageSIDPattern = lazyregexp.New(`^S-1-[0-9]+(-[0-9]+)+$`)
+
+// windowsHookImageBlockingNamedFiles is the set of files (lower case) of the
+// scan that name a launch folder, or may, and do not belong to a skipped
+// profile.
+func windowsHookImageBlockingNamedFiles(scan windowsHookImageConfigScan, skip map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	for _, files := range scan.Named {
+		for _, file := range files {
+			key := strings.ToLower(file)
+			if scan.UserFiles[key] && skip[scan.FileSIDs[key]] {
+				continue
+			}
+			out[key] = true
+		}
+	}
+	return out
+}
+
+// windowsHookImageBlockingUnverified counts the scan's unverified account
+// files that do not belong to a skipped profile: retire waits on them too (a
+// file held open can be read again; turev #6).
+func windowsHookImageBlockingUnverified(scan windowsHookImageConfigScan, skip map[string]bool) int {
+	count := 0
+	for _, file := range scan.Unverified {
+		if sid := file.File.SID; sid == "" || !skip[sid] {
+			count++
+		}
+	}
+	return count
+}
+
+// windowsHookImageRecordSkips audits each skipped profile and records the
+// audited ones in the marker. It returns the recorded skips and, by SID,
+// why a skip was not recorded.
+func windowsHookImageRecordSkips(
+	steps windowsHookImageRetireSteps,
+	marker string,
+	skipped map[string][]windowsHookImageNamedFile,
+	profiles map[string]windowsHookImageProfile,
+) ([]windowsHookImageSkippedProfile, map[string]string) {
+	failures := map[string]string{}
+	var body windowsHookImageRetireMarker
+	current, err := steps.ReadMarker(marker)
+	if err == nil {
+		err = json.Unmarshal(current, &body)
+	}
+	if err != nil {
+		for sid := range skipped {
+			failures[sid] = fmt.Sprintf("read %s: %v", marker, err)
+		}
+		return []windowsHookImageSkippedProfile{}, failures
+	}
+	sids := make([]string, 0, len(skipped))
+	for sid := range skipped {
+		sids = append(sids, sid)
+	}
+	sort.Strings(sids)
+	actor := steps.Actor()
+	at := steps.Now().UTC().Format(time.RFC3339)
+	recorded := []windowsHookImageSkippedProfile{}
+	for _, sid := range sids {
+		files := skipped[sid]
+		sort.Slice(files, func(i, j int) bool { return files[i].File < files[j].File })
+		profile := windowsHookImageSkippedProfile{
+			SID: sid, Account: profiles[sid].Account, Home: profiles[sid].Home,
+			SkippedBy: actor, SkippedAt: at, Files: files,
+		}
+		if err := steps.Audit(profile); err != nil {
+			failures[sid] = "the audit row could not be written (" + err.Error() + "); start the DefenseClaw gateway service and run retire again"
+			continue
+		}
+		kept := body.SkippedProfiles[:0]
+		for _, entry := range body.SkippedProfiles {
+			if !strings.EqualFold(entry.SID, sid) {
+				kept = append(kept, entry)
+			}
+		}
+		body.SkippedProfiles = append(kept, profile)
+		recorded = append(recorded, profile)
+	}
+	if len(recorded) == 0 {
+		return recorded, failures
+	}
+	data, _ := json.Marshal(body)
+	if err := steps.WriteMarker(marker, append(data, '\n')); err != nil {
+		for _, profile := range recorded {
+			failures[profile.SID] = fmt.Sprintf("audited, but %s could not be written: %v", marker, err)
+		}
+		return []windowsHookImageSkippedProfile{}, failures
+	}
+	return recorded, failures
+}
+
+// windowsHookImageSkippedProfilesNotRetired returns, for status and verify,
+// one line per profile the retire marker records as skipped whose recorded
+// files still name a launch folder of bin (or can no longer be read to
+// tell). A profile whose files no longer name one is converted and is not
+// listed. Each file is read as the account's own, below its home.
+func windowsHookImageSkippedProfilesNotRetired(marker []byte, bin string, read func(windowsHookImageConfigFile) ([]byte, error)) []string {
+	var body windowsHookImageRetireMarker
+	if err := json.Unmarshal(marker, &body); err != nil {
+		return nil
+	}
+	var lines []string
+	for _, profile := range body.SkippedProfiles {
+		var still []string
+		for _, named := range profile.Files {
+			data, err := read(windowsHookImageConfigFile{Path: named.File, User: true, Home: profile.Home, SID: profile.SID})
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				continue
+			case err != nil:
+				still = append(still, named.File+" (could not be read: "+err.Error()+")")
+			case len(windowsHookImageFoldersNamedIn(data, bin)) > 0:
+				still = append(still, named.File)
+			}
+		}
+		if len(still) == 0 {
+			continue
+		}
+		account := profile.Account
+		if account == "" {
+			account = profile.SID
+		}
+		lines = append(lines, fmt.Sprintf("%s (%s) is not retired: %s skipped it in hook-image retire at %s, and %s still name a launch folder, "+
+			"so an older release's guardian fails this account; have it sign in (the guardian rewrites its configs), or remove it with its profile",
+			account, profile.SID, profile.SkippedBy, profile.SkippedAt, strings.Join(still, ", ")))
+	}
+	return lines
 }

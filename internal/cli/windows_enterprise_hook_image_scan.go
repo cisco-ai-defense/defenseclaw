@@ -11,13 +11,16 @@
 package cli
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -38,15 +41,22 @@ type windowsHookImageConfigFile struct {
 	// Home is the folder an account file is read below: the enrolled
 	// account's home, or ProgramData for a vendor folder file. The file is
 	// read only when no link lies at or below Home on its path
-	// (link_in_account_path otherwise: skipped, never read).
+	// (link_in_account_path otherwise: unverified, never read).
 	Home string
 	// Note says why a file outside an account's home is an account file
-	// ("not_admin_owned: <element>"); it is shown with a skipped line.
+	// ("not_admin_owned: <element>"); it is shown with an unverified line.
 	// Home is then ProgramData: the file is opened from ProgramData's handle.
 	Note string
+	// SID is the enrolled account an account file in its home belongs to
+	// (the profile `hook-image retire --skip-profile` names); "" otherwise.
+	SID string
+	// Unverified, when set, is why the list could not vouch for this
+	// account file (its agent home is not resolvable, or outside the home):
+	// it is never read and is unverified (rel-1-0-10 GAP-0884).
+	Unverified string
 }
 
-// line is the Incomplete or Skipped line of file for err.
+// line is the Incomplete or Unverified line of file for err.
 func (f windowsHookImageConfigFile) line(err error) string {
 	if f.Note != "" {
 		return fmt.Sprintf("%s (%s): %v", f.Path, f.Note, err)
@@ -54,7 +64,7 @@ func (f windowsHookImageConfigFile) line(err error) string {
 	return fmt.Sprintf("%s: %v", f.Path, err)
 }
 
-// windowsHookImageLinkInAccountPath starts the skipped line of an account
+// windowsHookImageLinkInAccountPath starts the unverified line of an account
 // file whose path has a link at or below the account home.
 const windowsHookImageLinkInAccountPath = "link_in_account_path"
 
@@ -83,16 +93,57 @@ func windowsHookImageAccountPathError(err error) error {
 // through that handle. SYSTEM would resolve every folder of the path with its
 // own rights if it opened the path by name, so a folder the account replaced
 // with a junction would point SYSTEM's open anywhere the account chooses.
+//
+// Each view is bounded (windowsHookImageBounded): an account that holds an
+// oplock on its own agent config kept retire, which holds lifecycle.lock,
+// waiting in the open (rel-1-0-10 GAP-0886); it is unverified instead.
 func windowsHookImageAccountView(view func(home, path string) (fs.FileInfo, []fs.DirEntry, error)) func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
+	type viewed struct {
+		info     fs.FileInfo
+		children []fs.DirEntry
+	}
 	return func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
 		if strings.TrimSpace(home) == "" {
 			return nil, nil, errWindowsHookImageNoAccountHome
 		}
-		info, children, err := view(home, path)
+		got, err := windowsHookImageBounded(func() (viewed, error) {
+			info, children, err := view(home, path)
+			return viewed{info, children}, err
+		})
 		if err != nil {
 			return nil, nil, windowsHookImageAccountPathError(err)
 		}
-		return info, children, nil
+		return got.info, got.children, nil
+	}
+}
+
+// windowsHookImageScanTimeout bounds one open, listing or read of the scan,
+// so a path held with an oplock, or one that does not answer, cannot keep
+// retire or prune (which hold the lifecycle lock) waiting. A call still
+// blocked at the timeout is given up on; its goroutine ends with the process.
+const windowsHookImageScanTimeout = 5 * time.Second
+
+var errWindowsHookImageScanTimeout = errors.New("did not answer in time (an oplock, or a path that does not answer); not read")
+
+// windowsHookImageBounded runs do within windowsHookImageScanTimeout.
+func windowsHookImageBounded[T any](do func() (T, error)) (T, error) {
+	type result struct {
+		value T
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		value, err := do()
+		done <- result{value, err}
+	}()
+	timer := time.NewTimer(windowsHookImageScanTimeout)
+	defer timer.Stop()
+	select {
+	case got := <-done:
+		return got.value, got.err
+	case <-timer.C:
+		var zero T
+		return zero, errWindowsHookImageScanTimeout
 	}
 }
 
@@ -123,17 +174,27 @@ type windowsHookImageVendorFS struct {
 // owned by SYSTEM or Administrators; from the first element that is not, the
 // rest is account files read below ProgramData (Note not_admin_owned:
 // <element>), so one the user made unreadable, or a link the user made, is
-// skipped and never voids the scan (which would keep every folder and leave
-// retire pending). A link owned by SYSTEM or Administrators is not followed
+// unverified and never voids the scan (prune keeps every superseded folder
+// while one is left; retire names it and stays pending until it is readable
+// or its profile skipped). A link owned by SYSTEM or Administrators is not followed
 // either: it makes the scan incomplete (link_at_machine_folder), since only
 // an administrator can make it and what it points to is not known. A folder
 // SYSTEM cannot list is a problem (the scan is incomplete) when it is a
-// machine folder and an account entry (skipped by the scan) otherwise; the
+// machine folder and an account entry (unverified by the scan) otherwise; the
 // listing goes on with its siblings, so one unreadable folder cannot hide
 // the other files. A missing vendor folder lists nothing. Owners do not
 // change under the scan: a standard user cannot make a folder of theirs
 // owned by SYSTEM or Administrators, nor replace one that is.
 func windowsHookImageVendorFiles(programData, dir string, depth int, vfs windowsHookImageVendorFS) ([]windowsHookImageConfigFile, []string) {
+	// Bounded like an account view (GAP-0886): a standard user can hold an
+	// oplock on an element it made in a vendor folder.
+	inspect, list := vfs.Inspect, vfs.List
+	vfs.Inspect = func(root, path string) (winpath.BelowInfo, error) {
+		return windowsHookImageBounded(func() (winpath.BelowInfo, error) { return inspect(root, path) })
+	}
+	vfs.List = func(root, path string) ([]fs.DirEntry, error) {
+		return windowsHookImageBounded(func() ([]fs.DirEntry, error) { return list(root, path) })
+	}
 	var files []windowsHookImageConfigFile
 	var problems []string
 	entry := func(path, note string) windowsHookImageConfigFile {
@@ -149,6 +210,9 @@ func windowsHookImageVendorFiles(programData, dir string, depth int, vfs windows
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return "", "", true
+		case errors.Is(err, errWindowsHookImageScanTimeout):
+			// Not known to be an account's: the scan is incomplete.
+			return "", fmt.Sprintf("%s: %v", path, err), false
 		case err != nil:
 			// SYSTEM is not the owner of an object a standard user made and
 			// does not get READ_CONTROL on one whose ACL the user set, so an
@@ -234,32 +298,37 @@ type windowsHookImageConfigScan struct {
 	Named map[string][]string
 	// UserFiles are the files of Named that are an account's own.
 	UserFiles map[string]bool
+	// FileSIDs maps an account file of Named (lower case) to the enrolled
+	// account's SID, when the file is in that account's home.
+	FileSIDs map[string]string
 	// Incomplete lists "<file>: <error>" for each machine file (written by
 	// DefenseClaw as SYSTEM) that exists but could not be read. A scan with
 	// any entry here proves nothing about the folders: prune removes none
 	// and retire stays pending.
 	Incomplete []string
-	// Skipped lists "<file>: <error>" for each account file that was a
-	// link, had a link at or below its account home (link_in_account_path),
-	// was not a regular file, too large, unreadable or did not answer in
-	// time. It is reported (skipped_unsafe) and does not void the scan: a
-	// folder it might name is still kept while it is current, the replaced
-	// one or replaced less than hookImageRetainAfterSupersede ago.
-	Skipped []string
+	// Unverified are the account files that were a link, had a link at or
+	// below their account home (link_in_account_path), were not a regular
+	// file, too large, unreadable, did not answer in time, or that the list
+	// could not locate for certain (a signed-out Hermes account, a moved
+	// agent home). Prune notes them (skipped_unsafe) and keeps every
+	// superseded folder while one is left (unverified_account_file). Retire cannot
+	// tell whether they name a launch folder, so it names each in
+	// still_named (unreadable) and never ends ok over one (rel-1-0-10
+	// GAP-0882: an Administrator's retire was denied an account's .codex
+	// folder and ended ok without reading its config).
+	Unverified []windowsHookImageUnverifiedFile
 }
 
-// NamedBySystem reports the folders a machine file names (retire waits
-// only for those: the older release's Setup reads only them).
-func (s windowsHookImageConfigScan) NamedBySystem() map[string][]string {
-	out := map[string][]string{}
-	for folder, files := range s.Named {
-		for _, file := range files {
-			if !s.UserFiles[strings.ToLower(file)] {
-				out[folder] = append(out[folder], file)
-			}
-		}
-	}
-	return out
+// windowsHookImageUnverifiedFile is an account file the scan could not read
+// or vouch for, and Err why.
+type windowsHookImageUnverifiedFile struct {
+	File windowsHookImageConfigFile
+	Err  string
+}
+
+// Line is the "<file>: <error>" line of u.
+func (u windowsHookImageUnverifiedFile) Line() string {
+	return u.File.line(errors.New(u.Err))
 }
 
 // errWindowsHookImageScanUnsafe is a scanned path that is a link, a folder
@@ -299,10 +368,10 @@ func readWindowsHookImageRetryingBusy(read func() ([]byte, error), busy func(err
 // expandWindowsHookImageConfigFiles turns the watched paths into the regular
 // files to read: a folder (Claude Code's managed-settings.d) becomes its
 // regular files, a missing path is dropped, a link or other non-regular entry
-// is refused (machine: incomplete; account: skipped). A machine path is
+// is refused (machine: incomplete; account: unverified). A machine path is
 // looked at with lstat and readDir; an account path only through viewAccount
 // (windowsHookImageAccountView): one with a link at or below its home is
-// skipped (link_in_account_path) and never listed or read, and a watched
+// unverified (link_in_account_path) and never listed or read, and a watched
 // account folder is listed through the handle the view opened. Lock files
 // and temporaries are left out: writers hold them without sharing and they
 // never name a hook.
@@ -311,15 +380,15 @@ func expandWindowsHookImageConfigFiles(
 	lstat func(string) (fs.FileInfo, error),
 	readDir func(string) ([]fs.DirEntry, error),
 	viewAccount func(home, path string) (fs.FileInfo, []fs.DirEntry, error),
-) ([]windowsHookImageConfigFile, []string, []string) {
+) ([]windowsHookImageConfigFile, []string, []windowsHookImageUnverifiedFile) {
 	var files []windowsHookImageConfigFile
-	var incomplete, skipped []string
+	var incomplete []string
+	var unverified []windowsHookImageUnverifiedFile
 	refuse := func(entry windowsHookImageConfigFile, err error) {
-		line := entry.line(err)
 		if entry.User {
-			skipped = append(skipped, line)
+			unverified = append(unverified, windowsHookImageUnverifiedFile{File: entry, Err: err.Error()})
 		} else {
-			incomplete = append(incomplete, line)
+			incomplete = append(incomplete, entry.line(err))
 		}
 	}
 	seen := map[string]bool{}
@@ -338,6 +407,10 @@ func expandWindowsHookImageConfigFiles(
 			continue
 		}
 		expanded[entryKey] = true
+		if entry.Unverified != "" {
+			refuse(entry, errors.New(entry.Unverified))
+			continue
+		}
 		var info fs.FileInfo
 		var children []fs.DirEntry
 		var err error
@@ -390,7 +463,7 @@ func expandWindowsHookImageConfigFiles(
 			}
 		}
 	}
-	return files, incomplete, skipped
+	return files, incomplete, unverified
 }
 
 func windowsHookImageScanSkipsName(path string) bool {
@@ -401,10 +474,10 @@ func windowsHookImageScanSkipsName(path string) bool {
 // scanWindowsHookImageConfigFiles reads each regular file (a missing one is
 // skipped) and records the launch folders of bin it names. A machine file
 // that cannot be read makes the scan incomplete; an account file that
-// cannot be read is skipped (see windowsHookImageConfigScan). read gets the
+// cannot be read is unverified (see windowsHookImageConfigScan). read gets the
 // whole entry: an account file is read only below its Home.
 func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin string, read func(windowsHookImageConfigFile) ([]byte, error)) windowsHookImageConfigScan {
-	scan := windowsHookImageConfigScan{Named: map[string][]string{}, UserFiles: map[string]bool{}}
+	scan := windowsHookImageConfigScan{Named: map[string][]string{}, UserFiles: map[string]bool{}, FileSIDs: map[string]string{}}
 	seen := map[string]bool{}
 	for _, file := range files {
 		key := strings.ToLower(strings.TrimSpace(file.Path))
@@ -417,18 +490,25 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 			continue
 		}
 		if err != nil {
-			line := file.line(err)
 			if file.User {
-				scan.Skipped = append(scan.Skipped, line)
+				scan.Unverified = append(scan.Unverified, windowsHookImageUnverifiedFile{File: file, Err: err.Error()})
 			} else {
-				scan.Incomplete = append(scan.Incomplete, line)
+				scan.Incomplete = append(scan.Incomplete, file.line(err))
 			}
 			continue
 		}
 		for _, folder := range windowsHookImageFoldersNamedIn(body, bin) {
+			if folder == windowsHookImageUnknownFolder && !file.User {
+				// A machine file that may name a folder: nothing is known.
+				scan.Incomplete = append(scan.Incomplete, file.line(errWindowsHookImageUndecodable))
+				continue
+			}
 			scan.Named[folder] = append(scan.Named[folder], file.Path)
 			if file.User {
 				scan.UserFiles[key] = true
+				if file.SID != "" {
+					scan.FileSIDs[key] = file.SID
+				}
 			}
 		}
 	}
@@ -443,7 +523,18 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 // image of this install's bin counts, so a string an account writes about
 // another folder, another install or a relative path keeps nothing.
 func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
-	text := strings.ReplaceAll(strings.ToLower(string(body)), "/", `\`)
+	// A PowerShell bridge names the hook only inside the base64 script of
+	// its -EncodedCommand (the Copilot VS Code Local hooks, the Codex and
+	// Cursor machine commands): read those scripts too, before the case is
+	// folded (base64 is case-sensitive). Without them retire ended ok over a
+	// Copilot file that named a launch folder, and the 1.0.9 guardian failed
+	// that account (rel-1-0-10 GAP-0794); prune could remove such a folder.
+	raw := string(body)
+	scripts, undecodable := windowsHookImageEncodedScripts(raw, windowsHookImageEncodedScriptDepth)
+	for _, script := range scripts {
+		raw += "\n" + script
+	}
+	text := strings.ReplaceAll(strings.ToLower(raw), "/", `\`)
 	for strings.Contains(text, `\\`) {
 		text = strings.ReplaceAll(text, `\\`, `\`)
 	}
@@ -483,12 +574,118 @@ func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
 			found[location.Digest] = true
 		}
 	}
-	out := make([]string, 0, len(found))
+	out := make([]string, 0, len(found)+1)
 	for digest := range found {
 		out = append(out, digest)
 	}
 	sort.Strings(out)
+	if undecodable {
+		// A script that cannot be read may name any folder (GAP-0794
+		// review F4): unknown keeps retire pending; prune keeps what it
+		// keeps for an unreadable file.
+		out = append(out, windowsHookImageUnknownFolder)
+	}
 	return out
+}
+
+// windowsHookImageEncodedArgument is a command-line switch (a hyphen, two,
+// a slash, or the en dash, em dash or horizontal bar PowerShell reads as a
+// hyphen); one followed by a blank or a colon is read, and its value is the word after it (windowsHookImageSwitchValue). Only
+// a switch PowerShell reads as -EncodedCommand counts
+// (windowsHookImageEncodedSwitch), and only on a line that starts
+// powershell or pwsh.
+var windowsHookImageEncodedArgument = lazyregexp.New(`(?:^|[\s"'])(?:--?|/|\x{2013}|\x{2014}|\x{2015})([A-Za-z]+)`)
+
+// windowsHookImageSwitchValue is the word at text[at:] after blanks: up to
+// a blank, a quote, a comma or a semicolon.
+func windowsHookImageSwitchValue(text string, at int) string {
+	for at < len(text) && (text[at] == ' ' || text[at] == '\t') {
+		at++
+	}
+	end := at
+	for end < len(text) && !strings.ContainsRune(" \t\r\n\"',;", rune(text[end])) {
+		end++
+	}
+	return text[at:end]
+}
+
+// windowsHookImageUnknownFolder stands for the folders a file may name in a
+// PowerShell script that could not be decoded (too large, not base64 of
+// UTF-16LE): an account file holds retire back with it, a machine file
+// makes the scan incomplete.
+const windowsHookImageUnknownFolder = "unknown"
+
+var errWindowsHookImageUndecodable = errors.New("holds a PowerShell -EncodedCommand value that could not be decoded, so it is not known which hook it starts")
+
+// windowsHookImageEncodedScriptLimit bounds one base64 value the scan
+// decodes; windowsHookImageEncodedScriptDepth how deep a decoded script's
+// own -EncodedCommand is read.
+const (
+	windowsHookImageEncodedScriptLimit = 256 << 10
+	windowsHookImageEncodedScriptDepth = 2
+)
+
+// windowsHookImageEncodedSwitch reports a switch name PowerShell (5.1 and
+// 7) binds to -EncodedCommand: -e, -ec and every prefix of encodedcommand
+// from -e on, with one or two dashes or a slash.
+func windowsHookImageEncodedSwitch(name string) bool {
+	name = strings.ToLower(name)
+	return name == "ec" || strings.HasPrefix("encodedcommand", name)
+}
+
+// windowsHookImagePowerShellLine reports whether the line of text that holds
+// offset starts a PowerShell (powershell or pwsh) command before offset.
+func windowsHookImagePowerShellLine(text string, offset int) bool {
+	start := strings.LastIndexAny(text[:offset], "\r\n") + 1
+	if offset-start > 4096 {
+		start = offset - 4096
+	}
+	line := strings.ToLower(text[start:offset])
+	return strings.Contains(line, "powershell") || strings.Contains(line, "pwsh")
+}
+
+// windowsHookImageEncodedScripts returns the scripts (base64 of UTF-16LE)
+// of every -EncodedCommand argument of a PowerShell command line in text
+// and, to depth, in those scripts, and whether any such value could not be
+// decoded.
+func windowsHookImageEncodedScripts(text string, depth int) (scripts []string, undecodable bool) {
+	if depth <= 0 {
+		return nil, false
+	}
+	for _, match := range windowsHookImageEncodedArgument.FindAllStringSubmatchIndex(text, -1) {
+		name := text[match[2]:match[3]]
+		if match[3] >= len(text) || (text[match[3]] != ' ' && text[match[3]] != '\t' && text[match[3]] != ':') ||
+			!windowsHookImageEncodedSwitch(name) || !windowsHookImagePowerShellLine(text, match[2]) {
+			continue
+		}
+		start := match[3]
+		if text[start] == ':' {
+			// -EncodedCommand:<value>
+			start++
+		}
+		value := windowsHookImageSwitchValue(text, start)
+		// A JSON writer may escape the slash.
+		value = strings.ReplaceAll(value, `\/`, "/")
+		if len(value) > windowsHookImageEncodedScriptLimit {
+			undecodable = true
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(value)
+		if err != nil || len(decoded)%2 != 0 {
+			undecodable = true
+			continue
+		}
+		units := make([]uint16, len(decoded)/2)
+		for i := range units {
+			units[i] = uint16(decoded[2*i]) | uint16(decoded[2*i+1])<<8
+		}
+		script := string(utf16.Decode(units))
+		scripts = append(scripts, script)
+		nested, unknown := windowsHookImageEncodedScripts(script, depth-1)
+		scripts = append(scripts, nested...)
+		undecodable = undecodable || unknown
+	}
+	return scripts, undecodable
 }
 
 // windowsHookImagePathStart finds where the absolute path that ends at end
@@ -541,6 +738,14 @@ func windowsHookImageStageTimes(fsys windowsHookImageFS, root string, entries []
 func windowsHookImageRetainReason(name string, staged map[string]time.Time, policy windowsHookImagePrunePolicy) string {
 	if len(policy.Scan.Incomplete) > 0 {
 		return "scan_incomplete"
+	}
+	// An account file that could not be read or verified (a signed-out
+	// Hermes account, a moved agent home, a link, a timeout) may name any
+	// folder, so no superseded folder goes while one is left (rel-1-0-10
+	// GAP-0891: such an account became one unread entry, and prune removed
+	// the folders its Hermes files still named).
+	if len(policy.Scan.Unverified) > 0 {
+		return "unverified_account_file:" + policy.Scan.Unverified[0].File.Path
 	}
 	if files := policy.Scan.Named[name]; len(files) > 0 {
 		return "named_by:" + files[0]

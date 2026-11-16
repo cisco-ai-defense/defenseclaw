@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest import mock
 
 from defenseclaw.commands import cmd_doctor
@@ -155,3 +156,40 @@ def test_llm_reachable_proxy_names_lowercase_var_and_plain_timeout(tmp_path, mon
     detail = r.checks[-1]["detail"]
     assert f"Bedrock timed out after 5 s through the proxy http://127.0.0.1:18508 (from {var})" in detail
     assert "litellm" not in detail and "None seconds" not in detail
+
+
+def _route_only_cfg(*, enabled: bool = True):
+    return SimpleNamespace(
+        guardrail=SimpleNamespace(enabled=True, judge=SimpleNamespace(enabled=False)),
+        routing=SimpleNamespace(enabled=enabled, route_only={"connectors": ["claudecode"], "upstreams": {}}),
+    )
+
+
+def test_llm_reachable_skip_names_route_only_routing_not_no_routing() -> None:
+    # GAP-0915: with Claude Code on route-only routing the row said no connector
+    # routes through the proxy, next to Route-only rows that were PASS.
+    cfg = _route_only_cfg()
+    r = _DoctorResult()
+    with (
+        mock.patch.object(cmd_doctor, "_guardrail_proxy_intentionally_closed", return_value="hook-enforced"),
+        mock.patch.object(cmd_doctor, "_doctor_active_connectors", return_value=["claudecode"]),
+        mock.patch("defenseclaw.llm.ping") as ping,
+    ):
+        cmd_doctor._check_llm_reachable(cfg, r)
+    ping.assert_not_called()
+    row = r.checks[-1]
+    assert row["status"] == "skip"
+    assert "no connector routes" not in row["detail"]
+    assert "claudecode" in row["detail"] and "route-only" in row["detail"]
+
+
+def test_llm_reachable_skip_keeps_the_no_routing_wording_without_route_only() -> None:
+    for cfg in (_route_only_cfg(enabled=False), _route_only_cfg()):
+        r = _DoctorResult()
+        active = ["codex"] if cfg.routing.enabled else ["claudecode"]
+        with (
+            mock.patch.object(cmd_doctor, "_guardrail_proxy_intentionally_closed", return_value="hook-enforced"),
+            mock.patch.object(cmd_doctor, "_doctor_active_connectors", return_value=active),
+        ):
+            cmd_doctor._check_llm_reachable(cfg, r)
+        assert "no connector routes through the proxy" in r.checks[-1]["detail"]

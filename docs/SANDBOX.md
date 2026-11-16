@@ -2878,11 +2878,11 @@ stop a hostile local user.
 ### Policy
 
 `openshell.admin` and `guardrail.profiles.<p>.sandbox` share one type,
-`config.OpenShellAdminConfig`. The profile is chosen by the #1085 rules
+`config.SandboxAdminConfig` (`OpenShellAdminConfig` is its older alias). The profile is chosen by the #1085 rules
 (first matching assignment for the verified subject and the harness
 connector, else `default_profile`, else the floor alone; `match.agents` is
 ignored). `Config.SandboxFloor(profile)` returns F and its digest;
-`TightenOpenShellAdmin` combines the layers (contradictions are load errors).
+`TightenSandboxAdmin` combines the layers (contradictions are load errors).
 Unset means no constraint, and an empty intersect list is refused by the schema
 (`minItems: 1`). `packs.Resolve` takes an explicit `Subject` (peer uid and
 home), a `Floor`, the daemon-read `UserPack` bytes and the daemon's

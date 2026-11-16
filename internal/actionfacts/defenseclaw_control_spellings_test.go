@@ -11,7 +11,7 @@ import (
 )
 
 // provenControlKinds are the kinds a row of the corpus can prove.
-var provenControlKinds = map[string]bool{"stop": true, "disable": true, "uninstall": true, "config": true}
+var provenControlKinds = map[string]bool{"stop": true, "disable": true, "uninstall": true, "config": true, "substrate": true}
 
 func shellQuoteForTest(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"

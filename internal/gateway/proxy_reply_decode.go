@@ -5,16 +5,9 @@ package gateway
 
 import (
 	"bytes"
-	"compress/flate"
-	"compress/gzip"
-	"compress/zlib"
 	"errors"
 	"io"
 	"net/http"
-	"strings"
-
-	"github.com/andybalholm/brotli"
-	"github.com/klauspost/compress/zstd"
 )
 
 // A buffered provider reply the transport left encoded (GAP-0097 and
@@ -25,8 +18,8 @@ import (
 // record, and the caller gets the decoded reply. An encoding that cannot be
 // decoded (an unknown token, corrupt bytes, a body over the cap) is left as
 // it came, so uninspectableEncoding still names it and uninspectableReply
-// refuses or alerts per mode. Streams are not decoded: an encoded stream
-// takes the uninspectable path.
+// refuses or alerts per mode. A stream is decoded as it is read
+// (newStreamDecoder, proxy_body_decode.go).
 
 // replyDecodeCap bounds a decoded reply: the 10 MiB the passthrough reads.
 const replyDecodeCap = 10 << 20
@@ -46,66 +39,25 @@ var (
 // Content-Length from h and returns the decoded bytes and true; otherwise
 // body and h are unchanged and it returns false.
 func decodeReplyBody(h http.Header, body []byte) ([]byte, bool) {
-	enc := uninspectableEncoding(h)
-	if enc == "" {
+	out, encoded, err := decodeEncodings(h, body)
+	if err != nil || !encoded {
 		return body, false
-	}
-	layers := strings.Split(enc, ",")
-	real := 0
-	for _, l := range layers {
-		if t := strings.TrimSpace(l); t != "" && t != "identity" {
-			real++
-		}
-	}
-	if real > replyDecodeMaxLayers {
-		return body, false
-	}
-	out := body
-	for i := len(layers) - 1; i >= 0; i-- {
-		var err error
-		if out, err = decodeReplyLayer(strings.TrimSpace(layers[i]), out); err != nil {
-			return body, false
-		}
 	}
 	h.Del("Content-Encoding")
 	h.Del("Content-Length")
 	return out, true
 }
 
+// decodeReplyLayer removes one encoding layer, bounded by replyDecodeCap.
 func decodeReplyLayer(enc string, in []byte) ([]byte, error) {
-	var r io.Reader
-	switch enc {
-	case "", "identity":
+	if enc == "" || enc == "identity" {
 		return in, nil
-	case "gzip", "x-gzip":
-		zr, err := gzip.NewReader(bytes.NewReader(in))
-		if err != nil {
-			return nil, err
-		}
-		defer zr.Close()
-		r = zr
-	case "deflate":
-		// HTTP deflate is zlib-wrapped; some servers send raw DEFLATE.
-		if zr, err := zlib.NewReader(bytes.NewReader(in)); err == nil {
-			defer zr.Close()
-			r = zr
-		} else {
-			fr := flate.NewReader(bytes.NewReader(in))
-			defer fr.Close()
-			r = fr
-		}
-	case "br":
-		r = brotli.NewReader(bytes.NewReader(in))
-	case "zstd":
-		zr, err := zstd.NewReader(bytes.NewReader(in), zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(replyDecodeCap+(1<<20)))
-		if err != nil {
-			return nil, err
-		}
-		defer zr.Close()
-		r = zr
-	default:
-		return nil, errReplyEncodingUnknown
 	}
+	r, closeFn, err := openEncodingReader(enc, bytes.NewReader(in))
+	if err != nil {
+		return nil, err
+	}
+	defer closeFn()
 	out, err := io.ReadAll(io.LimitReader(r, replyDecodeCap+1))
 	if err != nil {
 		return nil, err

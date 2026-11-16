@@ -108,8 +108,10 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // here-document body are statements only when its command runs its standard
 // input as shell code; another command's body is its data and stays unread
 // text, and a command that is not known is the unknown tier
-// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876).
-func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). source is the text
+// the tail was read from: the consumer reading looks in it for a function,
+// alias, hash entry or PATH assignment that renames a data program (GAP-0902).
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, source string, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
 	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
 	capped := tail.Truncated.Any()
@@ -151,7 +153,7 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 	statements := slices.Clone(tail.Statements)
 	unknownBody := false
 	for _, doc := range tail.HereDocs {
-		switch syntaxTailHereDocConsumer(doc.Consumer) {
+		switch syntaxTailHereDocConsumerIn(doc.Consumer, source) {
 		case hereDocRunsCode:
 			statements = append(statements, doc.Statements...)
 		case hereDocUnknown:
@@ -174,63 +176,6 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntaxCap})
 	}
 	return result
-}
-
-// hereDocConsumer is what the command of a quoted here-document does with
-// its body (syntaxTailHereDocConsumer).
-type hereDocConsumer uint8
-
-const (
-	// hereDocData: no command of the opener line runs its standard input as
-	// shell code; the body is data.
-	hereDocData hereDocConsumer = iota
-	// hereDocUnknown: the command is not known (no command text, a text that
-	// does not parse, or a word made at run time that could start a shell).
-	hereDocUnknown
-	// hereDocRunsCode: a command runs its standard input as shell code
-	// (posixStdinCodeTarget: a shell without -c, also behind env, command or
-	// a privilege wrapper or scheduler that does).
-	hereDocRunsCode
-)
-
-// syntaxTailHereDocConsumer reads the command of a quoted here-document
-// (shellparse.SyntaxTailHereDoc.Consumer). Each simple command of the text is
-// one that may get the body (cat <<'EOF' | sh pipes it on); a word made at run
-// time is read as sh, so a command that could start a shell through it is
-// not known.
-func syntaxTailHereDocConsumer(consumer string) hereDocConsumer {
-	if strings.TrimSpace(consumer) == "" {
-		return hereDocUnknown
-	}
-	file, ok := shellparse.Parse(consumer)
-	if !ok || file == nil {
-		return hereDocUnknown
-	}
-	verdict := hereDocData
-	syntax.Walk(file, func(node syntax.Node) bool {
-		call, isCall := node.(*syntax.CallExpr)
-		if !isCall || len(call.Args) == 0 {
-			return verdict != hereDocRunsCode
-		}
-		argv := make([]string, 0, len(call.Args))
-		dynamic := false
-		for _, arg := range call.Args {
-			word, known := simpleStaticWord(arg, nil)
-			if !known {
-				word, dynamic = "sh", true
-			}
-			argv = append(argv, word)
-		}
-		if posixStdinCodeTarget(argv) {
-			if !dynamic {
-				verdict = hereDocRunsCode
-			} else if verdict == hereDocData {
-				verdict = hereDocUnknown
-			}
-		}
-		return verdict != hereDocRunsCode
-	})
-	return verdict
 }
 
 // EvaluationFailureSyntaxCap follows EvaluationFailureSyntax when the reading
@@ -414,7 +359,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// for its tail, so a call that parses pays no second parse.
 	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
 		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
-			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
+			return syntaxTailCommands(input, tail, source, depth, interpreter, inherited, guess)
 		}
 	}
 	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&

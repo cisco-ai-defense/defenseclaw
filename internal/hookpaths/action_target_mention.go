@@ -562,7 +562,11 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		text = actionBlankComments(text, command)
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, token := range actionMentionToken.FindAllString(text, -1) {
+	for _, span := range actionMentionToken.FindAllStringIndex(text, -1) {
+		token := text[span[0]:span[1]]
+		if actionURLAuthorityToken(text, span[0], token) {
+			continue
+		}
 		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
 		token = strings.ReplaceAll(token, actionLiteralTilde, "~")
 		if strings.ContainsAny(token, "*?[]") && (parsed || !strings.ContainsAny(token, "/\\")) {
@@ -1408,6 +1412,35 @@ const actionLiteralTilde = "\x1e"
 
 var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
+// actionURLAuthorityToken reports a mention token that is the //host/... part
+// of a URL (scheme://host/...): a token stops at the colon, so the scan reads
+// http://x/y.sh as http and //x/y.sh. That part names no file of this
+// machine. Where it would be read as a network share (a Windows UNC path,
+// \\x\y.sh), asking it opens an SMB session to the host the URL names with
+// the user's credentials, before the command runs and for a command that
+// only downloads (rel-1-0-10:GAP-0920), so it is no mention there. On a host
+// where //x/y.sh is a local path the reading is unchanged, and an empty host
+// (file:///path) names a local path everywhere.
+func actionURLAuthorityToken(text string, start int, token string) bool {
+	if start < 2 || text[start-1] != ':' || len(token) < 3 || token[0] != '/' || token[1] != '/' || token[2] == '/' {
+		return false
+	}
+	scheme := start - 1
+	for scheme > 0 && actionURLSchemeByte(text[scheme-1]) {
+		scheme--
+	}
+	if scheme == start-1 || !asciiLetter(text[scheme]) {
+		return false
+	}
+	return networkShareRootOf(token) != ""
+}
+
+// actionURLSchemeByte is a byte of a URL scheme (RFC 3986: ALPHA *( ALPHA /
+// DIGIT / "+" / "-" / "." )).
+func actionURLSchemeByte(c byte) bool {
+	return asciiLetter(c) || c >= '0' && c <= '9' || c == '+' || c == '-' || c == '.'
+}
+
 func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 	literal := true
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -1488,6 +1521,14 @@ func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*synta
 		case "command", "builtin", "nohup", "exec", "nice", "env", "sudo", "doas", "timeout",
 			"stdbuf", "ionice", "setsid":
 		default:
+			// Any other wrapper the shared reader knows (chroot, nsenter,
+			// unbuffer, taskset, flock, xargs ...) runs the program at its
+			// child index: a write behind it is no read the scan excuses
+			// (rel-1-0-10:GAP-0910).
+			if next := actionLiteralWrapperChild(args, home); next > 0 {
+				args = args[next:]
+				continue
+			}
 			return args, true
 		}
 		durationPending := program == "timeout"
@@ -1553,6 +1594,18 @@ func actionLiteralCommandWords(args []*syntax.Word, home string) (words []*synta
 		args = args[index:]
 	}
 	return nil, false
+}
+
+// actionLiteralWrapperChild is the index of the program word the wrapper at
+// args[0] runs, by the shared wrapper reader (actionfacts.WrapperChildIndex),
+// or -1. A word that expands at run time is not static there.
+func actionLiteralWrapperChild(args []*syntax.Word, home string) int {
+	values := make([]string, len(args))
+	static := make([]bool, len(args))
+	for i, word := range args {
+		values[i], static[i] = StaticWord(word, home)
+	}
+	return actionfacts.WrapperChildIndex(values, static)
 }
 
 // actionLiteralWrapperOption reports how many words an option of sudo, doas,

@@ -5187,7 +5187,7 @@ def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
     return "pass", f"{dist} {installed}"
 
 
-def _mcp_scanner_import_note(status: str, note: str, dist: str) -> tuple[str, str, str]:
+def _mcp_scanner_import_note(status: str, note: str, dist: str, data_dir: str = "") -> tuple[str, str, str]:
     """``(status, note, remediation)`` once the MCP scanner SDK imports.
 
     The installed metadata said cisco-ai-mcp-scanner was there while the SDK
@@ -5196,11 +5196,21 @@ def _mcp_scanner_import_note(status: str, note: str, dist: str) -> tuple[str, st
     in a child interpreter, as `defenseclaw mcp scan` would, so a damaged
     package cannot break this run; a failure names the files that differ from
     their wheels and the repair, which rebuilds the environment.
+
+    The import takes seconds (it loads LiteLLM), so the result is remembered in
+    *data_dir* while the environment is unchanged (GAP-0938,
+    :func:`venv_integrity.cached_import_error`).
     """
     try:
         # The first import after an install compiles and scans LiteLLM.
-        error = venv_integrity.import_error(
-            "from mcpscanner import Config, Scanner", env=trusted_system_subprocess_env()
+        from defenseclaw import __version__ as defenseclaw_version
+        from defenseclaw.scanner import settings as scanner_settings
+
+        error = venv_integrity.cached_import_error(
+            "from mcpscanner import Config, Scanner",
+            os.path.join(data_dir, venv_integrity.PROBE_CACHE_NAME) if data_dir else "",
+            venv_integrity.probe_key("mcpscanner", (dist, scanner_settings.LITELLM_DIST), defenseclaw_version),
+            env=trusted_system_subprocess_env(),
         )
     except OSError as exc:
         return "warn", f"{note}; could not start {sys.executable} to import it: {exc}", ""
@@ -5255,7 +5265,9 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
     remediation = ""
     if status != "fail":
-        status, note, remediation = _mcp_scanner_import_note(status, note, scanner_settings.MCP_SCANNER_DIST)
+        status, note, remediation = _mcp_scanner_import_note(
+            status, note, scanner_settings.MCP_SCANNER_DIST, str(getattr(cfg, "data_dir", "") or "")
+        )
     _emit(status, "Scanner: mcp-scanner", note, r=r, remediation=remediation)
     status, note = _litellm_version_note()
     _emit(status, "Scanner: litellm", note, r=r)
@@ -14170,6 +14182,18 @@ def _check_guardrail_cascade(cfg, r: _DoctorResult) -> None:
     _emit("pass", "Guardrail cascade", summary, r=r)
 
 
+def _active_route_only_connectors(cfg) -> list[str]:
+    """Set-up connectors that route their model traffic through the gateway (route-only)."""
+
+    if not getattr(getattr(cfg, "routing", None), "enabled", False):
+        return []
+    from defenseclaw import routing_route_only
+
+    connectors, _upstreams = routing_route_only._route_only(cfg)
+    active = set(_doctor_active_connectors(cfg))
+    return [c for c in connectors if c in active]
+
+
 def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     """One-shot ``llm.ping`` against the guardrail's resolved LLM.
 
@@ -14191,13 +14215,20 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
     judge = getattr(gc, "judge", None)
     if _guardrail_proxy_intentionally_closed(cfg) and not bool(getattr(judge, "enabled", False)):
         # As for the LLM API key: hook/policy connectors send no model traffic
-        # through DefenseClaw, and with the judge off nothing calls this LLM.
-        _emit(
-            "skip",
-            "LLM reachable",
-            "not used: the LLM judge is disabled and no connector routes through the proxy",
-            r=r,
-        )
+        # through the guardrail proxy, and with the judge off nothing calls this
+        # LLM. A route-only connector does send its model traffic through the
+        # gateway, so the row says so and points at the Route-only rows that
+        # check that path (GAP-0915).
+        routed = _active_route_only_connectors(cfg)
+        if routed:
+            detail = (
+                "not used: the LLM judge is disabled; "
+                f"{', '.join(routed)} {'reaches its model' if len(routed) == 1 else 'reach their models'} "
+                "through route-only routing (the Route-only rows check it)"
+            )
+        else:
+            detail = "not used: the LLM judge is disabled and no connector routes through the proxy"
+        _emit("skip", "LLM reachable", detail, r=r)
         return
     llm = cfg.resolve_llm("guardrail")
     prefix = ""
@@ -19646,7 +19677,10 @@ def _check_connector_inventory(
                     f"defenseclaw guardrail judge add {connector}"
                 )
                 if gate_empty:
-                    detail += "; no hook connector is turned on, so the judge reviews proxy traffic only (all: defenseclaw guardrail judge add all)"
+                    detail += (
+                        "; no hook connector is turned on, so the judge reviews proxy traffic only "
+                        "(all: defenseclaw guardrail judge add all)"
+                    )
         if judge_enabled and judge_failing:
             detail += "; judge failing: all recent calls failed, so only the rules decide"
         by_connector = judge_details.get("judge_fallbacks_by_connector") if isinstance(judge_details, dict) else None

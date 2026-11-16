@@ -82,7 +82,10 @@ processors:
       - defenseclaw.sandbox.name
 
   # The managed sandbox counters (defenseclaw.sandbox.managed.*) carry no
-  # host, account or device label. Remote write turns every resource
+  # host, account or device label. The defenseclaw.substrate.* metrics take
+  # the same branch, so the gateway pod and the Kubernetes resource attributes
+  # (k8s.cluster.name, k8s.namespace.name, host.name) do not become labels.
+  # Remote write turns every resource
   # attribute into a label, so these counters take their own metrics branch
   # whose resource keeps only the service, the environment and the OS
   # (os_type). service.instance.id stays: it is a random id per gateway
@@ -92,11 +95,11 @@ processors:
   filter/managed-sandbox-out:
     error_mode: ignore
     metric_conditions:
-      - 'IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+      - 'IsMatch(metric.name, "^defenseclaw[.](sandbox[.]managed|substrate)[.]")'
   filter/managed-sandbox-only:
     error_mode: ignore
     metric_conditions:
-      - 'not IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+      - 'not IsMatch(metric.name, "^defenseclaw[.](sandbox[.]managed|substrate)[.]")'
   transform/managed-sandbox-resource:
     error_mode: ignore
     metric_statements:

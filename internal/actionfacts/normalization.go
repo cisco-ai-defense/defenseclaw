@@ -190,8 +190,7 @@ func pathContextForCommand(
 		// so shell metacharacters in their paths are literal data. A trusted
 		// CWD supplies the otherwise absent filesystem dialect.
 		context.expansion.literal = true
-		if syntax := syntaxForNormalizationCWD(cwd); syntax != pathSyntaxUnknown &&
-			!windowsAbsolutePathValue(fact.Value) {
+		if syntax := syntaxForNormalizationCWD(cwd); syntax != pathSyntaxUnknown {
 			context.syntax = syntax
 			context.trustedSyntax = true
 			if syntax == pathSyntaxPOSIX {
@@ -513,16 +512,6 @@ func syntaxForCWD(cwd string) pathSyntax {
 	default:
 		return pathSyntaxUnknown
 	}
-}
-
-// windowsAbsolutePathValue reports a drive-letter or UNC path, which names the
-// same file whatever syntax the working folder is in: a structured tool's
-// working folder (the proxy's neutral folder is a POSIX one) never makes it a
-// relative name under that folder (rel-1-0-10:GAP-0872).
-func windowsAbsolutePathValue(value string) bool {
-	return strings.HasPrefix(value, `\\`) ||
-		len(value) >= 3 && isASCIILetter(value[0]) && value[1] == ':' &&
-			(value[2] == '\\' || value[2] == '/')
 }
 
 func looksWindowsPath(value string) bool {
