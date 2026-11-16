@@ -760,14 +760,14 @@ func (r *credentialPathResolver) jsonOperands(command CommandFact) []int {
 // after a script or module name are its arguments: no reads.
 func credentialInterpreterWords(program string, argv []string) (code, inputs []int) {
 	codeLetters, loopLetters := "c", ""
-	switch {
-	case program == "node" || program == "nodejs" || program == "bun":
+	switch program {
+	case "node", "nodejs", "bun":
 		codeLetters = "ep"
-	case program == "perl" || program == "ruby":
+	case "perl", "ruby":
 		codeLetters, loopLetters = "eE", "np"
-	case program == "php":
+	case "php":
 		codeLetters = "r"
-	case program == "deno":
+	case "deno":
 		for i := 1; i+1 < len(argv); i++ {
 			if argv[i] == "eval" {
 				return []int{i + 1}, nil
@@ -804,7 +804,7 @@ func credentialInterpreterWords(program string, argv []string) (code, inputs []i
 					takesCode = j == len(arg)-2 // the code is the next word
 					break
 				}
-				if letter == 'm' && (program == "python" || strings.HasPrefix(program, "python")) {
+				if letter == 'm' && strings.HasPrefix(program, "python") {
 					return code, inputs // a module: the rest are its arguments
 				}
 			}
