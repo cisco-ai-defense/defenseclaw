@@ -47,9 +47,27 @@ import (
 // leader.MethodIntentGet, leader.MethodIntentPut and the inspect-once record
 // (MethodHistorySeen, MethodHistoryRecord).
 const (
-	MethodChainLifecycle = "ChainLifecycle"
-	MethodChainEgress    = "ChainEgress"
+	MethodChainLifecycle  = "ChainLifecycle"
+	MethodChainEgress     = "ChainEgress"
+	MethodChainUnrecorded = "ChainUnrecorded"
 )
+
+// UnrecordedRequest says a gateway replica could not put one of the actor's
+// tool steps in its chain window (SUBSTRATE-CHAIN-UNRECORDED): the egress
+// check can't link a later request to it, so the next egress checks carry
+// Why for the chain window (substrate-1 GAP-0339).
+type UnrecordedRequest struct {
+	Actor Actor  `json:"actor"`
+	Why   string `json:"why"`
+	// Uncleared marks a step that was recorded, a credentials read that
+	// started the secret-read chain at its proposal because no result can
+	// be tied to the call: Why is added to the refusal reason of the
+	// chain's egress, so the person knows why (GAP-0338).
+	Uncleared bool `json:"uncleared,omitempty"`
+}
+
+// maxUnrecordedWhy bounds the reason the leader keeps.
+const maxUnrecordedWhy = 240
 
 // Actor is a verified actor: the atespace and the live actor UID from the
 // actor token (never a request claim).
@@ -210,4 +228,8 @@ type EgressVerdict struct {
 	Rule     string   `json:"rule,omitempty"`
 	Reason   string   `json:"reason,omitempty"`
 	Detected []string `json:"detected,omitempty"`
+	// Unrecorded is why one of the actor's tool steps in the chain window
+	// is not in it (UnrecordedRequest): the callout refuses the request
+	// where it refuses unchecked egress, else alerts (GAP-0339).
+	Unrecorded string `json:"unrecorded,omitempty"`
 }

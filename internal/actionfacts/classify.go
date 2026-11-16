@@ -3056,7 +3056,21 @@ func classifyPatternSearchPaths(
 }
 
 func searchOperands(argv []string, program string) []string {
-	var operands []string
+	indexes := searchOperandIndexes(argv, program)
+	if len(indexes) == 0 {
+		return nil
+	}
+	operands := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		operands = append(operands, argv[index])
+	}
+	return operands
+}
+
+// searchOperandIndexes is searchOperands as argv indexes (the pattern, when
+// no option gives it, first).
+func searchOperandIndexes(argv []string, program string) []int {
+	var operands []int
 	options := true
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
@@ -3070,7 +3084,7 @@ func searchOperands(argv []string, program string) []string {
 			}
 			continue
 		}
-		operands = append(operands, arg)
+		operands = append(operands, i)
 	}
 	return operands
 }

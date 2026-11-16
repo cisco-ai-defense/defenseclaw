@@ -1349,3 +1349,24 @@ func toolChainDigest(parts ...string) string {
 	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
+
+// ToolChainProjectionStep is projection reduced to one step of one chain:
+// that step's detection and enforcement bits and the chain's join
+// identities, nothing of any other chain. ok is false when projection does
+// not hold the step. The secret-read chain start uses it to keep a read's
+// step 1 alone (substrate-1 GAP-0337, GAP-0338).
+func ToolChainProjectionStep(projection ToolChainProjection, chainID string, step int) (ToolChainProjection, bool) {
+	bit, bitOK := ToolChainStepMask(chainID, step)
+	index, indexOK := ToolChainIndexByID(chainID)
+	if !bitOK || !indexOK || projection.DetectionStepMask&bit == 0 {
+		return ToolChainProjection{}, false
+	}
+	out := ToolChainProjection{
+		ParseStatus:         projection.ParseStatus,
+		DetectionStepMask:   bit,
+		EnforcementStepMask: projection.EnforcementStepMask & bit,
+	}
+	out.EnforcementJoinDigests[index] = projection.EnforcementJoinDigests[index]
+	out.EnforcementOutputJoinDigests[index] = projection.EnforcementOutputJoinDigests[index]
+	return out, true
+}

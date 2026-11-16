@@ -102,6 +102,25 @@ type ToolChainResolvePendingInput struct {
 	// replace it as the enforcement join for the later secretsdump sink.
 	SuccessfulS4UTargetPrincipalIdentityDigest string `json:"-"`
 	SuccessfulS4UTicketCacheDigest             string `json:"-"`
+	// UnsuccessfulMayHaveRead marks a failed or ambiguous result of a call
+	// that ran and that the gateway cannot prove read nothing: a read that
+	// printed a credentials file is a secret read whatever its exit code
+	// (owner decision 2026-11-13, substrate-1 GAP-0337). The proposal's
+	// secret-read step 1 alone is promoted, as a success promotes it; every
+	// other step of the proposal is dropped, as for any unsuccessful result.
+	UnsuccessfulMayHaveRead bool `json:"-"`
+	// ResultMayHaveRead marks a result, of any outcome but denied or
+	// cancelled, whose content does not prove its call read nothing. Only the
+	// Substrate leader reads it, for a further result of a call it already
+	// resolved (substrate-1 GAP-0348, GAP-0345): such a result is a replay,
+	// and one that may have read still starts the secret-read chain from the
+	// call's proposal, so a second result never clears a read.
+	ResultMayHaveRead bool `json:"-"`
+	// ResultShowsRead marks a result whose own content shows its call may
+	// have read: a line that is not blank, an exit status or a reader error
+	// naming the call's operand (GAP-0352). A further result of a call whose
+	// earlier result proved nothing was read starts the chain only on it.
+	ResultShowsRead bool `json:"-"`
 }
 
 type ToolChainResolvePendingResult struct {
@@ -432,13 +451,30 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		return ToolChainResolvePendingResult{Status: ToolChainPendingExpired}, nil
 	}
 	if input.Outcome != ToolChainPendingOutcomeSuccess {
+		var observation ToolChainObserveResult
+		if projection, ok := unsuccessfulSecretReadProjection(pending, input); ok {
+			observation, err = repo.observeTx(ctx, tx, ToolChainObserveInput{
+				SemanticEventID:     input.TerminalSemanticEventID,
+				ConnectorInstanceID: input.ConnectorInstanceID,
+				InputFingerprint:    input.TerminalInputFingerprint,
+				RulesetFingerprint:  input.RulesetFingerprint,
+				Projection:          projection,
+				DenyEligible:        false,
+			}, now)
+			if err != nil {
+				return ToolChainResolvePendingResult{}, err
+			}
+			if observation.Status == ToolChainObserveNoJoin {
+				return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
+			}
+		}
 		if err := deleteToolChainPending(
 			ctx, tx, repo, input.ConnectorInstanceID, session,
 			input.ToolInvocationDigest,
 		); err != nil {
 			return ToolChainResolvePendingResult{}, err
 		}
-		return ToolChainResolvePendingResult{Status: ToolChainPendingResolved}, nil
+		return ToolChainResolvePendingResult{Status: ToolChainPendingResolved, Observation: observation}, nil
 	}
 	if pending.ruleset != input.RulesetFingerprint {
 		if err := deleteToolChainPending(
@@ -1026,6 +1062,16 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 		"terminal input fingerprint", input.TerminalInputFingerprint, true,
 	); err != nil {
 		return err
+	}
+	if input.UnsuccessfulMayHaveRead {
+		if input.Outcome != ToolChainPendingOutcomeFailure &&
+			input.Outcome != ToolChainPendingOutcomeUnknown {
+			// A denied or cancelled call did not run.
+			return errors.New("audit: only a failed or unknown result may have read")
+		}
+		if err := validateSHA256("tool-chain ruleset fingerprint", input.RulesetFingerprint, true); err != nil {
+			return err
+		}
 	}
 	if input.Outcome != ToolChainPendingOutcomeSuccess {
 		if input.SuccessfulReadPathDigest != "" ||
@@ -1870,4 +1916,24 @@ func (repo *ToolChainRepository) advanceCutoffBarrier(
 		return persistedToolChainCutoffBarrier{}, err
 	}
 	return barrier, nil
+}
+
+// unsuccessfulSecretReadProjection is the part of a pending proposal an
+// unsuccessful result that may have read promotes: the secret-read chain's
+// step 1 with its join identity, nothing else (substrate-1 GAP-0337). A
+// proposal of another ruleset, or without that step, promotes nothing.
+func unsuccessfulSecretReadProjection(
+	pending persistedToolChainPending,
+	input ToolChainResolvePendingInput,
+) (guardrail.ToolChainProjection, bool) {
+	if !input.UnsuccessfulMayHaveRead || pending.ruleset != input.RulesetFingerprint {
+		return guardrail.ToolChainProjection{}, false
+	}
+	return guardrail.ToolChainProjectionStep(guardrail.ToolChainProjection{
+		ParseStatus:                  actionfacts.ParseStatus(pending.parseStatus),
+		DetectionStepMask:            pending.detectionSteps,
+		EnforcementStepMask:          pending.enforcementSteps,
+		EnforcementJoinDigests:       pending.enforcementJoinDigests,
+		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
+	}, guardrail.ToolChainSecretReadThenEgress, 1)
 }

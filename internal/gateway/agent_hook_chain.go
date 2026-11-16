@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 )
 
 const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v12-sqlite-database-table-lineage"
@@ -239,14 +240,21 @@ func placeSecretReadPaths(facts actionfacts.Facts, reported string) actionfacts.
 		}
 		placed[i].Resolved = path.Join(reported, value)
 	}
-	if placed == nil {
-		return facts
+	if placed != nil {
+		facts.Paths = placed
 	}
-	facts.Paths = placed
-	return facts
+	// The chain's private record is placed by the same lexical rule
+	// (actionfacts.Facts.PlaceCredentialPathReads), so a relative read in it
+	// has the identity an ordinary read of the same file has.
+	return facts.PlaceCredentialPathReads(reported)
 }
 
 func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.CredentialPathReads() {
+		if candidate.Value != "" && !candidate.Absolute && candidate.Resolved == "" {
+			return true
+		}
+	}
 	for _, candidate := range facts.Paths {
 		if !candidate.Absolute && candidate.Resolved == "" {
 			return true
@@ -340,10 +348,20 @@ func (a *APIServer) applyAgentHookToolChains(
 	// the leader: the callout's egress check reads it (GAP-0201). A step
 	// that can't is reported, never skipped silently: rootMissed says why.
 	_, substrateActor := substrateActorFrom(ctx)
+	// A tool call on an event the connector's lifecycle routes nowhere (a
+	// contract with no lifecycle, or an event it does not name) is a step
+	// too: it is reported, never skipped silently (GAP-0339).
+	unroutedToolCall := route == connector.ToolEventRouteUnknown &&
+		strings.TrimSpace(req.ToolName) != "" && !req.ToolNameIsLabel
 	substrateStep := substrateActor &&
-		(structuredAction || route == connector.ToolEventRouteResultContent)
+		(structuredAction || route == connector.ToolEventRouteResultContent || unroutedToolCall)
 	rootMissed := ""
-	if substrateStep && !lifecycleEligible {
+	switch {
+	case substrateStep && substrateRegistrationNamesNoConnector(ctx):
+		rootMissed = "the actor's registration names no connector (an actor made outside DefenseClaw from a template whose attestation names none), so no reviewed hook contract applies"
+	case substrateStep && unroutedToolCall:
+		rootMissed = "the actor's hook contract routes no tool-call lifecycle event " + strconv.Quote(req.HookEventName)
+	case substrateStep && !lifecycleEligible:
 		rootMissed = "the hook contract is not one this gateway reviewed for the actor's agent version (" +
 			profile.CompatibilityReason + ")"
 	}
@@ -498,7 +516,20 @@ func (a *APIServer) applyAgentHookToolChains(
 		observationProjection = terminalProjection
 	}
 
-	invocationDigest := exactToolChainInvocationDigest(lifecycle, req)
+	invocationDigest := exactToolChainInvocationDigest(ctx, lifecycle, req)
+	if structuredAction && invocationDigest == "" &&
+		lifecycle.IsPreProposalEvent(req.HookEventName) &&
+		resp.Action != guardrailActionBlock {
+		// No result can be tied to this call (the connector names no tool
+		// invocation, or this call carries none): nothing will ever say
+		// what it printed, so its credentials read starts the chain here,
+		// at the proposal (the secret-read chain start, GAP-0338).
+		started := withSecretReadStart(observationProjection, predecessorProjection)
+		if started.DetectionStepMask != observationProjection.DetectionStepMask {
+			a.noteUnclearedRead(ctx, req.ConnectorName)
+		}
+		observationProjection = started
+	}
 	var result, rootResult audit.ToolChainObserveResult
 	resolvedSuccess := false
 	resolvedInvocation := false
@@ -551,7 +582,28 @@ func (a *APIServer) applyAgentHookToolChains(
 			SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
 			SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
 		}
+		ran := outcome != connector.ToolLifecycleOutcomeDenied && outcome != connector.ToolLifecycleOutcomeCancelled
+		if outcome == connector.ToolLifecycleOutcomeFailure || outcome == connector.ToolLifecycleOutcomeUnknown {
+			// The call ran (or may have) and did not succeed: the secret-read
+			// chain start decides by what it printed (GAP-0337).
+			resolveInput.UnsuccessfulMayHaveRead = !toolResultProvesNothingRead(req)
+		}
+		if substrateActor && ran {
+			// A further result of a call the leader already resolved (Claude
+			// Code and Cursor post a failure result and then a PostToolUse for
+			// one failed call; the kit retries a post) is a replay there, and
+			// one whose content may show a read still starts the secret-read
+			// chain from the call's proposal (GAP-0348, GAP-0345).
+			resolveInput.ResultMayHaveRead = resolveInput.UnsuccessfulMayHaveRead ||
+				outcome == connector.ToolLifecycleOutcomeSuccess && !toolResultProvesNothingRead(req)
+			// After an earlier result proved the read failed, only a result
+			// that shows a read chains: Claude Code's PostToolUse after a
+			// PostToolUseFailure carries no output (GAP-0352).
+			resolveInput.ResultShowsRead = resolveInput.ResultMayHaveRead && resultShowsRead(req)
+		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
+		var rootStatus audit.ToolChainPendingStatus
+		rootFailed := false
 		if rootRepository != nil {
 			// The root scope promotes its own copy of the proposal; a failure
 			// there leaves the session verdict as it is.
@@ -561,12 +613,22 @@ func (a *APIServer) applyAgentHookToolChains(
 				rootResolved.Status == audit.ToolChainPendingResolved {
 				rootResult, rootResolvedSuccess = rootResolved.Observation, true
 			}
+			rootStatus, rootFailed = rootResolved.Status, rootErr != nil
 			if rootErr != nil {
 				rootMissed = "the leader did not take the step: " + rootErr.Error()
 			}
 		}
 		if resolveErr != nil {
 			return resp, finalization
+		}
+		if substrateActor && ran && resultCallUnjoined(resolved.Status, rootRepository != nil, rootStatus, rootFailed) &&
+			resultMayBeAnUnjoinedRead(req, projection) {
+			// The call ran (or may have) but the actor window does not know
+			// it: its PreToolUse reached no leader (a replica cut off from
+			// it, or a leader that lost or evicted it since), so the read may
+			// be in no window at all. The step is reported unrecorded, and
+			// the leader keeps that for the callout (review rch3 R1).
+			rootMissed = "a tool result whose call is not in the actor's chain window (its call did not reach the leader)"
 		}
 		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved
 		resolvedSuccess = outcome == connector.ToolLifecycleOutcomeSuccess &&
@@ -761,6 +823,11 @@ func (a *APIServer) applyAgentHookToolChains(
 		// a deny on exact replay even if the live mode later changes to observe.
 		resp = committedAgentHookChainBlock(profile, req, resp)
 	}
+	if slices.Contains(result.DetectedChainIDs, guardrail.ToolChainSecretReadThenEgress) &&
+		!lifecycle.SupportsExactInvocationJoin() {
+		// The read may be one no result could clear: say so (GAP-0338).
+		resp.Reason = strings.TrimSpace(resp.Reason + " The " + unclearedReadWhy(req.ConnectorName) + ".")
+	}
 	if result.Status == audit.ToolChainObserveFresh &&
 		len(result.ReceiptIDs) != 0 {
 		finalization.repository = repository
@@ -815,9 +882,39 @@ func (a *APIServer) applyAgentHookToolChains(
 	return resp, finalization
 }
 
+// resultCallUnjoined reports a call result that no chain window joins (R1).
+// The actor window, which the callout reads, decides when it is bound: its
+// Missing is marked whatever the session says, so a session replay never
+// hides it (review rk347 P3-1); a result after a turn boundary (Stop
+// discards only the session's proposal) is joined there (GAP-0345); a
+// further result of a resolved call is a replay in both (GAP-0348). A root
+// call that failed is reported by the caller already.
+func resultCallUnjoined(session audit.ToolChainPendingStatus, rootBound bool, root audit.ToolChainPendingStatus, rootFailed bool) bool {
+	switch {
+	case !rootBound:
+		return session == audit.ToolChainPendingMissing
+	case rootFailed:
+		return false
+	}
+	rootJoined := root == audit.ToolChainPendingResolved || root == audit.ToolChainPendingReplay
+	return root == audit.ToolChainPendingMissing || session == audit.ToolChainPendingMissing && !rootJoined
+}
+
+// substrateRegistrationNamesNoConnector reports a verified actor whose
+// registration names no connector: an actor made outside DefenseClaw from an
+// unattested template (GAP-0347). Its binding resolves the empty hook
+// profile, so the step's real reason is that, not the lifecycle.
+func substrateRegistrationNamesNoConnector(ctx context.Context) bool {
+	reg, ok := substrateRegistrationFrom(ctx)
+	return ok && strings.TrimSpace(reg.Connector) == ""
+}
+
 // substrateChainUnrecordedRule is the finding of a Substrate actor's tool
 // step that did not reach its actor window (GAP-0201).
 const substrateChainUnrecordedRule = "SUBSTRATE-CHAIN-UNRECORDED"
+
+// substrateUnrecordedTimeout bounds telling the leader of an unrecorded step.
+const substrateUnrecordedTimeout = 2 * time.Second
 
 // substrateChainWarned bounds the gateway log warning to one per actor and
 // reason.
@@ -838,8 +935,20 @@ func (a *APIServer) substrateChainUnrecorded(ctx context.Context, profile connec
 		fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: a tool step is not in the actor's chain window, so the egress check can't link it: %s\n",
 			actor.Atespace, actor.Name, why)
 	}
+	// The leader keeps it for the actor's egress checks: the callout refuses
+	// a request checked against an incomplete window where it refuses
+	// unchecked egress, and alerts elsewhere (GAP-0339). A leader that can't
+	// be reached fails the egress check itself (the chain failure mode).
+	if st := a.substrateState(); st != nil && st.cfg.Chains != nil {
+		note := substrateNote{client: st.cfg.Chains, actor: chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, why: why}
+		if err := substrateNotes.deliver(ctx, note); err != nil {
+			why += "; the leader was not told yet (retrying): " + err.Error()
+		}
+	}
+	// Refused on a managed install and with a strict pack, an alert
+	// elsewhere (refuse-by-default for what can't be checked, GAP-0339).
 	intent := guardrailActionAlert
-	if strictPackPosture(a.decisionConfig(ctx), req.ConnectorName) {
+	if ManagedEnterpriseActive() || strictPackPosture(a.decisionConfig(ctx), req.ConnectorName) {
 		intent = guardrailActionBlock
 	}
 	findings := []RuleFinding{{
@@ -1088,7 +1197,15 @@ func toolChainProjectionHasSteps(projection guardrail.ToolChainProjection) bool 
 	return projection.DetectionStepMask != 0 || projection.EnforcementStepMask != 0
 }
 
+// exactToolChainInvocationDigest is the key that joins a tool call's result
+// to its pre-tool proposal. A verified Substrate actor's proposal lives on
+// the leader, and its result may reach another gateway replica than its
+// call: each replica keys its correlation digests with its own HMAC key,
+// derived from its own device key, so the key is the actor's own, not the
+// replica's (substrate-1 GAP-0342). Elsewhere it stays the local
+// correlation digest.
 func exactToolChainInvocationDigest(
+	ctx context.Context,
 	lifecycle connector.ToolCallLifecycleContract,
 	req agentHookRequest,
 ) string {
@@ -1100,10 +1217,28 @@ func exactToolChainInvocationDigest(
 		strings.TrimSpace(value.Value) == "" || value.Value != req.ToolInvocationID {
 		return ""
 	}
+	if actor, ok := substrateActorFrom(ctx); ok {
+		return substrateToolInvocationDigest(actor.Atespace, actor.UID, req.ConnectorName, req.SessionID, value)
+	}
 	return correlationValueDigest(
 		audit.ConnectorInstanceID(req.ConnectorInstanceID),
 		value,
 	)
+}
+
+// substrateToolInvocationDigest is a verified actor's tool invocation key:
+// the actor, its connector and session and the reported tool call id, the
+// same on every gateway replica. The id is the agent's own random call id;
+// the digest names it on the leader only.
+func substrateToolInvocationDigest(atespace, uid, connectorName, sessionID string, value connector.CorrelationValue) string {
+	digest := sha256.Sum256([]byte("defenseclaw/substrate/tool-invocation/v1\x00" + atespace + "\x00" + uid + "\x00" +
+		normalizeConnectorNameForDigest(connectorName) + "\x00" + sessionID + "\x00" +
+		typedCorrelationNamespace(value) + "\x00" + value.Value))
+	return hex.EncodeToString(digest[:])
+}
+
+func normalizeConnectorNameForDigest(name string) string {
+	return strings.ToLower(strings.TrimSpace(name))
 }
 
 func auditToolChainPendingOutcome(
@@ -1358,7 +1493,8 @@ func projectTrustedActionChainSteps(
 			guardrail.ToolChainSecretReadThenEgress,
 			joinDigest,
 		)
-	} else if facts.Parse.Status == actionfacts.StatusPartial {
+	} else if facts.Parse.Status == actionfacts.StatusPartial ||
+		facts.Parse.Status == actionfacts.StatusComplete && facts.HasCredentialPathReads() {
 		// A pipeline or a command list the classifier cannot finish (an
 		// unknown operand grammar in another stage) still proves a
 		// credentials-file read when the reading command is complete: carry
@@ -2231,6 +2367,11 @@ func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 // and an SSH client that only presents a key (ssh -i, scp -i), which
 // PATH-SSH-KEY does not count either.
 func credentialFileContentRead(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.CredentialPathReads() {
+		if !credentialFileFixturePath(semanticPathValue(candidate)) {
+			return true
+		}
+	}
 	for _, candidate := range facts.Paths {
 		if _, ok := credentialFileContentReadCommand(facts, candidate); ok {
 			return true
@@ -2503,6 +2644,19 @@ func secretReadPathIdentity(facts actionfacts.Facts, candidate actionfacts.PathF
 // secret-read chain: the identity of a relative operand in a call that may
 // change directory is not exact (GAP-0409).
 func exactSecretReadChainDigest(facts actionfacts.Facts) (string, bool) {
+	private := facts.CredentialPathReads()
+	if len(private) != 0 {
+		facts.Paths = append([]actionfacts.PathFact(nil), facts.Paths...)
+	}
+	for _, candidate := range private {
+		if credentialFileFixturePath(semanticPathValue(candidate)) {
+			continue
+		}
+		if candidate.Value == "" {
+			return "", false
+		}
+		facts.Paths = append(facts.Paths, candidate)
+	}
 	return exactSinglePathDigestBy(facts, func(candidate actionfacts.PathFact) bool {
 		return candidate.Access == actionfacts.PathAccessRead &&
 			matchesAnySensitivePathCandidate(semanticPathValue(candidate))
@@ -2566,13 +2720,31 @@ func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 // (substrate-1:GAP-0388).
 func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 	selected, found, exact := "", false, true
+	private := facts.CredentialPathReads()
+	for _, candidate := range private {
+		if credentialFileFixturePath(semanticPathValue(candidate)) {
+			continue
+		}
+		found = true
+		identity, ok := secretReadPathIdentity(facts, candidate)
+		if !ok || selected != "" && selected != identity {
+			exact = false
+		} else {
+			selected = identity
+		}
+	}
 	for _, candidate := range facts.Paths {
 		command, ok := credentialFileContentReadCommand(facts, candidate)
 		if !ok {
 			continue
 		}
 		if !command.ArgvComplete {
-			return "", false
+			if len(private) == 0 {
+				return "", false
+			}
+			// A word the call computes may name another file: the record
+			// proves a read, not which one.
+			exact = false
 		}
 		found = true
 		identity, ok := secretReadPathIdentity(facts, candidate)
@@ -3462,4 +3634,409 @@ func writeToolChainDigestPart(writer toolChainHashWriter, value string) {
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	_, _ = writer.Write(length[:])
 	_, _ = writer.Write([]byte(value))
+}
+
+// resultMayBeAnUnjoinedRead reports a tool result whose own call may have
+// been a credentials read: its projection holds the secret-read step, its
+// tool input reads a credentials file (a result event runs no pre-tool rule
+// dispatch, so its facts are read here), or it names no tool to tell (R1).
+// A plain call (ls) does not.
+func resultMayBeAnUnjoinedRead(req agentHookRequest, projection guardrail.ToolChainProjection) bool {
+	if bit, ok := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1); ok && projection.DetectionStepMask&bit != 0 {
+		return true
+	}
+	if strings.TrimSpace(req.ToolName) == "" {
+		return true
+	}
+	return credentialFileContentRead(actionfacts.Analyze(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs, CWD: req.CWD}))
+}
+
+// The secret-read chain start (owner decision 2026-11-13; substrate-1
+// GAP-0337, GAP-0338). A tool call that reads a credentials file starts
+// chain.secret_read_then_egress unless DefenseClaw proves it read nothing,
+// whatever its exit code and whatever the connector:
+//   - a call whose result is tied to it (a paired tool invocation id) keeps
+//     the read as a pending proposal. Its result decides by what it printed:
+//     a success, or a failed or unknown result that toolResultProvesNothingRead
+//     does not clear, promotes it (ResolvePending, UnsuccessfulMayHaveRead);
+//     a denied or cancelled call never ran;
+//   - a call whose result cannot be tied to it (no invocation id: Devin,
+//     Copilot, Antigravity's step index, or a call that carries none) starts
+//     the chain at the proposal (withSecretReadStart): no result will say
+//     what it printed, so nothing can clear it.
+// Both keep the read's step 1 alone (guardrail.ToolChainProjectionStep).
+
+// withSecretReadStart adds the secret-read step 1 of a proposal's
+// predecessor projection to its observation. A call that also uploads keeps
+// the one join identity the projection has for the chain.
+func withSecretReadStart(observation, predecessor guardrail.ToolChainProjection) guardrail.ToolChainProjection {
+	start, ok := guardrail.ToolChainProjectionStep(predecessor, guardrail.ToolChainSecretReadThenEgress, 1)
+	if !ok {
+		return observation
+	}
+	index, _ := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
+	observation.DetectionStepMask |= start.DetectionStepMask
+	observation.EnforcementStepMask |= start.EnforcementStepMask
+	if observation.EnforcementJoinDigests[index] == "" {
+		observation.EnforcementJoinDigests[index] = start.EnforcementJoinDigests[index]
+	}
+	if observation.EnforcementOutputJoinDigests[index] == "" {
+		observation.EnforcementOutputJoinDigests[index] = start.EnforcementOutputJoinDigests[index]
+	}
+	if observation.ParseStatus == "" {
+		observation.ParseStatus = start.ParseStatus
+	}
+	return observation
+}
+
+// unclearedReadWhy says why a connector's credentials read started the
+// secret-read chain at its proposal (GAP-0338).
+func unclearedReadWhy(connectorName string) string {
+	return "credentials read could not be cleared: no result correlation for " + connectorName
+}
+
+// noteUnclearedRead tells the leader, for a verified actor, that its
+// credentials read started the chain uncleared, so the callout's refusal of
+// the chain's egress says why (GAP-0338). A failure changes nothing: the
+// read is in the window either way.
+func (a *APIServer) noteUnclearedRead(ctx context.Context, connectorName string) {
+	actor, ok := substrateActorFrom(ctx)
+	st := a.substrateState()
+	if !ok || st == nil || st.cfg.Chains == nil {
+		return
+	}
+	_ = substrateNotes.deliver(ctx, substrateNote{client: st.cfg.Chains, actor: chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID},
+		why: unclearedReadWhy(connectorName), uncleared: true})
+}
+
+// substrateNote is an unrecorded step (or an uncleared read) of an actor for
+// the leader.
+type substrateNote struct {
+	client    *chainstate.Client
+	actor     chainstate.Actor
+	why       string
+	uncleared bool
+	since     time.Time
+}
+
+func (n substrateNote) key() string {
+	return n.actor.Atespace + "/" + n.actor.UID + "\x00" + strconv.FormatBool(n.uncleared)
+}
+
+func sendSubstrateNote(ctx context.Context, n substrateNote) error {
+	if n.uncleared {
+		return n.client.Uncleared(ctx, n.actor, n.why)
+	}
+	return n.client.Unrecorded(ctx, n.actor, n.why)
+}
+
+// substrateNoteQueue delivers the notes and keeps one that could not be
+// delivered, retrying it in the background until the leader takes it or
+// the chain window it is for has passed: a leader restart or a transient
+// error must not leave the callout checking an incomplete window as if it
+// were whole (GAP-0339 review F3). The newest note of an actor and kind
+// replaces an older one; the queue is bounded, oldest out first.
+type substrateNoteQueue struct {
+	send    func(context.Context, substrateNote) error
+	every   time.Duration
+	keep    time.Duration
+	timeout time.Duration
+
+	mu      sync.Mutex
+	pending map[string]substrateNote
+	order   []string
+	running bool
+}
+
+// maxPendingSubstrateNotes bounds the notes waiting for the leader.
+const maxPendingSubstrateNotes = 4096
+
+var substrateNotes = &substrateNoteQueue{send: sendSubstrateNote, every: 5 * time.Second,
+	keep: 30 * time.Minute, timeout: substrateUnrecordedTimeout}
+
+// deliver sends n once; on a failure it queues n for retry and returns the
+// error.
+func (q *substrateNoteQueue) deliver(ctx context.Context, n substrateNote) error {
+	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), q.timeout)
+	err := q.send(uctx, n)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	if n.since.IsZero() {
+		n.since = time.Now()
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.pending == nil {
+		q.pending = map[string]substrateNote{}
+	}
+	if _, ok := q.pending[n.key()]; !ok {
+		q.order = append(q.order, n.key())
+	}
+	q.pending[n.key()] = n
+	for len(q.order) > maxPendingSubstrateNotes {
+		delete(q.pending, q.order[0])
+		q.order = q.order[1:]
+	}
+	if !q.running {
+		q.running = true
+		go q.retry()
+	}
+	return err
+}
+
+// retry resends the pending notes every q.every until none is left.
+func (q *substrateNoteQueue) retry() {
+	for {
+		time.Sleep(q.every)
+		q.mu.Lock()
+		batch := make([]substrateNote, 0, len(q.order))
+		for _, k := range q.order {
+			batch = append(batch, q.pending[k])
+		}
+		q.mu.Unlock()
+		for _, n := range batch {
+			ctx, cancel := context.WithTimeout(context.Background(), q.timeout)
+			err := q.send(ctx, n)
+			cancel()
+			if err == nil || time.Since(n.since) > q.keep {
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: gave up telling the leader of an unrecorded tool step after %s: %v\n",
+						n.actor.Atespace, n.actor.UID, q.keep, err)
+				}
+				q.drop(n)
+			}
+		}
+		q.mu.Lock()
+		if len(q.order) == 0 {
+			q.running = false
+			q.mu.Unlock()
+			return
+		}
+		q.mu.Unlock()
+	}
+}
+
+// drop removes n unless a newer note of the same actor and kind replaced it.
+func (q *substrateNoteQueue) drop(n substrateNote) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if cur, ok := q.pending[n.key()]; !ok || cur.why != n.why || !cur.since.Equal(n.since) {
+		return
+	}
+	delete(q.pending, n.key())
+	for i, k := range q.order {
+		if k == n.key() {
+			q.order = append(q.order[:i], q.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// pendingCount is the notes waiting for the leader.
+func (q *substrateNoteQueue) pendingCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.order)
+}
+
+// readOnlyPrograms are the plain readers whose own error lines can prove a
+// failed call read nothing (toolResultProvesNothingRead).
+var readOnlyPrograms = map[string]struct{}{
+	"cat": {}, "head": {}, "tail": {}, "less": {}, "more": {}, "nl": {}, "tac": {}, "bat": {},
+}
+
+// readErrorPhrases end a reader's error line for an operand it did not read.
+var readErrorPhrases = []string{
+	"No such file or directory", "Permission denied", "Is a directory",
+	"Not a directory", "No such device or address",
+}
+
+// maxProofResultBytes bounds the result text the proof reads.
+const maxProofResultBytes = 64 << 10
+
+// toolResultProvesNothingRead reports an unsuccessful result that proves its
+// call read no file (substrate-1 GAP-0337). The call is one plain reader
+// whose operands are all simple words (no operator, redirect, pipe, quote,
+// variable, glob or option), and the result's whole text is that reader's
+// error line for every operand ("cat: .env: No such file or directory")
+// plus an "Exit code N" line. Such a call cannot print anything but what
+// it read, and a file it printed would show as other lines. Anything else
+// (no result text, other output, any other command shape) proves nothing:
+// a failed call that printed a credentials file is a secret read.
+func toolResultProvesNothingRead(req agentHookRequest) bool {
+	command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs})
+	if !ok {
+		return false
+	}
+	words := strings.Fields(command)
+	if len(words) < 2 || strings.ContainsAny(command, "|&;<>()$`'\"\\*?[]{}!#=\n") {
+		return false
+	}
+	program := words[0]
+	if _, ok := readOnlyPrograms[program]; !ok {
+		return false
+	}
+	operands := words[1:]
+	for _, operand := range operands {
+		if strings.HasPrefix(operand, "-") {
+			return false
+		}
+	}
+	var text []string
+	size := 0
+	if !collectResultText(req.Payload, &text, &size) || len(text) == 0 {
+		return false
+	}
+	named := make(map[string]bool, len(operands))
+	for _, chunk := range text {
+		for _, line := range strings.Split(chunk, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || isExitCodeLine(line) {
+				continue
+			}
+			operand, ok := readerErrorOperand(program, line)
+			if !ok || !slices.Contains(operands, operand) {
+				return false
+			}
+			named[operand] = true
+		}
+	}
+	for _, operand := range operands {
+		if !named[operand] {
+			return false
+		}
+	}
+	return true
+}
+
+// resultShowsRead reports a result whose own content shows its call may have
+// read: a line that is not blank, an exit status line, or a reader's error
+// naming one of the command's operands (GAP-0352). A result too large to
+// read shows one. It is the evidence a further result of a call needs to
+// start the secret-read chain once an earlier result proved the read failed
+// (the 1.0.10 lead's rule, STEER 7 and 8 2026-11-16): one that repeats the
+// failure, or carries no output, shows none; one that printed shows one, so a
+// no-read result never clears a read another result shows.
+func resultShowsRead(req agentHookRequest) bool {
+	var text []string
+	size := 0
+	if !collectResultText(req.Payload, &text, &size) {
+		return true
+	}
+	program, operands := "", []string(nil)
+	if command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs}); ok {
+		if words := strings.Fields(command); len(words) >= 2 {
+			program, operands = words[0], words[1:]
+		}
+	}
+	for _, chunk := range text {
+		for _, line := range strings.Split(chunk, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || isExitCodeLine(line) {
+				continue
+			}
+			if operand, ok := readerErrorOperand(program, line); program != "" && ok && slices.Contains(operands, operand) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// isExitCodeLine is the exit status line a connector adds to a failed
+// shell result ("Exit code 1").
+func isExitCodeLine(line string) bool {
+	rest, ok := strings.CutPrefix(line, "Exit code ")
+	if !ok {
+		return false
+	}
+	_, err := strconv.Atoi(rest)
+	return err == nil
+}
+
+// readerErrorOperand is the operand of program's error line
+// "program: operand: phrase" (the program prefix may be absent).
+func readerErrorOperand(program, line string) (string, bool) {
+	line = strings.TrimPrefix(line, program+": ")
+	for _, phrase := range readErrorPhrases {
+		if operand, ok := strings.CutSuffix(line, ": "+phrase); ok && operand != "" {
+			return operand, true
+		}
+	}
+	return "", false
+}
+
+// resultTextKeys are the payload keys where a connector's harness puts a
+// tool's output and error text (Claude Code tool_response and error, Cursor
+// error_message and tool_output, Hermes extra.result, OpenCode, Amp and
+// Codex tool_response, Antigravity output and error).
+var resultTextKeys = []string{
+	"tool_response", "toolResponse", "tool_output", "toolOutput", "tool_result", "toolResult",
+	"output", "result", "response", "stdout", "stderr",
+	"error", "error_message", "errorMessage", "error_details", "errorDetails",
+}
+
+// collectResultText gathers the text of a result payload: every string
+// under its result keys (and the same keys under extra), a string that holds
+// a JSON object or array read as that value, but status, type, kind and id
+// fields, bounded by maxProofResultBytes; false when the result is larger.
+// The payload is the harness plugin's, not the model's.
+func collectResultText(payload map[string]any, out *[]string, size *int) bool {
+	for _, scope := range []map[string]any{payload, nestedResultScope(payload)} {
+		for _, key := range resultTextKeys {
+			if value, ok := scope[key]; ok && !collectText(value, out, size) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func nestedResultScope(payload map[string]any) map[string]any {
+	extra, _ := payload["extra"].(map[string]any)
+	return extra
+}
+
+func collectText(value any, out *[]string, size *int) bool {
+	switch v := value.(type) {
+	case string:
+		*size += len(v)
+		if *size > maxProofResultBytes {
+			return false
+		}
+		if trimmed := strings.TrimSpace(v); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			var decoded any
+			if json.Unmarshal([]byte(trimmed), &decoded) == nil {
+				return collectText(decoded, out, size)
+			}
+		}
+		*out = append(*out, v)
+	case map[string]any:
+		for key, item := range v {
+			if resultEnumKey(key) {
+				continue
+			}
+			if !collectText(item, out, size) {
+				return false
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if !collectText(item, out, size) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// resultEnumKey is a field inside a result whose value is a label, not
+// output (opencode_v2_status, a content block type, an id).
+func resultEnumKey(key string) bool {
+	lower := strings.ToLower(key)
+	return strings.Contains(lower, "status") || lower == "type" || lower == "kind" ||
+		lower == "id" || strings.HasSuffix(lower, "_id") || strings.HasSuffix(key, "Id") || strings.HasSuffix(key, "ID")
 }

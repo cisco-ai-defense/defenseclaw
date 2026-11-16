@@ -44,13 +44,14 @@ func TestSecretReadChainReviewReadersAndTable(t *testing.T) {
 	}
 }
 
-// srd2ReviewReaderArms: sed with a bare or -e script, awk -F and openssl
-// base64 -in stay out (substrate-1:GAP-0233: their scripts and subcommands
-// can write or run files); env VAR=value stays fail-closed by decision.
+// srd2ReviewReaderArms: env VAR=value stays fail-closed by decision. sed with
+// a bare or -e script, awk -F and openssl base64 -in read their file operand
+// and arm the chain through its private record (substrate-1:GAP-0341); an
+// in-place sed -i writes the file instead and does not.
 var srd2ReviewReaderArms = map[string]bool{
 	"RD-tac": true, "RD-nl": true, "RD-od": true, "RD-strings": true, "RD-cut": true, "RD-sort": true,
 	"RD-hexdump": true, "RD-xargs": true, "RD-nice": true, "RD-time": true, "RD-timeout": true, "RD-nohup": true,
 	"RD-envassign": false, "RD-tar": true, "RD-tar2": true, "RD-zip": true,
-	"RD-sedbare": false, "RD-sede": false, "RD-awkF": false,
-	"RD-diff": true, "RD-rsync": true, "RD-openssl": false,
+	"RD-sedbare": true, "RD-sede": true, "RD-awkF": true,
+	"RD-diff": true, "RD-rsync": true, "RD-openssl": true,
 }

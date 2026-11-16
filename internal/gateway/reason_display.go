@@ -262,6 +262,14 @@ const agentReviewAction = "review"
 // redaction directive, or the managed agent-reason carve-out (which hands
 // the agent the raw reason) leave displayReason unchanged.
 func agentVerdictReason(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
+	reason := agentVerdictReasonOf(action, sourceReason, displayReason, policy)
+	if action == "block" {
+		reason = withUnclearedReadNote(reason, sourceReason)
+	}
+	return reason
+}
+
+func agentVerdictReasonOf(action, sourceReason, displayReason string, policy redaction.SinkPolicy) string {
 	if action != "block" && action != "confirm" && action != agentReviewAction {
 		return displayReason
 	}
@@ -802,4 +810,36 @@ func agentConfirmUnavailableReason(agent, sourceReason, displayReason string, po
 	}
 	return "DefenseClaw blocked this action: your organization's policy needs your confirmation for it" + detail +
 		", and " + agent + " cannot ask for it. Contact your administrator if you need it allowed."
+}
+
+// unclearedReadNotePrefix starts the one sentence a block keeps from the
+// source reason on every agent surface: why the secret-read chain refused
+// the egress of a connector whose results can't be tied to their calls
+// (substrate-1 GAP-0338). It is DefenseClaw's own text around a connector
+// name.
+const unclearedReadNotePrefix = "The credentials read could not be cleared: no result correlation for "
+
+// unclearedReadConnector is the connector name the note may carry.
+var unclearedReadConnector = lazyregexp.New(`^[a-z][a-z0-9-]{0,31}$`)
+
+// unclearedReadNote is the note sentence in reason, or "".
+func unclearedReadNote(reason string) string {
+	_, rest, ok := strings.Cut(reason, unclearedReadNotePrefix)
+	if !ok {
+		return ""
+	}
+	name, _, ok := strings.Cut(rest, ".")
+	if !ok || !unclearedReadConnector.MatchString(name) {
+		return ""
+	}
+	return unclearedReadNotePrefix + name + "."
+}
+
+// withUnclearedReadNote adds the note of sourceReason to reason once.
+func withUnclearedReadNote(reason, sourceReason string) string {
+	note := unclearedReadNote(sourceReason)
+	if note == "" || strings.Contains(reason, note) {
+		return reason
+	}
+	return strings.TrimSpace(reason + " " + note)
 }

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -50,6 +51,10 @@ type AttachOptions struct {
 	// Dir is the folder in the actor the agent starts in when it is not
 	// running yet (the copy of the project); "" keeps the relay default.
 	Dir string
+	// Resume is the Input of the last attachment's hello: the relay's
+	// hello then says how much input it got from that attachment
+	// (Control.Received, GAP-0170).
+	Resume string
 	// HTTPClient carries long-poll requests (default http.DefaultClient).
 	HTTPClient *http.Client
 	// Dialer dials WebSocket (default websocket.DefaultDialer).
@@ -65,6 +70,12 @@ type AttachResult struct {
 	Detached bool
 	ExitCode *int
 	Session  string
+	// Input is the relay's input count id of this attachment (its hello),
+	// "" for a relay that has none; Sent is the DATA bytes written to the
+	// connection. A reconnect passes Input as Resume and compares Sent with
+	// the hello's Received (GAP-0170).
+	Input string
+	Sent  int64
 }
 
 // Attach connects in to the agent's terminal and copies in to the agent and
@@ -84,6 +95,9 @@ func sizeQuery(o AttachOptions) string {
 	q := "?cols=" + strconv.Itoa(int(o.Cols)) + "&rows=" + strconv.Itoa(int(o.Rows))
 	if o.Dir != "" {
 		q += "&dir=" + url.QueryEscape(o.Dir)
+	}
+	if o.Resume != "" {
+		q += "&resume=" + url.QueryEscape(o.Resume)
 	}
 	return q
 }
@@ -148,6 +162,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(dead)) })
 	var res AttachResult
 	var resMu sync.Mutex // the reader goroutine writes res while the paths below read it
+	var sent atomic.Int64
 	done := make(chan struct{})
 	go func() {
 		t := time.NewTicker(every)
@@ -189,7 +204,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 				resMu.Lock()
 				switch c.Type {
 				case CtlHello:
-					res.Session = c.Session
+					res.Session, res.Input = c.Session, c.Input
 				case CtlExit:
 					res.ExitCode = c.Code
 				}
@@ -212,7 +227,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	}
 	detached := make(chan bool, 1)
 	go func() {
-		detached <- pumpInput(in, o.unsentTracked(func(b []byte) error { return send(Encode(FrameData, b)) }))
+		detached <- pumpInput(in, o.tracked(&sent, func(b []byte) error { return send(Encode(FrameData, b)) }))
 	}()
 	select {
 	case <-done:
@@ -230,6 +245,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	}
 	resMu.Lock()
 	defer resMu.Unlock()
+	res.Sent = sent.Load()
 	return res, nil
 }
 
@@ -262,6 +278,7 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	path := RoutePoll + "/" + open.ID
 	var res AttachResult
 	var resMu sync.Mutex // the follower goroutine writes res while the paths below read it
+	var sent atomic.Int64
 	var outMu sync.Mutex
 	send := func(frame []byte) error {
 		r, err := do(ctx, http.MethodPost, path, AppendStream(nil, frame))
@@ -313,7 +330,7 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 					resMu.Lock()
 					switch cc.Type {
 					case CtlHello:
-						res.Session = cc.Session
+						res.Session, res.Input = cc.Session, cc.Input
 					case CtlExit:
 						res.ExitCode = cc.Code
 					}
@@ -337,7 +354,7 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	}
 	detached := make(chan bool, 1)
 	go func() {
-		detached <- pumpInput(in, o.unsentTracked(func(b []byte) error { return send(Encode(FrameData, b)) }))
+		detached <- pumpInput(in, o.tracked(&sent, func(b []byte) error { return send(Encode(FrameData, b)) }))
 	}()
 	select {
 	case <-done:
@@ -354,14 +371,19 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	}
 	resMu.Lock()
 	defer resMu.Unlock()
+	res.Sent = sent.Load()
 	return res, nil
 }
 
-// unsentTracked wraps send so a chunk that fails is reported (OnUnsent).
-func (o AttachOptions) unsentTracked(send func([]byte) error) func([]byte) error {
+// tracked wraps send so a chunk that fails is reported (OnUnsent) and one
+// that is written is counted in sent.
+func (o AttachOptions) tracked(sent *atomic.Int64, send func([]byte) error) func([]byte) error {
 	return func(b []byte) error {
 		err := send(b)
-		if err != nil && o.OnUnsent != nil && len(b) > 0 {
+		switch {
+		case err == nil:
+			sent.Add(int64(len(b)))
+		case o.OnUnsent != nil && len(b) > 0:
 			o.OnUnsent(len(b))
 		}
 		return err

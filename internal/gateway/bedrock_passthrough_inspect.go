@@ -185,7 +185,9 @@ type bedrockEventStreamText struct {
 	buf    []byte
 	dec    *eventstream.Decoder
 	broken bool
-	model  string
+	// cut: the stream ended inside a tool call the agent runs (Finish).
+	cut   bool
+	model string
 	// Tool calls (GAP-0098): open blocks by content index, assembled from
 	// the stream's input deltas, and the finished calls not yet taken.
 	tools    map[int]*bedrockStreamTool
@@ -347,7 +349,9 @@ func (s *bedrockEventStreamText) Model() string { return s.model }
 func (s *bedrockEventStreamText) PartialLen() int { return len(s.buf) }
 
 // Finish ends the tool calls still open when the stream ended (a stream cut
-// inside a call): they are handed to the tool-call rules like finished ones.
+// inside a call): they are handed to the tool-call rules like finished ones,
+// and a cut call the agent runs (not a server call) marks the stream Cut, so
+// the tier's fail mode applies after the rules (GAP-0987).
 // A stream the decoder could not frame has no reliable open calls.
 func (s *bedrockEventStreamText) Finish() {
 	if s.broken {
@@ -359,9 +363,15 @@ func (s *bedrockEventStreamText) Finish() {
 	}
 	sort.Ints(idx)
 	for _, i := range idx {
+		if !s.tools[i].Server {
+			s.cut = true
+		}
 		s.toolStop(i)
 	}
 }
+
+// Cut reports a stream that ended inside a tool call the agent runs.
+func (s *bedrockEventStreamText) Cut() bool { return s.cut }
 
 // Feed takes the next bytes of the stream and returns the model text of
 // the messages they complete (messagePieces).

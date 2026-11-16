@@ -157,6 +157,9 @@ type Service struct {
 	// maxGone; past it, Egress still asks Current while it holds the entry.
 	gone     map[string]bool
 	goneList []string
+	// calls are the tool calls this leader prepared or resolved, for a
+	// further result of a call (GAP-0348, GAP-0345, GAP-0350; calls.go).
+	calls *callTable
 	// diskHook, set by tests only, runs before every disk operation on an
 	// actor's files: a store open or access (storeOf), a state file write
 	// and a purge's removals. A test blocks it to stand for a disk that does
@@ -250,6 +253,15 @@ type actorState struct {
 	Forked bool `json:"forked,omitempty"`
 	// Task is the launcher-registered --task text.
 	Task string `json:"task,omitempty"`
+	// UnrecordedUnixNano is the actor's running time of its last tool step
+	// a gateway could not record (0 for none), UnrecordedWhy the reason
+	// (GAP-0339).
+	UnrecordedUnixNano int64  `json:"unrecorded_unix_nano,omitempty"`
+	UnrecordedWhy      string `json:"unrecorded_why,omitempty"`
+	// UnclearedUnixNano and UnclearedWhy are the same for the last
+	// credentials read that started the chain uncleared (GAP-0338).
+	UnclearedUnixNano int64  `json:"uncleared_unix_nano,omitempty"`
+	UnclearedWhy      string `json:"uncleared_why,omitempty"`
 	// Egress is the egress memo (GAP-0179), filled when the file is
 	// written. A state file without it is from an older leader.
 	Egress *egressSnapshot `json:"egress,omitempty"`
@@ -325,7 +337,8 @@ func New(opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{}}
+	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{},
+		calls: newCallTable()}
 	s.action.Store(&opts.EgressAction)
 	if err := s.load(); err != nil {
 		return nil, err
@@ -362,6 +375,7 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(leader.MethodIntentPut, s.logged(leader.MethodIntentPut, leader.Typed(s.IntentPut)))
 	srv.Handle(MethodChainLifecycle, s.logged(MethodChainLifecycle, leader.Typed(s.Lifecycle)))
 	srv.Handle(MethodChainEgress, s.logged(MethodChainEgress, leader.Typed(s.Egress)))
+	srv.Handle(MethodChainUnrecorded, s.logged(MethodChainUnrecorded, leader.Typed(s.Unrecorded)))
 	srv.Handle(MethodHistorySeen, s.logged(MethodHistorySeen, leader.Typed(s.HistorySeen)))
 	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
 }
@@ -625,6 +639,7 @@ func (s *Service) purgeLocked(e *actorEntry) {
 	}
 	e.purged = true
 	delete(s.actors, e.actor.key())
+	s.calls.dropActor(e.actor.key())
 	s.purging[e.actor.key()] = true
 	s.purges = append(s.purges, job)
 }
@@ -823,7 +838,9 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 
 // forkClock starts a child's clock from its parent's, once: a late or
 // repeated fork event never resets the child's own time. The child takes
-// the parent's task if it has none.
+// the parent's task if it has none, and the parent's later unrecorded and
+// uncleared marks: the child goes on from the parent's work, as it inherits
+// its windows (GAP-0339 review F1).
 func forkClock(cst, pst actorState) actorState {
 	if !cst.Forked {
 		cst.UncountedNanos, cst.ActiveUnixNano = pst.UncountedNanos, pst.ActiveUnixNano
@@ -832,6 +849,12 @@ func forkClock(cst, pst actorState) actorState {
 	}
 	if cst.Task == "" {
 		cst.Task = pst.Task
+	}
+	if pst.UnrecordedUnixNano > cst.UnrecordedUnixNano {
+		cst.UnrecordedUnixNano, cst.UnrecordedWhy = pst.UnrecordedUnixNano, pst.UnrecordedWhy
+	}
+	if pst.UnclearedUnixNano > cst.UnclearedUnixNano {
+		cst.UnclearedUnixNano, cst.UnclearedWhy = pst.UnclearedUnixNano, pst.UnclearedWhy
 	}
 	return cst
 }
@@ -1030,7 +1053,12 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 			return ObserveResponse{}, bad(err)
 		}
 		x.ConnectorInstanceID = instance
-		result, err = repo.ResolvePending(ctx, x)
+		var r audit.ToolChainResolvePendingResult
+		r, err = repo.ResolvePending(ctx, x)
+		if err == nil {
+			r, err = s.furtherResult(ctx, repo, e, in, x, r)
+		}
+		result = r
 	case OpPrepare:
 		var x audit.ToolChainPreparePendingInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -1040,7 +1068,10 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if err := s.notePending(e, in.Scope, x.Projection); err != nil {
 			return ObserveResponse{}, err
 		}
-		result, err = repo.PreparePending(ctx, x)
+		var r audit.ToolChainPreparePendingResult
+		r, err = repo.PreparePending(ctx, x)
+		s.noteCall(e, in, x, r.Status, err)
+		result = r
 	case OpDiscard:
 		var x audit.ToolChainDiscardPendingForEventSessionInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -1478,7 +1509,17 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		return EgressVerdict{}, err
 	}
 	s.touch(e)
-	v, ok := e.memo.verdict(s.stamp(e, s.opts.Now()), s.EgressAction())
+	now := s.stamp(e, s.opts.Now())
+	v, ok := e.memo.verdict(now, s.EgressAction())
+	if ok {
+		st := s.stateOf(e)
+		v.Unrecorded = noteWithin(st.UnrecordedUnixNano, st.UnrecordedWhy, now)
+		if v.Rule == guardrail.ToolChainSecretReadThenEgress {
+			if why := noteWithin(st.UnclearedUnixNano, st.UnclearedWhy, now); why != "" {
+				v.Reason += " The " + why + "."
+			}
+		}
+	}
 	switch {
 	case !ok:
 		s.egress.push(egressRecord{actor: e.actor, sync: true})
@@ -1703,4 +1744,53 @@ func (s *Service) SetEgressAction(action string) error {
 	}
 	s.action.Store(&action)
 	return nil
+}
+
+// Unrecorded keeps that a gateway could not record one of the actor's tool
+// steps in its chain window, at the actor's running time, for the egress
+// checks of the chain window (GAP-0339).
+func (s *Service) Unrecorded(ctx context.Context, in UnrecordedRequest) (struct{}, error) {
+	if err := in.Actor.Validate(); err != nil {
+		return struct{}{}, bad(err)
+	}
+	why := strings.TrimSpace(in.Why)
+	if why == "" {
+		why = "a tool step was not recorded"
+	}
+	if len(why) > maxUnrecordedWhy {
+		why = why[:maxUnrecordedWhy]
+	}
+	e, release, err := s.acquire(in.Actor)
+	if err != nil {
+		return struct{}{}, err
+	}
+	defer release()
+	defer s.lock(in.Actor)()
+	s.touch(e)
+	st := s.stateOf(e)
+	at := s.stamp(e, s.opts.Now()).UnixNano()
+	if in.Uncleared {
+		st.UnclearedUnixNano, st.UnclearedWhy = at, why
+	} else {
+		st.UnrecordedUnixNano, st.UnrecordedWhy = at, why
+	}
+	return struct{}{}, s.setState(e, st)
+}
+
+// unrecordedWindow is how long, in running time, an unrecorded step counts
+// for egress: the secret-read chain's window.
+var unrecordedWindow = func() time.Duration {
+	if d, ok := guardrail.ToolChainDefinitionByID(guardrail.ToolChainSecretReadThenEgress); ok {
+		return d.TimeWindow
+	}
+	return 30 * time.Minute
+}()
+
+// noteWithin is why when its step at (running time) is within the window
+// at running time now, else "".
+func noteWithin(at int64, why string, now time.Time) string {
+	if at == 0 || now.UnixNano()-at > int64(unrecordedWindow) {
+		return ""
+	}
+	return why
 }

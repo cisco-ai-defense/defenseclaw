@@ -446,6 +446,7 @@ var boundedLaneGroups = []struct {
 	{"ShellDepth", boundedLaneNames("cap floor pieces", "cap floor here-document nest",
 		"sed backup reader eval depth", "prefix wrapper chain", "shell analysis depth",
 		"s7/winrecall script-wrapper depth", "s7/winrecall in-list wrapper body", "s7/sender reading depth")},
+	{"SecretReadResolve", boundedLaneNames("secret-read credentials-file resolve")},
 }
 
 func boundedLaneNames(names ...string) func(string) bool {
@@ -544,6 +545,10 @@ func TestBoundRuleEveryLaneCapShellStrings(t *testing.T) {
 
 func TestBoundRuleEveryLaneCapShellDepth(t *testing.T) {
 	boundRuleEveryLaneCap(t, "ShellDepth")
+}
+
+func TestBoundRuleEveryLaneCapSecretReadResolve(t *testing.T) {
+	boundRuleEveryLaneCap(t, "SecretReadResolve")
 }
 
 func TestBoundRuleEveryLaneCapOther(t *testing.T) {

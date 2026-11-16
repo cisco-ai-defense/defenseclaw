@@ -230,6 +230,9 @@ func (s *passthroughStream) run() {
 	sseBlockMsg := ""
 	brokenReported := false
 	framerReported := false
+	// frameCutReported: the stream ended inside a Bedrock frame and that cut
+	// took the fail mode (one alert per cut).
+	frameCutReported := false
 	ambiguousReported := false
 	streamEnded := false
 	initialFlushed := mode != "action"
@@ -712,10 +715,13 @@ read:
 				// be read, so the stream takes the fail mode. A managed install
 				// refuses it (the agent reads a block); otherwise what was sent
 				// is forwarded as it is, after the alert.
-				if ctx.Err() == nil && p.uninspectableReply(ctx, label, mode, "the stream ended inside a frame") {
-					sseBlockMsg = uninspectableMsg
-					stopped = true
-					break read
+				if ctx.Err() == nil {
+					frameCutReported = true
+					if p.uninspectableReply(ctx, label, mode, "the stream ended inside a frame") {
+						sseBlockMsg = uninspectableMsg
+						stopped = true
+						break read
+					}
 				}
 				pend := bedrockPending
 				bedrockPending = nil
@@ -760,7 +766,16 @@ read:
 		} else {
 			s.bedrock.Finish()
 		}
-		sseRefused()
+		if !sseRefused() && s.bedrock != nil && s.bedrock.Cut() && !frameCutReported && ctx.Err() == nil {
+			// The partial call passed the rules, but the stream was cut
+			// inside it: the tier's fail mode applies, as it does to an SSE
+			// stream cut inside a call (sseToolCalls.Finish, GAP-0987). A cut
+			// inside a frame already took it, and a client that went away
+			// gets no verdict.
+			if p.uninspectableReply(ctx, label, mode, "the event stream ended inside a tool call") {
+				sseBlockMsg = blockMessage(s.customBlockMsg, "tool_call", "the provider reply could not be inspected")
+			}
+		}
 	}
 	if sseBlockMsg == "" && streamEnded && !stopped && s.bedrock == nil && framer.DataEvents == 0 && framer.Unframed > 0 {
 		// Labelled event-stream, but not framed as one: it cannot be read.
