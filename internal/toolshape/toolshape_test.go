@@ -1066,3 +1066,28 @@ func TestPathListInOneString(t *testing.T) {
 		t.Fatalf("over the items bound: truncated=%v, %d paths", m.Truncated, len(paths(m)))
 	}
 }
+
+// rel-1-0-10:GAP-1058: the shadow file rule left the default and permissive
+// packs' semantic catalog for this table; it is pack_typed, so the gateway
+// judges its finding as the pack's typed finding was. The other rules keep the
+// lane's own tier.
+func TestPackTypedPathRules(t *testing.T) {
+	for _, access := range []string{"read", "write", "append", "delete"} {
+		if got := PathRules(access, "/etc/shadow", ""); !slices.Equal(got, []string{"PATH-ETC-SHADOW"}) {
+			t.Errorf("shadow %s = %v", access, got)
+		}
+	}
+	for _, path := range []string{"/etc/shadow.bak", "/repo/etc/shadow", "/etc/gshadow"} {
+		if got := PathRules("read", path, ""); slices.Contains(got, "PATH-ETC-SHADOW") {
+			t.Errorf("%s matched the shadow rule: %v", path, got)
+		}
+	}
+	if !PackTypedPathRule("PATH-ETC-SHADOW") {
+		t.Error("PATH-ETC-SHADOW is not pack_typed")
+	}
+	for _, id := range []string{"PATH-GIT-CREDS", "PATH-ETC-PASSWD", "CMD-PERSIST-SYSTEM-SCHEDULE", "NO-SUCH-RULE"} {
+		if PackTypedPathRule(id) {
+			t.Errorf("%s is pack_typed", id)
+		}
+	}
+}

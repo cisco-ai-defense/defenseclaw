@@ -445,12 +445,18 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	// merge adds the lane's finding of ruleID; token says whether the lane
 	// derives it from a developer-token file of the active home itself
 	// (ownDeveloperTokenAccess), and whether the call reads it or reaches it another way.
-	merge := func(ruleID, note string, token ownTokenAccess) {
+	// facts are the facts the finding was read from (the call, or one statement of it).
+	merge := func(facts actionfacts.Facts, ruleID, note string, token ownTokenAccess) {
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
 		finding := nonShellFinding(rule, note, request.Input.Tool, hard)
+		if !hard && toolshape.PackTypedPathRule(ruleID) {
+			if finding, ok = packTypedPathFinding(generation, request, facts, rule, note); !ok {
+				return
+			}
+		}
 		if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 {
 			// When the call names a credential file in another account's
 			// home, a finding of the same rule that is stronger by
@@ -485,15 +491,15 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		}
 		out = withSimpleCommandFindings(out, []RuleFinding{finding})
 	}
-	add := func(ruleID, note string) { merge(ruleID, note, ownTokenNone) }
+	add := func(facts actionfacts.Facts, ruleID, note string) { merge(facts, ruleID, note, ownTokenNone) }
 	judge := func(facts actionfacts.Facts, command, text string) {
 		if isShell {
 			for _, id := range toolshape.TextRules(command) {
-				add(id, "")
+				add(facts, id, "")
 			}
 			for _, c := range facts.Commands {
 				for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
-					add(id, "")
+					add(facts, id, "")
 				}
 			}
 		}
@@ -511,7 +517,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 				if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(facts, p.CommandID) {
 					continue
 				}
-				merge(id, "", own)
+				merge(facts, id, "", own)
 			}
 			// The developer-token files of an account's home (the credentials
 			// table's class of PATH-GIT-CREDS) are read by the native file tools as
@@ -519,7 +525,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			// comes from the one table, so each branch's table decides which names
 			// are in it; the home is found by position.
 			if p.Access == actionfacts.PathAccessRead && developerTokenFileOfAccountHome(path) {
-				merge("PATH-GIT-CREDS", "", own)
+				merge(facts, "PATH-GIT-CREDS", "", own)
 			}
 		}
 	}
@@ -557,11 +563,35 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 				if id == "CMD-PERSIST-SYSTEM-SCHEDULE" && linksToDevNull(guestFacts, p.CommandID) {
 					continue
 				}
-				add(id, "")
+				add(guestFacts, id, "")
 			}
 		}
 	}
 	return out
+}
+
+// packTypedPathFinding is the lane's finding of a pack_typed path rule
+// (toolshape.PackTypedPathRule) outside the strict tier and managed installs:
+// the finding the pack's own typed path expression of the rule gave, judged by
+// the boundary every catalog finding of a trusted action passes
+// (finalizeTrustedActionFindings) on the facts the lane read. A local read of
+// /etc/shadow is MEDIUM there (an alert in default, below the permissive alert
+// threshold), and a mutation or a read that leaves the machine keeps the
+// rule's own tier. So a call that reaches the file after a cd (cd /etc && cat
+// shadow) gets the verdict the one-step spelling gets from the pack's text
+// pattern, in every pack; a lane alert at the rule's severity alerted in
+// permissive, where the one-step form is allowed (rel-1-0-10:GAP-1058). A
+// reference that reads nothing stays a detection-only audit finding, as the
+// one-step spelling's does. ok is false when the boundary leaves no finding of
+// the rule.
+func packTypedPathFinding(generation *compiledRulePackCategories, request trustedActionRequest, facts actionfacts.Facts, rule *PatternRule, note string) (RuleFinding, bool) {
+	typed := nonShellFinding(rule, note, request.Input.Tool, true)
+	for _, finding := range finalizeTrustedActionFindings(generation, request, facts, []RuleFinding{typed}) {
+		if finding.RuleID == rule.ID {
+			return finding, true
+		}
+	}
+	return RuleFinding{}, false
 }
 
 // homePathRuleIDs are the table rules on a file of the account's own home

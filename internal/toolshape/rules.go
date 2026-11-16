@@ -26,9 +26,17 @@ type PathRule struct {
 	// TextRe, when set, must also match the text of the call (the shell
 	// command, or the content a write carries): the path alone is not enough.
 	TextRe string `yaml:"text_re"`
-	re     *regexp.Regexp
-	homeRe *regexp.Regexp
-	textRe *regexp.Regexp
+	// PackTyped marks a rule whose finding the gateway judges as the pack's
+	// own typed path finding of the rule (the trusted-action context
+	// disposition: a local read of the file is an advisory MEDIUM, a mutation
+	// keeps the rule's tier), not as a lane alert at the rule's severity, so
+	// the lane gives the verdict the one-step spelling of the call gets in
+	// every pack (rel-1-0-10:GAP-1058). It only matters outside the strict
+	// tier and managed installs, where lane findings alert.
+	PackTyped bool `yaml:"pack_typed"`
+	re        *regexp.Regexp
+	homeRe    *regexp.Regexp
+	textRe    *regexp.Regexp
 }
 
 // CommandRule is a rule on one parsed command (program and argv).
@@ -140,6 +148,16 @@ func pathRules(access, path, text string, pattern func(*PathRule) *regexp.Regexp
 		}
 	}
 	return out
+}
+
+// PackTypedPathRule reports whether a path rule of the table with this id is
+// pack_typed (PathRule.PackTyped).
+func PackTypedPathRule(id string) bool {
+	t, err := load()
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(t.PathRules, func(r PathRule) bool { return r.ID == id && r.PackTyped })
 }
 
 // PathAccessOf maps an effect kind to the access name PathRules takes.

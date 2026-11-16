@@ -159,19 +159,6 @@ rules:
     confidence: 0.85
     tags: [system-file]
   - id: PATH-ETC-SHADOW
-    expression: >-
-      f.paths.exists(p, (p.resolved == '/etc/shadow' || p.normalized == '/etc/shadow') &&
-      (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] ||
-      (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ &&
-      f.commands.exists(c, c.id == p.command_id &&
-      c.program in ['cat', 'base64', 'head', 'tail', 'less', 'more', 'strings',
-      'xxd', 'hexdump', 'cp', 'read', 'readfile', 'read_file', 'read-file',
-      'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread',
-      'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile',
-      'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile',
-      'get_file', 'get-file']))))
     pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)'
     title: "/etc/shadow access"
     severity: CRITICAL
