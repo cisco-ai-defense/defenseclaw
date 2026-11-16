@@ -32,6 +32,8 @@ foreach ($name in @(
     'Assert-DefenseClawApprovedConfigProven',
     'Restore-DefenseClawApprovedConfigOverHandEdit',
     'ConvertTo-DefenseClawBoundedDiagnostic',
+    'Save-DefenseClawRejectedStandalonePolicy',
+    'Add-DefenseClawRestoredPolicyNote',
     'Invoke-DefenseClawRepairApprovedPolicyRecovery',
     'Publish-DefenseClawApprovedPolicySources',
     'Install-DefenseClawSourceDescriptor',
@@ -74,6 +76,7 @@ $script:Copies = 0
 $script:AclWrites = 0
 $script:ValidatedConfigPaths = [Collections.Generic.List[string]]::new()
 $script:ResilienceReasons = [Collections.Generic.List[string]]::new()
+$script:DefenseClawRestoredPolicyNotes = @()
 function Get-DefenseClawArtifactPath {
     param($Layout, $Name)
     if ($Name -ceq 'config') { return $Layout.ConfigPath }
@@ -89,7 +92,7 @@ function Assert-DefenseClawPathAcl {
         throw 'installed policy descriptor changed'
     }
 }
-function Assert-DefenseClawNoReparsePath { param($Path) }
+function Assert-DefenseClawNoReparsePath { param($Path, [switch]$AllowMissingLeaf) }
 function Get-DefenseClawSourceDescriptor {
     param($Path, $Label)
     return @{ path = $Path; label = $Label; authenticode = $false;
@@ -181,8 +184,15 @@ try {
         -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway'
     if (-not [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($script:Layout.ConfigPath), $approvedConfig) -or
         -not [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($script:Layout.ManifestPath), $approvedManifest) -or
-        $script:Copies -ne 4 -or $script:AclWrites -ne 4) {
+        $script:Copies -ne 6 -or $script:AclWrites -ne 6) {
         throw 'Repair did not rewrite both files from the recorded approved bytes'
+    }
+    # GAP-1049: each replaced file is kept first (one more copy and one more
+    # access-list write apiece), with the bytes it had, and the restore is logged.
+    if ([IO.File]::ReadAllText([IO.Path]::Combine($etc, 'rejected-config.yaml')) -ne "config_version: 9`nchanged: true`n" -or
+        [IO.File]::ReadAllText([IO.Path]::Combine($etc, 'rejected-targets.yaml')) -ne "targets: [changed]`n" -or
+        $script:DefenseClawRestoredPolicyNotes.Count -ne 2) {
+        throw 'Repair did not keep the replaced config.yaml and targets.yaml'
     }
     $priorCopies = $script:Copies
     Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
@@ -326,7 +336,8 @@ try {
         Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
             -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig $recovered
         Assert-ConfigIsApproved "Repair left a $($edit.name) hand edit installed"
-        if ($script:Copies -ne $copiesBefore + 1 -or $recovered['config'] -cne $record.config) {
+        # One copy keeps the replaced file (GAP-1049), one restores the approved bytes.
+        if ($script:Copies -ne $copiesBefore + 2 -or $recovered['config'] -cne $record.config) {
             throw "Repair did not report the approved config it restored over a $($edit.name) hand edit"
         }
         # Rollback puts the same preimage back; it must not leave the edit.
@@ -483,7 +494,7 @@ try {
     Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
         -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig $recovered
     Assert-ConfigIsApproved 'Repair did not restore the approved copy over a proven hand edit'
-    if ($script:Copies -ne $copiesBefore + 1) { throw 'a proven restore copied more than once' }
+    if ($script:Copies -ne $copiesBefore + 2) { throw 'a proven restore copied more than the kept file and the approved bytes' }
     Set-HandEditRecord -Text "config_version: 9`n# edited by hand`n"
     $copiesBefore = $script:Copies
     # No recorded approved source: Repair refuses before changing anything and
@@ -502,7 +513,7 @@ try {
         $script:ResilienceReasons[0] -notmatch 'kept the restored config') {
         throw 'a hand edit without a recorded approved source was not left as it was'
     }
-    'approved policy Repair smoke passed'
+    Write-Output 'enterprise-standalone-approved-policy-repair-smoke: OK'
 }
 finally {
     if ([IO.Directory]::Exists($root)) {
