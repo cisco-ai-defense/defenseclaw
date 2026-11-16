@@ -29,14 +29,11 @@ func patchOf(directive, target string) string {
 	return "*** Begin Patch\n*** " + directive + ": " + target + "\n" + body + "*** End Patch"
 }
 
-// A typed patch target that Windows opens as a local file is a path fact like
-// the drive path it opens, so the path rules judge it: the extended-length and
-// device forms of a drive path and the admin share of this machine under
-// every local name.
+// A typed patch target that names a file below a root the path rules read is
+// a path fact, so the path rules judge it: the extended-length and device
+// forms of a drive path, the admin share of this machine under every local
+// name, and a share of another host.
 func TestPatchTargetThatOpensALocalWindowsFileIsAPathFact(t *testing.T) {
-	previous := patchLocalHostname
-	patchLocalHostname = func() (string, error) { return "build-host", nil }
-	t.Cleanup(func() { patchLocalHostname = previous })
 	for _, target := range []string{
 		`\\?\C:\Users\fixture\.netrc`, `\\.\C:\Users\fixture\.netrc`, `\\?\c:\Users\fixture\.netrc`,
 		`\\localhost\c$\Users\fixture\.netrc`, `\\LOCALHOST\C$\Users\fixture\.netrc`,
@@ -44,6 +41,11 @@ func TestPatchTargetThatOpensALocalWindowsFileIsAPathFact(t *testing.T) {
 		`\\0--1.ipv6-literal.net\c$\Users\fixture\.netrc`, `\\build-host\c$\Users\fixture\.netrc`,
 		`\\?\UNC\localhost\c$\Users\fixture\.netrc`, `\\?\UNC\127.0.0.1\C$\Users\fixture\.netrc`,
 		`\\localhost/c$/Users/fixture/.netrc`, `\\?\C:/Users/fixture/.netrc`,
+		// A share of another host, its admin share included, is the path a
+		// Claude Code Write of the same name has (rel-1-0-10:GAP-1052).
+		`\\server\share\file.txt`, `\\server\c$\file.txt`, `\\localhost\share\file.txt`,
+		`\\localhost\cc$\file.txt`, `\\localhost.example\c$\file.txt`,
+		`\\?\UNC\server\share\file.txt`, `\\?\UNC\server\c$\file.txt`, `\\server/c$/file.txt`,
 	} {
 		for _, directive := range []string{"Add File", "Delete File"} {
 			t.Run(directive+" "+target, func(t *testing.T) {
@@ -60,17 +62,14 @@ func TestPatchTargetThatOpensALocalWindowsFileIsAPathFact(t *testing.T) {
 	}
 }
 
-// A target that Windows does not open as a file of this machine stays unread,
-// as before: another host's share, a share that is no drive, a device that is
-// no drive, a drive without a path, and a name that only looks local.
+// A target that names no file below a root the path rules read stays unread:
+// a share without a file, a device or namespace that is no drive, a drive
+// without a path, and a name with an empty server. The gateway judges such a
+// call at the unknown tier (PatchNamesUnplacedTarget).
 func TestPatchTargetThatIsNoLocalWindowsFileStaysUnread(t *testing.T) {
-	previous := patchLocalHostname
-	patchLocalHostname = func() (string, error) { return "build-host", nil }
-	t.Cleanup(func() { patchLocalHostname = previous })
 	for _, target := range []string{
-		`\\server\share\file.txt`, `\\server\c$\file.txt`, `\\localhost\share\file.txt`,
-		`\\localhost\c$`, `\\localhost\c$\`, `\\localhost\cc$\file.txt`, `\\localhost.example\c$\file.txt`,
-		`\\?\UNC\server\share\file.txt`, `\\?\UNC\server\c$\file.txt`, `\\?\GLOBALROOT\Device\x\file.txt`,
+		`\\localhost\c$`, `\\localhost\c$\`, `\\server\share`, `\\?\UNC\server\share`,
+		`\\?\GLOBALROOT\Device\x\file.txt`,
 		`\\.\pipe\file`, `\\.\PhysicalDrive0`, `\\?\C:`, `\\?\C:file.txt`, `\\?\Volume{1234}\file.txt`,
 		`\\\localhost\c$\file.txt`, `\\`, `\\?\`, `\\localhost`,
 	} {

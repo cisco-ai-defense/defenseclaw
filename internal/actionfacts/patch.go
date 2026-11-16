@@ -17,7 +17,7 @@
 package actionfacts
 
 import (
-	"os"
+	"encoding/json"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -40,6 +40,11 @@ type patchEnvelopeResult struct {
 	hasMove   bool
 	status    ParseStatus
 	issue     IssueCode
+	// unplaced says the envelope is well formed but a header names its file
+	// by a spelling no reader places (isAcceptedPatchPath). The tool writes
+	// that file, so the call is judged at the unknown tier
+	// (PatchNamesUnplacedTarget), never read as an envelope the tool rejects.
+	unplaced bool
 }
 
 func isApplyPatchTool(tool string) bool {
@@ -96,18 +101,17 @@ func isPatchFileHeader(line string) bool {
 // its own drive as it does any other root-relative path. Codex and the
 // Copilot CLI apply such a target as given, so it is a write fact like a
 // relative one and every path rule judges it (rel-1-0-6:GAP-0361,
-// GAP-0398). Home forms (~) stay unread because the tool does not expand
-// them, and so do shares of another host (\\host\share) and drive-relative
-// paths (C:x), which name another host or the current directory of another
-// drive. A spelling of a local file is read: the extended-length and device
-// forms of a drive path (\\?\C:\x, \\.\C:\x) and the admin share of this
-// machine (\\localhost\C$\x, \\127.0.0.1\C$\x, \\<this host>\C$\x, also
-// below \\?\UNC\). Each opens the file of its drive path, so it is a write
-// fact like that path and the path rules judge what Windows opens, never the
-// spelling (rel-1-0-6:GAP-1004).
+// GAP-0398). So is a spelling that begins with two backslashes and names a
+// file below a root the path rules read (isWindowsRootedPatchTarget): a
+// Claude Code Write or Edit of that name is a path fact as written, and the
+// patch of the same file must be judged as that write is
+// (rel-1-0-10:GAP-1052, GAP-0947). Home forms (~) are not, because the tool
+// does not expand them, nor are drive-relative paths (C:x), which name the
+// current directory of another drive: the tool writes a file no rule can
+// name, and the call is judged at the unknown tier (unplaced).
 func isAcceptedPatchPath(value string) bool {
 	if strings.HasPrefix(value, `\\`) {
-		return isLocalWindowsPatchTarget(value)
+		return isWindowsRootedPatchTarget(value)
 	}
 	if value == "" || value == "~" || strings.HasPrefix(value, "~/") ||
 		strings.HasPrefix(value, `~\`) {
@@ -119,16 +123,18 @@ func isAcceptedPatchPath(value string) bool {
 	return true
 }
 
-// patchLocalHostname is the name of this machine, which names its own admin
-// shares like localhost does. A variable so a test can name the machine.
-var patchLocalHostname = os.Hostname
-
-// isLocalWindowsPatchTarget reports a patch target that begins with two
-// backslashes and opens a file of this machine: the extended-length or device
-// prefix before a drive path, or the admin share (X$) of a local server name,
-// bare or below \\?\UNC\. Any other share, device or namespace names a file
-// the rules cannot read as a local path and stays unread.
-func isLocalWindowsPatchTarget(value string) bool {
+// isWindowsRootedPatchTarget reports a patch target that begins with two
+// backslashes and names a file below a root the path rules read
+// (windowsOpenedPath): a drive path behind the extended-length or device
+// prefix (\\?\C:\x, \\.\C:\x), or a file of a share of any host
+// (\\server\share\x, the admin shares \\host\C$\x included, also below
+// \\?\UNC\). The share of this machine opens the file of its drive path,
+// and the share of another host keeps its server and share, as the path of
+// a Claude Code Write of the same name does (rel-1-0-6:GAP-1004,
+// rel-1-0-10:GAP-1052). Any other device or namespace (\\.\pipe\x,
+// \\?\Volume{...}\x), a share without a file, and a drive without a path
+// name nothing the rules read, and stay unplaced.
+func isWindowsRootedPatchTarget(value string) bool {
 	text := strings.TrimPrefix(strings.ReplaceAll(value, "/", `\`), `\\`)
 	if strings.HasPrefix(text, `?\`) || strings.HasPrefix(text, `.\`) {
 		text = text[2:]
@@ -141,9 +147,7 @@ func isLocalWindowsPatchTarget(value string) bool {
 		text = text[4:]
 	}
 	parts := strings.SplitN(text, `\`, 3)
-	return len(parts) == 3 && parts[2] != "" && len(parts[1]) == 2 &&
-		isASCIILetter(parts[1][0]) && parts[1][1] == '$' &&
-		WindowsLocalHost(parts[0], patchLocalHostname)
+	return len(parts) == 3 && parts[0] != "" && parts[1] != "" && parts[2] != ""
 }
 
 // patchDirectives are the directive lines of an apply_patch envelope that name
@@ -249,6 +253,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	updateHunk := false
 	updateContent := false
 	hasMove := false
+	unplaced := false
 	for _, line := range lines[1 : len(lines)-1] {
 		// A carriage return that does not end a line is read only in a
 		// directive name, which the tools take without it.
@@ -318,11 +323,18 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 				break
 			}
 		}
-		if kind == "" || pathValue == "" ||
+		if kind != "" && pathValue != "" && len(pathValue) <= maxScalarBytes &&
+			strings.IndexByte(pathValue, 0) < 0 &&
+			strings.TrimLeftFunc(pathValue, unicode.IsSpace) == pathValue &&
+			!isAcceptedPatchPath(pathValue) {
+			// The tool writes this file, but no reader places its name:
+			// the rest of the envelope is still read, and a well formed
+			// one is unplaced, not invalid.
+			unplaced = true
+		} else if kind == "" || pathValue == "" ||
 			strings.TrimLeftFunc(pathValue, unicode.IsSpace) != pathValue ||
 			len(pathValue) > maxScalarBytes ||
-			strings.IndexByte(pathValue, 0) >= 0 ||
-			!isAcceptedPatchPath(pathValue) {
+			strings.IndexByte(pathValue, 0) >= 0 {
 			status := StatusInvalid
 			issue := IssueInvalidSyntax
 			if len(pathValue) > maxScalarBytes {
@@ -385,6 +397,11 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 	}
 	if activeDirective == "update" && !updateContent {
 		return fail(StatusInvalid, IssueInvalidSyntax)
+	}
+	if unplaced {
+		result := fail(StatusInvalid, IssueInvalidSyntax)
+		result.unplaced = true
+		return result
 	}
 	return patchEnvelopeResult{
 		canonical: strings.Join(append(canonical, patchEndLine), "\n"),
@@ -451,4 +468,34 @@ func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
 	if patch.hasMove {
 		addOperation(command, OperationMove)
 	}
+}
+
+// UnplacedPatchTargetReason is the audit reason of a patch call judged at the
+// unknown tier because a header names its file by a spelling no reader places.
+const UnplacedPatchTargetReason = "patch_target_unplaced"
+
+// PatchNamesUnplacedTarget reports an apply_patch tool call whose patch text,
+// in any field the patch reader reads (isPatchInputField,
+// isPatchEnvelopeField), is a well formed envelope with a header that names
+// its file by a spelling no reader places: a home form the tool does not
+// expand, a drive-relative path, a device or namespace path, a share without
+// a file. The tool writes that file and no path rule can name it, so the
+// caller judges the call at the unknown tier of the pack, never as a clean
+// allow (rel-1-0-10:GAP-1052, GAP-0947). An envelope the tool rejects for its
+// syntax writes nothing and is not reported.
+func PatchNamesUnplacedTarget(tool string, args json.RawMessage) bool {
+	if !isApplyPatchTool(tool) || len(args) == 0 || len(args) > maxArgsJSONBytes {
+		return false
+	}
+	var object map[string]any
+	if json.Unmarshal(args, &object) != nil {
+		return false
+	}
+	for key, value := range object {
+		text, ok := value.(string)
+		if ok && (isPatchInputField(key) || isPatchEnvelopeField(key, value)) && parsePatchEnvelope(text).unplaced {
+			return true
+		}
+	}
+	return false
 }

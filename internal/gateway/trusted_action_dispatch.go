@@ -850,6 +850,18 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	// An apply_patch call whose envelope names a file by a spelling no reader
+	// places (a home form the tool does not expand, a drive-relative path, a
+	// device path) writes a file no path rule can name: it is judged at the
+	// unknown tier of the pack at least, never a clean allow
+	// (rel-1-0-10:GAP-1052, GAP-0947).
+	if facts.Parse.Status == actionfacts.StatusInvalid &&
+		actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) {
+		defer func() {
+			findings = withUnknownFinding(findings, unknownReasonFinding(unplacedPatchTargetTitle,
+				actionfacts.UnplacedPatchTargetReason, request.EnforcementCapable))
+		}()
+	}
 	// A Windows call the tokenizer stopped reading at its input bound (one word
 	// over the word limit) is truncated: judged as unknown at the pack's
 	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345). So is
@@ -7292,6 +7304,10 @@ func trustedNestedExactFallbackProofFromActions(
 	}
 	return false
 }
+
+// unplacedPatchTargetTitle is the ship-authored title of a patch whose header
+// names its file by a spelling no reader places; the reason follows it.
+const unplacedPatchTargetTitle = "Patch names a file no rule can place, judged as unknown"
 
 func noRecoverableCommandFacts(facts actionfacts.Facts) bool {
 	if facts.Parse.Status != actionfacts.StatusInvalid &&
