@@ -103,6 +103,7 @@ func useFakeAdmin(t *testing.T, f *fakeAdmin) {
 
 func runSubstrate(t *testing.T, cmd *cobra.Command, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	substrateNoConsole(t)
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errb)
@@ -110,6 +111,26 @@ func runSubstrate(t *testing.T, cmd *cobra.Command, args ...string) (stdout, std
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	err = cmd.Execute()
 	return out.String(), errb.String(), err
+}
+
+// substrateNoConsole points os.Stdin at the null device for the rest of the
+// test. The commands ask their yes/no questions only when stdin is a
+// terminal, so a test process whose stdin is a console (a Windows scheduled
+// task, a run from a terminal) would otherwise wait for an answer forever
+// (GAP-1018). The null device is not a terminal on any platform and reads
+// as end of file. A command input set with cmd.SetIn is kept.
+func substrateNoConsole(t *testing.T) {
+	t.Helper()
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() {
+		os.Stdin = old
+		_ = f.Close()
+	})
 }
 
 func sampleActors() map[string]any {
