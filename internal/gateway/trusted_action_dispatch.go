@@ -643,6 +643,13 @@ func dispatchTrustedAction(
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
 		analyzedCaps = capFloorAnalysisCaps(facts)
+		// A write operand with a .. component whose walk cannot be resolved
+		// has an unknown target: at least the unknown tier of the pack, what
+		// the readers proved still deciding (the one bound rule, cap paths;
+		// rel-1-0-10:GAP-1007).
+		if trustedDotDotWalkUnresolved(request, facts) {
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Paths), request) }()
+		}
 		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
@@ -3865,10 +3872,20 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			continue
 		}
 		// The spelling the kernel walks first (GAP-2047 L5), then the
-		// lexical one the path fact keeps.
-		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, projected.ActiveHome); ok {
+		// walk spelling the hook client keys on every system, a Windows
+		// junction or drive path included (GAP-1007), then the lexical one
+		// the path fact keeps.
+		walked, isWalked := stateWalkSpelling(candidate, request.Input.CWD, projected.ActiveHome)
+		if isWalked {
 			physicalCandidate := candidate
 			physicalCandidate.Resolved = walked
+			if provenStateCandidateMatches(projected, command, physicalCandidate, request, lineStaysOff) {
+				return true
+			}
+		}
+		if raw, ok := dotDotWalkSpelling(candidate, request); ok && (!isWalked || raw != walked) {
+			physicalCandidate := candidate
+			physicalCandidate.Resolved = raw
 			if provenStateCandidateMatches(projected, command, physicalCandidate, request, lineStaysOff) {
 				return true
 			}

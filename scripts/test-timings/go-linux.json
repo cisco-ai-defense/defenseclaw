@@ -1827,6 +1827,7 @@
    "TestGAP0980Round2ReviewRows": 390.9,
    "TestGAP0980RunTimeShellIsNeverWeakerThanTheLiteralShell": 159.1,
    "TestGAP0988PowerShellArgumentStatements": 114.7,
+   "TestGAP1007JunctionDotDotWriteIsStateWriteInEveryTier": 45.7,
    "TestGAP1409DirectoryEntryOperandsDoNotFollowFinalLink": 2.6,
    "TestGAP1409ObserveSelfProtectionHooks": 2.3,
    "TestGAP2590BenignLinkReadersAndLinkRemoval": 2.7,
