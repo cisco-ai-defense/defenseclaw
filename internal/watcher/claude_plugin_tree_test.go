@@ -340,6 +340,49 @@ func TestClaudeMarketplaceNamedLikeUpdateCloneIsStillScanned(t *testing.T) {
 	}
 }
 
+// CodeRabbit on #1432: temp_subdir_1_a.clone and temp_git_1_a are valid
+// marketplace names that have the exact staging-clone shape. When Claude
+// Code has the name registered (known_marketplaces.json or a plugin@name key
+// in installed_plugins.json) the folder is a marketplace and its plugins are
+// scanned; an unregistered folder of that shape is still staging.
+func TestRegisteredMarketplaceWithCloneShapedNameIsScanned(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, body string
+		staging          bool
+	}{
+		{"temp_subdir_1_a.clone", "known_marketplaces.json", `{"temp_subdir_1_a.clone": {"installLocation": "x"}}`, false},
+		{"temp_git_1_a", "known_marketplaces.json", `{"temp_git_1_a": {}}`, false},
+		{"temp_subdir_1_a.clone", "installed_plugins.json", `{"version": 2, "plugins": {"tool-plug@temp_subdir_1_a.clone": []}}`, false},
+		{"temp_subdir_1_a.clone", "known_marketplaces.json", `{"official": {}}`, true},
+		{"temp_subdir_1_a.clone", "known_marketplaces.json", `{not json`, true},
+		{"temp_subdir_1_a.clone", "", "", true},
+	} {
+		t.Run(tc.name+"/"+tc.file+"/"+tc.body, func(t *testing.T) {
+			cfg, store, logger, _ := setupTestEnv(t)
+			cfg.Guardrail.Connector = "claudecode"
+			plugins := filepath.Join(t.TempDir(), ".claude", "plugins")
+			cache := filepath.Join(plugins, "cache")
+			version := filepath.Join(cache, tc.name, "tool-plug", "1.0.0")
+			if err := os.MkdirAll(version, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tc.file != "" {
+				if err := os.WriteFile(filepath.Join(plugins, tc.file), []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+			if got := w.inClaudePluginStaging(version, 0); got != tc.staging {
+				t.Fatalf("inClaudePluginStaging(%s) = %v, want %v", version, got, tc.staging)
+			}
+			w.queueExistingClaudePlugins(context.Background(), cache, 0)
+			if _, queued := w.pending[version]; queued == tc.staging {
+				t.Fatalf("queued = %v, want %v (pending %v)", queued, !tc.staging, w.pending)
+			}
+		})
+	}
+}
+
 func TestPathHasGitDirSegment(t *testing.T) {
 	for _, tc := range []struct {
 		path string

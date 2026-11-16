@@ -21,8 +21,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -4822,6 +4824,12 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 		if !isPluginStagingFolder(first) {
 			return false
 		}
+		// A registered marketplace can have a name with the clone shape;
+		// Claude Code's own registry says which folders are marketplaces.
+		if (isClaudePluginUpdateClone(first) || isClaudePluginGitClone(first)) &&
+			claudeMarketplaceRegistered(filepath.Dir(rootAbs), first) {
+			return false
+		}
 		// Update clones are never installed plugins; skip them on rescan
 		// regardless of age so a leftover clone is not quarantined (#1428).
 		if isClaudePluginUpdateClone(first) {
@@ -4832,6 +4840,50 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 		}
 		info, statErr := os.Lstat(filepath.Join(rootAbs, first))
 		return statErr == nil && time.Since(info.ModTime()) < grace
+	}
+	return false
+}
+
+// claudeMarketplaceRegistryMaxBytes bounds the Claude Code registry files
+// claudeMarketplaceRegistered reads.
+const claudeMarketplaceRegistryMaxBytes = 4 << 20
+
+// claudeMarketplaceRegistered reports whether Claude Code has a marketplace
+// called name registered under pluginsDir (~/.claude/plugins): a key of
+// known_marketplaces.json, or the marketplace part of a plugin@marketplace
+// key in installed_plugins.json. Marketplace names may take the same shape
+// as a staging clone (temp_subdir_1_a.clone), so the registry, not the name,
+// decides. A missing or unreadable registry registers nothing.
+func claudeMarketplaceRegistered(pluginsDir, name string) bool {
+	readJSON := func(file string, v any) bool {
+		f, err := os.Open(filepath.Join(pluginsDir, file))
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		data, err := io.ReadAll(io.LimitReader(f, claudeMarketplaceRegistryMaxBytes+1))
+		if err != nil || len(data) > claudeMarketplaceRegistryMaxBytes {
+			return false
+		}
+		return json.Unmarshal(data, v) == nil
+	}
+	var known map[string]json.RawMessage
+	if readJSON("known_marketplaces.json", &known) {
+		for key := range known {
+			if strings.EqualFold(key, name) {
+				return true
+			}
+		}
+	}
+	var installed struct {
+		Plugins map[string]json.RawMessage `json:"plugins"`
+	}
+	if readJSON("installed_plugins.json", &installed) {
+		for key := range installed.Plugins {
+			if at := strings.LastIndex(key, "@"); at >= 0 && strings.EqualFold(key[at+1:], name) {
+				return true
+			}
+		}
 	}
 	return false
 }
