@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 )
 
@@ -29,6 +30,9 @@ func TestCredentialFileCopyIsJudgedLikeItsReadFiveTiers(t *testing.T) {
 			"tool": "exec", "connector": "openclaw", "args": map[string]any{"command": "ls", "workdir": t.TempDir()},
 		})
 		for _, file := range files {
+			if runtime.GOOS == "windows" && file == "/proc/self/environ" {
+				continue // no /proc on a Windows host
+			}
 			read, _ := tdetectVerdict(t, a, "cat "+file)
 			if read == "allow" && p.pack != "permissive" {
 				t.Errorf("%s: cat %s is allowed, the oracle needs a verdict", p.name, file)

@@ -187,6 +187,11 @@ path_rules:
   # A write to a repository's own .git/config runs code at the next git command (core.fsmonitor, core.hooksPath, core.sshCommand, an alias), as a
   # git hook does (the git program's own config calls have their rule in the pack).
   - {id: source.git_config_exec, access: [write, append], re: "(?i)(?:^|/)[.]git/config$"}
+  # The developer-token files of an account's home (the class of PATH-GIT-CREDS: .git-credentials, .netrc, _netrc, .pgpass). A native file tool reads them
+  # as the typed owner does on the shell and MCP lanes (rel-1-0-10:GAP-0816). The home is found by its position, as isRecognizedHomeRoot reads it: /root, or
+  # the account folder directly below /home, /Users or <drive>:/Users. A folder of a project that is only called home, homes or users, at any depth, is
+  # no account home (rel-1-0-10:GAP-0836).
+  - {id: PATH-GIT-CREDS, access: [read], re: "(?i)^(?:/root|/(?:home|users)/[^/]+|[a-z]:/users/[^/]+)/(?:[.](?:git-credentials|netrc|pgpass)|_netrc)$"}
   - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$", text_re: ":[^:[:space:]]*:0:0:"}
   # A unit or launch file in the account's own scheduler folders runs at its next login or start, as a cron entry does: a systemd user unit, an XDG
   # autostart entry, a launchd agent. home_re reads the path below the active home of the call (a laptop home, a sandbox home /sandbox), as

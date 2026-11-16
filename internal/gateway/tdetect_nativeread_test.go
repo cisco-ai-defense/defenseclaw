@@ -3,22 +3,30 @@
 
 package gateway
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // TestNativeReadOfCredentialFilesOutsideTheActiveHomeFiveTiers: a native Read
-// of a credentials file is judged by the shape of the file in any home, not only
-// the active one (lead probe 2026-11-15). Through the real Claude Code hook handler
-// (Codex has no native Read tool: its file reads are shell reads, and the s7-gate probe sends the same rows
-// through the Codex adapter) in the five tiers, the same file in a mounted or alternate home
-// (/mnt/home/<u>, /data/home/<u>, /Volumes/x/Users/<u>) must get the verdict of
-// the same file in another user's ordinary home (/home/other): never a clean
-// allow where that one is not. The SSH key of an alternate home was a clean
-// allow in every tier.
+// of a credentials file is judged by the shape of the file in any account home,
+// not only the active one (lead probe 2026-11-15). Through the real Claude Code
+// hook handler (Codex has no native Read tool: its file reads are shell reads,
+// and the s7-gate probe sends the same rows through the Codex adapter) in the
+// five tiers, the same file in another account's home (/home/<u>, /Users/<u>,
+// /root, <drive>:/Users/<u>, found by position and never by a folder name deeper
+// in the path: rel-1-0-10:GAP-0836) must get the verdict of the same file in
+// /home/other. A folder that only is called home, homes or users is a project
+// folder: its files keep the verdict they had on rel.
 func TestNativeReadOfCredentialFilesOutsideTheActiveHomeFiveTiers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home spellings (/home, /Users, /root) are read by the host's own path rules on native Windows; the C:\\Users forms are pinned by TestAccountHomeByPosition and TestOtherHomeCredentialFileShapes")
+	}
 	files := []string{".git-credentials", ".netrc", ".ssh/id_rsa", ".ssh/id_ed25519", ".aws/credentials", ".kube/config", ".docker/config.json"}
-	alternates := []string{"/mnt/home/alice", "/data/home/alice", "/Volumes/data/Users/bob", "/srv/homes/carol", "/Users/other", "/root"}
+	alternates := []string{"/home/carol", "/Users/other", "/root"}
 	// Project folders that hold the same names stay allowed.
-	projects := []string{"/work/f5proj/.aws/credentials", "/work/app/.kube/config", "/srv/data/proj/.netrc"}
+	projects := []string{"/work/f5proj/.aws/credentials", "/work/app/.kube/config", "/srv/data/proj/.netrc",
+		"/work/repo/users/bob/.aws/credentials", "/srv/app/homes/x/.kube/config"}
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "claudecode", "action")
 		for _, connector := range []string{"claudecode"} {
@@ -34,7 +42,7 @@ func TestNativeReadOfCredentialFilesOutsideTheActiveHomeFiveTiers(t *testing.T) 
 			// A proven content read of another user's SSH key keeps the verdict
 			// of the active home's: a block in the strict packs.
 			if p.pack == "strict" {
-				for _, key := range []string{"/home/other/.ssh/id_rsa", "/mnt/home/alice/.ssh/id_ed25519", "/srv/homes/carol/.ssh/id_rsa"} {
+				for _, key := range []string{"/home/other/.ssh/id_rsa", "/Users/other/.ssh/id_ed25519", "/root/.ssh/id_rsa"} {
 					if got := read(key); got != "block" {
 						t.Errorf("%s %s: Read %s is %s, want block", p.name, connector, key, got)
 					}
@@ -54,7 +62,7 @@ func TestNativeReadOfCredentialFilesOutsideTheActiveHomeFiveTiers(t *testing.T) 
 				}
 			}
 			// Not credentials: the same names in an alternate home stay allowed.
-			for _, path := range []string{"/mnt/home/alice/.ssh/id_rsa.pub", "/mnt/home/alice/.ssh/known_hosts", "/mnt/home/alice/.ssh/config", "/mnt/home/alice/notes.txt"} {
+			for _, path := range []string{"/home/carol/.ssh/id_rsa.pub", "/home/carol/.ssh/known_hosts", "/home/carol/.ssh/config", "/home/carol/notes.txt"} {
 				if got := read(path); got != "allow" {
 					t.Errorf("%s %s: Read %s is %s, want allow", p.name, connector, path, got)
 				}

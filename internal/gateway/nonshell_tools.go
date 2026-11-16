@@ -292,6 +292,39 @@ func nonShellFinding(rule *PatternRule, note, tool string, hard bool) RuleFindin
 	return f
 }
 
+// nonShellNamesOtherAccountCredential reports whether the call names a home
+// credential file (otherHomeCredentialFile) of an account home that is not the
+// active one. With no active home nothing tells the two apart, and the call
+// keeps the findings it carries.
+func nonShellNamesOtherAccountCredential(facts actionfacts.Facts) bool {
+	if canonicalSemanticPath(facts.ActiveHome) == "" {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if _, own := activeHomeRelative(facts, candidate); own {
+			continue
+		}
+		shape, ok := actionfacts.MatchCredentialFileShape(canonicalSemanticPath(semanticPathValue(candidate)))
+		if ok && otherHomeCredentialFile(facts, candidate, shape.Class, "") {
+			return true
+		}
+	}
+	return false
+}
+
+// nonShellFindingStronger reports whether candidate is a stronger finding of
+// its rule than existing: it may enforce where existing only alerts, or it
+// carries a higher severity.
+func nonShellFindingStronger(candidate, existing RuleFinding) bool {
+	if candidate.enforcement == findingEnforcementAllowed && existing.enforcement != findingEnforcementAllowed {
+		return true
+	}
+	if existing.enforcement == findingEnforcementAllowed && candidate.enforcement != findingEnforcementAllowed {
+		return false
+	}
+	return guardrailSeverityRank(candidate.Severity) > guardrailSeverityRank(existing.Severity)
+}
+
 // nonShellPathTwin judges the file effect of an MCP call as the native file
 // tool of the same effect would be judged, so every protected-target rule of
 // the pack applies to the path the MCP argument names.
@@ -393,16 +426,30 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	request.Input.CWD = managedClientCWD(ctx, request.Input.CWD, request.ResolvedWriteTargets)
 	facts := actionfacts.Analyze(request.Input)
 	hard := request.StrictPolicy || request.ManagedInstall
+	otherAccount := nonShellNamesOtherAccountCredential(facts)
 	out := append([]RuleFinding(nil), findings...)
 	add := func(ruleID, note string) {
-		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
-			return
-		}
 		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
+		finding := nonShellFinding(rule, note, request.Input.Tool, hard)
+		// A finding of the same rule the call already carries is kept. When
+		// the call names a credential file in another account's home, a
+		// stronger one replaces it: the regex fallback judges that home at a
+		// lower severity and alert-only, so an upload of another account's
+		// .git-credentials or .netrc was weaker than an upload of one's own
+		// (rel-1-0-10:GAP-0834, GAP-0835). The active home's own files keep
+		// the finding they carry, as on rel: a read of one's own
+		// .git-credentials, .netrc or .pgpass is judged like a read of one's
+		// own AWS or kube credentials (rel-1-0-10:GAP-0888).
+		if index := slices.IndexFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }); index >= 0 {
+			if otherAccount && nonShellFindingStronger(finding, out[index]) {
+				out[index] = finding
+			}
+			return
+		}
+		out = append(out, finding)
 	}
 	if isShell {
 		for _, id := range toolshape.TextRules(command) {
