@@ -591,9 +591,8 @@ func (a *APIServer) applyAgentHookToolChains(
 				outcome == connector.ToolLifecycleOutcomeSuccess && !toolResultProvesNothingRead(req)
 		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
-		// rootJoined: the actor window knows the call (it took this result,
-		// or a result of the call before it).
-		rootJoined := false
+		var rootStatus audit.ToolChainPendingStatus
+		rootFailed := false
 		if rootRepository != nil {
 			// The root scope promotes its own copy of the proposal; a failure
 			// there leaves the session verdict as it is.
@@ -603,8 +602,7 @@ func (a *APIServer) applyAgentHookToolChains(
 				rootResolved.Status == audit.ToolChainPendingResolved {
 				rootResult, rootResolvedSuccess = rootResolved.Observation, true
 			}
-			rootJoined = rootErr == nil && (rootResolved.Status == audit.ToolChainPendingResolved ||
-				rootResolved.Status == audit.ToolChainPendingReplay)
+			rootStatus, rootFailed = rootResolved.Status, rootErr != nil
 			if rootErr != nil {
 				rootMissed = "the leader did not take the step: " + rootErr.Error()
 			}
@@ -612,17 +610,13 @@ func (a *APIServer) applyAgentHookToolChains(
 		if resolveErr != nil {
 			return resp, finalization
 		}
-		if substrateActor && resolved.Status == audit.ToolChainPendingMissing && !rootJoined && ran &&
+		if substrateActor && ran && resultCallUnjoined(resolved.Status, rootRepository != nil, rootStatus, rootFailed) &&
 			resultMayBeAnUnjoinedRead(req, projection) {
-			// The call ran (or may have) but neither the session nor the
-			// actor window knows it: its PreToolUse reached no leader (a
-			// replica cut off from it, or a leader that lost it since), so
-			// the read may be in no window at all. The step is reported
-			// unrecorded, and the leader keeps that for the callout (review
-			// rch3 R1). A further result of a call the leader resolved is a
-			// replay, not missing, and a result after a turn boundary (Stop
-			// discards only the session's proposal) is joined in the actor
-			// window: neither is marked (GAP-0348, GAP-0345).
+			// The call ran (or may have) but the actor window does not know
+			// it: its PreToolUse reached no leader (a replica cut off from
+			// it, or a leader that lost or evicted it since), so the read may
+			// be in no window at all. The step is reported unrecorded, and
+			// the leader keeps that for the callout (review rch3 R1).
 			rootMissed = "a tool result whose call is not in the actor's chain window (its call did not reach the leader)"
 		}
 		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved
@@ -875,6 +869,24 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	return resp, finalization
+}
+
+// resultCallUnjoined reports a call result that no chain window joins (R1).
+// The actor window, which the callout reads, decides when it is bound: its
+// Missing is marked whatever the session says, so a session replay never
+// hides it (review rk347 P3-1); a result after a turn boundary (Stop
+// discards only the session's proposal) is joined there (GAP-0345); a
+// further result of a resolved call is a replay in both (GAP-0348). A root
+// call that failed is reported by the caller already.
+func resultCallUnjoined(session audit.ToolChainPendingStatus, rootBound bool, root audit.ToolChainPendingStatus, rootFailed bool) bool {
+	switch {
+	case !rootBound:
+		return session == audit.ToolChainPendingMissing
+	case rootFailed:
+		return false
+	}
+	rootJoined := root == audit.ToolChainPendingResolved || root == audit.ToolChainPendingReplay
+	return root == audit.ToolChainPendingMissing || session == audit.ToolChainPendingMissing && !rootJoined
 }
 
 // substrateRegistrationNamesNoConnector reports a verified actor whose

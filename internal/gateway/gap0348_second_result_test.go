@@ -10,6 +10,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 )
@@ -124,6 +125,38 @@ func TestGAP0348SecondResultThatShowsTheReadStillChains(t *testing.T) {
 			_, upload, v := gap0348Run(t, row.steps)
 			gap0342Refused(t, row.name, upload, v)
 		})
+	}
+}
+
+// The R1 decision: the actor window's Missing is marked whatever the session
+// says (review rk347 P3-1), a root join covers a session miss after Stop.
+func TestGAP0348ResultCallUnjoined(t *testing.T) {
+	const (
+		missing  = audit.ToolChainPendingMissing
+		resolved = audit.ToolChainPendingResolved
+		replay   = audit.ToolChainPendingReplay
+		noJoin   = audit.ToolChainPendingNoJoin
+	)
+	for _, tc := range []struct {
+		name          string
+		session, root audit.ToolChainPendingStatus
+		bound, failed bool
+		want          bool
+	}{
+		{"no actor window: session missing", missing, "", false, false, true},
+		{"no actor window: session resolved", resolved, "", false, false, false},
+		{"session replay over an actor-window miss (P3-1)", replay, missing, true, false, true},
+		{"session resolved over an actor-window miss", resolved, missing, true, false, true},
+		{"both missing", missing, missing, true, false, true},
+		{"after Stop: session missing, actor window resolved", missing, resolved, true, false, false},
+		{"further result: both replay", replay, replay, true, false, false},
+		{"session missing, actor window replay", missing, replay, true, false, false},
+		{"session missing, actor window no join", missing, noJoin, true, false, true},
+		{"actor window failed (reported by the caller)", missing, "", true, true, false},
+	} {
+		if got := resultCallUnjoined(tc.session, tc.bound, tc.root, tc.failed); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
