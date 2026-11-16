@@ -232,7 +232,34 @@ func Attach(ctx context.Context, o Options) (res Result, err error) {
 	if !o.NoBanner {
 		writeBanner(o.Err, o.Banner, o.Target)
 	}
-	return a.run(ctx)
+	res, err = a.run(ctx)
+	// The relay's warning again once the terminal is the person's: a
+	// full-screen agent cleared it from the screen (GAP-0151).
+	if w := a.warningText(); w != "" {
+		fmt.Fprintf(o.Err, "Warning: %s\n", w)
+	}
+	return res, err
+}
+
+// noteWarning keeps the relay's hello warning and shows it on the
+// launcher's row while no ask is shown there (GAP-0151).
+func (a *attacher) noteWarning(w string) {
+	w = safetext.Line(w)
+	if w == "" {
+		return
+	}
+	a.warnMu.Lock()
+	a.warning = w
+	a.warnMu.Unlock()
+	if a.asks != nil {
+		a.asks.setNotice("DefenseClaw warning: " + w)
+	}
+}
+
+func (a *attacher) warningText() string {
+	a.warnMu.Lock()
+	defer a.warnMu.Unlock()
+	return a.warning
 }
 
 type attacher struct {
@@ -274,6 +301,10 @@ type attacher struct {
 	sizeMu sync.Mutex
 	size   relay.Resize
 	sizeCh chan relay.Resize
+
+	// warning is the relay's hello warning (GAP-0151).
+	warnMu  sync.Mutex
+	warning string
 }
 
 func newAttacher(ctx context.Context, o Options) (*attacher, error) {
@@ -693,6 +724,7 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		OnControl: func(c relay.Control) {
 			if c.Type == relay.CtlHello {
 				connected.Store(true)
+				a.noteWarning(c.Warning)
 				if c.Received != nil && resume != "" {
 					// Sent before the cut but never written to the
 					// agent: lost on the way (a suspend).

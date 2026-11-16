@@ -394,7 +394,16 @@ func input(a *Attachment, in *inputCount, frame []byte, send func(Control)) bool
 // hello is the first message of an attachment: its input count id, and
 // what the relay got from the attachment the client resumes (GAP-0170).
 func (s *Server) hello(input string, received *int64) Control {
-	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: kit.ModeInteract, Input: input, Received: received}
+	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: kit.ModeInteract, Input: input, Received: received,
+		Warning: s.warning()}
+}
+
+// warning is the E9 warning of this agent, "" when there is none.
+func (s *Server) warning() string {
+	if s.agent == nil {
+		return ""
+	}
+	return s.agent.Banner
 }
 
 var upgrader = websocket.Upgrader{
@@ -695,7 +704,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"version": Version, "session": s.session, "agent_running": s.agent.Running(),
 		"last_preconnect_ms": float64(warm.Microseconds()) / 1000, "tasks": tasks, "workdir": relayWorkdir(s.opts.Config.Relay.Workdir),
-		"state_root": s.stateRoot(),
+		"state_root": s.stateRoot(), "signin_warning": s.warning(),
 	})
 }
 

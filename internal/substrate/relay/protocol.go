@@ -85,6 +85,12 @@ type Control struct {
 	// client says how much (substrate-1 GAP-0170).
 	Input    string `json:"input,omitempty"`
 	Received *int64 `json:"received,omitempty"`
+	// Warning (hello) is what the person must know about this agent (the
+	// E9 warning of an open-source agent that signs in to a vendor
+	// account). The relay also puts it at the top of the terminal, but a
+	// full-screen agent clears that at once, so the client shows it where
+	// the agent cannot draw (substrate-1 GAP-0151).
+	Warning string `json:"warning,omitempty"`
 }
 
 // Resize is a RESIZE frame.
