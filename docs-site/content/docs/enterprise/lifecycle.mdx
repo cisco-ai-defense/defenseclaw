@@ -452,7 +452,7 @@ differs from the installed one and applies it:
 & 'C:\ProgramData\DefenseClaw-Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\ProgramData\DefenseClaw-Staging\config.yaml JSON=1
 ```
 
-If the new config is invalid, `ensure` fails and the installed config stays (`config_invalid` on Linux and macOS; on Windows the reason is in `errors[].message`). When an edit made in place is rejected, the lifecycle puts the last applied config back and keeps the edit as `rejected-config.yaml`; `verify` fails with `config_rejected` until the file is written again. A change to `enterprise.network` takes effect when the gateway restarts, and the profile cannot change in place: uninstall one and install the other.
+If the new config is invalid, `ensure` fails and the installed config stays (`config_invalid` on Linux and macOS; on Windows the reason is in `errors[].message`). When an edit made in place is rejected, the lifecycle puts the last applied config back and keeps the edit as `rejected-config.yaml`; `verify` fails with `config_rejected` until the file is written again. The same holds for a config you supply: when Setup `/ensure CONFIG=` (Windows) or `ensure --config` (Linux, macOS) refuses the config or fails and rolls back, `status` warns and `verify` fails with `config_rejected` until a later run applies a config. A change to `enterprise.network` takes effect when the gateway restarts, and the profile cannot change in place: uninstall one and install the other.
 
 ### Applying a config change
 
@@ -488,6 +488,18 @@ not come up healthy with it), the lifecycle puts the last applied config back an
 rejected file as `rejected-config.yaml` in the lifecycle directory. Until the config file is
 written again, `status` warns and `verify` fails with `config_rejected`. Push a corrected
 config or the previous one to clear it.
+
+A config you supply is reported the same way on every OS. When Setup `/ensure CONFIG=` on
+Windows, or `ensure --config` on Linux and macOS, refuses the config or fails and rolls the deployment back, the
+host keeps running the previous config, and until a later run applies a config `status`
+warns and `verify` fails with `config_rejected`. Both also set `coverage_complete` and
+`security_complete` to false. The message gives the time of the failed run, the short digests
+of the requested and the running config, a closed cause (`route_config_drift`,
+`config_refused` or `transaction_failed`), the error codes of that run and the next step.
+It never quotes the config or names accounts: the full result of the failed run is in the
+lifecycle log. On Windows the record is `config-rejected.json` beside `deployment.json`, and
+it no longer applies once `config.yaml` changes. On Linux and macOS the rejected file is kept
+as `rejected-config.yaml`.
 
 The apply trigger watches the config file and the top level of the secrets and policies
 directories. `ensure` re-applies when the config or a secret changed, when an installed
@@ -784,7 +796,8 @@ stop cleanly keeps the full wait, and a slower or busier host takes longer, so g
 a time limit of several minutes. Nothing is upgraded: the result carries the warning `ensure_config_restart`,
 which names the keys that made it restart. Only a newer release reports `ensure_upgrade`. When
 the transaction fails or rolls back, the warning is `ensure_config_failed` instead: the change is
-not confirmed applied, and the errors say what failed.
+not confirmed applied, and the errors say what failed. Until a later run applies a config,
+`status` warns and `verify` fails with `config_rejected`.
 
 ## Uninstall
 
