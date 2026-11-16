@@ -889,7 +889,7 @@
    "TestEnterpriseHookWorkerRejectsMalformedOrRunawayWorkers": 3.4,
    "TestEnterpriseHookWorkerSlowPrivateScanReturnsPartialResponse": 2.1,
    "TestEnterpriseHookWorkerTightensTheUsersOwnHome": 2.3,
-   "TestEnterpriseHookWorkerTimedOutInsideInstallKeepsTheRestore": 6.7,
+   "TestEnterpriseHookWorkerTimedOutInsideInstallKeepsTheRestore": 11.2,
    "TestEnterpriseHooksDiscoverKeepsAnUnlistedExtensionsFolder": 3.1,
    "TestExclusionWithdrawsAnOmittedRecordWhateverTheSpoolSize": 2.1,
    "TestForeignCleanupWorkerTakesEveryModeTheGuardianSends": 2.3,
@@ -950,9 +950,9 @@
    "TestSubstrateRecreatedActorEgressIsChainChecked": 5.9,
    "TestUpgradeAuditStoreBeforeStartAppliesPendingMigrations": 2.5,
    "TestWindowsSetupProductFloorRefusal": 5.8,
-   "TestWorkerNamesNoChangeForAnElementFileTooLargeToRead": 12.8,
-   "TestWorkerRechecksARepairedTargetAndKeepsBothRestores": 17.0,
-   "TestWorkerRestoresTheScriptAndTheEntryDamagedInOneChange": 34.7
+   "TestWorkerNamesNoChangeForAnElementFileTooLargeToRead": 13.1,
+   "TestWorkerRechecksARepairedTargetAndKeepsBothRestores": 17.5,
+   "TestWorkerRestoresTheScriptAndTheEntryDamagedInOneChange": 40.8
   },
   "internal/config": {
    "*": 0.07,
