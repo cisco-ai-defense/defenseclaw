@@ -2628,18 +2628,78 @@ func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
 	defer s.resetSkillFacts()
 	var out []AISignal
 	for _, sig := range s.catalog {
+		// ~/.agents/skills and the relative .agents/skills can name one folder.
+		seen := map[string]bool{}
 		for _, candidate := range sig.SkillPaths {
+			if strings.HasPrefix(strings.TrimSpace(candidate), "/") && !filepath.IsAbs(strings.TrimSpace(candidate)) {
+				continue // a Unix admin folder, on Windows
+			}
+			// A folder named relative to a scan root is a repository's.
+			project := relativeCandidate(candidate)
 			for _, path := range s.expandCandidatePath(candidate) {
+				if seen[filepath.Clean(path)] {
+					continue
+				}
+				seen[filepath.Clean(path)] = true
 				if dirHasEntry(path) && !s.profileLinkRefused(path) {
 					signal := s.signalFromDirectoryChildren(sig, SignalSkill, "skill", path)
 					if !s.profileLinkRefused(path) {
-						out = append(out, signal)
+						out = append(out, projectSkills(signal, project))
+					}
+					// Claude Code keeps account-synced skills in
+					// skills/synced/<account>/<skill>; each account folder is
+					// scanned as its own skill folder.
+					if synced, ok := claudeSyncedSkills(path); ok && strings.EqualFold(strings.TrimSpace(sig.ID), "claudecode") {
+						for _, account := range realChildDirs(synced) {
+							accountDir := filepath.Join(synced, account)
+							if dirHasEntry(accountDir) && !s.profileLinkRefused(accountDir) {
+								// The account id stays on the endpoint.
+								signal := s.signalFromDirectoryChildren(sig, SignalSkill, "skill", accountDir)
+								signal.Basenames = slices.DeleteFunc(signal.Basenames, func(name string) bool { return name == account })
+								for i, ev := range signal.Evidence {
+									if ev.Type == "skill" {
+										signal.Evidence[i].Basename = "synced"
+									}
+									if ev.Skill != nil {
+										ev.Skill.Location = strings.Replace(ev.Skill.Location, "/synced/"+account+"/", "/synced/", 1)
+									}
+								}
+								out = append(out, projectSkills(signal, project))
+							}
+						}
 					}
 				}
 			}
 		}
 	}
 	return out
+}
+
+func relativeCandidate(candidate string) bool {
+	candidate = strings.TrimSpace(candidate)
+	return candidate != "" && !strings.ContainsAny(candidate[:1], "~$/\\") && !filepath.IsAbs(candidate)
+}
+
+// projectSkills marks the skills of a repository folder, whose path stays
+// on the endpoint.
+func projectSkills(signal AISignal, project bool) AISignal {
+	for _, ev := range signal.Evidence {
+		if ev.Skill != nil && project {
+			ev.Skill.Scope, ev.Skill.Location = SkillScopeProject, ""
+		}
+	}
+	return signal
+}
+
+// claudeSyncedSkills returns the synced folder of a .claude/skills folder,
+// which holds account folders of skills rather than one skill.
+func claudeSyncedSkills(skillsDir string) (string, bool) {
+	if filepath.Base(skillsDir) != "skills" || filepath.Base(filepath.Dir(skillsDir)) != ".claude" {
+		return "", false
+	}
+	synced := filepath.Join(skillsDir, "synced")
+	info, err := os.Lstat(synced)
+	return synced, err == nil && info.IsDir()
 }
 
 func (s *ContinuousDiscoveryService) detectRules() []AISignal {
@@ -2749,6 +2809,9 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				if detector == "skill" && isHiddenSkillStateFile(entry) {
 					continue
 				}
+				if _, synced := claudeSyncedSkills(path); detector == "skill" && synced && entry.Name() == "synced" {
+					continue // scanned per account by detectSkills
+				}
 				// Codex uses `.system` as a one-level skill container. Expand
 				// its children instead of presenting the container as a skill.
 				// Only the exact per-user `$CODEX_HOME/skills/.system` cache is
@@ -2796,7 +2859,7 @@ func (s *ContinuousDiscoveryService) directoryChildEvidence(detector, parent, en
 		// apart from "walker didn't stamp an origin"
 		// (latter must fail-safe).
 		ev.Origin = "user"
-		ev.Skill = s.skillFacts(child)
+		ev.Skill = s.skillFacts(child, false)
 	}
 	if s.keepEvidencePath() {
 		ev.RawPath = child
@@ -2842,7 +2905,7 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 			PathHash: hashPath(entry.Path),
 			Origin:   origin,
 			Bundled:  entry.Bundled,
-			Skill:    s.skillFacts(entry.Path),
+			Skill:    s.skillFacts(entry.Path, entry.Bundled),
 		}
 		if s.keepEvidencePath() {
 			ev.RawPath = entry.Path
@@ -2929,7 +2992,7 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 			PathHash: hashPath(child),
 			Origin:   origin,
 			Bundled:  bundled,
-			Skill:    s.skillFacts(child),
+			Skill:    s.skillFacts(child, bundled),
 		}
 		if s.keepEvidencePath() {
 			ev.RawPath = child
