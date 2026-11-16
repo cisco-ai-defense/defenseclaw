@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"runtime"
 )
 
@@ -31,7 +33,8 @@ import (
 // target and proved no state write: a redirect into the state from a call
 // the analysis read in part was allowed on Windows only
 // (rel-1-0-10:GAP-0982). On Windows the native spelling of the same path is
-// looked up too; elsewhere the spelling is the key.
+// looked up only after the full filesystem walk succeeds. Lexical cleaning
+// could select a different operand across a junction followed by .. (GAP-1006).
 func clientWriteTarget(targets map[string]string, spelling string) (string, bool) {
 	if value, found := targets[spelling]; found {
 		return value, true
@@ -39,7 +42,10 @@ func clientWriteTarget(targets map[string]string, spelling string) (string, bool
 	if runtime.GOOS != "windows" || spelling == "" {
 		return "", false
 	}
-	native := filepath.Clean(filepath.FromSlash(spelling))
+	native, resolved := hookpaths.ResolveWriteTarget(filepath.FromSlash(spelling))
+	if !resolved {
+		return "", false
+	}
 	if native == spelling {
 		return "", false
 	}

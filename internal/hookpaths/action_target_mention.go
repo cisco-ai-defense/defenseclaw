@@ -562,7 +562,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		text = actionBlankComments(text, command)
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, span := range actionMentionToken.FindAllStringIndex(text, -1) {
+	// A drive prefix belongs to the path token on Windows. Dropping its
+	// colon turned a protected C:/ path inside unknown-role text into /...
+	// under the wrong drive (GAP-0991).
+	tokenPattern := actionMentionToken
+	if windowsHost || spelledWindows {
+		tokenPattern = actionWindowsMentionToken
+	}
+	for _, span := range tokenPattern.FindAllStringIndex(text, -1) {
 		token := text[span[0]:span[1]]
 		if actionURLAuthorityToken(text, span[0], token) {
 			continue
@@ -1411,6 +1418,7 @@ func patchCommandResolutionChange(line string) bool {
 const actionLiteralTilde = "\x1e"
 
 var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+var actionWindowsMentionToken = lazyregexp.New(`(?:[A-Za-z]:)?[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
 // actionURLAuthorityToken reports a mention token that is the //host/... part
 // of a URL (scheme://host/...): a token stops at the colon, so the scan reads

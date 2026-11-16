@@ -35,6 +35,9 @@ import (
 // the spelling itself is a key (rel-1-0-10:GAP-0982).
 func TestClientWriteTargetNativeSpelling(t *testing.T) {
 	native := filepath.Join(t.TempDir(), ".defenseclaw", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(native), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	targets := map[string]string{native: native}
 	if got, ok := clientWriteTarget(targets, native); !ok || got != native {
 		t.Fatalf("native spelling: %q, %v", got, ok)

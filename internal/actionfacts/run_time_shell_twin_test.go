@@ -41,8 +41,8 @@ func TestRunTimeShellTwin(t *testing.T) {
 		{`nohup "$SHELL" -c 'make test'`, `nohup bash -c 'make test'`},
 		{`time "$SHELL" -c 'make test'`, `time bash -c 'make test'`},
 		{`FOO=$BAR "$SHELL" -c 'make test'`, `FOO=$BAR bash -c 'make test'`},
-		{`"$SHELL" <<< 'make test'`, `bash <<< 'make test'`},
-		{`echo 'make test' | "$SHELL" -s`, `echo 'make test' | bash -s`},
+		{`"$SHELL" <<< 'make test'`, `bash -c 'make test' <<< 'make test'`},
+		{`echo 'make test' | "$SHELL" -s`, `echo 'make test' | bash -c 'make test'`},
 		{`cd web && "$SHELL" -c 'npm test'`, `cd web && bash -c 'npm test'`},
 		// A static shell STRING is its own command line.
 		{`bash -c '"$SHELL" -c "make test"'`, `bash -c 'bash -c "make test"'`},

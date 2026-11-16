@@ -17,7 +17,11 @@
 package actionfacts
 
 import (
+	"errors"
+	"io"
 	"sort"
+
+	"mvdan.cc/sh/v3/expand"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -25,138 +29,165 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
-// runTimeShellNames are the parameters that name the shell a call starts
-// when the program word is written as their expansion, and the shell the
-// reading writes in their place:
-//
-//   - SHELL is the login shell (set from the password database at login and
-//     kept by every shell the user starts); "$SHELL" -c TEXT starts it.
-//   - BASH is set by bash to the path of the running bash binary.
-//   - ZSH_NAME is set by zsh to the name it was started as.
-//
-// A command substitution that looks a static shell name up on PATH
-// ($(which sh), $(command -v bash); lookedUpShell) names that shell too.
-//
-// "0" (the positional parameter zero) is read as a shell only where it is
-// one: in the agent's own command line, which the agent runs as SHELL -c
-// TEXT, and in a -c STRING given no name operand. A script file or a
-// STRING with a name operand sets it to that name, so there it is not read.
-//
-// No other parameter is read as a shell: a program word such as "$GREP",
-// "$TOOL" or "$T" names a program the reading cannot know, and its -c
-// cluster is an option of that program (a count, a config file), not a
-// command STRING (rel-1-0-10:GAP-0981).
-var runTimeShellNames = map[string]string{
-	"SHELL":    "bash",
-	"BASH":     "bash",
-	"ZSH_NAME": "zsh",
+// RunTimeShellWord projects the program word symbolically, using shell-owned
+// parameter values and the shell expansion grammar. Quotes, concatenation and
+// parameter operators therefore have one reading rather than a list of shapes.
+// Unknown program variables stay unknown (GAP-0981). No command is executed.
+func RunTimeShellWord(word *syntax.Word, zeroIsShell bool) (string, bool) {
+	return symbolicShellWord(word, zeroIsShell, "")
 }
 
-// RunTimeShellWord reports whether word is the expansion of a parameter that
-// names a shell (runTimeShellNames: $SHELL, "${SHELL}", ${SHELL:-sh},
-// ${SHELL##*/}, $BASH, $ZSH_NAME, and $0 when zeroIsShell), and returns the
-// static name of that shell. A default that is itself a shell name
-// (${SHELL:-/bin/zsh}) gives that shell. Any other operator on the parameter
-// (an alternate value, a replacement, a slice, a length) does not name the
-// shell, and the word is not read.
-func RunTimeShellWord(word *syntax.Word, zeroIsShell bool) (string, bool) {
-	if word == nil || len(word.Parts) != 1 {
+func symbolicShellWord(word *syntax.Word, zeroIsShell bool, lastShell string) (string, bool) {
+	if word == nil {
 		return "", false
 	}
-	part := word.Parts[0]
-	if quoted, ok := part.(*syntax.DblQuoted); ok {
-		if len(quoted.Parts) != 1 {
-			return "", false
-		}
-		part = quoted.Parts[0]
-	}
-	if substitution, ok := part.(*syntax.CmdSubst); ok {
-		return lookedUpShell(substitution)
-	}
-	param, ok := part.(*syntax.ParamExp)
-	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
-		param.Flags != nil || param.NestedParam != nil || param.Index != nil || len(param.Modifiers) != 0 ||
-		param.Slice != nil || param.Repl != nil || param.Names != 0 {
+	projected := projectPOSIXWord(word)
+	if !projected.Expands && projected.Value != "/proc/self/exe" {
 		return "", false
 	}
-	shell, named := runTimeShellNames[param.Param.Value]
-	if !named {
-		if param.Param.Value != "0" || !zeroIsShell {
-			return "", false
+	safe := true
+	syntax.Walk(word, func(n syntax.Node) bool {
+		switch n.(type) {
+		case *syntax.ArithmExp, *syntax.ProcSubst, *syntax.ExtGlob, *syntax.BraceExp:
+			safe = false
 		}
-		shell = "bash"
+		return safe
+	})
+	if !safe {
+		return "", false
 	}
-	if param.Exp == nil {
-		return shell, true
-	}
-	switch param.Exp.Op {
-	case syntax.DefaultUnset, syntax.DefaultUnsetOrNull, syntax.AssignUnset, syntax.AssignUnsetOrNull:
-		if param.Exp.Word != nil {
-			if fallback := projectPOSIXWord(param.Exp.Word); !fallback.Expands &&
-				wrappedShellPrograms[wrapperProgramName(fallback.Value)] {
-				return wrapperProgramName(fallback.Value), true
+	// A runtime directory cannot change a final static /shell basename.
+	// Flatten quote boundaries, resetting the suffix at every expansion.
+	suffix := ""
+	var tail func([]syntax.WordPart, bool)
+	tail = func(parts []syntax.WordPart, quoted bool) {
+		for _, part := range parts {
+			switch part := part.(type) {
+			case *syntax.Lit:
+				suffix += unquotePOSIXLiteral(part.Value, quoted)
+			case *syntax.SglQuoted:
+				if part.Dollar {
+					suffix = ""
+				} else {
+					suffix += part.Value
+				}
+			case *syntax.DblQuoted:
+				tail(part.Parts, true)
+			default:
+				suffix = ""
 			}
 		}
-		return shell, true
-	case syntax.RemSmallPrefix, syntax.RemLargePrefix:
-		// ${SHELL##*/} is the base name of the shell.
-		if param.Exp.Word != nil && len(param.Exp.Word.Parts) == 1 {
-			if pattern, literal := param.Exp.Word.Parts[0].(*syntax.Lit); literal && pattern.Value == "*/" {
-				return shell, true
+	}
+	tail(word.Parts, false)
+	if strings.Contains(suffix, "/") {
+		if name := wrapperProgramName(suffix); wrappedShellPrograms[name] {
+			return name, true
+		}
+	}
+	for _, populated := range []bool{false, true} {
+		env := []string{"$=1"}
+		if populated {
+			env = append(env, "SHELL=/bin/bash", "BASH=/bin/bash", "BASH_ARGV0=/bin/bash", "ZSH_NAME=zsh")
+			if zeroIsShell {
+				env = append(env, "0=/bin/bash")
 			}
+			if lastShell != "" {
+				env = append(env, "_="+lastShell)
+			}
+		}
+		cfg := &expand.Config{Env: expand.ListEnviron(env...)}
+		cfg.CmdSubst = func(w io.Writer, sub *syntax.CmdSubst) error {
+			shell, valid := "", true
+			syntax.Walk(sub, func(n syntax.Node) bool {
+				call, ok := n.(*syntax.CallExpr)
+				if !ok {
+					return true
+				}
+				if len(call.Args) == 0 || len(call.Assigns) != 0 {
+					valid = false
+					return false
+				}
+				program := wrapperProgramName(projectPOSIXWord(call.Args[0]).Value)
+				// A stream selector preserves a shell path emitted upstream.
+				if program == "head" && shell != "" {
+					return false
+				}
+				switch program {
+				case "which", "command", "type", "whence", "readlink", "realpath", "echo", "printf":
+				default:
+					valid = false
+					return false
+				}
+				operands := 0
+				lookup := program != "command" && program != "type" && program != "whence"
+				for i, arg := range call.Args[1:] {
+					value := projectPOSIXWord(arg)
+					if !value.Expands && strings.HasPrefix(value.Value, "-") {
+						if value.Value == "-V" {
+							valid = false
+						}
+						if strings.ContainsAny(strings.TrimPrefix(value.Value, "-"), "vpP") {
+							lookup = true
+						}
+						continue
+					}
+					if program == "printf" && i == 0 {
+						if value.Expands || value.Value != "%s" && value.Value != "%s\\n" {
+							valid = false
+						}
+						continue
+					}
+					name := wrapperProgramName(value.Value)
+					if value.Expands {
+						var known bool
+						name, known = symbolicShellWord(arg, zeroIsShell, lastShell)
+						if !known {
+							valid = false
+							continue
+						}
+					}
+					if !wrappedShellPrograms[name] {
+						valid = false
+						continue
+					}
+					operands++
+					if shell == "" {
+						shell = name
+					}
+				}
+				if operands != 1 || !lookup {
+					valid = false
+				}
+				return false
+			})
+			if !valid || shell == "" {
+				return errors.New("unknown command output")
+			}
+			_, err := io.WriteString(w, shell)
+			return err
+		}
+		value, err := expand.Literal(cfg, word)
+		if err != nil {
+			continue
+		}
+		if value == "/proc/self/exe" || value == "/proc/1/exe" {
+			return "bash", true
+		}
+		name := wrapperProgramName(value)
+		if wrappedShellPrograms[name] {
+			return name, true
 		}
 	}
 	return "", false
 }
 
-// lookedUpShell returns the shell a command substitution names when its one
-// command looks a static shell name up on PATH: $(which sh), `which bash`,
-// $(command -v bash), $(type -P zsh), $(whence -p zsh). The output of the
-// lookup is the path of that shell, so the word names the shell.
-func lookedUpShell(substitution *syntax.CmdSubst) (string, bool) {
-	if len(substitution.Stmts) != 1 || substitution.Stmts[0].Negated || substitution.Stmts[0].Background {
-		return "", false
-	}
-	call, ok := substitution.Stmts[0].Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) != 0 || len(call.Args) < 2 || len(call.Args) > 3 {
-		return "", false
-	}
-	words := make([]string, len(call.Args))
-	for index, arg := range call.Args {
-		word := projectPOSIXWord(arg)
-		if word.Expands {
-			return "", false
-		}
-		words[index] = word.Value
-	}
-	lookup := strings.Join(words[:len(words)-1], " ")
-	switch lookup {
-	case "which", "command -v", "type -p", "type -P", "whence -p":
-	default:
-		return "", false
-	}
-	shell := wrapperProgramName(words[len(words)-1])
-	if !wrappedShellPrograms[shell] {
-		return "", false
-	}
-	return shell, true
-}
-
-// RunTimeShellTwin returns the POSIX reading of command in which the program
-// word of every call that names its shell at run time ("$SHELL" -c TEXT,
-// $BASH -ec TEXT, "${SHELL:-sh}" -o pipefail -c TEXT, env "$SHELL" -c
-// TEXT, "$SHELL" <<< TEXT; RunTimeShellWord) is written as the shell it
-// names, so the call is read exactly as the literal shell call: its TEXT is
-// a script for every rule (state removal, a config, key or startup-file
-// write, tamper), not data of a program of unknown role
-// (rel-1-0-10:GAP-0980). The prefix wrappers in front of the program word
-// stay as written: the caller reads them as it reads them in front of the
-// literal shell. A static shell STRING (bash -c '"$SHELL" -c TEXT') is its
-// own command line and is read the same way, up to maxNestedShellStrings.
-//
-// The reading is a twin of the call as written: a caller judges both and
-// keeps the stricter verdict, so the reading only ever adds what the
-// literal shell call proves. ok is false when no word was written.
+// RunTimeShellTwin adds the literal-shell reading of every shell script
+// source: a -c argument, static stdin, or a child command exposed by the
+// existing wrapper and script readers. Program words use symbolic shell
+// expansion, independent of their quote or parameter-operator shape.
+// Generic runtime programs retain their unknown operand roles (GAP-0981).
+// The gateway judges this reading beside the original and keeps the strictest
+// verdict; the hook client resolves its targets using the same reading.
 func RunTimeShellTwin(command string) (twin string, ok bool) {
 	return runTimeShellTwin(command, 0, true)
 }
@@ -167,9 +198,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 			twin, ok = "", false
 		}
 	}()
-	if !strings.ContainsAny(command, "$`") {
-		return "", false
-	}
+
 	file, parsed := shellparse.Parse(command)
 	if !parsed {
 		return "", false
@@ -185,14 +214,119 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 			edits = append(edits, edit{start: start, end: end, text: text})
 		}
 	}
+	owners := map[*syntax.CallExpr]*syntax.Stmt{}
+	inputs := map[*syntax.CallExpr]*syntax.Word{}
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+				owners[call] = stmt
+			}
+		}
+		if pipe, ok := node.(*syntax.BinaryCmd); ok && pipe.Op == syntax.Pipe {
+			if call, ok := pipe.Y.Cmd.(*syntax.CallExpr); ok {
+				inputs[call] = simpleEchoWord(pipe.X)
+			}
+		}
+		return true
+	})
+	var visit func(syntax.Node) bool
+	visit = func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall {
 			return true
 		}
-		at, shell, found := shellCallProgram(call.Args, zeroIsShell)
+		if len(call.Args) == 0 {
+			return true
+		}
+		// Track the last operand of preceding top-level calls for $_.
+		// Its syntax is expanded by the same word reader as every parameter.
+		lastShell := ""
+		for _, stmt := range file.Stmts {
+			prior, ok := stmt.Cmd.(*syntax.CallExpr)
+			if !ok || prior.End().Offset() >= call.Pos().Offset() || len(prior.Args) == 0 {
+				continue
+			}
+			lastShell = ""
+			last := projectPOSIXWord(prior.Args[len(prior.Args)-1])
+			if !last.Expands && wrappedShellPrograms[wrapperProgramName(last.Value)] {
+				lastShell = wrapperProgramName(last.Value)
+			}
+		}
+		at, shell, found := shellCallProgram(call.Args, zeroIsShell, lastShell)
+		program := wrapperProgramName(projectPOSIXWord(call.Args[at]).Value)
+		if program == "eval" {
+			body, _, nested, static := simpleNestedScript(&syntax.CallExpr{Args: call.Args[at:]}, nil, nil, nil)
+			if nested && static && depth < maxNestedShellStrings {
+				if twin, changed := runTimeShellTwin(body, depth+1, zeroIsShell); changed {
+					start, end := int(call.Pos().Offset()), int(call.End().Offset())
+					edits = append(edits, edit{start, end, "eval " + posixSingleQuoted(twin)})
+					return false
+				}
+			}
+		}
+		if program == "find" || program == "gfind" {
+			argv := make([]string, len(call.Args)-at)
+			for i, arg := range call.Args[at:] {
+				argv[i] = projectPOSIXWord(arg).Value
+			}
+			for _, child := range findEmbeddedPrograms(argv) {
+				if len(child.parent) == 0 {
+					continue
+				}
+				start := at + child.parent[0]
+				end := start + len(child.whole)
+				if end <= len(call.Args) {
+					visit(&syntax.CallExpr{Args: call.Args[start:end]})
+				}
+			}
+			return true
+		}
 		if !found {
 			return true
+		}
+		// Every shell script source is read through the same -c text parser.
+		// A redirect supersedes pipeline stdin; opaque input is never invented.
+		argv := []string{"bash"}
+		staticArgs := true
+		for _, arg := range call.Args[at+1:] {
+			value := projectPOSIXWord(arg)
+			if value.Expands {
+				staticArgs = false
+				break
+			}
+			argv = append(argv, value.Value)
+		}
+		invocation := parsePOSIXShellInvocation("bash", argv)
+		if staticArgs && invocation.valid && !invocation.noExec && invocation.mode == posixShellModeStdin {
+			bodyWord := inputs[call]
+			body, known := "", false
+			if bodyWord != nil {
+				body, known = simpleStaticScriptWord(bodyWord, nil)
+			}
+			if stmt := owners[call]; stmt != nil {
+				for _, redir := range stmt.Redirs {
+					if redir.N != nil && redir.N.Value != "0" {
+						continue
+					}
+					switch redir.Op {
+					case syntax.WordHdoc:
+						body, known = simpleStaticScriptWord(redir.Word, nil)
+					case syntax.Hdoc, syntax.DashHdoc:
+						body, known = literalPOSIXHeredocBody(redir.Hdoc)
+					case syntax.RdrIn, syntax.RdrInOut, syntax.DplIn:
+						body, known = "", false
+					}
+				}
+			}
+			if known {
+				if depth < maxNestedShellStrings {
+					if nested, changed := runTimeShellTwin(body, depth+1, true); changed {
+						body = nested
+					}
+				}
+				edits = append(edits, edit{int(call.Args[at].Pos().Offset()), int(call.End().Offset()), "bash -c " + posixSingleQuoted(body)})
+				return false
+			}
 		}
 		if shell != "" {
 			replace(call.Args[at], shell)
@@ -209,11 +343,12 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 			return true
 		}
 		// $0 of the STRING is its first operand after the STRING, if any.
-		if body, changed := runTimeShellTwin(value.Value, depth+1, text+1 >= len(call.Args)); changed && body != value.Value {
+		if body, changed := runTimeShellTwin(value.Value, depth+1, text+1 >= len(call.Args) || wrappedShellPrograms[wrapperProgramName(projectPOSIXWord(call.Args[text+1]).Value)]); changed && body != value.Value {
 			replace(call.Args[text], posixSingleQuoted(body))
 		}
 		return true
-	})
+	}
+	syntax.Walk(file, visit)
 	if len(edits) == 0 {
 		return "", false
 	}
@@ -237,14 +372,14 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool) (twin string,
 // wrappers (env, command, exec, nohup, nice, timeout, sudo, setsid, ...;
 // wrapperChildIndex): a shell named at run time (RunTimeShellWord, whose
 // static name is returned) or a static POSIX shell (an empty name).
-func shellCallProgram(args []*syntax.Word, zeroIsShell bool) (int, string, bool) {
+func shellCallProgram(args []*syntax.Word, zeroIsShell bool, lastShell string) (int, string, bool) {
 	// A wrapper reads the shell named at run time as the shell it names,
 	// so its options end where they end before the literal shell.
 	value := func(at int) (string, bool) {
 		if at >= len(args) {
 			return "", false
 		}
-		if shell, named := RunTimeShellWord(args[at], zeroIsShell); named {
+		if shell, named := symbolicShellWord(args[at], zeroIsShell, lastShell); named {
 			return shell, true
 		}
 		word := projectPOSIXWord(args[at])
@@ -253,7 +388,7 @@ func shellCallProgram(args []*syntax.Word, zeroIsShell bool) (int, string, bool)
 	var run PrefixWrapperRun
 	index := 0
 	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
-		if shell, named := RunTimeShellWord(args[index], zeroIsShell); named {
+		if shell, named := symbolicShellWord(args[index], zeroIsShell, lastShell); named {
 			return index, shell, true
 		}
 		word, static := value(index)
@@ -271,9 +406,20 @@ func shellCallProgram(args []*syntax.Word, zeroIsShell bool) (int, string, bool)
 		if wrappedShellPrograms[name] {
 			return index, "", true
 		}
+		if name == "xargs" {
+			argv := make([]string, len(args)-index)
+			for i := range argv {
+				argv[i], _ = value(index + i)
+			}
+			if start, _, known := XargsProgram(argv); known && start > 0 {
+				index += start
+				continue
+			}
+			return 0, "", false
+		}
 		next, known := wrapperChildIndex(name, value, len(args), index, &run)
 		if !known {
-			return 0, "", false
+			return index, "", false
 		}
 		index = next
 	}
