@@ -933,7 +933,15 @@ func TestStreamTailStalledPartialLine(t *testing.T) {
 		for _, strict := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/strict=%v", f.name, strict), func(t *testing.T) {
 				unfinished := f.delta("an unfinished delta of plain words")
+				// The part of the event the upstream sends before it stalls:
+				// up to the middle of its text where the event carries the text as is
+				// (every NDJSON line of the format starts with the same 58
+				// bytes, so half a line is no mark of this one, GAP-0322),
+				// else half the event (a Bedrock frame carries it in base64).
 				partial := unfinished[:len(unfinished)/2]
+				if i := strings.Index(unfinished, "unfinished delta"); i >= 0 {
+					partial = unfinished[:i+len("unfinished")]
+				}
 				stall := make(chan struct{})
 				defer close(stall)
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
