@@ -515,7 +515,7 @@ type hereDocBuiltinOptions struct {
 // These are the union of the bash and zsh builtin spellings; an option with
 // dialect-dependent operand boundaries is ambiguous and uses the unknown tier.
 var hereDocBuiltinOptionTable = map[string]hereDocBuiltinOptions{
-	"read":      {letters: "aAdeniNptursEkclqz", valued: "aAdinNptu", ambiguous: "k"},
+	"read":      {letters: "aAdeniNptursEkclqz", valued: "aAdinNptu", ambiguous: "knpt"},
 	"mapfile":   {letters: "dnOstuCc", valued: "dnOsuCc"},
 	"readarray": {letters: "dnOstuCc", valued: "dnOsuCc"},
 	"hash":      {letters: "dlprtfmvL", valued: "p"},

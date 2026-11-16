@@ -46,6 +46,9 @@ func TestHereDocConsumerGAP0978Spellings(t *testing.T) {
 		{"read-separate", "read -a PATH <<< " + value},
 		{"zsh-read-attached", "read -APATH <<< " + value},
 		{"zsh-read-separate", "read -A PATH <<< " + value},
+		{"zsh-read-prompt-ambiguity", "read -p PATH x <<< " + value},
+		{"zsh-read-count-ambiguity", "read -n PATH x <<< " + value},
+		{"zsh-read-timeout-ambiguity", "read -t PATH x <<< " + value},
 		{"zsh-commands", "commands[cat]=" + value},
 		{"zsh-aliases", "aliases[cat]=" + value},
 		{"zsh-functions", "functions[cat]=" + value},
@@ -70,7 +73,7 @@ func TestHereDocConsumerGAP0978Spellings(t *testing.T) {
 // gap0927Keeps change no lookup: cat stays data after them. CDPATH changes
 // where cd looks, not what a command word runs.
 var gap0927Keeps = []string{
-	"CDPATH=/tmp/x; cd y", "echo $PATH", "x=PATH", "read -p PATH x < /tmp/p", "printf '%s' PATH", "unset foo",
+	"CDPATH=/tmp/x; cd y", "echo $PATH", "x=PATH", "printf '%s' PATH", "unset foo",
 	"getopts ab opt", "let x=1", "((x=1))", "echo $((y+1))", "declare -r X=1", "local x", "export -n FOO", "export PATH",
 	"readonly PATH", "hash cat", "hash -r", "alias ll='ls -l'", "read -r -a arr < f", "mapfile -t lines < f", "echo ${PATH}",
 	": ${HOME:=/x}", "wait -n", "printf -v out %s \"$PATH\"", "cd /tmp && ls", "for f in a b; do echo $f; done",
