@@ -44,11 +44,14 @@ func TestSecretReadChainReviewReadersAndTable(t *testing.T) {
 	}
 }
 
-// GAP-0341 resolves credentials-shaped operands independently of reader grammar.
+// srd2ReviewReaderArms: env VAR=value stays fail-closed by decision. sed with
+// a bare or -e script, awk -F and openssl base64 -in read their file operand
+// and arm the chain through its private record (substrate-1:GAP-0341); an
+// in-place sed -i writes the file instead and does not.
 var srd2ReviewReaderArms = map[string]bool{
 	"RD-tac": true, "RD-nl": true, "RD-od": true, "RD-strings": true, "RD-cut": true, "RD-sort": true,
 	"RD-hexdump": true, "RD-xargs": true, "RD-nice": true, "RD-time": true, "RD-timeout": true, "RD-nohup": true,
-	"RD-envassign": true, "RD-tar": true, "RD-tar2": true, "RD-zip": true,
+	"RD-envassign": false, "RD-tar": true, "RD-tar2": true, "RD-zip": true,
 	"RD-sedbare": true, "RD-sede": true, "RD-awkF": true,
 	"RD-diff": true, "RD-rsync": true, "RD-openssl": true,
 }

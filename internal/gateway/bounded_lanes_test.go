@@ -435,6 +435,7 @@ var boundedLaneGroups = []struct {
 	{"NonShellNodes", boundedLaneNames("s7/nonshell mcp-nodes", "s7/nonshell mcp-depth", "s7/nonshell mcp-json-string")},
 	{"NonShellItems", boundedLaneNames("s7/nonshell mcp-twins", "s7/nonshell mcp-array", "s7/nonshell mcp-effects",
 		"s7/nonshell mcp-address-list", "s7/nonshell mcp-address-array")},
+	{"SecretReadResolve", boundedLaneNames("secret-read credentials-file resolve")},
 }
 
 func boundedLaneNames(names ...string) func(string) bool {
@@ -521,6 +522,10 @@ func TestBoundRuleEveryLaneCapNonShellNodes(t *testing.T) {
 
 func TestBoundRuleEveryLaneCapNonShellItems(t *testing.T) {
 	boundRuleEveryLaneCap(t, "NonShellItems")
+}
+
+func TestBoundRuleEveryLaneCapSecretReadResolve(t *testing.T) {
+	boundRuleEveryLaneCap(t, "SecretReadResolve")
 }
 
 func TestBoundRuleEveryLaneCapOther(t *testing.T) {

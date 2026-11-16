@@ -313,16 +313,16 @@ func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, wind
 	artifacts := cloneSlice(o.artifacts)
 	normalizeArtifactFactsForCommands(artifacts, cwd, activeHome, commands)
 	return Facts{
-		Tool:                tool,
-		CWD:                 cwd,
-		ActiveHome:          activeHome,
-		Parse:               ParseResult{Status: status, Dialect: dialect, Issues: cloneSlice(o.issues)},
-		Commands:            commands,
-		Paths:               paths,
-		CredentialPathReads: resolveCredentialPathWords(o.credentialWords, cwd, activeHome, commands),
-		Network:             network,
-		DataFlows:           cloneSlice(o.dataFlows),
-		Artifacts:           artifacts,
+		Tool:            tool,
+		CWD:             cwd,
+		ActiveHome:      activeHome,
+		Parse:           ParseResult{Status: status, Dialect: dialect, Issues: cloneSlice(o.issues)},
+		Commands:        commands,
+		Paths:           paths,
+		Network:         network,
+		DataFlows:       cloneSlice(o.dataFlows),
+		Artifacts:       artifacts,
+		credentialPaths: resolveCredentialPathReads(o.credentialWords, cwd, activeHome, commands, paths),
 	}
 }
 

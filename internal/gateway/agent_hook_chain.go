@@ -242,24 +242,14 @@ func placeSecretReadPaths(facts actionfacts.Facts, reported string) actionfacts.
 	if placed != nil {
 		facts.Paths = placed
 	}
-	// The private projection is placed by the same lexical rule. Leaving a
-	// duplicate private spelling unplaced would erase an ordinary exact read.
-	private := slices.Clone(facts.CredentialPathReads)
-	for i, candidate := range private {
-		value := candidate.Value
-		if candidate.Absolute || candidate.Resolved != "" || candidate.Flavor == actionfacts.PathFlavorWindows ||
-			value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") ||
-			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
-			continue
-		}
-		private[i].Resolved = path.Join(reported, value)
-	}
-	facts.CredentialPathReads = private
-	return facts
+	// The chain's private record is placed by the same lexical rule
+	// (actionfacts.Facts.PlaceCredentialPathReads), so a relative read in it
+	// has the identity an ordinary read of the same file has.
+	return facts.PlaceCredentialPathReads(reported)
 }
 
 func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
-	for _, candidate := range facts.CredentialPathReads {
+	for _, candidate := range facts.CredentialPathReads() {
 		if candidate.Value != "" && !candidate.Absolute && candidate.Resolved == "" {
 			return true
 		}
@@ -1376,7 +1366,7 @@ func projectTrustedActionChainSteps(
 			joinDigest,
 		)
 	} else if facts.Parse.Status == actionfacts.StatusPartial ||
-		facts.Parse.Status == actionfacts.StatusComplete && len(facts.CredentialPathReads) != 0 {
+		facts.Parse.Status == actionfacts.StatusComplete && facts.HasCredentialPathReads() {
 		// A pipeline or a command list the classifier cannot finish (an
 		// unknown operand grammar in another stage) still proves a
 		// credentials-file read when the reading command is complete: carry
@@ -2249,7 +2239,7 @@ func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 // and an SSH client that only presents a key (ssh -i, scp -i), which
 // PATH-SSH-KEY does not count either.
 func credentialFileContentRead(facts actionfacts.Facts) bool {
-	for _, candidate := range facts.CredentialPathReads {
+	for _, candidate := range facts.CredentialPathReads() {
 		if !credentialFileFixturePath(semanticPathValue(candidate)) {
 			return true
 		}
@@ -2526,10 +2516,11 @@ func secretReadPathIdentity(facts actionfacts.Facts, candidate actionfacts.PathF
 // secret-read chain: the identity of a relative operand in a call that may
 // change directory is not exact (GAP-0409).
 func exactSecretReadChainDigest(facts actionfacts.Facts) (string, bool) {
-	if len(facts.CredentialPathReads) != 0 {
+	private := facts.CredentialPathReads()
+	if len(private) != 0 {
 		facts.Paths = append([]actionfacts.PathFact(nil), facts.Paths...)
 	}
-	for _, candidate := range facts.CredentialPathReads {
+	for _, candidate := range private {
 		if credentialFileFixturePath(semanticPathValue(candidate)) {
 			continue
 		}
@@ -2601,7 +2592,8 @@ func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
 // (substrate-1:GAP-0388).
 func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 	selected, found, exact := "", false, true
-	for _, candidate := range facts.CredentialPathReads {
+	private := facts.CredentialPathReads()
+	for _, candidate := range private {
 		if credentialFileFixturePath(semanticPathValue(candidate)) {
 			continue
 		}
@@ -2618,8 +2610,13 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 		if !ok {
 			continue
 		}
-		if !command.ArgvComplete && len(facts.CredentialPathReads) == 0 {
-			return "", false
+		if !command.ArgvComplete {
+			if len(private) == 0 {
+				return "", false
+			}
+			// A word the call computes may name another file: the record
+			// proves a read, not which one.
+			exact = false
 		}
 		found = true
 		identity, ok := secretReadPathIdentity(facts, candidate)

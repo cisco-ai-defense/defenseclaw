@@ -94,17 +94,19 @@ func TestSecretReadChainReviewProbes(t *testing.T) {
 }
 
 // srd2ReviewProbeChain is the verdict of each probe id after the fix: the
-// chain is raised (true) or not. F6 is a named read and an unrelated named
-// upload. GAP-0341 now records credentials operands of env and mv too. X1 and X2
+// chain is raised (true) or not. False rows are the documented limits: D5
+// (env -C runs the program elsewhere and records no read), F6 (a named read
+// and an unrelated named upload) and F7 (a move reads no content,
+// rel-1-0-10:GAP-1030). X1 and X2
 // (an upload with a dynamic word) join: the sender reader cannot read the
 // call in full, so its egress is the unknown tier, which joins the exact read
 // (GAP-0672).
 var srd2ReviewProbeChain = map[string]bool{
-	"D1": true, "D1s": true, "D1w": true, "D2": true, "D3": true, "D4": true, "D5": true, "D6": true, "D7": true,
+	"D1": true, "D1s": true, "D1w": true, "D2": true, "D3": true, "D4": true, "D5": false, "D6": true, "D7": true,
 	"U1": true, "U2": true, "U3": true, "U4": true,
 	"T1": true, "T2": true, "T3": true, "T4": true, "T5": true,
 	"R1": true, "R2": true,
-	"F1": true, "F2": true, "F3": true, "F4": true, "F5": true, "F6": false, "F7": true, "F8": true,
+	"F1": true, "F2": true, "F3": true, "F4": true, "F5": true, "F6": false, "F7": false, "F8": true,
 	"X1": true, "X2": true,
 }
 
@@ -119,6 +121,6 @@ var srd2ReviewProbeChain = map[string]bool{
 // in the default tier (S7 ruling for push 18b).
 var srd2ReviewProbeStrictBlock = map[string]bool{
 	"X1": true, "X2": true,
-	"D1": true, "D1w": true, "D2": true, "D3": true, "D4": true, "D5": true, "D6": true, "D7": true, "T2": true,
+	"D1": true, "D1w": true, "D2": true, "D3": true, "D4": true, "D6": true, "D7": true, "T2": true,
 	"U1": true, "U2": true, "U3": true, "U4": true,
 }

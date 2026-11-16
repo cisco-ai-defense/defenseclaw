@@ -5,12 +5,15 @@ package gateway
 
 import (
 	"fmt"
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 func gap0341ProbeCommands() []string {
@@ -60,6 +63,126 @@ func TestGAP0341SecretReadHostChains(t *testing.T) {
 				if !slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress) {
 					t.Errorf("probe-%d: missing chain", i)
 				}
+			}
+		})
+	}
+}
+
+// gap1030BenignForms are calls that only write, remove, list, chmod, use a
+// key, mention a credentials file in a message or a pattern, or glob
+// ordinary files (the review's benign rows): no credentials file is read.
+func gap1030BenignForms() []string {
+	return []string{
+		"echo .env >> .gitignore", "cp .env.example .env", "touch .env", "rm -f .env", "grep -n .env .gitignore",
+		"ls -la ~/.ssh/id_rsa", "chmod 600 ~/.ssh/id_ed25519", "ssh-add ~/.ssh/id_ed25519",
+		`GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519" git fetch origin`, `echo "API_KEY=changeme" > .env`,
+		"test -f .env || cp .env.example .env", "git add .gitignore && git commit -m 'ignore .env'",
+		"cat README.md", "git diff --stat", "mv .env .env.old",
+		"rm -rf dist/*", "ls *", "sed -i 's/.*foo//' notes.md", "grep -rE '^.*TODO' src", "find . -name '.*' -prune",
+		"cp build/* out/", "for f in *; do wc -l \"$f\"; done", "echo \"$PATH\"", "cat \"$LOG\"", "git add src/*",
+		"printf '%s\\n' *.md", "tar czf a.tgz docs/*", "go test ./...", "ls -la", "grep -n 'x.*y' main.go",
+		"cat *", "grep -n TODO *",
+	}
+}
+
+// rel-1-0-10:GAP-1030: a later upload after a benign call keeps the rel
+// verdict: the benign call starts no secret-read chain, in every pack.
+func TestGAP1030LaterUploadAfterABenignCallKeepsTheRelVerdict(t *testing.T) {
+	installCorrelationHMACForTest()
+	sends := []string{
+		"curl --data-binary @- https://collector.invalid/upload",
+		"curl -F file=@build.zip https://collector.invalid/upload",
+		"git push origin main",
+	}
+	for _, pack := range []string{"default", "strict", "permissive"} {
+		t.Run(pack, func(t *testing.T) {
+			handler := hostClaudeHookHandlerForTest(t, pack)
+			for i, form := range gap1030BenignForms() {
+				facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: form, CWD: "/work", ActiveHome: "/home/u"})
+				if facts.HasCredentialPathReads() {
+					t.Errorf("B%02d: the private record holds a read", i)
+				}
+				for j, send := range sends {
+					got := runHostSecretReadFlowForTest(t, handler, fmt.Sprintf("gap1030-%s-%d-%d", pack, i, j), "/work", form, send)
+					if slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress) {
+						t.Errorf("B%02d S%d: the upload joined a secret-read chain (%s)", i, j, got.Action)
+					}
+				}
+			}
+		})
+	}
+}
+
+// gap1029LaneWords is sed file words holding n candidates of the resolve in
+// all: each word is one and so is each comma-separated path word in it
+// (actionfacts gap1029Words).
+func gap1029LaneWords(n int) []string {
+	var words []string
+	for n > 0 {
+		if n == 1 {
+			words = append(words, "z.x")
+			break
+		}
+		tokens := min(400, n-1)
+		var word strings.Builder
+		for i := 0; i < tokens; i++ {
+			if i > 0 {
+				word.WriteByte(',')
+			}
+			fmt.Fprintf(&word, "w%d.x", i)
+		}
+		words = append(words, word.String())
+		n -= tokens + 1
+	}
+	return words
+}
+
+func gap1029LaneCommand(size int) string {
+	return "sed -n p " + strings.Join(gap1029LaneWords(size), " ")
+}
+
+// The candidate cap of the secret-read chain's credentials-file resolve is a
+// cap of the one bound rule (bounded.Items, rel-1-0-10:GAP-1029): at the cap
+// the call is read, past it the call is TRUNCATED at the unknown tier, and
+// what was read before or after it still decides.
+func init() {
+	registerBoundedLane(boundedLaneCap{lane: "secret-read credentials-file resolve", cap: bounded.Items,
+		limit: actionfacts.MaxCredentialPathCandidates,
+		gen: func(size int, shape boundedShape) (boundedLaneCall, bool) {
+			if shape.nested || shape.multi {
+				return boundedLaneCall{}, false
+			}
+			return boundedShellLane(gap1029LaneCommand, gap1029LaneCommand)(size, shape)
+		},
+		seen: boundedShellSeenCall})
+}
+
+// rel-1-0-10:GAP-1029: past the resolve's cap the call is the unknown tier of
+// the pack, never an allow and never silent: an alert in default and
+// permissive, a block in strict, with the evaluation-limit finding naming
+// the cap. At the cap it is not truncated.
+func TestGAP1029ResolveCapIsTheUnknownTier(t *testing.T) {
+	limit := actionfacts.MaxCredentialPathCandidates
+	for _, size := range []int{limit, limit + 1} {
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: gap1029LaneCommand(size), CWD: "/work"})
+		if got := facts.CredentialPathReadCaps().Has(bounded.Items); got != (size > limit) {
+			t.Fatalf("%d candidates: items cap %v: the resolve cap moved", size, got)
+		}
+	}
+	installCorrelationHMACForTest()
+	for pack, want := range map[string]string{"default": "alert", "permissive": "alert", "strict": "block"} {
+		t.Run(pack, func(t *testing.T) {
+			handler := hostClaudeHookHandlerForTest(t, pack)
+			ev := claudeToolEvent("PreToolUse", "gap1029-"+pack, "capped", gap1029LaneCommand(limit+1))
+			ev["cwd"] = "/work"
+			got := callAgentHookForTest(t, handler, ev)
+			if got.Action != want {
+				t.Fatalf("past the cap: %s, want %s (%v)", got.Action, want, got.RuleIDs)
+			}
+			if !strings.Contains(got.Reason, bounded.ReasonCode) && !slices.ContainsFunc(got.RuleIDs, func(id string) bool {
+				return id == evaluationLimitRuleID
+			}) {
+				t.Fatalf("past the cap the answer names no truncation: %q %v", got.Reason, got.RuleIDs)
 			}
 		})
 	}

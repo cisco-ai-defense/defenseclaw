@@ -871,6 +871,15 @@ func dispatchTrustedAction(
 			findings = withBoundedTruncation(findings, set, request)
 		}()
 	}
+	// A cap the secret-read chain's credentials-file resolve hit (its
+	// candidates, work or lookups) is TRUNCATED too: at least the unknown
+	// tier of the pack, and what it resolved before the cap still joins the
+	// chain (rel-1-0-10:GAP-1029).
+	if set := facts.CredentialPathReadCaps(); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
