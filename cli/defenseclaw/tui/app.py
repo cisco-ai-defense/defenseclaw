@@ -5400,7 +5400,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App
         if self.active_panel == "audit":
             self._sync_signal_connector_filters()
             self._table_columns, self._table_rows = self._fit_to_screen(
-                self.audit_model.data_table_columns(), self.audit_model.data_table_rows(), drop=("RUN",)
+                self.audit_model.data_table_columns(), self.audit_model.data_table_rows()
             )
             self.body_text = self._connector_chip_text() + self._audit_body_text()
             return self.body_text
@@ -17002,9 +17002,9 @@ def _styled_cell(column: str, value: str) -> Text:
         text.stylize(state_color(value))
         if normalized in {"running", "active", "enabled", "allowed", "blocked", "error", "stopped"}:
             text.stylize("bold")
-    elif column_key == "severity" or normalized in {"critical", "high", "medium", "low", "info"}:
+    elif column_key in {"severity", "sev"} or normalized in {"critical", "crit", "high", "medium", "med", "low", "info"}:
         text.stylize(severity_color(value))
-        if normalized in {"critical", "high"}:
+        if normalized in {"critical", "crit", "high"}:
             text.stylize("bold")
     elif column_key in {"sel", "selected"} and value.strip():
         text.stylize(TOKENS.accent_violet)
