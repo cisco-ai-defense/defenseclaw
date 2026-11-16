@@ -551,6 +551,14 @@ func (a *APIServer) applyAgentHookToolChains(
 			SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
 			SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
 		}
+		if outcome == connector.ToolLifecycleOutcomeFailure || outcome == connector.ToolLifecycleOutcomeUnknown {
+			// The call ran (or may have) and did not succeed. A read that
+			// printed a credentials file is a secret read whatever its
+			// exit code (owner decision 2026-11-13, substrate-1 GAP-0337):
+			// the store promotes the proposal's secret-read step 1 unless
+			// the result proves nothing was read.
+			resolveInput.UnsuccessfulMayHaveRead = !toolResultProvesNothingRead(req)
+		}
 		resolved, resolveErr := repository.ResolvePending(ctx, resolveInput)
 		if rootRepository != nil {
 			// The root scope promotes its own copy of the proposal; a failure
@@ -3462,4 +3470,169 @@ func writeToolChainDigestPart(writer toolChainHashWriter, value string) {
 	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
 	_, _ = writer.Write(length[:])
 	_, _ = writer.Write([]byte(value))
+}
+
+// readOnlyPrograms are the plain readers whose own error lines can prove a
+// failed call read nothing (toolResultProvesNothingRead).
+var readOnlyPrograms = map[string]struct{}{
+	"cat": {}, "head": {}, "tail": {}, "less": {}, "more": {}, "nl": {}, "tac": {}, "bat": {},
+}
+
+// readErrorPhrases end a reader's error line for an operand it did not read.
+var readErrorPhrases = []string{
+	"No such file or directory", "Permission denied", "Is a directory",
+	"Not a directory", "No such device or address",
+}
+
+// maxProofResultBytes bounds the result text the proof reads.
+const maxProofResultBytes = 64 << 10
+
+// toolResultProvesNothingRead reports an unsuccessful result that proves its
+// call read no file (substrate-1 GAP-0337). The call is one plain reader
+// whose operands are all simple words (no operator, redirect, pipe, quote,
+// variable, glob or option), and the result's whole text is that reader's
+// error line for every operand ("cat: .env: No such file or directory")
+// plus an "Exit code N" line. Such a call cannot print anything but what
+// it read, and a file it printed would show as other lines. Anything else
+// (no result text, other output, any other command shape) proves nothing:
+// a failed call that printed a credentials file is a secret read.
+func toolResultProvesNothingRead(req agentHookRequest) bool {
+	command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs})
+	if !ok {
+		return false
+	}
+	words := strings.Fields(command)
+	if len(words) < 2 || strings.ContainsAny(command, "|&;<>()$`'\"\\*?[]{}!#=\n") {
+		return false
+	}
+	program := words[0]
+	if _, ok := readOnlyPrograms[program]; !ok {
+		return false
+	}
+	operands := words[1:]
+	for _, operand := range operands {
+		if strings.HasPrefix(operand, "-") {
+			return false
+		}
+	}
+	var text []string
+	size := 0
+	if !collectResultText(req.Payload, &text, &size) || len(text) == 0 {
+		return false
+	}
+	named := make(map[string]bool, len(operands))
+	for _, chunk := range text {
+		for _, line := range strings.Split(chunk, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || isExitCodeLine(line) {
+				continue
+			}
+			operand, ok := readerErrorOperand(program, line)
+			if !ok || !slices.Contains(operands, operand) {
+				return false
+			}
+			named[operand] = true
+		}
+	}
+	for _, operand := range operands {
+		if !named[operand] {
+			return false
+		}
+	}
+	return true
+}
+
+// isExitCodeLine is the exit status line a connector adds to a failed
+// shell result ("Exit code 1").
+func isExitCodeLine(line string) bool {
+	rest, ok := strings.CutPrefix(line, "Exit code ")
+	if !ok {
+		return false
+	}
+	_, err := strconv.Atoi(rest)
+	return err == nil
+}
+
+// readerErrorOperand is the operand of program's error line
+// "program: operand: phrase" (the program prefix may be absent).
+func readerErrorOperand(program, line string) (string, bool) {
+	line = strings.TrimPrefix(line, program+": ")
+	for _, phrase := range readErrorPhrases {
+		if operand, ok := strings.CutSuffix(line, ": "+phrase); ok && operand != "" {
+			return operand, true
+		}
+	}
+	return "", false
+}
+
+// resultTextKeys are the payload keys where a connector's harness puts a
+// tool's output and error text (Claude Code tool_response and error, Cursor
+// error_message and tool_output, Hermes extra.result, OpenCode, Amp and
+// Codex tool_response, Antigravity output and error).
+var resultTextKeys = []string{
+	"tool_response", "toolResponse", "tool_output", "toolOutput", "tool_result", "toolResult",
+	"output", "result", "response", "stdout", "stderr",
+	"error", "error_message", "errorMessage", "error_details", "errorDetails",
+}
+
+// collectResultText gathers the text of a result payload: every string
+// under its result keys (and the same keys under extra), a string that holds
+// a JSON object or array read as that value, but status, type, kind and id
+// fields, bounded by maxProofResultBytes; false when the result is larger.
+// The payload is the harness plugin's, not the model's.
+func collectResultText(payload map[string]any, out *[]string, size *int) bool {
+	for _, scope := range []map[string]any{payload, nestedResultScope(payload)} {
+		for _, key := range resultTextKeys {
+			if value, ok := scope[key]; ok && !collectText(value, out, size) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func nestedResultScope(payload map[string]any) map[string]any {
+	extra, _ := payload["extra"].(map[string]any)
+	return extra
+}
+
+func collectText(value any, out *[]string, size *int) bool {
+	switch v := value.(type) {
+	case string:
+		*size += len(v)
+		if *size > maxProofResultBytes {
+			return false
+		}
+		if trimmed := strings.TrimSpace(v); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			var decoded any
+			if json.Unmarshal([]byte(trimmed), &decoded) == nil {
+				return collectText(decoded, out, size)
+			}
+		}
+		*out = append(*out, v)
+	case map[string]any:
+		for key, item := range v {
+			if resultEnumKey(key) {
+				continue
+			}
+			if !collectText(item, out, size) {
+				return false
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if !collectText(item, out, size) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// resultEnumKey is a field inside a result whose value is a label, not
+// output (opencode_v2_status, a content block type, an id).
+func resultEnumKey(key string) bool {
+	lower := strings.ToLower(key)
+	return strings.Contains(lower, "status") || lower == "type" || lower == "kind" ||
+		lower == "id" || strings.HasSuffix(lower, "_id") || strings.HasSuffix(key, "Id") || strings.HasSuffix(key, "ID")
 }
