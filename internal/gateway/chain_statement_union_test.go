@@ -201,3 +201,86 @@ func TestChainStatementFindingsKeepTheStrictest(t *testing.T) {
 		t.Fatal("no credentials-file copy was judged alone; the table or the packs changed")
 	}
 }
+
+// TestChainStatementFindingsAfterABackgroundStatement (rel-1-0-10:GAP-1021)
+// takes the statements of TestChainStatementFindingsAreTheUnion behind a
+// background statement that changes HOME or the directory, in all five packs.
+// The shell runs a background statement (cmd &) in a child shell, so the
+// statements after it read the HOME and directory from before it, as the
+// statement alone does. The walk kept a background statement in the
+// caller's scope: ~ resolved to the decoy, and a copy of the account's file
+// was allowed in every pack.
+//
+// A benign statement in the same forms keeps its verdict.
+func TestChainStatementFindingsAfterABackgroundStatement(t *testing.T) {
+	const home = "/home/alice"
+	t.Setenv("HOME", home)
+	cwd := home + "/proj"
+	decoy := cwd + "/h"
+	rank := map[any]int{"allow": 0, "alert": 1, "block": 2}
+	severity := map[any]int{"NONE": 0, "": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+	copyOut := func(path string) string { return "cp " + path + " /tmp/n" }
+	type form struct{ name, format string }
+	// %s is the statement; each form changes HOME only in a child shell.
+	homeForms := []form{
+		{"background", "HOME=" + decoy + " & %s"},
+		{"background-wait", "HOME=" + decoy + " & wait; %s"},
+		{"background-newline", "HOME=" + decoy + " &\n%s"},
+		{"background-export", "export HOME=" + decoy + " & %s"},
+		{"background-group", "{ HOME=" + decoy + "; } & %s"},
+		{"background-list", "true && HOME=" + decoy + " & %s"},
+		{"background-function", "f(){ HOME=" + decoy + "; }; f & %s"},
+		{"background-in-function", "f(){ HOME=" + decoy + " & }; f; %s"},
+		{"background-in-if", "if true; then HOME=" + decoy + " & fi; %s"},
+	}
+	// %s is the statement read relative to the directory; each form changes
+	// the directory only in a child shell.
+	cwdForms := []form{
+		{"background-cd", "cd /tmp & %s"},
+		{"background-cd-wait", "cd /tmp & wait; %s"},
+		{"background-pushd", "pushd /tmp & %s"},
+	}
+	benign := []string{"proj/README.md", "notes.txt"}
+	judged := 0
+	for _, pack := range gap0437Packs {
+		server := gap0437Server(t, pack, "claudecode", "action")
+		call := 0
+		hook := func(command string) map[string]any {
+			call++
+			return gap0437Hook(t, server, cwd, fmt.Sprintf("background-%s-%d", pack.name, call), command)
+		}
+		check := func(probe string, statement string, forms []form) {
+			alone := hook(statement)
+			if rank[alone["action"]] == 0 {
+				return
+			}
+			judged++
+			for _, f := range forms {
+				got := hook(fmt.Sprintf(f.format, statement))
+				if rank[got["action"]] < rank[alone["action"]] || severity[got["severity"]] < severity[alone["severity"]] {
+					t.Errorf("%s: %s (%s): %v %v %v, weaker than the statement alone: %v %v %v",
+						pack.name, probe, f.name, got["action"], got["severity"], got["rule_ids"],
+						alone["action"], alone["severity"], alone["rule_ids"])
+				}
+			}
+		}
+		for _, probe := range actionfacts.CredentialFileShapeProbePaths() {
+			check(probe, copyOut("~/"+probe), homeForms)
+			check(probe, copyOut("../"+probe), cwdForms)
+		}
+		for _, name := range benign {
+			for _, statement := range []string{copyOut("~/" + name), copyOut("../" + name)} {
+				alone := hook(statement)
+				for _, f := range append(slices.Clone(homeForms), cwdForms...) {
+					if got := hook(fmt.Sprintf(f.format, statement)); got["action"] != alone["action"] {
+						t.Errorf("%s: benign %s (%s): %v %v, the statement alone is %v",
+							pack.name, name, f.name, got["action"], got["rule_ids"], alone["action"])
+					}
+				}
+			}
+		}
+	}
+	if judged == 0 {
+		t.Fatal("no credentials-file copy was judged alone; the table or the packs changed")
+	}
+}
