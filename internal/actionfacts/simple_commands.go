@@ -528,6 +528,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// syntaxUnread: a nested body with a syntax error was read only in part
 	// (syntaxTailCommands).
 	syntaxUnread := false
+	// unknownFolderBody: a body the caller expands in an unknown folder was
+	// read with that folder as its head (simpleUnknownFolderNestedCall); the
+	// reading of the body as unread stays too.
+	unknownFolderBody := ""
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
 	var plainWords simplePlainWords
@@ -756,7 +760,21 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				var innerInterpreter string
 				nestedCall, nestedVars := call, effective
 				if state.cwdUnknown || state.cwd == "" && input.CWD == "" {
-					nestedCall, nestedVars = simpleUnknownFolderNestedCall(part.text, call, effective)
+					// Only a body the caller's expansion left unread is read
+					// so; the call keeps the unread body's reading as well
+					// (EvaluationFailureUnresolvedBody below), so its verdict
+					// is never below the one it had.
+					if _, _, nested, static := simpleNestedScript(call, effective, nil, nil); nested && !static {
+						folderCall, folderVars := simpleUnknownFolderNestedCall(part.text, call, effective)
+						if _, _, nested, static := simpleNestedScript(folderCall, folderVars, nil, nil); nested && static {
+							nestedCall, nestedVars = folderCall, folderVars
+							// The failure the unread body gives (below).
+							unknownFolderBody = EvaluationFailureUnresolvedBody
+							if !simplePotentialShellScript(call.Args, effective) || !simpleRuntimeWords(call.Args) {
+								unknownFolderBody = "parse"
+							}
+						}
+					}
 				}
 				script, shared, nested, static := simpleNestedScript(nestedCall, nestedVars, &innerCWDUnknown, &innerInterpreter)
 				if nested {
@@ -958,6 +976,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	}
 	if syntaxUnread {
 		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
+	}
+	if unknownFolderBody != "" {
+		result = append(result, SimpleCommand{EvaluationFailure: unknownFolderBody})
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
@@ -2444,7 +2465,9 @@ func simpleUnknownFolderAssignment(text string, state *simpleShellState) (stmt *
 // in the unknown folder (Input.folderUnknown), where the head left the body
 // unread (rel-1-0-10:GAP-1042). $(pwd) and `pwd` print PWD. A body with a cd
 // of its own is left as it was: there the expanded folder is no longer the
-// current one.
+// current one. The walk reads a body so only where it would be unread, and
+// keeps that unread reading beside it: a rule that judges the whole call
+// (a fetched file run as ./p) reads $PWD/p as no file it fetched.
 func simpleUnknownFolderNestedCall(source string, call *syntax.CallExpr, vars map[string]string) (*syntax.CallExpr, map[string]string) {
 	if _, held := vars["PWD"]; held || !strings.Contains(source, "PWD") && !strings.Contains(source, "pwd") ||
 		strings.Contains(source, "cd ") || strings.Contains(source, "pushd") || strings.Contains(source, "popd") {
