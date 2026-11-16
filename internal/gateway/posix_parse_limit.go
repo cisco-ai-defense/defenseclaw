@@ -225,5 +225,7 @@ func posixArgvScriptReadAsText(request trustedActionRequest, facts actionfacts.F
 		return false
 	}
 	launcher := launcherBodyTwinRequest(request, facts)
-	return launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes
+	// fully already holds every launcher reading of the call to the command
+	// bound (launcherCallTwin, rel-1-0-10:GAP-0857).
+	return launcher.read && launcher.fully
 }

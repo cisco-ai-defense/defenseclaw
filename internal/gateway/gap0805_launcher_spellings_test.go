@@ -39,6 +39,21 @@ var gap0805Wrappers = []gap0805Wrapper{
 	{"xargs", []string{"xargs"}, "echo x | xargs "},
 }
 
+// gap0857Wrappers are wrappers whose operand is spelled as a launcher name,
+// and start titles: the word is read both as the operand and as the
+// launcher, so the launcher after it is read (rel-1-0-10:GAP-0857).
+var gap0857Wrappers = []gap0805Wrapper{
+	{"sudo -u cmd", []string{"sudo", "-u", "cmd"}, "sudo -u cmd "},
+	{"env -u pwsh", []string{"env", "-u", "pwsh"}, "env -u pwsh "},
+	{"timeout -s sh 5", []string{"timeout", "-s", "sh", "5"}, "timeout -s sh 5 "},
+	{"xargs -I bash", []string{"xargs", "-I", "bash"}, "xargs -I bash "},
+	{"wsl -d cmd.exe -e", []string{"wsl", "-d", "cmd.exe", "-e"}, "wsl -d cmd.exe -e "},
+	{"wsl -u powershell.exe --", []string{"wsl", "-u", "powershell.exe", "--"}, "wsl -u powershell.exe -- "},
+	{"nice -n cmd.exe", []string{"nice", "-n", "cmd.exe"}, "nice -n cmd.exe "},
+	{"start <title>", []string{"start", "My Title"}, `start "My Title" `},
+	{"start <title spelled as a launcher>", []string{"start", "pwsh"}, `start "pwsh" `},
+}
+
 var gap0805Launchers = []gap0711Launcher{
 	{"powershell.exe -Command", "powershell.exe", []string{"-Command"}, false},
 	{"pwsh -c", "pwsh", []string{"-c"}, false},
@@ -134,6 +149,57 @@ func gap0805LauncherSpellings(t *testing.T, tierIndex int) {
 	}
 }
 
+// A wrapper operand spelled as a launcher name and a start title
+// (gap0857Wrappers) do not hide the launcher after them: the authorized_keys
+// redirect fixture blocks behind each, an ordinary script is allowed, and
+// argv and string agree, for a PowerShell and a CMD launcher in every tier
+// (rel-1-0-10:GAP-0857).
+func TestGAP0857LauncherOperandsDefault(t *testing.T)    { gap0857LauncherOperands(t, 0) }
+func TestGAP0857LauncherOperandsPermissive(t *testing.T) { gap0857LauncherOperands(t, 1) }
+func TestGAP0857LauncherOperandsStrict(t *testing.T)     { gap0857LauncherOperands(t, 2) }
+func TestGAP0857LauncherOperandsManaged(t *testing.T)    { gap0857LauncherOperands(t, 3) }
+func TestGAP0857LauncherOperandsManagedStrict(t *testing.T) {
+	gap0857LauncherOperands(t, 4)
+}
+
+func gap0857LauncherOperands(t *testing.T, tierIndex int) {
+	gap0589WindowsHost(t)
+	cwd := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tier := boundedTestTiers[tierIndex]
+	api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
+	decide := func(command interface{}) string {
+		return api.evaluateCodexHook(t.Context(), codexHookRequest{
+			HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+			ToolInput: map[string]interface{}{"command": command},
+		}).Action
+	}
+	launchers := []gap0711Launcher{gap0805Launchers[1], gap0805Launchers[3]}
+	for _, w := range gap0857Wrappers {
+		for _, l := range launchers {
+			for _, r := range []struct {
+				id, body string
+				want     bounded.Action
+			}{
+				{"redirect", overLimitWindowsRedirect, bounded.Block},
+				{"benign-git", `git log --oneline -5`, bounded.Allow},
+			} {
+				argv, text := decide(gap0805Argv(w, l, r.body)), decide(gap0805Text(w, l, r.body))
+				for form, got := range map[string]string{"argv": argv, "string": text} {
+					if boundedParse(got) != r.want {
+						t.Errorf("%s/%s/%s/%s %s: action %s, want %s", tier.name, w.name, l.name, r.id, form, got, r.want)
+					}
+				}
+				if argv != text {
+					t.Errorf("%s/%s/%s/%s: argv %s differs from the same command as a string, %s", tier.name, w.name, l.name, r.id, argv, text)
+				}
+			}
+		}
+	}
+}
+
 // A POSIX argv launcher whose -c script runs the words after it as its
 // arguments ("$@", $1) is TRUNCATED when those words are past the argv
 // bounds (rel-1-0-10:GAP-0803), and a launcher nested past the launcher depth
@@ -181,6 +247,92 @@ func TestGAP0803LauncherArgumentsAndDepthAreBounded(t *testing.T) {
 		})
 		if boundedParse(resp.Action) != bounded.Allow {
 			t.Errorf("%s/ordinary positional script: action %s, want allow: %v", tier.name, resp.Action, resp.RuleIDs)
+		}
+	}
+}
+
+// cmd /c around a cmd /c launcher of the authorized_keys redirect fixture
+// blocks at every depth up to the launcher depth, argv and string, in every
+// tier: the redirect of a launcher string is part of the script it runs, so
+// each nested twin reads it and the proven finding keeps its verdict
+// (rel-1-0-10:GAP-0806). Past the depth the call is TRUNCATED (above). The
+// same nesting of an ordinary command is allowed, or, where the reading of
+// the call itself reaches the wrapper depth of the analysis (a Windows host
+// reads the string as PowerShell first, one level more), it is the unknown
+// tier of the pack with the limit finding: the one bound rule, never a block
+// in the default pack.
+func TestGAP0806NestedLaunchersKeepTheProvenBlock(t *testing.T) {
+	gap0589WindowsHost(t)
+	cwd := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tier := range boundedTestTiers {
+		api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
+		for k := 1; k <= maxLauncherBodyDepth; k++ {
+			for _, row := range []struct {
+				id, body string
+				want     bounded.Action
+			}{
+				{"redirect", overLimitWindowsRedirect, bounded.Block},
+				{"benign-listing", `dir C:\Users\alice\project`, bounded.Allow},
+			} {
+				inner := row.body
+				for i := 1; i < k; i++ {
+					inner = "cmd /c " + inner
+				}
+				for form, command := range map[string]interface{}{
+					"argv":   []interface{}{"cmd", "/c", inner},
+					"string": "cmd /c " + inner,
+				} {
+					resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+						HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+						ToolInput: map[string]interface{}{"command": command},
+					})
+					got := boundedParse(resp.Action)
+					atCap := row.want == bounded.Allow && got == bounded.Unknown(tier.tier) &&
+						containsString(resp.RuleIDs, evaluationLimitRuleID) && len(resp.RuleIDs) == 1
+					if got != row.want && !atCap {
+						t.Errorf("%s/depth %d/%s %s: action %s rules %v, want %s", tier.name, k, row.id, form, resp.Action, resp.RuleIDs, row.want)
+					}
+				}
+			}
+		}
+	}
+}
+
+// An argv launcher whose tool arguments are past the decode bound
+// (maxArgvDecodeBytes) is read by nothing: TRUNCATED at the unknown tier of
+// the pack with the limit finding, for an ordinary script and the fixture
+// alike (rel-1-0-10:GAP-0858). The severity label of a bound-only row is
+// GAP-0851's (T-BOUNDS): on delta 4 another argv cut adds this row's limit
+// finding first, with that label.
+func TestGAP0858ArgvPastTheDecodeBoundIsTruncated(t *testing.T) {
+	gap0589WindowsHost(t)
+	cwd := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pad := "# " + strings.Repeat("x", (1<<20)+64) + "\n"
+	for _, tier := range boundedTestTiers {
+		floor := bounded.Unknown(tier.tier)
+		api := gap0589TierAPI(t, "codex", tier.posture, tier.managed, tier.tier)
+		for _, row := range []struct{ id, body string }{
+			{"benign-git", `git log --oneline -5`},
+			{"redirect", overLimitWindowsRedirect},
+		} {
+			for _, argv := range [][]interface{}{
+				{"pwsh", "-Command", pad + row.body},
+				{"cmd", "/c", "rem " + pad[2:] + " & " + row.body},
+			} {
+				resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+					HookEventName: "PreToolUse", ToolName: "shell", CWD: cwd,
+					ToolInput: map[string]interface{}{"command": argv},
+				})
+				if boundedParse(resp.Action) < floor || !containsString(resp.RuleIDs, evaluationLimitRuleID) {
+					t.Errorf("%s/%s/%v: action %s rules %v, want at least %s with %s", tier.name, row.id, argv[0], resp.Action, resp.RuleIDs, floor, evaluationLimitRuleID)
+				}
+			}
 		}
 	}
 }

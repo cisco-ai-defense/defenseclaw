@@ -123,6 +123,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 
 	addPOSIXStructuralFlows(&out)
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
+	expandStaticPOSIXWrappedAwkCalls(&out, wrapperDepth)
 	if posixMayRebindHome(parsedSource) {
 		for i := range out.commands {
 			for j := range out.commands[i].Arguments {
@@ -1509,14 +1510,15 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			if !ok {
 				continue
 			}
-			if wrapperDepth >= maxWrapperDepth {
+			cost := staticPOSIXWrapperDepthCost(command.Argv)
+			if wrapperDepth+cost > maxWrapperDepth {
 				out.markLimit(IssueWrapperLimit)
 				return
 			}
 			child = analyzeStructuredArgv(
 				nestedArgv,
 				out.nextID,
-				wrapperDepth+1,
+				wrapperDepth+cost,
 				DialectPOSIX,
 			)
 			// The argv was projected exactly by the surrounding POSIX parser;
@@ -1526,24 +1528,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		default:
 			continue
 		}
-		for i := range child.commands {
-			if child.commands[i].ParentCommandID == 0 {
-				child.commands[i].ParentCommandID = command.ID
-				if posixDescriptorIsUnredirected(child.commands[i], 1) {
-					child.appendDataFlow(DataFlowFact{
-						FromCommandID: child.commands[i].ID,
-						ToCommandID:   command.ID,
-						From:          DataStdout,
-						To:            DataProcess,
-					})
-				}
-			}
-			child.commands[i].Wrappers = append(
-				[]WrapperFact{{Executable: command.Executable, Argv: cloneSlice(command.Argv)}},
-				child.commands[i].Wrappers...,
-			)
-		}
-		out.mergeNested(child)
+		mergeStaticPOSIXWrapperChild(out, command, child)
 	}
 }
 
@@ -1578,6 +1563,46 @@ var (
 		"-b": {}, "--background": {},
 	}
 )
+
+// posixContextNeutralWrappers are the static wrappers that change only how
+// long, how nicely or how detached the program they run runs (nice, time,
+// timeout, nohup): not who runs it, where, or with which environment.
+var posixContextNeutralWrappers = map[string]struct{}{
+	"nice": {}, "time": {}, "timeout": {}, "nohup": {},
+}
+
+// staticPOSIXWrapperDepthCost is the wrapper depth the static wrapper at
+// argv[0] spends. A run of context-neutral wrappers is unwrapped linearly and
+// spends none, up to InlineChainWrappers (the chain bound the inline
+// hand-off and the prefix-wrapper readers read whole); a run past that bound
+// is the wrapper limit at once (TRUNCATED, the one bound rule). Every wrapper
+// that changes who runs the program, where or with which environment (env,
+// sudo, doas, exec, command, builtin, nsenter, chroot) spends 1, as on rel,
+// so maxWrapperDepth still bounds them. Joining the shared set
+// (rel-1-0-10:GAP-0859) made a 64-deep nohup chain stop at maxWrapperDepth,
+// below the bound the readers use (TestBoundRuleEveryLaneCapOther,
+// s7/tamper-min wrapper chain; substrate-1:GAP-0334).
+func staticPOSIXWrapperDepthCost(argv []string) int {
+	run := 0
+	for len(argv) >= 2 {
+		program := commandProgram(argv[0])
+		if _, neutral := posixContextNeutralWrappers[program]; !neutral {
+			break
+		}
+		if run++; run > InlineChainWrappers {
+			return maxWrapperDepth + 1
+		}
+		nested, ok, uncertain := staticPOSIXWrapperArgv(argv, program)
+		if !ok || uncertain {
+			break
+		}
+		argv = nested
+	}
+	if run == 0 {
+		return 1
+	}
+	return 0
+}
 
 // staticPOSIXWrapperPrograms are the programs staticPOSIXWrapperArgv unwraps:
 // the one list of the pass-through wrappers, read by both places that

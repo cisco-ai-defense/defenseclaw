@@ -61,12 +61,15 @@ func trustedArgvCommandInput(input actionfacts.Input) ([]string, bool) {
 }
 
 // launcherBodyReading is the second reading of a shell launcher call
-// (launcherBodyTwinRequest): the request that reads it, whether the launcher's
-// script is all the call runs (fully: no unread wrapper words, no words after
-// a POSIX -c script that it may run), and whether a launcher was found past
+// (launcherBodyTwinRequest): the requests that read it, one per launcher the
+// call may run (actionfacts.ShellLauncherCalls: a word read both as a wrapper
+// operand and as the launcher gives two, rel-1-0-10:GAP-0857), whether the
+// launcher's script is all the call runs in every one of them (fully: no
+// unread wrapper words, no words after a POSIX -c script that it may run, a
+// script within the command bound), and whether a launcher was found past
 // maxLauncherBodyDepth (depthCut).
 type launcherBodyReading struct {
-	twin     trustedActionRequest
+	twins    []trustedActionRequest
 	read     bool
 	fully    bool
 	depthCut bool
@@ -78,9 +81,10 @@ type launcherBodyReading struct {
 // GAP-0804, GAP-0805). The Codex Windows shell tool sends powershell.exe
 // -Command, pwsh -c or cmd /c as an argv array or as one string, at any
 // install path, behind a wrapper (start "", wsl -e, sudo, env, nohup,
-// timeout, xargs) or in a later statement. actionfacts.ShellLauncherCall
-// names the launcher with the over-limit screen's wrapper reading, so the
-// screen and this reading agree on which launcher a call runs.
+// timeout, xargs) or in a later statement. actionfacts.ShellLauncherCalls
+// names the launchers with the over-limit screen's wrapper reading, so the
+// screen and this reading agree on which launcher a call runs; each one is
+// judged and the caller keeps the strongest proven verdict.
 //
 //   - CMD launcher (argv or string): the script is judged as the CMD command
 //     it is, whatever AutoRun does before it.
@@ -108,34 +112,55 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 		return launcherBodyReading{}
 	}
 	var (
-		call      actionfacts.LauncherCall
+		calls     []actionfacts.LauncherCall
 		words     []string
 		statement int
-		ok        bool
 	)
 	argv, isArgv := trustedArgvCommandInput(request.Input)
 	if isArgv {
 		words = argv
-		call, ok = actionfacts.ShellLauncherCall(argv)
+		calls = actionfacts.ShellLauncherCalls(argv)
 	} else {
 		text, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return launcherBodyReading{}
 		}
-		call, words, statement, ok = actionfacts.ShellLauncherCallOfText(text)
+		calls, words, statement, _ = actionfacts.ShellLauncherCallsOfText(text)
 	}
-	if !ok {
+	if len(calls) == 0 {
 		return launcherBodyReading{}
 	}
 	if request.launcherDepth >= maxLauncherBodyDepth {
 		return launcherBodyReading{depthCut: true}
 	}
+	reading := launcherBodyReading{fully: true}
+	for _, call := range calls {
+		twin, read, fully := launcherCallTwin(request, facts, call, words, statement, isArgv)
+		if !read {
+			continue
+		}
+		reading.read = true
+		reading.fully = reading.fully && fully
+		reading.twins = append(reading.twins, twin)
+	}
+	if !reading.read {
+		return launcherBodyReading{}
+	}
+	return reading
+}
+
+// launcherCallTwin is the request that reads one launcher call of
+// launcherBodyTwinRequest, and whether its script is all the call runs.
+func launcherCallTwin(
+	request trustedActionRequest, facts actionfacts.Facts, call actionfacts.LauncherCall,
+	words []string, statement int, isArgv bool,
+) (twin trustedActionRequest, read, fully bool) {
 	prefix := 0
 	for _, word := range words[:call.Start] {
 		prefix += len(word)
 	}
-	reading := launcherBodyReading{read: true, fully: !call.Trailing && prefix <= maxLauncherPrefixBytes}
-	twin := request
+	fully = !call.Trailing && prefix <= maxLauncherPrefixBytes
+	twin = request
 	twin.launcherDepth++
 	twin.record, twin.recordTelemetry = nil, nil
 	twin.conflictSource = nil
@@ -145,7 +170,7 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 		// read inside the call); only an argv array, whose words the analysis
 		// bounds one by one, needs the script read on its own.
 		if !isArgv || facts.Parse.Status != actionfacts.StatusLimitExceeded {
-			return launcherBodyReading{}
+			return trustedActionRequest{}, false, false
 		}
 	case actionfacts.DialectPowerShell:
 		bodyFacts := actionfacts.Analyze(actionfacts.Input{
@@ -156,9 +181,13 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 			launcher := words[call.Start:]
 			bare := launcherProgramName(launcher[0])
 			if !isArgv && statement == 0 && call.Start == 0 && bare == launcher[0] {
-				return launcherBodyReading{}
+				return trustedActionRequest{}, false, false
 			}
 			line := powerShellLineOfArgv(append([]string{bare}, launcher[1:]...))
+			if call.Redirects != "" {
+				// The redirections of the launcher's statement (rel-1-0-10:GAP-0806).
+				line += " " + call.Redirects
+			}
 			twin.Input.Command, twin.Input.Args, twin.Input.Argv = line, nil, nil
 			// The dialect the Windows hook gives the same text as a string.
 			twin.Input.DialectHint = actionfacts.DialectPowerShell
@@ -167,15 +196,13 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 				twin.Input.DialectHint, _ = selectWindowsShellDialectReading(request.Input.Tool, line, twin.Input)
 			}
 			twin.LegacyText = line
-			reading.twin = twin
-			return reading
+			return twin, true, fully && len(line) <= actionfacts.MaxCommandBytes
 		}
 	}
 	twin.Input.Command, twin.Input.Args, twin.Input.Argv = call.Body, nil, nil
 	twin.Input.DialectHint = call.Dialect
 	twin.LegacyText = call.Body
-	reading.twin = twin
-	return reading
+	return twin, true, fully && len(call.Body) <= actionfacts.MaxCommandBytes
 }
 
 // launcherProgramName is the launcher program word as the bare launcher is
@@ -230,4 +257,33 @@ func trustedArgvReadingCut(input actionfacts.Input, facts actionfacts.Facts) bou
 		return bounded.Of(bounded.Items)
 	}
 	return bounded.Of(bounded.Bytes)
+}
+
+// trustedUndecodedCommandCut is the cap of a shell execution call whose
+// tool arguments are past maxArgvDecodeBytes and hold no command string: its
+// command array is decoded by no reader (not the launcher body reading, not
+// the argv cut), so the call is TRUNCATED at the byte cap, the one bound
+// rule (rel-1-0-10:GAP-0858). Below that size the argv readings decide.
+func trustedUndecodedCommandCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded || len(input.Argv) > 0 ||
+		len(input.Args) <= maxArgvDecodeBytes || !trustedShellCommandTool(input.Tool) {
+		return bounded.CapSet{}
+	}
+	if _, known := trustedBashCommandInput(input); known {
+		return bounded.CapSet{}
+	}
+	return bounded.Of(bounded.Bytes)
+}
+
+// withUndecodedCommandTruncation adds the TRUNCATED finding of
+// trustedUndecodedCommandCut. Nothing of the call was read, so the bound
+// alone decides it: the unknown tier at MEDIUM severity, never CRITICAL. A
+// limit finding the call already carries is kept as it is.
+func withUndecodedCommandTruncation(findings []RuleFinding, cut bounded.CapSet, request trustedActionRequest) []RuleFinding {
+	had := boundedLimitIndex(findings) >= 0
+	findings = withBoundedTruncation(findings, cut, request)
+	if index := boundedLimitIndex(findings); !had && index >= 0 {
+		findings[index].Severity = "MEDIUM"
+	}
+	return findings
 }

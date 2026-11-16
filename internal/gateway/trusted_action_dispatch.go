@@ -684,19 +684,25 @@ func dispatchTrustedAction(
 			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
 		}
 		launcher := launcherBodyTwinRequest(request, facts)
-		if launcher.read {
+		for _, twin := range launcher.twins {
 			// The script of an argv shell launcher (powershell.exe -Command,
 			// cmd /c) is judged as the string command the same script is
 			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
-			// TRUNCATED floor of its own cap among them.
+			// TRUNCATED floor of its own cap among them. Each launcher the
+			// call may run is judged (rel-1-0-10:GAP-0857).
 			defer func() {
-				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcher.twin))
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 			}()
 		}
 		if launcher.depthCut {
 			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
 			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
+		if cut := trustedUndecodedCommandCut(request.Input, facts); cut.Any() {
+			// A command array past the decode bound is read by nothing: the
+			// call is TRUNCATED (the one bound rule, rel-1-0-10:GAP-0858).
+			defer func() { findings = withUndecodedCommandTruncation(findings, cut, request) }()
 		}
 		// A script past the input bound is not read in full, so the bound of the argv
 		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
@@ -706,7 +712,7 @@ func dispatchTrustedAction(
 		// word judged as its twin) keeps that reading, which is the finer floor: a
 		// plain operand past 4 KiB of echo or dcx stays data, as in the text form
 		// (rel-1-0-10:GAP-0689). The argv cut covers every other argv call.
-		argvRead := launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes ||
+		argvRead := launcher.read && launcher.fully ||
 			posixByteBoundCommand(request, facts) != ""
 		if cut := trustedReadingCut(request.Input, facts, argvRead); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
