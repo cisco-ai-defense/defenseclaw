@@ -414,9 +414,10 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 }
 
 // settleWAL runs at most rounds settle rounds (see walSettledSpan) from the
-// copy that began at *copyBegan, and reports whether the last round's span
-// was within walSettledSpan. Every round starts with a sync of the database
-// file, and the rounds end only after one. It updates ckpt, logBytes and
+// copy that began at *copyBegan, fewer when the pass's deadline leaves no
+// time for another (walRoundOutrunsPass), and reports whether the last
+// round's span was within walSettledSpan. Every round starts with a sync of
+// the database file, and the rounds end only after one. It updates ckpt, logBytes and
 // copyBegan with each copy; a copy that another checkpoint kept busy, that
 // brought the log to its end (result.Restarted) or that found the log over
 // stopAbove ends the rounds unsettled.
@@ -446,6 +447,11 @@ func (s *Store) settleWAL(ctx context.Context, db *sql.DB, result *WALCheckpoint
 		if round == rounds || stalls == walSettleStalls {
 			return false, nil
 		}
+		if walRoundOutrunsPass(ctx, span) {
+			// Another round would leave the pass too little time for its
+			// writer phase: go to it now.
+			return false, nil
+		}
 		previous = span
 		*copyBegan = walClock()
 		next, err := s.copyWAL(ctx, db, walCopyPhaseHook)
@@ -466,6 +472,22 @@ func (s *Store) settleWAL(ctx context.Context, db *sql.DB, result *WALCheckpoint
 			return false, nil
 		}
 	}
+}
+
+// walPassReserve is the time a pass keeps for its writer phase: the first
+// wait for a free writer and the emergency hold. Before each settle round
+// after the first, a pass with a deadline checks that one more round, as
+// long as the last one, still leaves it that much (walRoundOutrunsPass): on
+// a disk whose syncs took 8-26 s each, the rounds could otherwise use up the
+// pass before its writer phase (G-flood-wal round 3, rel-1-0-10:GAP-1153
+// review). A variable so tests can change it.
+var walPassReserve = walBoundedAcquireWait + walEmergencyCatchUpCap
+
+// walRoundOutrunsPass reports whether a settle round as long as lastSpan
+// would leave ctx's pass less than walPassReserve.
+func walRoundOutrunsPass(ctx context.Context, lastSpan time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && deadline.Sub(walClock()) < lastSpan+walPassReserve
 }
 
 // walCatchUpPolicy is how a catch-up takes and holds the writer connection:
@@ -491,8 +513,12 @@ func (s *Store) boundedCatchUpPolicy(writerBudget time.Duration) walCatchUpPolic
 // is over when the pass did not restart it and its last copy found it over
 // limitBytes; a pass that never measured it (logBytes < 0) keeps the last
 // pass's record. Over marks the store for background writers
-// (awaitWALHeadroom). A log that is not over resets the misses; an over-limit
-// miss or failed pass increases only the next acquisition wait.
+// (awaitWALHeadroom). A log that is not over resets the misses and the
+// capped holds; an over-limit miss or failed pass increases only the next
+// acquisition wait, and a bounded hold that reached its cap counts toward the
+// hold backoff. A hold that does not reach its cap either restarts the log or
+// did not get SQLite's write lock (another process held it), which says
+// nothing about the disk, so it leaves the count as it is.
 func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limitBytes int64) {
 	over := !result.Restarted && logBytes > limitBytes
 	if logBytes < 0 {
@@ -826,8 +852,12 @@ func (s *Store) syncDatabaseFile() error {
 	if s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
 		return nil
 	}
-	return syncDatabaseFileData(s.dbPathGuard.pinned)
+	return walSyncDatabaseFile(s.dbPathGuard.pinned)
 }
+
+// walSyncDatabaseFile is syncDatabaseFileData; a variable so tests can see
+// that a settle round really syncs the database file.
+var walSyncDatabaseFile = syncDatabaseFileData
 
 // walBackgroundWait bounds how long a background writer waits for the WAL
 // to come back under its limit; walBackgroundPoll is how often it looks.

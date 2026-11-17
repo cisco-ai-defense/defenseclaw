@@ -6,6 +6,7 @@ package audit
 import (
 	"context"
 	"math"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,5 +145,59 @@ func TestGAP1153CappedHoldsBackOffUntilTheLogRestarts(t *testing.T) {
 	}
 	if got, want := countWALGuardEvents(t, store), 220+int(writes.Load()); got != want {
 		t.Fatalf("audit rows after the passes = %d; want all %d written", got, want)
+	}
+}
+
+// deadlineAtContext is a pass context whose deadline is at, on the test's
+// walClock; it is never done.
+type deadlineAtContext struct {
+	context.Context
+	at time.Time
+}
+
+func (c deadlineAtContext) Deadline() (time.Time, bool) { return c.at, true }
+
+// rel-1-0-10:GAP-1153 review: on a slow disk the syncs of a settle round took
+// 8-26 s each (G-flood-wal round 3). Each round after the first checks the
+// time its pass has left, and a pass that cannot fit one more round and its
+// writer phase goes to the writer at once, instead of running all
+// walBoundedSettleRounds rounds into its deadline.
+func TestGAP1153SettleRoundsStopWhenThePassHasNoTimeForAnother(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writes := writeDuringEveryCopy(t, store)
+	overrideWALDuration(t, &walCatchUpCap, overLimitTestHoldCap)
+	var clockMu sync.Mutex
+	now := time.Now()
+	originalClock, originalSync := walClock, walSyncPhaseHook
+	t.Cleanup(func() { walClock, walSyncPhaseHook = originalClock, originalSync })
+	walClock = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	const slowSync = 20 * time.Second
+	walSyncPhaseHook = func(context.Context) {
+		clockMu.Lock()
+		now = now.Add(slowSync)
+		clockMu.Unlock()
+	}
+	// After the first 20 s round the pass has 31.5 s left, room for another
+	// round and its writer phase (walPassReserve); after the second it has
+	// 11.5 s, so it stops after two syncs instead of three.
+	ctx := deadlineAtContext{Context: context.Background(), at: walClock().Add(2*slowSync + slowSync/2 + walPassReserve)}
+	if walBoundedSettleRounds < 2 {
+		t.Fatalf("model: walBoundedSettleRounds = %d; the test needs at least 2", walBoundedSettleRounds)
+	}
+	pass, err := store.CheckpointWALIfLarge(ctx, 0, 2*overLimitTestHoldCap)
+	if err != nil || !pass.Bounded || pass.Syncs != 2 {
+		t.Fatalf("slow-sync pass over the limit: %+v, %v; want a bounded pass that stops after 2 of its %d syncs", pass, err, walBoundedSettleRounds+1)
+	}
+	if pass.HoldCap <= 0 || pass.WriterHeld <= 0 || !pass.Restarted {
+		t.Fatalf("slow-sync pass over the limit: %+v; want it to take the writer and restart the log", pass)
+	}
+	if got, want := countWALGuardEvents(t, store), 200+int(writes.Load()); got != want {
+		t.Fatalf("audit rows after the pass = %d; want all %d written", got, want)
 	}
 }

@@ -300,9 +300,13 @@ type Store struct {
 	// writer back before the log restarted (boundedCatchUpPolicy). Guarded
 	// by walGuardMu.
 	walBoundedMisses int
-	// walCappedHolds counts the bounded catch-ups in a row whose hold reached
-	// its cap without restarting the log, and walHoldResume is when the next
-	// one may take the writer again (walHoldBackoff). Guarded by walGuardMu.
+	// walCappedHolds counts the bounded catch-ups whose hold reached its cap
+	// since the log last restarted or was last under the limit, and
+	// walHoldResume is when the next one may take the writer again
+	// (walHoldBackoff). A pass that left the writer alone, or did not get the
+	// writer or SQLite's write lock, neither adds to it nor resets it: only a
+	// restart or a log back under the limit does (noteWALGuardPass). Guarded
+	// by walGuardMu.
 	walCappedHolds int
 	walHoldResume  time.Time
 	// walPressure is true while the last WAL guard pass left the log over

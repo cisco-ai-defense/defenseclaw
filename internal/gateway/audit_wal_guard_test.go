@@ -169,3 +169,29 @@ func TestAuditWALAlarmStartsAtPublishedCeiling(t *testing.T) {
 		t.Fatalf("first over-ceiling alarm = %q", line)
 	}
 }
+
+// rel-1-0-10:GAP-1153 review: the passes of a hold backoff take nothing from
+// the hooks and logged nothing. The sidecar log says once when the backoff
+// starts and once when it ends, not on every pass.
+func TestAuditWALGuardPassReportsTheHoldBackoffOnceEachWay(t *testing.T) {
+	fake := &fakeWALCheckpointer{}
+	alarm := &auditWALAlarm{}
+	var log bytes.Buffer
+	for _, pass := range []audit.WALCheckpoint{
+		{Bounded: true, WriterDeferred: true, HoldBackoff: true, LogBytes: 300 << 20},
+		{Bounded: true, WriterDeferred: true, HoldBackoff: true, LogBytes: 310 << 20},
+		{Bounded: true, WriterDeferred: true, HoldBackoff: true, LogBytes: 320 << 20},
+		{Bounded: true, Restarted: true, WriterHeld: 80 * time.Millisecond, HoldCap: 100 * time.Millisecond, LogBytes: 330 << 20},
+		{Restarted: true, LogBytes: 10 << 20},
+	} {
+		fake.result = pass
+		auditWALGuardPass(t.Context(), fake, alarm, time.Now(), &log)
+	}
+	got := log.String()
+	if strings.Count(got, "leaving the audit writer to the hooks") != 1 {
+		t.Fatalf("backoff start lines in %q; want exactly one", got)
+	}
+	if strings.Count(got, "holds the audit writer again (WAL 330 MiB, restarted true)") != 1 {
+		t.Fatalf("backoff end lines in %q; want exactly one, on the pass that held the writer again", got)
+	}
+}

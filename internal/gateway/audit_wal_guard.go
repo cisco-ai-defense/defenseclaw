@@ -133,17 +133,43 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint held the audit writer for %s (budget %s)\n",
 			pass.WriterHeld.Round(time.Millisecond), auditWALWriterBudget)
 	}
+	if line := alarm.observeBackoff(pass); line != "" {
+		fmt.Fprintln(log, line)
+	}
 	if line := alarm.observe(now, pass.FileBytes); line != "" {
 		fmt.Fprintln(log, line)
 	}
 	return pass
 }
 
+// observeBackoff says once when the guard starts leaving the writer to the
+// hooks because its holds kept reaching their cap without restarting the log
+// (audit.WALCheckpoint.HoldBackoff), and once when a pass no longer does.
+// The passes in between are otherwise silent (rel-1-0-10:GAP-1153 review).
+func (a *auditWALAlarm) observeBackoff(pass audit.WALCheckpoint) string {
+	switch {
+	case pass.HoldBackoff && !a.backingOff:
+		a.backingOff = true
+		return fmt.Sprintf("[sidecar] audit WAL over its %d MiB limit (%d MiB): writer holds did not restart the log; "+
+			"leaving the audit writer to the hooks while the disk catches up",
+			int64(auditWALLimitBytes)>>20, pass.LogBytes>>20)
+	case !pass.HoldBackoff && a.backingOff:
+		a.backingOff = false
+		return fmt.Sprintf("[sidecar] audit WAL guard holds the audit writer again (WAL %d MiB, restarted %t)",
+			pass.LogBytes>>20, pass.Restarted)
+	}
+	return ""
+}
+
 // auditWALAlarm says when the audit WAL file passes auditWALAlarmBytes, again
-// every auditWALAlarmRepeat while it stays there, and once when it is back.
+// every auditWALAlarmRepeat while it stays there, and once when it is back,
+// and when the guard's hold backoff starts and when it ends.
 type auditWALAlarm struct {
 	raised   bool
 	reported time.Time
+	// backingOff is whether the last pass left the writer alone
+	// (observeBackoff).
+	backingOff bool
 }
 
 func (a *auditWALAlarm) observe(now time.Time, walBytes int64) string {
