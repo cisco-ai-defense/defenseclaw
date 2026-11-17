@@ -87,6 +87,9 @@ type Verified struct {
 	// entrypoint and may set only allowlisted variables (GAP-0354).
 	Entrypoint, Cmd []string
 	Env             map[string]string
+	// Workdir is the image WORKDIR: the only place an ActorTemplate may
+	// mount a data volume (GAP-0368).
+	Workdir string
 	// ValidUntil is when the controller must verify again: a cached verdict
 	// never outlives it, so a revoked key or a raised policy generation reaches
 	// a template that was admitted earlier. A controller that polls less often
@@ -360,7 +363,7 @@ func (v *Verifier) check(ctx context.Context, pol Policy, ref Ref, digest string
 		return nil, err
 	}
 	out := &Verified{Digest: digest, Statement: st, KeyID: anchor.KeyID, KeyName: anchor.Name, CheckedAt: now, ValidUntil: now.Add(v.SuccessTTL),
-		Entrypoint: img.entrypoint, Cmd: img.cmd, Env: img.env}
+		Entrypoint: img.entrypoint, Cmd: img.cmd, Env: img.env, Workdir: img.workdir}
 	// The environment is checked again with this build's allowlist, so a
 	// template signed under the older deny list is refused when its image
 	// sets a variable the allowlist does not permit (GAP-0355); a clean
@@ -377,6 +380,7 @@ func (v *Verifier) check(ctx context.Context, pol Policy, ref Ref, digest string
 type imageFacts struct {
 	entrypoint, cmd []string
 	env             map[string]string
+	workdir         string
 }
 
 func anchorID(a *Anchor) string {
@@ -414,7 +418,11 @@ func (v *Verifier) checkImage(ctx context.Context, ref Ref, digest string, kit K
 	if err != nil {
 		return imageFacts{}, reject(CodeImageMismatch, "the image config entrypoint cannot be read")
 	}
-	return imageFacts{entrypoint: ep, cmd: cmd, env: env}, nil
+	_, workdir, _, _, err := img.Config.Container()
+	if err != nil {
+		return imageFacts{}, reject(CodeImageMismatch, "the image config working directory cannot be read")
+	}
+	return imageFacts{entrypoint: ep, cmd: cmd, env: env, workdir: workdir}, nil
 }
 
 func short(d string) string {

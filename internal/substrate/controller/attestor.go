@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/regauth"
 )
 
@@ -62,7 +63,8 @@ var _ Attestor = (*TemplateAttestor)(nil)
 // permits (attest.CheckEnv: the kit's variables with the kit's value where it
 // fixes one, and the ordinary base-image settings), and the process is the
 // image's attested entrypoint and arguments (a different command, or extra
-// arguments, is refused). Those refusals, and the image environment's
+// arguments, is refused), and every volume mount is one the kit allows
+// (MountRefusal, GAP-0368). Those refusals, and the image environment's
 // (attest.Rejection.Allowlist, GAP-0355), carry Allowlist with every other
 // field filled, so the controller keeps an actor admitted before the
 // upgrade running while it refuses new ones.
@@ -115,6 +117,9 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		if why := ContainerSpecRefusal(c, v); why != "" && allowlist == "" {
 			allowlist = fmt.Sprintf("container %d: %s", i, why)
 		}
+		if why := MountRefusal(c, tmpl.GetVolumes(), v); why != "" && allowlist == "" {
+			allowlist = fmt.Sprintf("container %d: %s", i, why)
+		}
 		if !v.ValidUntil.IsZero() && (out.ValidUntil.IsZero() || v.ValidUntil.Before(out.ValidUntil)) {
 			out.ValidUntil = v.ValidUntil
 		}
@@ -165,10 +170,24 @@ const maxArgvShown = 200
 // image's attested ENTRYPOINT and CMD. Substrate runs command + args when
 // command is set, ENTRYPOINT + args when only args is, and ENTRYPOINT +
 // CMD otherwise; the result must be ENTRYPOINT + CMD.
+//
+// A name set twice is refused (GAP-0370): the check would read one value
+// and the process another (a Go program such as the relay keeps the first).
 func ContainerSpecRefusal(c *ateapi.Container, v *attest.Verified) string {
 	env := map[string]string{}
+	var twice []string
 	for _, e := range c.GetEnv() {
+		if _, seen := env[e.GetName()]; seen && !slices.Contains(twice, e.GetName()) {
+			twice = append(twice, e.GetName())
+		}
 		env[e.GetName()] = e.GetValue()
+	}
+	if len(twice) > 0 {
+		names := strings.Join(twice, ", ")
+		if len(names) > maxArgvShown {
+			names = names[:maxArgvShown] + "…"
+		}
+		return "env sets " + names + " more than once; set each variable once"
 	}
 	if bad := attest.CheckEnv(env); len(bad) > 0 {
 		return "env sets variables the actor environment allowlist does not permit: " + attest.FormatEnvRefusals(bad) +
@@ -193,6 +212,102 @@ func ContainerSpecRefusal(c *ateapi.Container, v *attest.Verified) string {
 	}
 	return fmt.Sprintf("args %s are not the attested arguments %s; remove args from the template", argvText(args), argvText(v.Cmd))
 }
+
+// SystemInfoMount is where a kit-built template mounts its system_info
+// volume (the egress trust bundle and the actor identity files).
+const SystemInfoMount = "/run/ate"
+
+// MountRefusal says why a container's volume mounts do not keep what was
+// attested in place (GAP-0368), "" when they do. A mount over the kit's
+// files hides them: a durable folder is empty and agent-writable, so the
+// hook binary that every connector's root-owned settings call would be gone
+// or the agent's. The check is default-deny:
+//   - a system_info volume only at /run/ate, the kit's own mount;
+//   - any other volume only at or below the image WORKDIR (the project
+//     folder), when that WORKDIR is a clean absolute path other than /;
+//   - and no mount at, above or below a path the attestation covers: the
+//     kit library (hooks, relay, kit files), /etc/defenseclaw, /run/ate,
+//     every hook and settings file the build checked and the guarded HOME
+//     folders.
+//
+// The mount path must be a clean absolute path (no trailing slash, "." or
+// ".."). A symlink in the image below the WORKDIR that points at a kit path
+// is out of sight here; the relay checks the mounts it runs with at start
+// (relay.checkMounts). The refusal names the field, never the path.
+func MountRefusal(c *ateapi.Container, vols []*ateapi.Volume, v *attest.Verified) string {
+	mounts := c.GetVolumeMounts()
+	if len(mounts) == 0 {
+		return ""
+	}
+	byName := map[string]*ateapi.Volume{}
+	for _, vol := range vols {
+		byName[vol.GetName()] = vol
+	}
+	protected := attestedPaths(v)
+	// A WORKDIR that holds or lies in an attested path (WORKDIR /usr) admits
+	// no data mount: below it are system folders, not the project.
+	workdir := ""
+	if v != nil && cleanAbs(v.Workdir) && !slices.ContainsFunc(protected, func(a string) bool { return pathsOverlap(v.Workdir, a) }) {
+		workdir = v.Workdir
+	}
+	for j, m := range mounts {
+		field := fmt.Sprintf("volume_mounts[%d]", j)
+		p := m.GetMountPath()
+		if !cleanAbs(p) {
+			return field + ".mount_path is not a clean absolute path; mount data folders below the image WORKDIR"
+		}
+		vol := byName[m.GetName()]
+		if vol == nil {
+			return field + ".name names no volume of the template"
+		}
+		if vol.GetSystemInfo() != nil {
+			if p == SystemInfoMount {
+				continue
+			}
+			return field + " mounts a system_info volume elsewhere than " + SystemInfoMount + "; mount it at " + SystemInfoMount + " only"
+		}
+		for _, a := range protected {
+			if pathsOverlap(p, a) {
+				return field + ".mount_path is at, above or below a path DefenseClaw attested (the kit, its hooks or settings); mount data folders below the image WORKDIR"
+			}
+		}
+		if workdir == "" || !pathWithin(p, workdir) {
+			return field + ".mount_path is outside the image WORKDIR; DefenseClaw admits data mounts only at or below the WORKDIR"
+		}
+	}
+	return ""
+}
+
+// attestedPaths are the paths a mount must not touch (MountRefusal).
+func attestedPaths(v *attest.Verified) []string {
+	out := []string{kit.LibDir, path.Dir(kit.ConfigPath), SystemInfoMount}
+	if v == nil || v.Statement == nil {
+		return out
+	}
+	for _, f := range v.Statement.Predicate.Hooks.Files {
+		if path.IsAbs(f.Path) {
+			out = append(out, path.Clean(f.Path))
+		}
+	}
+	home := v.Env["HOME"]
+	if !cleanAbs(home) {
+		home = kit.ActorHome
+	}
+	return append(out, kit.GuardedDirs(v.Statement.Predicate.Template.Connector, home)...)
+}
+
+// cleanAbs reports whether p is a clean absolute path other than /.
+func cleanAbs(p string) bool {
+	return p != "/" && path.IsAbs(p) && path.Clean(p) == p && !strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f })
+}
+
+// pathWithin reports whether p is dir or below it (both clean).
+func pathWithin(p, dir string) bool {
+	return p == dir || strings.HasPrefix(p, strings.TrimSuffix(dir, "/")+"/")
+}
+
+// pathsOverlap reports whether one of two clean paths is the other or below it.
+func pathsOverlap(a, b string) bool { return pathWithin(a, b) || pathWithin(b, a) }
 
 func argvText(a []string) string {
 	s := fmt.Sprintf("%q", a)

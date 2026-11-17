@@ -53,7 +53,7 @@ func AllowlistCheck(ts []AllowlistTemplate, err error) (status, detail, fix stri
 	case err != nil:
 		return "warn", "the templates could not be listed to check them against the 1.0.10 actor allowlist: " + err.Error(), ""
 	case len(ts) == 0:
-		return "pass", "every template passes the actor environment and entrypoint allowlist", ""
+		return "pass", "every template passes the actor environment, entrypoint and mount allowlist", ""
 	}
 	parts := make([]string, 0, len(ts))
 	for i, t := range ts {

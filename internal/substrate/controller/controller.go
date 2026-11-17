@@ -1139,7 +1139,7 @@ func (c *Controller) alertAllowlist(k, atespace string, att Attestation) {
 }
 
 // AllowlistImpact is what the 1.0.10 allowlist does to a template it refuses.
-const AllowlistImpact = "New actors from it are refused; actors already running keep running and keep their network with a warning in 1.0.10, and are refused from the next release. Remove the variable or command from the template (or the image) and publish it again"
+const AllowlistImpact = "New actors from it are refused; actors already running keep running and keep their network with a warning in 1.0.10, and are refused from the next release. Remove the variable, command or volume mount from the template (or the image) and publish it again"
 
 func sameTemplateVersion(a, b *ateapi.ActorTemplate) bool {
 	return a.GetMetadata().GetUid() == b.GetMetadata().GetUid() && a.GetMetadata().GetVersion() == b.GetMetadata().GetVersion()
