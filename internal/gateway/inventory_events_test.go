@@ -814,6 +814,29 @@ func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
 	if parent, recorded := tools.recordObserved("claudecode", "notes", "search", time.Now()); !recorded || parent == "" {
 		t.Fatalf("complete Claude inventory did not establish its parent: parent=%q recorded=%v rows=%+v", parent, recorded, rows)
 	}
+	capture := &endpointInventoryCapture{}
+	if err := emitEndpointInventory(t.Context(), cfg, registry, capture, false, nil, nil, &tools); err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range capture.snapshot() {
+		if record.Action() != string(config.ObservabilityV8ManagedMCPInventoryAction) ||
+			record.EventName() != "ai_component.observed" {
+			continue
+		}
+		body, ok := record.Body()
+		if !ok {
+			continue
+		}
+		fields, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fields[observability.TelemetryAttributeDefenseClawAIDiscoverySource] == "endpoint_local_mcp_observed_tool_inventory" &&
+			fields[observability.TelemetryAttributeDefenseClawInventoryItemName] == "search" {
+			return
+		}
+	}
+	t.Fatal("unrelated malformed Codex config suppressed managed Claude observed-tool inventory")
 }
 
 func TestPreferNativeMCPInventory(t *testing.T) {

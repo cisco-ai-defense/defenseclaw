@@ -254,6 +254,28 @@ func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
 	}
 }
 
+// observedIncomplete reports whether an incomplete connector owns durable
+// observed evidence. Such a connector must keep both observed collections
+// partial: its unreadable configuration may be hiding the server that tells us
+// whether the retained parent is local or remote. An unrelated incomplete
+// connector with no observed evidence cannot make a complete connector's
+// authenticated observations diagnostic-only.
+func (m *mcpToolInventory) observedIncomplete(incompleteConnectors map[string]struct{}) bool {
+	if m == nil || len(incompleteConnectors) == 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, tools := range m.observed {
+		connector, _, _ := strings.Cut(key, "\x00")
+		if _, incomplete := incompleteConnectors[connector]; incomplete &&
+			(len(tools) > 0 || m.observedPartial[key]) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remote bool, onlySource ...string) ([]endpointInventoryComponent, bool) {
 	if m == nil {
 		return nil, false

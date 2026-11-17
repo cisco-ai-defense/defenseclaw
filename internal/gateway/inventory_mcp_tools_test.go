@@ -394,6 +394,21 @@ func TestObservedMCPToolInventoryDoesNotWaitForToolsListAndPreservesSiblings(t *
 	}
 }
 
+func TestObservedMCPToolIncompleteOwnerKeepsSnapshotPartial(t *testing.T) {
+	var tools mcpToolInventory
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	if _, recorded := tools.recordObserved("codex", "notes", "search", time.Now()); !recorded {
+		t.Fatal("fixture observation was not recorded")
+	}
+	if !tools.observedIncomplete(map[string]struct{}{"codex": {}}) {
+		t.Fatal("incomplete owner with durable evidence was treated as a complete observed snapshot")
+	}
+	if tools.observedIncomplete(map[string]struct{}{"claudecode": {}}) {
+		t.Fatal("unrelated incomplete connector suppressed complete observed evidence")
+	}
+}
+
 func TestObservedMCPToolOverflowStaysSeparateFromListingState(t *testing.T) {
 	var tools mcpToolInventory
 	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "claudecode"}

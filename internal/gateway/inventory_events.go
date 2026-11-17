@@ -310,6 +310,11 @@ func emitEndpointInventory(
 		if toolStates[0].store != nil {
 			_ = toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed)
 		}
+		observedReadPartial := toolStates[0].observedIncomplete(perConnectorStatus.incompleteConnectors)
+		if perConnectorPartial && len(perConnectorStatus.incompleteConnectors) == 0 {
+			// A partial result without connector attribution is not safe to scope.
+			observedReadPartial = true
+		}
 		for _, collection := range []struct {
 			source     string
 			remote     bool
@@ -321,7 +326,12 @@ func emitEndpointInventory(
 			{"endpoint_remote_mcp_observed_tool_inventory", true, "observed"},
 		} {
 			rows, toolPartial := toolStates[0].components(perConnectorMCP, collection.remote, collection.toolSource)
-			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, perConnectorPartial || toolPartial,
+			readPartial := perConnectorPartial
+			if collection.toolSource == "observed" {
+				readPartial = observedReadPartial
+			}
+			snapshotPartial := readPartial || toolPartial
+			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, snapshotPartial,
 				config.ObservabilityV8ManagedMCPInventoryAction, publish)
 			if err != nil && firstErr == nil {
 				firstErr = err
@@ -330,7 +340,7 @@ func emitEndpointInventory(
 			switch {
 			case err != nil:
 				outcome, reason = "error", "publish_error"
-			case perConnectorPartial || toolPartial:
+			case snapshotPartial:
 				outcome, reason = "partial", "incomplete"
 			case len(rows) == 0:
 				outcome = "empty"
