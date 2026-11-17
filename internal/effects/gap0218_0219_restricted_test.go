@@ -118,6 +118,20 @@ var gap0218Rows = []restrictedRow{
 	{"g0218 ctl block exec redirect", raLin, `{ exec cat /t/k; } > /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 ctl block exit redirect", raLin, `{ exit; } >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 ctl while exit redirect", raLin, `while exit; do :; done >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	// Batch review P2-1: an elif condition runs only when the conditions
+	// before it failed, so a suppressor there is conditional.
+	{"g0218 ctl elif exit", raLin, `if true; then :; elif exit; then :; fi; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl elif set -n", raLin, `if test -f /t/x; then :; elif set -n; then :; fi; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl elif exec", raLin, `if true; then :; elif exec true; then :; fi; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl elif trap exit DEBUG", raLin, `if true; then :; elif trap exit DEBUG; then :; fi; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	// Batch review P2-2: a DEBUG trap whose parsed action cannot end or stop
+	// execution keeps the claim; one that can still demotes.
+	{"g0218 ctl trap echo $BASH_COMMAND", raLin, `trap 'echo $BASH_COMMAND >&2' DEBUG; rm -f /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl trap set +x", raLin, `trap 'set +x' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl trap logger $(date)", raLin, `trap 'logger "$(date) $BASH_COMMAND"' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 trap echo; exit", raLin, `trap 'echo $BASH_COMMAND; exit 0' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 trap set -n", raLin, `trap 'set -n' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 trap $(exit) dynamic word", raLin, `trap '$CMD' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 after a block that exits", raLin, `{ exit; } > /t/x; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 }
 
@@ -125,18 +139,18 @@ var gap0219Rows = []restrictedRow{
 	// A flag the program rejects: it exits without touching the file.
 	{"rv10-R11 rm -u (shred-only)", raLin, `rm -u /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"rv10-R12 unlink -f (no options)", raLin, `unlink -f /home/u/.ssh/authorized_keys`, rlAK, false},
-	{"rv10-R15 macOS BSD cp -t", raMacBSD, `cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, false},
+	{"rv10-R15 macOS BSD /bin/cp -t", raMacBSD, `/bin/cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, false},
 	{"g0219 rm -z (shred-only)", raLin, `rm -z /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0219 shred -r (rm-only)", raLin, `shred -r /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0219 cp -D (install-only)", raLin, `cp -D -t /home/u/.ssh /t/authorized_keys`, rlAK, false},
 	{"g0219 cp -m (install-only)", raLin, `cp -m 600 -t /home/u/.ssh /t/authorized_keys`, rlAK, false},
 	{"g0219 install -n (cp-only)", raLin, `install -n -t /home/u/.ssh /t/authorized_keys`, rlAK, false},
 	{"g0219 install -a (cp-only)", raLin, `install -a -t /home/u/.ssh /t/authorized_keys`, rlAK, false},
-	{"g0219 macOS mv -t", raMacBSD, `mv -t /Users/u/.ssh /t/authorized_keys`, rMacAK, false},
-	{"g0219 macOS rm --force", raMacBSD, `rm --force /Users/u/.ssh/authorized_keys`, rMacAK, false},
-	{"g0219 macOS rm -u", raMacBSD, `rm -u /Users/u/.ssh/authorized_keys`, rMacAK, false},
-	{"g0219 macOS tee -p", raMacBSD, `tee -p /Users/u/.ssh/authorized_keys < /t/k`, rMacAK, false},
-	{"g0219 macOS unlink -f", raMacBSD, `unlink -f /Users/u/.ssh/authorized_keys`, rMacAK, false},
+	{"g0219 macOS /bin/mv -t", raMacBSD, `/bin/mv -t /Users/u/.ssh /t/authorized_keys`, rMacAK, false},
+	{"g0219 macOS /bin/rm --force", raMacBSD, `/bin/rm --force /Users/u/.ssh/authorized_keys`, rMacAK, false},
+	{"g0219 macOS /bin/rm -u", raMacBSD, `/bin/rm -u /Users/u/.ssh/authorized_keys`, rMacAK, false},
+	{"g0219 macOS /usr/bin/tee -p", raMacBSD, `/usr/bin/tee -p /Users/u/.ssh/authorized_keys < /t/k`, rMacAK, false},
+	{"g0219 macOS /bin/unlink -f", raMacBSD, `/bin/unlink -f /Users/u/.ssh/authorized_keys`, rMacAK, false},
 	// Controls: valid flags, the file is changed.
 	{"g0219 ctl rm -f", raLin, `rm -f /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0219 ctl rm -rf --", raLin, `rm -rf -- /home/u/.ssh/authorized_keys`, rlAK, true},
@@ -147,25 +161,30 @@ var gap0219Rows = []restrictedRow{
 	{"g0219 ctl mv -t", raLin, `mv -t /home/u/.ssh /t/authorized_keys`, rlAK, true},
 	{"g0219 ctl tee -a", raLin, `tee -a /home/u/.ssh/authorized_keys < /t/k`, rlAK, true},
 	{"g0219 ctl macOS rm -f", raMacBSD, `rm -f /Users/u/.ssh/authorized_keys`, rMacAK, true},
-	{"g0219 ctl macOS rm -P", raMacBSD, `rm -P /Users/u/.ssh/authorized_keys`, rMacAK, true},
+	{"g0219 ctl macOS /bin/rm -P", raMacBSD, `/bin/rm -P /Users/u/.ssh/authorized_keys`, rMacAK, true},
 	{"g0219 ctl macOS unlink", raMacBSD, `unlink /Users/u/.ssh/authorized_keys`, rMacAK, true},
 	{"g0219 ctl macOS tee -a", raMacBSD, `tee -a /Users/u/.ssh/authorized_keys < /t/k`, rMacAK, true},
 	{"g0219 ctl macOS redirect", raMacBSD, `echo k >> /Users/u/.ssh/authorized_keys`, rMacAK, true},
 	{"g0219 ctl GNU host cp -t under raMac", raMac, `cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, true},
 	{"g0219 macOS /bin/cp -t", raMacBSD, `/bin/cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, false},
 	// Review round 1: BSD getopt stops at the first operand; a GNU path is GNU.
-	{"g0219 ctl macOS rm -f AK --verbose", raMacBSD, `rm -f /Users/u/.ssh/authorized_keys --verbose`, rMacAK, true},
-	{"g0219 ctl macOS tee AK --append", raMacBSD, `tee /Users/u/.ssh/authorized_keys --append < /t/k`, rMacAK, true},
+	{"g0219 ctl macOS /bin/rm -f AK --verbose", raMacBSD, `/bin/rm -f /Users/u/.ssh/authorized_keys --verbose`, rMacAK, true},
+	{"g0219 ctl macOS /usr/bin/tee AK --append", raMacBSD, `/usr/bin/tee /Users/u/.ssh/authorized_keys --append < /t/k`, rMacAK, true},
 	{"g0219 ctl macOS gnubin cp -t", raMacBSD, `/opt/homebrew/opt/coreutils/libexec/gnubin/cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, true},
 	// Review round 2: a trailing option moves cp/install's destination under
 	// GNU (permutes) but not under BSD: unaccounted, and the write is kept.
-	{"g0219 macOS cp trailing -f", raMacBSD, `cp /t/k /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
-	{"g0219 macOS install trailing -m", raMacBSD, `install /t/k /Users/u/.ssh/authorized_keys -m 600`, rMacAK, false},
-	{"g0219 macOS mv trailing -f", raMacBSD, `mv /t/authorized_keys /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
+	{"g0219 macOS /bin/cp trailing -f", raMacBSD, `/bin/cp /t/k /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
+	{"g0219 macOS /usr/bin/install trailing -m", raMacBSD, `/usr/bin/install /t/k /Users/u/.ssh/authorized_keys -m 600`, rMacAK, false},
+	{"g0219 macOS /bin/mv trailing -f", raMacBSD, `/bin/mv /t/authorized_keys /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
 	// Review round 3: a flag both tools take with a different arity moves the
 	// operands between the readings.
-	{"g0219 macOS install -T (arity differs)", raMacBSD, `install -T /t/k /Users/u/.ssh/authorized_keys`, rMacAK, false},
-	{"g0219 macOS cp -S (arity differs)", raMacBSD, `cp -S x /t/k /Users/u/.ssh/authorized_keys`, rMacAK, false},
+	{"g0219 macOS /usr/bin/install -T (arity differs)", raMacBSD, `/usr/bin/install -T /t/k /Users/u/.ssh/authorized_keys`, rMacAK, false},
+	{"g0219 macOS /bin/cp -S (arity differs)", raMacBSD, `/bin/cp -S x /t/k /Users/u/.ssh/authorized_keys`, rMacAK, false},
+	// Batch review P2-3: a bare name may be GNU coreutils first on PATH
+	// (Homebrew gnubin, a Linux sandbox): the GNU reading keeps its claim.
+	{"g0219 ctl macOS bare cp -t", raMacBSD, `cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, true},
+	{"g0219 ctl macOS bare rm --force", raMacBSD, `rm --force /Users/u/.ssh/authorized_keys`, rMacAK, true},
+	{"g0219 ctl macOS bare mv -t", raMacBSD, `mv -t /Users/u/.ssh /t/authorized_keys`, rMacAK, true},
 	{"g0219 ctl macOS gnubin rm --force", raMacBSD, `/usr/local/opt/coreutils/libexec/gnubin/rm --force /Users/u/.ssh/authorized_keys`, rMacAK, true},
 }
 

@@ -492,15 +492,14 @@ func shoptStopsExecution(args []Word) bool {
 	return false
 }
 
-// trapFlowWords are the commands that, run from a DEBUG trap, can end the
-// shell or skip what follows.
-var trapFlowWords = set("exit", "exec", "kill", "return", "logout", "set", "shopt", "trap", "eval", "source", ".", "enable", "suspend")
-
-// trapChangesExecution reports a `trap` call that sets a DEBUG or RETURN trap
-// whose action may end the shell or skip commands (a flow builtin, a function
-// of the call, a dynamic part, or any action once extdebug may be on), or a
-// trap call the walker cannot read. A DEBUG trap that only prints or logs
-// leaves every command running.
+// trapChangesExecution reports a `trap` call that sets a DEBUG trap whose
+// action may end the shell or skip commands, or a trap call the walker cannot
+// read. A static action is parsed and demotes only when one of its commands
+// ends or stops execution (trapActionChangesExecution); a dynamic or
+// unparseable action, or any action once extdebug may be on (a failing DEBUG
+// trap then skips the command), demotes. A trap that only prints or logs
+// (`echo $BASH_COMMAND`, `set +x`) leaves every command running. RETURN and
+// ERR traps are not modeled (they fire only on a return / a failure).
 func (w *walker) trapChangesExecution(args []Word, d Dialect) bool {
 	i := 0
 	if i < len(args) {
@@ -537,23 +536,66 @@ func (w *walker) trapChangesExecution(args []Word, d Dialect) bool {
 	if !flow {
 		return false
 	}
-	if !action.Static || w.extdebugMaybe || strings.ContainsAny(action.Value, "$`") {
+	if !action.Static || w.extdebugMaybe {
 		return true
 	}
-	// The command word of each simple command of the action (after command /
-	// builtin): a word in argument position (echo exit) changes nothing.
-	for _, seg := range strings.FieldsFunc(action.Value, func(r rune) bool {
-		return r == '\n' || r == ';' || r == '&' || r == '|' || r == '(' || r == ')' || r == '{' || r == '}' || r == '!'
-	}) {
-		f := strings.Fields(seg)
-		for len(f) > 1 && (f[0] == "command" || f[0] == "builtin") {
-			f = f[1:]
-		}
-		if len(f) == 0 {
-			continue
-		}
-		if tok := f[0]; trapFlowWords[tok] || w.funcs[funcKey(tok, d)] || w.aliases[tok] != "" {
-			return true
+	return w.trapActionChangesExecution(parsePOSIX(action.Value, w.o), d, 0)
+}
+
+// trapActionChangesExecution reads a parsed DEBUG trap action: true when the
+// parse left an unknown, a command word is dynamic, or a command can end the
+// shell or skip what follows: exit / exec CMD / kill / return / logout /
+// suspend, set or shopt that stop execution, a nested trap, eval / source / .
+// (their text is not read here), a function or alias of the call, or a
+// builtin turned off with enable. Command substitutions and subshell bodies of
+// the action are read the same way.
+func (w *walker) trapActionChangesExecution(s *Script, d Dialect, depth int) bool {
+	if s == nil {
+		return false
+	}
+	if len(s.Unknowns) > 0 || depth > 4 {
+		return true
+	}
+	for _, st := range s.Stmts {
+		for _, c := range st.Cmds {
+			if c.Sub != nil && w.trapActionChangesExecution(c.Sub, d, depth+1) {
+				return true
+			}
+			for _, n := range c.Nested {
+				if w.trapActionChangesExecution(n, d, depth+1) {
+					return true
+				}
+			}
+			words := c.Words
+			for len(words) > 1 && words[0].Static && (words[0].Value == "command" || words[0].Value == "builtin") {
+				words = words[1:]
+			}
+			if len(words) == 0 {
+				continue
+			}
+			if !words[0].Static {
+				return true
+			}
+			name := words[0].Value
+			if !w.isBuiltin(name, d) {
+				return true
+			}
+			switch name {
+			case "exit", "kill", "return", "logout", "suspend", "trap", "eval", "source", ".", "enable":
+				return true
+			case "exec":
+				if len(words) > 1 {
+					return true
+				}
+			case "set":
+				if setStopsExecution(words[1:]) {
+					return true
+				}
+			case "shopt":
+				if shoptStopsExecution(words[1:]) {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -1126,9 +1168,10 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	bsdHost := w.o.BSDUserland && bsdSystemProgram(prog.Value)
 	entry, known := lookupProgram(program, w.o.flavor(), dialect, bsdHost)
-	// A flag the BSD tool rejects (GAP-0219): BSD exits without a change, but
-	// GNU coreutils may come first on PATH, so the GNU reading is kept and the
-	// whole command is unaccounted (never a fully known claim, never dropped).
+	// A flag the BSD tool rejects (GAP-0219): /bin/cp and the rest are the BSD
+	// tools, which exit without a change. The GNU reading is kept (its effects
+	// stay visible) and the whole command is unaccounted: never a fully known
+	// claim, never dropped. A bare name never gets here (bsdSystemProgram).
 	bsdReject := false
 	if bsd, ok := bsdTable[program]; ok && known && bsdHost && w.o.flavor() != FlavorWindows &&
 		dialect != DialectCMD && dialect != DialectPowerShell && bsdRejectsFlag(bsd, posixTable[program], inner[1:]) {

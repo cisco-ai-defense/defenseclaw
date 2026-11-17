@@ -482,7 +482,9 @@ func alignmentEffects(ctx context.Context, connectorName, toolName, args, cwd st
 	if raw == nil && trimmed != "" && call.Surface == effects.SurfaceShell {
 		call.Command = trimmed
 	}
-	opts := effects.Options{Flavor: alignmentFlavor(cwd), Home: hookActiveHome(ctx), CWD: cwd}
+	flavor := alignmentFlavor(cwd)
+	opts := effects.Options{Flavor: flavor, Home: hookActiveHome(ctx), CWD: cwd,
+		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
 	return effects.Extract(call, opts), true
 }
 

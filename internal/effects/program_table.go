@@ -162,17 +162,19 @@ func lookupProgram(name string, flavor Flavor, dialect Dialect, bsd bool) (Progr
 
 // lookupPOSIX returns the BSD row of a program on a BSD (macOS) host, else the
 // GNU row. Git Bash (the Windows flavor) runs GNU coreutils.
-// bsdSystemProgram reports a program word that runs the system (BSD) tool on
-// macOS: a bare name, or a path in /bin, /usr/bin, /sbin or /usr/sbin. Any
-// other path (Homebrew gnubin, a GNU coreutils prefix) is read with the GNU
-// row.
+
+// bsdSystemProgram reports a program word that names the macOS system (BSD)
+// tool for certain: an absolute path in /bin or /usr/bin. A bare name is read
+// with the GNU row: GNU coreutils may come first on PATH (Homebrew gnubin), and
+// a GNU mutation the BSD row would reject must never be demoted (t-obs-b2 batch
+// review P2-3). Any other path is GNU or unknown, also the GNU row.
 func bsdSystemProgram(word string) bool {
 	i := strings.LastIndexByte(word, '/')
 	if i < 0 {
-		return true
+		return false
 	}
 	switch word[:i] {
-	case "/bin", "/usr/bin", "/sbin", "/usr/sbin":
+	case "/bin", "/usr/bin":
 		return true
 	}
 	return false
