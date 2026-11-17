@@ -29,7 +29,7 @@ func TestGAP0388StatusModeFollowsTheProfileAskRule(t *testing.T) {
 	for raw, want := range map[string]string{
 		`{"unattended":true,"unattended_asks":"queue","ask_timeout":"5m0s"}`: "unattended (asks wait for up to 5m0s for a person: defenseclaw substrate approvals)",
 		`{"unattended":true,"unattended_asks":"deny"}`:                       "unattended (asks are denied)",
-		`{"unattended":true}`:                                                "unattended (asks are denied)",
+		`{"unattended":true}`: "unattended (asks are denied)",
 	} {
 		var a api.Actor
 		if err := json.Unmarshal([]byte(raw), &a); err != nil {
