@@ -83,36 +83,14 @@ func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget 
 }
 
 // noDereferenceTouchStartupUnknown reports a shell startup that can change
-// what the touch statement runs: a startup file (BASH_ENV, ENV), or an
-// exported function that bash calls instead of touch or gtouch (bash accepts
-// slashes in a function name, so /usr/bin/touch can be one) or for a missing
-// program (command_not_found_handle). The statement calls no other function,
-// so an exported function of another name leaves the proof intact. An export
-// spelled neither name%% (bash 4.3+) nor name() (older patched bash) is
-// unknown.
+// what the touch statement runs (shellStartupUnknown): the statement calls
+// touch or gtouch and no other function, so an exported function of another
+// name leaves the proof intact.
 func noDereferenceTouchStartupUnknown() bool {
-	if os.Getenv("BASH_ENV") != "" || os.Getenv("ENV") != "" {
-		return true
-	}
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		function, exported := strings.CutPrefix(name, "BASH_FUNC_")
-		if !exported {
-			continue
-		}
-		function, modern := strings.CutSuffix(function, "%%")
-		if !modern {
-			var patched bool
-			if function, patched = strings.CutSuffix(function, "()"); !patched {
-				return true
-			}
-		}
+	return shellStartupUnknown(func(function string) bool {
 		base := function[strings.LastIndexByte(function, '/')+1:]
-		if base == "touch" || base == "gtouch" || function == "command_not_found_handle" {
-			return true
-		}
-	}
-	return false
+		return base == "touch" || base == "gtouch"
+	})
 }
 
 func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) ([]string, bool) {

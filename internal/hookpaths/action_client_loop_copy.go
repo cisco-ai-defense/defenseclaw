@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -351,16 +350,4 @@ func dropLiteralCharacters(raw string, n *int) string {
 		*n--
 	}
 	return raw[i:]
-}
-
-func actionClientLoopCopySourceStartupUnknown() bool {
-	if os.Getenv("BASH_ENV") != "" || os.Getenv("ENV") != "" {
-		return true
-	}
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "BASH_FUNC_") {
-			return true
-		}
-	}
-	return false
 }
