@@ -303,8 +303,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Four time-balanced shards finish with the gateway shards.
-        shard: [0, 1, 2, 3]
+        # Five time-balanced shards finish with the gateway shards. Four
+        # planned 523 s each against the flat 11m -timeout (1.26x headroom):
+        # a whole-package run took 60 minutes on a loaded box and the CI
+        # shards ran up to 10 minutes (rel-1-0-10:GAP-1216). Five plan 418 s,
+        # inside the 440 s budget of the gateway shards, with the same
+        # planned -timeout (planned x1.5 + 60 s, at most 12 minutes).
+        shard: [0, 1, 2, 3, 4]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -320,18 +325,21 @@ jobs:
       - name: Run audit race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 4
+          GO_TEST_SHARDS: 5
         run: |
           set -euo pipefail
-          test_regex="$(python3 scripts/go_test_shards.py \
-            --package-dir internal/audit \
-            --timings scripts/test-timings/go-linux.json \
-            --shard-count "$GO_TEST_SHARDS" \
-            --shard-index "$GO_TEST_SHARD")"
+          plan=(python3 scripts/go_test_shards.py
+            --package-dir internal/audit
+            --timings scripts/test-timings/go-linux.json
+            --shard-count "$GO_TEST_SHARDS"
+            --shard-index "$GO_TEST_SHARD")
+          test_regex="$("${plan[@]}")"
+          test_timeout="$("${plan[@]}" --timeout)"
+          echo "audit shard $GO_TEST_SHARD: go test -timeout $test_timeout"
           # checkptr is off only in modernc.org, and the log comes from
           # go_test_report.py: see Go Gateway Test.
           set +e
-          go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m \
+          go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$test_timeout" \
             -coverprofile="coverage-go-audit-$GO_TEST_SHARD.out" \
             -run "$test_regex" \
             ./internal/audit 2>&1 |
@@ -700,9 +708,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 96 gateway + 4 audit + 19 remaining-package shards, plus the
+          # 96 gateway + 5 audit + 19 remaining-package shards, plus the
           # frozen-gateway job.
-          test "${#coverage_parts[@]}" -eq 120
+          test "${#coverage_parts[@]}" -eq 121
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"

@@ -181,7 +181,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
-    assert profiles == 119
+    assert profiles == 120
     # The frozen-gateway job adds one more profile (it runs the three tests
     # that no longer run in the shards).
     profiles += 1
@@ -191,12 +191,13 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     # go_test_report.py names the test still running.
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
-    assert workflow.count(race) == 1
-    # A gateway shard's -timeout follows its planned seconds
-    # (go_test_shards.py --timeout, test_linux_gateway_shard_timeouts_fit_the_job).
-    gateway = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$test_timeout" '
-    assert workflow.count(gateway) == 1
-    assert 'test_timeout="$("${plan[@]}" --timeout)"' in workflow
+    assert workflow.count(race) == 0
+    # A gateway and an audit shard's -timeout follow their planned seconds
+    # (go_test_shards.py --timeout, test_linux_gateway_shard_timeouts_fit_the_job;
+    # the audit shards had a flat 11m until rel-1-0-10:GAP-1216).
+    planned = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$test_timeout" '
+    assert workflow.count(planned) == 2
+    assert workflow.count('test_timeout="$("${plan[@]}" --timeout)"') == 2
     # The remaining-package shards run several go test runs in one step: they
     # share one deadline inside the step budget, and each run is stopped at
     # most 11 minutes in or when the deadline is up, whichever comes first.
