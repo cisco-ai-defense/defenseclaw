@@ -5,10 +5,16 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/historystore"
 )
 
 const missingPreToolRuleID = "HOOK-PRE-TOOL-MISSING"
@@ -42,14 +48,15 @@ type preToolDecisionTracker struct {
 	sequence uint64
 }
 
-func (tracker *preToolDecisionTracker) record(key preToolDecisionKey) {
+// record adds key and reports whether it was not held yet.
+func (tracker *preToolDecisionTracker) record(key preToolDecisionKey) bool {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	if tracker.seen == nil {
 		tracker.seen = make(map[preToolDecisionKey]uint64)
 	}
 	if tracker.seen[key] != 0 {
-		return
+		return false
 	}
 	tracker.sequence++
 	index := tracker.sequence % maxPendingPreToolDecisions
@@ -59,6 +66,7 @@ func (tracker *preToolDecisionTracker) record(key preToolDecisionKey) {
 	}
 	tracker.slots[index] = preToolDecisionSlot{key: key, sequence: tracker.sequence}
 	tracker.seen[key] = tracker.sequence
+	return true
 }
 
 func (tracker *preToolDecisionTracker) forget(key preToolDecisionKey) {
@@ -71,6 +79,113 @@ func (tracker *preToolDecisionTracker) contains(key preToolDecisionKey) bool {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	return tracker.seen[key] != 0
+}
+
+// On Agent Substrate the hooks of one actor are spread over the gateway
+// replicas, so a PostToolUse can land on another replica than its PreToolUse
+// and this process's ring alone reported the audited PreToolUse as missing
+// (substrate-1 GAP-0267). An actor's decisions are also kept in the record
+// every replica shares on the leader (the inspect-once record's store, by
+// hash only: the tool invocation id never crosses the wire). A decision
+// forgotten here (its answer unconfirmed, its audit row not written) is
+// marked forgotten there, and stays so for the other replicas if it is
+// recorded again (one more alert, never a missed one). The record is
+// audit-only: it is written in the background, so no hook answer waits on
+// the leader, and a leader that cannot be reached leaves the replica's own
+// ring, so the alert is written rather than missed.
+const preToolSharedTimeout = 2 * time.Second
+
+var preToolSharedLastWarn atomic.Int64
+
+// preToolShared is the shared record of ctx's call: the leader's store for
+// a verified actor's call on a Substrate gateway, else nil.
+func preToolShared(ctx context.Context) historystore.Store {
+	if _, ok := substrateActorFrom(ctx); !ok {
+		return nil
+	}
+	if shared := substrateHistoryStore.Load(); shared != nil {
+		return *shared
+	}
+	return nil
+}
+
+// sharedScope is the key's scope in the shared record: a digest of the
+// caller, connector and session, so its length is bounded.
+func (key preToolDecisionKey) sharedScope() string {
+	sum := sha256.Sum256([]byte(key.caller + "\x00" + key.connector + "\x00" + key.session))
+	return "\x00defenseclaw-pre-tool\x00" + hex.EncodeToString(sum[:16])
+}
+
+func (key preToolDecisionKey) sharedHashes() (decided, forgotten historystore.Hash) {
+	return historyHashOf("decided\x00" + key.toolUse), historyHashOf("forgotten\x00" + key.toolUse)
+}
+
+func preToolSharedWarn(op string, err error) {
+	now := time.Now().UnixNano()
+	last := preToolSharedLastWarn.Load()
+	if now-last < int64(time.Minute) || !preToolSharedLastWarn.CompareAndSwap(last, now) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] warning: the replicas' pre-tool decision record could not be %s (%v); this replica's own record is used\n", op, err)
+}
+
+func preToolSharedWrite(ctx context.Context, key preToolDecisionKey, forgotten bool) {
+	shared := preToolShared(ctx)
+	if shared == nil {
+		return
+	}
+	decided, forgot := key.sharedHashes()
+	h := decided
+	if forgotten {
+		h = forgot
+	}
+	ctx = context.WithoutCancel(ctx)
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, preToolSharedTimeout)
+		defer cancel()
+		if err := shared.Record(ctx, key.caller, key.sharedScope(), []historystore.Hash{h},
+			historystore.Entry{Verdict: historystore.Allowed}, maxPendingPreToolDecisions); err != nil {
+			preToolSharedWarn("written", err)
+		}
+	}()
+}
+
+// recordPreToolDecision keeps an audited PreToolUse decision, on every
+// replica of a Substrate gateway.
+func (a *APIServer) recordPreToolDecision(ctx context.Context, key preToolDecisionKey) {
+	if a.preToolDecisions.record(key) {
+		preToolSharedWrite(ctx, key, false)
+	}
+}
+
+// forgetPreToolDecision drops a decision whose answer was unconfirmed or
+// whose audit row was not written.
+func (a *APIServer) forgetPreToolDecision(ctx context.Context, key preToolDecisionKey) {
+	a.preToolDecisions.forget(key)
+	preToolSharedWrite(ctx, key, true)
+}
+
+// preToolDecided reports an audited PreToolUse decision of key: this
+// replica's, or, for an actor's call, one another replica recorded.
+func (a *APIServer) preToolDecided(ctx context.Context, key preToolDecisionKey) bool {
+	if a.preToolDecisions.contains(key) {
+		return true
+	}
+	shared := preToolShared(ctx)
+	if shared == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preToolSharedTimeout)
+	defer cancel()
+	decided, forgotten := key.sharedHashes()
+	known, err := shared.Seen(ctx, key.sharedScope(), []historystore.Hash{decided, forgotten})
+	if err != nil {
+		preToolSharedWarn("read", err)
+		return false
+	}
+	_, isDecided := known[decided]
+	_, isForgotten := known[forgotten]
+	return isDecided && !isForgotten
 }
 
 // preToolDecisionKeyFor is the key of a tracked hook call and its event, or
@@ -106,7 +221,7 @@ func (a *APIServer) notePreToolDecision(ctx context.Context, req agentHookReques
 		resp.Action == hookActionUnconfirmed || a.preToolDecisions.contains(key) {
 		return preToolDecisionKey{}, false
 	}
-	a.preToolDecisions.record(key)
+	a.recordPreToolDecision(ctx, key)
 	return key, true
 }
 
@@ -118,11 +233,11 @@ func (a *APIServer) auditMissingPreToolDecision(ctx context.Context, req agentHo
 	connector := key.connector
 	if event == "PreToolUse" {
 		if key.session != "" && key.toolUse != "" && resp.Action != hookActionUnconfirmed {
-			a.preToolDecisions.record(key)
+			a.recordPreToolDecision(ctx, key)
 		}
 		return
 	}
-	if key.session != "" && key.toolUse != "" && a.preToolDecisions.contains(key) {
+	if key.session != "" && key.toolUse != "" && a.preToolDecided(ctx, key) {
 		return
 	}
 	// A missing exact ID cannot establish a safe match. Keep the post-tool

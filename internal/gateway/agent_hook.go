@@ -1336,7 +1336,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// must receive the same final verdict.
 		resp = finalization.Response
 		if preNoted && (!finalization.AuditPersisted || panicked || resp.Action == hookActionUnconfirmed) {
-			a.preToolDecisions.forget(preKey)
+			a.forgetPreToolDecision(ctx, preKey)
 		}
 		a.copilotPermission.record(persistCtx, req, finalization.AuditPersisted && !panicked && resp.Action == "allow")
 		if delivery == nil && !finalization.AuditPersisted {
