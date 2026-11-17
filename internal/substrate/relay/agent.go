@@ -16,12 +16,13 @@ import (
 // survives every attachment, suspend and resume, and the relay reads the
 // agent's exit status from wait.
 //
-// There is no multiplexer socket (no tmux): the agent runs as the same user
-// as the relay, and anything the relay listened on the agent could connect to
-// and type into the person's terminal, answering its own permission prompts
-// (substrate-1 GAP-0048). The PTY master is a close-on-exec descriptor of a
-// process the agent cannot read or trace (the relay makes itself
-// non-dumpable, harden_linux.go).
+// There is no multiplexer socket (no tmux): anything the relay listened on
+// the agent could connect to and type into the person's terminal, answering
+// its own permission prompts (substrate-1 GAP-0048). The PTY master is a
+// close-on-exec descriptor of a process the agent cannot read or trace: the
+// relay makes itself non-dumpable (harden_linux.go) and, in an image of
+// 1.0.10 or later, runs as root while the agent runs as its own user
+// (separate_linux.go).
 type Agent struct {
 	Argv []string
 	Dir  string
@@ -30,6 +31,9 @@ type Agent struct {
 	// own output (the E9 warning of an agent that signs in to a vendor
 	// account).
 	Banner string
+	// sep runs the agent as its own user (GAP-0116); nil runs it as the
+	// relay's user.
+	sep *separation
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -90,6 +94,7 @@ func (a *Agent) start(cols, rows uint16) error {
 	cmd := exec.Command(a.Argv[0], a.Argv[1:]...)
 	cmd.Dir = a.Dir
 	cmd.Env = append(append([]string{}, a.Env...), "TERM=xterm-256color")
+	a.sep.asAgent(cmd)
 	p, err := startPTY(cmd, cols, rows)
 	if err != nil {
 		a.lastErr = err
@@ -220,6 +225,45 @@ func (t *Attachment) Resize(cols, rows uint16) {
 		_ = setSize(t.agent.pty, cols, rows)
 		t.agent.cols, t.agent.rows = cols, rows
 	}
+}
+
+// Stop shows why to every attachment, ends the agent's process group and
+// closes every attachment: a process that survives in a group of its own
+// (the caller stops those, stopActorProcesses) must not keep a terminal
+// that still answers (GAP-0358). The relay's guard calls it (GAP-0120).
+func (a *Agent) Stop(why string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.running || a.cmd == nil {
+		return
+	}
+	line := []byte("\r\n\x1b[31mdefenseclaw: " + why + "\x1b[0m\r\n")
+	a.scroll = append(a.scroll, line...)
+	code := 128 + 9
+	for id, s := range a.subs {
+		select {
+		case s.ch <- event{data: line}:
+		default:
+		}
+		select {
+		case s.ch <- event{exit: &code}:
+		default:
+		}
+		close(s.ch)
+		s.closed = true
+		delete(a.subs, id)
+	}
+	_ = killProcessGroup(a.cmd)
+}
+
+// pid is the running agent's process ID, 0 when it does not run.
+func (a *Agent) pid() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.running || a.cmd == nil || a.cmd.Process == nil {
+		return 0
+	}
+	return a.cmd.Process.Pid
 }
 
 // Close detaches; the agent keeps running.

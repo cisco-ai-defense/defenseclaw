@@ -551,7 +551,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
-					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks)}
+					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks),
+					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor())}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -885,6 +886,24 @@ func substrateActorKeysCheck(ctx context.Context, ks *identity.KeySet) gateway.S
 	}
 	return gateway.SubstrateCheck{ID: id, Status: "pass",
 		Detail: fmt.Sprintf("the keys URL answers (%d keys) and Substrate's issuer matches substrate.identity.issuer", n)}
+}
+
+// substrateTemplateAllowlistCheck names every template the actor allowlist of
+// 1.0.10 refuses (GAP-0354, GAP-0355): after an upgrade its new actors are
+// refused, while running ones keep running with a warning in 1.0.10.
+func substrateTemplateAllowlistCheck(ctx context.Context, ate ateapi.Client, a controller.Attestor) gateway.SubstrateCheck {
+	ts, err := controller.TemplatesFailingAllowlist(ctx, ate, a)
+	status, detail, fix := controller.AllowlistCheck(ts, err)
+	return gateway.SubstrateCheck{ID: controller.AllowlistCheckID, Status: status, Detail: detail, Fix: fix}
+}
+
+// substrateRelaySeparationCheck names every template whose relay runs as
+// the agent's own user (GAP-0372): images built before 1.0.10 are admitted,
+// but the agent can stop their relay until they are rebuilt.
+func substrateRelaySeparationCheck(ctx context.Context, ate ateapi.Client, a controller.Attestor) gateway.SubstrateCheck {
+	ts, err := controller.UnseparatedTemplates(ctx, ate, a)
+	status, detail, fix := controller.SeparationCheck(ts, err)
+	return gateway.SubstrateCheck{ID: controller.SeparationCheckID, Status: status, Detail: detail, Fix: fix}
 }
 
 // substrateInfo is the admin listener's unauthenticated sign-in

@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // AdmissionFunc decides a scan result with the existing admission rules
@@ -354,7 +355,11 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	if note := personalSkillsPluginNote(claudePlugins, workdir); note != "" {
 		sum.Notes = append(sum.Notes, note)
 	}
-	rep.Hooks = checkHooks(fsys, env, user, o)
+	entrypoint, _, err := cfg.Argv()
+	if err != nil {
+		return nil, err
+	}
+	rep.Hooks = checkHooks(fsys, env, user, entrypoint, o)
 	sum.Verdict = worse(sum.Verdict, VerdictClean)
 	for _, a := range o.AcceptFindings {
 		items := lifted[a.RuleID]
@@ -673,15 +678,35 @@ func serverTools(fsys *ImageFS, s MCPServer) ([]ToolDef, string) {
 }
 
 // checkHooks verifies ownership of the expected files and the switches.
-func checkHooks(fsys *ImageFS, env map[string]string, user string, o ScanOptions) HookChecks {
-	hc := HookChecks{RootOwned: true, PhoneHomeOff: true, EnvClean: true}
-	for k := range env {
-		if unsafeEnv[strings.ToUpper(k)] {
-			hc.EnvClean = false
-			hc.UnsafeEnv = append(hc.UnsafeEnv, k)
-		}
+// envCheck is the image environment check of a build (CheckEnv; a test
+// swaps it for the check of an older build).
+var envCheck = CheckEnv
+
+// relayAgentUser is the non-root relay.agent_user of the image's kit
+// configuration when the entrypoint is the relay, else "".
+func relayAgentUser(fsys *ImageFS, entrypoint []string) string {
+	if len(entrypoint) == 0 || entrypoint[0] != kit.RelayBinary {
+		return ""
 	}
-	sort.Strings(hc.UnsafeEnv)
+	data, err := fsys.Read(kit.ConfigPath)
+	if err != nil {
+		return ""
+	}
+	var cfg kit.Config
+	if json.Unmarshal(data, &cfg) != nil {
+		return ""
+	}
+	if _, _, ok, err := cfg.Relay.AgentIDs(); !ok || err != nil {
+		return ""
+	}
+	return cfg.Relay.AgentUser
+}
+
+func checkHooks(fsys *ImageFS, env map[string]string, user string, entrypoint []string, o ScanOptions) HookChecks {
+	hc := HookChecks{RootOwned: true, PhoneHomeOff: true, EnvClean: true}
+	if bad := envCheck(env); len(bad) > 0 {
+		hc.EnvClean, hc.UnsafeEnv = false, EnvRefusalNames(bad)
+	}
 	for _, ef := range o.Expected {
 		hf := HookFile{Path: ef.Path}
 		e, ok := fsys.Lookup(ef.Path)
@@ -712,12 +737,19 @@ func checkHooks(fsys *ImageFS, env map[string]string, user string, o ScanOptions
 		}
 		hc.Files = append(hc.Files, hf)
 	}
-	// The agent must not run as root.
+	// The agent must not run as root. A kit image of 1.0.10 or later runs
+	// the relay as root, and the relay starts the agent as the kit
+	// configuration's relay.agent_user (GAP-0116): root is accepted only
+	// with the relay as the entrypoint and a non-root agent user.
 	u := strings.TrimSpace(user)
 	uf := HookFile{Path: "(image USER)", Mode: "-"}
 	switch {
 	case u == "" || u == "0" || u == "root" || strings.HasPrefix(u, "0:") || strings.HasPrefix(u, "root:"):
-		uf.Note = "the image runs as root; set a non-root USER"
+		if agent := relayAgentUser(fsys, entrypoint); agent != "" {
+			uf.OK, uf.Note = true, "root runs the relay only; the relay starts the agent as "+agent
+		} else {
+			uf.Note = "the image runs as root; set a non-root USER (or, in a kit image, the relay entrypoint with relay.agent_user)"
+		}
 	default:
 		uf.OK = true
 	}
@@ -725,6 +757,14 @@ func checkHooks(fsys *ImageFS, env map[string]string, user string, o ScanOptions
 		hc.RootOwned = false
 	}
 	hc.Files = append(hc.Files, uf)
+	for _, sf := range codeLoadingSettings(fsys, env["HOME"]) {
+		hc.RootOwned = false
+		hc.Files = append(hc.Files, sf)
+	}
+	for _, lf := range linksIntoAttested(fsys, o.Expected, env["HOME"]) {
+		hc.RootOwned = false
+		hc.Files = append(hc.Files, lf)
+	}
 
 	keys := make([]string, 0, len(o.PhoneHome))
 	for k := range o.PhoneHome {
@@ -758,6 +798,54 @@ func checkHooks(fsys *ImageFS, env map[string]string, user string, o ScanOptions
 		}
 	}
 	return hc
+}
+
+// linksIntoAttested lists the symlinks of the image that lead into a path
+// the build attests (GAP-0439): the hook and settings files and the folders
+// that hold them (kit.ProtectedPaths). A volume mounted at such a link
+// lands on DefenseClaw's settings and hides them, and admission sees only
+// the mount path. A link to a regular file is left alone (a volume is a
+// folder and cannot be mounted on a file), and so is a link that is itself
+// inside an attested folder. Nothing is checked without expected files (a
+// scan of a plain base image).
+func linksIntoAttested(fsys *ImageFS, expected []ExpectedFile, home string) []HookFile {
+	if len(expected) == 0 {
+		return nil
+	}
+	files := make([]kit.ImageFile, 0, len(expected))
+	for _, ef := range expected {
+		files = append(files, kit.ImageFile{Path: ef.Path})
+	}
+	protected := kit.ProtectedPaths(files, home)
+	within := func(p string) string {
+		for _, a := range protected {
+			if p == a || strings.HasPrefix(p, a+"/") {
+				return a
+			}
+		}
+		return ""
+	}
+	var out []HookFile
+	for _, lp := range fsys.Paths() {
+		e := fsys.idx[lp]
+		if e == nil || !e.IsSymlink() || within(lp) != "" {
+			continue
+		}
+		real, ok := fsys.canon(lp, true)
+		if !ok {
+			continue
+		}
+		a := within(real)
+		if a == "" {
+			continue
+		}
+		if t, found := fsys.idx[real]; found && !t.IsDir() {
+			continue
+		}
+		out = append(out, HookFile{Path: lp, UID: e.UID, GID: e.GID, Mode: "-",
+			Note: "is a symlink into " + a + ", which DefenseClaw attests: a volume mounted at it would hide DefenseClaw's settings; remove the link from the image"})
+	}
+	return out
 }
 
 // badAncestor returns the first parent folder a non-root user can change.
@@ -959,11 +1047,3 @@ func sevRank(s scanner.Severity) int {
 
 // FloorNone turns the severity floor off.
 const FloorNone scanner.Severity = "none"
-
-// unsafeEnv are image environment variables that make every process load
-// code or settings the template did not scan.
-var unsafeEnv = map[string]bool{
-	"LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "LD_AUDIT": true, "NODE_OPTIONS": true, "BASH_ENV": true, "ENV": true,
-	"PYTHONSTARTUP": true, "PYTHONPATH": true, "PYTHONHOME": true, "RUBYOPT": true, "RUBYLIB": true, "PERL5OPT": true, "PERL5LIB": true,
-	"JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "JDK_JAVA_OPTIONS": true, "DOTNET_STARTUP_HOOKS": true, "GIT_CONFIG_GLOBAL": true,
-}

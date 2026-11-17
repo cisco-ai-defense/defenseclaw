@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // Rejection codes. They are stable: they go into template_unverified events
@@ -32,7 +34,7 @@ const (
 	CodeScanBlocked        = "scan_blocked"
 	CodeHooksNotRoot       = "hooks_not_root_owned"
 	CodePhoneHome          = "phone_home_enabled"
-	CodeEnvUnsafe          = "env_loads_code"
+	CodeEnvNotPermitted    = "env_not_permitted"
 	CodeDigestRevoked      = "digest_revoked"
 	CodeUnpinned           = "unpinned_reference"
 	CodeRegistry           = "registry_error"
@@ -47,6 +49,12 @@ type Rejection struct {
 	// Retryable is true when the cause may pass (the registry is down); the
 	// template is still not admitted meanwhile.
 	Retryable bool
+	// Allowlist marks a refusal by the actor environment and entrypoint
+	// allowlist that 1.0.10 added (GAP-0354, GAP-0355). Verify then also
+	// returns the Verified: the signature and every older rule passed, so
+	// the controller can keep an actor that was admitted before the upgrade
+	// running, with a warning, while it refuses new ones.
+	Allowlist bool
 }
 
 func (r *Rejection) Error() string { return r.Code + ": " + r.Detail }
@@ -75,6 +83,19 @@ type Verified struct {
 	KeyID     string
 	KeyName   string
 	CheckedAt time.Time
+	// Entrypoint, Cmd and Env are the image's ENTRYPOINT, CMD and
+	// environment. The image config is bound to the digest, so they are
+	// what was attested: an ActorTemplate container must run exactly that
+	// entrypoint and may set only allowlisted variables (GAP-0354).
+	Entrypoint, Cmd []string
+	Env             map[string]string
+	// Workdir is the image WORKDIR: the only place an ActorTemplate may
+	// mount a data volume (GAP-0368).
+	Workdir string
+	// User is the image USER: root only with the kit relay as the
+	// entrypoint, which then starts the agent as relay.agent_user (GAP-0116,
+	// GAP-0372).
+	User string
 	// ValidUntil is when the controller must verify again: a cached verdict
 	// never outlives it, so a revoked key or a raised policy generation reaches
 	// a template that was admitted earlier. A controller that polls less often
@@ -210,7 +231,12 @@ func (v *Verifier) Verify(ctx context.Context, image string) (*Verified, error) 
 		if pol.now().Sub(c.at) < ttl {
 			v.mu.Unlock()
 			if c.err != nil {
-				return nil, c.err
+				if c.v == nil {
+					return nil, c.err
+				}
+				cp := *c.v
+				cp.Image, cp.Pinned = image, ref.Digest != ""
+				return &cp, c.err
 			}
 			// The kit judgement is a function, so it is asked again; the copy
 			// names this reference, not the one that filled the cache.
@@ -265,8 +291,10 @@ func (v *Verifier) verify(ctx context.Context, pol Policy, ref Ref, digest strin
 	var last error
 	for _, env := range envs {
 		ok, err := v.check(ctx, pol, ref, digest, env)
-		if err == nil {
-			return ok, nil
+		if err == nil || ok != nil {
+			// ok with an error is an allowlist refusal of the image itself:
+			// another envelope cannot change it.
+			return ok, err
 		}
 		last = err
 	}
@@ -330,16 +358,35 @@ func (v *Verifier) check(ctx context.Context, pol Policy, ref Ref, digest string
 	}
 	if !p.Hooks.EnvClean {
 		if len(p.Hooks.UnsafeEnv) == 0 {
-			return nil, reject(CodeEnvUnsafe, "the attestation has no environment check (built before it existed); build the template again")
+			return nil, reject(CodeEnvNotPermitted, "the attestation has no environment check (built before it existed); build the template again")
 		}
-		return nil, reject(CodeEnvUnsafe, "the image environment sets variables that load code into every process: %s", strings.Join(p.Hooks.UnsafeEnv, ", "))
+		return nil, reject(CodeEnvNotPermitted, "the build refused the image environment: %s", strings.Join(p.Hooks.UnsafeEnv, ", "))
 	}
 	// The statement is about this digest; make sure the image it describes
 	// actually carries the kit layer it names, at the place it names.
-	if err := v.checkImage(ctx, ref, digest, p.Kit); err != nil {
+	img, err := v.checkImage(ctx, ref, digest, p.Kit)
+	if err != nil {
 		return nil, err
 	}
-	return &Verified{Digest: digest, Statement: st, KeyID: anchor.KeyID, KeyName: anchor.Name, CheckedAt: now, ValidUntil: now.Add(v.SuccessTTL)}, nil
+	out := &Verified{Digest: digest, Statement: st, KeyID: anchor.KeyID, KeyName: anchor.Name, CheckedAt: now, ValidUntil: now.Add(v.SuccessTTL),
+		Entrypoint: img.entrypoint, Cmd: img.cmd, Env: img.env, Workdir: img.workdir, User: img.user}
+	// The environment is checked again with this build's allowlist, so a
+	// template signed under the older deny list is refused when its image
+	// sets a variable the allowlist does not permit (GAP-0355); a clean
+	// image needs no rebuild.
+	if bad := CheckEnv(img.env); len(bad) > 0 {
+		r := reject(CodeEnvNotPermitted, "the image environment sets variables the actor environment allowlist does not permit: %s", FormatEnvRefusals(bad))
+		r.Allowlist = true
+		return out, r
+	}
+	return out, nil
+}
+
+// imageFacts are what checkImage read from the image config.
+type imageFacts struct {
+	entrypoint, cmd []string
+	env             map[string]string
+	workdir, user   string
 }
 
 func anchorID(a *Anchor) string {
@@ -349,27 +396,39 @@ func anchorID(a *Anchor) string {
 	return a.KeyID
 }
 
-func (v *Verifier) checkImage(ctx context.Context, ref Ref, digest string, kit KitInfo) error {
+func (v *Verifier) checkImage(ctx context.Context, ref Ref, digest string, kit KitInfo) (imageFacts, error) {
 	img, err := v.Registry.Image(ctx, ref.WithDigest(digest), DefaultPlatform)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return reject(CodeImageMismatch, "the image manifest is gone from the registry")
+			return imageFacts{}, reject(CodeImageMismatch, "the image manifest is gone from the registry")
 		}
-		return registryRejection("read the image", err)
+		return imageFacts{}, registryRejection("read the image", err)
 	}
 	if img.Digest != digest {
 		// The digest named an index; its attested platform image is another digest.
-		return reject(CodeImageMismatch, "the attested digest is an index, attest and use the platform manifest")
+		return imageFacts{}, reject(CodeImageMismatch, "the attested digest is an index, attest and use the platform manifest")
 	}
 	layers := img.Manifest.Layers
 	if kit.LayerIndex < 0 || kit.LayerIndex >= len(layers) || layers[kit.LayerIndex].Digest != kit.LayerDigest {
-		return reject(CodeImageMismatch, "the image has no layer %s at position %d", short(kit.LayerDigest), kit.LayerIndex)
+		return imageFacts{}, reject(CodeImageMismatch, "the image has no layer %s at position %d", short(kit.LayerDigest), kit.LayerIndex)
 	}
 	diffs, err := img.Config.DiffIDs()
 	if err != nil || kit.LayerIndex >= len(diffs) || diffs[kit.LayerIndex] != kit.LayerDiffID {
-		return reject(CodeImageMismatch, "the image config does not carry the attested kit layer")
+		return imageFacts{}, reject(CodeImageMismatch, "the image config does not carry the attested kit layer")
 	}
-	return nil
+	env, err := img.Config.EnvMap()
+	if err != nil {
+		return imageFacts{}, reject(CodeImageMismatch, "the image config environment cannot be read")
+	}
+	ep, cmd, err := img.Config.Argv()
+	if err != nil {
+		return imageFacts{}, reject(CodeImageMismatch, "the image config entrypoint cannot be read")
+	}
+	user, workdir, _, _, err := img.Config.Container()
+	if err != nil {
+		return imageFacts{}, reject(CodeImageMismatch, "the image config working directory cannot be read")
+	}
+	return imageFacts{entrypoint: ep, cmd: cmd, env: env, workdir: workdir, user: user}, nil
 }
 
 func short(d string) string {
@@ -390,3 +449,16 @@ func registryAllowed(host string, allowed []string) bool {
 
 // maxCacheEntries bounds the verdict cache.
 const maxCacheEntries = 4096
+
+// RelaySeparated reports whether the image's relay runs as root and starts
+// the agent as its own user (GAP-0116): the kit relay is the entrypoint and
+// the image USER is root, which template build admits only with
+// relay.agent_user set. A kit image built before 1.0.10 runs the relay as
+// the agent's user.
+func (v *Verified) RelaySeparated() bool {
+	if v == nil || len(v.Entrypoint) == 0 || v.Entrypoint[0] != kit.RelayBinary {
+		return false
+	}
+	u := strings.TrimSpace(v.User)
+	return u == "" || u == "0" || u == "root" || strings.HasPrefix(u, "0:") || strings.HasPrefix(u, "root:")
+}

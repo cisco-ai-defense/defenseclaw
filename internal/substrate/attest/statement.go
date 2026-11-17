@@ -117,8 +117,11 @@ type HookChecks struct {
 	// PhoneHomeOff is true when every per-connector phone-home and
 	// auto-update switch is set in the image environment.
 	PhoneHomeOff bool `json:"phoneHomeOff"`
-	// EnvClean is true when the image environment sets none of the variables
-	// that load code into every process (LD_PRELOAD, NODE_OPTIONS, BASH_ENV ...).
+	// EnvClean is true when every variable of the image environment is on
+	// the actor environment allowlist (CheckEnv); UnsafeEnv names those that
+	// are not. Statements of builds before 1.0.10 used a deny list of
+	// variables that load code; the verifier checks the image again with
+	// the allowlist.
 	EnvClean  bool          `json:"envClean"`
 	UnsafeEnv []string      `json:"unsafeEnv,omitempty"`
 	Switches  []SwitchCheck `json:"switches,omitempty"`

@@ -105,6 +105,10 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 		}
 	}
 	cfg.KitVersion = o.KitVersion
+	// The relay runs as root and starts the agent as the image user, so
+	// the agent cannot signal or trace it (GAP-0116; gVisor delivers
+	// SIGKILL to an actor's PID 1 from inside).
+	cfg.Relay.AgentUser = fmt.Sprintf("%d:%d", o.UID, o.GID)
 	if o.RelayListen != "" {
 		cfg.Relay.Listen = o.RelayListen
 	}
@@ -162,7 +166,7 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 
 	spec := attest.KitSpec{
 		Version: o.KitVersion, HookContract: ov.HookContract, Remove: ov.Remove, Env: ov.Env,
-		User: fmt.Sprintf("%d:%d", o.UID, o.GID), Workdir: Workdir,
+		User: "0:0", AgentUser: cfg.Relay.AgentUser, Workdir: Workdir,
 		Entrypoint: []string{kit.RelayBinary, "serve"},
 		HomeOwners: map[string][2]int{Home: {o.UID, o.GID}},
 		UserFiles:  map[string]bool{},

@@ -52,6 +52,7 @@ type rig struct {
 	verified  int
 	image     string // what the stubbed publish returns
 	pubErr    error
+	separated bool // what the stubbed relaySeparated answers
 }
 
 // newRig stubs the publish, verify and dial steps. The fake has the atespace
@@ -60,8 +61,11 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	r := &rig{fake: ateapifake.New(), image: imageOf('a')}
 	r.fake.PutAtespace("team")
-	oldPub, oldVer, oldDial, oldBackoff := publishImage, verifyImage, dialAPI, apiBackoff
-	t.Cleanup(func() { publishImage, verifyImage, dialAPI, apiBackoff = oldPub, oldVer, oldDial, oldBackoff })
+	oldPub, oldVer, oldDial, oldBackoff, oldSep := publishImage, verifyImage, dialAPI, apiBackoff, relaySeparated
+	t.Cleanup(func() {
+		publishImage, verifyImage, dialAPI, apiBackoff, relaySeparated = oldPub, oldVer, oldDial, oldBackoff, oldSep
+	})
+	relaySeparated = func(context.Context, *attest.Verifier, string) bool { return r.separated }
 	apiBackoff = 0
 	publishImage = func(context.Context, attest.PublishOptions) (string, error) {
 		r.published++
@@ -422,7 +426,7 @@ func TestPublishTemplateFlagsAreChecked(t *testing.T) {
 		{"bad memory", []string{"--template", "team/kit", "--memory", "-1"}, "--memory"},
 		{"workdir", []string{"--template", "team/kit", "--workdir", "/srv"}, "no working-directory field"},
 		{"env without equals", []string{"--template", "team/kit", "--env", "LANG"}, "K=V"},
-		{"env twice", []string{"--template", "team/kit", "--env", "A=1", "--env", "A=2"}, "twice"},
+		{"env twice", []string{"--template", "team/kit", "--env", "LANG=C", "--env", "LANG=C.UTF-8"}, "twice"},
 		{"secret env", []string{"--template", "team/kit", "--env", "API_TOKEN=abc123"}, "looks like a credential"},
 		{"bad auth", []string{"--template", "team/kit", "--api-auth", "basic"}, "serviceaccount or mtls"},
 		{"flag without template", []string{"--cpu", "2"}, "only applies with --template"},

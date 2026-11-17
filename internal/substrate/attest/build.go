@@ -27,7 +27,11 @@ type KitSpec struct {
 	// Env is set on the image (existing keys are replaced).
 	Env map[string]string
 	// User, Workdir and Entrypoint, when set, replace the base's.
-	User       string
+	User string
+	// AgentUser is the UID:GID the relay starts the agent as when User is
+	// root (kit images of 1.0.10 and later, GAP-0116); an image that keeps
+	// its base entrypoint runs as AgentUser itself.
+	AgentUser  string
 	Workdir    string
 	Entrypoint []string
 	Cmd        []string
