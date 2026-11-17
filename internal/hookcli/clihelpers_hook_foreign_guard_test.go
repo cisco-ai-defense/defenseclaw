@@ -52,9 +52,15 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	// where its tree has no .git: the native Windows gate runs a copied
 	// binary under the account profile, and the walk reached that
 	// account's real .cursor\hooks.json (INT row
-	// TestOutageTableManagedOpenMatchesAFullManagedCall). The fixture runs
-	// in its own project.
-	t.Chdir(fixture.project)
+	// TestOutageTableManagedOpenMatchesAFullManagedCall). The process runs
+	// in an empty repository of its own beside the project, so the fixture
+	// project is reached only through the payload's working directory, as
+	// when the hook runs outside the workspace.
+	elsewhere := filepath.Join(fixture.home, "elsewhere")
+	if err := os.MkdirAll(filepath.Join(elsewhere, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(elsewhere)
 	fixture.summary = &enterprisepolicy.PublicPolicy{
 		SchemaVersion: 1,
 		HookBinary:    foreignGuardHookBinary,
