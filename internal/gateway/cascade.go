@@ -354,8 +354,9 @@ func cascadeUninspected(v *ToolInspectVerdict) bool {
 // uninspected call (cascadeUninspected, or a policy input whose findings
 // were capped) ends at least at unknownAction, whatever policy.lowest says:
 // the ONE BOUND RULE floor, the same on every surface. provenBlock (an
-// uninspected input whose read part already proved a block) keeps the
-// block: what was seen before the cap still decides (GAP-0579). A proven
+// uninspected input whose read part already proved a block, or a block
+// whose findings the policy input capped) keeps the block: what was seen
+// before the cap still decides (GAP-0579, rel-1-0-10:GAP-0713). A proven
 // CRITICAL ends at least at admin.critical_floor.
 func cascadeFinalAction(before string, flagged, provenCritical, uninspected, provenBlock bool, decisions []policy.CascadeDecision, evalErr error,
 	unknownAction string, e config.EffectiveCascade,
@@ -490,7 +491,24 @@ func cascadeInputProvenBlock(input map[string]any) bool {
 // cascadeProvenBlock reports an uninspected verdict whose block the content
 // that was read proved, not the uninspected marker (uninspectedRaised).
 func cascadeProvenBlock(v *ToolInspectVerdict) bool {
-	return v != nil && !v.uninspectedRaised && cascadeRank(v.Action) >= cascadeRank(config.CascadeBlock) && cascadeUninspected(v)
+	return cascadeReadBlock(v) && cascadeUninspected(v)
+}
+
+// cascadeInputProvenBlockOf is truncated.proven_block of a policy input
+// built from v: an uninspected verdict whose read part proved a block
+// (cascadeProvenBlock), or a block whose findings the input capped
+// (capped). The verdict read the call in full and proved the block; the
+// policy saw only the first maxCascadeInputFindings of its findings, so it
+// cannot lower that block (rel-1-0-10:GAP-0713: a block with 65 findings
+// and a low policy.lowest ended at the unknown tier).
+func cascadeInputProvenBlockOf(v *ToolInspectVerdict, capped bool) bool {
+	return cascadeReadBlock(v) && (capped || cascadeUninspected(v))
+}
+
+// cascadeReadBlock reports a block the call's layers proved, not one the
+// uninspected marker raised (uninspectedRaised).
+func cascadeReadBlock(v *ToolInspectVerdict) bool {
+	return v != nil && !v.uninspectedRaised && cascadeRank(v.Action) >= cascadeRank(config.CascadeBlock)
 }
 
 // applyCascadeOutcome writes the final step's outcome onto v.
@@ -631,7 +649,7 @@ func (a *APIServer) cascadePolicyInput(ctx context.Context, cfg *config.Config, 
 		"subject":        subject,
 		"findings":       findings,
 		"flagged":        flagged,
-		"truncated":      map[string]any{"any": limitHit || truncated, "input_findings_capped": truncated, "uninspected": cascadeUninspected(v), "proven_block": cascadeProvenBlock(v)},
+		"truncated":      map[string]any{"any": limitHit || truncated, "input_findings_capped": truncated, "uninspected": cascadeUninspected(v), "proven_block": cascadeInputProvenBlockOf(v, truncated)},
 		"layers":         layers,
 		"cascade_action": normalizedGuardrailAction(v.Action),
 		"unknown_action": unknownAction,
