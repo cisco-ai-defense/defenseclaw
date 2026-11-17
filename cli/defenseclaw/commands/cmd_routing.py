@@ -1577,6 +1577,12 @@ def routing_setup(
     }
     if routes:
         changes["routing.signals"], changes["routing.decisions"] = _route_rules(routing, routes)
+        if classifier == "systemone":
+            # System One picks one of routing.categories and never reads the
+            # keyword decisions: without the map every request falls back with
+            # configuration_failure (rel-1-0-10:GAP-1098).
+            existing = routing.get("categories")
+            changes["routing.categories"] = {**(existing if isinstance(existing, dict) else {}), **routes}
     if not _write(app, changes):
         click.echo("Routing already has these settings.")
     if classifier == "rules" and not (routes or _dicts(routing.get("decisions"))):

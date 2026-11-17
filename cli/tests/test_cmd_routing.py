@@ -298,6 +298,27 @@ def test_setup_adds_models_without_prompting(home: Path, monkeypatch) -> None:
     assert run("setup", "--yes", "--model", "bad").exit_code == 2
 
 
+def test_setup_route_with_systemone_writes_routing_categories(home: Path) -> None:
+    """GAP-1098: System One reads routing.categories, not the keyword decisions, so
+    the remedy doctor names (setup --classifier systemone --route coding=ALIAS) must fill it."""
+    result = run("setup", "--yes", "--classifier", "systemone", "--route", "coding=fast", "--route", "summarize=local")
+    assert result.exit_code == 0, result.output
+    routing = written(home)["routing"]
+    assert routing["categories"] == {"coding": "fast", "summarize": "local"}
+    assert {d["name"] for d in routing["decisions"]} == {"coding", "summarize"}
+    # A later run re-points one category and keeps the others the user set.
+    (home / "config.yaml").write_text(
+        (home / "config.yaml").read_text().replace("  categories:", "  categories:\n    reasoning: fast", 1)
+    )
+    assert run("setup", "--yes", "--classifier", "systemone", "--route", "coding=local").exit_code == 0
+    assert written(home)["routing"]["categories"] == {"reasoning": "fast", "coding": "local", "summarize": "local"}
+
+
+def test_setup_route_with_rules_leaves_routing_categories_alone(home: Path) -> None:
+    assert run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast").exit_code == 0
+    assert "categories" not in written(home)["routing"]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="chmod 0 does not take read access away on Windows")
 def test_managed_unreadable_config_says_so(home: Path, monkeypatch) -> None:
     monkeypatch.setattr(cmd_routing.config_writer, "machine_managed_standalone", lambda: True)
