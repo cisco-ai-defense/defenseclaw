@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0293: an unknown shell startup (BASH_ENV, ENV, an exported bash
@@ -28,9 +30,7 @@ func TestGAP0293StartupUnknownOnlyRemovesAllowProofs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("# decoy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "keylink"))
 	startup := filepath.Join(root, "startup.sh")
 	if err := os.WriteFile(startup, []byte(":\n"), 0o600); err != nil {
 		t.Fatal(err)

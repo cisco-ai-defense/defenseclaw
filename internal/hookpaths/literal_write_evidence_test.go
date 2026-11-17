@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR104LiteralWriterOperands(t *testing.T) {
@@ -121,12 +123,8 @@ func TestR104ClientProofForProtectedAlias(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, protected, filepath.Join(cwd, "alias"))
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink"))
 	if err := os.WriteFile(filepath.Join(cwd, "do.sh"), []byte("echo marker >> alias\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -218,9 +216,7 @@ func TestR104IndirectFileReadStaysWithinProject(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(parent, "outside.sh"), []byte("echo marker >> alias\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(parent, "outside.sh"), filepath.Join(cwd, "outside-link.sh")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(parent, "outside.sh"), filepath.Join(cwd, "outside-link.sh"))
 	for _, name := range []string{"../outside.sh", "outside-link.sh"} {
 		if content, ok := readIndirectSource(name, cwd); ok || content != "" {
 			t.Fatalf("external source %q was read", name)
@@ -238,9 +234,7 @@ func TestR104IndirectFileReadStaysWithinProject(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, "sub", "actual.sh"), []byte("echo nested\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("sub", "nested"), filepath.Join(cwd, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join("sub", "nested"), filepath.Join(cwd, "dirlink"))
 	if content, ok := readIndirectSource("dirlink/../actual.sh", cwd); !ok || content != "echo nested\n" {
 		t.Fatalf("linked directory source read = %q, known=%v", content, ok)
 	}
@@ -255,9 +249,7 @@ func TestR104DirectoryExecutionOperands(t *testing.T) {
 	if err := os.Mkdir(project, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink"))
 	want := filepath.Join(home, ".ssh", "authorized_keys")
 	for _, tc := range []struct{ name, command string }{
 		{"called function", `cd dirlink && f() { echo marker >> authorized_keys; }; f`},
@@ -313,12 +305,8 @@ func TestInterpreterLiteralWritesThroughLinksReachTheKeysFile(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, protected, filepath.Join(cwd, "disklink"))
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "dirlink"))
 	t.Setenv("HOME", home)
 	targets := func(t *testing.T, command string) []string {
 		t.Helper()

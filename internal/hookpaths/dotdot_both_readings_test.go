@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A dot-dot step after a link has two readings on Windows: Win32 removes the
@@ -45,9 +47,7 @@ func TestDotDotAfterALinkIsOrdinaryOnlyWhenEveryReadingIs(t *testing.T) {
 				if err := os.WriteFile(protected, []byte("protected"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(filepath.Join(other, "child"), filepath.Join(project, "jump")); err != nil {
-					t.Fatal(err)
-				}
+				testenv.SymlinkOrSkip(t, filepath.Join(other, "child"), filepath.Join(project, "jump"))
 				entry := func(path string, protectedEntry bool) {
 					t.Helper()
 					var err error

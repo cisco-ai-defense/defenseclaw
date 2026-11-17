@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-1445: a wildcard in any path component is expanded as the shell does,
@@ -30,9 +32,7 @@ func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
 		filepath.Join(cwd, "keydir"):       ssh,
 		filepath.Join(cwd, "sub", "inner"): ssh,
 	} {
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, target, link)
 	}
 	for _, command := range []string{
 		`cp payload keyd*/authorized_keys`,

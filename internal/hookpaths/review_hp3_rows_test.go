@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestReviewHP3WindowsReadings holds the independent review rows of
@@ -135,9 +136,7 @@ func TestReviewHP3PosixRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, target := range map[string]string{"keylink": "../.ssh/authorized_keys", "sshlink": "../.ssh"} {
-		if err := os.Symlink(target, filepath.Join(project, name)); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, target, filepath.Join(project, name))
 	}
 	if err := os.WriteFile(filepath.Join(project, "a.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)

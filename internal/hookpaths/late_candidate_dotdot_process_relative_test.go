@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestLateCandidateDotDotThroughProcessRelativeLinkStaysUnproved(t *testing.T) {
@@ -33,13 +35,9 @@ func TestLateCandidateDotDotThroughProcessRelativeLinkStaysUnproved(t *testing.T
 		t.Fatal(err)
 	}
 	for _, path := range []string{filepath.Join(root, "agent", "status"), filepath.Join(project, "status")} {
-		if err := os.Symlink(protected, path); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, protected, path)
 	}
-	if err := os.Symlink("/proc/thread-self/cwd", filepath.Join(project, "jump")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, "/proc/thread-self/cwd", filepath.Join(project, "jump"))
 	target := filepath.Join(project, "jump") + "/../status"
 	t.Chdir(hookCWD)
 	if data, err := os.ReadFile(target); err != nil || string(data) != "ordinary" {
@@ -127,12 +125,8 @@ func TestLateCandidateDotDotRelativeAndNestedLinks(t *testing.T) {
 			if err := os.WriteFile(protected, []byte("protected"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink("../other/child", filepath.Join(project, "jump")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("jump", filepath.Join(project, "chain")); err != nil {
-				t.Fatal(err)
-			}
+			testenv.SymlinkOrSkip(t, "../other/child", filepath.Join(project, "jump"))
+			testenv.SymlinkOrSkip(t, "jump", filepath.Join(project, "chain"))
 			ordinary := func(path string) {
 				t.Helper()
 				if err := os.WriteFile(path, []byte("ordinary"), 0600); err != nil {
@@ -141,9 +135,7 @@ func TestLateCandidateDotDotRelativeAndNestedLinks(t *testing.T) {
 			}
 			link := func(path string) {
 				t.Helper()
-				if err := os.Symlink(protected, path); err != nil {
-					t.Fatal(err)
-				}
+				testenv.SymlinkOrSkip(t, protected, path)
 			}
 			if protectedPhysical {
 				ordinary(filepath.Join(project, "status"))
@@ -228,9 +220,7 @@ func TestLateCandidateDotDotFinalProtectedLinkStaysNamed(t *testing.T) {
 	if err := os.WriteFile(ordinary, []byte("ordinary"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(ordinary, filepath.Join(ssh, "authorized_keys")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, ordinary, filepath.Join(ssh, "authorized_keys"))
 	for _, path := range []string{
 		filepath.Join(ssh, "authorized_keys"),
 		ssh + "/plain/../authorized_keys",

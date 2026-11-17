@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A ".." step in an operand goes to the parent of the physical folder in front
@@ -46,9 +48,7 @@ func TestLateOrdinaryCallStepsThroughParentFolders(t *testing.T) {
 	if err := os.Symlink(linkedChild, jump); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if err := os.Symlink(keys, filepath.Join(plain, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, keys, filepath.Join(plain, "keylink"))
 	if err := os.Link(keys, filepath.Join(plain, "hardlink")); err != nil {
 		t.Skipf("hard link unavailable: %v", err)
 	}

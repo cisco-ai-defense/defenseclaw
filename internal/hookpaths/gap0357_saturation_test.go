@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A later gateway layer may also identify these writes. Check the bounded
@@ -30,9 +32,7 @@ func TestGAP0357SaturationInvalidation(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, "names.txt"), []byte("keylink\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(cwd, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, "../.ssh/authorized_keys", filepath.Join(cwd, "keylink"))
 	var capSteps strings.Builder
 	for i := 1; i <= 5; i++ {
 		fmt.Fprintf(&capSteps, "if [ -n \"$A%d\" ]; then a%d=1; fi; ", i, i)

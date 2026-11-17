@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // r104Loop3CDPathHome builds a home whose project has sub and sub/deeper, and
@@ -34,9 +36,7 @@ func r104Loop3CDPathHome(t *testing.T) (home, cwd string) {
 		filepath.Join(home, "elsewhere", "sub", "out.txt"):           "../../.ssh/authorized_keys",
 		filepath.Join(home, "elsewhere", "sub", "deeper", "out.txt"): "../../../.ssh/authorized_keys",
 	} {
-		if err := os.Symlink(target, name); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, target, name)
 	}
 	t.Setenv("HOME", home)
 	return home, cwd

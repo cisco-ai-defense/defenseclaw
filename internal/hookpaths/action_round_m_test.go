@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // Round m (1b7708e7 review): every documented wrapper (sudo, doas, env,
@@ -122,9 +124,7 @@ func TestR104GlobAliasBehindHiddenHome(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(ssh, "authorized_keys"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(ssh, filepath.Join(cwd, "keydir")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, ssh, filepath.Join(cwd, "keydir"))
 	blocked := []string{
 		`cp payload keyd*/authorized_keys`,
 		`cat payload >> keyd*/authorized_keys`,

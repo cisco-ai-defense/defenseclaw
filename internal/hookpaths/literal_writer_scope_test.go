@@ -10,6 +10,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A literal interpreter write in a function body runs where the function is
@@ -28,9 +30,7 @@ func TestR104CalledFunctionLiteralWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(cwd, "alias")
-	if err := os.Symlink(protected, alias); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, protected, alias)
 	t.Setenv("HOME", home)
 	called := []string{
 		`f() { python3 -c 'open("alias","a").write("marker")'; }; f`,

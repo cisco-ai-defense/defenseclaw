@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR103B07RelativeLinkThroughLinkedDirectory(t *testing.T) {
@@ -35,16 +37,12 @@ func TestR103B07RelativeLinkThroughLinkedDirectory(t *testing.T) {
 			link := filepath.Join(c, "l2")
 			_ = os.Remove(folder)
 			_ = os.Remove(link)
-			if err := os.Symlink(tc.folder, folder); err != nil {
-				t.Fatal(err)
-			}
+			testenv.SymlinkOrSkip(t, tc.folder, folder)
 			leaf := "ok.txt"
 			if tc.id == "GAP-1556" {
 				leaf = "authorized_keys"
 			}
-			if err := os.Symlink("b2/../"+leaf, link); err != nil {
-				t.Fatal(err)
-			}
+			testenv.SymlinkOrSkip(t, "b2/../"+leaf, link)
 			got, ok := ResolveWriteTarget(link)
 			if !ok || got != tc.want {
 				t.Fatalf("target=%q ok=%v, want %q", got, ok, tc.want)

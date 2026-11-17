@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // r104ReviewProtectedWrite runs the protected-file proof the way a per-user
@@ -63,9 +64,7 @@ func r104ReviewHome(t *testing.T) (home, cwd string) {
 	if err := os.WriteFile(protected, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, protected, filepath.Join(cwd, "alias"))
 	t.Setenv("HOME", home)
 	return home, cwd
 }

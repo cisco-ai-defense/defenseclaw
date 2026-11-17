@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // gap0298Allowed make or tighten the user's own .ssh folder; gap0298Blocked
@@ -64,12 +65,8 @@ func TestSSHFolderSetupIsNotAKeysWrite(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink("../.ssh", filepath.Join(project, "sshlink")); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "keylink")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, "../.ssh", filepath.Join(project, "sshlink"))
+		testenv.SymlinkOrSkip(t, "../.ssh/authorized_keys", filepath.Join(project, "keylink"))
 		for _, command := range []string{"chmod 700 sshlink", "mkdir -p sshlink"} {
 			if got := ActionCommandDecision(command, project, home); got != "" {
 				t.Errorf("%q = %q, want allow", command, got)

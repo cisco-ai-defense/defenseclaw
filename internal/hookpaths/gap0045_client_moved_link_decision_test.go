@@ -5,10 +5,11 @@ package hookpaths
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestR106ClientDecisionFollowsMovedDiskLink (rel-1-0-6:GAP-0045): the hook
@@ -22,9 +23,7 @@ func TestR106ClientDecisionFollowsMovedDiskLink(t *testing.T) {
 		t.Skip("POSIX home")
 	}
 	_, home, project := r106KeysHome(t)
-	if err := os.Symlink("notes.txt", filepath.Join(project, "readlink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, "notes.txt", filepath.Join(project, "readlink"))
 	t.Setenv("HOME", home)
 	for command, want := range map[string]bool{
 		`mv keylink k2; echo x >> k2`:                               true,

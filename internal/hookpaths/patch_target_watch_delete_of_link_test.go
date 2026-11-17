@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A Delete File of a link removes the link, so the hook attests the entry (its
@@ -47,13 +49,9 @@ func TestPatchTargetWatchDeleteOfLinkIsReadAsTheEntry(t *testing.T) {
 			"lnk-notes": filepath.Join(project, "notes.txt"),
 			"lnk-ssh":   filepath.Join(home, ".ssh", "authorized_keys"),
 		} {
-			if err := os.Symlink(target, filepath.Join(project, name)); err != nil {
-				t.Fatal(err)
-			}
+			testenv.SymlinkOrSkip(t, target, filepath.Join(project, name))
 		}
-		if err := os.Symlink(home, filepath.Join(project, "lnk-home")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, home, filepath.Join(project, "lnk-home"))
 		return home, project
 	}
 
@@ -112,9 +110,7 @@ func TestPatchTargetWatchDeleteOfLinkIsReadAsTheEntry(t *testing.T) {
 		if err := os.RemoveAll(filepath.Join(project, "sub")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(home, filepath.Join(project, "sub")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, home, filepath.Join(project, "sub"))
 		if !watch.Changed() {
 			t.Error("the directory led to the home since the reading, and the delete read as unchanged")
 		}

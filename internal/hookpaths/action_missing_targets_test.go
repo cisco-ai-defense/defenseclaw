@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestLargeTouchRangeChecksPresentLinksAndProtectedNames(t *testing.T) {
@@ -36,9 +38,7 @@ func TestLargeTouchRangeChecksPresentLinksAndProtectedNames(t *testing.T) {
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			if row.name == "linked-member" {
-				if err := os.Symlink(keys, filepath.Join(cwd, "173")); err != nil {
-					t.Fatal(err)
-				}
+				testenv.SymlinkOrSkip(t, keys, filepath.Join(cwd, "173"))
 				t.Cleanup(func() { _ = os.Remove(filepath.Join(cwd, "173")) })
 			}
 			if row.name == "placed-linked-member" {
@@ -46,9 +46,7 @@ func TestLargeTouchRangeChecksPresentLinksAndProtectedNames(t *testing.T) {
 				if err := os.Mkdir(nested, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(keys, filepath.Join(nested, "173")); err != nil {
-					t.Fatal(err)
-				}
+				testenv.SymlinkOrSkip(t, keys, filepath.Join(nested, "173"))
 			}
 			got := ActionCommandDecision(row.command, cwd, home) == "protected-target"
 			if got != row.block {

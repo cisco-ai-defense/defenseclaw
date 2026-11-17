@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A typed apply_patch Delete File removes the final name: the client lists the
@@ -31,12 +33,8 @@ func TestPatchDeleteListsTheEntryItRemoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	directoryLink, finalLink := filepath.Join(project, "homelink"), filepath.Join(project, "finalnet")
-	if err := os.Symlink(home, directoryLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(secret, finalLink); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, home, directoryLink)
+	testenv.SymlinkOrSkip(t, secret, finalLink)
 	t.Setenv("HOME", home)
 	patch := func(directive, file string) map[string]string {
 		body := ""
@@ -79,12 +77,8 @@ func TestShellPatchDeleteListsTheEntryItRemoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	directoryLink, finalLink := filepath.Join(project, "homelink"), filepath.Join(project, "finalnet")
-	if err := os.Symlink(home, directoryLink); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(secret, finalLink); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, home, directoryLink)
+	testenv.SymlinkOrSkip(t, secret, finalLink)
 	t.Setenv("HOME", home)
 	shellPatch := func(directive, file string) map[string]string {
 		body := ""

@@ -9,14 +9,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR103B36ReviewRealClientCopyFact(t *testing.T) {
 	project := t.TempDir()
 	t.Setenv("HOME", project)
-	if err := os.Symlink("source-target", filepath.Join(project, "source")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, "source-target", filepath.Join(project, "source"))
 	if err := os.WriteFile(filepath.Join(project, "ordinary"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -91,9 +91,7 @@ func TestR103B36ReviewFactOnlyReplacesIncompleteWalk(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(hidden, "alias")
-	if err := os.Symlink("scope", alias); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, "scope", alias)
 	target := filepath.Join(alias, "n")
 	links := shellLinks{opaque: true, opaqueScopes: []opaqueScope{{path: scope}}}
 	forged := map[string]string{OpaqueScopeFactPrefix + target: "0"}

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-1780 / review round 2 R2-2: the key-read glob proof (GAP-0974) was a
@@ -54,12 +56,8 @@ func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
 		})
 	}
 	// Aliases are expanded on this host and resolved.
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "id_ed25519"), filepath.Join(project, "keyl")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink"))
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh", "id_ed25519"), filepath.Join(project, "keyl"))
 	for _, command := range []string{"head -c 4096 dirlink/id_*", "cat keyl*"} {
 		if !posixShellPrivateKeyRead(command, project, home) {
 			t.Errorf("posixShellPrivateKeyRead(%q) = false, want a key read through the alias", command)

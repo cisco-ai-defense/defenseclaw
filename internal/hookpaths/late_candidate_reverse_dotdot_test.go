@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0641 review 10: the cleaned spelling of a dot-dot path can name a
@@ -20,9 +22,7 @@ func TestGAP0641CleanedSpellingProtectedLinkIsNotReachedThroughLinkedParent(t *t
 	if err := os.Remove(filepath.Join(cwd, "status")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "status")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, protected, filepath.Join(cwd, "status"))
 	if err := os.Remove(filepath.Join(other, "status")); err != nil {
 		t.Fatal(err)
 	}

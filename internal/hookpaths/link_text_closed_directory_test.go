@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestResolveListsTheLinkTextOfALinkIntoAClosedDirectory: a link into a
@@ -38,9 +40,7 @@ func TestResolveListsTheLinkTextOfALinkIntoAClosedDirectory(t *testing.T) {
 		"chain-link":    filepath.Join(project, "closed-link"),
 	}
 	for name, target := range links {
-		if err := os.Symlink(target, filepath.Join(project, name)); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, target, filepath.Join(project, name))
 	}
 	if err := os.Chmod(closed, 0); err != nil {
 		t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-1717: a POSIX shell's call (the POSIX dialect hint: Claude Code's Bash
@@ -33,9 +34,7 @@ func TestGAP1717GitBashCallIsReadWithThePOSIXGrammar(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(ssh, filepath.Join(project, ".private")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, ssh, filepath.Join(project, ".private"))
 	windows := runtime.GOOS == "windows"
 	slashHome := filepath.ToSlash(home)
 	for _, tc := range []struct {

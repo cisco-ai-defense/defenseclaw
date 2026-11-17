@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-2569: the client header names where each link-walk spelling of a
@@ -24,9 +26,7 @@ func TestR105GAP2569ClientLinkWalkFacts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(cwd, "dclink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, state, filepath.Join(cwd, "dclink"))
 	t.Setenv("HOME", home)
 	home, _ = filepath.EvalSymlinks(home)
 	state = filepath.Join(home, ".defenseclaw")

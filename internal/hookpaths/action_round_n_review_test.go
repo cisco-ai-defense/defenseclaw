@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // Round n review 1: a patch body is skipped unless the shell text may change
@@ -62,9 +64,7 @@ func TestR104RoundNReviewPatchBodyPathMention(t *testing.T) {
 // command or a startup file) does.
 func TestR104RoundNReviewGlobLeadingDot(t *testing.T) {
 	_, home, cwd := globFactsFixture(t, false)
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, ".private")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, ".private"))
 	allowed := []string{
 		`git add */*`,
 		`cp payload */authorized_keys`,

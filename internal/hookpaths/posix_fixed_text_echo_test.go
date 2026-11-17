@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A fixed-text echo (no expansion, no redirect, no pipe) joined to a
@@ -33,9 +35,7 @@ func TestFixedTextEchoJoinedToAStatementIsVerdictNeutral(t *testing.T) {
 	if err := os.WriteFile(keys, []byte("decoy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(cwd, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, keys, filepath.Join(cwd, "keylink"))
 	for _, row := range []struct{ statement, compound string }{
 		{"uniq keylink > /dev/null", "uniq keylink > /dev/null; echo done"},
 		{"uniq keylink > /dev/null", "uniq keylink > /dev/null; echo uniq-done"},

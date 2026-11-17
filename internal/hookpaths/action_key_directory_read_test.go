@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // RV22-1 (GAP-2168, GAP-0281): grep and Select-String count as plain readers
@@ -27,9 +29,7 @@ func TestActionRecursiveReadOfTheKeyDirectoryIsAKeyRead(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "sshlink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "sshlink"))
 	for _, command := range []string{
 		"grep -r . ~/.ssh", "grep -r . ~/.ssh/", "grep -R . ~/.ssh", "grep --recursive . ~/.ssh",
 		"grep -d recurse . ~/.ssh", "grep --directories=recurse . ~/.ssh", "grep -rI BEGIN ~/.ssh",

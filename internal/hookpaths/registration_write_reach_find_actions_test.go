@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A find call writes only through an action predicate: the file of -fprint,
@@ -28,9 +30,7 @@ func TestRegistrationWriteReachFindActions(t *testing.T) {
 		}
 	}
 	link := filepath.Join(root, "linked-hook")
-	if err := os.Symlink(hook, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, hook, link)
 	rows := []struct {
 		name, command string
 		want          bool

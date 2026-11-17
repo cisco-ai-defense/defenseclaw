@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // An opener-relative alias that a link leads to reads as the hook own process
@@ -37,15 +39,9 @@ func TestGAP0641AliasThroughLinkStaysUnprovedWithoutDotDot(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(hookCWD, "status"), []byte("ordinary"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.Symlink(protected, filepath.Join(agentCWD, "status")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(alias, filepath.Join(project, "jump")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("jump", filepath.Join(project, "chain")); err != nil {
-				t.Fatal(err)
-			}
+			testenv.SymlinkOrSkip(t, protected, filepath.Join(agentCWD, "status"))
+			testenv.SymlinkOrSkip(t, alias, filepath.Join(project, "jump"))
+			testenv.SymlinkOrSkip(t, "jump", filepath.Join(project, "chain"))
 			t.Chdir(hookCWD)
 			for _, target := range []string{
 				filepath.Join(project, "jump", "status"),

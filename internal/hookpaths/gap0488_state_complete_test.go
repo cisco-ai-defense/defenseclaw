@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // g622b9State is a home with a project, one policy file and, in the project,
@@ -173,12 +175,8 @@ func TestG622b9LinkedStateDirectoryIsWalked(t *testing.T) {
 	if err := os.WriteFile(moved, []byte("# base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(s.policies, "extra")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(s.policies, filepath.Join(outside, "loop")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, outside, filepath.Join(s.policies, "extra"))
+	testenv.SymlinkOrSkip(t, s.policies, filepath.Join(outside, "loop"))
 	link := filepath.Join(s.project, "moved-alias.txt")
 	if err := os.Link(moved, link); err != nil {
 		t.Fatal(err)

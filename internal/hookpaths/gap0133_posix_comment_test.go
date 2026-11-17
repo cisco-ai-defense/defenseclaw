@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // r106KeysHome is a home with an authorized-keys decoy, a project with an
@@ -27,9 +29,7 @@ func r106KeysHome(t *testing.T) (homes, home, project string) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, "../.ssh/authorized_keys", filepath.Join(project, "keylink"))
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	return homes, home, project
 }

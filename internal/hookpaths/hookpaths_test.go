@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestRedirectOnlyStatementsDoNotPanic(t *testing.T) {
@@ -270,9 +272,7 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		{filepath.Join(home, "a2", "l"), filepath.FromSlash("b/../t")},
 		{filepath.Join(home, "ordinary", "lib"), filepath.FromSlash("../shared")},
 	} {
-		if err := os.Symlink(link.target, link.name); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, link.target, link.name)
 	}
 	for _, row := range []struct {
 		name, path, want string

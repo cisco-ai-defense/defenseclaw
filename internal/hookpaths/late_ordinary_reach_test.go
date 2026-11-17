@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func lateWrite(t *testing.T, path, text string) {
@@ -23,9 +25,7 @@ func lateWrite(t *testing.T, path, text string) {
 
 func lateSymlink(t *testing.T, target, link string) {
 	t.Helper()
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, target, link)
 }
 
 func lateAssertOrdinary(t *testing.T, project string, rows []struct {

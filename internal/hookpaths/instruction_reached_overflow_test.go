@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A start directory whose full sighting (its parents and their .claude
@@ -34,9 +36,7 @@ func TestReachedEvidenceKeepsTheStartDirectoryPastTheHeaderBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(deep, "lnk")
-	if err := os.Symlink(project, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, project, link)
 	if len(link) > MaxWriteTargetPathBytes {
 		t.Skip("the temporary directory is too long for the deep spelling")
 	}

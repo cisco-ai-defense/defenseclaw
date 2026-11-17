@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0488, GAP-0073: whatever shape of call carries a patch, evidence that
@@ -103,9 +105,7 @@ func TestCompletePatchEvidenceIsAlwaysWatched(t *testing.T) {
 				if err := os.Remove(target); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Symlink(keys, target); err != nil {
-					t.Fatal(err)
-				}
+				testenv.SymlinkOrSkip(t, keys, target)
 				defer func() {
 					_ = os.Remove(target)
 					_ = os.WriteFile(target, []byte("x\n"), 0o600)

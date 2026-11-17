@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-1739: an unreadable sibling directory made every glob in a write
@@ -33,9 +35,7 @@ func TestActionGlobUnreadableSiblingOfTheUserHoldsNoMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(keys, filepath.Join(cwd, "a", "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, keys, filepath.Join(cwd, "a", "keylink"))
 	if err := os.Chmod(filepath.Join(cwd, "aaa_unread"), 0); err != nil {
 		t.Fatal(err)
 	}

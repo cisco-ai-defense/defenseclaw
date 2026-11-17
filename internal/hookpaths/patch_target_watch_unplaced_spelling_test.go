@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A typed patch that steps up from a directory that does not exist
@@ -62,9 +64,7 @@ func TestPatchTargetWatchUnplacedStepUpSpellingLinkedLaterIsAChange(t *testing.T
 	if watch.Changed() {
 		t.Fatal("the unchanged patch reads as changed")
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "proj")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(project, "proj"))
 	if !watch.Changed() {
 		t.Error("a link made since at the missing directory, leading to the keys file, reads as unchanged")
 	}
@@ -128,9 +128,7 @@ func TestPatchTargetWatchUnplacedStepUpSpellingRetargetedToUnprovedFileIsAChange
 		if watch == nil || watch.Changed() {
 			t.Fatal("the unchanged patch reads as changed or is not attested")
 		}
-		if err := os.Symlink(hop, filepath.Join(project, "other")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, hop, filepath.Join(project, "other"))
 		if !watch.Changed() {
 			t.Error("a link made since onto a hard link to the keys file reads as unchanged")
 		}
@@ -141,9 +139,7 @@ func TestPatchTargetWatchUnplacedStepUpSpellingRetargetedToUnprovedFileIsAChange
 		if watch == nil || watch.Changed() {
 			t.Fatal("the unchanged patch reads as changed or is not attested")
 		}
-		if err := os.Symlink("/proc/self/cwd", filepath.Join(project, "other")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, "/proc/self/cwd", filepath.Join(project, "other"))
 		if !watch.Changed() {
 			t.Error("a link made since to the working directory of the process reads as unchanged")
 		}
@@ -154,9 +150,7 @@ func TestPatchTargetWatchUnplacedStepUpSpellingRetargetedToUnprovedFileIsAChange
 		if watch == nil || watch.Changed() {
 			t.Fatal("the unchanged patch reads as changed or is not attested")
 		}
-		if err := os.Symlink("other", filepath.Join(project, "other")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, "other", filepath.Join(project, "other"))
 		if !watch.Changed() {
 			t.Error("a link made since that loops reads as unchanged")
 		}
@@ -196,9 +190,7 @@ func TestPatchTargetWatchUnplacedStepUpSpellingThroughLinkedWorkingDirectory(t *
 		t.Run(tc.name, func(t *testing.T) {
 			_, project := stepUpFixture(t)
 			cwd := filepath.Join(t.TempDir(), "work")
-			if err := os.Symlink(project, cwd); err != nil {
-				t.Fatal(err)
-			}
+			testenv.SymlinkOrSkip(t, project, cwd)
 			watch := stepUpWatch(t, "typed", tc.target, cwd)
 			if watch == nil {
 				t.Fatal("the patch is not attested complete")
@@ -211,16 +203,12 @@ func TestPatchTargetWatchUnplacedStepUpSpellingThroughLinkedWorkingDirectory(t *
 	t.Run("link made since at the missing directory", func(t *testing.T) {
 		home, project := stepUpFixture(t)
 		cwd := filepath.Join(t.TempDir(), "work")
-		if err := os.Symlink(project, cwd); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, project, cwd)
 		watch := stepUpWatch(t, "typed", "proj/../.ssh/authorized_keys", cwd)
 		if watch == nil || watch.Changed() {
 			t.Fatal("the unchanged patch reads as changed or is not attested")
 		}
-		if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "proj")); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(project, "proj"))
 		if !watch.Changed() {
 			t.Error("a link made since at the missing directory reads as unchanged")
 		}

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // dotDotFixture lays out a protected state file, an ordinary directory with
@@ -34,12 +36,8 @@ func dotDotFixture(t *testing.T) (home, cwd, other string) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(protected, filepath.Join(other, "status")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(other, "child"), filepath.Join(cwd, "jump")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, protected, filepath.Join(other, "status"))
+	testenv.SymlinkOrSkip(t, filepath.Join(other, "child"), filepath.Join(cwd, "jump"))
 	return home, cwd, other
 }
 

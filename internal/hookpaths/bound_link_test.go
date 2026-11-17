@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0677 (review 3): the words of a call past a reading bound are looked
@@ -33,9 +35,7 @@ func TestBoundCallReachesProtectedLink(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, "plain.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(cwd, "output")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, keys, filepath.Join(cwd, "output"))
 	t.Setenv("HOME", home)
 	for _, row := range []struct {
 		command string

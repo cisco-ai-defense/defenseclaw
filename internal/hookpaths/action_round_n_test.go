@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-1481 (round n): a directory the walk cannot read, or a bound, used to
@@ -31,9 +33,7 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(key, filepath.Join(cwd, "tree", "a", "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, key, filepath.Join(cwd, "tree", "a", "keylink"))
 	if err := os.WriteFile(filepath.Join(cwd, "tree", "c", "notes.md"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -105,9 +105,7 @@ func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(key, filepath.Join(cwd, "many", fmt.Sprintf("d%03d", actionGlobMaxReads+4), "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, key, filepath.Join(cwd, "many", fmt.Sprintf("d%03d", actionGlobMaxReads+4), "keylink"))
 	for _, command := range []string{`cp payload many/*/keyl*`, `cd many && cp payload */keyl*`} {
 		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
 			t.Errorf("%s: ActionCommandDecision = %q, want protected-target", command, got)
@@ -160,9 +158,7 @@ func TestR104RoundNApplyPatchAfterQuotedText(t *testing.T) {
 	}
 	// A patch that names the key still blocks, after the same quoted text,
 	// through a directory alias, and with a body that looks benign.
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "keydir")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "keydir"))
 	for _, command := range []string{
 		`printf '%s\n' start; ` + envelope("*** Add File: "+filepath.Join(home, ".ssh", "authorized_keys")),
 		`printf 'a\n'; ` + envelope("*** Update File: ~/.ssh/authorized_keys"),

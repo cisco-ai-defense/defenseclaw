@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestGAP0529POSIXCopyOptionVariableWindowsHome(t *testing.T) {
@@ -143,9 +145,7 @@ func TestGAP0529ReadOnlyExpandedLinkData(t *testing.T) {
 	if err := os.WriteFile(keys, []byte("key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(cwd, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, keys, filepath.Join(cwd, "keylink"))
 	for _, row := range []struct{ name, command string }{
 		{"link printf", `f=key; f="${f}link"; t=" $f"; printf '%s\n' $t > report.txt`},
 		{"link echo", `f=key; f="${f}link"; t=" $f"; echo $t > report.txt`},

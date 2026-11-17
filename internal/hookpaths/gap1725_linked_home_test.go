@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-1725: with a home below a linked directory and no ~/.ssh yet, a write
@@ -26,9 +28,7 @@ func TestActionLinkedHomeProtectsAKeyFileBeforeItExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(root, "link")
-	if err := os.Symlink(real, link); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, real, link)
 	home := filepath.Join(link, "h")
 	cwd := filepath.Join(home, "project")
 	for _, command := range []string{

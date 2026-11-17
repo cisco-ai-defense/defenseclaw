@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A cp with a pattern source walks the link children of its destination
@@ -45,9 +47,7 @@ func TestLinkWalkFactsListsLinkChildrenOfCopyDestination(t *testing.T) {
 	if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(linked, "config.yaml")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, target, filepath.Join(linked, "config.yaml"))
 	if err := os.WriteFile(filepath.Join(linked, "plain.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

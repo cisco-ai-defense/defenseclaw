@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR104Refix4AWKVisibleOutput(t *testing.T) {
@@ -90,9 +92,7 @@ func TestR104Refix4GitWorktreeMarker(t *testing.T) {
 		t.Fatalf("worktree-file scope = %q, materializes = %v, want %q", scope, materializes, root)
 	}
 	alias := filepath.Join(t.TempDir(), "repo")
-	if err := os.Symlink(root, alias); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, root, alias)
 	if scope, materializes := gitMaterializationScope(
 		[]string{"-C", "repo/sub", "pull"}, []bool{true, true, true}, filepath.Dir(alias),
 	); !materializes || scope != root {

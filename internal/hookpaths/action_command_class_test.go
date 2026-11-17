@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // These parser cases preserve audit classifications; enforcement requires a resolved protected target.
@@ -133,9 +135,7 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias"))
 	for _, tc := range []struct {
 		command string
 		block   bool
@@ -175,9 +175,7 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias"))
 	body := `sh -c 'echo marker >> "$destination"'`
 	for _, tc := range []struct{ name, command string }{
 		{"env split", `env -S "sh -c 'echo marker >> \"$destination\"'"`},
@@ -223,9 +221,7 @@ func TestR104LeadGapCorpusPOSIX(t *testing.T) {
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias"))
 	for _, row := range []struct{ gap, command string }{
 		{"GAP-0539 here-string tee", `tee -a alias <<< marker`},
 		{"GAP-0553 xargs child", `printf alias | xargs -I {} sh -c 'echo marker >> "{}"'`},
@@ -260,9 +256,7 @@ func TestR104ActionClassGeneratedTargetAlias(t *testing.T) {
 	protected := filepath.Join(home, ".ssh", "authorized_keys")
 	for _, name := range []string{filepath.Join(cwd, "out", "run-123.log"),
 		filepath.Join(cwd, "build", time.Now().Format("20060102")+".log")} {
-		if err := os.Symlink(protected, name); err != nil {
-			t.Fatal(err)
-		}
+		testenv.SymlinkOrSkip(t, protected, name)
 	}
 	for _, command := range []string{
 		`echo marker > "out/run-$RANDOM.log"`,
@@ -682,9 +676,7 @@ func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
 	if err := os.Mkdir(cwd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "alias"))
 	for _, tc := range []struct {
 		command string
 		blocked bool

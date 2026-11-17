@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // GAP-0073: the hook client describes OpenCode V2 native patch tool
@@ -29,9 +31,7 @@ func TestGAP0073OpenCodePatchClientListsTargets(t *testing.T) {
 	if err := os.WriteFile(keys, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(t, keys, filepath.Join(project, "keylink"))
 	t.Setenv("HOME", home)
 	resolve := func(tool, patch string) map[string]string {
 		t.Helper()

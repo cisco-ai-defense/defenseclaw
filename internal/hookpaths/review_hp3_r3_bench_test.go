@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // hp3r3Script is the gateway round 3 generator (review_hp3_r3_test.go): n
@@ -52,9 +54,7 @@ func hp3r3Home(tb testing.TB) (home, project string) {
 	if err := os.WriteFile(keys, []byte("# decoy\n"), 0o600); err != nil {
 		tb.Fatal(err)
 	}
-	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "keylink")); err != nil {
-		tb.Fatal(err)
-	}
+	testenv.SymlinkOrSkip(tb, "../.ssh/authorized_keys", filepath.Join(project, "keylink"))
 	return home, project
 }
 
