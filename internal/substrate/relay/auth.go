@@ -113,7 +113,9 @@ func IdentityFiles(dir string) func() (Identity, error) {
 }
 
 // KeyVerifier verifies session tokens against public keys. It holds no
-// secret (D14).
+// secret (D14). Skew (default 60 s) is allowed on nbf only, for a gateway
+// whose clock runs ahead of this actor's: a token is refused from the
+// second it expires (GAP-0569).
 type KeyVerifier struct {
 	// Keys maps a kid to an *ecdsa.PublicKey (P-256) or ed25519.PublicKey.
 	Keys     map[string]crypto.PublicKey
@@ -245,7 +247,7 @@ func (v *KeyVerifier) VerifyToken(tok string) (Session, error) {
 	t := now()
 	exp, nbf, iat := time.Unix(c.Expiry, 0), time.Unix(c.NotBefore, 0), time.Unix(c.IssuedAt, 0)
 	switch {
-	case c.Expiry == 0 || t.After(exp.Add(skew)):
+	case c.Expiry == 0 || !t.Before(exp):
 		return Session{}, errors.New("session token expired")
 	case c.NotBefore != 0 && t.Add(skew).Before(nbf):
 		return Session{}, errors.New("session token not valid yet")

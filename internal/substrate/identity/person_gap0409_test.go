@@ -64,9 +64,10 @@ func TestPersonSignInAgeLimitGAP0409(t *testing.T) {
 		t.Fatalf("Expires = %v, want %v", got.Expires, want)
 	}
 
-	// Just inside the limit plus the verifier's skew: accepted.
-	if _, err := v.Verify(context.Background(), person(MaxPersonSignInAge+DefaultSkew-time.Second)); err != nil {
-		t.Fatalf("a sign-in inside the age limit and skew was refused: %v", err)
+	// One second inside the limit: accepted. The limit has no skew grace
+	// (GAP-0569, TestPersonAndWorkloadTokensRefusedTheSecondTheyExpireGAP0569).
+	if _, err := v.Verify(context.Background(), person(MaxPersonSignInAge-time.Second)); err != nil {
+		t.Fatalf("a sign-in inside the age limit was refused: %v", err)
 	}
 
 	// A CI workload token issued 20 minutes ago with a valid exp: accepted.

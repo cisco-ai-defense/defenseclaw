@@ -592,8 +592,8 @@ func TestAttachmentEndsWithItsToken(t *testing.T) {
 	defer srv.Close()
 	now := time.Now()
 	tok := ec.token(t, claims(now, func(c map[string]any) { c["exp"] = now.Add(2 * time.Second).Unix() }), TokenType)
-	// The verifier allows 60 s of skew; the relay itself ends the
-	// attachment at the token's exp.
+	// The token is valid for at most 2 more seconds; the relay ends the
+	// attachment at its exp.
 	c, _, err := dialWS(t, srv.URL, tok, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -269,7 +269,9 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 	if is.Kind == PersonHuman {
 		// checkTimes has refused a token without iat.
 		limit := time.Unix(*c.IssuedAt, 0).Add(MaxPersonSignInAge)
-		if now.After(limit.Add(v.skew)) {
+		// The sign-in age ends like exp: at the limit, with no skew
+		// grace (GAP-0569).
+		if !now.Before(limit) {
 			return Person{}, reasonf(ReasonExpired, "sign-in is older than %d minutes; sign in again", int(MaxPersonSignInAge/time.Minute))
 		}
 		if limit.Before(expires) {
