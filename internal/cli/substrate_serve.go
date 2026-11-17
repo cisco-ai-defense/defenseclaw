@@ -810,7 +810,8 @@ func kubeHTTPClient() (*http.Client, error) {
 }
 
 // substrateLeaderPermissions is who may call what on the leader
-// (GAP-0094): gateway replicas every method; the callout only the egress
+// (GAP-0094): gateway replicas every method but the controller's own
+// (leader.NamedOnly, GAP-0553); the callout only the egress
 // chain check and the name lookup of a registration (GAP-0090); the
 // controller the registrations, the chain lifecycle, the activity feed and
 // publishing its egress callout slot read (GAP-0505).

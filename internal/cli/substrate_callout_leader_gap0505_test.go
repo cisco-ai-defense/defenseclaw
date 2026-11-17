@@ -36,3 +36,32 @@ func TestSubstrateLeaderCalloutPermissionsGAP0505(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0553: the gateways' "*" on the leader does not reach the controller's
+// publish of the egress callout report, so a gateway cannot tell every
+// replica the slot is DefenseClaw's. An identity named for both roles
+// still publishes; the gateways keep their other methods.
+func TestGatewayCannotPublishTheCalloutReportGAP0553(t *testing.T) {
+	const (
+		gw   = "spiffe://cluster.local/ns/dc/sa/defenseclaw-gateway"
+		ctlr = "spiffe://cluster.local/ns/dc/sa/defenseclaw-controller"
+		both = "spiffe://cluster.local/ns/dc/sa/defenseclaw"
+	)
+	p := substrateLeaderPermissions([]string{gw, both}, nil, []string{ctlr, both})
+	for _, tc := range []struct {
+		peer, method string
+		want         bool
+	}{
+		{gw, leader.MethodCalloutPublish, false},
+		{gw, leader.MethodCalloutStatus, true},
+		{gw, leader.MethodRegistrationWrite, true},
+		{gw, leader.MethodChainObserve, true},
+		{ctlr, leader.MethodCalloutPublish, true},
+		{both, leader.MethodCalloutPublish, true},
+		{both, leader.MethodCalloutStatus, true},
+	} {
+		if got := p.Allows(tc.peer, tc.method); got != tc.want {
+			t.Errorf("%s %s: %v, want %v", tc.peer, tc.method, got, tc.want)
+		}
+	}
+}

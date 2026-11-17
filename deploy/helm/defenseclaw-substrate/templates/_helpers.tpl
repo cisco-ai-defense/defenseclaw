@@ -427,9 +427,11 @@ checksum/config: {{ include "dc.config" .ctx | sha256sum }}
 {{- end -}}
 
 {{/* Leader RPC mTLS: the pod-identity bundle and the SPIFFE IDs that may call the leader (A2 serve flags). */}}
-{{/* Leader peers: gateway replicas may call every method; the callout
- only the egress chain check and the controller only registrations,
- lifecycle and activity (leader.Permissions, GAP-0094). */}}
+{{/* Leader peers: gateway replicas may call every method but the
+ controller's publish of its egress callout read (leader.NamedOnly,
+ GAP-0553); the callout only the egress chain check and the controller
+ only registrations, lifecycle, activity and that publish
+ (leader.Permissions, GAP-0094, GAP-0505). */}}
 {{- define "dc.peerFlags" -}}
 - --peer-bundle=/var/run/ate/credential-bundle.pem
 - --peer-trust=/var/run/ate/podidentity-ca.crt

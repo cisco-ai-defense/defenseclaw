@@ -173,13 +173,21 @@ func NewRequestID() string {
 }
 
 // Permissions maps a peer identity (the SPIFFE ID in its verified mTLS
-// certificate) to the methods it may call; "*" is every method (GAP-0094).
+// certificate) to the methods it may call; "*" is every method except the
+// NamedOnly ones (GAP-0094, GAP-0553).
 type Permissions map[string][]string
+
+// NamedOnly are the methods only one role may call, so "*" does not grant
+// them: an identity calls one only if it is named for it. The controller
+// alone publishes its read of the egress callout slot; a gateway replica
+// that could publish would tell every replica the slot is DefenseClaw's
+// (GAP-0553).
+var NamedOnly = map[string]bool{MethodCalloutPublish: true}
 
 // Allows reports whether peer may call method.
 func (p Permissions) Allows(peer, method string) bool {
 	for _, m := range p[peer] {
-		if m == "*" || m == method {
+		if m == method || m == "*" && !NamedOnly[method] {
 			return true
 		}
 	}
