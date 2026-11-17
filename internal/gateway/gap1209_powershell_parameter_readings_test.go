@@ -9,36 +9,50 @@ import (
 )
 
 // TestGAP1209AmbiguousValuedParameterIsNeverASwitch pins how
-// psParameterReadings reads a parameter it cannot resolve
-// (rel-1-0-10:GAP-1209). A prefix that matches only parameters that take a
-// value (-t: Type, Target, ToSession) binds, if at all, with the next word as
-// its value, so no reading keeps that word as a positional: mv -t <folder>
-// <file> moved the folder in the PowerShell reading of the hook-config guard
-// and alerted on a file moved into the Claude Code settings folder. A name
-// that may be a switch (-F: Force, Filter, FilePath) or that no known
-// parameter starts (-Zz) keeps both readings, so the RV15-2 rows keep their
-// proof. valuedOnly tells powerShellWriteReading not to prove the form as
-// written, which the Windows PowerShell reader reads with that value as an
-// operand.
+// psParameterReadings reads a parameter its cmdlet does not bind
+// (rel-1-0-10:GAP-1209). A word that only parameters taking a value and
+// naming no path start (-t of mv: ItemType, Value and ToSession of the
+// other mutators) binds, if at all, with the next word as its value, so
+// plain, the statement that stands for the form, drops both, and no reading
+// keeps that word as a positional: mv -t <folder> <file> moved the folder in
+// the PowerShell reading of the hook-config guard and alerted on a file
+// moved into the Claude Code settings folder. A word that may be a switch or
+// a path (-F of Remove-Item: Force, Filter) or that no parameter starts
+// (-Zz) keeps both readings and the form, so the RV15-2 rows keep their
+// proof.
 func TestGAP1209AmbiguousValuedParameterIsNeverASwitch(t *testing.T) {
 	rows := []struct {
-		name, form  string
-		want, never []string
-		valuedOnly  bool
+		name, form, plain string
+		want, never       []string
 	}{
 		{
-			name:       "valued-only prefix takes the next word",
-			form:       `mv -t C:\Users\a\.claude notes.txt`,
-			want:       []string{`mv notes.txt`},
-			never:      []string{`mv C:\Users\a\.claude notes.txt`},
-			valuedOnly: true,
+			name:  "valued-only prefix takes the next word",
+			form:  `mv -t C:\Users\a\.claude notes.txt`,
+			plain: `mv notes.txt`,
+			never: []string{`mv C:\Users\a\.claude notes.txt`},
 		},
 		{
-			name:       "valued-only prefix before the operands",
-			form:       `Move-Item -T x C:\Users\a\notes.txt C:\Users\a\old.txt`,
-			want:       []string{`Move-Item C:\Users\a\notes.txt C:\Users\a\old.txt`},
-			never:      []string{`Move-Item x C:\Users\a\notes.txt C:\Users\a\old.txt`},
-			valuedOnly: true,
+			name:  "valued-only prefix before the operands",
+			form:  `Move-Item -T x C:\Users\a\notes.txt C:\Users\a\old.txt`,
+			plain: `Move-Item C:\Users\a\notes.txt C:\Users\a\old.txt`,
+			never: []string{`Move-Item x C:\Users\a\notes.txt C:\Users\a\old.txt`},
+		},
+		{
+			name:  "valued-only prefix next to a resolved one",
+			form:  `mv -t C:\Users\a\.claude -Fo notes.txt`,
+			plain: `mv -Force notes.txt`,
+			never: []string{`mv -t C:\Users\a\.claude -Force notes.txt`},
+		},
+		{
+			name:  "valued-only prefix next to an unknown one",
+			form:  `mv -t C:\Users\a\.claude -Zz notes.txt`,
+			plain: `mv -Zz notes.txt`,
+			want:  []string{`mv notes.txt`, `mv`},
+		},
+		{
+			name:  "valued-only prefix with its value",
+			form:  `Remove-Item -T:x C:\Users\a\notes.txt`,
+			plain: `Remove-Item C:\Users\a\notes.txt`,
 		},
 		{
 			name: "unknown name keeps both readings",
@@ -47,22 +61,22 @@ func TestGAP1209AmbiguousValuedParameterIsNeverASwitch(t *testing.T) {
 		},
 		{
 			name: "prefix of a switch keeps the switch reading",
-			form: `Rename-Item -F C:\Users\a\notes.txt c.bak`,
-			want: []string{`Rename-Item C:\Users\a\notes.txt c.bak`, `Rename-Item c.bak`},
+			form: `Remove-Item -F C:\Users\a\notes.txt`,
+			want: []string{`Remove-Item C:\Users\a\notes.txt`, `Remove-Item`},
 		},
 		{
-			name: "valued-only prefix as the last word",
-			form: `Remove-Item C:\Users\a\notes.txt -t`,
-			want: []string{`Remove-Item C:\Users\a\notes.txt`},
+			name:  "valued-only prefix as the last word",
+			form:  `Remove-Item C:\Users\a\notes.txt -t`,
+			plain: `Remove-Item C:\Users\a\notes.txt`,
 		},
 	}
 	for _, row := range rows {
-		readings, valuedOnly, bounded := psParameterReadings(row.form)
+		readings, plain, bounded := psParameterReadings(row.form)
 		if bounded {
 			t.Fatalf("%s: bounded", row.name)
 		}
-		if valuedOnly != row.valuedOnly {
-			t.Errorf("%s: valuedOnly %v, want %v", row.name, valuedOnly, row.valuedOnly)
+		if want := row.plain; want == "" && plain != row.form || want != "" && plain != want {
+			t.Errorf("%s: plain %q, want %q (form %q)", row.name, plain, row.plain, row.form)
 		}
 		for _, want := range row.want {
 			if !slices.Contains(readings, want) {
@@ -70,9 +84,45 @@ func TestGAP1209AmbiguousValuedParameterIsNeverASwitch(t *testing.T) {
 			}
 		}
 		for _, never := range row.never {
-			if slices.Contains(readings, never) {
-				t.Errorf("%s: readings %q hold %q", row.name, readings, never)
+			if slices.Contains(readings, never) || plain == never {
+				t.Errorf("%s: readings %q or plain %q hold %q", row.name, readings, plain, never)
 			}
+		}
+	}
+}
+
+// TestGAP1232ParameterBindsToItsCmdlet pins rel-1-0-10:GAP-1232:
+// psParameterReadings binds a prefix against the parameters of the cmdlet
+// in the statement, aliases included, as PowerShell does. One that names
+// one parameter is that parameter, spelled out, and plain stays the form,
+// so the form keeps its proof: -L and -LP are LiteralPath (LP is its
+// alias), -Fi is FilePath on Out-File and Tee-Object and Filter on
+// Remove-Item, -T is ToSession on Copy-Item and -Ty ItemType on New-Item.
+func TestGAP1232ParameterBindsToItsCmdlet(t *testing.T) {
+	const file = `C:\Users\a\notes.txt`
+	rows := []struct{ form, reading string }{
+		{`Remove-Item -L ` + file, `Remove-Item -LiteralPath ` + file},
+		{`Remove-Item -LP ` + file, `Remove-Item -LiteralPath ` + file},
+		{`Remove-Item -PSP ` + file, `Remove-Item -LiteralPath ` + file},
+		{`Remove-Item -L:` + file + ` -Force`, `Remove-Item -LiteralPath ` + file + ` -Force`},
+		{`Out-File -Fi ` + file, `Out-File -FilePath ` + file},
+		{`Out-File -Fil ` + file + ` -InputObject x`, `Out-File -FilePath ` + file + ` -InputObject x`},
+		{`Tee-Object -Fi ` + file, `Tee-Object -FilePath ` + file},
+		{`Remove-Item -Fi x ` + file, `Remove-Item -Filter x ` + file},
+		{`Copy-Item -T x ` + file + ` b`, `Copy-Item -ToSession x ` + file + ` b`},
+		{`New-Item -Ty File ` + file, `New-Item -ItemType File ` + file},
+		{`Rename-Item -F ` + file + ` b`, `Rename-Item -Force ` + file + ` b`},
+	}
+	for _, row := range rows {
+		readings, plain, bounded := psParameterReadings(row.form)
+		if bounded {
+			t.Fatalf("%s: bounded", row.form)
+		}
+		if plain != row.form {
+			t.Errorf("%s: plain %q, want the form", row.form, plain)
+		}
+		if !slices.Equal(readings, []string{row.reading}) {
+			t.Errorf("%s: readings %q, want [%q]", row.form, readings, row.reading)
 		}
 	}
 }
