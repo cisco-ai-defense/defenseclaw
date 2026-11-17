@@ -128,8 +128,20 @@ func (l CascadeLaneValues) NonShellMode() string { return l.mode(CascadeLaneNonS
 // this, LoadFromFile would replace the cascade with its fallback where the
 // gateway refuses the file.
 func checkCascadeLanesSource(plain map[string]any) error {
+	// A block the source names without a value (`guardrail:`, `cascade: null`,
+	// `lanes: ~`) decodes as the defaults, but the gateway's schema pass
+	// refuses it: refuse it here too, with the key named.
+	if v, present := plain["guardrail"]; present && v == nil {
+		return fmt.Errorf("config: guardrail has no value; give it settings or remove the key")
+	}
 	guardrail, _ := plain["guardrail"].(map[string]any)
+	if v, present := guardrail["cascade"]; present && v == nil {
+		return fmt.Errorf("config: guardrail.cascade has no value; give it settings or remove the key")
+	}
 	cascade, _ := guardrail["cascade"].(map[string]any)
+	if v, present := cascade["lanes"]; present && v == nil {
+		return fmt.Errorf("config: guardrail.cascade.lanes has no value; name the lanes (one of %s) or remove the key", strings.Join(CascadeLaneNames(), ", "))
+	}
 	lanes, _ := cascade["lanes"].(map[string]any)
 	for _, s := range CascadeLanes() {
 		v, present := lanes[s.Name]
