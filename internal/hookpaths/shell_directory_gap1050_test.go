@@ -44,6 +44,8 @@ func TestGAP1050FixedLastElementAfterUnknownDirectory(t *testing.T) {
 		{"eval \"$X\"\nprintf k > \"$D/authorized_keys:s\"", true},
 		{"eval \"$X\"\nprintf k > $D/authorized_\\keys", true},
 		{"eval \"$X\"\nprintf k > \"$F\"", true},
+		{"eval \"$X\"\nprintf k > $\"$D/pid\"", true},
+		{"eval \"$X\"\nprintf k > \"$D/authorized_keys.\"", true},
 		{"cd \"$D\"\nprintf k > \"$F\"", true},
 		// A static relative authorized-keys name after the change, in the
 		// case a case-insensitive file system opens and the Windows

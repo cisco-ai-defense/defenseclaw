@@ -691,7 +691,8 @@ func shellWordFixedOrdinaryBase(word *syntax.Word) bool {
 		}
 		text = part.Value
 	case *syntax.DblQuoted:
-		if len(part.Parts) == 0 {
+		// $"..." is translated through the message catalog at run time.
+		if part.Dollar || len(part.Parts) == 0 {
 			return false
 		}
 		lit, ok := part.Parts[len(part.Parts)-1].(*syntax.Lit)
