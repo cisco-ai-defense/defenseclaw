@@ -129,42 +129,49 @@ func TestOpenClawInstallPolicyReloadUnderAnUnknownVersionKeepsThePolicy(t *testi
 }
 
 // Path c: the watcher parses 2026.12.1, waits for the refresh lock, and the
-// cache reads "" by the time the refresh runs. The refresh is judged under
-// the version the watcher saw. (A known version goes on to the command check
-// of this test binary, which is not what this test is about, so the stub
-// answers for it; an unknown one goes to the real connector.)
-func TestOpenClawInstallPolicyWatchRaceWithAnEmptyCacheKeepsThePolicy(t *testing.T) {
+// cache reads "" by the time the refresh runs. The real connector judges the
+// refresh under the version the watcher saw, so the state file records
+// 2026.12.1; judged under "" it would have kept the 2026.11.3 state.
+func TestOpenClawInstallPolicyWatchRaceWithAnEmptyCacheJudgesUnderTheVersionSeen(t *testing.T) {
 	resetOpenClawInstallPolicyRetryState(t)
-	s, dataDir, configPath := registeredOpenClawInstallPolicy(t, "2026.11.3")
+	s, dataDir, _ := registeredOpenClawInstallPolicy(t, "2026.11.3")
 	real := openClawInstallPolicyRefresher
-	seen := make(chan string, 8)
+	judged := make(chan string, 8)
 	openClawInstallPolicyRefresher = func(opts connector.SetupOpts) (string, error) {
-		seen <- opts.AgentVersion
-		if connector.NormalizeAgentVersion("openclaw", opts.AgentVersion) == "" {
-			return real(opts)
-		}
-		return "registered", nil
+		state, err := real(opts)
+		judged <- opts.AgentVersion
+		return state, err
 	}
-	openClawInstallPolicyVersionPoll = 5 * time.Millisecond
+	openClawInstallPolicyVersionPoll = 2 * time.Millisecond
 	stop := s.startOpenClawInstallPolicyWatch(context.Background())
 	defer stop()
 
 	openClawInstallPolicyRefreshMu.Lock()
 	writeOpenClawDiscoveryVersion(t, dataDir, "2026.12.1")
-	time.Sleep(200 * time.Millisecond) // the watcher parsed it and waits for the lock
+	// Once the watcher recorded 2026.12.1 it goes on to the refresh lock in
+	// the same look.
+	deadline := time.Now().Add(5 * time.Second)
+	for openClawInstallPolicySeen().version != "2026.12.1" && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := openClawInstallPolicySeen().version; got != "2026.12.1" {
+		openClawInstallPolicyRefreshMu.Unlock()
+		t.Fatalf("the watcher did not parse 2026.12.1 (last seen %q)", got)
+	}
 	writeOpenClawDiscoveryVersion(t, dataDir, "")
 	openClawInstallPolicyRefreshMu.Unlock()
 	select {
-	case got := <-seen:
+	case got := <-judged:
 		if got != "2026.12.1" {
-			t.Errorf("the watcher's refresh was judged under OpenClaw %q, want the 2026.12.1 it saw", got)
+			t.Fatalf("the watcher's refresh was judged under OpenClaw %q, want the 2026.12.1 it saw", got)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the version change did not refresh the install policy")
 	}
 	stop()
-	if !openClawInstallPolicyStillRegistered(t, configPath) {
-		t.Fatal("the watcher race removed the registered install policy (fail-open)")
+	version, _, err := connector.OpenClawInstallPolicyStateWritten(dataDir)
+	if err != nil || version != "2026.12.1" {
+		t.Fatalf("the install policy state records OpenClaw %q (err %v), want 2026.12.1: the refresh did not decide under the version the watcher saw", version, err)
 	}
 }
 

@@ -13221,7 +13221,7 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
         )
 
     policy_state = openclaw_install_policy_state(cfg)
-    stale = openclaw_install_policy_stale_version(cfg) if policy_state == "ours" else ""
+    stale, _certain = openclaw_install_policy_stale_version(cfg) if policy_state == "ours" else ("", False)
     if stale:
         # GAP-1198: registered under a newer OpenClaw than the one installed
         # now; the gateway re-checks within 30 seconds, and this says so

@@ -80,25 +80,72 @@ class OpenClawInstallPolicyStaleVersionTest(unittest.TestCase):
         ]
         for platform, cached, recorded, warns in table:
             with self.subTest(platform=platform, cached=cached, recorded=recorded):
-                text = openclaw_install_policy_stale_version(self._cfg(cached, recorded), platform)
+                text, _certain = openclaw_install_policy_stale_version(self._cfg(cached, recorded), platform)
                 self.assertEqual(bool(text), warns, text)
 
     def test_sentences(self):
         # GAP-1198 review: Python reads no folder ACLs, so the Windows rule
         # (only below a root with inherit-only entries) is "may be" until the
         # gateway re-checks it; below 2026.8.35 it is a hard warning anywhere.
-        text = openclaw_install_policy_stale_version(self._cfg("2026.8.35", "2026.11.3"), "win32")
+        text, certain = openclaw_install_policy_stale_version(self._cfg("2026.8.35", "2026.11.3"), "win32")
+        self.assertFalse(certain)
         self.assertIn("OpenClaw 2026.8.35 may be too old for strict install policy on Windows", text)
         self.assertIn("until the gateway re-checks it", text)
         self.assertNotIn("is too old", text)
         self.assertIn("needs 2026.11.3 or later", text)
         self.assertIn("registered under OpenClaw 2026.11.3", text)
-        text = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.11.3"), "win32")
+        text, certain = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.11.3"), "win32")
+        self.assertTrue(certain)
         self.assertIn("OpenClaw 2026.7.1 has no security.installPolicy (needs 2026.8.35 or later)", text)
         self.assertNotIn("may be", text)
-        text = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.8.35"), "linux")
+        text, certain = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.8.35"), "linux")
+        self.assertTrue(certain)
         self.assertIn("has no security.installPolicy (needs 2026.8.35 or later)", text)
         self.assertIn("registered under OpenClaw 2026.8.35", text)
+
+
+class OpenClawInstallPolicyStatusRowTest(unittest.TestCase):
+    # GAP-1198 follow-up: status says "may not be checked" for the Windows
+    # rule the gateway settles and "not checked" for an OpenClaw below
+    # 2026.8.35, from the real stale-version result, not from its wording.
+    def _row(self, cached, recorded, platform):
+        from unittest.mock import patch
+
+        from defenseclaw.commands import cmd_status
+
+        data_dir, home = tempfile.mkdtemp(), tempfile.mkdtemp()
+        with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
+            json.dump({"agents": {"openclaw": {"version": cached}}}, f)
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            json.dump({"state": "registered", "openclaw_version": recorded}, f)
+        policy = {
+            "enabled": True,
+            "exec": {"command": "defenseclaw-gateway", "args": ["connector", "openclaw", "install-policy"]},
+        }
+        with open(os.path.join(home, "openclaw.json"), "w", encoding="utf-8") as f:
+            json.dump({"security": {"installPolicy": policy}}, f)
+        cfg = SimpleNamespace(
+            data_dir=data_dir, claw=SimpleNamespace(home_dir=home, config_file=os.path.join(home, "openclaw.json"))
+        )
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_openclaw_install_admission(cfg, platform)
+        self.assertEqual(row.call_count, 1)
+        self.assertEqual(row.call_args.args[0], "OpenClaw installs")
+        return row.call_args.args[1]
+
+    def test_windows_rule_may_not_be_checked(self):
+        text = self._row("2026.8.35", "2026.11.3", "win32")
+        self.assertIn("OpenClaw version changed; may not be checked", text)
+
+    def test_below_the_floor_is_not_checked(self):
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                text = self._row("2026.7.1", "2026.11.3", platform)
+                self.assertIn("OpenClaw version changed; not checked", text)
+                self.assertNotIn("may not be checked", text)
+
+    def test_same_version_is_checked(self):
+        self.assertIn("checked by DefenseClaw", self._row("2026.11.3", "2026.11.3", "win32"))
 
 
 class OpenClawInstallPolicyStateTest(unittest.TestCase):

@@ -494,17 +494,26 @@ class DoctorGuardrailTests(unittest.TestCase):
 
     def test_registered_install_admission_warns_when_openclaw_is_now_too_old(self):
         # GAP-1198: setup registered the command under OpenClaw 2026.11.3; the
-        # cached version is now 2026.8.35. The row may not say PASS.
-        stale = "OpenClaw 2026.8.35 is too old for strict install policy on Windows (needs 2026.11.3 or later)"
+        # cached version is now 2026.8.35. The row may not say PASS. The
+        # stale result is the real function's, for Windows.
+        from defenseclaw.openclaw_plugin_config import openclaw_install_policy_stale_version
+
+        data_dir = tempfile.mkdtemp()
+        with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
+            json.dump({"agents": {"openclaw": {"version": "2026.8.35"}}}, f)
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            json.dump({"state": "registered", "openclaw_version": "2026.11.3"}, f)
+        stale = openclaw_install_policy_stale_version(SimpleNamespace(data_dir=data_dir), "win32")
+        self.assertTrue(stale[0], stale)
         row = self._openclaw_rows(stale)["OpenClaw install admission"]
         self.assertEqual(row["status"], "warn")
-        self.assertIn("2026.8.35 is too old for strict install policy", row["detail"])
+        self.assertIn("2026.8.35 may be too old for strict install policy", row["detail"])
         self.assertIn("upgrade OpenClaw to 2026.11.3", row["remediation"])
         # d: the drive-root ACL advice is for a command OpenClaw refuses, not for a downgrade.
         self.assertNotIn("drive root", row["remediation"])
 
     def test_registered_install_admission_passes_for_a_current_version(self):
-        row = self._openclaw_rows("")["OpenClaw install admission"]
+        row = self._openclaw_rows(("", False))["OpenClaw install admission"]
         self.assertEqual(row["status"], "pass")
 
     def test_proxy_interception_waits_for_first_report_after_restart(self):

@@ -224,7 +224,7 @@ def openclaw_install_policy_recorded_state(cfg: object) -> str:
     return state.strip() if isinstance(state, str) else ""
 
 
-def openclaw_install_policy_stale_version(cfg: object, platform: str | None = None) -> str:
+def openclaw_install_policy_stale_version(cfg: object, platform: str | None = None) -> tuple[str, bool]:
     # GAP-1198: the install policy in openclaw.json is DefenseClaw's and was
     # registered under an OpenClaw that could run it, but the OpenClaw the
     # last discovery cached cannot. The state file records the version it was
@@ -238,8 +238,10 @@ def openclaw_install_policy_stale_version(cfg: object, platform: str | None = No
     #   does not read ACLs, so it says "may be" and the gateway, which
     #   re-checks the policy within 30 seconds, settles it.
     # No record (a separate-user layout, or setup never wrote the state), an
-    # unknown cached version, or the same version says nothing. Returns the
-    # sentence for doctor and status, or "".
+    # unknown cached version, or the same version says nothing. Returns
+    # (sentence, certain): the sentence for doctor and status ("" for
+    # nothing), and whether OpenClaw is certainly too old (below 2026.8.35)
+    # rather than "may be" (the Windows rule the gateway settles).
     import sys
 
     from defenseclaw.connector_contracts import compare_agent_versions, normalize_agent_version
@@ -248,14 +250,14 @@ def openclaw_install_policy_stale_version(cfg: object, platform: str | None = No
     recorded_raw = _openclaw_install_policy_state_record(cfg).get("openclaw_version")
     recorded = normalize_agent_version(recorded_raw) if isinstance(recorded_raw, str) else ""
     if not cached or not recorded or recorded == cached:
-        return ""
+        return "", False
     if compare_agent_versions(cached, OPENCLAW_INSTALL_POLICY_SINCE) < 0 <= compare_agent_versions(
         recorded, OPENCLAW_INSTALL_POLICY_SINCE
     ):
         return (
             f"OpenClaw {cached} has no security.installPolicy (needs {OPENCLAW_INSTALL_POLICY_SINCE} or later); "
             f"the install admission was registered under OpenClaw {recorded}"
-        )
+        ), True
     if (
         (platform or sys.platform) == "win32"
         and compare_agent_versions(cached, OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE) < 0
@@ -266,8 +268,8 @@ def openclaw_install_policy_stale_version(cfg: object, platform: str | None = No
             f"(needs {OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE} or later where a folder above defenseclaw-gateway "
             f"keeps inherit-only entries) until the gateway re-checks it; "
             f"the install admission was registered under OpenClaw {recorded}"
-        )
-    return ""
+        ), False
+    return "", False
 
 
 def openclaw_install_policy_stale_remediation() -> str:
