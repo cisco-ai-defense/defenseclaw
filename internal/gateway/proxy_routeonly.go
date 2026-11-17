@@ -1235,12 +1235,16 @@ func applyRouteOnlyRender(registry *connector.Registry, cfg *config.Config, name
 	if !ok {
 		return
 	}
-	if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: cfg.DataDir}, route); err != nil {
+	// Parked while this gateway does not hold its API port (GAP-1133).
+	if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: cfg.DataDir}, gatedRouteOnly(cfg, route)); err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] route-only render for %s: %v\n", name, err)
 		return
 	}
 	state := "removed"
-	if route != nil {
+	switch {
+	case route != nil && ossRouteOnlyGateway(cfg) && !ossRouteOnlyGate.Owned():
+		state = "parked (this gateway does not hold its API port)"
+	case route != nil:
 		state = "written"
 	}
 	fmt.Fprintf(os.Stderr, "[routing] route-only config for %s %s; restart the agent to pick it up\n", name, state)

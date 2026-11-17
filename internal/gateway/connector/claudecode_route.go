@@ -29,7 +29,11 @@ func claudeCodeRouteEnv(route *RouteOnlySetup) map[string]string {
 	if route == nil {
 		return nil
 	}
-	env := map[string]string{claudeCodeRouteHeaders: route.Token}
+	env := map[string]string{}
+	if route.Token != "" {
+		// A parked render carries no route credential (route_only_park.go).
+		env[claudeCodeRouteHeaders] = route.Token
+	}
 	if route.Bedrock {
 		env[claudeCodeRouteBedrockBaseURL] = route.BaseURL
 		// Custody: the agent sends no AWS signature or Bedrock bearer; the
@@ -49,6 +53,8 @@ func claudeCodeRouteEnv(route *RouteOnlySetup) map[string]string {
 
 // ApplyRouteOnly implements RouteOnlyConnector.
 func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) error {
+	route, release := lockedRoute(route)
+	defer release()
 	settingsPath := claudeCodeSettingsPath()
 	// Nothing rendered and nothing to render: touch no file (the lock would
 	// create the agent config directory).

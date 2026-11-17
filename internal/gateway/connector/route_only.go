@@ -41,6 +41,10 @@ type RouteOnlySetup struct {
 	// route_config_drift, so the guardian repairs and status says why,
 	// instead of reading it as "no route expected" (rel-1-0-10:GAP-0800).
 	Unavailable string
+	// Gate, on an OSS gateway, makes the write park the render while the
+	// gateway does not hold its API port (route_only_park.go,
+	// rel-1-0-10:GAP-1133). nil: the render is written as is.
+	Gate *RouteOnlyGate
 }
 
 // RouteOnlyPlaceholderCredential is the fixed, non-secret value a custody

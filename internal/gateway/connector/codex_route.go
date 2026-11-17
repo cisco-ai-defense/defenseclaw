@@ -140,7 +140,10 @@ func codexRouteTable(route *RouteOnlySetup, w codexWrappedProvider, eol string) 
 			headers[k] = v
 		}
 	}
-	headers[RouteOnlyHeader] = route.Token
+	if route.Token != "" {
+		// A parked render carries no route credential (route_only_park.go).
+		headers[RouteOnlyHeader] = route.Token
+	}
 	if route.Custody {
 		// The gateway holds the provider credential (S1 DESIGN 16.2): Codex
 		// sends a placeholder bearer, never OPENAI_API_KEY, the env_key of
@@ -307,6 +310,8 @@ func renderCodexRoute(raw []byte, route *RouteOnlySetup, b *routeEnvBackup) ([]b
 
 // ApplyRouteOnly implements RouteOnlyConnector.
 func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) error {
+	route, release := lockedRoute(route)
+	defer release()
 	path := codexConfigPath()
 	if route == nil {
 		b, err := loadRouteBackup(opts.DataDir, c.Name())

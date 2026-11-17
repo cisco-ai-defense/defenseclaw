@@ -7595,7 +7595,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:                     agentVersion,
 		AgentExecutable:                  agentExecutable,
 		HookContractID:                   contractResolution.Contract.ContractID,
-		RouteOnly:                        routeOnlySetupFor(cfg, conn.Name(), apiAddr),
+		RouteOnly:                        gatedRouteOnly(cfg, routeOnlySetupFor(cfg, conn.Name(), apiAddr)), // parked until the API port is ours (GAP-1133)
 		OpenClawInstallPolicy:            cfg.OpenClawInstallPolicyOn(),
 		OpenClawInstallPolicyTimeoutMs:   cfg.OpenClawInstallPolicyTimeoutMs(),
 		OpenClawInstallPolicyFailsClosed: cfg.OpenClawInstallPolicyFailsClosed(),

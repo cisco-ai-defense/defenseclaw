@@ -98,6 +98,28 @@ def _expected_base_url(cfg: Any, connector: str) -> str:
     return f"http://127.0.0.1:{port}/r/{connector}"
 
 
+def _parked(raw: str) -> bool:
+    """A parked render (GAP-1133): the gateway points the agent at port 0 of
+    the loopback address, with no route credential, while it does not hold
+    its API port (internal/gateway/connector ParkedRouteBaseURL)."""
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        return parts.hostname == "127.0.0.1" and parts.port == 0
+    except ValueError:
+        return False
+
+
+def _parked_row(label: str, where: str) -> Row:
+    return Row(
+        "warn",
+        label,
+        f"{where} is parked: this account's gateway did not hold its API port when it last wrote it, "
+        "so the agent sends its model calls nowhere (not to another process on the port)",
+        "start the gateway with defenseclaw-gateway start (it renders the route once it holds the port), "
+        "then restart the agent",
+    )
+
+
 def _shown_url(raw: str) -> str:
     """A configured URL as doctor prints it: the loopback render in full,
     any other URL as its origin only (a corporate URL can carry a token)."""
@@ -147,6 +169,8 @@ def agent_config_row(cfg: Any, connector: str, upstream: dict[str, Any], *, sign
                 "ANTHROPIC_BEDROCK_BASE_URL" if upstream.get("api") in ("converse", "invoke") else "ANTHROPIC_BASE_URL"
             )
             got = own.get(key, "").strip().rstrip("/")
+            if _parked(got):
+                return _parked_row(label, f"settings.json env {key}")
             if got != want:
                 shown = _shown_url(got) if got else "unset"
                 detail = f"settings.json env {key} is {shown}, not {want}"
@@ -159,6 +183,8 @@ def agent_config_row(cfg: Any, connector: str, upstream: dict[str, Any], *, sign
             doc = ro.codex_config()
             table = (doc.get("model_providers") or {}).get(ro.CODEX_ROUTE_PROVIDER) or {}
             got = str(table.get("base_url") or "").strip().rstrip("/")
+            if doc.get("model_provider") == ro.CODEX_ROUTE_PROVIDER and _parked(got):
+                return _parked_row(label, "config.toml model_providers.defenseclaw_route base_url")
             if doc.get("model_provider") != ro.CODEX_ROUTE_PROVIDER or got != want:
                 detail = f"config.toml model_provider is not {ro.CODEX_ROUTE_PROVIDER} at {want}"
                 return Row("warn", label, detail, _drift_fix(cfg, connector, signing_failed))

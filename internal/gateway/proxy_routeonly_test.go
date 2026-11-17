@@ -80,6 +80,10 @@ func newRouteOnlyFixture(t *testing.T) *routeOnlyFixture {
 	prev := acpLoopbackPeerUID
 	acpLoopbackPeerUID = func(*http.Request) (int, error) { return os.Getuid(), nil }
 	t.Cleanup(func() { acpLoopbackPeerUID = prev })
+	// OSS Windows: the kernel peer is this account (GAP-1133).
+	prevSID := routeOSSPeerSID
+	routeOSSPeerSID = func(*http.Request) (string, error) { return f.srv.tokens.owner, nil }
+	t.Cleanup(func() { routeOSSPeerSID = prevSID })
 	return f
 }
 
@@ -332,6 +336,8 @@ func TestRouteOnlyHotReloadRendersAndRestores(t *testing.T) {
 	connector.ClaudeCodeSettingsPathOverride = settings
 	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = prev })
 
+	// This gateway holds its API port: the real route is rendered (GAP-1133).
+	withOSSRouteOnlyGate(t).SetOwned(true)
 	f := newRouteOnlyFixture(t)
 	off := cloneConfig(f.cfg)
 	off.Routing.RouteOnly = config.RoutingRouteOnlyConfig{}
