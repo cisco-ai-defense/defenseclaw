@@ -10,6 +10,7 @@ import (
 
 	"mvdan.cc/sh/v3/syntax"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -26,7 +27,8 @@ type CommandPathWord struct {
 	// a redirect, cd); clear where it acts on the name itself (rm, mv, ln,
 	// ls, stat, readlink, find, test, a cp or tar that keeps links).
 	FollowsLink bool
-	// Program is set for the program word of a simple command.
+	// Program is set for the program word of a simple command, and for the
+	// program a static prefix wrapper there runs.
 	Program    bool
 	start, end int  // the byte offsets of Text in the command
 	quote      byte // 0 at the top level; ' or " inside a quoted body
@@ -101,8 +103,18 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 				}
 			}
 			follows := commandFollowsOperandLinks(program, node.Args, home)
+			// The program a static prefix wrapper runs (sudo /bin/sh -c,
+			// nice /usr/bin/python3) is a program word too.
+			child := 0
+			values, static := make([]string, len(node.Args)), make([]bool, len(node.Args))
 			for index, arg := range node.Args {
-				add(arg, index == 0 || follows, index == 0)
+				values[index], static[index] = StaticWord(arg, home)
+			}
+			if run, wrapped := actionfacts.StaticPrefixWrapperChild(values, static); wrapped {
+				child = run.Index
+			}
+			for index, arg := range node.Args {
+				add(arg, index == 0 || follows, index == 0 || index == child)
 			}
 			if depth < maxCommandPathBodyDepth {
 				for _, body := range staticCommandBodies(program, node.Args) {

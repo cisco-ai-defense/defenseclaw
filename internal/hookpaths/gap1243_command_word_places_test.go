@@ -15,8 +15,9 @@ import (
 // TestGAP1243LocalCommandWordPlaces: the laptop places each path word of a
 // shell call in its own file system, so a link operand in any position is
 // spelled as the file it reaches (rel-1-0-10:GAP-1243). A word that names no
-// link, a program name, a top-level folder alias and an in-place sed edit of
-// a link (which replaces the link) keep their spelling.
+// link, a program word (also the program a wrapper runs), a top-level folder
+// alias and an in-place sed edit of a link (which replaces the link) keep
+// their spelling.
 func TestGAP1243LocalCommandWordPlaces(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	app := filepath.Join(home, "app")
@@ -68,6 +69,10 @@ func TestGAP1243LocalCommandWordPlaces(t *testing.T) {
 		{"git status", ""},
 		{"cd /proc/self/cwd && ls", ""},
 		{"cat /tmp/x", ""},
+		// A program word keeps the name it runs as, behind a wrapper too.
+		{"./key-link", ""},
+		{"nice -n 5 ./key-link", ""},
+		{"sudo -u bob ./cfg-link x", ""},
 	} {
 		places := LocalCommandWordPlaces(tc.command, app, home, ResolveWriteTarget)
 		got, changed := LinkResolvedCommand(tc.command, home, places)

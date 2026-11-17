@@ -59,8 +59,10 @@ func LocalCommandWordPlaces(command, cwd, home string, resolve func(string) (str
 			continue
 		}
 		seen[word.Text] = true
-		if word.Program && !strings.Contains(word.Value, "/") {
-			// A program name is looked up in PATH, not in the folder.
+		if word.Program {
+			// A program is judged by the name it runs as: a link to it
+			// runs it with that name (/bin/sh to dash, python3 to
+			// python3.12), and a bare name is looked up in PATH.
 			continue
 		}
 		place, moved := localCommandWordPlace(word.Value, physicalCWD, resolve)
