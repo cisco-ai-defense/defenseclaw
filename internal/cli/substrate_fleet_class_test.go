@@ -30,7 +30,8 @@ import (
 // collector rightly leaves zero on a healthy cluster: a zero is a reading
 // there, not a missing one.
 var observedMayBeZero = map[string]string{
-	"OtherIssuers":    "one cluster in the config: no other issuers",
+	"OtherIssuers":    "no other DefenseClaw cluster in the kubeconfig: no other issuers",
+	"FleetUnread":     "every other cluster of the kubeconfig was read",
 	"OpenAPPA":        "the install file does not turn OpenAPPA on",
 	"BodyOptIn":       "nil is the reading 'the body opt-in setting does not exist'",
 	"KeysErr":         "the keys URL answered",

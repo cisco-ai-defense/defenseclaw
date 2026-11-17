@@ -99,6 +99,8 @@ DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may
 
 ### `verify` says two clusters share an issuer
 
+`issuer_unique` compares this cluster's issuer with the other DefenseClaw clusters your kubeconfig reaches: every other context, or the ones `--fleet-contexts A,B` names (`--fleet-contexts none` reads this cluster only). It fails when another cluster has the same issuer, or when this one uses the default issuer and another DefenseClaw cluster exists. A cluster that does not answer within 8 seconds is counted in the warning, not compared.
+
 The default actor-token issuer is the same on every cluster. Give each cluster its own: run `defenseclaw substrate setup --install-file install.yaml --issuer https://UNIQUE-HOST --yes`, then `ate-setup deploy ate-system --config install.yaml`, and set the same value in `substrate.identity.issuer`. The issuer need not resolve.
 
 ### Every hook and model call is refused, and `run --task` says "The task did not run"

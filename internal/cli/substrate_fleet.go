@@ -56,7 +56,11 @@ type substrateClusterFlags struct {
 	configFile  string
 	// managedAtespaces is the chart's managedAtespaces (openfga_grants).
 	managedAtespaces []string
-	timeout          time.Duration
+	// fleetContexts are the kubectl contexts of the other clusters whose
+	// issuers issuer_unique compares (empty: every other context of the
+	// kubeconfig; "none": this cluster only).
+	fleetContexts []string
+	timeout       time.Duration
 }
 
 // addKube adds the flags that say how to read the cluster with kubectl.
@@ -69,6 +73,7 @@ func (f *substrateClusterFlags) addKube(cmd *cobra.Command) {
 	fl.StringVar(&f.installFile, "install-file", "", "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)")
 	fl.StringVar(&f.configFile, "config", "", "DefenseClaw config.yaml (default: read from the cluster)")
 	fl.StringSliceVar(&f.managedAtespaces, "managed-atespaces", nil, "the chart's managedAtespaces, where DefenseClaw must be an editor (comma-separated)")
+	fl.StringSliceVar(&f.fleetContexts, "fleet-contexts", nil, "kubectl contexts of the other clusters whose actor token issuer must differ from this one's (default: every other context in the kubeconfig; none: this cluster only)")
 	fl.DurationVar(&f.timeout, "timeout", 30*time.Second, "give up on the cluster after this long")
 }
 
@@ -302,7 +307,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	if o.InstallIssuer != "" && o.Issuer == "" {
 		o.Issuer = o.InstallIssuer
 	}
-	o.Clusters = 1
+	readOtherClusters(cctx, f, &o, name)
 	readActorKeys(cctx, f, &o, keysCfg.EffectiveKeysURL())
 
 	// The Substrate release: the tag of the API server image.

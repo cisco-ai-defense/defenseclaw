@@ -88,11 +88,14 @@ type Observed struct {
 	// Issuer is substrate.identity.issuer; SubstrateNamespace the
 	// namespace Substrate runs in (its default issuer is
 	// https://idp.<namespace>.svc). OtherIssuers are the issuers of the
-	// other clusters in the fleet config; Clusters counts them all.
+	// other clusters DefenseClaw runs in that the administrator's
+	// kubeconfig reaches; Clusters counts them all, this one included.
+	// FleetUnread counts the other clusters that could not be read.
 	Issuer             string
 	SubstrateNamespace string
 	OtherIssuers       []string
 	Clusters           int
+	FleetUnread        int
 
 	// The actor token key set (GAP-0194). KeysURL is the effective
 	// substrate.identity.keys_url. Keys is the result of reading it: nil
@@ -205,23 +208,35 @@ func CheckVersion(o Observed) Check {
 }
 
 // CheckIssuerUnique: with more than one cluster each needs its own actor JWT
-// issuer, or an actor token of one cluster verifies in another (E13).
+// issuer, or an actor token of one cluster verifies in another (E13). A
+// message names the issuer only when it is a default one: that carries no
+// setting of this cluster (the status document leaves the cluster).
 func CheckIssuerUnique(o Observed) Check {
 	if o.Issuer == "" {
 		return result(CheckIssuer, Fail, "E13", "substrate.identity.issuer is not set")
 	}
+	isDefault := IsDefaultIssuer(o.Issuer) || o.Issuer == DefaultIssuer(o.SubstrateNamespace)
+	named := "the same actor JWT issuer"
+	if isDefault {
+		named = "the same actor JWT issuer, the default " + o.Issuer + ","
+	}
+	fix := "Give each cluster its own issuer (defenseclaw substrate setup --issuer URL, then ate-setup deploy) and the same " +
+		"value in substrate.identity.issuer"
 	digest := IssuerDigest(o.Issuer)
 	for _, other := range o.OtherIssuers {
 		if IssuerDigest(other) == digest {
-			return result(CheckIssuer, Fail, "E13", "another cluster uses the same actor JWT issuer: an actor token from one "+
-				"cluster would verify in the other. Give each cluster its own issuer (setup --issuer) and the same value in "+
-				"substrate.identity.issuer")
+			return result(CheckIssuer, Fail, "E13", "another cluster uses %s so an actor token from one cluster would verify "+
+				"in the other. %s", named, fix)
 		}
 	}
-	if IsDefaultIssuer(o.Issuer) || o.Issuer == DefaultIssuer(o.SubstrateNamespace) {
+	if isDefault {
 		if o.Clusters > 1 {
-			return result(CheckIssuer, Fail, "E13", "%d clusters are configured and this one uses the default issuer %s, "+
-				"which every cluster has; set a unique issuer per cluster", o.Clusters, o.Issuer)
+			return result(CheckIssuer, Fail, "E13", "%d clusters run DefenseClaw and this one uses the default issuer %s, "+
+				"which every cluster has. %s", o.Clusters, o.Issuer, fix)
+		}
+		if o.FleetUnread > 0 {
+			return result(CheckIssuer, Warn, "E13", "the default issuer %s is fine for one cluster, but %d other cluster(s) "+
+				"of the kubeconfig could not be read to compare; set a unique one before adding another", o.Issuer, o.FleetUnread)
 		}
 		return result(CheckIssuer, Warn, "E13", "the default issuer %s is fine for one cluster; set a unique one before adding another", o.Issuer)
 	}
