@@ -23,7 +23,21 @@ const (
 	maxPathFacts = 32
 	maxLinkHops  = 40
 	maxWalkDepth = 4
+	// maxProjectHookBytes bounds the project settings file the kit reads;
+	// maxProjectHookEvents and maxProjectHookEventLen bound what it reports.
+	maxProjectHookBytes    = 1 << 20
+	maxProjectHookEvents   = 32
+	maxProjectHookEventLen = 64
 )
+
+// projectHookFiles are, per connector, the project settings files (relative
+// to the session's cwd) whose hooks the actor's managed settings ignore:
+// Claude Code's drop-in sets allowManagedHooksOnly (claudecode_sandbox.go),
+// so a hook an uploaded repository declares never runs. The kit reports
+// them at SessionStart so the attempt is recorded (GAP-0479).
+var projectHookFiles = map[string][]string{
+	"claudecode": {".claude/settings.json", ".claude/settings.local.json"},
+}
 
 // pathKeys are tool_input keys whose string value is a file-system path in
 // the wave-1 connectors' tools (Claude Code Read/Write/Edit/NotebookEdit/
@@ -111,10 +125,69 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		budget = attachMCPWrite(f, connector, cwd, input, budget)
 	}
 	_ = budget
-	if len(f.Paths) == 0 && len(f.Files) == 0 && !f.Truncated && !f.readsSkill {
+	if event == "SessionStart" || event == "sessionStart" {
+		f.ProjectHooks = collectProjectHooks(connector, cwd)
+	}
+	if len(f.Paths) == 0 && len(f.Files) == 0 && len(f.ProjectHooks) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
 	}
 	return f
+}
+
+// collectProjectHooks returns the connector's project settings files under
+// cwd that declare at least one hook, with the events they name. A file
+// that is missing, too big or not JSON declares nothing the agent loads.
+func collectProjectHooks(connectorName, cwd string) []ProjectHooks {
+	var out []ProjectHooks
+	for _, rel := range projectHookFiles[connectorName] {
+		p := filepath.Join(cwd, filepath.FromSlash(rel))
+		info, err := os.Stat(p)
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxProjectHookBytes {
+			continue
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil || len(raw) > maxProjectHookBytes {
+			continue
+		}
+		var doc struct {
+			Hooks map[string]json.RawMessage `json:"hooks"`
+		}
+		if json.Unmarshal(raw, &doc) != nil {
+			continue
+		}
+		ph := ProjectHooks{Path: p}
+		for event, groups := range doc.Hooks {
+			var list []struct {
+				Hooks []json.RawMessage `json:"hooks"`
+			}
+			if json.Unmarshal(groups, &list) != nil {
+				continue
+			}
+			n := 0
+			for _, g := range list {
+				n += len(g.Hooks)
+			}
+			if n == 0 {
+				continue
+			}
+			ph.Hooks += n
+			if len(event) > maxProjectHookEventLen {
+				event = event[:maxProjectHookEventLen]
+			}
+			ph.Events = append(ph.Events, event)
+		}
+		if ph.Hooks == 0 {
+			continue
+		}
+		sort.Strings(ph.Events)
+		if len(ph.Events) > maxProjectHookEvents {
+			ph.Events = ph.Events[:maxProjectHookEvents]
+		}
+		sum := sha256.Sum256(raw)
+		ph.SHA256 = hex.EncodeToString(sum[:])
+		out = append(out, ph)
+	}
+	return out
 }
 
 // walkPaths calls add for every path-valued key and for every file an

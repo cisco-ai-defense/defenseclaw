@@ -76,8 +76,12 @@ type SubstrateFacts struct {
 	Paths []SubstratePathFact     `json:"paths,omitempty"`
 	Files []SubstrateAttachedFile `json:"files,omitempty"`
 	// Skills fingerprints every skill folder (A5's kit, GAP-0039).
-	Skills    []SubstrateSkillFingerprint `json:"skills,omitempty"`
-	Truncated bool                        `json:"truncated,omitempty"`
+	Skills []SubstrateSkillFingerprint `json:"skills,omitempty"`
+	// ProjectHooks are the project settings files that declare hooks the
+	// actor's managed settings ignore (the kit's SessionStart fact,
+	// GAP-0479): recorded, never run.
+	ProjectHooks []kit.ProjectHooks `json:"project_hooks,omitempty"`
+	Truncated    bool               `json:"truncated,omitempty"`
 }
 
 // SubstrateSkillFingerprint is one skill folder's content digest
@@ -209,6 +213,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
 		}
 		if route.class == sandboxauth.RouteHook {
+			st.substrateRecordProjectHooks(ctx, env)
 			if msg := st.substrateMCPRefusal(ctx, env); msg != "" {
 				st.logRefusal("%s", msg)
 				writeSubstrateMCPRefusal(w, msg)
