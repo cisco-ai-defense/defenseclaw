@@ -315,9 +315,20 @@ func (s *FileStore) Get(_ context.Context, atespace, uid string) (Registration, 
 	return r, ok, nil
 }
 
+// KitFillable reports whether r is an attributed record of an actor made
+// outside DefenseClaw (no fork parent, not deleted) that names no kit: the
+// controller could not attest its template when it first attributed it.
+// Such a record may take its attested kit (connector, harness version, hook
+// contract, kit version, template digest) once (GAP-0351).
+func KitFillable(r Registration) bool {
+	return r.Attributed && !r.Deleted && r.ParentUID == "" && r.Connector == "" && r.HarnessVersion == "" &&
+		r.HookContract == "" && r.KitVersion == "" && r.TemplateDigest == ""
+}
+
 // Put implements Store. A registration is written once per incarnation;
 // only the tombstone, the profile re-match (Profile, ProfileDigest,
-// Generation) and the secret names may change after that.
+// Generation), the secret names, and the kit of a KitFillable record may
+// change after that.
 func (s *FileStore) Put(_ context.Context, r Registration) error {
 	if err := r.Validate(); err != nil {
 		return err
@@ -325,7 +336,8 @@ func (s *FileStore) Put(_ context.Context, r Registration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if old, ok := s.mem[r.Key]; ok {
-		if old.Person.ID() != r.Person.ID() || old.Name != r.Name || old.Connector != r.Connector ||
+		kitFill := KitFillable(old) && r.Connector != ""
+		if old.Person.ID() != r.Person.ID() || old.Name != r.Name || (old.Connector != r.Connector && !kitFill) ||
 			old.Attributed != r.Attributed || old.Unattended != r.Unattended || old.BatchID != r.BatchID {
 			return errors.New("registry: a registration's owner, actor, connector and run mode do not change")
 		}

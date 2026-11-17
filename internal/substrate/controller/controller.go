@@ -271,6 +271,9 @@ type actorState struct {
 	regOK      bool
 	regAt      time.Time
 	regState   ateapi.ActorState
+	// kitFillWarned is set once a later attribution of the actor's attested
+	// kit could not be written (GAP-0351), so it warns once, not every pass.
+	kitFillWarned bool
 	// regStaleWarned is set while a leader outage keeps the last good
 	// registration in use (one warning per outage).
 	regStaleWarned bool
@@ -935,6 +938,8 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 		if err := c.o.Registry.Put(ctx, reg); err != nil {
 			return Registration{}, "", fmt.Errorf("%s: registry: %w", st.key, err)
 		}
+	} else if reg.Source == SourceAtespace && reg.Connector == "" {
+		c.fillKit(ctx, a, st, base, &reg)
 	}
 	reg.Template = ateapi.Key(a.GetActorTemplate())
 	st.reg, st.regOK, st.regAt, st.regState = reg, true, now, a.GetStatus().GetState()
@@ -942,21 +947,59 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 }
 
 // attributeKit puts what the actor's attested template names (connector,
-// agent version, hook contract, kit version, digest) in the new registration
-// of an actor made outside DefenseClaw (GAP-0347). Without them the gateway
+// agent version, hook contract, kit version, digest) in the registration of
+// an actor made outside DefenseClaw (GAP-0347). Without them the gateway
 // knows no connector for the actor, resolves no hook profile, and reports
 // every tool step as unrecorded (GAP-0339); a launched actor gets them from
 // the create route (GAP-0201). An unattested template, or one that can't be
 // read now, records none: admission decides about the actor, and its steps
-// are reported, never skipped. A registration is written once, so a later
-// pass does not add them.
-func (c *Controller) attributeKit(ctx context.Context, a *ateapi.Actor, reg *Registration) {
-	_, att, err := c.template(ctx, a.GetActorTemplate(), false)
+// are reported, never skipped. It returns the template it read (nil when it
+// recorded nothing).
+func (c *Controller) attributeKit(ctx context.Context, a *ateapi.Actor, reg *Registration) *ateapi.ActorTemplate {
+	tmpl, att, err := c.template(ctx, a.GetActorTemplate(), false)
 	if err != nil || !att.Attested {
-		return
+		return nil
 	}
 	reg.Connector, reg.AgentVersion, reg.HookContract = att.Connector, att.AgentVersion, att.HookContract
 	reg.KitVersion, reg.TemplateDigest = att.KitVersion, att.Digest
+	return tmpl
+}
+
+// fillKit attributes the kit again for an attributed registration that names
+// no connector: a template read error or an attestation that could not be
+// checked (an ATE API blip, a registry outage) at the first attribution must
+// not leave the actor without a connector for its life (GAP-0351). Until it
+// is recorded, the actor's tool steps are reported unrecorded (fail closed).
+// The kit is recorded only from a template that attests now and was not
+// edited after the actor was created, so it is the one the actor booted
+// (GAP-0053); the registry takes the kit fields once, into a record that has
+// none. It runs when the registration is read again (registrationTTL).
+func (c *Controller) fillKit(ctx context.Context, a *ateapi.Actor, st *actorState, base Event, reg *Registration) {
+	filled := *reg
+	tmpl := c.attributeKit(ctx, a, &filled)
+	if tmpl == nil || filled.Connector == "" {
+		return
+	}
+	edited, created := tmpl.GetMetadata().GetUpdateTime(), a.GetMetadata().GetCreateTime()
+	if edited == nil || created == nil || edited.AsTime().After(created.AsTime()) {
+		return
+	}
+	if err := c.o.Registry.Put(ctx, filled); err != nil {
+		if !st.kitFillWarned {
+			st.kitFillWarned = true
+			ev := base
+			ev.Type, ev.Severity = EventWarning, SeverityWarn
+			ev.Message = "the actor's attested connector could not be recorded (its tool steps stay reported unrecorded): " + err.Error()
+			c.emit(ev)
+		}
+		return
+	}
+	*reg = filled
+	ev := base
+	ev.Type, ev.Severity = EventWarning, SeverityInfo
+	ev.Message = "the actor's attested connector is recorded on a later pass (its template could not be attested at the first one)"
+	ev.Detail = map[string]any{"connector": filled.Connector, "template_digest": filled.TemplateDigest}
+	c.emit(ev)
 }
 
 func (c *Controller) parentRegistration(ctx context.Context, tag *ateapi.ObjectRef) (Registration, error) {
