@@ -167,10 +167,17 @@ func sandboxRulesSubject(rules []sandboxRule) string {
 func sandboxVerdictRules(ctx context.Context, connectorName string, ruleIDs, findings []string) []sandboxRule {
 	candidates := make([]string, 0, len(ruleIDs)+len(findings))
 	candidates = append(candidates, ruleIDs...)
+	// A ship-authored title for a sandbox-only reason replaces the catalog
+	// title of its rule (sandboxRuntimeWriteTargetTitle, substrate-1
+	// GAP-0389); no other label title is read.
+	authored := map[string]string{}
 	for _, label := range findings {
 		label = strings.TrimPrefix(strings.TrimSpace(label), "codeguard:")
-		if id, _, ok := strings.Cut(label, ":"); ok {
+		if id, title, ok := strings.Cut(label, ":"); ok {
 			candidates = append(candidates, id)
+			if id == "persistence.ssh_authorized_keys_command" && title == sandboxRuntimeWriteTargetTitle {
+				authored[strings.ToUpper(id)] = title
+			}
 		}
 	}
 	var (
@@ -186,6 +193,9 @@ func sandboxVerdictRules(ctx context.Context, connectorName string, ruleIDs, fin
 		}
 		seen[key] = true
 		if r, ok := lookupSandboxGuardrailRule(gen, key); ok {
+			if title, found := authored[key]; found {
+				r.title = title
+			}
 			out = append(out, r)
 		} else if r, ok := lookupSandboxCodeGuardRule(key); ok {
 			out = append(out, r)

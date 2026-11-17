@@ -1676,6 +1676,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				title = archiveBeforeWriteTitle
 			} else if unprovenOnly && !unresolved {
 				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
+			} else if symlinkWrite && named.ID == rule.ID && request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook &&
+				unprovenTarget.class == hookpaths.UnprovenTargetUnresolved && !unresolved &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+				!trustedSandboxGuestAuthorizedKeysWrite(request) {
+				// A copy-mode sandbox's write whose target the call builds at
+				// run time (cd /abs && eval '... > $x'): this gateway cannot
+				// read the sandbox's files to place it, so it keeps the block
+				// (a known limit of 1.0.10, substrate-1 GAP-0389) and says
+				// why, with a form it can place, instead of naming a key
+				// write the call does not make.
+				title = sandboxRuntimeWriteTargetTitle
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
@@ -2027,6 +2038,16 @@ func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 // nonWriteKeyMentionTitle is the title of the alert for a command whose only
 // statements naming the keys file read it.
 const nonWriteKeyMentionTitle = "A command names an SSH key file only as a read or as data of an unknown program"
+
+// sandboxRuntimeWriteTargetTitle is the title of the authorized-keys block of
+// a copy-mode sandbox write whose target the call builds at run time (an eval
+// or a variable), which the gateway cannot place without the sandbox's files
+// (substrate-1 GAP-0389). Like the other ship-authored titles it holds no
+// "; " or ", ", so it reaches the agent as written (trustedBuiltInFindingLabel,
+// sandboxVerdictRules).
+const sandboxRuntimeWriteTargetTitle = "DefenseClaw cannot see the files of this cloud sandbox and so cannot tell " +
+	"where a write lands when eval or a variable builds its target at run time. " +
+	"Use a relative path or a direct write instead of eval"
 
 // unresolvedWriteTargetTitle is the title of the authorized-keys block of a
 // write whose target neither the managed hook client nor the gateway could
