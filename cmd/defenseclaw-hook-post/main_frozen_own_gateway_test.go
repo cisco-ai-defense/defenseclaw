@@ -127,4 +127,18 @@ func TestGAP1162FrozenOwnGatewayIsDecidedWithinTheShellBudget(t *testing.T) {
 			}
 		})
 	}
+	// No fail-open: a frozen listener that the record does not name (no
+	// record at all here) is no proof of the own gateway, so even an
+	// ordinary call is not the outage under the earlier decision point.
+	t.Run("unrecorded frozen listener", func(t *testing.T) {
+		empty := filepath.Join(root, "no-record")
+		if err := os.MkdirAll(empty, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(hookPostDataDirEnv, empty)
+		got := post(t, "/api/v1/codex/hook", tool("Bash", "ls"))
+		if got == 0 || got == hookexec.PerUserPostLateOrdinaryExit || got == hookexec.PerUserPostOutageExit {
+			t.Fatalf("an unrecorded frozen listener got exit %d, a status the shell can let through", got)
+		}
+	})
 }

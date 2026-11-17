@@ -134,19 +134,19 @@ type answerWatchdog struct {
 	stdout, stderr io.Writer
 	out, err       bytes.Buffer
 
-	fallback         watchdogAnswer
-	noDecision       watchdogAnswer
-	secureClient     bool
-	visibleOutage    func() ([]byte, []byte, int)
+	fallback      watchdogAnswer
+	noDecision    watchdogAnswer
+	secureClient  bool
+	visibleOutage func() ([]byte, []byte, int)
 	// ordinaryGiven is the ordinary open answer useOrdinaryAtDeadline made
 	// the answer, and ordinaryVisible renders its text again with the
 	// once-per-session warning marker when the watchdog gives it
 	// (rel-1-0-10 GAP-1123). A call with a pending decision (closedKnown)
 	// still gets the ordinary answer, so this is not visibleOutage, which
 	// such a call never uses.
-	ordinaryGiven   watchdogAnswer
-	ordinaryVisible func() ([]byte, []byte, int)
-	exit            func(int)
+	ordinaryGiven    watchdogAnswer
+	ordinaryVisible  func() ([]byte, []byte, int)
+	exit             func(int)
 	deliveryReceipt  func(bool, bool)
 	deadlineDelivery *hookDeliveryRequest
 	// revoke reads the call's patch targets once more after finish wrote an
@@ -1283,14 +1283,18 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	if w.finished || w.answeredInTime.Load() {
 		return
 	}
-	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
+	// The ordinary open answer replaces the closed one also for a call with
+	// a pending decision (closedKnown), so its install window is checked as
+	// well: an install that holds the lock closes it (rel-1-0-10 GAP-1187).
+	ordinaryGiven := w.ordinaryVisible != nil && sameWatchdogAnswer(w.fallback, w.ordinaryGiven)
+	if installing && (!w.closedKnown || ordinaryGiven) && !w.claimedAnswer && w.installCheck != nil {
 		w.fallback = w.install
 		if len(w.install.frame) != 0 {
 			w.failureLog.replaceFallbackFrame(w.install.frame)
 		}
 	} else if !w.closedKnown && !w.claimedAnswer && !w.failureLogged && w.visibleOutage != nil {
 		w.fallback.out, w.fallback.err, w.fallback.code = w.visibleOutage()
-	} else if w.ordinaryVisible != nil && !w.claimedAnswer && !w.failureLogged && sameWatchdogAnswer(w.fallback, w.ordinaryGiven) {
+	} else if ordinaryGiven && !w.claimedAnswer && !w.failureLogged {
 		// Only the text: the decision (exit code) and the failure row stay
 		// the prepared ordinary answer's.
 		w.fallback.out, w.fallback.err, _ = w.ordinaryVisible()
