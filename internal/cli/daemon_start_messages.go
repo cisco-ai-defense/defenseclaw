@@ -35,14 +35,29 @@ type readinessError struct {
 func (e readinessError) Is(target error) bool { return target == e.kind }
 func (e readinessError) Unwrap() error        { return e.error }
 
+// startedBySystemd reports whether a service manager started this command as
+// a unit's ExecStart. systemd sets INVOCATION_ID for every unit it runs; a
+// login shell, an ssh session and a terminal do not have it.
+func startedBySystemd() bool { return os.Getenv("INVOCATION_ID") != "" }
+
 // reportGatewayStillStarting tells the user that the gateway did not answer
 // within the readiness deadline, that it was left running, and what to run.
 // The watchdog that restart stopped is started again so it reports whether
-// the gateway comes up. The exit code stays non-zero: protection is not
-// confirmed yet.
+// the gateway comes up. The exit code stays non-zero for an interactive
+// start: protection is not confirmed yet. Under a systemd unit the command
+// exits 0, because the gateway process was started and is alive and a
+// non-zero exit made a Type=forking unit fail, stop the gateway through
+// ExecStop and start it again in a loop (GAP-1160). Hooks stay fail-closed
+// until the gateway answers, and `defenseclaw-gateway status` says when it does.
 func reportGatewayStillStarting(_ error, pid int, logPath string, cfg *config.Config, cfgErr error) error {
 	fmt.Println(Style("STILL STARTING", "fg=yellow", "bold"))
 	_ = startConfiguredWatchdog(cfg, cfgErr, false)
+	if startedBySystemd() {
+		fmt.Printf("The gateway (PID %d) is still starting and was left running. Exiting 0 because systemd "+
+			"started this command: the unit is active and the gateway comes up on its own. Protection is not "+
+			"active until it answers: check it with defenseclaw-gateway status (check %s for errors)\n", pid, logPath)
+		return nil
+	}
 	// The probe error (a URL and a context deadline) is an internal detail;
 	// the user needs to know it is only slow and what that means (GAP-0478).
 	return fmt.Errorf("the gateway (PID %d) is still starting and was left running; on a busy machine this can "+

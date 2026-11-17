@@ -26,7 +26,7 @@ vi.mock("node:child_process", () => ({
   execFile: mockExecFile,
 }));
 
-import { runPluginScan } from "../policy/enforcer.js";
+import { runPluginScan, runSkillScan } from "../policy/enforcer.js";
 
 describe("runPluginScan", () => {
   beforeEach(() => {
@@ -57,6 +57,18 @@ describe("runPluginScan", () => {
     await expect(runPluginScan("/plugins/test")).rejects.toThrow(
       "defenseclaw plugin scan exited 127: not found",
     );
+  });
+
+  it("says the command is not available to this account when it cannot start (GAP-1161)", async () => {
+    mockExecFile.mockImplementation((_cmd, _args, _opts, cb) => {
+      cb({ code: "ENOENT" }, "", "");
+    });
+    const message =
+      "the defenseclaw command is not available to this account; " +
+      "run the scan from the DefenseClaw account terminal";
+
+    await expect(runPluginScan("/plugins/test")).rejects.toThrow(message);
+    await expect(runSkillScan("/tmp/x")).rejects.toThrow(message);
   });
 
   it("fails when stdout is not valid JSON", async () => {
