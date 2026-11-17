@@ -242,8 +242,8 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				assertNoForeignConfigRecord(t, hookDir, home)
 				writeOutageTierConfig(t, home, tc.config)
+				assertNoForeignConfigRecord(t, hookDir, home)
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, invoke.script)}, invoke.args...)...)
 				cmd.Stdin = strings.NewReader(invoke.stdin)
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
