@@ -155,6 +155,9 @@ func TestRouteOnlyEndpointFilteredForceAliasStillGatesTheChosenBackend(t *testin
 			if err := f.cfg.Routing.Validate(); err != nil {
 				t.Fatal(err)
 			}
+			// Agent call costs reach the budgets (tokenomics on), so the
+			// evaluator reads the spend.
+			routingAdminRuntime.SetFeed(true)
 			if routingAdminRuntime.For(f.cfg) == nil {
 				t.Fatal("evaluator")
 			}
