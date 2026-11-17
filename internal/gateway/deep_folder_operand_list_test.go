@@ -25,7 +25,10 @@ func deepFolderFixture(t *testing.T) b36ManagedHookFixture {
 }
 
 // deepFolderFixtureOf is the managed fixture below parts folders of width
-// bytes each.
+// bytes each. It names that folder as the fixture's parent: setting TMPDIR
+// moved t.TempDir() there only while GOTMPDIR was unset, so on a gate box
+// that sets GOTMPDIR the project stayed about 125 bytes deep and both deep
+// folder tests failed their own guards (rel-1-0-10:GAP-0439, GAP-0423).
 func deepFolderFixtureOf(t *testing.T, parts, width int) b36ManagedHookFixture {
 	t.Helper()
 	if runtime.GOOS == "darwin" && parts*width > 800 {
@@ -43,8 +46,7 @@ func deepFolderFixtureOf(t *testing.T, parts, width int) b36ManagedHookFixture {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TMPDIR", deep)
-	return newB36ManagedHookFixture(t)
+	return newB36ManagedHookFixtureIn(t, deep)
 }
 
 // TestLongOperandListInADeepFolderIsAllowedAndKeepsProtectedTargets is
