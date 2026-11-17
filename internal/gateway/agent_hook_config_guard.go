@@ -1300,7 +1300,8 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		}
 		return "", "", ""
 	}
-	if target := sandboxAgentHookConfigWrite(actionfacts.Analyze(input), input.ActiveHome); target != "" {
+	whole := actionfacts.Analyze(input)
+	if target := sandboxAgentHookConfigWrite(whole, input.ActiveHome); target != "" {
 		return agentHookConfigWriteRuleID, "", target
 	}
 	// Each top-level statement read alone in the directory a static cd
@@ -1312,10 +1313,12 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 	// one directory is read once. Like the laptop guard, it reads a command
 	// up to agentHookConfigMaxPlacedBytes, past the statement budget too:
 	// such a call carries the evaluation-limit finding and still names the
-	// write, as on the laptop (substrate-1 GAP-0359).
+	// write, as on the laptop (substrate-1 GAP-0359). A call the whole
+	// reading did not finish (a && list past its bound) is split even
+	// without a cd: its statements were never read (substrate-1 GAP-0363).
 	command := agentHookConfigRawShellCommand(input)
 	if command == "" || len(command) > agentHookConfigMaxPlacedBytes || !path.IsAbs(input.CWD) ||
-		!strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
+		whole.Authoritative() && !strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
 		return "", "", ""
 	}
 	statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome)

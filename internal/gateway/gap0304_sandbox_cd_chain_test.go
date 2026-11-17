@@ -84,9 +84,6 @@ func TestGAP0304SandboxCdChainKeepsLaptopParity(t *testing.T) {
 		// benign: the actor must give the laptop's answer, an allow when
 		// laptopAllows (otherwise the laptop's own limit).
 		benign, laptopAllows bool
-		// limited: the actor's own reading is truncated where the laptop's
-		// is not, so it alerts with the limit instead of the laptop's rules.
-		limited bool
 		// allPacks: also run in the permissive and strict packs.
 		allPacks bool
 	}
@@ -116,11 +113,12 @@ func TestGAP0304SandboxCdChainKeepsLaptopParity(t *testing.T) {
 		// it, both sides carry the limit and name the write.
 		probe{name: "guard-126-settings", command: repeat(126, trueStep) + settings},
 		probe{name: "guard-130-settings", command: repeat(130, trueStep) + settings, allPacks: true},
-		// More distinct placed commands than the guest reading takes (pipes,
-		// under the statement budget): truncated, never a silent allow.
+		// More distinct placed commands than the guest reading takes: 141
+		// simple commands are over the call's statement budget too (it
+		// counts pipeline stages), so both sides give the limit.
 		probe{name: "placed-140-pipes history", command: "cd .cache\n" +
 			repeat(70, func(i int) string { return fmt.Sprintf("touch a%d | touch b%d\n", i, i) }) + "rm ../.bash_history",
-			limited: true, allPacks: true},
+			allPacks: true},
 	)
 	for _, sep := range []string{"\n", " && "} {
 		for _, n := range []int{17, 28, 32, 100} {
@@ -166,10 +164,11 @@ func TestGAP0304SandboxCdChainKeepsLaptopParity(t *testing.T) {
 					t.Fatalf("%s: test setup: the laptop allows %q", p.name, p.command)
 				case ca == "allow":
 					t.Fatalf("%s: copy-mode actor allows (silently) what the laptop judges %s %v", p.name, la, lr)
-				case p.limited:
-					if !slices.Contains(cr, evaluationLimitRuleID) {
-						t.Fatalf("%s: copy-mode actor %s %v: want the evaluation-limit finding past the placement cap", p.name, ca, cr)
-					}
+				case ca == la && slices.Contains(lr, evaluationLimitRuleID) && gap0304RulesCover(cr, lr):
+					// Past its own && list bound the laptop's reading loses
+					// the cd for its semantic rules; the actor keeps it
+					// (substrate-1 GAP-0363), so it may name more, never
+					// fewer, with the same verdict.
 					continue
 				}
 				if ca != la || !slices.Equal(cr, lr) {
@@ -178,4 +177,14 @@ func TestGAP0304SandboxCdChainKeepsLaptopParity(t *testing.T) {
 			}
 		})
 	}
+}
+
+// gap0304RulesCover reports whether rules names every rule of sub.
+func gap0304RulesCover(rules, sub []string) bool {
+	for _, rule := range sub {
+		if !slices.Contains(rules, rule) {
+			return false
+		}
+	}
+	return true
 }
