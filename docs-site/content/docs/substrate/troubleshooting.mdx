@@ -115,7 +115,7 @@ Ask your administrator to run `defenseclaw substrate verify` and look at `actor_
 
 ### `verify` or `doctor` says a stage bundle no longer verifies
 
-`bundle_state` (in `verify` and `status --cluster`) and the `substrate.bundles` row of `doctor` fail when a stage's signed policy bundle no longer verifies against the trust anchors, for example after the anchors Secret was replaced with another key (`signature_invalid`) or the key was revoked (`key_revoked`). The controller stops enforcing that bundle: the stage's atespaces fall back to `config.yaml`, or keep only the DefenseClaw rule on a managed install, and it logs `sandbox.bundle.unverified`. The fix is with whoever manages your bundles: a bundle signed with a key in the current anchors, or the anchors Secret put back. `bundle_state` warns when your identity may not read the anchors Secret.
+`bundle_state` (in `verify` and `status --cluster`) and the `substrate.bundles` row of `doctor` fail when a stage's signed policy bundle no longer verifies against the trust anchors, for example after the anchors Secret was replaced with another key (`signature_invalid`) or the key was revoked (`key_revoked`). The controller stops enforcing that bundle: the stage's atespaces fall back to `config.yaml`, or keep only the DefenseClaw rule on a managed install, and it logs `sandbox.bundle.unverified`. Apply a bundle signed with a key in the current anchors (`defenseclaw substrate bundle apply FILE`), or put the anchors Secret back. `bundle_state` warns when your identity may not read the anchors Secret.
 
 ### `verify` cannot read the snapshot bucket
 
