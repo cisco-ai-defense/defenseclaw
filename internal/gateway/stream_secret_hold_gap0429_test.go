@@ -421,7 +421,7 @@ type gap0429Tally struct {
 func gap0429Run(t *testing.T, paths []gap0429Path) {
 	keys, tokens := gap0429Keys(t), gap0429Tokens(t)
 	tallies := map[string]*gap0429Tally{}
-	sizes := []int{1, 7, 24, 4096, 0}
+	sizes := gap0429Sizes()
 	for _, path := range paths {
 		for _, pack := range []string{"default", "strict", "permissive"} {
 			var rows []gap0429Row
@@ -494,9 +494,63 @@ func TestGAP0429StreamedSecretHeldLLM(t *testing.T) {
 	gap0429Run(t, gap0429Paths()[:1])
 }
 
+// The passthrough table runs in three tests of two stream formats each, so
+// each fits a CI shard (one test of all six ran 636 s plain).
 func TestGAP0429StreamedSecretHeldPassthrough(t *testing.T) {
-	paths := gap0429Paths()
-	gap0429Run(t, paths[1:len(paths)-1])
+	gap0429Run(t, gap0429PathsNamed(t, "passthrough/"+gap0429OpenAIChat.name, "passthrough/anthropic"))
+}
+
+func TestGAP0429StreamedSecretHeldPassthroughResponsesGemini(t *testing.T) {
+	gap0429Run(t, gap0429PathsNamed(t, "passthrough/openai-responses", "passthrough/gemini"))
+}
+
+func TestGAP0429StreamedSecretHeldPassthroughBedrockOllama(t *testing.T) {
+	gap0429Run(t, gap0429PathsNamed(t, "passthrough/bedrock", "passthrough/ollama"))
+}
+
+// TestGAP0429PassthroughTestsCoverEveryFormat: the three passthrough tests
+// above read every passthrough path of gap0429Paths, so a new stream format
+// is not left out of the table.
+func TestGAP0429PassthroughTestsCoverEveryFormat(t *testing.T) {
+	covered := map[string]bool{"passthrough/" + gap0429OpenAIChat.name: true, "passthrough/anthropic": true,
+		"passthrough/openai-responses": true, "passthrough/gemini": true, "passthrough/bedrock": true, "passthrough/ollama": true}
+	for _, p := range gap0429Paths() {
+		if strings.HasPrefix(p.name, "passthrough/") && !covered[p.name] {
+			t.Errorf("%s is in no TestGAP0429StreamedSecretHeldPassthrough* test", p.name)
+		}
+	}
+}
+
+// gap0429PathsNamed returns the paths of gap0429Paths with these names, in
+// that order; a name that is not a path fails the test.
+func gap0429PathsNamed(t *testing.T, names ...string) []gap0429Path {
+	t.Helper()
+	all := gap0429Paths()
+	out := make([]gap0429Path, 0, len(names))
+	for _, n := range names {
+		found := false
+		for _, p := range all {
+			if p.name == n {
+				out, found = append(out, p), true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no stream path %q", n)
+		}
+	}
+	return out
+}
+
+// gap0429Sizes are the piece sizes of the stream tables. Every frame is
+// checked over the whole reply text (as on rel, not the hold), so a row of
+// 1- or 7-byte pieces costs thousands of whole-text checks: under -race those
+// rows run past the CI shard cap, and the plain build runs them.
+func gap0429Sizes() []int {
+	if hookAnswerRaceBuild {
+		return []int{24, 4096, 0}
+	}
+	return []int{1, 7, 24, 4096, 0}
 }
 
 func TestGAP0429StreamedSecretHeldRawForward(t *testing.T) {

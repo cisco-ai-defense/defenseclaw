@@ -58,6 +58,17 @@ func gap0429BoundCases(t *testing.T) []gap0429BoundCase {
 	}
 }
 
+// gap0429BoundPieceSize is the piece size of the hold-bound table: 24 bytes
+// in the plain build; under -race 512, as a 64 KiB block in 24-byte pieces
+// is thousands of whole-text checks (1301 s under -race) and the bound is
+// the same at any piece size.
+func gap0429BoundPieceSize() int {
+	if hookAnswerRaceBuild {
+		return 512
+	}
+	return 24
+}
+
 func TestGAP0429HoldBoundsAreTheUnknownTier(t *testing.T) {
 	// The log names the bound only with reasons shown (a strict block line
 	// shows the reason redacted otherwise); stderr is captured, not printed.
@@ -68,7 +79,7 @@ func TestGAP0429HoldBoundsAreTheUnknownTier(t *testing.T) {
 				name := fmt.Sprintf("%s/%s/%s", path.name, c.name, tier.pack)
 				rec := httptest.NewRecorder()
 				w := &gap0429Watch{GuardrailInspector: retestInspector(), secret: c.secret.text, rec: rec}
-				log := captureStderr(t, func() { path.run(t, rec, w, tier.pack, gap0429Pieces(c.text, 24, nil)) })
+				log := captureStderr(t, func() { path.run(t, rec, w, tier.pack, gap0429Pieces(c.text, gap0429BoundPieceSize(), nil)) })
 				got := path.text(rec.Body.String())
 				released := gap0429Released(got, c.secret)
 				if !strings.Contains(log, "TRUNCATED") && !strings.Contains(log, boundedTruncatedTitle) {

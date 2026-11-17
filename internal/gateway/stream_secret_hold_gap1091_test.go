@@ -102,7 +102,7 @@ func gap1091Run(t *testing.T, paths []gap0429Path) {
 	tallies := map[string]*tally{}
 	for _, path := range paths {
 		for _, pack := range []string{"default", "strict", "permissive"} {
-			for _, size := range []int{1, 7, 24, 4096, 0} {
+			for _, size := range gap0429Sizes() {
 				for _, v := range values {
 					// Three offsets: inside a scan window, and with the /llm and
 					// passthrough 500-byte scan boundary (after the 1024-byte
