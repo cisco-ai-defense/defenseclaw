@@ -60,6 +60,14 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	shellWriteOperands(command, cwd, home, KnownUser{})
 	knownStateOperands(command, cwd, home)
 	powerShellQuotedPathOperands(command, cwd, home)
+	// The script of each PowerShell launcher a Linux or macOS call runs is
+	// read in PowerShell, as resolveConnector reads it (rel-1-0-10:GAP-1134).
+	for _, script := range actionfacts.PowerShellLauncherScripts(fallback) {
+		scriptInput := fallback
+		scriptInput.Command, scriptInput.DialectHint = script, actionfacts.DialectPowerShell
+		actionfacts.Analyze(scriptInput)
+		powerShellQuotedPathOperands(script, cwd, home)
+	}
 	LiteralWriteOperands(command, cwd, home)
 	AdjacentAssignedWriteOperands(command, cwd, home)
 	DeclaredRedirectWriteOperands(command, cwd, home)
@@ -178,7 +186,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionSedInPlaceWrite", "SedInPlaceBackupUnresolved", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
-	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwinFiles", "actionfacts.RunTimeShellTwin", "addReading",
+	"actionfacts.PowerShellLauncherScripts", "actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwinFiles", "actionfacts.RunTimeShellTwin", "addReading",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "quotedGlobNameWriteOperands", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }

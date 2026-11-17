@@ -134,15 +134,6 @@ func gap1116PowerShellWriteRoute(t *testing.T, conn, own string) {
 			}
 			for _, peer := range []bool{false, true} {
 				for _, target := range targets {
-					if peer && conn == "antigravity" && target.name == "DefenseClaw state" {
-						// The agy hook client lists no write targets for its
-						// toolCall envelope, so a hook-socket peer, which
-						// cannot open the home, has no placement for the
-						// state twins (rel-1-0-10:GAP-1132). On Windows the
-						// managed hook client sends no tool-call targets for
-						// any connector.
-						continue
-					}
 					for _, spelling := range spellings {
 						for _, form := range gap1115Forms {
 							// A .NET argument is an expression: $HOME is

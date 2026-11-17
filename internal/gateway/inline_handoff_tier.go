@@ -37,7 +37,14 @@ func readInlineState(facts actionfacts.Facts, request trustedActionRequest) inli
 		return inlineStateReading{}
 	}
 	home := strings.TrimRight(facts.ActiveHome, "/")
-	paths, caps := hookpaths.InlineHandedPaths(command, facts.CWD, home)
+	// A gateway behind ProtectHome receives no cwd of its own: the code is
+	// placed where the hook client ran the call, so a file it opens by an
+	// absolute name is read too (rel-1-0-10:GAP-1134).
+	cwd := facts.CWD
+	if client, placed := protectedHomeReportedDirectory(request); placed {
+		cwd = client
+	}
+	paths, caps := hookpaths.InlineHandedPaths(command, cwd, home)
 	reading := inlineStateReading{caps: caps}
 	reaches, ok := stateReachFunc(facts, request)
 	if !ok {

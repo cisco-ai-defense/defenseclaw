@@ -4081,38 +4081,11 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // PowerShell reading the selection made of a call it placed in no dialect
 // (selectWindowsShellDialectReading).
 func agentHookWindowsShellDialectReading(input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
-	command, ok := trustedShellCommandArgument(input.Args)
+	command, ok := actionfacts.ShellCommandArgument(input.Args)
 	if !ok {
 		return "", nil
 	}
 	return selectWindowsShellDialectReading(input.Tool, command, input)
-}
-
-// trustedShellCommandArgument is the command text of projected shell
-// arguments under any key the trusted-action parser reads as the command
-// (command, cmd, script, CommandLine, ...: conflictingToolArgumentField).
-// The dialect selection read only "command", so agy run_command
-// ({"CommandLine": ...}) was never offered the PowerShell reading on a
-// Windows host and its PowerShell text was judged as POSIX
-// (rel-1-0-10:GAP-0784). Keys that disagree name no command: the conflicting
-// keys check judges that call.
-func trustedShellCommandArgument(raw json.RawMessage) (string, bool) {
-	var object map[string]json.RawMessage
-	if json.Unmarshal(raw, &object) != nil {
-		return "", false
-	}
-	command, found := "", false
-	for key, value := range object {
-		if field, _ := conflictingToolArgumentField(key); field != "command" {
-			continue
-		}
-		var text string
-		if json.Unmarshal(value, &text) != nil || (found && text != command) {
-			return "", false
-		}
-		command, found = text, true
-	}
-	return command, found
 }
 
 // withWindowsShellDialect gives a structured shell call the Windows hook's
@@ -4299,12 +4272,9 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 		}
 	}
 	// Text sent to a running process is judged as shell input (see
-	// agentHookTrustedActionArgs): agy's send_command_input as run_command
-	// input, Hermes' process tool (write, submit) as a shell command.
-	if strings.EqualFold(strings.TrimSpace(connectorName), "antigravity") &&
-		strings.EqualFold(strings.TrimSpace(toolName), "send_command_input") {
-		return "run_command"
-	}
+	// agentHookTrustedActionArgs): Hermes' process tool (write, submit) as a
+	// shell command, agy's send_command_input as run_command input
+	// (hookpaths.ConnectorActionTool, above).
 	if strings.EqualFold(strings.TrimSpace(connectorName), "hermes") &&
 		strings.EqualFold(strings.TrimSpace(toolName), "process") {
 		return "shell"

@@ -1862,8 +1862,14 @@ func withActiveStateTargetMention(
 			// So is a proven writer or delete whose operand the client
 			// followed into the state tree through a link the gateway cannot
 			// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
+			// A managed peer's call is placed where the hook client ran it
+			// (managedLinkWalkView): the gateway behind ProtectHome receives no
+			// cwd of its own, so a bare name in the state folder (echo x >>
+			// config.yaml in ~/.defenseclaw) or a link in the project the
+			// client followed into the state tree was placed nowhere and
+			// allowed (rel-1-0-10:GAP-1135).
 			if !request.ProtectedHomeHook ||
-				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) &&
+				!provenShellRedirectStateWrite(request) && !throughLink(provenStateMutationPath) &&
 					!provenStaticRedirectStateMutation(facts, request) {
 				// The mention scan places files below the state directory; a
 				// cmd /c body that removes or moves the directory itself (cmd
@@ -1872,10 +1878,14 @@ func withActiveStateTargetMention(
 				// the state root (classifier-ps checker it9 RV9-2 X02, X07).
 				// A managed PowerShell call that reaches the state through a
 				// link names no state: its reading follows the paths the hook
-				// client placed there (GAP-1023).
+				// client placed there (GAP-1023). Nor does the quoted script of
+				// a pwsh launcher on Linux or macOS that names the state through
+				// a link: the mention scan reads the launcher's words, not the
+				// script, which the PowerShell reading walks (rel-1-0-10:GAP-1134).
 				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
 				proven := spelled && provenCMDSlashCStateWrite(request) ||
-					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)
+					(spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) &&
+						provenPowerShellStateWrite(request)
 				if !proven {
 					return findings
 				}
