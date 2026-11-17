@@ -601,10 +601,19 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 			reading.addUnknown(form, seen)
 		}
 	}
-	for _, text := range scan.dynamicPaths {
+	dynamic := scan.dynamicPaths
+	if scan.unplaced {
+		// A FileInfo or System.IO write the reader cannot place may write
+		// any file the command spells (rel-1-0-10:GAP-1230).
+		dynamic = append(dynamic, command)
+	}
+	for _, text := range dynamic {
 		for _, form := range psDynamicPathReadings(text, reading.merge.home, budget) {
 			reading.addUnknown(form, seen)
 		}
+	}
+	if budget.over {
+		return true, true
 	}
 	return false, true
 }
@@ -987,7 +996,16 @@ type psStateScan struct {
 	fileInfos, streams map[string]string
 	// groupClose is the index after the ) of the last (...) group read: a
 	// method called on it is called on what the group evaluates to.
+	// groupCall reports that group as the argument list of a call
+	// ([IO.FileInfo]::new(f).OpenWrite()), whose result is groupFile, the
+	// twin parameter of the FileInfo it returns ("" for none known).
 	groupOpen, groupClose int
+	groupCall             bool
+	groupFile             string
+	// unplaced reports a FileInfo or System.IO write the reader cannot
+	// place (psFileInfoMethod): every file the command spells may be the
+	// one it writes, the unknown tier (rel-1-0-10:GAP-1230).
+	unplaced bool
 }
 
 func (s *psStateScan) overBound() bool { return s.budget.over }
@@ -1106,7 +1124,9 @@ func (s *psStateScan) code(i int, nested bool) int {
 			// (Get-Item f)) is called on what the group evaluates to.
 			onGroup := s.groupClose > 0 && s.groupClose < i && r[s.groupClose] == '.' &&
 				strings.TrimSpace(statement) == string(r[s.groupClose:i])
-			groupOpen, groupClose := s.groupOpen, s.groupClose
+			groupOpen, groupClose, groupCall, groupFile := s.groupOpen, s.groupClose, s.groupCall, s.groupFile
+			// A ( glued to a name is the argument list of a call.
+			call := i > 0 && r[i-1] < unicode.MaxASCII && psVariableNameByte(byte(r[i-1]))
 			// A Start-Process statement keeps its (...) and @(...)
 			// argument arrays, so the -ArgumentList it runs is read
 			// (checker it16 RV16-2); the body is still scanned as a piece.
@@ -1121,12 +1141,15 @@ func (s *psStateScan) code(i int, nested bool) int {
 			if keep && s.account(end-i) {
 				cur = append(cur, r[i:end]...)
 			}
-			receiver := ""
-			if onGroup && s.account(groupClose-groupOpen) {
-				receiver = string(r[groupOpen+1 : groupClose-1])
+			var receiver *psReceiver
+			switch {
+			case onGroup && groupCall:
+				receiver = &psReceiver{file: groupFile, call: true}
+			case onGroup && s.account(groupClose-groupOpen):
+				receiver = &psReceiver{text: string(r[groupOpen+1 : groupClose-1])}
 			}
-			s.dotNetCall(method, statement, receiver, i, end)
-			s.groupOpen, s.groupClose = i, end
+			file := s.dotNetCall(method, statement, receiver, i, end)
+			s.groupOpen, s.groupClose, s.groupCall, s.groupFile = i, end, call, file
 			i = end
 		case c == '#' && comment:
 			for i < len(r) && r[i] != '\n' {

@@ -14,13 +14,19 @@ import (
 )
 
 // The .NET file opens the shared PowerShell write reader reads besides the
-// static writes of psFileWriteMethod (rel-1-0-10:GAP-1138): File.Open and the
-// FileStream constructors, whose FileMode and FileAccess decide whether they
-// write; the StreamWriter constructors, over a path or a stream variable; and
-// the FileInfo opens, of a FileInfo variable, a [IO.FileInfo] cast or a
-// (Get-Item f) group. A read-only open (FileMode Open with FileAccess Read)
-// writes nothing. An open whose mode, access or path is known only at run
-// time may write: its twin is the unknown tier, never the write.
+// static writes of psFileWriteMethod (rel-1-0-10:GAP-1138): File.Open,
+// File.OpenHandle and the FileStream constructors, whose FileMode and
+// FileAccess decide whether they write; the StreamWriter constructors, over a
+// path or a stream variable; and the FileInfo opens and writes (Delete,
+// CopyTo, MoveTo, Replace) of a FileInfo variable (also a typed one), a
+// [IO.FileInfo] cast, a [IO.FileInfo]::new(f) or New-Object IO.FileInfo
+// result, or a (Get-Item f) or (Get-ChildItem f) group. A read-only open
+// (FileMode Open with FileAccess Read) writes nothing. An open whose mode,
+// access or path is known only at run time may write: its twin is the
+// unknown tier, never the write. So is a FileInfo write on a receiver the
+// reader cannot place (a pipeline item, any other call result or variable)
+// and a System.IO call it does not classify: every file the command spells
+// may be the one written (rel-1-0-10:GAP-1230).
 
 // psOpenTarget is the twin parameter (-LiteralPath 'f' or -Path f) of a file
 // a .NET open writes; unknown when it may write it only.
@@ -41,6 +47,7 @@ const (
 // The kinds of .NET calls psDotNetCalls lists.
 const (
 	psCallOpen     = "open"     // (path, FileMode[, FileAccess, ...])
+	psCallHandle   = "handle"   // (path[, FileMode[, FileAccess, ...]]): Open and Read by default
 	psCallWriter   = "writer"   // (path or stream, ...)
 	psCallFileInfo = "fileinfo" // (path)
 )
@@ -49,16 +56,45 @@ const (
 // their argument list) that open a file by its path: the static method,
 // [T]::new and New-Object T(...).
 var psDotNetCalls = []struct{ suffix, kind string }{
-	{"file]::open", psCallOpen}, {"filestream]::new", psCallOpen}, {"io.filestream", psCallOpen},
+	{"file]::open", psCallOpen}, {"file]::openhandle", psCallHandle},
+	{"filestream]::new", psCallOpen}, {"io.filestream", psCallOpen},
 	{"streamwriter]::new", psCallWriter}, {"io.streamwriter", psCallWriter},
 	{"fileinfo]::new", psCallFileInfo}, {"io.fileinfo", psCallFileInfo},
 }
 
-// psFileInfoOpens are the FileInfo instance methods that open the file:
-// true for the ones that always write, false for Open(FileMode[,
-// FileAccess]).
-var psFileInfoOpens = map[string]bool{
-	"openwrite": true, "appendtext": true, "createtext": true, "create": true, "open": false,
+// psFileInfoMethod is what a FileInfo instance method does to the files it
+// names.
+type psFileInfoMethod struct {
+	// receiver: the method writes (or removes) the FileInfo's own file;
+	// mode: it opens it with the FileMode and FileAccess of its arguments.
+	receiver, mode bool
+	// arguments are the positions of the paths it writes.
+	arguments []int
+	// placedOnly: the name is too common on other types (String.Replace)
+	// for a receiver the reader cannot place to count.
+	placedOnly bool
+	// stream: the method returns a stream (or writer) of the file.
+	stream bool
+}
+
+// psFileInfoMethods are the FileInfo instance methods that open or write a
+// file: the opens, Delete, and CopyTo, MoveTo and Replace, which write the
+// files their arguments name (MoveTo and Replace also remove their own).
+var psFileInfoMethods = map[string]psFileInfoMethod{
+	"openwrite": {receiver: true, stream: true}, "appendtext": {receiver: true, stream: true},
+	"createtext": {receiver: true, stream: true}, "create": {receiver: true, stream: true},
+	"open": {mode: true, stream: true}, "delete": {receiver: true},
+	"copyto": {arguments: []int{0}}, "moveto": {receiver: true, arguments: []int{0}},
+	"replace": {receiver: true, arguments: []int{0, 1}, placedOnly: true},
+}
+
+// psReceiver is what a method is called on when it is not a variable: the
+// body of the (...) group, or the result of the call that group is the
+// argument list of (file: the twin parameter of the FileInfo it returns, ""
+// when not known).
+type psReceiver struct {
+	text, file string
+	call       bool
 }
 
 // psFileModes and psFileAccesses are the System.IO.FileMode and FileAccess
@@ -70,9 +106,10 @@ var (
 
 // dotNetCall reads the .NET call whose argument list runs from the ( at
 // open to end: method is the lower-case text before it, statement the
-// statement so far, receiver the body of the (...) group the method is
-// called on, if any.
-func (s *psStateScan) dotNetCall(method, statement, receiver string, open, end int) {
+// statement so far, receiver what the method is called on when it is not a
+// variable (nil for none). It returns the twin parameter of the FileInfo the
+// call returns, "" for none known.
+func (s *psStateScan) dotNetCall(method, statement string, receiver *psReceiver, open, end int) string {
 	write := psFileWriteMethod(method)
 	kind := ""
 	for _, call := range psDotNetCalls {
@@ -81,30 +118,18 @@ func (s *psStateScan) dotNetCall(method, statement, receiver string, open, end i
 			break
 		}
 	}
-	file, always := "", false
-	if write == nil && kind == "" {
-		dot := strings.LastIndexByte(method, '.')
-		if dot < 0 {
-			return
+	args := func() []string {
+		if end-1 > open+1 && s.account(end-1-open) {
+			if text := string(s.runes[open+1 : end-1]); strings.TrimSpace(text) != "" {
+				return psSplitArgumentTexts(text, s.budget)
+			}
 		}
-		name := method[dot+1:]
-		var ok bool
-		if always, ok = psFileInfoOpens[name]; !ok {
-			return
-		}
-		if file = s.fileInfoOf(statement, name, receiver); file == "" {
-			return
-		}
+		return nil
 	}
-	var args []string
-	if end-1 > open+1 && s.account(end-1-open) {
-		if text := string(s.runes[open+1 : end-1]); strings.TrimSpace(text) != "" {
-			args = psSplitArgumentTexts(text, s.budget)
-		}
-	}
-	variable, _ := psAssignment(statement)
+	variable, _, _ := psTypedAssignment(statement)
 	switch {
 	case write != nil:
+		args := args()
 		for _, index := range write {
 			if index < len(args) {
 				s.addOpen(args[index], psOpenWrite)
@@ -112,18 +137,64 @@ func (s *psStateScan) dotNetCall(method, statement, receiver string, open, end i
 		}
 		s.bindStream(variable, args)
 	case kind != "":
+		args := args()
 		s.dotNetConstruct(kind, variable, args)
+		if kind == psCallFileInfo && len(args) == 1 && args[0] != "" && psLiteralArgument(args[0], s.budget) {
+			return "-LiteralPath " + args[0]
+		}
+	case s.newObjectArguments(statement, args):
+	case s.unclassifiedIOCall(statement, open, end):
 	default:
-		verdict := psOpenWrite
-		if !always {
-			verdict = psOpenVerdictOf(args, 0)
+		dot := strings.LastIndexByte(method, '.')
+		if dot < 0 {
+			return ""
 		}
-		if verdict != psOpenRead {
-			s.opens = append(s.opens, psOpenTarget{file, verdict == psOpenUnknown})
+		name := method[dot+1:]
+		if effect, ok := psFileInfoMethods[name]; ok {
+			s.fileInfoMethod(name, effect, statement, receiver, variable, args())
 		}
-		if variable != "" {
-			s.bind(&s.streams, variable, file)
+	}
+	return ""
+}
+
+// fileInfoMethod reads the FileInfo instance method name (effect) called
+// with args on receiver (or the variable before .name in statement), whose
+// result is assigned to variable.
+func (s *psStateScan) fileInfoMethod(name string, effect psFileInfoMethod, statement string, receiver *psReceiver, variable string, args []string) {
+	file := s.fileInfoOf(statement, name, receiver)
+	if file == "" {
+		// A receiver the reader cannot place: an Open without a FileMode
+		// and Replace are calls of other types (a connection, a string).
+		if effect.placedOnly || effect.mode && len(args) == 0 {
+			return
 		}
+		for _, index := range effect.arguments {
+			if index < len(args) {
+				s.addOpen(args[index], psOpenUnknown)
+			}
+		}
+		if effect.receiver || effect.mode {
+			s.unplaced = true
+		}
+		return
+	}
+	for _, index := range effect.arguments {
+		if index < len(args) && !strings.EqualFold(args[index], "$null") {
+			s.addOpen(args[index], psOpenWrite)
+		}
+	}
+	verdict := psOpenWrite
+	switch {
+	case effect.mode:
+		verdict = psOpenVerdictOf(args, 0)
+	case !effect.receiver:
+		return
+	}
+	if verdict != psOpenRead {
+		s.opens = append(s.opens, psOpenTarget{file, verdict == psOpenUnknown})
+	}
+	if variable != "" && effect.stream {
+		s.bind(&s.streams, variable, file)
 	}
 }
 
@@ -131,8 +202,12 @@ func (s *psStateScan) dotNetCall(method, statement, receiver string, open, end i
 // result is assigned to variable ("" for none).
 func (s *psStateScan) dotNetConstruct(kind, variable string, args []string) {
 	switch kind {
-	case psCallOpen:
-		if verdict := psOpenVerdictOf(args, 1); verdict != psOpenRead && len(args) > 0 {
+	case psCallOpen, psCallHandle:
+		verdict := psOpenVerdictOf(args, 1)
+		if kind == psCallHandle {
+			verdict = psHandleVerdictOf(args)
+		}
+		if verdict != psOpenRead && len(args) > 0 {
 			s.addOpen(args[0], verdict)
 		}
 		s.bindStream(variable, args)
@@ -146,10 +221,116 @@ func (s *psStateScan) dotNetConstruct(kind, variable string, args []string) {
 		}
 		s.addOpen(args[0], psOpenWrite)
 	case psCallFileInfo:
-		if variable != "" && len(args) > 0 && args[0] != "" && psLiteralArgument(args[0], s.budget) {
+		if variable == "" {
+			return
+		}
+		if len(args) > 0 && args[0] != "" && psLiteralArgument(args[0], s.budget) {
 			s.bind(&s.fileInfos, variable, "-LiteralPath "+args[0])
+			return
+		}
+		// A FileInfo of a path known only at run time is not placed.
+		delete(s.fileInfos, variable)
+	}
+}
+
+// newObjectArguments reads a (...) or @(...) group at open..end that is
+// the argument list of the New-Object statement before it (New-Object T
+// -ArgumentList @(f, m)); false when it is not one.
+func (s *psStateScan) newObjectArguments(statement string, args func() []string) bool {
+	text := strings.TrimSuffix(strings.TrimRight(statement, " \t"), "@")
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "new-object") {
+		return false
+	}
+	variable, _, rest := psTypedAssignment(text)
+	words := psJoinListWords(psWords(rest, s.budget), s.budget)
+	if len(words) < 2 || s.budget.over || !strings.EqualFold(words[0].text, "new-object") {
+		return false
+	}
+	typeName, arguments := psNewObjectParts(words)
+	if typeName == "" || arguments != "" {
+		return false
+	}
+	// The group is the argument list only when the statement ends with the
+	// type name or an -ArgumentList (-Args) parameter.
+	last := strings.ToLower(words[len(words)-1].text)
+	name := strings.TrimPrefix(last, "-")
+	if last != strings.ToLower(typeName) && (name == last || !strings.HasPrefix("argumentlist", name) && name != "args") {
+		return false
+	}
+	s.dotNetNewObject(variable, typeName, args())
+	return true
+}
+
+// dotNetNewObject reads New-Object typeName with args, whose result is
+// assigned to variable.
+func (s *psStateScan) dotNetNewObject(variable, typeName string, args []string) {
+	typeName = psNewObjectType(typeName, s.budget)
+	for _, call := range psDotNetCalls {
+		if strings.HasPrefix(call.suffix, "io.") && typeName == call.suffix {
+			s.dotNetConstruct(call.kind, variable, args)
+			return
 		}
 	}
+}
+
+// psNewObjectType is the lower-case name of a New-Object type without its
+// System. namespace.
+func psNewObjectType(typeName string, budget *psBudget) string {
+	return strings.TrimPrefix(strings.Trim(strings.ToLower(psUnquote(typeName, budget)), "[]"), "system.")
+}
+
+// psIOType is the lower-case System.IO type (io.file) a static call
+// ([System.IO.File]::Name) before its argument list is made on, and the
+// lower-case method name; false for any other call.
+func psIOType(statement string) (typeName, name string, ok bool) {
+	lower := strings.ToLower(strings.TrimRight(statement, " \t"))
+	colons := strings.LastIndex(lower, "]::")
+	if colons < 0 {
+		return "", "", false
+	}
+	open := strings.LastIndexByte(lower[:colons], '[')
+	if open < 0 {
+		return "", "", false
+	}
+	typeName = strings.TrimPrefix(strings.TrimSpace(lower[open+1:colons]), "system.")
+	name = lower[colons+3:]
+	if !strings.HasPrefix(typeName, "io.") || name == "" || strings.ContainsAny(name, " \t.[]()") {
+		return "", "", false
+	}
+	return typeName, name, true
+}
+
+// psIOReadOnly reports a System.IO static call (lower case) that writes no
+// file: the Path methods, the constructors (the FileStream and
+// StreamWriter ones are read before, by their FileMode and path), and the
+// reads, lookups and listings.
+func psIOReadOnly(typeName, name string) bool {
+	if typeName == "io.path" || name == "new" {
+		return true
+	}
+	for _, prefix := range []string{"get", "read", "enumerate", "exists", "openread", "opentext", "resolvelinktarget", "setcurrentdirectory"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// unclassifiedIOCall reads a System.IO static call at open..end the reader
+// does not classify (File.SetAttributes, File.CreateSymbolicLink,
+// ZipFile.ExtractToDirectory, ...): every path its arguments spell may be
+// one it writes, the unknown tier (rel-1-0-10:GAP-1230). False for any other
+// call and for a read-only one.
+func (s *psStateScan) unclassifiedIOCall(statement string, open, end int) bool {
+	typeName, name, ok := psIOType(statement)
+	if !ok {
+		return false
+	}
+	if !psIOReadOnly(typeName, name) && end-1 > open+1 && s.account(end-1-open) {
+		s.dynamicPaths = append(s.dynamicPaths, string(s.runes[open+1:end-1]))
+	}
+	return true
 }
 
 // addOpen adds the file of a .NET path argument that verdict writes or may
@@ -180,11 +361,14 @@ func (s *psStateScan) bind(vars *map[string]string, variable, param string) {
 }
 
 // fileInfoOf returns the twin parameter of the FileInfo the method name is
-// called on: the (...) group receiver, else the variable before .name in
-// statement; "" when it is not a known FileInfo.
-func (s *psStateScan) fileInfoOf(statement, name, receiver string) string {
-	if receiver != "" {
-		return psFileInfoExpression(receiver, s.budget)
+// called on: the receiver, else the variable before .name in statement; ""
+// when the reader cannot place it.
+func (s *psStateScan) fileInfoOf(statement, name string, receiver *psReceiver) string {
+	switch {
+	case receiver != nil && receiver.call:
+		return receiver.file
+	case receiver != nil:
+		return psFileInfoExpression(receiver.text, s.budget)
 	}
 	before := strings.ToLower(strings.TrimRight(statement, " \t"))
 	before, ok := strings.CutSuffix(before, "."+name)
@@ -203,43 +387,53 @@ func (s *psStateScan) fileInfoOf(statement, name, receiver string) string {
 
 // dotNetStatement reads a statement that binds a FileInfo or opens a file
 // without an argument list in parentheses: New-Object T -ArgumentList a, b
-// (or T a, b), $f = Get-Item f and $f = [IO.FileInfo]'f'.
+// (or T a, b), $f = Get-Item f, $f = Get-ChildItem f, $f = [IO.FileInfo]'f'
+// and [IO.FileInfo]$f = 'f'.
 func (s *psStateScan) dotNetStatement(text string) {
 	lower := strings.ToLower(text)
 	if !strings.Contains(lower, "new-object") && !strings.Contains(lower, "fileinfo") &&
-		!strings.Contains(lower, "get-item") && !strings.Contains(lower, "gi ") {
+		!strings.Contains(lower, "get-item") && !strings.Contains(lower, "gi ") &&
+		!strings.Contains(lower, "get-childitem") && !strings.Contains(lower, "gci ") &&
+		!strings.Contains(lower, "dir ") && !strings.Contains(lower, "ls ") {
 		return
 	}
-	variable, rest := psAssignment(text)
+	variable, typeName, rest := psTypedAssignment(text)
 	words := psJoinListWords(psWords(rest, s.budget), s.budget)
 	if len(words) == 0 || s.budget.over {
 		return
 	}
 	if !strings.EqualFold(words[0].text, "new-object") {
-		if variable != "" {
-			if file := psFileInfoExpression(rest, s.budget); file != "" {
-				s.bind(&s.fileInfos, variable, file)
-			}
+		if variable == "" {
+			return
+		}
+		file := psFileInfoExpression(rest, s.budget)
+		if file == "" && psFileInfoType(typeName) {
+			// A variable typed [IO.FileInfo] converts what it is given.
+			file = psFileInfoExpression("[IO.FileInfo]"+strings.TrimSpace(rest), s.budget)
+		}
+		if file != "" {
+			s.bind(&s.fileInfos, variable, file)
 		}
 		return
 	}
 	typeName, arguments := psNewObjectParts(words)
-	typeName = strings.TrimPrefix(strings.Trim(strings.ToLower(psUnquote(typeName, s.budget)), "[]"), "system.")
 	var args []string
 	if strings.TrimSpace(arguments) != "" {
 		args = psSplitArgumentTexts(psArrayBody(arguments), s.budget)
 	}
-	for _, call := range psDotNetCalls {
-		if strings.HasPrefix(call.suffix, "io.") && typeName == call.suffix {
-			s.dotNetConstruct(call.kind, variable, args)
-			return
-		}
-	}
+	s.dotNetNewObject(variable, typeName, args)
+}
+
+// psFileInfoType reports the type literal [IO.FileInfo] ([System.IO.FileInfo]),
+// lower case.
+func psFileInfoType(typeName string) bool {
+	return typeName == "[io.fileinfo]" || typeName == "[system.io.fileinfo]"
 }
 
 // psNewObjectParts returns the type name (-TypeName or the first positional
-// word) and the argument list (-ArgumentList, -Args or the second positional
-// word) of a New-Object call whose words (comma lists joined) are words.
+// word) and the argument list (-ArgumentList, -Args, the second positional
+// word or the (...) glued to the type name) of a New-Object call whose words
+// (comma lists joined) are words.
 func psNewObjectParts(words []psWord) (typeName, arguments string) {
 	var positional []string
 	for k := 1; k < len(words); k++ {
@@ -268,6 +462,10 @@ func psNewObjectParts(words []psWord) (typeName, arguments string) {
 	if typeName == "" && len(positional) > 0 {
 		typeName, positional = positional[0], positional[1:]
 	}
+	if open := strings.IndexByte(typeName, '('); open > 0 && strings.HasSuffix(typeName, ")") && arguments == "" {
+		// New-Object IO.FileInfo('f'): the argument list is glued on.
+		typeName, arguments = typeName[:open], typeName[open:]
+	}
 	if arguments == "" && len(positional) > 0 {
 		arguments = positional[0]
 	}
@@ -276,7 +474,8 @@ func psNewObjectParts(words []psWord) (typeName, arguments string) {
 
 // psFileInfoExpression returns the twin parameter of the file an expression
 // evaluates to as a FileInfo: a [IO.FileInfo] cast of a literal,
-// [IO.FileInfo]::new(literal) or Get-Item (gi) of one path; "" otherwise.
+// [IO.FileInfo]::new(literal), New-Object IO.FileInfo of a literal, or
+// Get-Item (gi) or Get-ChildItem (gci, dir, ls) of one path; "" otherwise.
 func psFileInfoExpression(text string, budget *psBudget) string {
 	text = strings.TrimSpace(text)
 	lower := strings.ToLower(text)
@@ -292,7 +491,7 @@ func psFileInfoExpression(text string, budget *psBudget) string {
 			}
 			value = args[0]
 		}
-		if value == "" || !psLiteralArgument(value, budget) {
+		if value == "" || strings.HasPrefix(value, "::") || !psLiteralArgument(value, budget) {
 			return ""
 		}
 		return "-LiteralPath " + value
@@ -301,7 +500,24 @@ func psFileInfoExpression(text string, budget *psBudget) string {
 	if len(words) < 2 || budget.over {
 		return ""
 	}
-	if program := strings.ToLower(words[0].text); program != "get-item" && program != "gi" {
+	program := strings.ToLower(words[0].text)
+	if program == "new-object" {
+		typeName, arguments := psNewObjectParts(psJoinListWords(words, budget))
+		if psNewObjectType(typeName, budget) != "io.fileinfo" {
+			return ""
+		}
+		args := psSplitArgumentTexts(psArrayBody(arguments), budget)
+		if len(args) != 1 || args[0] == "" || !psLiteralArgument(args[0], budget) {
+			return ""
+		}
+		return "-LiteralPath " + args[0]
+	}
+	children := false
+	switch program {
+	case "get-item", "gi":
+	case "get-childitem", "gci", "dir", "ls":
+		children = true
+	default:
 		return ""
 	}
 	param := ""
@@ -315,7 +531,7 @@ func psFileInfoExpression(text string, budget *psBudget) string {
 			continue
 		}
 		name := strings.ToLower(word[1:])
-		if strings.HasPrefix("force", name) && len(name) >= 2 {
+		if strings.HasPrefix("force", name) && len(name) >= 2 || children && name == "file" {
 			continue
 		}
 		if k+1 >= len(words) {
@@ -327,6 +543,10 @@ func psFileInfoExpression(text string, budget *psBudget) string {
 			param = "-LiteralPath " + words[k].text
 		case len(name) >= 2 && strings.HasPrefix("path", name):
 			param = "-Path " + words[k].text
+		case children:
+			// A filter, a recursion or any other selection of children
+			// leaves the file unplaced.
+			return ""
 		}
 	}
 	if param == "" || !psLiteralArgument(param[strings.IndexByte(param, ' ')+1:], budget) {
@@ -358,6 +578,25 @@ func psOpenVerdictOf(args []string, mode int) psOpenVerdict {
 		return psOpenRead
 	}
 	return psOpenWrite
+}
+
+// psHandleVerdictOf is what File.OpenHandle(path[, FileMode[, FileAccess,
+// ...]]) does to its file: FileMode Open and FileAccess Read by default, so
+// only an Open with no access or FileAccess Read reads.
+func psHandleVerdictOf(args []string) psOpenVerdict {
+	if len(args) < 2 {
+		return psOpenRead
+	}
+	if len(args) == 2 {
+		switch name, ok := psEnumWord(args[1], "filemode", psFileModes); {
+		case !ok:
+			return psOpenUnknown
+		case name == "open":
+			return psOpenRead
+		}
+		return psOpenWrite
+	}
+	return psOpenVerdictOf(args, 1)
 }
 
 // psEnumWord returns the name (lower case) of a System.IO enum value spelled
@@ -394,13 +633,32 @@ func psEnumWord(arg, enum string, names []string) (string, bool) {
 	return "", false
 }
 
-// psAssignment returns the lower-case name of the variable a statement
-// assigns ($name = ...) and the text after the =; "" and the statement when
-// it assigns none.
-func psAssignment(statement string) (variable, rest string) {
+// psTypedAssignment returns the lower-case name of the variable a statement
+// assigns ($name = ... or [T]$name = ...), the lower-case type literal it is
+// constrained to ("" for none; the last when there are several) and the text
+// after the =; "", "" and the statement when it assigns none.
+func psTypedAssignment(statement string) (variable, typeName, rest string) {
 	t := strings.TrimLeft(statement, " \t\r\n")
+	for strings.HasPrefix(t, "[") {
+		depth, end := 0, -1
+		for k := 0; k < len(t) && end < 0; k++ {
+			switch t[k] {
+			case '[':
+				depth++
+			case ']':
+				if depth--; depth == 0 {
+					end = k
+				}
+			}
+		}
+		if end < 0 {
+			return "", "", statement
+		}
+		typeName = strings.ToLower(strings.ReplaceAll(t[:end+1], " ", ""))
+		t = strings.TrimLeft(t[end+1:], " \t")
+	}
 	if !strings.HasPrefix(t, "$") {
-		return "", statement
+		return "", "", statement
 	}
 	j := 1
 	for j < len(t) && psVariableNameByte(t[j]) {
@@ -411,9 +669,9 @@ func psAssignment(statement string) (variable, rest string) {
 		k++
 	}
 	if j == 1 || k >= len(t) || t[k] != '=' || k+1 < len(t) && t[k+1] == '=' {
-		return "", statement
+		return "", "", statement
 	}
-	return strings.ToLower(t[1:j]), t[k+1:]
+	return strings.ToLower(t[1:j]), typeName, t[k+1:]
 }
 
 func psVariableNameByte(c byte) bool {
