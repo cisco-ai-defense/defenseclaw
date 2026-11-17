@@ -78,12 +78,11 @@ func TestOpenClawInstallPolicyWatchNeedsTheRecordedOpenClawGoneOnLooksInARow(t *
 func TestOpenClawInstallPolicyReloadAfterADecidedReloadDoesNotGoBackToAnOlderSeenVersion(t *testing.T) {
 	s, dataDir, first, second, refreshed, _ := openClawExecutableFixture(t, true)
 	stop := s.startOpenClawInstallPolicyWatch(context.Background())
-	deadline := time.Now().Add(5 * time.Second)
-	for openClawInstallPolicySeen().version != "2026.11.3" && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
-	}
 	// No watcher from here: only reloads move what was written and seen.
 	stop()
+	if got := openClawInstallPolicySeen().version; got != "2026.11.3" {
+		t.Fatalf("last seen %q at the start, want the recorded 2026.11.3", got)
+	}
 	writeOpenClawDiscoveryAt(t, dataDir, "2026.12.1", first)
 	s.refreshOpenClawInstallPolicy()
 	if opts := waitOpenClawRefresh(t, refreshed, "the first reload"); opts.AgentVersion != "2026.12.1" {

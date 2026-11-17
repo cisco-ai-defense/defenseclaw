@@ -323,9 +323,15 @@ func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context, recorded openC
 			// follows at the next one.
 			if cfg != nil && openClawInstallPolicyRefreshMu.TryLock() {
 				if version, binaryPath, err := connector.OpenClawInstallPolicyStateWritten(cfg.DataDir); err == nil && version != "" {
+					// Only a state another setup wrote moves written-under:
+					// the one a refresh of this gateway wrote is already it,
+					// and moving it again would move the last seen OpenClaw
+					// back.
 					if state := (openClawObservation{version: version, binaryPath: binaryPath}); state != recorded {
 						recorded = state
-						setOpenClawInstallPolicyWritten(state)
+						if state != openClawInstallPolicyWritten() {
+							setOpenClawInstallPolicyWritten(state)
+						}
 					}
 				}
 				openClawInstallPolicyRefreshMu.Unlock()
@@ -433,14 +439,15 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config, watch bool) connector.
 		}
 	case watch && connector.NormalizeAgentVersion("openclaw", agentVersion) == "":
 		instead = seen
-	case agentExecutable == "":
+	}
+	if instead.version != "" {
+		agentVersion, agentExecutable = instead.version, instead.binaryPath
+	}
+	if agentExecutable == "" {
 		// A cache that names no executable is taken for the recorded one
 		// (openClawExecutableSame); keep it recorded, or the next decided
 		// refresh would drop it and the guard with it.
 		agentExecutable = written.binaryPath
-	}
-	if instead.version != "" {
-		agentVersion, agentExecutable = instead.version, instead.binaryPath
 	}
 	return connector.SetupOpts{
 		DataDir:                          cfg.DataDir,
