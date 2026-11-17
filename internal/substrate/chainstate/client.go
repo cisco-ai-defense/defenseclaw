@@ -140,6 +140,11 @@ func (c *Client) Lifecycle(ctx context.Context, ev LifecycleEvent) (LifecycleRes
 	return out, err
 }
 
+// Running reports the actors the controller saw running (GAP-0539).
+func (c *Client) Running(ctx context.Context, actors []Actor) error {
+	return c.call(ctx, MethodChainRunning, RunningRequest{Actors: actors}, nil)
+}
+
 // Unrecorded tells the leader that a tool step of the actor is not in its
 // chain window (GAP-0339).
 func (c *Client) Unrecorded(ctx context.Context, actor Actor, why string) error {

@@ -50,7 +50,22 @@ const (
 	MethodChainLifecycle  = "ChainLifecycle"
 	MethodChainEgress     = "ChainEgress"
 	MethodChainUnrecorded = "ChainUnrecorded"
+	// MethodChainRunning is the controller's report of the actors it saw
+	// running (substrate-1 GAP-0539).
+	MethodChainRunning = "ChainRunning"
 )
+
+// RunningRequest is the ChainRunning body: the actors the controller saw in
+// state RUNNING on its last pass. Each counts as running at the leader's
+// receive time, so wall time while an actor runs is its running time even
+// when the actor makes no request (GAP-0539). At most MaxRunningActors.
+type RunningRequest struct {
+	Actors []Actor `json:"actors"`
+}
+
+// MaxRunningActors bounds one ChainRunning report; the controller splits a
+// longer list.
+const MaxRunningActors = 2048
 
 // UnrecordedRequest says a gateway replica could not put one of the actor's
 // tool steps in its chain window (SUBSTRATE-CHAIN-UNRECORDED): the egress
