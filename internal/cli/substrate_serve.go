@@ -557,6 +557,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
 			TemplateSkills:       substrateTemplateSkills(ctl),
 			Info:                 substrateInfo(c),
+			// GAP-0497: /info says when another callout holds Substrate's
+			// egress slot and which checks are off; launchers print it.
+			EgressCallout: ctl.CalloutStatus,
 			// GAP-0262: the gateway checks the sign-in server it verifies
 			// people with, from its own network.
 			SignInServer: substrateSignInServer(people),

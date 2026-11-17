@@ -107,6 +107,8 @@ The slot can also change after DefenseClaw is set up, for example when someone r
 - With `substrate.extproc.failure_mode: open`, interactive agents keep their egress policies and the alert lists the checks that don't run: ask hosts, URL rules, egress feeds, secret and DLP scans, body and MCP inspection, and tool chains at egress.
 - With `substrate.extproc.enabled: false`, policies don't change; the record is a warning.
 
+People see it too. `defenseclaw substrate doctor` fails its `egress_callout` row, and `defenseclaw substrate status`, for the account and for one agent, prints an `Egress:` line. Both say that another egress callout is in place, which protections are off (ask hosts, URL rules, egress feeds, secret and DLP scans, body and MCP inspection, tool chains at egress), and what the fail mode does. DefenseClaw's hooks and Substrate's default-deny egress still apply. The gateway's `/api/v1/substrate/info` carries it as `egress_callout` without naming the other callout; the administrators' gateway doctor row `substrate.egress_callout` names it.
+
 To fix it, register the DefenseClaw callout again: `defenseclaw substrate setup --install-file FILE`, then `ate-setup deploy` with that file. If the slot can't be read (for example a chart older than 1.0.10 without the grant), the controller warns once and keeps the last state it read.
 
 ### `verify` says the Substrate version is outside the tested range

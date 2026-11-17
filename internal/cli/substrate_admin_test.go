@@ -55,6 +55,8 @@ type subAdminFake struct {
 	statusStatus int
 	attachStatus int
 	statusBody   string
+	// infoBody is the /info answer ("" answers 404, an older gateway).
+	infoBody string
 
 	bundleBody     []byte
 	bundleQuery    url.Values
@@ -118,6 +120,13 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 			return
 		}
 		writeJSONStatus(w, 200, f.statusBody)
+	})
+	mux.HandleFunc("/api/v1/substrate/info", func(w http.ResponseWriter, r *http.Request) {
+		if f.infoBody == "" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSONStatus(w, 200, f.infoBody)
 	})
 	mux.HandleFunc("/realms/x/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, 200, `{"issuer":"`+f.issuerAnswer+`"}`)

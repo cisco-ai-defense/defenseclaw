@@ -280,6 +280,10 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if a.Unattended {
 					fmt.Fprintln(w, "Mode:      unattended (asks are denied)")
 				}
+				if e := substrateEgressInfo(ctx, s); e.Replaced() {
+					// GAP-0497: say which protections are off.
+					fmt.Fprintf(w, "Egress:    %s\n", substrateEgressSummary(e))
+				}
 				if a.State == substrateStateCrashed {
 					// GAP-0410: say it crashed and the way back.
 					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
@@ -313,12 +317,22 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 			if tok != nil {
 				who = substrateDash(tok.Principal)
 			}
+			egress := substrateEgressInfo(ctx, s)
 			if asJSON {
-				return writeSubstrateJSON(w, map[string]any{"context": s.Name, "admin_url": s.Ctx.AdminURL, "signed_in_as": who, "agents": n})
+				doc := map[string]any{"context": s.Name, "admin_url": s.Ctx.AdminURL, "signed_in_as": who, "agents": n}
+				if egress != nil {
+					doc["egress_callout"] = egress
+				}
+				return writeSubstrateJSON(w, doc)
 			}
 			fmt.Fprintf(w, "Cluster:    %s (%s)\n", s.Name, s.Ctx.AdminURL)
 			fmt.Fprintf(w, "Signed in:  %s\n", who)
 			fmt.Fprintf(w, "Agents:     %d\n", n)
+			if egress.Replaced() {
+				// GAP-0497: not "all is well" while another callout holds
+				// Substrate's egress slot.
+				fmt.Fprintf(w, "Egress:     %s\n", substrateEgressSummary(egress))
+			}
 			return nil
 		},
 	}

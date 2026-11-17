@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -190,6 +191,10 @@ type SubstrateConfig struct {
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
 	Info   map[string]any
+	// EgressCallout is who holds Substrate's egress callout slot, as the
+	// create path's controller reads it (nil: not reported). /info carries
+	// its class and the checks that are off, /doctor the holder (GAP-0497).
+	EgressCallout func(ctx context.Context) (controller.CalloutStatus, bool)
 	// SignInServer is the OIDC issuer people sign in with (nil: none
 	// configured). The gateway checks it from its own network every
 	// signInCheckEvery; /info names a failing cause, /doctor the detail,
