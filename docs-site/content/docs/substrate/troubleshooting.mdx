@@ -165,6 +165,10 @@ The relay ended a `--task` run that made no progress for 10 minutes: no output e
 
 The cluster gateway did not answer some hook calls of a `--task` run, so those calls failed closed and the steps they guarded may not have run, yet the agent exited 0. The relay reports such a run with exit code 75 instead of a success. `logs NAME` shows how many hook calls got no answer and when the first one was; the audit log has the same reason in the `substrate` row with `event` `task_end`. Check the gateway Deployments for a restart or an outage at that time, then run the task again.
 
+### `verify` warns `worker_drain`, or actors crashed after a worker pool roll
+
+A worker pool roll is in progress: some workers are draining and actors still run on them. The controller suspends the actors DefenseClaw manages and resumes them on another worker (the controller log has `sandbox.worker_drain.suspend` and `sandbox.worker_drain.resume`); if no worker has room yet it says so and tries again on each pass, and `connect` also resumes the actor. Suspend other actors yourself before the old workers stop. An actor that crashed anyway needs `kubectl ate revert actor NAME -a ATESPACE` (an administrator), then `connect`. If the controller says it cannot list Substrate workers, it needs the global viewer grant that the chart bootstrap gives it.
+
 ### Hooks fail with "gateway unreachable"
 
 The hook retries once, then follows the fail mode. Check that the `defenseclaw-actor` Service has ready endpoints, that the NetworkPolicy admits Substrate's egress gateway, and that the agent's settings use the full Service name (`defenseclaw-actor.defenseclaw-system.svc.cluster.local`): an actor resolves only the names in its allow list. Some CNIs apply a NetworkPolicy a moment after a pod starts.

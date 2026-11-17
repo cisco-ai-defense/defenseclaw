@@ -167,6 +167,10 @@ type Controller struct {
 	// more by a scoped controller; listed is what the last scoped pass
 	// listed (GAP-0295).
 	retired, listed map[string]bool
+	// draining is the draining workers of the pass in progress, and
+	// workersWarned says the listing failed once (GAP-0449).
+	draining      ateapi.Draining
+	workersWarned bool
 }
 
 type recreatedActor struct {
@@ -228,6 +232,10 @@ type actorState struct {
 	// from how it changed (GAP-0141).
 	rid     restoreID
 	written bool
+	// drainResume: this controller suspended the actor off a draining
+	// worker and resumes it (GAP-0449); drainFrom is that worker's pod.
+	drainResume, drainResumeWarned bool
+	drainFrom                      string
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -312,6 +320,10 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	draining := c.drainingWorkers(ctx)
+	c.mu.Lock()
+	c.draining = draining
+	c.mu.Unlock()
 	now := c.o.Now()
 	seen := make(map[string]bool, len(actors))
 	var urgent, rest []*ateapi.Actor
@@ -769,6 +781,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 				}
 			}
 			if err := c.apply(ctx, a, st, reg, res.Profile, base); err != nil {
+				return err
+			}
+			if moved, err := c.drain(ctx, a, st, reg, base); moved || err != nil {
 				return err
 			}
 			return c.idle(ctx, a, st, reg, base, res.idleAfter(lv.IdleSuspendAfter))

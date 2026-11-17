@@ -66,6 +66,8 @@ type (
 	Snapshot             = pb.Snapshot
 	SnapshotStorage      = pb.SnapshotStorage
 	WorkerAssignment     = pb.WorkerAssignment
+	Worker               = pb.Worker
+	WorkerState          = pb.WorkerState
 	ResourceRequirements = pb.ResourceRequirements
 	Resources            = pb.Resources
 	ImageVolumeSource    = pb.ImageVolumeSource
@@ -103,6 +105,20 @@ const (
 	ActorStateDeleting    = pb.ActorState_ACTOR_STATE_DELETING
 	ActorStateReverting   = pb.ActorState_ACTOR_STATE_REVERTING
 )
+
+// Worker states (WorkerStatus.state). A DRAINING worker's pod is terminating:
+// Substrate places no new actor there and leaves the ones it hosts alone.
+const (
+	WorkerStateActive      = pb.WorkerState_WORKER_STATE_ACTIVE
+	WorkerStateDraining    = pb.WorkerState_WORKER_STATE_DRAINING
+	WorkerStateUnavailable = pb.WorkerState_WORKER_STATE_UNAVAILABLE
+)
+
+// WorkerLister lists the cluster's workers (global viewer). It is apart from
+// Client so a test double of Client needs it only when a test uses it.
+type WorkerLister interface {
+	ListWorkers(ctx context.Context, opts ListOptions) (Page[*Worker], error)
+}
 
 // Snapshot fidelity and actor metadata fields used when building a template.
 const (
@@ -431,6 +447,15 @@ func (c *GRPCClient) ListActors(ctx context.Context, atespace string, opts ListO
 		return Page[*Actor]{}, err
 	}
 	return Page[*Actor]{Items: resp.GetActors(), NextPageToken: resp.GetNextPageToken()}, nil
+}
+
+// ListWorkers lists the cluster's workers.
+func (c *GRPCClient) ListWorkers(ctx context.Context, opts ListOptions) (Page[*Worker], error) {
+	resp, err := c.ctl.ListWorkers(ctx, &pb.ListWorkersRequest{Options: listOptions(opts)})
+	if err != nil {
+		return Page[*Worker]{}, err
+	}
+	return Page[*Worker]{Items: resp.GetWorkers(), NextPageToken: resp.GetNextPageToken()}, nil
 }
 
 func (c *GRPCClient) SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor, error) {
