@@ -15565,6 +15565,18 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
     dotenv_path = os.path.join(cfg.data_dir, ".env")
     api_key = _resolve_api_key(key_env, dotenv_path) if key_env else ""
 
+    if not key_env:
+        # GAP-0464: a configuration error, not an outage. The gateway builds no
+        # AI Defense client without a key, so the remote scan never runs.
+        _emit(
+            "fail",
+            "Cisco AI Defense",
+            f"guardrail.scanner_mode is {gc.scanner_mode} but no AI Defense API key is configured "
+            "(cisco_ai_defense.api_key_env), so the remote scan never runs; set the key, "
+            "or set guardrail.scanner_mode to local",
+            r=r,
+        )
+        return
     if not api_key:
         display = key_env if key_env.isupper() and len(key_env) < 50 else "(env var not configured properly)"
         _emit("fail", "Cisco AI Defense", f"{display} not set", r=r)
@@ -17809,10 +17821,13 @@ def _hook_binary_release_check(hook_path: str, cli_version: str) -> tuple[str, s
     backup can leave an older hook beside a newer gateway; every agent hook
     call runs it, so doctor names it instead of reporting healthy hooks.
     """
-    from defenseclaw.doctor_health import _safe_semver
+    from defenseclaw.doctor_health import _safe_semver, _safe_token
 
     reinstall = "rerun the DefenseClaw installer (install.ps1) for this release to replace it"
     expected = _safe_semver(cli_version)
+    installed = ""
+    # GAP-0252: say why no release came back, instead of only that it did not.
+    why = ""
     try:
         proc = subprocess.run(
             [hook_path, "--version-json"],
@@ -17820,13 +17835,36 @@ def _hook_binary_release_check(hook_path: str, cli_version: str) -> tuple[str, s
             text=True,
             timeout=10.0,
             check=False,
+            # The hook is a GUI-subsystem program: give it a closed stdin, as
+            # setup does, rather than whatever this console has inherited.
+            stdin=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        installed = _safe_semver(json.loads(proc.stdout or "{}").get("version")) if proc.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
-        installed = ""
+        if proc.returncode != 0:
+            why = f"it exited {proc.returncode} for --version-json"
+        else:
+            try:
+                identity = json.loads(proc.stdout or "{}")
+            except ValueError:
+                identity = None
+            if not isinstance(identity, dict):
+                why = "it printed no JSON for --version-json"
+            else:
+                installed = _safe_semver(identity.get("version"))
+                if not installed:
+                    reported = _safe_token(identity.get("version"))
+                    why = (
+                        f"it reported version {reported!r}, which is not a release number "
+                        "(a build made without the release version)"
+                        if reported
+                        else "it reported no version"
+                    )
+    except subprocess.TimeoutExpired:
+        why = "it did not answer --version-json within 10 seconds"
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+        why = f"it could not be started ({type(exc).__name__})"
     if not installed:
-        return "warn", f"{hook_path} did not report its release", reinstall
+        return "warn", f"{hook_path} did not report its release: {why}", reinstall
     if expected and installed != expected:
         return "warn", f"{hook_path} is {installed}; this CLI is {expected}", reinstall
     return "pass", f"{installed}, the same release as this CLI", ""
