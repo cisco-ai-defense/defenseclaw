@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -757,7 +758,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	chains.Register(srv)
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
-	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleClosesAsks(chains.Lifecycle, askStore)))
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleClosesAsks(chains.Lifecycle, askStore, os.Stderr)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -1069,11 +1070,26 @@ func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) boo
 	}
 }
 
+// substrateAskCloseReasons is the reason code and the words of an ask a
+// lifecycle event closes (GAP-0526).
+var substrateAskCloseReasons = map[string][2]string{
+	chainstate.LifecycleCrashed:  {"actor_crashed", "the actor crashed"},
+	chainstate.LifecycleReverted: {"actor_reverted", "the actor was reverted to a snapshot"},
+	chainstate.LifecycleDeleted:  {"actor_deleted", "the actor was deleted"},
+}
+
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
 // crashed, reverted or deleted event the actor's pending asks are closed
 // (a revert drops the held request with the run it belonged to, GAP-0415).
+// Each closed ask is a decision with the reason code, as an answer is, and
+// a log line names the event and every ask it closed (GAP-0526).
 func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
-	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	asksStore interface {
+		CloseActor(uid, code, reason string) []asks.Ask
+	}, log io.Writer) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	if log == nil {
+		log = io.Discard
+	}
 	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 		res, err := next(ctx, ev)
 		if err != nil || res.Ignored {
@@ -1082,13 +1098,14 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			// (GAP-0142 residual).
 			return res, err
 		}
-		switch ev.Event {
-		case chainstate.LifecycleCrashed:
-			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
-		case chainstate.LifecycleReverted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was reverted to a snapshot")
-		case chainstate.LifecycleDeleted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
+		why, ok := substrateAskCloseReasons[ev.Event]
+		if !ok {
+			return res, nil
+		}
+		closed := asksStore.CloseActor(ev.Actor.UID, why[0], why[1])
+		fmt.Fprintf(log, "[substrate] lifecycle %s: actor %s/%s; closed %d open ask(s) (%s)\n", ev.Event, ev.Actor.Atespace, ev.Actor.UID, len(closed), why[0])
+		for _, a := range closed {
+			fmt.Fprintf(log, "[substrate] ask %s of %s/%s (%s) closed: expired, reason %s (%s)\n", a.ID, a.Atespace, a.Actor, substrateFirst(a.Host, a.Tool), why[0], why[1])
 		}
 		return res, nil
 	}

@@ -713,6 +713,16 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 			if ev != "" {
 				st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
 			}
+			if ev == chainstate.LifecycleCrashed {
+				// The crash is a record of its own (GAP-0526): the leader
+				// closes the actor's open asks with reason actor_crashed
+				// when it gets the lifecycle event, and the audit trail
+				// says why the actor and its asks stopped.
+				ce := base
+				ce.Type, ce.Severity, ce.Message = EventCrashed, SeverityWarn, "actor crashed: its open asks are closed (actor_crashed)"
+				ce.Detail = map[string]any{"lifecycle": chainstate.LifecycleCrashed, "reason": "actor_crashed"}
+				c.emit(ce)
+			}
 		}
 	}
 	st.rid = rid

@@ -224,6 +224,9 @@ const (
 	// it is again (GAP-0505).
 	EventCalloutReplaced = "sandbox.callout_replaced"
 	EventCalloutRestored = "sandbox.callout_restored"
+	// EventCrashed: Substrate reports the actor CRASHED; the leader closes
+	// its open asks with reason actor_crashed (GAP-0526).
+	EventCrashed = "sandbox.crashed"
 )
 
 // Severities.
