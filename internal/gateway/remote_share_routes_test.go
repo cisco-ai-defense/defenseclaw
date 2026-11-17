@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -83,7 +84,7 @@ func TestGatewayRemoteShareOperandIsNeverAsked(t *testing.T) {
 			for _, tail := range gap1074Tails {
 				for _, route := range gap1074Routes {
 					rows++
-					host := fmt.Sprintf("g1074gw-%04d.example.test", rows)
+					host := fmt.Sprintf("g1074gw-%s%04d.example.test", os.Getenv("DC_G1074_HOST_TAG"), rows)
 					path := strings.NewReplacer("{H}", host, "{N}", fmt.Sprint(rows%250+1)).Replace(s.root) + `\` + tail
 					hook := func(id string) map[string]any {
 						return gap0437Serve(t, a.handleAgentHook("claudecode"), "/api/v1/claude-code/hook", map[string]any{

@@ -86,8 +86,12 @@ var remoteShareDirectReaders = map[string]func(string){
 	"shareAnswersForLinks": func(p string) { _ = shareAnswersForLinks(p) },
 }
 
+// remoteShareRow is the spelling with a fresh server for the row. A native run
+// sets DC_G1074_HOST_TAG so that the DNS client cache it reads afterwards
+// tells its rows from any earlier run.
 func remoteShareRow(spelling string, row int) string {
-	return strings.NewReplacer("{H}", fmt.Sprintf("g1074-%04d.example.test", row), "{N}", fmt.Sprint(row%250+1)).Replace(spelling)
+	host := fmt.Sprintf("g1074-%s%04d.example.test", os.Getenv("DC_G1074_HOST_TAG"), row)
+	return strings.NewReplacer("{H}", host, "{N}", fmt.Sprint(row%250+1)).Replace(spelling)
 }
 
 // countRemoteShareAsks counts the shares the gate asks, keeping the real
