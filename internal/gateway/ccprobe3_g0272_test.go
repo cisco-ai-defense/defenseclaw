@@ -14,12 +14,14 @@ package gateway
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func TestCCP3G0272_GemmaPromptJudgeSchemaIsBounded(t *testing.T) {
 	checked := 0
 	for _, kind := range []string{"injection", "exfil", "pii"} {
-		plain := string((&LLMJudge{model: "gpt-4o-mini"}).judgeChatRequest(nil, 256, kind).ResponseFormat)
+		plain := string((&LLMJudge{model: "gpt-4o-mini", cfg: &config.JudgeConfig{}}).judgeChatRequest(nil, 256, kind).ResponseFormat)
 		if !strings.Contains(plain, `"reasoning"`) && !strings.Contains(plain, `"entities"`) {
 			continue
 		}
@@ -27,7 +29,7 @@ func TestCCP3G0272_GemmaPromptJudgeSchemaIsBounded(t *testing.T) {
 			t.Fatalf("control %s: the non-Gemma schema carries bounds: %s", kind, plain)
 		}
 		checked++
-		gemma := string((&LLMJudge{model: "openai/gemma-4-31b"}).judgeChatRequest(nil, 256, kind).ResponseFormat)
+		gemma := string((&LLMJudge{model: "openai/gemma-4-31b", cfg: &config.JudgeConfig{}}).judgeChatRequest(nil, 256, kind).ResponseFormat)
 		t.Logf("ROW %s gemma bounded=%v", kind, strings.Contains(gemma, "maxLength"))
 		if !strings.Contains(gemma, "maxLength") {
 			t.Errorf("%s: the Gemma judge schema has unbounded free text: %s", kind, gemma)
