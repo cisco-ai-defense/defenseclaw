@@ -1637,6 +1637,24 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         r=r,
         check_id=check_id,
     )
+    # A routing.admin group this host knows by no spelling the matcher
+    # selects: its deny never acts here (rel-1-0-10:GAP-1124).
+    for warning in getattr(validation, "warnings", None) or []:
+        if isinstance(warning, str) and warning.endswith(f"({_ROUTING_GROUP_UNMATCHED})"):
+            _emit(
+                "warn",
+                "Routing policy",
+                warning.removesuffix(f" ({_ROUTING_GROUP_UNMATCHED})"),
+                r=r,
+                remediation=(
+                    "write the group as this host lists an account's groups (id -Gn on Linux and macOS, "
+                    "whoami /groups on Windows); name@domain and DOMAIN\\name of one domain both match"
+                ),
+            )
+
+
+# The Go config validate code of a routing.admin group no spelling matches.
+_ROUTING_GROUP_UNMATCHED = "routing_admin_group_unmatched"
 
 
 # The managed enumerator's unprotected-agents record and the command that runs
