@@ -140,7 +140,7 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 		dialect = effects.DialectPOSIX
 	}
 	opts := effects.Options{Flavor: flavor, Dialect: dialect, Home: in.ActiveHome, CWD: in.CWD,
-		BSDUserland: effectBSDUserland(runtime.GOOS, flavor)}
+		BSDUserland: effectBSDUserland(effectHostGOOS, flavor)}
 
 	switch {
 	case in.Command != "":
@@ -153,6 +153,9 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 		return effects.Call{}, opts, false
 	}
 }
+
+// effectHostGOOS is the host the hook runs on; a test pins it.
+var effectHostGOOS = runtime.GOOS
 
 // effectBSDUserland reports that a POSIX call runs the BSD tools: the hook
 // runs on the agent's host, and macOS ships BSD cp, mv, ln, rm, install and

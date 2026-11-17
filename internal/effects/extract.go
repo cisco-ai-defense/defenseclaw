@@ -206,6 +206,14 @@ type walker struct {
 	// condFrame counts the eval / source / child-shell bodies walked under a
 	// condition: a statement in one is conditional although its own Cond is not.
 	condFrame int
+	// disabled names the builtins an `enable` call may have turned off or
+	// replaced; enableDyn: an enable call the walker could not read (GAP-0218).
+	disabled  map[string]bool
+	enableDyn bool
+	// execfailMaybe: shopt may have set execfail (a failed exec does not end the
+	// shell); extdebugMaybe: shopt may have set extdebug (a DEBUG trap that
+	// fails skips the command).
+	execfailMaybe, extdebugMaybe bool
 	// namerefSeen: a `declare -n` was seen, so any later assignment may land on
 	// HOME or CDPATH through the reference; both stay dynamic for the call.
 	namerefSeen bool
@@ -358,18 +366,21 @@ func (w *walker) deadStatement(st *Stmt, d Dialect) bool {
 }
 
 // isBuiltin reports that a shell builtin name is not shadowed by a function or
-// an alias defined earlier in the call.
+// an alias defined earlier in the call, and not turned off (or replaced) with
+// enable.
 func (w *walker) isBuiltin(name string, d Dialect) bool {
-	return !w.funcs[funcKey(name, d)] && w.aliases[name] == ""
+	return !w.funcs[funcKey(name, d)] && w.aliases[name] == "" && !w.enableDyn && !w.disabled[name]
 }
 
 // endsExecution reports a command after which the shell runs nothing the walker
-// can account for (GAP-0218): `exec CMD` replaces the shell, `exit` ends it,
-// `set` with an option outside the reviewed list (-n / -o noexec stop
-// execution, -t exits after one command, -k changes argument meaning) and a
-// DEBUG or RETURN trap can skip or stop later commands. words is the
-// command's argv, inner the argv after its wrappers. A shadowed builtin is
-// not the builtin: the caller keeps today's reading.
+// can account for (GAP-0218): `exec CMD` replaces the shell (unless execfail
+// may be on), `exit` ends it, `set -n` / `-t` / `-o noexec` / `-o onecmd`
+// (also through `shopt -o`) stop or end execution, and a DEBUG or RETURN
+// trap whose action may end the shell or skip commands. words is the
+// command's argv, inner the argv after its wrappers. A builtin shadowed by a
+// function or alias, or turned off with enable, is not the builtin: the
+// caller keeps today's reading. Options that do not stop a command (-e, -E,
+// -f, -C, -o posix, ...) never count, so a prefix cannot hide a real write.
 func (w *walker) endsExecution(words, inner []Word, d Dialect) bool {
 	wrapped := len(words) - len(inner)
 	k := 0
@@ -377,7 +388,7 @@ func (w *walker) endsExecution(words, inner []Word, d Dialect) bool {
 		k++
 	}
 	if k < wrapped {
-		return words[k].Static && words[k].Value == "exec" && w.isBuiltin("exec", d)
+		return words[k].Static && words[k].Value == "exec" && w.isBuiltin("exec", d) && !w.execfailMaybe
 	}
 	if len(inner) == 0 || !inner[0].Static || !w.isBuiltin(inner[0].Value, d) {
 		return false
@@ -386,57 +397,46 @@ func (w *walker) endsExecution(words, inner []Word, d Dialect) bool {
 	case "exit":
 		return true
 	case "set":
-		return setChangesExecution(inner[1:])
+		return setStopsExecution(inner[1:])
+	case "shopt":
+		return shoptStopsExecution(inner[1:])
 	case "trap":
-		return trapChangesExecution(inner[1:])
+		return w.trapChangesExecution(inner[1:], d)
 	}
 	return false
 }
 
-// reviewedSetLetters and reviewedSetOptions are the set options that never stop
-// or skip a later command (errexit stops only after a command ran, as an ERR
-// trap does). Anything else makes the rest of the shell unaccounted.
-const reviewedSetLetters = "euxva"
+// stopSetLetters and stopSetOptions are the set options that stop or end
+// execution: -n / noexec reads commands without running them, -t / onecmd
+// exits after one command.
+const stopSetLetters = "nt"
 
-var reviewedSetOptions = set("errexit", "nounset", "xtrace", "verbose", "pipefail", "allexport")
+var stopSetOptions = set("noexec", "onecmd")
 
-// setChangesExecution reports a `set` call with an option outside the reviewed
-// list, or one the walker cannot read.
-func setChangesExecution(args []Word) bool {
+// setStopsExecution reports a `set` call that turns on an option that stops
+// execution, or one whose words the walker cannot read.
+func setStopsExecution(args []Word) bool {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !a.Static {
 			return true
 		}
 		v := a.Value
-		if v == "--" || v == "-" {
-			return false // the rest are positional parameters
+		if v == "--" || v == "-" || len(v) < 2 || (v[0] != '-' && v[0] != '+') {
+			return false // the positional parameters follow
 		}
-		if v == "+" {
-			return true
-		}
-		if len(v) < 2 || (v[0] != '-' && v[0] != '+') {
-			return false // the first operand starts the positional parameters
-		}
+		on := v[0] == '-'
 		named := 0
 		for _, ch := range v[1:] {
-			switch {
-			case ch == 'o':
+			if ch == 'o' {
 				named++
-			case strings.ContainsRune(reviewedSetLetters, ch):
-			default:
+			} else if on && strings.ContainsRune(stopSetLetters, ch) {
 				return true
 			}
 		}
-		if named > 1 {
-			return true
-		}
-		if named == 1 {
-			if i+1 >= len(args) {
-				return false // `set -o` / `set +o` lists the options
-			}
+		for ; named > 0 && i+1 < len(args); named-- {
 			i++
-			if !args[i].Static || !reviewedSetOptions[args[i].Value] {
+			if !args[i].Static || (on && stopSetOptions[args[i].Value]) {
 				return true
 			}
 		}
@@ -444,10 +444,36 @@ func setChangesExecution(args []Word) bool {
 	return false
 }
 
+// shoptStopsExecution reports `shopt -s -o noexec` (the set -o options through
+// shopt) or a shopt call the walker cannot read.
+func shoptStopsExecution(args []Word) bool {
+	setOn, setOpts := false, false
+	for _, a := range args {
+		if !a.Static {
+			return true
+		}
+		if strings.HasPrefix(a.Value, "-") {
+			setOn = setOn || strings.Contains(a.Value, "s")
+			setOpts = setOpts || strings.Contains(a.Value, "o")
+			continue
+		}
+		if setOn && setOpts && stopSetOptions[a.Value] {
+			return true
+		}
+	}
+	return false
+}
+
+// trapFlowWords are the commands that, run from a DEBUG or RETURN trap, can end
+// the shell or skip what follows.
+var trapFlowWords = set("exit", "exec", "kill", "return", "logout", "set", "shopt", "trap", "eval", "source", ".", "enable", "builtin", "command", "suspend")
+
 // trapChangesExecution reports a `trap` call that sets a DEBUG or RETURN trap
-// (it runs before each command or at each function return, and can skip or end
-// what follows), or one whose options or signals the walker cannot read.
-func trapChangesExecution(args []Word) bool {
+// whose action may end the shell or skip commands (a flow builtin, a function
+// of the call, a dynamic part, or any action once extdebug may be on), or a
+// trap call the walker cannot read. A DEBUG trap that only prints or logs
+// leaves every command running.
+func (w *walker) trapChangesExecution(args []Word, d Dialect) bool {
 	i := 0
 	if i < len(args) {
 		if !args[i].Static {
@@ -467,17 +493,41 @@ func trapChangesExecution(args []Word) bool {
 		return false // nothing, or one signal reset
 	}
 	action := rest[0]
-	if action.Static && (action.Value == "-" || allDigits(action.Value)) {
-		return false // resets the named signals
+	if action.Static && (action.Value == "-" || action.Value == "" || allDigits(action.Value)) {
+		return false // resets or ignores the named signals
 	}
+	flow := false
 	for _, s := range rest[1:] {
 		if !s.Static {
 			return true
 		}
 		switch strings.TrimPrefix(strings.ToUpper(s.Value), "SIG") {
 		case "DEBUG", "RETURN":
-			return !(action.Static && action.Value == "")
+			flow = true
 		}
+	}
+	if !flow {
+		return false
+	}
+	if !action.Static || w.extdebugMaybe || strings.ContainsAny(action.Value, "$`") {
+		return true
+	}
+	for _, tok := range strings.FieldsFunc(action.Value, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == ';' || r == '&' || r == '|' || r == '(' || r == ')' || r == '{' || r == '}' || r == '!'
+	}) {
+		if trapFlowWords[tok] || w.funcs[funcKey(tok, d)] || w.aliases[tok] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// mutatesTarget reports a kind that changes its target (the kinds the
+// restricted tier can block on).
+func mutatesTarget(k Kind) bool {
+	switch k {
+	case KindWrite, KindAppend, KindDelete, KindLink, KindPermissionChange:
+		return true
 	}
 	return false
 }
@@ -587,8 +637,9 @@ func (w *walker) emit(e Effect) int {
 		w.res.addUnknown(ReasonLimit)
 		return 0
 	}
-	if w.execState || w.dead > 0 {
-		// The shell may never run it: not a fully known effect (GAP-0218).
+	if (w.execState || w.dead > 0) && mutatesTarget(e.Kind) {
+		// The shell may never run it: not a fully known mutation (GAP-0218). A
+		// read or run that may not happen keeps its reading, as before.
 		e.addReason(ReasonExecutionState, ScopeRole)
 	}
 	w.res.Effects = append(w.res.Effects, e)
@@ -1023,16 +1074,17 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// unreviewed set option or a DEBUG/RETURN trap in this shell, nothing later
 	// is a fully known effect. A conditional one leaves later effects as they
 	// are: they run on the paths where it did not.
-	if dialect == DialectPOSIX && !cond && w.condFrame == 0 && !c.Pipeline && !c.Async && w.endsExecution(words, inner, dialect) {
+	if dialect == DialectPOSIX && !cond && w.condFrame == 0 && !c.Pipeline && !c.Async && !c.ChildList && w.endsExecution(words, inner, dialect) {
 		defer func() { w.execState = true }()
 	}
 
-	entry, known := lookupProgram(program, w.o.flavor(), dialect, w.o.BSDUserland)
+	bsdHost := w.o.BSDUserland && bsdSystemProgram(prog.Value)
+	entry, known := lookupProgram(program, w.o.flavor(), dialect, bsdHost)
 	// A flag the BSD tool rejects (GAP-0219): BSD exits without a change, but
 	// GNU coreutils may come first on PATH, so the GNU reading is kept and the
 	// whole command is unaccounted (never a fully known claim, never dropped).
 	bsdReject := false
-	if bsd, ok := bsdTable[program]; ok && known && w.o.BSDUserland && w.o.flavor() != FlavorWindows &&
+	if bsd, ok := bsdTable[program]; ok && known && bsdHost && w.o.flavor() != FlavorWindows &&
 		dialect != DialectCMD && dialect != DialectPowerShell && bsdRejectsFlag(bsd, inner[1:]) {
 		entry, bsdReject = posixTable[program], true
 	}
@@ -1860,6 +1912,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		if !isFlag {
 			positionals = append(positionals, wd)
 			i++
+			// A BSD tool's getopt stops at the first operand: every later word is
+			// an operand, even one that starts with - (GAP-0219).
+			endOpts = endOpts || p.OptionsFirst
 			continue
 		}
 		// PowerShell / long --flag=value and -Param:Value inline value.
@@ -4220,13 +4275,31 @@ func (w *walker) noteShellOptions(program string, args []Word) {
 			if !a.Static || a.Value == "cd" || a.Value == "pushd" || a.Value == "popd" || a.Value == "-n" {
 				w.cdUnreliable = true
 			}
+			// GAP-0218: a named builtin may be off (or replaced) from here on; -f
+			// loads and -d deletes builtins from a shared object.
+			switch {
+			case !a.Static || strings.HasPrefix(a.Value, "-") && strings.ContainsAny(a.Value, "fd"):
+				w.enableDyn = true
+			case !strings.HasPrefix(a.Value, "-"):
+				if w.disabled == nil {
+					w.disabled = map[string]bool{}
+				}
+				w.disabled[a.Value] = true
+			}
 		}
 	case "shopt":
 		on := false
 		for _, a := range args {
 			if !a.Static {
 				w.cdUnreliable = true
+				w.execfailMaybe, w.extdebugMaybe = true, true
 				continue
+			}
+			switch a.Value {
+			case "execfail":
+				w.execfailMaybe = true
+			case "extdebug":
+				w.extdebugMaybe = true
 			}
 			if a.Value == "-s" || a.Value == "-o" {
 				on = true

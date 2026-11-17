@@ -126,6 +126,7 @@ type Program struct {
 	MovesSources   bool     // the sources are removed from where they were (mv, move, ren, Move-Item): each is also a delete
 	AppendFlag     string   // switch that turns the file operands into appends (tee -a)
 	InertOperands  bool     // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
+	OptionsFirst   bool     // options end at the first operand (BSD getopt, no permutation): later words are operands (GAP-0219)
 }
 
 var (
@@ -161,6 +162,22 @@ func lookupProgram(name string, flavor Flavor, dialect Dialect, bsd bool) (Progr
 
 // lookupPOSIX returns the BSD row of a program on a BSD (macOS) host, else the
 // GNU row. Git Bash (the Windows flavor) runs GNU coreutils.
+// bsdSystemProgram reports a program word that runs the system (BSD) tool on
+// macOS: a bare name, or a path in /bin, /usr/bin, /sbin or /usr/sbin. Any
+// other path (Homebrew gnubin, a GNU coreutils prefix) is read with the GNU
+// row.
+func bsdSystemProgram(word string) bool {
+	i := strings.LastIndexByte(word, '/')
+	if i < 0 {
+		return true
+	}
+	switch word[:i] {
+	case "/bin", "/usr/bin", "/sbin", "/usr/sbin":
+		return true
+	}
+	return false
+}
+
 func lookupPOSIX(name string, flavor Flavor, bsd bool) (Program, bool) {
 	if bsd && flavor != FlavorWindows {
 		if p, ok := bsdTable[name]; ok {
@@ -173,12 +190,12 @@ func lookupPOSIX(name string, flavor Flavor, bsd bool) (Program, bool) {
 
 // bsdRejectsFlag reports an option word the BSD row does not accept: a long
 // option (the BSD tools take none), or a short option or cluster letter not
-// in the row. A dynamic word is left to the operand reading.
+// in the row, before the first operand (or dynamic word), where BSD getopt stops.
 func bsdRejectsFlag(p Program, args []Word) bool {
 	for i := 0; i < len(args); i++ {
 		v := args[i].Value
 		if !args[i].Static || len(v) < 2 || v[0] != '-' {
-			continue
+			return false // BSD getopt stops at the first operand
 		}
 		if v == "--" {
 			return false
@@ -224,6 +241,7 @@ func buildBSDTable() {
 		}
 		p.Names = []string{name}
 		p.Flags = flags
+		p.OptionsFirst = true
 		bsdTable[name] = p
 	}
 	ign := Flag{Value: true, Role: RoleIgnore}

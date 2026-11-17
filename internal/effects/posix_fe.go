@@ -40,6 +40,9 @@ type posixWalker struct {
 	// or a provably true `||`: every statement lowered under it carries it as
 	// its DeadGuard (GAP-0218).
 	dead []string
+	// bg counts the backgrounded statements being lowered: every command under
+	// one runs in a child shell (Cmd.ChildList).
+	bg int
 }
 
 // linked lowers the right side of && / || with the link set.
@@ -58,6 +61,11 @@ func (w *posixWalker) add(st *Stmt) {
 	if st.DeadGuard == nil && w.dead != nil {
 		st.DeadGuard = w.dead
 	}
+	if w.bg > 0 {
+		for _, c := range st.Cmds {
+			c.ChildList = true
+		}
+	}
 	w.out.Stmts = append(w.out.Stmts, st)
 }
 
@@ -70,6 +78,10 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 		return
 	}
 	cond = cond || st.Negated
+	if st.Background {
+		w.bg++
+		defer func() { w.bg-- }()
+	}
 	switch cmd := st.Cmd.(type) {
 	case nil:
 		w.emitCall(st, nil, cond, pipeIn)

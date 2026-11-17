@@ -18,6 +18,8 @@ import (
 func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 	effectResolverOverride = func(p string) (string, bool) { return p, true }
 	defer func() { effectResolverOverride = nil }()
+	defer func(g string) { effectHostGOOS = g }(effectHostGOOS)
+	effectHostGOOS = "linux" // GNU coreutils; the darwin rows are below
 	rows := []struct {
 		cmd        string
 		restricted bool
@@ -39,6 +41,13 @@ func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 		{"rm -f /home/u/.ssh/authorized_keys", true},
 		{"tee -a /home/u/.ssh/authorized_keys < /t/k", true},
 		{"cp -t /home/u/.ssh /t/authorized_keys", true},
+		// review round 1: prefixes that do not stop the write keep the block
+		{"set -Eeuo pipefail; echo k >> ~/.ssh/authorized_keys", true},
+		{"set -f; set -C; echo k >> ~/.ssh/authorized_keys", true},
+		{"trap : DEBUG; echo k >> ~/.ssh/authorized_keys", true},
+		{"{ exit; } & echo k >> ~/.ssh/authorized_keys", true},
+		{"enable -n exit; exit; echo k >> ~/.ssh/authorized_keys", true},
+		{"shopt -s execfail; exec /t/none; echo k >> ~/.ssh/authorized_keys", true},
 	}
 	for _, r := range rows {
 		req := trustedActionRequest{
@@ -60,6 +69,42 @@ func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 		}
 		if res.Action == guardrailActionAllow || res.Action == "" {
 			t.Errorf("%q: action %q, want alert or block (no fail-open)", r.cmd, res.Action)
+		}
+	}
+}
+
+// On a macOS host the BSD rows apply: BSD cp has no -t (the command fails),
+// a valid BSD flag keeps the block, and a GNU coreutils path is read as GNU.
+func TestGap0219EffectShadowDarwinHost(t *testing.T) {
+	effectResolverOverride = func(p string) (string, bool) { return p, true }
+	defer func() { effectResolverOverride = nil }()
+	defer func(g string) { effectHostGOOS = g }(effectHostGOOS)
+	effectHostGOOS = "darwin"
+	rows := []struct {
+		cmd  string
+		tier effectTier
+	}{
+		{"cp -t /Users/u/.ssh /t/authorized_keys", effectTierUnknown},
+		{"rm --force /Users/u/.ssh/authorized_keys", effectTierUnknown},
+		{"rm -f /Users/u/.ssh/authorized_keys", effectTierRestricted},
+		{"rm -f /Users/u/.ssh/authorized_keys --verbose", effectTierRestricted},
+		{"/opt/homebrew/opt/coreutils/libexec/gnubin/cp -t /Users/u/.ssh /t/authorized_keys", effectTierRestricted},
+		{"echo k >> ~/.ssh/authorized_keys", effectTierRestricted},
+	}
+	for _, r := range rows {
+		req := trustedActionRequest{
+			Connector: "claudecode",
+			Input: actionfacts.Input{
+				Tool: "Bash", Command: r.cmd,
+				ActiveHome: "/Users/u", CWD: "/Users/u/work", DialectHint: actionfacts.DialectPOSIX,
+			},
+		}
+		res := computeEffectShadow(req, effectRulesShadow, tierRestricted)
+		if res.Tier != string(r.tier) {
+			t.Errorf("%q: tier %q, want %q", r.cmd, res.Tier, r.tier)
+		}
+		if res.Action == guardrailActionAllow || res.Action == "" {
+			t.Errorf("%q: action %q, want alert or block", r.cmd, res.Action)
 		}
 	}
 }

@@ -85,7 +85,25 @@ var gap0218Rows = []restrictedRow{
 	{"g0218 ctl shadowed false", raLin, `false() { :; }; false && echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 ctl shadowed exec", raLin, `exec() { :; }; exec true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 ctl shadowed set", raLin, `set() { :; }; set -n; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
-	{"g0218 ctl guard with argument", raLin, `false x && echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 guard with argument", raLin, `false x && echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 shopt -so noexec", raLin, `shopt -so noexec; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 set -o onecmd", raLin, `set -o onecmd; true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 DEBUG trap runs a function", raLin, `f() { exit 0; }; trap f DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 DEBUG trap with extdebug", raLin, `shopt -s extdebug; trap false DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	{"g0218 dynamic DEBUG trap", raLin, `trap "$T" DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	// Review round 1: shapes that do not stop the write must keep the claim.
+	{"g0218 ctl set -E", raLin, `set -E; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl set -Eeuo pipefail rm", raLin, `set -Eeuo pipefail; rm -f /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl set -f +H -o posix", raLin, `set -f; set +H; set -o posix; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl set -C append", raLin, `set -C; tee -a /home/u/.ssh/authorized_keys < /t/k`, rlAK, true},
+	{"g0218 ctl set +n", raLin, `set +n; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl trap : DEBUG", raLin, `trap : DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl trap echo DEBUG", raLin, `trap 'echo dbg >&2' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl exit in background block", raLin, `{ exit; } & echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl exit in background list", raLin, `exit || : & echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl enable -n exit", raLin, `enable -n exit; exit; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl enable -n false", raLin, `enable -n false; hash -p /bin/true false; false && echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl execfail", raLin, `shopt -s execfail; exec /t/none 2>/dev/null; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 }
 
 var gap0219Rows = []restrictedRow{
@@ -119,6 +137,12 @@ var gap0219Rows = []restrictedRow{
 	{"g0219 ctl macOS tee -a", raMacBSD, `tee -a /Users/u/.ssh/authorized_keys < /t/k`, rMacAK, true},
 	{"g0219 ctl macOS redirect", raMacBSD, `echo k >> /Users/u/.ssh/authorized_keys`, rMacAK, true},
 	{"g0219 ctl GNU host cp -t under raMac", raMac, `cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, true},
+	{"g0219 macOS /bin/cp -t", raMacBSD, `/bin/cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, false},
+	// Review round 1: BSD getopt stops at the first operand; a GNU path is GNU.
+	{"g0219 ctl macOS rm -f AK --verbose", raMacBSD, `rm -f /Users/u/.ssh/authorized_keys --verbose`, rMacAK, true},
+	{"g0219 ctl macOS tee AK --append", raMacBSD, `tee /Users/u/.ssh/authorized_keys --append < /t/k`, rMacAK, true},
+	{"g0219 ctl macOS gnubin cp -t", raMacBSD, `/opt/homebrew/opt/coreutils/libexec/gnubin/cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, true},
+	{"g0219 ctl macOS gnubin rm --force", raMacBSD, `/usr/local/opt/coreutils/libexec/gnubin/rm --force /Users/u/.ssh/authorized_keys`, rMacAK, true},
 }
 
 func runRestrictedRows(t *testing.T, rows []restrictedRow) {

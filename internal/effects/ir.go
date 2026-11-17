@@ -69,8 +69,12 @@ type Cmd struct {
 	// inside them must not change the parent's cwd/env (review N2).
 	Pipeline bool
 	Async    bool
-	Cond     bool
-	Span     [2]int
+	// ChildList marks a command inside a backgrounded compound or && / || list
+	// (`{ ...; } &`, `a || b &`): bash runs the whole list in a child shell, so
+	// an exit or exec there does not end this one (GAP-0218).
+	ChildList bool
+	Cond      bool
+	Span      [2]int
 	// Host is psparse's verdict on a cmd / powershell / pwsh host call that the
 	// PowerShell frontend lowered, nil when psparse gave none. The walker unwraps
 	// the payload only from a Static verdict, with psparse's text; a NotStatic
