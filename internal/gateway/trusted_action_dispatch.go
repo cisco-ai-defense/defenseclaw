@@ -441,6 +441,11 @@ func dispatchTrustedAction(
 			findings = withPosixDataWordRecord(findings)
 		}
 	}()
+	// A DefenseClaw state write that only a partial reading proves is at
+	// least the unknown tier, never a clean allow: judged after every other
+	// reading and twin, so a proven block keeps its verdict
+	// (rel-1-0-10:GAP-0892).
+	defer func() { findings = withPartialStateWriteFloor(request, findings) }()
 	// One dispatch is one hook call whichever surface carries the action (the
 	// hook request, an ACP frame, a direct evaluation): the file system reads
 	// of its reach scans are remembered for the decision (hookpaths.HookCall;
@@ -7178,6 +7183,12 @@ func filterExactFallbackFindings(
 			finding.enforcement = findingEnforcementAlertOnly
 		} else if contract.detectionOnly || !enforcementCapable || !proven {
 			finding.enforcement = findingEnforcementDetectionOnly
+			// The contract proved its operation on what the analysis read, but
+			// the call was read only in part, so no enforcing reader ran
+			// (rel-1-0-10:GAP-0892). A detection-only contract never denies
+			// itself; the caller may still floor the call at the unknown tier
+			// (withPartialStateWriteFloor).
+			finding.partialReading = matched && !proofBoundary && enforcementCapable
 		} else {
 			finding.enforcement = findingEnforcementAllowed
 		}
