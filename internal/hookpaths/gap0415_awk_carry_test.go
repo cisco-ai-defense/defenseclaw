@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -13,6 +14,10 @@ import (
 // an awk call whose inline program has no file output (a protected name in a
 // regular expression or an input operand is not a write), and only for that.
 func TestGAP0415AwkProgramWithoutOutputIsNoWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// writersAllProvenSafe is false for a Windows home (actionWindowsHome): the POSIX writer proof never applies there.
+		t.Skip("POSIX writer proof fixture")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged home")
 	}
