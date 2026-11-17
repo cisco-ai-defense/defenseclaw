@@ -558,10 +558,12 @@ fail_unreachable() {
   fi
 {{if not .Sandbox}}  # Codex does not show stderr of a hook that exits 0: say on screen that
   # this account's gateway is down and how to start it again. Codex shows a
-  # systemMessage for these two events.
+  # systemMessage for these events; the prompt carries it for a session that
+  # was running when the gateway stopped (rel-1-0-10 GAP-1168), and the
+  # once-per-session marker keeps it to one warning.
   if [ "$1" = "gateway unreachable" ]; then
     case "$BOUND_EVENT" in
-      SessionStart|PreToolUse) defenseclaw_unreachable_notice_json ;;
+      SessionStart|UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
     esac
   fi
 {{end}}  exit 0

@@ -306,7 +306,11 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // payload the shared reader proved ordinary (startOrdinaryLook); it is
 // given only if the account tier read at the deadline is open.
 type ordinaryAnswer struct {
-	answer       watchdogAnswer
+	answer watchdogAnswer
+	// visible renders answer again when the watchdog gives it, with the
+	// once-per-session warning marker: answer itself is rendered ahead of
+	// the deadline without it, so it always carries the warning.
+	visible      func() ([]byte, []byte, int)
 	tier         func() string
 	installCheck func() bool
 	install      watchdogAnswer
@@ -337,10 +341,18 @@ func (w *answerWatchdog) startOrdinaryLook(gen int, opts Options, sp spec, failM
 			return
 		}
 		installCheck, install := renderInstallAnswer(opts, sp, answer.mode)
+		// The answer the deadline gives shows the outage warning only when
+		// this session has not seen it yet (GAP-1352): a prompt that already
+		// warned leaves this tool call's allow silent (rel-1-0-10 GAP-1123).
+		outage := withPerUserOutage(opts)
+		outage.answerWatch = nil
+		visible := func() ([]byte, []byte, int) {
+			return renderVisibleOutage(outage, sp, answer.mode, answer.reason)
+		}
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		if gen == w.lookGen {
-			w.ordinary = &ordinaryAnswer{answer: answer, tier: opts.OutageFailModeNow, installCheck: installCheck, install: install}
+			w.ordinary = &ordinaryAnswer{answer: answer, visible: visible, tier: opts.OutageFailModeNow, installCheck: installCheck, install: install}
 		}
 	}()
 }
@@ -445,6 +457,7 @@ func (w *answerWatchdog) useOrdinaryAtDeadline(until time.Time) {
 		return
 	}
 	w.fallback, w.noDecision = ordinary.answer, ordinary.answer
+	w.visibleOutage = ordinary.visible
 	if w.failureLog.markerEnabled {
 		w.failureLog.replaceFallbackFrame(ordinary.answer.frame)
 	}

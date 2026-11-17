@@ -3050,7 +3050,15 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 		// call, which every Claude Code surface shows (cowork-1-0-8 GAP-0040).
 		events = []string{"UserPromptSubmit", "PreToolUse"}
 	case sp.connector == "codex":
-		events = []string{"SessionStart", "PreToolUse"}
+		// Codex shows a UserPromptSubmit systemMessage too ("surfaced as a
+		// warning", Codex hooks reference; user-prompt-submit.command.output
+		// of codex-cli 0.169). A session that was running when the gateway
+		// stopped and whose next turn is a prompt with no tool call got no
+		// warning at all: its model request then failed on the stopped
+		// route with only Codex's own "Reconnecting" (rel-1-0-10 GAP-1168).
+		// The once-per-session marker keeps a new session at one warning
+		// (its SessionStart takes it).
+		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
 	case copilotCLIOutageNotice(sp):
 		events, field = []string{"postToolUse"}, "additionalContext"
 	default:
