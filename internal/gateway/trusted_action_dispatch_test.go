@@ -1792,6 +1792,10 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			wantFinding: true,
 		},
 		{
+			// The here-string call is judged as its POSIX twin
+			// printf '%s\n' harmless | rm -rf /, which runs the delete, so
+			// the finding enforces as the one-step form's does
+			// (rel-1-0-10:GAP-1083).
 			name: "bash here string",
 			input: actionfacts.Input{
 				Tool:    "bash",
@@ -1800,6 +1804,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  dangerous + " <<< harmless",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "bash arithmetic loop",

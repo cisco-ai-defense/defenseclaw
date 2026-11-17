@@ -74,7 +74,7 @@ func hereStringReadingTwinRequest(request trustedActionRequest, facts actionfact
 		return trustedActionRequest{}, false
 	}
 	text, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, false, request.Input.LoopBindsStraightLine)
-	if !ok || mixed {
+	if !ok || mixed || hereStringTwinPipesIntoReader(text) {
 		return trustedActionRequest{}, false
 	}
 	twin := windowsReadingTwin(request)
@@ -95,6 +95,38 @@ func hereStringReadingTwinRequest(request trustedActionRequest, facts actionfact
 	twin.LegacyText = text
 	twin.conflictSource = nil
 	return twin, true
+}
+
+// hereStringTwinPipesIntoReader reports a twin with a pipe into read,
+// mapfile or readarray. In a pipe the builtin binds its names in a subshell,
+// so the twin reads them with the values they had before, where the
+// here-string binds them in the shell itself (a read whose binding the walk
+// could not prove stays a pipe in hereStringPipeTwin). Such a twin is no
+// reading of the call: u=$USER; command echo IFS=x; read u <<< w; ... $u
+// read $u as the login and blocked an ordinary write (rel-1-0-10:GAP-1083).
+func hereStringTwinPipesIntoReader(text string) bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(text), "")
+	if err != nil {
+		return true
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		pipe, ok := node.(*syntax.BinaryCmd)
+		if !ok || pipe.Op != syntax.Pipe && pipe.Op != syntax.PipeAll || pipe.Y == nil {
+			return true
+		}
+		if call, ok := pipe.Y.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+			switch call.Args[0].Lit() {
+			case "read", "mapfile", "readarray":
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // hereStringPipeTwin rewrites every `CMD <<< WORD` statement of a bash
