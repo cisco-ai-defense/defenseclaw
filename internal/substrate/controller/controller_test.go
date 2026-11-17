@@ -224,17 +224,12 @@ func TestForks(t *testing.T) {
 	}
 	cref := ateapi.RefOf(child.GetMetadata())
 	r.pass()
-	if !render.Equal(r.api.Policy(cref), r.api.Policy(pref)) {
-		t.Fatal("the fork did not get the parent's policy")
+	// In a launcher atespace: made outside DefenseClaw, refused (E17).
+	if r.api.Policy(cref) != nil {
+		t.Fatal("a fork in a launcher atespace got a policy")
 	}
-	reg, ok, _ := r.reg.Get(context.Background(), "eng-web", child.GetMetadata().GetUid())
-	if !ok || reg.Person != "sub-alice" || reg.ParentUID != parent.GetMetadata().GetUid() || reg.ForkedBy != controller.ForkedByDefenseClaw || reg.Source != controller.SourceFork {
-		t.Fatalf("fork registration = %+v", reg)
-	}
-	for _, w := range r.api.PolicyWrites() {
-		if w.Key == "eng-web/alice-1-fork" && w.ActorState != ateapi.ActorStateSuspended {
-			t.Fatalf("fork policy written while %s", w.ActorState)
-		}
+	if _, ok, _ := r.reg.Get(context.Background(), "eng-web", child.GetMetadata().GetUid()); ok {
+		t.Fatal("a fork in a launcher atespace was registered")
 	}
 	// Outside a launcher atespace: parent attribution, forked_by unknown.
 	p2 := r.actor("ci-runs", "job-1", ateapi.ActorStateSuspended, "")

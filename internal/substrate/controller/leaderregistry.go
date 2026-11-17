@@ -117,20 +117,8 @@ func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 		Connector: in.Connector, HarnessVersion: in.AgentVersion, HookContract: in.HookContract,
 		KitVersion: in.KitVersion, TemplateDigest: in.TemplateDigest,
 		Approved: slices.Clone(in.Approved), Attributed: true, CreatedAt: now().UTC()}
-	// Only a fork DefenseClaw made keeps the parent's person (and with it
-	// per-person secrets); a fork made outside DefenseClaw is attributed
-	// to its atespace (GAP-0082).
-	if in.Source == SourceFork && in.ParentUID != "" && in.ForkedBy == ForkedByDefenseClaw {
-		parent, pok, perr := l.Store.Get(ctx, in.Atespace, in.ParentUID)
-		if perr != nil {
-			return perr
-		}
-		if pok && !parent.Attributed && !parent.Deleted {
-			reg.Attributed = false
-			reg.Person, reg.Connector, reg.KitVersion, reg.HookContract = parent.Person, parent.Connector, parent.KitVersion, parent.HookContract
-			reg.HarnessVersion, reg.TemplateDigest, reg.Secrets = parent.HarnessVersion, parent.TemplateDigest, slices.Clone(parent.Secrets)
-		}
-	}
+	// A fork is attributed: DefenseClaw makes none, so it never keeps the
+	// parent's person or per-person secrets (GAP-0082, GAP-0425).
 	return l.Store.Put(ctx, reg)
 }
 

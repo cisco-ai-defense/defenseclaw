@@ -97,7 +97,7 @@ type Registration struct {
 	// Approved are the hosts asks approved for this actor (the controller
 	// adds them to its policy).
 	Approved []string `json:"approved,omitempty"`
-	// ForkedBy is defenseclaw or unknown for a fork (ParentUID set).
+	// ForkedBy is unknown for a fork (ParentUID set): DefenseClaw makes none.
 	ForkedBy  string    `json:"forked_by,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// Deleted is a tombstone: the actor was deleted (E10).

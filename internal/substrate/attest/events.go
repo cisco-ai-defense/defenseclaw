@@ -127,7 +127,7 @@ type ActorObservation struct {
 	Managed bool
 	// TemplateAttested is the controller's admission result for its template.
 	TemplateAttested bool
-	// ForkedBy names who forked it ("unknown" outside launcher atespaces).
+	// ForkedBy names who forked it ("unknown": DefenseClaw makes no forks).
 	ForkedBy  string
 	FirstSeen time.Time
 }

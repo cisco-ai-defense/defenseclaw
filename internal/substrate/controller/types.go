@@ -102,8 +102,7 @@ const (
 
 // Forked-by values.
 const (
-	ForkedByDefenseClaw = "defenseclaw"
-	ForkedByUnknown     = "unknown"
+	ForkedByUnknown = "unknown"
 )
 
 // Registration is who an actor belongs to, keyed by actor UID. The launcher

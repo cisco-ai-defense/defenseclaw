@@ -222,8 +222,10 @@ type actorState struct {
 	// registration in use (one warning per outage).
 	regStaleWarned bool
 	// forkQueued and inventoried make the once-per-incarnation fork event
-	// and inventory event survive a failed first pass.
-	forkQueued, inventoried bool
+	// and inventory event survive a failed first pass; forkReported is the
+	// sandbox.fork event of a fork that is never registered (refused in a
+	// launcher atespace), once.
+	forkQueued, inventoried, forkReported bool
 	// rid is the snapshot identity seen on the last pass; a revert is told
 	// from how it changed (GAP-0141).
 	rid     restoreID
@@ -843,21 +845,32 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 				// A fork inherits chain windows (keyed on the parent in the
 				// leader) but never the parent's ask approvals (PLAN §5.3).
 				reg.Approved = nil
+				// DefenseClaw makes no forks (neither the launcher nor the
+				// gateway creates an actor from a tag), so a fork with no
+				// registration of its own was made outside DefenseClaw, in
+				// a launcher atespace too: forked_by is unknown, and it is
+				// not that person's actor, so it gets no person binding (no
+				// per-person secrets) (GAP-0425).
 				reg.ForkedBy = ForkedByUnknown
-				if launcher {
-					// Only DefenseClaw may fork in a launcher atespace (the
-					// access policy grants it alone).
-					reg.ForkedBy = ForkedByDefenseClaw
-				} else {
-					// Someone else forked it: it is not that person's actor,
-					// so it gets no person binding (no per-person secrets).
-					reg.Person, reg.Workload = "", ""
+				reg.Person, reg.Workload = "", ""
+				if !st.forkReported {
+					st.forkReported = true
+					ev := base
+					ev.Type, ev.Severity, ev.Message = EventFork, SeverityInfo, "fork adopted with its parent's attribution"
+					if launcher {
+						ev.Message = "fork made outside DefenseClaw in a launcher atespace"
+					}
+					ev.Detail = map[string]any{"parent_uid": parent.UID, "parent": parent.Atespace + "/" + parent.Name,
+						"tag": ateapi.Key(tag), "forked_by": reg.ForkedBy, "person_bound": false}
+					c.emit(ev)
 				}
-				ev := base
-				ev.Type, ev.Severity, ev.Message = EventFork, SeverityInfo, "fork adopted with its parent's attribution"
-				ev.Detail = map[string]any{"parent_uid": parent.UID, "parent": parent.Atespace + "/" + parent.Name,
-					"tag": ateapi.Key(tag), "forked_by": reg.ForkedBy, "person_bound": reg.Person != ""}
-				c.emit(ev)
+				if launcher {
+					// Only DefenseClaw may fork in a launcher atespace
+					// (PLAN E17): the fork is refused like any actor made
+					// there outside DefenseClaw.
+					c.refuseOnce(st, base, EventForeignActor, "fork in a launcher atespace that DefenseClaw did not make", SignalForeignActor, "")
+					return reg, "foreign_actor", nil
+				}
 			default:
 				// The parent is gone or never registered.
 				reg.ForkedBy = ForkedByUnknown
