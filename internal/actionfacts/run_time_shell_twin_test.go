@@ -41,7 +41,13 @@ func TestRunTimeShellTwin(t *testing.T) {
 		{`nohup "$SHELL" -c 'make test'`, `nohup bash -c 'make test'`},
 		{`time "$SHELL" -c 'make test'`, `time bash -c 'make test'`},
 		{`FOO=$BAR "$SHELL" -c 'make test'`, `FOO=$BAR bash -c 'make test'`},
-		{`"$SHELL" <<< 'make test'`, `bash -c 'make test' <<< 'make test'`},
+		// The here-string or here-document that supplies the script is the
+		// -c STRING of the twin and not its stdin any more (GAP-1088).
+		{`"$SHELL" <<< 'make test'`, `bash -c 'make test'`},
+		{"\"$SHELL\" <<'EOF'\nmake test\nEOF", "bash -c 'make test\n'"},
+		{"make test; \"$SHELL\" <<< 'make lint' > out.log", "make test; bash -c 'make lint' > out.log"},
+		// Kept as written: text after the operator on its line.
+		{"\"$SHELL\" <<'EOF' && echo done\nmake test\nEOF", "bash -c 'make test\n' <<'EOF' && echo done\nmake test\nEOF"},
 		{`echo 'make test' | "$SHELL" -s`, `echo 'make test' | bash -c 'make test'`},
 		{`cd web && "$SHELL" -c 'npm test'`, `cd web && bash -c 'npm test'`},
 		// A static shell STRING is its own command line.
