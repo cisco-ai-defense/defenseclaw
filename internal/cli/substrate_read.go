@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
 // actorRef is how a person names an actor: "name" or "atespace/name".
@@ -282,6 +283,16 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if a.State == substrateStateCrashed {
 					// GAP-0410: say it crashed and the way back.
 					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
+					if a.Unattended {
+						// GAP-0420 (known limit in 1.0.10): a headless task does
+						// not resume after a crash; its record and log were in
+						// the crashed actor.
+						agent := a.Connector
+						if spec, err := sandboxcli.ResolveHarness(a.Connector); err == nil {
+							agent = spec.Command
+						}
+						fmt.Fprintf(w, "Task:      crashed and does not resume; undo brings the agent back without it. Re-run the task with: defenseclaw substrate run %s --task ...\n", substrateDash(agent))
+					}
 					return nil
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
