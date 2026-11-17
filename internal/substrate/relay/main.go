@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -79,8 +80,22 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
 	}
+	// The port is bound before the relay gives up its capabilities
+	// (GAP-0376): a port below 1024 needs CAP_NET_BIND_SERVICE.
+	var ln net.Listener
+	if args[0] == "serve" {
+		addr := cfg.Relay.Listen
+		if *listen != "" {
+			addr = *listen
+		}
+		if ln, err = net.Listen("tcp", addr); err != nil {
+			fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
+			return 1
+		}
+	}
 	// The agent runs as its own user when the image says so (GAP-0116);
-	// a root relay that cannot change user refuses to run the agent at all.
+	// a root relay that cannot change user refuses to run the agent at all,
+	// and a separated relay keeps only the capabilities it needs (GAP-0376).
 	sep, warn, err := separate(cfg.Relay)
 	if err != nil {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
@@ -117,13 +132,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
 	}
-	addr := cfg.Relay.Listen
-	if *listen != "" {
-		addr = *listen
-	}
-	srv := &http.Server{Addr: addr, Handler: NewServer(Options{Config: cfg, Verifier: v, sep: sep,
+	srv := &http.Server{Handler: NewServer(Options{Config: cfg, Verifier: v, sep: sep,
 		Log: slog.New(slog.NewJSONHandler(stderr, nil))}).Handler(), ReadHeaderTimeout: 10 * time.Second}
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(stderr, "defenseclaw-actor-relay:", err)
 		return 1
 	}

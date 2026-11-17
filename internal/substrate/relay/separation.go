@@ -39,6 +39,7 @@ const (
 	childFilesGet = "files-get" // PATH, tar on stdout; exit childNotFound when absent
 	childStateDir = "state-dir" // HOME WORKDIR, the state root on stdout
 	childNotFound = 3
+	childDenied   = 4 // files-get: the agent's user may not read a part of PATH
 )
 
 // IsChildCommand reports whether args name one of the relay's child commands.
@@ -89,10 +90,13 @@ func runChild(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_ = json.NewEncoder(stdout).Encode(out)
 		return 0
 	case args[0] == childFilesGet && len(args) == 2:
-		if _, err := os.Stat(args[1]); err != nil {
+		if err := readable(args[1]); err != nil {
 			fmt.Fprintln(stderr, err.Error())
-			if errors.Is(err, fs.ErrNotExist) {
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
 				return childNotFound
+			case errors.Is(err, fs.ErrPermission):
+				return childDenied
 			}
 			return 1
 		}
@@ -142,12 +146,17 @@ func (sp *separation) extract(ctx context.Context, r io.Reader, dir string, limi
 	return res.Result, errors.New(res.Error)
 }
 
-// errChildNotFound is a files-get of a path that does not exist.
-var errChildNotFound = errors.New("no such file or directory")
+// errChildNotFound is a files-get of a path that does not exist;
+// errChildDenied one the agent's user may not read all of (GAP-0375).
+var (
+	errChildNotFound = errors.New("no such file or directory")
+	errChildDenied   = errors.New("permission denied")
+)
 
 // tarTo starts writing the tar of p as the agent's user. ready is called
-// once the child found p, before the first byte; a missing p is
-// errChildNotFound and nothing is written.
+// once the child found p and checked that it can read all of it, before the
+// first byte; a missing p is errChildNotFound, one the agent's user may not
+// read errChildDenied, and nothing is written.
 func (sp *separation) tarTo(ctx context.Context, w io.Writer, p string, ready func()) error {
 	cmd := sp.child(ctx, childFilesGet, p)
 	var errb bytes.Buffer
@@ -164,8 +173,13 @@ func (sp *separation) tarTo(ctx context.Context, w io.Writer, p string, ready fu
 	if n == 0 {
 		werr := cmd.Wait()
 		var ee *exec.ExitError
-		if errors.As(werr, &ee) && ee.ExitCode() == childNotFound {
-			return errChildNotFound
+		if errors.As(werr, &ee) {
+			switch ee.ExitCode() {
+			case childNotFound:
+				return errChildNotFound
+			case childDenied:
+				return errChildDenied
+			}
 		}
 		if werr == nil {
 			werr = rerr

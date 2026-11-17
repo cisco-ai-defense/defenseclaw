@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // leakMarkEnv is set in the test binary's environment before any test runs.
@@ -28,36 +30,79 @@ const leakMarkEnv = "DC_RELAY_TEST_LEAKMARK"
 // go away before they count as left behind.
 const leakGrace = 5 * time.Second
 
+// markLeaks sets this run's mark and makes the test binary a child
+// subreaper: a process a test started whose parent exits (a daemon, a
+// detached session) is re-parented to the test binary, not to init, so it
+// stays a descendant even when it cleared its environment (env -i) and lost
+// the mark (substrate-1 GAP-0362).
 func markLeaks() {
 	b := make([]byte, 12)
 	_, _ = rand.Read(b)
 	_ = os.Setenv(leakMarkEnv, strconv.Itoa(os.Getpid())+"-"+hex.EncodeToString(b))
+	if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+		fmt.Printf("leak check: cannot become a child subreaper (%v); only marked processes are found\n", err)
+	}
 }
 
-// leftBehind lists the live processes, other than this one, whose
+// leftBehind lists the live processes, other than this one, that are its
+// descendants (by parent, the test binary being their subreaper) or whose
 // environment carries this run's mark. Zombies count as gone.
 func leftBehind() []int {
 	mark := []byte(leakMarkEnv + "=" + os.Getenv(leakMarkEnv) + "\x00")
 	self := os.Getpid()
 	dirs, _ := filepath.Glob("/proc/[0-9]*")
-	var out []int
+	parent := map[int]int{}
+	var live []int
+	marked := map[int]bool{}
 	for _, d := range dirs {
 		pid, err := strconv.Atoi(filepath.Base(d))
 		if err != nil || pid == self {
 			continue
 		}
-		env, err := os.ReadFile(d + "/environ")
-		if err != nil || !bytes.Contains(append(env, 0), mark) {
+		st, err := os.ReadFile(d + "/stat")
+		if err != nil {
 			continue
 		}
-		if st, err := os.ReadFile(d + "/stat"); err == nil {
-			if i := bytes.LastIndexByte(st, ')'); i > 0 && i+2 < len(st) && st[i+2] == 'Z' {
-				continue
-			}
+		i := bytes.LastIndexByte(st, ')')
+		if i < 0 || i+2 >= len(st) {
+			continue
 		}
-		out = append(out, pid)
+		f := bytes.Fields(st[i+1:])
+		if len(f) < 2 || f[0][0] == 'Z' {
+			continue
+		}
+		ppid, err := strconv.Atoi(string(f[1]))
+		if err != nil {
+			continue
+		}
+		parent[pid] = ppid
+		live = append(live, pid)
+		if env, err := os.ReadFile(d + "/environ"); err == nil && bytes.Contains(append(env, 0), mark) {
+			marked[pid] = true
+		}
+	}
+	var out []int
+	for _, pid := range live {
+		if marked[pid] || descends(pid, self, parent) {
+			out = append(out, pid)
+		}
 	}
 	return out
+}
+
+// descends reports whether pid's parent chain reaches root.
+func descends(pid, root int, parent map[int]int) bool {
+	for n := 0; n < 64; n++ {
+		pp, ok := parent[pid]
+		if !ok || pp <= 1 {
+			return pp == root
+		}
+		if pp == root {
+			return true
+		}
+		pid = pp
+	}
+	return false
 }
 
 // checkLeaks fails the run when a test left a process behind, and stops

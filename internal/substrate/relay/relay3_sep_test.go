@@ -68,6 +68,9 @@ func TestSeparatedAgentCannotSignalTheRelay(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root to start a process as another user")
 	}
+	if !inRelayChild(t) {
+		return
+	}
 	sp, _, err := separate(kit.RelayConfig{AgentUser: "65534:65534"})
 	if err != nil || sp == nil {
 		t.Fatalf("separate as root: %v %v", sp, err)
@@ -110,6 +113,9 @@ func TestSeparatedRelayRunsTheAgentAsItsUser(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root to start a process as another user")
 	}
+	if !inRelayChild(t) {
+		return
+	}
 	sp, _, err := separate(kit.RelayConfig{AgentUser: "65534:65534"})
 	if err != nil || sp == nil {
 		t.Fatalf("separate as root: %v %v", sp, err)
@@ -126,8 +132,11 @@ func TestSeparatedRelayRunsTheAgentAsItsUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := filepath.Join(dir, "work")
-	_ = os.Mkdir(work, 0o755)
-	_ = os.Chown(work, 65534, 65534) // the agent owns its working directory
+	// The agent owns its working directory; 0777 lets the test (root
+	// without DAC_OVERRIDE once separated) remove what the agent wrote.
+	_ = os.Mkdir(work, 0o777)
+	_ = os.Chmod(work, 0o777)
+	_ = os.Chown(work, 65534, 65534)
 	agent := "echo uid:$(id -u); kill -KILL " + strconv.Itoa(os.Getpid()) + " 2>/dev/null; echo rc:$?; while read l; do echo got:$l; done"
 	s, _, ec := testServer(t, []string{"sh", "-c", agent})
 	s.opts.sep = sp

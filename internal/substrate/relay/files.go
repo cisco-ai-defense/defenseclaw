@@ -644,6 +644,8 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 		case err == nil:
 		case errors.Is(err, errChildNotFound):
 			http.Error(w, "relay: files: "+p+": no such file or directory", http.StatusNotFound)
+		case errors.Is(err, errChildDenied):
+			http.Error(w, "relay: files: "+p+": the agent may not read all of it (permission denied)", http.StatusForbidden)
 		case !started:
 			http.Error(w, "relay: files: "+err.Error(), http.StatusInternalServerError)
 		default:
@@ -652,10 +654,13 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if _, err := os.Stat(p); err != nil {
+	if err := readable(p); err != nil {
 		code := http.StatusInternalServerError
-		if errors.Is(err, fs.ErrNotExist) {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			code = http.StatusNotFound
+		case errors.Is(err, fs.ErrPermission):
+			code = http.StatusForbidden
 		}
 		http.Error(w, "relay: files: "+err.Error(), code)
 		return
@@ -668,6 +673,32 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 		// broken stream and not a short archive.
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// readable checks, before the first byte of a files-get, that WriteTar can
+// read everything at p: every folder can be listed and every regular file
+// opened (GAP-0375). A path the reader may not read all of is then a clean
+// refusal (fs.ErrPermission) instead of a 200 that ends in a cut stream
+// after a tar header. A mode changed between the check and the copy still
+// cuts the stream.
+func readable(p string) error {
+	top, err := filepath.EvalSymlinks(filepath.Clean(p))
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(top, func(cur string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		f, err := os.Open(cur)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
 }
 
 // WriteTar writes the file or directory at p to w as a tar whose entry names
