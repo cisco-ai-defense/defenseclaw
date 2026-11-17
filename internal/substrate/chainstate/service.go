@@ -1075,6 +1075,11 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if err := decodeGob(in.Input, &x); err != nil {
 			return ObserveResponse{}, bad(err)
 		}
+		// The replicas mint their own semantic event IDs: a PreToolUse
+		// delivered again to another replica is the same call, not a reused
+		// invocation ID that voids the proposal (GAP-0562). Set here, so no
+		// caller sets it.
+		x.PreEventFromAnyReplica = true
 		x.ConnectorInstanceID = instance
 		if err := s.notePending(e, in.Scope, x.Projection); err != nil {
 			return ObserveResponse{}, err
