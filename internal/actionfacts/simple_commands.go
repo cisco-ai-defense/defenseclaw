@@ -2681,16 +2681,29 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 	}
 	wrapper := filepath.Base(program)
 	if simpleNestedWrapper(wrapper) {
+		// A word the walk cannot resolve in the wrapper's own words or in
+		// the program word it runs leaves the call unread (a possible
+		// shell -c body). One among the program's arguments does not: the
+		// wrapper is read to that program, whose own reading judges the
+		// word (a shell -c body, GAP-0535), as without the wrapper, so
+		// time env GOOS=x go test -c -o "$d/x" is not a possible shell body.
 		argv := make([]string, len(args))
+		unknown := -1
 		for index, arg := range args {
 			value, known := simpleStaticScriptWord(arg, vars)
-			if !known {
-				if simplePotentialShellScript(args, vars) {
-					return "", false, true, false
-				}
-				return "", false, false, false
+			if !known && unknown < 0 {
+				unknown = index
 			}
 			argv[index] = value
+		}
+		unread := func() (string, bool, bool, bool) {
+			if simplePotentialShellScript(args, vars) {
+				return "", false, true, false
+			}
+			return "", false, false, false
+		}
+		if unknown == 0 {
+			return unread()
 		}
 		var childIndex int
 		switch wrapper {
@@ -2704,22 +2717,27 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		case "nice":
 			childIndex = simpleNiceChildIndex(argv)
 		case "env":
-			if split, ok := simpleEnvSplitString(argv); ok {
-				return split, false, true, true
+			if unknown < 0 {
+				if split, ok := simpleEnvSplitString(argv); ok {
+					return split, false, true, true
+				}
 			}
 			childIndex = simpleEnvChildIndex(argv)
 		default:
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
 			if uncertain {
-				if simplePotentialShellScript(args, vars) {
-					return "", false, true, false
+				return unread()
+			}
+			if !found {
+				if unknown >= 0 {
+					return unread()
 				}
 				return "", false, false, false
 			}
-			if !found {
-				return "", false, false, false
-			}
 			childIndex = len(argv) - len(child)
+		}
+		if unknown >= 0 && (childIndex <= 0 || unknown <= childIndex) {
+			return unread()
 		}
 		if childIndex <= 0 || childIndex >= len(args) {
 			return "", false, true, false
@@ -2731,8 +2749,10 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 		} else {
 			depth++
 		}
-		if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
-			return program, false, true, true
+		if unknown < 0 {
+			if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
+				return program, false, true, true
+			}
 		}
 		return simpleNestedScriptRun(args[childIndex:], vars, depth, neutral, cwdUnknown, interpreter)
 	}

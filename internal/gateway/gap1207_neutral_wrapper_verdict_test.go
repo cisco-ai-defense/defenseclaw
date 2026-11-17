@@ -30,7 +30,8 @@ func gap1207NeutralChain(unit []string, count int) string {
 // the metadata fetch blocks behind nice as it does behind nohup
 // (rel-1-0-10:GAP-1207), and five or sixty-four of them are read whole
 // (substrate-1:GAP-0478, rel-1-0-10:GAP-0976). Ordinary programs behind the
-// same wrappers stay allowed. One wrapper past the bound is truncated at cap
+// same wrappers stay allowed, also with a -c option and a word made at run
+// time among their arguments. One wrapper past the bound is truncated at cap
 // depth, never weaker than the program in strict and never a clean allow
 // (rel-1-0-10:GAP-0973, the one bound rule).
 func TestGAP1207ContextNeutralWrapperKeepsTheProgramVerdict(t *testing.T) {
@@ -54,6 +55,10 @@ func TestGAP1207ContextNeutralWrapperKeepsTheProgramVerdict(t *testing.T) {
 		{"benign-git", "git status", false},
 		{"benign-ls", "ls -la", false},
 		{"benign-gotest", "go test ./...", false},
+		// A program option spelled -c and a word made at run time among
+		// the program's own arguments are not a shell -c body behind the
+		// wrapper either (owner-trace A/B, the -c of go test -c).
+		{"benign-gotest-c", `go test -c -o "$OUT/pkg.test" ./internal/gateway`, false},
 	}
 	for _, tier := range boundedTestTiers {
 		if tier.managed || tier.tier == bounded.TierPermissive {
