@@ -422,7 +422,7 @@ func TestPublishTemplateFlagsAreChecked(t *testing.T) {
 		{"bad memory", []string{"--template", "team/kit", "--memory", "-1"}, "--memory"},
 		{"workdir", []string{"--template", "team/kit", "--workdir", "/srv"}, "no working-directory field"},
 		{"env without equals", []string{"--template", "team/kit", "--env", "LANG"}, "K=V"},
-		{"env twice", []string{"--template", "team/kit", "--env", "A=1", "--env", "A=2"}, "twice"},
+		{"env twice", []string{"--template", "team/kit", "--env", "LANG=C", "--env", "LANG=C.UTF-8"}, "twice"},
 		{"secret env", []string{"--template", "team/kit", "--env", "API_TOKEN=abc123"}, "looks like a credential"},
 		{"bad auth", []string{"--template", "team/kit", "--api-auth", "basic"}, "serviceaccount or mtls"},
 		{"flag without template", []string{"--cpu", "2"}, "only applies with --template"},

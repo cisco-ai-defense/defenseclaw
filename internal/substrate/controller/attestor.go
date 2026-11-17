@@ -56,12 +56,23 @@ var _ Attestor = (*TemplateAttestor)(nil)
 // Attest implements Attestor. A refusal is an Attestation with Attested
 // false and a Reason; the error is reserved for nothing (the controller
 // treats both the same way: no policy).
+//
+// Besides the image, the container spec must match what was attested
+// (GAP-0354): every env variable is one the actor environment allowlist
+// permits (attest.CheckEnv: the kit's variables with the kit's value where it
+// fixes one, and the ordinary base-image settings), and the process is the
+// image's attested entrypoint and arguments (a different command, or extra
+// arguments, is refused). Those refusals, and the image environment's
+// (attest.Rejection.Allowlist, GAP-0355), carry Allowlist with every other
+// field filled, so the controller keeps an actor admitted before the
+// upgrade running while it refuses new ones.
 func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplate) (Attestation, error) {
 	cs := tmpl.GetContainers()
 	if len(cs) == 0 {
 		return Attestation{Reason: "the template has no container"}, nil
 	}
 	var out Attestation
+	allowlist := ""
 	for i, c := range cs {
 		img := c.GetImage()
 		ref, err := attest.ParseRef(img)
@@ -80,10 +91,16 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		v, err := t.Verifier.Verify(ctx, img)
 		if err != nil {
 			reason, retry := err.Error(), false
-			if r, ok := attest.AsRejection(err); ok {
+			r, ok := attest.AsRejection(err)
+			if ok {
 				reason, retry = r.Code+": "+r.Detail, r.Retryable
 			}
-			return Attestation{Digest: ref.Digest, Retryable: retry, Reason: fmt.Sprintf("container %d image %s: %s", i, ref.Name(), reason)}, nil
+			if !ok || !r.Allowlist || v == nil {
+				return Attestation{Digest: ref.Digest, Retryable: retry, Reason: fmt.Sprintf("container %d image %s: %s", i, ref.Name(), reason)}, nil
+			}
+			if allowlist == "" {
+				allowlist = fmt.Sprintf("container %d image %s: %s", i, ref.Name(), reason)
+			}
 		}
 		// The container runs ref.Digest; the attestation is about v.Digest.
 		// They must be the same digest (an index or a moved tag is not).
@@ -94,6 +111,9 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 			}
 			return Attestation{Digest: ref.Digest,
 				Reason: fmt.Sprintf("container %d runs %s but the attestation is for %s", i, ref.Digest, got)}, nil
+		}
+		if why := ContainerSpecRefusal(c, v); why != "" && allowlist == "" {
+			allowlist = fmt.Sprintf("container %d: %s", i, why)
 		}
 		if !v.ValidUntil.IsZero() && (out.ValidUntil.IsZero() || v.ValidUntil.Before(out.ValidUntil)) {
 			out.ValidUntil = v.ValidUntil
@@ -128,8 +148,58 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 			return Attestation{Reason: fmt.Sprintf("image volume %s (%s) is not in substrate.templates.volume_images", vol.GetName(), ref.Name())}, nil
 		}
 	}
+	if allowlist != "" {
+		out.Reason, out.Allowlist = allowlist, true
+		return out, nil
+	}
 	out.Attested = true
 	return out, nil
+}
+
+// maxArgvShown bounds an argv in a refusal.
+const maxArgvShown = 200
+
+// ContainerSpecRefusal says why a container spec does not match what was
+// attested about its image (GAP-0354), "" when it does: an env variable the
+// actor environment allowlist does not permit, or a process other than the
+// image's attested ENTRYPOINT and CMD. Substrate runs command + args when
+// command is set, ENTRYPOINT + args when only args is, and ENTRYPOINT +
+// CMD otherwise; the result must be ENTRYPOINT + CMD.
+func ContainerSpecRefusal(c *ateapi.Container, v *attest.Verified) string {
+	env := map[string]string{}
+	for _, e := range c.GetEnv() {
+		env[e.GetName()] = e.GetValue()
+	}
+	if bad := attest.CheckEnv(env); len(bad) > 0 {
+		return "env sets variables the actor environment allowlist does not permit: " + attest.FormatEnvRefusals(bad) +
+			"; remove them from the template (the kit sets what the agent needs)"
+	}
+	want := append(append([]string{}, v.Entrypoint...), v.Cmd...)
+	cmd, args := c.GetCommand(), c.GetArgs()
+	var got []string
+	switch {
+	case len(cmd) > 0:
+		got = append(append(got, cmd...), args...)
+	case len(args) > 0:
+		got = append(append(got, v.Entrypoint...), args...)
+	default:
+		return ""
+	}
+	if slices.Equal(got, want) {
+		return ""
+	}
+	if len(cmd) > 0 && !slices.Equal(cmd, v.Entrypoint) {
+		return fmt.Sprintf("command %s is not the attested entrypoint %s; remove command from the template (the image starts the relay)", argvText(cmd), argvText(v.Entrypoint))
+	}
+	return fmt.Sprintf("args %s are not the attested arguments %s; remove args from the template", argvText(args), argvText(v.Cmd))
+}
+
+func argvText(a []string) string {
+	s := fmt.Sprintf("%q", a)
+	if len(s) > maxArgvShown {
+		s = s[:maxArgvShown] + "…"
+	}
+	return s
 }
 
 // MatchImage reports whether a repository name ("registry/path") matches

@@ -10,26 +10,46 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
-// GAP-0115: variables that make git, a shell or an interpreter load code
-// fail the environment check; ordinary settings do not.
-func TestEnvCheckCatchesCodeLoadingVariables(t *testing.T) {
-	for _, k := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_PARAMETERS",
-		"GIT_SSH_COMMAND", "BASH_FUNC_ls%%", "NODE_PATH", "PERL5DB", "PROMPT_COMMAND", "ZDOTDIR", "PYTHONUSERBASE",
-		"GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "LD_PRELOAD", "git_config_count"} {
-		if !envLoadsCode(k) {
-			t.Errorf("%s passes the environment check", k)
+// GAP-0355 (was GAP-0115's deny list): the image environment check is an
+// allowlist. Variables that load code are refused, the four the review ran
+// code through among them, and so is any name the list does not know; the
+// kit's own variables pass, with the kit's value where it fixes one.
+func TestEnvCheckIsAnAllowlist(t *testing.T) {
+	for _, c := range []struct {
+		k, v string
+		ok   bool
+	}{
+		{"GIT_CONFIG_COUNT", "1", false}, {"GIT_CONFIG_KEY_0", "core.fsmonitor", false}, {"GIT_CONFIG_PARAMETERS", "x", false},
+		{"GIT_SSH_COMMAND", "x", false}, {"BASH_FUNC_ls%%", "() { :; }", false}, {"NODE_PATH", "/x", false}, {"PERL5DB", "x", false},
+		{"PROMPT_COMMAND", "x", false}, {"ZDOTDIR", "/x", false}, {"LD_PRELOAD", "/x.so", false}, {"ld_preload", "/x.so", false},
+		{"SHELLOPTS", "xtrace", false}, {"PS4", "$(id)", false}, {"PERLLIB", "/x", false}, {"GIT_DIR", "/x", false},
+		{"XDG_CONFIG_HOME", "/tmp/xdg", false}, {"EDITOR", "vi", false}, {"PAGER", "less", false}, {"MY_SETTING", "1", false},
+		{"LC_ALL_X%", "1", false}, {"x_VERSION", "1", false},
+		{"PATH", "/usr/bin", true}, {"HOME", "/sandbox", true}, {"LANG", "C.UTF-8", true}, {"LC_ALL", "C.UTF-8", true},
+		{"NODE_VERSION", "22.1.0", true}, {"YARN_VERSION", "1.22", true}, {"TERM", "xterm", true}, {"NODE_ENV", "production", true},
+		{"PYTHONUNBUFFERED", "1", true}, {"GIT_AUTHOR_NAME", "x", true},
+		// The kit's variables, with the kit's fixed value only.
+		{"XDG_CONFIG_HOME", kit.XDGConfigHome, true}, {"DISABLE_TELEMETRY", "1", true}, {"DISABLE_TELEMETRY", "0", false},
+		{"SSL_CERT_FILE", kit.TrustBundle, true}, {"SSL_CERT_FILE", "/tmp/ca.pem", false},
+		{"ANTHROPIC_BASE_URL", "https://gw.example/llm/anthropic", true}, {"ANTHROPIC_API_KEY", kit.PlaceholderSecret, true},
+		{"ANTHROPIC_API_KEY", "sk-real", false}, {"npm_config_fund", "false", true},
+	} {
+		bad := CheckEnv(map[string]string{c.k: c.v})
+		if (len(bad) == 0) != c.ok {
+			t.Errorf("%s=%s: permitted=%v, want %v (%v)", c.k, c.v, len(bad) == 0, c.ok, bad)
 		}
 	}
-	for _, k := range []string{"PATH", "HOME", "LANG", "EDITOR", "PAGER", "GIT_EDITOR", "NODE_ENV", "GIT_AUTHOR_NAME", "PYTHONUNBUFFERED", "TERM"} {
-		if envLoadsCode(k) {
-			t.Errorf("%s is refused, but it loads no code", k)
-		}
+	got := CheckEnv(map[string]string{"GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_COUNT": "1", "PATH": "/bin", "SSL_CERT_FILE": "/x"})
+	if s := FormatEnvRefusals(got); s != `GIT_CONFIG_COUNT (not on the allowlist), GIT_CONFIG_KEY_0 (not on the allowlist), SSL_CERT_FILE (the kit sets it to "/run/ate/trust-bundle.pem" only)` {
+		t.Fatalf("refusals: %s", s)
 	}
-	got := unsafeEnvOf(map[string]string{"GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_COUNT": "1", "PATH": "/bin"})
-	if strings.Join(got, ",") != "GIT_CONFIG_COUNT,GIT_CONFIG_KEY_0" {
-		t.Fatalf("unsafeEnvOf: %v", got)
+	// A refusal never echoes the value it refused.
+	if s := FormatEnvRefusals(CheckEnv(map[string]string{"ANTHROPIC_API_KEY": "sk-secret-value"})); strings.Contains(s, "sk-secret") {
+		t.Fatalf("the refusal shows the value: %s", s)
 	}
 }
 
@@ -80,16 +100,21 @@ func TestHTTPSRegistryCannotUseAPlainHTTPRealm(t *testing.T) {
 // image sets a variable added since.
 func TestVerifyRechecksTheImageEnvironment(t *testing.T) {
 	f := newFixture(t)
-	saved := unsafeEnvPrefixes
-	unsafeEnvPrefixes = nil // the build of an older DefenseClaw
+	saved := envCheck
+	envCheck = func(map[string]string) []EnvRefusal { return nil } // the build of an older DefenseClaw
 	res, err := f.build(t, func(o *BuildOptions) {
-		o.Kit.Env["GIT_CONFIG_COUNT_X"] = "1"
+		o.Kit.Env["GIT_CONFIG_COUNT"] = "1"
 		o.Kit.Env["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
 	})
-	unsafeEnvPrefixes = saved
+	envCheck = saved
 	if err != nil {
-		t.Fatalf("build with the older list: %v", err)
+		t.Fatalf("build with the older check: %v", err)
 	}
-	_, err = f.verifier(nil).Verify(context.Background(), f.m.host()+"/tmpl/claude@"+res.Digest)
-	wantCode(t, err, CodeEnvUnsafe)
+	v, err := f.verifier(nil).Verify(context.Background(), f.m.host()+"/tmpl/claude@"+res.Digest)
+	wantCode(t, err, CodeEnvNotPermitted)
+	// The refusal is the allowlist's, and the rest of the verdict comes
+	// with it: the controller keeps actors admitted before the upgrade.
+	if r, _ := AsRejection(err); !r.Allowlist || v == nil || v.Digest != res.Digest || !strings.Contains(r.Detail, "GIT_CONFIG_COUNT (not on the allowlist)") {
+		t.Fatalf("allowlist refusal: %+v %+v", r, v)
+	}
 }

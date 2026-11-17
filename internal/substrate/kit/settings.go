@@ -435,11 +435,11 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 			}
 			env["CLAUDE_CODE_USE_BEDROCK"] = "1"
 			env["ANTHROPIC_BEDROCK_BASE_URL"] = gw + "/llm/bedrock"
-			env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-not-a-secret"
+			env["AWS_BEARER_TOKEN_BEDROCK"] = PlaceholderSecret
 			env["AWS_REGION"] = "us-east-1"
 		case "anthropic":
 			env["ANTHROPIC_BASE_URL"] = gw + "/llm/anthropic"
-			env["ANTHROPIC_API_KEY"] = "placeholder-not-a-secret"
+			env["ANTHROPIC_API_KEY"] = PlaceholderSecret
 		}
 		if model != "" {
 			for _, k := range claudeCodeModelSlots {
@@ -447,8 +447,8 @@ func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 			}
 		}
 	case "codex":
-		env["OPENAI_API_KEY"] = "placeholder-not-a-secret"
-		env["CODEX_API_KEY"] = "placeholder-not-a-secret"
+		env["OPENAI_API_KEY"] = PlaceholderSecret
+		env["CODEX_API_KEY"] = PlaceholderSecret
 	}
 	for k, v := range wave2ModelEnv(connectorName, gw, o) {
 		env[k] = v

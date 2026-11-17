@@ -56,7 +56,7 @@ func wave2ModelEnv(name, gw string, o OverlayOptions) map[string]string {
 		env["COPILOT_PROVIDER_BASE_URL"] = base
 		env["COPILOT_PROVIDER_TYPE"] = "openai"
 		env["COPILOT_PROVIDER_WIRE_API"] = "responses"
-		env["COPILOT_PROVIDER_API_KEY"] = "placeholder-not-a-secret"
+		env["COPILOT_PROVIDER_API_KEY"] = PlaceholderSecret
 		env["COPILOT_MODEL"] = modelOrDefault(o)
 		env["COPILOT_PROVIDER_MODEL_ID"] = "gpt-5.4"
 		env["COPILOT_PROVIDER_WIRE_MODEL"] = modelOrDefault(o)
@@ -64,7 +64,7 @@ func wave2ModelEnv(name, gw string, o OverlayOptions) map[string]string {
 		env["COPILOT_PKG_CACHE_HOME"] = "/opt/defenseclaw-harness/copilot/cache"
 	case "hermes":
 		env["HERMES_DEFENSECLAW_BASE_URL"] = base
-		env["HERMES_DEFENSECLAW_API_KEY"] = "placeholder-not-a-secret"
+		env["HERMES_DEFENSECLAW_API_KEY"] = PlaceholderSecret
 		env["HERMES_MANAGED_DIR"] = "/etc/hermes"
 		env["HERMES_HOME"] = path.Join(o.Home, ".hermes")
 	case "kiro":

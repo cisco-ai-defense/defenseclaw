@@ -271,6 +271,11 @@ func parseEnv(kvs []string) ([]*ateapi.EnvVar, error) {
 		if secretNameRE.MatchString(k) && !strings.HasPrefix(strings.ToLower(v), "placeholder") {
 			return nil, fmt.Errorf("--env %s looks like a credential: a template is readable by anyone who can read the cluster. Give a placeholder value (placeholder-...) and let the egress credential provider inject the real one", k)
 		}
+		// The admission rule (GAP-0354): only allowlisted variables, the
+		// kit's with the kit's value.
+		if bad := attest.CheckEnv(map[string]string{k: v}); len(bad) > 0 {
+			return nil, fmt.Errorf("--env %s: admission refuses a template that sets it: the actor environment allowlist permits only the kit's variables and ordinary base-image settings (locale, terminal, version pins); the kit image already sets what the agent needs", bad[0])
+		}
 		out = append(out, &ateapi.EnvVar{Name: k, Value: v})
 	}
 	slices.SortFunc(out, func(a, b *ateapi.EnvVar) int { return strings.Compare(a.Name, b.Name) })
