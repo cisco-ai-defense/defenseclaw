@@ -260,6 +260,11 @@ type trustedActionRequest struct {
 	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
 	// that proof (loginGuessProvedFinding), so no other rule needs to run.
 	stateProofOnly bool
+	// unplacedStatement marks a simple command of a sandbox call that the
+	// walk placed in no folder (SimpleCommand.UnresolvedFolder): it is judged
+	// unplaced, as on the laptop, so the guest placement of the call alone
+	// reads it in the guest's directories (sandboxGuestPlacedInput).
+	unplacedStatement bool
 	// sendDestination marks the routing values of a message call, where its
 	// text is sent (ToolInspectRequest.sendDestination): the call is a send
 	// whatever the tool is named (trustedActionSendsMessage).
@@ -1225,6 +1230,15 @@ func dispatchTrustedActionWith(
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
 				child.stateProofOnly = simple.LoginGuess
+				// A statement the walk placed nowhere is judged as the laptop
+				// judges it, in no folder: the guest placement of the call
+				// already reads it in each directory the guest may be in
+				// (sandboxGuestPlacements). Placed in the guest's directory
+				// here, its proof there hid the unknown tier of the folder it
+				// may really run in, which the laptop names
+				// (withUnresolvedFolderTier, rel-1-0-10:GAP-0871; substrate-1
+				// GAP-0377 at FU8: $CMD; cat .ssh/id_ed25519).
+				child.unplacedStatement = simple.UnresolvedFolder && child.SandboxGuestCWD != ""
 				parent := request.Input
 				if wholeCommandKnown {
 					parent.Command = wholeCommand
@@ -4408,10 +4422,15 @@ func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts
 // owners place by the working directory itself, or a call the analysis did
 // not read in full, whose commands are then read one by one in the guest's
 // directories (a here-string parses invalid and names no path,
-// substrate-1 GAP-0363).
+// substrate-1 GAP-0363). A statement of the call the walk placed nowhere
+// (unplacedStatement) has no reading of its own here: the call's reading
+// places it.
+//
+// The exact-target lane reads this placement too (provedHighWriteFindings):
+// its rules match a resolved target, which a copy-mode call names only here.
 func sandboxGuestPlacedInput(request trustedActionRequest, facts actionfacts.Facts) (actionfacts.Input, bool) {
 	guestCWD := request.SandboxGuestCWD
-	if guestCWD == "" || guestCWD == request.Input.CWD {
+	if guestCWD == "" || guestCWD == request.Input.CWD || request.unplacedStatement {
 		return actionfacts.Input{}, false
 	}
 	if facts.Authoritative() && !hasRelativePathOperand(facts) && !hasGitHookMutationCandidate(facts) && !hasGitReadOutputWrite(facts) {

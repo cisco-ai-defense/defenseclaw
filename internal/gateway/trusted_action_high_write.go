@@ -363,6 +363,18 @@ func provedHighWriteFindings(
 		}
 	}
 	judgePaths(facts)
+	// A sandbox call is read in the guest's own working directory as well
+	// (sandboxGuestPlacedInput): a copy-mode call names no directory of its
+	// own, so a relative write the laptop resolves in its folder, or in a
+	// folder its working-folder tracking keeps for the command (cd -,
+	// cd "$D" or a cd before $CMD, rel-1-0-10:GAP-0869), named no target
+	// here, and the actor allowed rm ../.defenseclaw/audit.db after
+	// cd .cache; cd -; $CMD where the laptop blocks (substrate-1 GAP-0377 at
+	// FU8). The reading is lexical, and this lane reads no guest file on the
+	// host (isSandboxHookRequest).
+	if guest, ok := sandboxGuestPlacedInput(request, facts); ok {
+		judgePaths(actionfacts.Analyze(guest))
+	}
 	// A native write call with a key outside its reviewed schema stays
 	// partial and names no path; each file it may write is judged as the
 	// reviewed call that writes it (actionfacts.UnknownKeyWriteTargetViews,
