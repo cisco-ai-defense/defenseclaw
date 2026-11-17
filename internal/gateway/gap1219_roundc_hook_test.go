@@ -29,7 +29,12 @@ func TestGAP1219RoundCReviewHookTiers(t *testing.T) {
 		{"Z07", "rm -rf $D/*"},
 		{"Z08", "[[ D=1 ]]; rm -rf $D/*"},
 	}
-	shellTextTiers(t, func(tier string, decide func(string) (string, []string), _ func(string, bool) (string, []string)) {
+	shellTextTiers(t, func(tier string, decide func(string) (string, []string), oracle func(string, bool) (string, []string)) {
+		if !strings.HasSuffix(tier, "/permissive") {
+			if direct, findings := oracle("rm -rf /etc/*; :", true); direct != "block" {
+				t.Errorf("%s: metacharacter oracle is %s (%q), want block", tier, direct, findings)
+			}
+		}
 		for _, row := range rows {
 			shell := "bash"
 			if strings.HasPrefix(row.name, "Z") {
