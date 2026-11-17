@@ -205,23 +205,105 @@ func ArchiveExtractionPaths(command, cwd, home string) []string {
 // (bound rule, cap depth): what it extracts is unknown
 // (rel-1-0-10:GAP-0663).
 func ArchiveExtractionReading(command, cwd, home string) ([]string, bounded.CapSet) {
-	paths, _, caps := ArchiveExtractionUnknown(command, cwd, home)
-	return paths, caps
+	read := ReadArchiveExtractions(command, cwd, home)
+	return read.Paths, read.Caps
 }
 
-// ArchiveExtractionUnknown is ArchiveExtractionReading with the folders of
-// the extractions whose members the words do not tell: a member glob, a list
-// read from a file (tar -T), a rename of the members (tar --transform, bsdtar
-// -s). Whatever such an extraction writes below its folder is unknown
-// (rel-1-0-10:GAP-0142).
-func ArchiveExtractionUnknown(command, cwd, home string) (paths, unknown []string, caps bounded.CapSet) {
-	file, parsed := parseShell(command)
-	if !parsed || !filepath.IsAbs(cwd) {
-		return nil, nil, bounded.CapSet{}
+// ArchiveExtractions is what the archive extractions of one command write
+// (ReadArchiveExtractions).
+type ArchiveExtractions struct {
+	// Paths are the folders the extractions write in and the members their
+	// words name, absolute and clean.
+	Paths []string
+	// Unknown are the folders of the extractions whose members the words do
+	// not tell: a member glob, a list read from a file (tar -T), a rename of
+	// the members (tar --transform, bsdtar -s). Whatever such an extraction
+	// writes below its folder is unknown (rel-1-0-10:GAP-0142).
+	Unknown []string
+	// Whole are the extractions of every member of one archive file a word
+	// names (ArchiveWhole).
+	Whole []ArchiveWhole
+	// Caps are the bounds the reading hit.
+	Caps bounded.CapSet
+}
+
+// ArchiveWhole is an extraction of every member of one archive file into
+// Folder: a tar or unzip call that names no member, Expand-Archive, the .NET
+// ZipFile ExtractToDirectory call, Python tarfile and zipfile extractall and
+// shutil.unpack_archive (rel-1-0-10:GAP-1173). Its words do not tell where
+// the members land; the archive does (Landing).
+type ArchiveWhole struct {
+	Folder, Archive string
+	format          archiveFormat
+	// renamed: the call changes the member names (tar --strip-components,
+	// unzip -j), so the listing does not tell where they land.
+	renamed bool
+}
+
+type archiveFormat uint8
+
+const (
+	archiveTar archiveFormat = iota + 1
+	archiveZip
+	// archiveAny is read as a zip and else as a tar (shutil.unpack_archive
+	// of a name it guesses the format of).
+	archiveAny
+)
+
+// Landing lists where the members of the archive land below the folder.
+// present reports that the archive file is there to be read: a missing one
+// (made by an earlier statement, or out of the reach of a managed gateway)
+// and one on a network share that has not answered are not. listed reports
+// that every member was read, within the bounds of the plain-archive reading
+// (64 MiB, 4096 members), as a regular file or folder with a relative name
+// and no .. component, and that the call keeps the member names.
+func (whole ArchiveWhole) Landing() (paths []string, present, listed bool) {
+	info, err := pathStat(whole.Archive)
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, false, false
 	}
-	var trunc bounded.Truncated
-	archiveWalk(file, cwd, home, 0, &paths, &unknown, &trunc)
-	return paths, unknown, trunc.Set()
+	if whole.renamed {
+		return nil, true, false
+	}
+	var members []string
+	switch whole.format {
+	case archiveTar:
+		members, listed = tarArchiveMembers(whole.Archive)
+	case archiveZip:
+		members, listed = zipArchiveMembers(whole.Archive)
+	case archiveAny:
+		if members, listed = zipArchiveMembers(whole.Archive); !listed {
+			members, listed = tarArchiveMembers(whole.Archive)
+		}
+	}
+	if !listed {
+		return nil, true, false
+	}
+	for _, member := range members {
+		paths = append(paths, archiveMemberPath(whole.Folder, member))
+	}
+	return paths, true, true
+}
+
+// ReadArchiveExtractions reads the archive extractions of a command: the
+// shell calls ArchiveExtractionReading reads (tar, unzip, 7z, cpio, ditto,
+// and python -c code that calls tarfile, zipfile or shutil.unpack_archive)
+// and, on a command that names one, the PowerShell Expand-Archive and
+// ZipFile ExtractToDirectory calls (rel-1-0-10:GAP-1173).
+func ReadArchiveExtractions(command, cwd, home string) ArchiveExtractions {
+	var read archiveExtractionScan
+	if file, parsed := parseShell(command); parsed && filepath.IsAbs(cwd) {
+		archiveWalk(file, cwd, home, 0, &read)
+	}
+	powerShellArchiveExtractions(command, cwd, home, &read)
+	return ArchiveExtractions{Paths: read.paths, Unknown: read.unknown, Whole: read.whole, Caps: read.trunc.Set()}
+}
+
+// archiveExtractionScan collects one ReadArchiveExtractions.
+type archiveExtractionScan struct {
+	paths, unknown []string
+	whole          []ArchiveWhole
+	trunc          bounded.Truncated
 }
 
 // archiveMembersUnknown reports an extraction whose members cannot be read
@@ -251,22 +333,23 @@ func archiveMembersUnknown(program string, words []string) bool {
 	return false
 }
 
-func archiveWalk(file *syntax.File, cwd, home string, depth int, out, unknown *[]string, trunc *bounded.Truncated) {
+func archiveWalk(file *syntax.File, cwd, home string, depth int, read *archiveExtractionScan) {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
 		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
 		for index, arg := range call.Args {
-			words[index], _ = StaticWord(arg, home)
+			words[index], static[index] = StaticWord(arg, home)
 		}
 		if child, _, caps := actionfacts.InlineChild(words); len(child) > 0 {
-			trunc.Merge(caps)
+			read.trunc.Merge(caps)
 			if body, shell := launcherBody(child); shell {
-				if trunc.Within(bounded.Depth, depth+1, InlineMaxShellDepth) {
+				if read.trunc.Within(bounded.Depth, depth+1, InlineMaxShellDepth) {
 					if inner, parsed := parseShell(body); parsed {
-						archiveWalk(inner, cwd, home, depth+1, out, unknown, trunc)
+						archiveWalk(inner, cwd, home, depth+1, read)
 					}
 				}
 				return true
@@ -276,7 +359,27 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, out, unknown *[
 		if len(words) == 0 {
 			return true
 		}
+		static = static[len(static)-len(words):]
+		program := strings.ToLower(filepath.Base(words[0]))
+		if program == "python" || strings.HasPrefix(program, "python3") {
+			if code, ok := pythonLiteralCode(words); ok {
+				pythonArchiveExtractions(code, cwd, home, read)
+			}
+			return true
+		}
 		members := ArchiveExtractionMembers(words[0], words[1:])
+		unknown := archiveMembersUnknown(words[0], words[1:])
+		// A call that names no member extracts the whole archive: where its
+		// members land is read from the archive (rel-1-0-10:GAP-1173).
+		var whole ArchiveWhole
+		if len(members) == 0 && !unknown {
+			if archive, ok := extractionArchive(program, words[1:], static[1:], cwd); ok {
+				whole = ArchiveWhole{Archive: archive, format: archiveTar, renamed: archiveRenamesMembers(program, words[1:])}
+				if program == "unzip" {
+					whole.format = archiveZip
+				}
+			}
+		}
 		for _, folder := range ArchiveExtractionDestinations(words[0], words[1:]) {
 			if folder == "" || strings.HasPrefix(folder, "~") {
 				continue
@@ -284,16 +387,45 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, out, unknown *[
 			if !filepath.IsAbs(folder) {
 				folder = filepath.Join(cwd, folder)
 			}
-			*out = append(*out, filepath.Clean(folder))
-			if archiveMembersUnknown(words[0], words[1:]) {
-				*unknown = append(*unknown, filepath.Clean(folder))
+			folder = filepath.Clean(folder)
+			read.paths = append(read.paths, folder)
+			if unknown {
+				read.unknown = append(read.unknown, folder)
 			}
 			for _, member := range members {
-				*out = append(*out, archiveMemberPath(folder, member))
+				read.paths = append(read.paths, archiveMemberPath(folder, member))
+			}
+			if whole.Archive != "" {
+				whole.Folder = folder
+				read.whole = append(read.whole, whole)
 			}
 		}
 		return true
 	})
+}
+
+// archiveRenamesMembers reports a tar or unzip extraction that changes the
+// names its members land at: tar --strip-components and unzip -j.
+func archiveRenamesMembers(program string, words []string) bool {
+	for _, word := range words {
+		switch {
+		case strings.HasPrefix(word, "--"):
+			name, _, _ := strings.Cut(word, "=")
+			if program != "unzip" && tarLongName(name) == tminTable(tminTarStrip)[0] {
+				return true
+			}
+		case program == "unzip" && strings.HasPrefix(word, "-") && len(word) > 1:
+			// The letters up to a d are options; what follows it is its value.
+			cluster := word[1:]
+			if at := strings.IndexByte(cluster, 'd'); at >= 0 {
+				cluster = cluster[:at]
+			}
+			if strings.IndexByte(cluster, 'j') >= 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // archiveProgramWords drops the launchers before the program word.

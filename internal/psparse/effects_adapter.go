@@ -23,16 +23,38 @@ func WalkCommands(sc *Script, fn func(*Command)) {
 	if sc == nil {
 		return
 	}
-	walkCommandsStmts(sc.Statements, fn)
+	walkCommandsStmts(sc.Statements, astWalk{command: fn})
 }
 
-func walkCommandsStmts(sts []Statement, fn func(*Command)) {
-	for _, s := range sts {
-		walkCommandsStmt(s, fn)
+// WalkInvokes calls fn for every method call (Target.Name(args) and
+// Target::Name(args)) in the script, in source order, in the same nodes
+// WalkCommands reaches.
+func WalkInvokes(sc *Script, fn func(*Invoke)) {
+	if sc == nil {
+		return
+	}
+	walkCommandsStmts(sc.Statements, astWalk{invoke: fn})
+}
+
+// astWalk is what one walk calls: for each command, for each method call.
+type astWalk struct {
+	command func(*Command)
+	invoke  func(*Invoke)
+}
+
+func (w astWalk) visitCommand(c *Command) {
+	if w.command != nil {
+		w.command(c)
 	}
 }
 
-func walkCommandsStmt(s Statement, fn func(*Command)) {
+func walkCommandsStmts(sts []Statement, w astWalk) {
+	for _, s := range sts {
+		walkCommandsStmt(s, w)
+	}
+}
+
+func walkCommandsStmt(s Statement, w astWalk) {
 	switch v := s.(type) {
 	case nil:
 	case *Pipeline:
@@ -40,101 +62,104 @@ func walkCommandsStmt(s Statement, fn func(*Command)) {
 			for _, el := range p.Elements {
 				switch e := el.(type) {
 				case *Command:
-					fn(e)
-					walkCommandsCmd(e, fn)
+					w.visitCommand(e)
+					walkCommandsCmd(e, w)
 				case *ExprStatement:
-					walkCommandsExpr(e.Expr, fn)
+					walkCommandsExpr(e.Expr, w)
 				}
 			}
 			for _, r := range p.Redirs {
-				walkCommandsExpr(r.Target, fn)
+				walkCommandsExpr(r.Target, w)
 			}
 		}
 	case *Assignment:
-		walkCommandsExpr(v.LHS, fn)
-		walkCommandsStmt(v.RHS, fn)
+		walkCommandsExpr(v.LHS, w)
+		walkCommandsStmt(v.RHS, w)
 	case *Block:
-		walkCommandsStmts(v.Conditions, fn)
+		walkCommandsStmts(v.Conditions, w)
 		for _, b := range v.Bodies {
 			if b != nil {
-				walkCommandsStmts(b.Statements, fn)
+				walkCommandsStmts(b.Statements, w)
 			}
 		}
 	case *Command:
-		fn(v)
-		walkCommandsCmd(v, fn)
+		w.visitCommand(v)
+		walkCommandsCmd(v, w)
 	case *ExprStatement:
-		walkCommandsExpr(v.Expr, fn)
+		walkCommandsExpr(v.Expr, w)
 	}
 }
 
-func walkCommandsCmd(c *Command, fn func(*Command)) {
-	walkCommandsExpr(c.Name, fn)
+func walkCommandsCmd(c *Command, w astWalk) {
+	walkCommandsExpr(c.Name, w)
 	for _, el := range c.Elements {
 		switch e := el.(type) {
 		case *Parameter:
-			walkCommandsExpr(e.Colon, fn)
+			walkCommandsExpr(e.Colon, w)
 		case *Arg:
-			walkCommandsExpr(e.Value, fn)
+			walkCommandsExpr(e.Value, w)
 		case Expr:
-			walkCommandsExpr(e, fn)
+			walkCommandsExpr(e, w)
 		}
 	}
 	for _, r := range c.Redirs {
-		walkCommandsExpr(r.Target, fn)
+		walkCommandsExpr(r.Target, w)
 	}
 }
 
-func walkCommandsExpr(e Expr, fn func(*Command)) {
+func walkCommandsExpr(e Expr, w astWalk) {
 	switch v := e.(type) {
 	case nil:
 	case *ScriptBlockExpr:
-		walkCommandsStmts(v.Statements, fn)
+		walkCommandsStmts(v.Statements, w)
 	case *SubExpr:
-		walkCommandsStmts(v.Statements, fn)
+		walkCommandsStmts(v.Statements, w)
 	case *ArrayExpr:
-		walkCommandsStmts(v.Statements, fn)
+		walkCommandsStmts(v.Statements, w)
 	case *ArrayLit:
 		for _, el := range v.Elements {
-			walkCommandsExpr(el, fn)
+			walkCommandsExpr(el, w)
 		}
 	case *Hashtable:
 		for _, k := range v.Keys {
-			walkCommandsExpr(k, fn)
+			walkCommandsExpr(k, w)
 		}
 		for _, val := range v.Values {
-			walkCommandsExpr(val, fn)
+			walkCommandsExpr(val, w)
 		}
 	case *TypeExpr:
 		for _, a := range v.Args {
-			walkCommandsExpr(a, fn)
+			walkCommandsExpr(a, w)
 		}
 	case *Paren:
-		walkCommandsStmt(v.Inner, fn)
+		walkCommandsStmt(v.Inner, w)
 	case *Member:
-		walkCommandsExpr(v.Target, fn)
+		walkCommandsExpr(v.Target, w)
 	case *Invoke:
-		walkCommandsExpr(v.Target, fn)
+		if w.invoke != nil {
+			w.invoke(v)
+		}
+		walkCommandsExpr(v.Target, w)
 		for _, a := range v.Args {
-			walkCommandsExpr(a, fn)
+			walkCommandsExpr(a, w)
 		}
 	case *Index:
-		walkCommandsExpr(v.Target, fn)
-		walkCommandsExpr(v.Index, fn)
+		walkCommandsExpr(v.Target, w)
+		walkCommandsExpr(v.Index, w)
 	case *Binary:
-		walkCommandsExpr(v.LHS, fn)
-		walkCommandsExpr(v.RHS, fn)
+		walkCommandsExpr(v.LHS, w)
+		walkCommandsExpr(v.RHS, w)
 	case *Unary:
-		walkCommandsExpr(v.Operand, fn)
+		walkCommandsExpr(v.Operand, w)
 	case *Convert:
-		walkCommandsExpr(v.Operand, fn)
+		walkCommandsExpr(v.Operand, w)
 	case *StringLit:
 		for _, pt := range v.Parts {
-			walkCommandsExpr(pt.Expr, fn)
+			walkCommandsExpr(pt.Expr, w)
 		}
 	case *scriptExprWrap:
-		fn(v.cmd)
-		walkCommandsCmd(v.cmd, fn)
+		w.visitCommand(v.cmd)
+		walkCommandsCmd(v.cmd, w)
 	}
 }
 

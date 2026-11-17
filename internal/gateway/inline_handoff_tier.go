@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"context"
-	"path"
 	"slices"
 	"strings"
 
@@ -106,16 +105,13 @@ func withInlineHandoffTier(ctx context.Context, request trustedActionRequest, fi
 	facts := actionfacts.Analyze(request.Input)
 	reading := readInlineState(facts, request)
 	if mentionsArchiveExtractor(command) {
-		_, unknown, caps := hookpaths.ArchiveExtractionUnknown(command, facts.CWD, strings.TrimRight(facts.ActiveHome, "/"))
-		reading.caps = reading.caps.Union(caps)
-		// Members the words do not tell may be a file of the state below the
-		// extraction folder: the unknown tier.
-		if reaches, ok := stateReachFunc(facts, request); ok && !reading.hands {
-			for _, folder := range unknown {
-				if reaches(path.Join(folder, ".defenseclaw")) {
-					reading.hands, reading.access = true, actionfacts.InlineUnknown
-				}
-			}
+		archives := readArchiveState(facts, request)
+		reading.caps = reading.caps.Union(archives.caps)
+		// Members nothing tells (the words name none, the archive cannot be
+		// listed) may be a file of the state below a folder that holds it:
+		// the unknown tier (rel-1-0-10:GAP-0142, GAP-1173).
+		if archives.possible && !archives.writes && !reading.hands {
+			reading.hands, reading.access = true, actionfacts.InlineUnknown
 		}
 	}
 	if reading.caps.Any() {
@@ -154,14 +150,17 @@ func containsInlineInterpreterName(command string) bool {
 	return false
 }
 
-// mentionsArchiveExtractor is the cheap gate of the archive reading.
+// mentionsArchiveExtractor is the cheap gate of the archive reading: the
+// shell extractors, the Python archive modules and the PowerShell
+// extractions (rel-1-0-10:GAP-1173).
 func mentionsArchiveExtractor(command string) bool {
-	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto"} {
+	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto", "zipfile", "unpack_archive"} {
 		if strings.Contains(command, name) {
 			return true
 		}
 	}
-	return false
+	lower := strings.ToLower(command)
+	return strings.Contains(lower, "expand-archive") || strings.Contains(lower, "extracttodirectory")
 }
 
 // withFindChildTwins judges each program a find runs (-exec, -execdir, -ok,
