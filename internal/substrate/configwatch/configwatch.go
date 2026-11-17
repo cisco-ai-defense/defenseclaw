@@ -59,7 +59,7 @@ type Watcher struct {
 	Fetch Fetch
 	// Interval bounds how often the source is read (DefaultInterval).
 	Interval time.Duration
-	// Load decodes a source (config.LoadRuntimeV8CandidateFromBytes).
+	// Load decodes a source (LoadSource).
 	Load func(path string, raw []byte) (*config.Config, error)
 	Now  func() time.Time
 
@@ -162,13 +162,10 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 		d = Digest(raw)
 		w.mu.Lock()
 		same := d == w.digest || d == w.badHash
+		cur := w.cur
 		w.mu.Unlock()
 		if !same {
-			load := w.Load
-			if load == nil {
-				load = config.LoadRuntimeV8CandidateFromBytes
-			}
-			cfg, loadErr = load(w.Path, raw)
+			cfg, loadErr = w.loadCandidate(cur, raw)
 			if loadErr == nil && cfg != nil && !cfg.Substrate.Enabled {
 				loadErr = errors.New("substrate.enabled is false")
 			}
@@ -209,7 +206,7 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 	}
 	if loadErr == nil {
 		if reason, rerr := config.LiveReloadRefusal(w.cur, cfg); rerr != nil {
-			loadErr = fmt.Errorf("%s: %w; it applies only when the pods restart with it (helm upgrade)", reason, rerr)
+			loadErr = liveRefusal(reason, rerr)
 		}
 	}
 	if loadErr != nil {
@@ -223,6 +220,38 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 	w.cur, w.digest = cfg, d
 	out.Config, out.Digest, out.Gen = cfg, d, w.gen
 	return out
+}
+
+// LoadSource decodes a config.yaml source the way a component's start does:
+// the v8 schema pass first, then the runtime loader. Without the schema pass
+// a key the schema does not declare (a misspelling such as egres:) was put
+// in force live, its intended change lost and no alert raised, while the
+// next pod start refused the same source and crash-looped (GAP-0324).
+func LoadSource(path string, raw []byte) (*config.Config, error) {
+	if err := config.ValidateV8SchemaBytes(path, raw); err != nil {
+		return nil, err
+	}
+	return config.LoadRuntimeV8CandidateFromBytes(path, raw)
+}
+
+// loadCandidate decodes a changed source with Load (LoadSource). A change of
+// deployment_mode is refused for that reason before the load: the loader's
+// managed trust check on the mounted path answers first, and on a ConfigMap
+// mount it named a symlink instead of the mode change (GAP-0323).
+func (w *Watcher) loadCandidate(cur *config.Config, raw []byte) (*config.Config, error) {
+	if reason, err := config.LiveReloadSourceRefusal(cur, raw); err != nil {
+		return nil, liveRefusal(reason, err)
+	}
+	load := w.Load
+	if load == nil {
+		load = LoadSource
+	}
+	return load(w.Path, raw)
+}
+
+// liveRefusal is the refusal of a change no running component takes live.
+func liveRefusal(reason string, err error) error {
+	return fmt.Errorf("%s: %w; it applies only when the pods restart with it (helm upgrade)", reason, err)
 }
 
 // read returns the source: the ConfigMap, else the mounted file. answered

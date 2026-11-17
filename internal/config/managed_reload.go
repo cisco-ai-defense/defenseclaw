@@ -19,6 +19,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -54,4 +55,35 @@ func LiveReloadRefusal(old, next *Config) (string, error) {
 		return "deployment_mode_change", fmt.Errorf("deployment_mode %q to %q is not applied to a running component", old.DeploymentMode, next.DeploymentMode)
 	}
 	return "", nil
+}
+
+// LiveReloadSourceRefusal is LiveReloadRefusal for a source that is not
+// loaded yet, from the deployment_mode it would run as (the
+// DEFENSECLAW_DEPLOYMENT_MODE pin, else what it declares). A running
+// component checks it before the load: a source that switches an OSS
+// component to managed_enterprise makes the loader run the managed trust
+// check on the mounted path first, and on a ConfigMap mount (symlinks) that
+// refusal named the mount instead of the mode change the edit makes
+// (GAP-0323). It answers only a change of mode; ManagedReloadRefusal on the
+// loaded config still checks a change between two managed profiles.
+func LiveReloadSourceRefusal(old *Config, raw []byte) (string, error) {
+	if old == nil || len(raw) > V8YAMLMaxSourceBytes {
+		return "", nil
+	}
+	mode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	if mode == "" {
+		var declared struct {
+			DeploymentMode string `yaml:"deployment_mode"`
+		}
+		if decodeSourceYAML(raw, &declared) != nil {
+			// The load reports a source that does not decode.
+			return "", nil
+		}
+		mode = normalizeDeploymentMode(declared.DeploymentMode)
+	}
+	next := &Config{DeploymentMode: mode}
+	if managed.IsManagedEnterprise(old.DeploymentMode) == managed.IsManagedEnterprise(next.DeploymentMode) {
+		return "", nil
+	}
+	return LiveReloadRefusal(old, next)
 }

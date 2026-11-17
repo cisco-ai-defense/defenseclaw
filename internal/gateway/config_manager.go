@@ -1474,6 +1474,14 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	next, source, err := m.loadStableCandidate(ctx)
 	// The candidate's inline scanner key applies only once it is accepted.
 	exportCandidateKey := takeCandidateKeyExport(next)
+	var refusal *configLiveReloadRefusal
+	if errors.As(err, &refusal) {
+		// Refused like a loaded candidate LiveReloadRefusal refuses below:
+		// the source is valid, it waits for the pod's restart.
+		m.permissionRetry = false
+		m.recordLoadError(ctx, refusal.reason, nil)
+		return err
+	}
 	if err != nil {
 		m.rejected = true
 		m.permissionRetry = errors.Is(err, os.ErrPermission)
@@ -2045,6 +2053,19 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 	)
 }
 
+// configLiveReloadRefusal is a source a running Substrate pod does not take
+// live (config.LiveReloadSourceRefusal); reason is its load-error reason.
+type configLiveReloadRefusal struct {
+	reason string
+	err    error
+}
+
+func (e *configLiveReloadRefusal) Error() string {
+	return "config reload: " + e.reason + ": " + e.err.Error() + "; it applies only when the pod restarts with it"
+}
+
+func (e *configLiveReloadRefusal) Unwrap() error { return e.err }
+
 // buildCandidate compiles and loads raw as config.yaml at the manager's
 // path: the candidate of a reload of the file, or of bytes the gateway runs
 // in memory (the start fallback of a signed bundle).
@@ -2052,6 +2073,15 @@ func (m *ConfigManager) buildCandidate(raw []byte) (*config.Config, configReload
 	defaultDataDir, secureClient := "", false
 	if current := m.Current(); current != nil {
 		defaultDataDir, secureClient = current.DataDir, current.SecureClientIntegration()
+		// A Substrate pod refuses a deployment_mode change whole (GAP-0307),
+		// and for that reason: the load below runs the managed trust check
+		// of the mounted file first, which on a ConfigMap mount named a
+		// symlink instead of the mode change (GAP-0323).
+		if current.Substrate.Enabled {
+			if reason, err := config.LiveReloadSourceRefusal(current, raw); err != nil {
+				return nil, configReloadSource{}, &configLiveReloadRefusal{reason: reason, err: err}
+			}
+		}
 	}
 	if defaultDataDir != "" && !secureClient {
 		// A destination key added to .env after the gateway started (by
