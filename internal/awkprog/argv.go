@@ -367,10 +367,12 @@ func (c Call) programs() callPrograms {
 	return out
 }
 
-// Read reads the call: the shell commands its programs run as literals, and
-// whether some command is not fully known (built from fields or variables, a
-// gawk directive, a program text that does not scan, a program word or file
-// the reading cannot know, a program past the byte cap).
+// Read reads the call: the shell commands its programs run as literals, the
+// files its print statements redirect into as the shell redirect that writes
+// each (Output.Redirect, rel-1-0-10:GAP-1239), and whether some command is
+// not fully known (built from fields or variables, a gawk directive, a
+// program text that does not scan, a program word or file the reading cannot
+// know, a program past the byte cap).
 func (c Call) Read() Reading {
 	commands, reading := c.commands()
 	body, unreadable := ShellBody(commands)
@@ -392,6 +394,11 @@ func (c Call) commands() (commands []string, reading Reading) {
 			// was read); a command with a hole in it is not known, so it is
 			// left out.
 			more = slices.DeleteFunc(slices.Clone(more), func(command string) bool { return strings.Contains(command, Hole) })
+		}
+		for _, output := range program.Outputs {
+			if !slices.Contains(programs.holed, index) || !strings.Contains(output.Target, Hole) {
+				more = append(more, output.Redirect())
+			}
 		}
 		commands = append(commands, more...)
 		reading.Dynamic = reading.Dynamic || dynamic

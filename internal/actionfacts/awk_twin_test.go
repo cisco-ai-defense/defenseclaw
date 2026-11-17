@@ -31,6 +31,10 @@ func TestAwkCommandTwin(t *testing.T) {
 		{"in a shell string", `bash -c "awk 'BEGIN{system(\"touch a\")}'"`, "bash -c 'touch a'", []string{"touch a"}},
 		{"quotes in the command", `awk 'BEGIN{system("echo \"a b\"")}'`, "echo \"a b\"", []string{`echo "a b"`}},
 		{"two awk calls", `awk 'BEGIN{system("a")}'; gawk 'BEGIN{system("b")}'`, "{ a\n}; { b\n}", []string{"a", "b"}},
+		// A print redirect into a literal file is the shell redirect that
+		// writes it (rel-1-0-10:GAP-1239).
+		{"print to a file", `awk '{print $1 > "out"}' f`, ": > 'out'", []string{": > 'out'"}},
+		{"print appends behind env", `env awk '{print >> "log"}' f`, "env sh -c ': >> '\\''log'\\'''", []string{": >> 'log'"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,7 +58,7 @@ func TestAwkCommandTwin(t *testing.T) {
 func TestAwkCommandTwinLeavesOtherCalls(t *testing.T) {
 	for name, command := range map[string]string{
 		"columns":             `awk '{print $1, $2}' f`,
-		"print to a file":     `awk '{print $1 > "out"}' f`,
+		"print to a field":    `awk '{print $2 > $1}' f`,
 		"match with a pipe":   `awk '/a|b/ {print}' f`,
 		"command from field":  `awk '{system($1)}' f`,
 		"command from var":    `awk 'BEGIN{print | cmd}'`,
