@@ -601,9 +601,13 @@ func hookModelV8OutputMessage(content string, finishReason observability.Optiona
 // The structured GenAI contract bounds each text part at 4096 UTF-8 bytes,
 // while the hook cache intentionally retains up to 32 KiB. Split the bounded
 // value on rune boundaries so the generated builder can preserve the complete
-// retained payload without weakening either limit.
+// retained payload without weakening either limit. Redaction scans each part
+// on its own, so a part ends after whitespace when there is some in its last
+// 512 bytes: a token (a provider key has no whitespace) then never spans two
+// parts (GAP-0511).
 func hookModelV8TextParts(content string) []observability.TelemetryStructuredGenAIMessagePart {
 	const maxPartBytes = 4096
+	const whitespaceWindow = 512
 	parts := make([]observability.TelemetryStructuredGenAIMessagePart, 0, 8)
 	for len(content) > 0 {
 		cut := min(len(content), maxPartBytes)
@@ -613,6 +617,13 @@ func hookModelV8TextParts(content string) []observability.TelemetryStructuredGen
 		if cut == 0 {
 			_, width := utf8.DecodeRuneInString(content)
 			cut = max(width, 1)
+		} else if cut < len(content) {
+			for i := cut; i > 1 && i > cut-whitespaceWindow; i-- {
+				if claudeDisplaySpace(content[i-1]) {
+					cut = i
+					break
+				}
+			}
 		}
 		parts = append(parts, observability.TelemetryStructuredArmGenAIMessagePartText{
 			Value: observability.TelemetryStructuredGenAITextPart{Content: content[:cut]},
