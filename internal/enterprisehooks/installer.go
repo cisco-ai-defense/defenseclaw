@@ -175,7 +175,21 @@ type InstallResult struct {
 	// the schema a prior binary reads strictly. The worker's answer carries
 	// it next to the result, and the guardian records it in its own file.
 	AgentConfig string `json:"-"`
+	// RouteOnly is RouteOnlyUnverified when verify could not read the route-only
+	// agent files of the account: on Windows only LocalSystem reads them as the
+	// account, so the verify of an elevated administrator proves the render
+	// neither present nor drifted (GAP-1111). Empty otherwise, and always
+	// empty in the results of the guardian, which runs as LocalSystem.
+	RouteOnly string `json:"route_only,omitempty"`
 }
+
+// RouteOnlyUnverified is InstallResult.RouteOnly for a route-only render
+// verify could not read.
+const RouteOnlyUnverified = "unverified"
+
+// RouteConfigUnverifiedCode is the error code of a target whose route-only
+// render verify could not read: not ok, and not route_config_drift.
+const RouteConfigUnverifiedCode = "route_config_unverified"
 
 // agentConfigReadOnVerify reports a guardian that verifies the accounts'
 // agent configs without writing in their data folders: the Windows

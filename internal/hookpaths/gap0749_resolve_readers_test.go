@@ -59,7 +59,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	ShellWriteOperands(command, cwd, home)
 	shellWriteOperands(command, cwd, home, KnownUser{})
 	knownStateOperands(command, cwd, home)
-	powerShellQuotedPathOperands(command, cwd)
+	powerShellQuotedPathOperands(command, cwd, home)
 	LiteralWriteOperands(command, cwd, home)
 	AdjacentAssignedWriteOperands(command, cwd, home)
 	DeclaredRedirectWriteOperands(command, cwd, home)

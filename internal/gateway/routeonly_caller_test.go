@@ -144,7 +144,14 @@ func TestVerifiedRouteCallerOSSRules(t *testing.T) {
 		{"no route token", routeCallerInputs{PeerUID: 501, OwnerUID: 501}, false},
 		{"another account with the copied token", routeCallerInputs{CredentialIdentity: "501", PeerUID: 502, OwnerUID: 501}, false},
 		{"peer unknown", routeCallerInputs{CredentialIdentity: "501", PeerUIDErr: errors.New("x"), OwnerUID: 501}, false},
-		{"Windows: the token alone (user ACL file)", routeCallerInputs{Windows: true, CredentialIdentity: "S-1-5-21-1-2-3-500"}, true},
+		// rel-1-0-10:GAP-1133: the credential travels on the wire, so a
+		// process of another account that held the port has it; the token
+		// alone no longer proves the caller on Windows.
+		{"Windows: owner with the route token", routeCallerInputs{Windows: true, CredentialIdentity: "S-1-5-21-1-2-3-500", PeerSID: "S-1-5-21-1-2-3-500"}, true},
+		{"Windows: SID compares without case", routeCallerInputs{Windows: true, CredentialIdentity: "S-1-5-21-1-2-3-500", PeerSID: "s-1-5-21-1-2-3-500"}, true},
+		{"Windows: the token alone", routeCallerInputs{Windows: true, CredentialIdentity: "S-1-5-21-1-2-3-500"}, false},
+		{"Windows: another account with the captured token", routeCallerInputs{Windows: true, CredentialIdentity: "S-1-5-21-1-2-3-500", PeerSID: "S-1-5-21-1-2-3-501"}, false},
+		{"Windows: peer unknown", routeCallerInputs{Windows: true, CredentialIdentity: "S-1-5-21-1-2-3-500", PeerSIDErr: errors.New("x")}, false},
 	}
 	for _, tc := range cases {
 		if got := decideRouteCaller(tc.in); got.Verified != tc.want {

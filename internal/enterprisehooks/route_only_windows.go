@@ -64,18 +64,40 @@ func restoreWindowsRouteOnlyAsTarget(conn connector.Connector, sid *windows.SID,
 // read them (readWindowsAccountConfig: bounded, a link only to a file the
 // account owns, a share or mapped drive as the account; S1
 // REVIEW-code-winroute P3-3), with errors that carry no path or content.
-func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, dataDir string, route *connector.RouteOnlySetup) error {
+//
+// Only LocalSystem can read a file as the account (the session token needs
+// SeTcbPrivilege). An elevated administrator running verify is refused the
+// agent files, which the route-only render publishes for the account and
+// SYSTEM only, so that render is neither proven nor drift: verify returns
+// RouteOnlyUnverified and no error, and the caller reports the target as not
+// verified (route_config_unverified, never ok). As LocalSystem the same
+// failure stays drift, which the guardian repairs (GAP-1111).
+func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, dataDir string, route *connector.RouteOnlySetup) (string, error) {
+	unverified := false
 	read := func(path string) ([]byte, error) {
 		data, _, err := readWindowsAccountConfig(path, sid, home)
+		if errors.Is(err, errWindowsAccountConfigNeedsSession) && !windowsRouteOnlyVerifierIsLocalSystem() {
+			unverified = true
+		}
 		return data, windowsRouteOnlyReadError(err)
 	}
-	return connector.WithUserHomeDir(home, func() error {
+	status := ""
+	err := connector.WithUserHomeDir(home, func() error {
 		if err := connector.RouteOnlyDriftWithReader(conn, connector.SetupOpts{DataDir: dataDir}, route, read); err != nil {
+			if unverified {
+				status = RouteOnlyUnverified
+				return nil
+			}
 			return fmt.Errorf("enterprise hooks: %w", err)
 		}
 		return nil
 	})
+	return status, err
 }
+
+// windowsRouteOnlyVerifierIsLocalSystem reports whether verify runs as
+// LocalSystem (replaceable in tests).
+var windowsRouteOnlyVerifierIsLocalSystem = func() bool { return requireWindowsEnterpriseLocalSystem() == nil }
 
 // windowsRouteOnlyReadError is the category of a failed account-file read:
 // os.ErrNotExist kept, never the path or the underlying text.

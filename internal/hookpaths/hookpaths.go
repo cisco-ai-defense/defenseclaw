@@ -2149,7 +2149,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// PowerShell too (provenPowerShellStateWrite), whatever else
 				// parses it, so its quoted paths are listed for every such call.
 				if actionWindowsHome(home) {
-					quoted, over := powerShellQuotedPathOperands(command, cwd)
+					quoted, over := powerShellQuotedPathOperands(command, cwd, home)
 					stateOperands = append(stateOperands, quoted...)
 					truncated = truncated || over
 				}

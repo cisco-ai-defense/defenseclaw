@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed/peerbroker"
+	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -113,13 +114,23 @@ func decideRouteCaller(in routeCallerInputs) routeCaller {
 	return decideUnixRouteCaller(in)
 }
 
-// OSS (DESIGN 18.2): a valid route credential is the gateway owner; on
-// Linux and macOS the kernel peer must also be the gateway account.
+// OSS (DESIGN 18.2): a valid route credential is the gateway owner, and the
+// kernel peer must also be the gateway account: the uid on Linux and macOS,
+// the token user SID of the client process on Windows. The credential is
+// sent on the wire, so a process of another account that held the port
+// while this gateway was down has it; on Windows it was accepted from any
+// account (rel-1-0-10:GAP-1133).
 func decideOSSRouteCaller(in routeCallerInputs) routeCaller {
 	if in.CredentialIdentity == "" {
 		return unverifiedRoute(routeCallerCredentialInvalid)
 	}
 	if in.Windows {
+		if in.PeerSIDErr != nil || strings.TrimSpace(in.PeerSID) == "" {
+			return unverifiedRoute(routeCallerPeerUnverified)
+		}
+		if !strings.EqualFold(strings.TrimSpace(in.PeerSID), in.CredentialIdentity) {
+			return unverifiedRoute(routeCallerNotOwner)
+		}
 		return routeCaller{Verified: true, Subject: in.CredentialIdentity}
 	}
 	if in.PeerUIDErr != nil {
@@ -463,10 +474,38 @@ func (s *routeOnlyServer) caller(r *http.Request, cfg *config.Config, connectorN
 			in.CredentialIdentity = strconv.Itoa(s.ownerUID)
 		}
 	}
-	if !in.Windows && in.CredentialIdentity != "" {
+	switch {
+	case in.CredentialIdentity == "":
+	case in.Windows:
+		in.PeerSID, in.PeerSIDErr = routeOSSPeerSID(r)
+	default:
 		in.PeerUID, in.PeerUIDErr = acpLoopbackPeerUID(r)
 	}
 	return decideRouteCaller(in)
+}
+
+// routeOSSPeerSID names the token user SID of the process on the client end
+// of a loopback route-only request to an OSS Windows gateway: the owner TCP
+// table gives the client PID and connection creation time, and the process
+// is opened with the PID reuse check (it must have started no later than the
+// connection). An OSS gateway runs as the user, so it can read its own
+// account's processes; another account's process is an error, and the
+// caller is refused. Replaceable in tests.
+var routeOSSPeerSID = func(r *http.Request) (string, error) {
+	local, _ := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+	remote, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	if local == nil || err != nil {
+		return "", errors.New("the request carries no TCP addresses")
+	}
+	owner, err := peercred.LoopbackTCPClientOwner(local, remote)
+	if err != nil {
+		return "", err
+	}
+	identity, err := peercred.VerifyLoopbackTCPPeer(local, remote, uint32(os.Getpid()), owner)
+	if err != nil {
+		return "", err
+	}
+	return identity.SID, nil
 }
 
 // custody reports whether this host forwards no agent provider credential

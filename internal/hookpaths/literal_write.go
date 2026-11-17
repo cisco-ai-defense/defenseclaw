@@ -822,7 +822,7 @@ func starBackupName(file, suffix string) string {
 
 // sedInPlaceFiles lists the file operands of a sed -i call as GNU sed reads
 // it (the sed of Linux and gsed). The suffix and the backup names it makes
-// come from sedGNUInPlace and sedInPlaceWrites.
+// come from sedGNUInPlace and sedBackupName.
 func sedInPlaceFiles(words []string) []string {
 	files, _, _ := sedGNUInPlace(words)
 	return files
@@ -897,8 +897,9 @@ func sedGNUInPlace(words []string) (files []string, suffix string, inPlace bool)
 // /usr/bin/sed): -i and -I take the suffix from the rest of their word or,
 // when nothing follows them in the word, from the NEXT word (-i .bak; an
 // empty next word is no backup; -i -e makes the suffix "-e"). BSD sed has no
-// long options, and options end at the first operand. The hook cannot know which sed runs, so
-// sedInPlaceWrites judges this reading and the GNU one together.
+// long options, and options end at the first operand. The hook cannot know
+// which sed runs, so the backup reader (sedBackupReader.sed) judges this
+// reading and the GNU one together.
 func sedBSDInPlace(words []string) (files []string, suffix string, inPlace bool) {
 	script, options := false, true
 	for i := 1; i < len(words); i++ {
@@ -940,53 +941,6 @@ func sedBSDInPlace(words []string) (files []string, suffix string, inPlace bool)
 		return nil, "", false
 	}
 	return files, suffix, true
-}
-
-// sedInPlaceWrites lists every path a sed -i call can write, as typed (the
-// caller resolves them from the working directory): the files it edits and
-// the backups its suffix names, under the GNU and the BSD reading of the
-// command line. The hook cannot know which sed runs, so a name either
-// reading writes is judged. The backup name is what the sed writes:
-//
-//   - GNU sed 4.9, no "*" in the suffix: the operand as typed plus the
-//     suffix; with "*": every "*" is replaced by the operand as typed
-//     (directory included), so "bak_*" and sub/f name bak_sub/f.
-//   - BSD sed (macOS 15): the operand as typed plus the suffix, verbatim; a
-//     "*" is an ordinary character.
-//
-// Both rules are checked against the real programs by TestSedInPlaceNameRule.
-func sedInPlaceWrites(words []string) []string {
-	return append(sedGNUWrites(words), sedBSDWrites(words)...)
-}
-
-// sedGNUWrites is sedInPlaceWrites under the GNU reading.
-func sedGNUWrites(words []string) (writes []string) {
-	files, suffix, ok := sedGNUInPlace(words)
-	for _, file := range files {
-		if !ok || file == "" {
-			continue // sed fails on an empty file name and writes nothing
-		}
-		writes = append(writes, file)
-		if suffix != "" {
-			writes = append(writes, starBackupName(file, suffix))
-		}
-	}
-	return writes
-}
-
-// sedBSDWrites is sedInPlaceWrites under the BSD reading.
-func sedBSDWrites(words []string) (writes []string) {
-	files, suffix, ok := sedBSDInPlace(words)
-	for _, file := range files {
-		if !ok || file == "" {
-			continue
-		}
-		writes = append(writes, file)
-		if suffix != "" {
-			writes = append(writes, file+suffix)
-		}
-	}
-	return writes
 }
 
 func literalInterpreterWrites(code, language, cwd, home string) []string {
