@@ -4464,7 +4464,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// PowerShell text rarely parses as shell; its New-Item links are read
 		// however their parameters are spelled (rel-1-0-10:GAP-0849: only the
 		// -ItemType spelling opaqueLink finds was read here).
-		if opaqueLink.MatchString(command) || commandNewItemMayMakeLink(command) {
+		if opaqueLink.MatchString(command) || commandNewItemLinkSpelled(command) {
 			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
 				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
 			}
@@ -5657,7 +5657,7 @@ func opaqueLinkText(file *syntax.File, command, home string) bool {
 // command of data programs alone (rel-1-0-10:GAP-0849). It is read as the
 // -ItemType spelling is: as its twin, else opaque.
 func newItemLinkText(file *syntax.File, command, home string) bool {
-	if !commandNewItemMayMakeLink(command) {
+	if !commandNewItemLinkSpelled(command) {
 		return false
 	}
 	for _, stmt := range file.Stmts {

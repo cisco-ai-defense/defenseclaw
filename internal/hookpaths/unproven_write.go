@@ -65,9 +65,59 @@ var (
 // creates one with New-Item -ItemType File kept its authorized-keys block
 // in the default tier (rel-1-0-10:GAP-0801).
 func commandNewItemMayMakeLink(command string) bool {
+	mayMakeLink, unread := newItemCallsMayMakeLink(command)
+	return mayMakeLink || unread
+}
+
+// commandNewItemLinkSpelled is commandNewItemMayMakeLink for the link
+// reading (commandLinksRead): a New-Item spelling the PowerShell reading did
+// not read as a call (text another program runs, such as a PowerShell script
+// in a bash string, or a script block) is read from its words
+// (newItemTextMayMakeLink) instead of counting as a possible link, so a
+// folder or a file New-Item in such text keeps the reading it had before
+// (rel-1-0-10:GAP-0849: only the -ItemType link spelling was read there).
+func commandNewItemLinkSpelled(command string) bool {
+	mayMakeLink, unread := newItemCallsMayMakeLink(command)
+	return mayMakeLink || unread && newItemTextMayMakeLink(command)
+}
+
+// newItemTextMayMakeLink reads every New-Item spelling of a text from its
+// words alone: the words after it up to the end of its statement (a
+// separator, a pipe, a closing bracket), without their quotes and without
+// redirections, bind as powerShellNewItemMayMakeLink binds a call's words; a
+// word that may expand at run time is not static.
+func newItemTextMayMakeLink(command string) bool {
+	for _, loc := range newItemText.FindAllStringIndex(command, -1) {
+		rest := command[loc[1]:]
+		if end := strings.IndexAny(rest, ";|&\n\r)}"); end >= 0 {
+			rest = rest[:end]
+		}
+		var words []string
+		var static []bool
+		for _, word := range strings.Fields(rest) {
+			word = strings.Trim(word, "'\"`\\")
+			if word == "" || strings.ContainsAny(word, "<>") {
+				continue
+			}
+			words = append(words, word)
+			static = append(static, !strings.ContainsAny(word, "$@(){}`"))
+		}
+		if powerShellNewItemMayMakeLink(words, static, false) {
+			return true
+		}
+	}
+	return false
+}
+
+// newItemCallsMayMakeLink reads the New-Item calls of a command as
+// PowerShell: mayMakeLink is a read call that may make a link
+// (powerShellNewItemMayMakeLink); unread is a New-Item spelling that is no
+// read call (the text is not PowerShell, or the spelling is in a string or a
+// script block).
+func newItemCallsMayMakeLink(command string) (mayMakeLink, unread bool) {
 	spellings := len(newItemText.FindAllStringIndex(command, -1))
 	if spellings == 0 && !newItemAliasText.MatchString(command) {
-		return false
+		return false, false
 	}
 	facts := analyzeAtHookFolder(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell})
 	// A partial parse (a dynamic value) still names each call it read; a
@@ -75,7 +125,7 @@ func commandNewItemMayMakeLink(command string) bool {
 	// leaves the counts unequal.
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
 		// The ni alias is read in PowerShell text only.
-		return spellings > 0
+		return false, spellings > 0
 	}
 	// A call after the first of its pipeline reads pipeline input.
 	pipelineHead := make(map[int64]int64)
@@ -98,13 +148,13 @@ func commandNewItemMayMakeLink(command string) bool {
 			static[i] = call.ArgvComplete || !strings.ContainsAny(word, "$@(){}`")
 		}
 		if powerShellNewItemMayMakeLink(call.Argv[1:], static, call.PipelineID != 0 && pipelineHead[call.PipelineID] != call.ID) {
-			return true
+			return true, false
 		}
 		if !alias {
 			read++
 		}
 	}
-	return read != spellings
+	return false, read != spellings
 }
 
 // powerShellNewItemMayMakeLink reports a New-Item call (the words after the
