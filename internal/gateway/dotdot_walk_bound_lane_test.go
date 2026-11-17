@@ -33,5 +33,8 @@ func init() {
 			}
 			return boundedShellLane(walk, walk)(size, shape)
 		},
-		seen: boundedShellSeenCall})
+		seen: boundedShellSeenCall,
+		// In the managed tier the write past the bound blocks decisively
+		// (persistence.ssh_authorized_keys_command) and skips the judge.
+		open: map[string]string{"managed/" + boundedJudgeOpenShape: "rel-1-0-10:GAP-1203"}})
 }

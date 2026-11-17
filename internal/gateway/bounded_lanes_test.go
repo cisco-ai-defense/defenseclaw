@@ -88,9 +88,13 @@ type boundedLaneCap struct {
 	// floor when the judge fails.
 	judge func(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall) (string, []string)
 	// open maps "<tier>/<shape>" to the gap of a known violation not yet
-	// fixed in this tree. The lane's fix deletes the entry.
+	// fixed in this tree; "<tier>/judge" is one of the judge row
+	// (TestBoundRuleJudgeStillDecides). The lane's fix deletes the entry.
 	open map[string]string
 }
+
+// boundedJudgeOpenShape is the shape name of an OPEN entry for the judge row.
+const boundedJudgeOpenShape = "judge"
 
 // boundedPath is how a lane's cap reaches the decision.
 type boundedPath uint8
@@ -399,7 +403,7 @@ func boundedLaneTableErrors(lanes []boundedLaneCap) []string {
 		}
 		for key, gap := range lane.open {
 			tier, shape, ok := strings.Cut(key, "/")
-			if !ok || !tierNames[tier] || !shapeNames[shape] || !boundedOpenGap.MatchString(gap) {
+			if !ok || !tierNames[tier] || !shapeNames[shape] && shape != boundedJudgeOpenShape || !boundedOpenGap.MatchString(gap) {
 				errs = append(errs, fmt.Sprintf("%s: OPEN entry %q: %q needs a \"<tier>/<shape>\" key and one open gap id", name, key, gap))
 			}
 		}
@@ -696,13 +700,26 @@ func TestBoundRuleJudgeStillDecides(t *testing.T) {
 			action, findings := judge(t, api, env, call)
 			got := boundedParse(action)
 			name := tier.name + "/" + lane.lane
+			var violations []string
 			// Where the floor alerts the judge must be asked (this also proves
 			// the stub is wired); where it blocks the call is decisive.
 			if floor == bounded.Alert && boundedJudgeCalls(mock) == asked {
-				t.Errorf("%s: a truncated call skipped the judge (decisive); findings=%v", name, findings)
+				violations = append(violations, fmt.Sprintf("%s: a truncated call skipped the judge (decisive); findings=%v", name, findings))
 			}
 			if got != floor {
-				t.Errorf("%s: the judge failed and the call is %s, want the floor %s; findings=%v", name, got, floor, findings)
+				violations = append(violations, fmt.Sprintf("%s: the judge failed and the call is %s, want the floor %s; findings=%v", name, got, floor, findings))
+			}
+			switch gap := lane.open[tier.name+"/"+boundedJudgeOpenShape]; {
+			case gap != "" && len(violations) == 0:
+				t.Errorf("%s: OPEN entry %s passes: delete it", name, gap)
+			case gap != "":
+				for _, v := range violations {
+					t.Logf("OPEN %s: %s", gap, v)
+				}
+			default:
+				for _, v := range violations {
+					t.Error(v)
+				}
 			}
 		}
 	}
