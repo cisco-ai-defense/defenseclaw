@@ -691,8 +691,10 @@ func windowsHookImageRetireSkipActivity(profile windowsHookImageSkippedProfile, 
 
 // windowsHookImageProfileAccount names an enrolled profile for the report,
 // the marker and the audit row: the manifest's user, else the SID's account
-// (lookup), else the profile folder's name. The standalone manifest often
-// has no user, and the skip row then had an empty account (GAP-0906).
+// (lookup), else "profile folder <name>": a folder name is not an account
+// name (a renamed account keeps its folder), so it says what it is. The
+// standalone manifest often has no user, and the skip row then had an empty
+// account (GAP-0906).
 func windowsHookImageProfileAccount(user, home string, lookup func() string) string {
 	if user = strings.TrimSpace(user); user != "" {
 		return user
@@ -703,7 +705,10 @@ func windowsHookImageProfileAccount(user, home string, lookup func() string) str
 		}
 	}
 	home = strings.TrimRight(strings.TrimSpace(home), `\/`)
-	return home[strings.LastIndexAny(home, `\/`)+1:]
+	if folder := home[strings.LastIndexAny(home, `\/`)+1:]; folder != "" {
+		return "profile folder " + folder
+	}
+	return ""
 }
 
 // windowsHookImageBlockingNamedFiles is the set of files (lower case) of the

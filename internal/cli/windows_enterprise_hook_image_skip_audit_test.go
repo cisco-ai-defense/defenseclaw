@@ -60,8 +60,8 @@ func TestHookImageRetireSkipAuditRowNamesWhoSkippedAndTheAccount(t *testing.T) {
 	if a.After["skipped_by"] != profile.SkippedBy || a.After["skipped_at"] != profile.SkippedAt || a.After["retired"] != false {
 		t.Errorf("after_state = %v, want skipped_by %q", a.After, profile.SkippedBy)
 	}
-	if a.Before["account"] != "dcw-std2" {
-		t.Errorf("before_state.account = %v, want the profile folder's account", a.Before["account"])
+	if a.Before["account"] != "profile folder dcw-std2" {
+		t.Errorf("before_state.account = %v, want the profile folder, labelled as one", a.Before["account"])
 	}
 }
 
@@ -71,7 +71,7 @@ func TestHookImageProfileAccountFallsBackToTheSIDThenTheProfileFolder(t *testing
 	}{
 		{`HOST\dcw-std2`, `C:\Users\dcw-std2`, `HOST\other`, `HOST\dcw-std2`},
 		{"", `C:\Users\dcw-std2`, `HOST\dcw-std2`, `HOST\dcw-std2`},
-		{" ", `C:\Users\dcw-std2\`, "", "dcw-std2"},
+		{" ", `C:\Users\dcw-std2\`, "", "profile folder dcw-std2"},
 		{"", "", "", ""},
 	} {
 		got := windowsHookImageProfileAccount(tc.user, tc.home, func() string { return tc.lookup })
