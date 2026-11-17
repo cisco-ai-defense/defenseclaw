@@ -89,6 +89,12 @@ func goToolOrSkip(t *testing.T) string {
 	if err != nil {
 		t.Skip("go tool not on PATH")
 	}
+	// A native test-binary run ships the binary and the package files, not
+	// the module: go list has no package to list there (rel-1-0-10:GAP-0874).
+	out, err := exec.Command(path, "env", "GOMOD").Output()
+	if gomod := strings.TrimSpace(string(out)); err != nil || gomod == "" || gomod == os.DevNull {
+		t.Skip("no go.mod above the package folder (a test-binary run without the module source)")
+	}
 	return path
 }
 
