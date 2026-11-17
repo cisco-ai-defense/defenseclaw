@@ -45,18 +45,27 @@ class _Classified:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.rows = 0
+        # Set to n: the classification raises once it has seen n more rows.
+        self.fail_after: int | None = None
         hook, row = db_module.aggregate_connector_hook_decision, db_module.aggregate_hook_row_decision
 
         def counted_hook(*args):
-            self.rows += 1
+            self._count()
             return hook(*args)
 
         def counted_row(*args):
-            self.rows += 1
+            self._count()
             return row(*args)
 
         monkeypatch.setattr(db_module, "aggregate_connector_hook_decision", counted_hook)
         monkeypatch.setattr(db_module, "aggregate_hook_row_decision", counted_row)
+
+    def _count(self) -> None:
+        self.rows += 1
+        if self.fail_after is not None:
+            self.fail_after -= 1
+            if self.fail_after < 0:
+                raise RuntimeError("interrupted")
 
     def take(self) -> int:
         rows, self.rows = self.rows, 0
@@ -226,7 +235,7 @@ def test_a_second_count_classifies_only_the_rows_written_since(path_and_kind, mo
 
 def test_retention_recounts_only_the_chunks_it_changed(path_and_kind, monkeypatch) -> None:
     path, tracked = path_and_kind
-    monkeypatch.setattr(db_module, "_HOOK_STATS_CHUNK_BITS", 8)
+    monkeypatch.setattr(db_module, "_HOOK_STATS_CHUNK_BITS", 8, raising=False)
     _open(path, tracked).close()
     _insert(path, 0, 4_000, tracked)
     classified = _Classified(monkeypatch)
@@ -248,7 +257,7 @@ def test_retention_recounts_only_the_chunks_it_changed(path_and_kind, monkeypatc
 
 def test_the_counts_match_an_all_time_count_after_every_change(path_and_kind, monkeypatch) -> None:
     path, tracked = path_and_kind
-    monkeypatch.setattr(db_module, "_HOOK_STATS_CHUNK_BITS", 6)
+    monkeypatch.setattr(db_module, "_HOOK_STATS_CHUNK_BITS", 6, raising=False)
     _open(path, tracked).close()
     _insert(path, 0, 1_500, tracked)
     store = Store.open_read_only(path, timeout=1.0)
@@ -285,28 +294,23 @@ def test_the_counts_match_an_all_time_count_after_every_change(path_and_kind, mo
 
 
 def test_a_failed_count_leaves_no_partial_totals(path_and_kind, monkeypatch) -> None:
+    """A count that fails part way (a reader interrupted, a busy store)
+    leaves no half-merged totals: the next count is exact."""
+
     path, tracked = path_and_kind
-    monkeypatch.setattr(db_module, "_HOOK_STATS_CHUNK_BITS", 6)
+    monkeypatch.setattr(db_module, "_HOOK_STATS_CHUNK_BITS", 6, raising=False)
     _open(path, tracked).close()
     _insert(path, 0, 600, tracked)
+    classified = _Classified(monkeypatch)
     store = Store.open_read_only(path, timeout=1.0)
     try:
         store.connector_hook_event_stats()
         _insert(path, 600, 70, tracked)
-        real = store._hook_stats_pass
-        calls = {"n": 0}
-
-        def failing(*args, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return real(*args, **kwargs)
-            raise sqlite3.OperationalError("interrupted")
-
         _change(path, "DELETE FROM audit_events WHERE rowid <= 100")
-        monkeypatch.setattr(store, "_hook_stats_pass", failing)
+        classified.fail_after = 5
         with pytest.raises(sqlite3.OperationalError):
             store.connector_hook_event_stats()
-        monkeypatch.setattr(store, "_hook_stats_pass", real)
+        classified.fail_after = None
         assert store.connector_hook_event_stats() == _all_time(path)
     finally:
         store.close()
