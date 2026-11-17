@@ -286,14 +286,15 @@ networkPolicy:
   adminFrom: []
   # Peers that may scrape the metrics ports.
   metricsFrom: []
-  # Egress limits for the pods that hold keys (gateway, leader, callout):
+  # Egress limits for the pods that hold keys or dial out (gateway, leader,
+  # callout, controller):
   # DNS, the Kubernetes and Substrate APIs, the release's own Services,
   # OTLP, and (gateway and leader only) model providers on 443.
   egress:
     enabled: true
     # Ports of the OTLP collector(s) the pods export to.
     otlpPorts: [4317, 4318]
-    # Extra egress rules (NetworkPolicyEgressRule) for every key-holding pod.
+    # Extra egress rules (NetworkPolicyEgressRule) for each of those pods.
     extra: []
 
 # How launchers on laptops reach the admin listener (TLS). The actor
