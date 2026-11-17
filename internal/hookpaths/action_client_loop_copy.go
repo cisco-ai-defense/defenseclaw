@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -224,6 +225,59 @@ func actionClientLoopWriterDestinations(call *syntax.CallExpr, home string) []*s
 		return operands[len(operands)-1:]
 	}
 	return nil
+}
+
+// actionAttachedCopyDestinations returns the destination folders of a cp,
+// mv, install or ln call that a target-directory option holds in the option
+// word itself: -tDIR, -ftDIR, --target-directory=DIR. A destination that is a
+// word of its own is left out: the caller judges every word as written.
+//
+// The program is found with the shared wrapper reader (actionLiteralCommandWords
+// and its child index of xargs, chroot, flock, nsenter, sudo, doas and the like,
+// rel-1-0-10:GAP-0910), a multicall busybox or toybox removed. Where that reader
+// gives up on an environment assignment or an option it does not model (env
+// NAME=VALUE for any name, nice -N), lateUnwrapCall reads the prefix utilities
+// instead: those still run the copy as written (rel-1-0-10:GAP-1149).
+func actionAttachedCopyDestinations(call *syntax.CallExpr, home string) []*syntax.Word {
+	args := call.Args
+	for depth := 0; depth < 8 && len(args) > 1; depth++ {
+		program, fixed := staticProgramWord(args[0], home)
+		if !fixed {
+			return nil
+		}
+		if slices.Contains(multicallPrograms, programBase(program)) {
+			args = args[1:]
+			continue
+		}
+		words, known := actionLiteralCommandWords(args, home)
+		if known && len(words) < len(args) {
+			args = words
+			continue
+		}
+		if known {
+			break
+		}
+		if words, _, unwrapped := lateUnwrapCall(args, home); unwrapped && len(words) < len(args) {
+			args = words
+			continue
+		}
+		break
+	}
+	// A call that gives the option more than once is refused by GNU cp, mv,
+	// install and ln (multiple target directories), so no option given wins:
+	// every attached destination is judged.
+	var attached []*syntax.Word
+	for _, destination := range actionClientLoopWriterDestinations(&syntax.CallExpr{Args: args}, home) {
+		// An empty attached value (--target-directory= as the last word) names
+		// no folder: cp, mv, install and ln refuse it. The word cut out of the
+		// option has no parts, and a word with no parts has no position for
+		// the readers below to ask for.
+		if len(destination.Parts) == 0 || slices.Contains(call.Args, destination) {
+			continue
+		}
+		attached = append(attached, destination)
+	}
+	return attached
 }
 
 // actionClientTargetDirectoryOption reads the option word args[i] of cp, mv,
