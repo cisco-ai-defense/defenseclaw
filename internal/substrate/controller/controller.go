@@ -241,6 +241,12 @@ type actorState struct {
 	// from how it changed (GAP-0141).
 	rid     restoreID
 	written bool
+	// deleteDenied is set while the access policies refuse the delete of the
+	// actor's policy; the alert is sent once (GAP-0481).
+	deleteDenied bool
+	// foreignTemplateRead is set once the template of a foreign actor was
+	// read and, if unattested, reported (GAP-0495).
+	foreignTemplateRead bool
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -911,7 +917,7 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 			}
 			// Every actor in a launcher atespace is bound to a person at
 			// create; one nobody registered was made outside DefenseClaw.
-			if st.refused != EventForeignActor {
+			if !st.foreignTemplateRead {
 				c.foreignTemplate(ctx, a, st, base)
 			}
 			c.refuseOnce(st, base, EventForeignActor, "actor in a launcher atespace that DefenseClaw did not create", SignalForeignActor, "")
@@ -934,14 +940,19 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 // foreign actor (it gets no policy either way), so without this record
 // shadow AI would list the actor but not the template behind it, as
 // admission does for an actor of any other atespace (PLAN 6.2). It is sent
-// with the actor's first foreign_actor record.
+// once per actor, on the first pass whose template read succeeds: a read
+// error is tried again on the next pass (GAP-0495).
 func (c *Controller) foreignTemplate(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) {
 	if !c.live().RequireAttestation {
 		return
 	}
 	ref := a.GetActorTemplate()
 	_, att, err := c.template(ctx, ref, false)
-	if err != nil || att.Attested {
+	if err != nil {
+		return
+	}
+	st.foreignTemplateRead = true
+	if att.Attested {
 		return
 	}
 	reason := att.Reason
@@ -1344,13 +1355,38 @@ func (c *Controller) removePolicy(ctx context.Context, a *ateapi.Actor, st *acto
 		return fmt.Errorf("%s: get policy: %w", st.key, err)
 	}
 	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
+		if c.deleteRefused(st, base, err) {
+			return nil
+		}
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
-	st.written, st.ourVersion = false, 0
+	st.written, st.ourVersion, st.deleteDenied = false, 0, false
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: the actor is refused ("+st.refused+")"
 	c.emit(ev)
 	return nil
+}
+
+// deleteRefused handles a policy delete the access policies refuse
+// (PERMISSION_DENIED: DefenseClaw lacks can_delete_egress_policy in that
+// atespace, GAP-0481). The actor keeps a policy DefenseClaw wanted gone, so
+// one alert names it and the missing right; later passes try again without
+// failing the pass, which a reconcile loop would otherwise report about 40
+// times a minute. It reports whether err was such a refusal.
+func (c *Controller) deleteRefused(st *actorState, base Event, err error) bool {
+	if status.Code(err) != codes.PermissionDenied {
+		return false
+	}
+	if !st.deleteDenied {
+		st.deleteDenied = true
+		ev := base
+		ev.Type, ev.Severity = EventPolicyWriteFailed, SeverityAlert
+		ev.Message = "the actor's egress policy should be removed, but DefenseClaw may not delete egress policies in atespace " +
+			base.Atespace + " (can_delete_egress_policy); the policy stays in force until an administrator removes it or grants that right"
+		ev.Detail = map[string]any{"error": err.Error()}
+		c.emit(ev)
+	}
+	return true
 }
 
 // applyOnce is one read-compare-write of the actor's policy (apply).
@@ -1588,9 +1624,12 @@ func (c *Controller) unmanaged(ctx context.Context, a *ateapi.Actor, st *actorSt
 		return nil
 	}
 	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
+		if c.deleteRefused(st, base, err) {
+			return nil
+		}
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
-	st.unmanagedChecked, st.written, st.ourVersion, st.conflict, st.reverts = true, false, 0, false, nil
+	st.unmanagedChecked, st.written, st.ourVersion, st.conflict, st.reverts, st.deleteDenied = true, false, 0, false, nil, false
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: DefenseClaw no longer manages the actor"
 	c.emit(ev)

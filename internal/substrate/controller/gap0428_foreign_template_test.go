@@ -17,9 +17,13 @@
 package controller_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
@@ -61,5 +65,34 @@ func TestGAP0428ForeignActorNamesUnattestedTemplate(t *testing.T) {
 	r2.pass()
 	if n := len(r2.sink.Events(controller.EventTemplateUnverified)); n != 0 {
 		t.Fatalf("an attested template was reported unverified (%d)", n)
+	}
+}
+
+// GAP-0495: the record was one-shot. A template read error on the pass that
+// first called the actor foreign meant it was never sent. It is sent on the
+// first pass whose read succeeds, and only once.
+func TestGAP0495ForeignTemplateRecordRetriesAfterAReadError(t *testing.T) {
+	r := newRig(t, nil)
+	r.att.Set("eng-web/claude", controller.Attestation{Reason: "no attestation for the digest", Digest: "sha256:48365ae2"})
+	r.actor("eng-web", "sub-j18-raw2", ateapi.ActorStateSuspended, "")
+	r.pass()
+	r.clk.Add(16 * time.Second)
+	fail := true
+	r.api.Err = func(method, key string) error {
+		if fail && method == "GetActorTemplate" {
+			return status.Error(codes.Unavailable, "api server restarting")
+		}
+		return nil
+	}
+	_ = r.ctl.Reconcile(context.Background())
+	if n := len(r.sink.Events(controller.EventTemplateUnverified)); n != 0 {
+		t.Fatalf("a record was sent without a template read: %d", n)
+	}
+	fail = false
+	r.clk.Add(time.Minute)
+	r.pass()
+	r.pass()
+	if tu := r.sink.Events(controller.EventTemplateUnverified); len(tu) != 1 || tu[0].Detail["foreign_actor"] != true {
+		t.Fatalf("template_unverified after the read recovered = %+v, want one", tu)
 	}
 }

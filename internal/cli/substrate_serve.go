@@ -592,7 +592,7 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			out.Profiles = func(p identity.Person, requested, connector string, admin bool) (string, string, error) {
 				return gateway.SubstrateLauncherProfiles(live())(p, requested, connector, admin)
 			}
-			if out.Bundles, err = substrateBundleStore(c); err != nil {
+			if out.Bundles, err = substrateBundleStore(c, live); err != nil {
 				return out, err
 			}
 			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {

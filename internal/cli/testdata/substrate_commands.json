@@ -778,7 +778,7 @@
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",
-    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder). Nothing touches your folder until you choose: --apply writes the changes\ninto the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch.",
+    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.",
     "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
     "args": [
       {
@@ -787,6 +787,12 @@
       }
     ],
     "flags": [
+      {
+        "name": "allow-flagged",
+        "type": "bool",
+        "default": "false",
+        "usage": "with --apply: also write the files flagged as able to run code (review them first)"
+      },
       {
         "name": "apply",
         "type": "bool",
