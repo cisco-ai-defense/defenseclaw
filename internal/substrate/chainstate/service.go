@@ -734,7 +734,10 @@ func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, aud
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, "", err
 	}
-	st, err = audit.NewStore(path)
+	// A per-actor store is one of up to MaxOpenStores: a small page cache
+	// and no read pool, or each holds up to 100 MB outside the Go heap as it
+	// grows (GAP-0404).
+	st, err = audit.NewStore(path, audit.WithSmallFootprint())
 	if err != nil {
 		return nil, "", err
 	}

@@ -17,7 +17,7 @@ const auditReadPoolSize = 4
 // becomes ready. The DSN applies the same mode and pragmas to replacements.
 func (s *Store) openReadPool() (_ *sql.DB, err error) {
 	db, err := openAuditReadOnlyWithTimeout(s.dbPath,
-		"&_pragma=mmap_size(0)&_pragma=cache_size(-20000)", auditBusyTimeoutMillis)
+		"&_pragma=mmap_size(0)&_pragma="+auditCacheSizeDSN, auditBusyTimeoutMillis)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open read pool: %w", err)
 	}

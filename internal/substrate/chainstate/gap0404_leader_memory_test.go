@@ -1,0 +1,126 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package chainstate
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+)
+
+// leaderRSS is the process's resident memory (Linux), or -1.
+func leaderRSS() int64 {
+	raw, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return -1
+	}
+	f := strings.Fields(string(raw))
+	if len(f) < 2 {
+		return -1
+	}
+	pages, err := strconv.ParseInt(f[1], 10, 64)
+	if err != nil {
+		return -1
+	}
+	return pages * int64(os.Getpagesize())
+}
+
+func settledRSS() int64 {
+	runtime.GC()
+	debug.FreeOSMemory()
+	return leaderRSS()
+}
+
+// GAP-0404: the leader's memory grew about 90 KiB per audited tool call
+// (+215 MiB after 2,434 calls of 8 actors on E1) and kept most of it after
+// the actors were deleted. Each per-actor chain store opened with the
+// gateway's audit settings: a 20 MB SQLite page cache per connection, on
+// the writer and a 4-connection read pool, outside the Go heap, filling as
+// the store grows. The per-actor stores now open WithSmallFootprint, so an
+// actor's store holds at most a fixed small cache whatever its calls.
+//
+// The bound is the E1 cell's: growth over N calls of 8 actors at most
+// N x 2 KiB + 16 MiB after the stores are open.
+func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
+	if leaderRSS() < 0 {
+		t.Skip("resident memory is read from /proc/self/statm (Linux)")
+	}
+	h := newHarness(t, t.TempDir(), Options{})
+	ctx := context.Background()
+	actors := make([]Actor, 8)
+	for i := range actors {
+		actors[i] = Actor{Atespace: "dc-eng", UID: fmt.Sprintf("25a1da0f-1c9b-4ef7-8248-c276138c7f%02d", i)}
+	}
+	// A benign Bash call (echo): no chain step, as in the E1 replay.
+	benign := guardrail.ToolChainProjection{ParseStatus: actionfacts.StatusComplete}
+	n := 0
+	call := func(a Actor) {
+		n++
+		sum := sha256.Sum256([]byte(fmt.Sprintf("gap0404-inv-%d", n)))
+		inv := hex.EncodeToString(sum[:])
+		session := "sess-" + a.UID
+		for _, scope := range []Scope{ScopeSession, ScopeActor} {
+			id, fp := eventID(t)
+			b, err := h.client.Bind(a, scope, "claudecode", session, "PreToolUse")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.PreparePending(ctx, audit.ToolChainPreparePendingInput{ToolInvocationDigest: inv, PreSemanticEventID: id,
+				PreInputFingerprint: fp, RulesetFingerprint: ruleset, Projection: benign}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := h.svc.IntentPut(ctx, IntentRequest{Actor: a, Op: IntentAppend, Key: session, Tool: "Bash",
+			Args: fmt.Sprintf(`{"command":"echo call %d"}`, n)}); err != nil {
+			t.Fatal(err)
+		}
+		for _, scope := range []Scope{ScopeSession, ScopeActor} {
+			id, fp := eventID(t)
+			b, err := h.client.Bind(a, scope, "claudecode", session, "PostToolUse")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b.ResolvePending(ctx, audit.ToolChainResolvePendingInput{ToolInvocationDigest: inv,
+				Outcome: audit.ToolChainPendingOutcomeSuccess, RulesetFingerprint: ruleset,
+				TerminalSemanticEventID: id, TerminalInputFingerprint: fp}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		h.advance(50 * time.Millisecond)
+	}
+	// Open every actor's store first: what an open store costs is bounded
+	// by MaxOpenStores, not by the calls.
+	for range 10 {
+		for _, a := range actors {
+			call(a)
+		}
+	}
+	before := settledRSS()
+	const perActor = 150
+	for range perActor {
+		for _, a := range actors {
+			call(a)
+		}
+	}
+	calls := int64(perActor * len(actors))
+	grew := settledRSS() - before
+	bound := calls*2<<10 + 16<<20
+	t.Logf("%d calls: leader memory +%d KiB (%d B per call), bound %d KiB", calls, grew>>10, grew/calls, bound>>10)
+	if grew > bound {
+		t.Fatalf("leader memory grew %d KiB over %d calls (%d B per call), over the bound of %d KiB (2 KiB per call + 16 MiB)",
+			grew>>10, calls, grew/calls, bound>>10)
+	}
+}

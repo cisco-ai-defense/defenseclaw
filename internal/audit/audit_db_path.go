@@ -30,6 +30,8 @@ type auditDBPathHooks struct {
 	schemaTolerant bool
 	// secureClient opens with the pragmas of main (auditPragmasFor).
 	secureClient bool
+	// pageCacheKiB replaces the page cache of the pragmas (WithSmallFootprint).
+	pageCacheKiB int
 	// exclusive opens in SQLite's exclusive locking mode
 	// (exclusiveLockingQuery): only the audit compaction sets it.
 	exclusive bool
@@ -137,7 +139,7 @@ func openHardenedAuditSQLiteWithIdentity(
 	}
 
 	if prepared.inMemory {
-		db, err := openSQLiteWithPragmas(prepared.path, auditPragmasFor(hooks.secureClient))
+		db, err := openSQLiteWithPragmas(prepared.path, withPageCache(auditPragmasFor(hooks.secureClient), hooks.pageCacheKiB))
 		if err != nil {
 			prepared.close()
 			return nil, "", nil, err
@@ -150,7 +152,7 @@ func openHardenedAuditSQLiteWithIdentity(
 			return nil, "", nil, fmt.Errorf("audit: pre-open path check: %w", err)
 		}
 	}
-	pragmas := auditPragmasFor(hooks.secureClient)
+	pragmas := withPageCache(auditPragmasFor(hooks.secureClient), hooks.pageCacheKiB)
 	if hooks.schemaTolerant {
 		pragmas = schemaTolerantPragmas
 	}
