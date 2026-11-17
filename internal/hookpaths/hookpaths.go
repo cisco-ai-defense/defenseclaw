@@ -2177,6 +2177,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				for _, script := range actionfacts.PowerShellLauncherScripts(fallback) {
 					scriptInput := fallback
 					scriptInput.Command, scriptInput.DialectHint = script, actionfacts.DialectPowerShell
+					scriptInput.PowerShellLauncherBody = true
 					facts.Paths = append(facts.Paths, actionfacts.Analyze(scriptInput).AtHookFolder().Paths...)
 					quoted, over := powerShellQuotedPathOperands(script, cwd, home)
 					stateOperands = append(stateOperands, quoted...)

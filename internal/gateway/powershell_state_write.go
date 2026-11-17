@@ -62,19 +62,18 @@ func provenPowerShellStateWriteOf(request trustedActionRequest, command string) 
 // powerShellReadingCommands are the command texts of a call the PowerShell
 // reading judges: a call of a Windows home (a drive path) that runs in
 // PowerShell, or in a shell the gateway cannot tell from it (no hint, or
-// POSIX: Codex names its PowerShell tool Bash); a call of a Linux or macOS
-// home that runs in PowerShell; and, for a POSIX call of such a home, the
-// script of each PowerShell launcher it runs (pwsh -Command BODY,
-// actionfacts.PowerShellLauncherScripts): its .NET file writes, New-Item
-// -Value and home spellings were read nowhere else (rel-1-0-10:GAP-1134). A
-// cmd call is not one.
+// POSIX: Codex names its PowerShell tool Bash); and, for a POSIX call of a
+// Linux or macOS home, the script of each PowerShell launcher it runs (pwsh
+// -Command BODY, actionfacts.PowerShellLauncherScripts): its .NET file
+// writes, New-Item -Value and home spellings were read nowhere else
+// (rel-1-0-10:GAP-1134). A cmd call is not one, nor a PowerShell tool call
+// of a Linux or macOS home: the shared readers judge it, with their bounds.
 func powerShellReadingCommands(request trustedActionRequest) []string {
 	home := request.Input.ActiveHome
 	hint := request.Input.DialectHint
 	switch {
 	case len(home) >= 2 && home[1] == ':' &&
-		(hint == "" || hint == actionfacts.DialectPOSIX || hint == actionfacts.DialectPowerShell),
-		strings.HasPrefix(home, "/") && hint == actionfacts.DialectPowerShell:
+		(hint == "" || hint == actionfacts.DialectPOSIX || hint == actionfacts.DialectPowerShell):
 		if command, known := trustedBashCommandInput(request.Input); known {
 			return []string{command}
 		}
@@ -114,6 +113,9 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 		input := request.Input
 		input.Command, input.Args, input.Argv = form, nil, nil
 		input.DialectHint = actionfacts.DialectPowerShell
+		// Under a Linux or macOS home the reading reads only launcher
+		// scripts (powerShellReadingCommands).
+		input.PowerShellLauncherBody = strings.HasPrefix(request.Input.ActiveHome, "/")
 		twin := request
 		twin.Input = input
 		return proves(actionfacts.Analyze(input), twin)
