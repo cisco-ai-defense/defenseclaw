@@ -31,6 +31,7 @@ var defaultRuleCategories = sync.OnceValue(func() []ruleCategory {
 				{ID: "SEC-GITHUB-PAT", Pattern: regexp.MustCompile("github_pat_[a-zA-Z0-9_]{22,}"), Title: "GitHub fine-grained PAT", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 				{ID: "SEC-GITLAB", Pattern: regexp.MustCompile("glpat-[a-zA-Z0-9\\-_]{20,}"), Title: "GitLab personal access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 				{ID: "SEC-GOOGLE", Pattern: regexp.MustCompile("AIza[0-9A-Za-z\\-_]{35}"), Title: "Google API key", Severity: "CRITICAL", Confidence: 0.9, Tags: []string{"credential"}},
+				{ID: "SEC-HF-TOKEN", Pattern: regexp.MustCompile("\\bhf_[A-Za-z0-9]{34,}\\b"), Title: "Hugging Face access token", Severity: "CRITICAL", Confidence: 0.9, Tags: []string{"credential"}},
 				{ID: "SEC-SLACK-TOKEN", Pattern: regexp.MustCompile("xox[bpors]-[0-9a-zA-Z\\-]{10,}"), Title: "Slack token", Severity: "CRITICAL", Confidence: 0.9, Tags: []string{"credential"}},
 				{ID: "SEC-SLACK-WEBHOOK", Pattern: regexp.MustCompile("https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+"), Title: "Slack webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 				{ID: "SEC-DISCORD-WEBHOOK", Pattern: regexp.MustCompile("https://discord(?:app)?\\.com/api/webhooks/\\d+/[a-zA-Z0-9_\\-]+"), Title: "Discord webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
