@@ -1059,8 +1059,20 @@ class Store:
         pass (or a purge) changed, and a fail-mode lone decision a later
         connector-hook row paired dirties its chunk. A rewritten table (the
         row at the mark is gone or another row) or a schema change counts
-        all rows again.
+        all rows again. One call reads one snapshot of the store (a read
+        transaction), as the single all-time statement did.
         """
+
+        own = not self.db.in_transaction
+        if own:
+            self.db.execute("BEGIN")
+        try:
+            return self._connector_hook_event_stats_in_snapshot()
+        finally:
+            if own:
+                self.db.rollback()
+
+    def _connector_hook_event_stats_in_snapshot(self) -> dict[str, dict[str, Any]]:
 
         columns, _ = self._audit_projection_schema()
         records = {"payload_json", "projected_record_json"}.issubset(columns)
@@ -1117,7 +1129,12 @@ class Store:
                     if before.get(chunk, 0) != cache.sizes.get(chunk, 0)
                 }
                 dirty.update(rowid >> bits for rowid in cache.awaiting - awaiting)
-                chunks = {chunk: totals for chunk, totals in cache.chunks.items() if chunk not in dirty}
+                # Copies: the cached totals are never changed in place.
+                chunks = {
+                    chunk: {connector: list(entry) for connector, entry in totals.items()}
+                    for chunk, totals in cache.chunks.items()
+                    if chunk not in dirty
+                }
                 if mark > old:
                     for chunk, totals in self._hook_stats_pass(old, mark, records=records, tracked=tracked).items():
                         if chunk not in dirty:

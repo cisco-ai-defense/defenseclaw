@@ -45,12 +45,13 @@ class _Classified:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.rows = 0
-        # Set to n: the classification raises once it has seen n more rows.
-        self.fail_after: int | None = None
+        # Set to a predicate over a connector-hook row's details: classifying
+        # such a row raises.
+        self.fail_if = None
         hook, row = db_module.aggregate_connector_hook_decision, db_module.aggregate_hook_row_decision
 
         def counted_hook(*args):
-            self._count()
+            self._count(args[0] if args else None)
             return hook(*args)
 
         def counted_row(*args):
@@ -60,12 +61,10 @@ class _Classified:
         monkeypatch.setattr(db_module, "aggregate_connector_hook_decision", counted_hook)
         monkeypatch.setattr(db_module, "aggregate_hook_row_decision", counted_row)
 
-    def _count(self) -> None:
+    def _count(self, details: object = None) -> None:
         self.rows += 1
-        if self.fail_after is not None:
-            self.fail_after -= 1
-            if self.fail_after < 0:
-                raise RuntimeError("interrupted")
+        if self.fail_if is not None and isinstance(details, str) and self.fail_if(details):
+            raise RuntimeError("interrupted")
 
     def take(self) -> int:
         rows, self.rows = self.rows, 0
@@ -115,7 +114,7 @@ def _rows(start: int, count: int, tracked: bool) -> tuple[list[tuple], list[tupl
         if kind in (0, 1, 2):
             connector = ("claudecode", "codex", "cursor")[kind]
             action = ("allow", "alert", "block")[index % 3]
-            details = f"connector={connector} result=ok action={action} raw_action={action} mode=action"
+            details = f"connector={connector} result=ok action={action} raw_action={action} mode=action seq={index}"
             projected = json.dumps({"correlation": {"semantic_event_id": sid}})
             audit.append(
                 (
@@ -307,10 +306,13 @@ def test_a_failed_count_leaves_no_partial_totals(path_and_kind, monkeypatch) -> 
         store.connector_hook_event_stats()
         _insert(path, 600, 70, tracked)
         _change(path, "DELETE FROM audit_events WHERE rowid <= 100")
-        classified.fail_after = 5
+        # The rows written since the last count are classified and merged
+        # first; the count then fails in the recount of the chunk the delete
+        # changed (rows written before the last count).
+        classified.fail_if = lambda details: int(details.rsplit("seq=", 1)[1].split()[0]) < 600
         with pytest.raises(sqlite3.OperationalError):
             store.connector_hook_event_stats()
-        classified.fail_after = None
+        classified.fail_if = None
         assert store.connector_hook_event_stats() == _all_time(path)
     finally:
         store.close()
