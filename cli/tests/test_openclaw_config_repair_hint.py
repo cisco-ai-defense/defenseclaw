@@ -34,6 +34,16 @@ def test_hint_only_for_the_unrecognized_key_refusal() -> None:
     assert openclaw_config_repair_hint("connection refused", None) == ""
 
 
+def test_hint_not_given_for_a_key_defenseclaw_wrote() -> None:
+    from defenseclaw.config import openclaw_config_repair_hint
+
+    for out in (
+        "openclaw.json - approvals: Unrecognized key: plugin",
+        "openclaw.json - plugins.entries.defenseclaw: Unrecognized key: hooks",
+    ):
+        assert openclaw_config_repair_hint("", out) == ""
+
+
 def test_gateway_restart_failure_names_the_repair(capsys) -> None:
     proc = subprocess.CompletedProcess(["openclaw"], 1, stdout="", stderr=REFUSAL)
     with (

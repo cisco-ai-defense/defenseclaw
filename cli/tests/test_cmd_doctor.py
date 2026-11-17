@@ -2406,6 +2406,18 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
             self.assertIn("no AI Defense API key is configured", detail)
             self.assertIn("set guardrail.scanner_mode to local", detail)
 
+    def test_inline_api_key_is_not_a_missing_key_gap0464(self):
+        # The deprecated inline cisco_ai_defense.api_key still works: doctor must
+        # not tell that host its remote scanner never runs.
+        cfg = self._make_cfg()
+        cfg.guardrail.scanner_mode = "both"
+        cfg.cisco_ai_defense.api_key_env = ""
+        cfg.cisco_ai_defense.api_key = "inline-key"
+        r = _DoctorResult(passive=True)
+        _check_cisco_ai_defense(cfg, r)
+        details = " ".join(str(c.get("detail", "")) for c in r.checks)
+        self.assertNotIn("no AI Defense API key is configured", details)
+
     @patch("defenseclaw.commands.cmd_doctor.click.echo")
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(401, "invalid api key"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")

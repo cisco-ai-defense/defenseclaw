@@ -15581,9 +15581,9 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         return
 
     dotenv_path = os.path.join(cfg.data_dir, ".env")
-    api_key = _resolve_api_key(key_env, dotenv_path) if key_env else ""
+    api_key = _resolve_api_key(key_env, dotenv_path) if key_env else cfg.cisco_ai_defense.resolved_api_key()
 
-    if not key_env:
+    if not key_env and not api_key:
         # GAP-0464: a configuration error, not an outage. The gateway builds no
         # AI Defense client without a key, so the remote scan never runs.
         _emit(
