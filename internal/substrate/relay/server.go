@@ -61,6 +61,9 @@ type Options struct {
 	// sep runs everything the relay starts as the agent's user (GAP-0116;
 	// Main sets it from separate). nil: the relay's own user.
 	sep *separation
+	// mountinfo reads the actor's mount table (GAP-0368); nil is
+	// readMountinfo (tests set it).
+	mountinfo func() ([]byte, error)
 }
 
 // Server is the relay. NewServer has no side effect: the golden snapshot of
@@ -176,22 +179,6 @@ func (s *Server) init() error {
 			s.log.Warn("relay.signin_warning", "connector", rc.Connector)
 			s.agent.Banner = d.Message
 		}
-		// The hook folders the agent could rename away are watched from
-		// here on, before the agent first runs (GAP-0120).
-		s.taskCtx, s.taskStop = context.WithCancel(context.Background())
-		guard := s.opts.Guard
-		if guard == nil {
-			home := os.Getenv("HOME")
-			if home == "" {
-				home = "/sandbox" // the kit's image HOME, as its start wrapper assumes
-			}
-			guard = kit.GuardedDirs(rc.Connector, home)
-		}
-		if err := watchGuarded(s.taskCtx, guard, s.guardBroken); err != nil {
-			s.log.Warn("relay.guard_refused", "connector", rc.Connector, "error", err.Error())
-			s.initErr = &signinRefusal{msg: "DefenseClaw's hook folder is not in place (" + err.Error() + "); refusing to start the agent without its hooks"}
-			return
-		}
 		if s.opts.Warm == nil || s.opts.Report == nil {
 			t, err := kit.NewTransport(s.opts.Config)
 			if err != nil {
@@ -207,6 +194,44 @@ func (s *Server) init() error {
 			if s.opts.Tamper == nil {
 				s.opts.Tamper = GatewayTamper(t)
 			}
+		}
+		// The hook folders the agent could rename away are watched from
+		// here on, before the agent first runs (GAP-0120).
+		s.taskCtx, s.taskStop = context.WithCancel(context.Background())
+		guard := s.opts.Guard
+		if guard == nil {
+			home := os.Getenv("HOME")
+			if home == "" {
+				home = kit.ActorHome // the kit's image HOME, as its start wrapper assumes
+			}
+			guard = kit.GuardedDirs(rc.Connector, home)
+		}
+		// No mount may hide the kit's files, also through a symlink in the
+		// image that admission cannot see (GAP-0368).
+		read := s.opts.mountinfo
+		if read == nil {
+			read = readMountinfo
+		}
+		info, err := read()
+		if err != nil {
+			s.refuseAtStart("relay.mount_refused", "DefenseClaw cannot read the actor's mounts ("+err.Error()+"), so it cannot tell that its hooks are in place; refusing to start the agent")
+			return
+		}
+		if hidden := kitMountRefusal(info, guard); hidden != "" {
+			s.refuseAtStart("relay.mount_refused", "a volume is mounted at, above or below "+hidden+", which holds DefenseClaw's hooks, so the agent could run without them; refusing to start the agent (mount data folders below the working directory)")
+			return
+		}
+		if err := watchGuarded(s.taskCtx, guard, s.guardBroken); err != nil {
+			var degraded *guardDegraded
+			if errors.As(err, &degraded) {
+				// Fail closed (GAP-0369): without the watch a fast swap and
+				// restore of the folder would go unseen.
+				s.refuseAtStart("relay.guard_degraded", err.Error()+", so a move of it could go unseen; refusing to start the agent")
+				return
+			}
+			s.log.Warn("relay.guard_refused", "connector", rc.Connector, "error", err.Error())
+			s.initErr = &signinRefusal{msg: "DefenseClaw's hook folder is not in place (" + err.Error() + "); refusing to start the agent without its hooks"}
+			return
 		}
 		s.session = newID()
 		go s.watchResume()
@@ -225,11 +250,31 @@ func (s *Server) guardBroken(reason string) {
 	s.guardErr = &guardStopped{msg: msg}
 	s.guardMu.Unlock()
 	connector := s.opts.Config.Relay.Connector
+	if strings.HasPrefix(reason, guardWatchEnded) {
+		s.log.Error("relay.guard_degraded", "connector", connector, "reason", reason)
+	}
 	s.log.Warn("relay.guard_tamper", "connector", connector, "reason", reason)
 	s.taskStop()
 	if n := stopActorProcesses(s.agent.pid(), func() { s.agent.Stop(msg) }); n > 0 {
 		s.log.Warn("relay.guard_stopped_processes", "connector", connector, "processes", n)
 	}
+	if s.opts.Tamper != nil {
+		go func() {
+			if err := reportTamper(context.Background(), s.opts.Tamper, connector, reason); err != nil {
+				s.log.Warn("relay.guard_report", "connector", connector, "error", err.Error())
+			}
+		}()
+	}
+}
+
+// refuseAtStart refuses the agent for good before it first runs, because
+// DefenseClaw cannot keep its hooks in place (a mount over them, a guard
+// watch that cannot be set): the reason is logged as event, answered to
+// every attach (403) and audited as HIGH on the tamper route.
+func (s *Server) refuseAtStart(event, reason string) {
+	connector := s.opts.Config.Relay.Connector
+	s.log.Error(event, "connector", connector, "reason", reason)
+	s.initErr = &signinRefusal{msg: reason}
 	if s.opts.Tamper != nil {
 		go func() {
 			if err := reportTamper(context.Background(), s.opts.Tamper, connector, reason); err != nil {
