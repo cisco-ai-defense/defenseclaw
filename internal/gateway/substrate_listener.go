@@ -243,9 +243,6 @@ type substrateState struct {
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.
 	refusals *rate.Limiter
-	// authRefusals bounds the log lines and audit rows of refused tokens
-	// per listener and reason (GAP-0407, GAP-0408).
-	authRefusals substrateAuthRefusals
 	// audit writes a substrate audit row through the API server's logger
 	// (none while it has no logger).
 	audit func(ctx context.Context, severity, summary string, details map[string]any)

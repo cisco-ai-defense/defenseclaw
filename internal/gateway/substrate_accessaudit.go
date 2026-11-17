@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -33,8 +32,8 @@ const (
 	substrateAccessWindow = time.Minute
 	// substrateAccessMaxKeys bounds the window map.
 	substrateAccessMaxKeys = 4096
-	// substrateAccessQueue bounds the rows waiting to be written; past it
-	// attempts are dropped and counted on the next row.
+	// substrateAccessQueue bounds the rows waiting to be written; a row
+	// past it is written on the request path (record).
 	substrateAccessQueue = 256
 )
 
@@ -43,6 +42,9 @@ type substrateAccessEvent struct {
 	a   *APIServer
 	st  *substrateState
 	ctx context.Context
+	// at is when the attempt was made (record sets it), so the window
+	// does not depend on when the writer gets to it.
+	at time.Time
 
 	severity, outcome, reason, route, target string
 	// The acting identity: a signed-in person, or a calling actor and the
@@ -51,6 +53,9 @@ type substrateAccessEvent struct {
 	actorRef, actorUID  string
 	// tokenPerson is the person a refused session token names.
 	tokenPerson string
+	// render, when set, gives the row's event name, summary, extra details
+	// and log line for n attempts (a refused token: substrate_authrefusal.go).
+	render func(n int) (event, summary string, details map[string]any, line string)
 }
 
 func (ev substrateAccessEvent) key() string {
@@ -68,46 +73,91 @@ type substrateAccessRows struct {
 	windows map[string]*substrateAccessCount
 	now     func() time.Time
 
-	once    sync.Once
-	queue   chan substrateAccessEvent
-	dropped atomic.Int64
+	once  sync.Once
+	queue chan substrateAccessRow
 }
 
 // substrateAccessAudit is the gateway's one recorder of access rows.
 var substrateAccessAudit = &substrateAccessRows{}
 
-// record queues ev; it never blocks the request.
+// substrateAccessRow is one row that is due: n attempts of ev's key.
+type substrateAccessRow struct {
+	ev      substrateAccessEvent
+	n       int
+	flushed bool
+}
+
+// record counts ev on the request path (a map update under a mutex, the
+// same work for every attempt) and queues only the rows that are due, so a
+// flood of cheap attempts cannot crowd out another caller's row. A due row
+// that finds the queue full is written at once: due rows are bounded (one
+// per key per window), so this is bounded too, and no row is dropped.
 func (s *substrateAccessRows) record(ev substrateAccessEvent) {
 	s.once.Do(func() {
-		s.queue = make(chan substrateAccessEvent, substrateAccessQueue)
-		go func() {
-			for ev := range s.queue {
-				s.note(ev)
-			}
-		}()
+		s.queue = make(chan substrateAccessRow, substrateAccessQueue)
+		go s.writer()
 	})
 	ev.ctx = context.WithoutCancel(ev.ctx)
-	select {
-	case s.queue <- ev:
+	switch {
+	case s.now != nil:
+		ev.at = s.now()
+	case ev.st != nil && ev.st.now != nil:
+		ev.at = ev.st.now()
 	default:
-		s.dropped.Add(1)
+		ev.at = time.Now()
+	}
+	for _, row := range s.note(ev) {
+		select {
+		case s.queue <- row:
+		default:
+			row.ev.write(row.n, row.flushed)
+		}
 	}
 }
 
-// note counts ev and writes the rows that are due: ev's when its window
-// has passed, and an evicted key's pending count when the map is full.
-func (s *substrateAccessRows) note(ev substrateAccessEvent) {
-	now := time.Now()
-	if s.now != nil {
-		now = s.now()
+// writer writes queued rows, and every half window the counts of keys whose
+// window has passed with no later attempt, so the tail of a flood is
+// written too.
+func (s *substrateAccessRows) writer() {
+	tick := time.NewTicker(substrateAccessWindow / 2)
+	defer tick.Stop()
+	for {
+		select {
+		case row := <-s.queue:
+			row.ev.write(row.n, row.flushed)
+		case now := <-tick.C:
+			for _, row := range s.pending(now) {
+				row.ev.write(row.n, row.flushed)
+			}
+		}
 	}
-	type due struct {
-		ev      substrateAccessEvent
-		n       int
-		flushed bool
-	}
-	var rows []due
+}
+
+// pending returns, and restarts, the windows that have passed with
+// attempts not yet written.
+func (s *substrateAccessRows) pending(now time.Time) []substrateAccessRow {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	var rows []substrateAccessRow
+	for _, w := range s.windows {
+		if w.count > 0 && now.Sub(w.since) >= substrateAccessWindow {
+			rows = append(rows, substrateAccessRow{w.last, w.count, false})
+			w.since, w.count = now, 0
+		}
+	}
+	return rows
+}
+
+// note counts ev and returns the rows that are due: ev's when its window
+// has passed, and an evicted key's pending count when the map is full.
+func (s *substrateAccessRows) note(ev substrateAccessEvent) []substrateAccessRow {
+	now := ev.at
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var rows []substrateAccessRow
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.windows == nil {
 		s.windows = map[string]*substrateAccessCount{}
 	}
@@ -122,7 +172,7 @@ func (s *substrateAccessRows) note(ev substrateAccessEvent) {
 				}
 			}
 			if c := s.windows[oldest]; c.count > 0 {
-				rows = append(rows, due{c.last, c.count, true})
+				rows = append(rows, substrateAccessRow{c.last, c.count, true})
 			}
 			delete(s.windows, oldest)
 		}
@@ -132,16 +182,26 @@ func (s *substrateAccessRows) note(ev substrateAccessEvent) {
 	w.count++
 	w.last = ev
 	if w.since.IsZero() || now.Sub(w.since) >= substrateAccessWindow {
-		rows = append(rows, due{ev, w.count, false})
+		rows = append(rows, substrateAccessRow{ev, w.count, false})
 		w.since, w.count = now, 0
 	}
-	s.mu.Unlock()
-	for _, d := range rows {
-		d.ev.write(d.n, d.flushed, s.dropped.Swap(0))
-	}
+	return rows
 }
 
-func (ev substrateAccessEvent) write(n int, flushed bool, dropped int64) {
+func (ev substrateAccessEvent) write(n int, flushed bool) {
+	if ev.render != nil {
+		event, summary, details, line := ev.render(n)
+		details["event"], details["count"] = event, n
+		details["window_seconds"] = int(substrateAccessWindow / time.Second)
+		if flushed {
+			details["flushed"] = true
+		}
+		if ev.st != nil && ev.st.audit != nil {
+			ev.st.audit(ev.ctx, ev.severity, summary, details)
+		}
+		ev.st.logLine("%s", line)
+		return
+	}
 	who := ev.principal
 	if who == "" {
 		who = ev.personID
@@ -166,9 +226,6 @@ func (ev substrateAccessEvent) write(n int, flushed bool, dropped int64) {
 	}
 	if flushed {
 		details["flushed"] = true
-	}
-	if dropped > 0 {
-		details["dropped"] = dropped
 	}
 	if ev.a != nil && ev.a.logger != nil {
 		_ = ev.a.logger.LogAlertCtx(ev.ctx, "substrate", ev.severity, summary, details)

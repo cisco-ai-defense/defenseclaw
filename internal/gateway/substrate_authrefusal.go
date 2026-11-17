@@ -17,14 +17,11 @@
 package gateway
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
-	"sync"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
@@ -39,24 +36,21 @@ import (
 //
 //   - the metric defenseclaw.substrate.auth_refused, every refusal, labelled
 //     by listener and reason (both closed sets);
-//   - one gateway log line per listener and reason per window, with the
-//     count since the last line and the client address class;
-//   - one substrate audit row per listener and reason per window, with the
-//     same fields.
+//   - one gateway log line per listener, reason and client address class
+//     per window, with the count since the last line;
+//   - one substrate audit row per listener, reason and client class per
+//     window, with the same fields.
 //
-// A flood of bad tokens therefore costs at most one row and one line per
-// listener and reason per window on each replica, so it cannot fill the
-// audit store (GAP-0402) or the pod log.
+// Lines and rows go through the shared access recorder
+// (substrate_accessaudit.go, also GAP-0424, GAP-0434, GAP-0435): bounded
+// windows, written off the request path, so a flood of bad tokens cannot
+// fill the audit store (GAP-0402) or the pod log.
 
 // Listener names, the metric's listener label.
 const (
 	substrateListenerActor = "actor"
 	substrateListenerAdmin = "admin"
 )
-
-// substrateAuthRefusalWindow is how often one listener and reason writes a
-// log line and an audit row.
-const substrateAuthRefusalWindow = time.Minute
 
 // substrateAuthReasons is the closed reason set of the metric label and the
 // row. Anything else (a future verifier reason) counts as "other", so the
@@ -115,50 +109,6 @@ func substrateClientClass(remote string) string {
 	return "unknown"
 }
 
-type substrateAuthKey struct{ listener, reason string }
-
-type substrateAuthWindow struct {
-	since time.Time // the last row
-	count int       // refusals since that row, the one that writes the next row included
-}
-
-// substrateAuthRefusals bounds the log lines and audit rows of refused
-// tokens: one per listener and reason per window.
-type substrateAuthRefusals struct {
-	mu      sync.Mutex
-	windows map[substrateAuthKey]*substrateAuthWindow
-}
-
-// note counts one refusal and reports whether it writes a row, and how many
-// refusals that row stands for.
-func (s *substrateAuthRefusals) note(listener, reason string, now time.Time) (int, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.windows == nil {
-		s.windows = map[substrateAuthKey]*substrateAuthWindow{}
-	}
-	k := substrateAuthKey{listener, reason}
-	w := s.windows[k]
-	if w == nil {
-		w = &substrateAuthWindow{}
-		s.windows[k] = w
-	}
-	w.count++
-	if !w.since.IsZero() && now.Sub(w.since) < substrateAuthRefusalWindow {
-		return 0, false
-	}
-	n := w.count
-	w.since, w.count = now, 0
-	return n, true
-}
-
-func (st *substrateState) clock() time.Time {
-	if st.now != nil {
-		return st.now()
-	}
-	return time.Now()
-}
-
 // logLine writes one gateway log line (the caller bounds it).
 func (st *substrateState) logLine(format string, args ...any) {
 	out := st.logOut
@@ -169,7 +119,9 @@ func (st *substrateState) logLine(format string, args ...any) {
 }
 
 // authRefused records one refused token on listener: the metric always,
-// the log line and the audit row at most once per window.
+// and through the shared access recorder (substrate_accessaudit.go) one log
+// line and one audit row per listener, reason and client class per window,
+// written off the request path.
 func (st *substrateState) authRefused(r *http.Request, listener string, why identity.Reason) {
 	if st == nil {
 		return
@@ -178,28 +130,28 @@ func (st *substrateState) authRefused(r *http.Request, listener string, why iden
 	if st.cfg.OnAuthRefused != nil {
 		st.cfg.OnAuthRefused(listener, reason)
 	}
-	n, write := st.authRefusals.note(listener, reason, st.clock())
-	if !write {
-		return
-	}
 	client := substrateClientClass(r.RemoteAddr)
-	st.logLine("%s listener refused a token: %s (client %s, %d since the last line)", listener, reason, client, n)
-	if st.audit == nil {
-		return
-	}
 	severity := "INFO"
 	if substrateAuthForgery(reason) {
 		severity = "MEDIUM"
 	}
-	details := map[string]any{
-		"event": "auth_refused", "listener": listener, "reason": reason, "client": client,
-		"count": n, "window_seconds": int(substrateAuthRefusalWindow / time.Second),
-	}
 	// The actor route is a closed name; the admin path is caller text and
-	// stays out.
+	// stays out of the row and the window key.
+	route := ""
 	if listener == substrateListenerActor {
-		details["route"] = substrateRouteName(substrateRouteFrom(r.Context()))
+		route = substrateRouteName(substrateRouteFrom(r.Context()))
 	}
-	st.audit(context.WithoutCancel(r.Context()), severity,
-		fmt.Sprintf("%s listener refused %d token(s): %s", listener, n, reason), details)
+	substrateAccessAudit.record(substrateAccessEvent{
+		st: st, ctx: r.Context(), severity: severity, outcome: "refused", reason: reason,
+		route: listener + "/" + route, target: client,
+		render: func(n int) (string, string, map[string]any, string) {
+			details := map[string]any{"listener": listener, "reason": reason, "client": client}
+			if route != "" {
+				details["route"] = route
+			}
+			return "auth_refused",
+				fmt.Sprintf("%s listener refused %d token(s): %s", listener, n, reason), details,
+				fmt.Sprintf("%s listener refused a token: %s (client %s, %d since the last line)", listener, reason, client, n)
+		},
+	})
 }

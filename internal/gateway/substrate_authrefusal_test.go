@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -25,6 +26,18 @@ type canaryPeople struct{}
 
 func (canaryPeople) Verify(context.Context, string) (identity.Person, error) {
 	return identity.Person{}, &identity.Error{Reason: identity.ReasonAlgorithm, Message: `alg "` + authCanary + `" is not accepted`}
+}
+
+// waitAuthRefusalRows waits up to 3 s for n auth_refused rows, then a
+// little longer for the log lines written after them.
+func waitAuthRefusalRows(t *testing.T, store *audit.Store, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if len(authRefusalRows(t, store)) >= n {
+			break
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
 }
 
 func authRefusalRows(t *testing.T, store *audit.Store) []audit.Event {
@@ -72,6 +85,8 @@ func TestSubstrateRefusedTokensAreLoggedAndAuditedGAP0407GAP0408(t *testing.T) {
 		for range 200 {
 			f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors", authCanary+".flood.sig", "")
 		}
+		// Rows and lines are written off the request path.
+		waitAuthRefusalRows(t, store, 3)
 	})
 
 	for _, want := range []string{

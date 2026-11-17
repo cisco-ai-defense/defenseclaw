@@ -34,16 +34,21 @@ func TestSubstrateAuthRefusedMetricAndWindowGAP0408(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	f.api.store, f.api.logger = store, logger
 	st := f.api.substrateState()
-	var log strings.Builder
+	log := &lockedBuffer{}
+	var clock sync.Mutex
 	now := time.Date(2026, 11, 17, 16, 0, 0, 0, time.UTC)
-	st.logOut, st.now = &log, func() time.Time { return now }
+	st.logOut = log
+	st.now = func() time.Time { clock.Lock(); defer clock.Unlock(); return now }
 
 	for range 50 {
 		f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors", "x."+authCanary+".y", "")
 	}
-	now = now.Add(substrateAuthRefusalWindow)
+	clock.Lock()
+	now = now.Add(substrateAccessWindow)
+	clock.Unlock()
 	f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors", "x."+authCanary+".y", "")
 	f.do(t, f.actor, http.MethodPost, substrateRelayTask, "tok-stale", `{"exit_code":0}`)
+	waitAuthRefusalRows(t, store, 3)
 
 	mu.Lock()
 	if counts["admin/algorithm"] != 51 || counts["actor/actor_uid_mismatch"] != 1 || len(counts) != 2 {
@@ -75,4 +80,22 @@ func TestSubstrateAuthRefusedMetricAndWindowGAP0408(t *testing.T) {
 			t.Errorf("client class of %s = %s, want %s", in, got, want)
 		}
 	}
+}
+
+// lockedBuffer is a log the async row writer and the test share.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
