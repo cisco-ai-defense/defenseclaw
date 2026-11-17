@@ -552,3 +552,25 @@ def test_administrator_reads_the_routing_start_error_from_the_authenticated_heal
     _FakeClient.token_seen.clear()
     assert cmd_doctor._administrator_health(cfg, r3, _PUBLIC_ERROR) is _PUBLIC_ERROR
     assert _FakeClient.token_seen == []
+
+
+def test_passthrough_row_fails_only_when_proven_unusable_and_warns_when_unknown(monkeypatch) -> None:
+    """GAP-1105: FAIL when DefenseClaw's own recorded passthrough is proven unusable; WARN when the key source
+    is outside doctor's view; nothing when the agent has a key."""
+    from defenseclaw import doctor_route_only as dro
+    from defenseclaw import routing_route_only as ro
+
+    up = {"base_url": "https://bedrock-runtime.us-west-2.amazonaws.com", "api": "invoke", "bedrock": {"auth": "passthrough"}}
+    monkeypatch.setattr(ro, "claude_bedrock_passthrough_state", lambda: ro.PASSTHROUGH_UNUSABLE)
+    rows = dro.passthrough_rows("claudecode", up)
+    assert [r.tag for r in rows] == ["fail"] and "HTTP 400" in rows[0].detail
+    assert "routing disable --connector claudecode" in rows[0].fix and "routing enable" in rows[0].fix
+    monkeypatch.setattr(ro, "claude_bedrock_passthrough_state", lambda: ro.PASSTHROUGH_UNKNOWN)
+    rows = dro.passthrough_rows("claudecode", up)
+    assert [r.tag for r in rows] == ["warn"] and "settings.local.json" in rows[0].detail and "routing disable" in rows[0].fix
+    monkeypatch.setattr(ro, "claude_bedrock_passthrough_state", lambda: ro.PASSTHROUGH_OK)
+    assert dro.passthrough_rows("claudecode", up) == []
+    # Another auth mode, or another connector, is not this row's business.
+    monkeypatch.setattr(ro, "claude_bedrock_passthrough_state", lambda: ro.PASSTHROUGH_UNUSABLE)
+    assert dro.passthrough_rows("claudecode", {"bedrock": {"auth": "profile"}}) == []
+    assert dro.passthrough_rows("codex", up) == []
