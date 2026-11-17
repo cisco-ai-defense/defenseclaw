@@ -113,6 +113,13 @@ type resolvedWord struct {
 	// not modeled: the one candidate that is always possible, which the
 	// caller still checks by identity (GAP-0415). "" for any other word.
 	literal string
+	// superset is, for a word that is uncertain only because its pattern
+	// form or a glob option is not modeled, every path a WIDER reading names
+	// in folders the walk sees completely (resolverSuperset), the literal
+	// word included. No reading bash may take names a path outside it, so a
+	// superset with no protected file proves the word names none
+	// (UncertainGlobWriteReason). nil when the wider walk is not complete.
+	superset []string
 	// preGlob marks a word uncertain before any pathname expansion: an
 	// unknown parameter, a command or process substitution, an arithmetic
 	// or brace part, a word that splits. An extglob form is a glob form, not
@@ -148,7 +155,16 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 		return resolvedWord{uncertain: wordUncertainDynamic, preGlob: true}
 	}
 	if !resolverWordKnown(word, values) {
-		return resolvedWord{uncertain: wordUncertainDynamic, preGlob: !resolverWordHasExtGlob(word)}
+		if !resolverWordHasExtGlob(word) {
+			return resolvedWord{uncertain: wordUncertainDynamic, preGlob: true}
+		}
+		out := resolvedWord{uncertain: wordUncertainDynamic}
+		if wide, ok := resolverExtGlobWide(word, values, cwd); ok {
+			// The literal bash passes when nothing matches is a name in the
+			// same folder: the wide pattern stands in for it.
+			out.superset = resolverSuperset(wide, OperandPath(wide, cwd), cwd, values["HOME"])
+		}
+		return out
 	}
 	home := values["HOME"]
 	cfg := resolverConfig(values, cwd)
@@ -168,7 +184,8 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	}
 	switch {
 	case opts.unmodeled(), !resolverPatternModeled(pattern) && !opts.noGlob:
-		return resolvedWord{uncertain: wordUncertainDynamic, literal: OperandPath(literalText, cwd)}
+		literal := OperandPath(literalText, cwd)
+		return resolvedWord{uncertain: wordUncertainDynamic, literal: literal, superset: resolverSuperset(pattern, literal, cwd, home)}
 	case opts.noGlob:
 		return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, false)}
 	}
@@ -216,15 +233,41 @@ func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts s
 		value := resolveShellWord(tail, values, cwd, opts)
 		whole.candidates = append(whole.candidates, value.candidates...)
 		whole.caps = whole.caps.Union(value.caps)
-		if whole.uncertain == "" {
-			whole.uncertain, whole.preGlob = value.uncertain, value.preGlob
+		switch {
+		case whole.uncertain == "":
+			whole.uncertain, whole.preGlob, whole.superset = value.uncertain, value.preGlob, value.superset
+			if whole.superset != nil {
+				whole.superset = append(whole.superset, whole.candidates...)
+			}
+		case value.uncertain != "":
+			whole.superset = nil // the value's own reading is not proven
+		case whole.superset != nil:
+			whole.superset = append(whole.superset, value.candidates...)
 		}
 		return whole
 	}
 	if whole.uncertain != "" {
 		// The program receives the word as bash passes it when nothing
 		// matches, and writes the value after the equals sign: that value is
-		// the literal candidate (dd of=PATTERN), not the whole word.
+		// the literal candidate (dd of=PATTERN), not the whole word. The
+		// wider reading names the value too: the value read alone, and the
+		// value of each "name=value" file the wide walk names in the folder.
+		if whole.superset != nil {
+			value := resolveShellWord(tail, values, cwd, opts)
+			switch {
+			case value.uncertain == "":
+				whole.superset = append(whole.superset, value.candidates...)
+			case value.superset != nil:
+				whole.superset = append(whole.superset, value.superset...)
+			default:
+				whole.superset = nil
+			}
+			for _, candidate := range whole.superset {
+				if base := filepath.Base(candidate); filepath.Dir(candidate) == filepath.Clean(cwd) && strings.HasPrefix(base, name+"=") {
+					whole.superset = append(whole.superset, OperandPath(strings.TrimPrefix(base, name+"="), cwd))
+				}
+			}
+		}
 		if whole.literal != "" {
 			if fields, err := expand.Fields(resolverConfig(values, cwd), tail); err == nil && len(fields) == 1 {
 				whole.literal = OperandPath(fields[0], cwd)
@@ -392,6 +435,96 @@ func resolverPatternModeled(pattern string) bool {
 	return true
 }
 
+// resolverSuperset is every path a reading of pattern WIDER than any bash may
+// take names, for a word the resolver cannot expand exactly (an extglob
+// form, the GLOBIGNORE filter, options the call may change in a way it does
+// not spell): each extglob group read as *, which matches every string the
+// group matches, with dotglob, nocaseglob and globstar on and no filter
+// (GLOBIGNORE, nullglob and failglob only drop names), plus the literal word.
+// It returns nil when the wider walk is not complete (a folder it cannot see
+// or read, a bound) or the pattern has a group it does not read: the word
+// stays uncertain (rel-1-0-10:GAP-0378, GAP-0380).
+func resolverSuperset(pattern, literal, cwd, home string) []string {
+	wide, ok := resolverWidePattern(pattern)
+	if !ok || actionGlobViewHidden(cwd, home) {
+		return nil
+	}
+	base := ""
+	if !filepath.IsAbs(wide) {
+		base = filepath.Clean(cwd)
+	}
+	matches, complete, unseen := actionExpandGlobStar(OperandPath(wide, cwd), base, false,
+		actionProcessOwnsHome(home), func() bool { return true }, true, true)
+	if unseen || !complete || len(matches) >= MaxResolvedCandidates {
+		return nil
+	}
+	return append(matches, literal)
+}
+
+// resolverExtGlobWide is the pattern of an extglob word with every group
+// read as * (a group matches no string * does not), for a word whose other
+// parts the resolver knows. ok is false for any other word, or a group that
+// holds a slash.
+func resolverExtGlobWide(word *syntax.Word, values actionValues, cwd string) (string, bool) {
+	parts := make([]syntax.WordPart, 0, len(word.Parts))
+	for _, part := range word.Parts {
+		if group, isGroup := part.(*syntax.ExtGlob); isGroup {
+			if group.Pattern == nil || strings.Contains(group.Pattern.Value, "/") {
+				return "", false
+			}
+			part = &syntax.Lit{Value: "*"}
+		}
+		parts = append(parts, part)
+	}
+	wide := &syntax.Word{Parts: parts}
+	if !resolverWordKnown(wide, values) {
+		return "", false
+	}
+	return resolverPattern(wide, resolverConfig(values, cwd), values["HOME"])
+}
+
+// resolverWidePattern is pattern with every extglob group (?(..), *(..),
+// +(..), @(..), !(..)) read as *. ok is false for a group that is not
+// closed or that holds a slash.
+func resolverWidePattern(pattern string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if c == '\\' && i+1 < len(pattern) {
+			b.WriteString(pattern[i : i+2])
+			i++
+			continue
+		}
+		if strings.IndexByte("?*+@!", c) < 0 || i+1 >= len(pattern) || pattern[i+1] != '(' {
+			b.WriteByte(c)
+			continue
+		}
+		depth, j := 0, i+1
+		for ; j < len(pattern); j++ {
+			switch pattern[j] {
+			case '\\':
+				j++
+				continue
+			case '/':
+				return "", false
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+			if depth == 0 {
+				break
+			}
+		}
+		if j >= len(pattern) {
+			return "", false
+		}
+		b.WriteByte('*')
+		i = j
+	}
+	return b.String(), true
+}
+
 // resolveShellWordReadings is resolveShellWord for a word the call's own
 // statements may expand under other options (opts.may): the word is read
 // under each, and every path any reading names is a candidate. A reading
@@ -399,6 +532,7 @@ func resolverPatternModeled(pattern string) bool {
 func resolveShellWordReadings(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
 	var out resolvedWord
 	seen := map[string]bool{}
+	supersetLost := false
 	for _, reading := range globReadings(opts) {
 		got := resolveShellWord(word, values, cwd, reading)
 		for _, candidate := range got.candidates {
@@ -414,6 +548,18 @@ func resolveShellWordReadings(word *syntax.Word, values actionValues, cwd string
 		if out.literal == "" {
 			out.literal = got.literal
 		}
+		if got.uncertain != "" {
+			// A reading's wider walk proves only that reading: the word is
+			// proven only when every uncertain reading has one.
+			if got.superset == nil {
+				out.superset, supersetLost = nil, true
+			} else if !supersetLost {
+				out.superset = append(out.superset, got.superset...)
+			}
+		}
+	}
+	if out.superset != nil {
+		out.superset = append(out.superset, out.candidates...) // the exact readings' paths too
 	}
 	return out
 }

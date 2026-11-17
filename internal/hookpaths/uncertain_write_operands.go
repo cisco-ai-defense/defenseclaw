@@ -173,6 +173,12 @@ func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) stri
 // bf8dc50428). blind is a gateway behind ProtectHome, which sees no folder
 // of the home: the client's evidence decides its words (rel-1-0-6:GAP-0675),
 // so its hidden words stay uncertain.
+//
+// A word uncertain only because its pattern form or a glob option is not
+// modeled is proven when a reading wider than any bash may take names no
+// protected file (resolverSuperset): a sourced file or an extglob search
+// pattern in a folder with no protected file or link to one is no unproven
+// target. A wider reading that names one keeps the word uncertain.
 func UncertainGlobWriteReason(command, cwd, home string, startup *ShellStartup, blind bool) string {
 	return uncertainWriteReason(command, cwd, home, startup, true, blind)
 }
@@ -187,6 +193,10 @@ func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, glob
 	}
 	reason := ""
 	forEachWriteOperand(command, cwd, home, current, func(resolved resolvedWord) bool {
+		if globOnly && resolved.superset != nil && !supersetReachesProtected(resolved.superset, home) {
+			// a wider reading than any bash may take names no protected file
+			return false
+		}
 		if globOnly && (resolved.preGlob || resolved.uncertain == wordUncertainTruncated) {
 			// uncertain before any glob: the dynamic operand proofs judge it;
 			// past the bound: the bound rule judges it (TRUNCATED follows the
@@ -197,6 +207,21 @@ func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, glob
 		return reason != ""
 	})
 	return reason
+}
+
+// supersetReachesProtected reports a path of a word's wider reading
+// (resolvedWord.superset) that is a protected file or reaches one: the
+// protected names, a link or a hard link to one, the .ssh folder.
+func supersetReachesProtected(paths []string, home string) bool {
+	var memo *TargetMemo
+	protected := memo.protectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	for _, path := range paths {
+		if protectedReachPathWith(path, protected, ssh, memo) {
+			return true
+		}
+	}
+	return false
 }
 
 // harmlessWriterOptions are the options of a writer call that take no value:

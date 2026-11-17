@@ -319,6 +319,18 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				if resolved.uncertain == "" {
 					return false
 				}
+				// A word the resolver cannot expand exactly is settled by a
+				// reading wider than any bash may take, when the walk sees
+				// it all: no protected file among its paths, no mention
+				// (resolverSuperset, rel-1-0-10:GAP-0378).
+				if resolved.superset != nil {
+					for _, candidate := range resolved.superset {
+						if checkAs(candidate, false, effectiveCWD, true) {
+							return true
+						}
+					}
+					return false
+				}
 			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				return false
 			}

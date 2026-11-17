@@ -28,6 +28,13 @@ import (
 // uses in a UTF-8 locale, reads differently), and, with fold, an [:upper:]
 // or [:lower:] class. The caller treats an inexact answer as a match it
 // cannot prove (the walk is not complete): never as a proof either way.
+//
+// A doubtful bracket makes the answer inexact only when it can change it:
+// the match is read again with every doubtful bracket a member and with none
+// (a match only grows with a bracket's members), and the answer is exact when
+// both readings agree. [3-m] against a name of another length is no match in
+// any locale; reading every such test as a doubt made an assignment of a
+// list in brackets a possible key name (the owner A/B of s7/hlinkport-r2).
 func bashGlobMatch(pattern, name string, fold bool) (matched, exact bool) {
 	readings := []bashGlobReading{
 		{fold: fold},
@@ -43,7 +50,12 @@ func bashGlobMatch(pattern, name string, fold bool) (matched, exact bool) {
 			exact = false
 		}
 		if readings[i].doubt {
-			exact = false
+			none, all := readings[i], readings[i]
+			none.doubt, none.force = false, -1
+			all.doubt, all.force = false, 1
+			if none.match(pattern, name) != all.match(pattern, name) {
+				exact = false
+			}
 		}
 	}
 	return matched, exact
@@ -56,6 +68,9 @@ func bashGlobMatch(pattern, name string, fold bool) (matched, exact bool) {
 type bashGlobReading struct {
 	fold, bytes, interleaved bool
 	doubt                    bool
+	// force, when set, answers every bracket with a doubtful test: a member
+	// (1) or not (-1), after its negation (bashGlobMatch).
+	force int8
 }
 
 // chars splits text into the characters this reading compares: runes, or
@@ -157,6 +172,14 @@ func foldEqual(a, b rune) bool {
 // tests c. width is the length of the expression including its closing ].
 // closed is false when there is no closing ]: the [ is then a literal.
 func (r *bashGlobReading) bracket(p []rune, c rune) (matched bool, width int, closed bool) {
+	outer := r.doubt
+	r.doubt = false
+	defer func() {
+		if closed && r.doubt && r.force != 0 {
+			matched = r.force > 0
+		}
+		r.doubt = outer || closed && r.doubt
+	}()
 	i := 0
 	negate := false
 	if i < len(p) && (p[i] == '!' || p[i] == '^') {
