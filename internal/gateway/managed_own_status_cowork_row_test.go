@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 )
 
 // The Cowork row keeps its state to a single word and carries the reason in
@@ -86,7 +87,7 @@ func ownStatusRoutingSummaryAt(t *testing.T, now time.Time) {
 	}
 	routingAdminRuntime.Ledger().ApplyRemote([]string{"daily", "eng"}, nil, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1001"}, 4, now)
-	summary := ownRoutingSummary(cfg, "1001", now)
+	summary := ownRoutingSummary(cfg, "1001", routingadmin.Caller{}, now)
 	budget, _ := summary["budget"].(map[string]any)
 	if summary["enabled"] != true || budget == nil || budget["id"] != "daily" || budget["percent_used"].(float64) != 40 {
 		t.Fatalf("summary = %v", summary)
@@ -94,18 +95,18 @@ func ownStatusRoutingSummaryAt(t *testing.T, now time.Time) {
 	if got, _ := summary["route_only"].([]string); len(got) != 1 || got[0] != "claudecode" {
 		t.Fatalf("route_only = %v", summary["route_only"])
 	}
-	if other := ownRoutingSummary(cfg, "1002", now); other["budget"] == nil || other["budget"].(map[string]any)["percent_used"].(float64) != 0 {
+	if other := ownRoutingSummary(cfg, "1002", routingadmin.Caller{}, now); other["budget"] == nil || other["budget"].(map[string]any)["percent_used"].(float64) != 0 {
 		t.Fatalf("another account shares the first account spend: %v", other)
 	}
 	cfg.Routing.Admin.Visibility = &config.RoutingVisibility{UsersSee: config.RoutingUsersSeeNone}
-	hidden := ownRoutingSummary(cfg, "1001", now)
+	hidden := ownRoutingSummary(cfg, "1001", routingadmin.Caller{}, now)
 	if hidden["enabled"] != true || hidden["budget"] != nil {
 		t.Fatalf("users_see none = %v", hidden)
 	}
-	if ownRoutingSummary(nil, "1", now) != nil {
+	if ownRoutingSummary(nil, "1", routingadmin.Caller{}, now) != nil {
 		t.Fatal("no configuration still answers")
 	}
-	if off := ownRoutingSummary(&config.Config{}, "1", now); off["enabled"] != false {
+	if off := ownRoutingSummary(&config.Config{}, "1", routingadmin.Caller{}, now); off["enabled"] != false {
 		t.Fatalf("routing off = %v", off)
 	}
 }

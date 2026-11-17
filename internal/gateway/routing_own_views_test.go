@@ -26,15 +26,19 @@ import (
 const (
 	ownViewSID1 = "S-1-5-21-1111111111-2222222222-3333333333-4101"
 	ownViewSID3 = "S-1-5-21-1111111111-2222222222-3333333333-4103"
+	// Group SIDs: on Windows the managed gateway matches a configured group
+	// name through its looked-up SID (routingGroupSIDsFor).
+	ownViewEngSID = "S-1-5-21-1111111111-2222222222-3333333333-2001"
+	ownViewCtrSID = "S-1-5-21-1111111111-2222222222-3333333333-2002"
 )
 
 func ownViewAccounts() map[string]profileSubject {
 	return map[string]profileSubject{
-		"4101":      {UserID: "4101", IDKind: useridentity.KindPOSIXUID, UserName: "eng1", Groups: []string{"eng"}},
-		"4102":      {UserID: "4102", IDKind: useridentity.KindPOSIXUID, UserName: "eng2", Groups: []string{"eng"}},
-		"4103":      {UserID: "4103", IDKind: useridentity.KindPOSIXUID, UserName: "ctr1", Groups: []string{"contractors"}},
-		ownViewSID1: {UserID: ownViewSID1, IDKind: useridentity.KindWindowsSID, UserName: "eng1", Groups: []string{"eng"}},
-		ownViewSID3: {UserID: ownViewSID3, IDKind: useridentity.KindWindowsSID, UserName: "ctr1", Groups: []string{"contractors"}},
+		"4101":      {UserID: "4101", IDKind: useridentity.KindPOSIXUID, UserName: "eng1", Groups: []string{"eng", ownViewEngSID}},
+		"4102":      {UserID: "4102", IDKind: useridentity.KindPOSIXUID, UserName: "eng2", Groups: []string{"eng", ownViewEngSID}},
+		"4103":      {UserID: "4103", IDKind: useridentity.KindPOSIXUID, UserName: "ctr1", Groups: []string{"contractors", ownViewCtrSID}},
+		ownViewSID1: {UserID: ownViewSID1, IDKind: useridentity.KindWindowsSID, UserName: "eng1", Groups: []string{"eng", ownViewEngSID}},
+		ownViewSID3: {UserID: ownViewSID3, IDKind: useridentity.KindWindowsSID, UserName: "ctr1", Groups: []string{"contractors", ownViewCtrSID}},
 	}
 }
 
@@ -43,11 +47,21 @@ func withOwnViewAccounts(t *testing.T) {
 	t.Helper()
 	accounts := ownViewAccounts()
 	prevSource, prevFacts, prevExists := profileSubjectSource, identityFactsEnabled.Load(), profileGroupExists
+	prevSID, prevLocalSID := profileGroupSIDLookup, profileGroupLocalSIDLookup
 	t.Cleanup(func() {
 		profileSubjectSource, profileGroupExists = prevSource, prevExists
+		profileGroupSIDLookup, profileGroupLocalSIDLookup = prevSID, prevLocalSID
 		identityFactsEnabled.Store(prevFacts)
 	})
 	identityFactsEnabled.Store(true)
+	groupSIDs := map[string]string{"eng": ownViewEngSID, "contractors": ownViewCtrSID}
+	lookup := func(name string) (string, error) {
+		if sid, ok := groupSIDs[strings.ToLower(name)]; ok {
+			return sid, nil
+		}
+		return "", errProfileGroupUnknown
+	}
+	profileGroupSIDLookup, profileGroupLocalSIDLookup = lookup, lookup
 	profileSubjectSource = func(ctx context.Context) (profileSubject, bool) {
 		s, ok := verifiedSubjectFromContext(ctx)
 		if !ok {
@@ -75,6 +89,7 @@ func ownViewConfig(t *testing.T) *config.Config {
 			{ID: "eng2-only", Match: config.RoutingAdminMatch{Users: []string{"eng2", "eng1-not-me"}}, Allow: []string{"local"}},
 			{ID: "contractors-no-cloud", Match: config.RoutingAdminMatch{Groups: []string{"contractors"}}, Action: "deny", Message: "contractors use the local model"},
 			{ID: "codex-everyone", Match: config.RoutingAdminMatch{Connectors: []string{"codex"}}, Allow: []string{"fast", "local"}},
+			{ID: "one-agent", Match: config.RoutingAdminMatch{Agents: []string{"agent-of-eng2"}}, Allow: []string{"local"}},
 		},
 		Budgets: []config.RoutingBudget{
 			{ID: "b-all", Scope: "user", Subject: "*", Period: "month", LimitUSD: 10, OnExceed: "warn"},
@@ -159,7 +174,7 @@ func TestRoutingOwnRulesAndBudgetsListWhatAppliesToTheCaller(t *testing.T) {
 	}{
 		{"eng1 over the hook socket", hookPeerContext(t, 4101, "eng1"),
 			[]string{"eng1-claude-fast", "eng-any", "codex-everyone"}, []string{"b-all", "b-eng1", "b-devs"},
-			[]string{"eng2", "contractors", "b-ctr", "\"users\"", "\"groups\"", "Users", "Groups", "\"subject\""}},
+			[]string{"eng2", "contractors", "b-ctr", "one-agent", "agent-of", "\"users\"", "\"groups\"", "\"agents\"", "Users", "Groups", "\"subject\""}},
 		{"eng2 over the hook socket", hookPeerContext(t, 4102, "eng2"),
 			[]string{"eng-any", "eng2-only", "codex-everyone"}, []string{"b-all", "b-devs", "b-eng2"},
 			[]string{"eng1", "contractors", "\"users\"", "Users", "\"subject\""}},
@@ -197,8 +212,11 @@ func TestRoutingOwnRulesAndBudgetsListWhatAppliesToTheCaller(t *testing.T) {
 						t.Fatalf("own named budget shows own spend: %+v", budget)
 					}
 				case "b-devs":
-					if budget.SpentUSD != nil || budget.PercentUsed == nil || *budget.PercentUsed != 50 {
-						t.Fatalf("a group pool shows the percent used only: %+v", budget)
+					// 50 of 100 USD spent: a member sees only that it is not
+					// used up (spend or percent with the limit is the other
+					// members' spend too).
+					if budget.SpentUSD != nil || budget.PercentUsed != nil || budget.Exceeded {
+						t.Fatalf("a group pool shows only whether it is used up: %+v", budget)
 					}
 				}
 			}
@@ -248,6 +266,7 @@ func TestUsageRecordsCarryTheProvedRoutingAdminGroups(t *testing.T) {
 	}
 	member.Groups = append(member.Groups, "not-in-config")
 	prev := profileSubjectSource
+	t.Cleanup(func() { profileSubjectSource = prev })
 	profileSubjectSource = func(context.Context) (profileSubject, bool) { return member, true }
 	got := groupsOf(t, withPinnedGeneration(context.Background(), &Generation{Config: many, N: 1}), "4101")
 	profileSubjectSource = prev

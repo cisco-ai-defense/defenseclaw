@@ -97,7 +97,7 @@ type routingBudgetView struct {
 // subjects); a user sees the budgets that apply to them: * user budgets and
 // a user budget that names them, with their own spend, and the budget of a
 // group they are proved a member of (own, the routingOwnCaller facts) with
-// only the percent used, since its spend is the group pool. A user never
+// only whether it is used up, since its spend is the group pool. A user never
 // sees a subject, nor a budget of another user or group (their selectors
 // are the administrator's policy). Before, a user saw only * budgets, so
 // routing budgets list was empty for a user a named budget applies to
@@ -118,6 +118,7 @@ func routingBudgetViews(cfg *config.Config, key string, admin bool, own routinga
 		}
 		var spend float64
 		var known, pooled bool
+		var ownKey string
 		switch {
 		case admin:
 			view.Subject = b.Subject
@@ -128,12 +129,20 @@ func routingBudgetViews(cfg *config.Config, key string, admin bool, own routinga
 			}
 			spend, known = ledger.Spend("user:"+b.ID+":*:"+key, b.Period, now)
 		case b.Scope == config.RoutingBudgetScopeUser && routingadmin.NamesCaller(own, config.ProfileMatch{Users: []string{b.Subject}}):
-			// The charge key of routingadmin chargeKey.
-			spend, known = ledger.Spend("user:"+b.ID+":="+routingadmin.LocalSubjectHash(b.Subject), b.Period, now)
+			ownKey = routingadmin.BudgetChargeKey(b)
+			spend, known = ledger.Spend(ownKey, b.Period, now)
 		case b.Scope == config.RoutingBudgetScopeGroup && routingadmin.NamesCaller(own, config.ProfileMatch{Groups: []string{b.Subject}}):
-			spend, known = ledger.Spend("group:"+b.ID+":"+routingadmin.LocalSubjectHash(b.Subject), b.Period, now)
+			ownKey = routingadmin.BudgetChargeKey(b)
+			spend, known = ledger.Spend(ownKey, b.Period, now)
 			pooled = true
 		default:
+			continue
+		}
+		if pooled {
+			// A group pool shows only whether it is used up: its spend or
+			// percent (with the limit) is the other members' spend too.
+			view.Exceeded = known && spend >= b.LimitUSD
+			views = append(views, view)
 			continue
 		}
 		if known && spend >= budgetstore.ExceededUSD/2 {
@@ -144,10 +153,8 @@ func routingBudgetViews(cfg *config.Config, key string, admin bool, own routinga
 			continue
 		}
 		if known {
-			if !pooled {
-				s := spend
-				view.SpentUSD = &s
-			}
+			s := spend
+			view.SpentUSD = &s
 			if b.LimitUSD > 0 {
 				p := 100 * spend / b.LimitUSD
 				view.PercentUsed = &p
@@ -238,7 +245,8 @@ func routingOwnCaller(ctx context.Context, cfg *config.Config, key string) routi
 }
 
 // routingOwnRuleView is a routing.admin rule as the account it applies to
-// reads it (the routing rules list shape): no users or groups selector.
+// reads it (the routing rules list shape): no users, groups or agents
+// selector.
 type routingOwnRuleView struct {
 	ID      string               `json:"id"`
 	Match   *routingOwnRuleMatch `json:"match,omitempty"`
@@ -251,16 +259,17 @@ type routingOwnRuleView struct {
 // routingOwnRuleMatch is the part of a rule match that names no account.
 type routingOwnRuleMatch struct {
 	Connectors      []string `json:"connectors,omitempty"`
-	Agents          []string `json:"agents,omitempty"`
 	Categories      []string `json:"categories,omitempty"`
 	SeverityAtLeast string   `json:"severity_at_least,omitempty"`
 }
 
 // routingOwnRules are the routing.admin rules that apply to the caller of a
-// managed own read: a rule that names no user or group, or one whose users
-// and groups selectors the facts prove name the caller (the evaluator
-// matcher). Its users and groups are left out: they are the administrator's
-// policy and can name other accounts. Before, a user got no rules at all,
+// managed own read: a rule that names no user, group or agent, or one whose
+// users and groups selectors the facts prove name the caller (the evaluator
+// matcher). A rule that selects by agents only is not listed (an agent id
+// can stand for another person's agent), and users, groups and agents are
+// never shown: they are the administrator's policy and can name other
+// accounts. Before, a user got no rules at all,
 // so routing rules list said [] scope own while those rules applied to the
 // account (rel-1-0-10:GAP-1129).
 func routingOwnRules(cfg *config.Config, own routingadmin.Caller) []routingOwnRuleView {
@@ -270,12 +279,13 @@ func routingOwnRules(cfg *config.Config, own routingadmin.Caller) []routingOwnRu
 	}
 	for _, rule := range cfg.Routing.Admin.Rules {
 		m := rule.Match
-		if (len(m.Users) > 0 || len(m.Groups) > 0) && !routingadmin.NamesCaller(own, config.ProfileMatch{Users: m.Users, Groups: m.Groups}) {
+		person := len(m.Users) > 0 || len(m.Groups) > 0
+		if (!person && len(m.Agents) > 0) || (person && !routingadmin.NamesCaller(own, config.ProfileMatch{Users: m.Users, Groups: m.Groups})) {
 			continue
 		}
 		view := routingOwnRuleView{ID: rule.ID, Action: rule.Action, Allow: rule.Allow, Default: rule.Default, Message: rule.Message}
-		if len(m.Connectors)+len(m.Agents)+len(m.Categories) > 0 || m.SeverityAtLeast != "" {
-			view.Match = &routingOwnRuleMatch{Connectors: m.Connectors, Agents: m.Agents, Categories: m.Categories, SeverityAtLeast: m.SeverityAtLeast}
+		if len(m.Connectors)+len(m.Categories) > 0 || m.SeverityAtLeast != "" {
+			view.Match = &routingOwnRuleMatch{Connectors: m.Connectors, Categories: m.Categories, SeverityAtLeast: m.SeverityAtLeast}
 		}
 		rules = append(rules, view)
 	}

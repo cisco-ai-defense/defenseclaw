@@ -168,15 +168,16 @@ func routingGroupSIDsFor(cfg *config.Config) *profileGroupSIDs {
 	return routingGroupSIDs.table
 }
 
-// routingAdminGroupNames lists, once each in config order, the groups that
-// routing.admin rules (match.groups) and group budgets name.
+// routingAdminGroupNames lists, once each in config order (the first
+// spelling of names that differ only in case, as the matcher folds case),
+// the groups that routing.admin rules (match.groups) and group budgets name.
 func routingAdminGroupNames(cfg *config.Config) []string {
 	if cfg == nil || cfg.Routing.Admin == nil {
 		return nil
 	}
 	var names []string
 	add := func(group string) {
-		if strings.TrimSpace(group) != "" && !slices.Contains(names, group) {
+		if strings.TrimSpace(group) != "" && !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, group) }) {
 			names = append(names, group)
 		}
 	}

@@ -25,3 +25,14 @@ func TestEndpointFilterSkipsAnUnaddressableBackendWithAReason(t *testing.T) {
 		t.Fatalf("without the filter: %+v", ok)
 	}
 }
+
+// A backend with neither a credential nor an endpoint keeps its
+// credential reason, so the refusal names the missing credential
+// (NoCredentialMessage) as before.
+func TestCredentialReasonWinsOverEndpoint(t *testing.T) {
+	none := func(b Backend, _ Request) bool { return b.Alias != "claude" }
+	d := mustEngine(t, testConfig(), Options{CredentialOK: none, EndpointOK: none}).Decide(context.Background(), chat("refactor"))
+	if d.FilteredBy != "credential" || len(d.NoCredential) != 1 || d.NoCredential[0] != "claude" {
+		t.Fatalf("decision = %+v", d)
+	}
+}

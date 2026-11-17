@@ -82,8 +82,11 @@ func usageIdentity(ctx context.Context, f *modelusage.CallFacts) {
 		f.ProfileName, f.ProfileDigest = resolved.decision.Name, resolved.decision.Digest
 	}
 	if f.IdentityVerified && len(f.Groups) == 0 {
-		caller, _ := routeCallerFromContext(ctx)
-		f.Groups = usageCallerGroups(routingRequestConfig(ctx), caller)
+		// The caller matcher is built only where routing.admin names a group.
+		if cfg := routingRequestConfig(ctx); cfg != nil && cfg.StandaloneEnterprise() && len(routingAdminGroupNames(cfg)) > 0 {
+			caller, _ := routeCallerFromContext(ctx)
+			f.Groups = usageCallerGroups(cfg, caller)
+		}
 	}
 }
 

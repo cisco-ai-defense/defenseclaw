@@ -206,9 +206,6 @@ func (e *Engine) eligible(p Policy, alias string, req Request) (Backend, string)
 	if req.APIFamily != config.RoutingAPIChat && !slices.Contains(b.APIs, req.APIFamily) {
 		return Backend{}, "api"
 	}
-	if e.endpointOK != nil && !e.endpointOK(b, req) {
-		return Backend{}, "endpoint"
-	}
 	if e.capabilityFilter && slices.ContainsFunc(b.Capabilities, func(c string) bool { return slices.Contains(capabilityWords, c) }) {
 		need := map[string]bool{"tools": req.HasTools, "vision": req.HasImages, "long_context": req.LongContext}
 		for c, needed := range need {
@@ -219,6 +216,9 @@ func (e *Engine) eligible(p Policy, alias string, req Request) (Backend, string)
 	}
 	if e.credentialOK != nil && !e.credentialOK(b, req) {
 		return Backend{}, "credential"
+	}
+	if e.endpointOK != nil && !e.endpointOK(b, req) {
+		return Backend{}, "endpoint"
 	}
 	return b, ""
 }

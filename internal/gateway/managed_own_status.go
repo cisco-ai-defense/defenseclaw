@@ -188,7 +188,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	if usage := a.ownUsageSummary(ctx, idKey, self); usage != nil {
 		answer["usage"] = usage
 	}
-	if routing := ownRoutingSummary(cfg, self, time.Now()); routing != nil {
+	if routing := ownRoutingSummary(cfg, self, routingOwnCaller(ctx, cfg, self), time.Now()); routing != nil {
 		answer["routing"] = routing
 	}
 	return answer

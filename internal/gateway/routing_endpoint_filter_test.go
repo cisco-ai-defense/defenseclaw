@@ -74,8 +74,14 @@ func TestRouteOnlyBedrockResponsesAliasWithoutBaseURLIsFilteredWithAReason(t *te
 	activeEngineRouter.Store(f.srv.router)
 	t.Cleanup(func() { activeEngineRouter.Store(previous) })
 	routingTestLimiter.Lock()
+	previousLast := routingTestLimiter.last
 	routingTestLimiter.last = map[string]time.Time{}
 	routingTestLimiter.Unlock()
+	t.Cleanup(func() {
+		routingTestLimiter.Lock()
+		routingTestLimiter.last = previousLast
+		routingTestLimiter.Unlock()
+	})
 	a := &APIServer{scannerCfg: f.cfg}
 	rec := httptest.NewRecorder()
 	a.handleRoutingTest(rec, httptest.NewRequest(http.MethodPost, "/api/v1/routing/test", strings.NewReader(`{"prompt":"please refactor this function","connector":"codex"}`)))
