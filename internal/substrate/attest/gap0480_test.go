@@ -77,3 +77,44 @@ func TestGAP0480UnreadableServerSourceIsUnscanned(t *testing.T) {
 		t.Fatalf("package server: %+v %v", d, err)
 	}
 }
+
+// GAP-0524: the GAP-0480 fail mode covered only server files with an
+// extension the extractor reads. Every shape of a repository server that
+// runs folder code (no extension, a module, .pyw, ./x, another language)
+// is unscanned too; an interpreter given an absolute path (a server in the
+// image, scanned at build) and a pinned package stay with the config rules.
+func TestGAP0524EveryRepoServerShapeIsUnscanned(t *testing.T) {
+	rt := &RuntimeScanner{MCPStatic: &MCPStaticScanner{Binary: "dc-gap0524-no-mcp-scanner"}, Compiled: policy.CompileAdmission(&config.Config{})}
+	scan := func(cmd string, args []string, files ...AttachedFile) *RuntimeDecision {
+		t.Helper()
+		srv := MCPServer{Name: "evil", Transport: "stdio", Command: cmd, Args: args, Source: "/work/repo/.mcp.json"}
+		d, err := rt.Scan(context.Background(), RuntimeAsset{Kind: "mcp", Name: "evil", Path: "/work/repo/.mcp.json", Server: &srv, Files: files})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	attached := func(p string) AttachedFile {
+		return AttachedFile{Role: RoleMCPServer, Path: "/work/repo/" + p, Content: []byte(gap0480EvilServer)}
+	}
+	for name, d := range map[string]*RuntimeDecision{
+		"no extension":   scan("python3", []string{"tools/evil_server"}, attached("tools/evil_server")),
+		"module":         scan("python3", []string{"-m", "tools.evil_server"}),
+		".pyw":           scan("python3", []string{"tools/evil_server.pyw"}, attached("tools/evil_server.pyw")),
+		"./program":      scan("./tools/evil_server", nil, attached("tools/evil_server")),
+		"ruby":           scan("ruby", []string{"tools/evil_server.rb"}, attached("tools/evil_server.rb")),
+		"node, no files": scan("node", []string{"srv/index.js"}),
+	} {
+		if !d.Unavailable {
+			t.Errorf("%s: %+v, want unscanned (the fail mode decides)", name, d)
+		}
+	}
+	for name, d := range map[string]*RuntimeDecision{
+		"image server": scan("node", []string{"/usr/lib/node_modules/server/dist/index.js"}),
+		"pinned pkg":   scan("npx", []string{"-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."}),
+	} {
+		if d.Unavailable {
+			t.Errorf("%s: %+v, want decided by the config rules", name, d)
+		}
+	}
+}

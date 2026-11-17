@@ -230,12 +230,18 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 		res.Findings = append(res.Findings, ConfigRules(*a.Server, r.AllowedMCPHosts)...)
 		if r.MCPStatic != nil && a.Server.Transport == "stdio" {
 			var src strings.Builder
-			hasSource := false
+			// hasSource: the server runs code of the folder, which only a tool
+			// scan could judge: a file it starts, whatever its extension, or
+			// an interpreter given a module or a path (GAP-0524). Only the
+			// extensions the extractor reads are read for tools.
+			hasSource := localInterpreterServer(*a.Server)
 			for _, f := range files {
-				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] && serverStarts(*a.Server, f.Path) {
+				if f.Role == RoleMCPServer && serverStarts(*a.Server, f.Path) {
 					hasSource = true
-					src.Write(f.Content)
-					src.WriteByte('\n')
+					if sourceExt[path.Ext(f.Path)] {
+						src.Write(f.Content)
+						src.WriteByte('\n')
+					}
 				}
 			}
 			tools := ExtractToolDefs(src.String())
@@ -609,6 +615,42 @@ func skillDirOf(file, name string) string {
 // file p: the kit attaches the in-repository files of every server of a
 // config (E20), and one server's source must not decide another server's
 // tool calls (GAP-0185: a package server beside a local one).
+// interpreters run a program named on their command line. A server
+// started by one with a module (-m) or a path to run is code the tool scan
+// would have to read; a pinned package from a runtime fetcher (npx, uvx) is
+// decided by the config rules (GAP-0524).
+var interpreters = map[string]bool{"python": true, "python3": true, "py": true, "node": true, "nodejs": true, "deno": true, "bun": true,
+	"ruby": true, "perl": true, "php": true, "java": true, "lua": true, "Rscript": true, "julia": true}
+
+// localInterpreterServer reports a stdio server that runs code of the
+// folder: a program started by a relative path (./x), or an interpreter
+// given a relative script, a module (-m), a jar or inline code. An
+// absolute path is a program installed in the image, which the template
+// build scanned; a pinned package fetcher is decided by the config rules.
+func localInterpreterServer(s MCPServer) bool {
+	base := path.Base(filepath.ToSlash(s.Command))
+	if strings.HasPrefix(s.Command, "./") || strings.HasPrefix(s.Command, "../") {
+		return true
+	}
+	if !interpreters[strings.TrimSuffix(base, ".exe")] && !strings.HasPrefix(base, "python3.") {
+		return false
+	}
+	for i, a := range s.Args {
+		switch {
+		case a == "-m" || a == "-jar":
+			return i+1 < len(s.Args)
+		case a == "-c" || a == "-e" || a == "--eval":
+			return true
+		case strings.HasPrefix(a, "-"):
+			continue
+		default:
+			// The script the interpreter runs: the folder's when relative.
+			return !path.IsAbs(filepath.ToSlash(a)) && !filepath.IsAbs(a)
+		}
+	}
+	return false
+}
+
 func serverStarts(s MCPServer, p string) bool {
 	p = path.Clean("/" + filepath.ToSlash(p))
 	for _, cand := range append([]string{s.Command}, s.Args...) {
