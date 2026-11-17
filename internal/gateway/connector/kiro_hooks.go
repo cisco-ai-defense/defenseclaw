@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -152,6 +153,7 @@ func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool) error 
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		removeKiroFileResidue(path, hookScript, false)
 		return nil
 	}
 	return writeJSONObject(path, cfg)
@@ -308,6 +310,7 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
+			removeKiroFileResidue(path, hookScript, true)
 			return nil
 		}
 		return writeJSONObject(path, cfg)
@@ -331,6 +334,7 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		removeKiroFileResidue(path, hookScript, true)
 		return nil
 	}
 	return writeJSONObject(path, cfg)
@@ -487,7 +491,7 @@ func kiroV2AgentIsDefenseClawOverlay(cfg map[string]interface{}) bool {
 	if len(cfg) == 0 {
 		return true
 	}
-	if !kiroV2AgentAllowsSeed(cfg) && !kiroV2AgentCarriesOnlyMetadata(cfg) {
+	if !kiroV2AgentAllowsSeed(cfg) && !kiroV2AgentIsKnownDefenseClawShape(cfg) {
 		return false
 	}
 	name, _ := cfg["name"].(string)
@@ -526,29 +530,97 @@ func seedKiroDefaultAgentOverlay(cfg map[string]interface{}) {
 // agent; it marks the file as DefenseClaw's own.
 const kiroManagedAgentDescription = "DefenseClaw-guarded Kiro agent"
 
-// kiroAgentBehaviorKeys are the keys of a Kiro agent that change what it does.
-// A defenseclaw agent that carries one was edited by its operator.
-var kiroAgentBehaviorKeys = []string{
-	"prompt", "mcpServers", "toolAliases", "allowedTools", "toolsSettings",
-	"resources", "useLegacyMcpJson", "model", "keyboardShortcut", "welcomeMessage",
-}
+// kiroAgentEmptyKeys are keys of a Kiro agent file that Kiro writes with an
+// empty value when it converts or normalizes an agent. Empty, they change
+// nothing; with a value they are the operator's.
+var kiroAgentEmptyKeys = []string{"prompt", "resources", "mcpServers", "allowedTools", "toolAliases", "toolsSettings"}
 
-// kiroV2AgentCarriesOnlyMetadata reports whether an agent that holds a key
-// Setup does not seed is still DefenseClaw's own file: it carries Setup's
-// description, and every other key is metadata (Kiro's own upgrade record of
-// an agent it converted) rather than a setting that changes the agent. Teardown
-// then removes it with its last DefenseClaw hook instead of leaving an orphaned
-// "DefenseClaw-guarded" agent behind (rel-1-0-10 GAP-1174).
-func kiroV2AgentCarriesOnlyMetadata(cfg map[string]interface{}) bool {
+// kiroV2AgentIsKnownDefenseClawShape reports whether cfg is a defenseclaw
+// agent file holding only keys that Setup writes (name, description, tools,
+// includeMcpJson, hooks), the $schema pointer, and the keys of
+// kiroAgentEmptyKeys with an empty value, and carrying Setup's description.
+// Any other key, or a non-empty value of those, is the operator's content, so
+// the file stays when its last DefenseClaw hook goes (rel-1-0-10 GAP-1174).
+func kiroV2AgentIsKnownDefenseClawShape(cfg map[string]interface{}) bool {
 	if description, _ := cfg["description"].(string); strings.TrimSpace(description) != kiroManagedAgentDescription {
 		return false
 	}
-	for _, key := range kiroAgentBehaviorKeys {
-		if _, ok := cfg[key]; ok {
+	for key, value := range cfg {
+		switch {
+		case key == "name" || key == "hooks" || key == "description" || key == "tools" || key == "includeMcpJson" || key == "$schema":
+		case slices.Contains(kiroAgentEmptyKeys, key) && kiroEmptyJSONValue(value):
+		default:
 			return false
 		}
 	}
 	return true
+}
+
+func kiroEmptyJSONValue(value interface{}) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(v) == ""
+	case []interface{}:
+		return len(v) == 0
+	case map[string]interface{}:
+		return len(v) == 0
+	}
+	return false
+}
+
+// removeKiroFileResidue removes what sits beside a Kiro file DefenseClaw has
+// just removed: its empty lock file, and, for a CLI 2.x agent, the
+// <agent>.json.bak copies Kiro's /upgrade-agent keeps, when each is itself
+// only DefenseClaw's overlay (its hooks all DefenseClaw's and no operator
+// key). A copy with anything else in it is the operator's and stays.
+func removeKiroFileResidue(path, hookScript string, agent bool) {
+	if info, err := os.Lstat(path + ".lock"); err == nil && info.Mode().IsRegular() && info.Size() == 0 {
+		_ = os.Remove(path + ".lock")
+	}
+	if !agent {
+		return
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return
+	}
+	prefix := filepath.Base(path) + ".bak"
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) || !entry.Type().IsRegular() {
+			continue
+		}
+		backup := filepath.Join(filepath.Dir(path), entry.Name())
+		if info, err := os.Stat(backup); err != nil || info.Size() > 1<<20 {
+			continue
+		}
+		cfg, err := readJSONObject(backup)
+		if err != nil || len(cfg) == 0 {
+			continue
+		}
+		if list, ok := cfg["hooks"].([]interface{}); ok {
+			if kept := removeKiroOwnedUniversalHooks(list, hookScript); len(kept) == 0 {
+				delete(cfg, "hooks")
+			} else {
+				cfg["hooks"] = kept
+			}
+		} else if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+			for event, raw := range hooks {
+				if remaining := removeKiroOwnedV2Hooks(raw, hookScript); len(remaining) == 0 {
+					delete(hooks, event)
+				} else {
+					hooks[event] = remaining
+				}
+			}
+			if len(hooks) == 0 {
+				delete(cfg, "hooks")
+			}
+		}
+		if kiroV2AgentIsDefenseClawOverlay(cfg) {
+			_ = os.Remove(backup)
+		}
+	}
 }
 
 func kiroV2AgentAllowsSeed(cfg map[string]interface{}) bool {
@@ -600,6 +672,41 @@ func removeKiroOwnedV2Hooks(raw interface{}, hookScript string) []interface{} {
 // DefenseClaw Kiro entry, including a form an earlier build wrote; teardown
 // verification uses it.
 func kiroV2AgentReferencesAnyHook(path, hookScript string) (bool, error) {
+	return kiroAgentFileHoldsCommand(path, kiroOwnedHookCommands(hookScript))
+}
+
+// kiroV3FileHoldsCommand reports whether the v3 hook file at path has an
+// entry whose decoded action.command is exactly one of commands. Unlike
+// kiroV3FileReferencesHook it does not take the name prefix defenseclaw-* or
+// the script's base name as proof: a file shared with another install's
+// entries is not this install's.
+func kiroV3FileHoldsCommand(path string, commands []string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false, fmt.Errorf("parse kiro hooks %s: %w", path, err)
+	}
+	hooks, _ := cfg["hooks"].([]interface{})
+	for _, item := range hooks {
+		obj, _ := item.(map[string]interface{})
+		action, _ := obj["action"].(map[string]interface{})
+		command, _ := action["command"].(string)
+		if command = strings.TrimSpace(command); command != "" && slices.Contains(commands, command) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// kiroAgentFileHoldsCommand reports whether the CLI 2.x agent file at path has
+// a hook entry that runs exactly one of commands, in any form of the file.
+func kiroAgentFileHoldsCommand(path string, commands []string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -611,7 +718,7 @@ func kiroV2AgentReferencesAnyHook(path, hookScript string) (bool, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return false, fmt.Errorf("parse kiro agent %s: %w", path, err)
 	}
-	return containsHookScript(cfg, kiroOwnedHookCommands(hookScript)...), nil
+	return containsHookScript(cfg, commands...), nil
 }
 
 func kiroBuiltInAgentName(name string) bool {

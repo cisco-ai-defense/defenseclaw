@@ -60,6 +60,15 @@ func TestBootRemovesHooksOfAConnectorTheInstallNoLongerGuards(t *testing.T) {
 		return err == nil && strings.Contains(string(data), "defenseclaw-")
 	}
 
+	// Without a kiro-hook.sh and with entries that are another install's (a
+	// defenseclaw-* name, another data folder's command): nothing proves they
+	// are this install's, so they stay.
+	write(hooksFile, foreign)
+	s.reclaimUnguardedConnectorHooks(context.Background(), registry)
+	if !kiroHasHooks() {
+		t.Fatal("another install's hooks were removed without any proof they are this install's")
+	}
+
 	// Without a kiro-hook.sh (a rollback's data swap dropped it) the entries
 	// still name this install's script: they run a script that is not there
 	// and block every Kiro call, so a boot removes them (GAP-1092).

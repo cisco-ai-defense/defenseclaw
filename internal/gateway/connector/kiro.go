@@ -300,23 +300,54 @@ func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 // an unconfigured connector "already absent" with its hook file still there
 // (rel-1-0-10 GAP-1092, GAP-1174).
 func (c *KiroConnector) orphanedHookFiles(opts SetupOpts) ([]string, error) {
-	command := c.hookCommand(opts)
+	commands := c.installHookCommands(opts)
+	if len(commands) == 0 {
+		return nil, nil
+	}
 	var found []string
 	for _, path := range c.hookCleanupPaths(opts) {
-		if present, err := kiroV3FileReferencesHook(path, command); err != nil {
+		if present, err := kiroV3FileHoldsCommand(path, commands); err != nil {
 			return nil, err
 		} else if present {
 			found = append(found, path)
 		}
 	}
 	for _, path := range append(c.agentCleanupPaths(opts), kiroBuiltInDefaultAgentPath()) {
-		if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
+		if present, err := kiroAgentFileHoldsCommand(path, commands); err != nil {
 			return nil, err
 		} else if present {
 			found = append(found, path)
 		}
 	}
 	return uniqueNonEmptyStrings(found), nil
+}
+
+// installHookCommands are the exact commands this install's per-user Setup
+// writes into Kiro's files, in the forms an earlier release wrote them. The
+// hook files under ~/.kiro are shared by every DefenseClaw data folder of the
+// account, so a file that merely holds an entry named defenseclaw-* may be
+// another install's: ownership is the decoded action.command being one of
+// these. A managed install's footprint belongs to the hook guardian, so no
+// command is owned there.
+func (c *KiroConnector) installHookCommands(opts SetupOpts) []string {
+	if kiroManaged(opts) {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return kiroWindowsOwnedHookCommandsFor(false)
+	}
+	script := c.hookCommand(opts)
+	v3 := c.hookCommandForV3Surface(opts)
+	return uniqueNonEmptyStrings([]string{script, posixHookCommandUnquoted(script), v3, posixHookCommandUnquoted(v3)})
+}
+
+// InstallOwnsHookEntries reports whether a Kiro file still holds a hook entry
+// whose command is one this install wrote. The boot reclaim of an unguarded
+// connector uses it as the proof of ownership when the install's hook script
+// is gone (a rollback's data swap drops it).
+func (c *KiroConnector) InstallOwnsHookEntries(opts SetupOpts) (bool, error) {
+	files, err := c.orphanedHookFiles(opts)
+	return len(files) > 0, err
 }
 
 // reclaimKiroHookFile puts one v3 hook file back as Setup found it when it is
@@ -679,9 +710,19 @@ func windowsKiroPowerShellBridge(hookBinary, surface string, managed bool, answe
 // removes them in the CLI 2.x agent files, whose entries are otherwise
 // matched by exact command.
 func kiroWindowsOwnedHookCommands() []string {
+	return kiroWindowsOwnedHookCommandsFor(true)
+}
+
+// kiroWindowsOwnedHookCommandsFor is kiroWindowsOwnedHookCommands with, or
+// without, the commands the administrator-managed footprint writes.
+func kiroWindowsOwnedHookCommandsFor(includeManaged bool) []string {
 	var commands []string
+	managedForms := []bool{false}
+	if includeManaged {
+		managedForms = append(managedForms, true)
+	}
 	for _, binary := range nativeHookBinaryOwnershipCandidates() {
-		for _, managed := range []bool{false, true} {
+		for _, managed := range managedForms {
 			forms := []string{
 				windowsKiroHookCommandForBinary(binary, "", managed),
 				windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3, managed),

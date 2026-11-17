@@ -92,6 +92,15 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 	return found, nil
 }
 
+// InstallHookEntryOwner is a connector that can say, from the decoded entries
+// of the agent files alone, whether one of them is a hook this install's
+// Setup wrote (never a managed install's, and never another data folder's of
+// the same account). The boot reclaim of an unguarded connector uses it as the
+// proof of ownership when the install's hook script is gone.
+type InstallHookEntryOwner interface {
+	InstallOwnsHookEntries(SetupOpts) (bool, error)
+}
+
 // ownedRegistrationKeyPresent checks only the host's registration namespace.
 // Commands below those keys can change across releases without losing the
 // ownership signal used by rollback cleanup.
