@@ -596,13 +596,24 @@ func TestGAP0429BenignStreamsAreNotHeld(t *testing.T) {
 		{"code-words", "func (c *Client) Refresh() error {\n\ttoken, err := c.source.Token()\n\tif err != nil {\n\t\treturn err\n\t}\n\tc.task = \"desk-top\"\n\treturn c.store.Save(token)\n}\n"},
 		{"long-prose", retestFiller(64 << 10)},
 	}
+	sizes := []int{7, 24, 4096}
+	if hookAnswerRaceBuild {
+		sizes = []int{24, 4096} // as gap0429Sizes: the 7-byte rows run in the plain build
+	}
 	for _, path := range gap0429Paths() {
 		for _, b := range benign {
-			for _, size := range []int{7, 24, 4096} {
+			for _, size := range sizes {
 				if b.name == "long-prose" && size == 7 && (path.name == "raw-forward" || path.name == gap0429PassthroughPath(gap0429OpenAIChat).name) {
 					// The raw forward checks the whole text at every frame:
 					// 9k frames of 7 bytes outlast the request deadline, as on
 					// rel 4269debe92 (not the hold).
+					continue
+				}
+				if hookAnswerRaceBuild && b.name == "long-prose" && size != 4096 {
+					// Under -race the whole-text check at every frame makes
+					// 64 KiB in small frames outlast the request deadline on
+					// every passthrough path (807 s, the client got part of
+					// the text); the plain build runs those rows.
 					continue
 				}
 				name := fmt.Sprintf("%s/%s/size=%d", path.name, b.name, size)
