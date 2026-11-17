@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestPerUserNativeRegisteredArgsAndScriptTwin(t *testing.T) {
@@ -111,19 +113,40 @@ func TestGAP0322NativeGatewayUnderShellOptions(t *testing.T) {
 			addr := strings.TrimPrefix(server.URL, "http://")
 			payload := `{"hook_event_name":"PreToolUse","session_id":"session","tool_name":"Bash","tool_input":{"command":"echo ok"}}`
 			var out, errOut bytes.Buffer
-			if code := run(home, addr, strings.NewReader(payload), &out, &errOut, time.Now()); code != 2 {
+			// The hook's answer budget (3.5 s from startedAt) is a product
+			// wall-clock window this test does not measure: under a loaded
+			// whole-package -race run the reply came back past it ("posix:
+			// incomplete gateway response", rel-1-0-10:GAP-1217), and that
+			// deadline answer says nothing about shell options. The call
+			// starts later by the host slowdown (testenv.HostSlowdown), as
+			// other budget tests do, and a deadline answer measures again,
+			// doubles and tries once more; the asserted verdicts are unchanged.
+			slow := testenv.HostSlowdown()
+			call := func(want int) int {
+				var code int
+				for try := 0; try < 2; try++ {
+					out.Reset()
+					errOut.Reset()
+					startedAt := time.Now().Add(testenv.Scale(3500*time.Millisecond, slow) - 3500*time.Millisecond)
+					code = run(home, addr, strings.NewReader(payload), &out, &errOut, startedAt)
+					deadline := strings.Contains(errOut.String(), "incomplete gateway response") ||
+						strings.Contains(errOut.String(), "did not answer in time")
+					if code == want || !deadline {
+						break
+					}
+					slow = min(2*max(slow, testenv.HostSlowdown()), testenv.MaxHostSlowdown)
+				}
+				return code
+			}
+			if code := call(2); code != 2 {
 				t.Fatalf("protected exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
 			reply.Store(`{"action":"allow"}`)
-			out.Reset()
-			errOut.Reset()
-			if code := run(home, addr, strings.NewReader(payload), &out, &errOut, time.Now()); code != 0 {
+			if code := call(0); code != 0 {
 				t.Fatalf("ordinary exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
 			server.Close()
-			out.Reset()
-			errOut.Reset()
-			if code := run(home, addr, strings.NewReader(payload), &out, &errOut, time.Now()); code != 0 ||
+			if code := call(0); code != 0 ||
 				!strings.Contains(out.String(), `"permissionDecision":"deny"`) {
 				t.Fatalf("unavailable exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
