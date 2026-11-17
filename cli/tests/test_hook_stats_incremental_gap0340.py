@@ -17,9 +17,8 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 import defenseclaw.db as db_module
+import pytest
 from defenseclaw.db import Store
 
 _BASE = datetime(2026, 11, 17, 8, 0, 0, tzinfo=timezone.utc)
@@ -109,17 +108,50 @@ def _rows(start: int, count: int, tracked: bool) -> tuple[list[tuple], list[tupl
             action = ("allow", "alert", "block")[index % 3]
             details = f"connector={connector} result=ok action={action} raw_action={action} mode=action"
             projected = json.dumps({"correlation": {"semantic_event_id": sid}})
-            audit.append((f"ch-{index}", at, "connector-hook", details, None, connector,
-                          1 if action == "block" else 0, None, projected))
+            audit.append(
+                (
+                    f"ch-{index}",
+                    at,
+                    "connector-hook",
+                    details,
+                    None,
+                    connector,
+                    1 if action == "block" else 0,
+                    None,
+                    projected,
+                )
+            )
             if kind == 0:
-                audit.append((f"pair-{index}", at, "hook_decision", "hook_decision", None, connector, 0,
-                               json.dumps(_body(action)), projected))
+                audit.append(
+                    (
+                        f"pair-{index}",
+                        at,
+                        "hook_decision",
+                        "hook_decision",
+                        None,
+                        connector,
+                        0,
+                        json.dumps(_body(action)),
+                        projected,
+                    )
+                )
         elif kind in (3, 4):
             # A benign per-user allow (of record), or a fail-mode decision
             # awaiting its report.
             projected = json.dumps({"correlation": {"semantic_event_id": sid}, "body": _body("allow")})
-            audit.append((f"lone-{index}", at, "hook_decision", "hook_decision", None, "claudecode", 0,
-                           json.dumps(_body("allow" if kind == 3 else "alert")), projected))
+            audit.append(
+                (
+                    f"lone-{index}",
+                    at,
+                    "hook_decision",
+                    "hook_decision",
+                    None,
+                    "claudecode",
+                    0,
+                    json.dumps(_body("allow" if kind == 3 else "alert")),
+                    projected,
+                )
+            )
             if tracked:
                 lone.append((f"lone-{index}", None if kind == 3 else sid))
         elif kind == 5:
@@ -228,10 +260,11 @@ def test_the_counts_match_an_all_time_count_after_every_change(path_and_kind, mo
             ("rows deleted in the middle", ("DELETE FROM audit_events WHERE rowid % 11 = 0 AND rowid < 1200",)),
             ("one hook row deleted", ("DELETE FROM audit_events WHERE id = 'ch-1400'",)),
             # A connector-hook report row pairs a fail-mode lone decision.
-            ("late pairing", ("DELETE FROM audit_hook_lone WHERE semantic_event_id = 'sid-1201'",)
-             if tracked else ()),
-            ("newest row deleted, its rowid reused",
-             ("DELETE FROM audit_events WHERE rowid = (SELECT MAX(rowid) FROM audit_events)", ("insert", 2_000, 3))),
+            ("late pairing", ("DELETE FROM audit_hook_lone WHERE semantic_event_id = 'sid-1201'",) if tracked else ()),
+            (
+                "newest row deleted, its rowid reused",
+                ("DELETE FROM audit_events WHERE rowid = (SELECT MAX(rowid) FROM audit_events)", ("insert", 2_000, 3)),
+            ),
             ("VACUUM renumbers the rows", ("VACUUM",)),
             ("more rows", ("insert", 3_000, 200)),
             ("purge", ("DELETE FROM audit_events",)),

@@ -299,8 +299,9 @@ def _merge_hook_totals(target: dict[str, list[Any]], add: dict[str, list[Any]]) 
             entry[3] = newest
 
 
-def _add_hook_stat(stats: dict[str, dict[str, Any]], connector: Any, calls: Any, blocks: Any, alerts: Any,
-                   newest: Any) -> None:
+def _add_hook_stat(
+    stats: dict[str, dict[str, Any]], connector: Any, calls: Any, blocks: Any, alerts: Any, newest: Any
+) -> None:
     key = str(connector or "").strip().lower()
     if not key:
         return
@@ -323,6 +324,7 @@ def _chunk_ranges(chunks: list[int], bits: int) -> list[tuple[int, int]]:
         else:
             ranges.append((first, last))
     return ranges
+
 
 # Live Store connections in this process, by database path. A connection
 # whose POSIX lock was dropped looks absent to a peer process that closes the
@@ -1095,15 +1097,17 @@ class Store:
                 sizes[int(chunk)] = sizes.get(int(chunk), 0) + int(count)
                 if not is_new:
                     before[int(chunk)] = int(count)
-            awaiting = frozenset(
-                int(row[0])
-                for row in self.db.execute(
-                    f"""SELECT lone.rowid FROM {HOOK_ROWS_TABLE} AS hook_lone
-                        CROSS JOIN audit_events AS lone ON lone.id = hook_lone.audit_event_id
-                        WHERE hook_lone.semantic_event_id IS NOT NULL AND lone.rowid <= ?""",
-                    (mark,),
+            awaiting: frozenset[int] = frozenset()
+            if tracked:
+                awaiting = frozenset(
+                    int(row[0])
+                    for row in self.db.execute(
+                        f"""SELECT lone.rowid FROM {HOOK_ROWS_TABLE} AS hook_lone
+                            CROSS JOIN audit_events AS lone ON lone.id = hook_lone.audit_event_id
+                            WHERE hook_lone.semantic_event_id IS NOT NULL AND lone.rowid <= ?""",
+                        (mark,),
+                    )
                 )
-            ) if tracked else frozenset()
             if cache is None or old is None:
                 chunks = self._hook_stats_pass(None, mark, records=records, tracked=tracked)
             else:
@@ -1119,9 +1123,7 @@ class Store:
                         if chunk not in dirty:
                             _merge_hook_totals(chunks.setdefault(chunk, {}), totals)
                 for low, high in _chunk_ranges(sorted(chunk for chunk in dirty if sizes.get(chunk)), bits):
-                    chunks.update(
-                        self._hook_stats_pass(low - 1, min(high, mark), records=records, tracked=tracked)
-                    )
+                    chunks.update(self._hook_stats_pass(low - 1, min(high, mark), records=records, tracked=tracked))
             self._hook_stats_cache = _HookStatsCache(
                 key=key, mark=mark, mark_id=mark_id, sizes=sizes, chunks=chunks, awaiting=awaiting
             )
