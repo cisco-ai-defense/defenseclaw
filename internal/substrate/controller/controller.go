@@ -193,6 +193,11 @@ type actorState struct {
 	firstSeen time.Time
 	lastState ateapi.ActorState
 	runningAt time.Time
+	// stoppedAt is the last time the actor was seen not running (as read
+	// from the control API, or suspended by this controller); zero when it
+	// has been running since this controller first saw it. A task end after
+	// it belongs to the actor's current run (GAP-0411).
+	stoppedAt time.Time
 	// ourUID/ourVersion identify the policy version this controller last
 	// wrote or confirmed; a different version is a foreign change.
 	ourUID     string
@@ -308,6 +313,8 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	c.reloadConfig(ctx)
 	c.applyResets(ctx)
 	c.retryLifecycle(ctx)
+	// The list shows each actor's state as of listedAt or later.
+	listedAt := c.o.Now()
 	actors, err := c.listActors(ctx)
 	if err != nil {
 		return err
@@ -382,7 +389,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	var emu sync.Mutex
 	for _, batch := range [][]*ateapi.Actor{urgent, rest} {
 		c.parallel(batch, func(a *ateapi.Actor) {
-			if err := c.reconcileActor(ctx, a); err != nil {
+			if err := c.reconcileActor(ctx, a, listedAt); err != nil {
 				emu.Lock()
 				errs = append(errs, err)
 				emu.Unlock()
@@ -539,6 +546,7 @@ func createdAt(md *ateapi.ResourceMetadata, st *actorState) time.Time {
 func (c *Controller) EnsurePolicy(ctx context.Context, ref *ateapi.ObjectRef) error {
 	c.reloadConfig(ctx)
 	for try := 1; ; try++ {
+		readAt := c.o.Now()
 		a, err := c.o.Client.GetActor(ctx, ref)
 		if err != nil {
 			return err
@@ -552,7 +560,7 @@ func (c *Controller) EnsurePolicy(ctx context.Context, ref *ateapi.ObjectRef) er
 			c.actors[uid] = st
 		}
 		c.mu.Unlock()
-		if err := c.reconcileActor(ctx, a); err != nil {
+		if err := c.reconcileActor(ctx, a, readAt); err != nil {
 			return err
 		}
 		st.mu.Lock()
@@ -652,7 +660,9 @@ func (c *Controller) state(uid string) *actorState {
 	return c.actors[uid]
 }
 
-func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error {
+// reconcileActor decides one actor. seenAt is when its state was read (no
+// later than the read itself).
+func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt time.Time) error {
 	md := a.GetMetadata()
 	st := c.state(md.GetUid())
 	if st == nil {
@@ -667,6 +677,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	now := c.o.Now()
 	if state == ateapi.ActorStateRunning && st.lastState != ateapi.ActorStateRunning {
 		st.runningAt = now
+	}
+	if state != ateapi.ActorStateRunning && seenAt.After(st.stoppedAt) {
+		st.stoppedAt = seenAt
 	}
 	first := st.lastState == ateapi.ActorStateUnspecified
 	prev := st.lastState
