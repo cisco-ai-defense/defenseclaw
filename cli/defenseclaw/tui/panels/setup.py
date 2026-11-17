@@ -5167,6 +5167,16 @@ def _build_guardrail_setup_args(
     if judge_dirty and judge_model:
         combined = f"{judge_provider}/{judge_model}" if judge_provider else judge_model
         base.extend(("--judge-model", combined))
+    if scope == _GUARDRAIL_SCOPE_GLOBAL and "--connector" in base and "--judge-hook-connectors" not in base:
+        # On a one-connector install the global scope still names the connector,
+        # and a named connector alone gets the judge. Global means every active
+        # connector, including ones added later, so say so.
+        strategy = base[base.index("--detection-strategy") + 1] if "--detection-strategy" in base else ""
+        gate = [str(c).strip() for c in (get_config_value(cfg, "guardrail.judge.hook_connectors", None) or ())]
+        # A gate that already lists connectors is the operator's; an empty or "all" gate is
+        # the one a named connector would narrow.
+        if (strategy in {"regex_judge", "judge_first"} or "--judge-model" in base) and gate in ([], ["*"]):
+            base.extend(("--judge-hook-connectors", "all"))
     return tuple(base)
 
 
