@@ -801,6 +801,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 				// (GAP-0430).
 				c.recheck(st, a, base, "policy in force")
 			}
+			// The profile opts --task runs into idle suspend (GAP-0498); the
+			// registration only records that the actor is a task.
+			reg.IdleSuspendTask = reg.IdleSuspendTask || res.IdleSuspendTasks
 			return c.idle(ctx, a, st, reg, base, res.idleAfter(lv.IdleSuspendAfter))
 		}
 	}

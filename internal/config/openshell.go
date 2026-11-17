@@ -475,6 +475,10 @@ type SandboxAdminConfig struct {
 	// IdleSuspendAfter (a Go duration, at least 1m) replaces the cluster's
 	// substrate.idle_suspend_after for the actor; the shortest wins.
 	IdleSuspendAfter string `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty" json:",omitempty"`
+	// IdleSuspendTasks opts a running --task or --batch run into idle
+	// suspend; by default such a run is exempt (a silent long job is not an
+	// idle one). Any layer that sets it true opts in (GAP-0498).
+	IdleSuspendTasks *bool `mapstructure:"idle_suspend_tasks" yaml:"idle_suspend_tasks,omitempty" json:",omitempty"`
 	// UnattendedAsks is deny or queue (D12): what an ask of an unattended
 	// actor does, over substrate.unattended.asks; deny wins.
 	UnattendedAsks string `mapstructure:"unattended_asks" yaml:"unattended_asks,omitempty" json:",omitempty"`
@@ -539,7 +543,7 @@ func (a SandboxAdminConfig) IsZero() bool {
 		len(a.AllowedCredentials) == 0 && a.OnSilence == "" && a.MaxSilenceAfter == "" &&
 		a.ProcessTree == nil && a.ForeignSandboxes == "" && a.AllowUpstreamTelemetry == nil &&
 		a.DeleteStoppedAfter == "" && a.RequestAccess == "" && a.DriverFallback == "" &&
-		a.Runtimes == nil && a.SandboxClass == "" && a.IdleSuspendAfter == "" && a.UnattendedAsks == "" &&
+		a.Runtimes == nil && a.SandboxClass == "" && a.IdleSuspendAfter == "" && a.IdleSuspendTasks == nil && a.UnattendedAsks == "" &&
 		a.AskTimeout == "" && a.ActorSecrets == nil && a.AskHosts == nil && a.URLRules == nil
 }
 

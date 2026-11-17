@@ -169,6 +169,9 @@ type Resolution struct {
 	// IdleSuspendAfter, when set, replaces Options.IdleSuspendAfter for the
 	// actor (the profile's idle_suspend_after; 0 = off).
 	IdleSuspendAfter *time.Duration
+	// IdleSuspendTasks is the profile's idle_suspend_tasks: a --task or
+	// --batch run of this profile may be idle-suspended (GAP-0498).
+	IdleSuspendTasks bool
 	// Warnings are shown as events (for example a glob on a foreign
 	// atespace, E3).
 	Warnings []string
