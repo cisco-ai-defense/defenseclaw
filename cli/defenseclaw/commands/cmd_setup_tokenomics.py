@@ -65,7 +65,10 @@ def tokenomics(
     """Per-call model usage and cost (observability.tokenomics, observability.pricing).
 
     Off by default. Prices come only from the table in config.yaml; a model
-    with no price entry has no cost, never a zero.
+    with no price entry has no cost, never a zero. On a host, usage comes from
+    the calls the guardrail proxy carries; the agents' own OTLP usage
+    (observability.tokenomics.native_otel_import) is read only for agents in an
+    isolated OpenShell sandbox.
 
     \b
     Examples:
