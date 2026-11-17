@@ -236,6 +236,9 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | `defenseclaw.substrate.idle_suspends` | counter | Actors suspended for being idle |
 | `defenseclaw.substrate.policy_conflicts` | counter | Actors marked `policy_conflict` |
 | `defenseclaw.substrate.rate_limited` | counter | Calls refused by the fair-share limit |
+| `defenseclaw.substrate.auth_refused` | counter | Tokens refused on the actor or admin listener, labelled `listener` (`actor`, `admin`) and `reason` (`missing_token`, `malformed`, `signature`, `algorithm`, `issuer`, `expired` and the other verifier reasons) |
+
+**Refused tokens.** A refused actor token (hook, model or relay call) or person token (the launcher on the admin listener) also writes one gateway log line, `[substrate] <listener> listener refused a token: <reason> (client <class>, <n> since the last line)`, and one substrate audit row with `event: auth_refused`, `listener`, `reason`, `client` (`loopback`, `private`, `link_local`, `public` or `unknown`, never the address) and `count`, at most once a minute per listener and reason on each replica. The `count` says how many refusals the row stands for, so a flood of bad tokens cannot fill the audit store. No line, row or label holds token bytes, a claim or the verifier's detail. Made or altered tokens (`malformed`, `algorithm`, `signature`, `issuer`, `audience` and similar) are `MEDIUM`; a missing, expired or stale token is `INFO`.
 
 The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates.
 

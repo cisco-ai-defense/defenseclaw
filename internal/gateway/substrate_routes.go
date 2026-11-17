@@ -243,11 +243,13 @@ func (a *APIServer) substrateAdminAuthenticate(st *substrateState, next http.Han
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok := bearer(r)
 		if tok == "" {
+			st.authRefused(r, substrateListenerAdmin, identity.ReasonMissing)
 			writeSubstrateJSONError(w, http.StatusUnauthorized, string(identity.ReasonMissing))
 			return
 		}
 		p, err := st.cfg.People.Verify(r.Context(), tok)
 		if err != nil {
+			st.authRefused(r, substrateListenerAdmin, identity.ReasonOf(err))
 			status := http.StatusUnauthorized
 			reason := string(identity.ReasonOf(err))
 			if identity.Unavailable(err) {

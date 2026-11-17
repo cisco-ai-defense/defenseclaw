@@ -180,6 +180,12 @@ var substrateRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Actor requests refused by the fair-share limits (defenseclaw.substrate.rate_limited).",
 }, []string{"scope", "route"})
 
+// substrateAuthRefused is defenseclaw.substrate.auth_refused (GAP-0408).
+var substrateAuthRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "defenseclaw_substrate_auth_refused_total",
+	Help: "Tokens refused on the Substrate actor or admin listener, by listener and closed reason (defenseclaw.substrate.auth_refused).",
+}, []string{"listener", "reason"})
+
 func runServe(cmd *cobra.Command, args []string) error {
 	if !serveFlags.substrate {
 		return errors.New("serve runs only on Agent Substrate: pass --substrate")
@@ -191,7 +197,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return errors.New("serve: --plain-http is for tests outside a cluster; use --actor-plain-http to serve only the actor listener without TLS")
 	}
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(substrateRateLimited)
+	reg.MustRegister(substrateRateLimited, substrateAuthRefused)
 	var ready atomic.Bool
 	go serveSubstrateMetrics(reg, &ready)
 	switch serveFlags.role {
@@ -568,6 +574,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 			OnRateLimited: func(scope ratelimit.Scope, route string) {
 				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
+			},
+			OnAuthRefused: func(listener, reason string) {
+				substrateAuthRefused.WithLabelValues(listener, reason).Inc()
 			},
 		}
 		out.PolicyReset = substratePolicyResetter()
