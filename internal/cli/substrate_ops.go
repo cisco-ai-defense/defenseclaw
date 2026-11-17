@@ -396,6 +396,11 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	// GAP-0415: what the agent was asking about is gone with the folder it
+	// changed; its pending asks close now instead of waiting out their time.
+	if n := substrateCloseAsks(ctx, s.Client, a, "the agent was put back to a restore point with undo"); n > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Closed %d pending question(s) of %s.\n", n, a.Name)
+	}
 	return nil
 }
 
@@ -427,4 +432,23 @@ func substrateSleep(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// substrateCloseAsks denies a's pending asks with why and returns how many
+// it closed. Best effort: an ask it cannot close expires as before.
+func substrateCloseAsks(ctx context.Context, cl *api.Client, a api.Actor, why string) int {
+	asks, err := cl.Asks(ctx)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, k := range asks {
+		if k.Actor != a.Name || (k.Atespace != "" && k.Atespace != a.Atespace) {
+			continue
+		}
+		if cl.Decide(ctx, k.ID, "deny", false, why) == nil {
+			n++
+		}
+	}
+	return n
 }

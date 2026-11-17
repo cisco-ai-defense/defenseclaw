@@ -1049,7 +1049,8 @@ func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) boo
 }
 
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
-// crashed or deleted event the actor's pending asks are closed.
+// crashed, reverted or deleted event the actor's pending asks are closed
+// (a revert drops the held request with the run it belonged to, GAP-0415).
 func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
 	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
@@ -1063,6 +1064,8 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 		switch ev.Event {
 		case chainstate.LifecycleCrashed:
 			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
+		case chainstate.LifecycleReverted:
+			asksStore.CloseActor(ev.Actor.UID, "the actor was reverted to a snapshot")
 		case chainstate.LifecycleDeleted:
 			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
 		}
