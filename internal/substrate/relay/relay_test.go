@@ -277,6 +277,7 @@ func testServer(t *testing.T, argv []string) (*Server, *recorder, signer) {
 	s := NewServer(Options{Config: cfg, Verifier: v,
 		Warm:   func(context.Context, string) error { rec.add("warm"); return nil },
 		Report: func(_ context.Context, e TaskEnd) error { rec.add(fmt.Sprintf("report %d", e.ExitCode)); return nil },
+		Tamper: func(_ context.Context, c, reason string) error { rec.add("tamper " + c + ": " + reason); return nil },
 	})
 	t.Cleanup(func() {
 		if s.agent != nil {

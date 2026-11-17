@@ -6,6 +6,7 @@
 package relay
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -52,7 +53,7 @@ func TestGuardStopsTheAgentWhenItsHookFolderMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = os.MkdirAll(filepath.Join(gem, "config"), 0o755)
-	out := readUntil(t, c, "hook folder", nil)
+	out := readUntil(t, c, "integrity guard", nil)
 	if !strings.Contains(out, "was moved") {
 		t.Fatalf("the terminal did not say why: %q", out)
 	}
@@ -63,7 +64,7 @@ func TestGuardStopsTheAgentWhenItsHookFolderMoves(t *testing.T) {
 	if s.agent.Running() {
 		t.Fatal("the agent kept running after its hook folder moved")
 	}
-	if _, resp, err := dialWS(t, srv.URL, ec.token(t, claims(time.Now(), nil), TokenType), nil); err == nil || resp.StatusCode != 403 {
+	if _, resp, err := dialWS(t, srv.URL, ec.token(t, claims(time.Now(), nil), TokenType), nil); err == nil || resp.StatusCode != http.StatusGone {
 		t.Fatalf("an attachment after the move: %v", err)
 	}
 }

@@ -53,7 +53,11 @@ type Options struct {
 	// Guard are the folders the relay watches (GAP-0120); nil is
 	// kit.GuardedDirs of the connector in the relay's HOME, empty is none.
 	Guard []string
-	Now   func() time.Time
+	// Tamper reports a guard trip to the gateway, which audits it
+	// (TamperReportPath, GAP-0120); default GatewayTamper over the kit
+	// transport.
+	Tamper func(ctx context.Context, connector, reason string) error
+	Now    func() time.Time
 }
 
 // Server is the relay. NewServer has no side effect: the golden snapshot of
@@ -197,6 +201,9 @@ func (s *Server) init() error {
 			if s.opts.Report == nil {
 				s.opts.Report = GatewayReport(t)
 			}
+			if s.opts.Tamper == nil {
+				s.opts.Tamper = GatewayTamper(t)
+			}
 		}
 		s.session = newID()
 		go s.watchResume()
@@ -205,16 +212,37 @@ func (s *Server) init() error {
 }
 
 // guardBroken stops the agent and its task for good when a guarded folder
-// moved (GAP-0120).
+// moved (GAP-0120): every process of the actor but the relay ends (a tool
+// in a process group or session of its own too, GAP-0358), every attached
+// terminal is told why and closed, and the gateway audits the trip. Every
+// later attach is refused with the reason (410, GAP-0357).
 func (s *Server) guardBroken(reason string) {
-	msg := "DefenseClaw's hook folder " + reason + ", so the agent could run without DefenseClaw's hooks; the agent was stopped. Delete this agent and start a new one"
+	msg := "DefenseClaw's hook-folder integrity guard stopped this agent: " + reason + ", so the agent could have run without DefenseClaw's hooks. The agent cannot be started again; delete it and start a new one"
 	s.guardMu.Lock()
-	s.guardErr = &signinRefusal{msg: msg}
+	s.guardErr = &guardStopped{msg: msg}
 	s.guardMu.Unlock()
-	s.log.Warn("relay.guard_tamper", "connector", s.opts.Config.Relay.Connector, "reason", reason)
-	s.agent.Stop(msg)
+	connector := s.opts.Config.Relay.Connector
+	s.log.Warn("relay.guard_tamper", "connector", connector, "reason", reason)
 	s.taskStop()
+	if n := stopActorProcesses(s.agent.pid(), func() { s.agent.Stop(msg) }); n > 0 {
+		s.log.Warn("relay.guard_stopped_processes", "connector", connector, "processes", n)
+	}
+	if s.opts.Tamper != nil {
+		go func() {
+			if err := reportTamper(context.Background(), s.opts.Tamper, connector, reason); err != nil {
+				s.log.Warn("relay.guard_report", "connector", connector, "error", err.Error())
+			}
+		}()
+	}
 }
+
+// guardStopped is the refusal of every attachment after a guard trip.
+type guardStopped struct{ msg string }
+
+func (e *guardStopped) Error() string { return e.msg }
+
+// StoppedHeader marks a relay answer for an agent the guard stopped (410).
+const StoppedHeader = "X-Dcrelay-Stopped"
 
 func (s *Server) guardError() error {
 	s.guardMu.Lock()
@@ -336,9 +364,14 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open 
 		http.Error(w, "relay: "+err.Error(), status)
 		return Session{}, false
 	}
-	if err := s.guardError(); err != nil && open {
+	if err := s.guardError(); err != nil && (open || what == "status") {
+		// 410, not 403: the launcher tells "stopped for good" from "not
+		// yours" by the status and says why (GAP-0357). The status route
+		// answers the same, so the launcher's probe after a refused
+		// WebSocket does not take it for a proxy that blocks the upgrade.
 		s.log.Warn("relay.refused", "what", what, "reason", "hook folder moved", "person", sess.Person)
-		http.Error(w, "relay: "+err.Error(), http.StatusForbidden)
+		w.Header().Set(StoppedHeader, "guard")
+		http.Error(w, "relay: "+err.Error(), http.StatusGone)
 		return Session{}, false
 	}
 	s.log.Info("relay.accepted", "what", what, "person", sess.Person, "actor", sess.Actor, "actor_uid", sess.ActorUID, "jti", sess.TokenID)

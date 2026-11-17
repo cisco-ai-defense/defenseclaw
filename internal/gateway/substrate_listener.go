@@ -88,7 +88,9 @@ const (
 	substrateRelayVerify   = "/api/v1/substrate/relay/verify"
 	// substrateRelayTask takes a --task run's end (substrate_task.go).
 	substrateRelayTask = "/api/v1/substrate/relay/task"
-	substrateLLMPrefix = "/llm/"
+	// substrateRelayTamper takes a relay guard trip (substrate_task.go).
+	substrateRelayTamper = "/api/v1/substrate/relay/tamper"
+	substrateLLMPrefix   = "/llm/"
 
 	substrateShutdownTimeout = 10 * time.Second
 )
@@ -436,6 +438,8 @@ type substrateActorRoute struct {
 	relay     bool
 	// task is the relay's task-end report (relay is set too).
 	task bool
+	// tamper is the relay's guard trip report (relay is set too).
+	tamper bool
 }
 
 // classifySubstrateActorPath maps a path to its route, or false (404).
@@ -466,6 +470,8 @@ func (a *APIServer) classifySubstrateActorPath(path string) (substrateActorRoute
 		return substrateActorRoute{relay: true}, true
 	case path == substrateRelayTask:
 		return substrateActorRoute{relay: true, task: true}, true
+	case path == substrateRelayTamper:
+		return substrateActorRoute{relay: true, tamper: true}, true
 	case strings.HasPrefix(path, substrateLLMPrefix) && len(path) > len(substrateLLMPrefix):
 		return substrateActorRoute{llm: true}, true
 	}
@@ -729,7 +735,7 @@ func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) h
 		// The verified caller on every actor route, as for /llm: hook
 		// decisions, profiles and audit rows see the same person
 		// (substrate_identity.go).
-		if route.llm || route.task || route.class == sandboxauth.RouteHook || route.class == sandboxauth.RouteNotify || route.class == sandboxauth.RouteInspect {
+		if route.llm || route.task || route.tamper || route.class == sandboxauth.RouteHook || route.class == sandboxauth.RouteNotify || route.class == sandboxauth.RouteInspect {
 			ctx = a.attachSubstrateSubject(ctx, reg)
 		}
 		if route.class != "" && route.class != sandboxauth.RouteOTLP {
@@ -768,6 +774,9 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 	switch {
 	case route.task:
 		a.serveSubstrateRelayTask(st, w, r)
+		return
+	case route.tamper:
+		a.serveSubstrateRelayTamper(st, w, r)
 		return
 	case route.relay:
 		a.serveSubstrateRelayVerify(st, w, r)
