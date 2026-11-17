@@ -1001,8 +1001,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			// keeps UnresolvedFolder, so the unknown tier applies as well:
 			// the folder it may still be in judges it, never the unplaced
 			// reading alone (rel-1-0-10:GAP-1083, substrate-1:GAP-0367).
+			// A reading of the guess walk (LoginGuess) stays where the walk
+			// read it: it only proves a state write by the login it spells,
+			// which the walk could not bind there (u=$USER; command echo
+			// IFS=x; read u <<< w), and placed in a folder it proved one the
+			// shell never makes.
 			dirs := mayRunIn[partIndex]
-			if len(dirs) == 0 || !simpleRelativePathOperand(command.Text) {
+			if len(dirs) == 0 || guess || command.LoginGuess || !simpleRelativePathOperand(command.Text) {
 				continue
 			}
 			for _, dir := range mayRunIn[partIndex] {
