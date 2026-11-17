@@ -119,6 +119,14 @@ func gap0980Round2ReviewRows(t *testing.T, tierName string) {
 // TestGAP0980Round2ReviewRows<Tier> run the review rows one bounded tier each,
 // so the race shards can split their cost (rel-1-0-10:GAP-1032: 582 s under
 // -race as one test, past what one shard holds).
+// TestGAP0980Round2ReviewRowsCoverEveryTier fails when a tier is added to
+// boundedTestTiers: the per-tier tests above name five.
+func TestGAP0980Round2ReviewRowsCoverEveryTier(t *testing.T) {
+	if len(boundedTestTiers) != 5 {
+		t.Fatalf("boundedTestTiers has %d tiers; give each a TestGAP0980Round2ReviewRows<Tier> test", len(boundedTestTiers))
+	}
+}
+
 func TestGAP0980Round2ReviewRowsDefault(t *testing.T)    { gap0980Round2ReviewRows(t, "default") }
 func TestGAP0980Round2ReviewRowsPermissive(t *testing.T) { gap0980Round2ReviewRows(t, "permissive") }
 func TestGAP0980Round2ReviewRowsStrict(t *testing.T)     { gap0980Round2ReviewRows(t, "strict") }

@@ -226,9 +226,10 @@ jobs:
         # 396 s (90%), and 88 shards plan at most 391 s: the largest single test (TestGAP0980Round2ReviewRows), the floor.
         # 2026-11-17 (rel-1-0-10:GAP-1032): refreshed from the hosted runs of #1457 on da4177e225 and f1ccff5b7a (slowest
         # of the two), the gateway race time is 11.3 hours: every one of 88 shards plans 461 s or more, over the 440 s
-        # budget (shard 87 of run 44074568058 hit its -timeout). 96 shards plan at most 422 s, except the three tests
-        # that alone weigh more than the budget (TestGAP0980Round2ReviewRows 582 s, TestChainStatementFindingsKeepTheStrictest
-        # 510 s, TestChainStatementFindingsAfterABackgroundStatement 443 s), each in a shard of its own.
+        # budget (shard 87 of run 44074568058 hit its -timeout). Three tests alone weighed more than one shard holds
+        # (TestGAP0980Round2ReviewRows 582 s, TestChainStatementFindingsKeepTheStrictest 510 s,
+        # TestChainStatementFindingsAfterABackgroundStatement 443 s); each now runs as one test per tier or pack, and
+        # 96 shards plan at most 425 s.
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

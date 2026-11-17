@@ -204,6 +204,15 @@ func chainStatementFindingsKeepTheStrictest(t *testing.T, packs []gap0437Pack) {
 
 // TestChainStatementFindingsKeepTheStrictest<Pack> run chainStatementFindingsKeepTheStrictest one pack each, so the race shards can
 // split its cost (rel-1-0-10:GAP-1032: 443-510 s under -race as one test).
+// TestChainStatementFindingsPackSplitsCoverEveryPack fails when a pack is
+// added to gap0437Packs: the per-pack tests above name five, and a sixth
+// would run in none of them.
+func TestChainStatementFindingsPackSplitsCoverEveryPack(t *testing.T) {
+	if len(gap0437Packs) != 5 {
+		t.Fatalf("gap0437Packs has %d packs; give each a TestChainStatementFindings...<Pack> test", len(gap0437Packs))
+	}
+}
+
 func TestChainStatementFindingsKeepTheStrictestDefault(t *testing.T) {
 	chainStatementFindingsKeepTheStrictest(t, gap0437Packs[0:1])
 }
