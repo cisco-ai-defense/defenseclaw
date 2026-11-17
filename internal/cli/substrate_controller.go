@@ -204,6 +204,11 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		// reverts, deletes, crashes, and suspends for retention (A13). Its
 		// running-time clock needs none (GAP-0292).
 		ctl.SetLifecycle(&chainstate.Client{Leader: toLeader})
+		// Another callout in Substrate's egress slot follows the fail mode
+		// (GAP-0505).
+		if r := substrateCalloutReader(sub, cmd.ErrOrStderr()); r != nil {
+			ctl.SetCallout(r)
+		}
 	}
 	if err != nil {
 		return err

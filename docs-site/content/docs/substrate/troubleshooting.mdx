@@ -100,6 +100,15 @@ The callout checks each request against the actor's earlier tool calls (a secret
 
 Substrate has one slot for an egress callout. DefenseClaw refuses to replace another, because that would turn off someone's checks. Chain them on the other callout's side, or remove it deliberately. `setup --dry-run` shows what is registered.
 
+The slot can also change after DefenseClaw is set up, for example when someone runs `ate-setup deploy` with a file that names another callout. The controller and the gateway read the slot from the live atenet-egress config every 5 seconds (the chart lets them get that one ConfigMap in the Substrate namespace), so a stale install file doesn't hide it. When the slot isn't DefenseClaw's:
+
+- The controller logs one `sandbox.callout_replaced` alert that names what holds the slot, and `sandbox.callout_restored` when the DefenseClaw callout is back.
+- With the default fail mode (closed, and always on a managed install and for `--task` and `--batch` runs), every managed agent keeps only the DefenseClaw rule: hooks and model calls still work, every other host is refused. Each agent's policy record says `deny-only (callout_replaced: ...)`. The full policy comes back on the first pass after the DefenseClaw callout is registered again.
+- With `substrate.extproc.failure_mode: open`, interactive agents keep their egress policies and the alert lists the checks that don't run: ask hosts, URL rules, egress feeds, secret and DLP scans, body and MCP inspection, and tool chains at egress.
+- With `substrate.extproc.enabled: false`, policies don't change; the record is a warning.
+
+To fix it, register the DefenseClaw callout again: `defenseclaw substrate setup --install-file FILE`, then `ate-setup deploy` with that file. If the slot can't be read (for example a chart older than 1.0.10 without the grant), the controller warns once and keeps the last state it read.
+
 ### `verify` says the Substrate version is outside the tested range
 
 DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may work but aren't supported. Upgrade or downgrade Substrate with the upstream runbook, then run `setup` and `verify`.

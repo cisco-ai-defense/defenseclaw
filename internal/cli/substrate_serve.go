@@ -530,6 +530,11 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 		if err != nil {
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
+		// The create path writes the same policy as the controller while
+		// another callout holds Substrate's egress slot (GAP-0505).
+		if r := substrateCalloutReader(c.Substrate, os.Stderr); r != nil {
+			ctl.SetCallout(r)
+		}
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
 		out = gateway.SubstrateConfig{

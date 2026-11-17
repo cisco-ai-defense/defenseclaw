@@ -118,6 +118,10 @@ type Options struct {
 	// KitVersion is this release's kit version (N); N and N-1 are
 	// accepted. Empty or unparseable accepts every kit.
 	KitVersion string
+	// CalloutMode is what another callout in Substrate's egress callout
+	// slot does to actor policies (Live.CalloutMode; GAP-0505). The slot
+	// is read only with SetCallout.
+	CalloutMode string
 	// IdleSuspendAfter 0 turns idle suspend off.
 	IdleSuspendAfter time.Duration
 	IdleCPU          float64
@@ -167,6 +171,8 @@ type Controller struct {
 	// more by a scoped controller; listed is what the last scoped pass
 	// listed (GAP-0295).
 	retired, listed map[string]bool
+	// callout is the egress callout slot as last read (GAP-0505).
+	callout calloutWatch
 }
 
 type recreatedActor struct {
@@ -278,7 +284,7 @@ func New(o Options) (*Controller, error) {
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
 		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
-		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter}
+		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter, CalloutMode: o.CalloutMode}
 	if o.Config != nil {
 		_, lv.Digest = o.Config.Current()
 	}
@@ -311,6 +317,7 @@ func (c *Controller) Run(ctx context.Context) error {
 // so their policy lands before they reach the network.
 func (c *Controller) Reconcile(ctx context.Context) error {
 	c.reloadConfig(ctx)
+	c.checkCallout(ctx)
 	c.applyResets(ctx)
 	c.retryLifecycle(ctx)
 	// The list shows each actor's state as of listedAt or later.
@@ -545,6 +552,7 @@ func createdAt(md *ateapi.ResourceMetadata, st *actorState) time.Time {
 // registration the leader does not show yet is waited for briefly.
 func (c *Controller) EnsurePolicy(ctx context.Context, ref *ateapi.ObjectRef) error {
 	c.reloadConfig(ctx)
+	c.checkCallout(ctx)
 	for try := 1; ; try++ {
 		readAt := c.o.Now()
 		a, err := c.o.Client.GetActor(ctx, ref)
@@ -772,6 +780,12 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 			}
 			if !booted {
 				return c.removePolicy(ctx, a, st, base)
+			}
+			if res.DenyOnly == "" {
+				// Another callout holds Substrate's egress slot: what only
+				// the DefenseClaw callout enforced follows the fail mode
+				// (GAP-0505).
+				res.DenyOnly = c.calloutDenyOnly(lv, reg)
 			}
 			if res.DenyOnly != st.forcedDeny {
 				st.forcedDeny = res.DenyOnly

@@ -45,6 +45,10 @@ type Live struct {
 	Attestor           Attestor
 	Resolver           ProfileResolver
 	IdleSuspendAfter   time.Duration
+	// CalloutMode is what a callout replacement does (CalloutFailClosed,
+	// CalloutFailOpen or CalloutOff; "" is closed), from
+	// CalloutFailModeFromConfig (GAP-0505).
+	CalloutMode string
 }
 
 // ConfigSource is config.yaml as it is now (configwatch.Watcher).
