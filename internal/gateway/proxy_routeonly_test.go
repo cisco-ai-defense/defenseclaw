@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
+	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -195,6 +197,67 @@ func TestRouteOnlyRetriesTheOriginalBeforeTheFirstByte(t *testing.T) {
 	rec = f.post(t, "/r/claudecode/v1/messages", messagesBody("quick question"), nil)
 	if rec.Code != 500 || atomic.LoadInt32(&f.origHits) != 1 {
 		t.Fatalf("500 must not be retried: %d orig=%d", rec.Code, f.origHits)
+	}
+}
+
+// A routed call that fails before its first byte and is served by the
+// original request is recorded as a fallback that names the failed alias, and
+// the routing API lists the alias (GAP-1099, GAP-1101); a later call the alias
+// serves clears it.
+func TestRouteOnlyFallbackIsRecordedAndNamesTheAlias(t *testing.T) {
+	f := newRouteOnlyFixture(t)
+	withID := func(id string) func(*http.Request) {
+		return func(r *http.Request) { *r = *r.WithContext(ContextWithRequestID(r.Context(), id)) }
+	}
+	entry := func(id string) routingadmin.DecisionEntry {
+		t.Helper()
+		e, ok := routingAdminRuntime.Decisions().Find(id, routingadmin.OwnerKey, true)
+		if !ok {
+			t.Fatalf("no decision recorded for %s", id)
+		}
+		return e
+	}
+	f.altStatus = http.StatusServiceUnavailable
+	rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("quick question"), withID("rq-gap1099-a"))
+	if rec.Code != 200 || rec.Header().Get("X-Semantic-Router") != "fallback" {
+		t.Fatalf("not served by the original: %d %q", rec.Code, rec.Header().Get("X-Semantic-Router"))
+	}
+	e := entry("rq-gap1099-a")
+	if e.Outcome != engine.OutcomeFallback || e.SelectedAlias != "" || !slices.Contains(e.Warnings, "routed_alias_failed:haiku:http_503") {
+		t.Fatalf("decision after the fallback = %+v", e)
+	}
+	failures := routingAliasFailures(routingAdminRuntime.Decisions().Recent(routingadmin.OwnerKey, true, routingadmin.DecisionsSize), time.Now())
+	if len(failures) != 1 || failures[0].Alias != "haiku" || failures[0].Cause != "http_503" || failures[0].Count < 1 {
+		t.Fatalf("alias failures = %+v", failures)
+	}
+	f.altStatus = http.StatusOK
+	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("quick question"), withID("rq-gap1099-b")); rec.Code != 200 || rec.Header().Get("X-Semantic-Router") != "routed" {
+		t.Fatalf("recovered call: %d %q", rec.Code, rec.Header().Get("X-Semantic-Router"))
+	}
+	if got := entry("rq-gap1099-b"); got.Outcome != engine.OutcomeApplied || got.SelectedAlias != "haiku" {
+		t.Fatalf("served call decision = %+v", got)
+	}
+	if failures := routingAliasFailures(routingAdminRuntime.Decisions().Recent(routingadmin.OwnerKey, true, routingadmin.DecisionsSize), time.Now()); len(failures) != 0 {
+		t.Fatalf("an alias that served again is still failing: %+v", failures)
+	}
+}
+
+func TestRoutingAliasFailuresCountSinceTheLastServedCall(t *testing.T) {
+	now := time.Now()
+	fail := func(alias, cause string, ago time.Duration) routingadmin.DecisionEntry {
+		return routingadmin.DecisionEntry{Time: now.Add(-ago), Outcome: engine.OutcomeFallback, Connector: "codex", Warnings: []string{routedAliasFailedPrefix + alias + ":" + cause}}
+	}
+	served := routingadmin.DecisionEntry{Time: now.Add(-3 * time.Hour), Outcome: engine.OutcomeApplied, SelectedAlias: "dead"}
+	// Newest first, as Recent returns them.
+	got := routingAliasFailures([]routingadmin.DecisionEntry{
+		fail("dead", "unreachable", time.Minute), fail("dead", "unreachable", 2*time.Minute), served,
+		fail("dead", "http_503", 4*time.Hour), fail("old", "unreachable", 30*time.Hour),
+	}, now)
+	if len(got) != 1 || got[0].Alias != "dead" || got[0].Count != 2 || got[0].Cause != "unreachable" || got[0].Connector != "codex" {
+		t.Fatalf("failures = %+v", got)
+	}
+	if got := routingAliasFailures(nil, now); got == nil || len(got) != 0 {
+		t.Fatalf("no failures must be an empty list, got %#v", got)
 	}
 }
 

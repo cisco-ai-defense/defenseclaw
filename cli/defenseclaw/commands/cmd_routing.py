@@ -434,6 +434,45 @@ def routing_cmd() -> None:
 # ---------------- status
 
 
+_ALIAS_FAILURE_CAUSES = {
+    "unreachable": "the endpoint did not answer",
+    "signing": "gateway Bedrock signing is not ready for it",
+    "credential": "no credential the gateway may send it",
+}
+
+
+def alias_failure_notes(effective: dict[str, Any]) -> list[str]:
+    """One line per routed alias whose calls failed before their first byte and
+    were served by the original model instead (the gateway lists them as
+    alias_failures; rel-1-0-10:GAP-1099, GAP-1101). Without it a dead endpoint
+    looks like routing that works."""
+    notes = []
+    for f in _dicts(effective.get("alias_failures")):
+        cause = str(f.get("cause") or "")
+        if cause.startswith("http_"):
+            cause = f"HTTP {cause[5:]}"
+        else:
+            cause = _ALIAS_FAILURE_CAUSES.get(cause, cause or "unknown")
+        count = int(f.get("count") or 1)
+        notes.append(
+            f"alias {f.get('alias')} failed {count} time{'s' if count != 1 else ''} since it last served a call "
+            f"(last: {cause}, {str(f.get('last_at') or '')[11:19]} UTC): the original model served those requests; "
+            f"check its base_url and key with defenseclaw routing models list"
+        )
+    return notes
+
+
+def doctor_alias_rows(cfg: Any) -> list[tuple[str, str]]:
+    """("warn", detail) rows for defenseclaw doctor, one per failing routed alias;
+    [] when the gateway cannot be asked (doctor names that elsewhere)."""
+    import types
+
+    answer, error = _ask_gateway(types.SimpleNamespace(cfg=cfg), "GET", "/api/v1/routing/effective", timeout=3, params={"recent": 1})
+    if error or not isinstance(answer, dict):
+        return []
+    return [("warn", note) for note in alias_failure_notes(answer)]
+
+
 def _status_data(app: AppContext) -> dict[str, Any]:
     data: dict[str, Any] = {"managed": _managed()}
     warnings: list[str] = []
@@ -485,6 +524,8 @@ def _status_data(app: AppContext) -> dict[str, Any]:
         cause = " ".join(str((data["health"] or {}).get("last_error") or "").split())[:300]
         if cause:
             warnings.append(f"routing is on but the gateway could not start it: {cause} ({_cause_fix(cause)})")
+    if isinstance(effective, dict):
+        warnings.extend(alias_failure_notes(effective))
     for budget in _dicts(effective.get("budgets")) if isinstance(effective, dict) else []:
         if budget.get("exceeded"):
             warnings.append(

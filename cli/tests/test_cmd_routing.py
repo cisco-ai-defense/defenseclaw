@@ -313,6 +313,39 @@ def test_status_warns_with_the_gateway_startup_cause(home: Path, monkeypatch) ->
     assert any("could not start it: routing: Docker is required" in w for w in data["warnings"])
 
 
+FAILING = {
+    "alias_failures": [
+        {"alias": "dead", "count": 3, "cause": "http_503", "connector": "codex", "last_at": "2026-11-17T08:01:02Z"},
+        {"alias": "gone", "count": 1, "cause": "unreachable", "last_at": "2026-11-17T08:02:03Z"},
+    ]
+}
+
+
+def test_status_warns_about_an_alias_whose_calls_the_original_model_served(home: Path, monkeypatch) -> None:
+    """GAP-1099, GAP-1101: a dead alias endpoint fell back silently."""
+    (home / "config.yaml").write_text(BODY.replace("enabled: false", "enabled: true"))
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: ({"recent": [], **FAILING}, ""))
+    data = json.loads(run("status", "--json").output)
+    dead = [w for w in data["warnings"] if w.startswith("alias dead failed 3 times")]
+    gone = [w for w in data["warnings"] if w.startswith("alias gone failed 1 time ")]
+    assert dead and "HTTP 503" in dead[0] and "08:01:02 UTC" in dead[0] and "original model served" in dead[0]
+    assert gone and "the endpoint did not answer" in gone[0]
+    assert "alias dead failed" in run("status").output
+    # A gateway that lists none says nothing.
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: ({"recent": [], "alias_failures": []}, ""))
+    assert not any("failed" in w for w in json.loads(run("status", "--json").output)["warnings"])
+
+
+def test_doctor_alias_rows_name_each_failing_alias(monkeypatch) -> None:
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (dict(FAILING), ""))
+    rows = cmd_routing.doctor_alias_rows(object())
+    assert [status for status, _ in rows] == ["warn", "warn"]
+    assert "alias dead failed 3 times" in rows[0][1] and "alias gone failed 1 time" in rows[1][1]
+    # The gateway cannot be asked: doctor names that elsewhere.
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, "the gateway is not running"))
+    assert cmd_routing.doctor_alias_rows(object()) == []
+
+
 def test_doctor_rows(home: Path) -> None:
     assert cmd_routing.doctor_rows() == []
     (home / "config.yaml").write_text(BODY + "  admin:\n    rules:\n      - {id: c, match: {groups: [g]}, action: deny}\n")
