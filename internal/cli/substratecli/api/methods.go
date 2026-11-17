@@ -39,8 +39,12 @@ type Actor struct {
 	Unattended      bool      `json:"unattended,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 	Owner           string    `json:"owner,omitempty"`
-	Deleted         bool      `json:"deleted,omitempty"`
-	State           string    `json:"state,omitempty"`
+	// Attribution is person, workload or atespace (an actor made outside
+	// DefenseClaw, which Foreign marks too; GAP-0419).
+	Attribution string `json:"attribution,omitempty"`
+	Foreign     bool   `json:"foreign,omitempty"`
+	Deleted     bool   `json:"deleted,omitempty"`
+	State       string `json:"state,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
@@ -54,7 +58,7 @@ type Actor struct {
 // tables, status lines, prompts and errors. The identifiers the launcher
 // sends back (UID, registration key, session token) are left as they are.
 func (a Actor) shown() Actor {
-	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.State} {
+	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State} {
 		*f = safetext.Line(*f)
 	}
 	if a.Warnings != nil {

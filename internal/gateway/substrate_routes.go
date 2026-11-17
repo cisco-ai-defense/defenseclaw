@@ -281,7 +281,21 @@ func substrateActorView(reg registry.Registration) map[string]any {
 		"profile": reg.Profile, "connector": reg.Connector, "template": reg.Template,
 		"batch_id": reg.BatchID, "unattended": reg.Unattended, "created_at": reg.CreatedAt,
 		"owner": reg.Person.Principal, "deleted": reg.Deleted,
+		"attribution": substrateAttribution(reg), "foreign": reg.Attributed,
 	}
+}
+
+// substrateAttribution is whom an actor is attributed to (GAP-0419): the
+// person or CI workload the launcher verified at create, or, for an actor
+// made outside DefenseClaw, only its atespace (D3).
+func substrateAttribution(reg registry.Registration) string {
+	switch {
+	case reg.Attributed || reg.Person.Subject == "":
+		return "atespace"
+	case reg.Person.Kind == identity.PersonWorkload:
+		return "workload"
+	}
+	return "person"
 }
 
 func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
