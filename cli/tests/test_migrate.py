@@ -1082,6 +1082,38 @@ def test_set_aside_key_that_cannot_be_put_back_is_named_with_its_command(
     assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in captured.out + captured.err
 
 
+def test_one_refused_set_aside_key_does_not_hold_back_the_valid_ones(
+    data_dir: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """rel-1-0-10:GAP-1145: one refused key left effects_rules_tier and the other valid keys
+    unapplied. Each key goes back alone (routing.* together); the refused key is named with its
+    command, kept in the record, and the rest is applied."""
+    import yaml
+
+    config = _write_config(data_dir, "config_version: 9\n")
+    record = _set_aside_record(
+        data_dir,
+        {
+            "guardrail.effects_rules_tier": "restricted",
+            "openshell.trusted_ca_bundle": "relative.pem",
+            "routing.min_confidence": 0.6,
+        },
+    )
+
+    migrations._restore_set_aside_keys(str(data_dir), str(config))
+
+    got = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert got["guardrail"]["effects_rules_tier"] == "restricted"
+    assert got["routing"]["min_confidence"] == 0.6
+    assert "openshell" not in got
+    assert list(json.loads(record.read_text(encoding="utf-8"))["keys"]) == ["openshell.trusted_ca_bundle"]
+    shown = " ".join((lambda c: c.out + c.err)(capsys.readouterr()).split())
+    assert "Could not put back openshell.trusted_ca_bundle (" in shown
+    assert "defenseclaw config set openshell.trusted_ca_bundle relative.pem" in shown
+    assert "Could not put back guardrail.effects_rules_tier" not in shown
+    assert "Put back guardrail.effects_rules_tier" in shown and "Put back routing.min_confidence" in shown
+
+
 def _sealed_codex_lock(data_dir: Path, exe: Path, digest: str) -> None:
     lock = {
         "version": 1,

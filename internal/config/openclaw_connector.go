@@ -204,14 +204,15 @@ var openClawGOOS = runtime.GOOS
 
 var openClawAccountPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 
-// openClawSettingPath finds the connectors.openclaw setting a refusal names.
-var openClawSettingPath = lazyregexp.New(`\bconnectors\.openclaw\.[a-z_]+`)
+// openClawSettingPath finds the connectors.openclaw.* setting a refusal names.
+var openClawSettingPath = lazyregexp.New(`connectors\.openclaw(?:\.[a-z0-9_]+)*`)
 
 // ValidateOpenClawConnector checks connectors.openclaw. A refusal is a
-// SettingError at the setting its text names, so config set, config
-// validate and Windows Setup show the rule (for example that the
+// SettingError at the first connectors.openclaw setting its text names (or at
+// connectors.openclaw when it names none), so config set, config validate and
+// Windows Setup show the setting and the rule (for example that the
 // separate-user layout is Linux and macOS only) instead of "configuration
-// could not be compiled safely" at "$" (GAP-1140).
+// could not be compiled safely" at "$" (GAP-1140, GAP-1159).
 func (c *Config) ValidateOpenClawConnector() error {
 	err := c.validateOpenClawConnector()
 	if err == nil {
@@ -238,7 +239,7 @@ func (c *Config) validateOpenClawConnector() error {
 	dir := strings.TrimSpace(oc.PluginDir)
 	if mode == OpenClawPluginExternal {
 		if dir == "" || !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
-			return fmt.Errorf("config: connectors.openclaw.plugin_dir must be a clean absolute path when plugin_install is external")
+			return fmt.Errorf("config: connectors.openclaw.plugin_dir must be a clean absolute path when plugin_install is external (set plugin_dir first, then plugin_install)")
 		}
 		// OpenClaw names a plugin folder after the plugin id, and teardown
 		// and drift checks find DefenseClaw load paths by that name.
