@@ -563,6 +563,19 @@ func windowsName(rel string) bool {
 	return true
 }
 
+// hasGitComponent reports a path with a folder named .git in any case: git
+// metadata (a nested repository's, or one the agent made), which the
+// folder never takes (GAP-0530).
+func hasGitComponent(rel string) bool {
+	parts := strings.Split(rel, "/")
+	for _, p := range parts[:len(parts)-1] {
+		if strings.EqualFold(p, ".git") {
+			return true
+		}
+	}
+	return strings.EqualFold(parts[len(parts)-1], ".git")
+}
+
 // stageHostTree reads the actor's copy (a tar of <folder>) into dir:
 // regular files only. It returns the files kept and notes on what was not.
 func stageHostTree(r io.Reader, folder, dir string, limit int64, held func(string) bool) ([]hostFile, []string, []string, error) {
@@ -573,7 +586,7 @@ func stageHostTree(r io.Reader, folder, dir string, limit int64, held func(strin
 	defer root.Close()
 	var files []hostFile
 	var notes, dropped []string
-	links, invalid, caches := 0, 0, 0
+	links, invalid, caches, gitMeta := 0, 0, 0, 0
 	var total int64
 	tr := tar.NewReader(r)
 	for {
@@ -591,6 +604,13 @@ func stageHostTree(r io.Reader, folder, dir string, limit int64, held func(strin
 		}
 		switch {
 		case rel == ".git" || strings.HasPrefix(rel, ".git/"):
+			continue
+		case hasGitComponent(rel):
+			// A .git folder below the top, or one in another case (.GIT):
+			// git metadata, never the project's (GAP-0530).
+			if hdr.Typeflag == tar.TypeReg {
+				gitMeta++
+			}
 			continue
 		case osw.UnderHeavyDir(rel):
 			if hdr.Typeflag == tar.TypeReg {
@@ -646,6 +666,9 @@ func stageHostTree(r io.Reader, folder, dir string, limit int64, held func(strin
 	}
 	if caches > 0 {
 		notes = append(notes, fmt.Sprintf("%d file(s) in package caches (node_modules and the like) are not brought back", caches))
+	}
+	if gitMeta > 0 {
+		notes = append(notes, fmt.Sprintf("%d file(s) in git metadata folders the agent made (.git in any case) are not brought back", gitMeta))
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].rel < files[j].rel })
 	return files, notes, dropped, nil
