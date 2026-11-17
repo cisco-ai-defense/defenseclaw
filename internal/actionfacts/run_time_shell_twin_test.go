@@ -42,7 +42,8 @@ func TestRunTimeShellTwin(t *testing.T) {
 		{`time "$SHELL" -c 'make test'`, `time bash -c 'make test'`},
 		{`FOO=$BAR "$SHELL" -c 'make test'`, `FOO=$BAR bash -c 'make test'`},
 		{`"$SHELL" <<< 'make test'`, `bash -c 'make test' <<< 'make test'`},
-		{`echo 'make test' | "$SHELL" -s`, `echo 'make test' | bash -c 'make test'`},
+		// echo ends its line (rel-1-0-10:GAP-1146).
+		{`echo 'make test' | "$SHELL" -s`, "echo 'make test' | bash -c 'make test\n'"},
 		{`cd web && "$SHELL" -c 'npm test'`, `cd web && bash -c 'npm test'`},
 		// A static shell STRING is its own command line.
 		{`bash -c '"$SHELL" -c "make test"'`, `bash -c 'bash -c "make test"'`},
@@ -53,7 +54,7 @@ func TestRunTimeShellTwin(t *testing.T) {
 		{`"$(command -v bash)" -o pipefail -c 'make test'`, `bash -o pipefail -c 'make test'`},
 	}
 	for _, row := range rows {
-		got, ok, _ := RunTimeShellTwin(row.command)
+		got, ok, _, _ := RunTimeShellTwin(row.command)
 		if !ok || got != row.want {
 			t.Errorf("RunTimeShellTwin(%q) = %q, %v; want %q", row.command, got, ok, row.want)
 		}
@@ -75,7 +76,7 @@ func TestRunTimeShellTwin(t *testing.T) {
 		`$(which grep) -c TODO notes.txt`,
 		`$(command -V bash) -c 'make test'`,
 	} {
-		if got, ok, _ := RunTimeShellTwin(command); ok {
+		if got, ok, _, _ := RunTimeShellTwin(command); ok {
 			t.Errorf("RunTimeShellTwin(%q) = %q; want no reading", command, got)
 		}
 	}
