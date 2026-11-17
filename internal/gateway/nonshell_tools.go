@@ -557,6 +557,16 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			}
 			judge(child, actionfacts.Analyze(child), simple.Text, simple.Text)
 		}
+		// A bash here-string (CMD <<< WORD) is a syntax error to the POSIX
+		// analysis, so the call has no paths and no statements: the lane
+		// reads its twin printf '%s\n' WORD | CMD too, as the dispatch does
+		// (hereStringReadingTwinRequest). Without it a cd, a here-string and
+		// then a write in the cd folder lost the path rules of the write
+		// (a system schedule, a launch agent, the git config, the shadow
+		// read) that the one-step form gets (rel-1-0-10:GAP-1083).
+		if twin, ok := hereStringReadingTwinRequest(request, facts); ok {
+			out = shellToolFindings(ctx, twin, out)
+		}
 	}
 	// A sandbox call's relative operands name files in the guest's own
 	// working directory, where "~" is the guest home: the request's directory

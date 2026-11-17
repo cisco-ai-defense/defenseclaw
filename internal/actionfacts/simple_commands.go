@@ -220,10 +220,23 @@ type simpleShellState struct {
 	folderVars []string
 	// homeUnproven means HOME holds a value the walk could not read
 	// (HOME=$(pwd), HOME=$X, a declaration option that changes what the
-	// value means). HOME keeps its previous value, so a later ~ or $HOME
-	// write is still judged against a home the call can reach (GAP-2476),
-	// and a reading through it is marked UnprovenHome (rel-1-0-10:GAP-0996).
+	// value means). HOME is then the active home the action started in
+	// (startHome), so a later ~ or $HOME write is still judged against a
+	// home the call can reach (GAP-2476), and a reading through it is marked
+	// UnprovenHome (rel-1-0-10:GAP-0996).
 	homeUnproven bool
+	// startHome is the active home of the action, the HOME the walk starts
+	// with. An unreadable HOME value falls back to it, never only to a
+	// literal home an earlier statement moved HOME to: after export
+	// HOME=/tmp/x; export HOME=$(...) a later ~ write may reach the active
+	// home, and the earlier literal alone judged it a clean allow
+	// (rel-1-0-10:GAP-1087).
+	startHome string
+	// movedHome is that earlier literal home while the statement that made
+	// HOME unreadable is read: the walk then reads the statements after it
+	// in both homes (simpleHomeReadings), so a ~ write that blocks in
+	// either still blocks.
+	movedHome string
 }
 
 // simpleLocal is the caller value of name saved by a local declaration in
@@ -243,7 +256,7 @@ func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
 		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked), folderVars: slices.Clone(s.folderVars),
-		homeUnproven: s.homeUnproven}
+		homeUnproven: s.homeUnproven, startHome: s.startHome, movedHome: s.movedHome}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -252,11 +265,42 @@ func (s simpleShellState) clone() simpleShellState {
 
 // noteHome records what assignments did to HOME (updateSimpleVariables): a
 // value the walk read proves the home, a value it could not read leaves the
-// home unproven.
+// home unproven (unproveHome).
 func (s *simpleShellState) noteHome(set, known bool) {
-	if set {
-		s.homeUnproven = !known
+	switch {
+	case set && !known:
+		s.unproveHome()
+	case set:
+		s.homeUnproven = false
 	}
+}
+
+// unproveHome records that HOME got a value the walk cannot read: HOME is
+// the active home the action started in again; a literal home an earlier
+// statement moved it to stays a second reading (movedHome,
+// rel-1-0-10:GAP-1087).
+func (s *simpleShellState) unproveHome() {
+	s.homeUnproven = true
+	if home := s.vars["HOME"]; s.startHome != "" && home != s.startHome {
+		if s.movedHome == "" {
+			s.movedHome = home
+		}
+		s.vars["HOME"] = s.startHome
+	}
+}
+
+// simpleHomeReadings is the state after a statement: one state, or, when the
+// statement made HOME unreadable after HOME had been moved to another
+// literal home (unproveHome), the state in the active home and the state in
+// that literal home, since either may be the home the shell has
+// (rel-1-0-10:GAP-1087).
+func simpleHomeReadings(state simpleShellState) []simpleShellState {
+	if state.movedHome == "" {
+		return []simpleShellState{state}
+	}
+	moved := state.clone()
+	moved.vars["HOME"], moved.movedHome, state.movedHome = state.movedHome, "", ""
+	return []simpleShellState{state, moved}
 }
 
 // simpleReadsThroughUnprovenHome reports whether the reading text of a
@@ -520,7 +564,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		initialVars["PWD"] = simplePathClean(input.CWD)
 	}
 	states := map[string][]simpleShellState{
-		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars}},
+		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars, startHome: home}},
 	}
 	result := make([]SimpleCommand, 0, len(parts))
 	changed := reduced || len(parts) != 1 || input.folderUnknown
@@ -640,7 +684,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				state.noteHome(updateSimpleVariables(state.vars, assigns))
 				state.setFolderVars(simpleAssignNames(assigns), folderNames)
 				changed = true
-				nextVariants = append(nextVariants, state)
+				nextVariants = append(nextVariants, simpleHomeReadings(state)...)
 				if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
 					// The assignment may not run: the word of the loop, and the
 					// HOME it would change (false && HOME=/x, true || HOME=/x),
@@ -900,8 +944,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				simpleForgetUserVars(state.vars, CallBindsUserNames(call))
 				if simpleCallReadsHome(call) {
 					// read HOME: the value is known only when it runs, and
-					// HOME keeps the previous one (rel-1-0-10:GAP-0996).
-					state.homeUnproven = true
+					// HOME is the active home again (rel-1-0-10:GAP-0996,
+					// GAP-1087).
+					state.unproveHome()
 				}
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
@@ -940,7 +985,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if part.read != nil {
 				state.vars[part.read.name] = part.read.word
 			}
-			nextVariants = append(nextVariants, state)
+			nextVariants = append(nextVariants, simpleHomeReadings(state)...)
 			if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
 				// The statement may not run: the word of the loop, and the
 				// HOME it would change (false && export HOME=/x), stay as
@@ -1500,7 +1545,7 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 			if assign.Name.Value != "HOME" {
 				delete(vars, assign.Name.Value)
 			} else {
-				state.homeUnproven = true
+				state.unproveHome()
 			}
 			continue
 		}
@@ -1625,9 +1670,10 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) (ho
 			}
 		}
 		// A HOME value the walk cannot read (HOME=$(echo $HOME), HOME=$X)
-		// keeps the previous HOME: an unknown HOME dropped every later ~
-		// write (GAP-2476). The home a run-time value moves to is not known,
-		// so the state records it as unproven (rel-1-0-10:GAP-0996).
+		// leaves vars as they are; the state then makes HOME the active home
+		// (noteHome): an unknown HOME dropped every later ~ write
+		// (GAP-2476). The home a run-time value moves to is not known, so the
+		// state records it as unproven (rel-1-0-10:GAP-0996, GAP-1087).
 		if name == "HOME" {
 			homeSet, homeKnown = true, known
 		}
