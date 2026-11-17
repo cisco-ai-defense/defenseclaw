@@ -2101,6 +2101,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
+				// The plain-call decision of this command, read once: the
+				// carry below and the past-the-limits check both ask it, and
+				// a recovered parse of a long call pays a full reading each
+				// time (TestGAP0534RecoveredParseStaysBounded under -race).
+				decidedFor, plainDecision := "", ""
+				commandDecision := func() string {
+					if decidedFor != command || decidedFor == "" {
+						decidedFor, plainDecision = command, ActionCommandDecision(command, cwd, home)
+					}
+					return plainDecision
+				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" && WriteOperandCaps(command, cwd, home).Any() {
 					unprovenReason = UnprovenBoundedPaths
 				}
@@ -2121,7 +2132,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						// a value the call proves dead and a call whose writers
 						// the one resolver proves safe (writersAllProvenSafe).
 						protectedDecision = commandMayExpand(command) &&
-							ActionCommandDecision(command, cwd, home) != "" &&
+							commandDecision() != "" &&
 							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
 							!actionClientProvedOverwrittenRedirect(command, cwd, home) &&
 							!writersAllProvenSafe(command, cwd, home, nil)
@@ -2156,7 +2167,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// (GAP-0151).
 				if !protectedDecision && !isApplyPatchToolName(tool) &&
 					(fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded || callPastArgvBound(command)) {
-					protectedDecision = ActionCommandDecision(command, cwd, home) != ""
+					protectedDecision = commandDecision() != ""
 				}
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.

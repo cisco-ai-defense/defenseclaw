@@ -608,7 +608,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		text = actionBlankComments(text, command)
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, span := range actionMentionToken.FindAllStringIndex(text, -1) {
+	for _, span := range actionMentionTokenSpans(text) {
 		token := text[span[0]:span[1]]
 		if actionURLAuthorityToken(text, span[0], token) {
 			continue
@@ -1456,7 +1456,40 @@ func patchCommandResolutionChange(line string) bool {
 // not the home. Writers and redirects keep the conservative home spelling.
 const actionLiteralTilde = "\x1e"
 
-var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+// actionMentionTokenByte reports a byte of a mention token: a letter, a
+// digit, one of _ . / ~ * ? [ ] -, or the literal-tilde mark. Every member
+// is ASCII, so a byte of a multibyte character is never one.
+func actionMentionTokenByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	}
+	return strings.IndexByte("_./~*?[]-\x1e", c) >= 0
+}
+
+// actionMentionTokenSpans are the start and end of every maximal run of
+// mention-token bytes in text, in order. It is the scan the regexp
+// [A-Za-z0-9_./~*?\[\]\x1e-]+ made, without the regexp backtracker, which
+// allocates a bit set the size of the text for every match where sync.Pool
+// keeps none (the -race build): a long recovered parse read twice (the
+// client carry, rel-1-0-10:GAP-0415) went past the GAP-0534 bound there.
+func actionMentionTokenSpans(text string) [][2]int {
+	var spans [][2]int
+	for i := 0; i < len(text); {
+		if !actionMentionTokenByte(text[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(text) && actionMentionTokenByte(text[j]) {
+			j++
+		}
+		spans = append(spans, [2]int{i, j})
+		i = j
+	}
+	return spans
+}
+
 var actionWindowsMentionToken = lazyregexp.New(`(?:[A-Za-z]:)?[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
 // actionURLAuthorityToken reports a mention token that is the //host/... part
@@ -1831,7 +1864,7 @@ func actionMarkLiteralTildes(text string) string {
 	out.Grow(len(text))
 	for i := 0; i < len(text); i++ {
 		if text[i] == '~' && quoted[i] && i+1 < len(text) && text[i+1] == '/' &&
-			(i == 0 || !actionMentionToken.MatchString(text[i-1:i])) {
+			(i == 0 || !actionMentionTokenByte(text[i-1])) {
 			out.WriteString(actionLiteralTilde)
 			continue
 		}
