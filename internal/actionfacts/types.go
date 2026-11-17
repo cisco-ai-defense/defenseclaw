@@ -1096,9 +1096,11 @@ type CommandFact struct {
 	LiteralStdinView string
 	// PatchUnplacedTarget is true for an apply_patch fed by a here-document
 	// whose envelope has a header no reader places (a home form the tool
-	// does not expand, a drive-relative or device name): the tool writes a
-	// file no path rule can name (CommandPatchNamesUnplacedTarget,
-	// rel-1-0-10:GAP-1077). It is value-free and not serialized.
+	// does not expand, a drive-relative or device name), or whose body the
+	// shell expands (an expansion may add a header no reader sees,
+	// rel-1-0-10:GAP-1093): the tool writes a file no path rule can name
+	// (CommandPatchNamesUnplacedTarget, rel-1-0-10:GAP-1077). It is
+	// value-free and not serialized.
 	PatchUnplacedTarget bool `json:"-"`
 	Operations          []OperationKind
 	Redirects           []RedirectFact
