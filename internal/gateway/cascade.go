@@ -481,22 +481,18 @@ func cascadeInputUninspected(input map[string]any) bool {
 }
 
 // cascadeInputProvenBlock reads truncated.proven_block: an uninspected input
-// whose read part already proved a block (cascadeProvenBlock).
+// whose read part already proved a block, or a block whose findings the
+// input capped (cascadeInputProvenBlockOf).
 func cascadeInputProvenBlock(input map[string]any) bool {
 	t, _ := input["truncated"].(map[string]any)
 	p, _ := t["proven_block"].(bool)
 	return p
 }
 
-// cascadeProvenBlock reports an uninspected verdict whose block the content
-// that was read proved, not the uninspected marker (uninspectedRaised).
-func cascadeProvenBlock(v *ToolInspectVerdict) bool {
-	return cascadeReadBlock(v) && cascadeUninspected(v)
-}
-
 // cascadeInputProvenBlockOf is truncated.proven_block of a policy input
-// built from v: an uninspected verdict whose read part proved a block
-// (cascadeProvenBlock), or a block whose findings the input capped
+// built from v: an uninspected verdict whose read part proved a block (not
+// the uninspected marker, uninspectedRaised), or a block whose findings the
+// input capped
 // (capped). The verdict read the call in full and proved the block; the
 // policy saw only the first maxCascadeInputFindings of its findings, so it
 // cannot lower that block (rel-1-0-10:GAP-0713: a block with 65 findings

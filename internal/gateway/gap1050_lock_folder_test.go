@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -52,21 +54,38 @@ printf '%s\n' "$$" > "$LOCK_DIR/pid"`,
 		"cd keys":        `cd "$D"` + "\n" + `printf k > "$F/authorized_keys"`,
 		"eval static ok": eval + `printf k >> ~/.ssh/authorized_keys`,
 	}
-	env := boundedLaneEnv(t)
+	base := boundedLaneEnv(t)
+	// The working folder of the call: the project in the home, a deep one,
+	// and one outside the home (the folders of the gap's fixture).
+	envs := map[string]boundedEnv{"project": base}
+	deep := base
+	deep.cwd = filepath.Join(base.home, "a", "b", "c", "project")
+	envs["deep"] = deep
+	outside := base
+	outside.cwd = filepath.Join(filepath.Dir(filepath.Dir(base.home)), "ws", "project")
+	envs["outside home"] = outside
+	for _, env := range envs {
+		if err := os.MkdirAll(env.cwd, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
-		for name, command := range benign {
-			action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
-			if slices.ContainsFunc(findings, func(f string) bool { return strings.HasPrefix(f, keys+":") }) {
-				t.Errorf("%s %s: %s with %v, want no SSH authorized keys finding", tier.name, name, action, findings)
+		for where, env := range envs {
+			for name, command := range benign {
+				action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
+				// Only the eval reading may remain (CMD-EVAL).
+				if slices.ContainsFunc(findings, func(f string) bool { return !strings.HasPrefix(f, "CMD-EVAL:") }) {
+					t.Errorf("%s %s %s: %s with %v, want at most CMD-EVAL (no %s)", tier.name, where, name, action, findings, keys)
+				}
+				if tier.posture != "strict" && action == "block" {
+					t.Errorf("%s %s %s: block %v, want at most the eval alert", tier.name, where, name, findings)
+				}
 			}
-			if tier.posture != "strict" && action == "block" {
-				t.Errorf("%s %s: block %v, want at most the eval alert", tier.name, name, findings)
-			}
-		}
-		for name, command := range controls {
-			if action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command)); action != "block" {
-				t.Errorf("%s control %s: %s %v, want block", tier.name, name, action, findings)
+			for name, command := range controls {
+				if action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command)); action != "block" {
+					t.Errorf("%s %s control %s: %s %v, want block", tier.name, where, name, action, findings)
+				}
 			}
 		}
 	}

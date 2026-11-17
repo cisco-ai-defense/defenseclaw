@@ -156,7 +156,9 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 				// built at run time may be authorized_keys in whatever folder
 				// the shell reached. One whose last element is fixed text
 				// naming another file ("$LOCK_DIR/pid") names that file
-				// wherever it lies, as a static relative name does below
+				// wherever it lies: like a static relative name below, it is
+				// unknown only when that name is an authorized-keys file (or,
+				// for a run-time target, an SSH control file)
 				// (rel-1-0-10:GAP-1050: a lock script after a dynamic eval).
 				if s.changed && (!s.known && !shellWordFixedOrdinaryBase(redirect.Word) ||
 					sameShellDirectory(s.physical, filepath.Join(home, ".ssh"))) {
@@ -655,12 +657,15 @@ func literalShellCallBody(call *syntax.CallExpr, home string) string {
 	return literalShellBody(programBase(words[0]), words, static)
 }
 
+// shellAuthorizedKeysBase reports a name whose last element is an
+// authorized-keys file (AuthorizedKeysFiles, or sshd's Windows
+// administrators_authorized_keys), compared without case and without the
+// trailing dots and spaces Windows drops: a case-insensitive file system
+// (macOS, Windows) opens Authorized_Keys as authorized_keys, and Windows
+// opens "authorized_keys." as it too.
 func shellAuthorizedKeysBase(name string) bool {
-	base := filepath.Base(name)
-	if runtime.GOOS == "windows" {
-		base = strings.ToLower(base)
-	}
-	return base == "authorized_keys" || base == "authorized_keys2"
+	base := strings.ToLower(strings.TrimRight(filepath.Base(name), ". "))
+	return base == "administrators_authorized_keys" || slices.Contains(AuthorizedKeysFiles[:], base)
 }
 
 // shellWordFixedOrdinaryBase reports a word whose last path element is
@@ -669,10 +674,9 @@ func shellAuthorizedKeysBase(name string) bool {
 // the last slash is a plain ASCII file name (letters, digits, '.', '_', '-';
 // not "." or ".."), with no expansion, pattern, escape or quote in it. What
 // the parts before that slash expand to, the word names a file of that name.
-// The authorized-keys and SSH control file names are compared without case
-// and without the trailing dots and spaces Windows drops, so a
-// case-insensitive file system or a Windows spelling of one is never such a
-// name.
+// An authorized-keys name (shellAuthorizedKeysBase) or an SSH control file
+// name (SSHControlFiles), in any case and with trailing dots or spaces, is
+// never such a name.
 func shellWordFixedOrdinaryBase(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) == 0 {
 		return false
@@ -711,9 +715,8 @@ func shellWordFixedOrdinaryBase(word *syntax.Word) bool {
 			return false
 		}
 	}
-	name := strings.ToLower(strings.TrimRight(base, ". "))
-	protected := append(append([]string{"administrators_authorized_keys"}, AuthorizedKeysFiles[:]...), SSHControlFiles[:]...)
-	return name != "" && !slices.Contains(protected, name)
+	return !shellAuthorizedKeysBase(base) &&
+		!slices.Contains(SSHControlFiles[:], strings.ToLower(strings.TrimRight(base, ". ")))
 }
 
 func sameShellDirectory(a, b string) bool { return a != "" && filepath.Clean(a) == filepath.Clean(b) }

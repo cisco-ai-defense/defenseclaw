@@ -45,6 +45,14 @@ func TestGAP1050FixedLastElementAfterUnknownDirectory(t *testing.T) {
 		{"eval \"$X\"\nprintf k > $D/authorized_\\keys", true},
 		{"eval \"$X\"\nprintf k > \"$F\"", true},
 		{"cd \"$D\"\nprintf k > \"$F\"", true},
+		// A static relative authorized-keys name after the change, in the
+		// case a case-insensitive file system opens and the Windows
+		// spelling with a trailing dot.
+		{"eval \"$X\"\nprintf k > authorized_keys", true},
+		{"eval \"$X\"\nprintf k > Authorized_Keys", true},
+		{"eval \"$X\"\nprintf k > authorized_keys.", true},
+		{"eval \"$X\"\nprintf k > administrators_authorized_keys", true},
+		{"eval \"$X\"\nprintf k > notes.txt", false},
 	} {
 		if _, unknown := ShellDirectoryWriteOperands(row.command, cwd, home, nil, false, false); unknown != row.unknown {
 			t.Errorf("%q: unknown=%v, want %v", row.command, unknown, row.unknown)
