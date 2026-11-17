@@ -948,13 +948,22 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	resetWindowsHeldSwapsForTest(t)
 	advance := fakeWindowsHeldSwapClock(t)
 	var rows []windowsHolderAuditRow
-	savedStandalone, savedSys, savedPost := windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost
+	savedStandalone, savedSys, savedPost, savedSlow := windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost, windowsHolderSlowScan
 	windowsHolderStandalone = func() bool { return true }
 	windowsHolderSys = interactiveFactsSystem{windowsNativeHolderSystem{}}
 	windowsHolderAuditPost = func(row windowsHolderAuditRow) error { rows = append(rows, row); return nil }
+	// The checks are on the fake clock, the scans on the real one: a scan
+	// slowed by a loaded runner (over windowsHolderSlowScan) puts the next
+	// scan off like a refused hold and moves the close past the check the
+	// test expects it at (rel-1-0-10:GAP-0068, 1 of 3 runs on both sides).
+	windowsHolderSlowScan = time.Hour
 	resetWindowsHolderOutputForTest()
+	var log strings.Builder
 	t.Cleanup(func() {
-		windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost = savedStandalone, savedSys, savedPost
+		if t.Failed() {
+			t.Logf("guardian said: %s", log.String())
+		}
+		windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost, windowsHolderSlowScan = savedStandalone, savedSys, savedPost, savedSlow
 		resetWindowsHolderOutputForTest()
 	})
 	root := t.TempDir()
@@ -971,7 +980,6 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
 		t.Fatalf("keep copy: restored %q, %v", damage, err)
 	}
-	var log strings.Builder
 	check := func() {
 		t.Helper()
 		if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {

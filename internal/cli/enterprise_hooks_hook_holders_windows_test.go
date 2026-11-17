@@ -137,6 +137,9 @@ type fakeHolderSystem struct {
 	unlisted  bool // the system does not list the processes using the file
 	snapshots int
 	snapErr   error
+	// afterSnapshot runs once a snapshot is taken, before any of its handles
+	// is probed (a holder that acts between the two).
+	afterSnapshot func()
 }
 
 func (s *fakeHolderSystem) add(pid uint32, sid string, session uint32, handles ...*fakeHolderHandle) *fakeHolderProcess {
@@ -168,6 +171,9 @@ func (s *fakeHolderSystem) Snapshot(string) (windowsHolderSnapshot, error) {
 		if listed || p.openErr != nil {
 			snapshot.PIDs = append(snapshot.PIDs, pid)
 		}
+	}
+	if s.afterSnapshot != nil {
+		s.afterSnapshot()
 	}
 	return snapshot, nil
 }
@@ -2087,4 +2093,75 @@ func waitFor(t *testing.T, limit time.Duration, done func() bool) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// rotateFakeHolderAfterSnapshots makes proc rotate its hook handle (a
+// DuplicateHandle to a new value, then a CloseHandle of the old one: the same
+// process and file object) right after each of the next n snapshots, so that
+// the snapshot lists only the value that is gone by its probe. The returned
+// counter sets how many more snapshots it does that for.
+func rotateFakeHolderAfterSnapshots(rig *holdRig, proc *fakeHolderProcess, n int) *int {
+	left := n
+	value := proc.handles[0].value
+	rig.sys.afterSnapshot = func() {
+		if left == 0 {
+			return
+		}
+		left--
+		for _, h := range proc.handles {
+			h.closed = true
+		}
+		value += 8
+		proc.handles = append(proc.handles, rig.sys.culprit(value))
+	}
+	return &left
+}
+
+// rel-1-0-10:GAP-0068: a holder that rotates its handle between the
+// guardian's snapshot of the handle table and the probe of the value it
+// listed is still seen: the pass looks again at once and finds the new value,
+// so the hold is closed at the second check; and a check whose every look
+// missed it, while the hook stays refused, does not make the user's checks
+// start over.
+func TestWindowsHolderAHolderThatRotatesItsHandleDuringTheScanIsStillSeen(t *testing.T) {
+	t.Run("closed at the second check", func(t *testing.T) {
+		rig := newHoldRig(t)
+		proc := rig.sys.add(4100, fakeUserSID, 2, rig.sys.culprit(0x44))
+		rotations := rotateFakeHolderAfterSnapshots(rig, proc, 1)
+		if closed, err := rig.check(); closed != 0 || err != nil {
+			t.Fatalf("first check: closed %d, %v", closed, err)
+		}
+		*rotations = 1
+		closed, err := rig.tick()
+		if closed != 1 || err != nil || len(proc.closeLog) != 1 || len(rig.posted) != 1 {
+			t.Fatalf("second check: closed %d, %v, closes %v, rows %d, scans %d (the hold was on the hook at both checks)", closed, err, proc.closeLog, len(rig.posted), rig.sys.snapshots)
+		}
+		if rig.sys.snapshots != 4 {
+			t.Fatalf("%d scans, want 4 (each check looked once more after the stale value)", rig.sys.snapshots)
+		}
+	})
+	t.Run("a check that missed it keeps the hold", func(t *testing.T) {
+		rig := newHoldRig(t)
+		proc := rig.sys.add(4100, fakeUserSID, 2, rig.sys.culprit(0x44))
+		rotations := rotateFakeHolderAfterSnapshots(rig, proc, 0)
+		if closed, err := rig.check(); closed != 0 || err != nil {
+			t.Fatalf("first check: closed %d, %v", closed, err)
+		}
+		*rotations = 1 + windowsHolderRescans // every look of the second check misses it
+		if closed, err := rig.tick(); closed != 0 || err != nil || rig.sys.snapshots != 2+windowsHolderRescans {
+			t.Fatalf("second check: closed %d, %v, scans %d", closed, err, rig.sys.snapshots)
+		}
+		closed, err := rig.tick()
+		if closed != 1 || err != nil || len(proc.closeLog) != 1 {
+			t.Fatalf("third check: closed %d, %v (seen at the first and third checks, the hook refused all along)", closed, err)
+		}
+	})
+	t.Run("a hold that is gone is not looked for again", func(t *testing.T) {
+		rig := newHoldRig(t)
+		proc := rig.sys.add(4100, fakeUserSID, 2, rig.sys.culprit(0x44))
+		rig.sys.afterSnapshot = func() { proc.handles[0].closed = true } // let go, no new handle
+		if closed, err := rig.check(); closed != 0 || err != nil || rig.sys.snapshots != 1 {
+			t.Fatalf("closed %d, %v, scans %d (the start works again: one look)", closed, err, rig.sys.snapshots)
+		}
+	})
 }
