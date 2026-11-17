@@ -83,12 +83,15 @@ func TestGAP1197HostRunsPaddedEncodedCommand(t *testing.T) {
 		for _, argv := range gap1197PaddedRows("Write-Output gap1197-ran") {
 			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			cmd := exec.CommandContext(ctx, host, argv...)
-			var out bytes.Buffer
-			cmd.Stdout, cmd.Stderr = &out, &out
+			// Only stdout carries the script output: with redirected streams
+			// Windows PowerShell 5.1 writes its progress records to stderr as
+			// CLIXML ("Preparing modules for first use").
+			var out, errOut bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &errOut
 			err := cmd.Run()
 			cancel()
 			if err != nil || strings.TrimSpace(out.String()) != "gap1197-ran" {
-				t.Errorf("%s %q: err=%v out=%q; want the script to run", host, argv, err, out.String())
+				t.Errorf("%s %q: err=%v stdout=%q stderr=%q; want the script to run", host, argv, err, out.String(), errOut.String())
 			}
 		}
 	}
