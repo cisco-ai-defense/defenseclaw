@@ -551,15 +551,16 @@ def _echo_saved_without_restart(*, plural: bool = False) -> None:
     "batch_connectors",
     multiple=True,
     help=(
-        "(no subcommand) Configure this hook connector as part of a batch. "
-        "Repeatable: `-c hermes -c codex`. Combine with --detected/--all."
+        "(no subcommand) Add or update this hook connector. Repeatable: "
+        "`-c hermes -c codex`. Connectors you do not name keep their "
+        "configuration and stay on the roster."
     ),
 )
 @click.option(
     "--detected",
     "batch_detected",
     is_flag=True,
-    help="(no subcommand) Add every locally-detected hook connector to the batch.",
+    help="(no subcommand) Add every locally-detected hook connector; the others on the roster stay.",
 )
 @click.option(
     "--add-detected",
@@ -574,7 +575,7 @@ def _echo_saved_without_restart(*, plural: bool = False) -> None:
     "--all",
     "batch_all",
     is_flag=True,
-    help="(no subcommand) Add every supported hook connector to the batch.",
+    help="(no subcommand) Add every supported hook connector; the others on the roster stay.",
 )
 @click.option(
     "--mode",
@@ -632,6 +633,12 @@ def setup(
       For scripts, pick connectors with -c/--connector (repeatable),
       --detected or --all, for example:
         defenseclaw setup -c hermes -c codex --mode action
+      These flags add the named connectors, or update them if they are
+      already set up, and leave every other connector on the roster and its
+      settings as they are. The output lists what was set up and what was
+      kept. Only the interactive picker sets the exact roster: unchecked
+      connectors are removed. Use `defenseclaw setup remove <name>` to remove
+      one from a script.
       Use --add-detected --yes to add newly installed connectors in observe
       mode without changing the existing connectors or their modes.
     """
@@ -11826,6 +11833,7 @@ def _apply_hook_connector_setup(
     _protected_selection: _VerifiedSetupAgentSelections | None = None,
     _selection_transaction_snapshot: _SetupConfigSnapshot | None = None,
     _batch_summary: dict[str, Any] | None = None,
+    _selection_roster: tuple[str, ...] | None = None,
 ) -> bool:
     """Pin DefenseClaw to *connector* in hook-driven mode.
 
@@ -11973,7 +11981,12 @@ def _apply_hook_connector_setup(
 
     verified = _protected_selection
     selection_roster = (connector,)
-    if write_mode == "add":
+    if _selection_roster is not None:
+        # A batch that adds to the roster recorded one receipt for the whole
+        # desired roster; setting up its first connector must not look for a
+        # roster that has not yet received the later ones.
+        selection_roster = _selection_roster
+    elif write_mode == "add":
         # A protected selection receipt is transaction-scoped and replacing
         # it removes entries that are not named by the new receipt.  Carry the
         # complete additive roster so a sequence of ``--no-restart`` setup
@@ -12318,8 +12331,13 @@ def _echo_batch_setup_summary(
     click.echo()
     ux.echo(f"  ✓ Config saved to {config_path_for_data_dir(data_dir)}")
     ux.echo(f"  ✓ {len(applied)} connector(s) set up:")
+    was: dict[str, str] = summary.get("was", {})
     for name in applied:
-        click.echo(f"      - {name}: {modes.get(name, 'observe')}")
+        suffix = f" (was {was[name]})" if name in was else ""
+        click.echo(f"      - {name}: {modes.get(name, 'observe')}{suffix}")
+    kept: list[str] = summary.get("kept") or []
+    if kept:
+        ux.echo(f"  ✓ Left as they were ({len(kept)}): {', '.join(kept)}")
     workspace = summary.get("workspace")
     if workspace:
         ux.echo(f"  ✓ Workspace root pinned to {workspace}")
@@ -13186,10 +13204,10 @@ def _batch_replace_hint(removed: object, added: list[tuple[str, str]]) -> str:
     commands = " and ".join(f"`defenseclaw setup {c} --mode {m} --yes`" for c, m in added)
     added_names = ", ".join(c for c, _ in added)
     return (
-        "This setup (-c/--connector) sets the exact connector list, so it also tried to remove "
+        "This setup sets the exact connector list, so it also tried to remove "
         + ", ".join(names)
         + f". To add {added_names} and keep the others, run {commands} instead "
-        "(or name every connector to keep with -c)."
+        "(or check every connector to keep in the picker)."
     )
 
 
@@ -13353,7 +13371,7 @@ def _prune_judge_gate_to_action_scope(gc, connectors: list[str]) -> list[str]:
     return new_gate
 
 
-def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
+def _prompt_batch_judge_connectors(connectors: list[str], gc, *, preserve_outside_targets: bool = False) -> set[str]:
     """Ask once which selected action connectors should add LLM judge review."""
     options, display_by_connector, connector_by_display = _connector_display_options(connectors)
     ux.section("Optional LLM judge")
@@ -13366,7 +13384,9 @@ def _prompt_batch_judge_connectors(connectors: list[str], gc) -> set[str]:
         empty_ok=True,
     )
     selected_connectors = {connector_by_display[label] for label in selected}
-    _merge_batch_judge_selection(gc, connectors, selected_connectors)
+    _merge_batch_judge_selection(
+        gc, connectors, selected_connectors, preserve_outside_targets=preserve_outside_targets
+    )
     return selected_connectors
 
 
@@ -13485,12 +13505,19 @@ def _apply_setup_batch(
     prompt_per_connector: bool,
     connector_modes: dict[str, str] | None = None,
     preserve_global_settings: bool = False,
+    explicit_targets: bool = False,
     allow_trusted_path_prompt: bool = True,
     trusted_prompt_cache: dict[str, bool] | None = None,
     _prior_snapshot: _SetupConfigSnapshot | None = None,
     _protected_selection: _VerifiedSetupAgentSelections | None = None,
 ) -> None:
     """Configure each connector in *connectors* as a multi-connector batch (SU-11).
+
+    ``preserve_global_settings`` adds to the current roster and leaves its
+    settings alone; without it the batch sets the exact roster (the picker).
+    ``explicit_targets`` marks connectors the operator named (``-c``), which must
+    be set up or fail, unlike newly detected ones that are skipped when their
+    executable cannot be verified.
 
     Each connector is written with the additive (``add``) shape so they all
     land in ``guardrail.connectors`` as peers, with per-connector mode
@@ -13508,6 +13535,14 @@ def _apply_setup_batch(
         capture_runtime=_windows_runtime_rollback(restart),
         capture_codex_backup="codex" in connectors and restart,
     )
+
+    # Naming connectors adds them to the roster, so the executable receipt covers
+    # the whole desired roster; a receipt for the named ones alone would drop the
+    # peers' executable authority (agent_selection.json replaces what it omits).
+    selection_roster: tuple[str, ...] | None = None
+    if preserve_global_settings and explicit_targets:
+        selection_roster = tuple(dict.fromkeys(normalize_connector(str(n)) for n in desired))
+    named = {normalize_connector(str(n)) for n in connectors}
 
     if "opencode" in connectors:
         _preflight_opencode_plugin_folder()
@@ -13539,8 +13574,9 @@ def _apply_setup_batch(
         try:
             protected_selection = _record_windows_setup_agent_selections(
                 getattr(app.cfg, "data_dir", None),
-                tuple(connectors),
+                selection_roster or tuple(connectors),
                 _prior_snapshot=setup_snapshot,
+                required=named if selection_roster else None,
             )
         except Exception as exc:
             _restore_setup_config_in_memory(app, setup_snapshot)
@@ -13621,9 +13657,10 @@ def _apply_setup_batch(
         try:
             protected_selection = _record_windows_setup_agent_selections(
                 getattr(app.cfg, "data_dir", None),
-                tuple(connectors),
+                selection_roster or tuple(connectors),
                 _prior_snapshot=setup_snapshot,
-                skip_unverified=preserve_global_settings,
+                required=named if selection_roster else None,
+                skip_unverified=preserve_global_settings and not explicit_targets,
             )
         except Exception as exc:
             try:
@@ -13634,7 +13671,7 @@ def _apply_setup_batch(
                     f"agent_selection.json rollback was incomplete: {rollback_exc}"
                 ) from exc
             raise
-        if preserve_global_settings:
+        if preserve_global_settings and not explicit_targets:
             # --add-detected (make all): a newly detected connector whose
             # executable cannot be verified is left out with the warning
             # above instead of failing every other connector (GAP-1148).
@@ -13649,6 +13686,10 @@ def _apply_setup_batch(
                 ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
                 return
 
+    prior_modes = {
+        n: app.cfg.guardrail.effective_mode(n)
+        for n in (normalize_connector(str(c)) for c in app.cfg.active_connectors() if str(c).strip())
+    }
     removed_by_batch: list[str] = []
     if not preserve_global_settings:
         removed_by_batch = _reconcile_batch_active_connectors(app.cfg, connectors)
@@ -13689,6 +13730,7 @@ def _apply_setup_batch(
                 _protected_selection=protected_selection,
                 _selection_transaction_snapshot=setup_snapshot,
                 _batch_summary=batch_summary,
+                _selection_roster=selection_roster,
             )
         except Exception as exc:
             try:
@@ -13717,6 +13759,15 @@ def _apply_setup_batch(
     if not applied:
         raise click.ClickException("no connectors were configured — see errors above")
 
+    batch_summary["kept"] = [
+        n for n in (normalize_connector(str(c)) for c in app.cfg.active_connectors() if str(c).strip())
+        if n not in applied
+    ]
+    batch_summary["was"] = {
+        n: prior_modes[n]
+        for n in applied
+        if n in prior_modes and prior_modes[n] != batch_summary.get("modes", {}).get(n, prior_modes[n])
+    }
     _echo_batch_setup_summary(applied, batch_summary, restart=restart, data_dir=app.cfg.data_dir)
 
     # Restart handling: the bare batch owns one narrow result-callback marker.
@@ -13742,6 +13793,17 @@ def _apply_setup_batch(
         # The summary above already says the change applies on the next
         # gateway restart; a second note said it again (GAP-1951).
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+
+
+def _roster_accepts_hook_merge(cfg) -> bool:
+    """True when ``setup -c/--detected/--all`` can add to the current roster.
+
+    An empty roster has nothing to keep, and a roster with a proxy connector
+    (OpenClaw, ZeptoClaw) cannot share the hook path, so both take the
+    full setup path.
+    """
+    active = [normalize_connector(str(n)) for n in cfg.active_connectors() if str(n).strip()]
+    return bool(active) and all(c in _HOOK_ENFORCED_CONNECTORS for c in active)
 
 
 def _dispatch_bare_setup(
@@ -13771,6 +13833,7 @@ def _dispatch_bare_setup(
         return
 
     targets: list[str] = []
+    scripted = bool(connectors or detected or all_connectors)
 
     def _add(raw: str) -> None:
         c = normalize_connector(raw)
@@ -13823,8 +13886,13 @@ def _dispatch_bare_setup(
         if not targets:
             ux.echo("  Aborted — no connectors selected.")
             return
+        scripted = False  # the picker sets the exact roster
 
-    desired = (*app.cfg.active_connectors(), *targets) if add_detected else targets
+    # Flags name the connectors to add or update; only the picker sets the exact
+    # roster. A roster with a proxy connector cannot be merged into (proxies do
+    # not share the hook path), so that case still replaces and names what goes.
+    merge_roster = add_detected or (scripted and _roster_accepts_hook_merge(app.cfg))
+    desired = (*app.cfg.active_connectors(), *targets) if merge_roster else targets
     if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart, connectors=desired):
         raise click.ClickException(refusal)
 
@@ -13839,8 +13907,9 @@ def _dispatch_bare_setup(
         try:
             protected_selection = _record_windows_setup_agent_selections(
                 getattr(app.cfg, "data_dir", None),
-                tuple(targets),
+                tuple(desired) if merge_roster and not add_detected else tuple(targets),
                 _prior_snapshot=setup_snapshot,
+                required=set(targets) if merge_roster and not add_detected else None,
             )
         except Exception as exc:
             _restore_setup_config_in_memory(app, setup_snapshot)
@@ -13871,7 +13940,11 @@ def _dispatch_bare_setup(
                 c for c in targets if (connector_modes.get(c, "observe") or "").strip().lower() == "action"
             ]
             if judge_targets:
-                judge_connectors = _prompt_batch_judge_connectors(judge_targets, gc)
+                # When the flags add to the roster, the judge gate of the connectors
+                # that were not named stays as it is.
+                judge_connectors = _prompt_batch_judge_connectors(
+                    judge_targets, gc, preserve_outside_targets=merge_roster
+                )
             else:
                 judge_connectors = set()
                 click.echo("  " + ux.dim("LLM judge: skipped because no selected connector is in action mode."))
@@ -13901,7 +13974,8 @@ def _dispatch_bare_setup(
         restart=restart,
         prompt_per_connector=False,
         connector_modes=connector_modes,
-        preserve_global_settings=add_detected,
+        preserve_global_settings=merge_roster,
+        explicit_targets=not add_detected,
         allow_trusted_path_prompt=prompt_batch,
         trusted_prompt_cache=trusted_prompt_cache,
         _prior_snapshot=setup_snapshot,

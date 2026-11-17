@@ -4213,7 +4213,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True), \
                 patch(
                     "defenseclaw.commands.cmd_setup._prompt_batch_judge_connectors",
-                    side_effect=lambda targets, gc: self.assertTrue(add_mock.called) or set(),
+                    side_effect=lambda targets, gc, **_kw: self.assertTrue(add_mock.called) or set(),
                 ):
             res = _invoke(["-c", "hermes", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
@@ -4264,7 +4264,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         gc.judge.enabled = True
         gc.judge.hook_connectors = ["*"]
 
-        def choose_codex(targets, gc_arg):
+        def choose_codex(targets, gc_arg, **_kw):
             self.assertEqual(targets, ["codex"])
             cmd_setup._merge_batch_judge_selection(gc_arg, targets, {"codex"})
             return {"codex"}
@@ -4442,7 +4442,7 @@ class TestGatewayOfflineStaging(_BaseSetup):
         self.assertEqual(gc.judge.hook_connectors, [])
 
     def test_batch_judge_selection_can_configure_model(self):
-        def choose_hermes(targets, gc_arg):
+        def choose_hermes(targets, gc_arg, **_kw):
             cmd_setup._merge_batch_judge_selection(gc_arg, targets, {"hermes"})
             return {"hermes"}
 

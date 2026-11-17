@@ -3677,7 +3677,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         WizardGoal(
             "bulk",
             "Choose which agents DefenseClaw protects",
-            summary="Pick every agent to protect in one step; the others are turned off.",
+            summary="Add agents to protect in one step; agents you do not list stay as they are (use Remove a connector to stop one).",
             presets={"@Action": "batch"},
             fields=(
                 "Connectors (CSV)",
@@ -6521,7 +6521,7 @@ _CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
 # "Choose which agents DefenseClaw protects" is the batch goal, so the
 # "Batch setup only:" hint prefixes said nothing (GAP-2386).
 _BULK_GOAL_HINTS: dict[str, str] = {
-    "Connectors (CSV)": "Agents to protect, comma-separated (e.g. codex,hermes); the others are turned off.",
+    "Connectors (CSV)": "Agents to add or update, comma-separated (e.g. codex,hermes); the others stay as they are.",
     "Detected Connectors": "Also protect every agent found on this machine.",
     "All Supported Connectors": "Protect every agent DefenseClaw supports.",
 }
