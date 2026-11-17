@@ -388,9 +388,10 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			edits = append(edits, edit{start, end, "bash -c " + posixSingleQuoted(script)})
 			return false
 		}
-		if !known && sourced && holdsHereText(call.Args[at+1]) {
-			// source <(cat <<EOF ... EOF) or sh <(...) of a document the
-			// reading cannot know (rel-1-0-10:GAP-1147).
+		if !known && (sourced || program == "eval" && len(call.Args)-at == 2) && holdsHereText(call.Args[at+1]) {
+			// source <(cat <<EOF ... EOF), sh <(...) or eval "$(cat <<EOF
+			// ... EOF)" of a document the reading cannot know
+			// (rel-1-0-10:GAP-1147, GAP-1193).
 			reader.unread = true
 		}
 		if program == "find" || program == "gfind" {
@@ -490,6 +491,10 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 					script = nested
 				}
 				replace(call.Args[text], posixSingleQuoted(script))
+			} else if holdsHereText(call.Args[text]) {
+				// A STRING of here-document text the reading cannot know
+				// (rel-1-0-10:GAP-1147, GAP-1193).
+				reader.unread = true
 			}
 			return true
 		}
@@ -858,10 +863,15 @@ func holdsHereText(node syntax.Node) bool {
 // unquoted delimiter whose body expands only parameters
 // (posixHeredocBodyRunsNothing), the body with the backslash escapes the
 // holding shell undoes (\$, \`, \\ and a backslash line end;
-// rel-1-0-10:GAP-1148) undone and its parameters as written, which the shell
-// that runs it expands as the shell that holds the document would
-// (rm -rf $HOME/* is the same delete in both). A body that runs a command
-// substitution or arithmetic is not known.
+// rel-1-0-10:GAP-1148) undone and its parameters as written. The holding
+// shell expands those parameters before the shell that runs the text parses
+// it, so the text as written is that script only where the running shell
+// expands each parameter the same way (heredocParamsExpandAsWritten): rm -rf
+// $HOME/* is the same delete in both. A body that runs a command
+// substitution or arithmetic, or whose parameters the running shell would
+// read otherwise (inside single quotes, after an escaped backslash, a name
+// the body binds, a positional or special parameter; rel-1-0-10:GAP-1193),
+// is not known: a shell that runs it is unread (rel-1-0-10:GAP-1147).
 func heredocScriptText(redir *syntax.Redirect) (string, bool) {
 	body := redir.Hdoc
 	if posixHeredocDelimiterQuoted(redir.Word) {
@@ -871,17 +881,180 @@ func heredocScriptText(redir *syntax.Redirect) (string, bool) {
 		return "", false
 	}
 	var out strings.Builder
+	var params []int
+	names := map[string]bool{}
 	printer := syntax.NewPrinter()
 	for _, part := range body.Parts {
-		if literal, ok := part.(*syntax.Lit); ok {
-			out.WriteString(unescapeHeredocLiteral(literal.Value))
+		switch typed := part.(type) {
+		case *syntax.Lit:
+			out.WriteString(unescapeHeredocLiteral(typed.Value))
 			continue
+		case *syntax.ParamExp:
+			if !heredocParamNames(typed, names) {
+				return "", false
+			}
+			params = append(params, out.Len())
+		default:
+			return "", false
 		}
 		if err := printer.Print(&out, &syntax.Word{Parts: []syntax.WordPart{part}}); err != nil {
 			return "", false
 		}
 	}
-	return out.String(), true
+	text := out.String()
+	if len(params) != 0 && !heredocParamsExpandAsWritten(text, params, names) {
+		return "", false
+	}
+	return text, true
+}
+
+// heredocParamNames adds to names every parameter a parameter expansion of an
+// unquoted here-document body reads, and reports whether each is a variable
+// both shells hold alike: a positional or special parameter ($1, $@, $?, $$,
+// $0, ...) is the holding shell's own, and ${NAME=word} or ${NAME:=word}
+// assigns it there (rel-1-0-10:GAP-1193).
+func heredocParamNames(param *syntax.ParamExp, names map[string]bool) bool {
+	shared := true
+	syntax.Walk(param, func(node syntax.Node) bool {
+		nested, ok := node.(*syntax.ParamExp)
+		if !ok {
+			return shared
+		}
+		if nested.Param == nil || !simpleVariableName(nested.Param.Value) || nested.Excl ||
+			nested.Exp != nil && (nested.Exp.Op == syntax.AssignUnset || nested.Exp.Op == syntax.AssignUnsetOrNull) {
+			shared = false
+			return false
+		}
+		names[nested.Param.Value] = true
+		return true
+	})
+	return shared
+}
+
+// heredocParamsExpandAsWritten reports a here-document text, its parameters
+// printed as written at the offsets at, that the shell running it reads as
+// the holding shell left it: each of those parameters is a parameter
+// expansion of the running shell too (not inside single quotes or after an
+// escaping backslash), or sits in a comment, and the text binds none of the
+// names they read (NAME=, for NAME, read NAME, ((NAME++)), ...), which the
+// holding shell expands before the text runs (rel-1-0-10:GAP-1193).
+func heredocParamsExpandAsWritten(text string, at []int, names map[string]bool) bool {
+	file, ok := shellparse.ParseWithComments(text)
+	if !ok {
+		return false
+	}
+	expanded := map[int]bool{}
+	var comments [][2]int
+	bound := false
+	bind := func(name string) {
+		if names[name] {
+			bound = true
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.ParamExp:
+			expanded[int(typed.Pos().Offset())] = true
+			if typed.Param != nil && typed.Exp != nil &&
+				(typed.Exp.Op == syntax.AssignUnset || typed.Exp.Op == syntax.AssignUnsetOrNull) {
+				bind(typed.Param.Value)
+			}
+		case *syntax.Comment:
+			comments = append(comments, [2]int{int(typed.Pos().Offset()), int(typed.End().Offset())})
+		case *syntax.Assign:
+			if typed.Name != nil {
+				bind(typed.Name.Value)
+			}
+		case *syntax.ForClause:
+			if iter, ok := typed.Loop.(*syntax.WordIter); ok && iter.Name != nil {
+				bind(iter.Name.Value)
+			}
+		case *syntax.BinaryArithm:
+			if heredocArithmAssigns(typed.Op) {
+				bind(arithmWordName(typed.X))
+			}
+		case *syntax.UnaryArithm:
+			if typed.Op == syntax.Inc || typed.Op == syntax.Dec {
+				bind(arithmWordName(typed.X))
+			}
+		case *syntax.CallExpr:
+			heredocCallBinds(typed, bind)
+		}
+		return !bound
+	})
+	if bound {
+		return false
+	}
+	for _, offset := range at {
+		if expanded[offset] {
+			continue
+		}
+		inComment := false
+		for _, span := range comments {
+			if offset > span[0] && offset < span[1] {
+				inComment = true
+				break
+			}
+		}
+		if !inComment {
+			return false
+		}
+	}
+	return true
+}
+
+// heredocArithmAssigns reports an arithmetic operator that assigns its left
+// operand.
+func heredocArithmAssigns(op syntax.BinAritOperator) bool {
+	switch op {
+	case syntax.Assgn, syntax.AddAssgn, syntax.SubAssgn, syntax.MulAssgn, syntax.QuoAssgn,
+		syntax.RemAssgn, syntax.AndAssgn, syntax.OrAssgn, syntax.XorAssgn, syntax.ShlAssgn,
+		syntax.ShrAssgn, syntax.AndBoolAssgn, syntax.OrBoolAssgn, syntax.XorBoolAssgn, syntax.PowAssgn:
+		return true
+	}
+	return false
+}
+
+// arithmWordName is the variable an arithmetic operand names, if it is one
+// bare name.
+func arithmWordName(expr syntax.ArithmExpr) string {
+	word, ok := expr.(*syntax.Word)
+	if !ok || len(word.Parts) != 1 {
+		return ""
+	}
+	if lit, ok := word.Parts[0].(*syntax.Lit); ok {
+		return lit.Value
+	}
+	return ""
+}
+
+// heredocCallBinds calls bind for the operand names of the builtins that
+// assign variables by name: read, getopts, mapfile, readarray and unset take
+// names as operands, printf -v NAME one.
+func heredocCallBinds(call *syntax.CallExpr, bind func(string)) {
+	if len(call.Args) == 0 {
+		return
+	}
+	program, static := simpleStaticWord(call.Args[0], nil)
+	if !static {
+		return
+	}
+	switch program {
+	case "read", "getopts", "mapfile", "readarray", "unset":
+		for _, arg := range call.Args[1:] {
+			if name, static := simpleStaticWord(arg, nil); static {
+				bind(name)
+			}
+		}
+	case "printf":
+		for index := 1; index+1 < len(call.Args); index++ {
+			if flag, _ := simpleStaticWord(call.Args[index], nil); flag == "-v" {
+				if name, static := simpleStaticWord(call.Args[index+1], nil); static {
+					bind(name)
+				}
+			}
+		}
+	}
 }
 
 // unescapeHeredocLiteral undoes the escapes of the literal text of an
