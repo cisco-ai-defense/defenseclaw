@@ -1882,19 +1882,28 @@ func withActiveStateTargetMention(
 				// a pwsh launcher on Linux or macOS that names the state through
 				// a link: the mention scan reads the launcher's words, not the
 				// script, which the PowerShell reading walks (rel-1-0-10:GAP-1134).
+				// A .NET open that may write the state by a mode or path known
+				// only at run time is the unknown tier (rel-1-0-10:GAP-1138).
 				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
-				proven := spelled && provenCMDSlashCStateWrite(request) ||
-					(spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) &&
-						provenPowerShellStateWrite(request)
+				proven, unknown := spelled && provenCMDSlashCStateWrite(request), false
+				if !proven && (spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) {
+					proven, unknown = provenPowerShellStateWrite(request)
+				}
+				if unknown {
+					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+				}
 				if !proven {
 					return findings
 				}
 			}
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
-			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
-			!provenPowerShellStateWrite(request) {
-			return findings
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
+			if proven, unknown := provenPowerShellStateWrite(request); unknown {
+				return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+			} else if !proven {
+				return findings
+			}
 		}
 	}
 	return withProvenActiveStateMutation(request, findings)
