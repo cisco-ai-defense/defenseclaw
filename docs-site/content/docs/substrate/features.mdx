@@ -113,7 +113,7 @@ Reading a body needs a Substrate version that lets the callout ask for it. Witho
 | Sandbox telemetry | Changed | `runtime=substrate`, `driver=gvisor` or `microvm`. See [Sandbox telemetry](/docs/observability/sandbox-telemetry) |
 | Alerts | New | The chart can install a PrometheusRule for availability, policy lag, conflicts and unattested templates |
 | Splunk, Galileo, webhooks | Same | Exported from the gateway |
-| Redaction | Same | Same rules, applied in the gateway before export. Secret values are never in an event |
+| Redaction | Stricter default | Same rules and profiles, applied in the gateway before it stores or exports a record. A laptop keeps its own user's history whole (profile `none`); the cluster gateway holds every person's prompts, answers and tool results, so the chart defaults to `sensitive`: credentials, secrets and PII are replaced in its audit store and in every destination. Set `observability.redactionProfile` (or `config.observability.defaults.redaction_profile`) to change it |
 | Batch volume | New | Runs started with `--task` can be sampled; blocks and lifecycle records are never sampled |
 
 ## Not covered

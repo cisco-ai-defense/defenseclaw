@@ -127,6 +127,15 @@ identity.keys_url and keys_ca_file unless config sets them. */ -}}
 {{- $_ := set $sub "identity" $id -}}
 {{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
+{{- /* GAP-0426: redact before the gateway keeps or sends a record. The
+chart's profile is the observability default unless config names one. */ -}}
+{{- $obsDefaults := get (get $cfg "observability" | default dict) "defaults" | default dict -}}
+{{- if not (hasKey $obsDefaults "redaction_profile") -}}
+{{- $obs := get $cfg "observability" | default dict -}}
+{{- $_ := set $obsDefaults "redaction_profile" .Values.observability.redactionProfile -}}
+{{- $_ := set $obs "defaults" $obsDefaults -}}
+{{- $_ := set $cfg "observability" $obs -}}
+{{- end -}}
 {{- /* The local collector (observability.local.enabled) is the try-out
 target: export to it unless config names a destination chart-collector
 (GAP-0272). Its Service address is private, so the destination allows

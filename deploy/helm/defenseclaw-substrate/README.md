@@ -77,6 +77,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `networkPolicy.egress.*` | on, OTLP 4317/4318 | egress limits for the gateway, leader and callout (DNS, Kubernetes and Substrate APIs, the release, OTLP; providers on 443 for gateway and leader) |
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `homeSizeLimit` | `256Mi` | the memory `emptyDir` each pod keeps its local audit database in. It is lost when the pod is replaced, and each gateway replica holds only what it handled; the durable audit record is an export destination under `config.observability.destinations` |
+| `observability.redactionProfile` | `sensitive` | the redaction profile of every record the gateway keeps in its audit store and sends, unless `config.observability.defaults.redaction_profile` names one: credentials, secrets and PII in prompts, model answers and tool results are replaced before they are written (GAP-0426). `none` keeps them whole; use it only when the store and every destination share an approved trust boundary |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart (debug exporter), and an otlp destination `chart-collector` to it in `config.observability.destinations` unless one with that name is set. For a real backend, add your own destination under `config.observability.destinations` |
 | `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |
 
