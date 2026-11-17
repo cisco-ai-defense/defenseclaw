@@ -40,7 +40,7 @@ func mcpInventoryFingerprint(key []byte, domain string, values []string) string 
 	if len(key) != sha256.Size || len(values) > maxMCPFingerprintParts {
 		return ""
 	}
-	if domain != "command" && domain != "arguments" {
+	if domain != "command" && domain != "arguments" && domain != "remote_url" {
 		return ""
 	}
 	mac := hmac.New(sha256.New, key)
@@ -59,6 +59,22 @@ func mcpInventoryFingerprint(key []byte, domain string, values []string) string 
 		_, _ = mac.Write([]byte(value))
 	}
 	return fmt.Sprintf("hmac-sha256:%x", mac.Sum(nil))
+}
+
+// mcpInventoryRemoteIdentity identifies a configured remote endpoint without
+// exporting its path. Paths can contain bearer material even when query and
+// fragment are absent, so the canonical endpoint is used only as keyed HMAC
+// input. The exported server_url is limited separately to scheme and host.
+func mcpInventoryRemoteIdentity(key []byte, raw string) string {
+	canonical := mcpInventoryCanonicalRemoteEndpoint(raw)
+	if canonical == "" {
+		return ""
+	}
+	fingerprint := mcpInventoryFingerprint(key, "remote_url", []string{canonical})
+	if fingerprint == "" {
+		return ""
+	}
+	return "remote\x00" + fingerprint
 }
 
 func mcpInventoryLocalFingerprints(key []byte, server config.MCPServerEntry) (string, string) {

@@ -306,16 +306,22 @@ func emitEndpointInventory(
 	}
 	if len(toolStates) > 0 && toolStates[0] != nil {
 		if !perConnectorPartial && !connectorDiscoveryPartial {
-			toolStates[0].refreshParents(perConnectorMCP)
+			removed := toolStates[0].refreshParents(perConnectorMCP)
+			if toolStates[0].store != nil {
+				_ = toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed)
+			}
 		}
 		for _, collection := range []struct {
-			source string
-			remote bool
+			source     string
+			remote     bool
+			toolSource string
 		}{
-			{"endpoint_local_mcp_tool_inventory", false},
-			{"endpoint_remote_mcp_tool_inventory", true},
+			{"endpoint_local_mcp_tool_inventory", false, "advertised"},
+			{"endpoint_remote_mcp_tool_inventory", true, "advertised"},
+			{"endpoint_local_mcp_observed_tool_inventory", false, "observed"},
+			{"endpoint_remote_mcp_observed_tool_inventory", true, "observed"},
 		} {
-			rows, toolPartial := toolStates[0].components(perConnectorMCP, collection.remote)
+			rows, toolPartial := toolStates[0].components(perConnectorMCP, collection.remote, collection.toolSource)
 			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, perConnectorPartial || toolPartial,
 				config.ObservabilityV8ManagedMCPInventoryAction, publish)
 			if err != nil && firstErr == nil {
@@ -458,16 +464,6 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 	appendServers := func(connectorName, homeScope, home string, servers []config.MCPServerEntry) {
 		slug := inventoryStableToken(connectorName, 128)
 		owner := ownerFor(connectorName, home)
-		identityAliases := make(map[string]map[string]struct{}, len(servers))
-		for _, server := range servers {
-			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
-			if identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint); identity != "" && inventorySafeItemName(server.Name, 256) != "" {
-				if identityAliases[identity] == nil {
-					identityAliases[identity] = make(map[string]struct{})
-				}
-				identityAliases[identity][server.Name] = struct{}{}
-			}
-		}
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
 			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
@@ -487,14 +483,16 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			// Local IDs use the keyed command and ordered arguments; remote
 			// IDs use the sanitized configured URL. Scope distinguishes users.
 			serverIdentity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
-			if serverURL != "" {
-				serverIdentity = "remote\x00" + serverURL
-			} else if serverIdentity == "" {
+			if remoteIdentity := mcpInventoryRemoteIdentity(fingerprintKey, server.URL); remoteIdentity != "" {
+				serverIdentity = remoteIdentity
+			}
+			if serverIdentity == "" {
 				serverIdentity = server.Name
-			} else if len(identityAliases[serverIdentity]) > 1 {
-				// Identical commands can be configured under distinct aliases.
-				// Use the alias only for this collision so both rows survive.
-				serverIdentity += "/" + server.Name
+			} else {
+				// The alias is part of configured-server identity. Hook evidence is
+				// attributed by alias, and including it unconditionally prevents a
+				// later same-command sibling from changing an existing server ID.
+				serverIdentity += "\x00alias\x00" + server.Name
 			}
 			identity := connectorName + "/" + homeScope + "/" + serverIdentity
 			if _, seen := seenComponent[identity]; seen {
@@ -966,16 +964,6 @@ func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bo
 
 func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerprintKey []byte) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0, len(servers))
-	identityAliases := make(map[string]map[string]struct{}, len(servers))
-	for _, server := range servers {
-		commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
-		if identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint); identity != "" && inventorySafeItemName(server.Name, 256) != "" {
-			if identityAliases[identity] == nil {
-				identityAliases[identity] = make(map[string]struct{})
-			}
-			identityAliases[identity][server.Name] = struct{}{}
-		}
-	}
 	for _, server := range servers {
 		command := inventorySafeBasename(server.Command)
 		commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
@@ -990,12 +978,13 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 			product = host
 		}
 		identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
-		if serverURL != "" {
-			identity = "remote\x00" + serverURL
-		} else if identity == "" {
+		if remoteIdentity := mcpInventoryRemoteIdentity(fingerprintKey, server.URL); remoteIdentity != "" {
+			identity = remoteIdentity
+		}
+		if identity == "" {
 			identity = server.Name
-		} else if len(identityAliases[identity]) > 1 {
-			identity += "/" + server.Name
+		} else {
+			identity += "\x00alias\x00" + server.Name
 		}
 		if strings.TrimSpace(identity) == "" {
 			identity = strings.Join([]string{command, host}, "\x00")
@@ -1634,11 +1623,22 @@ func mcpURLHost(raw string) string {
 	return host
 }
 
-// mcpInventoryServerURL retains the configured remote endpoint's scheme,
-// host, port, and escaped path for inventory identity. URL userinfo, query,
-// and fragment are omitted because those positions commonly hold secrets.
-// It does not contact the endpoint.
+// mcpInventoryServerURL returns only the configured remote endpoint's origin.
+// Paths, userinfo, query, and fragment are omitted because every one of those
+// positions is used for bearer material in real MCP configurations. It does
+// not contact the endpoint.
 func mcpInventoryServerURL(raw string) string {
+	canonical := mcpInventoryCanonicalRemoteEndpoint(raw)
+	if canonical == "" {
+		return ""
+	}
+	parsed, _ := url.Parse(canonical)
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host)
+}
+
+// mcpInventoryCanonicalRemoteEndpoint is identity-only material. Callers must
+// never export or persist it; use it only as input to a keyed fingerprint.
+func mcpInventoryCanonicalRemoteEndpoint(raw string) string {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Opaque != "" {
 		return ""

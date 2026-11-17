@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 const maxMCPToolObservations = maxManagedMCPInventory
@@ -19,22 +21,25 @@ type mcpToolObservation struct {
 }
 
 // mcpToolInventory retains only tool names from completed scanner listings and
-// authenticated hook calls. It is bounded and process-local; it never retains
-// arguments, descriptions, schemas, or the scanner's target URL.
+// authenticated hook calls. Observed calls are projected into the audit store
+// so they survive a restart. It never retains arguments, descriptions, schemas,
+// results, or the scanner's target URL.
 type mcpToolInventory struct {
-	mu         sync.Mutex
-	metric     func(context.Context, string, string, string)
-	advertised map[string][]mcpToolObservation
-	observed   map[string]map[string]time.Time
-	partial    map[string]bool
-	parents    map[string]string
+	mu              sync.Mutex
+	metric          func(context.Context, string, string, string)
+	store           *audit.Store
+	advertised      map[string][]mcpToolObservation
+	observed        map[string]map[string]time.Time
+	partial         map[string]bool
+	observedPartial map[string]bool
+	parents         map[string]string
 }
 
 // refreshParents invalidates evidence when an alias starts naming a different
 // configured server. It also withholds evidence for ambiguous aliases.
-func (m *mcpToolInventory) refreshParents(servers []endpointInventoryComponent) {
+func (m *mcpToolInventory) refreshParents(servers []endpointInventoryComponent) []string {
 	if m == nil {
-		return
+		return nil
 	}
 	counts := make(map[string]int, len(servers))
 	next := make(map[string]string, len(servers))
@@ -50,14 +55,20 @@ func (m *mcpToolInventory) refreshParents(servers []endpointInventoryComponent) 
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	var removed []string
 	for key, old := range m.parents {
 		if next[key] != old {
+			if old != "" {
+				removed = append(removed, old)
+			}
 			delete(m.advertised, key)
 			delete(m.observed, key)
 			delete(m.partial, key)
+			delete(m.observedPartial, key)
 		}
 	}
 	m.parents = next
+	return removed
 }
 
 func (m *mcpToolInventory) recordMetric(ctx context.Context, stage, outcome, reason string) {
@@ -76,7 +87,16 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 	}
 	server, tool, valid := exactMCPToolResource(req.ToolName, payloadString(req.Payload, "mcp_server_name"))
 	if valid {
-		a.mcpTools.recordObserved(projection.connector, server, tool, at)
+		parentID, recorded := a.mcpTools.recordObserved(projection.connector, server, tool, at)
+		if recorded && a.mcpTools.store != nil {
+			_ = a.mcpTools.store.UpsertMCPObservedTool(ctx, audit.MCPObservedTool{
+				ParentComponentID: parentID,
+				Connector:         projection.connector,
+				ServerName:        server,
+				ToolName:          tool,
+				LastObservedAt:    at,
+			})
+		}
 	}
 }
 
@@ -134,19 +154,20 @@ func (m *mcpToolInventory) recordListingFailure(connector, server string) {
 	m.partial[mcpToolServerKey(connector, server)] = true
 }
 
-func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at time.Time) {
+func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at time.Time) (string, bool) {
 	if m == nil || connector == "" || server == "" {
-		return
+		return "", false
 	}
 	name := inventorySafeItemName(rawName, 256)
 	if name == "" || name != rawName {
-		return
+		return "", false
 	}
 	key := mcpToolServerKey(connector, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.parents[key] == "" {
-		return
+	parentID := m.parents[key]
+	if parentID == "" {
+		return "", false
 	}
 	if m.observed == nil {
 		m.observed = make(map[string]map[string]time.Time)
@@ -155,12 +176,55 @@ func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at 
 		m.observed[key] = make(map[string]time.Time)
 	}
 	if _, exists := m.observed[key][name]; !exists && len(m.observed[key]) >= 256 {
-		return
+		if m.observedPartial == nil {
+			m.observedPartial = make(map[string]bool)
+		}
+		m.observedPartial[key] = true
+		return parentID, true
 	}
 	m.observed[key][name] = at.UTC()
+	return parentID, true
 }
 
-func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remote bool) ([]endpointInventoryComponent, bool) {
+func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.observed == nil {
+		m.observed = make(map[string]map[string]time.Time)
+	}
+	if m.parents == nil {
+		m.parents = make(map[string]string)
+	}
+	for _, tool := range tools {
+		name := inventorySafeItemName(tool.ToolName, 256)
+		if name == "" || name != tool.ToolName || tool.ParentComponentID == "" {
+			continue
+		}
+		key := mcpToolServerKey(tool.Connector, tool.ServerName)
+		if current := m.parents[key]; current != "" && current != tool.ParentComponentID {
+			continue
+		}
+		if m.observed[key] == nil {
+			m.observed[key] = make(map[string]time.Time)
+		}
+		if _, exists := m.observed[key][name]; !exists && len(m.observed[key]) >= maxMCPToolObservations {
+			continue
+		}
+		m.parents[key] = tool.ParentComponentID
+		m.observed[key][name] = tool.LastObservedAt.UTC()
+		if tool.Overflowed {
+			if m.observedPartial == nil {
+				m.observedPartial = make(map[string]bool)
+			}
+			m.observedPartial[key] = true
+		}
+	}
+}
+
+func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remote bool, onlySource ...string) ([]endpointInventoryComponent, bool) {
 	if m == nil {
 		return nil, false
 	}
@@ -174,6 +238,11 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 	}
 	rows := make([]endpointInventoryComponent, 0)
 	partial := false
+	includeAdvertised, includeObserved := true, true
+	if len(onlySource) > 0 {
+		includeAdvertised = onlySource[0] == "advertised"
+		includeObserved = onlySource[0] == "observed"
+	}
 	for _, server := range servers {
 		if server.mcpIsRemote != remote {
 			continue
@@ -191,10 +260,15 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 		// managed collection partial until each configured server has completed
 		// a listing, including an explicitly empty one. Observed calls alone
 		// cannot prove that previously advertised tools disappeared.
-		if _, listed := m.advertised[key]; !listed {
-			partial = true
+		if includeAdvertised {
+			if _, listed := m.advertised[key]; !listed {
+				partial = true
+			}
+			partial = partial || m.partial[key]
 		}
-		partial = partial || m.partial[key]
+		if includeObserved {
+			partial = partial || m.observedPartial[key]
+		}
 		add := func(name, source string, at time.Time) {
 			if len(rows) >= maxMCPToolObservations {
 				partial = true
@@ -210,17 +284,21 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 				userName: server.userName, userEmail: server.userEmail,
 			})
 		}
-		for _, item := range m.advertised[key] {
-			add(item.name, "advertised", item.at)
+		if includeAdvertised {
+			for _, item := range m.advertised[key] {
+				add(item.name, "advertised", item.at)
+			}
 		}
 		// Map iteration is nondeterministic; sorting keeps snapshot digests stable.
-		observedNames := make([]string, 0, len(m.observed[key]))
-		for name := range m.observed[key] {
-			observedNames = append(observedNames, name)
-		}
-		sort.Strings(observedNames)
-		for _, name := range observedNames {
-			add(name, "observed", m.observed[key][name])
+		if includeObserved {
+			observedNames := make([]string, 0, len(m.observed[key]))
+			for name := range m.observed[key] {
+				observedNames = append(observedNames, name)
+			}
+			sort.Strings(observedNames)
+			for _, name := range observedNames {
+				add(name, "observed", m.observed[key][name])
+			}
 		}
 	}
 	return rows, partial

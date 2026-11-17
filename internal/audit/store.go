@@ -2085,6 +2085,10 @@ var migrations = []migration{
 		description: sparseKeyIndexesMigrationDescription,
 		apply:       migrateSparseKeyIndexes,
 	},
+	{
+		description: "MCP inventory: add bounded durable observed tool state",
+		apply:       migrateMCPObservedTools,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2701,7 +2705,9 @@ var knownTables = map[string]bool{
 	"guardrail_chain_terminal_resets":    true,
 	"guardrail_chain_cutoff_barriers":    true,
 	// Connector/session selection and load provenance (WIN-AUD-070/071).
-	"runtime_asset_state": true,
+	"runtime_asset_state":       true,
+	"mcp_observed_tools":        true,
+	"mcp_observed_tool_parents": true,
 }
 
 func (s *Store) hasColumn(table, column string) (bool, error) {

@@ -608,6 +608,14 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		runtime, _ := sidecar.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 		recordMCPToolInventoryMetric(ctx, runtime, stage, outcome, reason)
 	}
+	if store != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		sidecar.mcpTools.store = store
+		if observed, loadErr := store.ListMCPObservedTools(context.Background()); loadErr == nil {
+			sidecar.mcpTools.restoreObserved(observed)
+		} else {
+			fmt.Fprintf(os.Stderr, "[sidecar] observed MCP tool state unavailable: %v\n", loadErr)
+		}
+	}
 	// Commit the already-validated cold-start policy candidate only after every
 	// fallible constructor has succeeded. A rejected candidate must leave the
 	// process-global scanners unchanged, and must not publish a rule pack to

@@ -1070,7 +1070,7 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 	if component.product != "payments-mcp" || component.itemName != "payments-mcp" ||
 		component.mcpTransport != "http" || component.mcpCommandBasename != "mcp-server" ||
 		component.mcpURLHost != "mcp.example.com:8443" || component.mcpAuthProviderType != "oauth" ||
-		component.mcpServerURL != "https://mcp.example.com:8443/v1" ||
+		component.mcpServerURL != "https://mcp.example.com:8443" ||
 		component.mcpDisabled == nil || !*component.mcpDisabled || component.active {
 		t.Fatalf("sanitized component=%+v", component)
 	}
@@ -1100,8 +1100,8 @@ func TestEndpointLocalMCPIdentityUsesCommandAndOrderedArguments(t *testing.T) {
 		return components[0]
 	}
 	base := component("alias-a", "/private/bin/mcp", "--mode", "safe")
-	if renamed := component("alias-b", "/private/bin/mcp", "--mode", "safe"); renamed.id != base.id {
-		t.Fatalf("renaming a local server changed identity: %q / %q", base.id, renamed.id)
+	if renamed := component("alias-b", "/private/bin/mcp", "--mode", "safe"); renamed.id == base.id {
+		t.Fatalf("distinct server aliases shared identity: %q", base.id)
 	}
 	if changed := component("alias-a", "/other/bin/mcp", "--mode", "safe"); changed.id == base.id {
 		t.Fatal("changing the full command did not change identity")
@@ -1128,8 +1128,8 @@ func TestEndpointLocalMCPIdentityDistinguishesCollidingAliases(t *testing.T) {
 
 func TestMCPInventoryServerURLDropsCredentialsQueryAndFragment(t *testing.T) {
 	for raw, want := range map[string]string{
-		"HTTPS://user:password@MCP.example.com:8443/v1?token=private#fragment": "https://mcp.example.com:8443/v1",
-		"http://mcp.example.com/stream%2Fv1?key=private":                       "http://mcp.example.com/stream%2Fv1",
+		"HTTPS://user:password@MCP.example.com:8443/v1?token=private#fragment": "https://mcp.example.com:8443",
+		"http://mcp.example.com/stream%2Fv1?key=private":                       "http://mcp.example.com",
 		"file:///private/mcp": "",
 		"https://":            "",
 	} {
@@ -1140,22 +1140,26 @@ func TestMCPInventoryServerURLDropsCredentialsQueryAndFragment(t *testing.T) {
 }
 
 func TestEndpointRemoteMCPIdentityUsesSanitizedURL(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
 	component := func(name, url string) endpointInventoryComponent {
 		t.Helper()
-		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{Name: name, URL: url}}, nil)
+		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{Name: name, URL: url}}, key)
 		if len(components) != 1 {
 			t.Fatalf("components=%d", len(components))
 		}
 		return components[0]
 	}
 	base := component("first", "https://user:password@mcp.example.com/v1?token=secret")
-	if renamed := component("second", "https://mcp.example.com/v1?token=other"); renamed.id != base.id {
-		t.Fatalf("alias or removed URL credentials changed remote identity: %q / %q", base.id, renamed.id)
+	if sanitized := component("first", "https://mcp.example.com/v1?token=other"); sanitized.id != base.id {
+		t.Fatalf("removed URL credentials changed remote identity: %q / %q", base.id, sanitized.id)
+	}
+	if renamed := component("second", "https://mcp.example.com/v1?token=other"); renamed.id == base.id {
+		t.Fatalf("distinct remote aliases shared identity: %q", base.id)
 	}
 	if changed := component("first", "https://mcp.example.com/v2"); changed.id == base.id {
 		t.Fatal("different endpoint path kept the same remote identity")
 	}
-	if strings.Contains(base.id, "password") || strings.Contains(base.id, "secret") {
+	if strings.Contains(base.id, "password") || strings.Contains(base.id, "secret") || strings.Contains(base.mcpServerURL, "/v1") {
 		t.Fatalf("component ID disclosed URL credential: %q", base.id)
 	}
 }
@@ -1346,8 +1350,8 @@ func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 	}
 	identifiers := canonicalObjectArray(t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers])
 	if len(identifiers) != 1 || identifiers[0]["command_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpCommandFingerprint] ||
-		mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpServerURL] != "https://mcp.example.com:8443/v1" ||
-		identifiers[0]["server_url"] != "https://mcp.example.com:8443/v1" ||
+		mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpServerURL] != "https://mcp.example.com:8443" ||
+		identifiers[0]["server_url"] != "https://mcp.example.com:8443" ||
 		identifiers[0]["arguments_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpArgumentsFingerprint] {
 		t.Fatalf("MCP aggregate identifiers do not match per-component fingerprints: %+v", identifiers)
 	}

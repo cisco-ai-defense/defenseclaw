@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,7 +156,7 @@ func TestManagedRemoteMCPToolInventoryUsesConfiguredURLIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	servers, readPartial := perConnectorMCPEntriesWithStatus(cfg, registry)
-	if readPartial || len(servers) != 1 || !servers[0].mcpIsRemote || servers[0].mcpServerURL != "https://mcp.example.com/v1" {
+	if readPartial || len(servers) != 1 || !servers[0].mcpIsRemote || servers[0].mcpServerURL != "https://mcp.example.com" {
 		t.Fatalf("remote parents=%+v partial=%v", servers, readPartial)
 	}
 	var tools mcpToolInventory
@@ -186,7 +187,11 @@ func TestManagedRemoteMCPToolInventoryUsesConfiguredURLIdentity(t *testing.T) {
 		if fields[observability.TelemetryAttributeDefenseClawAIComponentType] != "mcp_tool" {
 			continue
 		}
-		if fields[observability.TelemetryAttributeDefenseClawAIDiscoverySource] != "endpoint_remote_mcp_tool_inventory" ||
+		wantSource := "endpoint_remote_mcp_tool_inventory"
+		if fields[observability.TelemetryAttributeDefenseClawInventoryMcpToolSource] == "observed" {
+			wantSource = "endpoint_remote_mcp_observed_tool_inventory"
+		}
+		if fields[observability.TelemetryAttributeDefenseClawAIDiscoverySource] != wantSource ||
 			fields[observability.TelemetryAttributeDefenseClawInventoryMcpToolParentID] != servers[0].id {
 			t.Fatalf("remote lineage=%v", fields)
 		}
@@ -304,6 +309,56 @@ func TestMCPToolInventoryWaitsForAuthoritativeFirstListing(t *testing.T) {
 	rows, partial = tools.components([]endpointInventoryComponent{parent}, false)
 	if len(rows) != 1 || partial {
 		t.Fatalf("completed empty listing rows=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestObservedMCPToolInventoryDoesNotWaitForToolsListAndPreservesSiblings(t *testing.T) {
+	withManagedEnterprise(t, true)
+	var tools mcpToolInventory
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "claudecode"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	first := time.Date(2026, 11, 17, 1, 2, 3, 0, time.UTC)
+	tools.recordObserved("claudecode", "notes", "search", first)
+	tools.recordObserved("claudecode", "notes", "read", first.Add(time.Minute))
+	tools.recordObserved("claudecode", "notes", "search", first.Add(2*time.Minute))
+
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "observed")
+	if partial || len(rows) != 2 {
+		t.Fatalf("observed rows=%+v partial=%v", rows, partial)
+	}
+	got := map[string]string{}
+	for _, row := range rows {
+		got[row.itemName] = row.mcpToolObservedAt
+		if row.mcpToolSource != "observed" || row.mcpToolParentID != parent.id {
+			t.Fatalf("invalid observed lineage: %+v", row)
+		}
+	}
+	if got["search"] != first.Add(2*time.Minute).Format(time.RFC3339Nano) ||
+		got["read"] != first.Add(time.Minute).Format(time.RFC3339Nano) {
+		t.Fatalf("sibling observations=%v", got)
+	}
+
+	advertised, advertisedPartial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if len(advertised) != 0 || !advertisedPartial {
+		t.Fatalf("advertised rows=%+v partial=%v", advertised, advertisedPartial)
+	}
+}
+
+func TestObservedMCPToolOverflowStaysSeparateFromListingState(t *testing.T) {
+	var tools mcpToolInventory
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "claudecode"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	for index := 0; index <= maxMCPToolObservations; index++ {
+		tools.recordObserved("claudecode", "notes", fmt.Sprintf("tool-%03d", index), time.Now())
+	}
+	tools.recordAdvertised("claudecode", "notes", nil, time.Now())
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "observed")
+	if len(rows) != maxMCPToolObservations || !partial {
+		t.Fatalf("observed rows=%d partial=%v", len(rows), partial)
+	}
+	advertised, advertisedPartial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if len(advertised) != 0 || advertisedPartial {
+		t.Fatalf("advertised rows=%+v partial=%v", advertised, advertisedPartial)
 	}
 }
 
