@@ -482,6 +482,7 @@ func (c *countingSpendSink) Add(string, []string, float64, bool, time.Time) {
 
 func TestRouteOnlyConfigMakesNativeUsageACrossCheckSoOneProxiedCallIsOneCharge(t *testing.T) {
 	cfg := &config.Config{}
+	cfg.Routing.Enabled = true
 	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
 	setNativeUsageSuppression(cfg)
 	t.Cleanup(func() { setNativeUsageSuppression(nil) })
@@ -528,4 +529,36 @@ func TestRouteOnlyConfigMakesNativeUsageACrossCheckSoOneProxiedCallIsOneCharge(t
 		t.Fatal(err)
 	}
 	sink.one(t)
+}
+
+// TestNativeUsageIsTheSourceWhileRoutingIsOff: routing.route_only.connectors
+// left in config.yaml after defenseclaw routing disable must not drop the
+// agent's native usage, because the route-only listener answers nothing
+// while routing is off (rel-1-0-10 GAP-0223).
+func TestNativeUsageIsTheSourceWhileRoutingIsOff(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
+	setNativeUsageSuppression(cfg)
+	t.Cleanup(func() { setNativeUsageSuppression(nil) })
+	if nativeUsageSuppressed("claudecode") {
+		t.Fatal("routing off: claudecode native usage must be counted, the route-only listener carries nothing")
+	}
+
+	fixture := newCodexNativeOTLPFixture(t)
+	sink := installNativeUsageEngine(t, config.TokenomicsConfig{Enabled: true})
+	api := &APIServer{}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	now := time.Now().UTC()
+	if _, err := api.importDecodedOTLPRequestV8(
+		context.Background(), claudeAPIRequestLog(now, claudeAPIRequestAttributes()), otelSignalLogs, "claudecode", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	sink.one(t)
+
+	cfg.Routing.Enabled = true
+	setNativeUsageSuppression(cfg)
+	if !nativeUsageSuppressed("claudecode") {
+		t.Fatal("routing on: the route-only listener carries claudecode, native usage is a cross-check")
+	}
 }
