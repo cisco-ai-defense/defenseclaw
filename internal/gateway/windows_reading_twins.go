@@ -52,7 +52,8 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 		return nil, bounded.CapSet{}
 	}
 	input := request.Input
-	if input.DialectHint == "" && request.windowsPowerShellReading != nil {
+	placedNowhere := input.DialectHint == "" && request.windowsPowerShellReading != nil
+	if placedNowhere {
 		input.DialectHint = actionfacts.DialectPowerShell
 		facts = request.windowsPowerShellReading.factsFor(input)
 	}
@@ -89,7 +90,16 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 		return argumentTwins, cut
 	}
 	if !ok {
-		if !unplaced || facts.Parse.Status != actionfacts.StatusPartial || facts.Parse.Dialect != actionfacts.DialectPowerShell {
+		// A folder move the selection's reading cannot follow (the POSIX
+		// reading of Set-Location, or of cd C:\x, names no folder) keeps
+		// the readable statements out (a left-out move changes where the
+		// others write), so a relative write after it was read only in the
+		// hook's folder, never where the move, or a move that failed, left
+		// the shell: the PowerShell reading of the whole call, which reads
+		// it in each of those folders, is the extra reading
+		// (rel-1-0-10:GAP-1150).
+		moves := placedNowhere && facts.MovesWindowsFolder()
+		if !unplaced && !moves || facts.Parse.Status != actionfacts.StatusPartial || facts.Parse.Dialect != actionfacts.DialectPowerShell {
 			return argumentTwins, bounded.CapSet{}
 		}
 		readable = input
