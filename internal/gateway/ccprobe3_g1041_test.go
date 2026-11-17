@@ -56,7 +56,8 @@ func TestCCP3G1041_GAP1041NestedSubstitutionsDecideInTime(t *testing.T) {
 					elapsed := time.Since(start)
 					t.Logf("ROW|%s|%s|ms=%d", name, action, elapsed.Milliseconds())
 					if elapsed > ccp3g1041DecisionBudget {
-						t.Errorf("%s: decision took %v, budget %v", name, elapsed, ccp3g1041DecisionBudget)
+						// s7-probe3: stop at the first decision past the budget; pre-fix the cost doubles per level and a 30-level call never ends
+						t.Fatalf("%s: decision took %v, budget %v", name, elapsed, ccp3g1041DecisionBudget)
 					}
 					if !boundedHasLimit(findings, 0, false) {
 						t.Errorf("%s: no evaluation-limit finding: %v", name, findings)
