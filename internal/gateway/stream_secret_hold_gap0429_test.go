@@ -423,7 +423,7 @@ func gap0429Run(t *testing.T, paths []gap0429Path) {
 	tallies := map[string]*gap0429Tally{}
 	sizes := gap0429Sizes()
 	for _, path := range paths {
-		for _, pack := range []string{"default", "strict", "permissive"} {
+		for _, pack := range gap0429Packs() {
 			var rows []gap0429Row
 			for _, size := range sizes {
 				for i, k := range keys {
@@ -551,6 +551,17 @@ func gap0429Sizes() []int {
 		return []int{24, 4096, 0}
 	}
 	return []int{1, 7, 24, 4096, 0}
+}
+
+// gap0429Packs are the rule packs of the stream tables. Under -race each
+// pack costs the same (the passthrough tests took 554-679 s with three, over
+// the CI shard cap), so -race runs the default pack for the race check and
+// the plain build runs all three.
+func gap0429Packs() []string {
+	if hookAnswerRaceBuild {
+		return []string{"default"}
+	}
+	return []string{"default", "strict", "permissive"}
 }
 
 func TestGAP0429StreamedSecretHeldRawForward(t *testing.T) {

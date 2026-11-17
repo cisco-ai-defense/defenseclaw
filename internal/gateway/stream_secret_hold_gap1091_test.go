@@ -101,7 +101,7 @@ func gap1091Run(t *testing.T, paths []gap0429Path) {
 	type tally struct{ rows, blocked, leaking, maxBefore, sumBefore int }
 	tallies := map[string]*tally{}
 	for _, path := range paths {
-		for _, pack := range []string{"default", "strict", "permissive"} {
+		for _, pack := range gap0429Packs() {
 			for _, size := range gap0429Sizes() {
 				for _, v := range values {
 					// Three offsets: inside a scan window, and with the /llm and
