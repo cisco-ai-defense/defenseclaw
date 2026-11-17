@@ -1101,6 +1101,20 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			checkedLocalOrdinary := false
 			localOrdinary := false
+			// The endpoint owner proves a closed sequence. A simple-command
+			// pass must not turn one step of an otherwise unproved sequence
+			// into an independently enforcing finding.
+			suppressEndpointSecuritySimple := false
+			if facts.Authoritative() {
+				topLevel := 0
+				for _, command := range facts.Commands {
+					if command.ParentCommandID == 0 {
+						topLevel++
+					}
+				}
+				suppressEndpointSecuritySimple = topLevel > 1 &&
+					!actionfacts.ExactEndpointSecurityProductDisable(facts)
+			}
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := request.simpleMemo.commands(request.Input, facts)
 			if len(simples) == 0 && wholeCommandKnown &&
@@ -1289,6 +1303,11 @@ func dispatchTrustedActionWith(
 							return f.RuleID == "persistence.ssh_authorized_keys_command"
 						})
 					}
+				}
+				if suppressEndpointSecuritySimple {
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "tamper.endpoint_security_product_disable"
+					})
 				}
 				findings = withSimpleCommandFindings(findings, childFindings)
 			}
