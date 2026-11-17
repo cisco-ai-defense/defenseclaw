@@ -268,9 +268,14 @@ func actionAttachedCopyDestinations(call *syntax.CallExpr, home string) []*synta
 	// every attached destination is judged.
 	var attached []*syntax.Word
 	for _, destination := range actionClientLoopWriterDestinations(&syntax.CallExpr{Args: args}, home) {
-		if !slices.Contains(call.Args, destination) {
-			attached = append(attached, destination)
+		// An empty attached value (--target-directory= as the last word) names
+		// no folder: cp, mv, install and ln refuse it. The word cut out of the
+		// option has no parts, and a word with no parts has no position for
+		// the readers below to ask for.
+		if len(destination.Parts) == 0 || slices.Contains(call.Args, destination) {
+			continue
 		}
+		attached = append(attached, destination)
 	}
 	return attached
 }
