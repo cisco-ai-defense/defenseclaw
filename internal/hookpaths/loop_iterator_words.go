@@ -66,7 +66,7 @@ func programKeepsNames(program string) bool {
 	}
 	for i := 0; i < len(program); i++ {
 		b := program[i]
-		if !(b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' || strings.IndexByte("._+-/", b) >= 0) {
+		if (b < '0' || b > '9') && (b < 'A' || b > 'Z') && (b < 'a' || b > 'z') && strings.IndexByte("._+-/", b) < 0 {
 			return false
 		}
 	}
@@ -322,7 +322,7 @@ func loopPlainValue(value string) bool {
 	}
 	for i := 0; i < len(value); i++ {
 		b := value[i]
-		if !(b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' || strings.IndexByte("._+-", b) >= 0) {
+		if (b < '0' || b > '9') && (b < 'A' || b > 'Z') && (b < 'a' || b > 'z') && strings.IndexByte("._+-", b) < 0 {
 			return false
 		}
 	}
@@ -337,7 +337,7 @@ func plainPathValue(value string) bool {
 	}
 	for i := 0; i < len(value); i++ {
 		b := value[i]
-		if !(b >= '0' && b <= '9' || b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' || strings.IndexByte("._+-/:", b) >= 0) {
+		if (b < '0' || b > '9') && (b < 'A' || b > 'Z') && (b < 'a' || b > 'z') && strings.IndexByte("._+-/:", b) < 0 {
 			return false
 		}
 	}

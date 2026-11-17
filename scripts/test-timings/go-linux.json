@@ -1845,6 +1845,8 @@
    "TestGAP0805LauncherSpellingsStrict": 368.2,
    "TestGAP0806NestedLaunchersKeepTheProvenBlock": 7.5,
    "TestGAP0826AnalysisBoundRowsTakeTheUnknownTierOfThePack": 12.8,
+   "TestGAP0839CopyAndArchiveWordsClaudeCode": 34.1,
+   "TestGAP0839CopyAndArchiveWordsCodex": 37.4,
    "TestGAP0857LauncherOperandsDefault": 3.5,
    "TestGAP0857LauncherOperandsManaged": 4.3,
    "TestGAP0857LauncherOperandsManagedStrict": 4.0,
