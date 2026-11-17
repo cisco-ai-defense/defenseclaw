@@ -17,7 +17,6 @@
 package cli
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
@@ -74,25 +73,24 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 	if asJSON {
 		emit = func(e relay.TaskEvent) { _ = writeSubstrateJSONCompact(cmd.OutOrStdout(), e) }
 	}
-	fctx := ctx
-	if !follow {
-		// A snapshot: read what is there, then stop once nothing new comes.
-		var cancel context.CancelFunc
-		fctx, cancel = context.WithCancel(ctx)
-		defer cancel()
-		idle := time.AfterFunc(3*time.Second, cancel)
-		defer idle.Stop()
-		inner := emit
-		emit = func(e relay.TaskEvent) {
-			idle.Reset(2 * time.Second)
-			inner(e)
-		}
-	}
+	var code int
 	if follow {
 		defer substratePresence(cmd, a)()
+		code, err = attach.FollowTask(ctx, o, id, emit)
+	} else {
+		// A snapshot: read what is there, then stop once nothing new comes.
+		// Only the open log is timed, never the wait for the agent to wake
+		// and answer: that wait cut a finished task's log off unread, and
+		// logs printed nothing with exit 0 (GAP-0406).
+		code, err = attach.SnapshotTask(ctx, o, id, attach.Quiet{First: 3 * time.Second, Then: 2 * time.Second}, emit)
+		if errors.Is(err, attach.ErrTaskStillRunning) {
+			if !asJSON {
+				fmt.Fprintf(cmd.ErrOrStderr(), "The task is still running. Follow it with: defenseclaw substrate logs -f %s\n", a.Name)
+			}
+			return nil
+		}
 	}
-	code, err := attach.FollowTask(fctx, o, id, emit)
-	if err != nil && (!errors.Is(err, context.Canceled) || follow) {
+	if err != nil {
 		return substrateFail(err)
 	}
 	if err == nil && code != 0 && !asJSON {
