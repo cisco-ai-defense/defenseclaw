@@ -66,13 +66,16 @@ func trustedArgvCommandInput(input actionfacts.Input) ([]string, bool) {
 // operand and as the launcher gives two, rel-1-0-10:GAP-0857), whether the
 // launcher's script is all the call runs in every one of them (fully: no
 // unread wrapper words, no words after a POSIX -c script that it may run, a
-// script within the command bound), and whether a launcher was found past
-// maxLauncherBodyDepth (depthCut).
+// script within the command bound), whether a launcher was found past
+// maxLauncherBodyDepth (depthCut), and whether a launcher reading was not
+// judged because the wrapper chain held more than the reader judges or went on
+// past the words it reads (readingCut, rel-1-0-10:GAP-0971).
 type launcherBodyReading struct {
-	twins    []trustedActionRequest
-	read     bool
-	fully    bool
-	depthCut bool
+	twins      []trustedActionRequest
+	read       bool
+	fully      bool
+	depthCut   bool
+	readingCut bool
 }
 
 // launcherBodyTwinRequest is the second reading of a shell launcher call, so
@@ -115,25 +118,26 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 		calls     []actionfacts.LauncherCall
 		words     []string
 		statement int
+		cut       bool
 	)
 	argv, isArgv := trustedArgvCommandInput(request.Input)
 	if isArgv {
 		words = argv
-		calls = actionfacts.ShellLauncherCalls(argv)
+		calls, cut = actionfacts.ShellLauncherCalls(argv)
 	} else {
 		text, known := trustedBashCommandInput(request.Input)
 		if !known {
 			return launcherBodyReading{}
 		}
-		calls, words, statement, _ = actionfacts.ShellLauncherCallsOfText(text)
+		calls, words, statement, cut, _ = actionfacts.ShellLauncherCallsOfText(text)
 	}
 	if len(calls) == 0 {
-		return launcherBodyReading{}
+		return launcherBodyReading{readingCut: cut}
 	}
 	if request.launcherDepth >= maxLauncherBodyDepth {
-		return launcherBodyReading{depthCut: true}
+		return launcherBodyReading{depthCut: true, readingCut: cut}
 	}
-	reading := launcherBodyReading{fully: true}
+	reading := launcherBodyReading{fully: !cut, readingCut: cut}
 	for _, call := range calls {
 		twin, read, fully := launcherCallTwin(request, facts, call, words, statement, isArgv)
 		if !read {
@@ -144,7 +148,7 @@ func launcherBodyTwinRequest(request trustedActionRequest, facts actionfacts.Fac
 		reading.twins = append(reading.twins, twin)
 	}
 	if !reading.read {
-		return launcherBodyReading{}
+		return launcherBodyReading{readingCut: cut}
 	}
 	return reading
 }

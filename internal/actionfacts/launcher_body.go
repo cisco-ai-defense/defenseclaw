@@ -72,7 +72,7 @@ type LauncherCall struct {
 // launcher (rel-1-0-10:GAP-0805). Then ShellLauncherBody's grammar reads the
 // script. It is the first of ShellLauncherCalls.
 func ShellLauncherCall(argv []string) (LauncherCall, bool) {
-	calls := ShellLauncherCalls(argv)
+	calls, _ := ShellLauncherCalls(argv)
 	if len(calls) == 0 {
 		return LauncherCall{}, false
 	}
@@ -86,14 +86,41 @@ func ShellLauncherCall(argv []string) (LauncherCall, bool) {
 // launcher after it is read too (rel-1-0-10:GAP-0857). Each reading whose
 // launcher grammar gives a script is one call; the caller judges each and
 // keeps the strongest proven verdict.
-func ShellLauncherCalls(argv []string) []LauncherCall {
-	var calls []LauncherCall
-	for _, start := range launcherStarts(argv) {
-		if call, ok := shellLauncherCallAt(argv, start); ok {
-			calls = append(calls, call)
+//
+// At most maxLauncherReadings calls are returned. The walk reads the whole
+// wrapper chain, so the last launcher word, the one the chain runs when every
+// word before it is an operand or a title, is always read; a reading between
+// that does not fit is not judged, and cut is set: the caller must treat the
+// call as TRUNCATED (the one bound rule). cut is also set when the chain is
+// still open at MaxArgvItems words (rel-1-0-10:GAP-0971).
+func ShellLauncherCalls(argv []string) (calls []LauncherCall, cut bool) {
+	starts, open := launcherStarts(argv)
+	calls, skipped := launcherCallsAt(argv, starts)
+	return calls, skipped || open && len(argv) > MaxArgvItems
+}
+
+// launcherCallsAt is the calls read at starts, bounded by maxLauncherReadings
+// (see ShellLauncherCalls), and whether a reading was skipped. A reading past
+// the bound is skipped and the walk goes on to the last start without building
+// another body, so the cost stays at maxLauncherReadings+1 bodies however long
+// the chain.
+func launcherCallsAt(argv []string, starts []int) (calls []LauncherCall, skipped bool) {
+	for i, start := range starts {
+		last := i == len(starts)-1
+		if skipped && !last {
+			continue
 		}
+		call, ok := shellLauncherCallAt(argv, start)
+		if !ok {
+			continue
+		}
+		if !last && len(calls) == maxLauncherReadings-1 {
+			skipped = true
+			continue
+		}
+		calls = append(calls, call)
 	}
-	return calls
+	return calls, skipped
 }
 
 func shellLauncherCallAt(argv []string, start int) (LauncherCall, bool) {
@@ -119,34 +146,38 @@ func shellLauncherCallAt(argv []string, start int) (LauncherCall, bool) {
 	return call, ok
 }
 
-// maxLauncherReadings bounds the launcher words one argv is read at. Each
-// one past the first follows a word read both ways (an operand or a title),
-// so a wrapper chain longer than this is a crafted one; the screen still
-// names it.
+// maxLauncherReadings bounds the launcher calls one argv is judged as (each
+// is a request of its own, and a launcher's script may hold launchers again).
+// Each one past the first follows a word read both ways (an operand or a
+// title), so a wrapper chain with more is a crafted one: the readings that do
+// not fit are TRUNCATED, and the last launcher is still read (see
+// ShellLauncherCalls, rel-1-0-10:GAP-0971).
 const maxLauncherReadings = 4
 
 // launcherStarts are the indexes of the launcher words an argv may run (see
 // ShellLauncherCalls). Leading assignments are skipped. A word in an operand
-// slot (after a wrapper flag) or in the start title slot is read as the
-// launcher when it names one, and as the operand or title all the same, so
-// the walk goes on past it. cmd's start takes its first quoted word as the
+// slot (after a wrapper flag or a start switch that takes one) or in the start
+// title slot is read as the launcher when it names one, and as the operand or
+// title all the same, so the walk goes on past it, however many there are
+// (rel-1-0-10:GAP-0971). cmd's start takes its first quoted word as the
 // window title and any other first word as the program: an argv carries no
 // quotes, so the first word after start's switches is read both ways, and
 // start has one title. command -v and -V only print. The walk reads up to
 // MaxArgvItems words, the bound of the argv analysis itself: a wrapper chain
 // the analysis reads whole (context-neutral wrappers spend no wrapper depth up
 // to InlineChainWrappers, substrate-1:GAP-0334) is read whole here too, so the
-// launcher at its end is found (rel-1-0-10:GAP-0970).
-func launcherStarts(argv []string) []int {
-	var starts []int
+// launcher at its end is found (rel-1-0-10:GAP-0970). open reports a walk that
+// ran out of words still inside the wrapper chain: the command it runs is
+// past the words read.
+func launcherStarts(argv []string) (starts []int, open bool) {
 	wrapper, afterFlag, titled := "", false, false
 	for index := 0; index < len(argv) && index < MaxArgvItems; index++ {
 		literal := argv[index]
 		titleSlot := wrapper == "start" && !titled
 		if literal != "" && launcherProgramWord(literal) {
 			starts = append(starts, index)
-			if !afterFlag && !titleSlot || len(starts) >= maxLauncherReadings {
-				return starts
+			if !afterFlag && !titleSlot {
+				return starts, false
 			}
 			if afterFlag {
 				afterFlag = false
@@ -164,26 +195,26 @@ func launcherStarts(argv []string) []int {
 		case name != "" && launcherWrapper(name):
 			if (name == "command" || name == "builtin") && index+1 < len(argv) &&
 				layoutOptions(argv[index+1]) && strings.ContainsAny(argv[index+1], "vV") {
-				return starts
+				return starts, false
 			}
 			wrapper, afterFlag, titled = name, false, false
 		case wrapper == "" && word.assign:
 		case wrapper == "":
-			return starts
+			return starts, false
 		case launcherPrefix(word, wrapper):
 			if wrapper == "start" && literal == "" {
 				titled = true
 			}
-			afterFlag = launcherFlag(word)
+			afterFlag = launcherOperandFlag(word, wrapper)
 		case afterFlag:
 			afterFlag = false
 		case titleSlot:
 			titled = true
 		default:
-			return starts
+			return starts, false
 		}
 	}
-	return starts
+	return starts, true
 }
 
 // launcherProgramWord reports a shell launcher program at any path.
@@ -295,8 +326,10 @@ func cmdLauncherBody(argv []string) (string, bool) {
 }
 
 // maxLauncherTextWords bounds the words read from the head of a launcher
-// command string.
-const maxLauncherTextWords = 64
+// command string: the argv walk's own bound, so a wrapper chain is read as
+// far in a string as in an argv; a chain still open at it is TRUNCATED
+// (rel-1-0-10:GAP-0971).
+const maxLauncherTextWords = MaxArgvItems
 
 // maxLauncherTextStatements bounds the statements of a command string read
 // for a launcher; maxLauncherTextBytes the text: a launcher string past the
@@ -319,7 +352,7 @@ func ShellLauncherBodyOfText(text string) (body string, dialect Dialect, ok bool
 
 // ShellLauncherCallOfText is the first of ShellLauncherCallsOfText.
 func ShellLauncherCallOfText(text string) (call LauncherCall, words []string, statement int, ok bool) {
-	calls, words, statement, ok := ShellLauncherCallsOfText(text)
+	calls, words, statement, _, ok := ShellLauncherCallsOfText(text)
 	if !ok {
 		return LauncherCall{}, nil, 0, false
 	}
@@ -336,10 +369,13 @@ func ShellLauncherCallOfText(text string) (call LauncherCall, words []string, st
 // redirection (< > >> 2> 2>&1 and its target) is no word: it is kept in
 // LauncherCall.Redirects, since the launcher's script runs with it. A
 // leading call operator & is skipped. words are the words of that statement
-// and statement its index.
-func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string, statement int, ok bool) {
+// and statement its index. cut is set when a statement read had a launcher
+// reading past maxLauncherReadings, or its wrapper chain went on past the
+// words read (ShellLauncherCalls): the caller treats the call as TRUNCATED
+// (the one bound rule, rel-1-0-10:GAP-0971).
+func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string, statement int, cut, ok bool) {
 	if text == "" || len(text) > maxLauncherTextBytes {
-		return nil, nil, 0, false
+		return nil, nil, 0, false, false
 	}
 	from := 0
 	for statement = 0; statement < maxLauncherTextStatements && from < len(text); statement++ {
@@ -347,10 +383,14 @@ func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string
 		var redirects []string
 		words, redirects, next, ok = launcherTextWords(text, from)
 		if next < 0 {
-			return nil, nil, 0, false // unterminated quote
+			return nil, nil, 0, false, false // unterminated quote
 		}
 		if ok {
-			if calls = ShellLauncherCalls(words); len(calls) > 0 {
+			starts, open := launcherStarts(words)
+			var skipped bool
+			calls, skipped = launcherCallsAt(words, starts)
+			cut = cut || skipped || open && len(words) >= maxLauncherTextWords
+			if len(calls) > 0 {
 				if len(redirects) > 0 {
 					for i := range calls {
 						if calls[i].Dialect == DialectCMD || calls[i].Dialect == DialectPowerShell {
@@ -359,12 +399,12 @@ func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string
 						}
 					}
 				}
-				return calls, words, statement, true
+				return calls, words, statement, cut, true
 			}
 		}
 		from = next
 	}
-	return nil, nil, 0, false
+	return nil, nil, 0, cut, false
 }
 
 func launcherTextWords(text string, from int) ([]string, []string, int, bool) {

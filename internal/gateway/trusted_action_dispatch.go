@@ -699,6 +699,14 @@ func dispatchTrustedAction(
 			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
 		}
+		if launcher.readingCut {
+			// A wrapper chain with more launcher readings than the reader
+			// judges, or one still open past the words it reads, has a
+			// launcher reading no request judged: TRUNCATED (the one bound
+			// rule, rel-1-0-10:GAP-0971). The readings judged, the last
+			// launcher of the chain among them, still decide.
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
+		}
 		if cut := trustedUndecodedCommandCut(request.Input, facts); cut.Any() {
 			// A command array past the decode bound is read by nothing: the
 			// call is TRUNCATED (the one bound rule, rel-1-0-10:GAP-0858).
