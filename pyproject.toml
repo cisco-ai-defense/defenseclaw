@@ -52,9 +52,11 @@ dependencies = [
     # Used by `defenseclaw setup galileo test` to emit a real, minimal OTLP
     # protobuf canary span without starting the gateway.
     "opentelemetry-proto>=1.28.0,<2",
-    # MCP permits opentelemetry-api>=1.28.0, but CVE-2026-126360 is fixed only
-    # in 1.45.2. Keep the floor in wheel metadata as well as uv.lock.
+    # LiteLLM brings the API and SDK into the installed runtime. Keep their
+    # advisory-backed floor in wheel metadata: CVE-2026-114603 is fixed in
+    # 1.45.1 and CVE-2026-126360 is fixed in 1.45.2.
     "opentelemetry-api>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
     # Skill scanner 2.3.2 ships only platform wheels (each bundles a CEL
     # helper; there is no py3-none-any wheel or Windows arm64/musl wheel) and
     # requires Python >=3.11, so Python 3.10 installs have no skill scanning.
@@ -148,8 +150,6 @@ dev = [
     "freezegun==1.5.5",
     "jsonschema>=4.23.0",
     "ruff==0.15.7",
-    # Keep the development SDK on the fixed runtime API release.
-    "opentelemetry-sdk>=1.45.2",
 ]
 
 [project.scripts]
