@@ -42,8 +42,9 @@ import (
 //	ANY  /api/v1/substrate/actors/{atespace}/{name}/attach/{rest}   the relay's dcrelay/1/{rest}:
 //	     poll[/{id}] (long-poll fallback), task[/{id}], status, exec, files
 //
-// The person must own the actor; an administrator may attach to any actor
-// and is recorded as themselves (E2). The relay still requires a
+// Only the person who owns the actor may attach; an administrator sees the
+// inventory, never a session, and is refused with not_your_agent and
+// audited as themselves (GAP-0435). The relay still requires a
 // person-bound session token: the gateway mints one for the signed-in
 // person and this actor incarnation for each request, so a token never
 // crosses the laptop's network. The hop from the router to the relay is
