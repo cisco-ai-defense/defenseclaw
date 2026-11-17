@@ -72,3 +72,81 @@ func TestSandboxPathAccessMissingAndOwned(t *testing.T) {
 		t.Fatalf("own 0600 file: %+v", got)
 	}
 }
+
+// TestGAP0007DockerDesktopSocketLink pins how the managed gateway, a
+// service account, judges the macOS docker socket: Docker Desktop's
+// root-owned link into the 0700 ~/.docker of the account that started it.
+// The gateway cannot stat through it, so the plain path rule said "denied"
+// for the caller's own Docker Desktop and no managed Mac account could run
+// a docker-driver sandbox (rel-1-0-10:GAP-0007). The link into the caller's
+// own home is usable; one into another home, an untrusted link and a
+// dangling one are not.
+func TestGAP0007DockerDesktopSocketLink(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root traverses a 0000 folder; the fixture needs a non-root account")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "Users", "dcm-std2")
+	sockDir := filepath.Join(home, ".docker", "run")
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sockDir, "docker.sock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(root, "var", "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(runDir, "docker.sock")
+	if err := os.Symlink(filepath.Join(sockDir, "docker.sock"), abs); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join(runDir, "docker-rel.sock")
+	if err := os.Symlink("../../Users/dcm-std2/.docker/run/docker.sock", rel); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(runDir, "docker-gone.sock")
+	if err := os.Symlink(filepath.Join(root, "Users", "nobody", "docker.sock"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	// The service account cannot look behind the link: ~/.docker is not
+	// searchable for it.
+	dockerDir := filepath.Join(home, ".docker")
+	if err := os.Chmod(dockerDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dockerDir, 0o700) })
+
+	trusted := true
+	saved := sandboxDockerLinkTrusted
+	sandboxDockerLinkTrusted = func(fs.FileInfo) bool { return trusted }
+	t.Cleanup(func() { sandboxDockerLinkTrusted = saved })
+
+	uid := os.Getuid()
+	own := func(int) (string, error) { return home, nil }
+	if got := sandboxDevicePathAccess(abs, uid, false); got.State != sandboxDeviceDenied {
+		t.Fatalf("fixture: the plain path rule should be denied behind ~/.docker, got %+v", got)
+	}
+	for name, tc := range map[string]struct {
+		path    string
+		home    func(int) (string, error)
+		trusted bool
+		want    sandboxDeviceState
+	}{
+		"own Docker Desktop":             {abs, own, true, sandboxDeviceUsable},
+		"own Docker Desktop, relative":   {rel, own, true, sandboxDeviceUsable},
+		"home with a trailing slash":     {abs, func(int) (string, error) { return home + "/", nil }, true, sandboxDeviceUsable},
+		"another account's":              {abs, func(int) (string, error) { return filepath.Join(root, "Users", "dcm-std1"), nil }, true, sandboxDeviceDenied},
+		"a link not made by root":        {abs, own, false, sandboxDeviceDenied},
+		"home is the root folder":        {abs, func(int) (string, error) { return "/", nil }, true, sandboxDeviceDenied},
+		"relative home":                  {abs, func(int) (string, error) { return "Users/dcm-std2", nil }, true, sandboxDeviceDenied},
+		"account record unreachable":     {abs, func(int) (string, error) { return "", errors.New("directory down") }, true, sandboxDeviceGroupsUnknown},
+		"Docker Desktop not started yet": {dangling, own, true, sandboxDeviceMissing},
+	} {
+		trusted = tc.trusted
+		if got := sandboxDockerDesktopAccess(tc.path, uid, tc.home); got.State != tc.want {
+			t.Errorf("%s: %+v, want state %d", name, got, tc.want)
+		}
+	}
+}
