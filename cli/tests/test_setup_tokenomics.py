@@ -77,3 +77,25 @@ def test_flags_conflict_and_default_is_status(tmp_path: Path) -> None:
     assert CliRunner().invoke(tokenomics, ["--enable", "--disable"], obj=app).exit_code != 0
     result = CliRunner().invoke(tokenomics, [], obj=app, catch_exceptions=False)
     assert "Tokenomics:     off" in result.output and "Price table:    none" in result.output
+
+
+def test_disable_turns_the_local_store_off_and_says_what_stays(tmp_path: Path) -> None:
+    # rel-1-0-10 GAP-1166: --disable left local_store.enabled on, so status read
+    # "Local store: on" after tokenomics was turned off.
+    app = _app(tmp_path)
+    assert CliRunner().invoke(tokenomics, ["--enable"], obj=app, catch_exceptions=False).exit_code == 0
+    (tmp_path / "model_usage").mkdir()
+    result = CliRunner().invoke(tokenomics, ["--disable"], obj=app, catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    tok = yaml.safe_load((tmp_path / "config.yaml").read_text())["observability"]["tokenomics"]
+    assert tok["enabled"] is False and tok["local_store"]["enabled"] is False
+    assert "Local store:    off" in result.output
+    assert f"usage already recorded stays in {tmp_path / 'model_usage'}" in result.output
+    state = json.loads(CliRunner().invoke(tokenomics, ["--status", "--json"], obj=app, catch_exceptions=False).output)
+    assert state["enabled"] is False and state["local_store"] is False
+
+
+def test_status_says_a_store_left_on_is_idle_while_tokenomics_is_off(tmp_path: Path) -> None:
+    app = _app(tmp_path, BASE.replace("observability: {}", "observability:\n  tokenomics:\n    local_store: {enabled: true}"))
+    result = CliRunner().invoke(tokenomics, ["--status"], obj=app, catch_exceptions=False)
+    assert "Local store:    on, idle while tokenomics is off (keeps 30 days)" in result.output
