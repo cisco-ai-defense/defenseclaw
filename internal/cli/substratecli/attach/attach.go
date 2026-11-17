@@ -146,10 +146,14 @@ type Result struct {
 	Transport string
 }
 
+// ClusterFullMessage is what connect, attach and run print while they wait
+// for room in a full cluster (GAP-0528: one wording for both).
+const ClusterFullMessage = "The cluster is full. Waiting for room (Ctrl-C to stop)..."
+
 const (
 	// stableAfter: a connection that lasted this long resets the backoff.
 	stableAfter = 30 * time.Second
-	fullMsg     = "The cluster is full. Waiting for room (Ctrl-C to stop)..."
+	fullMsg     = ClusterFullMessage
 	startingMsg = "The agent is starting. Waiting for it (Ctrl-C to stop)..."
 	lostMsg     = "Connection lost; reconnecting (Ctrl-] detaches; keys typed now are not sent)..."
 	backMsg     = "Reconnected."
