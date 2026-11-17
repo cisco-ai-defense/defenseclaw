@@ -86,45 +86,51 @@ func fieldRefusal(m protoreflect.Message, at string) string {
 	return why
 }
 
-// relayNeeds are the capabilities a separated relay cannot run without
-// (relay.separate: it refuses to start).
-var relayNeeds = []string{"SETUID", "SETGID", "KILL"}
+// capName is a capability name as Substrate takes it: upper case, without
+// the CAP_ prefix.
+func capName(c string) string {
+	return strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(c)), "CAP_")
+}
 
 // securityContextRefusal says why a container's security_context does not
-// keep what was attested (GAP-0371), "" when it does. A kit actor needs no
-// added capability (PLAN 6.4), so any capabilities.add is refused: it would
-// give the relay, or an agent of a relay that is not separated, a power the
-// attested image does not have. Dropping capabilities is hardening and is
-// admitted, except, for an image whose root relay starts the agent as its
-// own user, ALL or one the relay needs (it would refuse to start).
+// fit the attested image (GAP-0371, GAP-0458), "" when it does. Substrate
+// gives an actor container its default capabilities minus drop plus add
+// (kit.ActorCapabilities).
+//   - An image whose root relay starts the agent as its own user must end
+//     with SETUID, SETGID and KILL (the relay refuses to start without them)
+//     and may add only those (template publish adds SETUID and SETGID and
+//     drops the other defaults: kit.RelayCapabilitiesAdd and Drop).
+//   - Any other image may add nothing: its agent runs as the relay's user,
+//     so a capability added to the container would be the agent's.
+//
+// Dropping capabilities is hardening and is admitted otherwise.
 func securityContextRefusal(c *ateapi.Container, v *attest.Verified) string {
 	caps := c.GetSecurityContext().GetCapabilities()
-	if len(caps.GetAdd()) > 0 {
-		return "security_context.capabilities.add adds capabilities; DefenseClaw actors need none, remove it from the template"
-	}
-	if !relaySeparated(v) {
-		return ""
+	var add, drop []string
+	for _, a := range caps.GetAdd() {
+		add = append(add, capName(a))
 	}
 	for _, d := range caps.GetDrop() {
-		n := strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(d)), "CAP_")
-		if n == "ALL" || slices.Contains(relayNeeds, n) {
-			return "security_context.capabilities.drop drops " + n + ", which DefenseClaw's relay needs to start the agent as its own user and to stop it (CAP_SETUID, CAP_SETGID, CAP_KILL); it keeps only those it needs by itself"
+		drop = append(drop, capName(d))
+	}
+	if !v.RelaySeparated() {
+		if len(add) > 0 {
+			return "security_context.capabilities.add adds capabilities, which the agent of this image (it runs as the relay's user) would get; remove it from the template"
+		}
+		return ""
+	}
+	for _, a := range add {
+		if !slices.Contains(kit.RelayCapabilities, a) {
+			return "security_context.capabilities.add adds " + a + "; DefenseClaw's relay needs only SETUID and SETGID added (template publish sets it)"
+		}
+	}
+	got := kit.ActorCapabilities(add, drop)
+	for _, need := range kit.RelayCapabilities {
+		if !slices.Contains(got, need) {
+			return "security_context.capabilities does not give the container " + need + ", which DefenseClaw's relay needs to start the agent as its own user and to stop it; publish the template with defenseclaw substrate template publish (it adds SETUID and SETGID)"
 		}
 	}
 	return ""
-}
-
-// relaySeparated reports whether the image's relay runs as root and starts
-// the agent as its own user (GAP-0116): the relay is the entrypoint and the
-// image USER is root, which the template build of 1.0.10 and later admits
-// only with relay.agent_user set. A kit image built before 1.0.10 runs the
-// relay as the agent's user.
-func relaySeparated(v *attest.Verified) bool {
-	if v == nil || len(v.Entrypoint) == 0 || v.Entrypoint[0] != kit.RelayBinary {
-		return false
-	}
-	u := strings.TrimSpace(v.User)
-	return u == "" || u == "0" || u == "root" || strings.HasPrefix(u, "0:") || strings.HasPrefix(u, "root:")
 }
 
 // UnseparatedReason is the note on a template whose relay and agent share a

@@ -229,7 +229,7 @@ func (s *Server) init() error {
 			s.refuseAtStart("relay.mount_refused", "a volume is mounted at, above or below "+hidden+", which holds DefenseClaw's hooks, so the agent could run without them; refusing to start the agent (mount data folders below the working directory)")
 			return
 		}
-		if err := watchGuarded(s.taskCtx, guard, s.guardBroken); err != nil {
+		if err := watchGuardedAs(s.taskCtx, guard, s.guardBroken, s.opts.sep.agentCred()); err != nil {
 			var degraded *guardDegraded
 			if errors.As(err, &degraded) {
 				// Fail closed (GAP-0369): without the watch a fast swap and

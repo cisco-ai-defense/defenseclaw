@@ -17,7 +17,11 @@ import (
 // startPTY starts cmd on a new pseudo-terminal of cols x rows and returns
 // its master side.
 func startPTY(cmd *exec.Cmd, cols, rows uint16) (*os.File, error) {
-	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+	var cred agentCred
+	if cmd.SysProcAttr != nil {
+		cred = cmd.SysProcAttr.Credential
+	}
+	master, err := openPTMX(cred)
 	if err != nil {
 		return nil, fmt.Errorf("open pty: %w", err)
 	}
@@ -37,11 +41,6 @@ func startPTY(cmd *exec.Cmd, cols, rows uint16) (*os.File, error) {
 		return nil, fmt.Errorf("open pty slave: %w", err)
 	}
 	defer slave.Close()
-	var cred agentCred
-	if cmd.SysProcAttr != nil {
-		cred = cmd.SysProcAttr.Credential
-	}
-	ownTTY(slave, cred)
 	if err := setSize(master, cols, rows); err != nil {
 		master.Close()
 		return nil, err

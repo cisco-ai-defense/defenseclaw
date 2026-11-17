@@ -8,6 +8,7 @@ package relay
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -46,11 +47,8 @@ func separate(rc kit.RelayConfig) (*separation, string, error) {
 	case euid != 0:
 		return nil, fmt.Sprintf("relay.agent_user is %s but the relay runs as UID %d, not root, so the agent and the relay are not separated; the template's image must keep USER 0 (template build sets it)", rc.AgentUser, euid), nil
 	}
-	if !hasCaps(unix.CAP_SETUID, unix.CAP_SETGID) {
-		return nil, "", fmt.Errorf("the relay runs as root but may not change user (CAP_SETUID or CAP_SETGID is dropped), so it cannot start the agent as %s; it never runs the agent as root. Keep the default capabilities in the template", rc.AgentUser)
-	}
-	if !hasCaps(unix.CAP_KILL) {
-		return nil, "", fmt.Errorf("the relay runs as root but may not signal the agent's processes (CAP_KILL is dropped), so it could not stop the agent when DefenseClaw's hooks are tampered with. Keep the default capabilities in the template")
+	if !hasCaps(unix.CAP_SETUID, unix.CAP_SETGID, unix.CAP_KILL) {
+		return nil, "", fmt.Errorf("the relay runs as root but lacks CAP_SETUID, CAP_SETGID or CAP_KILL, so it can neither start the agent as %s nor stop it; it never runs the agent as root. The template's container must add SETUID and SETGID (security_context.capabilities; defenseclaw substrate template publish sets it)", rc.AgentUser)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -69,29 +67,27 @@ func separate(rc kit.RelayConfig) (*separation, string, error) {
 	return &separation{cred: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{uint32(gid)}}, exe: exe}, warn, nil
 }
 
-// relayCaps are the only capabilities a separated relay keeps (GAP-0376),
-// each for code that needs it:
+// relayCaps are the only capabilities a separated relay keeps (GAP-0376,
+// GAP-0458), each for code that needs it; kit.RelayCapabilities, the set
+// its template asks Substrate for:
 //   - CAP_SETUID, CAP_SETGID: every process it starts (agent PTY, headless
 //     task, exec, the files-put, files-get and state-dir children) is
-//     switched to relay.agent_user (asAgent: setgroups, setgid, setuid).
+//     switched to relay.agent_user (asAgent: setgroups, setgid, setuid), and
+//     the relay takes the agent's file-system identity to open the agent's
+//     terminal (devpts gives it to the opener) and to read the agent's
+//     /proc/<pid>/io (withFSCred).
 //   - CAP_KILL: it signals the agent's processes, another user's: the
 //     agent's process group (killProcessGroup), the task tree on a stall
 //     (procTree.signal) and every process of the actor on a guard trip
 //     (stopActorProcesses).
-//   - CAP_CHOWN: it gives the agent the terminal it runs on (ownTTY); the
-//     PTY is made by root.
-//   - CAP_DAC_READ_SEARCH: as root but no longer exempt from file modes, it
-//     still reads inside the agent's own folders, whose modes the base image
-//     picks (a 0700 or 0750 HOME is common): the guard's lstat and inotify
-//     watch of HOME and ~/.gemini (watchGuarded) and the project folder
-//     check (projectDir). It reads only; it writes nothing as root.
 //
-// Everything else goes from the effective, permitted, inheritable, ambient
-// and bounding sets of every thread: no DAC_OVERRIDE, FOWNER, NET_RAW,
-// SYS_CHROOT, MKNOD, SETPCAP, SETFCAP, NET_BIND_SERVICE (the port is bound
-// by then) or AUDIT_WRITE. CAP_CHOWN and CAP_DAC_READ_SEARCH are kept only
-// when the relay has them; the first three are required (separate).
-var relayCaps = []int{unix.CAP_SETUID, unix.CAP_SETGID, unix.CAP_KILL, unix.CAP_CHOWN, unix.CAP_DAC_READ_SEARCH}
+// Everything else goes from the effective, permitted, inheritable and
+// ambient sets of every thread, and from the bounding set when the relay may
+// change it: CHOWN, DAC_OVERRIDE, DAC_READ_SEARCH, FOWNER, NET_RAW,
+// NET_BIND_SERVICE (the port is bound by then), AUDIT_WRITE and the rest. A
+// kit actor on Substrate has only these three (kit.RelayCapabilitiesAdd and
+// Drop).
+var relayCaps = []int{unix.CAP_SETUID, unix.CAP_SETGID, unix.CAP_KILL}
 
 // capMask is the 64-bit mask of caps.
 func capMask(caps []int) uint64 {
@@ -124,8 +120,8 @@ func confine() (string, error) {
 				return "", fmt.Errorf("the relay could not drop capability %d from its bounding set: %v", c, errno)
 			}
 		}
-	} else {
-		warn = "the relay may not drop capabilities from its bounding set (CAP_SETPCAP is dropped); its own capabilities are dropped"
+	} else if bnd, err := boundingSet(); err == nil && bnd&^keep != 0 {
+		warn = fmt.Sprintf("the relay may not drop capabilities from its bounding set (CAP_SETPCAP is dropped; bounding set %#x); its own capabilities are dropped", bnd)
 	}
 	if _, _, errno := syscall.AllThreadsSyscall(syscall.SYS_PRCTL, unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0); errno != 0 && errno != syscall.EINVAL {
 		return "", fmt.Errorf("the relay could not clear its ambient capabilities: %v", errno)
@@ -139,6 +135,51 @@ func confine() (string, error) {
 		return "", fmt.Errorf("the relay could not drop its capabilities on every thread: %v", errno)
 	}
 	return warn, nil
+}
+
+// boundingSet reads the process's bounding set (CapBnd).
+func boundingSet() (uint64, error) {
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return 0, err
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "CapBnd:"); ok {
+			return strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+		}
+	}
+	return 0, fmt.Errorf("no CapBnd line")
+}
+
+// withFSCred runs fn on a locked thread whose file-system uid and gid are
+// cred's (setfsuid needs CAP_SETUID), and puts them back. If they cannot be
+// put back the thread stays locked and ends with the goroutine, so no other
+// goroutine runs with them. ok is false when the identity could not be
+// taken (fn did not run).
+func withFSCred(cred *syscall.Credential, fn func()) (ok bool) {
+	if cred == nil {
+		fn()
+		return true
+	}
+	runtime.LockOSThread()
+	pg, _ := unix.SetfsgidRetGid(int(cred.Gid))
+	pu, _ := unix.SetfsuidRetUid(int(cred.Uid))
+	cu, _ := unix.SetfsuidRetUid(-1)
+	cg, _ := unix.SetfsgidRetGid(-1)
+	if cu == int(cred.Uid) && cg == int(cred.Gid) {
+		fn()
+		ok = true
+	}
+	_, _ = unix.SetfsuidRetUid(pu)
+	_, _ = unix.SetfsgidRetGid(pg)
+	if u, _ := unix.SetfsuidRetUid(-1); u != pu {
+		return ok
+	}
+	if g, _ := unix.SetfsgidRetGid(-1); g != pg {
+		return ok
+	}
+	runtime.UnlockOSThread()
+	return ok
 }
 
 // lastCap is the highest capability the kernel knows.
@@ -166,10 +207,15 @@ func hasCaps(caps ...int) bool {
 	return true
 }
 
-// ownTTY gives the agent's user the terminal it runs on, as login does; a
-// failure leaves the open descriptors working.
-func ownTTY(f *os.File, cred *syscall.Credential) {
-	if cred != nil {
-		_ = f.Chown(int(cred.Uid), int(cred.Gid))
+// openPTMX opens a new pseudo-terminal master. For a separated relay it is
+// opened with the agent's file-system identity: devpts makes the new
+// terminal the opener's, so the agent owns the terminal it runs on, as
+// after a login, without CAP_CHOWN (GAP-0458).
+func openPTMX(cred *syscall.Credential) (*os.File, error) {
+	var f *os.File
+	var err error
+	if !withFSCred(cred, func() { f, err = os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0) }) {
+		f, err = os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
 	}
+	return f, err
 }

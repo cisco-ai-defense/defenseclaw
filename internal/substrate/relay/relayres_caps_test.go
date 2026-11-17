@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/sys/unix"
@@ -76,13 +77,67 @@ func parseCaps(s string) map[string]uint64 {
 	return out
 }
 
-// GAP-0376: a separated relay keeps only CAP_SETUID, CAP_SETGID, CAP_KILL,
-// CAP_CHOWN and CAP_DAC_READ_SEARCH, on every thread and in its bounding
-// set, and every spawn path still works: the agent's PTY, a headless task,
-// exec, the files-put, files-get and state-dir children, stopping the
-// agent's processes, and the guard's watch of a 0700 HOME. Each process it
-// starts runs as the agent's user with no capabilities and the relay's
-// bounding set. Needs root; runs in a child process.
+// capNumbers are the capabilities the tests name.
+var capNumbers = map[string]int{"AUDIT_WRITE": unix.CAP_AUDIT_WRITE, "KILL": unix.CAP_KILL, "NET_BIND_SERVICE": unix.CAP_NET_BIND_SERVICE,
+	"SETUID": unix.CAP_SETUID, "SETGID": unix.CAP_SETGID, "CHOWN": unix.CAP_CHOWN, "DAC_OVERRIDE": unix.CAP_DAC_OVERRIDE}
+
+// asSubstrateActor gives this process (every thread) exactly the
+// capabilities a Substrate actor's container has with names as its set:
+// effective, permitted and bounding, nothing inheritable or ambient, as
+// atelet's OCI spec does (Substrate v1.0.0).
+func asSubstrateActor(t *testing.T, names []string) uint64 {
+	t.Helper()
+	var mask uint64
+	for _, n := range names {
+		c, ok := capNumbers[n]
+		if !ok {
+			t.Fatalf("unknown capability %s", n)
+		}
+		mask |= 1 << uint(c)
+	}
+	for c := 0; c <= lastCap(); c++ {
+		if mask&(1<<uint(c)) == 0 {
+			if _, _, e := syscall.AllThreadsSyscall(syscall.SYS_PRCTL, unix.PR_CAPBSET_DROP, uintptr(c), 0); e != 0 && e != syscall.EINVAL {
+				t.Fatalf("drop %d from the bounding set: %v", c, e)
+			}
+		}
+	}
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	set := [2]unix.CapUserData{{Effective: uint32(mask), Permitted: uint32(mask)}, {Effective: uint32(mask >> 32), Permitted: uint32(mask >> 32)}}
+	if _, _, e := syscall.AllThreadsSyscall(syscall.SYS_CAPSET, uintptr(unsafe.Pointer(&hdr)), uintptr(unsafe.Pointer(&set[0])), 0); e != 0 {
+		t.Fatalf("capset: %v", e)
+	}
+	return mask
+}
+
+// GAP-0458: with Substrate's default capabilities (a template that asks for
+// none: AUDIT_WRITE, KILL, NET_BIND_SERVICE) a root relay refuses to start,
+// and says the template's container must add SETUID and SETGID. Root, in a
+// child process.
+func TestRelayWithSubstratesDefaultCapabilitiesNamesTheTemplateFix(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	if !inRelayChild(t) {
+		return
+	}
+	asSubstrateActor(t, kit.SubstrateDefaultCapabilities)
+	_, _, err := separate(kit.RelayConfig{AgentUser: "65534:65534"})
+	if err == nil || !strings.Contains(err.Error(), "must add SETUID and SETGID") {
+		t.Fatalf("separate with the default set: %v", err)
+	}
+}
+
+// GAP-0458, GAP-0376: a relay with the capabilities a Substrate actor gets
+// from the kit's template (kit.ActorCapabilities of the template's add and
+// drop: SETUID, SETGID, KILL and nothing else) starts and keeps exactly
+// those on every thread and in its bounding set, and every spawn path
+// works: the agent's PTY (owned by the agent without CAP_CHOWN), a headless
+// task, exec and its timeout kill, the files-put, files-get and state-dir
+// children, the task watchdog's I/O read and the guard's watch in a 0700
+// HOME (as the agent's file-system identity, without DAC_READ_SEARCH). Each
+// process it starts runs as the agent's user with no capabilities. Root, in
+// a child process.
 func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root to start a process as another user")
@@ -90,33 +145,13 @@ func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 	if !inRelayChild(t) {
 		return
 	}
-	before := procCaps(t, "/proc/self/status")
-	sp, _, err := separate(kit.RelayConfig{AgentUser: "65534:65534"})
-	if err != nil || sp == nil {
-		t.Fatalf("separate as root: %v %v", sp, err)
+	actorCaps := kit.ActorCapabilities(kit.RelayCapabilitiesAdd, kit.RelayCapabilitiesDrop)
+	if strings.Join(actorCaps, ",") != "KILL,SETGID,SETUID" {
+		t.Fatalf("the kit template gives the actor %v, want KILL, SETGID and SETUID", actorCaps)
 	}
-	var want uint64
-	for _, c := range []int{unix.CAP_SETUID, unix.CAP_SETGID, unix.CAP_KILL, unix.CAP_CHOWN, unix.CAP_DAC_READ_SEARCH} {
-		want |= 1 << uint(c)
-	}
-	want &= before["CapPrm"]
-	bnd := want
-	if before["CapEff"]&(1<<unix.CAP_SETPCAP) == 0 {
-		bnd = before["CapBnd"]
-	}
-	tasks, _ := filepath.Glob("/proc/self/task/*/status")
-	if len(tasks) < 2 {
-		t.Fatalf("threads: %v", tasks)
-	}
-	for _, st := range append([]string{"/proc/self/status"}, tasks...) {
-		c := procCaps(t, st)
-		if c["CapEff"] != want || c["CapPrm"] != want || c["CapInh"] != 0 || c["CapAmb"] != 0 || c["CapBnd"] != bnd {
-			t.Fatalf("%s: relay capabilities %x, want effective and permitted %x, bounding %x, no inheritable or ambient", st, c, want, bnd)
-		}
-	}
-
-	// The agent's user owns its HOME (0700, as many base images make it) and
-	// its working directory; the relay binary is copied where it may run.
+	// Before the capabilities go: the agent's user owns its HOME (0700, as
+	// many base images make it) and its working directory; the relay binary
+	// is copied where it may run.
 	dir, err := os.MkdirTemp("", "relay-caps-")
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +162,7 @@ func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 		_ = os.Mkdir(d, 0o700)
 		_ = os.Chown(d, 65534, 65534)
 	}
+	var sp *separation
 	t.Cleanup(func() {
 		// The agent's files are removed as the agent (the relay has no
 		// DAC_OVERRIDE now).
@@ -139,10 +175,29 @@ func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sp.exe = filepath.Join(dir, "relay")
-	if err := os.WriteFile(sp.exe, bin, 0o755); err != nil {
+	exe := filepath.Join(dir, "relay")
+	if err := os.WriteFile(exe, bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	want := asSubstrateActor(t, actorCaps)
+	bnd := want
+	sp, _, err = separate(kit.RelayConfig{AgentUser: "65534:65534"})
+	if err != nil || sp == nil {
+		t.Fatalf("separate with the Substrate actor's capabilities: %v %v", sp, err)
+	}
+	tasks, _ := filepath.Glob("/proc/self/task/*/status")
+	if len(tasks) < 2 {
+		t.Fatalf("threads: %v", tasks)
+	}
+	for _, st := range append([]string{"/proc/self/status"}, tasks...) {
+		c := procCaps(t, st)
+		if c["CapEff"] != want || c["CapPrm"] != want || c["CapInh"] != 0 || c["CapAmb"] != 0 || c["CapBnd"] != bnd {
+			t.Fatalf("%s: relay capabilities %x, want effective and permitted %x, bounding %x, no inheritable or ambient", st, c, want, bnd)
+		}
+	}
+
+	sp.exe = exe
 
 	// A process the relay starts: the agent's user, no capabilities, the
 	// relay's bounding set.
@@ -251,7 +306,33 @@ func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 	}
 	childOK("task", text.String())
 
-	// The guard reads the agent's 0700 HOME (CAP_DAC_READ_SEARCH).
+	// The task watchdog reads the agent tree's I/O counts (GAP-0458): the
+	// relay may not ptrace the agent, so a plain read of /proc/<pid>/io is
+	// refused and the read as the agent's user is not.
+	io := exec.Command("sh", "-c", "head -c 200000 /dev/zero > /dev/null; exec sleep 30")
+	sp.asAgent(io)
+	setProcessGroup(io)
+	if err := io.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = killProcessGroup(io); _ = io.Wait() }()
+	var got Usage
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		tree := newProcTree(io.Process.Pid)
+		tree.asAgent(sp)
+		if got, _ = tree.usage(); got.IO >= 200000 {
+			break
+		}
+	}
+	if got.IO < 200000 {
+		t.Fatalf("the watchdog reads %d I/O bytes of the agent's tree, want at least 200000", got.IO)
+	}
+	if n := readProcIO(fmt.Sprintf("/proc/%d/io", io.Process.Pid)); n != 0 {
+		t.Logf("a plain read of the agent's io counts works here (%d): the runtime grants the relay ptrace", n)
+	}
+
+	// The guard looks into the agent's 0700 HOME as the agent's file-system
+	// identity (no DAC_READ_SEARCH).
 	gem := filepath.Join(home, ".gemini")
 	mk := exec.Command("mkdir", gem)
 	sp.asAgent(mk)
@@ -260,7 +341,7 @@ func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := watchGuarded(ctx, []string{gem}, func(string) {}); err != nil {
+	if err := watchGuardedAs(ctx, []string{gem}, func(string) {}, sp.cred); err != nil {
 		t.Fatalf("the guard cannot watch a folder in the agent's 0700 HOME: %v", err)
 	}
 }

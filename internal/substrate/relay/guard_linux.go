@@ -26,7 +26,7 @@ var inotifyAddWatch = unix.InotifyAddWatch
 
 type dirID struct{ dev, ino uint64 }
 
-func lstatDir(p string) (dirID, error) {
+func lstatDirOf(p string) (dirID, error) {
 	var st unix.Stat_t
 	if err := unix.Lstat(p, &st); err != nil {
 		return dirID{}, fmt.Errorf("%s: %w", p, err)
@@ -62,8 +62,25 @@ const (
 // error, a watch the kernel dropped) is a trip whose reason starts with
 // guardWatchEnded.
 func watchGuarded(ctx context.Context, dirs []string, broken func(reason string)) error {
+	return watchGuardedAs(ctx, dirs, broken, nil)
+}
+
+// watchGuardedAs is watchGuarded looking at the folders with cred as the
+// file-system identity (a separated relay: the agent's user, GAP-0458). A
+// root relay that keeps only SETUID, SETGID and KILL is not exempt from
+// file modes, and the guarded folders lie in the agent's HOME, whose mode
+// the base image picks (0700 is common).
+func watchGuardedAs(ctx context.Context, dirs []string, broken func(reason string), cred agentCred) error {
 	if len(dirs) == 0 {
 		return nil
+	}
+	lstatDir := func(p string) (id dirID, err error) {
+		withFSCred(cred, func() { id, err = lstatDirOf(p) })
+		return id, err
+	}
+	addWatch := func(fd int, p string, mask uint32) (w int, err error) {
+		withFSCred(cred, func() { w, err = inotifyAddWatch(fd, p, mask) })
+		return w, err
 	}
 	ids := map[string]dirID{}
 	for _, d := range dirs {
@@ -83,12 +100,12 @@ func watchGuarded(ctx context.Context, dirs []string, broken func(reason string)
 	// selves: watch descriptor -> guarded folder.
 	parents, selves := map[int32]map[string]string{}, map[int32]string{}
 	for d := range ids {
-		pw, err := inotifyAddWatch(fd, filepath.Dir(d), guardParentMask)
+		pw, err := addWatch(fd, filepath.Dir(d), guardParentMask)
 		if err != nil {
 			unix.Close(fd)
 			return &guardDegraded{err: fmt.Errorf("watch %s: %w", filepath.Dir(d), err)}
 		}
-		sw, err := inotifyAddWatch(fd, d, guardSelfMask)
+		sw, err := addWatch(fd, d, guardSelfMask)
 		if err != nil {
 			unix.Close(fd)
 			return &guardDegraded{err: fmt.Errorf("watch %s: %w", d, err)}

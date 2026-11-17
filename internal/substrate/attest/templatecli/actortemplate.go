@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // ExitUnavailable is the exit code when the Substrate API cannot be reached
@@ -86,7 +87,14 @@ var (
 // dialer and the retry backoff.
 var (
 	publishImage = attest.Publish
-	verifyImage  = func(ctx context.Context, v *attest.Verifier, image string) (string, error) {
+	// relaySeparated reports whether a verified image's root relay starts
+	// the agent as its own user (its template gets that relay's
+	// capabilities, GAP-0458).
+	relaySeparated = func(ctx context.Context, v *attest.Verifier, image string) bool {
+		got, err := v.Verify(ctx, image)
+		return err == nil && got.RelaySeparated()
+	}
+	verifyImage = func(ctx context.Context, v *attest.Verifier, image string) (string, error) {
 		got, err := v.Verify(ctx, image)
 		if err != nil {
 			return "", err
@@ -146,6 +154,10 @@ type templatePlan struct {
 	Env      []*ateapi.EnvVar
 	Labels   map[string]string
 	API      ateapi.Options
+	// Separated is set when the image's root relay starts the agent as its
+	// own user (attest.Verified.RelaySeparated): the container then gets
+	// the capabilities that relay needs (GAP-0458).
+	Separated bool
 }
 
 // plan validates the flags; given names the flags that were set. It returns
@@ -321,11 +333,12 @@ func buildTemplate(p *templatePlan, name, image string) (*ateapi.ActorTemplate, 
 	t := &ateapi.ActorTemplate{
 		Metadata: &ateapi.ResourceMetadata{Atespace: p.Atespace, Name: name},
 		Containers: []*ateapi.Container{{
-			Name:         containerName,
-			Image:        image,
-			Env:          p.Env,
-			VolumeMounts: []*ateapi.VolumeMount{{Name: "system-info", MountPath: systemInfoMount}},
-			WakeupProbe:  &ateapi.WakeupProbe{HttpGet: &ateapi.HttpGetAction{Path: probePath, Port: probePort}, TimeoutSeconds: probeTimeout},
+			Name:            containerName,
+			Image:           image,
+			Env:             p.Env,
+			VolumeMounts:    []*ateapi.VolumeMount{{Name: "system-info", MountPath: systemInfoMount}},
+			WakeupProbe:     &ateapi.WakeupProbe{HttpGet: &ateapi.HttpGetAction{Path: probePath, Port: probePort}, TimeoutSeconds: probeTimeout},
+			SecurityContext: relaySecurityContext(p.Separated),
 		}},
 		Volumes: []*ateapi.Volume{{
 			Name: "system-info",
@@ -345,6 +358,20 @@ func buildTemplate(p *templatePlan, name, image string) (*ateapi.ActorTemplate, 
 		t.WorkerSelector = &ateapi.Selector{MatchLabels: p.Labels}
 	}
 	return t, nil
+}
+
+// relaySecurityContext is the capability adjustment of a kit actor's
+// container (GAP-0458): Substrate gives an actor container AUDIT_WRITE, KILL
+// and NET_BIND_SERVICE by default, so a relay that starts the agent as its
+// own user gets SETUID and SETGID added and the other defaults dropped:
+// exactly SETUID, SETGID and KILL (kit.RelayCapabilities). An image whose
+// relay and agent share a user gets none.
+func relaySecurityContext(separated bool) *ateapi.SecurityContext {
+	if !separated {
+		return nil
+	}
+	return &ateapi.SecurityContext{Capabilities: &ateapi.Capabilities{
+		Add: append([]string(nil), kit.RelayCapabilitiesAdd...), Drop: append([]string(nil), kit.RelayCapabilitiesDrop...)}}
 }
 
 // settingsOf drops what the server owns or defaults (metadata, status, the

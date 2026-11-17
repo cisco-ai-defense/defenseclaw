@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // Rejection codes. They are stable: they go into template_unverified events
@@ -447,3 +449,16 @@ func registryAllowed(host string, allowed []string) bool {
 
 // maxCacheEntries bounds the verdict cache.
 const maxCacheEntries = 4096
+
+// RelaySeparated reports whether the image's relay runs as root and starts
+// the agent as its own user (GAP-0116): the kit relay is the entrypoint and
+// the image USER is root, which template build admits only with
+// relay.agent_user set. A kit image built before 1.0.10 runs the relay as
+// the agent's user.
+func (v *Verified) RelaySeparated() bool {
+	if v == nil || len(v.Entrypoint) == 0 || v.Entrypoint[0] != kit.RelayBinary {
+		return false
+	}
+	u := strings.TrimSpace(v.User)
+	return u == "" || u == "0" || u == "root" || strings.HasPrefix(u, "0:") || strings.HasPrefix(u, "root:")
+}

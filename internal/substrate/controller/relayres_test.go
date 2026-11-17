@@ -29,7 +29,8 @@ func kitAttest(t *testing.T, mut func(*ateapi.ActorTemplate)) controller.Attesta
 	v.Env = map[string]string{"HOME": "/sandbox"}
 	ta := &controller.TemplateAttestor{Verifier: fakeVerifier{by: map[string]*attest.Verified{img: v}}, Registries: []string{"reg.example.com"}}
 	tmpl := &ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "a", Name: "t"},
-		Containers: []*ateapi.Container{{Image: img}}}
+		Containers: []*ateapi.Container{{Image: img, SecurityContext: &pb.SecurityContext{Capabilities: &pb.Capabilities{
+			Add: []string{"SETUID", "SETGID"}, Drop: []string{"AUDIT_WRITE", "NET_BIND_SERVICE"}}}}}}
 	if mut != nil {
 		mut(tmpl)
 	}
@@ -88,12 +89,13 @@ func TestAdmissionRefusesFieldsItDoesNotCheck(t *testing.T) {
 		if att.Attested || !att.Allowlist || att.Reason == "" {
 			t.Errorf("%s: admitted (%+v)", name, att)
 		}
-		if strings.Contains(att.Reason, "DAC_OVERRIDE") || strings.Contains(att.Reason, "\"x\"") {
+		if strings.Contains(att.Reason, "\"x\"") {
 			t.Errorf("%s: the refusal shows a value: %s", name, att.Reason)
 		}
 	}
 	if att := kitAttest(t, func(m *ateapi.ActorTemplate) {
-		m.Containers[0].SecurityContext = &pb.SecurityContext{Capabilities: &pb.Capabilities{Drop: []string{"NET_RAW", "MKNOD", "AUDIT_WRITE"}}}
+		m.Containers[0].SecurityContext = &pb.SecurityContext{Capabilities: &pb.Capabilities{Add: []string{"SETUID", "SETGID"},
+			Drop: []string{"NET_RAW", "MKNOD", "AUDIT_WRITE", "NET_BIND_SERVICE"}}}
 	}); !att.Attested {
 		t.Errorf("hardening drops are refused: %s", att.Reason)
 	}
@@ -110,6 +112,8 @@ func TestAdmissionRefusesTwiceNamedVolumesSystemFolderMountsAndBadEnvNames(t *te
 		ta := &controller.TemplateAttestor{Verifier: fakeVerifier{by: map[string]*attest.Verified{img: v}}, Registries: []string{"reg.example.com"}}
 		tmpl.Metadata = &ateapi.ResourceMetadata{Atespace: "a", Name: "t"}
 		tmpl.Containers[0].Image = img
+		tmpl.Containers[0].SecurityContext = &pb.SecurityContext{Capabilities: &pb.Capabilities{
+			Add: []string{"SETUID", "SETGID"}, Drop: []string{"AUDIT_WRITE", "NET_BIND_SERVICE"}}}
 		att, err := ta.Attest(context.Background(), tmpl)
 		if err != nil {
 			t.Fatal(err)

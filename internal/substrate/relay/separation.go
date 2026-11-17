@@ -29,6 +29,14 @@ type separation struct {
 	exe string
 }
 
+// agentCred is the agent's user of a separated relay, nil otherwise.
+func (sp *separation) agentCred() agentCred {
+	if sp == nil {
+		return nil
+	}
+	return sp.cred
+}
+
 // Child commands of the relay binary, run as the agent's user: every file
 // the relay writes or reads for a launcher is written or read with the
 // agent's permissions, so a root relay neither leaves root-owned files in

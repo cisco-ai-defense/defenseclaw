@@ -52,6 +52,7 @@ type rig struct {
 	verified  int
 	image     string // what the stubbed publish returns
 	pubErr    error
+	separated bool // what the stubbed relaySeparated answers
 }
 
 // newRig stubs the publish, verify and dial steps. The fake has the atespace
@@ -60,8 +61,11 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	r := &rig{fake: ateapifake.New(), image: imageOf('a')}
 	r.fake.PutAtespace("team")
-	oldPub, oldVer, oldDial, oldBackoff := publishImage, verifyImage, dialAPI, apiBackoff
-	t.Cleanup(func() { publishImage, verifyImage, dialAPI, apiBackoff = oldPub, oldVer, oldDial, oldBackoff })
+	oldPub, oldVer, oldDial, oldBackoff, oldSep := publishImage, verifyImage, dialAPI, apiBackoff, relaySeparated
+	t.Cleanup(func() {
+		publishImage, verifyImage, dialAPI, apiBackoff, relaySeparated = oldPub, oldVer, oldDial, oldBackoff, oldSep
+	})
+	relaySeparated = func(context.Context, *attest.Verifier, string) bool { return r.separated }
 	apiBackoff = 0
 	publishImage = func(context.Context, attest.PublishOptions) (string, error) {
 		r.published++

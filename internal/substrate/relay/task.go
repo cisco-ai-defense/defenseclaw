@@ -280,6 +280,7 @@ func watch(cmd *exec.Cmd, connector string, stall time.Duration, o HeadlessOptio
 	}
 	pid := cmd.Process.Pid
 	tree := newProcTree(pid)
+	tree.asAgent(o.sep)
 	usage := o.Usage
 	cpuMin := tick / 100
 	t := time.NewTicker(tick)

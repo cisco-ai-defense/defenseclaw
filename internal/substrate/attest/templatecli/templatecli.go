@@ -756,6 +756,7 @@ func runPublish(ctx context.Context, args []string, stdout io.Writer) (int, erro
 		fmt.Fprintf(stdout, "published %s\n", ref)
 		return ExitOK, nil
 	}
+	plan.Separated = relaySeparated(ctx, v, ref)
 	res, err := applyTemplate(ctx, api, plan, ref)
 	if err != nil {
 		if c.json {
@@ -821,6 +822,7 @@ func runPublishDry(ctx context.Context, c *common, v *attest.Verifier, plan *tem
 		fmt.Fprintf(stdout, "dry run: would publish %s\n", image)
 		return ExitOK, nil
 	}
+	plan.Separated = relaySeparated(ctx, v, pos[0])
 	res, _, err := dryRunResult(plan, image)
 	if err != nil {
 		return ExitUsageError, err

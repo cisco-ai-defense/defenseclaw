@@ -27,6 +27,11 @@ func specAttest(t *testing.T, c *ateapi.Container) controller.Attestation {
 		Registries: []string{"reg.example.com"},
 	}
 	c.Image = img
+	if c.SecurityContext == nil {
+		// The kit's capability adjustment (GAP-0458), as template publish
+		// writes it.
+		c.SecurityContext = &ateapi.SecurityContext{Capabilities: &ateapi.Capabilities{Add: kit.RelayCapabilitiesAdd, Drop: kit.RelayCapabilitiesDrop}}
+	}
 	att, err := ta.Attest(context.Background(), &ateapi.ActorTemplate{
 		Metadata:   &ateapi.ResourceMetadata{Atespace: "a", Name: "t"},
 		Containers: []*ateapi.Container{c}})

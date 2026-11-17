@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -359,4 +360,48 @@ func (c Config) FailModeFor(mode string) string {
 		return "closed"
 	}
 	return c.FailMode
+}
+
+// The capabilities of a kit actor's container (substrate-1 GAP-0458,
+// GAP-0376). A Substrate actor's container gets AUDIT_WRITE, KILL and
+// NET_BIND_SERVICE by default (Substrate v1.0.0, atelet), and a template
+// may add a short list (SETUID and SETGID among them) and drop any. A kit
+// image whose relay runs as root and starts the agent as relay.agent_user
+// needs SETUID and SETGID for that switch and KILL to stop the agent, and
+// nothing else: its template adds the first two and drops the other
+// defaults (the relay listens above 1023). An image whose relay and agent
+// share a user gets no adjustment: an added capability would be the agent's.
+var (
+	RelayCapabilitiesAdd  = []string{"SETUID", "SETGID"}
+	RelayCapabilitiesDrop = []string{"AUDIT_WRITE", "NET_BIND_SERVICE"}
+	// RelayCapabilities are the capabilities the separated relay keeps.
+	RelayCapabilities = []string{"KILL", "SETGID", "SETUID"}
+	// SubstrateDefaultCapabilities are an actor container's capabilities
+	// when its template asks for no adjustment (Substrate v1.0.0).
+	SubstrateDefaultCapabilities = []string{"AUDIT_WRITE", "KILL", "NET_BIND_SERVICE"}
+)
+
+// ActorCapabilities is the capability set Substrate gives an actor
+// container: the default, minus drop ("ALL" clears it), plus add; sorted.
+func ActorCapabilities(add, drop []string) []string {
+	set := map[string]bool{}
+	for _, c := range SubstrateDefaultCapabilities {
+		set[c] = true
+	}
+	for _, d := range drop {
+		if d == "ALL" {
+			set = map[string]bool{}
+			break
+		}
+		delete(set, d)
+	}
+	for _, a := range add {
+		set[a] = true
+	}
+	out := make([]string, 0, len(set))
+	for c := range set {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
 }

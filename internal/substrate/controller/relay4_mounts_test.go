@@ -36,7 +36,7 @@ func mountAttest(t *testing.T, connector string, vols []*ateapi.Volume, mounts .
 	}
 	att, err := ta.Attest(context.Background(), &ateapi.ActorTemplate{
 		Metadata:   &ateapi.ResourceMetadata{Atespace: "a", Name: "t"},
-		Containers: []*ateapi.Container{{Image: img, VolumeMounts: mounts}},
+		Containers: []*ateapi.Container{{Image: img, VolumeMounts: mounts, SecurityContext: kitSecurityContext()}},
 		Volumes:    vols,
 	})
 	if err != nil {

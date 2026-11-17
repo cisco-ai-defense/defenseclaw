@@ -6,13 +6,9 @@
 package relay
 
 import (
-	"os"
-
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // separate: actors are Linux; elsewhere (tests) the relay and the agent are
 // not separated.
 func separate(kit.RelayConfig) (*separation, string, error) { return nil, "", nil }
-
-func ownTTY(*os.File, agentCred) {}

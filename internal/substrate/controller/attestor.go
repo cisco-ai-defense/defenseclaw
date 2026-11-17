@@ -138,7 +138,7 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		}
 		if i == 0 {
 			out.Digest = v.Digest
-			if !relaySeparated(v) {
+			if !v.RelaySeparated() {
 				out.Unseparated = UnseparatedReason
 			}
 			if st := v.Statement; st != nil {
