@@ -1119,10 +1119,16 @@ type CommandFact struct {
 	// shell expands, the text the document shows with one "$" for each
 	// expansion. It is not the stdin; only applyPatchStdinText reads it.
 	LiteralStdinView string
-	Operations       []OperationKind
-	Redirects        []RedirectFact
-	Wrappers         []WrapperFact
-	curlCapability   *CurlCapability `json:"-"`
+	// PatchUnplacedTarget is true for an apply_patch fed by a here-document
+	// whose envelope has a header no reader places (a home form the tool
+	// does not expand, a drive-relative or device name): the tool writes a
+	// file no path rule can name (CommandPatchNamesUnplacedTarget,
+	// rel-1-0-10:GAP-1077). It is value-free and not serialized.
+	PatchUnplacedTarget bool `json:"-"`
+	Operations          []OperationKind
+	Redirects           []RedirectFact
+	Wrappers            []WrapperFact
+	curlCapability      *CurlCapability `json:"-"`
 }
 
 // CommandControlFlowOperator is a private, value-free summary of the POSIX
