@@ -751,6 +751,55 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertIn("Left as they were (3): claudecode, codex, copilot", result.output)
         self.assertNotIn("removes:", result.output)
 
+    def test_dash_c_new_connector_gets_the_discovery_and_scanner_defaults_gap1121(self):
+        # GAP-1121: `setup <connector>` turns AI discovery on and pins scanner mode
+        # local; `setup -c X` on the same host left both as they were. A connector
+        # new to the roster now gets the same defaults.
+        self._seed_map("claudecode", "codex")
+        gc = self.app.cfg.guardrail
+        gc.scanner_mode = "both"
+        self.app.cfg.ai_discovery.enabled = False
+        with _setup_patches(), patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False):
+            result = _invoke(["-c", "cursor", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.active_connectors(), ["claudecode", "codex", "cursor"])
+        self.assertTrue(self.app.cfg.ai_discovery.enabled)
+        self.assertEqual(gc.scanner_mode, "local")
+
+    def test_dash_c_keeps_what_the_host_set_for_discovery_and_scanners_gap1121(self):
+        # The defaults are for a host that has not set them: a scanner mode other
+        # than the shipped default, an AI Defense key and enabled discovery stay.
+        self._seed_map("claudecode", "codex")
+        gc = self.app.cfg.guardrail
+        gc.scanner_mode = "remote"
+        self.app.cfg.ai_discovery.enabled = True
+        self.app.cfg.ai_discovery.mode = "basic"
+        with _setup_patches(), patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False):
+            result = _invoke(["-c", "cursor", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(gc.scanner_mode, "remote")
+        self.assertEqual(self.app.cfg.ai_discovery.mode, "basic")
+
+        gc.scanner_mode = "both"
+        self.app.cfg.cisco_ai_defense.api_key_env = "CISCO_AI_DEFENSE_API_KEY"
+        with _setup_patches(), patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False):
+            result = _invoke(["-c", "copilot", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(gc.scanner_mode, "both")
+
+    def test_dash_c_on_a_configured_connector_leaves_discovery_off_gap1121(self):
+        # Updating a connector that is already on the roster is not an add: the
+        # host's global settings are not touched.
+        self._seed_map("claudecode", "codex")
+        self.app.cfg.guardrail.scanner_mode = "both"
+        self.app.cfg.ai_discovery.enabled = False
+        with _setup_patches(), patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False):
+            result = _invoke(["-c", "codex", "--mode", "action", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(self.app.cfg.ai_discovery.enabled)
+        self.assertEqual(self.app.cfg.guardrail.scanner_mode, "both")
+
     def test_dash_c_on_a_configured_connector_updates_it_and_says_what_changed_gap1095(self):
         self._seed_map("claudecode", "codex")
         with _setup_patches(), patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False):

@@ -11809,6 +11809,36 @@ def _apply_judge_enablement(
             gc.judge.hook_connectors = gate
 
 
+def _scanner_mode_is_unset_default(cfg) -> bool:
+    """True when guardrail.scanner_mode is still the shipped default (both) or
+    empty, and no AI Defense client is configured, so local is what the host
+    can run. A host that chose remote, or wired AI Defense, keeps its mode."""
+    gc = cfg.guardrail
+    if (gc.scanner_mode or "").strip().lower() not in ("", "both"):
+        return False
+    aid = getattr(cfg, "cisco_ai_defense", None)
+    return not (getattr(aid, "api_key", "") or getattr(aid, "api_key_env", ""))
+
+
+def _apply_ai_discovery_setup_defaults(cfg) -> None:
+    """The AI-discovery settings a hook connector setup turns on."""
+    cfg.ai_discovery.enabled = True
+    cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
+    cfg.ai_discovery.include_shell_history = True
+    cfg.ai_discovery.include_package_manifests = True
+    cfg.ai_discovery.include_env_var_names = True
+    cfg.ai_discovery.include_network_domains = True
+    runtime = cfg.ai_discovery.runtime
+    host_plane_already_enabled = bool(
+        runtime.enable_host_plane
+        and "c" in {str(plane).strip().lower() for plane in (runtime.planes or [])}
+    )
+    if host_plane_already_enabled:
+        enable_all_runtime_planes(runtime)
+    else:
+        enable_user_runtime_planes(runtime)
+
+
 def _apply_hook_connector_setup(
     app: AppContext,
     *,
@@ -11820,6 +11850,7 @@ def _apply_hook_connector_setup(
     workspace_dir: str | None = None,
     write_mode: str = "replace",
     preserve_global_settings: bool = False,
+    seed_new_connector_defaults: bool = False,
     rule_pack: str | None = None,
     block_message: str | None = None,
     fail_mode: str | None = None,
@@ -12046,6 +12077,12 @@ def _apply_hook_connector_setup(
     # connector (legacy behavior); "add" merges it into guardrail.connectors
     # alongside the existing one(s) while keeping the singular field as a
     # backward-compatible primary mirror.
+    # GAP-1121: a connector the operator named (setup -c) that is new to the
+    # roster seeds the host defaults below, as setup <connector> does. Read
+    # before the connector is written. --add-detected keeps the host's settings.
+    connector_new_to_roster = seed_new_connector_defaults and normalize_connector(connector) not in {
+        normalize_connector(str(name)) for name in cfg.active_connectors() if str(name).strip()
+    }
     _write_connector_identity(
         cfg,
         connector,
@@ -12185,6 +12222,11 @@ def _apply_hook_connector_setup(
 
     if not preserve_global_settings:
         gc.scanner_mode = "local"
+    elif connector_new_to_roster and _scanner_mode_is_unset_default(cfg):
+        # GAP-1121: `setup -c X` adds X to the roster the way `setup X` does,
+        # so a connector new to the roster gets the same scanner default when
+        # the host still has the shipped one and no AI Defense client.
+        gc.scanner_mode = "local"
     gc.port = gc.port or 4000
     # SU-02/J1/J2: preserve the operator's detection strategy + judge state
     # across re-runs. setup used to unconditionally re-pin detection_strategy =
@@ -12199,22 +12241,8 @@ def _apply_hook_connector_setup(
         gc.detection_strategy = "regex_only"
     if not gc.detection_strategy_completion:
         gc.detection_strategy_completion = "regex_only"
-    if not preserve_global_settings:
-        cfg.ai_discovery.enabled = True
-        cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
-        cfg.ai_discovery.include_shell_history = True
-        cfg.ai_discovery.include_package_manifests = True
-        cfg.ai_discovery.include_env_var_names = True
-        cfg.ai_discovery.include_network_domains = True
-        runtime = cfg.ai_discovery.runtime
-        host_plane_already_enabled = bool(
-            runtime.enable_host_plane
-            and "c" in {str(plane).strip().lower() for plane in (runtime.planes or [])}
-        )
-        if host_plane_already_enabled:
-            enable_all_runtime_planes(runtime)
-        else:
-            enable_user_runtime_planes(runtime)
+    if not preserve_global_settings or (connector_new_to_roster and not cfg.ai_discovery.enabled):
+        _apply_ai_discovery_setup_defaults(cfg)
 
     try:
         cfg.save()
@@ -13722,6 +13750,7 @@ def _apply_setup_batch(
                 defer_audit=restart,
                 write_mode="add",
                 preserve_global_settings=preserve_global_settings,
+                seed_new_connector_defaults=explicit_targets,
                 enable_judge=enable_judge,
                 judge_hook_connectors=None,
                 allow_trusted_path_prompt=allow_trusted_path_prompt,
@@ -18460,6 +18489,10 @@ def _restart_openclaw_gateway() -> bool:
         if err:
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
+        from defenseclaw.config import openclaw_config_repair_hint
+
+        if hint := openclaw_config_repair_hint(result.stderr, result.stdout):
+            click.echo(f"    {hint}")
         return False
     except FileNotFoundError:
         ux.echo(" ✗ (openclaw CLI not found)")
