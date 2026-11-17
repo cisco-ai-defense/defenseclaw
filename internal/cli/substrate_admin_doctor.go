@@ -465,7 +465,19 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags) []substrat
 	if err != nil {
 		return []substrateCheck{{ID: "cluster", Status: doctorFail, Summary: doctorFirstLine(err), Fix: "check your kubectl access and the --install-file path, then run doctor again"}}
 	}
-	return doctorConvertFleet(fleet.BuildVerify(o, r.ProductVersion, r.Now).Checks)
+	rows := doctorConvertFleet(fleet.BuildVerify(o, r.ProductVersion, r.Now).Checks)
+	for _, g := range r.GlobOverlaps {
+		rows = append(rows, substrateCheck{ID: "cluster.atespace_globs", Status: doctorWarn, Summary: g,
+			Fix: "list the atespace by name in match.substrate.atespaces, or delete it"})
+	}
+	for i := range rows {
+		if rows[i].ID == "cluster."+fleet.CheckCallout && rows[i].Fix != "" {
+			// The fix depends on what holds the slot (GAP-0496): setup
+			// refuses while another callout is in the install file.
+			rows[i].Fix = fleet.CalloutFix(o)
+		}
+	}
+	return rows
 }
 
 func fleetCheckFix(id string) string {

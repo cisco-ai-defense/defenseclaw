@@ -35,6 +35,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
@@ -264,6 +265,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	}
 	var keysCfg config.SubstrateConfig
 	adminService := ""
+	var globs, exact []string
 	if cfgText != "" {
 		var doc struct {
 			Substrate struct {
@@ -284,7 +286,19 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 					Admin string `yaml:"admin"`
 				} `yaml:"services"`
 				Launcher map[string][]string `yaml:"launcher_atespaces"`
+				Extproc  struct {
+					Enabled *bool `yaml:"enabled"`
+				} `yaml:"extproc"`
 			} `yaml:"substrate"`
+			Guardrail struct {
+				Assignments []struct {
+					Match struct {
+						Substrate *struct {
+							Atespaces []string `yaml:"atespaces"`
+						} `yaml:"substrate"`
+					} `yaml:"match"`
+				} `yaml:"profile_assignments"`
+			} `yaml:"guardrail"`
 		}
 		if err := yaml.Unmarshal([]byte(cfgText), &doc); err == nil {
 			o.Issuer = doc.Substrate.Identity.Issuer
@@ -293,6 +307,19 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 			keysCfg.Identity.KeysURL, keysCfg.API.Address = doc.Substrate.Identity.KeysURL, doc.Substrate.API.Address
 			keysCfg.API.ServerName, keysCfg.Services.Actor = doc.Substrate.API.ServerName, doc.Substrate.Services.Actor
 			keysCfg.LauncherAtespaces = doc.Substrate.Launcher
+			o.ExtprocOff = doc.Substrate.Extproc.Enabled != nil && !*doc.Substrate.Extproc.Enabled
+			for _, a := range doc.Guardrail.Assignments {
+				if a.Match.Substrate == nil {
+					continue
+				}
+				for _, ns := range a.Match.Substrate.Atespaces {
+					if strings.ContainsAny(ns, "*?[") {
+						globs = append(globs, ns)
+					} else {
+						exact = append(exact, ns)
+					}
+				}
+			}
 			if doc.Substrate.Supported != "" {
 				o.SupportedVersions = doc.Substrate.Supported
 			}
@@ -329,6 +356,12 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	}
 	readAccessPolicies(cctx, f, &o, launcherAtespaceList(keysCfg.LauncherAtespaces), cluster, apiErr)
 	readInventory(cctx, &r, o.LauncherAtespaces, o.WritableAtespaces, cluster, apiErr)
+	if len(globs) > 0 {
+		// GAP-0506: the controller warns per actor; doctor and verify say
+		// it once per atespace, before anyone wonders why a profile does not
+		// apply.
+		r.GlobOverlaps = fleet.GlobOverlaps(r.ActorAtespaces, launcherAtespaceList(keysCfg.LauncherAtespaces), exact, globs)
+	}
 	readActorRoutes(cctx, f, &o, keysCfg.Services.Actor)
 	if o.SignInIssuer != "" {
 		readSignInServer(cctx, f, &o, adminService)
@@ -517,6 +550,9 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 		}
 	} else {
 		printSubstrateFleet(w, kind, header, doc, checks, ok, r.InventoryNote)
+		for _, g := range r.GlobOverlaps {
+			fmt.Fprintf(w, "  warn  %-22s %s\n", "atespace_globs", safetext.Line(g))
+		}
 	}
 	if kind == "verify" && !ok {
 		return cliusage.WithExitCode(errors.New("a cluster check failed"), 1)

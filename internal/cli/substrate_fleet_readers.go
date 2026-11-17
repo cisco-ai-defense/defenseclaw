@@ -390,6 +390,7 @@ func readInventory(ctx context.Context, r *fleet.Report, launcher, writable []st
 	}
 	for _, a := range actors {
 		inv.States[a.State]++
+		r.ActorAtespaces = append(r.ActorAtespaces, a.Atespace)
 		if sp, ok := spaces[a.Atespace]; ok {
 			sp.Actors++
 			sp.States[a.State]++

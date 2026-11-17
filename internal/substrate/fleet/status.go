@@ -7,7 +7,11 @@
 package fleet
 
 import (
+	"fmt"
+	"path"
+	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
@@ -125,6 +129,41 @@ type Report struct {
 	Atespaces      []Atespace
 	Inventory      *Inventory
 	InventoryNote  string
+	// GlobOverlaps are the atespaces DefenseClaw does not manage that a
+	// glob of a match.substrate assignment meets (GAP-0506), one line each.
+	// They are warnings for the text output and doctor only: the contract
+	// documents (status/verify --json) keep their fixed check list.
+	GlobOverlaps []string
+	// ActorAtespaces are the atespaces of the actors read (one per actor).
+	ActorAtespaces []string
+}
+
+// GlobOverlaps returns, for each atespace that holds actors and that
+// DefenseClaw neither created (launcher) nor lists by name, a line naming
+// the match.substrate globs that meet it: the profile does not apply there (E3), as the
+// controller's sandbox.warning says, so an operator who meant it to must
+// list the atespace by name. The result is sorted.
+func GlobOverlaps(actorAtespaces, launcher, exact, globs []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, a := range actorAtespaces {
+		if seen[a] || slices.Contains(launcher, a) || slices.Contains(exact, a) {
+			continue
+		}
+		seen[a] = true
+		var hit []string
+		for _, g := range globs {
+			if ok, err := path.Match(g, a); err == nil && ok {
+				hit = append(hit, g)
+			}
+		}
+		if len(hit) > 0 {
+			out = append(out, fmt.Sprintf("atespace %s matches the glob %s but DefenseClaw neither created nor lists it, so the profile "+
+				"does not apply there: list it by name in match.substrate.atespaces, or delete it if it should not exist", a, strings.Join(hit, ", ")))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ClusterOf builds the cluster member from what was observed.
@@ -145,11 +184,18 @@ func ClusterOf(o Observed) Cluster {
 // no gateway or callout replica is ready, degraded when a component is
 // short or a check fails.
 func HealthState(h Health, checks []Check) string {
+	return healthState(h, checks, false)
+}
+
+// healthState is HealthState; calloutOff (substrate.extproc.enabled: false,
+// GAP-0496) means an unregistered callout is the operator's choice, which
+// the callout check reports as a warning, not a degraded cluster.
+func healthState(h Health, checks []Check, calloutOff bool) string {
 	if h.Gateway.Ready == 0 || (h.Callout.Registered && h.Callout.Ready == 0) {
 		return Down
 	}
 	if h.Gateway.Ready < h.Gateway.Desired || !h.Leader.Ready || !h.Leader.LeaseHeld || h.Controller.Ready == 0 ||
-		h.Callout.Ready < h.Callout.Desired || !h.Callout.Registered {
+		h.Callout.Ready < h.Callout.Desired || (!h.Callout.Registered && !calloutOff) {
 		return Degraded
 	}
 	for _, c := range checks {
@@ -168,7 +214,7 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 	h := r.Health
 	h.Callout.Registered = o.ExtprocService == setup.CalloutService(o.Namespace, o.CalloutPort) && !o.OpenAPPA
 	h.Callout.BodyMode = BodyMode(o)
-	h.State = HealthState(h, checks)
+	h.State = healthState(h, checks, o.ExtprocOff)
 	atespaces := append([]Atespace{}, r.Atespaces...)
 	sort.Slice(atespaces, func(i, j int) bool { return atespaces[i].Name < atespaces[j].Name })
 	for i := range atespaces {
