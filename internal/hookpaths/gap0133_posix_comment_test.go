@@ -27,9 +27,7 @@ func r106KeysHome(t *testing.T) (homes, home, project string) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, "../.ssh/authorized_keys", filepath.Join(project, "keylink"))
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	return homes, home, project
 }

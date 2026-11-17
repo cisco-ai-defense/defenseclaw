@@ -42,22 +42,12 @@ func newLateFixture(t *testing.T) lateFixture {
 	if err := os.WriteFile(filepath.Join(project, "src", "main.go"), []byte("package main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(keys, filepath.Join(project, "keylink")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(keys, filepath.Join(project, "-keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(project, "keylink"))
+	testSymlink(t, keys, filepath.Join(project, "-keylink"))
 	// A link whose name is one letter, and one with a space in its name.
-	if err := os.Symlink(filepath.Join(project, "plain.txt"), filepath.Join(project, "l")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(keys, filepath.Join(project, "key link")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(project, "plain.txt"), filepath.Join(project, "l"))
+	testSymlink(t, keys, filepath.Join(project, "key link"))
+	testSymlink(t, filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink"))
 	if err := os.Link(keys, filepath.Join(project, "hardlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -236,9 +226,7 @@ func TestGAP0518LateOrdinaryCallRound4(t *testing.T) {
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(sub, "childlink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(sub, "childlink"))
 	if err := os.WriteFile(filepath.Join(sub, "plain.txt"), []byte("plain\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -337,9 +325,7 @@ func TestGAP0518LateOrdinaryCallRound5(t *testing.T) {
 	if err := os.Mkdir(sub, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(sub, "childlink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(sub, "childlink"))
 	links := map[string]string{
 		"chain":    filepath.Join(f.project, "keylink"),
 		"srclink":  filepath.Join(f.project, "src"),
@@ -349,9 +335,7 @@ func TestGAP0518LateOrdinaryCallRound5(t *testing.T) {
 		"upplain":  filepath.Join(f.project, "l"),
 	}
 	for name, target := range links {
-		if err := os.Symlink(target, filepath.Join(f.project, name)); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, filepath.Join(f.project, name))
 	}
 	for _, tc := range []struct {
 		name, command string

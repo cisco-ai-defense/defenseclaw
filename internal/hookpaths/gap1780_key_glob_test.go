@@ -54,12 +54,8 @@ func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
 		})
 	}
 	// Aliases are expanded on this host and resolved.
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Join(home, ".ssh", "id_ed25519"), filepath.Join(project, "keyl")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(home, ".ssh"), filepath.Join(project, "dirlink"))
+	testSymlink(t, filepath.Join(home, ".ssh", "id_ed25519"), filepath.Join(project, "keyl"))
 	for _, command := range []string{"head -c 4096 dirlink/id_*", "cat keyl*"} {
 		if !posixShellPrivateKeyRead(command, project, home) {
 			t.Errorf("posixShellPrivateKeyRead(%q) = false, want a key read through the alias", command)

@@ -41,9 +41,7 @@ func sedBackupFixture(t *testing.T) (home, proj string) {
 	for link, target := range map[string]string{
 		"lnk": "authorized_keys", "alnk": filepath.Join(keys, "authorized_"), "lnk2": "f", "dlnk": "ssh/../f",
 	} {
-		if err := os.Symlink(target, filepath.Join(proj, link)); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, filepath.Join(proj, link))
 	}
 	return home, proj
 }

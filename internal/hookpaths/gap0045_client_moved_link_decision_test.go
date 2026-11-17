@@ -22,9 +22,7 @@ func TestR106ClientDecisionFollowsMovedDiskLink(t *testing.T) {
 		t.Skip("POSIX home")
 	}
 	_, home, project := r106KeysHome(t)
-	if err := os.Symlink("notes.txt", filepath.Join(project, "readlink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, "notes.txt", filepath.Join(project, "readlink"))
 	t.Setenv("HOME", home)
 	for command, want := range map[string]bool{
 		`mv keylink k2; echo x >> k2`:                               true,
