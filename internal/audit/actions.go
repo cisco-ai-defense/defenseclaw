@@ -290,18 +290,22 @@ const (
 	ActionInspectToolBlock            Action = "inspect-tool-block"
 	ActionInspectToolAlert            Action = "inspect-tool-alert"
 	ActionInspectToolAllow            Action = "inspect-tool-allow"
+	ActionInspectToolTimeout          Action = "inspect-tool-timeout" // no verdict within the scan budget (504); the caller decides by its fail mode
 	ActionInspectRequestConfirm       Action = "inspect-request-confirm"
 	ActionInspectRequestBlock         Action = "inspect-request-block"
 	ActionInspectRequestAlert         Action = "inspect-request-alert"
 	ActionInspectRequestAllow         Action = "inspect-request-allow"
+	ActionInspectRequestTimeout       Action = "inspect-request-timeout"
 	ActionInspectResponseConfirm      Action = "inspect-response-confirm"
 	ActionInspectResponseBlock        Action = "inspect-response-block"
 	ActionInspectResponseAlert        Action = "inspect-response-alert"
 	ActionInspectResponseAllow        Action = "inspect-response-allow"
+	ActionInspectResponseTimeout      Action = "inspect-response-timeout"
 	ActionInspectToolResponseConfirm  Action = "inspect-tool-response-confirm"
 	ActionInspectToolResponseBlock    Action = "inspect-tool-response-block"
 	ActionInspectToolResponseAlert    Action = "inspect-tool-response-alert"
 	ActionInspectToolResponseAllow    Action = "inspect-tool-response-allow"
+	ActionInspectToolResponseTimeout  Action = "inspect-tool-response-timeout"
 	ActionInspectReveal               Action = "inspect-reveal"
 
 	// Setup, operator, API, and sink instrumentation. These actions
@@ -547,18 +551,22 @@ func AllActions() []Action {
 		ActionInspectToolBlock,
 		ActionInspectToolAlert,
 		ActionInspectToolAllow,
+		ActionInspectToolTimeout,
 		ActionInspectRequestConfirm,
 		ActionInspectRequestBlock,
 		ActionInspectRequestAlert,
 		ActionInspectRequestAllow,
+		ActionInspectRequestTimeout,
 		ActionInspectResponseConfirm,
 		ActionInspectResponseBlock,
 		ActionInspectResponseAlert,
 		ActionInspectResponseAllow,
+		ActionInspectResponseTimeout,
 		ActionInspectToolResponseConfirm,
 		ActionInspectToolResponseBlock,
 		ActionInspectToolResponseAlert,
 		ActionInspectToolResponseAllow,
+		ActionInspectToolResponseTimeout,
 		ActionInspectReveal,
 		ActionAPIAuthFailure,
 		ActionAPIConfigPatch,
