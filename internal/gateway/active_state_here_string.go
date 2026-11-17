@@ -41,6 +41,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	// blocks when it reaches state. The calls that do not bind keep the value
 	// they had, which no one text can say, so such a command is never judged
 	// here (mixed): the walk of its calls, each with its own state, judges it.
+	request.skipRunTimeShellTwin = true
 	seen := map[string]bool{}
 	for _, split := range []bool{true, false} {
 		twin, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, split, request.Input.LoopBindsStraightLine)

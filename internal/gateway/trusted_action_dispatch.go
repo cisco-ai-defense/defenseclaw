@@ -351,6 +351,14 @@ type trustedActionRequest struct {
 	// only the outermost call applies the inline hand-off tier
 	// (withInlineHandoffTier).
 	inlineTierNested bool
+	// skipRunTimeShellTwin leaves out the run-time shell reading
+	// (runTimeShellTwinRequest) of this request and the requests derived from
+	// it. The here-string probe of the state mutation proof sets it: the
+	// reading of the call itself judges the shell script of the here-string
+	// once, the probe asks only whether the script reaches state, and the
+	// reading of its pipe twin was the same script judged a second time
+	// (rel-1-0-10:GAP-1088).
+	skipRunTimeShellTwin bool
 }
 
 // trustedSimpleMemo holds the first simple-command split asked of it.
@@ -805,7 +813,12 @@ func dispatchTrustedAction(
 	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
 	// call does: that reading is judged too, and the stricter of the two
 	// readings counts (rel-1-0-10:GAP-0980).
-	shellTwin, shellTwinOK, shellCaps := runTimeShellTwinRequest(request)
+	var shellTwin trustedActionRequest
+	var shellTwinOK bool
+	var shellCaps bounded.CapSet
+	if !request.skipRunTimeShellTwin {
+		shellTwin, shellTwinOK, shellCaps = runTimeShellTwinRequest(request)
+	}
 	if shellTwinOK {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
