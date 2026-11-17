@@ -192,6 +192,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if cfg == nil {
 			return errors.New("serve: no configuration loaded")
 		}
+		// The chart's LLM credentials Secret is where a managed cluster
+		// keeps the keys its enterprise.inspection.llm.credential names (the
+		// LLM judge's, GAP-0560), as the /llm route reads its provider keys.
+		managed.UseClusterCredentialDir(serveFlags.llmCredDir)
 		if !cfg.Substrate.Enabled {
 			return errors.New("serve: substrate.enabled is false in the configuration")
 		}
