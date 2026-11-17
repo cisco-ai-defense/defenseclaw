@@ -212,7 +212,7 @@ func (capture *toolChainHookCapture) recordTrustedAction(
 	if capture == nil {
 		return
 	}
-	capture.facts = placeSecretReadPaths(facts, capture.reportedCWD)
+	capture.facts = placeArtifactIntentPaths(placeSecretReadPaths(facts, capture.reportedCWD), capture.reportedCWD)
 	capture.findings = append([]RuleFinding(nil), findings...)
 	capture.recorded = true
 }
@@ -246,6 +246,75 @@ func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest)
 	placed := request.Input
 	placed.CWD = filepath.Clean(client)
 	return actionfacts.Analyze(placed)
+}
+
+// placeArtifactIntentPaths places, in the directory the agent reported, the
+// relative artifact of a remote download (curl -o tool.sh, wget -O tool.sh)
+// and the relative script a call runs (bash tool.sh, ./tool.sh), when the
+// gateway could not resolve the call's directory (it does not exist on this
+// host: an Agent Substrate actor, whose folder is in the actor). Without it
+// the relative spelling named no artifact, so chain.download_then_execute_
+// same_artifact never joined curl -o tool.sh to bash tool.sh or to bash
+// /work/p1/tool.sh in an actor, while the absolute spelling did
+// (substrate-1:GAP-0493). The rule is placeSecretReadPaths': an absolute,
+// clean reported directory; a literal POSIX operand with no expansion or
+// glob character; and every other command of the call one that cannot
+// change the directory (callProvenToKeepDirectory's table), so the operand
+// names the file the command opened. The download chain is detection-only,
+// so a placement can add an alert, never a block. The facts are copied.
+func placeArtifactIntentPaths(facts actionfacts.Facts, reported string) actionfacts.Facts {
+	if facts.CWD != "" || toolChainDriveMounts || !strings.HasPrefix(reported, "/") ||
+		hasParentElement(reported) || strings.ContainsRune(reported, 0) ||
+		facts.Parse.Status != actionfacts.StatusComplete || facts.Parse.Dialect != actionfacts.DialectPOSIX {
+		return facts
+	}
+	reported = path.Clean(reported)
+	var placed []actionfacts.PathFact
+	for i, candidate := range facts.Paths {
+		value := candidate.Value
+		if candidate.Absolute || candidate.Resolved != "" || candidate.Flavor != actionfacts.PathFlavorPOSIX ||
+			(candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessExecute) ||
+			value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") || hasParentElement(value) ||
+			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
+			continue
+		}
+		owner, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || owner.Dialect != actionfacts.DialectPOSIX {
+			continue
+		}
+		if candidate.Access == actionfacts.PathAccessWrite && owner.Program != "curl" && owner.Program != "wget" {
+			continue
+		}
+		if !othersKeepDirectory(facts, candidate.CommandID) {
+			continue
+		}
+		if placed == nil {
+			placed = slices.Clone(facts.Paths)
+		}
+		placed[i].Resolved = path.Join(reported, value)
+	}
+	if placed != nil {
+		facts.Paths = placed
+	}
+	return facts
+}
+
+// othersKeepDirectory reports that every command of the call but owner is
+// one that cannot change the directory (directoryKeepingPrograms, a
+// standard file reader, or chmod, which a download is usually chained to):
+// the owner's operand is then read in the directory the call started in,
+// whatever the order of the commands. chmod is added here only, not to
+// directoryKeepingPrograms, so the secret-read chain's proofs are unchanged.
+func othersKeepDirectory(facts actionfacts.Facts, owner int64) bool {
+	for _, command := range facts.Commands {
+		if command.ID == owner || command.Program == "chmod" {
+			continue
+		}
+		if _, ok := directoryKeepingPrograms[command.Program]; !ok && !actionfacts.StandardFileReaderProgram(command.Program) {
+			return false
+		}
+	}
+	return true
 }
 
 // placeSecretReadPaths places a relative operand of a credentials-file read or
