@@ -138,7 +138,15 @@ type answerWatchdog struct {
 	noDecision       watchdogAnswer
 	secureClient     bool
 	visibleOutage    func() ([]byte, []byte, int)
-	exit             func(int)
+	// ordinaryGiven is the ordinary open answer useOrdinaryAtDeadline made
+	// the answer, and ordinaryVisible renders its text again with the
+	// once-per-session warning marker when the watchdog gives it
+	// (rel-1-0-10 GAP-1123). A call with a pending decision (closedKnown)
+	// still gets the ordinary answer, so this is not visibleOutage, which
+	// such a call never uses.
+	ordinaryGiven   watchdogAnswer
+	ordinaryVisible func() ([]byte, []byte, int)
+	exit            func(int)
 	deliveryReceipt  func(bool, bool)
 	deadlineDelivery *hookDeliveryRequest
 	// revoke reads the call's patch targets once more after finish wrote an
@@ -457,7 +465,7 @@ func (w *answerWatchdog) useOrdinaryAtDeadline(until time.Time) {
 		return
 	}
 	w.fallback, w.noDecision = ordinary.answer, ordinary.answer
-	w.visibleOutage = ordinary.visible
+	w.ordinaryGiven, w.ordinaryVisible = ordinary.answer, ordinary.visible
 	if w.failureLog.markerEnabled {
 		w.failureLog.replaceFallbackFrame(ordinary.answer.frame)
 	}
@@ -1282,6 +1290,10 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		}
 	} else if !w.closedKnown && !w.claimedAnswer && !w.failureLogged && w.visibleOutage != nil {
 		w.fallback.out, w.fallback.err, w.fallback.code = w.visibleOutage()
+	} else if w.ordinaryVisible != nil && !w.claimedAnswer && !w.failureLogged && sameWatchdogAnswer(w.fallback, w.ordinaryGiven) {
+		// Only the text: the decision (exit code) and the failure row stay
+		// the prepared ordinary answer's.
+		w.fallback.out, w.fallback.err, _ = w.ordinaryVisible()
 	}
 	w.fired = true
 	// Whatever of the prepared failure log (the ordinary log, the marker) the
