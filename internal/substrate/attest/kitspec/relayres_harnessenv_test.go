@@ -6,6 +6,7 @@ package kitspec
 import (
 	"bufio"
 	"bytes"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -63,6 +64,9 @@ func dockerfileEnv(t *testing.T, df []byte) map[string]string {
 // environment allowlist, so a base image pin or a harness change cannot
 // block every template build again.
 func TestEveryConnectorsHarnessEnvironmentPassesTheAllowlist(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenShell harness images are rendered on Linux and macOS hosts only")
+	}
 	for _, c := range kit.Connectors() {
 		h, ok := harness.Get(c)
 		if !ok {
