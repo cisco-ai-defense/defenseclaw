@@ -47,6 +47,8 @@ func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 		{"set -t; true; echo k >> ~/.ssh/authorized_keys", true},
 		{"{ eval exit; } & echo k >> ~/.ssh/authorized_keys", true},
 		{"trap exit DEBUG; (echo k >> ~/.ssh/authorized_keys)", true},
+		{"if true; then :; elif exit; then :; fi; echo k >> ~/.ssh/authorized_keys", true},
+		{"trap 'echo $BASH_COMMAND' DEBUG; rm -f /home/u/.ssh/authorized_keys", true},
 		{"trap : DEBUG; echo k >> ~/.ssh/authorized_keys", true},
 		{"{ exit; } & echo k >> ~/.ssh/authorized_keys", true},
 		{"enable -n exit; exit; echo k >> ~/.ssh/authorized_keys", true},
@@ -87,10 +89,12 @@ func TestGap0219EffectShadowDarwinHost(t *testing.T) {
 		cmd  string
 		tier effectTier
 	}{
-		{"cp -t /Users/u/.ssh /t/authorized_keys", effectTierUnknown},
-		{"rm --force /Users/u/.ssh/authorized_keys", effectTierUnknown},
+		{"/bin/cp -t /Users/u/.ssh /t/authorized_keys", effectTierUnknown},
+		{"/bin/rm --force /Users/u/.ssh/authorized_keys", effectTierUnknown},
+		{"cp -t /Users/u/.ssh /t/authorized_keys", effectTierRestricted},
+		{"rm --force /Users/u/.ssh/authorized_keys", effectTierRestricted},
 		{"rm -f /Users/u/.ssh/authorized_keys", effectTierRestricted},
-		{"rm -f /Users/u/.ssh/authorized_keys --verbose", effectTierRestricted},
+		{"/bin/rm -f /Users/u/.ssh/authorized_keys --verbose", effectTierRestricted},
 		{"/opt/homebrew/opt/coreutils/libexec/gnubin/cp -t /Users/u/.ssh /t/authorized_keys", effectTierRestricted},
 		{"echo k >> ~/.ssh/authorized_keys", effectTierRestricted},
 	}

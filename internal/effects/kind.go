@@ -116,7 +116,8 @@ const (
 	ReasonDestMayBeDir       ReasonCode = "dest_may_be_dir"
 	ReasonVirtualRoot        ReasonCode = "virtual_root"
 	// ReasonExecutionState: the shell may not run this effect at all. An earlier
-	// unconditional `set -n`, `exec CMD`, `exit` or DEBUG/RETURN trap changed
+	// unconditional `set -n`, `exec CMD`, `exit` or a DEBUG trap that ends or
+	// stops execution changed
 	// what the rest of the shell runs, or the statement sits behind a provably
 	// false `&&` / true `||` (rel-1-0-10 GAP-0218).
 	ReasonExecutionState ReasonCode = "execution_state"

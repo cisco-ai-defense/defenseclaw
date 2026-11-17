@@ -286,7 +286,10 @@ func (w *posixWalker) ifClause(cmd *syntax.IfClause, cond bool) {
 		w.stmt(inner, true, false)
 	}
 	if cmd.Else != nil {
-		w.ifClause(cmd.Else, cond)
+		// An elif condition runs only when the conditions before it failed: it is
+		// conditional, so an exit or set -n in it does not end the shell for
+		// what follows the if (t-obs-b2 batch review P2-1).
+		w.ifClause(cmd.Else, true)
 	}
 }
 

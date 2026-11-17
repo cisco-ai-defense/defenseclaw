@@ -42,9 +42,11 @@ type Options struct {
 	// CaseInsensitive folds path case for Key() and placement (Windows always,
 	// macOS defaults). Derived by the caller, never from GOOS here.
 	CaseInsensitive bool
-	// BSDUserland selects the BSD (macOS) rows of the POSIX programs whose flag
-	// sets differ from GNU coreutils (cp, mv, ln, rm, unlink, install, tee): a
-	// flag only the GNU tool takes is then unaccounted (rel-1-0-10 GAP-0219).
+	// BSDUserland: the host runs the BSD (macOS) tools. A program named by its
+	// system path (/bin/cp, /usr/bin/tee, ...) is then read with the BSD row of
+	// the programs whose flags differ from GNU coreutils (cp, mv, ln, rm, unlink,
+	// install, tee): a flag the BSD tool rejects is unaccounted (rel-1-0-10
+	// GAP-0219). A bare name keeps the GNU row (gnubin may be first on PATH).
 	// Derived by the caller (the host is macOS), never from GOOS here. Ignored
 	// for the Windows flavor.
 	BSDUserland bool
