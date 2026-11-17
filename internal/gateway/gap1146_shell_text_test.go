@@ -30,7 +30,7 @@ func shellTextTiers(t *testing.T, check func(tier string, decide func(string) (s
 			return boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
 		}
 		oracle := func(script string, verdict bool) (string, []string) {
-			got, findings := decide("sh <<'EOF'\n" + script + "\nEOF")
+			got, findings := decide("sh <<'EOF'\n"+script+"\nEOF")
 			if verdict && got == "allow" && tier.posture != "permissive" {
 				t.Errorf("%s: the direct form of %q is allowed (%q), the oracle needs a verdict", tier.name, script, findings)
 			}
@@ -149,6 +149,11 @@ func TestGAP1148UnquotedHeredocEscapesAreUndone(t *testing.T) {
 		{"rm -rf \\\\/etc/*", "rm -rf \\/etc/*", true},
 		{"rm -rf \\$HOME/*", "rm -rf $HOME/*", true},
 		{"rm -rf \\`echo ~\\`/*", "rm -rf `echo ~`/*", false},
+		// A write the client resolves through $HOME: read raw, the escaped
+		// dollar names a folder called $HOME and the write was allowed.
+		{"echo x >> \\$HOME/.bashrc", "echo x >> $HOME/.bashrc", true},
+		{"rm -f \\$HOME/.defenseclaw/config.yaml", "rm -f $HOME/.defenseclaw/config.yaml", true},
+		{"chmod 777 \\$HOME/.ssh", "chmod 777 $HOME/.ssh", true},
 	}
 	forms := []string{
 		"cat <<EOF | sh\nBODY\nEOF",
