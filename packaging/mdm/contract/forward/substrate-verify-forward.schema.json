@@ -134,7 +134,6 @@
         "applied_at",
         "atespaces",
         "bundle_id",
-        "key_id",
         "manifest_sha256",
         "source",
         "stage",
@@ -161,10 +160,6 @@
         "version": {
           "type": "integer",
           "minimum": 0
-        },
-        "key_id": {
-          "type": "string",
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
         },
         "manifest_sha256": {
           "type": "string",
@@ -204,16 +199,6 @@
         "read": {
           "type": "boolean",
           "description": "Every person's agents were listed and counted."
-        },
-        "reason": {
-          "enum": [
-            "no_sign_in",
-            "signed_out",
-            "not_administrator",
-            "unreachable",
-            "not_read"
-          ],
-          "description": "Why they were not counted (absent when read): no_sign_in no DefenseClaw context here; signed_out the sign-in expired or was refused; not_administrator the cluster listed only the caller's own agents; unreachable the admin listener did not answer; not_read this command does not count them."
         },
         "agents": {
           "type": "integer",
