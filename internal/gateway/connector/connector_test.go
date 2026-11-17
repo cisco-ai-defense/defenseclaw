@@ -1309,9 +1309,6 @@ func TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding(t *testing.T) {
 // so human approval on it is refused before openclaw.json is touched. The
 // refusal precedes the extension-bundle check, so it needs no bundle.
 func TestOpenClaw_Setup_HILTRefusedOnOpenClawWithoutPluginApprovals(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
-	}
 	dir := t.TempDir()
 	ocHome := filepath.Join(dir, "openclaw-home")
 	if err := os.MkdirAll(ocHome, 0o755); err != nil {
@@ -1504,9 +1501,6 @@ func TestOpenClaw_Teardown_RemovesExtensionAndConfig(t *testing.T) {
 
 func requireOpenClawExtensionBundle(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("OpenClaw requires the guardrail proxy and is intentionally unsupported by the native Windows hook-only build")
-	}
 	if !OpenClawExtensionAvailable() {
 		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
 	}
