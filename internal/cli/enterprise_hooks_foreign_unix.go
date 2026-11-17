@@ -1141,6 +1141,12 @@ func nextOpenCodeServicePorts(recorded, planned map[int]int) (map[int]int, bool)
 // its OpenCode port (tests shorten it).
 var enterpriseHookOpenCodeReadTimeout = 20 * time.Second
 
+// enterpriseHookOpenCodeReadBeforeWait, when set (tests only), runs in the
+// pass's goroutine for an account between the start of its read and the wait
+// for the answer, so a test can make the answer and the deadline both ready
+// before the wait looks at them (GAP-0059).
+var enterpriseHookOpenCodeReadBeforeWait func(uid int)
+
 // enterpriseHookReadOpenCodePortsAsUsers reads, as each account, the OpenCode
 // service port of the accounts given (the eligible ones with no record entry:
 // the only use of a user's file is that import) (worker operation
@@ -1159,7 +1165,7 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 	// A read that outlives its deadline keeps running after this function
 	// returns, so it is handed copies of everything it needs and never reads
 	// a package variable the caller (or a test) may reassign afterwards.
-	readTimeout, runWorker := enterpriseHookOpenCodeReadTimeout, enterpriseHookWorkerRunner
+	readTimeout, runWorker, beforeWait := enterpriseHookOpenCodeReadTimeout, enterpriseHookWorkerRunner, enterpriseHookOpenCodeReadBeforeWait
 	note := func(account enterprisehooks.UnixEligibleAccount, reason string) {
 		path := enterprisepolicy.OpenCodeServiceConfigPath(account.Home)
 		mu.Lock()
@@ -1180,7 +1186,14 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 			defer wg.Done()
 			// The slot is released when the read answers or its deadline
 			// passes, whichever is first: a hung read does not hold it.
+			// Only the deadline (or the end of the pass) makes readCtx done:
+			// the read goroutine does not cancel it, and an answer that is
+			// in when the wait sees the deadline still counts (GAP-0059: the
+			// reader cancelled readCtx right after it answered, so both cases
+			// could be ready and select reported an answered read as a
+			// timeout at random).
 			readCtx, cancel := context.WithTimeout(ctx, readTimeout)
+			defer cancel()
 			type answer struct {
 				response enterpriseHookWorkerResponse
 				err      error
@@ -1188,17 +1201,23 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 			answered := make(chan answer, 1)
 			workerAccount := enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: account.Home}
 			go func() {
-				defer cancel()
 				request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpOpenCodePortRead, Standalone: true,
 					TimeoutSeconds: int(readTimeout / time.Second)}
 				response, err := runWorker(readCtx, workerAccount, request)
 				answered <- answer{response, err}
 			}()
+			if beforeWait != nil {
+				beforeWait(account.UID)
+			}
 			var got answer
 			select {
 			case got = <-answered:
 			case <-readCtx.Done():
-				got = answer{err: fmt.Errorf("the read did not answer within %s", readTimeout)}
+				select {
+				case got = <-answered:
+				default:
+					got = answer{err: fmt.Errorf("the read did not answer within %s", readTimeout)}
+				}
 			}
 			<-slots
 			report := got.response.OpenCodeServicePort
