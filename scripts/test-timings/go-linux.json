@@ -1569,6 +1569,7 @@
    "TestExecRunnersWriteWhatThePlainCallWrites": 4.0,
    "TestExpiredExemptNameNeedsCurrentAnswer": 4.0,
    "TestExportHomeAssignmentMovesTheHomeSpelling": 2.2,
+   "TestExportedFunctionNeverFlipsABlockToAllow": 39.1,
    "TestExporterHealthCollectionGateSkipsProcessingWhenMetricsDisabled": 2.4,
    "TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess": 2.5,
    "TestExtraKeyProtectedTargetsByClass": 32.2,
