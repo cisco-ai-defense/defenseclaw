@@ -988,8 +988,10 @@ func removeDefenseClawConversationGrant(entry map[string]interface{}, keepEmptyH
 // openClawSetupGrant says whether the conversation-hook grant in the
 // defenseclaw entry is DefenseClaw's to take out, as the copy of openclaw.json
 // from before setup shows it. Setup keeps a grant the operator already had, so
-// only a copy without one (or no file at all) makes it setup's. With no copy,
-// or one that cannot be read, nothing is claimed.
+// only a copy without one (or no file at all) makes it setup's. A copy that
+// is there but cannot be read claims nothing. With no copy at all nothing says
+// who wrote the grant, so the grant stays beside other keys of the entry and
+// goes with an entry that holds nothing else (unrecorded, GAP-0267).
 type openClawSetupGrant struct {
 	// added: the file before setup had no hooks.allowConversationAccess in the entry.
 	added bool
@@ -1003,9 +1005,16 @@ type openClawSetupGrant struct {
 }
 
 func openClawSetupGrantFor(dataDir, connectorName string) openClawSetupGrant {
-	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, "openclaw.json"))
+	path := managedFileBackupPath(dataDir, connectorName, "openclaw.json")
+	b, err := loadManagedFileBackupPath(path)
 	if err != nil {
-		return openClawSetupGrant{unrecorded: true}
+		// A record that is absent is "no copy"; one that is there and cannot be
+		// read says nothing about who wrote the grant, so the grant is kept
+		// (nothing is claimed, and no lone entry is dropped).
+		if _, statErr := os.Lstat(path); statErr != nil && os.IsNotExist(statErr) {
+			return openClawSetupGrant{unrecorded: true}
+		}
+		return openClawSetupGrant{}
 	}
 	if !b.Existed {
 		return openClawSetupGrant{added: true}

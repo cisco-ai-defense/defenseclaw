@@ -150,6 +150,22 @@ func TestOpenClawUninstallWithoutARecordDropsAnEntryLeftWithOnlyTheGrant(t *test
 	}
 }
 
+// A record of the file from before setup that is there but damaged says nothing
+// about who wrote the grant: it is kept (nothing is claimed).
+func TestOpenClawUninstallWithADamagedRecordKeepsTheConversationGrant(t *testing.T) {
+	configPath, opts := openClawGrantFixture(t, "{}\n")
+	record := managedFileBackupPath(opts.DataDir, "openclaw", "openclaw.json")
+	if err := os.WriteFile(record, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := uninstallOpenClawExtension(openClawPathsIn(filepath.Dir(configPath)), false, openClawSetupGrantFor(opts.DataDir, "openclaw")); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustReadFileString(t, configPath); !strings.Contains(got, "allowConversationAccess") {
+		t.Fatalf("a grant beside a damaged record was removed:\n%s", got)
+	}
+}
+
 func TestOpenClawUninstallWithoutARecordKeepsAGrantBesideOperatorKeys(t *testing.T) {
 	configPath, opts := openClawGrantFixture(t, "{\"plugins\":{\"entries\":{\"defenseclaw\":{\"hooks\":{\"timeouts\":{\"x\":1}}}}}}\n")
 	discardManagedFileBackup(opts.DataDir, "openclaw", "openclaw.json")
