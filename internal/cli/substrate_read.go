@@ -90,6 +90,21 @@ func substrateIsSuffix(s string) bool {
 	return true
 }
 
+// substrateUnattendedMode is the Mode line of an unattended agent: what its
+// asks do, as its profile's unattended_asks says (D12, GAP-0388).
+func substrateUnattendedMode(a api.Actor) string {
+	profile := substrateDash(a.Profile)
+	if a.UnattendedAsks != "queue" {
+		return "unattended (asks are denied: profile " + profile + " has unattended_asks: deny)"
+	}
+	wait := ""
+	if a.AskTimeoutSeconds > 0 {
+		wait = ", denied after " + substrateAge(time.Unix(0, 0), time.Unix(a.AskTimeoutSeconds, 0)) + " without an answer"
+	}
+	return "unattended (asks are queued for approval: profile " + profile + " has unattended_asks: queue" + wait +
+		"; answer them with defenseclaw substrate approvals)"
+}
+
 func substrateAge(t time.Time, now time.Time) string {
 	if t.IsZero() {
 		return "-"
@@ -256,7 +271,7 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
 				}
 				if a.Unattended {
-					fmt.Fprintln(w, "Mode:      unattended (asks are denied)")
+					fmt.Fprintf(w, "Mode:      %s\n", substrateUnattendedMode(a))
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
 				return nil
