@@ -39,8 +39,11 @@ import (
 // (GAP-0274). Once it reached the gateway after the end (pull, logs,
 // connect), or was woken again later, it is idle like any other actor
 // (GAP-0288).
+// The task-end suspend does not depend on idle suspend: with no idle timeout
+// (idle_suspend_after: 0) a finished task still gives its worker back
+// (GAP-0518).
 func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, after time.Duration) error {
-	if after <= 0 || c.o.Activity == nil || a.GetStatus().GetState() != ateapi.ActorStateRunning || st.conflict {
+	if c.o.Activity == nil || a.GetStatus().GetState() != ateapi.ActorStateRunning || st.conflict {
 		return nil
 	}
 	if _, none := c.o.Activity.(NoActivity); none {
@@ -65,6 +68,9 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 				return c.taskEnded(ctx, a, st, reg, base, ended, now)
 			}
 		}
+	}
+	if after <= 0 {
+		return nil // idle suspend is off
 	}
 	last := st.runningAt
 	seen, heard := c.o.Activity.LastActivity(uid)
