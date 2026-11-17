@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // cdFoldRoute is one way a Bash call reaches the gateway: the Claude Code
@@ -61,21 +62,70 @@ func cdFoldChain(n int) string {
 // for a ../ operand after a cd into a folder of the home (cd ~/.cache/d;
 // ...; rm ../../.defenseclaw/...). Controls (a cd into an ordinary folder, an
 // ordinary write) keep the verdict of the dynamic step alone.
-func TestCDFolderJudgesTheStatementsAfterADynamicStepClaudeCode(t *testing.T) {
-	cdFoldDynamicStepRows(t, cdFoldRoutes[0])
+func TestCDFolderJudgesTheStatementsAfterADynamicStepClaudeCodeDefault(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[0], gap0437Packs[0])
 }
 
-func TestCDFolderJudgesTheStatementsAfterADynamicStepCodex(t *testing.T) {
-	cdFoldDynamicStepRows(t, cdFoldRoutes[1])
+func TestCDFolderJudgesTheStatementsAfterADynamicStepClaudeCodeStrict(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[0], gap0437Packs[1])
 }
 
-func TestCDFolderJudgesTheStatementsAfterADynamicStepInspect(t *testing.T) {
-	cdFoldDynamicStepRows(t, cdFoldRoutes[2])
+func TestCDFolderJudgesTheStatementsAfterADynamicStepClaudeCodePermissive(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[0], gap0437Packs[2])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepClaudeCodeManaged(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[0], gap0437Packs[3])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepClaudeCodeManagedStrict(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[0], gap0437Packs[4])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepCodexDefault(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[1], gap0437Packs[0])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepCodexStrict(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[1], gap0437Packs[1])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepCodexPermissive(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[1], gap0437Packs[2])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepCodexManaged(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[1], gap0437Packs[3])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepCodexManagedStrict(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[1], gap0437Packs[4])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepInspectDefault(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[2], gap0437Packs[0])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepInspectStrict(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[2], gap0437Packs[1])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepInspectPermissive(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[2], gap0437Packs[2])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepInspectManaged(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[2], gap0437Packs[3])
+}
+
+func TestCDFolderJudgesTheStatementsAfterADynamicStepInspectManagedStrict(t *testing.T) {
+	cdFoldDynamicStepRows(t, cdFoldRoutes[2], gap0437Packs[4])
 }
 
 // cdFoldDynamicStepRows are the rows of the dynamic-step tests on one route
-// (one test per route keeps each within a CI shard under -race).
-func cdFoldDynamicStepRows(t *testing.T, r cdFoldRoute) {
+// in the packs given: one test per route and pack keeps each well within a
+// CI shard under -race (a route in all five packs took 290-350 s there).
+func cdFoldDynamicStepRows(t *testing.T, r cdFoldRoute, packs ...gap0437Pack) {
 	t.Helper()
 	home, project := cdFirstFixture(t)
 	for _, dir := range []string{filepath.Join(home, ".cache", "d"), filepath.Join(project, "src")} {
@@ -83,8 +133,11 @@ func cdFoldDynamicStepRows(t *testing.T, r cdFoldRoute) {
 			t.Fatal(err)
 		}
 	}
-	for _, p := range gap0437Packs {
+	for _, p := range packs {
 		a := gap0437Server(t, p, r.connector, "action")
+		// Policy semantics, not latency: under -race the inspect route must
+		// not turn a verdict into a 504 scan timeout.
+		a.inspectToolScanTimeout = 30 * time.Second
 		session := "td-cdfold-" + r.name + "-" + p.name
 		verdict := func(command string) string { return r.verdict(t, a, session, project, command) }
 		for _, tg := range cdFirstTargets {
@@ -151,6 +204,9 @@ func cdPathHeadRows(t *testing.T, r cdFoldRoute) {
 	cds := []string{`CDPATH="$TD327_UNSET" cd sub && `, `CDPATH="$TD327_UNSET" cd sub; `, "CDPATH=/nonexistent-td327 cd sub && "}
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, r.connector, "action")
+		// Policy semantics, not latency: under -race the inspect route must
+		// not turn a verdict into a 504 scan timeout.
+		a.inspectToolScanTimeout = 30 * time.Second
 		session := "td-cdpath-" + r.name + "-" + p.name
 		tier := "L"
 		if strings.Contains(p.name, "strict") {
