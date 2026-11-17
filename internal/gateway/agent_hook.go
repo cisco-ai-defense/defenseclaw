@@ -1821,6 +1821,9 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			}
 			fmt.Fprintf(os.Stderr, "[gateway] hook audit persistence failed connector=%s event=%s action=%s denied_for_audit=%t delivered=%t: %v\n",
 				connectorName, req.HookEventName, resp.Action, denied, delivered, auditErr)
+			// A full volume also gets the store's one ALERT line
+			// (substrate-1:GAP-0554), whichever write found it full.
+			a.store.NoteWriteError("hook audit record", auditErr)
 		}
 	}
 	if req.sandboxReceiptAcknowledgment && !result.AuditPersisted {

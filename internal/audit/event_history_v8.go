@@ -1129,7 +1129,15 @@ func (writer *EventHistoryWriter) enqueueHealthFailure(
 	err error,
 	classOverride EventHistorySQLiteClass,
 ) {
-	if writer == nil || writer.healthReporter == nil {
+	if writer == nil {
+		return
+	}
+	if code == EventHistoryHealthWriteFailed {
+		// The store's one full-volume alert (substrate-1:GAP-0554); a writer
+		// without a health reporter used to log nothing at all.
+		writer.store.NoteWriteError("event-history write", err)
+	}
+	if writer.healthReporter == nil {
 		return
 	}
 	var sqliteClass EventHistorySQLiteClass
@@ -1170,13 +1178,6 @@ func eventHistoryWriteFailureLogLine(class EventHistorySQLiteClass, primary uint
 			cause = strings.ToValidUTF8(cause[:300], "") + "..."
 		}
 		line += ": " + cause
-	}
-	if class == EventHistorySQLiteFull {
-		// GAP-0402: a full store is no transient write error. Hook calls that
-		// need an audit record fail closed until the store has room again.
-		line += "; ALERT audit_store_full: the audit store's volume has no space left, so audit records are not written " +
-			"and hook calls that need one fail closed until it has room: free space or enlarge the volume, " +
-			"and set observability.local.max_store_mb below its size"
 	}
 	return line
 }

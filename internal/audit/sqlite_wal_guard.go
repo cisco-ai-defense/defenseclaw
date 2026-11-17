@@ -437,6 +437,9 @@ func (s *Store) boundedCatchUpPolicy(writerBudget time.Duration) walCatchUpPolic
 // (awaitWALHeadroom). A log that is not over resets the misses; an over-limit
 // miss or failed pass increases only the next acquisition wait.
 func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limitBytes int64) {
+	// A checkpoint that cannot copy the log into a full volume
+	// (substrate-1:GAP-0554).
+	s.NoteWriteError("WAL checkpoint", err)
 	over := !result.Restarted && logBytes > limitBytes
 	if logBytes < 0 {
 		over = s.walPressure.Load()

@@ -382,7 +382,7 @@ const sandboxInternalErrorReason = "DefenseClaw hit an internal error while chec
 const sandboxAuditFailureReason = "DefenseClaw blocked this call because it could not write the call's audit record: " +
 	"the DefenseClaw gateway's audit store is full or failing. This is not a policy decision. " +
 	"Retry later; if this keeps happening, ask your administrator to check the gateway's audit store " +
-	"(gateway log: \"hook audit persistence failed\")."
+	"(gateway log: \"ALERT audit_store_full\" when it is full, \"hook audit persistence failed\" otherwise)."
 
 // failSandboxHookClosed turns the response of a sandbox hook whose
 // evaluation or finalization panicked into a block with
