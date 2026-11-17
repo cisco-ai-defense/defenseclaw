@@ -175,6 +175,15 @@ func (c *Client) Get(ctx context.Context, atespace, name string) (Actor, error) 
 	return a.shown(), err
 }
 
+// Recover brings a crashed actor back to its last snapshot and starts it
+// again (GAP-0410). The gateway answers 409 not_crashed for an actor that
+// has not crashed.
+func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, error) {
+	var a Actor
+	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/recover", nil, map[string]any{}, &a)
+	return a.shown(), err
+}
+
 // Delete removes an actor and its snapshots.
 func (c *Client) Delete(ctx context.Context, atespace, name string) error {
 	return c.do(ctx, http.MethodDelete, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, nil)

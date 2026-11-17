@@ -270,11 +270,19 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				fmt.Fprintf(w, "Profile:   %s\n", substrateDash(a.Profile))
 				fmt.Fprintf(w, "Template:  %s\n", substrateDash(a.Template))
 				fmt.Fprintf(w, "Started:   %s ago\n", substrateAge(a.CreatedAt, time.Now()))
+				if a.State != "" {
+					fmt.Fprintf(w, "State:     %s\n", a.State)
+				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
 				}
 				if a.Unattended {
 					fmt.Fprintln(w, "Mode:      unattended (asks are denied)")
+				}
+				if a.State == substrateStateCrashed {
+					// GAP-0410: say it crashed and the way back.
+					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
+					return nil
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
 				return nil

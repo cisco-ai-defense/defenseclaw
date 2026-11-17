@@ -285,6 +285,19 @@ func (f *Fake) Revert(ref *ateapi.ObjectRef) error {
 	return nil
 }
 
+// RevertActor implements ateapi.Reverter over Revert.
+func (f *Fake) RevertActor(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.Actor, error) {
+	if err := f.enter("RevertActor", key(ref)); err != nil {
+		return nil, err
+	}
+	if err := f.Revert(ref); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return clone(f.actors[key(ref)]), nil
+}
+
 // CompleteUpload marks the actor's newest snapshot uploaded, as a sync
 // suspend or a finished async upload leaves it (the files stay on the node).
 func (f *Fake) CompleteUpload(ref *ateapi.ObjectRef) error {

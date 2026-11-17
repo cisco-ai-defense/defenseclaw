@@ -117,6 +117,10 @@ type Options struct {
 	// MaxWait bounds the wait while the cluster is full or the agent is
 	// starting (default 10m).
 	MaxWait time.Duration
+	// Health, when set, is asked before each such wait: an error (the agent
+	// crashed) ends the wait with it, since waiting cannot bring the agent
+	// back (GAP-0410).
+	Health func(ctx context.Context) error
 	// ReconnectFor bounds how long a lost connection is retried, as when
 	// the agent is suspended and resumes (default 3m, GAP-0003).
 	ReconnectFor time.Duration

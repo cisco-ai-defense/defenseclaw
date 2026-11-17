@@ -140,6 +140,7 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	mux.HandleFunc("GET /api/v1/substrate/actors/{atespace}/{name}", a.substrateGetActor(st))
 	mux.HandleFunc("DELETE /api/v1/substrate/actors/{atespace}/{name}", a.substrateDeleteActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/policy/reset", a.substratePolicyReset(st))
+	mux.HandleFunc("POST /api/v1/substrate/actors/{atespace}/{name}/recover", a.substrateRecoverActor(st))
 	mux.HandleFunc("POST /api/v1/substrate/session-cert", a.substrateSessionCert(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach", a.substrateAttach(st))
 	mux.HandleFunc("/api/v1/substrate/actors/{atespace}/{name}/attach/{rest...}", a.substrateAttach(st))
@@ -649,7 +650,12 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
-		writeSubstrateJSON(w, http.StatusOK, substrateActorView(reg))
+		v := substrateActorView(reg)
+		// GAP-0410: status shows a crashed agent as crashed.
+		if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
+			v["state"] = strings.ToLower(string(live.State))
+		}
+		writeSubstrateJSON(w, http.StatusOK, v)
 	}
 }
 

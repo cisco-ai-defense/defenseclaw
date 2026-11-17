@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
@@ -54,6 +55,10 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 	if err != nil {
 		return substrateFail(err)
 	}
+	if a.State == substrateStateCrashed {
+		// GAP-0420: no wait for an agent that cannot answer.
+		return substrateFail(substrateCrashedErr(a))
+	}
 	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
 	if err != nil {
 		return err
@@ -66,6 +71,12 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 			return substrateFail(err)
 		}
 		if id = latestSubstrateTask(st); id == "" {
+			if a.Unattended {
+				// GAP-0420: a headless run whose actor crashed and came back
+				// lost its run and its log with the worker.
+				return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
+					"Bring its folder home with: defenseclaw substrate pull %s, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
+			}
 			return fmt.Errorf("%s/%s has no headless task; start one with: defenseclaw substrate run AGENT --task \"...\"", a.Atespace, a.Name)
 		}
 	}
@@ -144,6 +155,9 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	a, err := resolveSubstrateActor(ctx, s.Client, ref)
 	if err != nil {
 		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed {
+		return substrateFail(substrateCrashedErr(a))
 	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
@@ -324,6 +338,28 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 	if err != nil {
 		return substrateFail(err)
 	}
+	if a.State == substrateStateCrashed {
+		// GAP-0410: a crashed agent has no worker to run the restore in.
+		// The gateway first brings it back to its last snapshot.
+		if !yes {
+			ok, err := substrateConfirm(cmd, fmt.Sprintf("%s/%s crashed. Bring it back to its last snapshot? What it did after that snapshot is lost.", a.Atespace, a.Name))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+				return nil
+			}
+		}
+		if _, err := s.Client.Recover(ctx, a.Atespace, a.Name); err != nil {
+			var ae *api.Error
+			if errors.As(err, &ae) && ae.NotImplemented() {
+				return substrateFail(fmt.Errorf("this cluster cannot bring a crashed agent back yet; ask your administrator to upgrade DefenseClaw (or to run: kubectl ate revert actor %s -a %s)", a.Name, a.Atespace))
+			}
+			return substrateFail(fmt.Errorf("bringing %s/%s back from its crash: %w", a.Atespace, a.Name, err))
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s crashed; it is back at its last snapshot and starting.\n", a.Atespace, a.Name)
+	}
 	dir, err := substrateRemoteDir(a)
 	if err != nil {
 		return err
@@ -347,10 +383,48 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	defer rel.Close()
-	info, err := workspace.Undo(ctx, workspace.UndoOptions{Exec: rel.Client, Dir: dir, ID: to, DataDir: auth.StateDir(), Name: substrateCopyName(a)})
+	opts := workspace.UndoOptions{Exec: rel.Client, Dir: dir, ID: to, DataDir: auth.StateDir(), Name: substrateCopyName(a)}
+	info, err := workspace.Undo(ctx, opts)
+	for try := 1; err != nil && a.State == substrateStateCrashed && try <= substrateUndoStartTries && substrateRelayStarting(err); try++ {
+		// The recovered agent's relay may need a moment to answer.
+		if serr := substrateSleep(ctx, 2*time.Second); serr != nil {
+			return serr
+		}
+		info, err = workspace.Undo(ctx, opts)
+	}
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
 	return nil
+}
+
+// substrateUndoStartTries bounds the retries of an undo while a recovered
+// agent starts (2 s apart).
+const substrateUndoStartTries = 30
+
+// substrateRelayStarting reports an error of an agent that is still
+// starting (HTTP 502, 503 or 504 from the route or the relay).
+func substrateRelayStarting(err error) bool {
+	if errors.Is(err, attach.ErrStarting) || errors.Is(err, attach.ErrClusterFull) {
+		return true
+	}
+	msg := err.Error()
+	for _, code := range []string{"HTTP 502", "HTTP 503", "HTTP 504"} {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+func substrateSleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
