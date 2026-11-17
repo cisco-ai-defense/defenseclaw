@@ -381,48 +381,48 @@ func simpleTopLevelHereDocBodies(source string, input Input) []SimpleCommand {
 	}
 	var result []SimpleCommand
 	for _, stmt := range file.Stmts {
-		// A definition or control construct is not itself a consumer. The
-		// ordinary command walk decides when its body can run.
-		switch stmt.Cmd.(type) {
-		case *syntax.CallExpr, *syntax.BinaryCmd:
-		default:
-			continue
-		}
-		var consumer strings.Builder
-		if syntax.NewPrinter().Print(&consumer, stmt.Cmd) != nil {
-			continue
-		}
-		reading := syntaxTailHereDocConsumer(consumer.String())
 		syntax.Walk(stmt, func(node syntax.Node) bool {
+			// A function declaration does not run its body in this call.
+			if _, definition := node.(*syntax.FuncDecl); definition {
+				return false
+			}
 			if len(result) >= maxSimpleEvaluations {
 				return false
 			}
-			redirection, isRedirect := node.(*syntax.Redirect)
-			if !isRedirect || redirection.Op != syntax.Hdoc && redirection.Op != syntax.DashHdoc {
+			owner, isStmt := node.(*syntax.Stmt)
+			if !isStmt || len(owner.Redirs) == 0 {
 				return true
 			}
-			if reading == hereDocData {
-				return false
+			call, isCall := owner.Cmd.(*syntax.CallExpr)
+			if !isCall {
+				return true
 			}
-			body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
-			// A valid here-document fed to an ordinary program is data even
-			// when the closed syntax-tail reader cannot prove that program's
-			// stdin semantics. Only the GAP-1183 launcher forms with a possible
-			// state write need the unknown tier at the top level.
-			if reading == hereDocUnknown && (!topLevelHereDocUnknownStateConsumer(stmt.Cmd) ||
-				!hereDocBodyMayWriteState(body, input)) {
-				return false
+			bindings := hereDocBindingsBefore(file, owner)
+			var consumer strings.Builder
+			if syntax.NewPrinter().Print(&consumer, call) != nil {
+				return true
 			}
-			if !posixHeredocDelimiterQuoted(redirection.Word) || !exact || len(body) > maxScalarBytes {
-				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
-				return false
+			reading := hereDocTextConsumer(consumer.String(), bindings, 0)
+			for _, redirection := range owner.Redirs {
+				if redirection.Op != syntax.Hdoc && redirection.Op != syntax.DashHdoc || reading == hereDocData {
+					continue
+				}
+				body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
+				if reading == hereDocUnknown && (!topLevelHereDocUnknownStateConsumer(call, bindings) ||
+					!hereDocBodyMayWriteState(body, input)) {
+					continue
+				}
+				if !posixHeredocDelimiterQuoted(redirection.Word) || !exact || len(body) > maxScalarBytes {
+					result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
+					continue
+				}
+				if reading == hereDocRunsCode {
+					result = append(result, SimpleCommand{Text: body, CWD: input.CWD})
+				} else {
+					result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
+				}
 			}
-			if reading == hereDocRunsCode {
-				result = append(result, SimpleCommand{Text: body, CWD: input.CWD})
-			} else {
-				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
-			}
-			return false
+			return true
 		})
 		if len(result) >= maxSimpleEvaluations {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
@@ -431,32 +431,72 @@ func simpleTopLevelHereDocBodies(source string, input Input) []SimpleCommand {
 	return result
 }
 
+// hereDocBindingsBefore uses the syntax-tail binding reader on statements
+// that can run before owner. A later PATH assignment cannot rename an
+// earlier data consumer.
+func hereDocBindingsBefore(file *syntax.File, owner *syntax.Stmt) *hereDocBindings {
+	bindings := &hereDocBindings{names: map[string]bool{}}
+	start := owner.Pos().Offset()
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if fn, definition := node.(*syntax.FuncDecl); definition {
+			if fn.End().Offset() <= start && fn.Name != nil {
+				bindings.names[fn.Name.Value] = true
+			}
+			return false
+		}
+		stmt, isStmt := node.(*syntax.Stmt)
+		if !isStmt || stmt.End().Offset() > start {
+			return true
+		}
+		if fn, definition := stmt.Cmd.(*syntax.FuncDecl); definition {
+			if fn.Name != nil {
+				bindings.names[fn.Name.Value] = true
+			}
+			return false
+		}
+		bindings.read(stmt, 0)
+		return false
+	})
+	return bindings
+}
+
 // topLevelHereDocUnknownStateConsumer is the small set of valid opener
 // shapes in GAP-1183. Other unknown stdin consumers retain their release
 // behavior; the syntax-error tail has its separate conservative contract.
-func topLevelHereDocUnknownStateConsumer(cmd syntax.Command) bool {
-	call, ok := cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) == 0 {
+func topLevelHereDocUnknownStateConsumer(call *syntax.CallExpr, bindings *hereDocBindings) bool {
+	if len(call.Args) == 0 {
 		return false
+	}
+	if bindings != nil && bindings.resolution {
+		return true
 	}
 	for _, assign := range call.Assigns {
 		if assign.Name != nil && assign.Name.Value == "PATH" {
 			return true
 		}
 	}
-	first, known := simpleStaticWord(call.Args[0], nil)
-	if !known {
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(words))
+	for i, arg := range call.Args {
+		words[i], static[i] = simpleStaticWord(arg, nil)
+	}
+	if run, ok := StaticPrefixWrapperChild(words, static); ok {
+		if run.ChangesResolution {
+			return true
+		}
+		words, static = words[run.Index:], static[run.Index:]
+	}
+	if len(words) == 0 || !static[0] {
 		return false
 	}
-	if commandProgram(first) == "newgrp" {
+	if commandProgram(words[0]) == "newgrp" {
 		return true
 	}
-	if commandProgram(first) != "" || len(call.Args) < 2 {
+	if commandProgram(words[0]) != "" || len(words) < 2 {
 		return false
 	}
-	for _, arg := range call.Args[1:] {
-		word, known := simpleStaticWord(arg, nil)
-		if known && (posixShellProgram(commandProgram(word)) || hereDocExtraShells[commandProgram(word)]) {
+	for i, word := range words[1:] {
+		if static[i+1] && (posixShellProgram(commandProgram(word)) || hereDocExtraShells[commandProgram(word)]) {
 			return true
 		}
 	}
@@ -919,6 +959,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					innerInput := input
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
 					innerInput.CWD = state.cwd
+					var wrapperFolderUnknown bool
+					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd); changed {
+						innerInput.CWD = folder
+						wrapperFolderUnknown = unknown
+						innerCWDUnknown = innerCWDUnknown || unknown
+					}
 					if innerCWDUnknown {
 						innerInput.CWD = ""
 					}
@@ -927,7 +973,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// the walk does not know: its walk knows that, so a
 					// current-folder head or a relative operand of the body is
 					// read as on the top level (rel-1-0-10:GAP-1042).
-					innerInput.folderUnknown = innerInput.CWD == "" && (state.cwdUnknown || input.CWD == "")
+					innerInput.folderUnknown = innerInput.CWD == "" && (wrapperFolderUnknown || state.cwdUnknown || input.CWD == "")
 					if shared {
 						if resolved, ok := simpleResolvedVariables(script, effective); ok {
 							innerInput.Command = resolved
@@ -2733,6 +2779,58 @@ func directoryStackTildeName(name string) bool {
 		name = name[1:]
 	}
 	return name != "" && strings.Trim(name, "0123456789") == ""
+}
+
+// simpleNestedChildFolder follows the same static wrapper child indexes as
+// simpleNestedScript. A changed root or working directory belongs to the
+// child, not to the caller's later statements.
+func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd string) (folder string, changed, unknown bool) {
+	words := make([]string, len(args))
+	static := make([]bool, len(args))
+	for i, arg := range args {
+		words[i], static[i] = simpleStaticScriptWord(arg, vars)
+	}
+	folder = cwd
+	for depth := 0; depth < 8 && len(words) > 0 && static[0]; depth++ {
+		var child int
+		switch commandProgram(words[0]) {
+		case "chroot":
+			parsed := parseChrootInvocation(words)
+			if !parsed.complete || parsed.childIndex <= 0 || !static[parsed.childIndex] {
+				return "", true, true
+			}
+			child = parsed.childIndex
+			if !slices.Contains(words[1:child], "--skip-chdir") {
+				if filepath.IsAbs(parsed.root) {
+					folder = filepath.Clean(parsed.root)
+				} else if folder != "" {
+					folder = filepath.Join(folder, parsed.root)
+				} else {
+					return "", true, true
+				}
+				changed = true
+			}
+		case "nsenter":
+			parsed := parseNSEnterInvocation(words)
+			if !parsed.childKnown {
+				return "", true, true
+			}
+			child = parsed.childIndex
+			if parsed.folderUnknown {
+				return "", true, true
+			}
+			if parsed.workDir != "" {
+				folder, changed = filepath.Clean(parsed.workDir), true
+			}
+		default:
+			child = WrapperChildIndex(words, static)
+		}
+		if child <= 0 || child >= len(words) {
+			break
+		}
+		words, static = words[child:], static[child:]
+	}
+	return folder, changed, false
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the

@@ -8901,11 +8901,13 @@ func windowsDriveRoot(value string) bool {
 }
 
 type nsenterInvocation struct {
-	paths      []string
-	childIndex int
-	childKnown bool
-	preview    bool
-	complete   bool
+	paths         []string
+	childIndex    int
+	childKnown    bool
+	workDir       string
+	folderUnknown bool
+	preview       bool
+	complete      bool
 }
 
 func parseNSEnterInvocation(argv []string) nsenterInvocation {
@@ -8942,6 +8944,11 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			continue
 		case "-F", "--no-fork":
 			continue
+		case "-w", "--wd", "-r", "--root":
+			// With no attached value, nsenter inherits the target process's
+			// folder or root, which the caller cannot place locally.
+			result.folderUnknown = true
+			continue
 		case "-t", "--target":
 			if i+1 >= len(argv) || argv[i+1] == "" {
 				result.complete = false
@@ -8962,6 +8969,24 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			} else {
 				target = value
 			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--wd=") {
+			result.workDir = strings.TrimPrefix(arg, "--wd=")
+			if !staticAbsolutePOSIXPath(result.workDir) {
+				result.folderUnknown = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-w") && len(arg) > 2 {
+			result.workDir = arg[2:]
+			if !staticAbsolutePOSIXPath(result.workDir) {
+				result.folderUnknown = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--root=") || strings.HasPrefix(arg, "-r") && len(arg) > 2 {
+			result.folderUnknown = true
 			continue
 		}
 		if strings.HasPrefix(arg, "-t") && len(arg) > 2 {

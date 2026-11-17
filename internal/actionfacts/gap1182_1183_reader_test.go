@@ -75,3 +75,29 @@ func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
+	for _, row := range []struct {
+		name, command, cwd string
+		unknown            bool
+	}{
+		{"chroot root", "chroot / sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
+		{"chroot named root", "chroot /srv/root sh -c ': >> home/u/.defenseclaw/config.yaml'", "/srv/root", false},
+		{"chroot skip chdir", "chroot --skip-chdir / sh -c ': >> .defenseclaw/config.yaml'", "/home/u", false},
+		{"nsenter wd", "nsenter --target=1 --wd=/ sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
+		{"nsenter target wd", "nsenter --target=1 --wd sh -c ': >> .defenseclaw/config.yaml'", "", true},
+		{"nsenter target root", "nsenter --target=1 --root sh -c ': >> .defenseclaw/config.yaml'", "", true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			input := Input{Tool: "Bash", Command: row.command, CWD: "/home/u", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
+			got := SimpleCommands(input, Analyze(input))
+			if !slices.ContainsFunc(got, func(s SimpleCommand) bool {
+				return s.Text == ": >> home/u/.defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown ||
+					s.Text == ": >> .defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown
+			}) {
+				t.Errorf("child folder want %q unknown=%v: %+v", row.cwd, row.unknown, got)
+			}
+		})
+	}
+}
