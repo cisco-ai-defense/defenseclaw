@@ -133,6 +133,11 @@ type V8ProviderOptions struct {
 	ConnectorMode         string
 	DiscoverySource       string
 	DeviceKeyFile         string
+	// K8sClusterName and K8sNamespaceName are the k8s.cluster.name and
+	// k8s.namespace.name resource attributes of a gateway pod on Agent
+	// Substrate ("" leaves them out).
+	K8sClusterName        string
+	K8sNamespaceName      string
 	SpanProcessorFactory  V8SpanProcessorFactory
 	MetricReaderFactories []V8MetricReaderFactory
 	GenerationPipelines   V8GenerationPipelineFactory
@@ -1072,6 +1077,8 @@ func newV8ResourceContext(
 	setTrusted("workspace.id", options.WorkspaceID)
 	setTrusted("defenseclaw.deployment.mode", options.DeploymentMode)
 	setTrusted("defenseclaw.claw.mode", options.ConnectorMode)
+	setTrusted("k8s.cluster.name", options.K8sClusterName)
+	setTrusted("k8s.namespace.name", options.K8sNamespaceName)
 	environment := strings.TrimSpace(values["deployment.environment.name"])
 	if environment == "" {
 		environment = strings.TrimSpace(options.Environment)

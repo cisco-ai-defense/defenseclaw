@@ -129,6 +129,7 @@ func (a *APIServer) substrateDecideAsk(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
+		a.emitSubstrateApprovalV8(r.Context(), got, false, audit.SandboxApprovalByOperator)
 		if got.OwnerID != ownerOf(c.person).ID() {
 			// An administrator answering someone else's ask is recorded as
 			// themselves (decided_by), and logged here.
@@ -407,6 +408,10 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
+		}
+		if !slices.ContainsFunc(list, func(o asks.Ask) bool { return o.ID == got.ID }) {
+			// A new ask, not the one already open for the same question.
+			a.emitSubstrateApprovalV8(r.Context(), got, true, "")
 		}
 		if got.Unattended {
 			a.dispatchQueuedAskWebhook(got)

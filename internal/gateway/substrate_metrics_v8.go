@@ -9,6 +9,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
 
 // The Agent Substrate metrics a gateway replica measures, recorded through
@@ -80,5 +81,36 @@ func (a *APIServer) recordSubstratePolicyLag(d time.Duration) {
 	a.recordSubstrateMetricV8(observability.TelemetryInstrumentDefenseClawSubstratePolicyLag,
 		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
 			return builder.BuildMetricDefenseClawSubstratePolicyLag(observability.MetricDefenseClawSubstratePolicyLagInput{Envelope: envelope, Value: s})
+		})
+}
+
+// recordSubstrateCount records a count the controller reported through the
+// leader (telemetryrelay): defenseclaw.substrate.idle_suspends or
+// policy_conflicts. Each increment reaches one replica only, so the sum
+// over the replicas is the cluster's.
+func (a *APIServer) recordSubstrateCount(metric string, n int64) {
+	if n <= 0 {
+		return
+	}
+	switch metric {
+	case telemetryrelay.MetricIdleSuspends:
+		a.recordSubstrateMetricV8(observability.TelemetryInstrumentDefenseClawSubstrateIdleSuspends,
+			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+				return builder.BuildMetricDefenseClawSubstrateIdleSuspends(observability.MetricDefenseClawSubstrateIdleSuspendsInput{Envelope: envelope, Value: n})
+			})
+	case telemetryrelay.MetricPolicyConflicts:
+		a.recordSubstrateMetricV8(observability.TelemetryInstrumentDefenseClawSubstratePolicyConflicts,
+			func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+				return builder.BuildMetricDefenseClawSubstratePolicyConflicts(observability.MetricDefenseClawSubstratePolicyConflictsInput{Envelope: envelope, Value: n})
+			})
+	}
+}
+
+// recordSubstrateUnattestedTemplates is defenseclaw.substrate.unattested_templates:
+// the controller's current count, which every replica reports.
+func (a *APIServer) recordSubstrateUnattestedTemplates(n int64) {
+	a.recordSubstrateMetricV8(observability.TelemetryInstrumentDefenseClawSubstrateUnattestedTemplates,
+		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return builder.BuildMetricDefenseClawSubstrateUnattestedTemplates(observability.MetricDefenseClawSubstrateUnattestedTemplatesInput{Envelope: envelope, Value: n})
 		})
 }

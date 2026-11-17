@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
 
 var (
@@ -187,7 +188,11 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	}
 	// Bundle mode: profiles come from the active signed bundle of each
 	// stage layered over config.yaml (PLAN §9); otherwise config.yaml.
-	sink := &controller.JSONSink{W: cmd.OutOrStdout()}
+	// The controller has no telemetry runtime: its counts reach the OTLP
+	// destinations through the leader and a gateway replica (GAP-0450).
+	relay := &telemetryrelay.Poster{Leader: toLeader, Method: telemetryrelay.MethodPostCounts}
+	go relay.Run(ctx)
+	sink := substrateRelayCounts{next: &controller.JSONSink{W: cmd.OutOrStdout()}, relay: relay}
 	resolver, err := substrateProfileResolver(ctx, cfg, sink)
 	if err != nil {
 		return err
@@ -211,6 +216,7 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	if substrateControllerOnce {
 		return ctl.Reconcile(ctx)
 	}
+	go substrateReportUnattested(ctx, ctl, relay, telemetryrelay.DefaultInterval)
 	if err := ctl.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
@@ -272,4 +278,42 @@ func orDefaultString(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// substrateRelayCounts passes every controller event on and counts the ones
+// a defenseclaw.substrate.* counter names: one idle suspend, one actor
+// entering policy_conflict (GAP-0450).
+type substrateRelayCounts struct {
+	next  controller.Sink
+	relay *telemetryrelay.Poster
+}
+
+func (s substrateRelayCounts) Emit(e controller.Event) {
+	s.next.Emit(e)
+	metric := ""
+	switch e.Type {
+	case controller.EventIdleSuspend:
+		metric = telemetryrelay.MetricIdleSuspends
+	case controller.EventPolicyConflict:
+		metric = telemetryrelay.MetricPolicyConflicts
+	default:
+		return
+	}
+	s.relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindCount, At: e.Time, Metric: metric, Value: 1})
+}
+
+// substrateReportUnattested reports the controller's count of unattested
+// templates (defenseclaw.substrate.unattested_templates) every interval.
+func substrateReportUnattested(ctx context.Context, ctl *controller.Controller, relay *telemetryrelay.Poster, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindGauge, At: time.Now().UTC(),
+			Metric: telemetryrelay.MetricUnattestedTemplates, Value: int64(ctl.UnattestedTemplates())})
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

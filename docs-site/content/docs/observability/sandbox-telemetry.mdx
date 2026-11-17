@@ -224,7 +224,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 
 **Secrets.** `secret.injected` records the secret name and the host, never a value, a prefix or the placeholder.
 
-**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller sends no telemetry of its own in this release: the metrics it would record are marked below, and its `sandbox.*` events (in the controller's log) say the same things.
+**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller and the callout have no telemetry runtime: they send their counts and records to the leader, and a gateway replica records each one once. The leader keeps what is waiting in memory (up to 50,000 records): records not yet handed on when the leader restarts are lost, and the gateway logs how many.
 
 | Metric | Type | Recorded |
 | --- | --- | --- |
@@ -232,12 +232,12 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | `defenseclaw.substrate.hook_rtt` | histogram, ms | By the gateway: an actor's hook call from its arrival on the actor listener to the answer (the network leg from the kit is not included) |
 | `defenseclaw.substrate.leader_observe_latency` | histogram, ms | By the gateway: one tool-chain step sent to the leader, until it answers |
 | `defenseclaw.substrate.rate_limited` | counter | By the gateway: calls refused by the fair-share limit |
-| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | Not recorded in this release: no component sees both the resume and the first hook call |
-| `defenseclaw.substrate.unattested_templates` | gauge | Not recorded in this release (controller). Read `sandbox.template_unverified` events |
-| `defenseclaw.substrate.idle_suspends` | counter | Not recorded in this release (controller). Read `sandbox.idle_suspend` events |
-| `defenseclaw.substrate.policy_conflicts` | counter | Not recorded in this release (controller). Read `sandbox.policy_conflict` events |
+| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | Not recorded in this release: the controller sees a resume only at its next pass, seconds late, so a time from it to the first hook call would not be the resume's |
+| `defenseclaw.substrate.unattested_templates` | gauge | By the gateway, from the controller: the templates the controller has read that carry no valid attestation now. Every replica reports the same value |
+| `defenseclaw.substrate.idle_suspends` | counter | By the gateway, from the controller: actors suspended for being idle |
+| `defenseclaw.substrate.policy_conflicts` | counter | By the gateway, from the controller: actors entering `policy_conflict` |
 
-The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability and policy lag. Its conflict and unattested-template rules stay silent until the controller records those metrics.
+The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates. The rules on these metrics read the series your OTLP backend writes to Prometheus, which have no namespace label, so they cover every DefenseClaw cluster that reports there.
 
 ## What to trust
 

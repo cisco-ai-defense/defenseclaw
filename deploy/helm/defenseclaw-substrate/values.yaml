@@ -351,6 +351,11 @@ hooks:
     requests: {cpu: 50m, memory: 64Mi}
     limits: {memory: 256Mi}
 
+# clusterName names this cluster in the gateway's telemetry
+# (the k8s.cluster.name resource attribute); empty leaves it out. The
+# namespace (k8s.namespace.name) comes from the pod.
+clusterName: ""
+
 metrics:
   prometheusRule:
     enabled: false
