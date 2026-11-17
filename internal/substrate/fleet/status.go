@@ -9,6 +9,7 @@ package fleet
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -136,6 +137,94 @@ type Report struct {
 	GlobOverlaps []string
 	// ActorAtespaces are the atespaces of the actors read (one per actor).
 	ActorAtespaces []string
+	// AssignmentGroups are the match.groups of each profile assignment of
+	// config.yaml, by profile (GAP-0568).
+	AssignmentGroups []ProfileGroups
+}
+
+// ProfileGroups is one profile assignment's match.groups.
+type ProfileGroups struct {
+	Profile string
+	Groups  []string
+}
+
+// groupIDRE is a Keycloak group id (a UUID): the form a groups claim
+// carries only when the issuer maps group ids, not names or paths.
+var groupIDRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// groupForm is "id" for a Keycloak group id, "path" for a full group path
+// (/parent/name), "name" otherwise.
+func groupForm(g string) string {
+	switch g = strings.TrimSpace(g); {
+	case groupIDRE.MatchString(g):
+		return "id"
+	case strings.HasPrefix(g, "/"):
+		return "path"
+	}
+	return "name"
+}
+
+// groupFormWords says a form in words.
+func groupFormWords(form string) string {
+	switch form {
+	case "id":
+		return "group ids"
+	case "path":
+		return "group paths"
+	}
+	return "group names"
+}
+
+// GroupFormMismatches returns one warning per profile assignment whose
+// match.groups cannot match the groups the sign-in server sends
+// (GAP-0568): an assignment that mixes Keycloak group ids with names or
+// paths (a group claim carries one form, so the other values match nobody),
+// and, when tokenGroups (the groups of a signed-in token) are known, an
+// assignment written in another form than the token's. The line names the
+// profile and the form the claim really carries.
+func GroupFormMismatches(assignments []ProfileGroups, tokenGroups []string) []string {
+	tokenForm := ""
+	for _, g := range tokenGroups {
+		f := groupForm(g)
+		if tokenForm == "" {
+			tokenForm = f
+		} else if tokenForm != f {
+			tokenForm = "mixed"
+		}
+	}
+	example := ""
+	if len(tokenGroups) > 0 {
+		example = tokenGroups[0]
+	}
+	var out []string
+	for _, a := range assignments {
+		forms := map[string][]string{}
+		for _, g := range a.Groups {
+			forms[groupForm(g)] = append(forms[groupForm(g)], strings.TrimSpace(g))
+		}
+		switch {
+		case len(forms) > 1:
+			out = append(out, fmt.Sprintf("profile %s matches groups in more than one form (%s): a group claim carries one form, so some of these values match nobody; write every group in the form your sign-in server sends", a.Profile, groupFormList(forms)))
+		case len(forms) == 1 && tokenForm != "" && tokenForm != "mixed":
+			for form := range forms {
+				if form != tokenForm {
+					out = append(out, fmt.Sprintf("profile %s matches %s (%s), but the sign-in server sends %s (such as %s), so it matches nobody and its members get the default profile; write them as %s",
+						a.Profile, groupFormWords(form), strings.Join(forms[form], ", "), groupFormWords(tokenForm), example, groupFormWords(tokenForm)))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func groupFormList(forms map[string][]string) string {
+	var parts []string
+	for _, f := range []string{"id", "name", "path"} {
+		if vs, ok := forms[f]; ok {
+			parts = append(parts, groupFormWords(f)+": "+strings.Join(vs, ", "))
+		}
+	}
+	return strings.Join(parts, "; ")
 }
 
 // GlobOverlaps returns, for each atespace that holds actors and that

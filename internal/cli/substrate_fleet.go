@@ -292,7 +292,9 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 			} `yaml:"substrate"`
 			Guardrail struct {
 				Assignments []struct {
-					Match struct {
+					Profile string `yaml:"profile"`
+					Match   struct {
+						Groups    []string `yaml:"groups"`
 						Substrate *struct {
 							Atespaces []string `yaml:"atespaces"`
 						} `yaml:"substrate"`
@@ -309,6 +311,9 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 			keysCfg.LauncherAtespaces = doc.Substrate.Launcher
 			o.ExtprocOff = doc.Substrate.Extproc.Enabled != nil && !*doc.Substrate.Extproc.Enabled
 			for _, a := range doc.Guardrail.Assignments {
+				if len(a.Match.Groups) > 0 {
+					r.AssignmentGroups = append(r.AssignmentGroups, fleet.ProfileGroups{Profile: a.Profile, Groups: a.Match.Groups})
+				}
 				if a.Match.Substrate == nil {
 					continue
 				}
@@ -552,6 +557,10 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 		printSubstrateFleet(w, kind, header, doc, checks, ok, r.InventoryNote)
 		for _, g := range r.GlobOverlaps {
 			fmt.Fprintf(w, "  warn  %-22s %s\n", "atespace_globs", safetext.Line(g))
+		}
+		// verify has no sign-in, so only the config-alone form check runs.
+		for _, g := range fleet.GroupFormMismatches(r.AssignmentGroups, nil) {
+			fmt.Fprintf(w, "  warn  %-22s %s\n", "group_forms", safetext.Line(g))
 		}
 	}
 	if kind == "verify" && !ok {
