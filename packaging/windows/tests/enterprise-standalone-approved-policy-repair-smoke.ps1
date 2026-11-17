@@ -15,6 +15,20 @@ $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     $ModulePath, [ref]$null, [ref]$parseErrors)
 if (@($parseErrors).Count -ne 0) { throw "module parse failed: $($parseErrors[0])" }
+# The functions below are dot-sourced from the module AST, so the module's
+# load-time binding of Microsoft.PowerShell.Management, .Utility and .Security
+# to the engine's own modules never runs on its own. Run that block as an
+# import would: Windows PowerShell 5.1 started from a PowerShell 7
+# parent (Windows CI runs Python under pwsh) inherits the PowerShell 7
+# PSModulePath and would autoload the PowerShell 7 Utility manifest, which has
+# no Get-FileHash function for Windows PowerShell 5.1.
+$engineBinding = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.ForEachStatementAst] -and
+    $node.Variable.VariablePath.UserPath -eq 'engineModuleName' -and
+    $node.Parent -eq $ast.EndBlock
+}, $false)
+if ($null -eq $engineBinding) { throw 'module does not bind the engine modules at load' }
+. ([scriptblock]::Create($engineBinding.Extent.Text))
 foreach ($name in @(
     'Get-DefenseClawApprovedPolicyPath',
     'Get-DefenseClawApprovedPolicyHash',
