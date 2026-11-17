@@ -38,9 +38,8 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	var concrete actionConcreteOperands
 	actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
 	actionClientProvedSafeVariableTargetsForHook(command, cwd, home)
-	actionClientVariableWriteCandidate(command, home)
 	ActionCommandDecision(command, cwd, home)
-	actionSedInPlaceWrite(command, cwd, home, nil)
+	actionSedInPlaceDecision(command, cwd, home, nil)
 	SedInPlaceBackupUnresolved(command, cwd, home)
 	actionClientProvedOverwrittenRedirect(command, cwd, home)
 	actionClientLoopCopyDestinationProtected(command, cwd, home)
@@ -90,7 +89,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		readings = append(readings, shellTwin)
 		twin := fallback
 		twin.Command = shellTwin
-		shellTwinFacts := actionfacts.Analyze(twin)
+		actionfacts.Analyze(twin)
 		clientProtectedDecision(shellTwin, cwd, home)
 		ShellWriteOperands(shellTwin, cwd, home)
 		LiteralWriteOperands(shellTwin, cwd, home)
@@ -99,7 +98,6 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		DeclaredRedirectWriteOperands(shellTwin, cwd, home)
 		BoundedShellWriteOperands(shellTwin, cwd, home)
 		QuotedDynamicCopyDestinations(shellTwin, cwd, home)
-		quotedGlobNameWriteOperands(shellTwin, cwd, home, shellTwinFacts.Paths)
 		BoundedLoopCopyDestinations(shellTwin, cwd, home)
 		CopySourceGlobDestinations(shellTwin, cwd, home, nil)
 		BoundedGlobLoopCopyDestinations(shellTwin, cwd, home, nil)
@@ -115,7 +113,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		readings = append(readings, awked.Text)
 		twin := fallback
 		twin.Command = awked.Text
-		awkedFacts := actionfacts.Analyze(twin)
+		actionfacts.Analyze(twin)
 		ShellWriteOperands(awked.Text, cwd, home)
 		LiteralWriteOperands(awked.Text, cwd, home)
 		ShellDirectoryWriteOperands(awked.Text, cwd, home, sourceFacts, true, false)
@@ -123,7 +121,6 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		DeclaredRedirectWriteOperands(awked.Text, cwd, home)
 		BoundedShellWriteOperands(awked.Text, cwd, home)
 		QuotedDynamicCopyDestinations(awked.Text, cwd, home)
-		quotedGlobNameWriteOperands(awked.Text, cwd, home, awkedFacts.Paths)
 		BoundedLoopCopyDestinations(awked.Text, cwd, home)
 		CopySourceGlobDestinations(awked.Text, cwd, home, nil)
 		BoundedGlobLoopCopyDestinations(awked.Text, cwd, home, nil)
@@ -160,7 +157,11 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		}
 	}
 	SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
-	quotedGlobNameWriteOperands(command, cwd, home, fallbackFacts.Paths)
+	ReplaceVerbShape(command, cwd, home)
+	replaceVerbSafe(command, cwd, home)
+	writersAllProvenSafe(command, cwd, home, nil)
+	commandMayExpand(command)
+	WriteOperandCaps(command, cwd, home)
 	actionGlobFacts(command, cwd, home)
 	LinkWalkFacts(command, cwd, home)
 }
@@ -175,12 +176,12 @@ var gap0749ResolveReaderCalls = []string{
 	"MayNameState", "NoDereferenceTouchShape", "QuotedDynamicCopyDestinations",
 	"SafeShellRedirectOccurrencesWithFacts", "ShellDirectoryWriteOperands", "ShellWriteOperands",
 	"StateNamingReading", "actionClientLoopCopyDestinationProtected", "actionClientProvedOverwrittenRedirect",
-	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
-	"actionConcreteProtectedWriteOnWithOperands", "actionSedInPlaceWrite", "SedInPlaceBackupUnresolved", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
+	"actionClientProvedSafeVariableTargetsForHook",
+	"actionConcreteProtectedWriteOnWithOperands", "actionSedInPlaceDecision", "SedInPlaceBackupUnresolved", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwinFiles", "actionfacts.RunTimeShellTwin", "addReading",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
-	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "quotedGlobNameWriteOperands", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
+	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "ReplaceVerbShape", "replaceVerbSafe", "writersAllProvenSafe", "commandMayExpand", "WriteOperandCaps", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }
 
 // TestGAP0749ResolveReadersCoverResolve: the argv readers a bounded sweep

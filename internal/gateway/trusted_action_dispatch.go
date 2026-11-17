@@ -232,6 +232,9 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
+	// ShellStartup is the shell startup of the agent's process, from the
+	// hook client's header (nil: an older client; the gateway's own).
+	ShellStartup *hookpaths.ShellStartup
 	// ActiveAgentFileIdentities maps the hook client's file identity of each
 	// instruction file the session loaded to that file, for a gateway that
 	// cannot read it (hookpaths.LoadedIdentityPrefix).
@@ -531,6 +534,9 @@ func dispatchTrustedAction(
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	if request.ShellStartup != nil {
+		request.targetMemo.WithShellStartup(request.ShellStartup)
+	}
 	// A backup file of sed -i or perl -i the readers cannot resolve is a
 	// path target past what they judge: at least the unknown tier
 	// (rel-1-0-10:GAP-0540).
@@ -600,6 +606,12 @@ func dispatchTrustedAction(
 		// judged in full below, and the bound still decides the call at
 		// least as the evaluation limit does (rel-1-0-10:GAP-0526).
 		defer func() { findings = withTrustedActionLimitFinding(findings, true) }()
+	}
+	// A write operand the resolver read past its path bound is truncated
+	// (bounded.Paths): what was read is judged below, and the bound rule
+	// floors the call to the unknown tier of the pack (rel-1-0-10 GAP-0438).
+	if caps := trustedResolverCaps(request); caps.Any() {
+		defer func() { findings = withBoundedTruncation(findings, caps, request) }()
 	}
 	if bound == shellReadingNestedProof {
 		// The readers below read it, but past this weight they do not prove

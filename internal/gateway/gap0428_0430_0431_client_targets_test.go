@@ -14,8 +14,25 @@ type hp7ClientRow struct {
 	name, command, managedWant, perUserWant string
 }
 
+// hp7BenignPerUserBlocks are the rows whose fixture states that the per-user
+// reading over-blocks a benign call (an overwritten variable that ends on an
+// ordinary file) while the managed client's proof allows it. A false block is
+// not a protection the managed gateway lacks, so managedAtLeastPerUser skips
+// these rows and only these: a row is exempt by its name here, with the gap
+// that records the over-block, never by the verdicts its fixture expects.
+var hp7BenignPerUserBlocks = map[string]string{
+	"GAP0389/tee-overwritten-benign": "rel-1-0-6:GAP-0389",
+	"GAP0428/dynamic-same-redirect":  "rel-1-0-6:GAP-0428",
+	"GAP0428/fixed-same-redirect":    "rel-1-0-6:GAP-0428",
+}
+
 func checkHP7ClientRows(t *testing.T, f b36ManagedHookFixture, rows []hp7ClientRow) {
 	t.Helper()
+	for _, row := range rows {
+		if row.managedWant == "allow" && row.perUserWant == "block" && hp7BenignPerUserBlocks[row.name] == "" {
+			t.Errorf("%s: managed allow and per-user block is not an exempt row; list it in hp7BenignPerUserBlocks with its gap or fix the managed reading", row.name)
+		}
+	}
 	for _, name := range []string{"a.txt", "b.txt", "out.txt", "out2.txt", "out3.txt"} {
 		if err := os.WriteFile(filepath.Join(f.project, name), []byte("x\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -30,7 +47,7 @@ func checkHP7ClientRows(t *testing.T, f b36ManagedHookFixture, rows []hp7ClientR
 	for i, row := range rows {
 		cells := everyMode(row.name, payloads[i], headers[i])
 		for _, cell := range cells {
-			cell.benignPerUserBlock = row.managedWant == "allow" && row.perUserWant == "block"
+			cell.benignPerUserBlock = hp7BenignPerUserBlocks[row.name] != ""
 		}
 		calls = append(calls, cells...)
 	}

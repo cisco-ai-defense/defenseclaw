@@ -1029,7 +1029,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	facts = facts.AtHookFolder()
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
-			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+			request.ResolvedWriteTargets, request.ProtectedHomeHook, request.ShellStartup) {
 		return false
 	}
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {

@@ -1517,7 +1517,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome,
-		request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+		request.ResolvedWriteTargets, request.ProtectedHomeHook, request.ShellStartup) {
 		// A pattern in a complete entry-only touch can leave an earlier
 		// path finding that followed a link. Keep unrelated findings.
 		kept := findings[:0]
@@ -1869,7 +1869,7 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 // trustedAuthorizedKeysWriteProofWith is trustedAuthorizedKeysWriteProof
 // with the evaluation's file system answers (trustedActionRequest.targetMemo).
 func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo) bool {
-	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil) {
+	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil, memo.ShellStartup()) {
 		return false
 	}
 	if input.Command != "" &&
@@ -1906,17 +1906,26 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedNestedAuthorizedKeysWrite(input, facts)
 }
 
-func trustedNoDereferenceTouchSafe(command, cwd, home string, evidence map[string]string, managed bool) bool {
+func trustedNoDereferenceTouchSafe(command, cwd, home string, evidence map[string]string, managed bool, startup *hookpaths.ShellStartup) bool {
 	if managed && !filepath.IsAbs(cwd) {
 		cwd = evidence[hookpaths.CWDKey]
 	}
-	if !hookpaths.NoDereferenceTouchShape(command, cwd, home) {
+	// One key carries the entry-only proof: touch -h and the replace verbs
+	// (mv, install, sed -i) change the name an operand holds, not the file a
+	// link reaches.
+	touch := hookpaths.NoDereferenceTouchShape(command, cwd, home)
+	if !touch && !hookpaths.ReplaceVerbShape(command, cwd, home) {
 		return false
 	}
 	if managed {
 		return evidence[hookpaths.NoDereferenceTouchSafeKey] == "1"
 	}
-	return hookpaths.NoDereferenceTouchSafe(command, cwd, home)
+	// A per-user gateway judges the startup the agent's shell has, which the
+	// hook client sent, not its own service's (F6).
+	if touch {
+		return hookpaths.NoDereferenceTouchSafeIn(command, cwd, home, startup)
+	}
+	return hookpaths.ReplaceVerbSafe(command, cwd, home, startup)
 }
 
 // An unmodeled program's output option cannot prove a safe read. When that
