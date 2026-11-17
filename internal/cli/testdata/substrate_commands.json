@@ -12,6 +12,12 @@
     "long": "Lists the questions your agents asked that nobody has answered yet. Answer with\n\"defenseclaw substrate approve ID\" or \"defenseclaw substrate reject ID\". An agent attached to your\nterminal shows the same question on its last line. An unattended run (--task, --batch)\ndenies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n\"unattended\" in the RUN column and is denied when its time runs out.",
     "flags": [
       {
+        "name": "all",
+        "type": "bool",
+        "default": "false",
+        "usage": "every person's pending asks (administrators only)"
+      },
+      {
         "name": "context",
         "type": "string",
         "usage": "cluster to use (default: the one you signed in to last)",

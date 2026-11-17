@@ -117,6 +117,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             '"unattended" in the RUN column and is denied when its time runs out.'
         ),
         flags=(
+            _Flag("all", "bool", "every person's pending asks (administrators only)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),

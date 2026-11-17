@@ -488,6 +488,7 @@ func newSubstrateApprovalsCmd() *cobra.Command {
 	var (
 		out substrateOutput
 		com substrateCommon
+		all bool
 	)
 	cmd := &cobra.Command{
 		Use:   "approvals",
@@ -509,7 +510,7 @@ denies its asks unless its profile sets unattended_asks: queue; a queued ask is 
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			asks, err := s.Client.Asks(ctx)
+			asks, err := s.Client.AsksOf(ctx, all)
 			if err != nil {
 				return substrateFail(err)
 			}
@@ -534,6 +535,7 @@ denies its asks unless its profile sets unattended_asks: queue; a queued ask is 
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().BoolVar(&all, "all", false, "every person's pending asks (administrators only)")
 	return cmd
 }
 

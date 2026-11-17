@@ -226,11 +226,19 @@ func (c *Client) Usage(ctx context.Context, batch string, all bool) (map[string]
 }
 
 // Asks lists the person's pending approvals.
-func (c *Client) Asks(ctx context.Context) ([]Ask, error) {
+func (c *Client) Asks(ctx context.Context) ([]Ask, error) { return c.AsksOf(ctx, false) }
+
+// AsksOf lists the pending approvals of the person, or with all every
+// person's (administrators only; the gateway audits the read, GAP-0466).
+func (c *Client) AsksOf(ctx context.Context, all bool) ([]Ask, error) {
 	var out struct {
 		Asks []Ask `json:"asks"`
 	}
-	if err := c.do(ctx, http.MethodGet, "asks", nil, nil, &out); err != nil {
+	var q url.Values
+	if all {
+		q = url.Values{"all": {"1"}}
+	}
+	if err := c.do(ctx, http.MethodGet, "asks", q, nil, &out); err != nil {
 		return nil, err
 	}
 	for i := range out.Asks {
