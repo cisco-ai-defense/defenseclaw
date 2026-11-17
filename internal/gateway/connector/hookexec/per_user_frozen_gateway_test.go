@@ -5,11 +5,14 @@ package hookexec
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,10 +22,13 @@ import (
 // a short window.
 func frozenProbeForTest(t *testing.T, window time.Duration) {
 	t.Helper()
-	previousOn, previousWindow := perUserFrozenProbeOn, perUserFrozenProbeWindow
+	previousOn, previousWindow, previousGap := perUserFrozenProbeOn, perUserFrozenProbeWindow, perUserFrozenConfirmGap
 	perUserFrozenProbeOn = func(Options) bool { return true }
 	perUserFrozenProbeWindow = window
-	t.Cleanup(func() { perUserFrozenProbeOn, perUserFrozenProbeWindow = previousOn, previousWindow })
+	perUserFrozenConfirmGap = 50 * time.Millisecond
+	t.Cleanup(func() {
+		perUserFrozenProbeOn, perUserFrozenProbeWindow, perUserFrozenConfirmGap = previousOn, previousWindow, previousGap
+	})
 }
 
 func frozenGAP1107Payload(event string) string {
@@ -172,5 +178,137 @@ func TestGAP1107ClaudeToolResultBlockIsStructured(t *testing.T) {
 		if code := emitManagedClaudeBlock(Options{Event: event, Stdout: &stdout, Stderr: &stderr}, "x"); code != blockExit || stdout.Len() != 0 {
 			t.Errorf("%s from the payload: exit %d stdout=%q", event, code, stdout.String())
 		}
+	}
+}
+
+// healthHangsFirst serves /health with no status for its first `hang`
+// requests (until the probe gives up) and 200 after them; every other path
+// answers allow after callDelay.
+func healthHangsFirst(t *testing.T, hang int32, callDelay time.Duration) string {
+	t.Helper()
+	var probes atomic.Int32
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	return gatewayAt(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			if probes.Add(1) <= hang {
+				select {
+				case <-r.Context().Done():
+				case <-release:
+				}
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		select {
+		case <-time.After(callDelay):
+			_, _ = w.Write([]byte(`{"action":"allow"}`))
+		case <-r.Context().Done():
+		}
+	})
+}
+
+// GAP-1122: the probe window starts at the verified connection. A dial and
+// owner check that take longer than the whole window (a loaded host) are not
+// a miss when the gateway then answers /health.
+func TestGAP1122SlowVerifiedDialIsNotAMiss(t *testing.T) {
+	frozenProbeForTest(t, 200*time.Millisecond)
+	addr := healthHangsFirst(t, 0, 0)
+	dialer := &net.Dialer{}
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			time.Sleep(600 * time.Millisecond) // the dial and the owner-tuple check
+			return dialer.DialContext(ctx, network, address)
+		}}}
+	if got := perUserProbeGateway(context.Background(), Options{APIAddr: addr, HTTPClient: client}); got != probeNotFrozen {
+		t.Fatalf("slow verified dial = %v, want not frozen", got)
+	}
+}
+
+// GAP-1122: one missed probe is not a frozen gateway. A live gateway that
+// misses one probe and answers the next keeps the call waiting for its
+// decision; the call never turns into an outage allow.
+func TestGAP1122OneMissedProbeIsNotFrozen(t *testing.T) {
+	shortAnswerBudget(t, 200*time.Millisecond)
+	frozenProbeForTest(t, 300*time.Millisecond)
+	var home string
+	result, elapsed := runAgainstGateway(t, "claudecode", healthHangsFirst(t, 1, 1500*time.Millisecond), func(opts *Options) {
+		home = opts.Home
+		opts.Event = "UserPromptSubmit"
+		opts.FailMode = "closed"
+		opts.OutageFailModeNow = func() string { return "open" }
+		opts.Stdin = strings.NewReader(frozenGAP1107Payload("UserPromptSubmit"))
+		opts.HTTPClient.Timeout = 6 * time.Second
+	})
+	if result.code != 0 || elapsed < 1500*time.Millisecond || strings.Contains(result.stdout+result.stderr, "did not answer") {
+		t.Fatalf("after %s exit %d stdout=%q stderr=%q, want the gateway's own late allow", elapsed, result.code, result.stdout, result.stderr)
+	}
+	if data, err := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl")); err == nil && len(bytes.TrimSpace(data)) != 0 {
+		t.Fatalf("one missed probe wrote a failure row: %s", data)
+	}
+}
+
+// GAP-1122: the watch calls the gateway frozen only after two consecutive
+// misses; an answer or an inconclusive probe between them restarts the count.
+func TestGAP1122TwoConsecutiveMissesAreFrozen(t *testing.T) {
+	shortAnswerBudget(t, 10*time.Millisecond)
+	frozenProbeForTest(t, 10*time.Millisecond)
+	for _, tc := range []struct {
+		name   string
+		seq    []frozenProbeResult
+		frozen bool
+	}{
+		{"two misses", []frozenProbeResult{probeMissed, probeMissed}, true},
+		{"one miss", []frozenProbeResult{probeMissed}, false},
+		{"miss, answer, miss", []frozenProbeResult{probeMissed, probeNotFrozen, probeMissed}, false},
+		{"miss, clock jump, miss", []frozenProbeResult{probeMissed, probeInconclusive, probeMissed}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			previous := perUserFrozenProbe
+			perUserFrozenProbe = func(context.Context, Options) frozenProbeResult {
+				n := int(calls.Add(1))
+				if n > len(tc.seq) {
+					return probeNotFrozen
+				}
+				return tc.seq[n-1]
+			}
+			t.Cleanup(func() { perUserFrozenProbe = previous })
+			ctx, _, release := watchPerUserFrozenGateway(context.Background(), Options{
+				Connector: "claudecode", Event: "UserPromptSubmit", HTTPClient: &http.Client{}, StartedAt: time.Now(),
+			})
+			defer release()
+			deadline := time.Now().Add(2 * time.Second)
+			for int(calls.Load()) <= len(tc.seq) && !perUserGatewayFrozen(ctx) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if got := perUserGatewayFrozen(ctx); got != tc.frozen {
+				t.Fatalf("frozen = %v after %d probes, want %v", got, calls.Load(), tc.frozen)
+			}
+		})
+	}
+}
+
+// GAP-1122: a window whose wall clock jumped (the host slept and resumed
+// mid-call) proves nothing; the same window without the jump is a miss.
+func TestGAP1122ClockJumpMakesTheMissInconclusive(t *testing.T) {
+	frozenProbeForTest(t, 200*time.Millisecond)
+	addr := hungGateway(t)
+	opts := Options{APIAddr: addr, HTTPClient: &http.Client{}}
+	if got := perUserProbeGateway(context.Background(), opts); got != probeMissed {
+		t.Fatalf("plain silent window = %v, want a miss", got)
+	}
+	previous := frozenProbeWall
+	var reads atomic.Int32
+	frozenProbeWall = func() time.Time {
+		if reads.Add(1) > 1 {
+			return time.Now().Round(0).Add(30 * time.Second)
+		}
+		return time.Now().Round(0)
+	}
+	t.Cleanup(func() { frozenProbeWall = previous })
+	if got := perUserProbeGateway(context.Background(), opts); got != probeInconclusive {
+		t.Fatalf("window with a 30 s wall-clock jump = %v, want inconclusive", got)
 	}
 }
