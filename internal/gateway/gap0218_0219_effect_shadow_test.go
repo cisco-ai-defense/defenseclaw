@@ -29,7 +29,7 @@ func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 		{"false && echo k >> ~/.ssh/authorized_keys", false},
 		{"trap exit DEBUG; echo k >> ~/.ssh/authorized_keys", false},
 		{"rm -u /home/u/.ssh/authorized_keys", false},
-		{"unlink -f /home/u/.ssh/authorized_keys", false},
+		{"unlink -f /home/u/.ssh/authorized_keys", false}, // unlink is not a listed program: unknown tier before and after
 		{"cp -m 600 -t /home/u/.ssh /t/authorized_keys", false},
 		// controls
 		{"echo k >> ~/.ssh/authorized_keys", true},
@@ -37,7 +37,7 @@ func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 		{"cd /t/x || exit 1; echo k >> ~/.ssh/authorized_keys", true},
 		{"false || echo k >> ~/.ssh/authorized_keys", true},
 		{"rm -f /home/u/.ssh/authorized_keys", true},
-		{"unlink /home/u/.ssh/authorized_keys", true},
+		{"tee -a /home/u/.ssh/authorized_keys < /t/k", true},
 		{"cp -t /home/u/.ssh /t/authorized_keys", true},
 	}
 	for _, r := range rows {
