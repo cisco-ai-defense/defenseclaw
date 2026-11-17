@@ -14,8 +14,27 @@ import (
 // homeGatewayPortHolder reads the socket table; tests replace it.
 var homeGatewayPortHolder = FindPortHolder
 
-// homeGatewayHolderIsThisAccount is holderIsThisAccount; tests replace it.
-var homeGatewayHolderIsThisAccount = holderIsThisAccount
+// homeGatewayHolderAccount is holderAccount; tests replace it.
+var homeGatewayHolderAccount = holderAccount
+
+// homeGatewayStartIdentity is holderStartIdentity; tests replace it.
+var homeGatewayStartIdentity = holderStartIdentity
+
+// holderAccountMatch is what the account check of a port holder found.
+type holderAccountMatch int
+
+const (
+	// holderOtherAccount: another account, no such process, or a lookup
+	// error other than holderAccountUnreadable.
+	holderOtherAccount holderAccountMatch = iota
+	// holderThisAccount: the holder runs as this account.
+	holderThisAccount
+	// holderAccountUnreadable: Windows only. The process or its token is
+	// access denied: a gateway this account started elevated or in another
+	// logon session, seen from a non-elevated caller (or another account's
+	// process).
+	holderAccountUnreadable
+)
 
 // HomeGatewayHoldsPort reports whether the socket table shows the listener on
 // host:port held by this data directory's own gateway, a process other than
@@ -23,41 +42,88 @@ var homeGatewayHolderIsThisAccount = holderIsThisAccount
 // start identity (defenseclaw-gateway start), or the one its private
 // gateway-api.json names for that port (written by every gateway of this home
 // once it binds, so a foreground gateway counts too). The holder must run as
-// this account (holderIsThisAccount: the UID on Linux and macOS, the token
-// user SID on Windows), because gateway-api.json outlives a crash or a forced
-// stop: another account that got the crashed gateway's PID and bound the port
-// must not match it. It never connects to the port. A table-read error, a
-// failed account check, no listener, or any other holder is false
+// this account (holderAccount: the UID on Linux and macOS, the token user SID
+// on Windows), because gateway-api.json outlives a crash or a forced stop:
+// another account that got the crashed gateway's PID and bound the port must
+// not match it. It never connects to the port. A table-read error, a failed
+// account check, no listener, or any other holder is false
 // (rel-1-0-10:GAP-1133: the one rule for "may the route-only agents of this
 // home be parked").
+//
+// A Windows gateway this account started elevated in another logon session
+// (a scheduled task, an administrator's SSH session) does not open for a
+// non-elevated caller, nor its token (rel-1-0-10:GAP-1164). It still holds
+// the port when its creation time, which the kernel's process list gives
+// without a handle, is the one its gateway-api.json recorded: that private
+// record is written only by this home's gateway about itself, and a reused
+// PID was created later, so it never matches. With a start identity in the
+// record, this account's holder must match it too.
 func HomeGatewayHoldsPort(dataDir, host string, port int) bool {
 	if !filepath.IsAbs(dataDir) || port < 1 || port > 65535 {
 		return false
 	}
 	holder, err := homeGatewayPortHolder(host, port)
-	if err != nil || holder.PID <= 0 || holder.PID == os.Getpid() || !homeGatewayHolderIsThisAccount(holder) {
+	if err != nil || holder.PID <= 0 || holder.PID == os.Getpid() {
+		return false
+	}
+	account := homeGatewayHolderAccount(holder)
+	if account == holderOtherAccount {
 		return false
 	}
 	if New(dataDir).HasManagedProcessIdentity(holder.PID) {
 		return true
 	}
-	return runtimeAPIRecordNames(dataDir, holder.PID, port)
+	record, ok := readRuntimeAPIRecord(dataDir)
+	if !ok || record.PID != holder.PID || record.Port != port {
+		return false
+	}
+	if record.StartIdentity == "" {
+		// A gateway older than 1.0.10 wrote no start identity: the account
+		// check is all its record has, until that gateway restarts.
+		return account == holderThisAccount
+	}
+	return startIdentityMatches(holder.PID, record.StartIdentity)
 }
 
-// runtimeAPIRecordNames reports whether the private gateway-api.json of
-// dataDir names pid listening on port.
-func runtimeAPIRecordNames(dataDir string, pid, port int) bool {
+// startIdentityMatches reports whether process pid is the process a record
+// named by start identity; a read error or an empty identity is no match.
+func startIdentityMatches(pid int, recorded string) bool {
+	live, err := homeGatewayStartIdentity(pid)
+	return err == nil && live != "" && live == recorded
+}
+
+// runtimeAPIRecord is the private gateway-api.json a gateway writes in its
+// data directory once it binds (internal/gateway recordRuntimeAPIAddress).
+type runtimeAPIRecord struct {
+	PID           int    `json:"pid"`
+	Port          int    `json:"port"`
+	StartIdentity string `json:"start_identity"`
+}
+
+// readRuntimeAPIRecord reads the private gateway-api.json of dataDir.
+func readRuntimeAPIRecord(dataDir string) (runtimeAPIRecord, bool) {
 	record := filepath.Join(filepath.Clean(dataDir), "gateway-api.json")
 	if err := safefile.ValidatePrivateFile(record); err != nil {
-		return false
+		return runtimeAPIRecord{}, false
 	}
 	raw, err := safefile.ReadRegularFileBounded(record, 4<<10)
 	if err != nil {
-		return false
+		return runtimeAPIRecord{}, false
 	}
-	var published struct {
-		PID  int `json:"pid"`
-		Port int `json:"port"`
+	var published runtimeAPIRecord
+	if json.Unmarshal(raw, &published) != nil {
+		return runtimeAPIRecord{}, false
 	}
-	return json.Unmarshal(raw, &published) == nil && published.PID == pid && published.Port == port
+	return published, true
+}
+
+// SelfStartIdentity is this process's start identity in the text its PID
+// record and its gateway-api.json carry (processStartIdentity), or "" when the
+// system does not say.
+func SelfStartIdentity() string {
+	identity, err := processStartIdentity(os.Getpid())
+	if err != nil {
+		return ""
+	}
+	return identity
 }
