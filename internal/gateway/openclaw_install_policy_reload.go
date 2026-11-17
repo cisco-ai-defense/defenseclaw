@@ -80,45 +80,83 @@ var (
 // left armed past the context keeps its closure (and the sidecar) alive and
 // fires a refresh into a gateway that is gone. A restarted gateway starts
 // with the refresh still owed in memory, and setup at its start writes the
-// install policy again, so nothing is persisted for the owed state.
+// install policy again, so nothing is persisted for the owed state. A retry
+// that fired before the stop is counted in openClawInstallPolicyRetryRuns,
+// and the stop waits for it, so no retry refresh runs once it returned.
 var (
 	openClawInstallPolicyRetryTimerMu sync.Mutex
 	openClawInstallPolicyRetryTimer   *time.Timer
 	openClawInstallPolicyStopped      atomic.Bool
+	openClawInstallPolicyRetryRuns    sync.WaitGroup
 )
+
+// openClawInstallPolicyWrittenUnder is the OpenClaw version the install
+// policy was last written under: the state file's when the watch starts
+// (else the cached one), then the version of each refresh that ran. The
+// watcher compares the cached version with it, not with the last one it
+// saw, so a refresh that failed past every retry runs again at its next
+// look while the policy is still judged under the old version (GAP-1198).
+var (
+	openClawInstallPolicyWrittenMu    sync.Mutex
+	openClawInstallPolicyWrittenUnder string
+)
+
+func openClawInstallPolicyWrittenVersion() string {
+	openClawInstallPolicyWrittenMu.Lock()
+	defer openClawInstallPolicyWrittenMu.Unlock()
+	return openClawInstallPolicyWrittenUnder
+}
+
+func setOpenClawInstallPolicyWrittenVersion(version string) {
+	openClawInstallPolicyWrittenMu.Lock()
+	openClawInstallPolicyWrittenUnder = version
+	openClawInstallPolicyWrittenMu.Unlock()
+}
 
 // openClawInstallPolicyVersionPoll is how often the gateway looks at the
 // OpenClaw version the last discovery cached. Discovery runs in the CLI and
 // the gateway, not in this process, so a changed version has no event.
 var openClawInstallPolicyVersionPoll = 30 * time.Second
 
-// stopOpenClawInstallPolicyRetries stops the armed retry and any later one.
-// The refresh stays owed (openClawInstallPolicyPending).
+// stopOpenClawInstallPolicyRetries stops the armed retry and any later one,
+// and waits for a retry that already fired. The refresh stays owed
+// (openClawInstallPolicyPending).
 func stopOpenClawInstallPolicyRetries() {
 	openClawInstallPolicyStopped.Store(true)
 	openClawInstallPolicyRetryTimerMu.Lock()
-	defer openClawInstallPolicyRetryTimerMu.Unlock()
 	if openClawInstallPolicyRetryTimer != nil {
 		openClawInstallPolicyRetryTimer.Stop()
 		openClawInstallPolicyRetryTimer = nil
 	}
 	openClawInstallPolicyRetrying.Store(false)
+	openClawInstallPolicyRetryTimerMu.Unlock()
+	openClawInstallPolicyRetryRuns.Wait()
 }
 
 // scheduleOpenClawInstallPolicyRetry arms the retry unless the gateway is
-// stopping or one is already armed.
-func (s *Sidecar) scheduleOpenClawInstallPolicyRetry(attempt int, reason string, delay time.Duration) bool {
+// stopping or one is already armed. version is the one the failed refresh
+// was asked to judge under (see openClawInstallPolicyRefreshOpts).
+func (s *Sidecar) scheduleOpenClawInstallPolicyRetry(attempt int, reason, version string, delay time.Duration) bool {
 	openClawInstallPolicyRetryTimerMu.Lock()
 	defer openClawInstallPolicyRetryTimerMu.Unlock()
 	if openClawInstallPolicyStopped.Load() || !openClawInstallPolicyRetrying.CompareAndSwap(false, true) {
 		return false
 	}
 	openClawInstallPolicyRetryTimer = time.AfterFunc(delay, func() {
-		openClawInstallPolicyRetrying.Store(false)
+		// Stopped is checked under the timer lock the stop takes, and the
+		// run is counted before the lock is let go, so a stop either sees
+		// this retry and waits for it or this retry sees the stop.
+		openClawInstallPolicyRetryTimerMu.Lock()
 		if openClawInstallPolicyStopped.Load() {
+			openClawInstallPolicyRetryTimerMu.Unlock()
 			return
 		}
-		s.refreshOpenClawInstallPolicyAttempt(attempt+1, reason)
+		openClawInstallPolicyRetrying.Store(false)
+		openClawInstallPolicyRetryTimer = nil
+		openClawInstallPolicyRetryRuns.Add(1)
+		openClawInstallPolicyRetryTimerMu.Unlock()
+		defer openClawInstallPolicyRetryRuns.Done()
+		s.refreshOpenClawInstallPolicyAttempt(attempt+1, reason, version)
 	})
 	return true
 }
@@ -130,12 +168,19 @@ func (s *Sidecar) startOpenClawInstallPolicyWatch(ctx context.Context) (stop fun
 	openClawInstallPolicyStopped.Store(false)
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	// The version the policy is judged under now is read here, not in the
+	// The version the policy was written under is read here, not in the
 	// goroutine, so a change right after start is a change.
-	last := openClawCachedVersion(s.currentConfig())
+	cfg := s.currentConfig()
+	written := openClawCachedVersion(cfg)
+	if cfg != nil {
+		if recorded := connector.OpenClawInstallPolicyStateVersion(cfg.DataDir); recorded != "" {
+			written = recorded
+		}
+	}
+	setOpenClawInstallPolicyWrittenVersion(written)
 	go func() {
 		defer close(done)
-		s.watchOpenClawInstallPolicy(wctx, last)
+		s.watchOpenClawInstallPolicy(wctx)
 	}()
 	return func() {
 		cancel()
@@ -154,11 +199,11 @@ func openClawCachedVersion(cfg *config.Config) string {
 }
 
 // watchOpenClawInstallPolicy re-checks the install policy when the cached
-// OpenClaw version changes. Setup wrote the policy under one version: a
-// reinstall below 2026.8.35, or below 2026.11.3 on a hardened Windows root,
-// leaves a registered command OpenClaw refuses, and the reload refresh only
-// follows config changes (GAP-1198).
-func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context, last string) {
+// OpenClaw version differs from the one it was written under. Setup wrote
+// the policy under one version: a reinstall below 2026.8.35, or below
+// 2026.11.3 on a hardened Windows root, leaves a registered command OpenClaw
+// refuses, and the reload refresh only follows config changes (GAP-1198).
+func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context) {
 	if s == nil {
 		return
 	}
@@ -171,20 +216,18 @@ func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context, last string) {
 		case <-ticker.C:
 			cfg := s.currentConfig()
 			version := openClawCachedVersion(cfg)
-			if version == "" || version == last {
-				// An empty or unparsable version is no evidence about
-				// OpenClaw: discovery writes "" while an executable is
-				// replaced mid-scan, when a probe times out and from a shell
-				// without openclaw on PATH. An empty version reads as "not
-				// wanted" and would remove a registered policy (fail-open),
-				// so it is skipped and last stays the version we acted on.
+			// An empty or unparsable version is no evidence about OpenClaw
+			// (the connector keeps a registered policy under it). An armed
+			// retry refreshes from the cache when it fires; until a refresh
+			// ran, written-under keeps the old version and the next look
+			// tries again.
+			if version == "" || version == openClawInstallPolicyWrittenVersion() ||
+				openClawInstallPolicyRetrying.Load() || !openClawInstallPolicyGuarded(cfg) {
 				continue
 			}
-			last = version
-			if !openClawInstallPolicyGuarded(cfg) {
-				continue
-			}
-			s.refreshOpenClawInstallPolicyAttempt(0, "an OpenClaw version change to "+version)
+			// The version is passed on: the cache can read "" again by the
+			// time the refresh holds its lock.
+			s.refreshOpenClawInstallPolicyAttempt(0, "an OpenClaw version change to "+version, version)
 		}
 	}
 }
@@ -222,8 +265,14 @@ func openClawInstallPolicyGuarded(cfg *config.Config) bool {
 }
 
 // openClawInstallPolicyRefreshOpts is the part of the OpenClaw SetupOpts
-// that the install policy block is written from.
-func openClawInstallPolicyRefreshOpts(cfg *config.Config) connector.SetupOpts {
+// that the install policy block is written from. The OpenClaw version is the
+// cached one when it parses, else version (the one the watcher saw; "" from
+// a reload): the cache can read "" between the watcher's look and this one.
+func openClawInstallPolicyRefreshOpts(cfg *config.Config, version string) connector.SetupOpts {
+	agentVersion := connector.LoadCachedAgentVersion(cfg.DataDir, "openclaw")
+	if connector.NormalizeAgentVersion("openclaw", agentVersion) == "" && version != "" {
+		agentVersion = version
+	}
 	return connector.SetupOpts{
 		DataDir:                          cfg.DataDir,
 		OpenClawHome:                     cfg.OpenClawHome(),
@@ -232,7 +281,7 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config) connector.SetupOpts {
 		OpenClawPluginAccount:            strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount),
 		OpenClawPluginTokenFile:          strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile),
 		APIAddr:                          apiListenAddr(cfg),
-		AgentVersion:                     connector.LoadCachedAgentVersion(cfg.DataDir, "openclaw"),
+		AgentVersion:                     agentVersion,
 		OpenClawInstallPolicy:            cfg.OpenClawInstallPolicyOn(),
 		OpenClawInstallPolicyTimeoutMs:   cfg.OpenClawInstallPolicyTimeoutMs(),
 		OpenClawInstallPolicyFailsClosed: cfg.OpenClawInstallPolicyFailsClosed(),
@@ -247,12 +296,13 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config) connector.SetupOpts {
 // admission off. Every refresh logs the state it left and why. OpenClaw
 // reads openclaw.json at each install, so no restart is needed.
 func (s *Sidecar) refreshOpenClawInstallPolicy() {
-	s.refreshOpenClawInstallPolicyAttempt(0, "the config reload")
+	s.refreshOpenClawInstallPolicyAttempt(0, "the config reload", "")
 }
 
 // refreshOpenClawInstallPolicyAttempt is one try; reason says what asked for
-// the refresh in the log.
-func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason string) {
+// the refresh in the log, version is the OpenClaw version to judge under when
+// the cache no longer parses ("" for none).
+func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason, version string) {
 	if s == nil {
 		return
 	}
@@ -268,14 +318,18 @@ func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason string
 	if cfg.OpenClawInstallPolicyOn() {
 		setting = "on"
 	}
-	state, err := openClawInstallPolicyRefresher(openClawInstallPolicyRefreshOpts(cfg))
+	opts := openClawInstallPolicyRefreshOpts(cfg, version)
+	state, err := openClawInstallPolicyRefresher(opts)
 	if err == nil {
 		openClawInstallPolicyPending.Store(false)
+		if written := connector.NormalizeAgentVersion("openclaw", opts.AgentVersion); written != "" {
+			setOpenClawInstallPolicyWrittenVersion(written)
+		}
 		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission after %s (install_policy %s): %s\n", reason, setting, state)
 		return
 	}
 	openClawInstallPolicyPending.Store(true)
-	if attempt < len(delays) && s.scheduleOpenClawInstallPolicyRetry(attempt, reason, delays[attempt]) {
+	if attempt < len(delays) && s.scheduleOpenClawInstallPolicyRetry(attempt, reason, version, delays[attempt]) {
 		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; retrying in %s\n", setting, err, delays[attempt])
 		return
 	}

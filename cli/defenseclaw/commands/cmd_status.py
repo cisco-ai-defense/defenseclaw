@@ -1099,10 +1099,14 @@ def _print_agents(
                 _status_row("OpenClaw remediation", "off (no operator.admin)")
             if openclaw_install_policy_wanted(cfg):
                 if openclaw_install_policy_state(cfg) == "ours":
-                    if openclaw_install_policy_stale_version(cfg):
+                    stale = openclaw_install_policy_stale_version(cfg)
+                    if stale:
+                        # "may be too old": the Windows ACL rule is the
+                        # gateway's to settle (GAP-1198).
+                        checked = "may not be checked" if "may be too old" in stale else "not checked"
                         _status_row(
                             "OpenClaw installs",
-                            ux._style("OpenClaw version changed; not checked (defenseclaw doctor)", fg="yellow"),
+                            ux._style(f"OpenClaw version changed; {checked} (defenseclaw doctor)", fg="yellow"),
                         )
                     else:
                         _status_row("OpenClaw installs", "checked by DefenseClaw before OpenClaw installs them")

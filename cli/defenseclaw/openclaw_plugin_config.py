@@ -233,7 +233,10 @@ def openclaw_install_policy_stale_version(cfg: object, platform: str | None = No
     #   2026.11.3: on Windows, below it OpenClaw counts inherit-only ACEs and
     #   refuses the command below a hardened root. Go decides that from the
     #   folder ACLs; a policy that was registered under an older rule passed
-    #   them, so only a registration made under 2026.11.3 or later is at risk.
+    #   them, so only a registration made under 2026.11.3 or later is at risk,
+    #   and only when a folder on the path keeps inherit-only entries. This
+    #   does not read ACLs, so it says "may be" and the gateway, which
+    #   re-checks the policy within 30 seconds, settles it.
     # No record (a separate-user layout, or setup never wrote the state), an
     # unknown cached version, or the same version says nothing. Returns the
     # sentence for doctor and status, or "".
@@ -259,16 +262,18 @@ def openclaw_install_policy_stale_version(cfg: object, platform: str | None = No
         and compare_agent_versions(recorded, OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE) >= 0
     ):
         return (
-            f"OpenClaw {cached} is too old for strict install policy on Windows "
-            f"(needs {OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE} or later): it counts inherit-only entries; "
+            f"OpenClaw {cached} may be too old for strict install policy on Windows "
+            f"(needs {OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE} or later where a folder above defenseclaw-gateway "
+            f"keeps inherit-only entries) until the gateway re-checks it; "
             f"the install admission was registered under OpenClaw {recorded}"
         )
     return ""
 
 
 def openclaw_install_policy_stale_remediation() -> str:
-    # What doctor says for openclaw_install_policy_stale_version: upgrade
-    # OpenClaw; the gateway re-checks the policy by itself.
+    # What doctor says for openclaw_install_policy_stale_version, and for a
+    # setup that found OpenClaw too old: upgrade OpenClaw; the gateway
+    # re-checks the policy by itself.
     return (
         "upgrade OpenClaw to 2026.11.3 or later (npm install -g openclaw@latest), then run "
         "`defenseclaw setup openclaw`; until then installed skills and plugins are checked "
@@ -287,11 +292,7 @@ def openclaw_install_policy_remediation(policy_state: str, platform: str | None 
     if policy_state == "operator":
         return "remove your own security.installPolicy from openclaw.json, then run `defenseclaw setup openclaw`"
     if "is too old for strict install policy" in recorded:
-        return (
-            "upgrade OpenClaw to 2026.11.3 or later (npm install -g openclaw@latest), then run "
-            "`defenseclaw setup openclaw`; until then installed skills and plugins are checked "
-            "when DefenseClaw finds them"
-        )
+        return openclaw_install_policy_stale_remediation()
     text = (
         "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
         "gateway.log names the reason (install admission is not registered: ...)"

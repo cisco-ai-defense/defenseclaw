@@ -12,6 +12,7 @@ from defenseclaw.openclaw_plugin_config import (
     openclaw_hook_mode_detail,
     openclaw_install_policy_recorded_state,
     openclaw_install_policy_remediation,
+    openclaw_install_policy_stale_remediation,
     openclaw_install_policy_stale_version,
     openclaw_install_policy_state,
 )
@@ -83,10 +84,18 @@ class OpenClawInstallPolicyStaleVersionTest(unittest.TestCase):
                 self.assertEqual(bool(text), warns, text)
 
     def test_sentences(self):
+        # GAP-1198 review: Python reads no folder ACLs, so the Windows rule
+        # (only below a root with inherit-only entries) is "may be" until the
+        # gateway re-checks it; below 2026.8.35 it is a hard warning anywhere.
         text = openclaw_install_policy_stale_version(self._cfg("2026.8.35", "2026.11.3"), "win32")
-        self.assertIn("OpenClaw 2026.8.35 is too old for strict install policy on Windows", text)
+        self.assertIn("OpenClaw 2026.8.35 may be too old for strict install policy on Windows", text)
+        self.assertIn("until the gateway re-checks it", text)
+        self.assertNotIn("is too old", text)
         self.assertIn("needs 2026.11.3 or later", text)
         self.assertIn("registered under OpenClaw 2026.11.3", text)
+        text = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.11.3"), "win32")
+        self.assertIn("OpenClaw 2026.7.1 has no security.installPolicy (needs 2026.8.35 or later)", text)
+        self.assertNotIn("may be", text)
         text = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.8.35"), "linux")
         self.assertIn("has no security.installPolicy (needs 2026.8.35 or later)", text)
         self.assertIn("registered under OpenClaw 2026.8.35", text)
@@ -250,6 +259,8 @@ class OpenClawInstallPolicyRemediationTest(unittest.TestCase):
             "none", "win32", recorded="not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows"
         )
         self.assertIn("upgrade OpenClaw to 2026.11.3", text)
+        # One remediation text for a too-old setup and a downgrade.
+        self.assertEqual(text, openclaw_install_policy_stale_remediation())
 
     def test_operator_policy(self):
         self.assertIn("remove your own security.installPolicy", openclaw_install_policy_remediation("operator", "win32"))
