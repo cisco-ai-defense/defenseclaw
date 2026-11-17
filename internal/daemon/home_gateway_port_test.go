@@ -81,6 +81,19 @@ func TestHolderIsThisAccount(t *testing.T) {
 	if holderIsThisAccount(PortHolder{PID: 0x3ffffff0, UID: -1}) {
 		t.Fatal("a PID that does not exist (owner query fails) is not this account")
 	}
+	// A process of another account: System (PID 4) on Windows, init (PID 1)
+	// for a non-root account elsewhere. The SID or UID differs, or the
+	// token query fails for a standard user; either way it parks.
+	switch {
+	case runtime.GOOS == "windows":
+		if holderIsThisAccount(PortHolder{PID: 4, UID: -1}) {
+			t.Fatal("System (PID 4) is not this account")
+		}
+	case os.Getuid() != 0:
+		if holderIsThisAccount(PortHolder{PID: 1, UID: -1}) {
+			t.Fatal("init (PID 1, root) is not this account")
+		}
+	}
 	if runtime.GOOS != "windows" {
 		if !holderIsThisAccount(PortHolder{PID: os.Getpid(), UID: os.Getuid()}) {
 			t.Fatal("this account's UID")
