@@ -89,10 +89,15 @@ func (tracker *preToolDecisionTracker) contains(key preToolDecisionKey) bool {
 // hash only: the tool invocation id never crosses the wire). A decision
 // forgotten here (its answer unconfirmed, its audit row not written) is
 // marked forgotten there, and stays so for the other replicas if it is
-// recorded again (one more alert, never a missed one). The record is
-// audit-only: it is written in the background, so no hook answer waits on
-// the leader, and a leader that cannot be reached leaves the replica's own
-// ring, so the alert is written rather than missed.
+// recorded again (one more alert, never a missed one). A decision is on the
+// leader before the agent gets the PreToolUse answer (one leader call,
+// bounded by preToolSharedTimeout): the tool runs only after that answer,
+// so its PostToolUse finds the decision on any replica. Written in the
+// background, a fast tool's PostToolUse (160 ms on the cert cluster) could
+// read the leader first and raise the false HIGH alert and its
+// subsystem.degraded health record anyway (substrate-1 GAP-0456). The
+// record is audit-only: a leader that cannot be reached leaves the
+// replica's own ring, so the alert is written rather than missed.
 const preToolSharedTimeout = 2 * time.Second
 
 var preToolSharedLastWarn atomic.Int64
@@ -139,15 +144,12 @@ func preToolSharedWrite(ctx context.Context, key preToolDecisionKey, forgotten b
 	if forgotten {
 		h = forgot
 	}
-	ctx = context.WithoutCancel(ctx)
-	go func() {
-		ctx, cancel := context.WithTimeout(ctx, preToolSharedTimeout)
-		defer cancel()
-		if err := shared.Record(ctx, key.caller, key.sharedScope(), []historystore.Hash{h},
-			historystore.Entry{Verdict: historystore.Allowed}, maxPendingPreToolDecisions); err != nil {
-			preToolSharedWarn("written", err)
-		}
-	}()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preToolSharedTimeout)
+	defer cancel()
+	if err := shared.Record(ctx, key.caller, key.sharedScope(), []historystore.Hash{h},
+		historystore.Entry{Verdict: historystore.Allowed}, maxPendingPreToolDecisions); err != nil {
+		preToolSharedWarn("written", err)
+	}
 }
 
 // recordPreToolDecision keeps an audited PreToolUse decision, on every

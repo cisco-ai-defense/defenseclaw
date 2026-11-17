@@ -1737,6 +1737,7 @@
    "TestGAP0448AndGAP0462Round9StateReadings": 39.9,
    "TestGAP0451PowerShellValueFrameCommentBoundaries": 28.7,
    "TestGAP0456ForwardedChildBoundaryCells": 6.1,
+   "TestGAP0456NoDegradedHealthWhenPreToolUseLandedOnAnotherReplica": 7.8,
    "TestGAP0456OverBudgetWrappers": 16.5,
    "TestGAP0456WrappedStateWriteVerdictParity": 55.7,
    "TestGAP0458ReadNamesNeedStableBinding": 80.5,
