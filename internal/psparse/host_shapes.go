@@ -34,8 +34,9 @@ import (
 // switch word may carry leading or trailing blanks: pwsh 7 and Windows
 // PowerShell 5.1 trim every host argument before they match it as a switch
 // (GetSwitchKey: args[i].Trim()), so " -ec" is -ec and the script after it
-// runs (rel-1-0-10:GAP-0155). Option values and the base64 word are never
-// padded: the host does not trim those.
+// runs (rel-1-0-10:GAP-0155). Option values are never padded: the host does
+// not trim those. The base64 word is read as the host decodes it (HostBase64,
+// rel-1-0-10:GAP-1197).
 // A positional command is deliberately not a shape: pwsh 7 reads a positional
 // word as a script file, Windows PowerShell 5.1 as a command.
 const (
