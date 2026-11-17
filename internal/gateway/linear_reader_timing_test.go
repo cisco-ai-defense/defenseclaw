@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -19,7 +20,12 @@ const linearReaderHookBudget = 3500 * time.Millisecond
 // input; run(false) judges the half-size input and run(true) the full one
 // again. The full size must take at most 2.5x the half size (best of up to
 // 3 tries, 50 ms for timer noise), so the reading grows linearly; a quadratic
-// reading takes 4x. Outside -race the full size must also stay within the
+// reading takes 4x. The ratio compares the time each reading had the CPU:
+// every timed reading after the caller's first runs under testenv.Measure,
+// which takes off the time the host kept its thread waiting, after a
+// collection that keeps the garbage of the reading before out of it. On a
+// loaded box a half-size reading that ran alone against a full-size one the
+// host held back read as quadratic (rel-1-0-10:GAP-0424). Outside -race the full size must also stay within the
 // hook budget (best of up to 3 runs); -race costs about 10x and hosted runners vary, so a single
 // wall-clock figure is no pass criterion there.
 func assertLinearReaderTime(t *testing.T, label string, full time.Duration, run func(full bool) time.Duration) {
@@ -32,6 +38,14 @@ func assertLinearReaderTime(t *testing.T, label string, full time.Duration, run 
 func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, run func(full bool) time.Duration, ceiling bool) {
 	t.Helper()
 	bestFull, bestHalf := full, time.Duration(-1)
+	// ownFull is the best full-size time on the CPU (the caller's first
+	// reading has no meter and counts its wall time).
+	ownFull := full
+	measured := func(full bool) (took time.Duration, reading testenv.Call) {
+		runtime.GC()
+		reading = testenv.Measure(func() { took = run(full) })
+		return took, reading
+	}
 	// withinBudget: some full-size run stayed inside the hook budget. A run
 	// that missed it is given only the time the host kept the thread that ran
 	// it from the CPU during that run (testenv.Measure): a reading that waited
@@ -39,16 +53,19 @@ func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, 
 	// has no meter and is judged by its wall time.
 	withinBudget := full <= linearReaderHookBudget
 	runFull := func() {
-		var again time.Duration
-		reading := testenv.Measure(func() { again = run(true) })
+		again, reading := measured(true)
 		if again < bestFull {
 			bestFull = again
 		}
+		if own := again - reading.Denied(); own < ownFull {
+			ownFull = own
+		}
 		withinBudget = withinBudget || reading.Within(again, linearReaderHookBudget)
 	}
-	linear := func() bool { return bestFull <= bestHalf*5/2+50*time.Millisecond }
+	linear := func() bool { return ownFull <= bestHalf*5/2+50*time.Millisecond }
 	for try := 0; try < 3; try++ {
-		if half := run(false); bestHalf < 0 || half < bestHalf {
+		half, reading := measured(false)
+		if half -= reading.Denied(); bestHalf < 0 || half < bestHalf {
 			bestHalf = half
 		}
 		if try > 0 {
@@ -61,9 +78,9 @@ func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, 
 	for try := 1; !hookAnswerRaceBuild && !withinBudget && try < 3; try++ {
 		runFull()
 	}
-	t.Logf("%s: full size %s, half size %s", label, bestFull, bestHalf)
+	t.Logf("%s: full size %s (%s on the CPU), half size %s on the CPU", label, bestFull, ownFull, bestHalf)
 	if !linear() {
-		t.Errorf("%s: full size %s, half size %s: not linear (over 2.5x)", label, bestFull, bestHalf)
+		t.Errorf("%s: full size %s, half size %s on the CPU: not linear (over 2.5x)", label, ownFull, bestHalf)
 	}
 	if !hookAnswerRaceBuild && !withinBudget && !ceiling {
 		t.Logf("%s: full size judged in %s, over the %s hook budget (known, not failed here)", label, bestFull, linearReaderHookBudget)
