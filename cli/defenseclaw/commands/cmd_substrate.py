@@ -588,10 +588,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             '"defenseclaw substrate connect NAME". Bring the changes home with "defenseclaw substrate pull '
             'NAME".\n'
             "\n"
-            "With --task the agent runs headless without you: asks are denied and the run is checked as strictly "
-            "as\n"
-            'an unattended job. Add --detach to leave it running and follow it with "defenseclaw substrate logs '
-            '-f NAME".\n'
+            "With --task the agent runs headless without you: asks are denied, or queued for approval when the "
+            "profile's\n"
+            "unattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to "
+            "leave it\n"
+            'running and follow it with "defenseclaw substrate logs -f NAME".\n'
             "With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run "
             "at once.\n"
             "With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments "

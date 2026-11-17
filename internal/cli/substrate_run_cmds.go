@@ -65,8 +65,9 @@ guard asks before a step, the question appears on the last line: press Ctrl-\ to
 Press Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with
 "defenseclaw substrate connect NAME". Bring the changes home with "defenseclaw substrate pull NAME".
 
-With --task the agent runs headless without you: asks are denied and the run is checked as strictly as
-an unattended job. Add --detach to leave it running and follow it with "defenseclaw substrate logs -f NAME".
+With --task the agent runs headless without you: asks are denied, or queued for approval when the profile's
+unattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to leave it
+running and follow it with "defenseclaw substrate logs -f NAME".
 With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run at once.
 With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments after -- go
 to the agent.`,
