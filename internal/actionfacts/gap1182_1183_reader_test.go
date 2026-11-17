@@ -62,6 +62,8 @@ func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
 		"cat <<'EOF' | python3 -\nprint('hello')\nEOF",
 		"env FOO=1 python3 - <<'EOF'\nprint('hello')\nEOF",
 		"PATH=/tmp/x:$PATH cat <<'EOF'\nordinary data\nEOF",
+		"PATH=/tmp/x:$PATH cat <<'EOF'\necho .defenseclaw/config.yaml\nEOF",
+		"PATH=/tmp/x:$PATH cat <<'EOF'\ncat ~/.defenseclaw/config.yaml\nEOF",
 		"newgrp <<'EOF'\nordinary data\nEOF",
 		"/tmp/x/wrap sh <<'EOF'\nordinary data\nEOF",
 	} {

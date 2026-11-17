@@ -344,7 +344,7 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 			source = capture.source
 		}
 		if strings.Contains(source, "<<") && len(source) <= maxCommandBytes {
-			result = append(result, simpleTopLevelHereDocBodies(source, input.CWD)...)
+			result = append(result, simpleTopLevelHereDocBodies(source, input)...)
 		}
 	}
 	if argsOnly && slices.ContainsFunc(result, isSyntaxTailUnread) {
@@ -374,7 +374,7 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 // simpleTopLevelHereDocBodies gives a parsed here-document to the same
 // consumer reader used after a syntax error. The ordinary command walk keeps
 // the opener, but its literal stdin is otherwise never judged as a child.
-func simpleTopLevelHereDocBodies(source, cwd string) []SimpleCommand {
+func simpleTopLevelHereDocBodies(source string, input Input) []SimpleCommand {
 	file, ok := shellparse.Parse(source)
 	if !ok || file == nil {
 		return nil
@@ -410,7 +410,7 @@ func simpleTopLevelHereDocBodies(source, cwd string) []SimpleCommand {
 			// stdin semantics. Only the GAP-1183 launcher forms with a possible
 			// state write need the unknown tier at the top level.
 			if reading == hereDocUnknown && (!topLevelHereDocUnknownStateConsumer(stmt.Cmd) ||
-				!hereDocBodyMayNameState(body)) {
+				!hereDocBodyMayWriteState(body, input)) {
 				return false
 			}
 			if !posixHeredocDelimiterQuoted(redirection.Word) || !exact || len(body) > maxScalarBytes {
@@ -418,7 +418,7 @@ func simpleTopLevelHereDocBodies(source, cwd string) []SimpleCommand {
 				return false
 			}
 			if reading == hereDocRunsCode {
-				result = append(result, SimpleCommand{Text: body, CWD: cwd})
+				result = append(result, SimpleCommand{Text: body, CWD: input.CWD})
 			} else {
 				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
 			}
@@ -463,9 +463,23 @@ func topLevelHereDocUnknownStateConsumer(cmd syntax.Command) bool {
 	return false
 }
 
-func hereDocBodyMayNameState(body string) bool {
+func hereDocBodyMayWriteState(body string, input Input) bool {
 	lower := strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(body))
-	return strings.Contains(lower, "defense") || strings.Contains(lower, "claw")
+	if !strings.Contains(lower, "defense") && !strings.Contains(lower, "claw") {
+		return false
+	}
+	piece := input
+	piece.Command, piece.Args, piece.Argv = body, nil, nil
+	for _, target := range Analyze(piece).Paths {
+		if target.Access != PathAccessWrite && target.Access != PathAccessAppend && target.Access != PathAccessDelete {
+			continue
+		}
+		name := strings.ToLower(target.Value)
+		if strings.Contains(name, "defense") || strings.Contains(name, "claw") {
+			return true
+		}
+	}
+	return false
 }
 
 func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []SimpleCommand {
