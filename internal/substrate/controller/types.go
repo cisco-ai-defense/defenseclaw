@@ -199,7 +199,6 @@ type Sink interface {
 // Event types.
 const (
 	EventInventory          = "sandbox.inventory"
-	EventLifecycle          = "sandbox.lifecycle" // a state change of an inventoried actor (GAP-0430)
 	EventDeleted            = "sandbox.deleted"
 	EventRecreatedSameName  = "sandbox.actor.recreated_same_name"
 	EventPolicyWritten      = "sandbox.policy.written"

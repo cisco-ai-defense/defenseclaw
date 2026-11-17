@@ -219,6 +219,7 @@ type actorState struct {
 	lifeWarned  bool
 	// forcedDeny is why the resolver gives the actor deny-only (D8).
 	forcedDeny string
+	recheckGen int32
 	reg        Registration
 	regOK      bool
 	regAt      time.Time
@@ -246,10 +247,6 @@ type actorState struct {
 	// foreignTemplateChecked is set once a foreign actor's template was
 	// checked for an attestation (GAP-0428).
 	foreignTemplateChecked bool
-	// resumed is set when a pass sees the actor resume (RESUMING, or a
-	// resume that fell between two polls) and cleared by the policy check
-	// that is its re-check: one per resume (GAP-0430).
-	resumed bool
 }
 
 // New checks the options and fills defaults.
@@ -700,14 +697,6 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	base := Event{Atespace: md.GetAtespace(), Actor: md.GetName(), ActorUID: md.GetUid()}
 	self := chainstate.Actor{Atespace: md.GetAtespace(), UID: md.GetUid()}
 	rid := restoreIDOf(a.GetStatus())
-	switch state {
-	case ateapi.ActorStateResuming:
-		if prev != ateapi.ActorStateResuming {
-			st.resumed = true
-		}
-	case ateapi.ActorStateSuspending, ateapi.ActorStateSuspended, ateapi.ActorStateCrashed:
-		st.resumed = false
-	}
 	if !first {
 		evs := []string{lifecycleOf(prev, state)}
 		if revertSeen(prev, state, st.rid, rid) {
@@ -718,16 +707,8 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			evs = append(evs, chainstate.LifecycleReverted)
 		}
 		for _, ev := range evs {
-			if ev == "" {
-				continue
-			}
-			st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
-			if st.inventoried {
-				c.transitioned(base, ev, prev, state)
-			}
-			if ev == chainstate.LifecycleResumed && prev != ateapi.ActorStateResuming {
-				// Resumed between two polls: never seen as RESUMING.
-				st.resumed = true
+			if ev != "" {
+				st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
 			}
 		}
 	}
@@ -1453,26 +1434,15 @@ func (c *Controller) wrote(st *actorState, p *ateapi.EgressPolicy, base Event, s
 	c.emit(ev)
 }
 
-// transitioned records one state change of an inventoried actor in
-// discovery (GAP-0430): the lifecycle event the leader gets, the state the
-// last pass saw and the state now. A pass that sees the same state sends
-// none; an actor not inventoried yet gets its state in "actor seen".
-func (c *Controller) transitioned(base Event, life string, prev, cur ateapi.ActorState) {
-	ev := base
-	ev.Type, ev.Severity, ev.Message = EventLifecycle, SeverityInfo, "actor "+life
-	ev.Detail = map[string]any{"transition": life, "previous_state": prev.String(), "state": cur.String()}
-	c.emit(ev)
-}
-
-// recheck records the first policy check after a resume, once per resume
-// (GAP-0430): a resume between two polls (SUSPENDED, then RUNNING) is one
-// too, and more passes that see RESUMING add none.
 func (c *Controller) recheck(st *actorState, a *ateapi.Actor, base Event, how string) {
-	if !st.resumed {
+	if a.GetStatus().GetState() != ateapi.ActorStateResuming {
 		return
 	}
-	st.resumed = false
 	gen := a.GetStatus().GetLastAssignedGeneration()
+	if st.recheckGen == gen && gen != 0 {
+		return
+	}
+	st.recheckGen = gen
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventResumeRecheck, SeverityInfo, "policy re-checked on resume: "+how
 	ev.Detail = map[string]any{"generation": gen, "policy_version": st.ourVersion}
