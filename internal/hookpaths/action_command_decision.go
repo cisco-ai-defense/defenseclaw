@@ -73,9 +73,18 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
-	if safe, protected := noDereferenceTouchStatus(command, cwd, home); protected {
+	startup := memo.shellStartup()
+	if safe, protected := noDereferenceTouchStatusIn(command, cwd, home, startup); protected {
 		return "protected-target"
 	} else if safe {
+		return ""
+	}
+	// The backup of sed -i or perl -i is judged before the replace-verb
+	// proof, which holds for the edited entry only (rel-1-0-10:GAP-0414).
+	if actionSedInPlaceWrite(command, cwd, home, memo) {
+		return "protected-target"
+	}
+	if replaceVerbSafeIn(command, cwd, home, startup) {
 		return ""
 	}
 	if actionStartupConditionalAliasRedirect(command) {
@@ -138,8 +147,7 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if actionMakeProtectedRecipe(command, cwd, home) {
 		return "protected-target"
 	}
-	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) ||
-		actionSedInPlaceWrite(command, cwd, home, memo) {
+	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) {
 		return "protected-target"
 	}
 	return ""
@@ -187,7 +195,10 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
-	if NoDereferenceTouchSafe(command, cwd, home) {
+	if startup := memo.shellStartup(); func() bool {
+		safe, _ := noDereferenceTouchStatusIn(command, cwd, home, startup)
+		return safe || replaceVerbSafeIn(command, cwd, home, startup)
+	}() {
 		return false
 	}
 	protected := memo.protectedFiles(home)

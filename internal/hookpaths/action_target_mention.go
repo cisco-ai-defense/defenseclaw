@@ -29,7 +29,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
-	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -247,7 +246,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
-		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
+		posixWords := !spelledWindows && !actionPosixWindowsHome(home)
+		globOptions := shellGlobOptionsForCall(command, memo.shellStartup())
 		// The read-only excuse of ActionMentionsNoWriteRole follows the
 		// call-level GAP-0570 rules (actionCallKeepsMentions): where a reader
 		// can hand a name on ($_) or run something else (an assignment, a
@@ -271,52 +271,56 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			}
 		}
 		checkWord := func(word *syntax.Word) bool {
+			resolverWord := posixWords && !stateOnly && shellWordNeedsResolver(word)
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
 			if !known && activeGlob {
 				value, known = actionWordValueWithGlob(word, values, effectiveCWD, home, true)
 			}
-			if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
-				// The value spells a quoted part's glob characters as
-				// pattern characters ('k[1]'* reads as k[1]*, matching k1x
-				// and missing k[1]x). The pattern that escapes them is the
-				// shell's reading (GAP-0293).
-				if activeGlob && literalReading && noDereferenceTouchLiteralWord(word) {
-					if pattern, escaped := noDereferenceTouchPattern(word, home); escaped {
-						value = pattern
-					}
+			if resolverWord {
+				// The resolver reads this word: its escaped pattern is the
+				// one recorded and judged, not the flattened value.
+				// A pattern form the resolver does not model exactly is never
+				// recorded: the client's glob answer would claim a walk that
+				// bash does not make. A glob option it does not model only
+				// widens what the walk finds (dotglob, GLOBIGNORE), so the
+				// check still runs and may block.
+				if pattern, active := resolverWordPattern(word, values, effectiveCWD); active &&
+					resolverPatternModeled(pattern) && check(pattern, false, effectiveCWD) {
+					return true
 				}
+			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				// A parsed value has had its shell tilde expanded already;
 				// a remaining "~/" was quoted, escaped or parameter-derived.
 				if check(value, false, effectiveCWD) {
 					return true
 				}
-				if _, target, attached := strings.Cut(value, "="); attached {
-					return check(target, actionAttachedTildeExpands(word, command), effectiveCWD)
-				}
-				return false
-			}
-			// Quoted or escaped glob characters are part of the name: the
-			// word names that one entry, a hard link of a protected file
-			// included (GAP-0293: 'k[1]' was never resolved).
-			if !literalReading {
-				return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
-			}
-			// A double-quoted or backslash-escaped one has no plain value:
-			// the shell's own field is the name.
-			if !known && noDereferenceTouchLiteralWord(word) {
-				if fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, word); err == nil && len(fields) == 1 {
-					value, known = fields[0], true
-				}
-			}
-			if known {
-				if checkAs(value, false, effectiveCWD, true) {
-					return true
-				}
 				if _, target, attached := strings.Cut(value, "="); attached &&
-					checkAs(target, actionAttachedTildeExpands(word, command), effectiveCWD, true) {
+					check(target, actionAttachedTildeExpands(word, command), effectiveCWD) {
 					return true
 				}
+			}
+			// The words whose expansion can differ from the plain value
+			// above (a quoted or escaped glob character, an ANSI-C escape,
+			// an unmatched pattern that bash passes as the literal word) go
+			// through the one resolver, and every candidate it names is
+			// judged by identity (GAP-0293, GAP-0324, GAP-0325).
+			if resolverWord {
+				resolved := resolveWriteWord(word, values, effectiveCWD, globOptions)
+				for _, candidate := range resolved.candidates {
+					if checkAs(candidate, false, effectiveCWD, true) {
+						return true
+					}
+				}
+				// An unsettled pattern may pass its literal name: judged too.
+				if resolved.literal != "" && checkAs(resolved.literal, false, effectiveCWD, true) {
+					return true
+				}
+				if resolved.uncertain == "" {
+					return false
+				}
+			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
+				return false
 			}
 			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
 		}
@@ -2089,6 +2093,23 @@ func actionCommandMayDotglob(command string) bool {
 	return actionDotglobQualifier.MatchString(command)
 }
 
+// systemShellProfiles and systemProfileDropInDir are the system shell startup
+// files the dotglob reading opens. Tests point them at nothing so the
+// reading does not depend on the host (UseSystemShellProfilesForTests).
+var (
+	systemShellProfiles = []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
+		"/etc/zprofile", "/etc/zsh/zprofile", "/etc/zshrc", "/etc/zsh/zshrc", "/etc/zlogin", "/etc/zsh/zlogin"}
+	systemProfileDropInDir = "/etc/profile.d"
+)
+
+// UseSystemShellProfilesForTests replaces the system profile files the
+// dotglob reading opens (none, for a hermetic test) and returns the restore.
+func UseSystemShellProfilesForTests(files []string, dropInDir string) (restore func()) {
+	oldFiles, oldDrop := systemShellProfiles, systemProfileDropInDir
+	systemShellProfiles, systemProfileDropInDir = files, dropInDir
+	return func() { systemShellProfiles, systemProfileDropInDir = oldFiles, oldDrop }
+}
+
 // actionShellProfileMayDotglob reports a startup file of the user's or the
 // system's shell, or an inherited BASHOPTS or GLOBIGNORE, that may set
 // dotglob, or a home this process cannot read.
@@ -2096,10 +2117,15 @@ func actionShellProfileMayDotglob(home string) bool {
 	if _, err := pathStat(home); err != nil || strings.Contains(os.Getenv("BASHOPTS"), "dotglob") || os.Getenv("GLOBIGNORE") != "" {
 		return true
 	}
-	files := []string{"/etc/profile", "/etc/bashrc", "/etc/bash.bashrc", "/etc/zshenv", "/etc/zsh/zshenv",
-		"/etc/zprofile", "/etc/zsh/zprofile", "/etc/zshrc", "/etc/zsh/zshrc", "/etc/zlogin", "/etc/zsh/zlogin"}
-	if profiles, err := filepath.Glob("/etc/profile.d/*.sh"); err == nil {
-		files = append(files, profiles...)
+	files := slices.Clone(systemShellProfiles)
+	if systemProfileDropInDir != "" {
+		if entries, err := pathReadDir(systemProfileDropInDir); err == nil {
+			for _, entry := range entries {
+				if strings.HasSuffix(entry.Name(), ".sh") {
+					files = append(files, filepath.Join(systemProfileDropInDir, entry.Name()))
+				}
+			}
+		}
 	}
 	for _, name := range []string{".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
 		files = append(files, filepath.Join(home, name))
@@ -2191,6 +2217,12 @@ const (
 // A component that starts with * or ? does not match a name with a leading
 // dot, as in the shell, unless dots reports a setting that changes that.
 func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func() bool) (candidates []string, complete, unseen bool) {
+	return actionExpandGlobFold(pattern, literal, hidden, userView, dots, false)
+}
+
+// actionExpandGlobFold is actionExpandGlob; fold matches names without case
+// (the nocaseglob option).
+func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots func() bool, fold bool) (candidates []string, complete, unseen bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -2254,7 +2286,8 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 				chunk, chunkErr := directory.Readdirnames(actionGlobMaxNames)
 				entries += len(chunk)
 				for _, name := range chunk {
-					if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
+					if (actionGlobNameMatch(component, name) || fold && actionGlobNameMatch(strings.ToLower(component), strings.ToLower(name))) &&
+						!actionGlobSkipsDotName(component, name, dots) {
 						matched = append(matched, name)
 					}
 				}

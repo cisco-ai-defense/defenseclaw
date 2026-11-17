@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // b36ManagedHookFixture is a managed user's home that the gateway cannot
@@ -76,18 +77,7 @@ func newB36ManagedHookFixture(t *testing.T) b36ManagedHookFixture {
 // functions, BASH_ENV or ENV changes the hook's startup readings (GAP-0293:
 // the shared dev host exports two helpers). A test that needs a startup sets
 // it after the fixture.
-func clearShellStartupEnv(t *testing.T) {
-	t.Helper()
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if name == "BASH_ENV" || name == "ENV" || strings.HasPrefix(name, "BASH_FUNC_") {
-			t.Setenv(name, "")
-			if err := os.Unsetenv(name); err != nil {
-				t.Fatalf("unset %s: %v", name, err)
-			}
-		}
-	}
-}
+func clearShellStartupEnv(t *testing.T) { testenv.ClearShellStartupT(t) }
 
 func (f b36ManagedHookFixture) payload(t *testing.T, command string) []byte {
 	t.Helper()
