@@ -409,7 +409,7 @@ func (g *agentHookConfigGuard) read(raw string) ([]byte, bool) {
 		} else if !filepath.IsAbs(path) {
 			path = filepath.Join(g.cwd, path)
 		}
-		if path == "" || !filepath.IsAbs(path) {
+		if path == "" || !filepath.IsAbs(path) || hookpaths.ShareReadUnanswered(filepath.Clean(path)) {
 			return nil, false
 		}
 		body, err := safefile.ReadRegularFileBounded(filepath.Clean(path), agentHookConfigMaxBytes)
@@ -1599,15 +1599,15 @@ func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGua
 			// left the call in) is an unreadable worktree: it is returned as
 			// is, and agentHookConfigGitTarget counts it as GAP-0572 counts
 			// an unreadable folder.
-			if _, err := os.Stat(root); err != nil {
+			if _, err := seamStat(root); err != nil {
 				targets := guard.links.AliasTargets(root, false)
 				for _, target := range targets {
-					if info, err := os.Stat(target); err == nil && info.IsDir() {
+					if info, err := seamStat(target); err == nil && info.IsDir() {
 						root = target
 						break
 					}
 				}
-				if _, err := os.Stat(root); err != nil && len(targets) > 0 {
+				if _, err := seamStat(root); err != nil && len(targets) > 0 {
 					return index, root
 				}
 			}
@@ -1687,10 +1687,10 @@ func agentHookConfigPathspecFolderHolds(folder, path, worktree string, fromIndex
 	if !fromIndex {
 		return true
 	}
-	if info, err := os.Stat(folder); err != nil || !info.IsDir() {
+	if info, err := seamStat(folder); err != nil || !info.IsDir() {
 		return true
 	}
-	if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
+	if _, err := seamLstat(path); err == nil || !os.IsNotExist(err) {
 		return true
 	}
 	return agentHookConfigGitIndexMayTrack(worktree, path)
@@ -1752,10 +1752,10 @@ func agentHookConfigGitIndexMayTrack(worktree, path string) bool {
 	}
 	relative = filepath.ToSlash(relative)
 	gitDir := filepath.Join(worktree, ".git")
-	if info, err := os.Lstat(gitDir); err != nil || !info.IsDir() {
+	if info, err := seamLstat(gitDir); err != nil || !info.IsDir() {
 		return true
 	}
-	file, err := os.Open(filepath.Join(gitDir, "index"))
+	file, err := seamOpen(filepath.Join(gitDir, "index"))
 	if os.IsNotExist(err) {
 		return false
 	}
@@ -2025,7 +2025,7 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 	// cannot read, may hold any hook file: a rewrite of it counts unless
 	// every pathspec names a file that is no hook file (rel-1-0-10:GAP-0718,
 	// the GAP-0572 unreadable-folder reading).
-	if _, err := os.Stat(worktree); err != nil && len(guard.links.AliasTargets(worktree, false)) > 0 &&
+	if _, err := seamStat(worktree); err != nil && len(guard.links.AliasTargets(worktree, false)) > 0 &&
 		!agentHookConfigGitFilePathspecsOnly(args, worktree, guard) {
 		return worktree
 	}

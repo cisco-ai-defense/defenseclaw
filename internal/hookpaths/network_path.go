@@ -678,6 +678,48 @@ func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.
 func ReadDir(name string) ([]os.DirEntry, error) { return pathReadDir(name) }
 
+// Readlink is os.Readlink for a path a hook call names, read as pathReadlink reads it.
+func Readlink(name string) (string, error) { return pathReadlink(name) }
+
+// Open is os.Open for a path a hook call names, read as pathOpen reads it.
+func Open(name string) (*os.File, error) { return pathOpen(name) }
+
+// ReadFile is os.ReadFile for a path a hook call names, read as pathOpen reads it.
+func ReadFile(name string) ([]byte, error) {
+	if networkPathUnanswered(name) {
+		return nil, networkShareError("open", name)
+	}
+	return os.ReadFile(fixturefs.Map(name))
+}
+
+// LstatPinned is pathidentity.LstatPinned for a path a hook call names,
+// read as pathLstat reads it.
+func LstatPinned(name string) (os.FileInfo, error) {
+	if linkUnanswered(name) {
+		return nil, networkShareError("lstat", name)
+	}
+	return pathidentity.LstatPinned(fixturefs.Map(name))
+}
+
+// ShareReadUnanswered reports that a read of name would reach a network
+// share that has not answered or that is on another machine, which the hook
+// path never contacts (rel-1-0-10:GAP-1074): a reader the gate does not wrap
+// (a bounded regular-file read) asks it first and takes true as unreadable.
+func ShareReadUnanswered(name string) bool { return networkPathUnanswered(name) }
+
+// ObserveRemoteShareReadsForTest calls note with every name a hook-path read
+// hands the file system (fixturefs.Map) that is below a share on another
+// machine, in any spelling Windows opens one by (windowsShareRoot), on any
+// host: a test counts every contact a call makes with such a share, the
+// reads past the gate as well as the share asks (rel-1-0-10:GAP-1074).
+func ObserveRemoteShareReadsForTest(note func(name string)) (restore func()) {
+	return fixturefs.ObserveForTest(func(name string) {
+		if root, _ := windowsShareRoot(name); root != "" && !shareOfThisMachine(root) {
+			note(name)
+		}
+	})
+}
+
 // NotExist reports a read error that a proof which tells a missing path
 // from an unreadable one takes as missing: an os not-exist error, or a
 // share that did not answer in time. A read that waits for such a share

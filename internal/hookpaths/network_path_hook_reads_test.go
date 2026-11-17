@@ -80,6 +80,114 @@ func TestHookPathReadsAreShareBounded(t *testing.T) {
 	}
 }
 
+// rel-1-0-10:GAP-1074: the agent hook config guard, the promoted-artifact
+// reader and the codex trusted-source proofs read a path a hook call names
+// (a Write or Edit target, a cp destination, a git pathspec or -C folder, a
+// script the command runs). Each read goes through the share-gated readers
+// (the guard through its seam, which must call them), so a share on another
+// machine is never contacted; a reader the gate does not wrap (a bounded
+// regular-file read) is asked ShareReadUnanswered first. On native Windows
+// the guard's direct os.Lstat and filepath.EvalSymlinks of a Write target on
+// \\server\share opened an SMB session (210 DNS names in the native run).
+func TestGatewayHookPathOperandReadsAreShareBounded(t *testing.T) {
+	files := []string{
+		"../gateway/agent_hook_config_guard.go", "../gateway/agent_hook_artifact.go",
+		"../gateway/fixturefs_seam.go", "../gateway/codex_hook.go",
+	}
+	// The codex hook also reads its cwd, config and component trees (the
+	// agent's own working tree, not operand text); only its proofs of a
+	// named operand are held here.
+	codexProofs := map[string]bool{
+		"trustedFixtureOrGuardrailSourceTarget": true, "trustedObserveWorkspaceSourceTarget": true,
+		"codexObserveGitDiffPathspecs": true, "trustedPhysicalWorkspaceRelativePath": true,
+	}
+	fset := token.NewFileSet()
+	var found []string
+	seamReaders := 0
+	seenProof := map[string]bool{}
+	for _, name := range files {
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, isFunc := decl.(*ast.FuncDecl)
+			if strings.HasSuffix(name, "codex_hook.go") {
+				if !isFunc || !codexProofs[fn.Name.Name] {
+					continue
+				}
+				seenProof[fn.Name.Name] = true
+			}
+			found = append(found, hookPathUnboundedReads(fset, decl)...)
+			found = append(found, gatewayUngatedOperandReads(fset, decl)...)
+			if isFunc && strings.HasSuffix(name, "fixturefs_seam.go") && strings.HasPrefix(fn.Name.Name, "seam") {
+				seamReaders++
+				if !callsPackage(fn, "hookpaths") {
+					found = append(found, fset.Position(fn.Pos()).String()+": "+fn.Name.Name+" does not read through a hookpaths reader")
+				}
+			}
+		}
+	}
+	for name := range codexProofs {
+		if !seenProof[name] {
+			t.Errorf("codex proof %s is gone; update the scan", name)
+		}
+	}
+	if seamReaders < 6 {
+		t.Fatalf("found %d seam readers; the scan no longer finds the guard seam", seamReaders)
+	}
+	sort.Strings(found)
+	if len(found) != 0 {
+		t.Fatalf("gateway reads of a path a hook call names that bypass the share gate (use the seam or hookpaths.Stat, Lstat, LstatPinned, EvalSymlinks, Readlink, Open, ReadFile; ask hookpaths.ShareReadUnanswered before a safefile read):\n%s", strings.Join(found, "\n"))
+	}
+}
+
+// gatewayUngatedOperandReads finds the readers hookPathRawReads does not
+// name that the gateway uses on an operand: a pinned lstat, and a bounded
+// safefile read in a function that does not ask ShareReadUnanswered.
+func gatewayUngatedOperandReads(fset *token.FileSet, decl ast.Decl) []string {
+	gated := false
+	ast.Inspect(decl, func(node ast.Node) bool {
+		if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "ShareReadUnanswered" {
+			gated = true
+		}
+		return true
+	})
+	var found []string
+	ast.Inspect(decl, func(node ast.Node) bool {
+		selector, ok := node.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		where := fset.Position(selector.Pos()).String() + ": " + pkg.Name + "." + selector.Sel.Name
+		switch {
+		case pkg.Name == "pathidentity" && selector.Sel.Name == "LstatPinned":
+			found = append(found, where)
+		case pkg.Name == "safefile" && strings.HasPrefix(selector.Sel.Name, "Read") && !gated:
+			found = append(found, where+" (no ShareReadUnanswered first)")
+		}
+		return true
+	})
+	return found
+}
+
+func callsPackage(fn *ast.FuncDecl, pkg string) bool {
+	calls := false
+	ast.Inspect(fn, func(node ast.Node) bool {
+		if selector, ok := node.(*ast.SelectorExpr); ok {
+			if ident, ok := selector.X.(*ast.Ident); ok && ident.Name == pkg {
+				calls = true
+			}
+		}
+		return true
+	})
+	return calls
+}
+
 func fixedLocalPath(value string) bool {
 	return strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") && !strings.Contains(value, `\`)
 }

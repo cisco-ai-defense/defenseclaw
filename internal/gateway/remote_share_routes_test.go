@@ -62,7 +62,10 @@ func gap1074Rank(action any) int {
 
 // The gateway routes contact no share on another machine for a path a hook
 // call names, in any spelling, on any route, in the five tiers
-// (rel-1-0-10:GAP-1074), and the verdict is never weaker than the one the
+// (rel-1-0-10:GAP-1074): no share ask and no read that hands the system a
+// path below such a share (the config guard's target walk read the write,
+// edit and cp targets with os.Lstat and filepath.EvalSymlinks past the share
+// gate, which opened an SMB session on native Windows), and the verdict is never weaker than the one the
 // call gets when the share answers (as rel read an answering share): the
 // remote path is judged by its text. Off Windows only for the comparison: on
 // Windows an answering share is a real read of the network.
@@ -93,8 +96,15 @@ func TestGatewayRemoteShareOperandIsNeverAsked(t *testing.T) {
 						})
 					}
 					restore := hookpaths.OverrideRemoteSharesForTest(ask, nil)
+					server := strings.ToLower(host)
+					unobserve := hookpaths.ObserveRemoteShareReadsForTest(func(name string) {
+						if strings.Contains(strings.ToLower(name), server) {
+							ask(name)
+						}
+					})
 					before := count()
 					unread := hook(fmt.Sprintf("u%d", rows))
+					unobserve()
 					restore()
 					if n := count() - before; n != 0 {
 						contacts += n

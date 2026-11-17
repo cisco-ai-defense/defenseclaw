@@ -18,26 +18,20 @@ package gateway
 
 import (
 	"os"
-	"path/filepath"
 
-	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// The reads of the agent hook config guard go through the fixturefs seam, the
-// identity in every product build (see package fixturefs).
+// The reads of the agent hook config guard name paths a hook call names (a
+// write target, a pathspec, a git -C folder), so each goes through the
+// share-gated hookpaths readers, which read through the fixturefs seam: a
+// share on another machine is never contacted and the path is judged by its
+// text (rel-1-0-10:GAP-1074), and a local share that does not answer costs
+// at most the share wait (rel-1-0-6:GAP-0482).
 
-func seamStat(name string) (os.FileInfo, error)  { return os.Stat(fixturefs.Map(name)) }
-func seamLstat(name string) (os.FileInfo, error) { return os.Lstat(fixturefs.Map(name)) }
-func seamOpen(name string) (*os.File, error)     { return os.Open(fixturefs.Map(name)) }
-
-func seamReadFile(name string) ([]byte, error) { return os.ReadFile(fixturefs.Map(name)) }
-
-func seamReadlink(name string) (string, error) {
-	target, err := os.Readlink(fixturefs.Map(name))
-	return fixturefs.Unmap(target), err
-}
-
-func seamEvalSymlinks(name string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(fixturefs.Map(name))
-	return fixturefs.Unmap(resolved), err
-}
+func seamStat(name string) (os.FileInfo, error)    { return hookpaths.Stat(name) }
+func seamLstat(name string) (os.FileInfo, error)   { return hookpaths.Lstat(name) }
+func seamOpen(name string) (*os.File, error)       { return hookpaths.Open(name) }
+func seamReadFile(name string) ([]byte, error)     { return hookpaths.ReadFile(name) }
+func seamReadlink(name string) (string, error)     { return hookpaths.Readlink(name) }
+func seamEvalSymlinks(name string) (string, error) { return hookpaths.EvalSymlinks(name) }
