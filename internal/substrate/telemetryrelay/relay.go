@@ -65,10 +65,12 @@ type Record struct {
 	Profile   string `json:"profile,omitempty"`
 	Template  string `json:"template,omitempty"`
 	Connector string `json:"connector,omitempty"`
-	BatchID   string `json:"batch_id,omitempty"`
-	RunMode   string `json:"run_mode,omitempty"`
-	UserID    string `json:"user_id,omitempty"`
-	UserName  string `json:"user_name,omitempty"`
+	// Driver is the actor's sandbox class (gvisor or microvm).
+	Driver   string `json:"driver,omitempty"`
+	BatchID  string `json:"batch_id,omitempty"`
+	RunMode  string `json:"run_mode,omitempty"`
+	UserID   string `json:"user_id,omitempty"`
+	UserName string `json:"user_name,omitempty"`
 
 	// Lifecycle is the chainstate lifecycle event (suspended, resumed,
 	// forked, reverted, deleted, crashed).

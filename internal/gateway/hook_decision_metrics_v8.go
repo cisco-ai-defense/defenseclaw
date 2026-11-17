@@ -241,6 +241,9 @@ func (a *APIServer) emitHookDecisionLogV8(
 		}
 		if sub := hookV8Substrate(ctx); sub.ActorUID.IsPresent() {
 			identityInput.DefenseClawSandboxRuntime = sub.Runtime
+			if sub.Driver.IsPresent() {
+				identityInput.DefenseClawSandboxDriver = sub.Driver
+			}
 			identityInput.DefenseClawSandboxSubstrateAtespace = sub.Atespace
 			identityInput.DefenseClawSandboxSubstrateActor = sub.Actor
 			identityInput.DefenseClawSandboxSubstrateActorUid = sub.ActorUID

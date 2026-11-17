@@ -39,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // The Agent Substrate gateway serves two listeners (PLAN §5.1, D15):
@@ -778,8 +779,28 @@ func contextWithSubstratePerson(ctx context.Context, reg registry.Registration) 
 	if reg.Person.Subject != "" {
 		id.UserID = sanitizeLLMEventUser(reg.Person.Subject)
 		id.UserName = sanitizeLLMEventUser(reg.Person.Principal)
+		// The person's principal on the records' identity group
+		// (defenseclaw.user.principal, identity.source oidc, assurance
+		// verified): the registration holds what the OIDC token verified
+		// (GAP-0454). It feeds telemetry only, never profile selection.
+		ctx = context.WithValue(ctx, substratePersonIdentityKey{}, substratePersonIdentity{userID: id.UserID, principal: reg.Person.Principal})
 	}
 	return ContextWithAgentIdentity(ctx, id)
+}
+
+type substratePersonIdentityKey struct{}
+
+type substratePersonIdentity struct{ userID, principal string }
+
+// substrateRequestIdentity is the identity group of a record of userID on a
+// request a verified actor made for its person.
+func substrateRequestIdentity(ctx context.Context, userID string) (*llmEventIdentity, bool) {
+	p, ok := ctx.Value(substratePersonIdentityKey{}).(substratePersonIdentity)
+	if !ok || p.userID == "" || p.userID != userID || strings.TrimSpace(p.principal) == "" {
+		return nil, false
+	}
+	return &llmEventIdentity{Directory: useridentity.DirectoryFacts{Principal: p.principal,
+		Source: useridentity.SourceOIDC, Assurance: useridentity.AssuranceVerified}}, true
 }
 
 func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Request) {

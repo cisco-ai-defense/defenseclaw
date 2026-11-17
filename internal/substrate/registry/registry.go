@@ -98,8 +98,12 @@ type Registration struct {
 	// adds them to its policy).
 	Approved []string `json:"approved,omitempty"`
 	// ForkedBy is defenseclaw or unknown for a fork (ParentUID set).
-	ForkedBy  string    `json:"forked_by,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ForkedBy string `json:"forked_by,omitempty"`
+	// SandboxClass is the class the actor runs in (gvisor or microvm), as
+	// the launcher create chose it; the defenseclaw.sandbox.driver of its
+	// records. Empty for an actor DefenseClaw did not create.
+	SandboxClass string    `json:"sandbox_class,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 	// Deleted is a tombstone: the actor was deleted (E10).
 	Deleted bool `json:"deleted,omitempty"`
 }

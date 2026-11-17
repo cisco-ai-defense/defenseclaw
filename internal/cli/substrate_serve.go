@@ -1073,6 +1073,7 @@ func substrateLifecycleRelays(next func(context.Context, chainstate.LifecycleEve
 		if reg, ok, rerr := regs.Get(ctx, ev.Actor.Atespace, ev.Actor.UID); rerr == nil && ok {
 			rec.Actor, rec.Profile, rec.Template, rec.Connector = reg.Name, reg.Profile, reg.Template, reg.Connector
 			rec.BatchID, rec.ParentUID, rec.UserID, rec.UserName = reg.BatchID, reg.ParentUID, reg.Person.ID(), reg.Person.Principal
+			rec.Driver = reg.SandboxClass
 			rec.RunMode = "interactive"
 			if reg.Unattended {
 				rec.RunMode = "unattended"

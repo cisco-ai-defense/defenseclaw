@@ -160,6 +160,7 @@ func (a *APIServer) emitSubstrateLifecycleV8(ctx context.Context, r telemetryrel
 				Envelope: envelope, Severity: sev, LogLevel: level, Outcome: outcome,
 				DefenseClawSandboxName:               r.Actor,
 				DefenseClawSandboxRuntime:            observability.Present("substrate"),
+				DefenseClawSandboxDriver:             substrateDriver(r.Driver),
 				DefenseClawSandboxProfile:            substrateRelayText(r.Profile),
 				DefenseClawSandboxPhase:              phase,
 				DefenseClawSandboxLifecycleTrigger:   observability.Present(trigger),

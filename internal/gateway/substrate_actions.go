@@ -251,10 +251,25 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	}
 	return SubstrateCreated{
 		Atespace: req.Atespace, Name: name, UID: a.GetMetadata().GetUid(),
-		Template: ateapi.Key(tref), Connector: req.Connector,
+		Template: ateapi.Key(tref), Connector: req.Connector, SandboxClass: substrateEffectiveClass(tmpl, req.SandboxClass),
 		HarnessVersion: kit.AgentVersion, HookContract: kit.HookContract,
 		KitVersion: kit.KitVersion, TemplateDigest: kit.Digest,
 	}, nil
+}
+
+// substrateEffectiveClass is the class an actor created from tmpl for class
+// runs in: the template's own when it meets class, else class
+// (substrateClassSelector moves the actor to that class's pool).
+func substrateEffectiveClass(tmpl *ateapi.ActorTemplate, class string) string {
+	class = strings.ToLower(strings.TrimSpace(class))
+	have := strings.ToLower(tmpl.GetWorkerSelector().GetMatchLabels()[controller.SandboxClassLabel])
+	if have == "" {
+		have = config.SubstrateSandboxGVisor
+	}
+	if class == "" || config.SandboxClassSatisfies(have, class) {
+		return have
+	}
+	return class
 }
 
 // substrateClassSelector is the worker selector an actor needs to run in
