@@ -42,6 +42,12 @@ type Options struct {
 	// CaseInsensitive folds path case for Key() and placement (Windows always,
 	// macOS defaults). Derived by the caller, never from GOOS here.
 	CaseInsensitive bool
+	// BSDUserland selects the BSD (macOS) rows of the POSIX programs whose flag
+	// sets differ from GNU coreutils (cp, mv, ln, rm, unlink, install, tee): a
+	// flag only the GNU tool takes is then unaccounted (rel-1-0-10 GAP-0219).
+	// Derived by the caller (the host is macOS), never from GOOS here. Ignored
+	// for the Windows flavor.
+	BSDUserland bool
 	// SessionFiles maps an absolute path to the text the session saw written to
 	// it by an earlier Write/Edit in the same session (review P2). A script run
 	// from such a path can be unwrapped one level.

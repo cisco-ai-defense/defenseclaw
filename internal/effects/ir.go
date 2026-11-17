@@ -41,7 +41,12 @@ type Stmt struct {
 	// failure of the statement before it (the right side of `a && b`, `a || b`).
 	// The walker uses it to know a cd's outcome (round 8 F); OpNone otherwise.
 	Link Op
-	Span [2]int
+	// DeadGuard names the builtins (true, false, :) whose constant status makes
+	// this statement unreachable: the right side of a provably false `&&` or a
+	// provably true `||` (GAP-0218). The walker treats the statement as dead only
+	// while none of these names is a function or an alias.
+	DeadGuard []string
+	Span      [2]int
 }
 
 // Cmd is one simple command or pipeline stage.

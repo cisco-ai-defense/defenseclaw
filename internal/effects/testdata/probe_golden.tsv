@@ -136,7 +136,7 @@ C24 cd redirect	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/author
 C25 cd in time	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 C26 cd in ! 	U|
 C27 cd in { }	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
-C28 cd via exec env	K|
+C28 cd via exec env	U|
 C29 cd in until	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
 C3 pushd	K|delete:/etc/passwd,delete:/home/u/proj/passwd
 C30 cd in while body	K|append:/home/u/.ssh/authorized_keys

@@ -194,6 +194,18 @@ type walker struct {
 	// variables (enable -n cd, shopt -s cdable_vars), or cd was aliased: its
 	// target and effect are no longer what the argument says.
 	cdUnreliable bool
+	// execState: an unconditional `set -n` (or another unreviewed set option),
+	// `exec CMD`, `exit` or DEBUG/RETURN trap ran in this shell, so whether a
+	// later statement runs is not modeled: every later effect of the shell is
+	// unaccounted. It belongs to one shell: saved and restored around a child
+	// shell (rel-1-0-10 GAP-0218).
+	execState bool
+	// dead counts the enclosing statements behind a provably false `&&` / true
+	// `||`: their effects never run, so each is unaccounted (GAP-0218).
+	dead int
+	// condFrame counts the eval / source / child-shell bodies walked under a
+	// condition: a statement in one is conditional although its own Cond is not.
+	condFrame int
 	// namerefSeen: a `declare -n` was seen, so any later assignment may land on
 	// HOME or CDPATH through the reference; both stay dynamic for the call.
 	namerefSeen bool
@@ -315,12 +327,159 @@ func (w *walker) walkScript(s *Script, depth int) {
 		w.res.addUnknown(u.Reason)
 	}
 	for _, st := range s.Stmts {
+		dead := w.deadStatement(st, s.Dialect)
+		if dead {
+			w.dead++
+		}
 		w.enterStmt(st)
 		for _, c := range st.Cmds {
 			w.commandStage(c, s.Dialect, depth, st.Cond || c.Cond)
 		}
 		w.leaveStmt()
+		if dead {
+			w.dead--
+		}
 	}
+}
+
+// deadStatement reports a statement the frontend found behind a constant
+// guard (false &&, true ||) whose builtins are still the builtins: a function
+// or alias of that name can return anything, so the statement may run.
+func (w *walker) deadStatement(st *Stmt, d Dialect) bool {
+	if len(st.DeadGuard) == 0 {
+		return false
+	}
+	for _, n := range st.DeadGuard {
+		if !w.isBuiltin(n, d) {
+			return false
+		}
+	}
+	return true
+}
+
+// isBuiltin reports that a shell builtin name is not shadowed by a function or
+// an alias defined earlier in the call.
+func (w *walker) isBuiltin(name string, d Dialect) bool {
+	return !w.funcs[funcKey(name, d)] && w.aliases[name] == ""
+}
+
+// endsExecution reports a command after which the shell runs nothing the walker
+// can account for (GAP-0218): `exec CMD` replaces the shell, `exit` ends it,
+// `set` with an option outside the reviewed list (-n / -o noexec stop
+// execution, -t exits after one command, -k changes argument meaning) and a
+// DEBUG or RETURN trap can skip or stop later commands. words is the
+// command's argv, inner the argv after its wrappers. A shadowed builtin is
+// not the builtin: the caller keeps today's reading.
+func (w *walker) endsExecution(words, inner []Word, d Dialect) bool {
+	wrapped := len(words) - len(inner)
+	k := 0
+	for k < wrapped && words[k].Static && (words[k].Value == "command" || words[k].Value == "builtin") && w.isBuiltin(words[k].Value, d) {
+		k++
+	}
+	if k < wrapped {
+		return words[k].Static && words[k].Value == "exec" && w.isBuiltin("exec", d)
+	}
+	if len(inner) == 0 || !inner[0].Static || !w.isBuiltin(inner[0].Value, d) {
+		return false
+	}
+	switch inner[0].Value {
+	case "exit":
+		return true
+	case "set":
+		return setChangesExecution(inner[1:])
+	case "trap":
+		return trapChangesExecution(inner[1:])
+	}
+	return false
+}
+
+// reviewedSetLetters and reviewedSetOptions are the set options that never stop
+// or skip a later command (errexit stops only after a command ran, as an ERR
+// trap does). Anything else makes the rest of the shell unaccounted.
+const reviewedSetLetters = "euxva"
+
+var reviewedSetOptions = set("errexit", "nounset", "xtrace", "verbose", "pipefail", "allexport")
+
+// setChangesExecution reports a `set` call with an option outside the reviewed
+// list, or one the walker cannot read.
+func setChangesExecution(args []Word) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			return true
+		}
+		v := a.Value
+		if v == "--" || v == "-" {
+			return false // the rest are positional parameters
+		}
+		if v == "+" {
+			return true
+		}
+		if len(v) < 2 || (v[0] != '-' && v[0] != '+') {
+			return false // the first operand starts the positional parameters
+		}
+		named := 0
+		for _, ch := range v[1:] {
+			switch {
+			case ch == 'o':
+				named++
+			case strings.ContainsRune(reviewedSetLetters, ch):
+			default:
+				return true
+			}
+		}
+		if named > 1 {
+			return true
+		}
+		if named == 1 {
+			if i+1 >= len(args) {
+				return false // `set -o` / `set +o` lists the options
+			}
+			i++
+			if !args[i].Static || !reviewedSetOptions[args[i].Value] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// trapChangesExecution reports a `trap` call that sets a DEBUG or RETURN trap
+// (it runs before each command or at each function return, and can skip or end
+// what follows), or one whose options or signals the walker cannot read.
+func trapChangesExecution(args []Word) bool {
+	i := 0
+	if i < len(args) {
+		if !args[i].Static {
+			return true
+		}
+		switch v := args[i].Value; {
+		case v == "--":
+			i++
+		case v == "-p" || v == "-l" || v == "-lp" || v == "-pl":
+			return false // lists the traps
+		case len(v) > 1 && v[0] == '-':
+			return true
+		}
+	}
+	rest := args[i:]
+	if len(rest) < 2 {
+		return false // nothing, or one signal reset
+	}
+	action := rest[0]
+	if action.Static && (action.Value == "-" || allDigits(action.Value)) {
+		return false // resets the named signals
+	}
+	for _, s := range rest[1:] {
+		if !s.Static {
+			return true
+		}
+		switch strings.TrimPrefix(strings.ToUpper(s.Value), "SIG") {
+		case "DEBUG", "RETURN":
+			return !(action.Static && action.Value == "")
+		}
+	}
+	return false
 }
 
 // funcKey is the name a function is stored and looked up under: cmd and
@@ -427,6 +586,10 @@ func (w *walker) emit(e Effect) int {
 	if len(w.res.Effects) >= w.o.maxEffects() {
 		w.res.addUnknown(ReasonLimit)
 		return 0
+	}
+	if w.execState || w.dead > 0 {
+		// The shell may never run it: not a fully known effect (GAP-0218).
+		e.addReason(ReasonExecutionState, ScopeRole)
 	}
 	w.res.Effects = append(w.res.Effects, e)
 	return len(w.res.Effects)
@@ -856,7 +1019,23 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 	}
 
-	entry, known := lookupProgram(program, w.o.flavor(), dialect)
+	// 4b. Execution state (GAP-0218): after an unconditional exec CMD, exit, an
+	// unreviewed set option or a DEBUG/RETURN trap in this shell, nothing later
+	// is a fully known effect. A conditional one leaves later effects as they
+	// are: they run on the paths where it did not.
+	if dialect == DialectPOSIX && !cond && w.condFrame == 0 && !c.Pipeline && !c.Async && w.endsExecution(words, inner, dialect) {
+		defer func() { w.execState = true }()
+	}
+
+	entry, known := lookupProgram(program, w.o.flavor(), dialect, w.o.BSDUserland)
+	// A flag the BSD tool rejects (GAP-0219): BSD exits without a change, but
+	// GNU coreutils may come first on PATH, so the GNU reading is kept and the
+	// whole command is unaccounted (never a fully known claim, never dropped).
+	bsdReject := false
+	if bsd, ok := bsdTable[program]; ok && known && w.o.BSDUserland && w.o.flavor() != FlavorWindows &&
+		dialect != DialectCMD && dialect != DialectPowerShell && bsdRejectsFlag(bsd, inner[1:]) {
+		entry, bsdReject = posixTable[program], true
+	}
 
 	// 5. Base exec effect for every command (review PT-1: never zero effects).
 	progTarget, progReason := w.programTarget(prog.Value)
@@ -878,7 +1057,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	prevPrim := w.lastPrim
 	cmdStart := len(w.res.Effects) // first effect index (0-based) of this command
-	unaccounted := wrapperUA || declUA
+	unaccounted := wrapperUA || declUA || bsdReject
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
@@ -2594,6 +2773,10 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 		w.res.addUnknown(ReasonNestingLimit)
 		return
 	}
+	if cond {
+		w.condFrame++
+		defer func() { w.condFrame-- }()
+	}
 	var sub *Script
 	switch dialect {
 	case DialectCMD:
@@ -2815,6 +2998,7 @@ type scopeState struct {
 	narrowedOther *cwdState
 	// varsOwned: the saved scope owned its env / exported maps.
 	varsOwned bool
+	execState bool
 }
 
 // saveScope returns the current state and installs private copies of the
@@ -2822,7 +3006,8 @@ type scopeState struct {
 // to them can leak into the parent when restoreScope puts the originals back.
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
-		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther}
+		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther,
+		execState: w.execState}
 	// The env and exported maps are shared with the saved state until the child
 	// first writes one (ownVars): most scopes (a command substitution, a pipeline
 	// stage) never assign, so copying on every entry would cost the deep-nesting
@@ -2849,6 +3034,7 @@ func (w *walker) restoreScope(s scopeState) {
 	w.curCWD, w.curHome, w.cwdAlt, w.cwdStack, w.env = s.cwd, s.home, s.alt, s.stack, s.env
 	w.exported, w.cdChain, w.narrowed, w.narrowedOther = s.exported, s.chain, s.narrowed, s.narrowedOther
 	w.varsOwned = s.varsOwned
+	w.execState = s.execState
 }
 
 func cloneBools(in map[string]bool) map[string]bool {
