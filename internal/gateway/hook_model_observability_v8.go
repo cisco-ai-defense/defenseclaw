@@ -629,7 +629,7 @@ func hookModelV8Content(content string, originalBytes int64, preTruncated bool) 
 	if originalBytes <= 0 {
 		originalBytes = int64(len(content))
 	}
-	bounded := boundedHookLLMSpanContent(strings.ToValidUTF8(content, "\uFFFD"))
+	bounded := boundedHookLLMSpanContent(maskAgentSessionTokens(strings.ToValidUTF8(content, "\uFFFD")))
 	state := "preserved"
 	if preTruncated || int64(len(bounded)) < originalBytes {
 		state = "truncated"
