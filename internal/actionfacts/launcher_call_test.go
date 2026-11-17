@@ -183,8 +183,8 @@ func TestGAP0971LauncherChainsReachTheLauncher(t *testing.T) {
 		if len(calls) == 0 || calls[len(calls)-1].Start != len(argv)-3 || calls[len(calls)-1].Body != body {
 			t.Errorf("chain n=%d: calls %+v, want the last one at %d with body %q", n, calls, len(argv)-3, body)
 		}
-		if len(calls) > maxLauncherReadings {
-			t.Errorf("chain n=%d: %d calls, want at most %d", n, len(calls), maxLauncherReadings)
+		if len(calls) > maxLauncherReadings+1 {
+			t.Errorf("chain n=%d: %d calls, want at most %d", n, len(calls), maxLauncherReadings+1)
 		}
 		// Every decoy whose reading gives a script (a pwsh or powershell word
 		// followed by a word PowerShell runs) is one reading more.
@@ -194,7 +194,7 @@ func TestGAP0971LauncherChainsReachTheLauncher(t *testing.T) {
 				readings++
 			}
 		}
-		if want := readings > maxLauncherReadings; cut != want {
+		if want := readings > maxLauncherReadings+1; cut != want {
 			t.Errorf("chain n=%d (%d readings): cut %t, want %t", n, readings, cut, want)
 		}
 		text := strings.Join(gap0971Chain(n), " ") + " pwsh -Command '" + body + "'"

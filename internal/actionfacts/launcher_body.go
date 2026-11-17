@@ -87,23 +87,23 @@ func ShellLauncherCall(argv []string) (LauncherCall, bool) {
 // launcher grammar gives a script is one call; the caller judges each and
 // keeps the strongest proven verdict.
 //
-// At most maxLauncherReadings calls are returned. The walk reads the whole
-// wrapper chain, so the last launcher word, the one the chain runs when every
-// word before it is an operand or a title, is always read; a reading between
-// that does not fit is not judged, and cut is set: the caller must treat the
-// call as TRUNCATED (the one bound rule). cut is also set when the chain is
-// still open at MaxArgvItems words (rel-1-0-10:GAP-0971).
+// The first maxLauncherReadings successful calls and the final launcher call
+// are returned. The walk reads the whole wrapper chain, so the last launcher
+// word, the one the chain runs when every word before it is an operand or a
+// title, is always read; a reading between that does not fit is not judged,
+// and cut is set: the caller must treat the call as TRUNCATED (the one bound
+// rule). cut is also set when the chain is still open at MaxArgvItems words
+// (rel-1-0-10:GAP-0971).
 func ShellLauncherCalls(argv []string) (calls []LauncherCall, cut bool) {
 	starts, open := launcherStarts(argv)
 	calls, skipped := launcherCallsAt(argv, starts)
 	return calls, skipped || open && len(argv) > MaxArgvItems
 }
 
-// launcherCallsAt is the calls read at starts, bounded by maxLauncherReadings
-// (see ShellLauncherCalls), and whether a reading was skipped. A reading past
-// the bound is skipped and the walk goes on to the last start without building
-// another body, so the cost stays at maxLauncherReadings+1 bodies however long
-// the chain.
+// launcherCallsAt is the calls read at starts and whether a reading was
+// skipped. A reading past the first maxLauncherReadings is skipped and the
+// walk goes on to the last start without building another body, so the cost
+// stays at maxLauncherReadings+2 bodies however long the chain.
 func launcherCallsAt(argv []string, starts []int) (calls []LauncherCall, skipped bool) {
 	for i, start := range starts {
 		last := i == len(starts)-1
@@ -114,7 +114,7 @@ func launcherCallsAt(argv []string, starts []int) (calls []LauncherCall, skipped
 		if !ok {
 			continue
 		}
-		if !last && len(calls) == maxLauncherReadings-1 {
+		if !last && len(calls) == maxLauncherReadings {
 			skipped = true
 			continue
 		}
@@ -146,12 +146,11 @@ func shellLauncherCallAt(argv []string, start int) (LauncherCall, bool) {
 	return call, ok
 }
 
-// maxLauncherReadings bounds the launcher calls one argv is judged as (each
-// is a request of its own, and a launcher's script may hold launchers again).
-// Each one past the first follows a word read both ways (an operand or a
-// title), so a wrapper chain with more is a crafted one: the readings that do
-// not fit are TRUNCATED, and the last launcher is still read (see
-// ShellLauncherCalls, rel-1-0-10:GAP-0971).
+// maxLauncherReadings bounds the successful operand and title readings one
+// argv judges before the final launcher (each is a request of its own, and a
+// launcher's script may hold launchers again). A wrapper chain with more is
+// a crafted one: readings that do not fit are TRUNCATED, and the last launcher
+// is still read (see ShellLauncherCalls, rel-1-0-10:GAP-0971).
 const maxLauncherReadings = 4
 
 // launcherStarts are the indexes of the launcher words an argv may run (see
