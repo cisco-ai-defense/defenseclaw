@@ -398,6 +398,11 @@ containerSecurityContext:
 # lost when the pod is replaced (a rollout, an eviction, a node move), and
 # each gateway replica holds only the requests it handled. Keep the record
 # with an export destination in config.observability.destinations (GAP-0275).
+# On this disk volume the kubelet evicts the pod at once when the volume passes
+# this size, and the local store is lost: ALERT audit_store_full is logged only
+# when a write finds no space (a memory volume or a full node disk). The pods
+# set no ephemeral-storage request, so leave room for this size per
+# DefenseClaw pod on the nodes' disks (GAP-0538).
 # The size must hold the audit store cap (config.observability.local
 # .max_store_mb) twice over plus 256 MiB for the audit write-ahead log, whose
 # flood ceiling is 256 MiB; the chart refuses a smaller one (GAP-0402).
