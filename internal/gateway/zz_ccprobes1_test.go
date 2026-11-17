@@ -350,12 +350,14 @@ func TestCCP1GAP0322RoutingArrayIsLinear(t *testing.T) {
 		to[i] = fmt.Sprintf("u%d", i)
 	}
 	raw, _ := json.Marshal(map[string]any{"text": "hello", "to": to})
+	api := testAPIServerWithConfig(t, "action")
 	start := time.Now()
-	_ = extractMessageArgs(raw)
-	if took := time.Since(start); took > 3*time.Second {
-		t.Errorf("16000 routing values took %v, want under 3 s", took)
+	rec, verdict := postInspect(t, api, `{"tool":"message","args":`+string(raw)+`,"direction":"outbound"}`)
+	took := time.Since(start)
+	if took > 3*time.Second || rec.Code != http.StatusOK {
+		t.Errorf("16000 routing values on /inspect/tool: %v, status %d, action %q; want an answer under 3 s", took, rec.Code, verdict.Action)
 	} else {
-		t.Logf("16000 routing values took %v", took)
+		t.Logf("16000 routing values took %v (action %q)", took, verdict.Action)
 	}
 }
 
