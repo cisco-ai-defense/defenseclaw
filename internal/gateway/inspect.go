@@ -3245,10 +3245,15 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 			findings = scanRuleGeneration(generation, content, "message", ruleScanOptions{})
 		}
 	}
-	if folded == "" {
-		return findings
+	if folded != "" {
+		findings = unionRuleFindings(findings, scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+			contentScope: scope, onlyCategory: "trust-exploit",
+		}))
 	}
-	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "message", ruleScanOptions{
-		contentScope: scope, onlyCategory: "trust-exploit",
-	}))
+	// The zero-width secret pass extends the raw scan; the Secure Client
+	// generation keeps its single pass, as for the folded trust view.
+	if scanRaw && !secureClientGeneration() {
+		findings = withZeroWidthSecretFindings(generation, findings, content, "message", scope)
+	}
+	return findings
 }

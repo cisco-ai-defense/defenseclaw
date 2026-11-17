@@ -1771,35 +1771,6 @@ func compileLocalPatternSources(field string, sources []string) ([]*regexp.Regex
 	return compiled, nil
 }
 
-type localSecretDetectorKind uint8
-
-const (
-	localSecretDetectorToken localSecretDetectorKind = iota + 1
-	localSecretDetectorPassword
-	localSecretDetectorAPIKey
-	localSecretDetectorBearer
-	localSecretDetectorAWS
-)
-
-type localSecretDetector struct {
-	kind        localSecretDetectorKind
-	canonicalID string
-	pattern     *regexp.Regexp
-}
-
-// secretPatternDetectors tighten patterns that cause false positives as bare
-// substrings. Every detector carries stable behavioral and canonical identities
-// so slice reordering cannot silently change acceptance or finding IDs.
-var secretPatternDetectors = []localSecretDetector{
-	{localSecretDetectorToken, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`)},
-	// Require an actual secret-shaped VALUE after the key name, so prose
-	// that merely mentions "password" / "api_key" / "bearer" is not flagged.
-	{localSecretDetectorPassword, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`)},
-	{localSecretDetectorAPIKey, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`)},
-	{localSecretDetectorBearer, "LP-SECRET-BEARER", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`)},
-	{localSecretDetectorAWS, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`)},
-}
-
 // Target names and transfer verbs are common in source review and operational
 // documentation. Strong built-in exfil detection therefore requires the
 // conjunction of a read/dump verb, a sensitive target, and an egress verb.
@@ -1924,12 +1895,31 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 	if secureClientGeneration() {
 		return findings
 	}
-	folded := trustPatternText(content)
-	if folded == content {
+	if folded := trustPatternText(content); folded != content {
+		findings = unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
+			contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+		}))
+	}
+	return withZeroWidthSecretFindings(generation, findings, content, "", ruleContentScopeUntrusted)
+}
+
+// withZeroWidthSecretFindings adds to findings the secret rules found on
+// content with only its invisible characters removed (stripZeroWidth; no
+// letter folding: a credential is matched byte for byte). A key with a
+// zero-width space spliced between its name and its value, or into the
+// value, reads the same to a model and to a shell. The proxy's own secret
+// regexes had this fallback and the pack did not, on any surface; the hook
+// path (messageRuleFindings) and the proxy (scanUntrustedContentRules) now
+// share it (rel-1-0-10:GAP-0210). A rule found on the text as written keeps
+// the stronger of its two findings (unionRuleFindings). Off under Secure
+// Client, like the folded trust pass: callers skip it there.
+func withZeroWidthSecretFindings(generation *compiledRulePackCategories, findings []RuleFinding, content, toolName string, scope ruleContentScope) []RuleFinding {
+	invisible := stripZeroWidth(content)
+	if invisible == content {
 		return findings
 	}
-	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
-		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+	return unionRuleFindings(findings, scanRuleGeneration(generation, invisible, toolName, ruleScanOptions{
+		contentScope: scope, onlyCategory: "secret",
 	}))
 }
 
@@ -2044,15 +2034,12 @@ func scanLocalPatternsWithActivation(
 			flags = append(flags, p)
 		}
 	}
-	for _, detector := range secretPatternDetectors {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
-			flag := match
-			if norm {
-				flag = "[normalized] " + match
-			}
-			flags = append(flags, flag)
-		}
-	}
+	// Every built-in secret detection comes from the rule pack, read as the
+	// hook path reads a prompt or a tool result (scanUntrustedContentRules).
+	// The proxy used to add its own secret regexes here, so a completion and a
+	// tool result holding the same text were decided by different detectors: a
+	// documentation placeholder alerted only in a response
+	// (rel-1-0-10:GAP-0210, GAP-0213).
 
 	// Content scanning retains trust, credential, and PII rules. Literal
 	// commands, paths, cognitive files, and C2 indicators are action categories
@@ -2267,34 +2254,6 @@ func triagePatterns(direction, content string) []TriageSignal {
 			})
 		}
 	}
-	// Secret regex: tries `content` first (case/whitespace preserved
-	// for audit context) and falls back to `lower` so evasions like
-	// "token\u200B=\u200B<60-char key>" still fire. Without the
-	// fallback the docstring on scanLocalPatterns above — which
-	// promises normalization defeats whitespace/slash-run evasions —
-	// would not hold for secrets.
-	for _, detector := range secretPatternDetectors {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
-			src := content
-			if norm {
-				src = lower
-			}
-			loc := strings.Index(src, match)
-			if loc < 0 {
-				continue
-			}
-			ev := extractEvidenceAt(src, loc, loc+len(match))
-			if norm {
-				ev = "[normalized] " + ev
-			}
-			signals = append(signals, TriageSignal{
-				Level: secretLevel, FindingID: "TRIAGE-SECRET-REGEX",
-				Category: "secret", Pattern: detector.pattern.String(),
-				Evidence: ev, Confidence: 0.75,
-			})
-		}
-	}
-
 	return signals
 }
 
