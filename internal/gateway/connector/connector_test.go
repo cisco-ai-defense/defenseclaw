@@ -1389,15 +1389,28 @@ func TestOpenClaw_SetupAndTeardownDropTheRejectedPluginApprovalsBlock(t *testing
 
 			c := NewOpenClawConnector()
 			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", AgentVersion: tc.version}
-			if err := c.Setup(context.Background(), opts); err != nil {
-				t.Fatalf("Setup: %v", err)
-			}
-			approvals := readApprovals(t, configPath)
-			if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
-				t.Fatalf("after Setup approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
-			}
-			if _, ok := approvals["exec"]; !ok {
-				t.Fatalf("Setup dropped the operator's approvals.exec: %v", approvals)
+			if openClawHooksGOOS == "windows" && openClawLacksNativeHooks(openClawObservedVersion(opts)) {
+				// Native Windows guards OpenClaw only through its native
+				// plugin hooks (2026.8.35 and later): setup refuses an older
+				// OpenClaw before it writes anything (rel-1-0-10:GAP-1171).
+				err := c.Setup(context.Background(), opts)
+				if err == nil || !strings.Contains(err.Error(), "native plugin hooks") {
+					t.Fatalf("Setup on Windows with %q: %v, want the native-hooks refusal", tc.version, err)
+				}
+				if got := mustReadFileString(t, configPath); got != tc.config {
+					t.Fatalf("a refused Setup changed openclaw.json: %s", got)
+				}
+			} else {
+				if err := c.Setup(context.Background(), opts); err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
+				approvals := readApprovals(t, configPath)
+				if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
+					t.Fatalf("after Setup approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
+				}
+				if _, ok := approvals["exec"]; !ok {
+					t.Fatalf("Setup dropped the operator's approvals.exec: %v", approvals)
+				}
 			}
 
 			// Teardown after an earlier release wrote it again.
