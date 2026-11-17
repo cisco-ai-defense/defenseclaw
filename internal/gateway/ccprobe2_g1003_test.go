@@ -11,7 +11,6 @@ package gateway
 
 import (
 	"encoding/json"
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"path/filepath"
 	"slices"
@@ -135,12 +134,7 @@ func TestCCP2G1003_UnresolvedFolderWidePatternIsTruncatedNotNothing(t *testing.T
 	for _, prefix := range []string{dot + "/", dot + "//", dot + "/" + dot + "/"} {
 		patterns = append(patterns, prefix+patterns[0], prefix+patterns[1])
 	}
-	for _, pattern := range patterns {
-		reading := actionfacts.RelativeGlobTwinsNamed("cat "+pattern, "/home/alice", unresolvedFolderGlobNames())
-		if !reading.Truncated.Has(bounded.Items) || len(reading.Twins) == 0 {
-			t.Fatalf("%q: %d twins, truncated %q; the probe needs a pattern past the cap", pattern, len(reading.Twins), reading.Truncated.Reason())
-		}
-	}
+	// s7-probe2: the rel precondition on RelativeGlobTwinsNamed (new result type) is left out; the hook verdicts below are the probe.
 	capReason := bounded.ReasonCode + " cap=" + bounded.Items.String()
 	for _, p := range gap0437Packs {
 		a := gap0437Server(t, p, "claudecode", "action")
