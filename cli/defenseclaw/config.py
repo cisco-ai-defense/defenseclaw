@@ -1146,6 +1146,24 @@ def _warn_untrusted_managed_config(path: str, data: dict[str, Any]) -> None:
 _openclaw_bin_cache: str | None = None
 
 
+OPENCLAW_CONFIG_REPAIR_HINT = (
+    "OpenClaw rejected its own openclaw.json; run `openclaw doctor --fix` to repair it "
+    "(DefenseClaw does not rewrite OpenClaw's config)"
+)
+
+
+def openclaw_config_repair_hint(*outputs: str | None) -> str:
+    """The repair to name when an openclaw command refused its own config.
+
+    OpenClaw 2026.11 rejects an openclaw.json written by an older release
+    ("Unrecognized key") and says to run ``openclaw doctor --fix``. DefenseClaw
+    repeats that repair where it shows such an error, and never edits the file.
+    Empty when the output is not that refusal (GAP-0110).
+    """
+    text = " ".join(o or "" for o in outputs).lower()
+    return OPENCLAW_CONFIG_REPAIR_HINT if "unrecognized key" in text else ""
+
+
 def openclaw_bin() -> str:
     """Return the absolute path to the ``openclaw`` binary.
 
