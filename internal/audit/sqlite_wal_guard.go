@@ -562,6 +562,7 @@ func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limi
 			s.walHoldResume = walClock().Add(walEscalated(walHoldBackoffBase, walHoldBackoffMax, rest))
 		}
 	}
+	return over
 }
 
 // walHoldBackoff reports whether a pass over the limit should leave the
