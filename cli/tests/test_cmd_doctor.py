@@ -2432,6 +2432,31 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn("defenseclaw setup", printed)
 
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="")
+    def test_remote_or_both_without_a_key_is_a_failure_naming_the_key(self, _mock_resolve, mock_probe):
+        # GAP-0464: scanner_mode remote or both with no AI Defense key is a
+        # configuration error (the remote scanner never runs): doctor fails
+        # and names the key to set; no request is made.
+        for mode in ("remote", "both"):
+            cfg = self._make_cfg()
+            cfg.guardrail.scanner_mode = mode
+            r = _DoctorResult()
+            _check_cisco_ai_defense(cfg, r)
+            self.assertEqual(r.failed, 1, (mode, r.checks))
+            self.assertEqual(r.checks[0]["label"], "Cisco AI Defense")
+            self.assertEqual(r.checks[0]["detail"], "CISCO_AI_DEFENSE_API_KEY not set")
+        cfg = self._make_cfg(endpoint="")
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual(r.checks[0]["detail"], "endpoint not configured")
+        cfg = self._make_cfg()
+        cfg.guardrail.scanner_mode = "local"
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual((r.failed, r.checks[0]["status"]), (0, "skip"))
+        mock_probe.assert_not_called()
+
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
     def test_200_is_pass_with_no_hint_noise(self, _mock_resolve, _mock_probe):
