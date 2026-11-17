@@ -1146,6 +1146,15 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 			if target.path != root && !strings.HasPrefix(target.path, root+string(filepath.Separator)) {
 				continue
 			}
+			// The walk removes only the entries it finds: a registration
+			// file that does not exist is not reached, and a folder is
+			// reached through the registration files it holds, which are
+			// targets of their own. A spelling of the root (., ./, the
+			// absolute path) therefore reaches the same files
+			// (rel-1-0-10:GAP-1196). A target whose state is unknown counts.
+			if !target.unknown && (target.info == nil || target.info.IsDir()) {
+				continue
+			}
 			if !tree && limits == 1 && maxDepth >= 0 && target.path != root &&
 				strings.Count(strings.TrimPrefix(target.path, root+string(filepath.Separator)), string(filepath.Separator)) >= maxDepth {
 				continue
