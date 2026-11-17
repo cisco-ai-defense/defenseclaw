@@ -185,7 +185,9 @@ The callout's refusal is a JSON body with `error: egress_blocked`, a `message` t
 
 ### A secret placeholder shows up in a tool's output
 
-The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it. Hosts that echo tokens back are a known case.
+The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it.
+
+If a tool's output shows the real value instead, the secret is bound to a host that echoes requests. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `hosts` list ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)), rotate the value, and see [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
 
 ### Credential injection returns 403 "atespace not permitted"
 
