@@ -193,8 +193,10 @@ type lateEntry struct {
 // lateMaxCwds bounds the working directories one call may visit.
 const lateMaxCwds = 8
 
-// accountHomeDir is the home of the account database; a test replaces it.
-var accountHomeDir = func() (string, error) {
+// AccountHomeDir is the home of the account database. Every late-call reader
+// (this scan and hookexec.OrdinaryNoAnswerPayload) asks it, so a test can
+// point both at a scratch folder instead of the real account home (GAP-0277).
+var AccountHomeDir = func() (string, error) {
 	current, err := user.Current()
 	if err != nil {
 		return "", err
@@ -224,7 +226,7 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 	// home, so a hard link to a protected file stays closed and a hard link
 	// to an ordinary file stays ordinary.
 	if !ok && given {
-		account, err := accountHomeDir()
+		account, err := AccountHomeDir()
 		if err != nil {
 			return nil, false
 		}
@@ -239,7 +241,7 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 		// The home of the process is not always the account home (a hook
 		// run with a scratch HOME): the protected files of both are indexed,
 		// so a hard link to the account's keys file is found either way.
-		if current, err := accountHomeDir(); err == nil {
+		if current, err := AccountHomeDir(); err == nil {
 			if account, usable := lateUsableHome(current); usable && !slices.Contains(indexHomes, account) {
 				indexHomes = append(indexHomes, account)
 			}

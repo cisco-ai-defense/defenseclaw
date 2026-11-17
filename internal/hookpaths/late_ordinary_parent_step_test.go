@@ -116,9 +116,9 @@ func TestLateOrdinaryCallIndexesBothHomes(t *testing.T) {
 		t.Skipf("hard link unavailable: %v", err)
 	}
 	t.Setenv("HOME", scratch)
-	restore := accountHomeDir
-	accountHomeDir = func() (string, error) { return account, nil }
-	t.Cleanup(func() { accountHomeDir = restore })
+	restore := AccountHomeDir
+	AccountHomeDir = func() (string, error) { return account, nil }
+	t.Cleanup(func() { AccountHomeDir = restore })
 	for _, tc := range []struct {
 		name, command string
 		want          bool
