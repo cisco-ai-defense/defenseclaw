@@ -98,6 +98,10 @@ func goToolOrSkip(t *testing.T) string {
 	}
 	out, err := exec.Command(path, "env", "GOMOD").Output()
 	if gomod := strings.TrimSpace(string(out)); err != nil || gomod == "" || gomod == os.DevNull {
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			// CI runs from the source tree; a missing module there is a red.
+			t.Fatalf("go env GOMOD = %q, %v in CI", gomod, err)
+		}
 		t.Skipf("no module source here for go list (go env GOMOD = %q, %v)", gomod, err)
 	}
 	return path

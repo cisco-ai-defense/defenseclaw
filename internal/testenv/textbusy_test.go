@@ -6,9 +6,11 @@
 package testenv
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -25,8 +27,8 @@ func TestStartWrittenRetriesATextBusyExecutable(t *testing.T) {
 	if _, err := f.WriteString("#!/bin/sh\nexit 0\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := exec.Command(script).Run(); err == nil {
-		t.Skip("this kernel runs a file that is open for writing")
+	if err := exec.Command(script).Run(); !errors.Is(err, syscall.ETXTBSY) {
+		t.Skipf("the first exec did not meet ETXTBSY here (%v): nothing to retry", err)
 	}
 	starts := 0
 	cmd, err := StartWritten(func() *exec.Cmd {

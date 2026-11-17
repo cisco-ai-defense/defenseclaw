@@ -388,9 +388,14 @@ def test_linux_audit_shard_timeouts_fit_the_job() -> None:
     seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
         "internal/audit"
     ]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["go-test-audit"]
+    shards = int(next(step["env"]["GO_TEST_SHARDS"] for step in job["steps"] if "GO_TEST_SHARDS" in step.get("env", {})))
+    # Every shard index the matrix runs is one the plan has, and back.
+    assert job["strategy"]["matrix"]["shard"] == list(range(shards))
     files = discover_test_files(root / "internal/audit")
     weigh = go_test_shards.test_weigher(seconds)
-    for index, shard in enumerate(partition_test_files(files, 5, seconds)):
+    for index, shard in enumerate(partition_test_files(files, shards, seconds)):
         planned = sum(weigh(name) for name in shard)
         wanted = planned * go_test_shards.TIMEOUT_HEADROOM + go_test_shards.TIMEOUT_PAD_SECONDS
         assert wanted < go_test_shards.TIMEOUT_CAP_SECONDS, (index, planned)
