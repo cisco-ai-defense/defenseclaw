@@ -649,7 +649,7 @@ The table follows `defenseclaw setup guardrail --help`.
     },
     "--judge-hook-connectors": {
       type: "all|none|list",
-      description: "Which hook connectors the judge covers (guardrail.judge.hook_connectors): all (or *), none, or a comma-separated list. The proxy lane is always judged. When the judge is turned on for the first time, the default is every active hook connector.",
+      description: "Which hook connectors the judge covers (guardrail.judge.hook_connectors): all (or *), none, or a comma-separated list. The proxy lane is always judged. When the judge is turned on for the first time, the default is every active hook connector; with `--connector X` it is only X, and the other connectors are left as they are.",
     },
     "--llm-role": {
       type: "judge_only|judge_and_agent",
