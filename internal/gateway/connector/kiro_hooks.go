@@ -153,7 +153,6 @@ func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool) error 
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		removeKiroFileResidue(path, hookScript, false)
 		return nil
 	}
 	return writeJSONObject(path, cfg)
@@ -310,7 +309,6 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				return err
 			}
-			removeKiroFileResidue(path, hookScript, true)
 			return nil
 		}
 		return writeJSONObject(path, cfg)
@@ -334,7 +332,6 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		removeKiroFileResidue(path, hookScript, true)
 		return nil
 	}
 	return writeJSONObject(path, cfg)

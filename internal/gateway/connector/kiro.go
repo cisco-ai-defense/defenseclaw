@@ -378,6 +378,9 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 		}
 	}
 	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		removeKiroFileResidue(path, command, false)
+	}
 	return nil
 }
 
@@ -436,6 +439,9 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 		}
 	}
 	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		removeKiroFileResidue(path, command, true)
+	}
 	return nil
 }
 
