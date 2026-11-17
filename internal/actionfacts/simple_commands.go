@@ -579,6 +579,18 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// unresolvedBody: a nested shell body made at run time was not read
 	// (EvaluationFailureUnresolvedBody); the rest of the call was.
 	unresolvedBody := false
+	// parseGap is the reading of a call the walk gives up on (a parse gap,
+	// judged as the whole action): the call is not split, but a nested shell
+	// body made at run time that an earlier statement already left unread
+	// stays recorded, as the walk gave it up at that statement on rel
+	// (rel-1-0-10:GAP-0535, GAP-1083: a later parse gap must not turn the
+	// unknown body into an allow).
+	parseGap := func() []SimpleCommand {
+		if unresolvedBody || unknownFolderBody == EvaluationFailureUnresolvedBody {
+			return []SimpleCommand{{EvaluationFailure: "parse"}, {EvaluationFailure: EvaluationFailureUnresolvedBody}}
+		}
+		return []SimpleCommand{{EvaluationFailure: "parse"}}
+	}
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
 	var plainWords simplePlainWords
@@ -588,7 +600,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		for previousScope != part.scope && !strings.HasPrefix(part.scope, previousScope+"/") {
 			index := strings.LastIndexByte(previousScope, '/')
 			if index < 0 {
-				return []SimpleCommand{{EvaluationFailure: "parse"}}
+				return parseGap()
 			}
 			parent := previousScope[:index]
 			body, ran := states[previousScope]
@@ -653,15 +665,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			reads = simpleParamNames(part.text)
 		}
 		if !simpleEnterForkedLoops(states, part, unreadLoops, &plainWords) {
-			return []SimpleCommand{{EvaluationFailure: "parse"}}
+			return parseGap()
 		}
 		variants := simpleScopeStates(states, part.scope)
 		if variants == nil {
-			return []SimpleCommand{{EvaluationFailure: "parse"}}
+			return parseGap()
 		}
 		file, parsed := shellparse.Parse(part.text)
 		if !parsed || len(file.Stmts) != 1 {
-			return []SimpleCommand{{EvaluationFailure: "parse"}}
+			return parseGap()
 		}
 		stmt := file.Stmts[0]
 		nextVariants := make([]simpleShellState, 0, len(variants))
@@ -712,7 +724,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				start := int(call.Args[0].Pos().Offset())
 				end := int(call.Pos().Offset())
 				if start <= end || start > len(text) {
-					return []SimpleCommand{{EvaluationFailure: "parse"}}
+					return parseGap()
 				}
 				if simplePrefixChangesResolution(call.Assigns) {
 					unprefixed = text[start:]
@@ -750,7 +762,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			}
 			text = resolve(text)
 			if strings.TrimSpace(text) == "" {
-				return []SimpleCommand{{EvaluationFailure: "parse"}}
+				return parseGap()
 			}
 			relative := state.cwdUnknown && simpleRelativePathOperand(text)
 			if relative {
@@ -843,10 +855,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						// Static text the walk does not model (a quoted
 						// pattern, an option it does not read), a trap
 						// handler: a parse gap, judged as the whole action.
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
+						return parseGap()
 					}
 					if len(script) > maxCommandBytes {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
+						return parseGap()
 					}
 					innerInput := input
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
@@ -882,7 +894,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
 						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
 					if !bodyParsed && !slices.ContainsFunc(inner, isSyntaxTailUnread) {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
+						return parseGap()
 					}
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
