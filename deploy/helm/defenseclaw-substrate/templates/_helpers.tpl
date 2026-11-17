@@ -407,6 +407,12 @@ initContainers:
   valueFrom:
     fieldRef:
       fieldPath: metadata.namespace
+{{- with .Values.clusterName }}
+# The k8s.cluster.name resource attribute of the gateway's telemetry
+# (Kubernetes has no API that names the cluster, GAP-0454).
+- name: DEFENSECLAW_K8S_CLUSTER_NAME
+  value: {{ . | quote }}
+{{- end }}
 {{- end -}}
 
 {{/* Annotations that roll pods when the config changes. */}}

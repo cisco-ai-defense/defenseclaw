@@ -140,3 +140,18 @@ func managedSet(lv *Live) map[string]bool {
 	}
 	return set
 }
+
+// UnattestedTemplates is how many of the templates the controller has read
+// carry no valid attestation now (defenseclaw.substrate.unattested_templates):
+// their actors get no network.
+func (c *Controller) UnattestedTemplates() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, ct := range c.templates {
+		if !ct.att.Attested {
+			n++
+		}
+	}
+	return n
+}

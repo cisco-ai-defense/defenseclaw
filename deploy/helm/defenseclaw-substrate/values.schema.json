@@ -666,6 +666,10 @@
         }
       }
     },
+    "clusterName": {
+      "type": "string",
+      "maxLength": 253
+    },
     "metrics": {
       "type": "object",
       "additionalProperties": false,
