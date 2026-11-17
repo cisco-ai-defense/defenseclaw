@@ -161,6 +161,9 @@ type Service struct {
 	// calls are the tool calls this leader prepared or resolved, for a
 	// further result of a call (GAP-0348, GAP-0345, GAP-0350; calls.go).
 	calls *callTable
+	// seed is the migrated store a new actor's store is copied from
+	// (seed.go, GAP-0564).
+	seed storeSeed
 	// diskHook, set by tests only, runs before every disk operation on an
 	// actor's files: a store open or access (storeOf), a state file write
 	// and a purge's removals. A test blocks it to stand for a disk that does
@@ -418,6 +421,7 @@ func (s *Service) warnf(format string, args ...any) {
 func (s *Service) Close() error {
 	s.egress.stop()
 	s.runPurges()
+	s.removeSeed()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
@@ -727,6 +731,10 @@ func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, aud
 	fresh := errors.Is(statErr, os.ErrNotExist)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, "", err
+	}
+	if fresh {
+		// A copy of the migrated seed, not every migration again (GAP-0564).
+		s.seedStore(path)
 	}
 	st, err = audit.NewStore(path)
 	if err != nil {
