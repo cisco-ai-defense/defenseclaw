@@ -52,6 +52,21 @@ type Actor struct {
 	// Warnings come with a create: what the cluster allowed but wants the
 	// person to know (an open-source vendor sign-in, E9).
 	Warnings []string `json:"warnings,omitempty"`
+	// PolicyConflict is set while the actor is in policy_conflict: after
+	// repeated foreign changes to its egress policy the controller keeps only
+	// the DefenseClaw rule (deny-only) until an administrator resets it
+	// (GAP-0398).
+	PolicyConflict *PolicyConflict `json:"policy_conflict,omitempty"`
+}
+
+// PolicyConflict is an actor's policy_conflict as the cluster shows it.
+type PolicyConflict struct {
+	Since time.Time `json:"since"`
+	// Reverts is how many foreign changes the controller reverted before
+	// it marked the conflict.
+	Reverts int `json:"reverts"`
+	// Fix is the administrator's command that clears it.
+	Fix string `json:"fix,omitempty"`
 }
 
 // shown returns a with every field a person reads made safe to print
@@ -61,6 +76,11 @@ type Actor struct {
 func (a Actor) shown() Actor {
 	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.State} {
 		*f = safetext.Line(*f)
+	}
+	if a.PolicyConflict != nil {
+		pc := *a.PolicyConflict
+		pc.Fix = safetext.Line(pc.Fix)
+		a.PolicyConflict = &pc
 	}
 	if a.Warnings != nil {
 		warnings := make([]string, len(a.Warnings))

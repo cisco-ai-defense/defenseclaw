@@ -169,6 +169,9 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 	} else {
 		name = s.Name
 		doctorCluster(ctx, d, s)
+		if c, ok := doctorPolicyConflicts(ctx, s, clusterFlag); ok {
+			d.checks = append(d.checks, c)
+		}
 	}
 
 	switch {
@@ -231,6 +234,43 @@ func printSubstrateDoctor(w io.Writer, rep substrateDoctorReport) {
 		}
 		fmt.Fprintf(w, "  %s: %s\n", c.ID, fix)
 	}
+}
+
+// doctorPolicyConflicts names the agents in policy_conflict: repeated foreign
+// changes to their network policy put them on the DefenseClaw rule only
+// (deny-only) until an administrator resets it (GAP-0398).
+// It reads your agents, every agent with --cluster (administrators). An
+// agent in conflict fails the cluster check and warns a person. ok is false
+// when the agents could not be read: the sign_in row already says why.
+func doctorPolicyConflicts(ctx context.Context, s *substrateSession, cluster bool) (substrateCheck, bool) {
+	const id = "policy_conflict"
+	actors, err := s.Client.List(ctx, api.ListOptions{All: cluster})
+	if err != nil {
+		return substrateCheck{}, false
+	}
+	var names, fixes []string
+	for _, a := range actors {
+		if a.Deleted || a.PolicyConflict == nil {
+			continue
+		}
+		ref := a.Atespace + "/" + a.Name
+		names = append(names, fmt.Sprintf("%s (%d foreign change(s) to its network policy reverted)", ref, a.PolicyConflict.Reverts))
+		fixes = append(fixes, "defenseclaw substrate policy reset "+ref)
+	}
+	whose := "of yours"
+	if cluster {
+		whose = "in the cluster"
+	}
+	if len(names) == 0 {
+		return substrateCheck{ID: id, Status: doctorOK, Summary: "no agent " + whose + " is in policy_conflict"}, true
+	}
+	status := doctorWarn
+	if cluster {
+		status = doctorFail
+	}
+	return substrateCheck{ID: id, Status: status,
+		Summary: fmt.Sprintf("%d agent(s) %s in policy_conflict, so they reach only DefenseClaw: %s", len(names), whose, strings.Join(names, "; ")),
+		Fix:     "stop whatever else writes the agent's egress policy, then an administrator runs: " + strings.Join(fixes, "; ")}, true
 }
 
 // doctorCluster runs the checks that need the cluster and the context.

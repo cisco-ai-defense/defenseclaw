@@ -141,6 +141,9 @@ type Registration struct {
 	ForkedBy        string   `json:"forked_by,omitempty"`
 	Approved        []string `json:"approved,omitempty"`
 	Source          string   `json:"source"`
+	// PolicyConflict is the registration's policy_conflict mark as the
+	// controller last read or wrote it (ConflictMarker, GAP-0398).
+	PolicyConflict bool `json:"policy_conflict,omitempty"`
 }
 
 // Registry stores registrations. The shipped controller uses

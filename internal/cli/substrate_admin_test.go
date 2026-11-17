@@ -55,6 +55,8 @@ type subAdminFake struct {
 	statusStatus int
 	attachStatus int
 	statusBody   string
+	// actorsBody is the list answer (default: one agent, a1/n1).
+	actorsBody string
 
 	bundleBody     []byte
 	bundleQuery    url.Values
@@ -83,7 +85,11 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 			writeJSONStatus(w, f.actorsStatus, `{"error":"x","reason":"token_invalid"}`)
 			return
 		}
-		writeJSONStatus(w, 200, `{"actors":[{"atespace":"a1","name":"n1"}]}`)
+		body := f.actorsBody
+		if body == "" {
+			body = `{"actors":[{"atespace":"a1","name":"n1"}]}`
+		}
+		writeJSONStatus(w, 200, body)
 	})
 	mux.HandleFunc("/api/v1/substrate/actors/a1/n1/attach/status", func(w http.ResponseWriter, r *http.Request) {
 		if f.attachStatus != 200 {

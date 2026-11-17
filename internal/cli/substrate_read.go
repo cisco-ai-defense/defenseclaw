@@ -136,6 +136,38 @@ func substrateAskRun(a api.Ask, now time.Time) string {
 	return "unattended, " + substrateAge(now, a.Expires) + " left"
 }
 
+// substrateActorState is the STATE column: the actor's state, and
+// policy_conflict while the controller keeps it on the DefenseClaw rule only
+// (GAP-0398).
+func substrateActorState(a api.Actor) string {
+	if a.PolicyConflict == nil {
+		return substrateDash(a.State)
+	}
+	if st := safetext.Line(a.State); st != "" {
+		return st + ", policy_conflict"
+	}
+	return "policy_conflict"
+}
+
+// substratePolicyConflictLine says what policy_conflict means for the agent
+// and how it is cleared, "" when it is not in conflict (GAP-0398).
+func substratePolicyConflictLine(a api.Actor) string {
+	pc := a.PolicyConflict
+	if pc == nil {
+		return ""
+	}
+	fix := pc.Fix
+	if fix == "" {
+		fix = "defenseclaw substrate policy reset " + a.Atespace + "/" + a.Name
+	}
+	since := ""
+	if !pc.Since.IsZero() {
+		since = " since " + pc.Since.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("policy_conflict%s: %d foreign change(s) to its network policy were reverted, so it may reach only DefenseClaw until an administrator clears it with: %s",
+		since, pc.Reverts, fix)
+}
+
 // substrateDash shows a value the cluster sent, as one safe line, or "-".
 func substrateDash(s string) string {
 	if s = safetext.Line(s); s == "" {
@@ -190,7 +222,7 @@ them and how long ago they started. Administrators see only their own agents unl
 			now := time.Now()
 			rows := make([][]string, 0, len(live))
 			for _, a := range live {
-				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateDash(a.State), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
+				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
 			}
 			substrateTable(cmd.OutOrStdout(), []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}, rows)
 			return nil
@@ -272,6 +304,9 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				}
 				if a.Unattended {
 					fmt.Fprintf(w, "Mode:      %s\n", substrateUnattendedMode(a))
+				}
+				if line := substratePolicyConflictLine(a); line != "" {
+					fmt.Fprintln(w, "Policy:    "+line)
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
 				return nil

@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
@@ -199,6 +200,9 @@ type actorState struct {
 	ourVersion int64
 	reverts    []time.Time
 	conflict   bool
+	// conflictMarkWarned is set while the registration's policy_conflict
+	// mark cannot be written (one warning per outage, GAP-0398).
+	conflictMarkWarned bool
 	// lastForeign is the last foreign change seen while in conflict.
 	lastForeign time.Time
 	refused     string
@@ -529,6 +533,13 @@ type Tombstoner interface {
 	MarkDeleted(ctx context.Context, atespace, uid string) error
 }
 
+// ConflictMarker is a Registry that can record an actor's policy_conflict on
+// its registration (LeaderRegistry), so the gateway shows it to the person
+// and to administrators (GAP-0398); c nil clears the mark.
+type ConflictMarker interface {
+	MarkConflict(ctx context.Context, atespace, uid string, c *registry.PolicyConflict) error
+}
+
 // FreshRegistry is a Registry that can read past its own miss cache
 // (LeaderRegistry over registry.Remote).
 type FreshRegistry interface {
@@ -729,6 +740,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	if err != nil {
 		return err
 	}
+	// Whatever this pass decides, the registration then carries the
+	// conflict state it leaves (GAP-0398).
+	defer c.markConflict(ctx, st, base)
 	if !st.forkQueued && reg.Source == SourceFork && reg.ParentUID != "" {
 		// Once per incarnation, on the first pass whose attribution
 		// succeeds (a leader outage on the first pass must not lose it).

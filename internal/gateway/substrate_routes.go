@@ -274,7 +274,8 @@ func substrateVisible(c substrateCaller, reg registry.Registration) bool {
 
 // actorView is reg as the admin listener shows it. An unattended actor also
 // says what its asks do (D12, GAP-0388): unattended_asks deny or queue from
-// its profile, and with queue how long an ask waits for a person.
+// its profile, and with queue how long an ask waits for a person. An actor
+// in policy_conflict carries the controller's mark (GAP-0398).
 func (st *substrateState) actorView(reg registry.Registration) map[string]any {
 	v := map[string]any{
 		"atespace": reg.Atespace, "name": reg.Name, "uid": reg.UID, "registration_key": reg.Key,
@@ -292,7 +293,23 @@ func (st *substrateState) actorView(reg registry.Registration) map[string]any {
 			v["unattended_asks"], v["ask_timeout_seconds"] = "queue", int64(rule.Timeout/time.Second)
 		}
 	}
+	if pc := substratePolicyConflictView(reg); pc != nil {
+		v["policy_conflict"] = pc
+	}
 	return v
+}
+
+// substratePolicyConflictView is the controller's policy_conflict mark as
+// list, status, policy explain and doctor show it (GAP-0398), nil when the
+// actor is not in conflict.
+func substratePolicyConflictView(reg registry.Registration) map[string]any {
+	if reg.PolicyConflict == nil {
+		return nil
+	}
+	return map[string]any{
+		"since": reg.PolicyConflict.Since, "reverts": reg.PolicyConflict.Reverts,
+		"fix": "defenseclaw substrate policy reset " + reg.Atespace + "/" + reg.Name,
+	}
 }
 
 func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
