@@ -312,7 +312,7 @@ func (repo *ToolChainRepository) preparePendingTx(
 			return ToolChainPreparePendingResult{}, err
 		}
 		if existing.expires > unixNano(now) {
-			if sameToolChainPending(existing, input, session, projectionFP) {
+			if sameToolChainProposal(existing, input, session, projectionFP) {
 				return ToolChainPreparePendingResult{Status: ToolChainPendingReplay}, nil
 			}
 			// A reused connector-owned invocation ID makes both proposals
@@ -1629,14 +1629,24 @@ func validatePendingToolChainProjection(projection guardrail.ToolChainProjection
 	return nil
 }
 
-func sameToolChainPending(
+// sameToolChainProposal reports a pre-tool proposal that is already
+// pending: the same call, session, hook body and projection. Its semantic
+// event id may differ. A hook client resends a post it got no answer for,
+// and a gateway replica that did not take the first delivery mints its own
+// event id for it: a Substrate kit retry after a slow answer lands on the
+// other replica about half the time (GAP-0564). The input fingerprint is
+// the digest of the exact hook body, so the resend can't change what is
+// pending; it is a replay and the first delivery's row stands. Before, it
+// read as a reused invocation id: the proposal was dropped, the actor was
+// marked unrecorded, and its egress was refused for the whole window. A
+// different proposal under the same invocation id still invalidates both.
+func sameToolChainProposal(
 	pending persistedToolChainPending,
 	input ToolChainPreparePendingInput,
 	session, projectionFP string,
 ) bool {
 	return pending.connector == string(input.ConnectorInstanceID) &&
 		pending.invocation == input.ToolInvocationDigest && pending.session == session &&
-		pending.preEvent == string(input.PreSemanticEventID) &&
 		pending.preInput == input.PreInputFingerprint && pending.projectionFP == projectionFP &&
 		pending.ruleset == input.RulesetFingerprint &&
 		pending.parseStatus == string(input.Projection.ParseStatus) &&
