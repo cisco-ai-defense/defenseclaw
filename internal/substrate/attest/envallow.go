@@ -24,6 +24,15 @@ import (
 // through four variables it did not name (SHELLOPTS with PS4, PERLLIB,
 // XDG_CONFIG_HOME, GIT_DIR). Names are compared exactly, as Linux does.
 
+// PATH may name any folder: every hook and settings file names
+// DefenseClaw's programs by absolute path, and every process the relay
+// starts, which alone looks a name up on PATH, runs as the agent's user, so
+// a PATH entry the agent can write gives it nothing it does not have. HOME
+// is the image's; an ActorTemplate may not move it (GAP-0374,
+// controller.ContainerSpecRefusal). VIRTUAL_ENV and UV_PYTHON_INSTALL_DIR
+// (the uv environment of the OpenShell harness base, GAP-0447) name
+// folders of the image, as the toolchain homes do.
+//
 // baseEnv are the base-image settings that load no code: locale and
 // terminal, the user's identity, version pins and the toolchain homes base
 // images set (a toolchain home names a folder of the scanned image, as PATH
@@ -35,7 +44,7 @@ var baseEnv = map[string]bool{
 	"NODE_ENV": true, "NO_COLOR": true, "FORCE_COLOR": true, "CI": true,
 	"PYTHONUNBUFFERED": true, "PYTHONDONTWRITEBYTECODE": true, "PYTHONIOENCODING": true, "PYTHON_SHA256": true, "GPG_KEY": true,
 	"GIT_AUTHOR_NAME": true, "GIT_AUTHOR_EMAIL": true, "GIT_COMMITTER_NAME": true, "GIT_COMMITTER_EMAIL": true,
-	"JAVA_HOME": true, "GOPATH": true, "GOROOT": true, "GOTOOLCHAIN": true, "CARGO_HOME": true, "RUSTUP_HOME": true,
+	"VIRTUAL_ENV": true, "UV_PYTHON_INSTALL_DIR": true, "JAVA_HOME": true, "GOPATH": true, "GOROOT": true, "GOTOOLCHAIN": true, "CARGO_HOME": true, "RUSTUP_HOME": true,
 }
 
 // baseEnvPrefix and baseEnvSuffix are families of base settings: the locale
