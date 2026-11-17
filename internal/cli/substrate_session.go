@@ -23,6 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -167,10 +168,30 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 			*dst = v
 		}
 	}
+	// A file is saved as an absolute path: later commands run from other
+	// folders (GAP-0421).
+	setFile := func(flag string, dst *string, v string) error {
+		if !fl.Changed(flag) {
+			return nil
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			abs, err := filepath.Abs(v)
+			if err != nil {
+				return cliusage.WithExitCode(fmt.Errorf("--%s: %w", flag, err), 2)
+			}
+			v = abs
+		}
+		*dst = v
+		return nil
+	}
 	set("admin-url", &c.AdminURL, f.adminURL)
-	set("admin-ca-file", &c.AdminCAFile, f.adminCA)
+	if err := setFile("admin-ca-file", &c.AdminCAFile, f.adminCA); err != nil {
+		return err
+	}
 	set("issuer", &c.Issuer, f.issuer)
-	set("issuer-ca-file", &c.IssuerCAFile, f.issuerCA)
+	if err := setFile("issuer-ca-file", &c.IssuerCAFile, f.issuerCA); err != nil {
+		return err
+	}
 	set("client-id", &c.ClientID, f.clientID)
 	set("default-profile", &c.Profile, f.profile)
 	set("default-template", &c.Template, f.template)
@@ -181,7 +202,9 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	if f.kube {
 		c.Kube = true
 	}
-	set("kubeconfig", &c.Kubeconfig, f.kubeconfig)
+	if err := setFile("kubeconfig", &c.Kubeconfig, f.kubeconfig); err != nil {
+		return err
+	}
 	set("kube-context", &c.KubeContext, f.kubeContext)
 	set("kube-namespace", &c.KubeNamespace, f.kubeNS)
 	set("kube-service-account", &c.KubeServiceAccount, f.kubeSA)
