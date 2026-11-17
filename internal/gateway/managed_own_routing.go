@@ -4,10 +4,43 @@
 package gateway
 
 import (
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+// ownNoHomeReason is what the routing member says when the gateway could not
+// resolve a home directory for the caller account, so the route settings a
+// route-only connector needs (the agent's own per-user settings file with the
+// base URL and route credential) are not known to exist for it. It says "not
+// resolved", not "none": a slow or failed directory lookup looks the same.
+const ownNoHomeReason = "home directory not resolved"
+
+// ownAccountHomeless reports whether the caller account, as the kernel-proved
+// hook socket peer, has no usable home directory: none could be resolved, or
+// it is a placeholder an account without a home gets (a directory account
+// that sets none has /var/empty on macOS), or a path that does not exist. A
+// caller that is not a hook
+// socket peer is never homeless here.
+func ownAccountHomeless(ctx context.Context) bool {
+	peer, ok := managedHookPeerFromContext(ctx)
+	if !ok {
+		return false
+	}
+	home := strings.TrimSpace(peer.Home)
+	switch home {
+	case "", "/var/empty", "/dev/null", "/nonexistent":
+		return true
+	}
+	// A home the directory names but nobody created holds no settings either.
+	_, err := os.Stat(home)
+	return errors.Is(err, fs.ErrNotExist)
+}
 
 // ownRoutingSummary is the routing member of the own-status answer
 // (rel-1-0-10 GAP-0574): whether model routing is on, which connectors are

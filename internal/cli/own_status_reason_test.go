@@ -101,6 +101,14 @@ func TestOwnRoutingLines(t *testing.T) {
 	if len(lines) != 2 || !strings.HasSuffix(lines[0], "on (claudecode, codex routed)") || !strings.HasSuffix(lines[1], "daily 85% of 20.00 USD per day") {
 		t.Fatalf("lines = %q", lines)
 	}
+	// GAP-1103: an account with no home directory is not routed, and the row says why.
+	var homeless ownRoutingView
+	if err := json.Unmarshal([]byte(`{"enabled":true,"route_only_unavailable":"home directory not resolved"}`), &homeless); err != nil {
+		t.Fatal(err)
+	}
+	if got := ownRoutingLines(&homeless); len(got) != 1 || !strings.HasSuffix(got[0], "on (not routed for this account: home directory not resolved)") {
+		t.Fatalf("homeless = %q", got)
+	}
 	view.Budget.Exceeded, view.Budget.PercentUsed = true, 120
 	if got := ownRoutingLines(&view)[1]; !strings.HasSuffix(got, "120% of 20.00 USD per day, used up (warn)") {
 		t.Fatalf("exceeded = %q", got)
