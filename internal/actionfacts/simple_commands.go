@@ -532,6 +532,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// read with that folder as its head (simpleUnknownFolderNestedCall); the
 	// reading of the body as unread stays too.
 	unknownFolderBody := ""
+	// unresolvedBody: a nested shell body made at run time was not read
+	// (EvaluationFailureUnresolvedBody); the rest of the call was.
+	unresolvedBody := false
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
 	var plainWords simplePlainWords
@@ -777,17 +780,24 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					}
 				}
 				script, shared, nested, static := simpleNestedScript(nestedCall, nestedVars, &innerCWDUnknown, &innerInterpreter)
+				if nested && !static && simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
+					// A shell -c body, or a word that may be the -c option,
+					// whose text is made at run time: what runs is not known
+					// (rel-1-0-10:GAP-0535). The statements around it are
+					// still read, each in its folder (a body that runs in the
+					// caller may move it): the unknown body is one more
+					// finding, never the only reading of the call
+					// (rel-1-0-10:GAP-1083).
+					unresolvedBody, nested, changed = true, false, true
+					if shared {
+						state.cwd, state.cwdUnknown = "", true
+						delete(state.vars, "PWD")
+					}
+				}
 				if nested {
 					if !static {
-						if simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
-							// A shell -c body, or a word that may be the -c
-							// option, whose text is made at run time: what runs
-							// is not known (rel-1-0-10:GAP-0535). Static text the
-							// walk does not model (a quoted pattern, an option
-							// it does not read) stays a parse gap, as on rel.
-							return []SimpleCommand{{EvaluationFailure: EvaluationFailureUnresolvedBody}}
-						}
-						// A wrapper option the walk does not model, a trap
+						// Static text the walk does not model (a quoted
+						// pattern, an option it does not read), a trap
 						// handler: a parse gap, judged as the whole action.
 						return []SimpleCommand{{EvaluationFailure: "parse"}}
 					}
@@ -939,13 +949,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			}
 		}
 		for _, command := range own {
-			// A statement the walk placed nowhere after no cd the tracking
-			// read (an unmodeled builtin, eval) stays unplaced: it is judged
-			// as an unresolved folder (UnresolvedFolder). After a cd the
-			// tracking read (a CDPATH miss), its folders are read.
+			// A statement the walk placed nowhere (after a dynamic command
+			// word, an eval or an unmodeled builtin that may move the shell)
+			// is read in every folder the working-folder tracking gives it,
+			// the one the shell was in before that command included, and it
+			// keeps UnresolvedFolder, so the unknown tier applies as well:
+			// the folder it may still be in judges it, never the unplaced
+			// reading alone (rel-1-0-10:GAP-1083, substrate-1:GAP-0367).
 			dirs := mayRunIn[partIndex]
-			if len(dirs) == 0 || command.CWD == "" && len(dirs) == 1 && dirs[0] == input.CWD ||
-				!simpleRelativePathOperand(command.Text) {
+			if len(dirs) == 0 || !simpleRelativePathOperand(command.Text) {
 				continue
 			}
 			for _, dir := range mayRunIn[partIndex] {
@@ -979,6 +991,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	}
 	if unknownFolderBody != "" {
 		result = append(result, SimpleCommand{EvaluationFailure: unknownFolderBody})
+	}
+	if unresolvedBody && unknownFolderBody != EvaluationFailureUnresolvedBody {
+		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
@@ -3180,8 +3195,15 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if simplePathAbs(dir) {
 		return simplePathClean(dir), true
 	}
-	if program == "cd" && vars["CDPATH"] != "" &&
+	if program == "cd" && (vars["CDPATH"] != "" || len(cdPathCandidates(call, dir)) != 0) &&
 		!strings.HasPrefix(dir, "./") && !strings.HasPrefix(dir, "../") {
+		// A CDPATH may send the cd to another folder: the CDPATH the walk
+		// holds, or one a prefix assignment sets (CDPATH=/srv cd app), also
+		// one whose value is not known (CDPATH="$X" cd app), which the
+		// assignment drops from vars. The candidates are the ones the
+		// working-folder tracking reads (cdPathCandidates), so the walk and
+		// the path facts agree on the folder, PWD included
+		// (rel-1-0-10:GAP-1063).
 		return "", true
 	}
 	if state.cwd == "" {

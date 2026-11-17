@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -57,6 +59,44 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	return false, judged
 }
 
+// hereStringReadingTwinRequest is the reading twin of a bash call with a
+// here-string the POSIX analysis cannot parse: the call with every
+// CMD <<< WORD written as printf '%s\n' WORD | CMD (hereStringPipeTwin, the
+// word kept whole). None for a call of another shape, a twin, a simple
+// command of a call (the call itself is judged so), a read whose binding
+// differs between its calls, or a twin that does not parse either.
+func hereStringReadingTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
+	if request.readingTwin || request.simpleCommandPass || facts.Parse.Status != actionfacts.StatusInvalid {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || len(command) > maxHereStringTwinBytes || !strings.Contains(command, "<<<") {
+		return trustedActionRequest{}, false
+	}
+	text, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, false, request.Input.LoopBindsStraightLine)
+	if !ok || mixed {
+		return trustedActionRequest{}, false
+	}
+	twin := windowsReadingTwin(request)
+	twin.Input.Tool, twin.Input.Command, twin.Input.Argv = "Bash", text, nil
+	twin.Input.Args = nil
+	if len(bytes.TrimSpace(request.Input.Args)) != 0 {
+		// The rules that read the tool input read the twin's command there,
+		// as the call carries its own.
+		raw, err := json.Marshal(map[string]string{"command": text})
+		if err != nil {
+			return trustedActionRequest{}, false
+		}
+		twin.Input.Command, twin.Input.Args = "", raw
+	}
+	if actionfacts.Analyze(twin.Input).Parse.Status == actionfacts.StatusInvalid {
+		return trustedActionRequest{}, false
+	}
+	twin.LegacyText = text
+	twin.conflictSource = nil
+	return twin, true
+}
+
 // hereStringPipeTwin rewrites every `CMD <<< WORD` statement of a bash
 // command as `printf '%s\n' WORD | CMD`, keeping CMD's other redirections.
 // With split, an xargs reader of a fixed word is judged as the call it
@@ -99,6 +139,17 @@ func hereStringPipeTwin(command, home string, split, straight bool) (string, boo
 		if stmt.Cmd == nil {
 			refused = true
 			return false
+		}
+		// A folder move reads no stdin and runs in the shell itself, where a
+		// pipe would run it in a copy: the twin drops the word, so the
+		// statements after it are read in the folder it moves to
+		// (rel-1-0-10:GAP-1083).
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+			switch call.Args[0].Lit() {
+			case "cd", "chdir", "pushd", "popd":
+				stmt.Redirs, changed = rest, true
+				return true
+			}
 		}
 		// xargs runs its program with the here-string word as arguments:
 		// judge that call itself (`xargs rm -rf <<< X` is `rm -rf X`).
