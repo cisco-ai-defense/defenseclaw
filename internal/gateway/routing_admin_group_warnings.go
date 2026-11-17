@@ -70,8 +70,9 @@ func RoutingAdminGroupWarnings(ctx context.Context, cfg *config.Config, spoolDir
 	for i, s := range selectors {
 		assignments[i] = config.ProfileAssignment{Match: config.ProfileMatch{Groups: s.groups}}
 	}
-	exists := foldedGroupExists(profileGroupExists, verifiedGroupDomains(spoolDir))
-	return routingAdminGroupWarningsFrom(selectors, unknownAssignmentGroups(ctx, assignments, exists, profileGroupQualifiedName, bareGroupsDirectorySilent))
+	pairs := verifiedGroupDomains(spoolDir)
+	exists := foldedGroupExists(profileGroupExists, pairs)
+	return routingAdminGroupWarningsFrom(selectors, unknownAssignmentGroups(ctx, assignments, exists, foldedGroupQualify(profileGroupQualifiedName, pairs), bareGroupsDirectorySilent))
 }
 
 // routingAdminGroupWarningsFrom names the selectors in the assignment

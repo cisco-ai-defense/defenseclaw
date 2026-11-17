@@ -195,9 +195,44 @@ func TestGroupChecksKnowThePairedSpelling(t *testing.T) {
 		}
 		return ""
 	}
-	warnings := unknownAssignmentGroupsForOS(context.Background(), assignments, sssd, respell, nil, "linux")
+	warnings := unknownAssignmentGroupsForOS(context.Background(), assignments, sssd, foldedGroupQualify(respell, pairs), nil, "linux")
 	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "assignment 2:") {
 		t.Fatalf("only the short-name respelling is a mismatch: %q", warnings)
+	}
+}
+
+// GAP-1136: only a respelling inside a verified domain pair is folded by the
+// matcher. A group of another domain (OTHER\x listed as x@other.test, or
+// TRUST\x as x@trust.example.com) stays unselected, so its warning stays.
+func TestRespelledGroupWarningIsKeptForADomainTheMatcherDoesNotFold(t *testing.T) {
+	pairs := []groupDomains{gap1124Domains}
+	for _, tc := range []struct {
+		written, listed string
+		folds           bool
+	}{
+		{`DCLAB\x`, "x@dclab.test", true},
+		{"x@dclab.test", `DCLAB\x`, true},
+		{`dclab.test\x`, `DCLAB\x`, false}, // both are backslash spellings: not a respelling
+		{`OTHER\x`, "x@other.test", false},
+		{`TRUST\x`, "x@trust.example.com", false},
+		{`DCLAB\x`, "x@other.test", false},
+		{`OTHER\x`, "x@dclab.test", false},
+		{`DCLAB\x`, `x`, false},
+	} {
+		if got := groupSpellingsFold(tc.written, tc.listed, pairs); got != tc.folds {
+			t.Errorf("groupSpellingsFold(%q, %q) = %v, want %v", tc.written, tc.listed, got, tc.folds)
+		}
+		if groupSpellingsFold(tc.written, tc.listed, nil) {
+			t.Errorf("no verified pair folds nothing: %q %q", tc.written, tc.listed)
+		}
+	}
+	assignments := []config.ProfileAssignment{{Match: config.ProfileMatch{Groups: []string{`TRUST\x`}}}}
+	sssd := func(context.Context, string) (bool, error) { return true, nil }
+	respell := func(context.Context, string) string { return "x@trust.example.com" }
+	got := unknownAssignmentGroupsForOS(context.Background(), assignments, sssd, foldedGroupQualify(respell, pairs), nil, "linux")
+	want := `assignment 1: group "TRUST\\x" is listed by this host as "x@trust.example.com", the name account group lists carry, so the assignment selects nobody; write "x@trust.example.com"`
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("a trusted domain's respelling must keep its warning: %q", got)
 	}
 }
 

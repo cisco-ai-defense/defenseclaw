@@ -131,14 +131,42 @@ func pairedGroupSpellings(group string, pairs []groupDomains) []string {
 }
 
 // groupSpellingsFold reports whether two qualified spellings name the same
-// group of one domain by its NetBIOS and DNS names (CORP\name and
+// group of one verified domain by its NetBIOS and DNS names (CORP\name and
 // name@corp.example.com): what a host answers a group by when its NSS
-// service resolves the other spelling, so the matcher folds them.
-func groupSpellingsFold(written, listed string) bool {
+// service resolves the other spelling, so the matcher folds them. Only a
+// pair of one of pairs folds (the matcher folds the subject's own domain and
+// no other): a respelling into another domain (CORP\name answered as
+// name@trust.example.com) is a mismatch that the warning must keep
+// (GAP-1136).
+func groupSpellingsFold(written, listed string, pairs []groupDomains) bool {
 	wDomain, wName, wForm := splitGroupName(written)
 	lDomain, lName, lForm := splitGroupName(listed)
-	return wForm == groupNameQualified && lForm == groupNameQualified && useridentity.EqualFold(wName, lName) &&
-		strings.Contains(written, `\`) != strings.Contains(listed, `\`) && !useridentity.EqualFold(wDomain, lDomain)
+	if wForm != groupNameQualified || lForm != groupNameQualified || !useridentity.EqualFold(wName, lName) ||
+		strings.Contains(written, `\`) == strings.Contains(listed, `\`) || useridentity.EqualFold(wDomain, lDomain) {
+		return false
+	}
+	for _, pair := range pairs {
+		if pair.paired() && pair.names(wDomain) && pair.names(lDomain) {
+			return true
+		}
+	}
+	return false
+}
+
+// foldedGroupQualify is qualify for the group checks, without the respelling
+// the matcher folds: a group that the host lists under the other spelling of
+// a verified domain is selected as written, so it has no respelled warning.
+func foldedGroupQualify(qualify func(context.Context, string) string, pairs []groupDomains) func(context.Context, string) string {
+	if qualify == nil || len(pairs) == 0 {
+		return qualify
+	}
+	return func(ctx context.Context, name string) string {
+		listed := qualify(ctx, name)
+		if listed != "" && groupSpellingsFold(name, listed, pairs) {
+			return ""
+		}
+		return listed
+	}
 }
 
 // verifiedGroupDomainsMax bounds the identity records one pass reads.
