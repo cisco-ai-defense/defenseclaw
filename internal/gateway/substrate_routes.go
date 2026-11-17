@@ -32,7 +32,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
@@ -282,23 +281,6 @@ func substrateActorView(reg registry.Registration) map[string]any {
 	}
 }
 
-// actorView is substrateActorView plus, for an unattended actor, what its
-// asks do (the profile's unattended_asks: deny or queue, and ask_timeout
-// for queue), so status does not say asks are denied on a queue profile
-// (GAP-0388).
-func (st *substrateState) actorView(reg registry.Registration) map[string]any {
-	v := substrateActorView(reg)
-	if reg.Unattended {
-		v["unattended_asks"] = config.SubstrateAsksDeny
-		if st.cfg.UnattendedAsk != nil {
-			if rule := st.cfg.UnattendedAsk(reg.Profile); rule.Queue {
-				v["unattended_asks"], v["ask_timeout"] = config.SubstrateAsksQueue, rule.Timeout.String()
-			}
-		}
-	}
-	return v
-}
-
 func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, _ := substrateCallerFrom(r.Context())
@@ -474,7 +456,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.recordSubstratePolicyLag(time.Since(createStart))
-		out := st.actorView(reg)
+		out := substrateActorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)
 		}
@@ -516,7 +498,7 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		}
 		out := make([]map[string]any, 0, len(regs))
 		for _, reg := range regs {
-			v := st.actorView(reg)
+			v := substrateActorView(reg)
 			// GAP-0167: the person sees which agents hold a worker.
 			if st.cfg.Lookup != nil && !reg.Deleted {
 				if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
@@ -560,7 +542,7 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
-		writeSubstrateJSON(w, http.StatusOK, st.actorView(reg))
+		writeSubstrateJSON(w, http.StatusOK, substrateActorView(reg))
 	}
 }
 
@@ -587,7 +569,7 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 		if inv, ok := st.cfg.Actors.(interface{ Invalidate(string, string) }); ok {
 			inv.Invalidate(reg.Atespace, reg.Name)
 		}
-		writeSubstrateJSON(w, http.StatusOK, st.actorView(reg))
+		writeSubstrateJSON(w, http.StatusOK, substrateActorView(reg))
 	}
 }
 
@@ -655,7 +637,7 @@ func (a *APIServer) substrateBatches(st *substrateState, r *http.Request, batchI
 	for _, reg := range regs {
 		if reg.BatchID != "" {
 			k := substrateBatchKey{owner: reg.Person.ID(), id: reg.BatchID}
-			out[k] = append(out[k], st.actorView(reg))
+			out[k] = append(out[k], substrateActorView(reg))
 		}
 	}
 	return out, nil
