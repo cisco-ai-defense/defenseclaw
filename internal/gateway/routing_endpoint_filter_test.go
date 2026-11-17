@@ -102,3 +102,86 @@ func TestRouteOnlyBedrockResponsesAliasWithoutBaseURLIsFilteredWithAReason(t *te
 		t.Fatalf("routing test says it decided as the route-only listener: %v", answer.Simulated)
 	}
 }
+
+// The endpoint filter never turns a refusal into an allow
+// (rel-1-0-10:GAP-1167 batch review): a sensitive request whose only local
+// model the route-only listener cannot reach is still refused with the
+// sensitive-local reason, never sent to the original (cloud) model.
+func TestRouteOnlyEndpointFilteredSensitiveLocalModelIsStillRefused(t *testing.T) {
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "bedrock", Model: "openai.gpt-oss-120b-1:0", BaseURL: "-", APIs: []string{config.RoutingAPIResponses}, APIKeyEnv: "ROUTE_ONLY_TEST_KEY_5511"})
+	up := config.RoutingUpstreamConfig{BaseURL: f.orig.URL, API: config.RoutingAPIResponses}
+	r := httptest.NewRequest(http.MethodPost, "/r/codex/v1/responses", nil)
+	caller, profiles := routeOnlyCaller(r.Context(), "owner")
+	body := []byte(`{"model":"gpt-5","input":"my password is hunter2"}`)
+	attempt, out, _ := f.srv.decide(r, f.cfg, "codex", "/v1/responses", config.RoutingAPIResponses, up, engine.CredentialAPIKey, nil, body, caller, profiles)
+	if attempt != nil || out.Result != SemanticRouteDenied || out.Deny == nil || out.Deny.Code != engine.DenyCodeSensitiveLocal {
+		t.Fatalf("a sensitive request with an unreachable local model is refused: attempt %+v outcome %+v deny %+v", attempt, out.Result, out.Deny)
+	}
+	if out.Route != nil {
+		t.Logf("filtered_by %q", out.Route.FilteredBy)
+	}
+}
+
+// A budget downgrade (Force) alias the listener cannot reach falls to the
+// next candidate, and the managed gate still judges the backend chosen: a
+// backend outside the downgrade list is refused, one inside it serves the
+// call.
+func TestRouteOnlyEndpointFilteredForceAliasStillGatesTheChosenBackend(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name      string
+		downgrade string
+		wantAlias string // "" = refused
+	}{
+		{"next candidate outside the downgrade list is refused", "downgrade:oss", ""},
+		{"next allowed downgrade alias serves the call", "downgrade:oss,cheap", "cheap"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatedRoutingAdminRuntimeAt(t, now)
+			f := newRouteOnlyFixture(t)
+			f.cfg.DeploymentMode = "managed_enterprise"
+			f.cfg.Enterprise.Profile = "standalone"
+			if !f.cfg.StandaloneEnterprise() {
+				t.Skip("fixture is not a standalone managed config on this platform")
+			}
+			f.cfg.Routing.Models = append(f.cfg.Routing.Models,
+				config.RoutingModelBackend{Name: "oss", Provider: "bedrock", Model: "openai.gpt-oss-120b-1:0", APIs: []string{config.RoutingAPIResponses}, APIKeyEnv: "ROUTE_ONLY_TEST_KEY_5511"},
+				config.RoutingModelBackend{Name: "oai", Provider: "openai", Model: "gpt-big", BaseURL: f.alt.URL + "/v1", APIs: []string{config.RoutingAPIResponses}, APIKeyEnv: "ROUTE_ONLY_TEST_KEY_5511"},
+				config.RoutingModelBackend{Name: "cheap", Provider: "openai", Model: "gpt-small", BaseURL: f.alt.URL + "/v1", APIs: []string{config.RoutingAPIResponses}, APIKeyEnv: "ROUTE_ONLY_TEST_KEY_5511"},
+			)
+			f.cfg.Routing.Signals.Keywords = append(f.cfg.Routing.Signals.Keywords, config.RoutingKeywordSignal{Name: "coding", Keywords: []string{"refactor this"}})
+			f.cfg.Routing.Decisions = append([]config.RoutingDecisionRule{{Name: "coding", Priority: 20, Conditions: []config.RoutingCondition{{Type: "keyword", Name: "coding"}}, ModelRefs: []string{"oai"}}}, f.cfg.Routing.Decisions...)
+			f.cfg.Routing.Admin = &config.RoutingAdminConfig{Budgets: []config.RoutingBudget{{ID: "b-down", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: tc.downgrade}}}
+			if err := f.cfg.Routing.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			// Agent call costs reach the budgets (tokenomics on), so the
+			// evaluator reads the spend.
+			routingAdminRuntime.SetFeed(true)
+			if routingAdminRuntime.For(f.cfg) == nil {
+				t.Fatal("evaluator")
+			}
+			routingAdminRuntime.Ledger().ApplyRemote([]string{"b-down"}, nil, now)
+			routingAdminRuntime.Charge([]string{"user:b-down:*:4101"}, 5, now)
+			f.srv = newRouteOnlyServer(newEngineRouter(f.cfg, nil, ""), func() *config.Config { return f.cfg }, f.cfg.DataDir)
+
+			r := httptest.NewRequest(http.MethodPost, "/r/codex/v1/responses", nil)
+			caller, profiles := routeOnlyCaller(r.Context(), "4101")
+			body := []byte(`{"model":"gpt-5","input":"please refactor this function"}`)
+			up := config.RoutingUpstreamConfig{BaseURL: f.orig.URL, API: config.RoutingAPIResponses}
+			attempt, out, _ := f.srv.decide(r, f.cfg, "codex", "/v1/responses", config.RoutingAPIResponses, up, engine.CredentialAPIKey, nil, body, caller, profiles)
+			if out.Route != nil {
+				t.Logf("result %s filtered_by %q warnings %v", out.Result, out.Route.FilteredBy, out.Route.Warnings)
+			}
+			if tc.wantAlias == "" {
+				if attempt != nil || out.Result != SemanticRouteDenied || out.Deny == nil || !strings.HasPrefix(out.Deny.Code, "budget_downgrade_unavailable") {
+					t.Fatalf("a backend outside the downgrade list is refused: attempt %+v result %s deny %+v", attempt, out.Result, out.Deny)
+				}
+				return
+			}
+			if attempt == nil || out.Result != SemanticRouteApplied || out.Route == nil || out.Route.Backend == nil || out.Route.Backend.Alias != tc.wantAlias {
+				t.Fatalf("the next downgrade alias serves the call: attempt %+v result %s deny %+v", attempt, out.Result, out.Deny)
+			}
+		})
+	}
+}
