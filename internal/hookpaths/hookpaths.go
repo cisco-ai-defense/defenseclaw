@@ -1918,7 +1918,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
-	facts := actionfacts.Analyze(input)
+	facts := actionfacts.Analyze(input).AtHookFolder()
 	if view, ok := overLimitBoundedTwinFacts(input, facts); ok {
 		// A command over the limit only by the white space and comments that
 		// pad it is judged by the gateway as the command without them, so the
@@ -2119,9 +2119,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
-				fallbackFacts := actionfacts.Analyze(fallback)
+				fallbackFacts := actionfacts.Analyze(fallback).AtHookFolder()
 				if twin, ok := actionfacts.OverLimitCommandBoundedTwin(fallback, fallbackFacts); ok {
-					fallback, fallbackFacts = twin, actionfacts.Analyze(twin)
+					fallback, fallbackFacts = twin, actionfacts.Analyze(twin).AtHookFolder()
 				}
 				// One per-command reading serves the move and the child
 				// readings below.
@@ -2149,7 +2149,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// PowerShell too (provenPowerShellStateWrite), whatever else
 				// parses it, so its quoted paths are listed for every such call.
 				if actionWindowsHome(home) {
-					quoted, over := powerShellQuotedPathOperands(command, cwd)
+					quoted, over := powerShellQuotedPathOperands(command, cwd, home)
 					stateOperands = append(stateOperands, quoted...)
 					truncated = truncated || over
 				}
@@ -2211,7 +2211,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						}
 						twinInput := fallback
 						twinInput.Command = reading
-						twinFacts := actionfacts.Analyze(twinInput)
+						twinFacts := actionfacts.Analyze(twinInput).AtHookFolder()
 						facts.Paths = append(facts.Paths, twinFacts.Paths...)
 						truncated = truncated || twinFacts.Parse.Status == actionfacts.StatusLimitExceeded
 						twinOperands, _, _ := ShellWriteOperands(reading, cwd, home)
@@ -2242,6 +2242,22 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					}
 					if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(command); isTwin && wrapped != command {
 						addReading(wrapped, false)
+					}
+					// A shell named at run time ("$SHELL" -c TEXT) runs TEXT
+					// as the literal shell call does. The gateway judges that
+					// reading too (actionfacts.RunTimeShellTwin), and behind
+					// ProtectHome reads its targets only from this map, also
+					// of the call it wraps (rel-1-0-10:GAP-0980).
+					shellTwin, isTwin, shellCaps := actionfacts.RunTimeShellTwin(command)
+					// A program word past the bounds of that reading leaves
+					// the map incomplete (rel-1-0-10:GAP-1041).
+					truncated = truncated || shellCaps.Any()
+					if isTwin && shellTwin != command {
+						addReading(shellTwin, true)
+						protectedDecision = protectedDecision || clientProtectedDecision(shellTwin, cwd, home)
+						if wrapped, isTwin := actionfacts.WrapperUnwrapTwin(shellTwin); isTwin && wrapped != shellTwin {
+							addReading(wrapped, false)
+						}
 					}
 					// The commands an awk program starts through system(),
 					// print | and | getline, written as string literals, run
@@ -2427,6 +2443,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	if backupUnresolved {
 		targets[BackupUnresolvedKey] = "1"
 		size += len(jsonString(BackupUnresolvedKey)) + 1 + len(jsonString("1")) + 1
+	}
+	// A write operand with a .. component the client cannot walk is an
+	// unknown target, for a managed gateway as for a per-user one
+	// (rel-1-0-10:GAP-1007).
+	if DotDotWalkUnresolved(facts, cwd) {
+		targets[DotDotWalkUnresolvedKey] = "1"
+		size += len(jsonString(DotDotWalkUnresolvedKey)) + 1 + len(jsonString("1")) + 1
 	}
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
@@ -2781,7 +2804,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	for _, reading := range dynamicReadings {
 		readingInput := input
 		readingInput.Tool, readingInput.Args, readingInput.Command = "Bash", nil, reading
-		readingFacts := actionfacts.Analyze(readingInput)
+		readingFacts := actionfacts.Analyze(readingInput).AtHookFolder()
 		truncated = truncated || readingFacts.Parse.Status == actionfacts.StatusLimitExceeded
 		readingPaths, _, _ := ShellWriteOperands(reading, cwd, home)
 		readingPaths = append(readingPaths, LiteralWriteOperands(reading, cwd, home)...)
@@ -3000,7 +3023,7 @@ func overLimitBoundedTwinFacts(input actionfacts.Input, facts actionfacts.Facts)
 	if !ok {
 		return actionfacts.Facts{}, false
 	}
-	return actionfacts.Analyze(twin), true
+	return actionfacts.Analyze(twin).AtHookFolder(), true
 }
 
 // movedDirectorySightingPath names a directory a complete, plain move may
@@ -3512,6 +3535,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
 		(targets[BackupUnresolvedKey] != "" && targets[BackupUnresolvedKey] != "1") ||
+		(targets[DotDotWalkUnresolvedKey] != "" && targets[DotDotWalkUnresolvedKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		!validShareBodyUnreadFact(targets[ShareBodyUnreadKey]) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
@@ -4385,7 +4409,7 @@ func straightLineReadings(input actionfacts.Input, command string) []actionfacts
 		return nil
 	}
 	input.LoopBindsStraightLine = true
-	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input))
+	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input).AtHookFolder())
 }
 
 // readingReachesLink reports a reading with a write operand that lies behind a
@@ -5704,6 +5728,9 @@ func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
 type RedirectOccurrence struct {
 	Path string
 	Safe bool
+	// NoInnerCommand proves that this redirect's own statement evaluates no
+	// nested command before opening the file. Earlier statements are separate.
+	NoInnerCommand bool
 	// OwnCopy: the write is a copy call writing its own destination, which
 	// may skip that call own copy scope (GAP-2579).
 	OwnCopy bool
@@ -5737,6 +5764,15 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 	}
 	seenLink, moved, index := false, false, 0
 	for _, stmt := range statements {
+		inner := false
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.CmdSubst, *syntax.ProcSubst:
+				inner = true
+				return false
+			}
+			return true
+		})
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
@@ -5749,7 +5785,8 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			}
 			path = OperandPath(path, cwd)
 			if index < len(result) && result[index].Path == path {
-				result[index].Safe = !seenLink
+				result[index].NoInnerCommand = !inner
+				result[index].Safe = !seenLink && !inner
 			}
 			index++
 		}

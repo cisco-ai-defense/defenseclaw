@@ -145,6 +145,7 @@ func (a *APIServer) nativeOTLPUsageRecordV8(
 	}
 	if caller, verified := verifiedAuditCaller(ctx); verified && caller.ID != "" {
 		facts.Subject, facts.SubjectKind, facts.IdentityVerified = caller.ID, caller.IDKind, true
+		facts.SubjectName = caller.Name
 	}
 	rec := modelusage.Record{Status: 200, Outcome: "completed", EndedAt: ended}
 	switch match.ClassID() {

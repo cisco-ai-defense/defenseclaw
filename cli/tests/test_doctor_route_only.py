@@ -383,3 +383,211 @@ def test_enable_on_a_managed_host_names_the_bundle_and_custody_key(tmp_path: Pat
     cfg.deployment_mode = "managed_enterprise"
     with pytest.raises(ro.RouteOnlyError, match=r"policy bundle .*routing\.models\[\]\.credential"):
         ro.enable(cfg, "claudecode")
+
+
+def test_a_scoped_rule_warning_is_shown_with_its_detail(tmp_path: Path) -> None:
+    # GAP-0921: the gateway keeps the connector ready and says some callers are refused;
+    # the administrator row carries the rule and model names (an ordinary account gets none).
+    cfg = _cfg(tmp_path, {"claudecode": _ANTHROPIC})
+    live = _health(
+        {
+            "connector": "claudecode",
+            "ready": True,
+            "credential": "agent",
+            "provider": "anthropic",
+            "warning": "allowed_alias_no_credential",
+            "detail": "routing.admin rule fixture-rule (scoped to some callers) allows only fixture-model",
+        }
+    )
+    rows = _by_label(dro.route_only_rows(cfg, live, platform="linux"))
+    assert rows["Route-only claudecode"].tag == "pass"
+    warn = rows["Route-only claudecode allowed models"]
+    assert warn.tag == "warn" and "fixture-rule" in warn.detail and "fixture-model" in warn.detail
+    quiet = _health({"connector": "claudecode", "ready": True, "credential": "agent", "provider": "anthropic"})
+    assert "Route-only claudecode allowed models" not in _by_label(dro.route_only_rows(cfg, quiet, platform="linux"))
+
+
+class _FakeClient:
+    """OrchestratorClient stand-in: the authenticated /health of a managed gateway."""
+
+    token_seen: list[str] = []
+
+    def __init__(self, host="", port=0, timeout=0, token=""):
+        _FakeClient.token_seen.append(token)
+
+    def health(self):
+        return _health(
+            {
+                "connector": "codex",
+                "ready": False,
+                "cause": "allowed_alias_no_credential",
+                "problem": "routing.admin rule fixture-rule applies to every codex caller and allows only "
+                "fixture-named, fixture-loopback, which has no gateway credential on this host",
+                "fix": "name a protected credential for fixture-named, fixture-loopback",
+            }
+        )
+
+
+def _managed_cfg(tmp_path: Path, token: str) -> SimpleNamespace:
+    cfg = _cfg(tmp_path, {"codex": {"base_url": "https://api.openai.com", "api": "responses"}})
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.enterprise = SimpleNamespace(profile="standalone")
+    cfg.gateway = SimpleNamespace(api_port=18970, resolved_token=lambda: token)
+    return cfg
+
+
+_PUBLIC = _health(
+    {
+        "connector": "codex",
+        "ready": False,
+        "cause": "allowed_alias_no_credential",
+        "problem": "a routing.admin rule that applies to every caller allows only models with no gateway credential",
+        "fix": "run defenseclaw doctor as an administrator for the cause and the fix",
+    }
+)
+
+
+class _Refused(_FakeClient):
+    def health(self):
+        raise RuntimeError("401")
+
+
+def test_doctor_as_administrator_reads_the_authenticated_rows_and_names_the_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _FakeClient)
+    _FakeClient.token_seen.clear()
+    cfg = _managed_cfg(tmp_path, "fixture-gateway-token")
+    live = cmd_doctor._administrator_route_only_health(cfg, _PUBLIC)
+    assert _FakeClient.token_seen == ["fixture-gateway-token"]
+    rows = _by_label(dro.route_only_rows(cfg, live, profile="standalone", platform="linux"))
+    row = rows["Route-only codex"]
+    assert row.tag == "fail" and "fixture-named" in row.detail and "fixture-loopback" in row.detail
+    assert "fixture-gateway-token" not in row.detail + row.fix
+
+
+def test_doctor_without_a_readable_token_keeps_the_public_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _FakeClient)
+    _FakeClient.token_seen.clear()
+    cfg = _managed_cfg(tmp_path, "")
+    assert cmd_doctor._administrator_route_only_health(cfg, _PUBLIC) is _PUBLIC
+    assert _FakeClient.token_seen == []
+
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _Refused)
+    cfg = _managed_cfg(tmp_path, "fixture-gateway-token")
+    live = cmd_doctor._administrator_route_only_health(cfg, _PUBLIC)
+    assert live is _PUBLIC
+    row = _by_label(dro.route_only_rows(cfg, live, profile="standalone", platform="linux"))["Route-only codex"]
+    assert row.tag == "fail" and "run defenseclaw doctor as an administrator" in row.fix
+
+
+def test_unmanaged_account_never_asks_even_with_a_readable_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GAP-1009: the standalone gate keeps an unmanaged account from sending its token.
+
+    The config has a readable token and a client that answers is patched in, so
+    only the gate stops the call: with the gate removed token_seen is not empty."""
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _FakeClient)
+    _FakeClient.token_seen.clear()
+    plain = _cfg(tmp_path, {"codex": {"base_url": "https://api.openai.com", "api": "responses"}})
+    plain.gateway = SimpleNamespace(api_port=18970, resolved_token=lambda: "fixture-gateway-token")
+    assert getattr(plain, "deployment_mode", "") != "managed_enterprise"
+    assert cmd_doctor._administrator_route_only_health(plain, _PUBLIC) is _PUBLIC
+    assert _FakeClient.token_seen == []
+
+
+class _ErrorClient(_FakeClient):
+    def health(self):
+        body = _FakeClient.health(self)
+        body["routing"].update({"state": "error", "last_error": "fixture start error: open fixture-credential"})
+        return body
+
+
+_PUBLIC_ERROR = {
+    **_PUBLIC,
+    "routing": {
+        **_PUBLIC["routing"],
+        "state": "error",
+        "last_error": "routing did not start; an administrator can read the cause in defenseclaw status",
+    },
+}
+
+
+def test_administrator_reads_the_routing_start_error_from_the_authenticated_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GAP-1008: the Semantic routing row is not circular for an administrator."""
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _ErrorClient)
+    _FakeClient.token_seen.clear()
+    cfg = _managed_cfg(tmp_path, "fixture-gateway-token")
+    cfg.routing = SimpleNamespace(enabled=True, classifier="vllm_sr", remote={}, port=8080, models=[])
+    r = cmd_doctor._DoctorResult(quiet=True)
+    live = cmd_doctor._administrator_health(cfg, r, _PUBLIC_ERROR)
+    cmd_doctor._check_semantic_routing(cfg, r, live_health=live)
+    row = next(c for c in r.checks if c["label"] == "Semantic routing")
+    assert row["status"] == "fail" and "fixture start error" in row["detail"]
+    assert "fixture-gateway-token" not in row["detail"] + str(row.get("remediation"))
+    # A refused call keeps the closed text, which points to status, never back to doctor.
+    r2 = cmd_doctor._DoctorResult(quiet=True)
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _Refused)
+    cmd_doctor._check_semantic_routing(cfg, r2, live_health=cmd_doctor._administrator_health(cfg, r2, _PUBLIC_ERROR))
+    row = next(c for c in r2.checks if c["label"] == "Semantic routing")
+    assert "fixture start error" not in row["detail"] and "defenseclaw status" in row["detail"]
+    assert "defenseclaw doctor" not in row["detail"]
+    # A gateway that is not this account's verified one is never asked.
+    r3 = cmd_doctor._DoctorResult(quiet=True)
+    r3.gateway_down = "foreign"
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", _ErrorClient)
+    _FakeClient.token_seen.clear()
+    assert cmd_doctor._administrator_health(cfg, r3, _PUBLIC_ERROR) is _PUBLIC_ERROR
+    assert _FakeClient.token_seen == []
+
+
+def test_agent_config_reports_a_parked_render(tmp_path: Path) -> None:
+    """GAP-1133: a render the gateway parked (port 0, no route credential, while it did not
+    hold its API port) is its own state with the start fix, not drift with a restart fix."""
+    cfg = _cfg(tmp_path, {"claudecode": _ANTHROPIC})
+    env = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:0/r/claudecode", "ANTHROPIC_CUSTOM_HEADERS": "X-Team: blue"}
+    (tmp_path / "claude" / "settings.json").write_text(json.dumps({"env": env}), encoding="utf-8")
+    row = dro.agent_config_row(cfg, "claudecode", _ANTHROPIC)
+    assert row.tag == "warn" and "is parked" in row.detail and "sends its model calls nowhere" in row.detail
+    assert "defenseclaw-gateway start" in row.fix
+    assert dro.render_outcome(cfg, "claudecode", _ANTHROPIC, None)[0] == dro.RENDER_PENDING
+    _render_claude(tmp_path)
+    assert dro.agent_config_row(cfg, "claudecode", _ANTHROPIC).tag == "pass"
+    assert not dro._parked("http://127.0.0.1:18970/r/claudecode") and not dro._parked("not a url")
+
+
+def test_agent_config_fails_a_real_route_with_the_gateway_down(tmp_path: Path) -> None:
+    """GAP-1133 round 2: after a crash, a logoff or a reboot the real route stays until the
+    next gateway start; doctor fails it while no gateway of this account holds the port,
+    names the start that parks it, and keeps a parked render a warn."""
+    cfg = _cfg(tmp_path, {"claudecode": _ANTHROPIC})
+    _render_claude(tmp_path)
+    row = dro.agent_config_row(cfg, "claudecode", _ANTHROPIC, gateway_down=True)
+    assert row.tag == "fail" and "does not hold it" in row.detail
+    assert "defenseclaw-gateway start" in row.fix and "parks the route" in row.fix
+    rows = dro.route_only_rows(cfg, None)
+    assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "fail"
+    rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_FOREIGN, holder="PID 7")
+    assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "fail"
+    rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_UNVERIFIED)
+    row = next(r for r in rows if r.label == "Route-only claudecode agent config")
+    assert row.tag == "fail" and "cannot verify" in row.detail
+    # A foreground gateway of this account holds the port: not this failure.
+    rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_FOREGROUND)
+    assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "pass"
+    env = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:0/r/claudecode"}
+    (tmp_path / "claude" / "settings.json").write_text(json.dumps({"env": env}), encoding="utf-8")
+    assert dro.agent_config_row(cfg, "claudecode", _ANTHROPIC, gateway_down=True).tag == "warn"

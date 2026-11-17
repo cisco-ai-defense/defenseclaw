@@ -43,7 +43,7 @@ func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
 			return "", false
 		}
 	}
-	facts := actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell, CWD: cwd, ActiveHome: home})
+	facts := analyzeAtHookFolder(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell, CWD: cwd, ActiveHome: home})
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell || len(facts.Commands) == 0 || len(facts.Commands) > maxPowerShellLinkCommands {
 		return "", false
 	}

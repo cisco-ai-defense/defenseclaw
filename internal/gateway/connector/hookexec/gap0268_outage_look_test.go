@@ -70,9 +70,7 @@ func TestGAP0268AnsweredCallReadsNoOutageTier(t *testing.T) {
 // the tier at its deadline, not when it connects, and follows it: open allows
 // with the warning, closed and strict availability deny.
 func TestGAP0268LateOrdinaryCallReadsTheTierAtTheDeadline(t *testing.T) {
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = time.Minute
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, time.Minute)
 	sp, _ := specFor("claudecode")
 	for _, tc := range []struct {
 		name   string

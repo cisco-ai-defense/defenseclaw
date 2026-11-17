@@ -304,6 +304,29 @@ func TestRules(t *testing.T) {
 	if got := PathRules("read", "/repo/docs/etc/k8s/admin.conf.md", ""); len(got) != 0 {
 		t.Errorf("an unrooted look-alike matched: %v", got)
 	}
+	// rel-1-0-10:GAP-1002: the account's own scheduler folders are read below
+	// the active home the caller gives, whatever its shape (/home/u, /sandbox);
+	// the whole-path rules guess no home from the shape of a path.
+	for _, relative := range []string{".config/systemd/user/x.service", ".config/autostart/x.desktop", "Library/LaunchAgents/x.plist"} {
+		if got := HomePathRules("write", relative, ""); !slices.Equal(got, []string{"CMD-PERSIST-SYSTEM-SCHEDULE"}) {
+			t.Errorf("home %s = %v", relative, got)
+		}
+		if got := HomePathRules("read", relative, ""); len(got) != 0 {
+			t.Errorf("a read of home %s matched: %v", relative, got)
+		}
+		if got := HomePathRules("write", "proj/"+relative, ""); len(got) != 0 {
+			t.Errorf("a project copy of home %s matched: %v", relative, got)
+		}
+		if got := PathRules("write", "/home/u/"+relative, ""); len(got) != 0 {
+			t.Errorf("a home found by path shape matched %s: %v", relative, got)
+		}
+	}
+	if got := PathRules("write", "/etc/systemd/system/x.service", ""); !slices.Equal(got, []string{"CMD-PERSIST-SYSTEM-SCHEDULE"}) {
+		t.Errorf("system unit = %v", got)
+	}
+	if got := HomePathRules("write", "etc/systemd/system/x.service", ""); len(got) != 0 {
+		t.Errorf("a system folder below the home matched: %v", got)
+	}
 	if got := CommandRules("chmod", []string{"chmod", "u+s", "/x"}); !slices.Equal(got, []string{"CMD-PRIV-SETUID"}) {
 		t.Errorf("chmod = %v", got)
 	}
@@ -1041,5 +1064,30 @@ func TestPathListInOneString(t *testing.T) {
 	m := mapOf(t, "mcp__bench__read_multiple_files", string(raw))
 	if !m.Truncated.Has(bounded.Items) || len(paths(m)) == 0 {
 		t.Fatalf("over the items bound: truncated=%v, %d paths", m.Truncated, len(paths(m)))
+	}
+}
+
+// rel-1-0-10:GAP-1058: the shadow file rule left the default and permissive
+// packs' semantic catalog for this table; it is pack_typed, so the gateway
+// judges its finding as the pack's typed finding was. The other rules keep the
+// lane's own tier.
+func TestPackTypedPathRules(t *testing.T) {
+	for _, access := range []string{"read", "write", "append", "delete"} {
+		if got := PathRules(access, "/etc/shadow", ""); !slices.Equal(got, []string{"PATH-ETC-SHADOW"}) {
+			t.Errorf("shadow %s = %v", access, got)
+		}
+	}
+	for _, path := range []string{"/etc/shadow.bak", "/repo/etc/shadow", "/etc/gshadow"} {
+		if got := PathRules("read", path, ""); slices.Contains(got, "PATH-ETC-SHADOW") {
+			t.Errorf("%s matched the shadow rule: %v", path, got)
+		}
+	}
+	if !PackTypedPathRule("PATH-ETC-SHADOW") {
+		t.Error("PATH-ETC-SHADOW is not pack_typed")
+	}
+	for _, id := range []string{"PATH-GIT-CREDS", "PATH-ETC-PASSWD", "CMD-PERSIST-SYSTEM-SCHEDULE", "NO-SUCH-RULE"} {
+		if PackTypedPathRule(id) {
+			t.Errorf("%s is pack_typed", id)
+		}
 	}
 }

@@ -71,6 +71,10 @@ type CallFacts struct {
 	SubjectKind      string
 	Groups           []string
 	IdentityVerified bool
+	// SubjectName is the verified account name (defenseclaw.user.name on the
+	// model.usage log, so per-user panels show a name, not a uid; "" when no
+	// name resolved, and the id stays). It is never stored or used as a key.
+	SubjectName string
 
 	// Correlation of a call imported from the OTLP telemetry of the agent
 	// (Engine.RecordNative): the session, turn and agent it joined on the hook

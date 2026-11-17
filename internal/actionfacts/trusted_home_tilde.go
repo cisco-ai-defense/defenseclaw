@@ -247,6 +247,30 @@ func rewriteTrustedPOSIXHomeTilde(source, activeHome string) (trustedPOSIXHomeRe
 			continue
 		}
 		literal, ok := firstLiteral(word)
+		if ok && strings.HasPrefix(literal.Value, "~") && literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/") {
+			// ~bob/f, ~root/f: another account's home, found by where the
+			// active home sits (simpleOtherAccountHome, rel-1-0-10:GAP-0837).
+			// A quoted part inside the prefix stops the expansion; a prefix
+			// the active home cannot place stays as written.
+			prefix, rest, slash := strings.Cut(literal.Value, "/")
+			if other, found := simpleOtherAccountHome(prefix[1:], activeHome); found && (slash || len(word.Parts) == 1) {
+				offset := int(literal.Pos().Offset())
+				if offset < last || offset+len(prefix) > len(source) || source[offset:offset+len(prefix)] != prefix {
+					return trustedPOSIXHomeRewrite{}, false
+				}
+				out.WriteString(source[last:offset])
+				out.WriteString(other)
+				last = offset + len(prefix)
+				if len(word.Parts) == 1 && !strings.ContainsAny(literal.Value, `\*?[`) {
+					tail := ""
+					if slash {
+						tail = "/" + rest
+					}
+					rewrite.tildeOperands[other+tail] = literal.Value
+				}
+				continue
+			}
+		}
 		if !ok || (literal.Value != "~" && !strings.HasPrefix(literal.Value, "~/")) {
 			if suffix, anchored := homeAnchoredLiteralWord(word); anchored &&
 				(plainHomeRewriteWord(word) || quotedPlainHomeRewriteWord(word)) {

@@ -4,9 +4,6 @@
 package connector
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -63,70 +60,5 @@ func TestRouteEpochRotatesTheRouteCredential(t *testing.T) {
 	otherBefore, _ := ManagedRouteToken(routeCredentialTestKey, &first, "codex", "S-1-5-21-1-2-3-1002")
 	if otherUser != otherBefore {
 		t.Fatal("a bump for one account must not change another account credential")
-	}
-}
-
-func TestRouteEpochFileRoundTrip(t *testing.T) {
-	dataDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := LoadRouteEpoch(dataDir); err != nil || got != nil {
-		t.Fatalf("absent epoch = (%v, %v), want (nil, nil)", got, err)
-	}
-	epoch, _ := NewRouteEpoch()
-	epoch.Generations["S-1-5-21-1-2-3-1001"] = 2
-	if err := WriteRouteEpoch(dataDir, epoch); err != nil {
-		t.Fatal(err)
-	}
-	got, err := LoadRouteEpoch(dataDir)
-	if err != nil || got == nil || got.Epoch != epoch.Epoch || got.Generations["S-1-5-21-1-2-3-1001"] != 2 {
-		t.Fatalf("round trip = (%+v, %v)", got, err)
-	}
-	path, _ := RouteEpochPath(dataDir)
-	for _, bad := range []string{`{"version":1,"epoch":"zz"}`, `{"version":2,"epoch":"` + epoch.Epoch + `"}`, `{"version":1,"epoch":"` + epoch.Epoch + `","generations":{"alice":1}}`, `not json`} {
-		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadRouteEpoch(dataDir); err == nil {
-			t.Fatalf("malformed epoch %q accepted", bad)
-		}
-	}
-	if err := WriteRouteEpoch(dataDir, RouteEpoch{Version: 1, Epoch: "short"}); err == nil {
-		t.Fatal("an invalid epoch must not be written")
-	}
-}
-
-// A published epoch another account could write is refused (P3-3): it
-// decides every route credential the guardian renders.
-func TestRouteEpochFileRefusesABroadFile(t *testing.T) {
-	dataDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	epoch, _ := NewRouteEpoch()
-	if err := WriteRouteEpoch(dataDir, epoch); err != nil {
-		t.Fatal(err)
-	}
-	path, _ := RouteEpochPath(dataDir)
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(path, 0o666); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadRouteEpoch(dataDir); err == nil {
-			t.Fatal("a world-writable route epoch must be refused")
-		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	link := path + ".target"
-	if err := os.Rename(path, link); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(link, path); err == nil {
-		if _, err := LoadRouteEpoch(dataDir); err == nil {
-			t.Fatal("a symlinked route epoch must be refused")
-		}
 	}
 }

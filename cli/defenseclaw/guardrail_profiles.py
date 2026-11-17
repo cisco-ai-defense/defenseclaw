@@ -146,6 +146,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
             # the delta 4 packs.
             "48b9e16495f0d8b860964b0b813cd6347edc20eba48e0194ddd7cc84b45ecff9",
+            # 1.0.10 (s7/g1058fix on s7/td327fix7 a41329ba08): the td327 train on the delta 4 packs;
+            # the typed path check of PATH-ETC-SHADOW is a Go rule of internal/toolshape (rel-1-0-10:GAP-1058).
+            "142564606e41360723658f06c3d71f449b80849d789767370e9b948697316882",
         }
     ),
     "permissive": frozenset(
@@ -248,6 +251,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
             # the delta 4 packs.
             "e0b99daa614eaa547fee67f0c87e805e8bffa208dd9b9bb82578756db58eba87",
+            # 1.0.10 (s7/g1058fix on s7/td327fix7 a41329ba08): the td327 train on the delta 4 packs;
+            # the typed path check of PATH-ETC-SHADOW is a Go rule of internal/toolshape (rel-1-0-10:GAP-1058).
+            "ec4d531ac9c39d223b257ebb032fab8c62a945e528557622d7bd4cc460fd7089",
         }
     ),
     "strict": frozenset(
@@ -349,6 +355,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
             # the delta 4 packs.
             "2237afe661765bf883ec757d5195149b15171872ffbef9b1b134195c02f4c189",
+            # 1.0.10 (s7/g1058fix on s7/td327fix7 a41329ba08): the td327 train on the delta 4 packs
+            # (b1d66c243c: a copy of a credential file is a read of it).
+            "2f4db7a9e2296cac025499b7785766eec2f82d4d75c2cb78873b542b8292a18d",
         }
     ),
 }

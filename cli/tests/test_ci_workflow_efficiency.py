@@ -16,7 +16,11 @@
 
 import importlib.util
 import re
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 import yaml
 
@@ -155,15 +159,17 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
     assert "GO_PACKAGE_SHARDS: 19" in workflow
-    assert "GO_TEST_SHARDS: 54" in workflow
+    assert "GO_TEST_SHARDS: 88" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
     # The three Linux jobs, and the six darwin gateway parts, which weigh the
     # unix and darwin tests by their macOS times once go-darwin.json records
     # internal/gateway and by their Linux times until then.
     assert workflow.count("--timings scripts/test-timings/go-linux.json") == 4
-    assert workflow.count("label: macos-latest darwin gateway ") == 6
-    assert workflow.count("            shards: 6\n") == 6
+    jobs = yaml.safe_load(workflow)["jobs"]
+    parts = jobs["darwin-gateway"]["strategy"]["matrix"]["include"]
+    assert parts == [{"part": shard + 1, "shard": shard} for shard in range(6)]
+    assert '--shard-count 6 \\\n            --shard-index "$GO_TEST_SHARD")"' in workflow
     assert (
         "--timings scripts/test-timings/go-darwin.json \\\n            --timings scripts/test-timings/go-linux.json \\"
         in workflow
@@ -172,11 +178,10 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     # count Combine Go coverage requires follows the shard counts (it stayed 52
     # when the remaining packages went from 12 to 16 shards and would have
     # failed the first run on which every shard passed).
-    jobs = yaml.safe_load(workflow)["jobs"]
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
-    assert profiles == 77
+    assert profiles == 111
     # The frozen-gateway job adds one more profile (it runs the three tests
     # that no longer run in the shards).
     profiles += 1
@@ -206,8 +211,47 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "name: go-test-timings-darwin-gateway-${{ matrix.shard }}" in workflow
-    # Part 1 runs go test's vet checks for the whole package; the others skip them.
-    assert '[ "$GO_TEST_SHARD" -ne 0 ] || vet=' in workflow
+    # The darwin gateway parts share one test binary. go test -c runs go
+    # test's vet checks for the whole package once, under a memory limit that
+    # keeps the 8 GB compile inside the 7 GB macOS runner; every part runs the
+    # binary through test2json the way go test -json runs it, and keeps the
+    # check name of its old Unix Standalone Lifecycle part.
+    build = jobs["darwin-gateway-test-binary"]
+    assert build["runs-on"] == "macos-latest"
+    step = next(s for s in build["steps"] if s.get("name") == "Build the internal/gateway test binary")
+    assert step["env"]["GOMEMLIMIT"] == "3GiB"
+    assert "go test -c -gcflags=github.com/defenseclaw/defenseclaw/internal/gateway=-c=1 " in step["run"]
+    assert "-vet=off" not in step["run"]
+    gateway_parts = jobs["darwin-gateway"]
+    assert gateway_parts["name"] == "Unix Standalone Lifecycle (macos-latest darwin gateway ${{ matrix.part }} of 6)"
+    assert "darwin-gateway-test-binary" in gateway_parts["needs"]
+    assert "needs.darwin-gateway-test-binary.result == 'success'" in gateway_parts["if"]
+    run = next(s["run"] for s in gateway_parts["steps"] if "test2json" in s.get("run", ""))
+    assert '(cd "$pkg" && go tool test2json -t -p "github.com/defenseclaw/defenseclaw/$pkg"' in run
+    assert '"$RUNNER_TEMP/gateway.test" -test.paniconexit0 -test.v=test2json -test.count=1' in run
+    assert '-test.timeout=10m -test.run="$pattern"' in run
+    # A part, and the darwin cli and hookcli step, fail when a selected test
+    # reported no result (rel-1-0-10:GAP-1051): a -run name the binary does
+    # not have runs nothing and passes.
+    assert '--annotate "darwin gateway part $GO_TEST_SHARD failed" --expect-run "$pattern"' in run
+    assert 'exit "${statuses[1]}"' in run
+    unix_step = next(
+        s["run"]
+        for s in jobs["unix-standalone-lifecycle"]["steps"]
+        if s.get("name") == "Go tests of the darwin paths in the CLI and hookcli packages"
+    )
+    assert '--annotate "darwin $UNIX_PACKAGE failed" --expect-run "$pattern"' in unix_step
+    assert 'exit "${statuses[1]}"' in unix_step
+    upload = next(s for s in build["steps"] if s.get("with", {}).get("name") == "darwin-gateway-test-binary")
+    assert upload["with"]["retention-days"] == 7
+    assert "go test" not in run.replace("go test -json", "")
+    assert not any(
+        "internal/gateway" == entry.get("package")
+        for entry in jobs["unix-standalone-lifecycle"]["strategy"]["matrix"]["include"]
+    )
+    required = jobs["enterprise-required"]
+    assert {"darwin-gateway-test-binary", "darwin-gateway"} <= set(required["needs"])
+    assert "UNIX_LIFECYCLE DARWIN_GATEWAY_BINARY DARWIN_GATEWAY; do" in workflow
     assert "DC_TEST_NATIVE_GATEWAY" in workflow
     needs = "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-test-frozen-gateway, go-pinned]"
     assert needs in workflow
@@ -319,6 +363,20 @@ LIVE_ONLY_JOBS = {
     ("connector-live-e2e.yml", "live-matrix"),
 }
 
+# Jobs whose one step is a whole-package compile that a slow hosted runner
+# cannot finish in 20 minutes keep a measured, longer budget (GAP-1090:
+# rel/1.0.10 push 5 cancelled Go Lint at 15m17s and the Darwin gateway test
+# binary at 20m32s, neither with a finding). Nothing else may exceed 20.
+LONG_COMPILE_JOBS = {
+    ("ci.yml", "go-lint"): 25,
+    ("ci.yml", "darwin-gateway-test-binary"): 35,
+    # Not a compile: the Windows upgrade lane installs, upgrades, converges and
+    # removes the standalone services on a hosted runner. On rel/1.0.10
+    # da4177e225 (CI run 44074568058) every step passed and the job was
+    # cancelled at 20m07s inside the last step, Setup /uninstall.
+    ("ci.yml", "enterprise-upgrade-windows"): 30,
+}
+
 
 def test_every_pull_request_job_has_a_twenty_minute_budget() -> None:
     # A hung test or lane fails within the pull request's 20-minute budget
@@ -328,7 +386,17 @@ def test_every_pull_request_job_has_a_twenty_minute_budget() -> None:
             continue
         budget = job.get("timeout-minutes")
         assert isinstance(budget, int), f"{name}:{job_id} has no timeout-minutes"
-        assert budget <= 20, f"{name}:{job_id} timeout-minutes {budget} is over 20"
+        limit = LONG_COMPILE_JOBS.get((name, job_id), 20)
+        assert budget <= limit, f"{name}:{job_id} timeout-minutes {budget} is over {limit}"
+
+
+def test_long_compile_jobs_keep_exactly_their_measured_budget() -> None:
+    # The exceptions name existing jobs and their exact budget, so a renamed
+    # job or a quietly raised budget fails here.
+    jobs = {(name, job_id): job for name, job_id, job in _pull_request_jobs()}
+    for key, minutes in LONG_COMPILE_JOBS.items():
+        assert key in jobs, f"{key} is not a pull request job"
+        assert jobs[key].get("timeout-minutes") == minutes, f"{key} timeout-minutes is not {minutes}"
 
 
 def test_go_test_timeouts_stay_inside_the_job_budget() -> None:
@@ -387,3 +455,42 @@ def test_every_go_cache_save_writes_the_entry_its_job_restores() -> None:
                     assert saved == restored, (
                         f"{path.name}:{job_id} restores {key}={restored!r} but saves {key}={saved!r}"
                     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the macOS jobs run this bash script")
+def test_go_unix_test_pattern_selects_the_unix_and_darwin_tests() -> None:
+    def names(path: Path) -> set[str]:
+        return set(re.findall(r"^func (Test\w+)\(t \*testing\.T\)", path.read_text(encoding="utf-8"), re.M))
+
+    script = ["bash", "scripts/go-unix-test-pattern.sh"]
+    out = subprocess.run([*script, "internal/gateway"], cwd=ROOT, check=True, capture_output=True, text=True)
+    pattern = out.stdout.strip()
+    assert pattern.startswith("^(") and pattern.endswith(")$")
+    selected = set(pattern[2:-2].split("|"))
+    gateway = ROOT / "internal/gateway"
+    darwin = set().union(*(names(path) for path in gateway.glob("*_darwin_test.go")))
+    assert darwin and darwin <= selected
+    # The open-loop throughput tests run alone in Go Throughput Test.
+    open_loop = names(gateway / "gap0490_open_loop_test.go")
+    assert open_loop and not open_loop & selected
+    assert subprocess.run([*script], cwd=ROOT, capture_output=True).returncode == 2
+
+
+def test_connector_matrix_runs_the_gateway_matrix_tests_in_guarded_parts() -> None:
+    # Connector Matrix (packages and CLI) ran the internal/gateway matrix tests
+    # beside cli, config and e2e: 950 s of its 1,200 s, cancelled when a
+    # checkout took 308 s (PR #1456). They run in four guarded parts.
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    job = yaml.safe_load(workflow)["jobs"]["connector-matrix"]
+    include = job["strategy"]["matrix"]["include"]
+    assert include[0] == {"part": "packages", "label": "packages and CLI"}
+    assert include[1:5] == [{"part": f"gateway-{i}", "label": f"gateway {i + 1} of 4"} for i in range(4)]
+    assert [entry["part"] for entry in include[5:]] == ["0", "1", "2", "3"]
+    run = next(step["run"] for step in job["steps"] if "connector-matrix-test" in step.get("run", ""))
+    assert "CONNECTOR_MATRIX_GATEWAY_PARTS=4" in run
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    packages = makefile.split("else ifeq ($(CONNECTOR_MATRIX_PART),packages)", 1)[1].split("else ifneq", 1)[0]
+    assert "./internal/gateway" not in packages
+    assert "--package-dir internal/gateway --built-files" in makefile
+    assert '--expect-run "$$run"' in makefile
+    assert "go-connector-matrix-test: .SHELLFLAGS := -o pipefail -c" in makefile

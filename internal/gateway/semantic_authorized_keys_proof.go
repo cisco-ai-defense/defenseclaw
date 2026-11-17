@@ -1022,6 +1022,11 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	// The link proof places the links of the call by the hook's folder (its own
+	// walk of the command); a write after a cd is judged by the other readers
+	// at the folder it reaches (actionfacts working_folder.go), so a link
+	// operation this walk cannot place never makes it an unproven link write.
+	facts = facts.AtHookFolder()
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
 			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
@@ -1127,7 +1132,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// simple commands where the client keyed its evidence.
 					if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; !filepath.IsAbs(moveInput.CWD) && filepath.IsAbs(cwd) {
 						moveInput.CWD = filepath.Clean(cwd)
-						moveFacts = actionfacts.Analyze(moveInput)
+						moveFacts = actionfacts.Analyze(moveInput).AtHookFolder()
 					}
 					plainMoves = hookpaths.PlainMoveDestinationsWithStatements(moveInput, moveFacts)
 				}
@@ -1701,7 +1706,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		ownCopy := hookpaths.IsCopyProgram(command.Argv) &&
 			(target == hookpaths.CopyDestination(command.Argv, clientCWD) ||
 				candidate.Value != "" && candidate.Value == hookpaths.CopyDestinationOperand(command.Argv))
-		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
+		// A redirect the shell operands above already judged is the same
+		// write, whatever spelling the path fact carries: a PowerShell
+		// reading names it C:/dir/file where the shell operand is
+		// C:\dir\file (the same name once the separators agree, never a
+		// case fold: two names that differ in case are two files on a POSIX
+		// host). Judged again under the second spelling, it lost the
+		// proof that it opens before the call can make a link
+		// (SafeShellRedirectOccurrences): PowerShell, like a POSIX shell and
+		// cmd.exe, opens a >, >>, n> or *> target before the command it
+		// redirects runs only when its own words run no inner command
+		// (GAP-0988; rel-1-0-10:GAP-0946, checked natively on Windows
+		// PowerShell 5.1 and pwsh 7). The cmdlets Set-Content, Add-Content
+		// and Tee-Object open their file at the first input instead; they
+		// are no redirect operator, so they are never matched here.
+		if integrityCommandOwnsStaticRedirect(command, candidate) && slices.ContainsFunc(safeRedirects, func(redirect hookpaths.RedirectOccurrence) bool {
+			return redirect.NoInnerCommand && filepath.Clean(filepath.FromSlash(redirect.Path)) == filepath.Clean(filepath.FromSlash(target))
+		}) {
 			continue
 		}
 		if replacedBySed[target] && !isProtected(target) {

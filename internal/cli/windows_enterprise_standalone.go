@@ -1093,6 +1093,8 @@ func runWindowsEnterpriseStandaloneAction(
 	}
 	if (action == "status" || action == "verify") && report.Installed {
 		appendWindowsEnterpriseStatusAdvisories(ctx, result, report)
+		// The last config a run was given and could not apply (GAP-1027).
+		applyWindowsEnterpriseConfigRejected(result)
 		// A release below the confirmed bundle's floor (put there by a
 		// Setup without the floor check) is reported only: the warning
 		// starts no repair, reinstall or fail-mode change.
@@ -3809,6 +3811,10 @@ var windowsEnterpriseKnownCodes = []string{
 	// changed) or pending (a config still names a launch folder; rerun).
 	"hook_image_retire_refused",
 	"hook_image_retire_pending",
+	// The verify of an elevated administrator could not read a route-only
+	// render (only LocalSystem reads the agent files as the account): not
+	// verified, not drift (GAP-1111). Exit 1603.
+	"route_config_unverified",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
@@ -3929,6 +3935,9 @@ func finishWindowsEnterpriseStandalone(
 			windowsEnterpriseHealthNotChecked, "installer_pipe_wait_delayed")
 	}
 	exitCode := result.Finish("windows", failureCode)
+	// A failed run given a config records that the config is not applied,
+	// a successful one clears that record (GAP-1027).
+	recordWindowsEnterpriseConfigOutcome(result, opts)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
 	// A standard account's refusal ran none of the deployment's checks or

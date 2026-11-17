@@ -22,7 +22,25 @@ import (
 // after its answer: a stalled disk must not hold the process past it. The
 // account lookup of a managed row is not inside it: that runs in the
 // background from the moment the watchdog is armed (failureLogHomeLookup).
-var answerWatchdogLogWait = 100 * time.Millisecond
+//
+// It is read from the watchdog goroutines (the delivery deadline, the
+// failure-log bound) and replaced by tests that shorten or lengthen it, so it
+// is atomic: a test's write cannot race a goroutine an earlier test left
+// running (rel-1-0-10 GAP-1040). Nothing in production writes it.
+var answerWatchdogLogWait = newAtomicDuration(100 * time.Millisecond)
+
+// atomicDuration is a time.Duration that several goroutines can read and
+// replace.
+type atomicDuration struct{ ns atomic.Int64 }
+
+func newAtomicDuration(d time.Duration) *atomicDuration {
+	v := &atomicDuration{}
+	v.Store(d)
+	return v
+}
+
+func (d *atomicDuration) Load() time.Duration   { return time.Duration(d.ns.Load()) }
+func (d *atomicDuration) Store(v time.Duration) { d.ns.Store(int64(v)) }
 
 // installLockCheckWait bounds the watchdog's look at the account's install
 // lock before it gives an answer that is not closed (GAP-0862): a stalled
@@ -1270,7 +1288,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		// The transport remains open for the token after the answer timer
 		// ends. Close it at the same bounded exit window if the process is
 		// simulated rather than exited (as in tests).
-		time.AfterFunc(answerWatchdogLogWait, delivery.close)
+		time.AfterFunc(answerWatchdogLogWait.Load(), delivery.close)
 		go func() {
 			_ = delivery.deadline(blocked)
 			close(done)
@@ -1321,16 +1339,16 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	// Prefer a prepared ordinary descriptor. If its open is still pending,
 	// the prepared fallback can record the committed answer immediately.
 	if !w.failureLogged {
-		if remaining > answerWatchdogLogWait && w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
+		if remaining > answerWatchdogLogWait.Load() && w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
 			startMarker()
 		} else {
 			startOrdinary()
 		}
 	}
 	recorded := false
-	deadlineExpired, stopDeadline := proofclock.NewTimer(answerWatchdogLogWait)
+	deadlineExpired, stopDeadline := proofclock.NewTimer(answerWatchdogLogWait.Load())
 	defer stopDeadline()
-	fallbackExpired, stopFallback := proofclock.NewTimer(answerWatchdogLogWait / 2)
+	fallbackExpired, stopFallback := proofclock.NewTimer(answerWatchdogLogWait.Load() / 2)
 	defer stopFallback()
 	for !recorded || receiptDone != nil {
 		select {
@@ -1413,7 +1431,7 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 // instead of racing the host for a file append (GAP-0859); a release build
 // runs the system clock.
 func waitForLog(done <-chan struct{}) {
-	expired, stop := proofclock.NewTimer(answerWatchdogLogWait)
+	expired, stop := proofclock.NewTimer(answerWatchdogLogWait.Load())
 	defer stop()
 	select {
 	case <-done:

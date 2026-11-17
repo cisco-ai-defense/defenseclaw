@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"path"
 	"regexp"
 	"strings"
 )
@@ -74,6 +75,88 @@ func FindHandedEntries(argv []string) HandedEntries {
 		i = end
 	}
 	return result
+}
+
+// FindHandedReadings are the programs a find hands its starting points to,
+// each read as the program run on one starting point alone: for an -exec,
+// -execdir, -ok or -okdir program that only reads or copies the entries it
+// is handed (a reader or a copy-out, handedEntriesOf), the program with each
+// {} written as that starting point. find ~/.cargo/credentials -exec cp {}
+// /tmp/n \; copies the file as cp ~/.cargo/credentials /tmp/n does, and a
+// gateway judges that reading too and keeps the strictest finding: the
+// developer-token files of the credentials table had no rule over the find,
+// so the find allowed where the copy alone alerts (rel-1-0-10:GAP-1048). A
+// program that may change the entries is not read so: its starting points
+// are write facts already (GAP-2122). A starting point the facts did not
+// resolve (a word made at run time) is not read. truncated reports more
+// readings than maxSimpleEvaluations, the walk's own bound: the first ones
+// are returned and the caller judges the rest as the unknown tier (the one
+// bound rule).
+func FindHandedReadings(facts Facts) (readings []string, truncated bool) {
+	for _, command := range facts.Commands {
+		if command.Dialect != DialectPOSIX || !command.ArgvComplete || len(command.Argv) < 2 ||
+			path.Base(strings.ReplaceAll(command.Program, `\`, "/")) != "find" {
+			continue
+		}
+		var starts []string
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID != command.ID || candidate.Access != PathAccessRead {
+				continue
+			}
+			spelling := candidate.Resolved
+			if spelling == "" {
+				spelling = candidate.Normalized
+			}
+			if spelling == "" {
+				spelling = candidate.Value
+			}
+			if spelling == "" || strings.HasPrefix(spelling, "$") || strings.HasPrefix(spelling, "~") {
+				continue
+			}
+			starts = append(starts, spelling)
+		}
+		if len(starts) == 0 {
+			continue
+		}
+		argv := command.Argv
+		for i := 1; i+1 < len(argv); i++ {
+			action := argv[i]
+			if action != "-exec" && action != "-execdir" && action != "-ok" && action != "-okdir" {
+				continue
+			}
+			end := i + 1
+			for end < len(argv) && argv[end] != ";" && argv[end] != "+" {
+				end++
+			}
+			words := argv[i+1 : end]
+			i = end
+			if len(words) == 0 || !strings.Contains(strings.Join(words, " "), "{}") ||
+				handedEntriesOf(words, action == "-execdir" || action == "-okdir").MayChange {
+				continue
+			}
+			for _, start := range starts {
+				quoted := make([]string, len(words))
+				for j, word := range words {
+					quoted[j] = findReadingWord(strings.ReplaceAll(word, "{}", start))
+				}
+				if len(readings) == maxSimpleEvaluations {
+					return readings, true
+				}
+				readings = append(readings, strings.Join(quoted, " "))
+			}
+		}
+	}
+	return readings, false
+}
+
+// findReadingWord is word as one shell word: as it is when every character
+// is one the shell reads literally, else in single quotes.
+func findReadingWord(word string) string {
+	if word != "" && strings.Trim(word, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:@%+=,-") == "" &&
+		!strings.HasPrefix(word, "~") && !strings.Contains(word, "=") {
+		return word
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
 // XargsHandedEntries reads the program words of an xargs (the program and

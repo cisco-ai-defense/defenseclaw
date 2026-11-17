@@ -1821,7 +1821,7 @@ func sendHookRequest(
 		// this request's gateway has advertised receipt support. Until then,
 		// the original context still bounds connection and body release.
 		deadlineCtx, cancelDeadline := context.WithDeadline(
-			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
+			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait.Load()))
 		transportCtx, cancelWithCause := context.WithCancelCause(deadlineCtx)
 		cancelTransport := func() {
 			cancelWithCause(nil)

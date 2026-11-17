@@ -66,6 +66,14 @@ const (
 	// padding the cap already judged at the unknown tier.
 	capFloorHeadScan = 64 << 10
 	capFloorTailScan = 32 << 10
+	// capFloorConsumerBytes bounds the statement-prefix bytes one call's cut
+	// parses to read the consumer of its quoted words and here-documents
+	// (capFloorConsumer). Each read parses the statement from its start, so
+	// a statement of thousands of quoted words or openers read every prefix
+	// again: 0.9 s at 9 KiB and 14.5 s at 36 KiB, past the hook answer
+	// budget (rel-1-0-10:GAP-0984). Past it no consumer is read and the cut
+	// is a cap of the call (bounded.Bytes): the unknown tier, never an allow.
+	capFloorConsumerBytes = 256 << 10
 )
 
 // capFloorState is the shared state of one hook call's cap floor.
@@ -149,7 +157,10 @@ func capFloorJudge(parent context.Context, request trustedActionRequest, finding
 		// no cut.
 		return findings
 	}
-	head, tail := capFloorPieces(command, request.Input.ActiveHome)
+	head, tail, unread := capFloorPieces(command, request.Input.ActiveHome)
+	if unread {
+		state.stopped = state.stopped.Union(bounded.Of(bounded.Bytes))
+	}
 	if request.capFloorDepth > capFloorMaxDepth {
 		// A piece nested past the bound is judged as it is but never cut
 		// again: what a cut would judge is unread.
@@ -478,9 +489,12 @@ func (r *capFloorRegion) chosen() []capFloorPiece {
 // whole command, or, for a command of more than
 // capFloorHeadScan+capFloorTailScan bytes, its start, and tail its end, each
 // cut from a statement boundary (nil when the command was cut whole).
-func capFloorPieces(command, home string) (head, tail []capFloorPiece) {
+// unread reports a consumer left unread past capFloorConsumerBytes, which
+// both cuts share: a cap of the call.
+func capFloorPieces(command, home string) (head, tail []capFloorPiece, unread bool) {
+	reader := &capFloorConsumerReader{home: home, budget: capFloorConsumerBytes}
 	if len(command) <= capFloorHeadScan+capFloorTailScan {
-		return capFloorCut(command, home, 0, len(command)), nil
+		return capFloorCut(command, reader, 0, len(command)), nil, reader.unread
 	}
 	headEnd := capFloorHeadScan
 	if i := strings.LastIndexAny(command[:headEnd], ";\n"); i > 0 {
@@ -490,7 +504,87 @@ func capFloorPieces(command, home string) (head, tail []capFloorPiece) {
 	if i := strings.IndexAny(command[tailStart:], ";\n"); i >= 0 {
 		tailStart += i + 1
 	}
-	return capFloorCut(command, home, 0, headEnd), capFloorCut(command, home, tailStart, len(command))
+	return capFloorCut(command, reader, 0, headEnd), capFloorCut(command, reader, tailStart, len(command)), reader.unread
+}
+
+// capFloorConsumerReader reads the consumers of one call's statements
+// (capFloorConsumer) within capFloorConsumerBytes of statement prefix.
+type capFloorConsumerReader struct {
+	home   string
+	budget int
+	unread bool // a read was refused at the budget
+	// last is the latest reading: the prefix command[stmt:end] and what
+	// capFloorConsumer read of it.
+	last struct {
+		valid     bool
+		stmt, end int
+		program   string
+		args      []string
+		known     bool
+	}
+}
+
+// read is capFloorConsumer of command[stmt:i], charged to the budget. ok is
+// false when the prefix does not fit in what is left (reader.unread).
+func (r *capFloorConsumerReader) read(command string, stmt, i int) (program string, args []string, known, ok bool) {
+	if i-stmt > r.budget {
+		r.unread = true
+		return "", nil, false, false
+	}
+	r.budget -= i - stmt
+	program, args, known = capFloorConsumer(command[stmt:i], r.home)
+	r.last.valid, r.last.stmt, r.last.end = true, stmt, i
+	r.last.program, r.last.args, r.last.known = program, args, known
+	return program, args, known, true
+}
+
+// shellDashC is capFloorDashC of the reading of command[stmt:i]. grows
+// reports that the text since the last reading of the same statement
+// continues its last word (no unquoted blank or redirect) and that the word
+// is plain from its start (capFloorPlainByte characters and plain single and
+// double quotes, see capFloorCut): the command word and every word but the
+// last are those of that reading, and the value of the last word is the value
+// that reading saw with text appended. When that reading already rules a
+// shell -c out for any growth of the word (the program is no shell, or the
+// word is no -c option and adding to it cannot make one), the answer is false
+// without a new parse; this keeps a statement of thousands of joined quotes
+// (the GAP-0984 shape) one parse. Any other word is read again, charged to
+// the budget: a $'...' or $"..." quote, an escape, a brace, a tilde, a glob
+// or an expansion can change what the text before it reads as once the word
+// goes on (bash $'-c'... reads $ before the quote and -c after it). ok is
+// false past the budget.
+func (r *capFloorConsumerReader) shellDashC(command string, stmt, i int, grows bool) (dashC, ok bool) {
+	if l := r.last; grows && l.valid && l.stmt == stmt && l.end <= i && l.known && len(l.args) > 0 &&
+		(!slices.Contains(capFloorShells, l.program) || capFloorNeverDashC(l.args[len(l.args)-1])) {
+		return false, true
+	}
+	program, args, known, ok := r.read(command, stmt, i)
+	return ok && capFloorDashC(program, args, known), ok
+}
+
+// shellStdin is capFloorStdin of the reading of command[stmt:i]; ok is false past the
+// budget.
+func (r *capFloorConsumerReader) shellStdin(command string, stmt, i int) (stdin, ok bool) {
+	program, args, known, ok := r.read(command, stmt, i)
+	return ok && capFloorStdin(program, args, known), ok
+}
+
+// capFloorNeverDashC reports a static word that no text appended to it makes a
+// shell -c option word (capFloorDashCOption): it does not start with one
+// dash, or it already holds a = or a /. The empty word is not one: two
+// quotes and then -c read -c.
+func capFloorNeverDashC(word string) bool {
+	return word != "" && (!strings.HasPrefix(word, "-") || strings.HasPrefix(word, "--") || strings.ContainsAny(word, "=/"))
+}
+
+// capFloorPlainByte reports an unquoted byte that is itself in the value of
+// its word and starts no expansion, quote or escape (the plain path
+// characters of hookpaths.StaticWord): a word of such bytes and plain quotes
+// has the value of its text, so text appended to it only appends to that
+// value.
+func capFloorPlainByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+		strings.IndexByte("_./-,:@%+=", c) >= 0
 }
 
 // capFloorHeredoc is a here-document whose body starts after the next line
@@ -502,9 +596,18 @@ type capFloorHeredoc struct {
 }
 
 // capFloorCut cuts command[from:to] into statements and shell bodies, reading
-// the text once.
-func capFloorCut(command, home string, from, to int) []capFloorPiece {
+// the text once; reader reads the consumer of each quoted word and
+// here-document within its budget.
+func capFloorCut(command string, reader *capFloorConsumerReader, from, to int) []capFloorPiece {
 	var pieces []capFloorPiece
+	// broken is set by an unquoted blank or redirect since the last
+	// consumer reading: the word that reading ended in is complete.
+	broken := false
+	// plain is cleared by any part of the word in progress that is not a
+	// capFloorPlainByte or a plain quote: a $'...' or $"..." quote, an
+	// escape, a $, a backquote, a glob, brace or tilde character, a
+	// command substitution. A plain word only grows (shellDashC).
+	plain := true
 	var pending []capFloorHeredoc
 	// open holds the open double quotes (") and subshells or command
 	// substitutions (() around i: a $( inside a double-quoted string is
@@ -533,6 +636,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
 		start, stmt = next, next
+		plain = true
 	}
 	cutPipe := func(end, next int) {
 		if pipeFrom < 0 {
@@ -542,6 +646,7 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
 		start, stmt = next, next
+		plain = true
 	}
 	// enter opens a $( or ( at i whose statement starts at next.
 	enter := func(i, next int) {
@@ -561,6 +666,10 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 	for i := from; i < to; {
 		c := command[i]
 		if n := len(open); n > 0 && open[n-1] == '"' {
+			if c == '\\' || c == '$' || c == '`' {
+				// An escape or an expansion inside the double quotes.
+				plain = false
+			}
 			switch {
 			case c == '\\':
 				i += 2
@@ -579,6 +688,14 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 			continue
 		}
 		switch {
+		case c == ' ' || c == '\t' || c == '<' || c == '>':
+			broken, plain = true, true
+		case c == ')':
+			broken = true
+		case c != '\'' && c != '"' && !capFloorPlainByte(c):
+			plain = false
+		}
+		switch {
 		case c == '\\':
 			i += 2
 			continue
@@ -589,9 +706,15 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				i = to
 				continue
 			}
-			if capFloorShellDashC(command[stmt:i], home) {
+			// Past the reader's budget the quoted word is not judged as a
+			// script: the cut is a cap of the call (the unknown tier).
+			if dashC, _ := reader.shellDashC(command, stmt, i, !broken && plain); dashC {
 				pieces = append(pieces, capFloorPiece{start: i, end: end, body: body})
 			}
+			// The helper also folds escaped quote joins. Those are not
+			// plain quotes: the next quote must get a fresh reading.
+			plain = plain && len(body) == end-i-2
+			broken = false
 			i = end
 			continue
 		case c == '"':
@@ -614,7 +737,9 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 		case c == '<' && strings.HasPrefix(command[i:to], "<<"):
 			doc, end, ok := capFloorHeredocAt(command, i, to)
 			if ok {
-				doc.fed = capFloorShellStdin(command[stmt:i], home)
+				// Past the reader's budget the body is not judged as a
+				// script: the cut is a cap of the call (the unknown tier).
+				doc.fed, _ = reader.shellStdin(command, stmt, i)
 				pending = append(pending, doc)
 				i = end
 				continue
@@ -668,6 +793,9 @@ func capFloorCut(command, home string, from, to int) []capFloorPiece {
 				stmt = stmtOpen[len(stmtOpen)-1]
 				stmtOpen = stmtOpen[:len(stmtOpen)-1]
 			}
+			// What follows the ) in the word around it holds the
+			// substitution: not a plain word.
+			plain = false
 		case c == '|' || c == '&':
 			if i > from && (command[i-1] == '>' || command[i-1] == '<') || i+1 < to && command[i+1] == '>' {
 				// A redirect (2>&1, &>, >|), not a list operator.
@@ -789,22 +917,22 @@ func capFloorDashCOption(word string) bool {
 		!strings.ContainsAny(word, "=/") && strings.Contains(word[1:], "c")
 }
 
-// capFloorShellDashC reports a statement prefix that ends with a shell and its
-// -c option: the quoted word that follows is the script it runs. The shell
-// is the command word of the statement, not any word of it (GAP-0691).
-func capFloorShellDashC(prefix, home string) bool {
-	program, args, known := capFloorConsumer(prefix, home)
+// capFloorDashC reports a consumer reading (capFloorConsumer) of a statement
+// prefix that ends with a shell and its -c option: the quoted word that
+// follows is the script it runs. The shell is the command word of the
+// statement, not any word of it (GAP-0691).
+func capFloorDashC(program string, args []string, known bool) bool {
 	return known && slices.Contains(capFloorShells, program) && len(args) > 0 && capFloorDashCOption(args[len(args)-1])
 }
 
-// capFloorShellStdin reports a statement prefix whose command word is a shell
-// with no script operand and no -c: the shell reads its script from standard
-// input, so a here-document of the statement is that script. A program the
+// capFloorStdin reports a consumer reading (capFloorConsumer) of a statement
+// prefix whose command word is a shell with no script operand and no -c: the
+// shell reads its script from standard input, so a here-document of the
+// statement is that script. A program the
 // prefix does not let us read is taken as a shell; grep, which, echo, cat,
 // an interpreter or ssh with a word "bash" among its operands is not one: its
 // data is not a shell script run here.
-func capFloorShellStdin(prefix, home string) bool {
-	program, args, known := capFloorConsumer(prefix, home)
+func capFloorStdin(program string, args []string, known bool) bool {
 	if !known {
 		return true
 	}

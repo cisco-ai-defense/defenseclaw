@@ -247,15 +247,15 @@ func TestRejectedConfigStaysReportedUntilConfigIsPushedAgain(t *testing.T) {
 	}
 	requireReported := func(t *testing.T, h *testHost) {
 		t.Helper()
-		if again := h.run(Options{Action: ActionEnsure, Reason: "path"}); !again.Noop || !hasWarning(again, codeConfigRejected) {
+		if again := h.run(Options{Action: ActionEnsure, Reason: "path"}); !again.Noop || !hasWarning(again, enterprisestatus.CodeConfigRejected) {
 			t.Fatalf("ensure after the revert: noop=%v warnings=%+v", again.Noop, again.Warnings)
 		}
 		status := h.run(Options{Action: ActionStatus})
-		if !hasWarning(status, codeConfigRejected) {
+		if !hasWarning(status, enterprisestatus.CodeConfigRejected) {
 			t.Fatalf("status does not report the rejected edit: %+v", status.Warnings)
 		}
 		// GAP-0587: the reason is named, not left to the lifecycle log.
-		if got := messagesOf(status.Warnings, codeConfigRejected); !strings.Contains(got, "api_port") || strings.Contains(got, "lifecycle log says why") {
+		if got := messagesOf(status.Warnings, enterprisestatus.CodeConfigRejected); !strings.Contains(got, "api_port") || strings.Contains(got, "lifecycle log says why") {
 			t.Fatalf("the rejected edit's reason is not named: %q", got)
 		}
 		if verify := h.run(Options{Action: ActionVerify}); !hasMessage(verify.Errors, "rejected") {
@@ -267,7 +267,7 @@ func TestRejectedConfigStaysReportedUntilConfigIsPushedAgain(t *testing.T) {
 		if exists(h.env.rejectedConfigPath()) {
 			t.Fatal("the superseded rejected edit was kept")
 		}
-		if status := h.run(Options{Action: ActionStatus}); hasWarning(status, codeConfigRejected) {
+		if status := h.run(Options{Action: ActionStatus}); hasWarning(status, enterprisestatus.CodeConfigRejected) {
 			t.Fatalf("status still reports a superseded rejected edit: %+v", status.Warnings)
 		}
 		if verify := h.run(Options{Action: ActionVerify}); hasMessage(verify.Errors, "rejected") {
@@ -279,7 +279,7 @@ func TestRejectedConfigStaysReportedUntilConfigIsPushedAgain(t *testing.T) {
 		h, applied := reject(t)
 		requireReported(t, h)
 		pushConfig(t, h, applied)
-		if r := h.run(Options{Action: ActionEnsure, Reason: "path"}); !r.Noop || hasWarning(r, codeConfigRejected) {
+		if r := h.run(Options{Action: ActionEnsure, Reason: "path"}); !r.Noop || hasWarning(r, enterprisestatus.CodeConfigRejected) {
 			t.Fatalf("ensure after the push: noop=%v warnings=%+v", r.Noop, r.Warnings)
 		}
 		requireCleared(t, h)

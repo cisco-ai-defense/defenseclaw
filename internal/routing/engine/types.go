@@ -171,13 +171,21 @@ type DenyReason struct {
 
 // Decision is the routing outcome for one request.
 type Decision struct {
-	Outcome      string
-	Backend      *Backend // nil unless Outcome is applied
-	Source       string
-	Category     string
-	RuleID       string
-	Candidate    string
-	FilteredBy   string
+	Outcome    string
+	Backend    *Backend // nil unless Outcome is applied
+	Source     string
+	Category   string
+	RuleID     string
+	Candidate  string
+	FilteredBy string
+	// NoCredential lists the aliases the policy allows that the request
+	// could not use for lack of a gateway credential (Gate then says so
+	// instead of blaming the administrator, rel-1-0-10 GAP-0921).
+	NoCredential []string
+	// OtherUnfit is true when another allowed alias was dropped for a reason
+	// that is not a credential (capability or API family), so a missing
+	// credential is not the whole story.
+	OtherUnfit   bool
 	FailureCode  string
 	Confidence   float64
 	Deny         *DenyReason
