@@ -2568,6 +2568,19 @@ func enterpriseHookLiveTargetVerifier(ctx context.Context, opts enterprisehooks.
 	return enterpriseHookLivePublicVerifier(ctx, opts)
 }
 
+// enterpriseHookRouteOnlyUnverified is the failure of a verified target
+// whose route-only render could not be read (result.RouteOnly unverified,
+// GAP-1111): coded route_config_unverified, so verify and the Windows
+// lifecycle report it as not verified, never as ok and never as
+// route_config_drift. nil for any other result.
+func enterpriseHookRouteOnlyUnverified(result enterprisehooks.InstallResult) error {
+	if result.RouteOnly != enterprisehooks.RouteOnlyUnverified {
+		return nil
+	}
+	return fmt.Errorf("%s: %s route-only settings are not verified: the agent files are read as the account, which only LocalSystem can do; run verify as SYSTEM (the guardian checks them)",
+		enterprisehooks.RouteConfigUnverifiedCode, strings.ToLower(strings.TrimSpace(result.Connector)))
+}
+
 // enterpriseHookManagedEnrollmentVerifier compares the protected enrollment set
 // the Guardian published with the one verify expects.
 var enterpriseHookManagedEnrollmentVerifier = verifyEnterpriseHookManagedEnrollments
@@ -2783,6 +2796,16 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
 			result, targetErr = enterpriseHookLiveTargetVerifier(ctx, opts, registrationOnly)
+			if targetErr == nil {
+				if unverified := enterpriseHookRouteOnlyUnverified(result); unverified != nil {
+					// Neither ok nor drift: the row keeps its result, with
+					// route_only "unverified", and fails (GAP-1111).
+					row.Result = &result
+					row.UserHome = result.UserHome
+					row.Connector = result.Connector
+					targetErr = unverified
+				}
+			}
 			if targetErr == nil {
 				row.Result = &result
 				row.UserHome = result.UserHome

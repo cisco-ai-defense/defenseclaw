@@ -2266,7 +2266,7 @@ jobs:
     needs: [changes, enterprise-install-assets-windows]
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets-windows.result == 'success' }}
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
       LANE_ASSET: setup

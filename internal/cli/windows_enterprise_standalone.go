@@ -3811,6 +3811,10 @@ var windowsEnterpriseKnownCodes = []string{
 	// changed) or pending (a config still names a launch folder; rerun).
 	"hook_image_retire_refused",
 	"hook_image_retire_pending",
+	// The verify of an elevated administrator could not read a route-only
+	// render (only LocalSystem reads the agent files as the account): not
+	// verified, not drift (GAP-1111). Exit 1603.
+	"route_config_unverified",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
