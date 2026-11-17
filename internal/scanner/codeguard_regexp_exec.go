@@ -193,7 +193,7 @@ func jsProvenRegExpNames(source string) map[string]bool {
 		}
 		decl := declarations[0]
 		unproven[name] = loc[0] < decl.blockStart || loc[1] > decl.blockEnd ||
-			!(jsMemberUse(code, loc[1]) || jsPatternArgument(code, loc[0], loc[1]))
+			(!jsMemberUse(code, loc[1]) && !jsPatternArgument(code, loc[0], loc[1]))
 	}
 	proven := map[string]bool{}
 	for name := range declared {
@@ -229,7 +229,7 @@ func jsMaskCode(source string) (string, map[int]int, bool) {
 	for i := 0; i < len(source); {
 		if inTemplate {
 			start := i
-			for i < len(source) && source[i] != '`' && !(source[i] == '$' && i+1 < len(source) && source[i+1] == '{') {
+			for i < len(source) && source[i] != '`' && (source[i] != '$' || i+1 >= len(source) || source[i+1] != '{') {
 				if source[i] == '\\' {
 					i++
 				}
@@ -360,7 +360,7 @@ func jsSlashStartsRegExp(prevByte byte, prevWord string) bool {
 	if prevWord != "" {
 		return jsRegexAfterWords[prevWord]
 	}
-	return prevByte != ')' && prevByte != ']' && !(prevByte >= '0' && prevByte <= '9') && prevByte != 'a'
+	return prevByte != ')' && prevByte != ']' && (prevByte < '0' || prevByte > '9') && prevByte != 'a'
 }
 
 // jsBraceMatches maps each { of the masked code to its }. ok is false when
@@ -483,7 +483,7 @@ func jsStatementEnds(code string, pos int) bool {
 		return false
 	}
 	word := code[pos:jsWordEnd(code, pos)]
-	return word != "" && !(word[0] >= '0' && word[0] <= '9') && !jsContinuationWords[word]
+	return word != "" && (word[0] < '0' || word[0] > '9') && !jsContinuationWords[word]
 }
 
 // jsPropertyName reports a name that is the property of a member access
