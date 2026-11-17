@@ -1783,6 +1783,7 @@
    "TestGAP0826AnalysisBoundRowsTakeTheUnknownTierOfThePack": 16.7,
    "TestGAP0876QuotedHereDocBodyIsItsCommandsInput": 8.8,
    "TestGAP1007JunctionDotDotWriteIsStateWriteInEveryTier": 45.7,
+   "TestGAP1075Win32SpellingsOfThePlainFile": 102.7,
    "TestGAP1409DirectoryEntryOperandsDoNotFollowFinalLink": 2.6,
    "TestGAP1409ObserveSelfProtectionHooks": 3.2,
    "TestGAP2590BenignLinkReadersAndLinkRemoval": 2.9,
