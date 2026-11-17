@@ -795,7 +795,7 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 	add(gateways, "*")
 	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
-		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot)
+		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot)
 	return p
 }
 

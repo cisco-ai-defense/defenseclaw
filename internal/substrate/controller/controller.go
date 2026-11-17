@@ -167,6 +167,59 @@ type Controller struct {
 	// more by a scoped controller; listed is what the last scoped pass
 	// listed (GAP-0295).
 	retired, listed map[string]bool
+	// runningAt is when the running report last went to the leader;
+	// runningWarned is set while it fails (GAP-0539).
+	runningAt     time.Time
+	runningWarned bool
+}
+
+// runningReportInterval is how often the controller tells the leader which
+// actors it sees running. Well under chainstate.ActiveGap, so a quiet actor
+// that runs keeps its running-time clock going between two reports and a
+// missed report or two costs nothing (GAP-0539).
+const runningReportInterval = time.Minute
+
+// runningReportTimeout bounds one running report, so a leader outage does
+// not hold the pass.
+const runningReportTimeout = 5 * time.Second
+
+// reportRunning tells the leader which listed actors are in state RUNNING,
+// at most once per runningReportInterval. Wall time while an actor runs is
+// its chain window's running time, also when it makes no request: a quiet
+// actor's secret read ages out after 30 minutes of running, as documented
+// (how-it-works, the secret-read chain; GAP-0539). Only RUNNING is reported:
+// an actor in any other or an unknown state, a pass that did not list it,
+// and a failed report leave its clock paused, so a window lasts longer,
+// never shorter.
+func (c *Controller) reportRunning(ctx context.Context, actors []*ateapi.Actor, now time.Time) {
+	rs, ok := c.o.Lifecycle.(RunningSink)
+	if !ok || now.Sub(c.runningAt) < runningReportInterval {
+		return
+	}
+	c.runningAt = now
+	var running []chainstate.Actor
+	for _, a := range actors {
+		if a.GetStatus().GetState() == ateapi.ActorStateRunning {
+			md := a.GetMetadata()
+			running = append(running, chainstate.Actor{Atespace: md.GetAtespace(), UID: md.GetUid()})
+		}
+	}
+	var err error
+	for len(running) > 0 && err == nil {
+		n := min(len(running), chainstate.MaxRunningActors)
+		rctx, cancel := context.WithTimeout(ctx, runningReportTimeout)
+		err = rs.Running(rctx, running[:n])
+		cancel()
+		running = running[n:]
+	}
+	switch {
+	case err != nil && !c.runningWarned:
+		c.runningWarned = true
+		c.emit(Event{Type: EventWarning, Severity: SeverityWarn,
+			Message: "the leader did not take the report of running actors (their chain windows' running time is paused until it does): " + err.Error()})
+	case err == nil:
+		c.runningWarned = false
+	}
 }
 
 type recreatedActor struct {
@@ -392,6 +445,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 			}
 		})
 	}
+	c.reportRunning(ctx, actors, now)
 	if len(errs) > 0 {
 		return fmt.Errorf("%d actors failed, first: %w", len(errs), errs[0])
 	}
@@ -1444,7 +1498,8 @@ const maxPendingLifecycle = 64
 // lifecycleOf is the lifecycle event of a state change, "" for none. Every
 // way into SUSPENDED is suspended (a revert or a crash ends SUSPENDED too):
 // the leader's retention of suspended actors. The leader's running-time
-// clock needs no event (GAP-0292).
+// clock needs no event (GAP-0292): it runs from the actor's requests and
+// the running report (reportRunning, GAP-0539).
 func lifecycleOf(prev, cur ateapi.ActorState) string {
 	if prev == cur {
 		return ""

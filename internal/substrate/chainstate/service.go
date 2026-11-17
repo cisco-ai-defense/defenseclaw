@@ -220,14 +220,19 @@ const ActiveGap = 5 * time.Minute
 // actorState is what the leader keeps of an actor on the volume: its
 // running-time clock, the order of its lifecycle events, and its task.
 //
-// The clock is the actor's own requests through DefenseClaw, at the
-// leader's receive time (never a guest timestamp, E15): hook chain calls,
-// intent calls and egress checks. A gap between two counts at most
-// ActiveGap. An actor that is not running makes no requests, so whatever
-// stopped it (a suspend of any kind, a detach, a drain, an eviction, an
-// outage of the controller or of the leader) stops its clock, and nothing
-// has to report it (GAP-0292). What the leader does not see counts as not
-// running: a chain window lasts longer, never shorter.
+// The clock is wall time while the actor runs (the chain horizon: 30
+// minutes of running time, a suspend does not count). The leader sees it
+// running from the actor's own requests through DefenseClaw (hook chain
+// calls, intent calls and egress checks) and from the controller's report
+// of the actors it saw in state RUNNING (ChainRunning, about once a minute,
+// GAP-0539), each at the leader's receive time (never a guest or controller
+// timestamp, E15, GAP-0319). A gap between two of them counts at most
+// ActiveGap. An actor that is not running makes no requests and is not
+// reported running, so whatever stopped it (a suspend of any kind, a
+// detach, a drain, an eviction, an outage of the controller or of the
+// leader) stops its clock, and nothing has to report the stop (GAP-0292).
+// What the leader does not see counts as not running: a chain window lasts
+// longer, never shorter.
 type actorState struct {
 	// UncountedNanos is the wall time that is not running time: the part of
 	// each gap between two requests past ActiveGap.
@@ -376,6 +381,7 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(MethodChainLifecycle, s.logged(MethodChainLifecycle, leader.Typed(s.Lifecycle)))
 	srv.Handle(MethodChainEgress, s.logged(MethodChainEgress, leader.Typed(s.Egress)))
 	srv.Handle(MethodChainUnrecorded, s.logged(MethodChainUnrecorded, leader.Typed(s.Unrecorded)))
+	srv.Handle(MethodChainRunning, s.logged(MethodChainRunning, leader.Typed(s.Running)))
 	srv.Handle(MethodHistorySeen, s.logged(MethodHistorySeen, leader.Typed(s.HistorySeen)))
 	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
 }
@@ -1274,6 +1280,32 @@ func (s *Service) IntentPut(ctx context.Context, in IntentRequest) (IntentRespon
 		return IntentResponse{}, s.setState(e, st)
 	}
 	return IntentResponse{}, bad(fmt.Errorf("chainstate: unknown intent operation %q", in.Op))
+}
+
+// Running serves ChainRunning: the controller saw these actors running, so
+// each runs at the leader's receive time (actorState.active), as for one of
+// its own requests (GAP-0539). Only an actor the leader keeps chain state
+// for is touched; others have no window to age, and an unknown or purged
+// one gets no entry. It is saved with the actor's next state write: a
+// leader that stops before loses only running time.
+func (s *Service) Running(_ context.Context, in RunningRequest) (struct{}, error) {
+	if len(in.Actors) > MaxRunningActors {
+		return struct{}{}, bad(fmt.Errorf("chainstate: a running report names at most %d actors", MaxRunningActors))
+	}
+	for _, a := range in.Actors {
+		if err := a.Validate(); err != nil {
+			return struct{}{}, bad(err)
+		}
+	}
+	now := s.opts.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range in.Actors {
+		if e := s.actors[a.key()]; e != nil && !e.purged && !e.purgeIdle {
+			e.state = e.state.active(now)
+		}
+	}
+	return struct{}{}, nil
 }
 
 // Lifecycle serves ChainLifecycle. Times are the controller's; zero is the
