@@ -1050,20 +1050,21 @@ public static class DcsfRemove {
             # Any other deletion failure is not retried and keeps its message.
             $layout = New-TestState 'other'
             [IO.File]::WriteAllText([IO.Path]::Combine($layout.StateRoot, 'refuse'), 'x')
-            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $script:dcsfTreeRemovals = 0
             Test-Refused 'deletion that fails for another reason' { Remove-DefenseClawPurgedStateRoot -Layout $layout } '^refusing StateRoot reparse point: '
-            if ($clock.ElapsedMilliseconds -ge 1500) {
-                $failures.Add("a failure that is not a file in use was retried ($($clock.ElapsedMilliseconds) ms)")
+            if ($script:dcsfTreeRemovals -ne 1) {
+                $failures.Add("a failure that is not a file in use was retried ($($script:dcsfTreeRemovals) tree removals)")
             }
 
             # The Secure Client profile keeps the single deletion. A retry is
             # counted, not timed: the tree removal above counts its calls, and
             # Secure Client must make exactly one, keeping the original
             # file-in-use error. The former check read "ended within 1.5 s" as
-            # "not retried"; one recursive delete of the held tree took 6-7 ms
-            # on dc-s7-win and 1.5 s and more on a hosted Windows PowerShell 5.1
-            # runner, so a deletion that ran once failed (rel-1-0-10:GAP-1233,
-            # #1457 job 134343225809).
+            # "not retried": one recursive delete of the held tree took 6-7 ms
+            # on dc-s7-win, and a deletion that ran once (its message was the
+            # original in-use error) still failed that bound on a hosted
+            # Windows PowerShell 5.1 runner (rel-1-0-10:GAP-1233, #1457 job
+            # 134343225809).
             $layout = New-TestState 'secure-client'
             $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
