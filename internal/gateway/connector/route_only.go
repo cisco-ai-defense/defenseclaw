@@ -42,6 +42,25 @@ type RouteOnlySetup struct {
 	// route_config_drift, so the guardian repairs and status says why,
 	// instead of reading it as "no route expected" (rel-1-0-10:GAP-0800).
 	Unavailable string
+	// Gate, on an OSS gateway, makes the write park the render while the
+	// gateway does not hold its API port (route_only_park.go,
+	// rel-1-0-10:GAP-1133). nil: the render is written as is.
+	Gate *RouteOnlyGate
+	// ParkOnly: write this render only parked (GAP-1133 round 2). The park
+	// before a bind or a release is built from config alone, with no route
+	// credential and no signing check, so it parks a connector whose real
+	// route cannot be derived right now (an AWS credential fetch failing at
+	// stop time). It is skipped where nothing is rendered (the agent talks
+	// to its provider directly) and when the gate already holds the port
+	// (the owner renders the real route itself).
+	ParkOnly bool
+	// HeldElsewhere, when set, reports at write time that this home's own
+	// gateway (another process) holds the API port. A gated write that
+	// would park then leaves the agent config alone: a second gateway
+	// process of the same home (a bare defenseclaw-gateway beside the
+	// background one) must not park the agents of the working gateway
+	// (GAP-1133 round 3).
+	HeldElsewhere func() bool
 }
 
 // RouteOnlyPlaceholderCredential is the fixed, non-secret value a custody

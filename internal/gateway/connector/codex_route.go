@@ -140,7 +140,10 @@ func codexRouteTable(route *RouteOnlySetup, w codexWrappedProvider, eol string) 
 			headers[k] = v
 		}
 	}
-	headers[RouteOnlyHeader] = route.Token
+	if route.Token != "" {
+		// A parked render carries no route credential (route_only_park.go).
+		headers[RouteOnlyHeader] = route.Token
+	}
 	if route.Custody {
 		// The gateway holds the provider credential (S1 DESIGN 16.2): Codex
 		// sends a placeholder bearer, never OPENAI_API_KEY, the env_key of
@@ -307,8 +310,14 @@ func renderCodexRoute(raw []byte, route *RouteOnlySetup, b *routeEnvBackup) ([]b
 
 // ApplyRouteOnly implements RouteOnlyConnector.
 func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) error {
+	route, release, write := lockedRoute(route)
+	defer release()
+	if !write {
+		return nil
+	}
 	path := codexConfigPath()
-	if route == nil {
+	// Nothing rendered and nothing to render (or only a park to write).
+	if route == nil || route.ParkOnly {
 		b, err := loadRouteBackup(opts.DataDir, c.Name())
 		if err == nil && len(b.Applied) == 0 {
 			raw, rerr := os.ReadFile(path)
@@ -323,7 +332,7 @@ func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) e
 			return err
 		}
 		err = atomicTransformFileWithStateDir(path, userAgentConfigTransactionDir(path, opts), 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
-			if !exists && route == nil {
+			if !exists && (route == nil || route.ParkOnly) {
 				return atomicTransformResult{Keep: true}, nil
 			}
 			out, err := renderCodexRoute(data, route, &backup)
