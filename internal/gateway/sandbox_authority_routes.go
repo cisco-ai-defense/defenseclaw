@@ -166,10 +166,11 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 	}
 	switch {
 	case goos == "darwin" || want == config.EnterpriseOpenShellDriverDocker:
-		// One driver, no fallback: macOS runs only the MicroVM driver.
-		if goos == "darwin" {
-			want = config.EnterpriseOpenShellDriverVM
-		}
+		// One driver, no fallback: the docker driver, and macOS, which runs
+		// the MicroVM driver unless the organization sets docker
+		// (SandboxDriver). Forcing vm here refused the registration of
+		// every managed Mac sandbox on the docker driver that ensure and
+		// the availability probe had set up (rel-1-0-10:GAP-0007).
 		if driver != want {
 			return "", "", sandboxDriverSwitchRefusal(driver, want)
 		}

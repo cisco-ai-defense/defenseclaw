@@ -171,6 +171,10 @@ type App struct {
 	// the docker driver, Docker Desktop's refuses a run up front
 	// (dockerDesktopRefusal).
 	DockerEngine func(ctx context.Context) (string, error)
+	// DockerVMLandlock is the Landlock ABI of Docker Desktop's Linux VM
+	// kernel, probed in a local image (openshell.DockerVMLandlockABI), which
+	// decides dockerDesktopRefusal.
+	DockerVMLandlock func(ctx context.Context) (abi int, kernel string, err error)
 	// Sleep waits between polls (tests make it instant).
 	Sleep func(context.Context, time.Duration) error
 	// LifecycleDir is the OpenShell configuration directory whose gateway
@@ -359,6 +363,19 @@ func (a *App) defaults() {
 		if a.DockerEngine == nil {
 			a.DockerEngine = func(ctx context.Context) (string, error) {
 				return openshell.DockerEngineOS(ctx, openshell.ExecRunner{})
+			}
+		}
+		if a.DockerVMLandlock == nil {
+			a.DockerVMLandlock = func(ctx context.Context) (int, string, error) {
+				images := []string{openshell.DefaultBaseImage}
+				if a.Images != nil {
+					if recs, err := a.Images.List(); err == nil {
+						for _, r := range recs {
+							images = append(images, r.Tag)
+						}
+					}
+				}
+				return openshell.DockerVMLandlockABI(ctx, openshell.ExecRunner{}, images)
 			}
 		}
 		if a.ConfigPath == "" && a.Cfg != nil {
