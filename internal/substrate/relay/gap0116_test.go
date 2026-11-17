@@ -11,16 +11,17 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
 
-// GAP-0116: the relay drops every catchable signal a process of the agent's
-// user can send, so the agent cannot stop it and take its port. (SIGKILL
-// and SIGSTOP never reach it because it is PID 1 of the actor's PID
-// namespace; that part is the kernel's and is checked live in an actor.)
-func TestRelayHoldsCatchableSignals(t *testing.T) {
+// GAP-0116: the relay drops every signal of heldSignals a process of the
+// agent's user can send (every one whose default ends or stops a process
+// and that can be caught), so the agent cannot stop it with one and take its
+// port. SIGKILL and SIGSTOP cannot be caught: gVisor delivers them to an
+// actor's PID 1, so only running the agent as another user keeps them away
+// (TestSeparatedAgentCannotSignalTheRelay; the E4 live check covers gVisor).
+func TestRelayHoldsTerminatingSignals(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "hold-probe")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -38,8 +39,7 @@ func TestRelayHoldsCatchableSignals(t *testing.T) {
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited })
-	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT,
-		syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGPIPE, syscall.SIGALRM, syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU} {
+	for _, sig := range heldSignals {
 		if err := cmd.Process.Signal(sig); err != nil {
 			t.Fatalf("%v: %v", sig, err)
 		}
