@@ -89,8 +89,11 @@ type RuntimeDecision struct {
 	// not installed, or a host that refuses scanner containment). For a
 	// skill the action is then block and the caller applies its fail mode
 	// (GAP-0164). For an MCP server only the tool scan is missing: the
-	// config rules decided the action (GAP-0185).
+	// config rules decided the action (GAP-0185), and an MCP server whose
+	// tools cannot be read from its source counts the same (GAP-0480).
 	Unavailable bool
+	// Unscanned says what was not scanned when Unavailable is set.
+	Unscanned string
 }
 
 // RuntimeScanner scans assets added mid-session.
@@ -189,7 +192,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	if so.Admission == nil {
 		so.Admission = FallbackAdmission
 	}
-	unavailable := false
+	unavailable, unscanned := false, ""
 	var res *scanner.ScanResult
 	switch a.Kind {
 	case config.AdmissionTypeSkill:
@@ -227,13 +230,24 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 		res.Findings = append(res.Findings, ConfigRules(*a.Server, r.AllowedMCPHosts)...)
 		if r.MCPStatic != nil && a.Server.Transport == "stdio" {
 			var src strings.Builder
+			hasSource := false
 			for _, f := range files {
 				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] && serverStarts(*a.Server, f.Path) {
+					hasSource = true
 					src.Write(f.Content)
 					src.WriteByte('\n')
 				}
 			}
-			if tools := ExtractToolDefs(src.String()); len(tools) > 0 {
+			tools := ExtractToolDefs(src.String())
+			if hasSource && len(tools) == 0 {
+				// The server's own source is here but declares its tools in a
+				// shape the extractor cannot read: its tool descriptions were
+				// not scanned, so the fail mode decides, never a silent
+				// allow (GAP-0480).
+				unavailable = true
+				unscanned = "the tools of the server could not be read from its source, so their descriptions were not scanned"
+			}
+			if len(tools) > 0 {
 				tf := filepath.Join(work, "tools.json")
 				raw, _ := json.Marshal(map[string]any{"tools": tools})
 				if err := os.WriteFile(tf, raw, 0o600); err != nil {
@@ -245,6 +259,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 					// still decide, and the fail mode decides the rest
 					// (Unavailable; GAP-0185, as for skills in GAP-0164).
 					unavailable = true
+					unscanned = "the MCP tool scan cannot run in the gateway (no mcp-scanner)"
 				} else {
 					if err != nil || sr == nil {
 						sr = failedScan(r.MCPStatic.Name(), a.Name, err)
@@ -278,7 +293,8 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			verdict, reason = VerdictBlock, "a HIGH finding, refused at run time as at the template build: "+strings.Join(high, ", ")
 		}
 	}
-	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete, Unavailable: unavailable}
+	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete,
+		Unavailable: unavailable, Unscanned: unscanned}
 	switch verdict {
 	case VerdictBlock:
 		d.Action = "block"
