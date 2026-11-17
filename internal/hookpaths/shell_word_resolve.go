@@ -34,19 +34,22 @@ const (
 const MaxResolvedCandidates = 256
 
 // shellGlobOptions are the bash options that change pathname expansion. The
-// first group the resolver models exactly (dotGlob, noCaseGlob, nullGlob,
-// failGlob, noGlob); the second group it does not, so a word with an active
-// glob character is uncertain whenever one of them may be on (globStar,
-// extGlob, globIgnore), or may have been changed by the command itself
-// (unknown).
+// resolver models dotGlob, noCaseGlob, nullGlob, failGlob, noGlob and
+// globStar exactly; extGlob changes only the parse (an extglob word is never
+// modeled). It does not model the GLOBIGNORE filter (globIgnore) or options
+// the command may change in a way it does not spell (unknown): a word with an
+// active glob character is uncertain then. may holds the options a statement
+// of the call itself may turn either way (globOptionsInCall): the word is read
+// under each value.
 type shellGlobOptions struct {
 	dotGlob, noCaseGlob, nullGlob, failGlob, noGlob bool
 	globStar, extGlob, globIgnore, unknown          bool
+	may                                             uint8
 }
 
 // unmodeled reports an option state the resolver cannot expand exactly.
 func (o shellGlobOptions) unmodeled() bool {
-	return o.globStar || o.extGlob || o.globIgnore || o.unknown
+	return o.globIgnore || o.unknown
 }
 
 // shellGlobOptionsFromEnv reads the options a non-interactive bash imports
@@ -88,19 +91,12 @@ func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 // glob word of such a call is uncertain.
 var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+]|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
 
-// globOptionsMayChange reports a command whose glob options the scan cannot
-// know at a later word.
-func globOptionsMayChange(command string) bool { return globOptionsChangeText.MatchString(command) }
-
 // shellGlobOptionsForCall is the options a call's glob words are expanded
 // with: the agent's environment (the client's header for a per-user gateway,
-// startup.glob), and unknown when the call itself may change them.
+// startup.glob) and what the call's own statements may set
+// (globOptionsInCall, rel-1-0-10:GAP-0380).
 func shellGlobOptionsForCall(command string, startup ShellStartup) shellGlobOptions {
-	o := startup.glob
-	if globOptionsMayChange(command) {
-		o.unknown = true
-	}
-	return o
+	return globOptionsInCall(command, startup.glob)
 }
 
 // resolvedWord is what one shell word names on the disk: every candidate
@@ -117,6 +113,11 @@ type resolvedWord struct {
 	// not modeled: the one candidate that is always possible, which the
 	// caller still checks by identity (GAP-0415). "" for any other word.
 	literal string
+	// preGlob marks a word uncertain before any pathname expansion: an
+	// unknown parameter, a command or process substitution, an arithmetic
+	// or brace part, a word that splits. An extglob form is a glob form, not
+	// preGlob (UncertainGlobWriteReason).
+	preGlob bool
 }
 
 // resolveShellWord is the one reading of a write operand:
@@ -140,20 +141,26 @@ type resolvedWord struct {
 // cannot read and a result past the bound. The caller judges every
 // candidate by identity.
 func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
-	if word == nil || !filepath.IsAbs(cwd) || !resolverWordKnown(word, values) {
-		return resolvedWord{uncertain: wordUncertainDynamic}
+	if opts.may != 0 {
+		return resolveShellWordReadings(word, values, cwd, opts)
+	}
+	if word == nil || !filepath.IsAbs(cwd) {
+		return resolvedWord{uncertain: wordUncertainDynamic, preGlob: true}
+	}
+	if !resolverWordKnown(word, values) {
+		return resolvedWord{uncertain: wordUncertainDynamic, preGlob: !resolverWordHasExtGlob(word)}
 	}
 	home := values["HOME"]
 	cfg := resolverConfig(values, cwd)
 	pattern, ok := resolverPattern(word, cfg, home)
 	if !ok {
-		return resolvedWord{uncertain: wordUncertainDynamic}
+		return resolvedWord{uncertain: wordUncertainDynamic, preGlob: true}
 	}
 	// Quote removal with globbing disabled (cfg has no ReadDir): the word
 	// as the shell passes it when nothing is expanded.
 	fields, err := expand.Fields(cfg, word)
 	if err != nil || len(fields) != 1 {
-		return resolvedWord{uncertain: wordUncertainDynamic}
+		return resolvedWord{uncertain: wordUncertainDynamic, preGlob: true}
 	}
 	literalText := fields[0]
 	if !resolverPatternActive(pattern) {
@@ -172,7 +179,7 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	hidden := actionGlobViewHidden(cwd, home)
 	userView := !hidden && actionProcessOwnsHome(home)
 	dots := func() bool { return opts.dotGlob || actionShellProfileMayDotglob(home) }
-	matches, complete, unseen := actionExpandGlobFold(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob)
+	matches, complete, unseen := actionExpandGlobStar(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob, opts.globStar)
 	var truncated bounded.Truncated
 	candidates := bounded.NewCounter(&truncated, bounded.Paths, MaxResolvedCandidates)
 	switch {
@@ -210,7 +217,7 @@ func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts s
 		whole.candidates = append(whole.candidates, value.candidates...)
 		whole.caps = whole.caps.Union(value.caps)
 		if whole.uncertain == "" {
-			whole.uncertain = value.uncertain
+			whole.uncertain, whole.preGlob = value.uncertain, value.preGlob
 		}
 		return whole
 	}
@@ -366,54 +373,49 @@ func resolverPatternActive(pattern string) bool {
 	return false
 }
 
-// resolverPatternModeled reports a glob pattern in the subset whose match
-// Go's matcher and bash agree on exactly: * and ? (no **, and none of the
-// extglob openers ?( *( +( @( !( ), and a bracket set of literal members
-// with an optional digit range. A negated set ([! or [^), a class or
-// collating form ([: [= [.), an escape inside the set, a set that starts
-// with ] or has no closing ], and a letter range (the order of letters
-// follows the locale in bash) are not.
+// resolverPatternModeled reports a glob pattern the one walk expands as bash
+// does: *, ?, ** (globstar's when it is on, *'s when off), backslash escapes
+// and every bracket form (bashGlobMatch, rel-1-0-10:GAP-0378). The extglob
+// openers ?( *( +( @( !( are not. A name whose match the user's locale or
+// shell version decides leaves the walk incomplete, so uncertain.
 func resolverPatternModeled(pattern string) bool {
 	for i := 0; i < len(pattern); i++ {
 		switch pattern[i] {
 		case '\\':
 			i++
-		case '*':
-			if i+1 < len(pattern) && (pattern[i+1] == '*' || pattern[i+1] == '(') {
-				return false
-			}
-		case '?', '+', '@', '!':
+		case '*', '?', '+', '@', '!':
 			if i+1 < len(pattern) && pattern[i+1] == '(' {
 				return false
 			}
-		case '[':
-			j := i + 1
-			if j >= len(pattern) || pattern[j] == '!' || pattern[j] == '^' || pattern[j] == ']' {
-				return false
-			}
-			closed := false
-			for ; j < len(pattern); j++ {
-				ch := pattern[j]
-				if ch == ']' {
-					closed = true
-					break
-				}
-				if ch == '[' || ch == '\\' {
-					return false
-				}
-				if ch == '-' {
-					if j == i+1 || j+1 >= len(pattern) || !isASCIIDigit(pattern[j-1]) || !isASCIIDigit(pattern[j+1]) || pattern[j-1] > pattern[j+1] {
-						return false
-					}
-				}
-			}
-			if !closed {
-				return false
-			}
-			i = j
 		}
 	}
 	return true
+}
+
+// resolveShellWordReadings is resolveShellWord for a word the call's own
+// statements may expand under other options (opts.may): the word is read
+// under each, and every path any reading names is a candidate. A reading
+// that is uncertain keeps the word uncertain.
+func resolveShellWordReadings(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
+	var out resolvedWord
+	seen := map[string]bool{}
+	for _, reading := range globReadings(opts) {
+		got := resolveShellWord(word, values, cwd, reading)
+		for _, candidate := range got.candidates {
+			if !seen[candidate] {
+				seen[candidate] = true
+				out.candidates = append(out.candidates, candidate)
+			}
+		}
+		out.caps = out.caps.Union(got.caps)
+		if out.uncertain == "" {
+			out.uncertain, out.preGlob = got.uncertain, got.preGlob
+		}
+		if out.literal == "" {
+			out.literal = got.literal
+		}
+	}
+	return out
 }
 
 func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
@@ -482,6 +484,18 @@ func shellWordNeedsResolver(word *syntax.Word) bool {
 // resolverWordKnown reports that every part of word is fixed text or a
 // parameter whose value the caller knows (no length, slice, replace or
 // indirection forms), so the expansion depends only on the disk.
+// resolverWordHasExtGlob reports an extglob part (?( *( +( @( !() in word.
+func resolverWordHasExtGlob(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.ExtGlob); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 func resolverWordKnown(word *syntax.Word, values actionValues) bool {
 	known := true
 	syntax.Walk(word, func(node syntax.Node) bool {

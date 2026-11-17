@@ -1851,7 +1851,46 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 	}
+	// No operand is proven protected. An operand whose pathname expansion the
+	// one shell word resolver cannot settle (a glob form it does not model, a
+	// glob option the call may have changed, a directory it cannot read) is
+	// not proven to leave the protected files alone either: it is UNCERTAIN,
+	// and the pack tier decides it (default and permissive alert, strict
+	// blocks; rel-1-0-10:GAP-0350, GAP-0378, GAP-0379, GAP-0380). A variable
+	// or substitution is left to the dynamic operand proofs, a result past
+	// the bound to the bound rule (hookpaths.UncertainGlobWriteReason).
+	//
+	// The agent's shell startup (the client's header) carries its glob
+	// options. A managed gateway behind a protected home (ProtectedHomeHook)
+	// cannot read the user's folders, so its own walk answers every glob word
+	// it would read unresolved: that answer is no evidence, and the client's
+	// evidence above decides the operand, as for every other check of this
+	// proof (rel-1-0-6:GAP-0675). A form or option the resolver does not model
+	// is uncertain before any walk, and stays uncertain there too.
+	//
+	// The client's evidence answers the words of the whole call, under the
+	// glob options the call itself sets. A statement the per-command pass
+	// reads alone, in a call whose other statements change those options
+	// (shopt -s globstar on its own line), is another reading of the same
+	// words: the client's answer does not decide it, and the blind walk keeps
+	// it unknown, where a per-user gateway reads that statement on the disk
+	// (rel-1-0-10:GAP-0415: managed is never weaker than per-user).
+	if input.Command != "" && trustedShellCommandInput(request.Input) {
+		if reason := hookpaths.UncertainGlobWriteReason(input.Command, input.CWD, facts.ActiveHome, request.ShellStartup); reason != "" &&
+			!(request.ProtectedHomeHook && reason == hookpaths.UnprovenTargetUnresolved && clientAnswersReading(request, input.Command)) {
+			return unproven(reason, "")
+		}
+	}
 	return false
+}
+
+// clientAnswersReading reports that the hook client's evidence was read for
+// the words of command as this evaluation reads them: command is the call
+// itself, or a statement of it that changes the glob options as the call
+// does (hookpaths.SameGlobOptionsInCall).
+func clientAnswersReading(request trustedActionRequest, command string) bool {
+	return !request.simpleCommandPass || request.parentPatch == nil ||
+		hookpaths.SameGlobOptionsInCall(request.parentPatch.Command, command)
 }
 
 // trustedPOSIXShellCall reports a call a POSIX shell runs (Bash tool,

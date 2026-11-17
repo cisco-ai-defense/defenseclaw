@@ -207,9 +207,10 @@ func TestResolverMatchesRealBashOnTheModeledSubset(t *testing.T) {
 	}
 }
 
-// Forms outside the subset, an option the resolver does not model and any
-// command that may change the options are uncertain, from the reviewer's
-// class variants (case ids only).
+// The resolver models every bracket form, globstar and the options the call
+// itself sets (rel-1-0-10:GAP-0378, GAP-0380); an extglob form and the
+// GLOBIGNORE filter stay uncertain, from the reviewer's class variants (case
+// ids only).
 func TestResolverUncertainOutsideTheModeledSubset(t *testing.T) {
 	f := newShellWordFixture(t)
 	for _, v := range hlinkmatrix.Rev2ClassVariants(f.names) {
@@ -218,15 +219,7 @@ func TestResolverUncertainOutsideTheModeledSubset(t *testing.T) {
 		}
 		forms := strings.SplitN(v.Transform, "+", 2)[0]
 		opt := strings.SplitN(v.Transform, "+", 2)[1]
-		wantUncertain := false
-		switch forms {
-		case "cls-bang", "cls-range-bang", "cls-caret", "cls-posix", "star2", "ext":
-			wantUncertain = true
-		}
-		if strings.Contains(opt, "globignore") || strings.Contains(opt, "extglob") || strings.Contains(opt, "globstar") ||
-			strings.HasPrefix(opt, "shopt-") {
-			wantUncertain = true
-		}
+		wantUncertain := forms == "ext" || strings.Contains(opt, "globignore")
 		t.Run(v.ID, func(t *testing.T) {
 			for name, value := range v.Env {
 				t.Setenv(name, value)
@@ -338,6 +331,30 @@ func TestHLinkRealBashOracle(t *testing.T) {
 
 // The startup header carries the agent's glob options, and a call that may
 // change them makes the glob words of the call uncertain.
+// A statement read alone means the same words as in its call only when it
+// changes the glob options as the call does (rel-1-0-10:GAP-0415: the
+// managed gateway's per-command pass).
+func TestSameGlobOptionsInCall(t *testing.T) {
+	for _, tc := range []struct {
+		call, statement string
+		same            bool
+	}{
+		{"touch -h a*", "touch -h a*", true},
+		{"cd sub\ntouch -h a*", "touch -h a*", true},
+		{"set -e\ntouch -h a*", "touch -h a*", true},
+		{"shopt -s globstar\ntouch -h **/a", "touch -h **/a", false},
+		{"shopt -s globstar\ntouch -h **/a", "shopt -s globstar", true},
+		{"shopt -s nocaseglob; touch -h A?", "touch -h A?", false},
+		{"set -f\ntouch -h a*", "touch -h a*", false},
+		{"GLOBIGNORE=x\ntouch -h a*", "touch -h a*", false},
+		{"eval x\ntouch -h a*", "touch -h a*", false},
+	} {
+		if got := SameGlobOptionsInCall(tc.call, tc.statement); got != tc.same {
+			t.Errorf("SameGlobOptionsInCall(%q, %q) = %t, want %t", tc.call, tc.statement, got, tc.same)
+		}
+	}
+}
+
 func TestShellGlobOptionsForCall(t *testing.T) {
 	startup := ShellStartup{glob: shellGlobOptions{dotGlob: true, noCaseGlob: true, globIgnore: true}}
 	got, ok := DecodeShellStartup(startup.Encode())
@@ -356,9 +373,29 @@ func TestShellGlobOptionsForCall(t *testing.T) {
 	if o := shellGlobOptionsForCall("touch a*", ShellStartup{}); o.unmodeled() {
 		t.Errorf("a plain call is modeled: %+v", o)
 	}
-	for _, change := range []string{"shopt -s nullglob; touch a*", "GLOBIGNORE=x touch a*", "set -f; touch a*", "eval touch a*", "bash -O dotglob -c 'touch a*'", "source x; touch a*"} {
+	// A statement of the call that names the option it turns is read: the
+	// later words are expanded under either value (rel-1-0-10:GAP-0380).
+	for change, may := range map[string]uint8{
+		"shopt -s nullglob; touch a*":   globMayNull,
+		"shopt -u dotglob; touch a*":    globMayDot,
+		"shopt -s globstar; touch a*":   globMayStar,
+		"set -f; touch a*":              globMayNoGlob,
+		"set -o noglob; touch a*":       globMayNoGlob,
+		"shopt -s nocaseglob\ntouch a*": globMayNoCase,
+	} {
+		if o := shellGlobOptionsForCall(change, ShellStartup{}); o.unknown || o.may != may {
+			t.Errorf("%q: unknown=%t may=%b, want may=%b", change, o.unknown, o.may, may)
+		}
+	}
+	if o := shellGlobOptionsForCall("GLOBIGNORE=x touch a*", ShellStartup{}); !o.globIgnore || !o.unmodeled() {
+		t.Errorf("a GLOBIGNORE assignment is a filter the resolver does not model: %+v", o)
+	}
+	for _, change := range []string{"eval touch a*", "bash -O dotglob -c 'touch a*'", "source x; touch a*", "BASHOPTS=globstar; touch a*", "shopt -s \"$o\"; touch a*"} {
 		if o := shellGlobOptionsForCall(change, ShellStartup{}); !o.unknown {
 			t.Errorf("%q: options not marked unknown", change)
 		}
+	}
+	if o := shellGlobOptionsForCall("set -e; set -o pipefail; touch a*", ShellStartup{}); o.unmodeled() || o.may != 0 {
+		t.Errorf("set -e and pipefail change no expansion: %+v", o)
 	}
 }

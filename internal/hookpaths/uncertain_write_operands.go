@@ -149,12 +149,36 @@ func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth in
 // files alone, so the pack tier decides it (GAP-0350), never a plain allow.
 // startup is the agent's shell startup (nil: this process's own).
 func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) string {
+	return uncertainWriteReason(command, cwd, home, startup, false)
+}
+
+// UncertainGlobWriteReason is UncertainWriteReason for what pathname
+// expansion alone leaves open: a glob form or a glob option the resolver
+// does not model (the word's literal is still a candidate), a directory the
+// walk cannot read. A result past the bound is the bound rule's (TRUNCATED
+// follows the pack, the judge still decides). An operand that is uncertain
+// before any glob (an unknown variable, a command substitution, a default
+// expansion) is not reported: the dynamic operand proofs judge it, as they
+// do on rel/1.0.10, and reading it here made every loop variable, function
+// parameter and dynamic word of a writer an unproven target
+// (rel-1-0-10:GAP-0378, GAP-0379, GAP-0380; the pack tier consumes this).
+func UncertainGlobWriteReason(command, cwd, home string, startup *ShellStartup) string {
+	return uncertainWriteReason(command, cwd, home, startup, true)
+}
+
+func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, globOnly bool) string {
 	current := CurrentShellStartup()
 	if startup != nil {
 		current = *startup
 	}
 	reason := ""
 	forEachWriteOperand(command, cwd, home, current, func(resolved resolvedWord) bool {
+		if globOnly && (resolved.preGlob || resolved.uncertain == wordUncertainTruncated) {
+			// uncertain before any glob: the dynamic operand proofs judge it;
+			// past the bound: the bound rule judges it (TRUNCATED follows the
+			// pack and the judge still decides, TestBoundRuleJudgeStillDecides)
+			return false
+		}
 		reason = resolved.uncertain
 		return reason != ""
 	})

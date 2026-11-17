@@ -2225,6 +2225,16 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 // actionExpandGlobFold is actionExpandGlob; fold matches names without case
 // (the nocaseglob option).
 func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots func() bool, fold bool) (candidates []string, complete, unseen bool) {
+	return actionExpandGlobStar(pattern, literal, hidden, userView, dots, fold, false)
+}
+
+// actionExpandGlobStar is actionExpandGlobFold; with globstar a component
+// that is exactly ** matches every directory below its folder, the folder
+// itself included (zero directories), and as the last component every file
+// and directory below it, as bash 5 reads it: no name with a leading dot
+// unless dots, and no symlink to a directory followed. The folders it reads
+// count toward the walk's bounds (rel-1-0-10:GAP-0380).
+func actionExpandGlobStar(pattern, literal string, hidden, userView bool, dots func() bool, fold, globstar bool) (candidates []string, complete, unseen bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -2236,8 +2246,31 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 	// entries counts the names read from every folder of this expansion.
 	entries := 0
 	complete = true
-	for _, component := range strings.Split(rest, separator) {
+	components := strings.Split(rest, separator)
+	for index, component := range components {
 		if component == "" {
+			continue
+		}
+		if globstar && component == "**" {
+			last := true
+			for _, after := range components[index+1:] {
+				last = last && after == ""
+			}
+			var next []string
+			for _, dir := range paths {
+				tree, treeComplete, treeUnseen := actionGlobStarTree(dir, last, hidden, userView, dots, &reads, &entries)
+				next = append(next, tree...)
+				complete = complete && treeComplete
+				unseen = unseen || treeUnseen
+				if len(next) > actionGlobMaxNames {
+					complete = false
+					break
+				}
+			}
+			if len(next) == 0 {
+				return nil, complete, unseen
+			}
+			paths = next
 			continue
 		}
 		if !strings.ContainsAny(component, "*?[") {
@@ -2325,6 +2358,63 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 		paths = next
 	}
 	return paths, complete, unseen
+}
+
+// actionGlobStarTree is what a globstar ** names under root: root and every
+// directory below it, and with files every other entry below it too. A
+// symlink is a name, never a folder to read; a name with a leading dot is
+// skipped unless dots. reads and entries are the walk's counters.
+func actionGlobStarTree(root string, files, hidden, userView bool, dots func() bool, reads, entries *int) (out []string, complete, unseen bool) {
+	complete = true
+	if !files {
+		out = append(out, root)
+	}
+	queue := []string{root}
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		if *reads++; *reads > actionGlobMaxReads {
+			return out, false, unseen
+		}
+		directory, err := actionGlobOpenDir(dir)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) && !hidden || errors.Is(err, syscall.ENOTDIR) || actionGlobInvalidName(err) ||
+				!hidden && actionGlobNotDirectory(dir, err) || errors.Is(err, fs.ErrPermission) && userView {
+				continue
+			}
+			complete, unseen = false, true
+			continue
+		}
+		for {
+			chunk, chunkErr := directory.ReadDir(actionGlobMaxNames)
+			*entries += len(chunk)
+			for _, entry := range chunk {
+				name := entry.Name()
+				if strings.HasPrefix(name, ".") && !dots() {
+					continue
+				}
+				path := filepath.Join(dir, name)
+				if entry.IsDir() {
+					out = append(out, path)
+					queue = append(queue, path)
+				} else if files {
+					out = append(out, path)
+				}
+			}
+			if chunkErr != nil {
+				if chunkErr != io.EOF {
+					complete = false
+				}
+				break
+			}
+			if len(chunk) == 0 || *entries > actionGlobMaxEntries || len(out) > actionGlobMaxNames {
+				complete = false
+				break
+			}
+		}
+		_ = directory.Close()
+	}
+	return out, complete, unseen
 }
 
 // actionGlobOpenDir opens a directory the walk lists. Windows refuses a
