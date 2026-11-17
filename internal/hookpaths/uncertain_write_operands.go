@@ -149,7 +149,7 @@ func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth in
 // files alone, so the pack tier decides it (GAP-0350), never a plain allow.
 // startup is the agent's shell startup (nil: this process's own).
 func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) string {
-	return uncertainWriteReason(command, cwd, home, startup, false)
+	return uncertainWriteReason(command, cwd, home, startup, false, false)
 }
 
 // UncertainGlobWriteReason is UncertainWriteReason for what pathname
@@ -162,11 +162,25 @@ func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) stri
 // do on rel/1.0.10, and reading it here made every loop variable, function
 // parameter and dynamic word of a writer an unproven target
 // (rel-1-0-10:GAP-0378, GAP-0379, GAP-0380; the pack tier consumes this).
-func UncertainGlobWriteReason(command, cwd, home string, startup *ShellStartup) string {
-	return uncertainWriteReason(command, cwd, home, startup, true)
+//
+// The resolver adds evidence only where its walk can see the folders. In a
+// view hidden from this process (actionGlobViewHidden: the working folder or
+// the home is not there for it, as for a cd target that does not exist here)
+// it sees nothing the protected-target readers do not, and their name
+// fallback for such a pattern decides the call, as on rel/1.0.10: reading
+// every glob operand there as uncertain made plain builds, listings and edits
+// an unproven authorized-keys write (the owner A/B of s7/hlinkport-r2
+// bf8dc50428). blind is a gateway behind ProtectHome, which sees no folder
+// of the home: the client's evidence decides its words (rel-1-0-6:GAP-0675),
+// so its hidden words stay uncertain.
+func UncertainGlobWriteReason(command, cwd, home string, startup *ShellStartup, blind bool) string {
+	return uncertainWriteReason(command, cwd, home, startup, true, blind)
 }
 
-func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, globOnly bool) string {
+func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, globOnly, blind bool) string {
+	if globOnly && !blind && actionGlobViewHidden(cwd, home) {
+		return ""
+	}
 	current := CurrentShellStartup()
 	if startup != nil {
 		current = *startup
