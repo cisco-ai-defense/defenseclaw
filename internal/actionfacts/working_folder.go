@@ -242,12 +242,15 @@ type workFolderTracker struct {
 	folders map[*syntax.Stmt]workFolders
 	// movers are the functions of the text whose body may move the folder.
 	movers map[string]bool
-	// decls are the definitions of the movers the text defines once, at its
-	// top level (nil for one defined more than once or in another body,
-	// which defines it only when that body runs): a call of one leaves the
-	// shell in the folders its body may leave it in, read from where the
-	// call runs.
+	// decls are the definitions of the movers the text defines once (nil
+	// for one defined more than once): a call of one the definition may
+	// have run before (workFolderDefinedAt) leaves the shell in the folders
+	// its body may leave it in, read from where the call runs.
 	decls map[string]*syntax.FuncDecl
+	// defs says where the text defines each mover, and callsOf holds the
+	// calls of each function name of the text.
+	defs    map[*syntax.FuncDecl]workFolderDef
+	callsOf map[string][]*syntax.CallExpr
 	// depth counts the mover bodies being read for a call, and calls the
 	// bodies read so far (shared): past either bound a call of a mover
 	// leaves an unresolved folder. inBody counts the function bodies the
@@ -255,6 +258,27 @@ type workFolderTracker struct {
 	depth, inBody int
 	calls         *int
 }
+
+// workFolderDef is where the text defines a mover. topLevel: a statement of
+// the top level of the text, which runs before every statement after it.
+// outer is the function whose body defines it (nil when the text itself
+// does, in a list, a group, a branch or a loop of it). scopes are the
+// subshells, command and process substitutions and pipeline stages the
+// definition is in: it defines nothing for the shell outside them.
+type workFolderDef struct {
+	topLevel bool
+	outer    *syntax.FuncDecl
+	scopes   []workFolderSpan
+}
+
+// workFolderSpan is the source range [from, to) of a node.
+type workFolderSpan struct{ from, to uint }
+
+func workFolderSpanOf(node syntax.Node) workFolderSpan {
+	return workFolderSpan{from: node.Pos().Offset(), to: node.End().Offset()}
+}
+
+func (s workFolderSpan) holds(offset uint) bool { return s.from <= offset && offset < s.to }
 
 // maxWorkFolderCallDepth bounds the nested mover calls whose bodies the
 // tracking reads, and maxWorkFolderCalls the bodies it reads for one text.
@@ -267,7 +291,8 @@ const (
 // bodies.
 func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	tracker := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: map[string]bool{},
-		decls: map[string]*syntax.FuncDecl{}, calls: new(int)}
+		decls: map[string]*syntax.FuncDecl{}, defs: map[*syntax.FuncDecl]workFolderDef{},
+		callsOf: map[string][]*syntax.CallExpr{}, calls: new(int)}
 	if file == nil {
 		return tracker
 	}
@@ -278,9 +303,25 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 		}
 	}
 	var all []*syntax.FuncDecl
+	var scopes []workFolderSpan
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil && decl.Body != nil {
-			all = append(all, decl)
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if node.Name != nil && node.Body != nil {
+				all = append(all, node)
+			}
+		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
+			scopes = append(scopes, workFolderSpanOf(node))
+		case *syntax.BinaryCmd:
+			if node.Op == syntax.Pipe || node.Op == syntax.PipeAll {
+				scopes = append(scopes, workFolderSpanOf(node.X), workFolderSpanOf(node.Y))
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) != 0 {
+				if name := projectPOSIXWord(node.Args[0]); !name.Expands {
+					tracker.callsOf[name.Value] = append(tracker.callsOf[name.Value], node)
+				}
+			}
 		}
 		return true
 	})
@@ -299,13 +340,66 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 		if !tracker.movers[name] {
 			continue
 		}
-		if _, seen := tracker.decls[name]; seen || !topLevel[decl] {
+		if _, seen := tracker.decls[name]; seen {
 			tracker.decls[name] = nil
-		} else {
-			tracker.decls[name] = decl
+			continue
 		}
+		tracker.decls[name] = decl
+		// A definition anywhere in the text, not only at its top level,
+		// defines a mover (rel-1-0-10:GAP-1229): `cd D && f() { cd X ||
+		// return; }; f; <write>` leaves the shell in X or D.
+		def := workFolderDef{topLevel: topLevel[decl]}
+		span := workFolderSpanOf(decl)
+		for _, scope := range scopes {
+			if scope.from <= span.from && span.to <= scope.to {
+				def.scopes = append(def.scopes, scope)
+			}
+		}
+		for _, other := range all {
+			if other == decl {
+				continue
+			}
+			body := workFolderSpanOf(other.Body)
+			if body.from <= span.from && span.to <= body.to &&
+				(def.outer == nil || body.from >= def.outer.Body.Pos().Offset()) {
+				def.outer = other // the innermost body around it
+			}
+		}
+		tracker.defs[decl] = def
 	}
 	return tracker
+}
+
+// definedAt reports a definition of a mover that may have run before call
+// (the one bound of a call is its depth): a call in the subshells and
+// substitutions of the definition, and, for one made at the top level of
+// the text, after it (a call in a function body runs when that body runs).
+// A definition in a function body has run only after a call of that body:
+// a function defined in the body of a function the text never calls is not
+// defined (rel-1-0-10:GAP-1144, the envelope rows).
+func (t *workFolderTracker) definedAt(decl *syntax.FuncDecl, call *syntax.CallExpr, depth int) bool {
+	def, known := t.defs[decl]
+	at := call.Pos().Offset()
+	if !known || depth > maxWorkFolderCallDepth || slices.ContainsFunc(def.scopes, func(scope workFolderSpan) bool { return !scope.holds(at) }) {
+		return false
+	}
+	if def.outer == nil {
+		return t.inBody != 0 || at >= decl.Pos().Offset()
+	}
+	if workFolderSpanOf(def.outer.Body).holds(at) {
+		return true // the body that defines it calls it
+	}
+	outer := def.outer.Name.Value
+	if t.decls[outer] != def.outer {
+		return false
+	}
+	for _, outerCall := range t.callsOf[outer] {
+		if from := outerCall.Pos().Offset(); !workFolderSpanOf(def.outer.Body).holds(from) &&
+			(t.inBody != 0 || from < at) && t.definedAt(def.outer, outerCall, depth+1) {
+			return true
+		}
+	}
+	return false
 }
 
 // posixWorkFolders returns, for every statement of file, the folders its
@@ -345,14 +439,15 @@ func functionBodyWorkFolders(file *syntax.File) map[*syntax.Stmt]workFolders {
 
 // moverCall returns the folders the shell may be in after call, a call of
 // the mover name that starts in in: those its body leaves, read from in (ok
-// where the body succeeded). A mover the tracking cannot tie to one
-// definition (defined more than once or in another function's body, or a
-// top-level call before the definition), or past the bounds of the
-// tracking, leaves an unresolved folder.
+// where the body succeeded), and where the call started when the
+// definition may not have run. A mover the tracking cannot tie to one
+// definition that may have run before the call (defined more than once, a
+// top-level call before the definition, a definition in a subshell or in the
+// body of a function the text does not call first; definedAt), or past the
+// bounds of the tracking, leaves an unresolved folder.
 func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in workFolders) (ok, after workFolders) {
 	decl := t.decls[name]
-	if decl == nil || t.inBody == 0 && call.Pos().Offset() < decl.Pos().Offset() ||
-		t.depth >= maxWorkFolderCallDepth || *t.calls >= maxWorkFolderCalls {
+	if decl == nil || t.depth >= maxWorkFolderCallDepth || *t.calls >= maxWorkFolderCalls || !t.definedAt(decl, call, 0) {
 		moved := unionWorkFolders(in, unresolvedWorkFolders)
 		return moved, moved
 	}
@@ -360,8 +455,15 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// The body statements keep the folders recorded where they are; only
 	// the folders the call leaves are read here.
 	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, decls: t.decls,
-		depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls}
-	return inner.stmt(decl.Body, in)
+		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls}
+	ok, after = inner.stmt(decl.Body, in)
+	if !t.defs[decl].topLevel {
+		// A definition in a list, a branch or a body may not have run: the
+		// call then finds no function, fails and leaves the shell where it
+		// was.
+		after = unionWorkFolders(after, in)
+	}
+	return ok, after
 }
 
 // workFolderBodyMoves reports a function body with a folder move in it, or
