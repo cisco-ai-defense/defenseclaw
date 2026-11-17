@@ -36,6 +36,15 @@ func TestGAP1219RoundCReviewDifferential(t *testing.T) {
 		{"Z07-zsh-outer-assignment", "zsh", "D=OUT; ", "printf '<%s>' $D"},
 		{"Z08-zsh-test-arithmetic", "zsh", "", "[[ D=1 ]]; printf '<%s>' $D"},
 	}
+	want := map[string]string{
+		"M01-default-semicolon": "<a>R", "M02-alternate-semicolon": "<a>R",
+		"M03-default-comment": "<>", "M04-default-redirect": "", "M05-default-space": "<a><b>",
+		"O01-outer-assignment": "<OUT>", "B01-brace-after-bare": "</hha></hhb>",
+		"A01-test-arithmetic": "<>", "Z01-zsh-default-space": "<a><b>",
+		"Z02-zsh-bare-space": "</hh>", "Z03-zsh-brace": "</hha></hhb>",
+		"Z05-zsh-default-semicolon": "<a>R", "Z06-zsh-alternate-semicolon": "<a>R",
+		"Z07-zsh-outer-assignment": "<OUT>", "Z08-zsh-test-arithmetic": "<>",
+	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			if _, err := exec.LookPath(row.shell); err != nil {
@@ -45,8 +54,13 @@ func TestGAP1219RoundCReviewDifferential(t *testing.T) {
 			cmd := exec.Command("bash", "-c", command)
 			cmd.Env = append(os.Environ(), "HOME=/hh")
 			cmd.Stdin = strings.NewReader("")
-			if _, err := cmd.CombinedOutput(); err != nil && !strings.HasPrefix(row.name, "Z04-") {
-				t.Fatalf("oracle failed: %v", err)
+			out, err := cmd.CombinedOutput()
+			if strings.HasPrefix(row.name, "Z04-") {
+				if err == nil || !strings.Contains(string(out), "no matches found") {
+					t.Fatalf("zsh subscript oracle = %q, %v; want unmatched glob error", out, err)
+				}
+			} else if err != nil || string(out) != want[row.name] {
+				t.Fatalf("oracle = %q, %v; want %q", out, err, want[row.name])
 			}
 			if twin, ok, _, unread := RunTimeShellTwin(command); !unread {
 				t.Errorf("%s: twin %q, ok=%v unread=%v; want unread", row.name, twin, ok, unread)
