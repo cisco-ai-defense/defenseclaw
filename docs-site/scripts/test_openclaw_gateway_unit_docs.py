@@ -49,15 +49,34 @@ class OpenClawGatewayUnitDocsTest(unittest.TestCase):
     def test_unit_waits_longer_than_the_readiness_wait(self):
         found = re.search(r"(?m)^TimeoutStartSec=(\d+)$", self.unit)
         self.assertTrue(found, "the unit sets no TimeoutStartSec")
-        self.assertGreaterEqual(int(found.group(1)), 120)
+        # The readiness wait is 60 s and extends per setup step to 3 x 60 s,
+        # plus work before the wait; 180 s would kill a start that is still
+        # making progress and Restart=on-failure would loop again.
+        self.assertGreaterEqual(int(found.group(1)), 300)
 
     def test_page_says_a_slow_start_exits_zero_under_systemd(self):
         self.assertIn("`STILL STARTING`", self.page)
-        self.assertIn("Started by systemd it exits 0", self.page)
-        self.assertIn("run from a terminal the same command exits 1", self.page)
+        self.assertIn("up to three minutes", self.page)
+        self.assertIn("as the unit's `ExecStart` it exits 0", self.page)
+        self.assertIn("Run from a terminal, a script or as `defenseclaw-gateway restart` it exits 1", self.page)
+
+    def test_page_does_not_claim_hooks_are_closed_in_every_tier(self):
+        # Default and permissive tiers fail open on a gateway outage.
+        self.assertNotIn("Hooks stay closed until the gateway answers", self.page)
+        self.assertIn("strict and managed installs block them (`closed`)", self.page)
+        self.assertIn("default and permissive policies let them run with a warning", self.page)
 
     def test_page_names_the_selinux_label_for_a_home_folder_binary(self):
-        for text in ("SELinux", "`status=203/EXEC`", "`bin_t`", "semanage fcontext -a -t bin_t", "restorecon"):
+        for text in (
+            "SELinux",
+            "`status=203/EXEC`",
+            "`bin_t`",
+            "sudo install -m 0755",
+            "a `mv` from `~/.local/bin` keeps the home label",
+            "restorecon -v /usr/local/bin/defenseclaw-gateway",
+            "semanage fcontext -a -t bin_t",
+            "policycoreutils-python-utils",
+        ):
             with self.subTest(text=text):
                 self.assertIn(text, self.page)
 
