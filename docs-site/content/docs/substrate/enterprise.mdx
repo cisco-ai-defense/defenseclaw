@@ -143,6 +143,8 @@ Two rules keep the scopes apart: `openshell.admin` on a laptop refuses the Subst
 
 Actors always enforce. Their hooks run in `action` mode whatever `guardrail.mode`, a profile's `mode` or its `connectors.<agent>.mode` says, so observe mode is not available in the cluster: an agent there runs with its own permission prompts off, and the hooks are the only gate on each tool call. The profile's thresholds (`block_at`, `alert_at`) and rule pack apply to actors as on laptops. A signed policy bundle that sets a `mode` is refused with `not_substrate_policy`.
 
+Model providers are never in an actor's allow list: agents reach them only through the DefenseClaw guardrail proxy. A provider host (for example `api.anthropic.com`, a Bedrock endpoint or a configured custom provider) in `egress_allow_only` or `ask_hosts` is dropped from the actor's egress policy, and a signed policy bundle that lists one is refused with `config_invalid`, naming the host.
+
 Deliver profile changes with `helm upgrade` or GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
 
 </Step>

@@ -42,6 +42,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	eb "github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
 // Platform is the platform a Substrate bundle must target: actors and the
@@ -285,6 +287,7 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 		return bad("guardrail", "the bundle sets no profile and no assignment")
 	}
 	names := slices.Sorted(maps.Keys(pol.Profiles))
+	providers := controller.SettingsFromConfig(base).ProviderHosts
 	for _, name := range names {
 		p := pol.Profiles[name]
 		if path := profileModePath(name, p); path != "" {
@@ -293,6 +296,9 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 		probe := config.GuardrailProfile{Description: p.Description, Sandbox: p.Sandbox}
 		if !profileEqual(p, probe) {
 			return Policy{}, refuse(CodeNotSubstrate, "guardrail.profiles."+name, "only description and sandbox apply to actors")
+		}
+		if key, host, m := providerHostIn(p.Sandbox, providers); key != "" {
+			return bad("guardrail.profiles."+name+".sandbox."+key, "%s is a model provider host (it matches %s): under the provider-host rule actors reach model providers only through the DefenseClaw guardrail proxy, so the host would be dropped from every actor's egress policy; remove it", bounded(host), m)
 		}
 		if _, err := config.TightenOpenShellAdmin(base.Substrate.Admin, p.Sandbox); err != nil {
 			return bad("guardrail.profiles."+name+".sandbox", "%s", bounded(err.Error()))
@@ -307,6 +313,26 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 		return bad("guardrail", "%s", bounded(err.Error()))
 	}
 	return pol, nil
+}
+
+// providerHostIn finds the first egress_allow_only or ask_hosts entry of sb
+// that reaches a model provider host, by the render's own check
+// (render.ProviderHost), with the provider entry it matches.
+func providerHostIn(sb *config.SandboxAdminConfig, providers []string) (key, host, match string) {
+	if sb == nil {
+		return "", "", ""
+	}
+	for _, l := range []struct {
+		key   string
+		hosts []string
+	}{{"egress_allow_only", sb.EgressAllowOnly}, {"ask_hosts", sb.AskHosts}} {
+		for _, h := range l.hosts {
+			if m, hit := render.ProviderHost(providers, h); hit {
+				return l.key, h, m
+			}
+		}
+	}
+	return "", "", ""
 }
 
 // profileModePath is the path of the first mode profile p sets (its own,
