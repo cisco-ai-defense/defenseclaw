@@ -560,14 +560,26 @@ func routeOnlyConversationID(h http.Header) string {
 	return ""
 }
 
-// decide asks the router and returns the routed attempt (nil: send the
-// original), the outcome, and whether the admin gate allows the original
-// request as a fallback target.
+// routeOnlyIdentityWait bounds how long a managed route-only model call waits
+// for the first directory lookup of its account when routing.admin or a
+// profile assignment selects by user or group. The hook-sized budget
+// (identityDirectoryBudget, 2 s) is too short when several directory
+// accounts start agents at once: SSSD answered after about 3 s and the first
+// model calls of each session were refused identity_unconfirmed
+// (rel-1-0-10:GAP-1155). A model call has no hook timeout to stay inside,
+// and the deadline of the request (ctx) still ends the wait.
+const routeOnlyIdentityWait = 10 * time.Second
+
 // routeOnlyManagedContext attaches the proved account of a managed
 // route-only request and the guardrail profile it resolves to, so the
 // routing.admin rules (users, groups) and the profile routing overlay match
 // this account, as on the hook and proxy paths (rel-1-0-10:GAP-0764).
+// An account whose facts are not cached yet is waited for first
+// (routeOnlyIdentityWait).
 func routeOnlyManagedContext(ctx context.Context, subject, connector string) context.Context {
+	if identityFactsEnabled.Load() && identityLookupBlocking.Load() {
+		awaitVerifiedIdentityDirectory(ctx, subject, routeOnlyIdentityWait)
+	}
 	ctx = attachVerifiedSubject(ctx, nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer)
 	return withGuardrailProfile(ctx, pinnedProfileSet(ctx), connector)
 }
@@ -587,6 +599,9 @@ func routeOnlyCaller(ctx context.Context, subject string) (engine.Caller, []stri
 	return engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer}, nil
 }
 
+// decide asks the router and returns the routed attempt (nil: send the
+// original), the outcome, and whether the admin gate allows the original
+// request as a fallback target.
 func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte, caller engine.Caller, profiles []string) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
 	if s.router == nil {
 		return nil, SemanticRouteOutcome{}, true

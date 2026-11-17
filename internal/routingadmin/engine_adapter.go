@@ -558,7 +558,7 @@ func (e *evaluator) Evaluate(_ context.Context, p engine.Policy, r engine.Reques
 
 // Gate checks one forwarded exit against the verdict.
 func (e *evaluator) Gate(v engine.AdminVerdict, target engine.GateTarget, managed bool) *engine.DenyReason {
-	verdict := Verdict{Bind: v.Bind, Force: v.Force, RuleIDs: v.RuleIDs, BindRuleIDs: v.RuleIDs}
+	verdict := Verdict{Bind: v.Bind, Force: v.Force, RuleIDs: v.RuleIDs, BindRuleIDs: v.BindRuleIDs}
 	if v.Bind {
 		verdict.Allowed = v.Policy.AllowedAliases
 	}
@@ -644,7 +644,7 @@ func ToEngineVerdict(p engine.Policy, v Verdict) engine.AdminVerdict {
 		}
 	}
 	out := engine.AdminVerdict{Policy: narrowed, Bind: v.Bind, Force: clone(v.Force), Warnings: clone(v.Warnings),
-		RuleIDs: clone(v.RuleIDs), ChargeKeys: clone(v.ChargeKeys)}
+		RuleIDs: clone(v.RuleIDs), BindRuleIDs: clone(v.BindRuleIDs), ChargeKeys: clone(v.ChargeKeys)}
 	if v.Deny != nil {
 		out.Deny = &engine.DenyReason{Code: v.Deny.Code, Message: v.Deny.Message}
 	}

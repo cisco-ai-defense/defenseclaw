@@ -2716,6 +2716,7 @@
    "TestRouteOnlyDecisionMetricFollowsTheFinalRouteChoice": 2.5,
    "TestRouteOnlyHumanTextLargeBody": 12.3,
    "TestRouteOnlyHumanTextMatchesTheFullDecodeRandom": 43.6,
+   "TestRouteOnlyManagedWaitsForAColdDirectoryLookup": 2.7,
    "TestRouteOnlyRecordsItsRoutingDecision": 2.5,
    "TestRoutingDecisionMetricLabelsAreClosedAndLeakNothing": 2.5,
    "TestRowOfRecordPanicBeforeItsFlushLeavesOnlyTheFailModeDecision": 3.2,

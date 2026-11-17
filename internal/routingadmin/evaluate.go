@@ -110,7 +110,12 @@ type Verdict struct {
 	// Deny is set only on a managed device.
 	Deny     *Deny
 	Warnings []string
-	RuleIDs  []string
+	// RuleIDs are the rules the facts prove match the request. A rule an
+	// unconfirmed identity fact may match still narrows (BindRuleIDs) or
+	// refuses (identity_unconfirmed:<fact>) on a managed device, but is not
+	// listed: before, an account whose directory facts had not resolved yet
+	// was shown as matching every user and group rule (rel-1-0-10:GAP-1155).
+	RuleIDs []string
 	// ChargeKeys are the budget keys this call counts against.
 	ChargeKeys []string
 }
@@ -210,10 +215,10 @@ func (p *Policy) Evaluate(req Request, ledger *Ledger, now time.Time) Verdict {
 			if v.Deny == nil {
 				v.Deny = &Deny{Code: "identity_unconfirmed:" + fact, Message: unconfirmedMessage(rule.ID)}
 			}
-			v.RuleIDs = append(v.RuleIDs, rule.ID)
 			continue
+		case state == Yes:
+			v.RuleIDs = append(v.RuleIDs, rule.ID)
 		}
-		v.RuleIDs = append(v.RuleIDs, rule.ID)
 		if rule.IsDeny() {
 			if !p.Managed {
 				v.warn("rule_deny_not_enforced:" + rule.ID)
