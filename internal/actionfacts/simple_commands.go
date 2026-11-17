@@ -857,6 +857,52 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
 						}
 					}
+					// The body starts where its caller is. After a cd that
+					// may fail or not run, that is each folder the tracking
+					// gives the call (mayRunIn), not only the one the walk
+					// moved to: `cd X || cd Y && eval "$body"` runs the body
+					// in X or Y, so it is read in each of them as well
+					// (rel-1-0-10:GAP-1144, GAP-0183). A body that starts in
+					// a folder of its own (innerCWDUnknown) has none.
+					if !innerCWDUnknown && innerInput.CWD != "" {
+						for _, dir := range mayRunIn[partIndex] {
+							if dir == innerInput.CWD {
+								continue
+							}
+							otherInput := innerInput
+							otherInput.CWD, otherInput.folderUnknown = dir, false
+							others := simpleCommands(otherInput, Analyze(otherInput), depth+1, innerInterpreter,
+								simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, nil)
+							if len(others) == 0 && strings.TrimSpace(otherInput.Command) != "" {
+								others = []SimpleCommand{{Text: otherInput.Command, CWD: dir}}
+							}
+							for _, child := range others {
+								if isSyntaxTailUnread(child) {
+									syntaxUnread = true
+									continue
+								}
+								if child.EvaluationFailure != "" {
+									unproven = true
+									continue
+								}
+								if !simpleRelativePathOperand(child.Text) {
+									continue // read in its own folder above
+								}
+								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
+									simpleUnresolvedBoundVariable(child.Text, effective, bound)
+								child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+								child.OtherFolder = true
+								if emitted[child] {
+									continue
+								}
+								emitted[child] = true
+								result = append(result, child)
+								if len(result) > maxSimpleEvaluations {
+									return []SimpleCommand{{EvaluationFailure: "limit"}}
+								}
+							}
+						}
+					}
 					if shared && !bodyParsed {
 						// The directory a shared body leaves is not known
 						// past its unread part.

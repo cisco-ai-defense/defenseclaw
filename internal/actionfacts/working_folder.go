@@ -242,23 +242,97 @@ type workFolderTracker struct {
 	folders map[*syntax.Stmt]workFolders
 	// movers are the functions of the text whose body may move the folder.
 	movers map[string]bool
+	// bodies are the bodies of the movers the text defines once (nil for
+	// one defined more than once): a call of one leaves the shell in the
+	// folders its body may leave it in, read from where the call runs.
+	bodies map[string]*syntax.Stmt
+	// depth counts the mover bodies being read for a call, and calls the
+	// bodies read so far (shared): past either bound a call of a mover
+	// leaves an unresolved folder.
+	depth int
+	calls *int
+}
+
+// maxWorkFolderCallDepth bounds the nested mover calls whose bodies the
+// tracking reads, and maxWorkFolderCalls the bodies it reads for one text.
+const (
+	maxWorkFolderCallDepth = 4
+	maxWorkFolderCalls     = 64
+)
+
+// newWorkFolderTracker is a tracker of file with its movers and their
+// bodies.
+func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
+	tracker := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: map[string]bool{},
+		bodies: map[string]*syntax.Stmt{}, calls: new(int)}
+	if file == nil {
+		return tracker
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil && decl.Body != nil && workFolderBodyMoves(decl.Body) {
+			name := decl.Name.Value
+			if _, seen := tracker.bodies[name]; seen {
+				tracker.bodies[name] = nil
+			} else {
+				tracker.bodies[name] = decl.Body
+			}
+			tracker.movers[name] = true
+		}
+		return true
+	})
+	return tracker
 }
 
 // posixWorkFolders returns, for every statement of file, the folders its
 // command may run in.
 func posixWorkFolders(file *syntax.File) map[*syntax.Stmt]workFolders {
-	tracker := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: map[string]bool{}}
+	tracker := newWorkFolderTracker(file)
+	if file != nil {
+		tracker.list(file.Stmts, hookWorkFolders)
+	}
+	return tracker.folders
+}
+
+// functionBodyWorkFolders returns, for every statement of a function body
+// of file, the folders it may run in relative to the folder the body starts
+// in (the folder of the call that runs it). A statement of a function
+// defined in another function's body is read relative to its own body.
+func functionBodyWorkFolders(file *syntax.File) map[*syntax.Stmt]workFolders {
+	tracker := newWorkFolderTracker(file)
 	if file == nil {
 		return tracker.folders
 	}
+	var bodies []*syntax.Stmt
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil && decl.Body != nil && workFolderBodyMoves(decl.Body) {
-			tracker.movers[decl.Name.Value] = true
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Body != nil {
+			bodies = append(bodies, decl.Body)
 		}
 		return true
 	})
-	tracker.list(file.Stmts, hookWorkFolders)
+	// The walk meets an enclosing definition before the ones in its body,
+	// so the innermost body is read last and its reading stays.
+	for _, body := range bodies {
+		tracker.stmt(body, hookWorkFolders)
+	}
 	return tracker.folders
+}
+
+// moverCall returns the folders the shell may be in after a call of the
+// mover name that starts in in: those its body leaves, read from in (ok
+// where the body succeeded). A mover defined more than once, or past the
+// bounds of the tracking, leaves an unresolved folder.
+func (t *workFolderTracker) moverCall(name string, in workFolders) (ok, after workFolders) {
+	body := t.bodies[name]
+	if body == nil || t.depth >= maxWorkFolderCallDepth || *t.calls >= maxWorkFolderCalls {
+		moved := unionWorkFolders(in, unresolvedWorkFolders)
+		return moved, moved
+	}
+	*t.calls++
+	// The body statements keep the folders recorded where they are; only
+	// the folders the call leaves are read here.
+	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, bodies: t.bodies,
+		depth: t.depth + 1, calls: t.calls}
+	return inner.stmt(body, in)
 }
 
 // workFolderBodyMoves reports a function body with a folder move in it.
@@ -330,8 +404,9 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		}
 		if len(cmd.Args) != 0 {
 			if name := projectPOSIXWord(cmd.Args[0]); !name.Expands && t.movers[name.Value] {
-				moved := unionWorkFolders(in, unresolvedWorkFolders)
-				return moved, moved
+				// After `f() { cd X || cd Y; }; f` the shell is in X, Y or
+				// where it was (rel-1-0-10:GAP-1144).
+				return t.moverCall(name.Value, in)
 			}
 		}
 		return in, in
@@ -794,13 +869,33 @@ func simplePartWorkFolders(source string, parts []sequenceStatement, cwd, home s
 		return true
 	})
 	tracked := posixWorkFolders(file)
+	// The call statements, by the offset of their call, and the folders of
+	// function body statements relative to the call that runs the body.
+	var calls map[int]*syntax.Stmt
+	var inBody map[*syntax.Stmt]workFolders
 	for index, part := range parts {
 		stmt := byOffset[part.sourceStart]
-		if stmt == nil || strings.Contains(part.scope, "/f") || strings.Contains(part.scope, "/e") {
-			// A function body runs where it is called; the walk reads it there.
+		if stmt == nil {
 			continue
 		}
-		folders := tracked[stmt].orHook()
+		folders := tracked[stmt]
+		if strings.Contains(part.scope, "/f") || strings.Contains(part.scope, "/e") {
+			// A function body runs where it is called: in each folder the
+			// call may run in, moved by the steps of the body before the
+			// statement. After `cd X || cd Y && f` that is X and Y, not the
+			// one folder the walk moved to (rel-1-0-10:GAP-1144). A body the
+			// text never calls, or a call the tracking did not record, is
+			// read by the walk alone.
+			if calls == nil {
+				calls, inBody = workFolderCallStatements(file), functionBodyWorkFolders(file)
+			}
+			var placed bool
+			folders, placed = calledBodyWorkFolders(part.callStarts, stmt, calls, tracked, inBody)
+			if !placed {
+				continue
+			}
+		}
+		folders = folders.orHook()
 		if slices.ContainsFunc(folders, func(folder workFolder) bool { return folder.unknown }) {
 			// A folder the tracking cannot give (cd -, popd, a variable):
 			// the walk reads those moves itself (OLDPWD, the directory
@@ -816,4 +911,55 @@ func simplePartWorkFolders(source string, parts []sequenceStatement, cwd, home s
 		}
 	}
 	return out
+}
+
+// workFolderCallStatements maps the offset of every call of file to the
+// statement whose command it is.
+func workFolderCallStatements(file *syntax.File) map[int]*syntax.Stmt {
+	calls := make(map[int]*syntax.Stmt)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			if call, isCall := stmt.Cmd.(*syntax.CallExpr); isCall {
+				calls[int(call.Pos().Offset())] = stmt
+			}
+		}
+		return true
+	})
+	return calls
+}
+
+// calledBodyWorkFolders are the folders a statement of a function body runs
+// in when the calls at callStarts (outermost first) run it: the folders of
+// the outermost call, then the steps of each inner call and of the
+// statement in their bodies. placed is false when a call is not one the
+// tracking read.
+func calledBodyWorkFolders(callStarts []int, stmt *syntax.Stmt, calls map[int]*syntax.Stmt,
+	tracked, inBody map[*syntax.Stmt]workFolders) (workFolders, bool) {
+	if len(callStarts) == 0 {
+		return nil, false
+	}
+	outer, found := calls[callStarts[0]]
+	if !found {
+		return nil, false
+	}
+	folders, found := tracked[outer]
+	if !found {
+		return nil, false
+	}
+	for _, start := range callStarts[1:] {
+		inner, found := calls[start]
+		if !found {
+			return nil, false
+		}
+		relative, found := inBody[inner]
+		if !found {
+			return nil, false
+		}
+		folders = relative.within(folders)
+	}
+	relative, found := inBody[stmt]
+	if !found {
+		return nil, false
+	}
+	return relative.within(folders), true
 }
