@@ -661,7 +661,9 @@ data:
 ---
 # Source: defenseclaw-substrate/templates/observability/collector.yaml
 # A local OpenTelemetry collector for trying the chart: OTLP in, the debug
-# exporter out. Not for production.
+# exporter out at verbosity detailed, so each record and its attributes show in
+# the collector log as values.yaml says (basic printed only counts, GAP-0454).
+# Not for production.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -684,7 +686,7 @@ data:
     processors:
       batch: {}
     exporters:
-      debug: {verbosity: basic}
+      debug: {verbosity: detailed}
     service:
       pipelines:
         traces: {receivers: [otlp], processors: [batch], exporters: [debug]}
