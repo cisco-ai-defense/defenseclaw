@@ -70,6 +70,8 @@ late policy only delays access.
 
 **Hook.** Agent hook, resident hook binary, egress (adds the token), actor listener. The gateway verifies the token and the live UID,
 finds the registration and profile, and runs the hook engine with surface `substrate`. Stateful steps go to the leader.
+Actor hooks always enforce (action mode): `guardrail.mode` and a profile's `mode` are not applied to actors, and a policy bundle
+that sets one is refused (`not_substrate_policy`). The profile's thresholds and rule pack apply.
 
 **Model.** `/llm/<provider>` on the actor Service resolves the caller from the token, applies routing and the guardrails, adds the key,
 forwards, checks the response and records usage.

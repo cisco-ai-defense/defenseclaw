@@ -141,6 +141,8 @@ What the Substrate keys do:
 
 Two rules keep the scopes apart: `openshell.admin` on a laptop refuses the Substrate keys, and `substrate.admin` refuses the laptop-only keys (`allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*`). A profile shared by laptops and the cluster may carry both; each side reads only its own.
 
+Actors always enforce. Their hooks run in `action` mode whatever `guardrail.mode`, a profile's `mode` or its `connectors.<agent>.mode` says, so observe mode is not available in the cluster: an agent there runs with its own permission prompts off, and the hooks are the only gate on each tool call. The profile's thresholds (`block_at`, `alert_at`) and rule pack apply to actors as on laptops. A signed policy bundle that sets a `mode` is refused with `not_substrate_policy`.
+
 Deliver profile changes with `helm upgrade` or GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
 
 </Step>

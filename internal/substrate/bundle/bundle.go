@@ -60,6 +60,11 @@ const (
 	CodeStateInvalid eb.Code = "state_invalid"
 )
 
+// modeNotSubstrate is the refusal of a guardrail mode in a Substrate bundle
+// (GAP-0571): actor hooks always run in action mode (the gateway's
+// sandboxHookMode), so a mode would change no actor verdict.
+const modeNotSubstrate = "mode is not a Substrate policy field: Substrate actors always enforce (action mode), whatever guardrail.mode or a profile's mode says"
+
 func refuse(code eb.Code, path, format string, a ...any) *eb.Error {
 	return &eb.Error{Code: code, Path: path, Detail: fmt.Sprintf(format, a...)}
 }
@@ -249,6 +254,13 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 			return Policy{}, refuse(CodeNotSubstrate, k, "a Substrate bundle sets only guardrail.profiles and guardrail.profile_assignments")
 		}
 	}
+	if g, ok := top["guardrail"]; ok && g.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(g.Content); i += 2 {
+			if g.Content[i].Value == "mode" {
+				return Policy{}, refuse(CodeNotSubstrate, "guardrail.mode", "%s", modeNotSubstrate)
+			}
+		}
+	}
 	var doc struct {
 		ConfigVersion  int    `yaml:"config_version"`
 		DeploymentMode string `yaml:"deployment_mode"`
@@ -275,6 +287,9 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 	names := slices.Sorted(maps.Keys(pol.Profiles))
 	for _, name := range names {
 		p := pol.Profiles[name]
+		if path := profileModePath(name, p); path != "" {
+			return Policy{}, refuse(CodeNotSubstrate, path, "%s", modeNotSubstrate)
+		}
 		probe := config.GuardrailProfile{Description: p.Description, Sandbox: p.Sandbox}
 		if !profileEqual(p, probe) {
 			return Policy{}, refuse(CodeNotSubstrate, "guardrail.profiles."+name, "only description and sandbox apply to actors")
@@ -292,6 +307,20 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 		return bad("guardrail", "%s", bounded(err.Error()))
 	}
 	return pol, nil
+}
+
+// profileModePath is the path of the first mode profile p sets (its own,
+// else a connector's, by name), or "".
+func profileModePath(name string, p config.GuardrailProfile) string {
+	if strings.TrimSpace(p.Mode) != "" {
+		return "guardrail.profiles." + name + ".mode"
+	}
+	for _, c := range slices.Sorted(maps.Keys(p.Connectors)) {
+		if strings.TrimSpace(p.Connectors[c].Mode) != "" {
+			return bounded("guardrail.profiles." + name + ".connectors." + c + ".mode")
+		}
+	}
+	return ""
 }
 
 func profileEqual(a, b config.GuardrailProfile) bool {
