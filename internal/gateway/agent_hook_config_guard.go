@@ -1321,6 +1321,22 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		whole.Authoritative() && !strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
 		return "", "", ""
 	}
+	if !whole.Authoritative() {
+		// A call the whole reading did not finish is read in the directories
+		// the guest placement gives its commands (sandboxGuestPlacements):
+		// after pushd, popd, cd -, { cd x; } or a function body that cds,
+		// and in an Args-only call the POSIX reader rejects, the statement
+		// split declines and the settings write went unnamed where the
+		// laptop alerts (substrate-1 GAP-0378, GAP-0379).
+		placements, _ := sandboxGuestPlacements(input, whole, false)
+		for _, placement := range placements {
+			placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: placement.text, CWD: placement.cwd, ActiveHome: input.ActiveHome})
+			if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
+				return agentHookConfigWriteRuleID, "", target
+			}
+		}
+		return "", "", ""
+	}
 	statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome)
 	if !ok {
 		return "", "", ""

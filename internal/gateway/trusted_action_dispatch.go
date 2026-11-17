@@ -925,8 +925,8 @@ func dispatchTrustedAction(
 	placed := placedReading{}
 	if input, ok := sandboxGuestPlacedInput(request, facts); ok {
 		analyzed := actionfacts.Analyze(input)
-		children, cut := sandboxGuestPlacedChildren(input, analyzed)
-		placed = placedReading{facts: &analyzed, everyOwner: true, children: children}
+		children, candidates, cut := sandboxGuestPlacedChildren(input, analyzed)
+		placed = placedReading{facts: &analyzed, everyOwner: true, children: children, candidates: candidates}
 		if cut.Any() {
 			// More placed commands than the reading takes: the call is
 			// truncated, judged at the unknown tier of the pack, never a
@@ -4185,18 +4185,23 @@ type placedReading struct {
 	facts      *actionfacts.Facts
 	everyOwner bool
 	children   []actionfacts.Facts
+	// candidates are read for the private-key read proof only
+	// (sandboxGuestPlacedChildren).
+	candidates []actionfacts.Facts
 }
 
 // placedReadingFirstView is the budget view number of the first placed view;
 // the dispatch's own views are 0 to 5 (evaluateSemanticRules).
 const placedReadingFirstView = 6
 
-// maxSandboxGuestPlacedChildren bounds the distinct simple-command readings
-// of one sandbox call at the call's own statement budget (128, the bound of
-// trustedCallOverStatementBudget); they share the call's semantic budget. A
-// call with more is truncated (sandboxGuestPlacedChildren). A cap of 16 gave
-// ACTION-COMPOUND-LIMIT to a cd followed by 17 or more distinct commands, a
-// setup script the laptop allows (substrate-1 GAP-0359).
+// maxSandboxGuestPlacedChildren is the call's own statement budget (128, the
+// bound of trustedCallOverStatementBudget) in the guest placement: the
+// distinct simple-command readings of a call the analysis read in full, and
+// the statements of a pass over a call it did not read in full when the call
+// is over that budget (sandboxGuestPlacements); the readings share the call's
+// semantic budget. A cap of 16 gave ACTION-COMPOUND-LIMIT to a cd followed by
+// 17 or more distinct commands, a setup script the laptop allows
+// (substrate-1 GAP-0359).
 const maxSandboxGuestPlacedChildren = 128
 
 // views returns the placed facts, then each child's.
@@ -4213,7 +4218,7 @@ func (placed placedReading) views() []actionfacts.Facts {
 // relative read of the guest home's key (cat .ssh/id_ed25519 from the home,
 // cat ../sandbox/.ssh/id_ed25519 from /work) is then the laptop's block.
 func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
-	for _, view := range placed.views() {
+	for _, view := range slices.Concat(placed.views(), placed.candidates) {
 		if view.Authoritative() && view.EnforcementEligible() &&
 			trustedActionActiveSSHPrivateKeyContentRead(view.EnforcementProjection()) {
 			return true
@@ -4222,96 +4227,36 @@ func (placed placedReading) provesSSHPrivateKeyContentRead() bool {
 	return false
 }
 
-// sandboxGuestPlacedChildren reads, lexically, each simple command of a
-// sandbox call that a static cd moved out of the guest working directory in
-// the directory it runs in: cd ../sandbox && echo x >> .profile writes the
-// guest home's .profile. The dispatch's own simple-command pass places the
-// command in the request's working directory, which a copy-mode actor does
-// not have, so the cd led nowhere there.
+// sandboxGuestPlacedChildren reads, lexically, each command of a sandbox
+// call that may run outside the guest working directory in the directory it
+// runs in: cd ../sandbox && echo x >> .profile writes the guest home's
+// .profile. The dispatch's own simple-command pass places the command in the
+// request's working directory, which a copy-mode actor does not have, so the
+// cd led nowhere there. The commands and their directories are
+// sandboxGuestPlacements; a call whose readings stop short reports cut
+// (bounded.Items): the caller adds the evaluation-limit finding, so a padded
+// chain is never a silent allow (substrate-1 GAP-0304).
 //
-// A command repeated in the same directory is read once: its reading is the
-// same, so a chain padded with the same static cd steps reads as the short
-// chain. More distinct commands than maxSandboxGuestPlacedChildren leave the
-// rest unread, and cut reports it (bounded.Items): the caller adds the
-// evaluation-limit finding, so a padded chain is never a silent allow
-// (substrate-1 GAP-0304).
-//
-// A call the analysis did not read in full has no whole-call view that
-// judges it (the dispatch's fallback), and its split may stop at a bash -c
-// "$X", a here-string, a $CMD or eval, or a && list past its bound. Its
-// top-level statements are read too, each in the directory a static cd
-// leaves it in, the guest's working directory included, as the laptop's
-// readers place them (hookpaths.TopLevelStatements, a lexical parse): rm
-// ../.defenseclaw/audit.db or cat ../.ssh/id_ed25519 after that command was
-// read nowhere (substrate-1 GAP-0363). That pass has its own count under the
-// cap: a call within its statement budget has at most 128 statements, so
-// only a call over the budget, which the laptop also limits, is cut there.
-func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) (children []actionfacts.Facts, cut bounded.CapSet) {
-	type placement struct{ text, cwd string }
-	seen := map[placement]bool{}
-	// place reads text in cwd once; read counts the readings of one pass,
-	// each pass under the cap.
-	place := func(text, cwd string, read *int) bool {
-		key := placement{text, cwd}
-		if seen[key] {
-			return true
-		}
-		if *read == maxSandboxGuestPlacedChildren {
-			return false
-		}
-		seen[key] = true
-		*read++
+// candidates are the readings in a directory the call reaches only as a cd
+// target no command runs in (guestPlacement.candidate): they count only for
+// the private-key read proof, as the laptop's readers judge a candidate
+// directory (substrate-1 GAP-0379).
+func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts) (children, candidates []actionfacts.Facts, cut bounded.CapSet) {
+	placements, stopped := sandboxGuestPlacements(input, facts, true)
+	for _, placement := range placements {
 		child := input
-		child.Command, child.CWD = text, cwd
+		child.Command, child.CWD = placement.text, placement.cwd
 		child.Args, child.Argv = nil, nil
-		children = append(children, actionfacts.Analyze(child))
-		return true
-	}
-	// known is the directory the last placed command ran in. After a
-	// command the split cannot follow ($CMD, eval "$X") the shell's
-	// directory is unknown; in a call the analysis did not read in full the
-	// next command is still read in that last directory, as the laptop's
-	// readers keep the earlier directories as candidates (cd .cache, $CMD,
-	// cat ../.ssh/id_ed25519).
-	known := ""
-	simplesRead := 0
-	for _, simple := range actionfacts.SimpleCommands(input, facts) {
-		cwd := simple.CWD
-		switch {
-		case path.IsAbs(cwd):
-			known = cwd
-		case cwd == "" && !facts.Authoritative():
-			cwd = known
-		}
-		if simple.EvaluationFailure != "" || simple.OpaqueValueAssignment || simple.LiteralOutputOnly ||
-			simple.LoginGuess || !path.IsAbs(cwd) || cwd == input.CWD {
-			continue
-		}
-		if !place(simple.Text, cwd, &simplesRead) {
-			return children, bounded.Of(bounded.Items)
+		if placement.candidate {
+			candidates = append(candidates, actionfacts.Analyze(child))
+		} else {
+			children = append(children, actionfacts.Analyze(child))
 		}
 	}
-	if facts.Authoritative() {
-		return children, bounded.CapSet{}
+	if stopped {
+		return children, candidates, bounded.Of(bounded.Items)
 	}
-	command, _ := trustedBashCommandInput(input)
-	if len(command) > agentHookConfigMaxPlacedBytes {
-		return children, bounded.CapSet{}
-	}
-	statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome)
-	if !ok {
-		return children, bounded.CapSet{}
-	}
-	statementsRead := 0
-	for _, statement := range statements {
-		if !path.IsAbs(statement.Dir) {
-			continue
-		}
-		if !place(statement.Command, statement.Dir, &statementsRead) {
-			return children, bounded.Of(bounded.Items)
-		}
-	}
-	return children, bounded.CapSet{}
+	return children, candidates, bounded.CapSet{}
 }
 
 // sandboxGuestPlacedInput is a sandbox call (every Substrate actor, an
