@@ -84,6 +84,12 @@ type credentialFileShape struct {
 	// homeOnly: see CredentialFileShape.HomeFile (a row with a relative
 	// path of several components is one already).
 	homeOnly bool
+	// notFolder: the parent folder of relative is not a credentials folder
+	// by its name (credentialDirectoryNames). Claude Code's .claude holds
+	// settings, skills, agents and worktrees, and a project has a .claude of
+	// its own: a sender handed a folder under one is not handed credential
+	// material for that (rel-1-0-10:GAP-1179, owner A/B datares-hd1).
+	notFolder bool
 }
 
 // credentialFileShapes is the single credentials-file table. The semantic
@@ -178,7 +184,7 @@ var credentialFileShapes = [...]credentialFileShape{
 	// so the home-only owner (secrets.cloud_credential_read) reads it as the
 	// account's own login (rel-1-0-10:GAP-1179). The base row keeps the
 	// CLAUDE_CONFIG_DIR folders, whose name is not known, for the chain.
-	{class: CredentialFileCloudCLI, relative: ".claude/.credentials.json"},
+	{class: CredentialFileCloudCLI, relative: ".claude/.credentials.json", notFolder: true},
 	{class: CredentialFileCloudCLI, base: ".credentials.json"},
 	// OpenAI Codex CLI: "~/.codex/auth.json" caches the login:
 	// https://developers.openai.com/codex/auth (moved to
