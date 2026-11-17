@@ -1158,6 +1158,25 @@ func RouteOnlyRouted(cfg *config.Config, connectorName string) bool {
 
 // routeOnlySetupBase is the rendering without its credential, or nil.
 func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
+	route := routeOnlyShape(cfg, connectorName, apiAddr)
+	if route == nil || !route.GatewaySigning {
+		return route
+	}
+	// The agent skips its own AWS auth only when the gateway can sign now
+	// (one credential fetched); otherwise the agent stays direct.
+	up := cfg.Routing.RouteOnly.Upstreams[connectorName]
+	if err := bedrockRenderReady(cfg, up.Bedrock, up.BaseURL); err != nil {
+		fmt.Fprintf(os.Stderr, "[routing] route-only for %s not rendered: gateway Bedrock signing cannot start: %v\n", connectorName, err)
+		return nil
+	}
+	return route
+}
+
+// routeOnlyShape is the route-only rendering of connectorName from config
+// alone: no credential is fetched and no route token read (GatewaySigning
+// says what the config asks for). routeOnlySetupBase adds the signing
+// check; the park writes it as is (GAP-1133).
+func routeOnlyShape(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
 	if !RouteOnlyRouted(cfg, connectorName) || strings.TrimSpace(apiAddr) == "" {
 		return nil
 	}
@@ -1173,16 +1192,7 @@ func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *conn
 	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName}
 	if up.API == config.RoutingAPIConverse || up.API == config.RoutingAPIInvoke {
 		route.Bedrock = true
-		if bedrockGatewaySigning(up.Bedrock) {
-			// The agent skips its own AWS auth only when the gateway can
-			// sign now (one credential fetched); otherwise the agent stays
-			// direct.
-			if err := bedrockRenderReady(cfg, up.Bedrock, up.BaseURL); err != nil {
-				fmt.Fprintf(os.Stderr, "[routing] route-only for %s not rendered: gateway Bedrock signing cannot start: %v\n", connectorName, err)
-				return nil
-			}
-			route.GatewaySigning = true
-		}
+		route.GatewaySigning = bedrockGatewaySigning(up.Bedrock)
 	}
 	return route
 }

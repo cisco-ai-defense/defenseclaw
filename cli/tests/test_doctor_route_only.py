@@ -567,3 +567,24 @@ def test_agent_config_reports_a_parked_render(tmp_path: Path) -> None:
     _render_claude(tmp_path)
     assert dro.agent_config_row(cfg, "claudecode", _ANTHROPIC).tag == "pass"
     assert not dro._parked("http://127.0.0.1:18970/r/claudecode") and not dro._parked("not a url")
+
+
+def test_agent_config_fails_a_real_route_with_the_gateway_down(tmp_path: Path) -> None:
+    """GAP-1133 round 2: after a crash, a logoff or a reboot the real route stays until the
+    next gateway start; doctor fails it while no gateway of this account holds the port,
+    names the start that parks it, and keeps a parked render a warn."""
+    cfg = _cfg(tmp_path, {"claudecode": _ANTHROPIC})
+    _render_claude(tmp_path)
+    row = dro.agent_config_row(cfg, "claudecode", _ANTHROPIC, gateway_down=True)
+    assert row.tag == "fail" and "does not hold it" in row.detail
+    assert "defenseclaw-gateway start" in row.fix and "parks the route" in row.fix
+    rows = dro.route_only_rows(cfg, None)
+    assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "fail"
+    rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_FOREIGN, holder="PID 7")
+    assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "fail"
+    # A foreground gateway of this account holds the port: not this failure.
+    rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_FOREGROUND)
+    assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "pass"
+    env = {"ANTHROPIC_BASE_URL": "http://127.0.0.1:0/r/claudecode"}
+    (tmp_path / "claude" / "settings.json").write_text(json.dumps({"env": env}), encoding="utf-8")
+    assert dro.agent_config_row(cfg, "claudecode", _ANTHROPIC, gateway_down=True).tag == "warn"

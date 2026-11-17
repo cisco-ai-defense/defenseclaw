@@ -152,3 +152,88 @@ func TestParkedRouteBaseURL(t *testing.T) {
 		t.Fatal("a lost-record restore must still recognize a parked render as ours")
 	}
 }
+
+// rel-1-0-10:GAP-1133 round 2: a park is built from config alone (no route
+// credential), so it must never become a real render. It parks a rendered
+// Claude Code or Codex config, leaves a config with nothing rendered alone
+// (that agent talks to its provider directly), and is skipped while the gate
+// holds the port (the owner renders the real route itself).
+func TestRouteOnlyParkOnlyNeverRendersTheRealRoute(t *testing.T) {
+	t.Run("claudecode", func(t *testing.T) {
+		path, opts := routeSettingsFixture(t, "{\n  \"model\": \"sonnet\"\n}")
+		c := NewClaudeCodeConnector()
+		gate := &RouteOnlyGate{}
+		park := &RouteOnlySetup{BaseURL: "http://127.0.0.1:18970/r/claudecode", Gate: gate, ParkOnly: true}
+
+		if err := c.ApplyRouteOnly(opts, park); err != nil {
+			t.Fatal(err)
+		}
+		if env := readEnv(t, path); env["ANTHROPIC_BASE_URL"] != nil {
+			t.Fatalf("nothing rendered: a park wrote %v", env)
+		}
+
+		gate.SetOwned(true)
+		live := &RouteOnlySetup{BaseURL: park.BaseURL, Token: "dcr1-abc", Gate: gate}
+		if err := c.ApplyRouteOnly(opts, live); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.ApplyRouteOnly(opts, park); err != nil {
+			t.Fatal(err)
+		}
+		if got := readEnv(t, path)["ANTHROPIC_BASE_URL"]; got != live.BaseURL {
+			t.Fatalf("a park while the gate holds the port changed the render: %v", got)
+		}
+
+		gate.SetOwned(false)
+		if err := c.ApplyRouteOnly(opts, park); err != nil {
+			t.Fatal(err)
+		}
+		env := readEnv(t, path)
+		headers, _ := env["ANTHROPIC_CUSTOM_HEADERS"].(string)
+		if got, _ := env["ANTHROPIC_BASE_URL"].(string); !IsParkedRouteBaseURL(got) || strings.Contains(headers, RouteOnlyHeader) {
+			t.Fatalf("released: base url %v headers %q, want parked without the route credential", got, headers)
+		}
+
+		// Without a gate (defenseclaw-gateway stop or start) it parks too.
+		gate.SetOwned(true)
+		if err := c.ApplyRouteOnly(opts, live); err != nil {
+			t.Fatal(err)
+		}
+		ungated := *park
+		ungated.Gate = nil
+		if err := c.ApplyRouteOnly(opts, &ungated); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := readEnv(t, path)["ANTHROPIC_BASE_URL"].(string); !IsParkedRouteBaseURL(got) {
+			t.Fatalf("an ungated park = %v", got)
+		}
+	})
+	t.Run("codex", func(t *testing.T) {
+		original := "model = \"gpt-5\"\n"
+		path, opts := codexRouteFixture(t, original)
+		c := NewCodexConnector()
+		park := &RouteOnlySetup{BaseURL: "http://127.0.0.1:18970/r/codex", ParkOnly: true}
+		if err := c.ApplyRouteOnly(opts, park); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(path); string(got) != original {
+			t.Fatalf("nothing rendered: a park changed config.toml:\n%s", got)
+		}
+		if err := c.ApplyRouteOnly(opts, &RouteOnlySetup{BaseURL: park.BaseURL, Token: "dcr1-xyz"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.ApplyRouteOnly(opts, park); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := os.ReadFile(path)
+		if !strings.Contains(string(raw), `base_url = "http://127.0.0.1:0/r/codex"`) || strings.Contains(string(raw), "dcr1-xyz") {
+			t.Fatalf("parked codex render:\n%s", raw)
+		}
+		if err := c.ApplyRouteOnly(opts, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(path); string(got) != original {
+			t.Fatalf("codex restore after a park-only write:\n got %q\nwant %q", got, original)
+		}
+	})
+}

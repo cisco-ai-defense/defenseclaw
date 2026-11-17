@@ -1752,6 +1752,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	var tcpBound chan net.Listener
 	retryCtx, stopRetry := context.WithCancel(ctx)
 	defer stopRetry()
+	// OSS: a render a crash, a forced stop or a logoff left in place points
+	// the agents at a port this gateway does not hold yet; park it before
+	// the bind, the real route follows once the port is ours (GAP-1133).
+	a.parkRouteOnly("this gateway is starting and does not hold its API port yet")
 	ln, lnErr := a.acquireAPIListener(ctx)
 	switch {
 	case lnErr == nil:

@@ -4,8 +4,10 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -30,10 +32,86 @@ func gatedRouteOnly(cfg *config.Config, route *connector.RouteOnlySetup) *connec
 	return &gated
 }
 
+// routeOnlyParkSetupFor is the parked render of connectorName: the shape of
+// its route from config alone, with no route token and no signing check, so
+// a connector whose real route cannot be derived right now (an AWS
+// credential fetch failing, an unreadable route key) is parked too. nil when
+// the connector is not routed on this OSS gateway.
+func routeOnlyParkSetupFor(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
+	if cfg == nil || cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() ||
+		!slices.Contains(cfg.ActiveConnectors(), connectorName) {
+		return nil
+	}
+	route := routeOnlyShape(cfg, connectorName, apiAddr)
+	if route == nil {
+		return nil
+	}
+	route.ParkOnly = true
+	route.Gate = ossRouteOnlyGate
+	return route
+}
+
+// ParkRouteOnlyAgents points the route-only agent config of every routed
+// connector of an OSS install at the parked address (port 0, no route
+// credential), where something is rendered, and returns the connectors it
+// parked. The gateway calls it before it binds its API port and before it
+// releases it; defenseclaw-gateway start and stop call it when no gateway of
+// this account runs, which covers a stop that had to kill the process
+// (Windows TerminateProcess) and a start after a crash. It never writes the
+// real route: a park racing a gateway that already holds the port is
+// skipped (that gateway renders the real route itself).
+func ParkRouteOnlyAgents(cfg *config.Config) ([]string, error) {
+	if !ossRouteOnlyGateway(cfg) {
+		return nil, nil
+	}
+	registry := connector.NewDefaultRegistry()
+	var parked []string
+	var errs []error
+	for _, name := range routeOnlyConnectorsOf(cfg) {
+		route := routeOnlyParkSetupFor(cfg, name, apiListenAddr(cfg))
+		if route == nil {
+			continue
+		}
+		conn, ok := registry.Get(name)
+		if !ok {
+			continue
+		}
+		rc, ok := conn.(connector.RouteOnlyConnector)
+		if !ok {
+			continue
+		}
+		if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: cfg.DataDir}, route); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			continue
+		}
+		parked = append(parked, name)
+	}
+	return parked, errors.Join(errs...)
+}
+
+// routeOnlyPark is ParkRouteOnlyAgents; tests replace it.
+var routeOnlyPark = ParkRouteOnlyAgents
+
+// parkRouteOnly parks the route-only agents of this OSS gateway (before a
+// bind, before a release) and logs it.
+func (a *APIServer) parkRouteOnly(why string) {
+	cfg := a.liveConfig()
+	if !ossRouteOnlyGateway(cfg) || len(routeOnlyConnectorsOf(cfg)) == 0 {
+		return
+	}
+	if _, err := routeOnlyPark(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "[routing] route-only park (%s): %v\n", why, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[routing] route-only agents parked: %s, so agents started from now on send nothing until this gateway holds %s\n", why, a.addr)
+}
+
 // routeOnlyPortOwned records that this OSS gateway now holds (true) or is
-// about to release (false) its API port, and renders every routed connector
-// again when that changed: the real route once the port is ours, the parked
-// one before it is closed. Managed gateways render through the guardian.
+// about to release (false) its API port. Owning it renders every routed
+// connector again with the real route; releasing it parks every routed
+// connector from config alone (routeOnlyParkSetupFor), so a connector whose
+// live route cannot be derived at stop time is parked too. Managed gateways
+// render through the guardian.
 func (a *APIServer) routeOnlyPortOwned(owned bool) {
 	cfg := a.liveConfig()
 	if !ossRouteOnlyGateway(cfg) {
@@ -42,11 +120,12 @@ func (a *APIServer) routeOnlyPortOwned(owned bool) {
 	if !ossRouteOnlyGate.SetOwned(owned) {
 		return
 	}
-	if len(routeOnlyConnectorsOf(cfg)) == 0 || a.onRouteKeyRotated == nil {
+	if !owned {
+		a.parkRouteOnly("this gateway is releasing its API port")
 		return
 	}
-	if !owned {
-		fmt.Fprintf(os.Stderr, "[routing] route-only agents parked: this gateway is releasing %s, so agents started from now on send nothing until it holds the port again\n", a.addr)
+	if len(routeOnlyConnectorsOf(cfg)) == 0 || a.onRouteKeyRotated == nil {
+		return
 	}
 	a.onRouteKeyRotated()
 }

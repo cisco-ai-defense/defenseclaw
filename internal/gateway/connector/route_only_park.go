@@ -49,20 +49,34 @@ func (g *RouteOnlyGate) Owned() bool {
 	return g.owned
 }
 
-// lockedRoute returns the render to write and the function that releases the
-// gate. A route without a gate (managed renders, restores) is written as is.
-func lockedRoute(route *RouteOnlySetup) (*RouteOnlySetup, func()) {
-	if route == nil || route.Gate == nil {
-		return route, func() {}
+// lockedRoute returns the render to write, the function that releases the
+// gate, and false when nothing is to be written: a ParkOnly render while the
+// gate holds the port. A route without a gate (managed renders, restores) is
+// written as is; a ParkOnly one always parked.
+func lockedRoute(route *RouteOnlySetup) (*RouteOnlySetup, func(), bool) {
+	noop := func() {}
+	if route == nil {
+		return nil, noop, true
+	}
+	if route.Gate == nil {
+		if route.ParkOnly {
+			parked := parkedRoute(*route)
+			return &parked, noop, true
+		}
+		return route, noop, true
 	}
 	g := route.Gate
 	g.mu.Lock()
 	effective := *route
 	effective.Gate = nil
-	if !g.owned {
+	switch {
+	case !g.owned:
 		effective = parkedRoute(effective)
+	case route.ParkOnly:
+		g.mu.Unlock()
+		return nil, noop, false
 	}
-	return &effective, g.mu.Unlock
+	return &effective, g.mu.Unlock, true
 }
 
 // parkedRoute is route with its endpoint on port 0 and no route credential.

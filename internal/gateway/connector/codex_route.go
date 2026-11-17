@@ -310,10 +310,14 @@ func renderCodexRoute(raw []byte, route *RouteOnlySetup, b *routeEnvBackup) ([]b
 
 // ApplyRouteOnly implements RouteOnlyConnector.
 func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) error {
-	route, release := lockedRoute(route)
+	route, release, write := lockedRoute(route)
 	defer release()
+	if !write {
+		return nil
+	}
 	path := codexConfigPath()
-	if route == nil {
+	// Nothing rendered and nothing to render (or only a park to write).
+	if route == nil || route.ParkOnly {
 		b, err := loadRouteBackup(opts.DataDir, c.Name())
 		if err == nil && len(b.Applied) == 0 {
 			raw, rerr := os.ReadFile(path)
@@ -328,7 +332,7 @@ func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) e
 			return err
 		}
 		err = atomicTransformFileWithStateDir(path, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
-			if !exists && route == nil {
+			if !exists && (route == nil || route.ParkOnly) {
 				return atomicTransformResult{Keep: true}, nil
 			}
 			out, err := renderCodexRoute(data, route, &backup)

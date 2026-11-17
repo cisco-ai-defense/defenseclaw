@@ -45,6 +45,14 @@ type RouteOnlySetup struct {
 	// gateway does not hold its API port (route_only_park.go,
 	// rel-1-0-10:GAP-1133). nil: the render is written as is.
 	Gate *RouteOnlyGate
+	// ParkOnly: write this render only parked (GAP-1133 round 2). The park
+	// before a bind or a release is built from config alone, with no route
+	// credential and no signing check, so it parks a connector whose real
+	// route cannot be derived right now (an AWS credential fetch failing at
+	// stop time). It is skipped where nothing is rendered (the agent talks
+	// to its provider directly) and when the gate already holds the port
+	// (the owner renders the real route itself).
+	ParkOnly bool
 }
 
 // RouteOnlyPlaceholderCredential is the fixed, non-secret value a custody
