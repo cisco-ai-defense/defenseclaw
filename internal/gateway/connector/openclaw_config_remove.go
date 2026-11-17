@@ -22,6 +22,10 @@ type openClawRemoval struct {
 	// because the operator had one before setup.
 	conversationGrant bool
 	keepEmptyHooks    bool
+	// loneGrant drops a defenseclaw entry that is left with nothing but that
+	// grant, when no copy of the file from before setup says the operator
+	// wrote it (GAP-0267).
+	loneGrant bool
 }
 
 // removeDefenseClawFromConfig takes the settings in scope out of a parsed
@@ -128,6 +132,12 @@ func nextDefenseClawRemoval(doc *jsonc.Value, data []byte, scope openClawRemoval
 						if scope.conversationGrant {
 							if spans := removeConversationGrantSpans(entry, data, scope.keepEmptyHooks); spans != nil {
 								return spans
+							}
+						}
+						if scope.loneGrant {
+							var left map[string]interface{}
+							if jsonc.UnmarshalJSON5(data[entry.Start:entry.End], &left) == nil && isLoneConversationGrant(left) {
+								return entries.RemoveChild(data, i)
 							}
 						}
 					}

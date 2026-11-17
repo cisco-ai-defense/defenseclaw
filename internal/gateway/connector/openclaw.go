@@ -819,6 +819,7 @@ func uninstallOpenClawExtension(paths openClawPaths, dropRejectedApprovals bool,
 		approvals:         dropRejectedApprovals,
 		conversationGrant: grant.added,
 		keepEmptyHooks:    grant.hooksBefore,
+		loneGrant:         grant.unrecorded,
 	})
 	if err != nil {
 		errs = append(errs, err.Error())
@@ -890,11 +891,22 @@ func removeDefenseClawEntryKeys(entries map[string]interface{}, scope openClawRe
 	if scope.conversationGrant {
 		removeDefenseClawConversationGrant(entry, scope.keepEmptyHooks)
 	}
+	if scope.loneGrant && isLoneConversationGrant(entry) {
+		delete(entries, "defenseclaw")
+		return
+	}
 	if len(entry) == 0 {
 		delete(entries, "defenseclaw")
 		return
 	}
 	entries["defenseclaw"] = entry
+}
+
+// isLoneConversationGrant reports whether entry holds nothing but
+// hooks.allowConversationAccess: true, the grant setup writes.
+func isLoneConversationGrant(entry map[string]interface{}) bool {
+	hooks, ok := entry["hooks"].(map[string]interface{})
+	return len(entry) == 1 && ok && len(hooks) == 1 && hooks["allowConversationAccess"] == true
 }
 
 // openClawHookModeKey is the plugin config key setup writes with the
@@ -983,12 +995,17 @@ type openClawSetupGrant struct {
 	added bool
 	// hooksBefore: it had a hooks object there, which stays even when empty.
 	hooksBefore bool
+	// unrecorded: no copy of the file from before setup exists, so nothing
+	// says the operator wrote the grant. An entry left holding nothing but
+	// that grant is then dropped with the plugin: a plugin installed later
+	// under the id defenseclaw would otherwise inherit it (GAP-0267).
+	unrecorded bool
 }
 
 func openClawSetupGrantFor(dataDir, connectorName string) openClawSetupGrant {
 	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, "openclaw.json"))
 	if err != nil {
-		return openClawSetupGrant{}
+		return openClawSetupGrant{unrecorded: true}
 	}
 	if !b.Existed {
 		return openClawSetupGrant{added: true}

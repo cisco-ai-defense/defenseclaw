@@ -131,16 +131,56 @@ func TestOpenClawUninstallOfASavedFileKeepsWhatTheOperatorHadUnderHooks(t *testi
 	}
 }
 
-// With no record of the file before setup nothing shows who wrote the grant,
-// so an uninstall of such a file leaves it.
-func TestOpenClawUninstallWithoutARecordKeepsTheConversationGrant(t *testing.T) {
+// With no record of the file before setup nothing shows who wrote the grant.
+// A grant next to other keys of the entry stays (the entry is the operator's);
+// an entry left with nothing but the grant goes with the plugin, so a plugin
+// installed later under the id defenseclaw does not inherit conversation
+// access (GAP-0267).
+func TestOpenClawUninstallWithoutARecordDropsAnEntryLeftWithOnlyTheGrant(t *testing.T) {
 	configPath, opts := openClawGrantFixture(t, "{}\n")
 	discardManagedFileBackup(opts.DataDir, "openclaw", "openclaw.json")
 	if err := uninstallOpenClawExtension(openClawPathsIn(filepath.Dir(configPath)), false, openClawSetupGrantFor(opts.DataDir, "openclaw")); err != nil {
 		t.Fatal(err)
 	}
-	if got := mustReadFileString(t, configPath); !strings.Contains(got, "allowConversationAccess") {
-		t.Fatalf("a grant of unknown origin was removed:\n%s", got)
+	got := mustReadFileString(t, configPath)
+	for _, residue := range []string{"allowConversationAccess", "defenseclaw"} {
+		if strings.Contains(got, residue) {
+			t.Fatalf("an entry holding only the grant stays (%q):\n%s", residue, got)
+		}
+	}
+}
+
+func TestOpenClawUninstallWithoutARecordKeepsAGrantBesideOperatorKeys(t *testing.T) {
+	configPath, opts := openClawGrantFixture(t, "{\"plugins\":{\"entries\":{\"defenseclaw\":{\"hooks\":{\"timeouts\":{\"x\":1}}}}}}\n")
+	discardManagedFileBackup(opts.DataDir, "openclaw", "openclaw.json")
+	if err := uninstallOpenClawExtension(openClawPathsIn(filepath.Dir(configPath)), false, openClawSetupGrantFor(opts.DataDir, "openclaw")); err != nil {
+		t.Fatal(err)
+	}
+	got := mustReadFileString(t, configPath)
+	if !strings.Contains(got, "allowConversationAccess") || !strings.Contains(got, "timeouts") {
+		t.Fatalf("a grant beside operator keys was removed:\n%s", got)
+	}
+}
+
+// The saved-file path (member-by-member text edit) drops the same entry.
+func TestOpenClawUninstallOfASavedFileWithoutARecordDropsAnEntryLeftWithOnlyTheGrant(t *testing.T) {
+	configPath, opts := openClawGrantFixture(t, "{\n  gateway: { port: 18789, },\n}\n")
+	discardManagedFileBackup(opts.DataDir, "openclaw", "openclaw.json")
+	saved := strings.Replace(mustReadFileString(t, configPath), "\"gateway\"", "\"meta\": {\"lastTouchedVersion\": \"x\"},\n  \"gateway\"", 1)
+	if err := os.WriteFile(configPath, []byte(saved), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := uninstallOpenClawExtension(openClawPathsIn(filepath.Dir(configPath)), false, openClawSetupGrantFor(opts.DataDir, "openclaw")); err != nil {
+		t.Fatal(err)
+	}
+	got := mustReadFileString(t, configPath)
+	for _, residue := range []string{"allowConversationAccess", "defenseclaw"} {
+		if strings.Contains(got, residue) {
+			t.Fatalf("an entry holding only the grant stays (%q):\n%s", residue, got)
+		}
+	}
+	if !strings.Contains(got, "lastTouchedVersion") {
+		t.Fatalf("operator key lost:\n%s", got)
 	}
 }
 
