@@ -1503,7 +1503,7 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 	// Antigravity command that stops or disables DefenseClaw, or rewrites an
 	// agent's hook configuration, raised no guard finding where every other
 	// hook connector blocks it.
-	if command, ok := trustedShellCommandArgument(input.Args); ok {
+	if command, ok := actionfacts.ShellCommandArgument(input.Args); ok {
 		return command
 	}
 	return ""

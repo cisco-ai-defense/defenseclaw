@@ -1787,6 +1787,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	var toolRaw, args json.RawMessage
 	var toolConflict, argsConflict bool
+	// agy names its command's directory in the call (agyCWD), not in cwd.
+	var agyCWD string
+	var agy bool
 	if copilot {
 		if rawCalls, present := envelope["toolCalls"]; present && surface == "" && event == "preToolUse" {
 			var calls any
@@ -1812,6 +1815,16 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		} else {
 			toolRaw, args, toolConflict, argsConflict = copilotCall(envelope, surface, event)
 		}
+	} else if name, callArgs, callCWD, present, ok := antigravityCall(connector, envelope, payload); present {
+		// agy's call is its toolCall, read as the gateway's agy profile reads
+		// it: listed under tool_name and tool_input only, an agy call had no
+		// targets and a managed gateway no placement for a write only they
+		// show (GAP-1132).
+		if !ok {
+			return incompleteEvidence("")
+		}
+		toolRaw, _ = json.Marshal(name)
+		args, agyCWD, agy = callArgs, callCWD, true
 	} else {
 		toolRaw, _, toolConflict = firstAlias(envelope, []string{"tool_name", "toolName"})
 		args, _, argsConflict = firstAlias(envelope,
@@ -1846,7 +1859,11 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	// The gateway names relative operands from the event cwd; use the same
 	// directory so both sides build the same keys.
 	var cwd string
-	_ = json.Unmarshal(envelope["cwd"], &cwd)
+	if agy {
+		cwd = agyCWD
+	} else {
+		_ = json.Unmarshal(envelope["cwd"], &cwd)
+	}
 	if !filepath.IsAbs(cwd) {
 		var err error
 		if cwd, err = os.Getwd(); err != nil {
@@ -1997,9 +2014,8 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	if toolArgs != nil {
-		for _, key := range []string{"command", "cmd"} {
-			var command string
-			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
+		for _, command := range clientShellCommands(tool, toolArgs, args) {
+			if command != "" {
 				var concreteOperands actionConcreteOperands
 				// An apply_patch command is a patch envelope, and one over
 				// the analysis string limit is file content far past what a
