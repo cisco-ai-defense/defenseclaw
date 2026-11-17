@@ -69,7 +69,9 @@ var openClawInstallPolicyRefreshMu sync.Mutex
 // A refresh that fails (the openclaw.json lock held past its wait, a write
 // error) is retried after each delay in turn; while one is still owed,
 // openClawInstallPolicyPending makes the next reload refresh again even when
-// it changes nothing for the install policy. Tests replace the delays.
+// it changes nothing for the install policy. A refresh that kept the policy
+// under an unknown OpenClaw version is still owed too, and the watcher runs
+// it once the cached version parses (GAP-1236). Tests replace the delays.
 var (
 	openClawInstallPolicyRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second, 2 * time.Minute, 5 * time.Minute}
 	openClawInstallPolicyPending     atomic.Bool
@@ -256,11 +258,20 @@ func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context) {
 			// Until a refresh decided, written-under keeps the old version
 			// and the next look tries again.
 			setOpenClawInstallPolicySeenVersion(version)
-			if version == openClawInstallPolicyWrittenVersion() ||
-				openClawInstallPolicyRetrying.Load() || !openClawInstallPolicyGuarded(cfg) {
+			if openClawInstallPolicyRetrying.Load() || !openClawInstallPolicyGuarded(cfg) {
 				continue
 			}
-			s.refreshOpenClawInstallPolicyAttempt(0, "an OpenClaw version change to "+version, true)
+			// An owed refresh (one that failed past its retries, or kept the
+			// policy under an unknown version) runs once the version parses,
+			// also when it is the one the policy was written under (GAP-1236).
+			reason := "an OpenClaw version change to " + version
+			if version == openClawInstallPolicyWrittenVersion() {
+				if !openClawInstallPolicyPending.Load() {
+					continue
+				}
+				reason = "an owed refresh under OpenClaw " + version
+			}
+			s.refreshOpenClawInstallPolicyAttempt(0, reason, true)
 		}
 	}
 }
@@ -365,7 +376,9 @@ func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason string
 	opts := openClawInstallPolicyRefreshOpts(cfg, watch)
 	state, err := openClawInstallPolicyRefresher(opts)
 	if err == nil {
-		openClawInstallPolicyPending.Store(false)
+		// An unknown version kept the policy as it was: what changed in
+		// config is still owed (GAP-1236).
+		openClawInstallPolicyPending.Store(state == connector.OpenClawInstallPolicyVersionUnknown)
 		line := fmt.Sprintf("[connector] openclaw: install admission after %s (install_policy %s): %s\n", reason, setting, state)
 		if !connector.OpenClawInstallPolicyDecided(state) {
 			if line != openClawInstallPolicyLastUndecided {

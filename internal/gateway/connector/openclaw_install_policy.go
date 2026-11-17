@@ -360,7 +360,7 @@ func OpenClawInstallPolicyDecided(state string) bool {
 const (
 	openClawInstallPolicyRegistered = "registered"
 	openClawInstallPolicyOff        = "off"
-	// openClawInstallPolicyVersionUnknown: the DefenseClaw block is
+	// OpenClawInstallPolicyVersionUnknown: the DefenseClaw block is
 	// registered and install_policy is on, but the OpenClaw version cannot be
 	// told (discovery cached "" while the executable was replaced mid-scan,
 	// after a probe timeout, or from a shell without openclaw on PATH; or a
@@ -369,7 +369,7 @@ const (
 	// DefenseClaw (fail-open), so it stays as it is and the state file keeps
 	// the version it was written under. A known version that is too old
 	// still removes it.
-	openClawInstallPolicyVersionUnknown = OpenClawInstallPolicyNotChanged + "OpenClaw version unknown"
+	OpenClawInstallPolicyVersionUnknown = OpenClawInstallPolicyNotChanged + "OpenClaw version unknown"
 )
 
 // applyOpenClawInstallPolicy writes, refreshes or removes the DefenseClaw
@@ -379,7 +379,7 @@ const (
 // "not registered: <reason>".
 func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) (string, error) {
 	state, err := applyOpenClawInstallPolicyState(configPath, opts)
-	if err == nil && state != openClawInstallPolicyVersionUnknown {
+	if err == nil && state != OpenClawInstallPolicyVersionUnknown {
 		saveOpenClawInstallPolicyState(opts.DataDir, state, openClawObservedVersion(opts))
 	}
 	return state, err
@@ -408,7 +408,7 @@ func applyOpenClawInstallPolicyState(configPath string, opts SetupOpts) (string,
 	if ours && opts.OpenClawInstallPolicy && NormalizeAgentVersion("openclaw", openClawObservedVersion(opts)) == "" {
 		// With no record, setup on an OpenClaw of no known version still
 		// does not register the block (below).
-		return openClawInstallPolicyVersionUnknown, nil
+		return OpenClawInstallPolicyVersionUnknown, nil
 	}
 	if !openClawInstallPolicyWanted(opts) {
 		state := openClawInstallPolicyOff
