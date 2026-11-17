@@ -76,8 +76,11 @@ type SubstrateFacts struct {
 	Paths []SubstratePathFact     `json:"paths,omitempty"`
 	Files []SubstrateAttachedFile `json:"files,omitempty"`
 	// Skills fingerprints every skill folder (A5's kit, GAP-0039).
-	Skills    []SubstrateSkillFingerprint `json:"skills,omitempty"`
-	Truncated bool                        `json:"truncated,omitempty"`
+	Skills []SubstrateSkillFingerprint `json:"skills,omitempty"`
+	// Proofs are the laptop's file-system proofs the kit made in the
+	// actor's file system (kit.ProofPrivateKeyRead, substrate-1 GAP-0471).
+	Proofs    []string `json:"proofs,omitempty"`
+	Truncated bool     `json:"truncated,omitempty"`
 }
 
 // SubstrateSkillFingerprint is one skill folder's content digest
@@ -200,6 +203,8 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 		// The facts stay on the envelope (substrateEnvelopeFrom); the skill
 		// scan below reads the attached files from it.
 		ctx := context.WithValue(r.Context(), substrateEnvelopeKey{}, env)
+		// The kit's proofs and link targets the policy reads (GAP-0471).
+		ctx = withSubstrateGuestClaims(ctx, env)
 		r = r.WithContext(ctx)
 		r.Body = io.NopCloser(bytes.NewReader(env.Payload))
 		r.ContentLength = int64(len(env.Payload))

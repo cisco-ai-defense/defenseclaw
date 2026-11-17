@@ -303,6 +303,19 @@ type trustedActionRequest struct {
 	// the authorized-keys proofs and the guest reading
 	// (sandboxGuestPlacedInput) read it, and only to add findings.
 	SandboxGuestCWD string
+	// guestKeyReadCommand is the shell command a Substrate actor's kit
+	// proved reads the actor's SSH private key in the actor's file system
+	// (substrateGuestClaims): the private-key read proof of a request that
+	// judges exactly that command holds (substrate-1 GAP-0471).
+	guestKeyReadCommand string
+	// guestProtectedWriteCommand is the shell command the kit's run of the
+	// laptop's protected-target decision (hookpaths.ActionCommandDecision)
+	// found writes a protected file in the actor's file system
+	// (trustedExistingAuthorizedKeysSymlinkWrite, substrate-1 GAP-0471).
+	guestProtectedWriteCommand string
+	// guestLinkTwin marks the twin of a file-tool call whose path arguments
+	// the kit resolved through a link (substrateGuestLinkTwinRequest).
+	guestLinkTwin bool
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
@@ -460,6 +473,19 @@ func dispatchTrustedAction(
 		}()
 	}
 	request.posixReadingTwin = false
+	if claims := substrateGuestClaimsFrom(parent); claims != nil {
+		// A Substrate actor's kit proved, in the actor's file system, what the
+		// laptop's gateway proves in its own (substrate-1 GAP-0471): a
+		// private-key read of the call's command, and the link targets of
+		// its path arguments. Both only add findings.
+		request.guestKeyReadCommand = claims.keyReadCommand
+		request.guestProtectedWriteCommand = claims.protectedWriteCommand
+		if twin, ok := substrateGuestLinkTwinRequest(parent, request); ok {
+			defer func() {
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+			}()
+		}
+	}
 	if trustedActionFaultHook != nil {
 		trustedActionFaultHook(request)
 	}

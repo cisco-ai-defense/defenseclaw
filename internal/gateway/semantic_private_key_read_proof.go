@@ -59,8 +59,11 @@ func appendTrustedPrivateKeyReaderFinding(
 		case strings.EqualFold(request.Input.Tool, "PowerShell"):
 			dialect = actionfacts.DialectPowerShell
 		}
+		// A Substrate actor's kit makes the same proof in the actor's file
+		// system, which this gateway cannot open (substrate-1 GAP-0471).
 		proved = hookpaths.ActionPrivateKeyReadWithDialect(command, request.Input.CWD, request.Input.ActiveHome, dialect) ||
-			hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
+			hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome) ||
+			request.substrateGuestClaimsProveKeyRead(command)
 		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) && !trustedActionCallOpensAccess(request) ||
 			trustedActionOwnSSHFolderCopy(request, request.Input)) {
 			// Every command copies inside the home and nothing in the call

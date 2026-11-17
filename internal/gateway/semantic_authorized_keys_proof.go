@@ -1047,6 +1047,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		return true
 	}
+	if command, ok := trustedBashCommandInput(request.Input); ok &&
+		request.guestProtectedWriteCommand != "" && command == request.guestProtectedWriteCommand {
+		// A Substrate actor's kit ran this decision on this command in the
+		// actor's file system, which this gateway cannot open, and found a
+		// protected target (a link to the actor's authorized_keys): the
+		// managed hook client's ActionDecisionKey proof below, made where
+		// the links are (substrate-1 GAP-0471).
+		return confirmed()
+	}
 	// unproven answers true for a write whose target is unknown, not a
 	// protected file: class (hookpaths.UnprovenWriteTitle) names why. The
 	// first true answer decides the call, so the class is that answer's

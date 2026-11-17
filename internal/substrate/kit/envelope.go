@@ -76,6 +76,11 @@ type Facts struct {
 	// Skills fingerprints every skill folder after PostToolUse,
 	// SessionStart and Stop (GAP-0039).
 	Skills []SkillFingerprint `json:"skills,omitempty"`
+	// Proofs name the laptop's file-system proofs the kit made in the
+	// actor's file system for the event's shell command (ProofPrivateKeyRead).
+	// The gateway, which has no view of that file system, uses a proof only
+	// to add the laptop's finding, never to remove one (substrate-1 GAP-0471).
+	Proofs []string `json:"proofs,omitempty"`
 	// Truncated is set when a cap dropped paths or file bytes.
 	Truncated bool `json:"truncated,omitempty"`
 	// readsSkill marks a PreToolUse read of a file in a skill root: the
@@ -105,6 +110,19 @@ type SkillFingerprint struct {
 	// (MaxAttachBytes): it is never attached, so only its Sums can match it.
 	Big bool `json:"big,omitempty"`
 }
+
+// ProofPrivateKeyRead says the event's shell command reads the content of the
+// actor's own SSH private key as the laptop's reader proves it against the
+// real file system (hookpaths.ActionPrivateKeyReadWithDialect): through a
+// symlink, a symlinked folder, a `..` walk or a cd (substrate-1 GAP-0471).
+const ProofPrivateKeyRead = "private_key_read"
+
+// ProofProtectedWrite says the laptop's protected-target decision
+// (hookpaths.ActionCommandDecision), run on the event's shell command in the
+// actor's file system, found it writes a protected file, such as a link to
+// the actor's authorized_keys: what a managed laptop's hook client reports
+// as its ActionDecisionKey (substrate-1 GAP-0471).
+const ProofProtectedWrite = "protected_write"
 
 // PathFact is one path argument as the actor's file system resolves it.
 type PathFact struct {

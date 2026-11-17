@@ -11,12 +11,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const (
@@ -88,6 +91,9 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	walkPaths("tool_input", input, 0, add)
 
 	isPre := event == "PreToolUse" || event == "preToolUse"
+	if isPre {
+		addShellCommandFacts(f, input, cwd, add)
+	}
 	if isPre && readTools[connector][view.ToolName] {
 		for _, pf := range f.Paths {
 			// A read of a skill's files runs the skill folder pass in this
@@ -111,10 +117,53 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		budget = attachMCPWrite(f, connector, cwd, input, budget)
 	}
 	_ = budget
-	if len(f.Paths) == 0 && len(f.Files) == 0 && !f.Truncated && !f.readsSkill {
+	if len(f.Paths) == 0 && len(f.Files) == 0 && len(f.Proofs) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
 	}
 	return f
+}
+
+// addShellCommandFacts makes, in the actor's file system, the file-system
+// proofs the laptop's gateway makes for a shell command (tool_input.command):
+// the private-key read proof and the protected-target write decision. It
+// also lists each path the command names whose physical place differs from
+// its spelling (a symlink, a symlinked folder, a `..` after one). The
+// gateway has no view of this file system: without these, cat key-link,
+// cat a/b/ssh/id_ed25519, cat ./a/../key-link and cd a/b/ssh && cat
+// id_ed25519 read the actor's private key where the laptop blocks
+// (substrate-1 GAP-0471). Only POSIX shells run in an actor.
+func addShellCommandFacts(f *Facts, input any, cwd string, add func(field, path string)) {
+	fields, ok := input.(map[string]any)
+	if !ok || runtime.GOOS == "windows" {
+		return
+	}
+	command, ok := fields["command"].(string)
+	if !ok || strings.TrimSpace(command) == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return
+	}
+	if hookpaths.ActionPrivateKeyReadWithDialect(command, cwd, home, actionfacts.DialectPOSIX) ||
+		hookpaths.ActionMakePrivateKeyRead(command, cwd, home) {
+		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
+	}
+	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
+		hookpaths.ProtectedTargetDecision {
+		f.Proofs = append(f.Proofs, ProofProtectedWrite)
+	}
+	walked := hookpaths.LinkWalkFacts(command, cwd, home)
+	spellings := make([]string, 0, len(walked))
+	for key := range walked {
+		if spelling, ok := strings.CutPrefix(key, hookpaths.WalkFactPrefix); ok {
+			spellings = append(spellings, spelling)
+		}
+	}
+	sort.Strings(spellings)
+	for _, spelling := range spellings {
+		add("tool_input.command", spelling)
+	}
 }
 
 // walkPaths calls add for every path-valued key and for every file an
