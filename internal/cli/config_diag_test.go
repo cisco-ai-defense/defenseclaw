@@ -112,7 +112,7 @@ func TestConfigValidateNamesTheRoutingRefusal(t *testing.T) {
 // GAP-1159: plugin_install external before plugin_dir failed with
 // "configuration could not be compiled safely" at "$"; it names the setting
 // and what to set first.
-func TestConfigValidateNamesTheOpenClawConnectorRefusal(t *testing.T) {
+func TestConfigValidateNamesTheOpenClawPluginDirRefusal(t *testing.T) {
 	for _, c := range []struct{ name, openclaw, path, want string }{
 		{"external before plugin_dir", "    plugin_install: external\n",
 			"$.connectors.openclaw.plugin_dir", "set plugin_dir first"},
