@@ -87,7 +87,7 @@ func (d substrateActorDirectory) ResolveActor(ctx context.Context, atespace, nam
 	case !l.Found:
 		return extproc.ActorRecord{}, true, nil
 	}
-	return extproc.ActorRecord{UID: l.UID, Profile: l.Profile, Unattended: l.Unattended}, true, nil
+	return extproc.ActorRecord{UID: l.UID, Profile: l.Profile, Unattended: l.Unattended, Person: l.Person, Principal: l.Principal}, true, nil
 }
 
 // substrateExtprocLeader is the callout's leader client: the chain check

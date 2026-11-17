@@ -426,6 +426,7 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		}
 	}
 	req.Actor.UID, req.Actor.Profile, req.Actor.Unattended = rec.UID, rec.Profile, rec.Unattended
+	req.Actor.Person, req.Actor.Principal = rec.Person, rec.Principal
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
 	if err != nil || pol == nil {
 		return e.failure(v, CategoryCalloutError, "DefenseClaw could not load this actor's policy.")

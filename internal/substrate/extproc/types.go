@@ -33,6 +33,9 @@ type ActorRef struct {
 	// profile the gateway gave the actor, and a --task or --batch run.
 	Profile    string
 	Unattended bool
+	// Person and Principal are the bound person from the registration
+	// (GAP-0513); empty without one.
+	Person, Principal string
 }
 
 // Key is atespace/name, the identity the egress gateway gives.
@@ -44,6 +47,8 @@ type ActorRecord struct {
 	UID        string
 	Profile    string
 	Unattended bool
+	// Person and Principal name the actor's bound person (GAP-0513).
+	Person, Principal string
 }
 
 // UIDResolver resolves an actor's name, the only identity atenet-egress
