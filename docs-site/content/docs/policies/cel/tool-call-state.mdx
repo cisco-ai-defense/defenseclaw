@@ -155,6 +155,19 @@ facts can contribute to a synchronous block. A later risky proposal may be
 blocked using already committed predecessors; the blocked proposal is never
 recorded as successful.
 
+The hook audit row of the call that completes a chain names the match in its
+`extra` fields, one value per matched chain in the order of `chain_match_ids`:
+`chain_match_scope` (`session`, or `root` for the root scope, which is the
+actor on Agent Substrate), `chain_match_partition` and `chain_match_sequence`
+(the first 16 hex digits of the partition key digest and the step's place in
+it), `chain_match_steps` (the chain's step count), `chain_match_artifact` (the
+first 16 hex digits of the resource identity both steps joined on, or `-`),
+and `chain_match_span_ms` against `chain_match_horizon_s` (the time from the
+joined earlier step to this one, against the chain's window). On Agent
+Substrate the span is running time, so time spent suspended is left out. A
+replayed call repeats the decision without these fields, and they never
+change a verdict.
+
 ## Connector outcome and identity matrix
 
 State levels have strict meanings:
