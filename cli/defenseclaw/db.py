@@ -31,7 +31,7 @@ import stat
 import threading
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -56,6 +56,7 @@ from defenseclaw.hook_metrics import (
     hook_decision_body_sql,
     hook_decision_may_block_sql,
     hook_semantic_event_id_sql,
+    lone_hook_decision_range_sql,
     lone_hook_decision_rows_sql,
     lone_hook_decision_sql,
 )
@@ -257,6 +258,72 @@ _VALID_FIELDS: dict[str, set[str]] = {
 }
 _SUMMARY_DETAILS_BYTES = 4096
 
+
+# The Overview hook counter (Store.connector_hook_event_stats) keeps its
+# totals by rowid chunk of 2**_HOOK_STATS_CHUNK_BITS rows: a retention pass
+# that deletes part of a chunk costs one recount of that chunk's rows, and a
+# chunk it empties costs nothing (rel-1-0-10:GAP-0340).
+_HOOK_STATS_CHUNK_BITS = 14
+_HOOK_STATS_PROXY_ACTIONS = (
+    "inspect-tool-allow",
+    "inspect-tool-alert",
+    "inspect-tool-confirm",
+    "inspect-tool-block",
+    "guardrail-verdict",
+    "block",
+    "guardrail-block",
+)
+# Every action a counted row has: the chunk fingerprints count these rows.
+_HOOK_STATS_ROW_ACTIONS = (CONNECTOR_HOOK_ACTION, HOOK_DECISION_ACTION, *_HOOK_STATS_PROXY_ACTIONS)
+
+
+@dataclass
+class _HookStatsCache:
+    """What the hook counter counted: the rows up to ``mark``, by chunk."""
+
+    key: tuple[Any, ...]
+    mark: int
+    mark_id: str
+    sizes: dict[int, int]
+    chunks: dict[int, dict[str, list[Any]]]
+    awaiting: frozenset[int]
+
+
+def _merge_hook_totals(target: dict[str, list[Any]], add: dict[str, list[Any]]) -> None:
+    for connector, (calls, blocks, alerts, newest) in add.items():
+        entry = target.setdefault(connector, [0, 0, 0, ""])
+        entry[0] += int(calls or 0)
+        entry[1] += int(blocks or 0)
+        entry[2] += int(alerts or 0)
+        if newest and str(newest) > str(entry[3]):
+            entry[3] = newest
+
+
+def _add_hook_stat(stats: dict[str, dict[str, Any]], connector: Any, calls: Any, blocks: Any, alerts: Any,
+                   newest: Any) -> None:
+    key = str(connector or "").strip().lower()
+    if not key:
+        return
+    entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
+    entry["calls"] = int(entry["calls"]) + int(calls or 0)
+    entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
+    entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
+    if newest and str(newest) > str(entry["newest"]):
+        entry["newest"] = newest
+
+
+def _chunk_ranges(chunks: list[int], bits: int) -> list[tuple[int, int]]:
+    """The rowid ranges ``(first, last)`` of sorted chunks, adjacent ones merged."""
+
+    ranges: list[tuple[int, int]] = []
+    for chunk in chunks:
+        first, last = chunk << bits, ((chunk + 1) << bits) - 1
+        if ranges and ranges[-1][1] + 1 == first:
+            ranges[-1] = (ranges[-1][0], last)
+        else:
+            ranges.append((first, last))
+    return ranges
+
 # Live Store connections in this process, by database path. A connection
 # whose POSIX lock was dropped looks absent to a peer process that closes the
 # database: the peer checkpoints and unlinks the WAL and SHM files under it,
@@ -312,6 +379,7 @@ class Store:
         self._audit_schema_version: int | None = None
         self._audit_event_columns_cache: frozenset[str] = frozenset()
         self._audit_tables_cache: frozenset[str] = frozenset()
+        self._hook_stats_cache: _HookStatsCache | None = None
         self._open_key: str | None = None
         newly_created = not read_only and self._db_will_be_created(db_path)
         connect_path = self._read_only_uri(db_path) if read_only else db_path
@@ -978,32 +1046,150 @@ class Store:
         Current rows use indexed connector identity; the SQLite callbacks also
         classify legacy rows whose identity or decision only exists in the
         structured envelope or exact ``key=value`` detail tokens.
+
+        The rows are classified once. The Store keeps their totals by rowid
+        chunk, and a later call classifies only the rows written since its
+        mark plus the chunks whose counted rows changed: a call on a grown
+        6.4 GB store classified every hook row's records again, 253 s with a
+        cold page cache and 18.7 s warm (rel-1-0-10:GAP-0340). Audit rows are
+        append-only between retention passes, which only delete; one
+        index-only count of the counted rows per chunk finds the chunks a
+        pass (or a purge) changed, and a fail-mode lone decision a later
+        connector-hook row paired dirties its chunk. A rewritten table (the
+        row at the mark is gone or another row) or a schema change counts
+        all rows again.
         """
+
         columns, _ = self._audit_projection_schema()
+        records = {"payload_json", "projected_record_json"}.issubset(columns)
+        tracked = records and self._hook_rows_tracked()
+        bits = _HOOK_STATS_CHUNK_BITS
+        key = (self._audit_schema_version, tracked, bits)
+        newest = self.db.execute("SELECT rowid, id FROM audit_events ORDER BY rowid DESC LIMIT 1").fetchone()
+        cache = self._hook_stats_cache
+        # Cleared until this call completes: a failed call leaves no
+        # half-merged totals behind, and the next one counts all rows again.
+        self._hook_stats_cache = None
+        if cache is not None and cache.key != key:
+            cache = None
+        if cache is not None:
+            at_mark = self.db.execute("SELECT id FROM audit_events WHERE rowid = ?", (cache.mark,)).fetchone()
+            if at_mark is None or str(at_mark[0]) != cache.mark_id:
+                cache = None
+        if newest is None:
+            chunks: dict[int, dict[str, list[Any]]] = {}
+        else:
+            mark, mark_id = int(newest[0]), str(newest[1])
+            old = cache.mark if cache is not None else None
+            # The inputs are read before the rows they describe, so a write
+            # racing this call makes the next call count again, never latch
+            # a stale total.
+            sizes: dict[int, int] = {}
+            before: dict[int, int] = {}
+            for chunk, is_new, count in self.db.execute(
+                f"""SELECT rowid >> {bits}, rowid > ?, COUNT(*) FROM audit_events
+                     WHERE action IN ({self._sql_string_values(_HOOK_STATS_ROW_ACTIONS)}) AND rowid <= ?
+                     GROUP BY 1, 2""",
+                (mark if old is None else old, mark),
+            ):
+                sizes[int(chunk)] = sizes.get(int(chunk), 0) + int(count)
+                if not is_new:
+                    before[int(chunk)] = int(count)
+            awaiting = frozenset(
+                int(row[0])
+                for row in self.db.execute(
+                    f"""SELECT lone.rowid FROM {HOOK_ROWS_TABLE} AS hook_lone
+                        CROSS JOIN audit_events AS lone ON lone.id = hook_lone.audit_event_id
+                        WHERE hook_lone.semantic_event_id IS NOT NULL AND lone.rowid <= ?""",
+                    (mark,),
+                )
+            ) if tracked else frozenset()
+            if cache is None or old is None:
+                chunks = self._hook_stats_pass(None, mark, records=records, tracked=tracked)
+            else:
+                dirty = {
+                    chunk
+                    for chunk in set(before) | set(cache.sizes)
+                    if before.get(chunk, 0) != cache.sizes.get(chunk, 0)
+                }
+                dirty.update(rowid >> bits for rowid in cache.awaiting - awaiting)
+                chunks = {chunk: totals for chunk, totals in cache.chunks.items() if chunk not in dirty}
+                if mark > old:
+                    for chunk, totals in self._hook_stats_pass(old, mark, records=records, tracked=tracked).items():
+                        if chunk not in dirty:
+                            _merge_hook_totals(chunks.setdefault(chunk, {}), totals)
+                for low, high in _chunk_ranges(sorted(chunk for chunk in dirty if sizes.get(chunk)), bits):
+                    chunks.update(
+                        self._hook_stats_pass(low - 1, min(high, mark), records=records, tracked=tracked)
+                    )
+            self._hook_stats_cache = _HookStatsCache(
+                key=key, mark=mark, mark_id=mark_id, sizes=sizes, chunks=chunks, awaiting=awaiting
+            )
+        stats: dict[str, dict[str, Any]] = {}
+        for totals in chunks.values():
+            for connector, (calls, blocks, alerts, newest_at) in totals.items():
+                _add_hook_stat(stats, connector, calls, blocks, alerts, newest_at)
+        if records and not tracked:
+            # A store no 1.0.10 gateway has opened (or a Secure Client store)
+            # has no audit_hook_lone: whether a hook_decision row is alone
+            # depends on every connector-hook row, so it is counted all-time
+            # each call, from the projected records (S8 R4, #1384).
+            cur = self.db.execute(
+                f"""SELECT connector_name, COUNT(*),
+                           SUM(CASE WHEN decision = 'block' THEN 1 ELSE 0 END),
+                           SUM(CASE WHEN decision = 'alert' THEN 1 ELSE 0 END),
+                           MAX(timestamp)
+                      FROM (SELECT COALESCE(NULLIF(LOWER(TRIM(COALESCE(connector, ''))), ''), '__unattributed__')
+                                       AS connector_name,
+                                   dc_hook_row_decision(action, '', {hook_decision_body_sql()}, enforced) AS decision,
+                                   timestamp
+                              FROM audit_events
+                             WHERE action = '{HOOK_DECISION_ACTION}' AND {lone_hook_decision_sql()})
+                     GROUP BY connector_name"""
+            )
+            for connector, calls, blocks, alerts, newest_at in cur.fetchall():
+                _add_hook_stat(stats, connector, calls, blocks, alerts, newest_at)
+        return dict(sorted(stats.items()))
+
+    def _hook_stats_pass(
+        self, low: int | None, high: int, *, records: bool, tracked: bool
+    ) -> dict[int, dict[str, list[Any]]]:
+        """Classify the counted rows with ``low < rowid <= high``, totals by chunk.
+
+        ``low`` None reads from the first row. A lone hook_decision row is
+        counted here only when audit_hook_lone lists it (``tracked``).
+        """
+
+        bits = _HOOK_STATS_CHUNK_BITS
+        bound = "rowid <= ?" if low is None else "rowid > ? AND rowid <= ?"
+        span: tuple[int, ...] = (high,) if low is None else (low, high)
         lone_hook_decisions = ""
-        if {"payload_json", "projected_record_json"}.issubset(columns) and self._hook_rows_tracked():
-            # The lone rows come from audit_hook_lone, so only their own
-            # records are read (rel-1-0-10:GAP-0316).
+        lone_span: tuple[int, ...] = ()
+        if tracked:
             body = hook_decision_body_sql("lone.payload_json", "lone.projected_record_json")
-            lone_hook_decisions = f"""UNION ALL
-                   SELECT COALESCE(NULLIF(LOWER(TRIM(COALESCE(lone.connector, ''))), ''), '__unattributed__'),
-                          dc_hook_row_decision(lone.action, '', {body}, lone.enforced),
-                          lone.timestamp
-                     {lone_hook_decision_rows_sql("lone")}"""
-        elif {"payload_json", "projected_record_json"}.issubset(columns):
+            if low is None:
+                # The lone rows come from audit_hook_lone, so only their own
+                # records are read (rel-1-0-10:GAP-0316).
+                rows = f"{lone_hook_decision_rows_sql('lone')} AND lone.rowid <= ?"
+            else:
+                # A range reads its own rows and looks each one up by key.
+                rows = f"{lone_hook_decision_range_sql('lone')} AND lone.rowid > ? AND lone.rowid <= ?"
             # A decision whose only local row is its hook_decision row (a
             # benign per-user allow since 1.0.10) counts once, from that row;
             # a decision with a connector-hook row counts from it alone, as
             # before (S8 R4, #1384).
             lone_hook_decisions = f"""UNION ALL
-                   SELECT COALESCE(NULLIF(LOWER(TRIM(COALESCE(connector, ''))), ''), '__unattributed__'),
-                          dc_hook_row_decision(action, '', {hook_decision_body_sql()}, enforced),
-                          timestamp
-                     FROM audit_events
-                    WHERE action = '{HOOK_DECISION_ACTION}' AND {lone_hook_decision_sql()}"""
+                   SELECT lone.rowid >> {bits},
+                          COALESCE(NULLIF(LOWER(TRIM(COALESCE(lone.connector, ''))), ''), '__unattributed__'),
+                          dc_hook_row_decision(lone.action, '', {body}, lone.enforced),
+                          lone.timestamp
+                     {rows}"""
+            lone_span = span
+        chunks: dict[int, dict[str, list[Any]]] = {}
         cur = self.db.execute(
             f"""WITH source AS (
-                   SELECT CASE
+                   SELECT rowid >> {bits} AS chunk,
+                          CASE
                               WHEN TRIM(COALESCE(connector, '')) <> ''
                                   THEN LOWER(TRIM(connector))
                               ELSE COALESCE(
@@ -1019,41 +1205,35 @@ class Store:
                           enforced,
                           timestamp
                      FROM audit_events
-                    WHERE action = ?
+                    WHERE action = ? AND {bound}
                ), classified AS (
-                   SELECT connector_name,
+                   SELECT chunk,
+                          connector_name,
                           dc_hook_decision(details, structured_json, enforced) AS decision,
                           timestamp
                      FROM source
                    {lone_hook_decisions}
                )
-               SELECT connector_name,
+               SELECT chunk,
+                      connector_name,
                       COUNT(*) AS calls,
                       SUM(CASE WHEN decision = 'block' THEN 1 ELSE 0 END) AS blocks,
                       SUM(CASE WHEN decision = 'alert' THEN 1 ELSE 0 END) AS alerts,
                       MAX(timestamp) AS newest
                  FROM classified
-                GROUP BY connector_name""",
-            ("connector-hook",),
+                GROUP BY chunk, connector_name""",
+            (CONNECTOR_HOOK_ACTION, *span, *lone_span),
         )
-        stats: dict[str, dict[str, Any]] = {}
-        for connector, calls, blocks, alerts, newest in cur.fetchall():
-            key = str(connector or "").strip().lower()
-            if not key:
-                continue
-            entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
-            entry["calls"] = int(entry["calls"]) + int(calls or 0)
-            entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
-            entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
-            if newest and str(newest) > str(entry["newest"]):
-                entry["newest"] = newest
+        for chunk, connector, calls, blocks, alerts, newest_at in cur.fetchall():
+            _merge_hook_totals(chunks.setdefault(int(chunk), {}), {connector: [calls, blocks, alerts, newest_at]})
         # Proxy connectors (OpenClaw, ZeptoClaw) write no connector-hook rows:
         # their guardrail records tool inspections (inspect-tool-*) and LLM
         # evaluations (guardrail-verdict), and a blocked LLM turn adds a
         # ``block`` row. Without them an OpenClaw-only Overview read "Blocks 0"
         # after a tool block and a prompt block (GAP-2496).
         cur = self.db.execute(
-            """SELECT LOWER(TRIM(connector)) AS connector_name,
+            f"""SELECT rowid >> {bits},
+                      LOWER(TRIM(connector)) AS connector_name,
                       SUM(CASE WHEN action IN ('inspect-tool-allow', 'inspect-tool-alert',
                                                'inspect-tool-confirm', 'inspect-tool-block',
                                                'guardrail-verdict')
@@ -1064,20 +1244,15 @@ class Store:
                                THEN 1 ELSE 0 END) AS alerts,
                       MAX(timestamp) AS newest
                  FROM audit_events
-                WHERE action IN ('inspect-tool-allow', 'inspect-tool-alert', 'inspect-tool-confirm',
-                                 'inspect-tool-block', 'guardrail-verdict', 'block', 'guardrail-block')
+                WHERE action IN ({self._sql_string_values(_HOOK_STATS_PROXY_ACTIONS)})
                   AND LOWER(TRIM(COALESCE(connector, ''))) IN ('openclaw', 'zeptoclaw')
-                GROUP BY connector_name"""
+                  AND {bound}
+                GROUP BY 1, 2""",
+            span,
         )
-        for connector, calls, blocks, alerts, newest in cur.fetchall():
-            key = str(connector or "").strip().lower()
-            entry = stats.setdefault(key, {"calls": 0, "blocks": 0, "alerts": 0, "newest": ""})
-            entry["calls"] = int(entry["calls"]) + int(calls or 0)
-            entry["blocks"] = int(entry["blocks"]) + int(blocks or 0)
-            entry["alerts"] = int(entry["alerts"]) + int(alerts or 0)
-            if newest and str(newest) > str(entry["newest"]):
-                entry["newest"] = newest
-        return stats
+        for chunk, connector, calls, blocks, alerts, newest_at in cur.fetchall():
+            _merge_hook_totals(chunks.setdefault(int(chunk), {}), {connector: [calls, blocks, alerts, newest_at]})
+        return chunks
 
     def audit_data_version(self) -> tuple[int, int]:
         """Return a cheap token that changes for external or local writes."""
