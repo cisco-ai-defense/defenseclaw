@@ -262,11 +262,16 @@ func gap0429Chunks(pieces []string) []StreamChunk {
 
 func gap0429LLMProvider(t *testing.T, rec *httptest.ResponseRecorder, prov LLMProvider, insp ContentInspector, pack string) {
 	t.Helper()
+	gap0429LLMProxy(t, rec, newTestProxy(t, prov, insp, "action"), pack)
+}
+
+// gap0429LLMProxy is gap0429LLMProvider through proxy.
+func gap0429LLMProxy(t *testing.T, rec *httptest.ResponseRecorder, proxy *GuardrailProxy, pack string) {
+	t.Helper()
 	body := mustJSON(t, map[string]interface{}{
 		"model": "gpt-4", "stream": true,
 		"messages": []map[string]interface{}{{"role": "user", "content": "go"}},
 	})
-	proxy := newTestProxy(t, prov, insp, "action")
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:12345"
 	req.Header.Set("Content-Type", "application/json")
@@ -309,6 +314,12 @@ func gap0429Passthrough(t *testing.T, f streamTailFormat, rec *httptest.Response
 
 func gap0429RawForwardRun(t *testing.T, rec *httptest.ResponseRecorder, insp ContentInspector, pack string, pieces []string) {
 	t.Helper()
+	gap0429RawForward(t, rec, newTestProxy(t, &mockProvider{}, insp, "action"), pack, pieces)
+}
+
+// gap0429RawForward is gap0429RawForwardRun through proxy.
+func gap0429RawForward(t *testing.T, rec *httptest.ResponseRecorder, proxy *GuardrailProxy, pack string, pieces []string) {
+	t.Helper()
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fl := w.(http.Flusher)
@@ -322,7 +333,6 @@ func gap0429RawForwardRun(t *testing.T, rec *httptest.ResponseRecorder, insp Con
 	t.Cleanup(up.Close)
 	registerRawForwardProviderDomain(t, up.URL, "openai")
 	allowRawForwardPrivateTargets(t)
-	proxy := newTestProxy(t, &mockProvider{}, insp, "action")
 	body := mustJSON(t, map[string]interface{}{
 		"model": "gpt-4", "stream": true,
 		"messages": []map[string]interface{}{{"role": "user", "content": "go"}},

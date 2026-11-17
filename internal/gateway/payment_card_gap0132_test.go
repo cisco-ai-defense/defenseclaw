@@ -49,7 +49,7 @@ func cardRegexScope(c testcorpus.Case) bool {
 
 func cardFinding(findings []string) bool {
 	for _, f := range findings {
-		if strings.Contains(f, "ENT-CC-") || strings.Contains(f, "TRIAGE-PII-CC") || strings.HasPrefix(f, "pii-data:") {
+		if strings.Contains(f, "ENT-CC-") || strings.Contains(f, "TRIAGE-PII-CC") || f == localPIIDataFinding {
 			return true
 		}
 	}
