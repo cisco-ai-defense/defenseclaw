@@ -138,7 +138,9 @@ func TestHookImageRetireSkipsTheSignedOutProfileWithItsAudit(t *testing.T) {
 // rel-1-0-10 GAP-0882: an account file retire could not read (an elevated
 // administrator is denied an account's .codex folder) must not end ok: it is
 // named in still_named (account, unreadable, with its cause) and the error
-// says to run retire as LocalSystem. A skip of the profile covers it, audited.
+// says to run retire as LocalSystem. A skip of the profile as LocalSystem
+// covers it, audited; the same skip by a caller that was only denied the
+// file is refused (rel-1-0-10 GAP-0907).
 func TestHookImageRetirePendsOnAnUnreadableAccountFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Windows-native twin makes the file unreadable with a deny ACE (TestHookImageRetirePendsOnAnAccountFileItIsDenied)")
@@ -185,6 +187,10 @@ func TestHookImageRetirePendsOnAnUnreadableAccountFile(t *testing.T) {
 
 	steps = s.skipSteps(skipTestSID)
 	steps.Scan = scan
+	if refused := retireWindowsHookImages(steps); refused.OK || refused.Reason != windowsHookImageRetireRefused || len(s.audits) != 0 {
+		t.Fatalf("a non-LocalSystem skip of a profile it was only denied = %+v", refused)
+	}
+	steps.CallerSystem = func() bool { return true }
 	report = retireWindowsHookImages(steps)
 	if !report.OK || len(report.SkippedProfiles) != 1 || len(report.SkippedProfiles[0].Files) != 1 ||
 		!report.SkippedProfiles[0].Files[0].Unreadable || len(s.audits) != 1 {
