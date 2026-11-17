@@ -150,18 +150,22 @@ func containsInlineInterpreterName(command string) bool {
 	return false
 }
 
-// mentionsArchiveExtractor is the cheap gate of the archive reading: the
-// shell extractors, the Python archive modules and the PowerShell
-// extractions (rel-1-0-10:GAP-1173).
+// mentionsArchiveExtractor is the cheap gate of the unknown-tier archive
+// reading: the shell extractors, the Python archive modules and the
+// PowerShell extractions (rel-1-0-10:GAP-1173). It reads the text as the
+// shell reads a program word, without quotes and backslashes and in any
+// case, so 'un'zip, t\ar and TAR pass it (rel-1-0-10:GAP-1223).
 func mentionsArchiveExtractor(command string) bool {
-	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto", "zipfile", "unpack_archive"} {
-		if strings.Contains(command, name) {
+	text := strings.ToLower(archiveGateText.Replace(command))
+	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto", "zipfile", "unpack_archive", "expand-archive", "extracttodirectory"} {
+		if strings.Contains(text, name) {
 			return true
 		}
 	}
-	lower := strings.ToLower(command)
-	return strings.Contains(lower, "expand-archive") || strings.Contains(lower, "extracttodirectory")
+	return false
 }
+
+var archiveGateText = strings.NewReplacer(`'`, "", `"`, "", `\`, "", "`", "")
 
 // withFindChildTwins judges each program a find runs (-exec, -execdir, -ok,
 // -okdir) as a call of its own, with the handed entry put as a plain file of

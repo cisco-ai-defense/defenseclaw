@@ -163,7 +163,10 @@ func powerShellArchiveExtractions(command, cwd, home string, read *archiveExtrac
 	add := func(archive, folder string, known bool) {
 		read.paths = append(read.paths, folder)
 		if known {
-			read.whole = append(read.whole, ArchiveWhole{Folder: folder, Archive: archive, format: archiveZip})
+			// A command that names the archive more than once may write it
+			// before the extraction opens it (rel-1-0-10:GAP-1224).
+			staged := strings.Count(lower, strings.ToLower(filepath.Base(archive))) > 1
+			read.whole = append(read.whole, ArchiveWhole{Folder: folder, Archive: archive, format: archiveZip, staged: staged})
 		}
 	}
 	psparse.WalkCommands(script, func(command *psparse.Command) {

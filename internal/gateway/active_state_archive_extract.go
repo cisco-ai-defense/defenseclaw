@@ -165,8 +165,12 @@ type archiveStateReading struct {
 //   - an archive that is not there to read keeps the verdict of the words
 //     alone (an extraction into the home that names no member is allowed).
 func readArchiveState(facts actionfacts.Facts, request trustedActionRequest) archiveStateReading {
+	// No raw-text gate: a program word the shell reads as the extractor
+	// need not spell its name ('un'zip, t\ar, TAR on a case-blind file
+	// system), and the words reading below sees through those spellings
+	// (rel-1-0-10:GAP-1223).
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || !mentionsArchiveExtractor(command) {
+	if !known {
 		return archiveStateReading{}
 	}
 	judge, ok := newStateJudge(facts, request)

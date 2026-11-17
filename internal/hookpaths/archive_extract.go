@@ -238,6 +238,12 @@ type ArchiveWhole struct {
 	// renamed: the call changes the member names (tar --strip-components,
 	// unzip -j), so the listing does not tell where they land.
 	renamed bool
+	// staged: the command names the archive before the extraction (a cp or
+	// mv onto it, a download to it) after a statement that may write a
+	// file, so the archive the extraction opens is not the file there at
+	// hook time (rel-1-0-10:GAP-1224, as the plain-archive reader asks:
+	// rel-1-0-6:GAP-0339, rel-1-0-10:GAP-0593).
+	staged bool
 }
 
 type archiveFormat uint8
@@ -262,7 +268,7 @@ func (whole ArchiveWhole) Landing() (paths []string, present, listed bool) {
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, false, false
 	}
-	if whole.renamed {
+	if whole.renamed || whole.staged {
 		return nil, true, false
 	}
 	var members []string
@@ -293,7 +299,7 @@ func (whole ArchiveWhole) Landing() (paths []string, present, listed bool) {
 func ReadArchiveExtractions(command, cwd, home string) ArchiveExtractions {
 	var read archiveExtractionScan
 	if file, parsed := parseShell(command); parsed && filepath.IsAbs(cwd) {
-		archiveWalk(file, cwd, home, 0, &read)
+		archiveWalk(file, command, cwd, home, 0, &read)
 	}
 	powerShellArchiveExtractions(command, cwd, home, &read)
 	return ArchiveExtractions{Paths: read.paths, Unknown: read.unknown, Whole: read.whole, Caps: read.trunc.Set()}
@@ -333,12 +339,22 @@ func archiveMembersUnknown(program string, words []string) bool {
 	return false
 }
 
-func archiveWalk(file *syntax.File, cwd, home string, depth int, read *archiveExtractionScan) {
+func archiveWalk(file *syntax.File, text, cwd, home string, depth int, read *archiveExtractionScan) {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
+		// Whole archives this call extracts are staged when the command may
+		// write them first (archiveStagedBefore).
+		first := len(read.whole)
+		defer func() {
+			for index := first; index < len(read.whole); index++ {
+				if archiveStagedBefore(file, call, text, home, read.whole[index].Archive) {
+					read.whole[index].staged = true
+				}
+			}
+		}()
 		words := make([]string, len(call.Args))
 		static := make([]bool, len(call.Args))
 		for index, arg := range call.Args {
@@ -349,7 +365,7 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, read *archiveEx
 			if body, shell := launcherBody(child); shell {
 				if read.trunc.Within(bounded.Depth, depth+1, InlineMaxShellDepth) {
 					if inner, parsed := parseShell(body); parsed {
-						archiveWalk(inner, cwd, home, depth+1, read)
+						archiveWalk(inner, body, cwd, home, depth+1, read)
 					}
 				}
 				return true
@@ -402,6 +418,22 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, read *archiveEx
 		}
 		return true
 	})
+}
+
+// archiveStagedBefore reports that a statement before the extraction call
+// may write the archive: the statements before it are not only static cd
+// and mkdir (onlyDirectoryStatementsBefore), and the text before the call
+// names the archive (rel-1-0-10:GAP-1224). A call the text cannot place is
+// read as staged.
+func archiveStagedBefore(file *syntax.File, call *syntax.CallExpr, text, home, archive string) bool {
+	if archive == "" || onlyDirectoryStatementsBefore(file, call, home) {
+		return false
+	}
+	at := int(call.Pos().Offset())
+	if at < 0 || at > len(text) {
+		return true
+	}
+	return strings.Contains(text[:at], filepath.Base(archive))
 }
 
 // archiveRenamesMembers reports a tar or unzip extraction that changes the
