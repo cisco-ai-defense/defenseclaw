@@ -11,7 +11,7 @@ func TestGAP0454SubstrateResourceNamesTheClusterAndNamespace(t *testing.T) {
 	snapshot := v8PlanForTest(t, "always_on", "", nil).Snapshot()
 	identity := v8ResourceProcessIdentity{serviceInstanceID: "service-1", defenseClawInstanceID: "instance-1"}
 	resource, err := newV8ResourceContext(snapshot, V8ProviderOptions{
-		Version: "1.0", K8sClusterName: "prod-eu", K8sNamespaceName: "defenseclaw-system",
+		Version: "1.0", Environment: "test", K8sClusterName: "prod-eu", K8sNamespaceName: "defenseclaw-system",
 	}, identity)
 	if err != nil {
 		t.Fatal(err)
@@ -19,7 +19,7 @@ func TestGAP0454SubstrateResourceNamesTheClusterAndNamespace(t *testing.T) {
 	if resource.values["k8s.cluster.name"] != "prod-eu" || resource.values["k8s.namespace.name"] != "defenseclaw-system" {
 		t.Fatalf("resource %v", resource.values)
 	}
-	off, err := newV8ResourceContext(snapshot, V8ProviderOptions{Version: "1.0"}, identity)
+	off, err := newV8ResourceContext(snapshot, V8ProviderOptions{Version: "1.0", Environment: "test"}, identity)
 	if err != nil {
 		t.Fatal(err)
 	}

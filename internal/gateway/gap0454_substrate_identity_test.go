@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -27,7 +28,12 @@ func TestGAP0454SubstrateRecordsNameTheDriverAndThePerson(t *testing.T) {
 
 	reg := registry.Registration{Atespace: "eng-web", Name: "alice-1", UID: subUID1, Connector: "claudecode", Profile: "eng",
 		SandboxClass: "microvm", Person: ownerOf(alice)}
-	ctx := withSubstrateActor(context.Background(), verifiedSubstrateActor(reg.Atespace, reg.Name, reg.UID, "actor/eng-web/alice-1", "k"))
+	key, err := sandboxreg.SubstrateKey(reg.Atespace, reg.UID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.Key = key
+	ctx := withSubstrateActor(context.Background(), verifiedSubstrateActor(reg.Atespace, reg.Name, reg.UID, "actor/eng-web/alice-1", key))
 	ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
 	if d, _ := hookV8Substrate(ctx).Driver.Get(); d != "microvm" {
 		t.Fatalf("driver %q, want microvm", d)

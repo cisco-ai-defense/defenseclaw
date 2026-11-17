@@ -59,7 +59,8 @@ func substrateLifecyclePhase(event string) (phase, trigger string, ok bool) {
 	case chainstate.LifecycleResumed:
 		return "ready", "watch", true
 	case chainstate.LifecycleForked:
-		return "unknown", "fork", true
+		// The child of a fork: a new actor made from its parent's snapshot.
+		return "creating", "fork", true
 	case chainstate.LifecycleReverted:
 		return "reverting", "watch", true
 	case chainstate.LifecycleCrashed:
@@ -161,7 +162,7 @@ func (a *APIServer) emitSubstrateLifecycleV8(ctx context.Context, r telemetryrel
 				DefenseClawSandboxName:               r.Actor,
 				DefenseClawSandboxRuntime:            observability.Present("substrate"),
 				DefenseClawSandboxDriver:             substrateDriver(r.Driver),
-				DefenseClawSandboxProfile:            substrateRelayText(r.Profile),
+				DefenseClawGuardrailProfileName:      hookV8OptionalIdentifier(r.Profile),
 				DefenseClawSandboxPhase:              phase,
 				DefenseClawSandboxLifecycleTrigger:   observability.Present(trigger),
 				DefenseClawSandboxSubstrateAtespace:  substrateRelayText(r.Atespace),
@@ -172,9 +173,9 @@ func (a *APIServer) emitSubstrateLifecycleV8(ctx context.Context, r telemetryrel
 				DefenseClawSandboxSubstrateParentUid: substrateRelayText(r.ParentUID),
 				DefenseClawSandboxSubstrateRunMode:   substrateRelayRunMode(r),
 				AteActorUid:                          substrateRelayText(r.UID),
-				UserID:                               substrateRelayText(r.UserID),
+				UserID:                               hookV8OptionalIdentifier(r.UserID),
 				DefenseClawUserIDKind:                v8UserIDKind(useridentity.KindForID(r.UserID)),
-				DefenseClawUserName:                  substrateRelayText(r.UserName),
+				DefenseClawUserName:                  v8UserName(r.UserName, hookV8OptionalIdentifier),
 			})
 		})
 }
@@ -207,7 +208,7 @@ func (a *APIServer) emitSubstrateEgressV8(ctx context.Context, r telemetryrelay.
 					DefenseClawNetworkReason: substrateRelayText(r.Reason), DefenseClawNetworkBlocked: observability.Present(true),
 					DefenseClawNetworkBodyInspected: observability.Present(r.BodyInspected), DefenseClawNetworkBodyOverCap: observability.Present(r.BodyOverCap),
 					ServerAddress: substrateRelayText(r.Host), DefenseClawSandboxName: substrateRelayText(r.Actor),
-					DefenseClawSandboxRuntime: observability.Present("substrate"), DefenseClawSandboxProfile: substrateRelayText(r.Profile),
+					DefenseClawSandboxRuntime: observability.Present("substrate"), DefenseClawGuardrailProfileName: hookV8OptionalIdentifier(r.Profile),
 					DefenseClawSandboxSubstrateAtespace: substrateRelayText(r.Atespace), DefenseClawSandboxSubstrateActor: substrateRelayText(r.Actor),
 					DefenseClawSandboxSubstrateActorUid: substrateRelayText(r.UID), AteActorUid: substrateRelayText(r.UID),
 					MandatoryEnforcedOutcome: true,
@@ -220,7 +221,7 @@ func (a *APIServer) emitSubstrateEgressV8(ctx context.Context, r telemetryrelay.
 				DefenseClawNetworkReason: substrateRelayText(r.Reason), DefenseClawNetworkBlocked: observability.Present(false),
 				DefenseClawNetworkBodyInspected: observability.Present(r.BodyInspected), DefenseClawNetworkBodyOverCap: observability.Present(r.BodyOverCap),
 				ServerAddress: substrateRelayText(r.Host), DefenseClawSandboxName: substrateRelayText(r.Actor),
-				DefenseClawSandboxRuntime: observability.Present("substrate"), DefenseClawSandboxProfile: substrateRelayText(r.Profile),
+				DefenseClawSandboxRuntime: observability.Present("substrate"), DefenseClawGuardrailProfileName: hookV8OptionalIdentifier(r.Profile),
 				DefenseClawSandboxSubstrateAtespace: substrateRelayText(r.Atespace), DefenseClawSandboxSubstrateActor: substrateRelayText(r.Actor),
 				DefenseClawSandboxSubstrateActorUid: substrateRelayText(r.UID), AteActorUid: substrateRelayText(r.UID),
 			})
@@ -292,11 +293,11 @@ func (a *APIServer) emitSubstrateApprovalV8(ctx context.Context, ask asks.Ask, r
 			if requested {
 				return builder.BuildLogApprovalRequested(observability.LogApprovalRequestedInput{
 					Envelope: envelope, Severity: sev, LogLevel: level, Outcome: outcome,
-					DefenseClawApprovalID: ask.ID, UserID: substrateRelayText(ask.OwnerID),
-					DefenseClawUserIDKind:  v8UserIDKind(useridentity.KindForID(ask.OwnerID)),
+					DefenseClawApprovalID: ask.ID, UserID: hookV8OptionalIdentifier(substrateOwnerSubject(ask.OwnerID)),
+					DefenseClawUserIDKind:  v8UserIDKind(useridentity.KindForID(substrateOwnerSubject(ask.OwnerID))),
 					ServerAddress:          substrateRelayText(ask.Host),
 					DefenseClawSandboxName: substrateRelayText(ask.Actor), DefenseClawSandboxRuntime: observability.Present("substrate"),
-					DefenseClawSandboxProfile:           substrateRelayText(ask.Profile),
+					DefenseClawGuardrailProfileName:     hookV8OptionalIdentifier(ask.Profile),
 					DefenseClawSandboxSubstrateAtespace: substrateRelayText(ask.Atespace), DefenseClawSandboxSubstrateActor: substrateRelayText(ask.Actor),
 					DefenseClawSandboxSubstrateActorUid: substrateRelayText(ask.UID), DefenseClawSandboxApprovalKind: kind,
 				})
@@ -312,11 +313,11 @@ func (a *APIServer) emitSubstrateApprovalV8(ctx context.Context, ask asks.Ask, r
 				Envelope: envelope, Severity: sev, LogLevel: level, Outcome: outcome,
 				DefenseClawApprovalID: ask.ID, DefenseClawApprovalResult: result,
 				DefenseClawApprovalActorType: observability.Present(by),
-				UserID:                       substrateRelayText(ask.OwnerID),
-				DefenseClawUserIDKind:        v8UserIDKind(useridentity.KindForID(ask.OwnerID)),
+				UserID:                       hookV8OptionalIdentifier(substrateOwnerSubject(ask.OwnerID)),
+				DefenseClawUserIDKind:        v8UserIDKind(useridentity.KindForID(substrateOwnerSubject(ask.OwnerID))),
 				ServerAddress:                substrateRelayText(ask.Host),
 				DefenseClawSandboxName:       substrateRelayText(ask.Actor), DefenseClawSandboxRuntime: observability.Present("substrate"),
-				DefenseClawSandboxProfile:           substrateRelayText(ask.Profile),
+				DefenseClawGuardrailProfileName:     hookV8OptionalIdentifier(ask.Profile),
 				DefenseClawSandboxSubstrateAtespace: substrateRelayText(ask.Atespace), DefenseClawSandboxSubstrateActor: substrateRelayText(ask.Actor),
 				DefenseClawSandboxSubstrateActorUid: substrateRelayText(ask.UID), DefenseClawSandboxApprovalKind: kind,
 				DefenseClawSandboxApprovalScope: scope, MandatoryApprovalResolution: true,
@@ -326,4 +327,13 @@ func (a *APIServer) emitSubstrateApprovalV8(ctx context.Context, ask asks.Ask, r
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[substrate] %s record failed: %v\n", event, err)
 	}
+}
+
+// substrateOwnerSubject is the person's subject in an ask's owner key
+// (issuer#subject): the user id the actor's hook records carry.
+func substrateOwnerSubject(owner string) string {
+	if i := strings.LastIndex(owner, "#"); i >= 0 {
+		return owner[i+1:]
+	}
+	return owner
 }

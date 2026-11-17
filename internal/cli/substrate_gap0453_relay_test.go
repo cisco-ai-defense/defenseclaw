@@ -53,7 +53,7 @@ func TestGAP0453LeaderRelaysLifecycleEventsWithTheRegistration(t *testing.T) {
 	r := out.Records[0]
 	if r.Kind != telemetryrelay.KindLifecycle || r.Lifecycle != chainstate.LifecycleSuspended || r.Actor != "alice-1" || r.Profile != "eng" ||
 		r.Template != "eng-web/claude" || r.Connector != "claudecode" || r.RunMode != "unattended" || r.BatchID != "b1" ||
-		r.UserName != "alice@example.com" || r.Driver != "microvm" || r.UserID != "https://idp.example#alice" || !r.At.Equal(at) {
+		r.UserName != "alice@example.com" || r.Driver != "microvm" || r.UserID != "alice" || !r.At.Equal(at) {
 		t.Fatalf("lifecycle record %+v", r)
 	}
 }
