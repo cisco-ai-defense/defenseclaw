@@ -133,6 +133,28 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 		{"settings home disableAllHooks", "Write", map[string]any{"file_path": "{H}/.claude/settings.json", "content": `{"disableAllHooks":true}`}, "block"},
 		{"settings.local tilde disableAllHooks", "Write", map[string]any{"file_path": "~/.claude/settings.local.json", "content": `{"disableAllHooks":true}`}, "block"},
 		{"settings.local home allowManagedHooksOnly", "Write", map[string]any{"file_path": "{H}/.claude/settings.local.json", "content": `{"allowManagedHooksOnly":true}`}, "block"},
+		// GAP-0536 (RKNF review of the GAP-0433 fix): changes the actor
+		// judged without the file's DefenseClaw entries. The actor applies
+		// them to synthetic copies of the registered file and compares as the
+		// laptop does.
+		{"rknf Edit keeps old as substring", "Edit", map[string]any{"file_path": "{H}/.claude/settings.json",
+			"old_string": "~/.defenseclaw/hooks/claude-code-hook.sh", "new_string": "true || ~/.defenseclaw/hooks/claude-code-hook.sh"}, "block"},
+		{"rknf Edit renames hooks key", "Edit", map[string]any{"file_path": "{H}/.claude/settings.json",
+			"old_string": `{"hooks":`, "new_string": `{"hooks_off":`}, "block"},
+		{"rknf Edit renames PreToolUse", "Edit", map[string]any{"file_path": "{H}/.claude/settings.json",
+			"old_string": `"PreToolUse"`, "new_string": `"PreToolUseOff"`}, "block"},
+		{"rknf Write decoy hook", "Write", map[string]any{"file_path": "{H}/.claude/settings.json",
+			"content": `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"echo defenseclaw"}]}]}}`}, "block"},
+		{"rknf Write dotdot path", "Write", map[string]any{"file_path": "{H}/.claude/../.claude/settings.json", "content": "{}"}, "block"},
+		// The same rule for other spellings: a case change of the event key,
+		// a later duplicate hooks key that overrides the kept one, and a
+		// matcher change.
+		{"gap0536 Edit lower-cases PreToolUse", "Edit", map[string]any{"file_path": "~/.claude/settings.json",
+			"old_string": `"PreToolUse"`, "new_string": `"pretooluse"`}, "block"},
+		{"gap0536 Edit adds later hooks key", "Edit", map[string]any{"file_path": "{H}/.claude/settings.json",
+			"old_string": `"timeout":30}]}]}}`, "new_string": `"timeout":30}]}]},"hooks":{}}`}, "block"},
+		{"gap0536 MultiEdit narrows matcher", "MultiEdit", map[string]any{"file_path": "{H}/.claude/settings.json",
+			"edits": []any{map[string]any{"old_string": `"matcher":"*"`, "new_string": `"matcher":"Read"`}}}, "block"},
 		// Controls: a write that keeps the hooks, an Edit that does not touch
 		// them, and a settings.local.json that never held them.
 		{"settings home Write keeps hooks", "Write", map[string]any{"file_path": "{H}/.claude/settings.json", "content": kept}, "allow"},
