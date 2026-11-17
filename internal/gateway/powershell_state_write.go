@@ -332,8 +332,17 @@ func psSwitchParameter(name string) bool {
 // psParameterReadings returns the readings of a mutator statement with
 // abbreviated parameters: one with every unique prefix spelled out, and,
 // for each parameter that stays unknown or ambiguous, that reading without
-// it and without it and its value. Nothing is returned for a statement
-// whose parameters are all known. bounded reports too many to read.
+// it and its value, and without it alone when it may be a switch. Nothing
+// is returned for a statement whose parameters are all known. bounded
+// reports too many to read.
+//
+// A prefix that matches known parameters only, none of them a switch, can
+// at most bind as one of them, which takes the next word as its value
+// (PowerShell refuses an ambiguous one): reading that word as a positional
+// moved, for mv -t <folder> <file>, the folder instead of the file and
+// alerted on a file moved into an agent settings folder
+// (rel-1-0-10:GAP-1209). An unknown name may be a parameter the list lacks,
+// a switch included, so it keeps both readings.
 func psParameterReadings(form string) ([]string, bool) {
 	budget := &psBudget{}
 	words := psWords(form, budget)
@@ -344,7 +353,10 @@ func psParameterReadings(form string) ([]string, bool) {
 		return nil, false
 	}
 	texts := make([]string, len(words))
+	// unknown lists the words that stay unknown or ambiguous; switchable,
+	// those of them that may bind as a switch (psSwitchParameter).
 	var unknown []int
+	switchable := map[int]bool{}
 	changed := false
 	for k, word := range words {
 		texts[k] = word.text
@@ -358,14 +370,16 @@ func psParameterReadings(form string) ([]string, bool) {
 		name, value, hasValue := strings.Cut(word.text[1:], ":")
 		full := ""
 		matches := 0
+		aSwitch := false
 		for _, known := range psKnownParameters {
 			if strings.EqualFold(known, name) {
-				full, matches = known, 1
+				full, matches, aSwitch = known, 1, psSwitchParameter(known)
 				break
 			}
 			if len(name) <= len(known) && strings.EqualFold(known[:len(name)], name) {
 				full = known
 				matches++
+				aSwitch = aSwitch || psSwitchParameter(known)
 			}
 		}
 		switch {
@@ -389,6 +403,7 @@ func psParameterReadings(form string) ([]string, bool) {
 			changed = true
 		default:
 			unknown = append(unknown, k)
+			switchable[k] = matches == 0 || aSwitch
 		}
 	}
 	const maxUnknown = 8
@@ -409,7 +424,9 @@ func psParameterReadings(form string) ([]string, bool) {
 		readings = append(readings, without(len(texts), 0))
 	}
 	for _, k := range unknown {
-		readings = append(readings, without(k, 1))
+		if switchable[k] || k+1 >= len(texts) {
+			readings = append(readings, without(k, 1))
+		}
 		if k+1 < len(texts) {
 			readings = append(readings, without(k, 2))
 		}
