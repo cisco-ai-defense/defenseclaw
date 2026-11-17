@@ -349,6 +349,26 @@
       "since": "1.0.6"
     },
     {
+      "name": "DEFENSECLAW_TASK_FAULTS",
+      "category": "hook_internal",
+      "purpose": "Path of the fault file the Agent Substrate relay gives a --task run; the actor kit hook adds one line for each hook call the gateway did not answer, so an agent that still exits 0 is not reported as a success (GAP-0326). Set by the relay, not by people.",
+      "default": "unset (no task run)",
+      "accepted_values": [
+        "absolute file path",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/substrate/kit/taskfaults.go",
+          "description": "Written by the relay for a task run and appended to by the kit hook"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
