@@ -152,7 +152,14 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			}
 			name, ok := StaticWord(redirect.Word, home)
 			if !ok {
-				if s.changed && (!s.known || sameShellDirectory(s.physical, filepath.Join(home, ".ssh"))) {
+				// After a directory change the walk cannot follow, a target
+				// built at run time may be authorized_keys in whatever folder
+				// the shell reached. One whose last element is fixed text
+				// naming another file ("$LOCK_DIR/pid") names that file
+				// wherever it lies, as a static relative name does below
+				// (rel-1-0-10:GAP-1050: a lock script after a dynamic eval).
+				if s.changed && (!s.known && !shellWordFixedOrdinaryBase(redirect.Word) ||
+					sameShellDirectory(s.physical, filepath.Join(home, ".ssh"))) {
 					unknown = true
 				}
 				continue
@@ -654,6 +661,59 @@ func shellAuthorizedKeysBase(name string) bool {
 		base = strings.ToLower(base)
 	}
 	return base == "authorized_keys" || base == "authorized_keys2"
+}
+
+// shellWordFixedOrdinaryBase reports a word whose last path element is
+// fixed text naming no authorized-keys file: the word's last part is literal
+// text (unquoted, single- or double-quoted) holding a slash, and what follows
+// the last slash is a plain ASCII file name (letters, digits, '.', '_', '-';
+// not "." or ".."), with no expansion, pattern, escape or quote in it. What
+// the parts before that slash expand to, the word names a file of that name.
+// The authorized-keys and SSH control file names are compared without case
+// and without the trailing dots and spaces Windows drops, so a
+// case-insensitive file system or a Windows spelling of one is never such a
+// name.
+func shellWordFixedOrdinaryBase(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	var text string
+	switch part := word.Parts[len(word.Parts)-1].(type) {
+	case *syntax.Lit:
+		text = part.Value
+	case *syntax.SglQuoted:
+		if part.Dollar {
+			return false
+		}
+		text = part.Value
+	case *syntax.DblQuoted:
+		if len(part.Parts) == 0 {
+			return false
+		}
+		lit, ok := part.Parts[len(part.Parts)-1].(*syntax.Lit)
+		if !ok {
+			return false
+		}
+		text = lit.Value
+	default:
+		return false
+	}
+	slash := strings.LastIndexByte(text, '/')
+	if slash < 0 {
+		return false
+	}
+	base := text[slash+1:]
+	if base == "" || base == "." || base == ".." {
+		return false
+	}
+	for _, r := range base {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	name := strings.ToLower(strings.TrimRight(base, ". "))
+	protected := append(append([]string{"administrators_authorized_keys"}, AuthorizedKeysFiles[:]...), SSHControlFiles[:]...)
+	return name != "" && !slices.Contains(protected, name)
 }
 
 func sameShellDirectory(a, b string) bool { return a != "" && filepath.Clean(a) == filepath.Clean(b) }
