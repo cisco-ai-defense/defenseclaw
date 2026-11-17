@@ -4,26 +4,14 @@
 package hookpaths
 
 import (
-	"errors"
-	"os"
-	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-// testSymlink makes a symbolic-link fixture. A standard Windows account
-// without the create-symbolic-link right (Developer Mode off) gets
-// ERROR_PRIVILEGE_NOT_HELD: the fixture cannot exist there, so the test
-// skips with the reason instead of failing before it checks anything (the
-// native Windows standard-user gate read 45 such tests as reds; Windows CI
-// runs elevated and runs them all). Any other error fails the test.
+// testSymlink makes a symbolic-link fixture (testenv.Symlink: a skip where a
+// standard Windows account may not create one).
 func testSymlink(t testing.TB, target, link string) {
 	t.Helper()
-	err := os.Symlink(target, link)
-	if err == nil {
-		return
-	}
-	if runtime.GOOS == "windows" && errors.Is(err, errorPrivilegeNotHeld) {
-		t.Skipf("this account may not create a symbolic link (fixture %s): %v", link, err)
-	}
-	t.Fatal(err)
+	testenv.Symlink(t, target, link)
 }
