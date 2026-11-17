@@ -921,7 +921,8 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 }
 
 // hostApplyBranch commits the patch on a new branch of the project's
-// repository through a temporary worktree; the checkout is not touched.
+// repository through a temporary worktree; the checkout is not touched. In
+// a repository with no commit yet the branch has no parent (GAP-0393).
 func hostApplyBranch(ctx context.Context, rec *hostRecord, opts ApplyOptions, patch []byte) error {
 	top, err := hostGit(ctx, rec.Project, nil, nil, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -937,6 +938,13 @@ func hostApplyBranch(ctx context.Context, rec *hostRecord, opts ApplyOptions, pa
 	}
 	if _, err := hostGit(ctx, toplevel, nil, nil, "rev-parse", "--verify", "--quiet", "refs/heads/"+opts.Branch); err == nil && !opts.Force {
 		return fmt.Errorf("branch %s exists already; choose another name or add --force", opts.Branch)
+	}
+	sub := strings.TrimSuffix(strings.TrimSpace(string(prefix)), "/")
+	if on, unborn := hostUnbornHead(ctx, toplevel); unborn {
+		if on == "refs/heads/"+opts.Branch {
+			return fmt.Errorf("this repository has no commit yet and %s is the branch the folder is on; choose another name", opts.Branch)
+		}
+		return hostOrphanBranch(ctx, toplevel, sub, opts, patch)
 	}
 	tmp, err := os.MkdirTemp(hostDir(opts.DataDir), opts.Name+".wt-")
 	if err != nil {
@@ -954,10 +962,9 @@ func hostApplyBranch(ctx context.Context, rec *hostRecord, opts ApplyOptions, pa
 	if _, err := hostGit(ctx, toplevel, nil, nil, "worktree", "add", "--quiet", bflag, opts.Branch, tmp, "HEAD"); err != nil {
 		return err
 	}
-	dir := "--directory=" + strings.TrimSuffix(strings.TrimSpace(string(prefix)), "/")
 	args := []string{"apply", "--whitespace=nowarn", "--index"}
-	if dir != "--directory=" {
-		args = append(args, dir)
+	if sub != "" {
+		args = append(args, "--directory="+sub)
 	}
 	if _, err := hostGit(ctx, tmp, nil, patch, append(args, "-")...); err != nil {
 		return fmt.Errorf("the changes do not apply to %s's last commit: %w", opts.Branch, err)
@@ -967,6 +974,59 @@ func hostApplyBranch(ctx context.Context, rec *hostRecord, opts ApplyOptions, pa
 		return err
 	}
 	return nil
+}
+
+// hostUnbornHead reports a repository with no commit yet (GAP-0393): HEAD
+// names a branch (on) that does not exist. pull --branch has nothing to
+// branch from there.
+func hostUnbornHead(ctx context.Context, toplevel string) (on string, unborn bool) {
+	ref, err := hostGit(ctx, toplevel, nil, nil, "symbolic-ref", "-q", "HEAD")
+	if err != nil {
+		return "", false
+	}
+	if _, err := hostGit(ctx, toplevel, nil, nil, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"); err == nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(ref)), true
+}
+
+// hostOrphanBranch commits the patch on a new branch with no parent, in a
+// repository with no commit yet, through a scratch index: the checkout, its
+// index and its unborn branch are not touched. Changes to files that are in
+// no commit have nothing to apply to.
+func hostOrphanBranch(ctx context.Context, toplevel, sub string, opts ApplyOptions, patch []byte) error {
+	f, err := os.CreateTemp(hostDir(opts.DataDir), opts.Name+".index-")
+	if err != nil {
+		return err
+	}
+	idx := f.Name()
+	f.Close()
+	// git starts an index that does not exist as empty; an empty file is
+	// not an index.
+	_ = os.Remove(idx)
+	defer os.Remove(idx)
+	env := []string{"GIT_INDEX_FILE=" + idx}
+	args := []string{"apply", "--whitespace=nowarn", "--cached"}
+	if sub != "" {
+		args = append(args, "--directory="+sub)
+	}
+	if _, err := hostGit(ctx, toplevel, env, patch, append(args, "-")...); err != nil {
+		return fmt.Errorf("this repository has no commit yet and the changes edit files that are in no commit; make a first commit and run pull --branch again, or use --apply or --patch-out FILE (%w)", err)
+	}
+	tree, err := hostGit(ctx, toplevel, env, nil, "write-tree")
+	if err != nil {
+		return err
+	}
+	commit, err := hostGit(ctx, toplevel, hostUser(ctx, toplevel), nil, "commit-tree", "-m", "Changes from the agent "+opts.Name, strings.TrimSpace(string(tree)))
+	if err != nil {
+		return err
+	}
+	ref := []string{"update-ref", "-m", "defenseclaw: pull " + opts.Name, "refs/heads/" + opts.Branch, strings.TrimSpace(string(commit))}
+	if !opts.Force {
+		ref = append(ref, "") // the branch must still not exist
+	}
+	_, err = hostGit(ctx, toplevel, nil, nil, ref...)
+	return err
 }
 
 // hostUser is the person's git identity for a branch commit (their config),
