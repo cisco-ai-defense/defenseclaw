@@ -250,6 +250,11 @@ type windowsHolderSystem interface {
 // windowsHolderSys is the system the scan reads; tests replace it.
 var windowsHolderSys windowsHolderSystem = windowsNativeHolderSystem{}
 
+// windowsHolderSelf is the guardian's own process id: the scan never counts
+// its handles. Tests that inject a handle table set it to 0, so that a fake
+// process whose id happens to be the test's own is still seen.
+var windowsHolderSelf = uint32(os.Getpid())
+
 // windowsHolderScan is what one pass found.
 type windowsHolderScan struct {
 	Identity windowsHookHolderIdentity
@@ -1298,7 +1303,7 @@ func endWindowsExclusiveHoldOn(gate *windowsHolderState, target string, probes w
 // of backing off. last is true on the final look, which then ends as any
 // other failed close.
 func (gate *windowsHolderState) pass(target string, probes windowsHolderProbes, now time.Time, last bool) (closed int, again bool, err error) {
-	scan, err := scanWindowsHolders(windowsHolderSys, target, uint32(os.Getpid()))
+	scan, err := scanWindowsHolders(windowsHolderSys, target, windowsHolderSelf)
 	if err != nil {
 		return 0, false, gate.refuse(now, fmt.Errorf("the guardian could not list who holds the hook: %w", err))
 	}

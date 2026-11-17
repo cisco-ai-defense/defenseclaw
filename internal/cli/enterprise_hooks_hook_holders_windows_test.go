@@ -247,11 +247,14 @@ func newHoldRig(t *testing.T) *holdRig {
 	rig.advance = fakeWindowsHeldSwapClock(t)
 	rig.sys = &fakeHolderSystem{t: t, hook: windowsHookHolderIdentity{volume: 7, id: [16]byte{1, 2, 3}}, procs: map[uint32]*fakeHolderProcess{}}
 	savedStandalone, savedSys, savedBlocked, savedPost, savedName := windowsHolderStandalone, windowsHolderSys, windowsHookBinaryDeleteBlocked, windowsHolderAuditPost, windowsHolderUserName
-	savedOpenRefused, savedKeep := windowsHookBinaryOpenRefused, windowsHookBinaryKeep
+	savedOpenRefused, savedKeep, savedSelf := windowsHookBinaryOpenRefused, windowsHookBinaryKeep, windowsHolderSelf
 	savedDataRead, savedDataDelete, savedDataDir := windowsHookDataReadRefused, windowsHookDataDeleteBlocked, windowsHookRuntimeDir
 	savedTimeout, savedHung, savedProbes, savedWrite, savedCommit := windowsHolderProbeTimeout, windowsHolderMaxHung, windowsHolderMaxProbes, windowsHolderAuditWrite, windowsHolderCommitWait
 	windowsHolderStandalone = func() bool { return true }
 	windowsHolderSys = rig.sys
+	// The fake processes are not this process, whatever their ids: a fake id
+	// equal to the test's own was skipped as the guardian's own process.
+	windowsHolderSelf = 0
 	windowsHookBinaryDeleteBlocked = func(string) bool { return rig.sys.blocked() }
 	windowsHookBinaryOpenRefused = func(string) bool { return rig.sys.startRefused() }
 	// The guardian's wrapper runs a hold pass of the test's own in place of
@@ -262,7 +265,7 @@ func newHoldRig(t *testing.T) *holdRig {
 	resetWindowsHolderOutputForTest()
 	t.Cleanup(func() {
 		windowsHolderStandalone, windowsHolderSys, windowsHookBinaryDeleteBlocked, windowsHolderAuditPost, windowsHolderUserName = savedStandalone, savedSys, savedBlocked, savedPost, savedName
-		windowsHookBinaryOpenRefused, windowsHookBinaryKeep = savedOpenRefused, savedKeep
+		windowsHookBinaryOpenRefused, windowsHookBinaryKeep, windowsHolderSelf = savedOpenRefused, savedKeep, savedSelf
 		windowsHookDataReadRefused, windowsHookDataDeleteBlocked, windowsHookRuntimeDir = savedDataRead, savedDataDelete, savedDataDir
 		windowsHolderProbeTimeout, windowsHolderMaxHung, windowsHolderMaxProbes, windowsHolderAuditWrite, windowsHolderCommitWait = savedTimeout, savedHung, savedProbes, savedWrite, savedCommit
 		resetWindowsHolderOutputForTest()

@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"os"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -83,5 +84,22 @@ func TestWindowsHolderOnlyAClosedHandleMakesAnEmptyCheckLookAgain(t *testing.T) 
 	windowsHolderSys = deniedProbeSystem{fakeHolderSystem: rig.sys, deny: map[uint32]bool{4300: true}}
 	if closed, err := rig.check(); closed != 0 || err != nil || rig.sys.snapshots != 1 {
 		t.Fatalf("closed %d, %v, %d scans; want one scan (a denied probe is not a rotated handle)", closed, err, rig.sys.snapshots)
+	}
+}
+
+// The rig's fake processes are seen whatever their ids. The scan skips the
+// guardian's own process id, and a fake id equal to the test process's own
+// (Windows ids are multiples of 4, as the fake ones are) made that fake
+// process invisible: tests that need it failed only on the runs where the
+// test process got that id.
+func TestWindowsHolderRigSeesAFakeProcessWithTheTestsOwnID(t *testing.T) {
+	rig := newHoldRig(t)
+	holder := rig.sys.culprit(0x44)
+	proc := rig.sys.add(uint32(os.Getpid()), fakeUserSID, 2, holder)
+	if closed, err := rig.check(); closed != 0 || err != nil {
+		t.Fatalf("first check: closed %d, %v", closed, err)
+	}
+	if closed, err := rig.tick(); closed != 1 || err != nil || !holder.closed || len(proc.closeLog) != 1 {
+		t.Fatalf("second check: closed %d, %v (a fake process with the test's own id was not seen)", closed, err)
 	}
 }
