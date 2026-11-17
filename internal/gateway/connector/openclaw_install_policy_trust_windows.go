@@ -30,15 +30,22 @@ import (
 
 // openClawInstallPolicyPathTrusted applies the OpenClaw rule for an install
 // policy command on Windows: the command must be a regular file, and neither
-// it nor any folder above it, up to the drive root, may let an account other
-// than LocalSystem, Administrators, TrustedInstaller or the current user add,
-// change or remove entries (OpenClaw reads the DACL and counts every allow
-// ACE with a right in winowner.CustodyWriteMask, the same mask OpenClaw
-// uses). OpenClaw through 2026.11.5 applies the rule to the drive root too,
-// and the default ACL of a Windows system drive root lets BUILTIN\Users
-// create folders in it, so on such a drive OpenClaw refuses every command,
-// and with it every skill and plugin install (GAP-1139). Setup then does not
-// write the command. An ACL that cannot be read is refused as well.
+// it nor any folder above it, up to the drive root, may give an account other
+// than the current user, LocalSystem or Administrators an allow ACE with a
+// right in winowner.CustodyWriteMask (the mask OpenClaw uses). That is the
+// trust set of OpenClaw's native ACL reader (fs-safe 0.26: the current user,
+// LocalSystem and built-in Administrators; its .NET fallback also trusts
+// TrustedInstaller, so DefenseClaw trusts only the narrower set). Inherit-only
+// ACEs do not apply to the object and are skipped, as OpenClaw 2026.11.x
+// skips them (OpenClaw 2026.8.35, fs-safe 0.5, counted them from icacls
+// text; on a drive root hardened as below it may still refuse the command).
+// Every OpenClaw release up to at least 2026.11.5 applies the rule to the
+// drive root too, and the default ACL of a Windows system drive root has
+// BUILTIN\Users:(CI)(AD), a create-folders grant that applies to the root
+// itself, so OpenClaw refuses every command on such a drive, and with it
+// every skill and plugin install (GAP-1139). Setup then does not write the
+// command. A root without that entry (the inherit-only Users and CREATOR
+// OWNER entries may stay) passes. An ACL that cannot be read is refused.
 func openClawInstallPolicyPathTrusted(command, _ string) error {
 	info, err := os.Lstat(command)
 	if err != nil {
@@ -53,7 +60,7 @@ func openClawInstallPolicyPathTrusted(command, _ string) error {
 	}
 	current := user.User.Sid.String()
 	for p := command; ; p = filepath.Dir(p) {
-		sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		sd, err := openClawInstallPolicyReadDACL(p)
 		if err != nil {
 			return fmt.Errorf("cannot read the ACL of %s: %v", p, err)
 		}
@@ -66,10 +73,21 @@ func openClawInstallPolicyPathTrusted(command, _ string) error {
 	}
 }
 
+// openClawInstallPolicyReadDACL reads the DACL of p; tests replace it.
+var openClawInstallPolicyReadDACL = func(p string) (*windows.SECURITY_DESCRIPTOR, error) {
+	return windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+}
+
+// openClawInstallPolicyWriterTrusted is OpenClaw's native trust set: the
+// current user, LocalSystem and built-in Administrators.
+func openClawInstallPolicyWriterTrusted(sid, current string) bool {
+	return sid != "" && (sid == current || sid == "S-1-5-18" || sid == "S-1-5-32-544")
+}
+
 // openClawInstallPolicyACLTrusted is the OpenClaw rule for one file or
-// folder p with security descriptor sd, for the account current (a SID).
-// An inherit-only ACE counts too, as OpenClaw counts it, and an ACE whose
-// layout is not a plain allow or deny cannot be checked and is refused.
+// folder p with security descriptor sd, for the account current (a SID). A
+// NULL DACL, and an ACE whose layout is not a plain allow or deny, cannot be
+// checked and are refused; deny ACEs never subtract a grant.
 func openClawInstallPolicyACLTrusted(p string, sd *windows.SECURITY_DESCRIPTOR, current string) error {
 	dacl, _, err := sd.DACL()
 	if err != nil || dacl == nil {
@@ -87,15 +105,15 @@ func openClawInstallPolicyACLTrusted(p string, sd *windows.SECURITY_DESCRIPTOR, 
 		default:
 			return fmt.Errorf("the ACL of %s has an entry DefenseClaw cannot check (type %d)", p, ace.Header.AceType)
 		}
-		if uint32(ace.Mask)&winowner.CustodyWriteMask == 0 {
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || uint32(ace.Mask)&winowner.CustodyWriteMask == 0 {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if winowner.Trusted(sid.String(), current) {
+		if openClawInstallPolicyWriterTrusted(sid.String(), current) {
 			continue
 		}
 		return fmt.Errorf("%s lets %s change its entries (access mask 0x%x); OpenClaw refuses an install policy command below such a folder, "+
-			"and a Windows drive root grants BUILTIN\\Users this by default", p, openClawInstallPolicySIDName(sid), uint32(ace.Mask))
+			"and a Windows drive root grants BUILTIN\\Users this by default (BUILTIN\\Users:(CI)(AD))", p, openClawInstallPolicySIDName(sid), uint32(ace.Mask))
 	}
 	return nil
 }

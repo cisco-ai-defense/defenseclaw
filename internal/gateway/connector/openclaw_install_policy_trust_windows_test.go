@@ -75,9 +75,14 @@ func TestOpenClawInstallPolicyACLTrustedWindows(t *testing.T) {
 		{"default system drive root", "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x4;;;BU)(A;CIIO;0x2;;;BU)(A;OICIIO;GA;;;CO)", false},
 		{"profile folder", "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + current + ")", true},
 		{"read and execute for everyone", "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;WD)(A;OICI;0x1200a9;;;BU)", true},
-		{"trusted installer and a deny", "D:PAI(D;;FA;;;BU)(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)", true},
+		{"a deny is skipped", "D:PAI(D;;FA;;;BU)(A;OICI;FA;;;SY)", true},
+		// OpenClaw's native reader does not trust TrustedInstaller.
+		{"trusted installer write", "D:PAI(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;OICI;FA;;;SY)", false},
 		{"authenticated users modify", "D:(A;OICI;0x1301bf;;;AU)", false},
-		{"inherit-only creator owner", "D:(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)", false},
+		// Inherit-only ACEs do not apply to the folder (OpenClaw 2026.11.x).
+		{"inherit-only creator owner", "D:(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)", true},
+		{"inherit-only users write", "D:(A;CIIO;0x2;;;BU)(A;OICI;FA;;;SY)", true},
+		{"hardened drive root", "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CIIO;0x2;;;BU)(A;OICIIO;GA;;;CO)", true},
 		{"owner rights write", "D:(A;;0x2;;;OW)", false},
 	}
 	for _, tc := range cases {
@@ -96,5 +101,45 @@ func TestOpenClawInstallPolicyACLTrustedWindows(t *testing.T) {
 	}
 	if err := openClawInstallPolicyACLTrusted(`C:\x`, nullDACL, current); err == nil {
 		t.Error("a NULL DACL lets everyone write and must be refused")
+	}
+}
+
+// A drive root hardened to drop BUILTIN\Users:(CI)(AD), keeping the
+// inherit-only Users and CREATOR OWNER entries, passes OpenClaw 2026.11.x,
+// so setup registers the install policy there; the default root does not.
+func TestOpenClawInstallPolicyRegisteredBelowAHardenedRootWindows(t *testing.T) {
+	configPath, command, opts := installPolicyFixture(t, openClawCombinedSpelling)
+	openClawInstallPolicyTrusted = openClawInstallPolicyPathTrusted
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + user.User.Sid.String() + ")"
+	const hardened = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CIIO;0x2;;;BU)(A;OICIIO;GA;;;CO)"
+	const defaultRoot = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;0x4;;;BU)(A;CIIO;0x2;;;BU)(A;OICIIO;GA;;;CO)"
+	prevRead := openClawInstallPolicyReadDACL
+	t.Cleanup(func() { openClawInstallPolicyReadDACL = prevRead })
+	for _, tc := range []struct {
+		root string
+		want bool
+	}{{defaultRoot, false}, {hardened, true}} {
+		root := tc.root
+		openClawInstallPolicyReadDACL = func(p string) (*windows.SECURITY_DESCRIPTOR, error) {
+			if filepath.Dir(p) == p {
+				return windows.SecurityDescriptorFromString(root)
+			}
+			return windows.SecurityDescriptorFromString(own)
+		}
+		c := NewOpenClawConnector()
+		if err := c.registerPlugin(opts); err != nil {
+			t.Fatalf("setup: %v", err)
+		}
+		policy, present := installPolicyIn(t, configPath)
+		if present != tc.want {
+			t.Fatalf("root %s: installPolicy present=%v, want %v", root, present, tc.want)
+		}
+		if present && policy.(map[string]interface{})["exec"].(map[string]interface{})["command"] != command {
+			t.Fatalf("installPolicy command = %v", policy)
+		}
 	}
 }

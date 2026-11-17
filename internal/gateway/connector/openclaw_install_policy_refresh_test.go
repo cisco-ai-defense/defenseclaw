@@ -18,7 +18,9 @@ package connector
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -38,8 +40,8 @@ func TestOpenClawRefreshInstallPolicyFollowsConfig(t *testing.T) {
 		t.Fatal("setup with install admission off wrote security.installPolicy")
 	}
 
-	if err := c.RefreshInstallPolicy(opts); err != nil {
-		t.Fatalf("refresh on: %v", err)
+	if state, err := c.RefreshInstallPolicy(opts); err != nil || state != openClawInstallPolicyRegistered {
+		t.Fatalf("refresh on: %q %v", state, err)
 	}
 	policy, present := installPolicyIn(t, configPath)
 	if !present || !reflect.DeepEqual(policy, openClawInstallPolicyBlock(opts, command)) {
@@ -53,13 +55,13 @@ func TestOpenClawRefreshInstallPolicyFollowsConfig(t *testing.T) {
 		t.Fatalf("setup after a refresh rewrote openclaw.json:\n%s", got)
 	}
 
-	if err := c.RefreshInstallPolicy(off); err != nil {
-		t.Fatalf("refresh off: %v", err)
+	if state, err := c.RefreshInstallPolicy(off); err != nil || state != openClawInstallPolicyOff {
+		t.Fatalf("refresh off: %q %v", state, err)
 	}
 	if _, present := installPolicyIn(t, configPath); present {
 		t.Fatalf("refresh with install admission off left the block:\n%s", mustReadFileString(t, configPath))
 	}
-	if err := c.RefreshInstallPolicy(opts); err != nil {
+	if _, err := c.RefreshInstallPolicy(opts); err != nil {
 		t.Fatalf("refresh on again: %v", err)
 	}
 	if err := c.Teardown(context.Background(), opts); err != nil {
@@ -78,10 +80,29 @@ func TestOpenClawRefreshInstallPolicyFollowsConfig(t *testing.T) {
 // Before setup registered the plugin there is nothing to refresh.
 func TestOpenClawRefreshInstallPolicyNeedsSetupFirst(t *testing.T) {
 	configPath, _, opts := installPolicyFixture(t, openClawCombinedSpelling)
-	if err := NewOpenClawConnector().RefreshInstallPolicy(opts); err != nil {
-		t.Fatalf("refresh: %v", err)
+	if state, err := NewOpenClawConnector().RefreshInstallPolicy(opts); err != nil || !strings.HasPrefix(state, "not changed: setup has not registered") {
+		t.Fatalf("refresh: %q %v", state, err)
 	}
 	if got := mustReadFileString(t, configPath); got != openClawCombinedSpelling {
 		t.Fatalf("refresh before setup changed openclaw.json:\n%s", got)
+	}
+}
+
+// GAP-1128 round 2: the refresh reports the state it left, so the gateway
+// log says "not registered" and why when the command check refuses (on
+// Windows below a default drive root), not "updated".
+func TestOpenClawRefreshInstallPolicyReportsWhyNotRegistered(t *testing.T) {
+	configPath, _, opts := installPolicyFixture(t, openClawCombinedSpelling)
+	c := NewOpenClawConnector()
+	if err := c.registerPlugin(opts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	openClawInstallPolicyTrusted = func(string, string) error { return errors.New(`C:\ lets BUILTIN\Users change its entries`) }
+	state, err := c.RefreshInstallPolicy(opts)
+	if err != nil || !strings.HasPrefix(state, "not registered: ") || !strings.Contains(state, "BUILTIN") {
+		t.Fatalf("state = %q, err = %v", state, err)
+	}
+	if _, present := installPolicyIn(t, configPath); present {
+		t.Fatal("a command OpenClaw would refuse stayed registered")
 	}
 }

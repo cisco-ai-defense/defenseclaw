@@ -21,6 +21,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -43,21 +44,24 @@ func openClawInstallPolicyInputsOf(cfg *config.Config) openClawInstallPolicyInpu
 	}
 }
 
-// openClawInstallPolicyRefresher rewrites the install policy block; tests
-// replace it.
-var openClawInstallPolicyRefresher = func(opts connector.SetupOpts) error {
+// openClawInstallPolicyRefresher rewrites the install policy block and
+// returns the state it left; tests replace it.
+var openClawInstallPolicyRefresher = func(opts connector.SetupOpts) (string, error) {
 	conn, ok := connector.NewDefaultRegistry().Get("openclaw")
 	if !ok {
-		return nil
+		return "not changed: no openclaw connector", nil
 	}
 	refresher, ok := conn.(interface {
-		RefreshInstallPolicy(connector.SetupOpts) error
+		RefreshInstallPolicy(connector.SetupOpts) (string, error)
 	})
 	if !ok {
-		return nil
+		return "not changed: the openclaw connector cannot refresh it", nil
 	}
 	return refresher.RefreshInstallPolicy(opts)
 }
+
+// openClawInstallPolicyRefreshMu runs one refresh at a time.
+var openClawInstallPolicyRefreshMu sync.Mutex
 
 // openClawInstallPolicyNeedsRefresh reports a reload that changes the
 // OpenClaw install admission of a configured, guarded OpenClaw: a rule pack
@@ -67,14 +71,20 @@ var openClawInstallPolicyRefresher = func(opts connector.SetupOpts) error {
 // openclaw.json kept the old answer until the next setup (GAP-1128). Managed
 // installs take their config from a signed bundle and run setup with it.
 func openClawInstallPolicyNeedsRefresh(oldCfg, newCfg *config.Config) bool {
-	if oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled ||
-		managed.IsManagedEnterprise(newCfg.DeploymentMode) ||
-		!slices.Contains(newCfg.ActiveConnectors(), "openclaw") ||
-		!newCfg.EffectiveGuardrailEnabledForConnector("openclaw") ||
-		connector.ConnectorExplicitlyInactive(newCfg.DataDir, "openclaw") {
+	if oldCfg == nil || !openClawInstallPolicyGuarded(newCfg) {
 		return false
 	}
 	return openClawInstallPolicyInputsOf(oldCfg) != openClawInstallPolicyInputsOf(newCfg)
+}
+
+// openClawInstallPolicyGuarded reports a configured, guarded, unmanaged
+// OpenClaw whose install policy the gateway keeps.
+func openClawInstallPolicyGuarded(cfg *config.Config) bool {
+	return cfg != nil && cfg.Guardrail.Enabled &&
+		!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+		slices.Contains(cfg.ActiveConnectors(), "openclaw") &&
+		cfg.EffectiveGuardrailEnabledForConnector("openclaw") &&
+		!connector.ConnectorExplicitlyInactive(cfg.DataDir, "openclaw")
 }
 
 // openClawInstallPolicyRefreshOpts is the part of the OpenClaw SetupOpts
@@ -96,19 +106,30 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config) connector.SetupOpts {
 }
 
 // refreshOpenClawInstallPolicy applies a reload to the OpenClaw install
-// admission (see openClawInstallPolicyNeedsRefresh). OpenClaw reads
-// openclaw.json at each install, so no restart is needed.
-func (s *Sidecar) refreshOpenClawInstallPolicy(oldCfg, newCfg *config.Config) {
-	if s == nil || !openClawInstallPolicyNeedsRefresh(oldCfg, newCfg) {
+// admission (see openClawInstallPolicyNeedsRefresh). The reload starts it in
+// a goroutine; refreshes run one at a time and each writes from the config
+// the gateway holds when it runs, not the one of its reload, so quick
+// reloads (strict, default, strict) cannot apply out of order and leave the
+// admission off. Every refresh logs the state it left and why. OpenClaw
+// reads openclaw.json at each install, so no restart is needed.
+func (s *Sidecar) refreshOpenClawInstallPolicy() {
+	if s == nil {
 		return
 	}
-	state := "off"
-	if newCfg.OpenClawInstallPolicyOn() {
-		state = "on"
-	}
-	if err := openClawInstallPolicyRefresher(openClawInstallPolicyRefreshOpts(newCfg)); err != nil {
-		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; run defenseclaw setup openclaw\n", state, err)
+	openClawInstallPolicyRefreshMu.Lock()
+	defer openClawInstallPolicyRefreshMu.Unlock()
+	cfg := s.currentConfig()
+	if !openClawInstallPolicyGuarded(cfg) {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission updated for the reloaded config (install_policy %s)\n", state)
+	setting := "off"
+	if cfg.OpenClawInstallPolicyOn() {
+		setting = "on"
+	}
+	state, err := openClawInstallPolicyRefresher(openClawInstallPolicyRefreshOpts(cfg))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; run defenseclaw setup openclaw\n", setting, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission after the config reload (install_policy %s): %s\n", setting, state)
 }

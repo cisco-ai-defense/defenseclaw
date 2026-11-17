@@ -2548,7 +2548,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// admission on or off (install_policy auto). It runs off the reload
 	// path: it takes the openclaw.json lock that setup holds.
 	if openClawInstallPolicyNeedsRefresh(oldHookCfg, appliedCfg) {
-		go s.refreshOpenClawInstallPolicy(oldHookCfg, appliedCfg)
+		go s.refreshOpenClawInstallPolicy()
 	}
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills, plugins and MCP servers affected by a list
