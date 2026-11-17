@@ -203,8 +203,10 @@ func TestEnterpriseWindowsEnumerateCycleBoundsExcludedOrphanRevoke(t *testing.T)
 	if !strings.Contains(log, "dcw-orphan00 ("+first.SID+")") {
 		t.Fatalf("the cycle did not name the excluded profile its revoke is at:\n%s", log)
 	}
-	if strings.Contains(log, `C:\Users\`) {
-		t.Fatalf("the log names an excluded profile's absolute path:\n%s", log)
+	for _, orphan := range orphanExcludedProfiles() {
+		if strings.Contains(log, orphan.UserHome) {
+			t.Fatalf("the log names the excluded profile path %s:\n%s", orphan.UserHome, log)
+		}
 	}
 	var again bytes.Buffer
 	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), &again, manifest); err != nil {
