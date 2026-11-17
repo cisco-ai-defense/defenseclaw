@@ -10,10 +10,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,15 +19,11 @@ import (
 )
 
 // pidReuseProbeEnv carries "<listener address>,<test process PID>" to the
-// creator process of TestLoopbackTCPPeerAccountRefusesAReusedPID.
+// creator process of TestLoopbackTCPConnOwnerPIDStaysReservedWhileTheSocketLives.
 const pidReuseProbeEnv = "DC_PEERCRED_PID_REUSE_PROBE"
 
-// pidReuseRequiredEnv=1 turns the probe's skips into failures (the
-// fail-before and pass-after evidence runs).
-const pidReuseRequiredEnv = "DC_REQUIRE_PID_REUSE_PROBE"
-
 // TestLoopbackTCPPeerAccountPIDReuseCreator is the creator process of the
-// probe below: it connects to the listener, hands a duplicate of its socket
+// test below: it connects to the listener, hands a duplicate of its socket
 // to the test process and exits. In a normal run it does nothing.
 func TestLoopbackTCPPeerAccountPIDReuseCreator(t *testing.T) {
 	spec := os.Getenv(pidReuseProbeEnv)
@@ -69,21 +63,38 @@ func TestLoopbackTCPPeerAccountPIDReuseCreator(t *testing.T) {
 	os.Exit(0)
 }
 
-// TestLoopbackTCPPeerAccountRefusesAReusedPID is a black-box probe on the
-// real connection table (GAP-1131), built only on LoopbackTCPPeerAccount and
-// LoopbackTCPClientOwner. A creator process makes the client socket, hands
-// it to a survivor (this test process, by DuplicateHandle) and exits; the
-// table keeps naming the creator's PID. Once a later process gets that PID,
-// the Secure Client caller account lookup must refuse to name its account.
-// It skips when the table stops naming the creator or Windows does not reuse
-// the PID within a minute, unless DC_REQUIRE_PID_REUSE_PROBE=1.
-func TestLoopbackTCPPeerAccountRefusesAReusedPID(t *testing.T) {
+// processState opens pid and returns its creation time and whether it has
+// exited; ok is false when no process object has that PID.
+func processState(pid uint32) (created uint64, exited, ok bool) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return 0, false, false
+	}
+	defer windows.CloseHandle(h) //nolint:errcheck // test query handle
+	var creation, exit, kernel, user windows.Filetime
+	if windows.GetProcessTimes(h, &creation, &exit, &kernel, &user) != nil {
+		return 0, false, true
+	}
+	var code uint32
+	_ = windows.GetExitCodeProcess(h, &code)
+	return uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime), code != 259, true // 259 = STILL_ACTIVE
+}
+
+// TestLoopbackTCPConnOwnerPIDStaysReservedWhileTheSocketLives is the
+// GAP-1131 PID-reuse case on the real kernel, built only on
+// LoopbackTCPClientOwner and LoopbackTCPPeerAccount (it compiles on
+// da4177e225 too). A creator process makes the client socket, hands it to a
+// survivor (this test process, by DuplicateHandle) and exits. The table
+// keeps naming the creator's PID; this checks the premise of the reuse case,
+// that another process can get that PID while the connection lives. Windows
+// keeps the exited creator's process object (and so its PID) while its
+// socket lives, so no other process can hold the PID the table names: the
+// lookup reaches the exited creator itself, on da4177e225 and on the head.
+// Once the socket is closed the PID is released. A native run that fails
+// here means the reuse case is reachable and the guard is the only defence.
+func TestLoopbackTCPConnOwnerPIDStaysReservedWhileTheSocketLives(t *testing.T) {
 	if os.Getenv(pidReuseProbeEnv) != "" {
 		return
-	}
-	skip := t.Skipf
-	if os.Getenv(pidReuseRequiredEnv) == "1" {
-		skip = t.Fatalf
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -102,6 +113,7 @@ func TestLoopbackTCPPeerAccountRefusesAReusedPID(t *testing.T) {
 	creator := exec.Command(os.Args[0], "-test.run=^TestLoopbackTCPPeerAccountPIDReuseCreator$")
 	creator.Env = append(os.Environ(),
 		pidReuseProbeEnv+"="+ln.Addr().String()+","+strconv.FormatUint(uint64(windows.GetCurrentProcessId()), 10))
+	// Output waits for the creator and closes this test's handle to it.
 	out, err := creator.Output()
 	if err != nil {
 		t.Fatalf("creator: %v: %s", err, out)
@@ -110,8 +122,7 @@ func TestLoopbackTCPPeerAccountRefusesAReusedPID(t *testing.T) {
 	var dup windows.Handle
 	for _, line := range strings.Split(string(out), "\n") {
 		if value, ok := strings.CutPrefix(strings.TrimSpace(line), "DUP "); ok {
-			n, err := strconv.ParseUint(value, 10, 64)
-			if err == nil {
+			if n, err := strconv.ParseUint(value, 10, 64); err == nil {
 				dup = windows.Handle(n)
 			}
 		}
@@ -119,56 +130,43 @@ func TestLoopbackTCPPeerAccountRefusesAReusedPID(t *testing.T) {
 	if dup == 0 {
 		t.Fatalf("the creator handed over no socket: %s", out)
 	}
-	defer windows.CloseHandle(dup) //nolint:errcheck // test cleanup
 	server, ok := <-accepted
 	if !ok {
+		_ = windows.Closesocket(dup)
 		t.Fatal("the listener accepted nothing")
 	}
-	defer server.Close()
 	local, remote := server.LocalAddr().(*net.TCPAddr), server.RemoteAddr().(*net.TCPAddr)
-	if owner, err := LoopbackTCPClientOwner(local, remote); err != nil || owner.PID != creatorPID {
-		skip("the table does not name the exited creator %d: %+v %v", creatorPID, owner, err)
+	owner, err := LoopbackTCPClientOwner(local, remote)
+	if err != nil || owner.PID != creatorPID {
+		_ = windows.Closesocket(dup)
+		server.Close()
+		t.Fatalf("the table names %+v, %v for the client end; want the exited creator %d", owner, err, creatorPID)
 	}
-	// Take the PID: start suspended, detached processes (they never run)
-	// until one gets it. The first ones stay alive (a most-recently-freed
-	// reuse order hands the PID out early); later ones are ended at once,
-	// so an oldest-first order cycles through the free IDs within the
-	// minute. Every taker is ended when the test returns.
-	cmd := filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe")
-	var kept []*exec.Cmd
-	defer func() {
-		for _, c := range kept {
-			_ = c.Process.Kill()
-			_ = c.Wait()
+	created, exited, held := processState(creatorPID)
+	sid, accountErr := LoopbackTCPPeerAccount(local, remote)
+	t.Logf("creator PID %d: held=%v exited=%v created=%d connection created=%d; LoopbackTCPPeerAccount=%q, %v",
+		creatorPID, held, exited, created, owner.CreateTime, sid, accountErr)
+	switch {
+	case !held:
+		t.Errorf("PID %d is free while the connection it owns lives: another process can get it (the reuse case is reachable)", creatorPID)
+	case !exited:
+		t.Errorf("PID %d names a running process, not the exited creator", creatorPID)
+	case created > owner.CreateTime:
+		t.Errorf("PID %d names a process that started after the connection: it was reused", creatorPID)
+	}
+	if err := windows.Closesocket(dup); err != nil {
+		t.Fatalf("close the duplicated socket: %v", err)
+	}
+	server.Close()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		now, _, stillHeld := processState(creatorPID)
+		if !stillHeld || now != created {
+			return // released once its socket is gone
 		}
-	}()
-	reused, takers := false, 0
-	for deadline := time.Now().Add(time.Minute); !reused && time.Now().Before(deadline); takers++ {
-		c := exec.Command(cmd, "/c", "exit")
-		c.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_SUSPENDED | windows.DETACHED_PROCESS}
-		if err := c.Start(); err != nil {
-			t.Fatalf("start a PID taker: %v", err)
+		if time.Now().After(deadline) {
+			t.Fatalf("PID %d is still the exited creator 10 s after its socket was closed: something else holds it", creatorPID)
 		}
-		reused = uint32(c.Process.Pid) == creatorPID
-		if reused || len(kept) < 200 {
-			kept = append(kept, c)
-			continue
-		}
-		_ = c.Process.Kill()
-		_ = c.Wait()
+		time.Sleep(100 * time.Millisecond)
 	}
-	if !reused {
-		skip("PID %d was not reused within a minute (%d processes)", creatorPID, takers)
-	}
-	if owner, err := LoopbackTCPClientOwner(local, remote); err != nil || owner.PID != creatorPID {
-		skip("the table no longer names PID %d: %+v %v", creatorPID, owner, err)
-	}
-	sid, err := LoopbackTCPPeerAccount(local, remote)
-	if err == nil {
-		t.Fatalf("LoopbackTCPPeerAccount named %s, the account of a process that got PID %d after the connection was made; want a refusal", sid, creatorPID)
-	}
-	if !strings.Contains(err.Error(), "started after") {
-		t.Fatalf("LoopbackTCPPeerAccount failed with %v; want the reused-PID refusal", err)
-	}
-	t.Logf("PID %d reused after %d processes and refused: %v", creatorPID, takers, err)
 }
