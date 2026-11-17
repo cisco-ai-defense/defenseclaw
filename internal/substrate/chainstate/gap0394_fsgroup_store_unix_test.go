@@ -53,7 +53,7 @@ func TestGAP0394FSGroupStoreTreeIsTakenBackAtOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	audit.TrustVolumeRoot(vol)
-	if _, err := New(Options{Dir: vol, EgressAction: "deny"}); err != nil {
+	if _, err := New(Options{Dir: vol, EgressAction: EgressBlock}); err != nil {
 		t.Fatalf("New on the fsGroup volume: %v", err)
 	}
 	for _, p := range []string{filepath.Join(vol, "chains"), filepath.Join(vol, "chains", "eng-web"), filepath.Join(vol, "actors"), file} {

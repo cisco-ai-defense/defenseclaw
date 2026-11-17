@@ -53,7 +53,10 @@ func TestGAP0388ActorViewNamesTheUnattendedAskRule(t *testing.T) {
 				t.Fatalf("unattended actor view: %v, want asks %s timeout %q", a, tc.asks, tc.timeout)
 			}
 			rec = f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors", "p-alice", "")
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || len(got.Actors) != 1 || got.Actors[0]["unattended_asks"] != nil {
+			var attended struct {
+				Actors []map[string]any `json:"actors"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &attended); err != nil || len(attended.Actors) != 1 || attended.Actors[0]["unattended_asks"] != nil {
 				t.Fatalf("an attended actor names an unattended ask rule: %s", rec.Body)
 			}
 		})
