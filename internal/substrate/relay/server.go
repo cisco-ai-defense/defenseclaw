@@ -495,7 +495,6 @@ type pollAttachment struct {
 	*Attachment
 	id       string
 	person   string
-	jti      string
 	in       *inputCount
 	out      *ring
 	mu       sync.Mutex
@@ -542,7 +541,7 @@ func (s *Server) pollOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	inID, in, received := s.countInput(sess.Person, r.URL.Query().Get("resume"))
-	p := &pollAttachment{Attachment: a, id: newID(), person: sess.Person, jti: sess.TokenID, in: in,
+	p := &pollAttachment{Attachment: a, id: newID(), person: sess.Person, in: in,
 		out: newRing(s.opts.Config.Relay.OutputBufferBytes), lastSeen: time.Now(), done: make(chan struct{})}
 	p.out.Append(EncodeControl(s.hello(inID, received)))
 	s.mu.Lock()
@@ -594,15 +593,17 @@ loop:
 	s.mu.Unlock()
 }
 
-// pollFor is the attachment the request names; only the token that opened
-// it may use it.
+// pollFor is the attachment the request names; only the person who opened
+// it may use it, and only with its random id. It is not bound to the token
+// that opened it: through the gateway every request carries a fresh session
+// token, so a token binding refused every read and write after the open and
+// the launcher piled up attachments until the cap (GAP-0414).
 func (s *Server) pollFor(w http.ResponseWriter, r *http.Request, sess Session) *pollAttachment {
 	s.mu.Lock()
 	p := s.polls[r.PathValue("id")]
 	s.mu.Unlock()
-	if p == nil || p.person != sess.Person || p.jti != sess.TokenID {
-		// Another person's (or token's) attachment is as absent as a
-		// closed one.
+	if p == nil || p.person != sess.Person {
+		// Another person's attachment is as absent as a closed one.
 		http.Error(w, "relay: no such attachment", http.StatusNotFound)
 		return nil
 	}
