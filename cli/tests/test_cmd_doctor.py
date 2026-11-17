@@ -498,7 +498,10 @@ class DoctorGuardrailTests(unittest.TestCase):
         # stale result is the real function's, for Windows.
         from defenseclaw.openclaw_plugin_config import openclaw_install_policy_stale_version
 
+        import shutil
+
         data_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, data_dir, True)
         with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
             json.dump({"agents": {"openclaw": {"version": "2026.8.35"}}}, f)
         with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:

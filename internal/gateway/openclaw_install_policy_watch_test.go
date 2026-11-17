@@ -62,8 +62,14 @@ func replaceOpenClawDiscoveryFile(t *testing.T, tmp, dst string) {
 func resetOpenClawInstallPolicyRetryState(t *testing.T) {
 	t.Helper()
 	prevRefresher, prevDelays, prevPoll := openClawInstallPolicyRefresher, openClawInstallPolicyRetryDelays, openClawInstallPolicyVersionPoll
+	prevGone := openClawInstallPolicyGoneLooks
+	// Start clean too: a test that does not reset leaves an owed refresh,
+	// which the watcher now runs.
+	openClawInstallPolicyPending.Store(false)
+	openClawInstallPolicyRetrying.Store(false)
 	t.Cleanup(func() {
 		openClawInstallPolicyRefresher, openClawInstallPolicyRetryDelays, openClawInstallPolicyVersionPoll = prevRefresher, prevDelays, prevPoll
+		openClawInstallPolicyGoneLooks = prevGone
 		stopOpenClawInstallPolicyRetries()
 		openClawInstallPolicyStopped.Store(false)
 		openClawInstallPolicyPending.Store(false)

@@ -295,7 +295,9 @@ func loadOpenClawInstallPolicyRecord(dataDir string) (openClawInstallPolicyRecor
 	if dataDir == "" {
 		return rec, false, nil
 	}
-	data, err := os.ReadFile(openClawInstallPolicyRecordPath(dataDir))
+	// Shared like the other connector state files, so a setup's atomic
+	// replace of the record does not fail on Windows while it is read.
+	data, err := readConnectorStateFile(openClawInstallPolicyRecordPath(dataDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return rec, false, nil
 	}
@@ -331,7 +333,7 @@ func OpenClawInstallPolicyStateWritten(dataDir string) (version, binaryPath stri
 	if dataDir == "" {
 		return "", "", nil
 	}
-	data, err := os.ReadFile(openClawInstallPolicyStatePath(dataDir))
+	data, err := readConnectorStateFile(openClawInstallPolicyStatePath(dataDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", "", nil
 	}

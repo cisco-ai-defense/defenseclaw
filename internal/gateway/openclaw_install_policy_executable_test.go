@@ -109,8 +109,9 @@ func TestOpenClawInstallPolicyWatchIgnoresAnotherOpenClawOnPATH(t *testing.T) {
 	defer stop()
 
 	writeOpenClawDiscoveryAt(t, dataDir, "2026.7.1", second)
-	// The watcher looks every 2 ms; give it many looks at the other openclaw.
-	time.Sleep(200 * time.Millisecond)
+	// The watcher looks every 2 ms; give it many looks at the other openclaw
+	// (the step below proves it is looking).
+	time.Sleep(500 * time.Millisecond)
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("a discovery that found another openclaw on PATH refreshed the install policy %d times", n)
 	}

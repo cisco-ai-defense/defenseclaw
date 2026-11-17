@@ -111,9 +111,13 @@ class OpenClawInstallPolicyStatusRowTest(unittest.TestCase):
     def _row(self, cached, recorded, platform):
         from unittest.mock import patch
 
+        import shutil
+
         from defenseclaw.commands import cmd_status
 
         data_dir, home = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, data_dir, True)
+        self.addCleanup(shutil.rmtree, home, True)
         with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
             json.dump({"agents": {"openclaw": {"version": cached}}}, f)
         with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:

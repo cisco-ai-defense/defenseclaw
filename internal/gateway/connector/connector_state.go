@@ -2801,6 +2801,18 @@ func CachedAgentNotFound(dataDir, connectorName string) bool {
 	return ok && signal.Installed != nil && !*signal.Installed && strings.TrimSpace(signal.BinaryPath) == ""
 }
 
+// LoadCachedOpenClawSignal is the OpenClaw version and executable the last
+// discovery cached, from one read of the cache so the two belong together
+// ("" for what it does not record). OpenClaw takes both from the discovery
+// cache on every platform (LoadCachedAgentVersion, LoadCachedAgentExecutable).
+func LoadCachedOpenClawSignal(dataDir string) (version, binaryPath string) {
+	signal, ok := loadCachedAgentSignal(dataDir, "openclaw")
+	if !ok {
+		return "", ""
+	}
+	return strings.TrimSpace(signal.Version), strings.TrimSpace(signal.BinaryPath)
+}
+
 func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bool) {
 	if strings.TrimSpace(dataDir) == "" {
 		return cachedAgentSignal{}, false

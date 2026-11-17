@@ -69,8 +69,9 @@ func TestOpenClawInstallPolicyRetryJudgesUnderTheLastVersionTheWatcherSaw(t *tes
 		t.Fatalf("the failed refresh under 2026.8.34 did not arm a retry (calls=%d)", calls.Load())
 	}
 	writeOpenClawDiscoveryVersion(t, dataDir, "2026.11.5")
-	// The watcher looks every 2 ms; give it many looks at 2026.11.5.
-	time.Sleep(200 * time.Millisecond)
+	// The watcher looks every 2 ms; give it many looks at 2026.11.5 (a
+	// black-box wait, so the test also runs against the code before the fix).
+	time.Sleep(500 * time.Millisecond)
 	writeOpenClawDiscoveryVersion(t, dataDir, "")
 	fireOpenClawInstallPolicyRetryNow(t)
 	select {
