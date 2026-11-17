@@ -252,18 +252,22 @@ func openClawInstallPolicyStatePath(dataDir string) string {
 	return filepath.Join(dataDir, "openclaw-install-policy-state.json")
 }
 
+// OpenClawBinaryPath is the openclaw executable discovery read the version
+// from (GAP-1237); a state file written before it was recorded has none.
 type openClawInstallPolicyStateRecord struct {
-	State           string `json:"state"`
-	OpenClawVersion string `json:"openclaw_version,omitempty"`
-	At              string `json:"at"`
+	State              string `json:"state"`
+	OpenClawVersion    string `json:"openclaw_version,omitempty"`
+	OpenClawBinaryPath string `json:"openclaw_binary_path,omitempty"`
+	At                 string `json:"at"`
 }
 
-func saveOpenClawInstallPolicyState(dataDir, state, version string) {
+func saveOpenClawInstallPolicyState(dataDir, state, version, binaryPath string) {
 	if dataDir == "" || state == "" {
 		return
 	}
 	data, err := json.MarshalIndent(openClawInstallPolicyStateRecord{
-		State: state, OpenClawVersion: NormalizeAgentVersion("openclaw", version), At: time.Now().UTC().Format(time.RFC3339),
+		State: state, OpenClawVersion: NormalizeAgentVersion("openclaw", version),
+		OpenClawBinaryPath: strings.TrimSpace(binaryPath), At: time.Now().UTC().Format(time.RFC3339),
 	}, "", "  ")
 	if err == nil {
 		_ = atomicWriteFile(openClawInstallPolicyStatePath(dataDir), append(data, byte(10)), 0o600)
@@ -318,27 +322,27 @@ func discardOpenClawInstallPolicyRecord(dataDir string) {
 	}
 }
 
-// OpenClawInstallPolicyStateVersion is the OpenClaw version the last setup
-// or refresh wrote the install policy state under, normalized; "" when there
-// is no state or it names no version. The gateway compares the cached
-// version with it (GAP-1198). A state file that is there but cannot be read
-// is an error, not "no state" (GAP-1234).
-func OpenClawInstallPolicyStateVersion(dataDir string) (string, error) {
+// OpenClawInstallPolicyStateWritten is the OpenClaw version (normalized) and
+// executable the last setup or refresh wrote the install policy state under;
+// "" for what there is no state of or the state does not name. The gateway
+// compares the cache with them (GAP-1198, GAP-1237). A state file that is
+// there but cannot be read is an error, not "no state" (GAP-1234).
+func OpenClawInstallPolicyStateWritten(dataDir string) (version, binaryPath string, err error) {
 	if dataDir == "" {
-		return "", nil
+		return "", "", nil
 	}
 	data, err := os.ReadFile(openClawInstallPolicyStatePath(dataDir))
 	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
+		return "", "", nil
 	}
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var rec openClawInstallPolicyStateRecord
 	if json.Unmarshal(data, &rec) != nil {
-		return "", nil
+		return "", "", nil
 	}
-	return NormalizeAgentVersion("openclaw", rec.OpenClawVersion), nil
+	return NormalizeAgentVersion("openclaw", rec.OpenClawVersion), strings.TrimSpace(rec.OpenClawBinaryPath), nil
 }
 
 // OpenClawInstallPolicyNotChanged starts every state of a refresh that
@@ -380,7 +384,7 @@ const (
 func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) (string, error) {
 	state, err := applyOpenClawInstallPolicyState(configPath, opts)
 	if err == nil && state != OpenClawInstallPolicyVersionUnknown {
-		saveOpenClawInstallPolicyState(opts.DataDir, state, openClawObservedVersion(opts))
+		saveOpenClawInstallPolicyState(opts.DataDir, state, openClawObservedVersion(opts), openClawObservedExecutable(opts))
 	}
 	return state, err
 }

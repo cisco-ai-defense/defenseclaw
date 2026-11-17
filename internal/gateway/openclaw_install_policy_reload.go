@@ -18,8 +18,11 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -92,48 +95,87 @@ var (
 	openClawInstallPolicyRetryRuns    sync.WaitGroup
 )
 
-// openClawInstallPolicyWrittenUnder is the OpenClaw version the install
-// policy was last decided under: the state file's when the watch starts
-// (else the cached one), then the version of each refresh that decided
+// openClawObservation is an OpenClaw version (normalized) and the
+// executable discovery read it from ("" when it names none).
+type openClawObservation struct {
+	version    string
+	binaryPath string
+}
+
+// openClawInstallPolicyWrittenUnder is the OpenClaw version and executable
+// the install policy was last decided under: the state file's when the watch
+// starts (else the cached version), then those of each refresh that decided
 // (connector.OpenClawInstallPolicyDecided). A refresh that returned before
 // it looked at the version, or found it unknown, moves nothing (GAP-1234).
 // The watcher compares the cached version with it, not with the last one it
 // saw, so a refresh that failed past every retry runs again at its next
 // look while the policy is still judged under the old version (GAP-1198).
 //
-// openClawInstallPolicyLastSeen is the last cached OpenClaw version the
-// watcher parsed, recorded at every look, also while a retry is armed. A
+// openClawInstallPolicyLastSeen is the last cached OpenClaw the watcher
+// parsed and acts on, recorded at every look, also while a retry is armed. A
 // watcher refresh and its retries judge under it when the cache no longer
 // parses, so a retry never goes back to an older version the watcher has
 // since seen replaced (GAP-1235).
 var (
 	openClawInstallPolicyWrittenMu    sync.Mutex
-	openClawInstallPolicyWrittenUnder string
-	openClawInstallPolicyLastSeen     string
+	openClawInstallPolicyWrittenUnder openClawObservation
+	openClawInstallPolicyLastSeen     openClawObservation
 )
 
-func openClawInstallPolicySeenVersion() string {
+func openClawInstallPolicySeen() openClawObservation {
 	openClawInstallPolicyWrittenMu.Lock()
 	defer openClawInstallPolicyWrittenMu.Unlock()
 	return openClawInstallPolicyLastSeen
 }
 
-func setOpenClawInstallPolicySeenVersion(version string) {
+func setOpenClawInstallPolicySeen(seen openClawObservation) {
 	openClawInstallPolicyWrittenMu.Lock()
-	openClawInstallPolicyLastSeen = version
+	openClawInstallPolicyLastSeen = seen
 	openClawInstallPolicyWrittenMu.Unlock()
 }
 
-func openClawInstallPolicyWrittenVersion() string {
+func openClawInstallPolicyWritten() openClawObservation {
 	openClawInstallPolicyWrittenMu.Lock()
 	defer openClawInstallPolicyWrittenMu.Unlock()
 	return openClawInstallPolicyWrittenUnder
 }
 
-func setOpenClawInstallPolicyWrittenVersion(version string) {
+func setOpenClawInstallPolicyWritten(written openClawObservation) {
 	openClawInstallPolicyWrittenMu.Lock()
-	openClawInstallPolicyWrittenUnder = version
+	openClawInstallPolicyWrittenUnder = written
 	openClawInstallPolicyWrittenMu.Unlock()
+}
+
+// openClawInstallPolicyAccepts reports whether the watcher acts on a cache
+// read from the executable seenPath while the policy was written under the
+// one at writtenPath, and whether that is another executable (GAP-1237).
+// Doctor, agent discover, the TUI and init rewrite the cache from the shell
+// they run in, so a run whose PATH finds another trusted openclaw removed and
+// re-added the block within 30 seconds although the OpenClaw the user runs
+// did not change. A cache from the executable the policy was written under is
+// acted on; one from another executable only once the recorded one is gone
+// (a reinstall to another folder), and then the change of executable is a
+// change of its own. No recorded executable (a state file from before it was
+// recorded) or a cache that names none acts on every version, as before. A
+// recorded executable that cannot be looked at is not gone.
+func openClawInstallPolicyAccepts(seenPath, writtenPath string) (accept, otherExecutable bool) {
+	if writtenPath == "" || seenPath == "" || openClawSameExecutable(seenPath, writtenPath) {
+		return true, false
+	}
+	if _, err := os.Stat(writtenPath); errors.Is(err, os.ErrNotExist) {
+		return true, true
+	}
+	return false, false
+}
+
+// openClawSameExecutable compares two executable paths as the file system
+// does: case-insensitively on Windows.
+func openClawSameExecutable(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // openClawInstallPolicyVersionPoll is how often the gateway looks at the
@@ -193,23 +235,23 @@ func (s *Sidecar) startOpenClawInstallPolicyWatch(ctx context.Context) (stop fun
 	openClawInstallPolicyStopped.Store(false)
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
-	// The version the policy was written under is read here, not in the
+	// What the policy was written under is read here, not in the
 	// goroutine, so a change right after start is a change.
 	cfg := s.currentConfig()
-	written := openClawCachedVersion(cfg)
+	written := openClawObservation{version: openClawCachedObservation(cfg).version}
 	if cfg != nil {
-		recorded, err := connector.OpenClawInstallPolicyStateVersion(cfg.DataDir)
+		version, binaryPath, err := connector.OpenClawInstallPolicyStateWritten(cfg.DataDir)
 		switch {
 		case err != nil:
 			// A state file that is there but cannot be read says nothing
 			// about the version: the first version that parses refreshes.
-			written = ""
-		case recorded != "":
-			written = recorded
+			written = openClawObservation{}
+		case version != "":
+			written = openClawObservation{version: version, binaryPath: binaryPath}
 		}
 	}
-	setOpenClawInstallPolicyWrittenVersion(written)
-	setOpenClawInstallPolicySeenVersion("")
+	setOpenClawInstallPolicyWritten(written)
+	setOpenClawInstallPolicySeen(openClawObservation{})
 	go func() {
 		defer close(done)
 		s.watchOpenClawInstallPolicy(wctx)
@@ -221,13 +263,17 @@ func (s *Sidecar) startOpenClawInstallPolicyWatch(ctx context.Context) (stop fun
 	}
 }
 
-// openClawCachedVersion is the OpenClaw version the last discovery cached,
-// normalized; "" when there is none.
-func openClawCachedVersion(cfg *config.Config) string {
+// openClawCachedObservation is the OpenClaw version the last discovery
+// cached, normalized ("" when there is none or it does not parse), and the
+// executable it was read from.
+func openClawCachedObservation(cfg *config.Config) openClawObservation {
 	if cfg == nil {
-		return ""
+		return openClawObservation{}
 	}
-	return connector.NormalizeAgentVersion("openclaw", connector.LoadCachedAgentVersion(cfg.DataDir, "openclaw"))
+	return openClawObservation{
+		version:    connector.NormalizeAgentVersion("openclaw", connector.LoadCachedAgentVersion(cfg.DataDir, "openclaw")),
+		binaryPath: connector.LoadCachedAgentExecutable(cfg.DataDir, "openclaw"),
+	}
 }
 
 // watchOpenClawInstallPolicy re-checks the install policy when the cached
@@ -247,29 +293,39 @@ func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context) {
 			return
 		case <-ticker.C:
 			cfg := s.currentConfig()
-			version := openClawCachedVersion(cfg)
+			seen := openClawCachedObservation(cfg)
 			// An empty or unparsable version is no evidence about OpenClaw
-			// (the connector keeps a registered policy under it).
-			if version == "" {
+			// (the connector keeps a registered policy under it), and a
+			// cache from another openclaw than the one the policy was
+			// written under is not the OpenClaw the user runs (GAP-1237).
+			if seen.version == "" {
+				continue
+			}
+			written := openClawInstallPolicyWritten()
+			accept, otherExecutable := openClawInstallPolicyAccepts(seen.binaryPath, written.binaryPath)
+			if !accept {
 				continue
 			}
 			// Recorded also while a retry is armed: the retry judges under
 			// it when the cache reads "" by the time it fires (GAP-1235).
 			// Until a refresh decided, written-under keeps the old version
 			// and the next look tries again.
-			setOpenClawInstallPolicySeenVersion(version)
+			setOpenClawInstallPolicySeen(seen)
 			if openClawInstallPolicyRetrying.Load() || !openClawInstallPolicyGuarded(cfg) {
 				continue
 			}
 			// An owed refresh (one that failed past its retries, or kept the
 			// policy under an unknown version) runs once the version parses,
 			// also when it is the one the policy was written under (GAP-1236).
-			reason := "an OpenClaw version change to " + version
-			if version == openClawInstallPolicyWrittenVersion() {
-				if !openClawInstallPolicyPending.Load() {
-					continue
-				}
-				reason = "an owed refresh under OpenClaw " + version
+			reason := "an OpenClaw version change to " + seen.version
+			switch {
+			case otherExecutable:
+				reason = "an OpenClaw executable change to " + seen.binaryPath
+			case seen.version != written.version:
+			case openClawInstallPolicyPending.Load():
+				reason = "an owed refresh under OpenClaw " + seen.version
+			default:
+				continue
 			}
 			s.refreshOpenClawInstallPolicyAttempt(0, reason, true)
 		}
@@ -309,17 +365,22 @@ func openClawInstallPolicyGuarded(cfg *config.Config) bool {
 }
 
 // openClawInstallPolicyRefreshOpts is the part of the OpenClaw SetupOpts
-// that the install policy block is written from. The OpenClaw version is the
-// cached one. When it does not parse, a refresh of the watcher (watch, also
-// its retries) judges under the last version the watcher parsed: the cache
-// can read "" between the watcher's look and this one, or by the time a
-// retry fires (GAP-1235). A reload refresh passes the cache as it is; the
-// connector keeps a registered policy under an unknown version.
+// that the install policy block is written from. The OpenClaw version and
+// executable are the cached ones. When the version does not parse, or the
+// cache names another openclaw the watcher does not act on (GAP-1237), a
+// refresh of the watcher (watch, also its retries) judges under the last one
+// the watcher saw: the cache can change between the watcher's look and this
+// one, or by the time a retry fires (GAP-1235). A reload refresh passes the
+// cache as it is; the connector keeps a registered policy under an unknown
+// version.
 func openClawInstallPolicyRefreshOpts(cfg *config.Config, watch bool) connector.SetupOpts {
 	agentVersion := connector.LoadCachedAgentVersion(cfg.DataDir, "openclaw")
-	if watch && connector.NormalizeAgentVersion("openclaw", agentVersion) == "" {
-		if seen := openClawInstallPolicySeenVersion(); seen != "" {
-			agentVersion = seen
+	agentExecutable := connector.LoadCachedAgentExecutable(cfg.DataDir, "openclaw")
+	if watch {
+		accept, _ := openClawInstallPolicyAccepts(agentExecutable, openClawInstallPolicyWritten().binaryPath)
+		if seen := openClawInstallPolicySeen(); seen.version != "" &&
+			(connector.NormalizeAgentVersion("openclaw", agentVersion) == "" || !accept) {
+			agentVersion, agentExecutable = seen.version, seen.binaryPath
 		}
 	}
 	return connector.SetupOpts{
@@ -331,6 +392,7 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config, watch bool) connector.
 		OpenClawPluginTokenFile:          strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile),
 		APIAddr:                          apiListenAddr(cfg),
 		AgentVersion:                     agentVersion,
+		AgentExecutable:                  agentExecutable,
 		OpenClawInstallPolicy:            cfg.OpenClawInstallPolicyOn(),
 		OpenClawInstallPolicyTimeoutMs:   cfg.OpenClawInstallPolicyTimeoutMs(),
 		OpenClawInstallPolicyFailsClosed: cfg.OpenClawInstallPolicyFailsClosed(),
@@ -388,8 +450,8 @@ func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason string
 			return
 		}
 		openClawInstallPolicyLastUndecided = ""
-		if written := connector.NormalizeAgentVersion("openclaw", opts.AgentVersion); written != "" {
-			setOpenClawInstallPolicyWrittenVersion(written)
+		if version := connector.NormalizeAgentVersion("openclaw", opts.AgentVersion); version != "" {
+			setOpenClawInstallPolicyWritten(openClawObservation{version: version, binaryPath: strings.TrimSpace(opts.AgentExecutable)})
 		}
 		fmt.Fprint(os.Stderr, line)
 		return

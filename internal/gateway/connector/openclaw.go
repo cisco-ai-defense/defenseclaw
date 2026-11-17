@@ -177,6 +177,19 @@ func openClawObservedVersion(opts SetupOpts) string {
 	return LoadCachedAgentVersion(opts.DataDir, "openclaw")
 }
 
+// openClawObservedExecutable is the openclaw executable the version of
+// openClawObservedVersion was read from: the one Setup was given with its
+// version, else the one the last discovery recorded; "" when it is not known.
+func openClawObservedExecutable(opts SetupOpts) string {
+	if strings.TrimSpace(opts.AgentVersion) != "" {
+		return strings.TrimSpace(opts.AgentExecutable)
+	}
+	if opts.DataDir == "" {
+		return ""
+	}
+	return LoadCachedAgentExecutable(opts.DataDir, "openclaw")
+}
+
 // dropDefenseClawPluginApprovals removes the approvals.plugin block an
 // earlier setup --human-approval wrote ({"enabled": true, "mode": "session"},
 // nothing else) and reports whether it did. The caller does this only for an
