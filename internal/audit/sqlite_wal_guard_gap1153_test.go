@@ -88,3 +88,61 @@ func TestGAP1153OverLimitPassSyncsOffTheWriterSoTheLogRestartsUnderAFlood(t *tes
 		t.Fatalf("audit rows after the passes = %d; want all %d written", got, want)
 	}
 }
+
+// rel-1-0-10:GAP-1153, a disk slower than the hooks' page writes: every
+// bounded hold reaches its cap without restarting the log. After
+// walCappedHoldsBeforeBackoff of them the passes leave the writer alone for
+// a rest that doubles with each further capped hold, and the first restart
+// ends it, so a disk that catches up again gets a hold on every pass.
+func TestGAP1153CappedHoldsBackOffUntilTheLogRestarts(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writes := writeDuringEveryCopy(t, store)
+	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
+	now := time.Now()
+	originalClock, originalWriter := walClock, walWriterPhaseHook
+	t.Cleanup(func() { walClock, walWriterPhaseHook = originalClock, originalWriter })
+	walClock = func() time.Time { return now }
+	walWriterPhaseHook = outrunTheHold(t, store)
+	pass := func(label string) WALCheckpoint {
+		t.Helper()
+		got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		if err != nil || !got.Bounded || !got.WriterDeferred || got.Restarted {
+			t.Fatalf("%s: %+v, %v; want a bounded pass that does not restart the log", label, got, err)
+		}
+		return got
+	}
+	for index := range walCappedHoldsBeforeBackoff {
+		if got := pass("capped hold"); got.HoldBackoff || got.WriterHeld < got.HoldCap {
+			t.Fatalf("pass %d: %+v; want a hold that reaches its cap", index, got)
+		}
+	}
+	for index := range 3 {
+		if got := pass("rest"); !got.HoldBackoff || got.WriterHeld != 0 {
+			t.Fatalf("pass %d after %d capped holds: %+v; want the writer left alone", index, walCappedHoldsBeforeBackoff, got)
+		}
+	}
+	now = now.Add(walHoldBackoffBase)
+	if got := pass("after the first rest"); got.HoldBackoff || got.WriterHeld < got.HoldCap {
+		t.Fatalf("pass after the rest: %+v; want one more capped hold", got)
+	}
+	now = now.Add(walHoldBackoffBase)
+	if got := pass("inside the doubled rest"); !got.HoldBackoff {
+		t.Fatalf("pass inside the doubled rest: %+v; want the writer left alone", got)
+	}
+	// The disk catches up: the next hold restarts the log and ends the rest.
+	walWriterPhaseHook = originalWriter
+	now = now.Add(walHoldBackoffBase)
+	got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+	if err != nil || got.HoldBackoff || !got.Restarted {
+		t.Fatalf("pass after the disk caught up: %+v, %v; want a hold that restarts the log", got, err)
+	}
+	logWALGuardEvents(t, store, 20)
+	if got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget); err != nil || got.HoldBackoff || got.WriterHeld == 0 {
+		t.Fatalf("pass after the restart: %+v, %v; want a hold again without a rest", got, err)
+	}
+	if got, want := countWALGuardEvents(t, store), 220+int(writes.Load()); got != want {
+		t.Fatalf("audit rows after the passes = %d; want all %d written", got, want)
+	}
+}
