@@ -50,6 +50,13 @@ type acpConnPeer struct {
 	known         bool
 	// sid is the client SID (Windows), "" until read.
 	sid string
+
+	// The account lookup of secureClientCallerAccount (secure_client_user.go),
+	// started once per connection.
+	accountOnce sync.Once
+	accountDone chan struct{}
+	accountID   string
+	accountErr  error
 }
 
 func (p *acpConnPeer) lookup() (int, error) {

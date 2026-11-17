@@ -516,8 +516,11 @@ func discoveryUserIDKind(userID string) string {
 // owner or a profile directory's owner), never from anything a client sent,
 // so its directory facts are reported as verified.
 func inventoryIdentity(userID string) *llmEventIdentity {
-	if userID == "" || !identityFactsEnabled.Load() {
+	if userID == "" {
 		return nil
+	}
+	if !identityFactsEnabled.Load() {
+		return secureClientInventoryIdentity(userID)
 	}
 	return inventoryIdentityFacts(userID)
 }
@@ -532,8 +535,11 @@ func inventoryIdentity(userID string) *llmEventIdentity {
 // that names no account cannot prove it, so it gets no facts. A Windows SID
 // is never reused, so it is not checked.
 func inventoryIdentityFor(userID, userName string) *llmEventIdentity {
-	if userID == "" || !identityFactsEnabled.Load() {
+	if userID == "" {
 		return nil
+	}
+	if !identityFactsEnabled.Load() {
+		return secureClientInventoryIdentity(userID)
 	}
 	if useridentity.KindForID(userID) == useridentity.KindPOSIXUID {
 		recorded, current := strings.TrimSpace(userName), strings.TrimSpace(userScopedIdentityName(userID))

@@ -4715,7 +4715,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedHookConnector(
-					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+					attachSecureClientUser(a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -4741,7 +4741,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if registered && !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedInspectConnector(
-					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+					attachSecureClientUser(a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -4777,6 +4777,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// to a fully minted entry so authenticated traffic still
 		// gets a stable agent_instance_id on its emissions.
 		ctx = a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))
+		if _, hook := a.hookTokenScopeForPath(r.URL.Path); hook || strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") {
+			// A hook that presents the gateway token: label its end user
+			// as the scoped-token branches above do. CLI and status calls
+			// are not attributed.
+			ctx = attachSecureClientUser(ctx)
+		}
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
