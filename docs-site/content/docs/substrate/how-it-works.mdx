@@ -130,7 +130,7 @@ The agent's model address (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and the like)
 
   ![An unattended defenseclaw substrate run claude --task that reads ~/.aws/credentials and then repeats a request: the hook records a MEDIUM finding for rule PATH-AWS-CREDS on the read and allows it, the request that follows answers 403, and the cluster's callout log shows log.egress.blocked for GET github.com with category chain_egress, rule chain.secret_read_then_egress and the reason that earlier in this actor's work it read a secret, so DefenseClaw blocks sending data off the cluster after that](/images/substrate/oss/secret-then-egress.png)
 - **Asks.** A refused site raises an ask in your session. An approval updates the agent's list, and Substrate applies it within seconds; the held request is retried for about ten seconds.
-- **What Substrate blocks anyway.** WebSockets from the actor, proxy tunnels, raw TCP, and UDP other than DNS.
+- **What Substrate blocks anyway.** WebSockets from the actor, proxy tunnels, raw TCP, and UDP other than DNS. A raw TCP connect still completes, to any address and port, because Substrate's egress answers it and then closes it when the first bytes match no rule: nothing reaches the target, but a port scan sees every port open (see [Known limits](/docs/substrate/threat-model#known-limits)).
 - **If the callout is down.** Closed in managed mode. Open source can choose; `verify` is red either way.
 
 ## The secret-read chain
