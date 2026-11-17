@@ -7188,7 +7188,7 @@ func filterExactFallbackFindings(
 			// (rel-1-0-10:GAP-0892). A detection-only contract never denies
 			// itself; the caller may still floor the call at the unknown tier
 			// (withPartialStateWriteFloor).
-			finding.partialReading = matched && !proofBoundary && enforcementCapable
+			finding.partialReading = matched && !proofBoundary && enforcementCapable && operandGrammarOnlyReading(facts)
 		} else {
 			finding.enforcement = findingEnforcementAllowed
 		}

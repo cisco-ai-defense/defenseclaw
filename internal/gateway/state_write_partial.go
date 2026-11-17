@@ -3,6 +3,8 @@
 
 package gateway
 
+import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
+
 // partialStateWriteTitle names the unknown-tier finding of a DefenseClaw state
 // write that only a reading the analysis could not finish proves.
 const (
@@ -35,4 +37,25 @@ func withPartialStateWriteFloor(request trustedActionRequest, findings []RuleFin
 		return findings
 	}
 	return withUnknownFinding(findings, unknownReasonFinding(partialStateWriteTitle, partialStateWriteReason, true))
+}
+
+// operandGrammarOnlyReading reports whether the only reason the analysis read
+// the call in part is a command word whose operand grammar it does not model
+// (a wrapped delete). A call that also has a construct the analysis does not
+// model (a function body, a group, a loop, a dynamic word) is floored by the
+// readings of its parts, which each read the wrapped delete on its own. Its
+// own contract match can come from a nested reading of a write without the
+// HOME that write runs under, so a function that moves HOME to another home
+// made a write below that home a state write (TestHomeDeclarationInAFunctionBody,
+// TestGAP0892WrappedStateDeleteInAConstructIsNeverAClearAllow).
+func operandGrammarOnlyReading(facts actionfacts.Facts) bool {
+	if len(facts.Parse.Issues) == 0 {
+		return false
+	}
+	for _, issue := range facts.Parse.Issues {
+		if issue != actionfacts.IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	return true
 }
