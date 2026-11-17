@@ -26,9 +26,13 @@ import (
 
 // idle suspends a running actor that has been idle for after (the profile's
 // idle_suspend_after, else IdleSuspendAfter; E4): no hook, model, relay or
-// egress activity and low CPU, never with a pending ask, never for a --task
-// run unless its profile allows it, and never without a fresh CPU sample (no
-// sample means not idle). Without an ActivitySource nothing is idle.
+// egress activity, never with a pending ask and never for a --task run
+// unless its profile allows it. With a CPU source the actor also needs a
+// fresh low CPU sample (no sample means not idle). Without one (the chart
+// wires no usage receiver, so this is the usual case) silence alone is
+// enough, but only for an actor the activity feed has heard of: unknown
+// activity is not idle (GAP-0465). Without an activity feed (nil or
+// NoActivity, the create path's controller) nothing is idle.
 //
 // A --task actor whose task ended is suspended TaskEndGrace after the end
 // (taskEnded), so a batch larger than the pool drains through it
@@ -37,6 +41,9 @@ import (
 // (GAP-0288).
 func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, after time.Duration) error {
 	if after <= 0 || c.o.Activity == nil || a.GetStatus().GetState() != ateapi.ActorStateRunning || st.conflict {
+		return nil
+	}
+	if _, none := c.o.Activity.(NoActivity); none {
 		return nil
 	}
 	uid := a.GetMetadata().GetUid()
@@ -60,17 +67,21 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 		}
 	}
 	last := st.runningAt
-	if t, ok := c.o.Activity.LastActivity(uid); ok && t.After(last) {
-		last = t
+	seen, heard := c.o.Activity.LastActivity(uid)
+	if heard && seen.After(last) {
+		last = seen
 	}
 	if last.IsZero() || now.Sub(last) < after {
 		return nil
 	}
-	if c.o.CPU == nil {
-		return nil
-	}
-	cores, at, ok := c.o.CPU.CPU(uid)
-	if !ok || now.Sub(at) > c.o.CPUSampleMaxAge || cores >= c.o.IdleCPU {
+	detail := map[string]any{"task": reg.Task}
+	if c.o.CPU != nil {
+		cores, at, ok := c.o.CPU.CPU(uid)
+		if !ok || now.Sub(at) > c.o.CPUSampleMaxAge || cores >= c.o.IdleCPU {
+			return nil
+		}
+		detail["cpu_cores"] = cores
+	} else if !heard {
 		return nil
 	}
 	if _, err := c.o.Client.SuspendActor(ctx, ateapi.RefOf(a.GetMetadata())); err != nil {
@@ -79,7 +90,8 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 	st.lastState = ateapi.ActorStateSuspended
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventIdleSuspend, SeverityInfo, "suspended after "+after.String()+" without activity"
-	ev.Detail = map[string]any{"idle_for": now.Sub(last).Round(1e9).String(), "cpu_cores": cores, "task": reg.Task}
+	detail["idle_for"] = now.Sub(last).Round(1e9).String()
+	ev.Detail = detail
 	c.emit(ev)
 	return nil
 }

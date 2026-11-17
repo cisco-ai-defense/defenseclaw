@@ -42,9 +42,9 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 	if act == nil {
 		act = controller.NoActivity{}
 	}
-	// No CPU source: never suspend on silence alone (E4).
-	idle := idleAfter && cpu != nil
-	live := substrateControllerLiveFunc(cfg, idle, resolver, sink)
+	// Without a CPU source (the chart wires no usage receiver) idle suspend
+	// rests on the activity feed alone (GAP-0465).
+	live := substrateControllerLiveFunc(cfg, idleAfter, resolver, sink)
 	lv := live(cfg)
 	o := controller.Options{
 		Client: client, Attestor: lv.Attestor, Activity: act, CPU: cpu,

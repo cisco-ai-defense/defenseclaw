@@ -92,7 +92,9 @@ type Options struct {
 	Client   ateapi.Client
 	Attestor Attestor
 	Activity ActivitySource
-	// CPU is the CPU source of idle suspend; without one nothing is idle.
+	// CPU, when set, is the CPU source of idle suspend: an idle actor also
+	// needs a fresh low sample. Without one silence alone is enough
+	// (GAP-0465).
 	CPU      CPUSource
 	Registry Registry
 	Resolver ProfileResolver
