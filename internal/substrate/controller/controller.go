@@ -228,6 +228,11 @@ type actorState struct {
 	// from how it changed (GAP-0141).
 	rid     restoreID
 	written bool
+	// syncedAt is when the controller last wrote or confirmed the actor's
+	// policy; staleSince when it saw that the policy needs a write (zero
+	// while it does not). policy_lag_ms of a write is measured from
+	// staleSince, not from when the actor was first seen (GAP-0392).
+	syncedAt, staleSince time.Time
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -273,7 +278,7 @@ func New(o Options) (*Controller, error) {
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
 		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
-		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter}
+		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter, LoadedAt: o.Now()}
 	if o.Config != nil {
 		_, lv.Digest = o.Config.Current()
 	}
@@ -1165,6 +1170,7 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	state := a.GetStatus().GetState()
 	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ref)
 	if ateapi.IsNotFound(err) {
+		c.markStale(st, lv)
 		created, err := c.o.Client.CreateActorEgressPolicy(ctx, ref, want)
 		if ateapi.IsAlreadyExists(err) {
 			return errWriteRace // another writer won: read it again and compare
@@ -1190,6 +1196,7 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 		// conflict is over.
 		st.conflict, st.reverts = false, nil
 		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
+		c.synced(st)
 		ev := base
 		ev.Type, ev.Severity, ev.Message = EventConflictCleared, SeverityInfo, "the actor's policy matches DefenseClaw's again"
 		c.emit(ev)
@@ -1198,6 +1205,7 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	}
 	if render.Equal(cur, want) {
 		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
+		c.synced(st)
 		c.recheck(st, a, base, "confirmed")
 		return nil
 	}
@@ -1219,6 +1227,7 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 			st.conflict, enter, want = true, true, deny
 		}
 	}
+	c.markStale(st, lv)
 	upd := &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Uid: m.GetUid(), Version: m.GetVersion()}, Rules: want.GetRules()}
 	updated, err := c.o.Client.UpdateActorEgressPolicy(ctx, ref, upd)
 	if ateapi.IsConflict(err) {
@@ -1272,8 +1281,36 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	return nil
 }
 
+// markStale records when the controller saw that the actor's policy needs
+// the write it is about to make, unless an earlier failed try did: the
+// actor's first policy from when the controller first saw the actor, a
+// config change from when it was applied, anything else (a foreign change,
+// a new approval or registration) from now, the pass that found it.
+func (c *Controller) markStale(st *actorState, lv *Live) {
+	switch {
+	case !st.staleSince.IsZero():
+	case st.syncedAt.IsZero():
+		st.staleSince = st.firstSeen
+	case lv.LoadedAt.After(st.syncedAt):
+		st.staleSince = lv.LoadedAt
+	default:
+		st.staleSince = c.o.Now()
+	}
+}
+
+// synced marks the actor's policy as right now (written or confirmed).
+func (c *Controller) synced(st *actorState) {
+	st.syncedAt, st.staleSince = c.o.Now(), time.Time{}
+}
+
 func (c *Controller) wrote(st *actorState, p *ateapi.EgressPolicy, base Event, state ateapi.ActorState, how string, res render.Result) {
 	st.ourUID, st.ourVersion, st.written = p.GetMetadata().GetUid(), p.GetMetadata().GetVersion(), true
+	now := c.o.Now()
+	lag := time.Duration(0)
+	if !st.staleSince.IsZero() && now.After(st.staleSince) {
+		lag = now.Sub(st.staleSince)
+	}
+	c.synced(st)
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyWritten, SeverityInfo, "egress policy "+how
 	drops := make([]string, 0, len(res.Dropped))
@@ -1285,7 +1322,7 @@ func (c *Controller) wrote(st *actorState, p *ateapi.EgressPolicy, base Event, s
 		bound = append(bound, b.Secret+"@"+b.Host)
 	}
 	ev.Detail = map[string]any{"how": how, "version": p.GetMetadata().GetVersion(), "rules": len(p.GetRules()),
-		"actor_state": state.String(), "policy_lag_ms": c.o.Now().Sub(st.firstSeen).Milliseconds(), "dropped": drops, "secrets_bound": bound,
+		"actor_state": state.String(), "policy_lag_ms": lag.Milliseconds(), "dropped": drops, "secrets_bound": bound,
 		"config_digest": c.live().Digest}
 	c.emit(ev)
 }

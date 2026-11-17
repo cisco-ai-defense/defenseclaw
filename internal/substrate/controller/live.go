@@ -45,6 +45,9 @@ type Live struct {
 	Attestor           Attestor
 	Resolver           ProfileResolver
 	IdleSuspendAfter   time.Duration
+	// LoadedAt is when the controller put this config in force: a policy
+	// write it causes measures its lag from here (GAP-0392).
+	LoadedAt time.Time
 }
 
 // ConfigSource is config.yaml as it is now (configwatch.Watcher).
@@ -99,7 +102,7 @@ func (c *Controller) reloadConfig(ctx context.Context) {
 	}
 	old := c.live()
 	lv := c.o.Live(ch.Config)
-	lv.Digest, lv.Gen = ch.Digest, ch.Gen
+	lv.Digest, lv.Gen, lv.LoadedAt = ch.Digest, ch.Gen, c.o.Now()
 	c.cur.Store(&lv)
 	// Atespaces the old config managed and the new one does not: a scoped
 	// controller (no global viewer) lists them once more, so their actors
