@@ -171,7 +171,10 @@ var benignPasswordRows = []struct{ id, in, rel string }{
 
 // TestPasswordBenignRowsKeepTheRelFloor (GAP-0522): no benign row is
 // reported by SEC-PASSWORD-ASSIGN or SEC-BEARER-BARE, so no surface alerts
-// on a row rel allows.
+// on a row rel allows. The rel column is the proxy verdict of rel/1.0.10
+// 4269debe92: its "alert" rows came from the proxy-only password, token and
+// bearer regexes, removed with rel-1-0-10:GAP-0210 / GAP-0213, so a prompt or
+// a completion may now be quieter than rel there, never louder.
 func TestPasswordBenignRowsKeepTheRelFloor(t *testing.T) {
 	insp := NewGuardrailInspector("local", nil, nil)
 	for _, row := range benignPasswordRows {
@@ -183,7 +186,7 @@ func TestPasswordBenignRowsKeepTheRelFloor(t *testing.T) {
 		}
 		for _, direction := range []string{"completion", "prompt"} {
 			v := insp.Inspect(context.Background(), direction, row.in, nil, "m", "action")
-			if v.Action != row.rel {
+			if v.Action != row.rel && v.Action != "allow" {
 				t.Errorf("%s %s: %s/%s, rel %s: %q %v", row.id, direction, v.Action, v.Severity, row.rel, row.in, v.Findings)
 			}
 		}
