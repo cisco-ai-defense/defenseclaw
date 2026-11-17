@@ -1829,8 +1829,14 @@ func withActiveStateTargetMention(
 			// So is a proven writer or delete whose operand the client
 			// followed into the state tree through a link the gateway cannot
 			// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
+			// A managed peer's call is placed where the hook client ran it
+			// (managedLinkWalkView): the gateway behind ProtectHome receives no
+			// cwd of its own, so a bare name in the state folder (echo x >>
+			// config.yaml in ~/.defenseclaw) or a link in the project the
+			// client followed into the state tree was placed nowhere and
+			// allowed (rel-1-0-10:GAP-1135).
 			if !request.ProtectedHomeHook ||
-				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) &&
+				!provenShellRedirectStateWrite(request) && !throughLink(provenStateMutationPath) &&
 					!provenStaticRedirectStateMutation(facts, request) {
 				// The mention scan places files below the state directory; a
 				// cmd /c body that removes or moves the directory itself (cmd

@@ -111,11 +111,6 @@ type codexHookRequest struct {
 	// guestCWD is a sandbox request's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); CWD is its host mount.
 	guestCWD string
-	// reportedCWD is the cwd as sent, before hookCWDForContext: a managed
-	// peer's session directory the service cannot resolve
-	// (managedPeerLexicalCWD).
-	reportedCWD string
-
 	// activeHome is the trusted home for "~" resolution, set by the handler
 	// from the request context (never decoded from the body).
 	activeHome         string
@@ -925,12 +920,10 @@ func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
 		// the user, and sent the workdir of the call (GAP-0991).
 		workdir = resolvedWritesFromContext(ctx)[hookpaths.CallWorkdirKey]
 	}
-	// A managed gateway cannot resolve the session directory in the caller's
-	// home: the call runs in it as sent, kept lexically, as for the other
-	// connectors' tool calls (agentHookTrustedActionCWDReported). Without it
-	// a bare name (echo x >> config.yaml in ~/.defenseclaw) or a link in the
-	// project was placed nowhere and allowed (rel-1-0-10:GAP-1135).
-	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, req.reportedCWD, workdir)
+	if workdir == "" {
+		return req.CWD
+	}
+	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir)
 }
 
 func codexToolName(req codexHookRequest) string {

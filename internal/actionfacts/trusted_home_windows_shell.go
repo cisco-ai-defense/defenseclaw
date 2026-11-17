@@ -38,8 +38,9 @@ var posixPowerShellHomeAnchors = []string{"${home}", "$home", "~"}
 
 // rewriteTrustedShellHome replaces each home anchor ($HOME, ~,
 // $env:USERPROFILE, %USERPROFILE%) that starts a word and is followed by a
-// path separator with the trusted Windows ActiveHome, and in PowerShell under
-// a Linux or macOS ActiveHome each of posixPowerShellHomeAnchors with that
+// path separator with the trusted Windows ActiveHome, and in the script a
+// PowerShell launcher runs under a Linux or macOS ActiveHome (launcherBody,
+// Input.PowerShellLauncherBody) each of posixPowerShellHomeAnchors with that
 // home. A Windows home made
 // `echo k >> $HOME\.ssh\authorized_keys` and `Get-Content ~\.ssh\id_rsa`
 // partial with no finding, while the same paths written out were judged
@@ -49,14 +50,14 @@ var posixPowerShellHomeAnchors = []string{"${home}", "$home", "~"}
 // The rewrite declines source with an escape character, an anchor inside
 // single quotes (PowerShell) or any other mention of HOME or USERPROFILE,
 // which could change what the anchors name before they are expanded.
-func rewriteTrustedShellHome(source, activeHome string, dialect Dialect) (string, bool) {
+func rewriteTrustedShellHome(source, activeHome string, dialect Dialect, launcherBody bool) (string, bool) {
 	anchors := windowsShellHomeAnchors[dialect]
 	// Written with backslashes, as cmd would otherwise read /Users as a
 	// switch; PowerShell reads both separators.
 	home := strings.ReplaceAll(activeHome, "/", `\`)
 	switch {
 	case trustedWindowsHomeLiteral.MatchString(activeHome):
-	case dialect == DialectPowerShell && trustedUnixPowerShellHome.MatchString(activeHome):
+	case launcherBody && dialect == DialectPowerShell && trustedUnixPowerShellHome.MatchString(activeHome):
 		anchors, home = posixPowerShellHomeAnchors, activeHome
 	default:
 		return "", false

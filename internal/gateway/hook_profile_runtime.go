@@ -148,7 +148,6 @@ func decodeCodexRequestForContext(ctx context.Context, rawBody []byte, payload m
 	req.Payload = payload
 	req.guestCWD = sandboxHookGuestCWD(ctx, req.CWD, "")
 	reportedCWD := req.CWD
-	req.reportedCWD = strings.TrimSpace(reportedCWD)
 	req.CWD = hookCWDForContext(ctx, req.CWD)
 	if req.CWD == "" && !ManagedEnterpriseActive() && strings.EqualFold(req.ToolName, "apply_patch") {
 		// A managed service may not be able to read the caller's project.
