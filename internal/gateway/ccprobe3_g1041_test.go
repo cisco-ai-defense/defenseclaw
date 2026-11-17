@@ -15,6 +15,18 @@ import (
 	"time"
 )
 
+// ccp3g1041DecisionBudget and ccp3g1041ProgramWord are the rel helpers of
+// gap1041_nested_word_bound_test.go (added by the fix c312dd117b), renamed.
+const ccp3g1041DecisionBudget = 2 * time.Second
+
+func ccp3g1041ProgramWord(seed string, levels int) string {
+	inner := seed
+	for i := 0; i < levels; i++ {
+		inner = "$(which " + inner + ")"
+	}
+	return `"` + inner + `"`
+}
+
 // TestGAP1041NestedSubstitutionsDecideInTime: a Bash call whose program
 // word nests command substitutions is decided in time at every depth and in
 // every tier, as TRUNCATED: the evaluation-limit finding and at least the
@@ -38,13 +50,13 @@ func TestCCP3G1041_GAP1041NestedSubstitutionsDecideInTime(t *testing.T) {
 			for _, seed := range []string{"$T", "bash"} {
 				for _, body := range bodies {
 					name := fmt.Sprintf("%s/%d/%s/%s", tier.name, levels, seed, body.id)
-					command := gap1041ProgramWord(seed, levels) + " -c '" + body.text + "'"
+					command := ccp3g1041ProgramWord(seed, levels) + " -c '" + body.text + "'"
 					start := time.Now()
 					action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
 					elapsed := time.Since(start)
 					t.Logf("ROW|%s|%s|ms=%d", name, action, elapsed.Milliseconds())
-					if elapsed > gap1041DecisionBudget {
-						t.Errorf("%s: decision took %v, budget %v", name, elapsed, gap1041DecisionBudget)
+					if elapsed > ccp3g1041DecisionBudget {
+						t.Errorf("%s: decision took %v, budget %v", name, elapsed, ccp3g1041DecisionBudget)
 					}
 					if !boundedHasLimit(findings, 0, false) {
 						t.Errorf("%s: no evaluation-limit finding: %v", name, findings)

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // s7-probe3 old-API probe (copied from s7-probe2 s7/ccprobes-2 4e1f46b09e) for rel-1-0-10:GAP-0836: the rel hook-route tests of the fix,
-// copied with only the rel test helpers the pre-fix sha 855f1dd978 lacks (s7-probe3: run at 15df480647 = 855f1dd978^, because 855f1dd978 itself does not compile: semantic_owners.go:1710 syntax error) (renamed),
+// copied with only the rel test helpers the pre-fix sha 855f1dd978 lacks (s7-probe3: run at 51e38bfab3, the tdetect-0810 head where the gap was observed; 15df480647 and 855f1dd978 between it and the fix do not compile: semantic_owners.go:1710 syntax error) (renamed),
 // so the file compiles on the pre-fix tree and on rel. Scratch, test-only branch.
 
 package gateway
