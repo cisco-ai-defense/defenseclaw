@@ -1003,6 +1003,7 @@ func dispatchTrustedAction(
 	// it may be a protected file there (rel-1-0-10:GAP-0871).
 	defer func() {
 		findings = withUnresolvedFolderTier(findings, request, facts, false)
+		findings = withSandboxGuestFolderTier(findings, request, facts)
 	}()
 	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
 		defer func() {

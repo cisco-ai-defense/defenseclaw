@@ -236,6 +236,36 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	return placements, false
 }
 
+// withSandboxGuestFolderTier gives a sandbox call the unknown tier the
+// laptop gives the same call in its own folder (withUnresolvedFolderTier,
+// rel-1-0-10:GAP-0871): an operand that may name a protected file in a
+// folder the call does not give, after a function that cds or a $CMD. A
+// copy-mode call names no folder, so the tier is read on the call placed in
+// the guest's working directory (sandboxGuestPlacedInput), as the laptop
+// reads it in its own. It is decided on that whole-call reading alone: the
+// commands the guest placement reads one by one (sandboxGuestPlacements) are
+// the laptop's piece readings, whose proof comes after the laptop's tier, so
+// their proof does not take the tier away here either. f() { cd .cache; };
+// f; $CMD; rm .defenseclaw/audit.db blocked in both, and only the laptop
+// named ACTION-COMPOUND-LIMIT (substrate-1 GAP-0377 at FU8). The reading is
+// lexical and only adds a finding.
+func withSandboxGuestFolderTier(findings []RuleFinding, request trustedActionRequest, facts actionfacts.Facts) []RuleFinding {
+	if request.simpleCommandPass || request.hostTwinDepth != 0 || request.stateProofOnly {
+		return findings
+	}
+	guest, ok := sandboxGuestPlacedInput(request, facts)
+	if !ok {
+		return findings
+	}
+	guestFacts := actionfacts.Analyze(guest)
+	if !guestFacts.MayRunInUnresolvedFolder() {
+		return findings
+	}
+	placed := request
+	placed.Input, placed.SandboxGuestCWD = guest, ""
+	return withSimpleCommandFindings(findings, withUnresolvedFolderTier(nil, placed, guestFacts, false))
+}
+
 // guestPlacementSkips reports a simple command the guest placement does not
 // read: one with no complete view, an opaque assignment, literal output, or
 // a guessed login.

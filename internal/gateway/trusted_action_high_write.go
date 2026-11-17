@@ -232,6 +232,11 @@ func provedHighWriteFindings(
 	// state: the judgement of a string under a key that names no place
 	// (actionfacts.UnknownKeyTwin.SelfProtectionOnly).
 	selfOnly := false
+	// guestHome is the sandbox guest's home while its placement is judged:
+	// the catalog rules spell a home as ~, $HOME, /root, /home/<name> or
+	// /Users/<name>, never as the guest's (/sandbox), so a target below it is
+	// matched in its ~ spelling, as the laptop's /home/<name> target is.
+	guestHome := ""
 	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
 		if seenTargets[resolved] {
 			return
@@ -239,12 +244,16 @@ func provedHighWriteFindings(
 		seenTargets[resolved] = true
 		instructionProof := instructionTarget(resolved, flavor)
 		instruction := instructionProof != instructionNotProved
+		matched := resolved
+		if rel, below := strings.CutPrefix(resolved, guestHome+"/"); guestHome != "" && below && flavor == actionfacts.PathFlavorPOSIX {
+			matched = "~/" + rel
+		}
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
 				if selfOnly && rule.ID != stateWriteRuleID {
 					continue
 				}
-				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
+				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, matched, flavor, instruction) {
 					continue
 				}
 				proof := proofForRule(rule.ID)
@@ -373,7 +382,11 @@ func provedHighWriteFindings(
 	// FU8). The reading is lexical, and this lane reads no guest file on the
 	// host (isSandboxHookRequest).
 	if guest, ok := sandboxGuestPlacedInput(request, facts); ok {
+		if home := path.Clean(guest.ActiveHome); path.IsAbs(guest.ActiveHome) && home != "/" {
+			guestHome = home
+		}
 		judgePaths(actionfacts.Analyze(guest))
+		guestHome = ""
 	}
 	// A native write call with a key outside its reviewed schema stays
 	// partial and names no path; each file it may write is judged as the
