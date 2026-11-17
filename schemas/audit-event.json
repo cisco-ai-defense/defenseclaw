@@ -207,6 +207,8 @@
             "rescan",
             "rescan-start",
             "restore",
+            "routing.admin_denied",
+            "routing.sensitive_refused",
             "sandbox-activity",
             "sandbox-approval",
             "sandbox-egress",

@@ -15084,6 +15084,12 @@ producer_identity_sets:
   - event_name: legacy.audit.setup.routing
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.routing.sensitive_refused
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.routing.admin_denied
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.setup.webhook
     bucket: compliance.activity
     compatibility_only: true
@@ -15952,6 +15958,12 @@ producer_identity_sets:
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.setup.routing
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.routing.sensitive_refused
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.routing.admin_denied
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.setup.webhook
@@ -20706,6 +20718,38 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.setup.routing
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: routing.sensitive_refused
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.routing.sensitive_refused
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: routing.admin_denied
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.routing.admin_denied
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action

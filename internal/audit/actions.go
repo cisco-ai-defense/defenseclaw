@@ -341,6 +341,8 @@ const (
 	ActionSetupLocalObservability  Action = "setup-local-observability"
 	ActionSetupWebhook             Action = "setup-webhook"
 	ActionSetupRouting             Action = "setup-routing"
+	ActionRoutingAdminDenied       Action = "routing.admin_denied"      // routing.admin refused the model request (a routing decision, not a guardrail block)
+	ActionRoutingSensitiveRefused  Action = "routing.sensitive_refused" // routing.sensitive refused a request no local model could take (not a guardrail block)
 	ActionDoctor                   Action = "doctor"
 	ActionUpgrade                  Action = "upgrade"
 	ActionInitGateway              Action = "init-gateway"
@@ -597,6 +599,8 @@ func AllActions() []Action {
 		ActionSetupLocalObservability,
 		ActionSetupWebhook,
 		ActionSetupRouting,
+		ActionRoutingAdminDenied,
+		ActionRoutingSensitiveRefused,
 		ActionDoctor,
 		ActionUpgrade,
 		ActionInitGateway,
