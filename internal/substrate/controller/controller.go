@@ -214,10 +214,14 @@ type actorState struct {
 	// forcedDeny is why the resolver gives the actor deny-only (D8).
 	forcedDeny string
 	recheckGen int32
-	reg        Registration
-	regOK      bool
-	regAt      time.Time
-	regState   ateapi.ActorState
+	// resumed is set for the pass that saw the actor come back from a
+	// suspend (the resume re-check is due even when RESUMING fell between
+	// two passes).
+	resumed  bool
+	reg      Registration
+	regOK    bool
+	regAt    time.Time
+	regState ateapi.ActorState
 	// regStaleWarned is set while a leader outage keeps the last good
 	// registration in use (one warning per outage).
 	regStaleWarned bool
@@ -674,6 +678,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	base := Event{Atespace: md.GetAtespace(), Actor: md.GetName(), ActorUID: md.GetUid()}
 	self := chainstate.Actor{Atespace: md.GetAtespace(), UID: md.GetUid()}
 	rid := restoreIDOf(a.GetStatus())
+	st.resumed = false
 	if !first {
 		evs := []string{lifecycleOf(prev, state)}
 		if revertSeen(prev, state, st.rid, rid) {
@@ -683,10 +688,22 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			// barrier in the actor's chains (GAP-0141).
 			evs = append(evs, chainstate.LifecycleReverted)
 		}
-		for _, ev := range evs {
-			if ev != "" {
-				st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
+		for _, life := range evs {
+			if life == "" {
+				continue
 			}
+			st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: life, AtUnixNano: now.UnixNano()})
+			st.resumed = st.resumed || life == chainstate.LifecycleResumed
+			if !st.inventoried {
+				continue // the first record of an actor is "actor seen"
+			}
+			// One inventory record per transition, so discovery sees a
+			// suspend, resume, revert or crash and not only the create and
+			// the delete (GAP-0430).
+			ev := base
+			ev.Type, ev.Severity, ev.Message = EventInventory, SeverityInfo, "actor "+life
+			ev.Detail = map[string]any{"lifecycle": life, "state": state.String(), "previous_state": prev.String()}
+			c.emit(ev)
 		}
 	}
 	st.rid = rid
@@ -770,6 +787,13 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			}
 			if err := c.apply(ctx, a, st, reg, res.Profile, base); err != nil {
 				return err
+			}
+			if st.resumed && st.hold == "" {
+				// The first pass after a resume: a RESUMING that fell between
+				// two passes, or one whose pass wrote the policy, still gets
+				// its re-check record; recheck sends one per generation
+				// (GAP-0430).
+				c.recheck(st, a, base, "policy in force")
 			}
 			return c.idle(ctx, a, st, reg, base, res.idleAfter(lv.IdleSuspendAfter))
 		}
@@ -872,6 +896,9 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 			}
 			// Every actor in a launcher atespace is bound to a person at
 			// create; one nobody registered was made outside DefenseClaw.
+			if st.refused != EventForeignActor {
+				c.foreignTemplate(ctx, a, st, base)
+			}
 			c.refuseOnce(st, base, EventForeignActor, "actor in a launcher atespace that DefenseClaw did not create", SignalForeignActor, "")
 			return reg, "foreign_actor", nil
 		}
@@ -885,6 +912,33 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 	reg.Template = ateapi.Key(a.GetActorTemplate())
 	st.reg, st.regOK, st.regAt, st.regState = reg, true, now, a.GetStatus().GetState()
 	return reg, "", nil
+}
+
+// foreignTemplate names the unattested template of an actor made outside
+// DefenseClaw in a launcher atespace (GAP-0428). Admission never runs for a
+// foreign actor (it gets no policy either way), so without this record
+// shadow AI would list the actor but not the template behind it, as
+// admission does for an actor of any other atespace (PLAN 6.2). It is sent
+// with the actor's first foreign_actor record.
+func (c *Controller) foreignTemplate(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) {
+	if !c.live().RequireAttestation {
+		return
+	}
+	ref := a.GetActorTemplate()
+	_, att, err := c.template(ctx, ref, false)
+	if err != nil || att.Attested {
+		return
+	}
+	reason := att.Reason
+	if reason == "" {
+		reason = "no DefenseClaw attestation"
+	}
+	ev := base
+	ev.Type, ev.Severity = EventTemplateUnverified, SeverityWarn
+	ev.Message = "template " + ateapi.Key(ref) + " of an actor made outside DefenseClaw is not attested: " + reason
+	ev.Detail = map[string]any{"template": ateapi.Key(ref), "template_digest": att.Digest, "foreign_actor": true}
+	ev.Signal = c.signal(base, SignalUnattestedTemplate, att.Digest, st.firstSeen)
+	c.emit(ev)
 }
 
 // attributeKit puts what the actor's attested template names (connector,
@@ -1290,8 +1344,10 @@ func (c *Controller) wrote(st *actorState, p *ateapi.EgressPolicy, base Event, s
 	c.emit(ev)
 }
 
+// recheck records the policy check of a resume: in a pass that sees
+// RESUMING, or the first pass after a resume the controller did not see.
 func (c *Controller) recheck(st *actorState, a *ateapi.Actor, base Event, how string) {
-	if a.GetStatus().GetState() != ateapi.ActorStateResuming {
+	if a.GetStatus().GetState() != ateapi.ActorStateResuming && !st.resumed {
 		return
 	}
 	gen := a.GetStatus().GetLastAssignedGeneration()
