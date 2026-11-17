@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"bytes"
 	"maps"
 	"path"
 	"path/filepath"
@@ -336,6 +337,16 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		pieces = new(simplePieces)
 	}
 	result := simpleCommandsOfCall(input, facts, pieces)
+	if facts.Parse.Dialect == DialectPOSIX && facts.Parse.Status != StatusInvalid {
+		source := input.Command
+		if source == "" && bytes.Contains(input.Args, []byte("<<")) {
+			_, capture := analyzeWithRedirectTargets(input, "")
+			source = capture.source
+		}
+		if strings.Contains(source, "<<") && len(source) <= maxCommandBytes {
+			result = append(result, simpleTopLevelHereDocBodies(source, input.CWD)...)
+		}
+	}
 	if argsOnly && slices.ContainsFunc(result, isSyntaxTailUnread) {
 		// A text with a syntax error (syntaxTailCommands): its readings are
 		// all of the call that was read, a cap they stopped at included.
@@ -355,6 +366,58 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		// occurs elsewhere in the call (a comment, a quoted word) is no piece.
 		if pieces != nil {
 			result = slices.DeleteFunc(result, pieces.has)
+		}
+	}
+	return result
+}
+
+// simpleTopLevelHereDocBodies gives a parsed here-document to the same
+// consumer reader used after a syntax error. The ordinary command walk keeps
+// the opener, but its literal stdin is otherwise never judged as a child.
+func simpleTopLevelHereDocBodies(source, cwd string) []SimpleCommand {
+	file, ok := shellparse.Parse(source)
+	if !ok || file == nil {
+		return nil
+	}
+	var result []SimpleCommand
+	for _, stmt := range file.Stmts {
+		// A definition or control construct is not itself a consumer. The
+		// ordinary command walk decides when its body can run.
+		switch stmt.Cmd.(type) {
+		case *syntax.CallExpr, *syntax.BinaryCmd:
+		default:
+			continue
+		}
+		var consumer strings.Builder
+		if syntax.NewPrinter().Print(&consumer, stmt.Cmd) != nil {
+			continue
+		}
+		reading := syntaxTailHereDocConsumer(consumer.String())
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			if len(result) >= maxSimpleEvaluations {
+				return false
+			}
+			redirection, isRedirect := node.(*syntax.Redirect)
+			if !isRedirect || redirection.Op != syntax.Hdoc && redirection.Op != syntax.DashHdoc {
+				return true
+			}
+			if reading == hereDocData {
+				return false
+			}
+			body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
+			if !posixHeredocDelimiterQuoted(redirection.Word) || !exact || len(body) > maxScalarBytes {
+				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
+				return false
+			}
+			if reading == hereDocRunsCode {
+				result = append(result, SimpleCommand{Text: body, CWD: cwd})
+			} else {
+				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
+			}
+			return false
+		})
+		if len(result) >= maxSimpleEvaluations {
+			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}
 	return result
@@ -2696,6 +2759,13 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			}
 			childIndex = simpleEnvChildIndex(argv)
 		default:
+			static := make([]bool, len(argv))
+			for index := range static {
+				static[index] = true
+			}
+			if childIndex = WrapperChildIndex(argv, static); childIndex > 0 {
+				break
+			}
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
 			if uncertain {
 				if simplePotentialShellScript(args, vars) {
@@ -2714,6 +2784,17 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
 			return program, false, true, true
 		}
+		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
+	}
+	// The other static program wrappers use the same child index as the
+	// protected-target reader. Their child shell body gets the ordinary
+	// nested-command checks, including a literal -c operand.
+	argv := make([]string, len(args))
+	fixedWords := make([]bool, len(args))
+	for index, arg := range args {
+		argv[index], fixedWords[index] = simpleStaticScriptWord(arg, vars)
+	}
+	if childIndex := WrapperChildIndex(argv, fixedWords); childIndex > 0 {
 		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
 	}
 	shellProgram := filepath.Base(program)
