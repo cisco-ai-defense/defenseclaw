@@ -54,6 +54,12 @@ func lateOrdinaryProject(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// The account database home is the fixture home too, as for an ordinary
+	// user: the late-call reader never reads the real account home, whose
+	// size and the box load moved the hard-link rows (rel-1-0-10:GAP-0821).
+	saved := accountHomeDir
+	accountHomeDir = func() (string, error) { return home, nil }
+	t.Cleanup(func() { accountHomeDir = saved })
 	return project
 }
 

@@ -27,10 +27,21 @@ func OrdinaryNoAnswerPayload(body []byte) bool {
 	if home, err := os.UserHomeDir(); err == nil {
 		homes = append(homes, home)
 	}
-	if account, err := osuser.Current(); err == nil {
-		homes = append(homes, account.HomeDir)
+	if home, err := accountHomeDir(); err == nil {
+		homes = append(homes, home)
 	}
 	return ordinaryNoAnswerPayloadInHomes(body, homes)
+}
+
+// accountHomeDir is the account database home (os/user). A test fixture
+// replaces it with its own home under t.TempDir, so a late-call verdict does
+// not depend on the files of the real account home (rel-1-0-10:GAP-0821).
+var accountHomeDir = func() (string, error) {
+	account, err := osuser.Current()
+	if err != nil {
+		return "", err
+	}
+	return account.HomeDir, nil
 }
 
 // ordinaryNoAnswerPayloadInHomes is ordinary only when the call names no
