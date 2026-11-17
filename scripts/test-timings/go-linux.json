@@ -1886,6 +1886,7 @@
    "TestGatewayEgressV8LogsInterceptedPluginEgressAndSkipsSelfTest": 2.2,
    "TestGatewayListsExactlyItsLoneHookDecisions": 2.4,
    "TestGatewayPanicV8EmitsCorrelatedMetricAndDurableHealthRecord": 2.5,
+   "TestGatewayRemoteShareOperandIsNeverAsked": 120.4,
    "TestGeneratedInspectorPanicMetricDoesNotRequireLegacyProvider": 3.0,
    "TestGeneratedInspectorTraceEndStampsManagedProjectionPolicyOnRootAndPhases": 5.6,
    "TestGeneratedInspectorTraceInvalidFinalFactsAbortDeferredPhases": 2.5,

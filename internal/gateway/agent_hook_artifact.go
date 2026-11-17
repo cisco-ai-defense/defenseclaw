@@ -19,7 +19,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -586,10 +586,10 @@ func promotedArtifactOpenedPath(value, cwd, home string, moved bool) (opened str
 	// The system answers first: a pathname it refuses (more links than it
 	// follows in one name, a folder it cannot search) opens no script,
 	// while EvalSymlinks follows many more links than the system does.
-	if _, err := os.Stat(value); err != nil {
+	if _, err := hookpaths.Stat(value); err != nil {
 		return "", true
 	}
-	physical, err := filepath.EvalSymlinks(value)
+	physical, err := hookpaths.EvalSymlinks(value)
 	if err != nil {
 		return "", true
 	}
@@ -721,7 +721,7 @@ func readPromotedArtifact(
 	path string,
 	dialectHint actionfacts.Dialect,
 ) ([]byte, actionfacts.Dialect, bool) {
-	before, err := pathidentity.LstatPinned(path)
+	before, err := hookpaths.LstatPinned(path)
 	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 ||
 		before.Size() <= 0 || before.Size() > promotedArtifactMaxBytes {
 		return nil, actionfacts.DialectNone, false
@@ -733,11 +733,11 @@ func readPromotedArtifact(
 		// readable even when the script itself is not executable.
 		return nil, actionfacts.DialectNone, false
 	}
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := hookpaths.EvalSymlinks(path)
 	if err != nil {
 		return nil, actionfacts.DialectNone, false
 	}
-	resolvedInfo, err := os.Stat(resolved)
+	resolvedInfo, err := hookpaths.Stat(resolved)
 	if err != nil || !os.SameFile(before, resolvedInfo) {
 		return nil, actionfacts.DialectNone, false
 	}
