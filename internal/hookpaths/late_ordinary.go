@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 )
 
 // LateOrdinaryCall reports a Claude Code or Codex shell or Read call that
@@ -193,15 +194,30 @@ type lateEntry struct {
 // lateMaxCwds bounds the working directories one call may visit.
 const lateMaxCwds = 8
 
+// accountHomeOverride, when set, replaces the account database home. It is
+// an atomic value because late scans run on watchdog goroutines that can
+// outlive the test that set it (a plain variable raced under -race).
+var accountHomeOverride atomic.Pointer[string]
+
 // AccountHomeDir is the home of the account database. Every late-call reader
 // (this scan and hookexec.OrdinaryNoAnswerPayload) asks it, so a test can
 // point both at a scratch folder instead of the real account home (GAP-0277).
-var AccountHomeDir = func() (string, error) {
+func AccountHomeDir() (string, error) {
+	if home := accountHomeOverride.Load(); home != nil {
+		return *home, nil
+	}
 	current, err := user.Current()
 	if err != nil {
 		return "", err
 	}
 	return current.HomeDir, nil
+}
+
+// SetAccountHomeDirForTest points AccountHomeDir at home until the returned
+// restore runs. Tests only; safe against scans still running.
+func SetAccountHomeDirForTest(home string) (restore func()) {
+	prev := accountHomeOverride.Swap(&home)
+	return func() { accountHomeOverride.Store(prev) }
 }
 
 func newLateScan(cwd, home string) (*lateScan, bool) {
