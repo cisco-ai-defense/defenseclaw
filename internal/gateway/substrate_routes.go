@@ -629,7 +629,13 @@ func (a *APIServer) substrateFind(st *substrateState, r *http.Request, atespace,
 	if err != nil {
 		return registry.Registration{}, http.StatusServiceUnavailable, "registrations_unavailable"
 	}
-	if !ok || reg.Deleted || !substrateVisible(c, reg) {
+	if !ok || reg.Deleted {
+		return registry.Registration{}, http.StatusNotFound, "actor_not_found"
+	}
+	if !substrateVisible(c, reg) {
+		// The same answer as a missing actor (no probing), audited as the
+		// person who tried (GAP-0434).
+		a.substrateAuditDenied(st, r, atespace+"/"+name, "not_owner")
 		return registry.Registration{}, http.StatusNotFound, "actor_not_found"
 	}
 	if c.admin && (reg.Person.Subject == "" || reg.Person.ID() != ownerOf(c.person).ID()) {

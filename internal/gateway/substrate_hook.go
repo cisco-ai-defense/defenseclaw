@@ -254,12 +254,17 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		writeSubstrateRefusal(w, http.StatusBadRequest, "token_required")
 		return
 	}
+	target := actor.Atespace + "/" + actor.Name
 	s, err := st.cfg.Sessions.Verify(in.Token)
 	if err != nil {
+		// No verified person: the row names the actor only (GAP-0434).
+		a.substrateAccessRow(st, r, "MEDIUM", "denied", "session_refused", "", "", target)
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_refused")
 		return
 	}
 	if s.Actor.Atespace != actor.Atespace || s.Actor.Name != actor.Name || s.ActorUID != actor.UID {
+		// The session token names the person who tried (GAP-0434).
+		a.substrateAccessRow(st, r, "MEDIUM", "denied", "session_for_another_actor", "", s.Person, target)
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_for_another_actor")
 		return
 	}
