@@ -307,7 +307,9 @@ your previous working tree is kept at refs/defenseclaw/copy/sub-55cccd5ce016/pre
 
 ![defenseclaw substrate pull claude-ab0eb3ec --diff: Reading the agent's work, 1 file changed (+1 -0) with notes.txt (added), the full diff that adds the line written inside the actor, the question Write these changes into this folder? answered y, and applied 1 changes to the project folder](/images/substrate/oss/pull-applied.png)
 
-As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell config). `--diff` prints the full diff. Nothing touches your folder until you choose: `--apply` writes the changes into it (after a question), `--branch NAME` puts them on a new git branch, `--patch-out FILE` writes a patch. If you cloned with `--clone`, the agent can push a branch instead, and `pull` has no copy to compare.
+As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell config). `--diff` prints the full diff. Nothing touches your folder until you choose: `--apply` writes the changes into it (after a question), `--branch NAME` puts them on a new git branch, `--patch-out FILE` writes a patch. If you cloned with `--clone`, run `pull` in a checkout of the same repository, or have the agent push a branch.
+
+Run `pull` on the computer you ran `run` on: it compares the agent's work with the folder you sent, and only that computer keeps a record of it. You can `connect` from any computer, but `pull` elsewhere stops with exit code 3 and says so; from there, commit the work and `git push` it from inside the agent, then `git pull` it.
 
 To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
 

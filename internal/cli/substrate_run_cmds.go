@@ -184,7 +184,11 @@ func newSubstratePullCmd() *cobra.Command {
 		Long: `Reads the agent's work back to this machine and shows what changed, with the files that need a
 careful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,
 links that leave the folder). Nothing touches your folder until you choose: --apply writes the changes
-into the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch.`,
+into the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch.
+
+Run it on the computer you started the agent from: it compares the changes with the folder you
+sent, and only that computer keeps a record of it. From another computer, connect to the agent and
+git push its work from inside it.`,
 		Example: "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
 		Args:    cobra.ExactArgs(1),
 		RunE:    func(cmd *cobra.Command, args []string) error { return runSubstratePull(cmd, &f, args[0]) },

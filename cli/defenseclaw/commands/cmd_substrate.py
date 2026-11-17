@@ -530,7 +530,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "files,\n"
             "links that leave the folder). Nothing touches your folder until you choose: --apply writes the "
             "changes\n"
-            "into the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch."
+            "into the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch.\n"
+            "\n"
+            "Run it on the computer you started the agent from: it compares the changes with the folder you\n"
+            "sent, and only that computer keeps a record of it. From another computer, connect to the agent and\n"
+            "git push its work from inside it."
         ),
         example=(
             "defenseclaw substrate pull fix-tests-7f3a\n"
