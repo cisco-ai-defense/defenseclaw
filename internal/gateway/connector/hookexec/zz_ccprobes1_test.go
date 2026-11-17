@@ -5,6 +5,7 @@
 package hookexec
 
 import (
+	"encoding/json"
 	"runtime"
 	"testing"
 )
@@ -20,7 +21,15 @@ func TestCCP1GAP0030LateOrdinaryOpenIsClaudeCodeAndCodexOnly(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("the payload-shape-only path is the Windows one")
 	}
-	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":"echo ok"}}`)
+	// The shared reader needs an absolute cwd; a per-test folder under the
+	// test user's temp folder names no protected file.
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse", "tool_name": "shell", "cwd": t.TempDir(),
+		"tool_input": map[string]any{"command": "echo ok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !bothLateScansOrdinary(Options{Connector: "claudecode", Event: "PreToolUse", failurePayload: payload}) {
 		t.Skip("control: a Claude Code ordinary late call does not follow the open tier on this tree")
 	}
