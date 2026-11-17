@@ -50,7 +50,9 @@ def model_keys(model: str) -> list[str]:
 
 def _has_rates(rates: Any) -> bool:
     # An entry without both rates prices nothing (the gateway skips it).
-    return isinstance(rates, dict) and rates.get("input_per_mtok") is not None and rates.get("output_per_mtok") is not None
+    if not isinstance(rates, dict):
+        return False
+    return rates.get("input_per_mtok") is not None and rates.get("output_per_mtok") is not None
 
 
 def _entries(pricing: dict[str, Any]) -> list[tuple[str, str, bool, str]]:
