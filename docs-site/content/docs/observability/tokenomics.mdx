@@ -39,8 +39,10 @@ You can do the same from the command line. This turns tokenomics and the local s
 ```bash
 defenseclaw setup tokenomics --enable
 defenseclaw setup tokenomics --status --json
-defenseclaw setup tokenomics --disable   # the price table stays
+defenseclaw setup tokenomics --disable   # tokenomics and the local store off
 ```
+
+`--disable` turns tokenomics and the local store off. The gateway writes the usage it still buffers, closes the store and writes it no more. The price table stays in `config.yaml`, and the usage already recorded stays in `model_usage` in the data directory until you delete that folder.
 
 Check the seeded prices against your contract before you rely on the cost. A model with no row has no cost.
 
