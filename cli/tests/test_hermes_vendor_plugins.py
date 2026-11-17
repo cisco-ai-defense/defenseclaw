@@ -38,6 +38,8 @@ def test_installed_release_is_covered():
         coverage = shipped_plugin_coverage(raw)
         assert coverage.state == COVERED, raw
         assert "not scanned" in coverage.detail and "an edited one is scanned" in coverage.detail
+        # rel-1-0-10:GAP-0765: a plugin Hermes wrote bytecode for is scanned once, not per scanner change.
+        assert "scanned once for that bytecode, not again for a scanner change" in coverage.detail
 
 
 def test_hermes_newer_than_every_release_says_what_happens_and_what_to_do():

@@ -1292,6 +1292,15 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return rescanSkipped // vendor content, decided on this read (GAP-0645)
 	}
 
+	if reason == "scanner-fingerprint-changed" && w.hermesBytecodeScanned(evt, baseline, currentSnap) {
+		// Vendor source with the bytecode its stored scan saw: a scan with
+		// the new scanner would read the same bytes, and this scan decides
+		// no admission, so skipping it releases nothing (rel-1-0-10:GAP-0765).
+		fmt.Fprintf(os.Stderr, "[rescan] %s %s is Hermes vendor source with the bytecode its last scan saw; not scanned again for the scanner change\n", evt.Type, evt.Name)
+		w.persistSnapshot(evt, currentSnap, baseline.ScanID, marked(fingerprint))
+		return rescanSkipped
+	}
+
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
 
 	// Drift, fingerprint change, or recovery: run the scanner exactly once
@@ -1739,12 +1748,19 @@ func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot,
 	depJSON, _ := json.Marshal(snap.DependencyHashes)
 	cfgJSON, _ := json.Marshal(snap.ConfigHashes)
 	epJSON, _ := json.Marshal(snap.NetworkEndpoints)
+	newBytecodeScan := w.hermesNewBytecodeScan(evt, snap, scanID)
 
 	if err := w.store.SetTargetSnapshot(
 		string(evt.Type), evt.Path, snap.ContentHash,
 		string(depJSON), string(cfgJSON), string(epJSON), scanID, fingerprint,
 	); err != nil {
 		return false
+	}
+	if newBytecodeScan {
+		// The bytecode this scan saw, read before it ran (hermesBytecodeScanned).
+		if err := w.store.SetTargetSnapshot(hermesBytecodeScanType, evt.Path, snap.hermesCachedVendor, "{}", "{}", "[]", scanID, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] record bytecode of %s: %v\n", evt.Path, err)
+		}
 	}
 	if evt.Type == InstallMCP {
 		w.noteMCPBaseline(evt.Path, snap.ContentHash, fingerprint)
@@ -2387,6 +2403,7 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 				sum := sha256.Sum256([]byte(snap.ContentHash + "\n" + extra))
 				snap.ContentHash = hex.EncodeToString(sum[:])
 			}
+			snap.hermesCachedVendor = w.hermesCachedVendorDigest(evt)
 		}
 		return snap, nil
 	}
