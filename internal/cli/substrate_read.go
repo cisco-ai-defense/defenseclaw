@@ -548,14 +548,14 @@ func newSubstrateApproveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approve <id>",
 		Short: "Approve a waiting question",
-		Long:  `Approves one question from "defenseclaw substrate approvals" once, or with --always for every later run that asks the same thing.`,
+		Long:  `Approves one question from "defenseclaw substrate approvals" for one request: the next request asks again. With --always it covers every later request of the agent that asks the same thing.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return substrateDecide(cmd, &com, args[0], "approve", always, reason)
 		},
 	}
 	com.add(cmd)
-	cmd.Flags().BoolVar(&always, "always", false, "keep this approval for later runs")
+	cmd.Flags().BoolVar(&always, "always", false, "keep this approval for every later request of the agent")
 	cmd.Flags().StringVar(&reason, "reason", "", "note recorded with the decision")
 	return cmd
 }

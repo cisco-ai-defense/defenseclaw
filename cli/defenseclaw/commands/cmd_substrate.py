@@ -127,12 +127,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("approve",),
         "Approve a waiting question",
         long=(
-            'Approves one question from "defenseclaw substrate approvals" once, or with --always for every later '
-            "run that asks the same thing."
+            'Approves one question from "defenseclaw substrate approvals" for one request: the next request asks '
+            "again. With --always it covers every later request of the agent that asks the same thing."
         ),
         args=(_Arg("id"),),
         flags=(
-            _Flag("always", "bool", "keep this approval for later runs"),
+            _Flag("always", "bool", "keep this approval for every later request of the agent"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("reason", "string", "note recorded with the decision", metavar="TEXT"),
         ),

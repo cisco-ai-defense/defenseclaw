@@ -46,12 +46,16 @@ import (
 //	GET  /api/v1/substrate/policy/explain[?actor=a/n][&host=][&method=][&tool=]
 //	POST /api/v1/substrate/callout/ask   (callout token) {actor, host|tool, summary, reason, severity, ask_id?}
 //	     ask_id reads that ask again (the callout's hold); a host already
-//	     approved for the actor answers approved.
+//	     approved for the actor answers approved. A once approval answers
+//	     approved for one request only, the first that takes it (GAP-0484).
 
 // SubstrateAskStore is the leader's ask and decision store (asks.Client).
 type SubstrateAskStore interface {
 	OpenAsk(ctx context.Context, a asks.Ask) (asks.Ask, error)
 	Resolve(ctx context.Context, in asks.ResolveRequest) (asks.Ask, error)
+	// Use takes an approval for one request: an always approval answers
+	// every request, a once approval only the first (asks.ErrUsed after).
+	Use(ctx context.Context, in asks.UseRequest) (asks.Ask, error)
 	List(ctx context.Context, in asks.ListRequest) ([]asks.Ask, error)
 	Record(ctx context.Context, d asks.Decision) (struct{}, error)
 	Decisions(ctx context.Context, in asks.ListRequest) ([]asks.Decision, error)
@@ -356,29 +360,78 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
+		// approvedFor reports whether an approved ask a answers this ask: a
+		// host-wide approval answers a host-wide ask; a url_rules ask is
+		// answered only by an approval of the same rule that named every
+		// method this ask names (GAP-0177).
+		approvedFor := func(a asks.Ask) bool {
+			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved &&
+				(urlRuleApprovalCovers(a.Rule, ask.Rule) || (hostWide && asks.HostWide(a.Rule)))
+		}
+		// use takes approval id for this one request (GAP-0484): ok is false
+		// when another request took a once approval first (or it is gone),
+		// and this request asks again; err is an outage.
+		use := func(id string) (asks.Ask, bool, error) {
+			got, err := st.cfg.Asks.Use(r.Context(), asks.UseRequest{ID: id, UID: reg.UID})
+			switch {
+			case err == nil:
+				return got, true, nil
+			case asks.IsUsed(err) || asks.IsNotFound(err):
+				return asks.Ask{}, false, nil
+			}
+			return asks.Ask{}, false, err
+		}
 		if in.AskID != "" {
 			// The callout holds the request and reads its ask again; only
 			// this actor incarnation's ask is answered.
+			held := slices.IndexFunc(list, func(a asks.Ask) bool { return a.ID == in.AskID && a.UID == reg.UID })
+			if held < 0 {
+				writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
+				return
+			}
+			if a := list[held]; a.State != asks.StateApproved || a.Always {
+				writeSubstrateJSON(w, http.StatusOK, askView(a))
+				return
+			}
+			// A once approval lets this held request through only if no
+			// other request took it first; otherwise this one asks again.
+			got, ok, err := use(in.AskID)
+			if err != nil {
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+				return
+			}
+			if ok {
+				writeSubstrateJSON(w, http.StatusOK, askView(got))
+				return
+			}
+		}
+		if ask.Host != "" {
+			// Approved always for this actor (the controller adds a host-wide
+			// one to the policy on its next pass): not asked twice.
+			standing := hostWide && slices.Contains(reg.Approved, ask.Host)
+			standing = standing || slices.ContainsFunc(list, func(a asks.Ask) bool { return a.Always && approvedFor(a) })
+			if standing {
+				writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
+				return
+			}
+			// A once approval nobody used yet lets this one request through
+			// (the agent's retry after its held request was refused as
+			// pending); every later request asks again (GAP-0484).
+			now := time.Now()
 			for _, a := range list {
-				if a.ID == in.AskID && a.UID == reg.UID {
-					writeSubstrateJSON(w, http.StatusOK, askView(a))
+				if a.Always || !approvedFor(a) || !a.UsedAt.IsZero() || !now.Before(a.DecidedAt.Add(asks.OnceWindow)) {
+					continue
+				}
+				got, ok, err := use(a.ID)
+				if err != nil {
+					writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+					return
+				}
+				if ok {
+					writeSubstrateJSON(w, http.StatusOK, askView(got))
 					return
 				}
 			}
-			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
-			return
-		}
-		if ask.Host != "" && ((hostWide && slices.Contains(reg.Approved, ask.Host)) || slices.ContainsFunc(list, func(a asks.Ask) bool {
-			// A host-wide approval answers a host-wide ask; a url_rules
-			// ask is answered only by an approval of the same rule that
-			// named every method this ask names (GAP-0177).
-			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved &&
-				(urlRuleApprovalCovers(a.Rule, ask.Rule) || (hostWide && asks.HostWide(a.Rule)))
-		})) {
-			// Approved earlier for this actor (the controller adds a
-			// host-wide one to the policy on its next pass): not asked twice.
-			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
-			return
 		}
 		if reg.Unattended {
 			// D12: an unattended run's ask is a deny unless the profile's

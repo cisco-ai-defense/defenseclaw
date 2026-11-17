@@ -247,8 +247,9 @@ func (c *Client) AsksOf(ctx context.Context, all bool) ([]Ask, error) {
 	return out.Asks, nil
 }
 
-// Decide answers one ask: decision is approve or deny; always keeps an
-// approval for later runs.
+// Decide answers one ask: decision is approve or deny. An approval lets
+// one request through; always keeps it for every later request of the
+// agent (GAP-0484).
 func (c *Client) Decide(ctx context.Context, id, decision string, always bool, reason string) error {
 	in := map[string]any{"decision": decision}
 	if always {

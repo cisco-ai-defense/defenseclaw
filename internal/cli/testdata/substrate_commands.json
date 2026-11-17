@@ -43,7 +43,7 @@
     "path": "substrate approve",
     "use": "approve \u003cid\u003e",
     "short": "Approve a waiting question",
-    "long": "Approves one question from \"defenseclaw substrate approvals\" once, or with --always for every later run that asks the same thing.",
+    "long": "Approves one question from \"defenseclaw substrate approvals\" for one request: the next request asks again. With --always it covers every later request of the agent that asks the same thing.",
     "args": [
       {
         "name": "id",
@@ -55,7 +55,7 @@
         "name": "always",
         "type": "bool",
         "default": "false",
-        "usage": "keep this approval for later runs"
+        "usage": "keep this approval for every later request of the agent"
       },
       {
         "name": "context",

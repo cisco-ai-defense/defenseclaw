@@ -25,7 +25,7 @@ keywords:
 | `undo <name> [--to ID]` | Put the agent's folder back to its last restore point, or to a given one, and discard what the agent changed since. It asks first |
 | `delete <name>... \| --batch ID` | Delete actors, their allow lists and their snapshots. Pull first |
 | `migrate <name>` | Move an actor with an old kit to the current kit |
-| `approvals`, `approve <id> [--always] [--reason]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. `approvals` lists `ID`, `AGENT`, `WHAT`, `SEVERITY`, `AGE` and `RUN`; an ask an unattended run queued shows `unattended` and the time left in `RUN` |
+| `approvals`, `approve <id> [--always] [--reason]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. `approve` lets one request through, and the next one asks again; `--always` covers every later request of the agent that asks the same thing. `approvals` lists `ID`, `AGENT`, `WHAT`, `SEVERITY`, `AGE` and `RUN`; an ask an unattended run queued shows `unattended` and the time left in `RUN` |
 | `usage [--batch ID] [--all]` | Your own usage and cost. Not available yet: the cluster answers "does not offer that yet" (see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost)) |
 | `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown. See [Secrets](/docs/substrate/secrets) |
 | `policy explain NAME`, `show`, `test NAME --host H [--method M] \| --tool T` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed for an agent |

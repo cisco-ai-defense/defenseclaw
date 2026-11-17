@@ -19,7 +19,8 @@
 //
 // An ask is raised by the callout (through the gateway's callout route) or
 // the gateway for one actor; its person answers it from the launcher
-// (approvals) or the inline ask row, an administrator as themselves. An
+// (approvals) or the inline ask row, an administrator as themselves. A
+// once approval lets exactly one request through (Use takes it); an always
 // approval of a host adds it to the actor's registration (Approved), and
 // the controller adds it to the actor's policy on its next pass. A
 // decision is a verdict that was not a plain allow (a block, an alert, an
@@ -50,6 +51,7 @@ const (
 	MethodAskOpen        = leader.MethodAskOpen
 	MethodAskResolve     = leader.MethodAskResolve
 	MethodAskList        = "AskList"
+	MethodAskUse         = "AskUse"
 	MethodDecisionRecord = "DecisionRecord"
 	MethodDecisionList   = "DecisionList"
 )
@@ -91,11 +93,14 @@ type Ask struct {
 	Created  time.Time `json:"created"`
 	Expires  time.Time `json:"expires"`
 	State    string    `json:"state"`
-	// DecidedBy is the deciding person's owner key; Always keeps the
-	// approval for later runs of the same person and profile (recorded).
+	// DecidedBy is the deciding person's owner key. Always keeps the
+	// approval for every later request of this actor; without it the
+	// approval lets one request through, and UsedAt is when that request
+	// took it (GAP-0484).
 	DecidedBy string    `json:"decided_by,omitempty"`
 	DecidedAt time.Time `json:"decided_at,omitzero"`
 	Always    bool      `json:"always,omitempty"`
+	UsedAt    time.Time `json:"used_at,omitzero"`
 	Note      string    `json:"note,omitempty"`
 	// Unattended marks an ask an unattended actor queued (D12
 	// unattended_asks: queue): nobody is watching the run, so a person
@@ -154,12 +159,31 @@ var ErrNotFound = errors.New("asks: no such ask")
 // ErrDecided is an ask that is no longer pending.
 var ErrDecided = errors.New("asks: the ask was already answered")
 
+// ErrUsed is an approval that lets no more requests through: a once
+// approval another request took, or one older than OnceWindow, or an ask
+// that was not approved.
+var ErrUsed = errors.New("asks: the approval was already used")
+
+// OnceWindow is how long after its answer a once approval waits for the
+// one request it lets through (the held request, or the agent's retry
+// after the hold ended).
+const OnceWindow = 10 * time.Minute
+
+// UseRequest takes an approval for one request of the actor UID.
+type UseRequest struct {
+	ID  string `json:"id"`
+	UID string `json:"uid"`
+}
+
 // IsNotFound reads either form of the error: the store's wire error (in
 // the leader process) or the client's sentinel.
 func IsNotFound(err error) bool { return errors.Is(err, ErrNotFound) || wireCode(err) == "not_found" }
 
 // IsDecided reports an ask that was already answered.
 func IsDecided(err error) bool { return errors.Is(err, ErrDecided) || wireCode(err) == "decided" }
+
+// IsUsed reports an approval that lets no more requests through.
+func IsUsed(err error) bool { return errors.Is(err, ErrUsed) || wireCode(err) == "used" }
 
 func wireCode(err error) string {
 	var we *leader.WireError
@@ -174,8 +198,9 @@ func wireCode(err error) string {
 // last decisionsKept are loaded back on start.
 type Store struct {
 	Dir string
-	// OnApprove runs when an ask is approved (it adds the host to the
-	// actor's registration); an error fails the answer.
+	// OnApprove runs when an ask is approved always (it adds the host to
+	// the actor's registration); an error fails the answer. A once
+	// approval never runs it: it is not a standing approval (GAP-0484).
 	OnApprove func(ctx context.Context, a Ask) error
 	Expiry    time.Duration
 	Now       func() time.Time
@@ -303,7 +328,7 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 		exp = min(t, MaxAskTimeout)
 	}
 	a.ID, a.Created, a.Expires, a.State = "ask-"+hex.EncodeToString(b), now, now.Add(exp), StatePending
-	a.DecidedBy, a.DecidedAt, a.Always = "", time.Time{}, false
+	a.DecidedBy, a.DecidedAt, a.Always, a.UsedAt = "", time.Time{}, false, time.Time{}
 	if a.Kind == "" {
 		a.Kind = "egress"
 		if a.Host == "" {
@@ -353,7 +378,7 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 	out.State, out.DecidedBy, out.DecidedAt, out.Note = StateDenied, in.CallerID, now, truncate(in.Note, 512)
 	if decision == "approve" {
 		out.State, out.Always = StateApproved, in.Always
-		if s.OnApprove != nil {
+		if s.OnApprove != nil && out.Always {
 			if err := s.OnApprove(ctx, out); err != nil {
 				return Ask{}, err
 			}
@@ -368,6 +393,32 @@ func (s *Store) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 	s.appendLocked(Decision{At: now, Atespace: out.Atespace, Actor: out.Actor, UID: out.UID, OwnerID: out.OwnerID,
 		Source: "ask", Tool: firstNonEmpty(out.Tool, out.Host), Verdict: out.State, Reason: out.Note, DecidedBy: in.CallerID})
 	return out, nil
+}
+
+// Use takes the approval of ask ID for one request of the actor UID. An
+// always approval answers every request and is not changed; a once
+// approval answers the first request that takes it, within OnceWindow of
+// its answer, and ErrUsed every later one (GAP-0484). The callout asks
+// for each request, and the gateway calls Use before it answers approved,
+// so no request rides on another's once approval.
+func (s *Store) Use(_ context.Context, in UseRequest) (Ask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.asks[in.ID]
+	if !ok || in.UID == "" || a.UID != in.UID {
+		return Ask{}, &leader.WireError{Code: "not_found", Message: ErrNotFound.Error()}
+	}
+	now := s.now()
+	switch {
+	case a.State != StateApproved:
+	case a.Always:
+		return *a, nil
+	case a.UsedAt.IsZero() && now.Before(a.DecidedAt.Add(OnceWindow)):
+		a.UsedAt = now
+		s.persist(a)
+		return *a, nil
+	}
+	return Ask{}, &leader.WireError{Code: "used", Message: ErrUsed.Error()}
 }
 
 // List lists asks.
@@ -481,6 +532,7 @@ func Serve(srv *leader.Server, s *Store) {
 	srv.Handle(MethodAskOpen, leader.Typed(s.OpenAsk))
 	srv.Handle(MethodAskResolve, leader.Typed(s.Resolve))
 	srv.HandleRead(MethodAskList, leader.Typed(s.List))
+	srv.Handle(MethodAskUse, leader.Typed(s.Use))
 	srv.Handle(MethodDecisionRecord, leader.Typed(s.Record))
 	srv.HandleRead(MethodDecisionList, leader.Typed(s.Decisions))
 }
@@ -503,6 +555,21 @@ func (c *Client) Resolve(ctx context.Context, in ResolveRequest) (Ask, error) {
 			return Ask{}, ErrNotFound
 		case "decided":
 			return Ask{}, ErrDecided
+		}
+	}
+	return out, err
+}
+
+func (c *Client) Use(ctx context.Context, in UseRequest) (Ask, error) {
+	var out Ask
+	err := c.Leader.Call(ctx, MethodAskUse, leader.NewRequestID(), in, &out)
+	var we *leader.WireError
+	if errors.As(err, &we) {
+		switch we.Code {
+		case "not_found":
+			return Ask{}, ErrNotFound
+		case "used":
+			return Ask{}, ErrUsed
 		}
 	}
 	return out, err

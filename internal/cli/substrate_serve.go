@@ -696,8 +696,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if cfg != nil {
 		askStore.Expiry = cfg.Substrate.EffectiveAskTimeout()
 	}
-	// An approved host joins the actor's registration; the controller adds
-	// it to the policy on its next pass.
+	// A host approved always joins the actor's registration; the controller
+	// adds it to the policy on its next pass. The store never runs this for
+	// a once approval, which lets one request through (GAP-0484).
 	askStore.OnApprove = func(ctx context.Context, a asks.Ask) error {
 		// Only a host-wide approval joins the registration (and so the
 		// policy); a url_rules approval covers its rule only (GAP-0177).
