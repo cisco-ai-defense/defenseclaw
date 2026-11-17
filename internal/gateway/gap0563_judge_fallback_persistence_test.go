@@ -101,9 +101,14 @@ func TestGAP0563HookJudgeFallbackPersistsAfterEarlyTelemetry(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil || answer.Action != "allow" {
 				t.Fatalf("ordinary tool answer %+v, error %v, body %s", answer, err, w.Body.String())
 			}
+			// The hook has answered; the judge call runs on for its own delay
+			// (up to 3.7 s here) and the fallback is persisted when it ends.
+			// The wait only proves it ends: a fixed 5 s left 1.3 s of slack
+			// past the slowest delay, which a -race build on a loaded box
+			// overran (rel-1-0-10:GAP-0289). It is not a product deadline.
 			select {
 			case <-provider.finished:
-			case <-time.After(5 * time.Second):
+			case <-time.After(tc.delay + 30*time.Second):
 				t.Fatal("judge call did not finish")
 			}
 			// A benign per-user allow keeps one local row, its hook_decision
