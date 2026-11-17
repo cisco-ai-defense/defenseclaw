@@ -322,7 +322,7 @@ func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) e
 		if err != nil {
 			return err
 		}
-		err = atomicTransformFileWithStateDir(path, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+		err = atomicTransformFileWithStateDir(path, userAgentConfigTransactionDir(path, opts), 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !exists && route == nil {
 				return atomicTransformResult{Keep: true}, nil
 			}
@@ -331,7 +331,7 @@ func (c *CodexConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) e
 				return atomicTransformResult{}, err
 			}
 			// The record goes first (see claudecode_route.go).
-			if err := saveRouteBackup(opts.DataDir, c.Name(), backup); err != nil {
+			if err := saveRouteBackup(opts, c.Name(), backup); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("route backup: %w", err)
 			}
 			if exists && bytes.Equal(out, data) {

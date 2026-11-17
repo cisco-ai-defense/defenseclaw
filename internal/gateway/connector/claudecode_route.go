@@ -74,7 +74,7 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 			}
 			backup = lostClaudeRouteRecord()
 		}
-		err = atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+		err = atomicTransformFileWithStateDir(settingsPath, userAgentConfigTransactionDir(settingsPath, opts), 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			settings := map[string]interface{}{}
 			if exists && len(bytes.TrimSpace(data)) > 0 {
 				if err := json.Unmarshal(data, &settings); err != nil {
@@ -109,7 +109,7 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 			}
 			// The record goes first: a crash after it and before the agent
 			// file is harmless (restore finds nothing of ours to change).
-			if err := saveRouteBackup(opts.DataDir, c.Name(), backup); err != nil {
+			if err := saveRouteBackup(opts, c.Name(), backup); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("route backup: %w", err)
 			}
 			if exists && bytes.Equal(bytes.TrimSpace(out), bytes.TrimSpace(data)) {
