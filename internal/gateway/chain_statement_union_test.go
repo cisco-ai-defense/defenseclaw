@@ -99,7 +99,7 @@ func TestChainStatementFindingsAreTheUnion(t *testing.T) {
 // is at least the unknown tier: an alert, a block in strict.
 //
 // A benign statement in the same forms keeps its verdict.
-func TestChainStatementFindingsKeepTheStrictest(t *testing.T) {
+func chainStatementFindingsKeepTheStrictest(t *testing.T, packs []gap0437Pack) {
 	const home = "/home/alice"
 	t.Setenv("HOME", home)
 	cwd := home + "/proj"
@@ -135,7 +135,7 @@ func TestChainStatementFindingsKeepTheStrictest(t *testing.T) {
 	}
 	benign := []string{"proj/README.md", "notes.txt"}
 	judged := 0
-	for _, pack := range gap0437Packs {
+	for _, pack := range packs {
 		server := gap0437Server(t, pack, "claudecode", "action")
 		call := 0
 		hook := func(command string) map[string]any {
@@ -202,6 +202,24 @@ func TestChainStatementFindingsKeepTheStrictest(t *testing.T) {
 	}
 }
 
+// TestChainStatementFindingsKeepTheStrictest<Pack> run chainStatementFindingsKeepTheStrictest one pack each, so the race shards can
+// split its cost (rel-1-0-10:GAP-1032: 443-510 s under -race as one test).
+func TestChainStatementFindingsKeepTheStrictestDefault(t *testing.T) {
+	chainStatementFindingsKeepTheStrictest(t, gap0437Packs[0:1])
+}
+func TestChainStatementFindingsKeepTheStrictestStrict(t *testing.T) {
+	chainStatementFindingsKeepTheStrictest(t, gap0437Packs[1:2])
+}
+func TestChainStatementFindingsKeepTheStrictestPermissive(t *testing.T) {
+	chainStatementFindingsKeepTheStrictest(t, gap0437Packs[2:3])
+}
+func TestChainStatementFindingsKeepTheStrictestManaged(t *testing.T) {
+	chainStatementFindingsKeepTheStrictest(t, gap0437Packs[3:4])
+}
+func TestChainStatementFindingsKeepTheStrictestManagedStrict(t *testing.T) {
+	chainStatementFindingsKeepTheStrictest(t, gap0437Packs[4:5])
+}
+
 // TestChainStatementFindingsAfterABackgroundStatement (rel-1-0-10:GAP-1021)
 // takes the statements of TestChainStatementFindingsAreTheUnion behind a
 // background statement that changes HOME or the directory, in all five packs.
@@ -212,7 +230,7 @@ func TestChainStatementFindingsKeepTheStrictest(t *testing.T) {
 // was allowed in every pack.
 //
 // A benign statement in the same forms keeps its verdict.
-func TestChainStatementFindingsAfterABackgroundStatement(t *testing.T) {
+func chainStatementFindingsAfterABackgroundStatement(t *testing.T, packs []gap0437Pack) {
 	const home = "/home/alice"
 	t.Setenv("HOME", home)
 	cwd := home + "/proj"
@@ -242,7 +260,7 @@ func TestChainStatementFindingsAfterABackgroundStatement(t *testing.T) {
 	}
 	benign := []string{"proj/README.md", "notes.txt"}
 	judged := 0
-	for _, pack := range gap0437Packs {
+	for _, pack := range packs {
 		server := gap0437Server(t, pack, "claudecode", "action")
 		call := 0
 		hook := func(command string) map[string]any {
@@ -283,4 +301,22 @@ func TestChainStatementFindingsAfterABackgroundStatement(t *testing.T) {
 	if judged == 0 {
 		t.Fatal("no credentials-file copy was judged alone; the table or the packs changed")
 	}
+}
+
+// TestChainStatementFindingsAfterABackgroundStatement<Pack> run chainStatementFindingsAfterABackgroundStatement one pack each, so the race shards can
+// split its cost (rel-1-0-10:GAP-1032: 443-510 s under -race as one test).
+func TestChainStatementFindingsAfterABackgroundStatementDefault(t *testing.T) {
+	chainStatementFindingsAfterABackgroundStatement(t, gap0437Packs[0:1])
+}
+func TestChainStatementFindingsAfterABackgroundStatementStrict(t *testing.T) {
+	chainStatementFindingsAfterABackgroundStatement(t, gap0437Packs[1:2])
+}
+func TestChainStatementFindingsAfterABackgroundStatementPermissive(t *testing.T) {
+	chainStatementFindingsAfterABackgroundStatement(t, gap0437Packs[2:3])
+}
+func TestChainStatementFindingsAfterABackgroundStatementManaged(t *testing.T) {
+	chainStatementFindingsAfterABackgroundStatement(t, gap0437Packs[3:4])
+}
+func TestChainStatementFindingsAfterABackgroundStatementManagedStrict(t *testing.T) {
+	chainStatementFindingsAfterABackgroundStatement(t, gap0437Packs[4:5])
 }

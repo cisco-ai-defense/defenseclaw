@@ -12,7 +12,7 @@ import (
 
 // Review round-one rows, read as scripts only at shell script sources.
 // The fixtures are synthetic and their protected paths belong to this test.
-func TestGAP0980Round2ReviewRows(t *testing.T) {
+func gap0980Round2ReviewRows(t *testing.T, tierName string) {
 	env := boundedLaneEnv(t)
 	payloads := []struct{ id, s string }{
 		{"rmdc", "rm -rf " + filepath.ToSlash(filepath.Join(env.home, ".defenseclaw"))},
@@ -45,7 +45,12 @@ func TestGAP0980Round2ReviewRows(t *testing.T) {
 		{"cmdsub", `x=$(%P -c '%S')`}, {"and", `true && %P -c '%S'`}, {"func", `f() { %P -c '%S'; }; f`},
 	}
 
+	ran := false
 	for _, tier := range boundedTestTiers {
+		if tier.name != tierName {
+			continue
+		}
+		ran = true
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		decide := func(command string) string {
 			action, _ := boundedDecideClaudeCode(t, api, env, boundedLaneCall{tool: "Bash", input: map[string]any{"command": command}})
@@ -106,6 +111,20 @@ func TestGAP0980Round2ReviewRows(t *testing.T) {
 			}
 		}
 	}
+	if !ran {
+		t.Fatalf("no bounded tier %q", tierName)
+	}
+}
+
+// TestGAP0980Round2ReviewRows<Tier> run the review rows one bounded tier each,
+// so the race shards can split their cost (rel-1-0-10:GAP-1032: 582 s under
+// -race as one test, past what one shard holds).
+func TestGAP0980Round2ReviewRowsDefault(t *testing.T)    { gap0980Round2ReviewRows(t, "default") }
+func TestGAP0980Round2ReviewRowsPermissive(t *testing.T) { gap0980Round2ReviewRows(t, "permissive") }
+func TestGAP0980Round2ReviewRowsStrict(t *testing.T)     { gap0980Round2ReviewRows(t, "strict") }
+func TestGAP0980Round2ReviewRowsManaged(t *testing.T)    { gap0980Round2ReviewRows(t, "managed") }
+func TestGAP0980Round2ReviewRowsManagedStrict(t *testing.T) {
+	gap0980Round2ReviewRows(t, "managed strict")
 }
 
 func TestGAP0991UnknownProgramSlashText(t *testing.T) {
