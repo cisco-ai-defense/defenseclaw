@@ -52,9 +52,9 @@ type guestPlacement struct {
 // (substrate-1 GAP-0304).
 //
 // A call the analysis read in full lists each simple command a static cd
-// moved out of the guest's directory, in that directory, up to
-// maxSandboxGuestPlacedChildren readings: its whole-call view judges the
-// rest.
+// moved out of the guest's directory, in each directory the walk places it,
+// up to maxSandboxGuestPlacedChildren statements (and
+// maxSandboxGuestPlacements readings): its whole-call view judges the rest.
 //
 // A call the analysis did not read in full has no whole-call view that
 // judges it (substrate-1 GAP-0363):
@@ -89,6 +89,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	type key struct{ text, cwd string }
 	seen := map[key]int{}
 	if facts.Authoritative() {
+		// Counted by statements, as the laptop counts them: the walk reads a
+		// command after a cd that may not run in every directory it may run
+		// in, so after three such cds each later command has seven readings
+		// outside the guest's directory, and a cap on readings cut a 24-line
+		// script the laptop allows (a here-string call, judged by its
+		// authoritative twin, substrate-1 GAP-0377).
+		statements := map[string]bool{}
 		for _, simple := range actionfacts.SimpleCommands(input, facts) {
 			cwd := simple.CWD
 			if guestPlacementSkips(simple) || !path.IsAbs(cwd) || cwd == input.CWD {
@@ -97,7 +104,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 			if _, ok := seen[key{simple.Text, cwd}]; ok {
 				continue
 			}
-			if len(placements) == maxSandboxGuestPlacedChildren {
+			if !statements[simple.Text] {
+				if len(statements) == maxSandboxGuestPlacedChildren {
+					return placements, true
+				}
+				statements[simple.Text] = true
+			}
+			if len(placements) == maxSandboxGuestPlacements {
 				return placements, true
 			}
 			seen[key{simple.Text, cwd}] = len(placements)
