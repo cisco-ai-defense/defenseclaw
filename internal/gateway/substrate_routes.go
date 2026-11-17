@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
@@ -496,19 +497,101 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "registrations_unavailable")
 			return
 		}
+		// GAP-0167: the person sees which agents hold a worker.
+		states := substrateLiveStates(r.Context(), st.cfg.Lookup, regs)
 		out := make([]map[string]any, 0, len(regs))
-		for _, reg := range regs {
+		for i, reg := range regs {
 			v := substrateActorView(reg)
-			// GAP-0167: the person sees which agents hold a worker.
-			if st.cfg.Lookup != nil && !reg.Deleted {
-				if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
-					v["state"] = strings.ToLower(string(live.State))
-				}
+			if states[i] != "" {
+				v["state"] = states[i]
 			}
 			out = append(out, v)
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"actors": out})
 	}
+}
+
+// Live states for a list (GAP-0427). One control API call per agent made a
+// person with 2,100 agents wait longer than the launcher does (30 s), so a
+// lookup that can list reads each atespace in a few paged calls, and any
+// other lookup runs substrateListLookups at a time. The states are left out
+// past substrateListStateBudget: the list itself still answers.
+const (
+	substrateListLookups     = 16
+	substrateListStateBudget = 10 * time.Second
+)
+
+// substrateLiveStates returns the lower-case live state of each live
+// registration whose actor still has that UID, "" for the others.
+func substrateLiveStates(ctx context.Context, lookup identity.ActorLookup, regs []registry.Registration) []string {
+	states := make([]string, len(regs))
+	if lookup == nil {
+		return states
+	}
+	ctx, cancel := context.WithTimeout(ctx, substrateListStateBudget)
+	defer cancel()
+	set := func(i int, live identity.LiveActor) {
+		if live.UID == regs[i].UID {
+			states[i] = strings.ToLower(string(live.State))
+		}
+	}
+	var single []int
+	if lister, ok := lookup.(identity.ActorLister); ok {
+		byAtespace := map[string][]int{}
+		for i, reg := range regs {
+			if !reg.Deleted {
+				byAtespace[reg.Atespace] = append(byAtespace[reg.Atespace], i)
+			}
+		}
+		for atespace, idx := range byAtespace {
+			// One agent in an atespace is one call either way.
+			if len(idx) == 1 {
+				single = append(single, idx[0])
+				continue
+			}
+			live, err := lister.ListLiveActors(ctx, atespace)
+			if err != nil {
+				single = append(single, idx...)
+				continue
+			}
+			for _, i := range idx {
+				if l, ok := live[regs[i].Name]; ok {
+					set(i, l)
+				}
+			}
+		}
+	} else {
+		for i, reg := range regs {
+			if !reg.Deleted {
+				single = append(single, i)
+			}
+		}
+	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	next := make(chan int)
+	for range min(substrateListLookups, len(single)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				if live, err := lookup.LookupActor(ctx, regs[i].Atespace, regs[i].Name); err == nil {
+					mu.Lock()
+					set(i, live)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, i := range single {
+		if ctx.Err() != nil {
+			break
+		}
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	return states
 }
 
 // substrateFind finds the live registration of atespace/name the caller
