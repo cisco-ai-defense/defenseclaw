@@ -17,33 +17,60 @@ import (
 // state root or a path in it, spelled there or reached through a link
 // (followed with the hook's target map first, a managed gateway cannot read
 // the home, then the local filesystem when the hook allows it). ok is false
-// when the home is not a POSIX one.
+// when the home is neither a POSIX one nor, on a native Windows gateway, a
+// drive one.
+//
+// A drive home (C:\Users\x) is judged in its slash spelling: the extraction
+// and inline hand-off readers place a Git Bash word (~/.defenseclaw, $HOME/x,
+// a relative folder) with filepath against the Windows home and cwd, so a
+// tar -C or unzip -d into the state and a python -c hand-off of a state file
+// were never judged on a Windows home (rel-1-0-10:GAP-0154, GAP-1173).
 func stateReachFunc(facts actionfacts.Facts, request trustedActionRequest) (func(string) bool, bool) {
 	home := strings.TrimRight(facts.ActiveHome, "/")
+	drive := false
 	if !strings.HasPrefix(home, "/") {
-		return nil, false
+		slashed := strings.TrimRight(filepath.ToSlash(home), "/")
+		if runtime.GOOS != "windows" || !actionfacts.DriveSlashPath(slashed) {
+			return nil, false
+		}
+		home, drive = slashed, true
 	}
 	resolve := stateLinkResolver(request)
-	_, inState := stateRootOf(home, resolve)
 	spelledRoot := home + "/.defenseclaw"
 	fold := runtime.GOOS == "darwin" || runtime.GOOS == "windows"
-	spelledInState := func(value string) bool {
+	under := func(value, root string) bool {
 		if fold {
-			value, spelledRoot := strings.ToLower(value), strings.ToLower(spelledRoot)
-			return value == spelledRoot || strings.HasPrefix(value, spelledRoot+"/")
+			value, root = strings.ToLower(value), strings.ToLower(root)
 		}
-		return value == spelledRoot || strings.HasPrefix(value, spelledRoot+"/")
+		return value == root || strings.HasPrefix(value, root+"/")
+	}
+	var inState func(string) bool
+	if drive {
+		// The physical state root and the physical path of a link are drive
+		// paths; both are compared in the slash spelling.
+		root, _ := stateRootOf(filepath.FromSlash(home), resolve)
+		root = path.Clean(filepath.ToSlash(root))
+		inState = func(value string) bool {
+			return under(path.Clean(filepath.ToSlash(value)), root)
+		}
+	} else {
+		_, inState = stateRootOf(home, resolve)
 	}
 	return func(full string) bool {
 		full = path.Clean(filepath.ToSlash(full))
-		if spelledInState(full) {
+		if under(full, spelledRoot) {
 			return true
 		}
-		physical, ok := resolve(full)
+		lookup := full
+		if drive {
+			lookup = filepath.FromSlash(full)
+		}
+		physical, ok := resolve(lookup)
 		if !ok {
 			physical, ok = request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+full]
 		}
-		return ok && path.IsAbs(physical) && inState(physical)
+		absolute := path.IsAbs(physical) || drive && actionfacts.DriveSlashPath(filepath.ToSlash(physical))
+		return ok && absolute && inState(physical)
 	}, true
 }
 
