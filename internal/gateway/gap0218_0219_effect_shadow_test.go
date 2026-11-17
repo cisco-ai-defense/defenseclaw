@@ -44,6 +44,9 @@ func TestGap0218Gap0219EffectShadowTiers(t *testing.T) {
 		// review round 1: prefixes that do not stop the write keep the block
 		{"set -Eeuo pipefail; echo k >> ~/.ssh/authorized_keys", true},
 		{"set -f; set -C; echo k >> ~/.ssh/authorized_keys", true},
+		{"set -t; true; echo k >> ~/.ssh/authorized_keys", true},
+		{"{ eval exit; } & echo k >> ~/.ssh/authorized_keys", true},
+		{"trap exit DEBUG; (echo k >> ~/.ssh/authorized_keys)", true},
 		{"trap : DEBUG; echo k >> ~/.ssh/authorized_keys", true},
 		{"{ exit; } & echo k >> ~/.ssh/authorized_keys", true},
 		{"enable -n exit; exit; echo k >> ~/.ssh/authorized_keys", true},

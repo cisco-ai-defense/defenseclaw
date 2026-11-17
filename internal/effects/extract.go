@@ -200,6 +200,11 @@ type walker struct {
 	// unaccounted. It belongs to one shell: saved and restored around a child
 	// shell (rel-1-0-10 GAP-0218).
 	execState bool
+	// debugTrap: a DEBUG trap that may end the shell or skip commands is set in
+	// this shell; a child shell does not inherit it (no set -T modeling).
+	debugTrap bool
+	// childDepth counts the enclosing commands that run in a child shell.
+	childDepth int
 	// dead counts the enclosing statements behind a provably false `&&` / true
 	// `||`: their effects never run, so each is unaccounted (GAP-0218).
 	dead int
@@ -374,44 +379,46 @@ func (w *walker) isBuiltin(name string, d Dialect) bool {
 
 // endsExecution reports a command after which the shell runs nothing the walker
 // can account for (GAP-0218): `exec CMD` replaces the shell (unless execfail
-// may be on), `exit` ends it, `set -n` / `-t` / `-o noexec` / `-o onecmd`
-// (also through `shopt -o`) stop or end execution, and a DEBUG or RETURN
-// trap whose action may end the shell or skip commands. words is the
-// command's argv, inner the argv after its wrappers. A builtin shadowed by a
-// function or alias, or turned off with enable, is not the builtin: the
-// caller keeps today's reading. Options that do not stop a command (-e, -E,
-// -f, -C, -o posix, ...) never count, so a prefix cannot hide a real write.
-func (w *walker) endsExecution(words, inner []Word, d Dialect) bool {
+// may be on), `exit` ends it, and `set -n` / `-o noexec` (also through
+// `shopt -s -o`) reads commands without running them. trap reports a DEBUG
+// trap whose action may end the shell or skip commands: it holds in this
+// shell only, a subshell does not inherit it. words is the command's argv,
+// inner the argv after its wrappers. A builtin shadowed by a function or
+// alias, or turned off with enable, is not the builtin: the caller keeps
+// today's reading. Options that do not stop a command (-e, -E, -f, -C, -t,
+// -o posix, ...; -t / onecmd is ignored under bash -c) never count, so a
+// prefix cannot hide a real write.
+func (w *walker) endsExecution(words, inner []Word, d Dialect) (ends, trap bool) {
 	wrapped := len(words) - len(inner)
 	k := 0
 	for k < wrapped && words[k].Static && (words[k].Value == "command" || words[k].Value == "builtin") && w.isBuiltin(words[k].Value, d) {
 		k++
 	}
 	if k < wrapped {
-		return words[k].Static && words[k].Value == "exec" && w.isBuiltin("exec", d) && !w.execfailMaybe
+		return words[k].Static && words[k].Value == "exec" && w.isBuiltin("exec", d) && !w.execfailMaybe, false
 	}
 	if len(inner) == 0 || !inner[0].Static || !w.isBuiltin(inner[0].Value, d) {
-		return false
+		return false, false
 	}
 	switch inner[0].Value {
 	case "exit":
-		return true
+		return true, false
 	case "set":
-		return setStopsExecution(inner[1:])
+		return setStopsExecution(inner[1:]), false
 	case "shopt":
-		return shoptStopsExecution(inner[1:])
+		return shoptStopsExecution(inner[1:]), false
 	case "trap":
-		return w.trapChangesExecution(inner[1:], d)
+		return false, w.trapChangesExecution(inner[1:], d)
 	}
-	return false
+	return false, false
 }
 
-// stopSetLetters and stopSetOptions are the set options that stop or end
-// execution: -n / noexec reads commands without running them, -t / onecmd
+// stopSetLetters and stopSetOptions are the set options that stop execution:
+// -n / noexec reads commands without running them. (-t / onecmd
 // exits after one command.
-const stopSetLetters = "nt"
+const stopSetLetters = "n"
 
-var stopSetOptions = set("noexec", "onecmd")
+var stopSetOptions = set("noexec")
 
 // setStopsExecution reports a `set` call that turns on an option that stops
 // execution, or one whose words the walker cannot read.
@@ -464,9 +471,9 @@ func shoptStopsExecution(args []Word) bool {
 	return false
 }
 
-// trapFlowWords are the commands that, run from a DEBUG or RETURN trap, can end
-// the shell or skip what follows.
-var trapFlowWords = set("exit", "exec", "kill", "return", "logout", "set", "shopt", "trap", "eval", "source", ".", "enable", "builtin", "command", "suspend")
+// trapFlowWords are the commands that, run from a DEBUG trap, can end the
+// shell or skip what follows.
+var trapFlowWords = set("exit", "exec", "kill", "return", "logout", "set", "shopt", "trap", "eval", "source", ".", "enable", "suspend")
 
 // trapChangesExecution reports a `trap` call that sets a DEBUG or RETURN trap
 // whose action may end the shell or skip commands (a flow builtin, a function
@@ -502,7 +509,7 @@ func (w *walker) trapChangesExecution(args []Word, d Dialect) bool {
 			return true
 		}
 		switch strings.TrimPrefix(strings.ToUpper(s.Value), "SIG") {
-		case "DEBUG", "RETURN":
+		case "DEBUG":
 			flow = true
 		}
 	}
@@ -512,10 +519,19 @@ func (w *walker) trapChangesExecution(args []Word, d Dialect) bool {
 	if !action.Static || w.extdebugMaybe || strings.ContainsAny(action.Value, "$`") {
 		return true
 	}
-	for _, tok := range strings.FieldsFunc(action.Value, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n' || r == ';' || r == '&' || r == '|' || r == '(' || r == ')' || r == '{' || r == '}' || r == '!'
+	// The command word of each simple command of the action (after command /
+	// builtin): a word in argument position (echo exit) changes nothing.
+	for _, seg := range strings.FieldsFunc(action.Value, func(r rune) bool {
+		return r == '\n' || r == ';' || r == '&' || r == '|' || r == '(' || r == ')' || r == '{' || r == '}' || r == '!'
 	}) {
-		if trapFlowWords[tok] || w.funcs[funcKey(tok, d)] || w.aliases[tok] != "" {
+		f := strings.Fields(seg)
+		for len(f) > 1 && (f[0] == "command" || f[0] == "builtin") {
+			f = f[1:]
+		}
+		if len(f) == 0 {
+			continue
+		}
+		if tok := f[0]; trapFlowWords[tok] || w.funcs[funcKey(tok, d)] || w.aliases[tok] != "" {
 			return true
 		}
 	}
@@ -637,7 +653,7 @@ func (w *walker) emit(e Effect) int {
 		w.res.addUnknown(ReasonLimit)
 		return 0
 	}
-	if (w.execState || w.dead > 0) && mutatesTarget(e.Kind) {
+	if (w.execState || w.debugTrap || w.dead > 0) && mutatesTarget(e.Kind) {
 		// The shell may never run it: not a fully known mutation (GAP-0218). A
 		// read or run that may not happen keeps its reading, as before.
 		e.addReason(ReasonExecutionState, ScopeRole)
@@ -875,6 +891,13 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if !w.spend() {
 		return
 	}
+	// A pipeline stage, a background command and a command of a backgrounded
+	// list run in a child shell, with the eval / source text they walk: an exit
+	// or exec there does not end this shell (GAP-0218).
+	if c.Pipeline || c.Async || c.ChildList {
+		w.childDepth++
+		defer func() { w.childDepth-- }()
+	}
 	// Subshell: runs in a child shell; save/restore cwd/home/env.
 	if c.Sub != nil {
 		saved := w.saveScope() // installs a copy of the env and cwd set
@@ -1074,8 +1097,10 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// unreviewed set option or a DEBUG/RETURN trap in this shell, nothing later
 	// is a fully known effect. A conditional one leaves later effects as they
 	// are: they run on the paths where it did not.
-	if dialect == DialectPOSIX && !cond && w.condFrame == 0 && !c.Pipeline && !c.Async && !c.ChildList && w.endsExecution(words, inner, dialect) {
-		defer func() { w.execState = true }()
+	if dialect == DialectPOSIX && !cond && w.condFrame == 0 && w.childDepth == 0 {
+		if ends, trap := w.endsExecution(words, inner, dialect); ends || trap {
+			defer func() { w.execState, w.debugTrap = w.execState || ends, w.debugTrap || trap }()
+		}
 	}
 
 	bsdHost := w.o.BSDUserland && bsdSystemProgram(prog.Value)
@@ -3054,6 +3079,7 @@ type scopeState struct {
 	// varsOwned: the saved scope owned its env / exported maps.
 	varsOwned bool
 	execState bool
+	debugTrap bool
 }
 
 // saveScope returns the current state and installs private copies of the
@@ -3062,7 +3088,8 @@ type scopeState struct {
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
 		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther,
-		execState: w.execState}
+		execState: w.execState, debugTrap: w.debugTrap}
+	w.debugTrap = false // a subshell does not inherit a DEBUG trap
 	// The env and exported maps are shared with the saved state until the child
 	// first writes one (ownVars): most scopes (a command substitution, a pipeline
 	// stage) never assign, so copying on every entry would cost the deep-nesting
@@ -3090,6 +3117,7 @@ func (w *walker) restoreScope(s scopeState) {
 	w.exported, w.cdChain, w.narrowed, w.narrowedOther = s.exported, s.chain, s.narrowed, s.narrowedOther
 	w.varsOwned = s.varsOwned
 	w.execState = s.execState
+	w.debugTrap = s.debugTrap
 }
 
 func cloneBools(in map[string]bool) map[string]bool {

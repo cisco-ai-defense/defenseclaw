@@ -52,9 +52,7 @@ var gap0218Rows = []restrictedRow{
 	{"rv10-R06 exec CMD before", raLin, `exec true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"rv10-R07 false &&", raLin, `false && echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"rv10-R17 trap exit DEBUG", raLin, `trap exit DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
-	{"g0218 set -t", raLin, `set -t; true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 set -eo noexec", raLin, `set -eo noexec; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
-	{"g0218 trap RETURN", raLin, `trap 'exit 0' RETURN; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 command exec", raLin, `command exec true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 exec in bash -c", raLin, `bash -c 'exec true; echo k >> /home/u/.ssh/authorized_keys'`, rlAK, false},
 	{"g0218 set -n in eval", raLin, `eval 'set -n'; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
@@ -87,7 +85,6 @@ var gap0218Rows = []restrictedRow{
 	{"g0218 ctl shadowed set", raLin, `set() { :; }; set -n; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 guard with argument", raLin, `false x && echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 shopt -so noexec", raLin, `shopt -so noexec; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
-	{"g0218 set -o onecmd", raLin, `set -o onecmd; true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 DEBUG trap runs a function", raLin, `f() { exit 0; }; trap f DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 DEBUG trap with extdebug", raLin, `shopt -s extdebug; trap false DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 	{"g0218 dynamic DEBUG trap", raLin, `trap "$T" DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
@@ -104,6 +101,18 @@ var gap0218Rows = []restrictedRow{
 	{"g0218 ctl enable -n exit", raLin, `enable -n exit; exit; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 ctl enable -n false", raLin, `enable -n false; hash -p /bin/true false; false && echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 ctl execfail", raLin, `shopt -s execfail; exec /t/none 2>/dev/null; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	// Review round 2: bash -c ignores onecmd; a RETURN trap fires only on a
+	// return; eval in a background list is a child; a subshell has no DEBUG
+	// trap; a flow word in argument position changes nothing.
+	{"g0218 ctl set -t under -c", raLin, `set -t; true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl set -o onecmd under -c", raLin, `set -o onecmd; true; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl trap RETURN", raLin, `trap 'exit 0' RETURN; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl eval exit in background block", raLin, `{ eval exit; } & echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl eval set -n in background list", raLin, `eval 'set -n' || : & echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl DEBUG trap and subshell", raLin, `trap exit DEBUG; (echo k >> /home/u/.ssh/authorized_keys)`, rlAK, true},
+	{"g0218 ctl trap echo exit", raLin, `trap 'echo exit' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl trap command -v", raLin, `trap 'command -v x' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 trap command exit", raLin, `trap 'command exit' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 }
 
 var gap0219Rows = []restrictedRow{
@@ -142,6 +151,11 @@ var gap0219Rows = []restrictedRow{
 	{"g0219 ctl macOS rm -f AK --verbose", raMacBSD, `rm -f /Users/u/.ssh/authorized_keys --verbose`, rMacAK, true},
 	{"g0219 ctl macOS tee AK --append", raMacBSD, `tee /Users/u/.ssh/authorized_keys --append < /t/k`, rMacAK, true},
 	{"g0219 ctl macOS gnubin cp -t", raMacBSD, `/opt/homebrew/opt/coreutils/libexec/gnubin/cp -t /Users/u/.ssh /t/authorized_keys`, rMacAK, true},
+	// Review round 2: a trailing option moves cp/install's destination under
+	// GNU (permutes) but not under BSD: unaccounted, and the write is kept.
+	{"g0219 macOS cp trailing -f", raMacBSD, `cp /t/k /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
+	{"g0219 macOS install trailing -m", raMacBSD, `install /t/k /Users/u/.ssh/authorized_keys -m 600`, rMacAK, false},
+	{"g0219 macOS mv trailing -f", raMacBSD, `mv /t/authorized_keys /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
 	{"g0219 ctl macOS gnubin rm --force", raMacBSD, `/usr/local/opt/coreutils/libexec/gnubin/rm --force /Users/u/.ssh/authorized_keys`, rMacAK, true},
 }
 

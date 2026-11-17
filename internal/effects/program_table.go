@@ -190,12 +190,26 @@ func lookupPOSIX(name string, flavor Flavor, bsd bool) (Program, bool) {
 
 // bsdRejectsFlag reports an option word the BSD row does not accept: a long
 // option (the BSD tools take none), or a short option or cluster letter not
-// in the row, before the first operand (or dynamic word), where BSD getopt stops.
+// in the row, before the first operand (or dynamic word), where BSD getopt
+// stops. After that, an option-shaped word is an operand to BSD but an
+// option to GNU (which permutes): unless the row reads every operand as a
+// target (OptionsFirst), the two readings differ, so it is a reject too.
 func bsdRejectsFlag(p Program, args []Word) bool {
 	for i := 0; i < len(args); i++ {
 		v := args[i].Value
 		if !args[i].Static || len(v) < 2 || v[0] != '-' {
-			return false // BSD getopt stops at the first operand
+			if p.OptionsFirst {
+				return false // BSD getopt stops at the first operand
+			}
+			for _, a := range args[i+1:] {
+				if !a.Static || a.Value == "--" {
+					return false
+				}
+				if len(a.Value) > 1 && a.Value[0] == '-' {
+					return true
+				}
+			}
+			return false
 		}
 		if v == "--" {
 			return false
@@ -241,7 +255,11 @@ func buildBSDTable() {
 		}
 		p.Names = []string{name}
 		p.Flags = flags
-		p.OptionsFirst = true
+		// Every operand of rm, unlink and tee is a target, so reading BSD's stop
+		// at the first operand changes no mutation; for cp, mv, ln and install a
+		// trailing option moves the destination, so bsdRejectsFlag sends those
+		// to the GNU reading, unaccounted.
+		p.OptionsFirst = p.Pos == PosAllDelete || p.Pos == PosAllWrite
 		bsdTable[name] = p
 	}
 	ign := Flag{Value: true, Role: RoleIgnore}
