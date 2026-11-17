@@ -28,4 +28,3 @@ def test_same_entry_as_the_gateway(pricing: dict, case: dict) -> None:
 
 def test_cases_load() -> None:
     assert len(FLAT) >= 20
-
