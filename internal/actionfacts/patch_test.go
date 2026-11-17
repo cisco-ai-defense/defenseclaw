@@ -120,6 +120,9 @@ func TestShellHeredocApplyPatchProjectsNativePathFacts(t *testing.T) {
 }
 
 func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
+	// The drive-relative and share-root rows are unplaced names of a Windows
+	// host (patchTargetsAreWindowsNames).
+	windowsPatchNames(t)
 	valid := "*** Begin Patch\n*** Add File: safe.go\n+safe\n*** End Patch"
 	many := strings.Builder{}
 	many.WriteString("*** Begin Patch\n")

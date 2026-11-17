@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"slices"
 	"strings"
 	"unicode"
 
@@ -31,19 +32,11 @@ import (
 // that spell a path the hook client lists in the state tree, as the user's
 // walk placed it (clientStateSpellings).
 func provenPowerShellStateWrite(request trustedActionRequest) bool {
-	home := request.Input.ActiveHome
-	if len(home) < 2 || home[1] != ':' {
-		return false
-	}
-	switch request.Input.DialectHint {
-	case "", actionfacts.DialectPOSIX, actionfacts.DialectPowerShell:
-	default:
-		return false
-	}
-	command, known := trustedBashCommandInput(request.Input)
+	command, known := powerShellReadingCommand(request)
 	if !known {
 		return false
 	}
+	home := request.Input.ActiveHome
 	var mentions func(string) bool
 	if !strings.Contains(strings.ToLower(command), "defenseclaw") {
 		cwd := request.Input.CWD
@@ -56,7 +49,41 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 			return false
 		}
 	}
-	forms, bounded, ok := powerShellStateWriteForms(command, home, request.Input.CWD, request.ResolvedWriteTargets, mentions)
+	return powerShellWriteReading(request, command, mentions, provenStateMutationPath)
+}
+
+// powerShellReadingCommand is the command text of a call the PowerShell
+// reading judges: a call of a Windows home (a drive path) that runs in
+// PowerShell, or in a shell the gateway cannot tell from it (no hint, or
+// POSIX: Codex names its PowerShell tool Bash). A cmd call is not one.
+func powerShellReadingCommand(request trustedActionRequest) (string, bool) {
+	home := request.Input.ActiveHome
+	if len(home) < 2 || home[1] != ':' {
+		return "", false
+	}
+	switch request.Input.DialectHint {
+	case "", actionfacts.DialectPOSIX, actionfacts.DialectPowerShell:
+	default:
+		return "", false
+	}
+	return trustedBashCommandInput(request.Input)
+}
+
+// powerShellWriteReading is the one reader of the files a PowerShell reading
+// of command writes, for every protected class: the DefenseClaw state
+// (provenPowerShellStateWrite), the agent hook configs
+// (agentHookConfigPowerShellWrite) and whichever class proves passes on.
+// Each statement and pipeline element that follows names (or spells
+// DefenseClaw) is read as a PowerShell command of its own, and each file an
+// expression writes (a redirect, a provider-path assignment, a .NET file
+// method: psFileWriteMethod) as Set-Content -LiteralPath <target>; ActionFacts
+// reads each such twin, as the redirect and every write cmdlet
+// (Add-Content, Set-Content, Out-File, Tee-Object, New-Item, Copy-Item and
+// Move-Item destinations) are read, and proves judges the twin's facts. A
+// command past the reading bounds is the write (true without proves).
+func powerShellWriteReading(request trustedActionRequest, command string, follows func(string) bool,
+	proves func(actionfacts.Facts, trustedActionRequest) bool) bool {
+	forms, bounded, ok := powerShellStateWriteForms(command, request.Input.ActiveHome, request.Input.CWD, request.ResolvedWriteTargets, follows)
 	if !ok {
 		return false
 	}
@@ -73,7 +100,7 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 		input.DialectHint = actionfacts.DialectPowerShell
 		twin := request
 		twin.Input = input
-		return provenStateMutationPath(actionfacts.Analyze(input), twin)
+		return proves(actionfacts.Analyze(input), twin)
 	}
 	const maxVariants = 256
 	variants := 0
@@ -112,8 +139,53 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 				return true
 			}
 		}
+		// The content a cmdlet writes leaves which file it opens alone,
+		// but ActionFacts keeps New-Item -Value partial (it may name a link
+		// target): the reading without it proves the write of -Path
+		// (rel-1-0-10:GAP-1115).
+		if variant, ok := psContentFreeReading(form); ok && proven(variant) {
+			return true
+		}
 	}
 	return false
+}
+
+// psContentParameters are, per mutator cmdlet, the parameters that carry
+// only what is written (content, or the target a new link points to),
+// never which item is written.
+var psContentParameters = map[string][]string{
+	"new-item": {"value", "target"},
+	"ni":       {"value", "target"},
+}
+
+// psContentFreeReading returns form without the content parameters of its
+// cmdlet (psContentParameters) and their values, false when it has none.
+// A parameter spelled with its value (-Value:x) drops as one word.
+func psContentFreeReading(form string) (string, bool) {
+	budget := &psBudget{}
+	words := psWords(form, budget)
+	if budget.over || len(words) < 2 {
+		return "", false
+	}
+	content := psContentParameters[strings.ToLower(words[0].text)]
+	if content == nil {
+		return "", false
+	}
+	kept := make([]string, 0, len(words))
+	dropped := false
+	for k := 0; k < len(words); k++ {
+		word := words[k]
+		name, _, joined := strings.Cut(strings.ToLower(strings.TrimPrefix(word.text, "-")), ":")
+		if k > 0 && !word.quoted && strings.HasPrefix(word.text, "-") && slices.Contains(content, name) {
+			dropped = true
+			if !joined {
+				k++
+			}
+			continue
+		}
+		kept = append(kept, word.text)
+	}
+	return strings.Join(kept, " "), dropped
 }
 
 // psMaxOpaqueValues bounds the words of one statement that
@@ -1230,6 +1302,9 @@ func psFileWriteMethod(prefix string) []int {
 		{"::createtext", []int{0}}, {"::create", []int{0}}, {"::openwrite", []int{0}},
 		{"::delete", []int{0}}, {"::move", []int{0, 1}}, {"::copy", []int{1}},
 		{"::replace", []int{0, 1, 2}}, {"streamwriter]::new", []int{0}},
+		// New-Object System.IO.StreamWriter(path, ...) opens the file as
+		// [System.IO.StreamWriter]::new does (rel-1-0-10:GAP-1115).
+		{"io.streamwriter", []int{0}},
 	} {
 		if strings.HasSuffix(prefix, method.name) {
 			return method.args
