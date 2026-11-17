@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -93,7 +95,35 @@ type CredentialSource string
 const (
 	CredentialFromSystemd CredentialSource = "systemd_credential"
 	CredentialFromFile    CredentialSource = "protected_file"
+	// CredentialFromCluster is a key of the Agent Substrate chart's LLM
+	// credentials Secret, mounted read-only into the cluster gateway
+	// (UseClusterCredentialDir).
+	CredentialFromCluster CredentialSource = "kubernetes_secret"
 )
+
+// clusterCredentialDir is the Agent Substrate gateway's mounted LLM
+// credentials Secret, "" on every other host (UseClusterCredentialDir).
+var clusterCredentialDir atomic.Pointer[string]
+
+// UseClusterCredentialDir makes dir, the Agent Substrate chart's LLM
+// credentials Secret volume (one file per key, written only through the
+// Kubernetes API by the cluster's administrators), a source of the named
+// service credentials of this process: enterprise.inspection.llm.credential
+// names a key of that Secret, as on a laptop it names a protected file
+// (GAP-0560: a managed cluster gateway had no source for its LLM judge key,
+// because a standalone deployment reads no key from the environment). Only
+// the cluster gateway calls it, once, at start.
+func UseClusterCredentialDir(dir string) {
+	dir = strings.TrimSpace(dir)
+	clusterCredentialDir.Store(&dir)
+}
+
+func clusterCredentialDirectory() string {
+	if dir := clusterCredentialDir.Load(); dir != nil {
+		return *dir
+	}
+	return ""
+}
 
 // ResolveServiceCredential reads the named credential of a standalone
 // deployment. secretsDir is the layout's administrator-owned secrets
