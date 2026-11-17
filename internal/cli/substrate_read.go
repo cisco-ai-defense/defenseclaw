@@ -988,9 +988,11 @@ func newSubstratePolicyResetCmd() *cobra.Command {
 		Use:   "reset <actor>",
 		Short: "Clear a policy conflict on an agent (administrators only)",
 		Long: `For administrators. When something outside DefenseClaw keeps rewriting an agent's network policy,
-the controller stops after three reverts in ten minutes and marks the agent policy_conflict. Once the
-other writer is stopped, "reset" clears that state so the controller writes the policy again. Name the
-agent as ATESPACE/NAME. The reset is recorded in the audit log under your own name.`,
+three reverts in ten minutes mark the agent policy_conflict and put it on deny-only: it keeps only the
+DefenseClaw rule, and each later change by the other writer is replaced with deny-only again, so a foreign
+policy never stays in force. Once the other writer is stopped, "reset" clears that state so the controller
+writes the full policy again. Name the agent as ATESPACE/NAME. The reset is recorded in the audit log under
+your own name.`,
 		Example: "defenseclaw substrate policy reset eng-web/fix-tests-7f3a --reason \"removed the GitOps rule\"",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

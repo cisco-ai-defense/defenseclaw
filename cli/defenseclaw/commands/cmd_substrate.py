@@ -483,11 +483,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         "Clear a policy conflict on an agent (administrators only)",
         long=(
             "For administrators. When something outside DefenseClaw keeps rewriting an agent's network policy,\n"
-            "the controller stops after three reverts in ten minutes and marks the agent policy_conflict. Once "
+            "three reverts in ten minutes mark the agent policy_conflict and put it on deny-only: it keeps only "
             "the\n"
-            'other writer is stopped, "reset" clears that state so the controller writes the policy again. Name '
-            "the\n"
-            "agent as ATESPACE/NAME. The reset is recorded in the audit log under your own name."
+            "DefenseClaw rule, and each later change by the other writer is replaced with deny-only again, so a "
+            "foreign\n"
+            'policy never stays in force. Once the other writer is stopped, "reset" clears that state so the '
+            "controller\n"
+            "writes the full policy again. Name the agent as ATESPACE/NAME. The reset is recorded in the audit "
+            "log under\n"
+            "your own name."
         ),
         example='defenseclaw substrate policy reset eng-web/fix-tests-7f3a --reason "removed the GitOps rule"',
         args=(_Arg("actor"),),

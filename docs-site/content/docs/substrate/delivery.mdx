@@ -76,7 +76,7 @@ On laptops, tamper protection keeps users from removing DefenseClaw. In a cluste
 | What could happen | What stops it |
 |---|---|
 | Someone edits DefenseClaw's config or Deployments | Kubernetes access control. Only platform admins can write `defenseclaw-system`. Changes made outside the chart show as drift in the fleet view |
-| Someone loosens an agent's allow list with `kubectl ate update egress-policy` | The controller sees the change, puts DefenseClaw's list back, and records who made it and what they changed. After three reverts in ten minutes the controller stops, marks the actor `policy_conflict` and raises an alert, so two writers don't fight forever. It never adds access while reverting |
+| Someone loosens an agent's allow list with `kubectl ate update egress-policy` | The controller sees the change, puts DefenseClaw's list back, and records who made it and what they changed. After three reverts in ten minutes the controller marks the actor `policy_conflict`, raises one alert and keeps the actor on deny-only (the DefenseClaw rule alone) until an admin resets it: a later change is replaced with deny-only again, so a foreign policy never stays in force. It never adds access |
 | Someone starts an agent in a team atespace without DefenseClaw | Substrate access policy lets only DefenseClaw create agents there |
 | Someone builds a template without the kit | Its agents get no network, and the template is reported |
 | An agent tries to change its own hooks | The hook config is root-owned in the image. The agent runs as an ordinary user |
