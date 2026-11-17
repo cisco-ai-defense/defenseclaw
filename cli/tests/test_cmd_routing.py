@@ -309,3 +309,26 @@ def test_managed_unreadable_config_says_so(home: Path, monkeypatch) -> None:
         assert CliRunner().invoke(cmd_routing.routing_cmd, ["enable"]).exit_code == 3
     finally:
         (home / "config.yaml").chmod(0o600)
+
+
+def test_models_add_says_when_route_only_calls_cannot_reach_a_bedrock_model(home: Path) -> None:
+    """rel-1-0-10:GAP-1167: a bedrock alias for the responses API without a
+    base_url was accepted silently; route-only Codex calls never use it."""
+    result = run(
+        "models", "add", "oss", "--provider", "bedrock", "--model", "openai.gpt-oss-120b-1:0",
+        "--api", "responses", "--api-key-env", "K",
+    )
+    assert result.exit_code == 0, result.output
+    assert "cannot reach a bedrock model without --base-url" in result.output
+    assert "filtered_by:endpoint" in result.output
+    assert "--provider openai --base-url https://bedrock-runtime.REGION.amazonaws.com/openai/v1" in result.output
+    assert written(home)["routing"]["models"][-1]["apis"] == ["responses"]
+    for args in (
+        ("conv", "--provider", "bedrock", "--model", "m", "--api", "converse"),
+        ("based", "--provider", "bedrock", "--model", "m", "--api", "responses", "--base-url", "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"),
+        ("oai", "--provider", "openai", "--model", "m", "--api", "responses"),
+    ):
+        quiet = run("models", "add", *args)
+        assert quiet.exit_code == 0, quiet.output
+        assert "cannot reach" not in quiet.output, args
+

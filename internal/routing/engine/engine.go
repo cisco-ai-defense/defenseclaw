@@ -22,6 +22,10 @@ type Options struct {
 	// CredentialOK reports whether the gateway can authenticate a call to
 	// b for this request (inbound passthrough or a gateway-held key).
 	CredentialOK func(b Backend, r Request) bool
+	// EndpointOK reports whether the gateway can address b for this request
+	// (an alias with no base_url whose provider has no endpoint the listener
+	// knows is filtered as "endpoint"); nil accepts every backend.
+	EndpointOK func(b Backend, r Request) bool
 	// Sticky is the conversation cache shared across generations (nil = a
 	// private one). It is used only with classifier systemone.
 	Sticky *StickyCache
@@ -51,6 +55,7 @@ type Engine struct {
 	admin         AdminEvaluator
 	managed       bool
 	credentialOK  func(Backend, Request) bool
+	endpointOK    func(Backend, Request) bool
 	sticky        *StickyCache
 	marks         *StickyCache
 	checker       SensitiveChecker
@@ -87,6 +92,7 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		admin:         opts.Admin,
 		managed:       opts.Managed,
 		credentialOK:  opts.CredentialOK,
+		endpointOK:    opts.EndpointOK,
 		context:       contextOptionsOf(r),
 	}
 	if r.Sensitive != nil && len(r.Sensitive.Aliases) > 0 {
@@ -210,6 +216,9 @@ func (e *Engine) eligible(p Policy, alias string, req Request) (Backend, string)
 	}
 	if e.credentialOK != nil && !e.credentialOK(b, req) {
 		return Backend{}, "credential"
+	}
+	if e.endpointOK != nil && !e.endpointOK(b, req) {
+		return Backend{}, "endpoint"
 	}
 	return b, ""
 }

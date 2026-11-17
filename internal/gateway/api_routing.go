@@ -4,9 +4,11 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,10 +94,15 @@ type routingBudgetView struct {
 
 // routingBudgetViews lists the budgets the caller may see with their spend:
 // an administrator sees every budget (a * budget as the sum over its
-// subjects); a user sees * user budgets for themselves and, for a pooled
-// budget, only the percent used. Named user and group budgets are not shown
-// to a user (their selectors are the administrator's policy).
-func routingBudgetViews(cfg *config.Config, key string, admin bool, now time.Time) []routingBudgetView {
+// subjects); a user sees the budgets that apply to them: * user budgets and
+// a user budget that names them, with their own spend, and the budget of a
+// group they are proved a member of (own, the routingOwnCaller facts) with
+// only whether it is used up, since its spend is the group pool. A user never
+// sees a subject, nor a budget of another user or group (their selectors
+// are the administrator's policy). Before, a user saw only * budgets, so
+// routing budgets list was empty for a user a named budget applies to
+// (rel-1-0-10:GAP-1129).
+func routingBudgetViews(cfg *config.Config, key string, admin bool, own routingadmin.Caller, now time.Time) []routingBudgetView {
 	// Always a non-nil slice: JSON null would reach the CLI as a missing list
 	// (GAP-0561).
 	views := []routingBudgetView{}
@@ -110,14 +117,32 @@ func routingBudgetViews(cfg *config.Config, key string, admin bool, now time.Tim
 			view.Seed = ledger.SeedState([]string{b.ID})
 		}
 		var spend float64
-		var known bool
+		var known, pooled bool
+		var ownKey string
 		switch {
 		case admin:
 			view.Subject = b.Subject
 			spend, known = ledger.SpendPrefix(b.Scope+":"+b.ID+":", b.Period, now)
-		case b.Scope == config.RoutingBudgetScopeUser && b.Subject == config.RoutingBudgetSubjectAll && key != "":
+		case b.Scope == config.RoutingBudgetScopeUser && b.Subject == config.RoutingBudgetSubjectAll:
+			if key == "" {
+				continue
+			}
 			spend, known = ledger.Spend("user:"+b.ID+":*:"+key, b.Period, now)
+		case b.Scope == config.RoutingBudgetScopeUser && routingadmin.NamesCaller(own, config.ProfileMatch{Users: []string{b.Subject}}):
+			ownKey = routingadmin.BudgetChargeKey(b)
+			spend, known = ledger.Spend(ownKey, b.Period, now)
+		case b.Scope == config.RoutingBudgetScopeGroup && routingadmin.NamesCaller(own, config.ProfileMatch{Groups: []string{b.Subject}}):
+			ownKey = routingadmin.BudgetChargeKey(b)
+			spend, known = ledger.Spend(ownKey, b.Period, now)
+			pooled = true
 		default:
+			continue
+		}
+		if pooled {
+			// A group pool shows only whether it is used up: its spend or
+			// percent (with the limit) is the other members' spend too.
+			view.Exceeded = known && spend >= b.LimitUSD
+			views = append(views, view)
 			continue
 		}
 		if known && spend >= budgetstore.ExceededUSD/2 {
@@ -156,15 +181,22 @@ func (a *APIServer) handleRoutingEffective(w http.ResponseWriter, r *http.Reques
 	if recent <= 0 || recent > routingRecentMax {
 		recent = 5
 	}
+	var own routingadmin.Caller
+	if !admin {
+		own = routingOwnCaller(r.Context(), cfg, key)
+	}
 	body := map[string]any{
 		"enabled": cfg != nil && cfg.Routing.Enabled,
 		"admin":   admin,
-		"budgets": routingBudgetViews(cfg, key, admin, time.Now()),
+		"budgets": routingBudgetViews(cfg, key, admin, own, time.Now()),
 		"recent":  nonNilSlice(routingAdminRuntime.Decisions().Recent(key, admin, recent)),
 	}
-	if admin && cfg != nil && cfg.Routing.Admin != nil {
+	switch {
+	case admin && cfg != nil && cfg.Routing.Admin != nil:
 		body["rules"] = nonNilSlice(cfg.Routing.Admin.Rules)
 		body["allowed_aliases"] = nonNilSlice(cfg.Routing.Admin.AllowedAliases)
+	case !admin:
+		body["rules"] = routingOwnRules(cfg, own)
 	}
 	writeRoutingJSON(w, http.StatusOK, body)
 }
@@ -180,7 +212,84 @@ func (a *APIServer) handleRoutingBudgets(w http.ResponseWriter, r *http.Request)
 		routingAPIError(w, http.StatusForbidden, "")
 		return
 	}
-	writeRoutingJSON(w, http.StatusOK, map[string]any{"budgets": routingBudgetViews(cfg, key, admin, time.Now())})
+	var own routingadmin.Caller
+	if !admin {
+		own = routingOwnCaller(r.Context(), cfg, key)
+	}
+	writeRoutingJSON(w, http.StatusOK, map[string]any{"budgets": routingBudgetViews(cfg, key, admin, own, time.Now())})
+}
+
+// routingOwnCaller is the routing.admin caller of a managed own read (key
+// from routingAPICaller: the hook socket kernel peer uid, or the Windows
+// own-status pipe SID), with the directory matcher the route-only and proxy
+// paths give routing.admin (routeCallerFromContext), so a list names the
+// rules and budgets the evaluator applies to that account. Zero (no rule
+// or budget proved) off a managed host, for an empty key, and when the
+// account cannot be verified.
+func routingOwnCaller(ctx context.Context, cfg *config.Config, key string) routingadmin.Caller {
+	if cfg == nil || !cfg.StandaloneEnterprise() || key == "" {
+		return routingadmin.Caller{}
+	}
+	if s, ok := verifiedSubjectFromContext(ctx); !ok || s.UserID != key {
+		source := subjectSourcePeerCredentials
+		if _, viaPipe := routingPipeCallerFromContext(ctx); viaPipe {
+			source = unenrolledRefusalSubject
+		}
+		ctx = attachVerifiedSubject(ctx, nil, key, sanitizeLLMEventUser(userScopedIdentityName(key)), source)
+	}
+	caller, _ := routeCallerFromContext(ctx)
+	if !caller.Verified || caller.Key != key {
+		return routingadmin.Caller{}
+	}
+	return routingadmin.CallerFromEngine(caller, true)
+}
+
+// routingOwnRuleView is a routing.admin rule as the account it applies to
+// reads it (the routing rules list shape): no users, groups or agents
+// selector.
+type routingOwnRuleView struct {
+	ID      string               `json:"id"`
+	Match   *routingOwnRuleMatch `json:"match,omitempty"`
+	Action  string               `json:"action,omitempty"`
+	Allow   []string             `json:"allow,omitempty"`
+	Default string               `json:"default,omitempty"`
+	Message string               `json:"message,omitempty"`
+}
+
+// routingOwnRuleMatch is the part of a rule match that names no account.
+type routingOwnRuleMatch struct {
+	Connectors      []string `json:"connectors,omitempty"`
+	Categories      []string `json:"categories,omitempty"`
+	SeverityAtLeast string   `json:"severity_at_least,omitempty"`
+}
+
+// routingOwnRules are the routing.admin rules that apply to the caller of a
+// managed own read: a rule that names no user, group or agent, or one whose
+// users and groups selectors the facts prove name the caller (the evaluator
+// matcher). A rule that selects by agents only is not listed (an agent id
+// can stand for another person's agent), and users, groups and agents are
+// never shown: they are the administrator's policy and can name other
+// accounts. Before, a user got no rules at all,
+// so routing rules list said [] scope own while those rules applied to the
+// account (rel-1-0-10:GAP-1129).
+func routingOwnRules(cfg *config.Config, own routingadmin.Caller) []routingOwnRuleView {
+	rules := []routingOwnRuleView{}
+	if cfg == nil || cfg.Routing.Admin == nil || !cfg.StandaloneEnterprise() || !own.Verified {
+		return rules
+	}
+	for _, rule := range cfg.Routing.Admin.Rules {
+		m := rule.Match
+		person := len(m.Users) > 0 || len(m.Groups) > 0
+		if (!person && len(m.Agents) > 0) || (person && !routingadmin.NamesCaller(own, config.ProfileMatch{Users: m.Users, Groups: m.Groups})) {
+			continue
+		}
+		view := routingOwnRuleView{ID: rule.ID, Action: rule.Action, Allow: rule.Allow, Default: rule.Default, Message: rule.Message}
+		if len(m.Connectors)+len(m.Categories) > 0 || m.SeverityAtLeast != "" {
+			view.Match = &routingOwnRuleMatch{Connectors: m.Connectors, Categories: m.Categories, SeverityAtLeast: m.SeverityAtLeast}
+		}
+		rules = append(rules, view)
+	}
+	return rules
 }
 
 func (a *APIServer) handleRoutingExplain(w http.ResponseWriter, r *http.Request) {
@@ -280,6 +389,13 @@ func (a *APIServer) handleRoutingTest(w http.ResponseWriter, r *http.Request) {
 	in := &ModelRouterInput{Text: req.Prompt, Connector: config.NormalizeConnectorName(req.Connector),
 		Listener: engine.ListenerGuardrail, Caller: caller, Profiles: profiles}
 	var simulated []string
+	if family, ok := routeOnlyTestFamily(cfg, in.Connector); ok {
+		// A route-only connector is decided as its listener decides (its API
+		// family and upstream provider), so a model that listener cannot
+		// reach is filtered here too (rel-1-0-10:GAP-1167).
+		in.Listener, in.APIFamily, in.RequestedProvider = engine.ListenerRouteOnly, family, routeOnlyProvider(family)
+		simulated = append(simulated, "route-only "+family+" call (the agent credential is not simulated)")
+	}
 	if req.Profile != "" {
 		in.Profiles, simulated = []string{req.Profile}, append(simulated, "profile "+req.Profile)
 	}
@@ -302,6 +418,23 @@ func (a *APIServer) handleRoutingTest(w http.ResponseWriter, r *http.Request) {
 		body["deny"] = map[string]string{"code": d.Deny.Code, "message": d.Deny.Message}
 	}
 	writeRoutingJSON(w, http.StatusOK, body)
+}
+
+// routeOnlyTestFamily is the API family the route-only listener sees from
+// connector: its routing.route_only.upstreams api, else the connector own
+// API. ok is false when routing does not send the connector through that
+// listener.
+func routeOnlyTestFamily(cfg *config.Config, connector string) (string, bool) {
+	if !cfg.RouteOnlyRouted(connector) {
+		return "", false
+	}
+	if up, ok := cfg.Routing.RouteOnly.Upstreams[connector]; ok && slices.Contains(config.RoutingAPIs, up.API) {
+		return up.API, true
+	}
+	if connector == "codex" {
+		return config.RoutingAPIResponses, true
+	}
+	return config.RoutingAPIMessages, true
 }
 
 // nonNilSlice returns v, or an empty slice for a nil one, so the JSON answer

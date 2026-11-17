@@ -119,6 +119,7 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 			SensitiveMarks:   r.marks,
 			SensitiveChecker: r.sensitiveCheckerFor(cfg),
 			CredentialOK:     func(b engine.Backend, req engine.Request) bool { return r.backendCredentialOK(cfg, b, req) },
+			EndpointOK:       routeOnlyEndpointKnown,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)
@@ -239,6 +240,24 @@ func routeOnlyCredentialFits(req engine.Request, b engine.Backend, key string) b
 		return same || strings.EqualFold(strings.TrimSpace(b.Provider), "bedrock")
 	}
 	return true
+}
+
+// routeOnlyEndpointKnown is the route-only endpoint rule as an eligibility
+// filter: the listener forwards the agent request unchanged in shape, so it
+// sends a routed call to the model base_url, else to the upstream of the
+// agent own provider, else to the public endpoint of the model provider.
+// A model with none of these (a bedrock alias without base_url for a
+// Responses or Messages call: Bedrock has no default endpoint for them) is
+// skipped with filtered_by endpoint, so routing test, routing explain and the
+// real call agree; before, the engine chose it and the call fell back to the
+// original model with only a route_only_fallback:origin warning
+// (rel-1-0-10:GAP-1167). Other listeners keep every backend.
+func routeOnlyEndpointKnown(b engine.Backend, req engine.Request) bool {
+	if req.Listener != engine.ListenerRouteOnly || originOf(b.BaseURL) != "" {
+		return true
+	}
+	provider := strings.ToLower(strings.TrimSpace(b.Provider))
+	return provider == strings.ToLower(req.RequestedProvider) || providerDefaultOrigins[provider] != ""
 }
 
 // Route implements ModelRouter.

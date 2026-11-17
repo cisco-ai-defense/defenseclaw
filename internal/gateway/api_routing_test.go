@@ -67,11 +67,11 @@ func TestRoutingBudgetViewsShowOwnOnly(t *testing.T) {
 	routingAdminRuntime.Ledger().ApplyRemote([]string{"daily", "eng"}, nil, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1001"}, 4, now)
 	routingAdminRuntime.Charge([]string{"user:daily:*:1002"}, 7, now)
-	user := routingBudgetViews(cfg, "1001", false, now)
+	user := routingBudgetViews(cfg, "1001", false, routingadmin.Caller{}, now)
 	if len(user) != 1 || user[0].ID != "daily" || user[0].Subject != "" || *user[0].SpentUSD != 4 || user[0].Exceeded {
 		t.Fatalf("user view: %+v", user)
 	}
-	admin := routingBudgetViews(cfg, "", true, now)
+	admin := routingBudgetViews(cfg, "", true, routingadmin.Caller{}, now)
 	if len(admin) != 2 || *admin[0].SpentUSD != 11 || !admin[0].Exceeded || admin[1].Subject != `DCLAB\eng` {
 		t.Fatalf("admin view: %+v", admin)
 	}

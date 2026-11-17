@@ -396,3 +396,26 @@ func denyCode(v Verdict) string {
 	}
 	return v.Deny.Code
 }
+
+// BudgetChargeKey is the key Evaluate charges for a named user and a group
+// budget (the caller own budget views read spend with it, rel-1-0-10:GAP-1129).
+func TestBudgetChargeKeyIsTheChargedKey(t *testing.T) {
+	budgets := []config.RoutingBudget{
+		{ID: "mine", Scope: "user", Subject: "eng1", Period: "day", LimitUSD: 10, OnExceed: "warn"},
+		{ID: "eng", Scope: "group", Subject: "eng", Period: "month", LimitUSD: 100, OnExceed: "warn"},
+		{ID: "all", Scope: "user", Subject: "*", Period: "day", LimitUSD: 10, OnExceed: "warn"},
+		{ID: "codex", Scope: "connector", Subject: "codex", Period: "week", LimitUSD: 5, OnExceed: "warn"},
+	}
+	p := Compile(nil, budgets, true)
+	v := p.Evaluate(Request{Caller: caller("eng1", "eng"), Connector: "codex"}, seededLedger(p.BudgetIDs()...), now)
+	for _, b := range budgets[:2] {
+		if k := BudgetChargeKey(b); k == "" || !slices.Contains(v.ChargeKeys, k) {
+			t.Fatalf("%s: key %q not in charged %v", b.ID, k, v.ChargeKeys)
+		}
+	}
+	for _, b := range budgets[2:] {
+		if k := BudgetChargeKey(b); k != "" {
+			t.Fatalf("%s: a * or connector budget has no own key: %q", b.ID, k)
+		}
+	}
+}
