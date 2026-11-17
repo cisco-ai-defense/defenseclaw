@@ -2644,6 +2644,7 @@
    "TestGAP0208ClaudeActorHookContractIsKnown": 14.3,
    "TestGAP0263ActorHookRowsNameTheVerifiedPerson": 5.5,
    "TestGAP0304SandboxCdChainKeepsLaptopParity": 27.0,
+   "TestGAP0363SandboxPlacedFallbackKeepsLaptopParity": 41.7,
    "TestSubstrateToolResultJudgeSeesTheUserRequest": 0.0,
    "TestSubstrateToolResultJudgeLeaderDownJudgesWithoutTheRequest": 2.0,
    "TestScanInboundPromptOpenClawCopyCountsOnce": 3.9,
