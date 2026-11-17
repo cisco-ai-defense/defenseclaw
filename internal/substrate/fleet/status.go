@@ -99,7 +99,10 @@ type StatusDocument struct {
 	Health             Health     `json:"health"`
 	Atespaces          []Atespace `json:"atespaces"`
 	Inventory          *Inventory `json:"inventory,omitempty"`
-	Checks             []Check    `json:"checks"`
+	// Bundles are the signed policy bundles in force, one per stage; left
+	// out when substrate.bundles is off (GAP-0432).
+	Bundles []BundleStage `json:"bundles,omitempty"`
+	Checks  []Check       `json:"checks"`
 }
 
 // VerifyDocument is `defenseclaw substrate verify --json`: the checks and
@@ -112,7 +115,9 @@ type VerifyDocument struct {
 	GeneratedAt        string  `json:"generated_at"`
 	Cluster            Cluster `json:"cluster"`
 	OK                 bool    `json:"ok"`
-	Checks             []Check `json:"checks"`
+	// Bundles: as in the status document (GAP-0432).
+	Bundles []BundleStage `json:"bundles,omitempty"`
+	Checks  []Check       `json:"checks"`
 }
 
 // Report is what the CLI collected for a status document beyond Observed.
@@ -194,6 +199,7 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 		Health:             h,
 		Atespaces:          atespaces,
 		Inventory:          inv,
+		Bundles:            bundleStages(o),
 		Checks:             checks,
 	}
 }
@@ -215,6 +221,7 @@ func BuildVerify(o Observed, productVersion string, now time.Time) VerifyDocumen
 		GeneratedAt:        now.UTC().Format(time.RFC3339),
 		Cluster:            ClusterOf(o),
 		OK:                 ok,
+		Bundles:            bundleStages(o),
 		Checks:             checks,
 	}
 }

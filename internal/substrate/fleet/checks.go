@@ -40,8 +40,8 @@ const (
 )
 
 // CheckIDs lists every check in the order doctor prints them.
-var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckCallout,
-	CheckIngressClients, CheckActorRoutes, CheckAPIAccess}
+var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckBundles,
+	CheckCallout, CheckIngressClients, CheckActorRoutes, CheckAPIAccess}
 
 // Check is one result. Message is for the admin (kept on the cluster);
 // EdgeCase names the plan edge case it guards, when there is one.
@@ -162,6 +162,10 @@ type Observed struct {
 	SignInSince  string
 
 	NamespaceLabels map[string]string
+
+	// Bundles is the signed policy bundle state; nil when substrate.bundles
+	// is off (GAP-0429, GAP-0432).
+	Bundles *Bundles
 }
 
 // DefaultIssuer is Substrate's actor JWT issuer when actorJWT.issuer is unset.
@@ -190,7 +194,7 @@ var defaultIssuerShape = regexp.MustCompile(`^https://idp\.[a-z0-9-]+\.svc(\.clu
 func RunChecks(o Observed) []Check {
 	return []Check{
 		CheckVersion(o), CheckIssuerUnique(o), CheckActorKeysVerify(o), CheckSignInServerReach(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
-		CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
+		CheckBundleState(o), CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
 	}
 }
 
