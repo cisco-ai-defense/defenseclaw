@@ -256,6 +256,11 @@ type Store struct {
 	// secureClientSchema keeps the tables, columns and indexes main creates
 	// (WithSecureClientSchema).
 	secureClientSchema bool
+	// pageCacheKiB, when over 0, replaces the 20 MB page cache of every
+	// connection, and noReadPool keeps the reads on the writer
+	// (WithSmallFootprint).
+	pageCacheKiB int
+	noReadPool   bool
 	// hookLoneTracked: the store keeps audit_hook_lone (ensureHookLoneTracking).
 	hookLoneTracked bool
 
@@ -561,6 +566,7 @@ func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
 
 func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
 	hooks.secureClient = secureClientStoreOptions(opts)
+	hooks.pageCacheKiB = pageCacheStoreOption(opts)
 	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
@@ -594,6 +600,47 @@ func (s *Store) SecureClientSchema() bool {
 // opener on such a host sets it.
 func WithSecureClientSchema() StoreOption {
 	return func(s *Store) { s.secureClientSchema = true }
+}
+
+// SmallFootprintPageCacheKiB is the page cache of each connection of a
+// WithSmallFootprint store.
+const SmallFootprintPageCacheKiB = 512
+
+// WithSmallFootprint opens a store one of many in a process keeps open: the
+// Substrate leader's per-actor chain stores (up to chainstate's
+// MaxOpenStores at once). Each connection gets a SmallFootprintPageCacheKiB
+// page cache instead of 20 MB, and the reads stay on the writer instead of
+// a 4-connection read pool. The cache lives outside the Go heap and fills
+// as the store grows: with the gateway's settings every actor's store held
+// up to 5 x 20 MB, about 90 KiB more leader memory per audited tool call
+// and never given back (substrate-1 GAP-0404).
+func WithSmallFootprint() StoreOption {
+	return func(s *Store) { s.pageCacheKiB, s.noReadPool = SmallFootprintPageCacheKiB, true }
+}
+
+func pageCacheStoreOption(opts []StoreOption) int {
+	var probe Store
+	for _, opt := range opts {
+		opt(&probe)
+	}
+	return probe.pageCacheKiB
+}
+
+// auditCacheSizeDSN is the page cache pragma of the DSNs below.
+const auditCacheSizeDSN = "cache_size(-20000)"
+
+// withPageCache is pragmas with a page cache of kib KiB per connection
+// (0 keeps the 20 MB of auditMandatoryIntegerPragmas).
+func withPageCache(pragmas string, kib int) string {
+	if kib <= 0 {
+		return pragmas
+	}
+	return strings.Replace(pragmas, auditCacheSizeDSN, fmt.Sprintf("cache_size(-%d)", kib), 1)
+}
+
+// pragmas is the pragma set of this store's writer-mode connections.
+func (s *Store) pragmas() string {
+	return withPageCache(auditPragmasFor(s.secureClientSchema), s.pageCacheKiB)
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -2386,7 +2433,7 @@ func (s *Store) Init() error {
 	}
 
 	s.prepareStatements(context.Background())
-	if !s.secureClientSchema && s.dbPathGuard != nil && !s.dbPathGuard.inMemory {
+	if !s.secureClientSchema && !s.noReadPool && s.dbPathGuard != nil && !s.dbPathGuard.inMemory {
 		if s.readDB == nil {
 			readDB, readErr := s.openReadPool()
 			if readErr == nil {
@@ -2563,6 +2610,9 @@ func (s *Store) verifyMandatoryPragmas(ctx context.Context) error {
 		row := s.db.QueryRowContext(ctx, "PRAGMA "+pragma.name)
 		if err := s.scanRow(ctx, "audit_pragma_"+pragma.name, row, &got); err != nil {
 			return fmt.Errorf("audit: verify SQLite %s pragma: %w", pragma.name, err)
+		}
+		if pragma.name == "cache_size" && s.pageCacheKiB > 0 {
+			pragma.want = -int64(s.pageCacheKiB)
 		}
 		if got != pragma.want && (pragma.name != "busy_timeout" || got != 0 || !s.writeLockHeld()) {
 			return fmt.Errorf("audit: SQLite %s pragma is %d, want %d", pragma.name, got, pragma.want)
