@@ -99,7 +99,9 @@ func TestRouteOnlySigV4RefusesAPeerOfAnotherAccount(t *testing.T) {
 	acpLoopbackPeerUID = func(*http.Request) (int, error) { return os.Getuid() + 1, nil }
 	t.Cleanup(func() { routeOSSPeerSID, acpLoopbackPeerUID = prevSID, prevUID })
 	rec := f.post(t, "/r/claudecode"+sigv4FlowARN, "hello", nil)
-	if rec.Code != http.StatusUnauthorized || len(f.orig)+len(f.alt) != 0 {
+	// Refused as not this gateway's account (not_gateway_owner), not as an
+	// unverified peer: the peer lookup worked and named another account.
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), routeCallerRefusalText(routeCallerNotOwner)) || len(f.orig)+len(f.alt) != 0 {
 		t.Fatalf("another account's peer: status %d body %s upstream hits %d, want 401 and nothing sent", rec.Code, rec.Body.String(), len(f.orig)+len(f.alt))
 	}
 }
