@@ -181,3 +181,64 @@ func TestVerifyWindowsRouteOnlyReadsBoundedWithoutPaths(t *testing.T) {
 		t.Fatalf("oversize settings = %v; want drift with the fixed reason and no path", err)
 	}
 }
+
+// TestVerifyWindowsRouteOnlyUnreadableAsAdministratorIsNotDrift: an elevated
+// administrator is refused the account-only agent file and cannot read it as
+// the account; verify reports the render as not verified instead of drift.
+// As LocalSystem the same failure stays drift (GAP-1111).
+func TestVerifyWindowsRouteOnlyUnreadableAsAdministratorIsNotDrift(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	settings := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account := currentWindowsTestSID(t)
+	setDACL := func(sddl string) {
+		t.Helper()
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(settings, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setDACL("D:P(D;;0x1;;;" + account.String() + ")(A;;FA;;;" + account.String() + ")(A;;FA;;;SY)")
+	t.Cleanup(func() { setDACL("D:P(A;;FA;;;" + account.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)") })
+	previousReadAs, previousSystem, previousWarn := windowsAccountConfigReadAs, windowsRouteOnlyVerifierIsLocalSystem, windowsRouteOnlyWarn
+	windowsAccountConfigReadAs = func(*windows.SID, string, func() error) error {
+		return errors.New("no session token for this caller")
+	}
+	var warnings []string
+	windowsRouteOnlyWarn = func(message string) { warnings = append(warnings, message) }
+	t.Cleanup(func() {
+		windowsAccountConfigReadAs, windowsRouteOnlyVerifierIsLocalSystem, windowsRouteOnlyWarn = previousReadAs, previousSystem, previousWarn
+	})
+	conn, _ := newWindowsEnterpriseConnectorRegistry().Get("claudecode")
+	route := &connector.RouteOnlySetup{BaseURL: "http://127.0.0.1:18970/r/claudecode", Token: "dcr1-claudecode", Custody: true}
+
+	windowsRouteOnlyVerifierIsLocalSystem = func() bool { return false }
+	if err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); err != nil {
+		t.Fatalf("administrator verify = %v; want not verified, not drift", err)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "not verified") {
+		t.Fatalf("warnings = %q; want one not-verified note", warnings)
+	}
+
+	windowsRouteOnlyVerifierIsLocalSystem = func() bool { return true }
+	if err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); !errors.Is(err, connector.ErrRouteConfigDrift) {
+		t.Fatalf("LocalSystem verify = %v; want route_config_drift", err)
+	}
+}
