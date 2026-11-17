@@ -120,8 +120,8 @@ func TestGAP1153CappedHoldsBackOffUntilTheLogRestarts(t *testing.T) {
 		}
 	}
 	for index := range 3 {
-		if got := pass("rest"); !got.HoldBackoff || got.WriterHeld != 0 {
-			t.Fatalf("pass %d after %d capped holds: %+v; want the writer left alone", index, walCappedHoldsBeforeBackoff, got)
+		if got := pass("rest"); !got.HoldBackoff || got.WriterHeld != 0 || !got.OverLimit {
+			t.Fatalf("pass %d after %d capped holds: %+v; want the writer left alone and the log still over the limit", index, walCappedHoldsBeforeBackoff, got)
 		}
 	}
 	now = now.Add(walHoldBackoffBase)
@@ -136,8 +136,8 @@ func TestGAP1153CappedHoldsBackOffUntilTheLogRestarts(t *testing.T) {
 	walWriterPhaseHook = originalWriter
 	now = now.Add(walHoldBackoffBase)
 	got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
-	if err != nil || got.HoldBackoff || !got.Restarted {
-		t.Fatalf("pass after the disk caught up: %+v, %v; want a hold that restarts the log", got, err)
+	if err != nil || got.HoldBackoff || !got.Restarted || got.OverLimit {
+		t.Fatalf("pass after the disk caught up: %+v, %v; want a hold that restarts the log and ends the over-limit record", got, err)
 	}
 	logWALGuardEvents(t, store, 20)
 	if got, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget); err != nil || got.HoldBackoff || got.WriterHeld == 0 {
@@ -186,7 +186,7 @@ func TestGAP1153SettleRoundsStopWhenThePassHasNoTimeForAnother(t *testing.T) {
 	// After the first 20 s round the pass has 31.5 s left, room for another
 	// round and its writer phase (walPassReserve); after the second it has
 	// 11.5 s, so it stops after two syncs instead of three.
-	ctx := deadlineAtContext{Context: context.Background(), at: walClock().Add(2*slowSync + slowSync/2 + walPassReserve)}
+	ctx := deadlineAtContext{Context: context.Background(), at: walClock().Add(2*slowSync + slowSync/2 + walPassReserve())}
 	if walBoundedSettleRounds < 2 {
 		t.Fatalf("model: walBoundedSettleRounds = %d; the test needs at least 2", walBoundedSettleRounds)
 	}

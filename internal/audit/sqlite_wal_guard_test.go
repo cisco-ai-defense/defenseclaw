@@ -401,6 +401,10 @@ func (c *fakeWALClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+// useFakeWALClock starts walClock in 2027. A pass reads its context's
+// deadline against walClock (walRoundOutrunsPass), so a test that uses it
+// must not give the pass a real context.WithTimeout: the deadline would read
+// as already past and the pass would skip its settle rounds.
 func useFakeWALClock(t *testing.T) *fakeWALClock {
 	t.Helper()
 	clock := &fakeWALClock{now: time.Unix(1_800_000_000, 0)}
@@ -1193,9 +1197,10 @@ func TestCheckpointWALIfLargeOverTheLimitSettlesBrieflyThenHoldsTheWriter(t *tes
 	// What this test pins is the order of the pass (each copy off the writer
 	// followed by a sync of the database file, walBoundedSettleRounds+1 of
 	// them, then the writer), not how fast a disk copies and syncs the ~15 MiB
-	// log under the writer. With the 100 ms production cap that copy and sync missed the
-	// cap on a Windows CI runner (100.7 ms held, WriterDeferred, no restart:
-	// rel-1-0-6:GAP-0410), so the bounded hold here gets room to finish.
+	// log under the writer. With the 100 ms production cap that copy and sync
+	// missed the cap on a Windows CI runner (100.7 ms held, WriterDeferred, no
+	// restart: rel-1-0-6:GAP-0410), so the bounded hold here gets room to
+	// finish.
 	overrideWALDuration(t, &walCatchUpCap, overLimitTestHoldCap)
 	// A reader on an older snapshot keeps every copy off the writer more than
 	// walCopyTargetFrames short of the end of the log, and each sync is

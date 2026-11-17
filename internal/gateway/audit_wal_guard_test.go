@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -172,26 +173,40 @@ func TestAuditWALAlarmStartsAtPublishedCeiling(t *testing.T) {
 
 // rel-1-0-10:GAP-1153 review: the passes of a hold backoff take nothing from
 // the hooks and logged nothing. The sidecar log says once when the backoff
-// starts and once when it ends, not on every pass.
+// starts and once when it ends, the first pass after which the store no
+// longer has the log over its limit, not on every pass: a probe hold at the
+// end of a rest that does not restart the log, a pass that found another
+// checkpoint busy, a failed pass or one that left the writer to the next
+// pass do not end it.
 func TestAuditWALGuardPassReportsTheHoldBackoffOnceEachWay(t *testing.T) {
 	fake := &fakeWALCheckpointer{}
 	alarm := &auditWALAlarm{}
 	var log bytes.Buffer
-	for _, pass := range []audit.WALCheckpoint{
-		{Bounded: true, WriterDeferred: true, HoldBackoff: true, LogBytes: 300 << 20},
-		{Bounded: true, WriterDeferred: true, HoldBackoff: true, LogBytes: 310 << 20},
-		{Bounded: true, WriterDeferred: true, HoldBackoff: true, LogBytes: 320 << 20},
-		{Bounded: true, Restarted: true, WriterHeld: 80 * time.Millisecond, HoldCap: 100 * time.Millisecond, LogBytes: 330 << 20},
-		{Restarted: true, LogBytes: 10 << 20},
+	rest := audit.WALCheckpoint{Bounded: true, WriterDeferred: true, HoldBackoff: true, LogBytes: 300 << 20, OverLimit: true}
+	for _, step := range []struct {
+		pass audit.WALCheckpoint
+		err  error
+	}{
+		{pass: rest},
+		{pass: rest},
+		// A probe hold after the rest: capped, no restart.
+		{pass: audit.WALCheckpoint{Bounded: true, WriterDeferred: true, WriterHeld: 470 * time.Millisecond, HoldCap: 470 * time.Millisecond, LogBytes: 320 << 20, OverLimit: true}},
+		// Another checkpoint was busy: nothing measured, the record stays.
+		{pass: audit.WALCheckpoint{OverLimit: true}},
+		{pass: audit.WALCheckpoint{OverLimit: true}, err: errors.New("audit: SQLite checkpoint: disk I/O error")},
+		{pass: audit.WALCheckpoint{Bounded: true, WriterDeferred: true, LogBytes: 330 << 20, OverLimit: true}},
+		{pass: rest},
+		{pass: audit.WALCheckpoint{Bounded: true, Restarted: true, WriterHeld: 300 * time.Millisecond, HoldCap: 470 * time.Millisecond, LogBytes: 340 << 20}},
+		{pass: audit.WALCheckpoint{Restarted: true, LogBytes: 10 << 20}},
 	} {
-		fake.result = pass
+		fake.result, fake.err = step.pass, step.err
 		auditWALGuardPass(t.Context(), fake, alarm, time.Now(), &log)
 	}
 	got := log.String()
 	if strings.Count(got, "leaving the audit writer to the hooks") != 1 {
 		t.Fatalf("backoff start lines in %q; want exactly one", got)
 	}
-	if strings.Count(got, "holds the audit writer again (WAL 330 MiB, restarted true)") != 1 {
-		t.Fatalf("backoff end lines in %q; want exactly one, on the pass that held the writer again", got)
+	if strings.Count(got, "writer hold backoff ended") != 1 || !strings.Contains(got, "(restarted true): writer hold backoff ended") {
+		t.Fatalf("backoff end lines in %q; want exactly one, on the pass that restarted the log", got)
 	}
 }
