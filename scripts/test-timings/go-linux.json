@@ -3158,7 +3158,12 @@
    "TestWriteThroughALinkToStateIsAStateWrite": 9.7,
    "TestWriteThroughANameFromAFolderBehindManyLinksIsJudgedByTheFileItReaches": 4.7,
    "TestWriteThroughCommandLinkToActiveStateBlocks": 9.3,
-   "TestXxdOutputOperandOfActiveState": 3.0
+   "TestXxdOutputOperandOfActiveState": 3.0,
+   "TestGAP1132AntigravityManagedPeerPlacesTheCallTargets": 19.9,
+   "TestGAP1134ProtectedWritesManagedAndPerUser": 110.2,
+   "TestGAP1138PwshLauncherDotNetOpens": 123.8,
+   "TestUnresolvedBodyIsKeptWhenALaterStatementIsAParseGap": 6.5,
+   "TestUnreadableHomeAfterALiteralMoveIsTheActiveHome": 19.0
   },
   "internal/gateway/connector": {
    "*": 0.112,
