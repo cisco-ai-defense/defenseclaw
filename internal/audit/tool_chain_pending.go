@@ -59,6 +59,14 @@ type ToolChainPreparePendingInput struct {
 	Projection               guardrail.ToolChainProjection
 	SQLValueSource           ToolChainPendingSQLValueSource       `json:"-"`
 	ReturnedCredentialSource actionfacts.ReturnedCredentialSource `json:"-"`
+	// PreEventFromAnyReplica is set by the Agent Substrate leader, never
+	// taken from a caller: each gateway replica mints its own semantic event
+	// ID for a hook, so the same PreToolUse delivered again to another
+	// replica (a retry, or after a restart) names another PreSemanticEventID.
+	// The same call (connector instance, session, invocation, raw input,
+	// projection and ruleset) is then a replay of the prepared proposal, not a
+	// reused invocation ID (substrate-1 GAP-0562).
+	PreEventFromAnyReplica bool `json:"-"`
 }
 
 // ToolChainPendingSQLValueSource is a value-free descriptor of one exact
@@ -1636,7 +1644,7 @@ func sameToolChainPending(
 ) bool {
 	return pending.connector == string(input.ConnectorInstanceID) &&
 		pending.invocation == input.ToolInvocationDigest && pending.session == session &&
-		pending.preEvent == string(input.PreSemanticEventID) &&
+		(pending.preEvent == string(input.PreSemanticEventID) || input.PreEventFromAnyReplica) &&
 		pending.preInput == input.PreInputFingerprint && pending.projectionFP == projectionFP &&
 		pending.ruleset == input.RulesetFingerprint &&
 		pending.parseStatus == string(input.Projection.ParseStatus) &&
