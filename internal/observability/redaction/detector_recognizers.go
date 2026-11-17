@@ -711,7 +711,7 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 	if looksUUID(value) || (len(value) == 32 && allHex(value)) || (len(value) == 64 && allHex(value) && fieldClass == observability.FieldClassIdentifier) {
 		return false
 	}
-	if identifierShaped(value) {
+	if identifierShaped(value) || labelWithSuffixShaped(value) {
 		return false
 	}
 	classes := 0
@@ -745,6 +745,63 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 // rule fired. The shape needs at least three segments, at least one of them an
 // upper-case word of three or more letters, and every mixed or numeric segment
 // at most four characters; random keys with long mixed groups still match.
+// labelWithSuffixShaped reports a lower-case DNS label made of readable
+// words and a short hex suffix, such as a Substrate actor name
+// (fix-tests-1a2b3c4d, lg411gva-5-bffaeefc): attribution data, not key
+// material (GAP-0520). It needs a letters-only word of at least three
+// letters before the suffix, and the suffix is 4 to 16 hex digits.
+func labelWithSuffixShaped(value string) bool {
+	// atespace/name, as audit summaries write an actor.
+	if space, name, ok := strings.Cut(value, "/"); ok {
+		return dnsLabel(space) && labelWithSuffixShaped(name)
+	}
+	segments := strings.Split(value, "-")
+	if len(segments) < 2 || len(value) > 63 {
+		return false
+	}
+	for i := range len(value) {
+		if c := value[i]; !isASCIILower(c) && !isASCIIDigit(c) && c != '-' {
+			return false
+		}
+	}
+	suffix := segments[len(segments)-1]
+	if len(suffix) < 4 || len(suffix) > 16 || !allHex(suffix) {
+		return false
+	}
+	word := false
+	for _, segment := range segments[:len(segments)-1] {
+		if segment == "" {
+			return false
+		}
+		letters := 0
+		for i := range len(segment) {
+			if isASCIILower(segment[i]) {
+				letters++
+			}
+		}
+		if letters == len(segment) && letters >= 3 {
+			word = true
+		}
+		if letters >= 3 && strings.IndexFunc(segment, func(r rune) bool { return r >= '0' && r <= '9' }) > 0 {
+			word = true // a readable prefix with a counter, as lg411gva
+		}
+	}
+	return word
+}
+
+// dnsLabel reports a lower-case DNS-1123 label.
+func dnsLabel(value string) bool {
+	if value == "" || len(value) > 63 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for i := range len(value) {
+		if c := value[i]; !isASCIILower(c) && !isASCIIDigit(c) && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func identifierShaped(value string) bool {
 	segments := strings.FieldsFunc(value, func(character rune) bool { return character == '-' || character == '_' })
 	if len(segments) < 3 || strings.Count(value, "-")+strings.Count(value, "_") != len(segments)-1 {
