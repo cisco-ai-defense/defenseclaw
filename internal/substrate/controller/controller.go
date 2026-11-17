@@ -238,6 +238,9 @@ type actorState struct {
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
+	// foreignTemplateChecked is set once a foreign actor's template was
+	// checked for an attestation (GAP-0428).
+	foreignTemplateChecked bool
 }
 
 // New checks the options and fills defaults.
@@ -869,6 +872,7 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 					// (PLAN E17): the fork is refused like any actor made
 					// there outside DefenseClaw.
 					c.refuseOnce(st, base, EventForeignActor, "fork in a launcher atespace that DefenseClaw did not make", SignalForeignActor, "")
+					c.foreignTemplate(ctx, a, st, base)
 					return reg, "foreign_actor", nil
 				}
 			default:
@@ -891,6 +895,7 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 			// Every actor in a launcher atespace is bound to a person at
 			// create; one nobody registered was made outside DefenseClaw.
 			c.refuseOnce(st, base, EventForeignActor, "actor in a launcher atespace that DefenseClaw did not create", SignalForeignActor, "")
+			c.foreignTemplate(ctx, a, st, base)
 			return reg, "foreign_actor", nil
 		}
 		if reg.Source == SourceAtespace {
@@ -903,6 +908,37 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 	reg.Template = ateapi.Key(a.GetActorTemplate())
 	st.reg, st.regOK, st.regAt, st.regState = reg, true, now, a.GetStatus().GetState()
 	return reg, "", nil
+}
+
+// foreignTemplate reports the unattested template of an actor made outside
+// DefenseClaw in a launcher atespace (GAP-0428): such an actor is refused
+// as foreign before admission runs, and shadow AI covers unattested
+// templates too, so template_unverified names the template and its digest.
+// Once per actor; a template that cannot be read now is tried again on the
+// next pass. The actor stays refused either way (default deny).
+func (c *Controller) foreignTemplate(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) {
+	if st.foreignTemplateChecked || !c.live().RequireAttestation {
+		return
+	}
+	tmpl, att, err := c.template(ctx, a.GetActorTemplate(), false)
+	if err != nil {
+		return
+	}
+	st.foreignTemplateChecked = true
+	if att.Attested {
+		return
+	}
+	reason := att.Reason
+	if reason == "" {
+		reason = "no DefenseClaw attestation"
+	}
+	k := ateapi.Key(ateapi.RefOf(tmpl.GetMetadata()))
+	ev := base
+	ev.Type, ev.Severity = EventTemplateUnverified, SeverityWarn
+	ev.Message = "template " + k + " of an actor made outside DefenseClaw is not attested: " + reason
+	ev.Detail = map[string]any{"template": k, "template_digest": att.Digest, "foreign_actor": true}
+	ev.Signal = c.signal(base, SignalUnattestedTemplate, att.Digest, st.firstSeen)
+	c.emit(ev)
 }
 
 // attributeKit puts what the actor's attested template names (connector,
