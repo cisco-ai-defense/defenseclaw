@@ -72,7 +72,7 @@ func TestSedInPlaceBackupReading(t *testing.T) {
 		{"SFXREV-env-var", `sed -i"$SFX" s/x/y/ authorized_keys`, sedUnresolved},
 		{"SFXREV-env-var-long", `sed --in-place="$SFX" s/x/y/ authorized_keys`, sedUnresolved},
 		{"SFXREV-bsd-var-next", `sed -i "$SFX" s/x/y/ authorized_keys`, sedUnresolved},
-		{"SFXREV-operand-var", `sed -i{keys}/* s/x/y/ "$F"`, sedUnresolved},
+		{"SFXREV-operand-var", `sed -i{keys}/* s/x/y/ "$F"`, sedBlock},
 		{"SFXREV-var-assign", `S={keys}/*; sed -i"$S" s/x/y/ authorized_keys`, sedUnresolved},
 		{"SFXREV-sh-c-dollar0", `sh -c 'sed -i"$0" s/x/y/ authorized_keys' '{keys}/*'`, sedUnresolved},
 		{"SFXREV-func", `f(){ sed -i"$1" s/x/y/ authorized_keys; }; f '{keys}/*'`, sedUnresolved},
@@ -80,17 +80,17 @@ func TestSedInPlaceBackupReading(t *testing.T) {
 		{"SFXREV-bash-c-outer-var", `bash -c "sed -i$X s/x/y/ authorized_keys"`, sedUnresolved},
 		{"SFXREV-eval-outer-var", `eval "sed -i$X s/x/y/ authorized_keys"`, sedUnresolved},
 		{"SFXREV-bash-c-outer-var-plain", `bash -c "sed -i.bak s/$X/y/ f"`, sedNone},
-		{"SFXREV-find-exec-sh-c", `find . -name f -exec sh -c 'sed -i{keys}/* s/x/y/ "$0"' {} \;`, sedUnresolved},
+		{"SFXREV-find-exec-sh-c", `find . -name f -exec sh -c 'sed -i{keys}/* s/x/y/ "$0"' {} \;`, sedBlock},
 		// Wrappers with a directory.
 		{"SFXREV-env-C", "env -C {home} sed -i.ssh/* s/x/y/ authorized_keys", sedBlock},
 		{"SFXREV-env-chdir", "env --chdir={home} sed -i.ssh/* s/x/y/ authorized_keys", sedBlock},
 		{"SFXREV-env-C-dyn", `env -C "$D" sed -i.ssh/* s/x/y/ authorized_keys`, sedUnresolved},
 		// Operands from standard input or find.
-		{"SFXREV-xargs", "echo authorized_keys | xargs sed -i{keys}/* s/x/y/", sedUnresolved},
-		{"SFXREV-xargs-I", "echo authorized_keys | xargs -I@ sed -i{keys}/* s/x/y/ @", sedUnresolved},
-		{"SFXREV-find-exec", `find authorized_keys -exec sed -i{keys}/* s/x/y/ {} \;`, sedUnresolved},
-		{"SFXREV-find-exec-plus", "find . -name authorized_keys -exec sed -i{keys}/* s/x/y/ {} +", sedUnresolved},
-		{"SFXREV-find-execdir", `find . -name authorized_keys -execdir sed -i{keys}/* s/x/y/ {} \;`, sedUnresolved},
+		{"SFXREV-xargs", "echo authorized_keys | xargs sed -i{keys}/* s/x/y/", sedBlock},
+		{"SFXREV-xargs-I", "echo authorized_keys | xargs -I@ sed -i{keys}/* s/x/y/ @", sedBlock},
+		{"SFXREV-find-exec", `find authorized_keys -exec sed -i{keys}/* s/x/y/ {} \;`, sedBlock},
+		{"SFXREV-find-exec-plus", "find . -name authorized_keys -exec sed -i{keys}/* s/x/y/ {} +", sedBlock},
+		{"SFXREV-find-execdir", `find . -name authorized_keys -execdir sed -i{keys}/* s/x/y/ {} \;`, sedBlock},
 		// GAP-0542: shell bodies from standard input, dynamic cd.
 		{"SFXREV-heredoc-bash", "bash <<'EOF'\nsed -i{keys}/* s/x/y/ authorized_keys\nEOF", sedBlock},
 		{"SFXREV-herestring-bash", "bash <<< 'sed -i{keys}/* s/x/y/ authorized_keys'", sedBlock},
@@ -109,9 +109,13 @@ func TestSedInPlaceBackupReading(t *testing.T) {
 		{"SFXREV-follow-rel-link-star", "sed --follow-symlinks -i../.ssh/* s/x/y/ lnk", sedBlock},
 		{"SFXREV-follow-rel-link-star-abbrev", "sed --follow -i../.ssh/* s/x/y/ lnk", sedBlock},
 		{"SFXREV-follow-abs-link-plain", "sed --follow-symlinks -ikeys s/x/y/ alnk", sedBlock},
-		{"SFXREV-nofollow-rel-link-star-ctl", "sed -i../.ssh/* s/x/y/ lnk", sedNone},
+		// A "*" suffix whose folder part is the keys folder (../.ssh/*) blocks
+		// whatever the operand or its link (GAP-0669): the operand names an
+		// entry of the keys folder, as cp f ~/.ssh/ does. The rows with a
+		// run-time operand and {keys}/* block for the same reason.
+		{"SFXREV-nofollow-rel-link-star-ctl", "sed -i../.ssh/* s/x/y/ lnk", sedBlock},
 		{"SFXREV-nofollow-abs-link-plain-ctl", "sed -ikeys s/x/y/ alnk", sedNone},
-		{"SFXREV-follow-dotted-link", "sed --follow-symlinks -i../.ssh/* s/x/y/ dlnk", sedNone},
+		{"SFXREV-follow-dotted-link", "sed --follow-symlinks -i../.ssh/* s/x/y/ dlnk", sedBlock},
 		{"SFXREV-follow-ordinary", "sed --follow-symlinks -i.bak s/x/y/ lnk2", sedNone},
 		{"SFXREV-follow-no-backup", "sed --follow-symlinks -i s/x/y/ lnk2", sedNone},
 		{"SFXREV-follow-missing", "sed --follow-symlinks -i.bak s/x/y/ nosuchfile", sedUnresolved},
@@ -122,7 +126,7 @@ func TestSedInPlaceBackupReading(t *testing.T) {
 		{"SFXREV-perl-star-rel", "perl -i../.ssh/* -pe 1 authorized_keys", sedBlock},
 		{"SFXREV-perl-star-file", "perl -i{home}/.* -pe 1 f", sedNone},
 		{"SFXREV-perl-star-typed-dir", "perl -pi{home}/.* -e 1 ssh/authorized_keys", sedBlock},
-		{"SFXREV-perl-star-var", `perl -pi{keys}/* -e 1 "$F"`, sedUnresolved},
+		{"SFXREV-perl-star-var", `perl -pi{keys}/* -e 1 "$F"`, sedBlock},
 		{"SFXREV-perl-ord", "perl -pi.bak -e 1 f", sedNone},
 		{"SFXREV-perl-ord-star", "perl -pibak/* -e 1 f", sedNone},
 		{"SFXREV-perl-ord-sep", "perl -pi -e 1 f g", sedNone},
