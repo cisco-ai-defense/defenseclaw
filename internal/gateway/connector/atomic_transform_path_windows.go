@@ -249,7 +249,7 @@ func atomicTransformWindowsDOSDrive(volume string) (string, bool) {
 		volume = volume[4:]
 	}
 	if len(volume) != 2 || volume[1] != ':' ||
-		!((volume[0] >= 'a' && volume[0] <= 'z') || (volume[0] >= 'A' && volume[0] <= 'Z')) {
+		(volume[0] < 'a' || volume[0] > 'z') && (volume[0] < 'A' || volume[0] > 'Z') {
 		return "", false
 	}
 	return strings.ToUpper(volume), true

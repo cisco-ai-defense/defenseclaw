@@ -10801,15 +10801,13 @@ func TestClaudeCodeHookScript_SuppressesCursorCompatibilityImport(t *testing.T) 
 		_, _ = w.Write([]byte(`{"action":"allow","severity":"INFO","mode":"observe","would_block":false}`))
 	}))
 	defer srv.Close()
-	addr := strings.TrimPrefix(srv.URL, "http://")
-
 	dir := t.TempDir()
 	dcHome := t.TempDir()
 	installNativeGatewayForHookTest(t, dcHome, dir)
-	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "claude-token"}, &ClaudeCodeConnector{}); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: strings.TrimPrefix(srv.URL, "http://"), APIToken: "claude-token"}, &ClaudeCodeConnector{}); err != nil {
 		t.Fatalf("write Claude Code hook: %v", err)
 	}
-	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "cursor-token"}, NewCursorConnector()); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: strings.TrimPrefix(srv.URL, "http://"), APIToken: "cursor-token"}, NewCursorConnector()); err != nil {
 		t.Fatalf("write Cursor hook: %v", err)
 	}
 
