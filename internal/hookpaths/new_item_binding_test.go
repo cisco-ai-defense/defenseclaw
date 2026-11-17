@@ -86,3 +86,41 @@ func TestNewItemBindingThisReadingCannotFollowMayMakeALink(t *testing.T) {
 		}
 	}
 }
+
+// TestNewItemSpellingsReadAsThePlainLink: the link reading of a command
+// (commandLinks) is the same in every spelling of -ItemType, also when the
+// shell parser cannot read the command (rel-1-0-10:GAP-0849, cert L73: a
+// first statement that assigns a parenthesized expression left only the
+// literal -ItemType text to find the link, so -Ty, an en dash and -ItemType:
+// read as no link).
+func TestNewItemSpellingsReadAsThePlainLink(t *testing.T) {
+	home := t.TempDir()
+	const computed = `$t = Join-Path $env:TEMP ("gap0849-" + [guid]::NewGuid()); `
+	rows := []string{
+		`New-Item -ItemType SymbolicLink -Path ./l -Target $t; Add-Content ./l marker`,
+		`New-Item -ItemType SymbolicLink -Path ./l -Target ./a; Add-Content ./l marker`,
+		`New-Item -ItemType Junction -Path ./l -Target $t`,
+		`New-Item -ItemType Directory -Path ./d; Add-Content ./d/f.txt marker`,
+		`New-Item -ItemType File -Path ./f.txt; Add-Content ./f.txt marker`,
+	}
+	type reading struct{ known, unread, opaque bool }
+	read := func(command string) reading {
+		links := commandLinks(command, home, home, nil, false, false)
+		return reading{links.known, links.unread, links.opaque}
+	}
+	for _, row := range rows {
+		for _, prefix := range []string{"", computed} {
+			plain := prefix + row
+			want := read(plain)
+			if prefix != "" && strings.Contains(row, "SymbolicLink -Path ./l -Target $t") && want.known {
+				t.Errorf("%q: the plain link reads as known, want unread", plain)
+			}
+			for _, spelling := range newItemSpellings {
+				command := strings.Replace(plain, "-ItemType ", spelling.spelling, 1)
+				if got := read(command); got != want {
+					t.Errorf("%s: commandLinks(%q) = %+v, want the plain reading %+v", spelling.id, command, got, want)
+				}
+			}
+		}
+	}
+}

@@ -4138,7 +4138,7 @@ func windowsAddPowerShellNewItemPath(
 			if !switchValueValid {
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			}
-		case unquoted && strings.HasPrefix(lower, "-"):
+		case unquoted && powerShellDashLed(lower):
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 		default:
 			positionals = append(positionals, arg)

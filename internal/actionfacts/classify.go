@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
 var filesystemFormatterPrograms = []string{
@@ -1717,7 +1719,7 @@ func classifyStructuredPowerShellNewItem(
 		if controls.consume(command, arg) {
 			continue
 		}
-		if arg == "" || arg == "-" || !strings.HasPrefix(arg, "-") {
+		if arg == "" || arg == "-" || !powerShellDashLed(arg) {
 			if !structuredPowerShellStaticOperand(arg) {
 				targetValid = false
 				structuredPowerShellMarkDynamicEffect(command, arg)
@@ -1855,39 +1857,27 @@ func structuredPowerShellBooleanValue(value string) (bool, bool) {
 	}
 }
 
+// canonicalPowerShellNewItemParameter binds a New-Item parameter key (a
+// dash word without a colon part) as PowerShell binds it, through the shared
+// table psparse.NewItemParameters: a name or alias in any case, a prefix of
+// one parameter only, any dash form (rel-1-0-10:GAP-0849). The result is the
+// canonical name with a hyphen. A key that binds to no parameter or to more
+// than one is returned in lower case, so it falls to the reader's
+// unknown-parameter case.
 func canonicalPowerShellNewItemParameter(key string) string {
-	switch strings.ToLower(key) {
-	case "-type":
-		return "-itemtype"
-	case "-target":
-		return "-value"
-	case "-ea":
-		return "-erroraction"
-	case "-ev":
-		return "-errorvariable"
-	case "-infa":
-		return "-informationaction"
-	case "-iv":
-		return "-informationvariable"
-	case "-ob":
-		return "-outbuffer"
-	case "-ov":
-		return "-outvariable"
-	case "-pv":
-		return "-pipelinevariable"
-	case "-proga":
-		return "-progressaction"
-	case "-wa":
-		return "-warningaction"
-	case "-wv":
-		return "-warningvariable"
-	case "-db":
-		return "-debug"
-	case "-vb":
-		return "-verbose"
-	default:
-		return strings.ToLower(key)
+	if name, _, colon, ok := psparse.ParameterWord(key); ok && !colon {
+		if binding, known := psparse.NewItemParameters.Bind(name); known {
+			return "-" + binding.Name
+		}
 	}
+	return strings.ToLower(key)
+}
+
+// powerShellDashLed reports a word PowerShell may read as a parameter: a
+// hyphen first, or an en dash, em dash or horizontal bar before a name.
+func powerShellDashLed(word string) bool {
+	_, _, _, ok := psparse.ParameterWord(word)
+	return ok || strings.HasPrefix(word, "-")
 }
 
 func powerShellNewItemCommonValueAuthoritative(
