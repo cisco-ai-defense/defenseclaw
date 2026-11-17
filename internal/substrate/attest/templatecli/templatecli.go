@@ -376,7 +376,8 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		return ExitUsageError, err
 	}
 	if *keepEP {
-		spec.Entrypoint, spec.Cmd = nil, nil
+		// No relay starts the agent: the image runs as the agent's user.
+		spec.Entrypoint, spec.Cmd, spec.User = nil, nil, spec.AgentUser
 	}
 	var signer *attest.Signer
 	if *keyFile != "" {

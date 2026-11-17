@@ -58,6 +58,9 @@ type Options struct {
 	// transport.
 	Tamper func(ctx context.Context, connector, reason string) error
 	Now    func() time.Time
+	// sep runs everything the relay starts as the agent's user (GAP-0116;
+	// Main sets it from separate). nil: the relay's own user.
+	sep *separation
 }
 
 // Server is the relay. NewServer has no side effect: the golden snapshot of
@@ -160,7 +163,7 @@ func (s *Server) init() error {
 		for k, v := range rc.Env {
 			env = append(env, k+"="+v)
 		}
-		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env}
+		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env, sep: s.opts.sep}
 		// E9: no agent that signs in to a vendor account in a managed
 		// image; an open-source image says what the sign-in costs.
 		d := s.signinDecision()

@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // AdmissionFunc decides a scan result with the existing admission rules
@@ -681,6 +682,26 @@ func serverTools(fsys *ImageFS, s MCPServer) ([]ToolDef, string) {
 // swaps it for the check of an older build).
 var envCheck = CheckEnv
 
+// relayAgentUser is the non-root relay.agent_user of the image's kit
+// configuration when the entrypoint is the relay, else "".
+func relayAgentUser(fsys *ImageFS, entrypoint []string) string {
+	if len(entrypoint) == 0 || entrypoint[0] != kit.RelayBinary {
+		return ""
+	}
+	data, err := fsys.Read(kit.ConfigPath)
+	if err != nil {
+		return ""
+	}
+	var cfg kit.Config
+	if json.Unmarshal(data, &cfg) != nil {
+		return ""
+	}
+	if _, _, ok, err := cfg.Relay.AgentIDs(); !ok || err != nil {
+		return ""
+	}
+	return cfg.Relay.AgentUser
+}
+
 func checkHooks(fsys *ImageFS, env map[string]string, user string, entrypoint []string, o ScanOptions) HookChecks {
 	hc := HookChecks{RootOwned: true, PhoneHomeOff: true, EnvClean: true}
 	if bad := envCheck(env); len(bad) > 0 {
@@ -716,12 +737,19 @@ func checkHooks(fsys *ImageFS, env map[string]string, user string, entrypoint []
 		}
 		hc.Files = append(hc.Files, hf)
 	}
-	// The agent must not run as root.
+	// The agent must not run as root. A kit image of 1.0.10 or later runs
+	// the relay as root, and the relay starts the agent as the kit
+	// configuration's relay.agent_user (GAP-0116): root is accepted only
+	// with the relay as the entrypoint and a non-root agent user.
 	u := strings.TrimSpace(user)
 	uf := HookFile{Path: "(image USER)", Mode: "-"}
 	switch {
 	case u == "" || u == "0" || u == "root" || strings.HasPrefix(u, "0:") || strings.HasPrefix(u, "root:"):
-		uf.Note = "the image runs as root; set a non-root USER"
+		if agent := relayAgentUser(fsys, entrypoint); agent != "" {
+			uf.OK, uf.Note = true, "root runs the relay only; the relay starts the agent as "+agent
+		} else {
+			uf.Note = "the image runs as root; set a non-root USER (or, in a kit image, the relay entrypoint with relay.agent_user)"
+		}
 	default:
 		uf.OK = true
 	}

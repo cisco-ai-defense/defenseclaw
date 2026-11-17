@@ -31,6 +31,9 @@ type Agent struct {
 	// own output (the E9 warning of an agent that signs in to a vendor
 	// account).
 	Banner string
+	// sep runs the agent as its own user (GAP-0116); nil runs it as the
+	// relay's user.
+	sep *separation
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -91,6 +94,7 @@ func (a *Agent) start(cols, rows uint16) error {
 	cmd := exec.Command(a.Argv[0], a.Argv[1:]...)
 	cmd.Dir = a.Dir
 	cmd.Env = append(append([]string{}, a.Env...), "TERM=xterm-256color")
+	a.sep.asAgent(cmd)
 	p, err := startPTY(cmd, cols, rows)
 	if err != nil {
 		a.lastErr = err

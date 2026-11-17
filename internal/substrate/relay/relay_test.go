@@ -47,6 +47,10 @@ func TestMain(m *testing.M) {
 		fmt.Println("dumpable", d, err)
 		os.Exit(0)
 	}
+	// The relay's child commands (file copies as the agent's user).
+	if IsChildCommand(os.Args[1:]) {
+		os.Exit(runChild(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	// "hold-probe" holds signals as the relay does and waits (GAP-0116).
 	if len(os.Args) > 1 && os.Args[1] == "hold-probe" {
 		holdSignals()

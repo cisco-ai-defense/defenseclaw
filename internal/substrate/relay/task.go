@@ -114,6 +114,9 @@ type HeadlessOptions struct {
 	// the agent (procTree: its descendants and its process group, Linux;
 	// elsewhere only output counts).
 	Usage func(pid int) (Usage, bool)
+	// sep runs the agent as its own user (GAP-0116); nil runs it as the
+	// relay's user.
+	sep *separation
 }
 
 type task struct {
@@ -182,6 +185,7 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, o Headles
 	// stops its whole process tree, tools in sessions of their own too
 	// (procTree, GAP-0289).
 	setProcessGroup(cmd)
+	o.sep.asAgent(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	// Own pipes, not StdoutPipe: the relay must not wait forever on a pipe
 	// that a child of the agent keeps open after the agent exited.
@@ -454,6 +458,7 @@ func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		o := s.opts.Headless
 		o.Warm = s.opts.Warm
+		o.sep = s.opts.sep
 		end := RunHeadless(s.taskCtx, s.opts.Config, req, o, t.emit)
 		code := end.ExitCode
 		t.mu.Lock()

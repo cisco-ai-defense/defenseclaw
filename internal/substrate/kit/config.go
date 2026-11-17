@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,6 +133,28 @@ type RelayConfig struct {
 	// group) before the relay ends it with exit 124 (GAP-0273); 0 is
 	// DefaultTaskStall.
 	TaskStallMS int `json:"task_stall_ms,omitempty"`
+	// AgentUser is "UID:GID", the unprivileged user the relay starts the
+	// agent (and every task, exec and file copy) as, when the relay itself
+	// runs as root (GAP-0116). The agent then cannot signal, trace or
+	// replace the relay: gVisor delivers SIGKILL and SIGSTOP from inside the
+	// actor to its PID 1, so being PID 1 alone does not protect the relay.
+	// Empty (images built before 1.0.10): the agent runs as the relay's own
+	// user, and the relay warns that they are not separated.
+	AgentUser string `json:"agent_user,omitempty"`
+}
+
+// AgentIDs parses AgentUser; ok is false when it is empty.
+func (r RelayConfig) AgentIDs() (uid, gid int, ok bool, err error) {
+	if r.AgentUser == "" {
+		return 0, 0, false, nil
+	}
+	u, g, found := strings.Cut(r.AgentUser, ":")
+	uid, uerr := strconv.Atoi(u)
+	gid, gerr := strconv.Atoi(g)
+	if !found || uerr != nil || gerr != nil || uid <= 0 || gid <= 0 {
+		return 0, 0, false, fmt.Errorf("actor kit config: relay.agent_user %q is not a non-root UID:GID", r.AgentUser)
+	}
+	return uid, gid, true, nil
 }
 
 // DefaultTaskStall is the relay's no-progress bound of a --task run: longer
@@ -216,6 +239,9 @@ func LoadConfig(path string) (Config, error) {
 
 // Validate checks a configuration.
 func (c Config) Validate() error {
+	if _, _, _, err := c.Relay.AgentIDs(); err != nil {
+		return err
+	}
 	u, err := url.Parse(c.GatewayURL)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("actor kit config: gateway_url %q is not a base URL", c.GatewayURL)

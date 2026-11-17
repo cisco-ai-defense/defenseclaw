@@ -37,12 +37,20 @@ func startPTY(cmd *exec.Cmd, cols, rows uint16) (*os.File, error) {
 		return nil, fmt.Errorf("open pty slave: %w", err)
 	}
 	defer slave.Close()
+	var cred agentCred
+	if cmd.SysProcAttr != nil {
+		cred = cmd.SysProcAttr.Credential
+	}
+	ownTTY(slave, cred)
 	if err := setSize(master, cols, rows); err != nil {
 		master.Close()
 		return nil, err
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setsid, cmd.SysProcAttr.Setctty, cmd.SysProcAttr.Ctty = true, true, 0
 	if err := cmd.Start(); err != nil {
 		master.Close()
 		return nil, err

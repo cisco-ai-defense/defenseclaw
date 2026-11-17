@@ -103,6 +103,8 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	cfg.Relay.Listen, cfg.Relay.SessionAudience, cfg.Relay.VerifyURL = listen, audience, verifyURL
 	cfg.Relay.Interactive = interactiveArgv
 	cfg.Relay.SessionIssuer = sessionIssuer
+	// The relay runs as root and starts the agent as uid:gid (GAP-0116).
+	cfg.Relay.AgentUser = fmt.Sprintf("%d:%d", uid, gid)
 	if len(keys) > 0 && sessionIssuer == "" {
 		return fmt.Errorf("--session-key needs --session-issuer")
 	}
@@ -240,7 +242,8 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	}
 	fmt.Fprintf(&df, "LABEL io.defenseclaw.actor-kit=%q io.defenseclaw.connector=%q io.defenseclaw.hook-contract=%q io.defenseclaw.harness-version=%q\n",
 		version, name, ov.HookContract, agentVersion)
-	fmt.Fprintf(&df, "USER %d:%d\nWORKDIR %s\nEXPOSE %s\nENTRYPOINT [%q, \"serve\"]\n", uid, gid, workdir, strings.TrimPrefix(listen, ":"), kit.RelayBinary)
+	// USER root: the relay starts the agent as relay.agent_user (GAP-0116).
+	fmt.Fprintf(&df, "USER 0:0\nWORKDIR %s\nEXPOSE %s\nENTRYPOINT [%q, \"serve\"]\n", workdir, strings.TrimPrefix(listen, ":"), kit.RelayBinary)
 	if err := write("Dockerfile", []byte(df.String())); err != nil {
 		return err
 	}
