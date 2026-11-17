@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -16,6 +17,10 @@ import (
 // resolver reads is truncated at the bounded.Paths cap, and the hook client
 // tells a managed gateway so under UnprovenReasonKey.
 func TestGAP0438ResolverCapReachesTheCallDecision(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// WriteOperandCaps reads a Windows home as outside the POSIX glob walk.
+		t.Skip("POSIX glob walk fixture")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged home")
 	}
