@@ -59,8 +59,12 @@ const (
 	// (managedEnterpriseScanInterval, the generated managed destination).
 	managedInventoryFullBundleInterval = 24 * time.Hour
 
-	managedInventoryPublishStateFile    = "managed_inventory_publish_state.json"
-	managedInventoryPublishStateVersion = 1
+	managedInventoryPublishStateFile = "managed_inventory_publish_state.json"
+	// Version 2 invalidates v1 publish digests so the first complete scan after
+	// upgrade re-baselines AI Defense with connector-native MCP details. This is
+	// required because v1 could record a successful native publish before the
+	// backend consumer was enabled, suppressing an unchanged retry for 24 hours.
+	managedInventoryPublishStateVersion = 2
 
 	// managedInventorySignalsKey is the state key for the per-signal lifecycle
 	// snapshot. The six endpoint collections key on their own `source` strings.

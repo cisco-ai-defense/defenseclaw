@@ -772,6 +772,34 @@ func TestPerConnectorMCPInventoryMarksMalformedDaemonCodexConfigPartial(t *testi
 	}
 }
 
+func TestPreferNativeMCPInventory(t *testing.T) {
+	disabled := false
+	discovered := []endpointInventoryComponent{
+		{id: "shared", itemName: "thin-duplicate"},
+		{id: "discovery-only", itemName: "discovery-only"},
+	}
+	native := []endpointInventoryComponent{
+		{id: "shared", componentType: "mcp_server", itemName: "rich-native", mcpTransport: "stdio", mcpDisabled: &disabled},
+		{id: "native-only", componentType: "mcp_server", itemName: "native-only", mcpTransport: "http", mcpDisabled: &disabled},
+	}
+
+	complete := preferNativeMCPInventory(discovered, native, false)
+	if len(complete) != 1 || complete[0].id != "discovery-only" {
+		t.Fatalf("complete native scan did not suppress only the duplicate: %+v", complete)
+	}
+
+	partial := preferNativeMCPInventory(discovered, native, true)
+	if !reflect.DeepEqual(partial, discovered) {
+		t.Fatalf("partial native scan removed discovery fallback: %+v", partial)
+	}
+
+	invalid := append([]endpointInventoryComponent(nil), native...)
+	invalid[0].mcpDisabled = nil
+	if got := preferNativeMCPInventory(discovered, invalid, false); !reflect.DeepEqual(got, discovered) {
+		t.Fatalf("managed-ineligible native scan removed discovery fallback: %+v", got)
+	}
+}
+
 func TestPerConnectorMCPInventoryKeepsValidAmpRowsOnPartialRead(t *testing.T) {
 	home := t.TempDir()
 	settingsDir := filepath.Join(home, ".config", "amp")

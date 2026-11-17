@@ -561,6 +561,16 @@ func TestManagedInventoryPublishStateFutureStampIsDue(t *testing.T) {
 }
 
 func TestManagedInventoryPublishStateFailOpen(t *testing.T) {
+	legacyVersion, err := json.Marshal(managedInventoryPublishFile{
+		Version:      managedInventoryPublishStateVersion - 1,
+		FullBundleAt: time.Now().UTC(),
+		Collections: map[string]managedInventoryPublishRecord{
+			"collection": {Digest: "digest-a"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	forwardVersion, err := json.Marshal(managedInventoryPublishFile{
 		Version:      managedInventoryPublishStateVersion + 1,
 		FullBundleAt: time.Now().UTC(),
@@ -579,6 +589,7 @@ func TestManagedInventoryPublishStateFailOpen(t *testing.T) {
 		{name: "missing", write: false},
 		{name: "malformed", content: []byte("{not json"), write: true},
 		{name: "empty", content: nil, write: true},
+		{name: "legacy-version", content: legacyVersion, write: true},
 		{name: "forward-version", content: forwardVersion, write: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -240,6 +240,16 @@ func emitEndpointInventory(
 		firstErr = err
 	}
 
+	// Collect the connector-native MCP inventory before processing the
+	// discovery report. A discovery signal can describe the same component as
+	// the native reader, but it cannot carry transport, URL, or local command
+	// fingerprints. When the native collection is complete it is authoritative
+	// for an exact component-id match, so the thinner discovery row must not be
+	// published later and overwrite those fields downstream. On a partial read
+	// keep the discovery row as a fail-open fallback; partial native snapshots
+	// are local diagnostics and do not reach the managed AI Defense route.
+	perConnectorMCP, perConnectorPartial := perConnectorMCPEntriesWithStatus(cfg, reg)
+
 	// Per-entry inventories derived from the latest AI-Discovery scan. Each
 	// enumerated skill / plugin / MCP server ships as its own
 	// ai_component.observed record with defenseclaw.agent.discovery.connector
@@ -250,6 +260,7 @@ func emitEndpointInventory(
 	if discoveryReport != nil {
 		discoveryPartial := !aiDiscoveryReportComplete(discoveryReport)
 		mcpEntries := discoveredMCPEntriesFromReport(*discoveryReport)
+		mcpEntries = preferNativeMCPInventory(mcpEntries, perConnectorMCP, perConnectorPartial)
 		if err := emitEndpointInventorySnapshot(
 			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, discoveryPartial,
 			config.ObservabilityV8ManagedMCPInventoryAction, publish,
@@ -287,7 +298,6 @@ func emitEndpointInventory(
 	// Skipping it would leave the cloud holding removed MCP servers forever — the
 	// stored digest would never advance past the last non-empty publish — and
 	// would silently drop the collection from the daily complete bundle.
-	perConnectorMCP, perConnectorPartial := perConnectorMCPEntriesWithStatus(cfg, reg)
 	if err := emitEndpointInventorySnapshot(
 		ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, perConnectorPartial,
 		config.ObservabilityV8ManagedMCPInventoryAction, publish,
@@ -324,6 +334,40 @@ func emitEndpointInventory(
 		}
 	}
 	return firstErr
+}
+
+// preferNativeMCPInventory removes discovery-derived MCP entries that would
+// shadow a richer connector-native component with the same stable id. Native
+// inventory only takes precedence when its scan is complete and eligible for
+// the managed route; a partial, over-limit, or invalid native snapshot is
+// diagnostic-only, so discovery entries remain available as a managed fallback.
+func preferNativeMCPInventory(
+	discovered, native []endpointInventoryComponent,
+	nativePartial bool,
+) []endpointInventoryComponent {
+	if nativePartial || len(discovered) == 0 || len(native) == 0 {
+		return discovered
+	}
+	if len(native) > managedInventoryLimit(config.ObservabilityV8ManagedMCPInventoryAction) {
+		return discovered
+	}
+	if _, ok := endpointInventoryCarrierFor(config.ObservabilityV8ManagedMCPInventoryAction, native); !ok {
+		return discovered
+	}
+	nativeIDs := make(map[string]struct{}, len(native))
+	for _, component := range native {
+		if component.id != "" {
+			nativeIDs[component.id] = struct{}{}
+		}
+	}
+	filtered := make([]endpointInventoryComponent, 0, len(discovered))
+	for _, component := range discovered {
+		if _, shadowed := nativeIDs[component.id]; shadowed {
+			continue
+		}
+		filtered = append(filtered, component)
+	}
+	return filtered
 }
 
 // perConnectorMCPEntries enumerates one endpointInventoryComponent per
