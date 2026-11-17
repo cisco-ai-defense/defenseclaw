@@ -194,7 +194,13 @@ func lookupPOSIX(name string, flavor Flavor, bsd bool) (Program, bool) {
 // stops. After that, an option-shaped word is an operand to BSD but an
 // option to GNU (which permutes): unless the row reads every operand as a
 // target (OptionsFirst), the two readings differ, so it is a reject too.
-func bsdRejectsFlag(p Program, args []Word) bool {
+func bsdRejectsFlag(p, gnu Program, args []Word) bool {
+	// A flag both rows know with a different arity (cp -S, install -S / -T)
+	// moves the operands between the readings: a reject too (review round 3).
+	arityDiffers := func(name string, f Flag) bool {
+		g, ok := gnu.Flags[name]
+		return ok && g.Value != f.Value
+	}
 	for i := 0; i < len(args); i++ {
 		v := args[i].Value
 		if !args[i].Static || len(v) < 2 || v[0] != '-' {
@@ -218,6 +224,9 @@ func bsdRejectsFlag(p Program, args []Word) bool {
 			return true
 		}
 		if f, ok := p.Flags[v]; ok {
+			if arityDiffers(v, f) {
+				return true
+			}
 			if f.Value {
 				i++
 			}
@@ -225,7 +234,7 @@ func bsdRejectsFlag(p Program, args []Word) bool {
 		}
 		for j := 1; j < len(v); j++ {
 			f, ok := p.Flags["-"+v[j:j+1]]
-			if !ok {
+			if !ok || arityDiffers("-"+v[j:j+1], f) {
 				return true
 			}
 			if f.Value {

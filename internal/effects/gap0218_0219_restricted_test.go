@@ -113,6 +113,12 @@ var gap0218Rows = []restrictedRow{
 	{"g0218 ctl trap echo exit", raLin, `trap 'echo exit' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 ctl trap command -v", raLin, `trap 'command -v x' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, true},
 	{"g0218 trap command exit", raLin, `trap 'command exit' DEBUG; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
+	// Review round 3: the shell opens a compound command's redirects before
+	// its body runs, so an exec / exit in the body does not undo them.
+	{"g0218 ctl block exec redirect", raLin, `{ exec cat /t/k; } > /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl block exit redirect", raLin, `{ exit; } >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 ctl while exit redirect", raLin, `while exit; do :; done >> /home/u/.ssh/authorized_keys`, rlAK, true},
+	{"g0218 after a block that exits", raLin, `{ exit; } > /t/x; echo k >> /home/u/.ssh/authorized_keys`, rlAK, false},
 }
 
 var gap0219Rows = []restrictedRow{
@@ -156,6 +162,10 @@ var gap0219Rows = []restrictedRow{
 	{"g0219 macOS cp trailing -f", raMacBSD, `cp /t/k /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
 	{"g0219 macOS install trailing -m", raMacBSD, `install /t/k /Users/u/.ssh/authorized_keys -m 600`, rMacAK, false},
 	{"g0219 macOS mv trailing -f", raMacBSD, `mv /t/authorized_keys /Users/u/.ssh/authorized_keys -f`, rMacAK, false},
+	// Review round 3: a flag both tools take with a different arity moves the
+	// operands between the readings.
+	{"g0219 macOS install -T (arity differs)", raMacBSD, `install -T /t/k /Users/u/.ssh/authorized_keys`, rMacAK, false},
+	{"g0219 macOS cp -S (arity differs)", raMacBSD, `cp -S x /t/k /Users/u/.ssh/authorized_keys`, rMacAK, false},
 	{"g0219 ctl macOS gnubin rm --force", raMacBSD, `/usr/local/opt/coreutils/libexec/gnubin/rm --force /Users/u/.ssh/authorized_keys`, rMacAK, true},
 }
 

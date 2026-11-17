@@ -203,6 +203,8 @@ type walker struct {
 	// debugTrap: a DEBUG trap that may end the shell or skip commands is set in
 	// this shell; a child shell does not inherit it (no set -T modeling).
 	debugTrap bool
+	// execMarks holds the execution state at each compound-redirect mark.
+	execMarks map[*Stmt][2]bool
 	// childDepth counts the enclosing commands that run in a child shell.
 	childDepth int
 	// dead counts the enclosing statements behind a provably false `&&` / true
@@ -340,6 +342,20 @@ func (w *walker) walkScript(s *Script, depth int) {
 		w.res.addUnknown(u.Reason)
 	}
 	for _, st := range s.Stmts {
+		if st.ExecMark {
+			if w.execMarks == nil {
+				w.execMarks = map[*Stmt][2]bool{}
+			}
+			w.execMarks[st] = [2]bool{w.execState, w.debugTrap}
+			continue
+		}
+		var afterBody [2]bool
+		if st.ExecFrom != nil {
+			if m, ok := w.execMarks[st.ExecFrom]; ok {
+				afterBody = [2]bool{w.execState, w.debugTrap}
+				w.execState, w.debugTrap = m[0], m[1]
+			}
+		}
 		dead := w.deadStatement(st, s.Dialect)
 		if dead {
 			w.dead++
@@ -351,6 +367,11 @@ func (w *walker) walkScript(s *Script, depth int) {
 		w.leaveStmt()
 		if dead {
 			w.dead--
+		}
+		if st.ExecFrom != nil {
+			if _, ok := w.execMarks[st.ExecFrom]; ok {
+				w.execState, w.debugTrap = afterBody[0], afterBody[1]
+			}
 		}
 	}
 }
@@ -1110,7 +1131,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// whole command is unaccounted (never a fully known claim, never dropped).
 	bsdReject := false
 	if bsd, ok := bsdTable[program]; ok && known && bsdHost && w.o.flavor() != FlavorWindows &&
-		dialect != DialectCMD && dialect != DialectPowerShell && bsdRejectsFlag(bsd, inner[1:]) {
+		dialect != DialectCMD && dialect != DialectPowerShell && bsdRejectsFlag(bsd, posixTable[program], inner[1:]) {
 		entry, bsdReject = posixTable[program], true
 	}
 

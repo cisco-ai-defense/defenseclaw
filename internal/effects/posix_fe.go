@@ -43,6 +43,9 @@ type posixWalker struct {
 	// bg counts the backgrounded statements being lowered: every command under
 	// one runs in a child shell (Cmd.ChildList).
 	bg int
+	// marks maps a compound statement with redirects to the mark statement
+	// lowered before its body.
+	marks map[*syntax.Stmt]*Stmt
 }
 
 // linked lowers the right side of && / || with the link set.
@@ -81,6 +84,17 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 	if st.Background {
 		w.bg++
 		defer func() { w.bg-- }()
+	}
+	if len(st.Redirs) > 0 {
+		switch st.Cmd.(type) {
+		case *syntax.Block, *syntax.IfClause, *syntax.WhileClause, *syntax.ForClause, *syntax.CaseClause:
+			mark := &Stmt{ExecMark: true, Span: span(st)}
+			w.add(mark)
+			if w.marks == nil {
+				w.marks = map[*syntax.Stmt]*Stmt{}
+			}
+			w.marks[st] = mark
+		}
 	}
 	switch cmd := st.Cmd.(type) {
 	case nil:
@@ -177,7 +191,7 @@ func (w *posixWalker) compoundRedirs(st *syntax.Stmt, cond bool) {
 	c := &Cmd{Cond: cond, Span: span(st)}
 	w.redirs(st, c)
 	if len(c.Redirs) > 0 {
-		w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
+		w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, ExecFrom: w.marks[st], Span: span(st)})
 	}
 }
 

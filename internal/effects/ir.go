@@ -46,7 +46,14 @@ type Stmt struct {
 	// provably true `||` (GAP-0218). The walker treats the statement as dead only
 	// while none of these names is a function or an alias.
 	DeadGuard []string
-	Span      [2]int
+	// ExecMark marks an empty statement placed before the body of a compound
+	// command that has redirects; ExecFrom, on the compound's redirect-only
+	// statement, points at it. The shell opens those redirects before the body
+	// runs, so the walker reads them under the execution state of the mark, not
+	// the state an exec / exit in the body left (GAP-0218 review round 3).
+	ExecMark bool
+	ExecFrom *Stmt
+	Span     [2]int
 }
 
 // Cmd is one simple command or pipeline stage.
