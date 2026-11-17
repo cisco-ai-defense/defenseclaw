@@ -105,8 +105,10 @@ func TestHolderIsThisAccount(t *testing.T) {
 			}
 			return
 		}
-		if os.Getuid() == 0 {
-			return
+		// rel-1-0-10:GAP-1165: in a container PID 1 may run as this
+		// account (docker run --user with the test as PID 1).
+		if uid, err := gatewayProcessUID(1); err != nil || uid != 0 || os.Getuid() == 0 {
+			t.Skipf("needs init (PID 1) running as root and a non-root caller: pid 1 uid=%d err=%v, caller uid=%d", uid, err, os.Getuid())
 		}
 		if holderAccount(PortHolder{PID: 1, UID: -1}) != holderOtherAccount {
 			t.Fatal("init (PID 1, root) is not this account")
