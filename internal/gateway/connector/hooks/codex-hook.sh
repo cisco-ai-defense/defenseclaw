@@ -556,11 +556,20 @@ fail_unreachable() {
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
   fi
-{{if not .Sandbox}}  # Codex does not show stderr of a hook that exits 0: say on screen that
+{{if and (not .Sandbox) .SecureClient}}  # Codex does not show stderr of a hook that exits 0: say on screen that
+  # this account's gateway is down and how to start it again. Codex shows a
+  # systemMessage for these two events.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$BOUND_EVENT" in
+      SessionStart|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
+{{else if not .Sandbox}}  # Codex does not show stderr of a hook that exits 0: say on screen that
   # this account's gateway is down and how to start it again. Codex shows a
   # systemMessage for these events; the prompt carries it for a session that
   # was running when the gateway stopped (rel-1-0-10 GAP-1168), and the
-  # once-per-session marker keeps it to one warning.
+  # once-per-session marker keeps it to one warning. Secure Client renders
+  # keep their pinned bytes.
   if [ "$1" = "gateway unreachable" ]; then
     case "$BOUND_EVENT" in
       SessionStart|UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;

@@ -3057,8 +3057,12 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 		// warning at all: its model request then failed on the stopped
 		// route with only Codex's own "Reconnecting" (rel-1-0-10 GAP-1168).
 		// The once-per-session marker keeps a new session at one warning
-		// (its SessionStart takes it).
+		// (its SessionStart takes it). Secure Client keeps its established
+		// events, as its shell render keeps its pinned bytes.
 		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
+		if opts.SecureClient {
+			events = []string{"SessionStart", "PreToolUse"}
+		}
 	case copilotCLIOutageNotice(sp):
 		events, field = []string{"postToolUse"}, "additionalContext"
 	default:
