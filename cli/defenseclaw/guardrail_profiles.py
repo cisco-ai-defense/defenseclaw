@@ -146,6 +146,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
             # the delta 4 packs.
             "48b9e16495f0d8b860964b0b813cd6347edc20eba48e0194ddd7cc84b45ecff9",
+            # 1.0.10 (s7/g0210port, rel-1-0-10 GAP-0210): SEC-HF-TOKEN in secrets.yaml.
+            "9b6e7fa40652745fc003fc45e99d096e28dc9e70b34c0405168344e96ee00c8b",
         }
     ),
     "permissive": frozenset(
@@ -248,6 +250,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
             # the delta 4 packs.
             "e0b99daa614eaa547fee67f0c87e805e8bffa208dd9b9bb82578756db58eba87",
+            # 1.0.10 (s7/g0210port, rel-1-0-10 GAP-0210): SEC-HF-TOKEN in secrets.yaml.
+            "6d0321f277040cc6097b9fc2eb735055e67b05fcf4cbc0f99995ba8d339a5cf3",
         }
     ),
     "strict": frozenset(
@@ -349,6 +353,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/gemma4-judge-rel merged with int/r110-b11d4 033c5cbd2b): the judge context packet on
             # the delta 4 packs.
             "2237afe661765bf883ec757d5195149b15171872ffbef9b1b134195c02f4c189",
+            # 1.0.10 (s7/g0210port, rel-1-0-10 GAP-0210): SEC-HF-TOKEN in secrets.yaml.
+            "47c95665ec49e90e553f084de7ce0cedcb1ca511bde0e0015995a0ecc9f9ccb9",
         }
     ),
 }
