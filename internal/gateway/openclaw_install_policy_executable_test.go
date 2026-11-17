@@ -42,9 +42,7 @@ func writeOpenClawDiscoveryAt(t *testing.T, dataDir, version, binaryPath string)
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(tmp, filepath.Join(dataDir, "agent_discovery.json")); err != nil {
-		t.Fatal(err)
-	}
+	replaceOpenClawDiscoveryFile(t, tmp, filepath.Join(dataDir, "agent_discovery.json"))
 }
 
 // openClawExecutableFixture is a registered install policy written under

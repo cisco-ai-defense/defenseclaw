@@ -21,6 +21,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,8 +37,25 @@ func writeOpenClawDiscoveryVersion(t *testing.T, dataDir, version string) {
 	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(tmp, filepath.Join(dataDir, "agent_discovery.json")); err != nil {
-		t.Fatal(err)
+	replaceOpenClawDiscoveryFile(t, tmp, filepath.Join(dataDir, "agent_discovery.json"))
+}
+
+// replaceOpenClawDiscoveryFile renames tmp over dst. On Windows a reader
+// that does not share delete (another test's process, an antivirus scan)
+// can hold dst for a moment; the gateway's own reads share it (GAP-1242), so
+// a short, bounded retry is enough.
+func replaceOpenClawDiscoveryFile(t *testing.T, tmp, dst string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err := os.Rename(tmp, dst)
+		if err == nil {
+			return
+		}
+		if runtime.GOOS != "windows" || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
