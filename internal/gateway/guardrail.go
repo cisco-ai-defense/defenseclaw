@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1978,8 +1979,7 @@ func scanLocalPatternsWithActivation(
 	var flags []string
 	isHigh := false
 	type localPIICandidate struct {
-		flag     string
-		evidence string
+		evidence string // the dedupe key of the value, never a flag
 	}
 	var localPIICandidates []localPIICandidate
 
@@ -2027,30 +2027,27 @@ func scanLocalPatternsWithActivation(
 	// be a lie: PII/secret regexes are exactly the surfaces an attacker
 	// would target with invisible-character splicing.
 	for _, re := range piiDRegexes {
-		if match, norm, ok := findAcceptedLocalPIIMatch(content, lower, re); ok {
-			flag := "pii-data:" + match
-			if norm {
-				flag = "pii-data:[normalized] " + match
-			}
+		if match, _, ok := findAcceptedLocalPIIMatch(content, lower, re); ok {
 			localPIICandidates = append(localPIICandidates, localPIICandidate{
-				flag:     flag,
 				evidence: normalizedPIIEvidenceKey(sanitizeEvidence(match)),
 			})
 		}
 	}
 
+	// A secret or PII flag names its finding, never the matched value: the
+	// flags become the verdict reason (the block message the agent and the
+	// user read) and the findings every sink receives (hook answers, audit
+	// rows, telemetry, logs, alerts), so a value here reached them all
+	// (rel-1-0-10:GAP-0429, GAP-1085). An operator's literal indicator can be
+	// a canary value itself.
 	for _, p := range secPatterns {
 		if strings.Contains(lower, p) {
-			flags = append(flags, p)
+			flags = appendUniqueFlag(flags, localSecretLiteralFinding)
 		}
 	}
 	for _, detector := range secretPatternDetectors {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
-			flag := match
-			if norm {
-				flag = "[normalized] " + match
-			}
-			flags = append(flags, flag)
+		if _, _, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
+			flags = appendUniqueFlag(flags, detector.canonicalID+":"+localCredentialFindingTitle)
 		}
 	}
 
@@ -2077,7 +2074,7 @@ func scanLocalPatternsWithActivation(
 			continue
 		}
 		seenLocalPIIEvidence[candidate.evidence] = struct{}{}
-		flags = append(flags, candidate.flag)
+		flags = appendUniqueFlag(flags, localPIIDataFinding)
 		isHigh = true
 	}
 	legacySeverity := "NONE"
@@ -2145,6 +2142,21 @@ var bare9DigitRegex = regexp.MustCompile(`\b\d{9}\b`)
 
 // Credit card patterns are HIGH_SIGNAL.
 var creditCardRegex = regexp.MustCompile(`(?:\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b|\b3[47]\d{2}[- ]?\d{6}[- ]?\d{5}\b)`)
+
+// The value-free findings of the legacy local secret and PII detectors
+// (rel-1-0-10:GAP-1085): normalizeFindingString reads them as their rule.
+const (
+	localSecretLiteralFinding = "LP-SECRET-MATCH:" + localCredentialFindingTitle
+	localPIIDataFinding       = "LP-PII-DATA:" + localPIIFindingTitle
+)
+
+// appendUniqueFlag appends flag to flags once.
+func appendUniqueFlag(flags []string, flag string) []string {
+	if slices.Contains(flags, flag) {
+		return flags
+	}
+	return append(flags, flag)
+}
 
 func triagePatterns(direction, content string) []TriageSignal {
 	// managed_enterprise: local regex detection is disabled — Cisco AI

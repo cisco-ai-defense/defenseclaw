@@ -426,13 +426,13 @@ func TestScanLocalPatterns_CreditCard_ZeroWidthEvasion(t *testing.T) {
 	}
 	foundPII := false
 	for _, f := range v.Findings {
-		if strings.Contains(f, "pii-data") {
+		if f == localPIIDataFinding {
 			foundPII = true
 			break
 		}
 	}
 	if !foundPII {
-		t.Errorf("expected pii-data flag, got findings %v", v.Findings)
+		t.Errorf("expected the %s flag, got findings %v", localPIIDataFinding, v.Findings)
 	}
 }
 

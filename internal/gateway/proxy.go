@@ -52,6 +52,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
@@ -3695,8 +3696,56 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		lastScanLen = accumulated.Len()
 		return true
 	}
+	// While the text ends inside an open secret nothing more is sent
+	// (rel-1-0-10:GAP-0429, stream_secret_hold.go). secretOpen is that state
+	// as last read; textAt is when the text last grew.
+	secretOpen := false
+	var textAt time.Time
+	// secretBound decides an open secret at a hold bound: TRUNCATED, the
+	// unknown tier of the pack, once the text read so far passed its check.
+	// False: it blocked; the stream is cut.
+	secretBound := func(c bounded.Cap, why string) bool {
+		if accumulated.Len() > lastScanLen && !scanMid() {
+			return false
+		}
+		accumulated.ReleaseOpenSecret()
+		secretOpen = false
+		tv := p.streamTailTruncatedVerdict(llmCtx, c, why)
+		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, tv, 0, mode, tv.Action == "block")
+		modelTrace.AddGuardrailOverlay(overlay)
+		if tv.Action == "block" {
+			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK %s (%d bytes held back)\n", logDisplayReason(tv.Reason), len(hold.buf))
+			p.enqueueBlockNotification(tv, "completion", aliasModel)
+			streamBlocked = true
+			streamCancel()
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
+		return true
+	}
+	// secretHeld reports that nothing may be sent now: the text ends inside
+	// an open secret, or a bound on it blocked.
+	secretHeld := func(held int) bool {
+		if !holding {
+			return false
+		}
+		o := accumulated.OpenSecret()
+		secretOpen = o.open
+		switch {
+		case !o.open:
+			return false
+		case o.overCap:
+			return !secretBound(bounded.Bytes, fmt.Sprintf("a private-key block in a reply stream over %d bytes", streamSecretMaxPEM))
+		case held > streamSecretMaxHeld:
+			return !secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
+		}
+		return true
+	}
 	// releaseHeld sends the held chunks after a check has read their text.
 	releaseHeld := func() bool {
+		if secretHeld(len(hold.buf)) {
+			return !streamBlocked
+		}
 		if accumulated.Len() > lastScanLen && !scanMid() {
 			return false
 		}
@@ -3723,6 +3772,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		// held for the post-stream check (GAP-0370).
 		hasToolCalls := false
 		isToolCallFinish := false
+		textBefore := accumulated.Len()
 		for _, c := range chunk.Choices {
 			if c.Delta != nil {
 				accumulated.Add(answerPiece(c.Index, c.Delta.Content))
@@ -3735,6 +3785,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				streamFinishReasons = append(streamFinishReasons, *c.FinishReason)
 				isToolCallFinish = isToolCallFinish || *c.FinishReason == "tool_calls"
 			}
+		}
+		if accumulated.Len() > textBefore {
+			textAt = time.Now()
 		}
 
 		if accumulated.Len()-lastScanLen >= midStreamScanInterval && mode == "action" {
@@ -3760,7 +3813,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if !initialBufFlushed {
 			initialChunkBuf = append(initialChunkBuf, data)
 			if accumulated.Len() >= streamBufSize {
-				// The initial buffer is sent after a check has read it.
+				// The initial buffer is sent after a check has read it, and
+				// not while its text ends inside an open secret (GAP-0429).
+				if secretHeld(bufferedBytes(initialChunkBuf)) {
+					return
+				}
 				if accumulated.Len() > lastScanLen && !scanMid() {
 					return
 				}
@@ -3781,7 +3838,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 		now := time.Now()
 		hold.add([]byte("data: "+string(data)+"\n\n"), now)
-		if accumulated.Len() == lastScanLen || len(hold.buf) >= streamHoldMaxBytes || hold.due(now) {
+		if accumulated.Len() == lastScanLen || len(hold.buf) >= streamHoldMaxBytes || hold.due(now) || secretOpen {
 			releaseHeld()
 		}
 	}
@@ -3804,7 +3861,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}()
 	for open := true; open; {
 		var deadline time.Time
-		if holding && !streamBlocked && len(hold.buf) > 0 {
+		switch {
+		case !holding || streamBlocked:
+		case secretOpen:
+			// An open secret waits for more text at most
+			// streamHoldMaxPartialAge (GAP-0429).
+			deadline = textAt.Add(streamHoldMaxPartialAge)
+		case len(hold.buf) > 0:
 			deadline = hold.since.Add(streamHoldMaxAge)
 		}
 		due := holdTimer.wait(deadline, time.Now())
@@ -3816,9 +3879,24 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 			handleChunk(chunk)
 		case <-due:
-			if !streamBlocked {
-				releaseHeld()
+			if streamBlocked {
+				break
 			}
+			if secretOpen {
+				if accumulated.OpenSecret().open && !secretBound(bounded.Time,
+					fmt.Sprintf("a secret in a reply stream unfinished, no new text for %s", streamHoldMaxPartialAge)) {
+					break
+				}
+				secretOpen = false
+				if !initialBufFlushed && len(initialChunkBuf) > 0 {
+					for _, buffered := range initialChunkBuf {
+						hold.add([]byte("data: "+string(buffered)+"\n\n"), time.Now())
+					}
+					initialChunkBuf = nil
+					initialBufFlushed = true
+				}
+			}
+			releaseHeld()
 		}
 	}
 	if streamPanic != nil {
@@ -3889,6 +3967,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			p.enqueueBlockNotification(verdict, "completion", aliasModel)
 			streamBlocked = true
 		}
+	}
+	// A stream that ended inside an open private-key block never had the
+	// block whole: TRUNCATED, the unknown tier decides (GAP-0429).
+	if holding && !streamBlocked && accumulated.OpenSecret().pem {
+		secretBound(bounded.Bytes, "a reply stream ended inside a private-key block")
 	}
 	if !streamBlocked {
 		if b := hold.take(len(hold.buf), time.Now()); len(b) > 0 {
@@ -6387,6 +6470,65 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		p.emitOpenAIToolCallEvents(llmCtx, toolMeta, assembled)
 		return true
 	}
+	// In action mode no frame goes out while the text ends inside an open
+	// secret (rel-1-0-10:GAP-0429, stream_secret_hold.go): the frames wait in
+	// heldFrames, in stream order, until it has ended and the frame check has
+	// read it whole. This path reads the upstream on the handler goroutine,
+	// so the hold has no clock of its own: it is bounded in bytes, and the
+	// end of the stream ends it.
+	var heldFrames [][]byte
+	heldSize := 0
+	flushHeldFrames := func() {
+		for _, frame := range heldFrames {
+			_, _ = w.Write(frame)
+		}
+		if len(heldFrames) > 0 {
+			flusher.Flush()
+		}
+		heldFrames, heldSize = nil, 0
+	}
+	// secretBound decides an open secret at a hold bound: TRUNCATED, the
+	// unknown tier of the pack. Every frame's text was checked. False: it
+	// blocked.
+	secretBound := func(c bounded.Cap, why string) bool {
+		accumulated.ReleaseOpenSecret()
+		tv := p.streamTailTruncatedVerdict(llmCtx, c, why)
+		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, tv, 0, mode, tv.Action == "block")
+		modelTrace.AddGuardrailOverlay(overlay)
+		if tv.Action == "block" {
+			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK %s (%d bytes held back)\n", logDisplayReason(tv.Reason), heldSize)
+			p.enqueueBlockNotification(tv, "completion", req.Model)
+			blockStream(tv.Reason)
+			return false
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
+		return true
+	}
+	// secretWait reports that the next frame (next bytes) must wait; ok is
+	// false when a bound blocked.
+	secretWait := func(next int) (wait, ok bool) {
+		if mode != "action" {
+			return false, true
+		}
+		o := accumulated.OpenSecret()
+		switch {
+		case !o.open:
+			return false, true
+		case o.overCap:
+			return false, secretBound(bounded.Bytes, fmt.Sprintf("a private-key block in a reply stream over %d bytes", streamSecretMaxPEM))
+		case heldSize+next > streamSecretMaxHeld:
+			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
+		}
+		return true, true
+	}
+	// endedInKey decides a stream that ended inside an open private-key
+	// block, after the final check. False: it blocked.
+	endedInKey := func() bool {
+		if mode != "action" || !accumulated.OpenSecret().pem {
+			return true
+		}
+		return secretBound(bounded.Bytes, "a reply stream ended inside a private-key block")
+	}
 	flushBufferedToolCalls := func() {
 		for _, frame := range bufferedTCFrames {
 			_, _ = w.Write(frame)
@@ -6458,9 +6600,10 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		}
 
 		if frameDone {
-			if !inspectFinalText() || !inspectBufferedToolCalls() {
+			if !inspectFinalText() || !endedInKey() || !inspectBufferedToolCalls() {
 				return false
 			}
+			flushHeldFrames()
 			flushBufferedToolCalls()
 			// [DONE] is the protocol terminal. Canonicalize the marker instead
 			// of forwarding any attacker-controlled lines that followed it in
@@ -6491,6 +6634,14 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				return true
 			}
 		}
+		if wait, ok := secretWait(len(frame)); !ok {
+			return false
+		} else if wait {
+			heldFrames = append(heldFrames, append([]byte(nil), frame...))
+			heldSize += len(frame)
+			return true
+		}
+		flushHeldFrames()
 		_, _ = w.Write(frame)
 		flusher.Flush()
 		return true
@@ -6519,7 +6670,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		processFrame(frame.Bytes())
 	}
 	streamReadErr := scanner.Err()
-	if streamReadErr == nil && !streamBlocked && (!inspectFinalText() || !inspectBufferedToolCalls()) {
+	if streamReadErr == nil && !streamBlocked && (!inspectFinalText() || !endedInKey() || !inspectBufferedToolCalls()) {
 		streamBlocked = true
 	}
 	if streamBlocked {
@@ -6580,6 +6731,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		fmt.Fprintf(os.Stderr, "[guardrail] raw stream read error: %v\n", err)
 		return
 	}
+	flushHeldFrames()
 	flushBufferedToolCalls()
 	finishReasons := append([]string(nil), streamFinishReasons...)
 	result := proxyV8TraceResult{
