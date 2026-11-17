@@ -167,6 +167,12 @@ type Controller struct {
 	// more by a scoped controller; listed is what the last scoped pass
 	// listed (GAP-0295).
 	retired, listed map[string]bool
+	// startedAt is when this controller started: an actor created before
+	// it may have been admitted by the controller it replaced (an upgrade).
+	startedAt time.Time
+	// allowlisted are the templates that fail only the 1.0.10 allowlist,
+	// with the reason last alerted (GAP-0354).
+	allowlisted map[string]string
 }
 
 type recreatedActor struct {
@@ -231,6 +237,9 @@ type actorState struct {
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
+	// allowlistWarned is the allowlist refusal the actor was last warned
+	// about while it keeps running (GAP-0354).
+	allowlistWarned string
 }
 
 // New checks the options and fills defaults.
@@ -271,7 +280,8 @@ func New(o Options) (*Controller, error) {
 		return nil, errors.New("controller: Config needs Live")
 	}
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
-		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{}}
+		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{},
+		startedAt: o.Now(), allowlisted: map[string]string{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
 		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter}
 	if o.Config != nil {
@@ -752,7 +762,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 		}
 		if res.Refuse != "" {
 			c.refuseOnce(st, base, EventProfileRefused, res.Refuse, "", "")
-		} else if c.admit(ctx, a, st, base, res.Profile.Name) == "" {
+		} else if code, err := c.admit(ctx, a, st, base, res.Profile.Name); err != nil {
+			return err
+		} else if code == "" {
 			booted, err := c.bootedTemplate(ctx, a, st, base)
 			if err != nil {
 				return err
@@ -926,13 +938,13 @@ func (c *Controller) parentRegistration(ctx context.Context, tag *ateapi.ObjectR
 }
 
 // admit checks the template's attestation and kit version.
-func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState, base Event, profile string) string {
+func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState, base Event, profile string) (string, error) {
 	// The first admission of an actor reads its template fresh: a cached
 	// verdict by name would admit an image swapped in after it (GAP-0053).
 	tmpl, att, err := c.template(ctx, a.GetActorTemplate(), !st.written)
 	if err != nil {
 		c.refuseOnce(st, base, EventTemplateUnverified, "template could not be read: "+err.Error(), "", "")
-		return "template_unreadable"
+		return "template_unreadable", nil
 	}
 	lv := c.live()
 	if !att.Attested && lv.RequireAttestation {
@@ -940,8 +952,29 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 		if reason == "" {
 			reason = "no DefenseClaw attestation"
 		}
-		c.refuseOnce(st, base, EventTemplateUnverified, "template "+ateapi.Key(ateapi.RefOf(tmpl.GetMetadata()))+" is not attested: "+reason, SignalUnattestedTemplate, att.Digest)
-		return "template_unverified"
+		key := ateapi.Key(ateapi.RefOf(tmpl.GetMetadata()))
+		keep := false
+		if att.Allowlist {
+			if keep, err = c.admittedBefore(ctx, a, st); err != nil {
+				return "", err
+			}
+		}
+		if !keep {
+			c.refuseOnce(st, base, EventTemplateUnverified, "template "+key+" is not attested: "+reason, SignalUnattestedTemplate, att.Digest)
+			return "template_unverified", nil
+		}
+		// Owner decision for 1.0.10: an actor admitted before the
+		// allowlist keeps running and keeps its network; only a warning
+		// row. Refusing it too comes in the next release.
+		if st.allowlistWarned != reason {
+			st.allowlistWarned = reason
+			ev := base
+			ev.Type, ev.Severity = EventWarning, SeverityWarn
+			ev.Message = "the actor keeps running on template " + key + ", which fails the actor allowlist of DefenseClaw 1.0.10 (" + reason +
+				"): new actors from it are refused, and DefenseClaw refuses running ones too from the next release; fix the template and recreate the actor"
+			ev.Detail = map[string]any{"template": key, "allowlist": reason}
+			c.emit(ev)
+		}
 	}
 	{
 		// PLAN §5.3 step 2: an attested digest that a profile allows. The
@@ -952,14 +985,37 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 		}
 		if repo, ok := ImagesAllowed(lv.Templates, profile, repos); !ok {
 			c.refuseOnce(st, base, EventTemplateUnverified, fmt.Sprintf("image %s is not allowed for profile %s (substrate.templates.allowed_images / profile_images)", repo, profile), SignalUnattestedTemplate, att.Digest)
-			return "image_not_allowed"
+			return "image_not_allowed", nil
 		}
 	}
 	if att.KitVersion != "" && !KitAccepted(c.o.KitVersion, att.KitVersion) {
 		c.refuseOnce(st, base, EventKitRefused, fmt.Sprintf("kit %s is older than N-1 of %s; %s", att.KitVersion, c.o.KitVersion, MigrateHint), SignalOldKit, att.KitVersion)
-		return "kit_too_old"
+		return "kit_too_old", nil
 	}
-	return ""
+	return "", nil
+}
+
+// admittedBefore reports whether an actor already runs with DefenseClaw's
+// policy from before the allowlist refused its template: this controller
+// wrote it, or the actor is older than this controller and carries
+// DefenseClaw's policy (the controller it replaced at the upgrade wrote it).
+// A policy read that fails is an error: no policy change on this pass.
+func (c *Controller) admittedBefore(ctx context.Context, a *ateapi.Actor, st *actorState) (bool, error) {
+	if st.written {
+		return true, nil
+	}
+	created := a.GetMetadata().GetCreateTime()
+	if created == nil || !created.AsTime().Before(c.startedAt) {
+		return false, nil
+	}
+	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ateapi.RefOf(a.GetMetadata()))
+	switch {
+	case ateapi.IsNotFound(err):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("%s: get policy (holding, no policy change): %w", st.key, err)
+	}
+	return render.IsDefenseClaw(cur, c.live().Settings), nil
 }
 
 // bootedTemplate reports whether the actor runs the template version that
@@ -1053,11 +1109,37 @@ func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef, fresh 
 	if att.Attested {
 		ct.goodAt = now
 	}
+	c.alertAllowlist(k, ref.GetAtespace(), att)
 	c.mu.Lock()
 	c.templates[k] = ct
 	c.mu.Unlock()
 	return ct.tmpl, ct.att, nil
 }
+
+// alertAllowlist writes one audit alert per template that the 1.0.10
+// allowlist refuses (GAP-0354, GAP-0355), naming the template and why, the
+// first time and when the reason changes: at the upgrade, every affected
+// template is named once.
+func (c *Controller) alertAllowlist(k, atespace string, att Attestation) {
+	c.mu.Lock()
+	prev, seen := c.allowlisted[k]
+	switch {
+	case att.Allowlist:
+		c.allowlisted[k] = att.Reason
+	case seen:
+		delete(c.allowlisted, k)
+	}
+	c.mu.Unlock()
+	if !att.Allowlist || (seen && prev == att.Reason) {
+		return
+	}
+	c.emit(Event{Type: EventTemplateAllowlist, Severity: SeverityAlert, Atespace: atespace,
+		Message: "template " + k + " fails the actor allowlist of DefenseClaw 1.0.10: " + att.Reason + ". " + AllowlistImpact,
+		Detail:  map[string]any{"template": k, "allowlist": att.Reason}})
+}
+
+// AllowlistImpact is what the 1.0.10 allowlist does to a template it refuses.
+const AllowlistImpact = "New actors from it are refused; actors already running keep running and keep their network with a warning in 1.0.10, and are refused from the next release. Remove the variable or command from the template (or the image) and publish it again"
 
 func sameTemplateVersion(a, b *ateapi.ActorTemplate) bool {
 	return a.GetMetadata().GetUid() == b.GetMetadata().GetUid() && a.GetMetadata().GetVersion() == b.GetMetadata().GetVersion()
