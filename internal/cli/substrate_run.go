@@ -317,6 +317,11 @@ type substrateRunTarget struct {
 	connName string
 	profile  string
 	template string
+	// loginTemplate marks a template taken from the login's default
+	// (GAP-0469); agentTemplate is the named agent's own template, used when
+	// the cluster says the login default is another agent's.
+	loginTemplate bool
+	agentTemplate string
 	// note is the substrateProven note, printed when the agent starts.
 	note string
 }
@@ -334,7 +339,9 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	// No profile named: the cluster gives the person the profile their
 	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
-	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, sandboxcli.HarnessArg(spec))
+	t.agentTemplate = sandboxcli.HarnessArg(spec)
+	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, t.agentTemplate)
+	t.loginTemplate = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE")) == "" && strings.TrimSpace(s.Ctx.Template) != ""
 	return t, nil
 }
 
@@ -424,6 +431,19 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
 	a, err = s.Client.Create(ctx, req)
+	// GAP-0469: the template login saved is the default for its own agent.
+	// Named another agent (run codex after a claude login), the cluster
+	// answers connector_mismatch: run that agent's own template instead.
+	if e, ok := api.AsError(err); ok && e.Status == 400 && e.Reason == "connector_mismatch" {
+		if t.loginTemplate && t.agentTemplate != "" && t.agentTemplate != req.Template {
+			fmt.Fprintf(w, "The default template %s from login is not a %s template; using %s.\n", req.Template, t.spec.DisplayName, t.agentTemplate)
+			req.Template = t.agentTemplate
+			a, err = s.Client.Create(ctx, req)
+		}
+		if e, ok := api.AsError(err); ok && e.Status == 400 && e.Reason == "connector_mismatch" {
+			return a, cliusage.WithExitCode(fmt.Errorf("template %s is not a %s template; name one with --template TEMPLATE, for example --template %s", req.Template, t.spec.DisplayName, t.agentTemplate), 2)
+		}
+	}
 	if err != nil {
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
 			return a, cliusage.WithExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
