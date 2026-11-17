@@ -116,6 +116,44 @@ def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch
     yield
 
 
+# The variables through which the account that runs the suite reaches a test
+# (Go: internal/testenv accountEnv).
+_ACCOUNT_ENV = (
+    "DEFENSECLAW_HOME",
+    "DEFENSECLAW_CONFIG",
+    "DEFENSECLAW_FAIL_MODE",
+    "DEFENSECLAW_HOOK_HOME",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "HERMES_HOME",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_posix_account(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Keep tests away from the real account's DefenseClaw install off Windows.
+
+    ``config_path()`` and the agents' folders follow HOME and the account
+    variables. On a box whose account has its own ``~/.defenseclaw/config.yaml``
+    (a gate box, the dev host) the setup-guardrail tests read that install and
+    refused with "Claude Code is not set up here (set up: openclaw)", while CI,
+    whose runner home is empty, passed (rel-1-0-10:GAP-0457). Every test starts
+    with an empty home of its own and none of the account variables, as on CI;
+    a test that needs one sets it after this fixture. Windows has its own
+    identity fixture above.
+    """
+    if os.name == "nt":
+        yield
+        return
+    home = tmp_path_factory.mktemp("account-home")
+    monkeypatch.setenv("HOME", os.fspath(home))
+    for name, sub in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share")):
+        monkeypatch.setenv(name, os.fspath(home / sub))
+    for name in _ACCOUNT_ENV:
+        monkeypatch.delenv(name, raising=False)
+    yield
+
+
 # The modules that test the Windows launcher preflight, or fake the launcher it probes.
 _LAUNCHER_PREFLIGHT_MODULES = frozenset({
     "test_cmd_setup_multi_connector",
