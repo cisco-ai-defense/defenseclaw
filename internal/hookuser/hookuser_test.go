@@ -121,9 +121,13 @@ func TestGAP0322NativeGatewayUnderShellOptions(t *testing.T) {
 				t.Fatalf("ordinary exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
 			server.Close()
+			// The gateway is gone: call an address that refuses every
+			// connection for the whole test. The freed port of the closed
+			// server may be taken by another process on a shared box, which
+			// then answered this call with its own HTTP 401 (GAP-0031).
 			out.Reset()
 			errOut.Reset()
-			if code := run(home, addr, strings.NewReader(payload), &out, &errOut, time.Now()); code != 0 ||
+			if code := run(home, refusedLoopbackAddr(t), strings.NewReader(payload), &out, &errOut, time.Now()); code != 0 ||
 				!strings.Contains(out.String(), `"permissionDecision":"deny"`) {
 				t.Fatalf("unavailable exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
