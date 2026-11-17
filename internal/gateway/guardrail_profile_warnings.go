@@ -488,8 +488,8 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 	if set != nil && runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 		return perUserWindowsGroupWarnings(set.assignments)
 	}
-	return set.unknownGroupWarningsWith(profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent, profileUserEntryUnmatched(),
-		directoryCacheHealth, wait)
+	return set.unknownGroupWarningsWith(foldedGroupExists(profileGroupExists, verifiedGroupDomains(currentIdentitySpoolDir())),
+		profileGroupQualifiedName, bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth, wait)
 }
 
 // Per-user Windows has no trusted group facts; these assignments cannot match.
@@ -597,8 +597,8 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 	for _, warning := range set.unknownConnectorWarnings() {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 	}
-	exists, qualify, silent, unmatchedUser, health := profileGroupExists, profileGroupQualifiedName, bareGroupsDirectorySilent,
-		profileUserEntryUnmatched(), directoryCacheHealth
+	exists, qualify, silent, unmatchedUser, health := foldedGroupExists(profileGroupExists, verifiedGroupDomains(currentIdentitySpoolDir())),
+		profileGroupQualifiedName, bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth
 	go func() {
 		if runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 			for _, warning := range perUserWindowsGroupWarnings(set.assignments) {
@@ -708,7 +708,9 @@ func unknownAssignmentGroupsForOS(ctx context.Context, assignments []config.Prof
 			}
 			if dead {
 				unknown = append(unknown, unknownGroup{assignment: i + 1, group: group, domain: domain})
-			} else if listed := respelled[key]; listed != "" {
+			} else if listed := respelled[key]; listed != "" && !groupSpellingsFold(group, listed) {
+				// CORP\name answered as name@corp.example.com is the same
+				// group: the matcher folds the two (rel-1-0-10:GAP-1124).
 				hint := ""
 				if _, listedDomain := useridentity.SplitQualifiedName(listed); listedDomain == "" {
 					hint = " (SSSD use_fully_qualified_names = False)"
