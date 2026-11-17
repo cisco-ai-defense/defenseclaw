@@ -44,10 +44,10 @@ func TestRunTimeShellTwinGAP1219MatchesBash(t *testing.T) {
 		{"B07-named-coproc-pid", "coproc WORK { :; }; printf '<%s>' $WORK_PID", false},
 		{"B08-unnamed-coproc-pid", "coproc { :; }; printf '<%s>' $COPROC_PID", false},
 		{"B15-shell-opt-prefix", "printf '<%s>' $OPT_EXTRA", false},
-		{"joined-parameter", "printf '<%s>' $HOME\\\nx", true},
+		{"joined-parameter", "printf '<%s>' $HOME\\\nx", false},
 		{"plain", "printf '<%s>' $HOME/x", true},
-		{"nested-plain", "printf '<%s>' ${HOME:+$HOME}", true},
-		{"removal", "printf '<%s>' ${HOME##*/}", true},
+		{"nested-plain", "printf '<%s>' ${HOME:+$HOME}", false},
+		{"removal", "printf '<%s>' ${HOME##*/}", false},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

@@ -28,7 +28,6 @@ func TestRunTimeShellTwinHeredocParametersAsTheHoldingShellExpands(t *testing.T)
 	}{
 		{"ls $HOME/x", "ls $HOME/x\n"},
 		{"ls \"$HOME\"/x ${HOME}/y", "ls \"$HOME\"/x ${HOME}/y\n"},
-		{"ls ${HOME:-/tmp}/x", "ls ${HOME:-/tmp}/x\n"},
 		{"# in $HOME\nls", "# in $HOME\nls\n"},
 		{"ls \\\\\\\\$HOME", "ls \\\\$HOME\n"},
 		{"ls \\$HOME", "ls $HOME\n"},
@@ -62,6 +61,7 @@ func TestRunTimeShellTwinHeredocParametersAsTheHoldingShellExpands(t *testing.T)
 		"((i++)); ls $i",
 		"printf -v D %s x; ls $D",
 		"ls ${D:=build}; ls $D",
+		"ls ${HOME:-/tmp}/x",
 		"ls $1",
 		"ls $@",
 		"cat <<'IN'\n$HOME\nIN",
