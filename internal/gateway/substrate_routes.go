@@ -380,12 +380,18 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		created, err := st.cfg.Actions.Create(r.Context(), req)
+		var classErr *SubstrateClassUnavailable
 		switch {
 		case errors.Is(err, ErrSubstrateTemplateNotFound):
 			writeSubstrateJSONError(w, http.StatusNotFound, "template_not_found")
 			return
 		case errors.Is(err, ErrSubstrateActorExists):
 			writeSubstrateJSONError(w, http.StatusConflict, "actor_exists")
+			return
+		case errors.As(err, &classErr):
+			// GAP-0386: say which class is missing, before any actor exists.
+			writeSubstrateJSON(w, http.StatusForbidden, map[string]any{"error": http.StatusText(http.StatusForbidden),
+				"reason": "sandbox_class_unavailable", "message": classErr.Error()})
 			return
 		case err != nil:
 			fmt.Fprintf(os.Stderr, "[substrate] create actor failed: %v\n", err)
