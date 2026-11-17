@@ -3827,7 +3827,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		var deadline time.Time
 		if holding && !streamBlocked && len(hold.buf) > 0 {
 			deadline = hold.since.Add(streamHoldMaxAge)
-		} else if earlyInitial && !streamBlocked && !initialBufFlushed && len(initialChunkBuf) > 0 && accumulated.Len() > 0 {
+		} else if earlyInitial && !streamBlocked && !initialBufFlushed && len(initialChunkBuf) > 0 && len(bufferedTCChunks) == 0 && accumulated.Len() > 0 {
 			deadline = lastChunkAt.Add(streamHoldMaxAge)
 		}
 		due := holdTimer.wait(deadline, time.Now())

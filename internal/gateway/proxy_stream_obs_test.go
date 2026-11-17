@@ -352,9 +352,11 @@ func TestGAP0625AgeDueChecksStayLocal(t *testing.T) {
 		}
 		check(t, aid, spans)
 	})
-	// The finding is followed by more than 500 bytes of text, so a full
-	// check reads it before the upstream goes idle.
-	marked := append(append(append(append([]string(nil), deltas[:100]...), " zq-aid-marker-0625 "), streamTailDeltas(800, size)...), "closing zq-0625-aid-end")
+	// The finding comes after the initial buffer went out (1600 bytes of
+	// text), so the local checks due by age let it out, and more than 500
+	// bytes follow it: the next full check reads it and ends the stream
+	// before the upstream goes idle.
+	marked := append(append(append(append([]string(nil), deltas[:200]...), " zq-aid-marker-0625 "), streamTailDeltas(800, size)...), "closing zq-0625-aid-end")
 	t.Run("passthrough/aid-finding", func(t *testing.T) {
 		aid := &obsCountingAID{marker: "zq-aid-marker-0625"}
 		insp, _ := obsBothInspector(aid)
@@ -527,6 +529,12 @@ func TestGAP0687ReplyExtractorReadsImagePromptAndTextInlineData(t *testing.T) {
 			reply                func(text string) map[string]any
 		}{"gemini/latin-1", "gemini", "/v1beta/models/gemini-test:generateContent", func(text string) map[string]any {
 			return gemReply(textBytes("text/plain; charset=iso-8859-1", append([]byte{'c', 'a', 'f', 0xE9, ' '}, text...)))
+		}},
+		struct {
+			name, provider, path string
+			reply                func(text string) map[string]any
+		}{"gemini/json-charset", "gemini", "/v1beta/models/gemini-test:generateContent", func(text string) map[string]any {
+			return gemReply(textBytes("application/json; charset=utf-8", []byte(streamTailJSON(map[string]string{"caption": text}))))
 		}},
 	)
 	for _, c := range buffered {

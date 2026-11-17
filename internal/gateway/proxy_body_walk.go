@@ -348,7 +348,7 @@ func (w *textWalker) replyTextMedia(key, s string) (string, bool) {
 		return "", false
 	}
 	mt := firstNonEmpty(w.cur.str("mimeType"), w.cur.str("mime_type"))
-	if !strings.Contains(mt, "/") || !textMediaType(mt) {
+	if base, _, _ := strings.Cut(mt, ";"); !strings.Contains(base, "/") || !textMediaType(base) {
 		return "", false
 	}
 	clean := strings.Map(func(r rune) rune {
