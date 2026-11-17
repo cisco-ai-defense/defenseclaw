@@ -57,6 +57,8 @@ const (
 	DefaultMaxActors = guardrail.ToolChainMaxPartitions
 	// DefaultMaxOpenStores bounds the open SQLite handles; idle ones close.
 	DefaultMaxOpenStores = 128
+	// DefaultWALGuardEvery is how often Run checkpoints the open stores.
+	DefaultWALGuardEvery = 2 * time.Second
 )
 
 // egressChains are the chains whose terminal step is external egress, and
@@ -102,6 +104,10 @@ type Options struct {
 	MaxActors int
 	// MaxOpenStores bounds the open per-actor stores (default 128).
 	MaxOpenStores int
+	// WALGuardEvery is how often Run copies the open per-actor stores'
+	// write-ahead logs into their databases (default 2 s, as the gateway's
+	// WAL guard does for audit.db; GAP-0404).
+	WALGuardEvery time.Duration
 	// ParentOf returns the parent UID of a forked actor from its verified
 	// registration ("" for none). The leader copies the parent's windows the
 	// first time it sees the child, whatever comes first (GAP-0091).
@@ -333,6 +339,9 @@ func New(opts Options) (*Service, error) {
 	}
 	if opts.MaxOpenStores <= 0 {
 		opts.MaxOpenStores = DefaultMaxOpenStores
+	}
+	if opts.WALGuardEvery <= 0 {
+		opts.WALGuardEvery = DefaultWALGuardEvery
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -1714,18 +1723,62 @@ func (s *Service) purgeDeleted(ctx context.Context, held []Actor) int {
 	return n
 }
 
-// Run sweeps every 10 minutes until ctx ends.
+// Run sweeps every 10 minutes, and checkpoints the open stores every
+// WALGuardEvery, until ctx ends.
 func (s *Service) Run(ctx context.Context) error {
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
+	wal := time.NewTicker(s.opts.WALGuardEvery)
+	defer wal.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-wal.C:
+			s.guardWALs(ctx)
 		case <-t.C:
 			if _, err := s.Sweep(ctx); err != nil {
 				s.warnf("sweep: %v", err)
 			}
+		}
+	}
+}
+
+// The WAL guard of the per-actor stores: the log is copied on every pass,
+// the writer is taken for at most storeWALWriterBudget when the log is over
+// storeWALLimitBytes, and an idle log is cut back (audit.Store.
+// CheckpointWALIfLarge, the gateway's pass for audit.db).
+const (
+	storeWALLimitBytes   = 4 << 20
+	storeWALWriterBudget = 50 * time.Millisecond
+	storeWALPassTimeout  = 10 * time.Second
+)
+
+// guardWALs checkpoints the write-ahead log of every open per-actor store.
+// An audit store runs with SQLite's own checkpoints off
+// (wal_autocheckpoint=0): its owner copies the log, as the gateway's WAL
+// guard does for audit.db. Nothing did for the chain stores, so each actor's
+// log grew with every call it made, about 300 KiB per hook call (81 MB after
+// 270 calls), on the leader's volume and in its memory (GAP-0404). A store
+// closed or purged meanwhile answers not ready and is skipped.
+func (s *Service) guardWALs(ctx context.Context) {
+	s.mu.Lock()
+	stores := make([]*audit.Store, 0, s.open)
+	for _, e := range s.actors {
+		if e.store != nil {
+			stores = append(stores, e.store)
+		}
+	}
+	s.mu.Unlock()
+	for _, st := range stores {
+		if ctx.Err() != nil {
+			return
+		}
+		pctx, cancel := context.WithTimeout(ctx, storeWALPassTimeout)
+		_, err := st.CheckpointWALIfLarge(pctx, storeWALLimitBytes, storeWALWriterBudget)
+		cancel()
+		if err != nil && ctx.Err() == nil && st.Ready() && !errors.Is(err, context.DeadlineExceeded) {
+			s.warnf("chain store WAL checkpoint: %v", err)
 		}
 	}
 }

@@ -46,20 +46,31 @@ func settledRSS() int64 {
 
 // GAP-0404: the leader's memory grew about 90 KiB per audited tool call
 // (+215 MiB after 2,434 calls of 8 actors on E1) and kept most of it after
-// the actors were deleted. Each per-actor chain store opened with the
-// gateway's audit settings: a 20 MB SQLite page cache per connection, on
-// the writer and a 4-connection read pool, outside the Go heap, filling as
-// the store grows. The per-actor stores now open WithSmallFootprint, so an
-// actor's store holds at most a fixed small cache whatever its calls.
+// the actors were deleted. Two things grew with the calls:
+//   - each actor's write-ahead log: audit stores run with SQLite's own
+//     checkpoints off and the leader never copied the chain stores' logs, so
+//     each grew by about 300 KiB per hook call (81 MB after 270 calls), on
+//     the volume and in the page cache the pod is charged for;
+//   - each store's SQLite page cache: the gateway's 20 MB per connection, on
+//     the writer and a 4-connection read pool, outside the Go heap.
 //
-// The bound is the E1 cell's: growth over N calls of 8 actors at most
-// N x 2 KiB + 16 MiB after the stores are open.
+// The leader's Run loop now checkpoints the open stores (guardWALs) and the
+// stores open WithSmallFootprint.
+//
+// The bound is the E1 cell's: resident growth over N calls of 8 actors at
+// most N x 2 KiB + 16 MiB once the stores are open, and every actor's log
+// stays at most a few passes of writes (16 MiB here).
 func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 	if leaderRSS() < 0 {
 		t.Skip("resident memory is read from /proc/self/statm (Linux)")
 	}
 	h := newHarness(t, t.TempDir(), Options{})
 	ctx := context.Background()
+	// The leader runs the service's loop (substrate_serve.go).
+	runCtx, stop := context.WithCancel(ctx)
+	ran := make(chan struct{})
+	go func() { defer close(ran); _ = h.svc.Run(runCtx) }()
+	defer func() { stop(); <-ran }()
 	actors := make([]Actor, 8)
 	for i := range actors {
 		actors[i] = Actor{Atespace: "dc-eng", UID: fmt.Sprintf("25a1da0f-1c9b-4ef7-8248-c276138c7f%02d", i)}
@@ -119,6 +130,16 @@ func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 	grew := settledRSS() - before
 	bound := calls*2<<10 + 16<<20
 	t.Logf("%d calls: leader memory +%d KiB (%d B per call), bound %d KiB", calls, grew>>10, grew/calls, bound>>10)
+	var largest int64
+	for _, a := range actors {
+		if info, err := os.Stat(h.svc.dbPath(a) + "-wal"); err == nil && info.Size() > largest {
+			largest = info.Size()
+		}
+	}
+	t.Logf("largest actor write-ahead log: %d KiB", largest>>10)
+	if largest > 16<<20 {
+		t.Fatalf("an actor's write-ahead log is %d KiB after %d calls of its actor: nothing copies it into the store", largest>>10, perActor+10)
+	}
 	if grew > bound {
 		t.Fatalf("leader memory grew %d KiB over %d calls (%d B per call), over the bound of %d KiB (2 KiB per call + 16 MiB)",
 			grew>>10, calls, grew/calls, bound>>10)
