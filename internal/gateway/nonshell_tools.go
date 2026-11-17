@@ -557,6 +557,13 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 			}
 			judge(child, actionfacts.Analyze(child), simple.Text, simple.Text)
 		}
+		// An xargs fed fixed words (echo|printf WORDS | xargs CMD) runs CMD
+		// with them, which the call's facts do not model: the lane reads
+		// that call as typed too, so a credential file copied through xargs
+		// gets the path rules of the copy (rel-1-0-10:GAP-0997).
+		for _, twin := range xargsStaticInputTwinRequests(request) {
+			out = shellToolFindings(ctx, twin, out)
+		}
 	}
 	// A sandbox call's relative operands name files in the guest's own
 	// working directory, where "~" is the guest home: the request's directory
