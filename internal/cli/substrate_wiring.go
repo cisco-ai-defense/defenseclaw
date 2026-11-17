@@ -43,7 +43,8 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 		act = controller.NoActivity{}
 	}
 	// Without a CPU source (the chart wires no usage receiver) idle suspend
-	// rests on the activity feed alone (GAP-0465).
+	// rests on the activity feed (GAP-0465): an attached actor is not idle
+	// unless substrate.idle_suspend_without_cpu says so (GAP-0534).
 	live := substrateControllerLiveFunc(cfg, idleAfter, resolver, sink)
 	lv := live(cfg)
 	o := controller.Options{
@@ -52,7 +53,8 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 		Sink:     sink,
 		Settings: lv.Settings, Secrets: lv.Secrets,
 		LauncherAtespaces: lv.LauncherAtespaces, RequireAttestation: lv.RequireAttestation, Templates: lv.Templates,
-		KitVersion: appVersion, IdleSuspendAfter: lv.IdleSuspendAfter, Resets: resets, Namespace: namespace,
+		KitVersion: appVersion, IdleSuspendAfter: lv.IdleSuspendAfter, IdleSuspendWithoutCPU: lv.IdleSuspendWithoutCPU,
+		Resets: resets, Namespace: namespace,
 	}
 	if src != nil {
 		o.Config, o.Live = src, live
@@ -88,7 +90,7 @@ func substrateControllerLive(cfg *config.Config, idle bool, resolver controller.
 	return controller.Live{
 		Settings: controller.SettingsFromConfig(cfg), Secrets: controller.SecretsFromConfig(cfg),
 		LauncherAtespaces: controller.LauncherSet(cfg), RequireAttestation: sub.AttestationRequired(), Templates: sub.Templates,
-		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after,
+		Attestor: attestor, Resolver: resolver, IdleSuspendAfter: after, IdleSuspendWithoutCPU: sub.IdleSuspendWithoutCPU,
 	}
 }
 

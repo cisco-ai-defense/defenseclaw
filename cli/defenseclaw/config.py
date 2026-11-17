@@ -4791,6 +4791,9 @@ class SubstrateConfig:
     templates: SubstrateTemplatesConfig = field(default_factory=SubstrateTemplatesConfig)
     default_sandbox_class: str = ""
     idle_suspend_after: str = ""
+    # Opt-in: without a CPU feed, silence alone is idle, an attached
+    # actor's too (GAP-0534).
+    idle_suspend_without_cpu: bool | None = None
     # block (default) or alert: a request after a secret read at the egress
     # callout; the leader reads it (GAP-0250).
     chain_egress_action: str = ""
@@ -8138,6 +8141,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         templates=_merge_substrate_templates(raw.get("templates")),
         default_sandbox_class=str(raw.get("default_sandbox_class", "") or ""),
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
+        idle_suspend_without_cpu=_optional_bool(raw.get("idle_suspend_without_cpu")),
         chain_egress_action=str(raw.get("chain_egress_action", "") or ""),
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         unattended=SubstrateUnattendedConfig(

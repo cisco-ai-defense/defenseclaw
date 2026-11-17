@@ -60,6 +60,9 @@ const (
 	// idle; DefaultCPUSampleMaxAge how fresh the sample must be.
 	DefaultIdleCPU         = 0.05
 	DefaultCPUSampleMaxAge = 2 * time.Minute
+	// DefaultAttachMaxAge is three of the gateway's attachment reports
+	// (one a minute, gateway.substrateAttachReportEvery).
+	DefaultAttachMaxAge = 3 * time.Minute
 	// DefaultTaskEndGrace is how long a finished --task actor keeps its
 	// worker before it is suspended (GAP-0274): time for the launcher that
 	// followed it to read the end; pull, logs and connect wake it.
@@ -93,8 +96,9 @@ type Options struct {
 	Attestor Attestor
 	Activity ActivitySource
 	// CPU, when set, is the CPU source of idle suspend: an idle actor also
-	// needs a fresh low sample. Without one silence alone is enough
-	// (GAP-0465).
+	// needs a fresh low sample. Without one an idle actor needs no open
+	// terminal attachment (AttachSource, GAP-0534), unless
+	// IdleSuspendWithoutCPU makes silence alone enough (GAP-0465).
 	CPU      CPUSource
 	Registry Registry
 	Resolver ProfileResolver
@@ -123,8 +127,14 @@ type Options struct {
 	KitVersion string
 	// IdleSuspendAfter 0 turns idle suspend off.
 	IdleSuspendAfter time.Duration
-	IdleCPU          float64
-	CPUSampleMaxAge  time.Duration
+	// IdleSuspendWithoutCPU (substrate.idle_suspend_without_cpu): without
+	// a CPU source, silence alone is idle, an attached actor's too.
+	IdleSuspendWithoutCPU bool
+	// AttachMaxAge is how long an attachment report means an attachment is
+	// open; default DefaultAttachMaxAge.
+	AttachMaxAge    time.Duration
+	IdleCPU         float64
+	CPUSampleMaxAge time.Duration
 	// TaskEndGrace is how long a finished --task actor runs on before it
 	// is suspended; default DefaultTaskEndGrace.
 	TaskEndGrace time.Duration
@@ -265,6 +275,7 @@ func New(o Options) (*Controller, error) {
 	def(&o.ConflictWindow, DefaultConflictWindow)
 	def(&o.CPUSampleMaxAge, DefaultCPUSampleMaxAge)
 	def(&o.TaskEndGrace, DefaultTaskEndGrace)
+	def(&o.AttachMaxAge, DefaultAttachMaxAge)
 	if o.IdleCPU <= 0 {
 		o.IdleCPU = DefaultIdleCPU
 	}
@@ -286,7 +297,8 @@ func New(o Options) (*Controller, error) {
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
 		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
-		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter, LoadedAt: o.Now()}
+		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter,
+		IdleSuspendWithoutCPU: o.IdleSuspendWithoutCPU, LoadedAt: o.Now()}
 	if o.Config != nil {
 		_, lv.Digest = o.Config.Current()
 	}

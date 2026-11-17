@@ -82,7 +82,7 @@ func init() {
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerOnce, "once", false, "run one reconcile pass and exit")
 	substrateControllerCmd.Flags().BoolVar(&substrateControllerCheck, "check", false, "check access to ate-api-server and exit")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerUsage, "usage-listen", "",
-		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; empty turns idle suspend off. "+
+		"address for Substrate's per-actor usage records (OTLP/HTTP POST /v1/logs or ndjson), the CPU source of idle suspend; without it an attached actor is never idle (substrate.idle_suspend_without_cpu changes that). "+
 			"Loopback only, unless --usage-tls-cert, --usage-tls-key and --usage-client-ca make it mutual TLS")
 	substrateControllerCmd.Flags().StringVar(&substrateControllerLeader, "leader-address", "",
 		"gateway leader host:port: the registrations the launcher writes (required)")

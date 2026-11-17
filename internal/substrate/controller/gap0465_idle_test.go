@@ -17,8 +17,9 @@ import (
 // (--usage-listen), so it has no CPU source. Idle suspend then needed a
 // CPU sample that never came, and idle_suspend_after suspended nothing in
 // any chart install. Without a CPU source, silence for idle_suspend_after
-// is enough once the actor's activity is known; a CPU source, when wired,
-// still has the last word.
+// is enough once the actor's activity is known and no terminal is attached
+// (the fake reports no attachment here; GAP-0534 covers attached actors);
+// a CPU source, when wired, still has the last word.
 func TestGAP0465IdleSuspendWithoutCPUSource(t *testing.T) {
 	r := newRig(t, func(_ *config.Config, o *controller.Options) { o.CPU = nil })
 	state := func(a *ateapi.Actor) ateapi.ActorState {

@@ -23,12 +23,18 @@
 // kind to the leader every few seconds (MethodActivityObserve). The leader
 // keeps the newest of all replicas (Store). The controller reads one
 // snapshot per idle pass (Source, MethodActivitySnapshot). A lost batch
-// only makes an actor look idle a few seconds early; the controller still
-// needs a low CPU sample before it suspends.
+// only makes an actor look idle a few seconds early; the controller also
+// needs a low CPU sample, or without a CPU feed no open attachment, before
+// it suspends.
 //
 // KindTaskEnd is not activity: it is when an actor's --task run ended (the
 // relay's report), kept apart (Snapshot.Ended) so that the controller can
 // free a finished task's worker (GAP-0274).
+//
+// KindAttach is not activity either: a gateway reports it about every
+// minute while it proxies a terminal attachment (WebSocket or long-poll),
+// kept apart (Snapshot.Attached) so that a controller without a CPU feed
+// never suspends an attached actor (GAP-0534).
 package activity
 
 import (
@@ -47,6 +53,8 @@ const (
 	KindEgress = "egress"
 	// KindTaskEnd is the end of a --task run, not activity.
 	KindTaskEnd = "task_end"
+	// KindAttach is an open terminal attachment, not activity.
+	KindAttach = "attach"
 )
 
 const (
@@ -73,11 +81,13 @@ type Batch struct {
 }
 
 // Snapshot is the leader's answer: last activity by actor UID, the UIDs
-// with an ask waiting, and when each actor's --task run last ended.
+// with an ask waiting, when each actor's --task run last ended and when a
+// terminal attachment of it was last seen open.
 type Snapshot struct {
-	Last    map[string]time.Time `json:"last"`
-	Pending []string             `json:"pending,omitempty"`
-	Ended   map[string]time.Time `json:"ended,omitempty"`
+	Last     map[string]time.Time `json:"last"`
+	Pending  []string             `json:"pending,omitempty"`
+	Ended    map[string]time.Time `json:"ended,omitempty"`
+	Attached map[string]time.Time `json:"attached,omitempty"`
 }
 
 // ---- gateway replica ----
@@ -169,10 +179,11 @@ type Store struct {
 	Pending func() []string
 	Now     func() time.Time
 
-	mu    sync.Mutex
-	last  map[string]time.Time
-	ended map[string]time.Time // KindTaskEnd
-	seen  map[string]time.Time // when the leader last heard of the UID
+	mu       sync.Mutex
+	last     map[string]time.Time
+	ended    map[string]time.Time // KindTaskEnd
+	attached map[string]time.Time // KindAttach
+	seen     map[string]time.Time // when the leader last heard of the UID
 }
 
 func (s *Store) now() time.Time {
@@ -191,6 +202,7 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 	defer s.mu.Unlock()
 	if s.last == nil {
 		s.last, s.ended, s.seen = map[string]time.Time{}, map[string]time.Time{}, map[string]time.Time{}
+		s.attached = map[string]time.Time{}
 	}
 	for _, e := range b.Entries {
 		if e.UID == "" {
@@ -201,8 +213,11 @@ func (s *Store) Observe(_ context.Context, b Batch) (struct{}, error) {
 				t = now
 			}
 			into := s.last
-			if kind == KindTaskEnd {
+			switch kind {
+			case KindTaskEnd:
 				into = s.ended
+			case KindAttach:
+				into = s.attached
 			}
 			if t.After(into[e.UID]) {
 				into[e.UID] = t
@@ -222,6 +237,7 @@ func (s *Store) prune(now time.Time) {
 			delete(s.seen, uid)
 			delete(s.last, uid)
 			delete(s.ended, uid)
+			delete(s.attached, uid)
 		}
 	}
 }
@@ -238,6 +254,12 @@ func (s *Store) Snapshot(context.Context, struct{}) (Snapshot, error) {
 		out.Ended = make(map[string]time.Time, len(s.ended))
 		for uid, t := range s.ended {
 			out.Ended[uid] = t
+		}
+	}
+	if len(s.attached) > 0 {
+		out.Attached = make(map[string]time.Time, len(s.attached))
+		for uid, t := range s.attached {
+			out.Attached[uid] = t
 		}
 	}
 	s.mu.Unlock()
@@ -265,6 +287,8 @@ type Source struct {
 	snap    Snapshot
 	pending map[string]bool
 	at      time.Time
+	// got is when snap came from the leader.
+	got time.Time
 }
 
 func (s *Source) now() time.Time {
@@ -274,11 +298,23 @@ func (s *Source) now() time.Time {
 	return time.Now()
 }
 
-func (s *Source) refresh() {
-	ttl := s.TTL
-	if ttl <= 0 {
-		ttl = DefaultSnapshotTTL
+func (s *Source) ttl() time.Duration {
+	if s.TTL <= 0 {
+		return DefaultSnapshotTTL
 	}
+	return s.TTL
+}
+
+// fresh reports whether the snapshot in hand is recent: no older than two
+// replica flushes and the TTL. An older one (the leader unreachable) makes
+// every actor's activity, task end and attachment unknown, so the
+// controller suspends nothing (GAP-0538).
+func (s *Source) fresh() bool {
+	return !s.got.IsZero() && s.now().Sub(s.got) <= 2*DefaultFlushInterval+s.ttl()
+}
+
+func (s *Source) refresh() {
+	ttl := s.ttl()
 	now := s.now()
 	if !s.at.IsZero() && now.Sub(s.at) < ttl {
 		return
@@ -287,13 +323,13 @@ func (s *Source) refresh() {
 	defer cancel()
 	var snap Snapshot
 	if err := s.Leader.Call(ctx, leader.MethodActivitySnapshot, leader.NewRequestID(), struct{}{}, &snap); err != nil {
-		// Keep the last snapshot; retry at the next pass. An actor whose
-		// activity is unknown is not called idle for it (LastActivity
-		// reports false only when no snapshot ever arrived).
+		// Keep the last snapshot while it is fresh; retry at the next
+		// pass. An actor whose activity is unknown (no fresh snapshot) is
+		// not called idle for it.
 		s.at = now.Add(-ttl + time.Second)
 		return
 	}
-	s.snap, s.at = snap, now
+	s.snap, s.at, s.got = snap, now, now
 	s.pending = make(map[string]bool, len(snap.Pending))
 	for _, uid := range snap.Pending {
 		s.pending[uid] = true
@@ -305,6 +341,9 @@ func (s *Source) LastActivity(uid string) (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refresh()
+	if !s.fresh() {
+		return time.Time{}, false
+	}
 	t, ok := s.snap.Last[uid]
 	return t, ok
 }
@@ -314,7 +353,22 @@ func (s *Source) TaskEnded(uid string) (time.Time, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refresh()
+	if !s.fresh() {
+		return time.Time{}, false
+	}
 	t, ok := s.snap.Ended[uid]
+	return t, ok
+}
+
+// Attached implements controller.AttachSource.
+func (s *Source) Attached(uid string) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refresh()
+	if !s.fresh() {
+		return time.Time{}, false
+	}
+	t, ok := s.snap.Attached[uid]
 	return t, ok
 }
 

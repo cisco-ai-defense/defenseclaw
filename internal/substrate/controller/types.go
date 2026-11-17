@@ -78,6 +78,15 @@ type TaskEndSource interface {
 	TaskEnded(uid string) (time.Time, bool)
 }
 
+// AttachSource is an ActivitySource that also knows when a terminal
+// attachment (WebSocket or long-poll) of an actor was last seen open: a
+// gateway reports one about every minute while it proxies it (GAP-0534).
+// Without a CPU source idle suspend needs it: an activity feed that cannot
+// tell attachments makes no actor idle.
+type AttachSource interface {
+	Attached(uid string) (time.Time, bool)
+}
+
 // CPUSource reports an actor's recent CPU use in cores and when it was
 // sampled. UsageCPU computes it from Substrate's per-actor usage records
 // (ate.actor.usage_sampled); controllerfake.Activity is the test fake.

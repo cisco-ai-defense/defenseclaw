@@ -230,6 +230,10 @@ const (
 	// SubstrateActivityTaskEnd marks the end of an actor's --task run: the
 	// controller frees the actor's worker (GAP-0274).
 	SubstrateActivityTaskEnd = "task_end"
+	// SubstrateActivityAttach is an open terminal attachment, reported
+	// about every minute while the attach route proxies it: a controller
+	// without a CPU feed does not suspend an attached actor (GAP-0534).
+	SubstrateActivityAttach = "attach"
 )
 
 type substrateState struct {

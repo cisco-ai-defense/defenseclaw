@@ -29,10 +29,14 @@ import (
 // egress activity, never with a pending ask and never for a --task run
 // unless its profile allows it. With a CPU source the actor also needs a
 // fresh low CPU sample (no sample means not idle). Without one (the chart
-// wires no usage receiver, so this is the usual case) silence alone is
-// enough, but only for an actor the activity feed has heard of: unknown
-// activity is not idle (GAP-0465). Without an activity feed (nil or
-// NoActivity, the create path's controller) nothing is idle.
+// wires no usage receiver, so this is the usual case) a busy actor shows
+// nothing, so only positive evidence counts (GAP-0534): the activity feed
+// has heard of the actor (GAP-0465) and reports attachments, no terminal
+// is attached, and the window runs from the last attachment too. A
+// detached actor running a silent job is then suspended: the known limit.
+// IdleSuspendWithoutCPU makes silence alone enough, an attached actor's
+// too. Without an activity feed (nil or NoActivity, the create path's
+// controller) nothing is idle.
 //
 // A --task actor whose task ended is suspended TaskEndGrace after the end
 // (taskEnded), so a batch larger than the pool drains through it
@@ -76,6 +80,20 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 	seen, heard := c.o.Activity.LastActivity(uid)
 	if heard && seen.After(last) {
 		last = seen
+	}
+	if c.o.CPU == nil && !c.live().IdleSuspendWithoutCPU {
+		src, ok := c.o.Activity.(AttachSource)
+		if !heard || !ok {
+			return nil // unknown activity or attachments: not idle
+		}
+		if at, ok := src.Attached(uid); ok {
+			if now.Sub(at) <= c.o.AttachMaxAge {
+				return nil // a terminal is attached
+			}
+			if at.After(last) {
+				last = at
+			}
+		}
 	}
 	if last.IsZero() || now.Sub(last) < after {
 		return nil

@@ -45,6 +45,8 @@ type Live struct {
 	Attestor           Attestor
 	Resolver           ProfileResolver
 	IdleSuspendAfter   time.Duration
+	// IdleSuspendWithoutCPU is Options.IdleSuspendWithoutCPU.
+	IdleSuspendWithoutCPU bool
 	// LoadedAt is when the controller put this config in force: a policy
 	// write it causes measures its lag from here (GAP-0392).
 	LoadedAt time.Time
