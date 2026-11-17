@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from defenseclaw.openclaw_plugin_config import (
     configured_openclaw_hook_mode,
     openclaw_hook_mode_detail,
+    openclaw_install_policy_recorded_state,
     openclaw_install_policy_remediation,
     openclaw_install_policy_state,
 )
@@ -197,3 +198,21 @@ class OpenClawInstallPolicyRemediationTest(unittest.TestCase):
 
     def test_operator_policy(self):
         self.assertIn("remove your own security.installPolicy", openclaw_install_policy_remediation("operator", "win32"))
+
+
+class OpenClawInstallPolicyRecordedStateTest(unittest.TestCase):
+    # GAP-1170: doctor and status read the reason the gateway recorded.
+    def test_reads_the_gateway_state(self):
+        data_dir = tempfile.mkdtemp()
+        cfg = SimpleNamespace(data_dir=data_dir)
+        self.assertEqual(openclaw_install_policy_recorded_state(cfg), "")
+        reason = (
+            "not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows "
+            "(needs 2026.11.3 or later): it counts inherit-only entries"
+        )
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            json.dump({"state": reason, "openclaw_version": "2026.8.35"}, f)
+        self.assertEqual(openclaw_install_policy_recorded_state(cfg), reason)
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertEqual(openclaw_install_policy_recorded_state(cfg), "")

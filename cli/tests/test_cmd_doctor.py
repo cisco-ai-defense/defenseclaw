@@ -457,11 +457,17 @@ class DoctorGuardrailTests(unittest.TestCase):
             patch("defenseclaw.openclaw_plugin_config.openclaw_plugin_evidence", return_value=("native", "plugin seen", True)),
             patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_state", return_value="none"),
             patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_wanted", return_value=True),
+            patch(
+                "defenseclaw.openclaw_plugin_config.openclaw_install_policy_recorded_state",
+                return_value="not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows (needs 2026.11.3 or later)",
+            ),
         ):
             _check_proxy_interception(cfg, result, live_health={})
         rows = {c["label"]: c for c in result.checks}
         self.assertIn("OpenClaw install admission", rows, result.checks)
         self.assertEqual(rows["OpenClaw install admission"]["status"], "warn")
+        # GAP-1170: the row names the reason the gateway recorded.
+        self.assertIn("2026.8.35 is too old for strict install policy", rows["OpenClaw install admission"]["detail"])
         self.assertEqual(result.failed, 0, result.checks)
 
     def test_proxy_interception_waits_for_first_report_after_restart(self):

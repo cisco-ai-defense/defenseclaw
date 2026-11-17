@@ -22,6 +22,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -62,6 +64,24 @@ var openClawInstallPolicyRefresher = func(opts connector.SetupOpts) (string, err
 
 // openClawInstallPolicyRefreshMu runs one refresh at a time.
 var openClawInstallPolicyRefreshMu sync.Mutex
+
+// A refresh that fails (the openclaw.json lock held past its wait, a write
+// error) is retried after each delay in turn; while one is still owed,
+// openClawInstallPolicyPending makes the next reload refresh again even when
+// it changes nothing for the install policy. Tests replace the delays.
+var (
+	openClawInstallPolicyRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second, 2 * time.Minute, 5 * time.Minute}
+	openClawInstallPolicyPending     atomic.Bool
+	openClawInstallPolicyRetrying    atomic.Bool
+)
+
+// openClawInstallPolicyReloadWanted reports a reload that should refresh
+// the OpenClaw install policy: its inputs changed, or an earlier refresh
+// failed and is still owed.
+func openClawInstallPolicyReloadWanted(oldCfg, newCfg *config.Config) bool {
+	return openClawInstallPolicyNeedsRefresh(oldCfg, newCfg) ||
+		(openClawInstallPolicyPending.Load() && openClawInstallPolicyGuarded(newCfg))
+}
 
 // openClawInstallPolicyNeedsRefresh reports a reload that changes the
 // OpenClaw install admission of a configured, guarded OpenClaw: a rule pack
@@ -113,6 +133,10 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config) connector.SetupOpts {
 // admission off. Every refresh logs the state it left and why. OpenClaw
 // reads openclaw.json at each install, so no restart is needed.
 func (s *Sidecar) refreshOpenClawInstallPolicy() {
+	s.refreshOpenClawInstallPolicyAttempt(0)
+}
+
+func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int) {
 	if s == nil {
 		return
 	}
@@ -120,6 +144,7 @@ func (s *Sidecar) refreshOpenClawInstallPolicy() {
 	defer openClawInstallPolicyRefreshMu.Unlock()
 	cfg := s.currentConfig()
 	if !openClawInstallPolicyGuarded(cfg) {
+		openClawInstallPolicyPending.Store(false)
 		return
 	}
 	setting := "off"
@@ -127,9 +152,20 @@ func (s *Sidecar) refreshOpenClawInstallPolicy() {
 		setting = "on"
 	}
 	state, err := openClawInstallPolicyRefresher(openClawInstallPolicyRefreshOpts(cfg))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; run defenseclaw setup openclaw\n", setting, err)
+	if err == nil {
+		openClawInstallPolicyPending.Store(false)
+		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission after the config reload (install_policy %s): %s\n", setting, state)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission after the config reload (install_policy %s): %s\n", setting, state)
+	openClawInstallPolicyPending.Store(true)
+	if attempt < len(openClawInstallPolicyRetryDelays) && openClawInstallPolicyRetrying.CompareAndSwap(false, true) {
+		delay := openClawInstallPolicyRetryDelays[attempt]
+		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; retrying in %s\n", setting, err, delay)
+		time.AfterFunc(delay, func() {
+			openClawInstallPolicyRetrying.Store(false)
+			s.refreshOpenClawInstallPolicyAttempt(attempt + 1)
+		})
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; the next config reload tries again, or run defenseclaw setup openclaw\n", setting, err)
 }

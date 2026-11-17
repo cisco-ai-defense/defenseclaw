@@ -195,6 +195,24 @@ def openclaw_install_policy_state(cfg: object) -> str:
     return "ours" if args[-3:] == ["connector", "openclaw", "install-policy"] else "operator"
 
 
+def openclaw_install_policy_recorded_state(cfg: object) -> str:
+    # The state the gateway left at its last setup or reload refresh
+    # (registered, off, "not registered: <reason>"), from
+    # <data_dir>/openclaw-install-policy-state.json, or "" when there is none.
+    # It says why OpenClaw does not ask DefenseClaw, for example that
+    # OpenClaw 2026.8.35 is too old for strict install policy on Windows.
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return ""
+    try:
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), encoding="utf-8") as stream:
+            record = json.load(stream)
+    except (OSError, ValueError):
+        return ""
+    state = record.get("state") if isinstance(record, dict) else None
+    return state.strip() if isinstance(state, str) else ""
+
+
 def openclaw_install_policy_remediation(policy_state: str, platform: str | None = None) -> str:
     # What doctor says when install_policy is on but OpenClaw does not ask
     # DefenseClaw. The gateway runs setup, so the reason is in gateway.log.

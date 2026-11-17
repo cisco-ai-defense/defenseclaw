@@ -540,6 +540,7 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if len(errs) > 0 {
 		return fmt.Errorf("openclaw teardown errors: %s", strings.Join(errs, "; "))
 	}
+	discardOpenClawInstallPolicyState(opts.DataDir)
 	if !opts.ManagedEnterprise && opts.DataDir != "" {
 		if err := c.VerifyClean(opts); err != nil {
 			return fmt.Errorf("openclaw verify clean before token revocation: %w", err)

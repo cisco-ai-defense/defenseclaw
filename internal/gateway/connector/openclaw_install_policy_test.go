@@ -45,7 +45,7 @@ func installPolicyFixture(t *testing.T, pristine string) (configPath, command st
 	}
 	prevExe, prevTrust := openClawInstallPolicyExecutable, openClawInstallPolicyTrusted
 	openClawInstallPolicyExecutable = func() (string, error) { return command, nil }
-	openClawInstallPolicyTrusted = func(string, string) error { return nil }
+	openClawInstallPolicyTrusted = func(string, string, string) error { return nil }
 	var notice bytes.Buffer
 	prevOut := openClawTeardownNoticeOutput
 	openClawTeardownNoticeOutput = &notice

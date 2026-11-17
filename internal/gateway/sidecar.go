@@ -2547,7 +2547,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// A rule pack switched to or from strict turns the OpenClaw install
 	// admission on or off (install_policy auto). It runs off the reload
 	// path: it takes the openclaw.json lock that setup holds.
-	if openClawInstallPolicyNeedsRefresh(oldHookCfg, appliedCfg) {
+	if openClawInstallPolicyReloadWanted(oldHookCfg, appliedCfg) {
 		go s.refreshOpenClawInstallPolicy()
 	}
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {

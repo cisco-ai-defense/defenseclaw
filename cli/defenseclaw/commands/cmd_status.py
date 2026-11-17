@@ -1087,10 +1087,27 @@ def _print_agents(
 
             hook_mode, hook_detail, _seen = openclaw_plugin_evidence(cfg, None if sidecar_down else health)
             _status_row("OpenClaw hooks", f"{hook_mode} ({hook_detail})")
-            from defenseclaw.openclaw_plugin_config import openclaw_operator_admin_off
+            from defenseclaw.openclaw_plugin_config import (
+                openclaw_install_policy_recorded_state,
+                openclaw_install_policy_state,
+                openclaw_install_policy_wanted,
+                openclaw_operator_admin_off,
+            )
 
             if openclaw_operator_admin_off():
                 _status_row("OpenClaw remediation", "off (no operator.admin)")
+            if openclaw_install_policy_wanted(cfg):
+                if openclaw_install_policy_state(cfg) == "ours":
+                    _status_row("OpenClaw installs", "checked by DefenseClaw before OpenClaw installs them")
+                else:
+                    recorded = openclaw_install_policy_recorded_state(cfg)
+                    _status_row(
+                        "OpenClaw installs",
+                        ux._style(
+                            recorded if recorded.startswith("not registered:") else "not registered (run defenseclaw doctor)",
+                            fg="yellow",
+                        ),
+                    )
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:

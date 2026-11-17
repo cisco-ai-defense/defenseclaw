@@ -97,7 +97,7 @@ func TestOpenClawRefreshInstallPolicyReportsWhyNotRegistered(t *testing.T) {
 	if err := c.registerPlugin(opts); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	openClawInstallPolicyTrusted = func(string, string) error { return errors.New(`C:\ lets BUILTIN\Users change its entries`) }
+	openClawInstallPolicyTrusted = func(string, string, string) error { return errors.New(`C:\ lets BUILTIN\Users change its entries`) }
 	state, err := c.RefreshInstallPolicy(opts)
 	if err != nil || !strings.HasPrefix(state, "not registered: ") || !strings.Contains(state, "BUILTIN") {
 		t.Fatalf("state = %q, err = %v", state, err)

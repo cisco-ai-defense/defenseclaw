@@ -17,6 +17,8 @@
 package gateway
 
 import (
+	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -127,5 +129,72 @@ func TestRefreshOpenClawInstallPolicyQuickReloadsEndOnTheLatest(t *testing.T) {
 	}
 	if len(applied) != 3 || !applied[len(applied)-1] {
 		t.Fatalf("applied %v: the last refresh must write the current (strict, on) config", applied)
+	}
+}
+
+// GAP-1128 round 3: a refresh that fails (here the openclaw.json lock held
+// past its wait) is retried; the retry ends registered and clears the debt.
+// When every retry fails, the next reload refreshes again even though it
+// changes nothing for the install policy.
+func TestRefreshOpenClawInstallPolicyRetriesAFailedRefresh(t *testing.T) {
+	prevRefresher, prevDelays := openClawInstallPolicyRefresher, openClawInstallPolicyRetryDelays
+	t.Cleanup(func() {
+		openClawInstallPolicyRefresher, openClawInstallPolicyRetryDelays = prevRefresher, prevDelays
+		openClawInstallPolicyPending.Store(false)
+		openClawInstallPolicyRetrying.Store(false)
+	})
+	errLockBusy := errors.New("lock_busy")
+	openClawInstallPolicyRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	dir := t.TempDir()
+	on := openClawInstallPolicyTestConfig(t, dir, "on")
+	s := &Sidecar{}
+	s.cfgCurrent.Store(on)
+
+	var calls atomic.Int32
+	done := make(chan string, 4)
+	openClawInstallPolicyRefresher = func(connector.SetupOpts) (string, error) {
+		if calls.Add(1) == 1 {
+			return "", fmt.Errorf("%w: openclaw.json.lock held by another process for 10s", errLockBusy)
+		}
+		done <- "registered"
+		return "registered", nil
+	}
+	s.refreshOpenClawInstallPolicy()
+	if !openClawInstallPolicyPending.Load() {
+		t.Fatal("a failed refresh must stay owed")
+	}
+	select {
+	case state := <-done:
+		if state != "registered" {
+			t.Fatalf("retry state %q", state)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the failed refresh was not retried (%d calls)", calls.Load())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for openClawInstallPolicyPending.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if openClawInstallPolicyPending.Load() || calls.Load() != 2 {
+		t.Fatalf("after the retry: pending=%v calls=%d", openClawInstallPolicyPending.Load(), calls.Load())
+	}
+
+	// Every retry fails: still owed, and the next reload asks again.
+	calls.Store(0)
+	openClawInstallPolicyRefresher = func(connector.SetupOpts) (string, error) {
+		calls.Add(1)
+		return "", errLockBusy
+	}
+	s.refreshOpenClawInstallPolicy()
+	deadline = time.Now().Add(5 * time.Second)
+	for calls.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if calls.Load() != 3 || !openClawInstallPolicyPending.Load() {
+		t.Fatalf("exhausted retries: calls=%d (want 1 + 2 retries) pending=%v", calls.Load(), openClawInstallPolicyPending.Load())
+	}
+	if openClawInstallPolicyNeedsRefresh(on, on) || !openClawInstallPolicyReloadWanted(on, on) {
+		t.Fatal("a reload must refresh an owed install policy even when it changes nothing for it")
 	}
 }

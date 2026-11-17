@@ -13203,6 +13203,7 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
         else:
             _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
     from defenseclaw.openclaw_plugin_config import (
+        openclaw_install_policy_recorded_state,
         openclaw_install_policy_remediation,
         openclaw_install_policy_state,
         openclaw_install_policy_wanted,
@@ -13223,11 +13224,13 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
             "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
         )
     elif openclaw_install_policy_wanted(cfg):
+        recorded = openclaw_install_policy_recorded_state(cfg)
         _emit(
             "warn",
             "OpenClaw install admission",
             "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
-            + (" (another security.installPolicy is configured)" if policy_state == "operator" else ""),
+            + (" (another security.installPolicy is configured)" if policy_state == "operator" else "")
+            + (f"; {recorded}" if recorded.startswith("not registered:") else ""),
             remediation=openclaw_install_policy_remediation(policy_state),
             r=r,
         )

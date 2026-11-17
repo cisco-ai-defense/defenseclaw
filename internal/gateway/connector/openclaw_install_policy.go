@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
@@ -44,6 +45,38 @@ import (
 // OpenClawInstallPolicySince is the first OpenClaw release whose
 // security.installPolicy runs an exec command.
 const OpenClawInstallPolicySince = "2026.8.35"
+
+// OpenClawWindowsInheritOnlySince is the first OpenClaw release (fs-safe
+// 0.26) whose Windows install-policy check skips inherit-only ACEs.
+// OpenClaw 2026.8.35 (fs-safe 0.5) counts them, so below a drive root that
+// keeps the default inherit-only Users and CREATOR OWNER entries it refuses
+// the command (rel-1-0-10 GAP-1170).
+const OpenClawWindowsInheritOnlySince = "2026.11.3"
+
+// openClawSkipsInheritOnlyACEs reports an OpenClaw known to skip
+// inherit-only ACEs; an unknown version is held to the older rule.
+func openClawSkipsInheritOnlyACEs(rawVersion string) bool {
+	version := NormalizeAgentVersion("openclaw", rawVersion)
+	return version != "" && CompareAgentVersions(version, OpenClawWindowsInheritOnlySince) >= 0
+}
+
+// openClawInstallPolicyTooOldError is a Windows command that passes only on
+// an OpenClaw that skips inherit-only ACEs.
+type openClawInstallPolicyTooOldError struct {
+	version string
+	cause   error
+}
+
+func (e *openClawInstallPolicyTooOldError) Error() string {
+	version := e.version
+	if version == "" {
+		version = "of unknown version"
+	}
+	return fmt.Sprintf("OpenClaw %s is too old for strict install policy on Windows (needs %s or later): it counts inherit-only entries, and %v",
+		version, OpenClawWindowsInheritOnlySince, e.cause)
+}
+
+func (e *openClawInstallPolicyTooOldError) Unwrap() error { return e.cause }
 
 // OpenClawInstallPolicyArgs are the static arguments setup writes.
 var OpenClawInstallPolicyArgs = []string{"connector", "openclaw", "install-policy"}
@@ -149,7 +182,11 @@ func openClawInstallPolicyCommand(opts SetupOpts) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := openClawInstallPolicyTrusted(command, strings.TrimSpace(opts.OpenClawPluginAccount)); err != nil {
+	if err := openClawInstallPolicyTrusted(command, strings.TrimSpace(opts.OpenClawPluginAccount), openClawObservedVersion(opts)); err != nil {
+		var tooOld *openClawInstallPolicyTooOldError
+		if errors.As(err, &tooOld) {
+			return "", err
+		}
 		return "", fmt.Errorf("OpenClaw would refuse %s as its install policy command (%v)", command, err)
 	}
 	return command, nil
@@ -202,6 +239,37 @@ type openClawInstallPolicyRecord struct {
 	SecurityBefore bool                   `json:"security_before"`
 }
 
+// openClawInstallPolicyStatePath is where setup and the reload refresh keep
+// the last install policy state (registered, off, not registered: why), so
+// doctor and status can say why OpenClaw does not ask DefenseClaw.
+func openClawInstallPolicyStatePath(dataDir string) string {
+	return filepath.Join(dataDir, "openclaw-install-policy-state.json")
+}
+
+type openClawInstallPolicyStateRecord struct {
+	State           string `json:"state"`
+	OpenClawVersion string `json:"openclaw_version,omitempty"`
+	At              string `json:"at"`
+}
+
+func saveOpenClawInstallPolicyState(dataDir, state, version string) {
+	if dataDir == "" || state == "" {
+		return
+	}
+	data, err := json.MarshalIndent(openClawInstallPolicyStateRecord{
+		State: state, OpenClawVersion: NormalizeAgentVersion("openclaw", version), At: time.Now().UTC().Format(time.RFC3339),
+	}, "", "  ")
+	if err == nil {
+		_ = atomicWriteFile(openClawInstallPolicyStatePath(dataDir), append(data, byte(10)), 0o600)
+	}
+}
+
+func discardOpenClawInstallPolicyState(dataDir string) {
+	if dataDir != "" {
+		_ = os.Remove(openClawInstallPolicyStatePath(dataDir))
+	}
+}
+
 func openClawInstallPolicyRecordPath(dataDir string) string {
 	return filepath.Join(dataDir, "openclaw-install-policy.json")
 }
@@ -244,6 +312,14 @@ const (
 // changed, is left as it is. It returns the state: registered, off, or
 // "not registered: <reason>".
 func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) (string, error) {
+	state, err := applyOpenClawInstallPolicyState(configPath, opts)
+	if err == nil {
+		saveOpenClawInstallPolicyState(opts.DataDir, state, openClawObservedVersion(opts))
+	}
+	return state, err
+}
+
+func applyOpenClawInstallPolicyState(configPath string, opts SetupOpts) (string, error) {
 	if opts.DataDir == "" {
 		return "not registered: no DefenseClaw data folder", nil
 	}
