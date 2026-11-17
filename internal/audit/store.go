@@ -300,6 +300,11 @@ type Store struct {
 	// writer back before the log restarted (boundedCatchUpPolicy). Guarded
 	// by walGuardMu.
 	walBoundedMisses int
+	// walCappedHolds counts the bounded catch-ups in a row whose hold reached
+	// its cap without restarting the log, and walHoldResume is when the next
+	// one may take the writer again (walHoldBackoff). Guarded by walGuardMu.
+	walCappedHolds int
+	walHoldResume  time.Time
 	// walPressure is true while the last WAL guard pass left the log over
 	// its limit; background writers wait for it (awaitWALHeadroom).
 	walPressure atomic.Bool
