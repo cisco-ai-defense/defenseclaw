@@ -85,7 +85,8 @@ func (p *fakeHolderProcess) find(handle uintptr) *fakeHolderHandle {
 func (p *fakeHolderProcess) Identify(handle uintptr) (windowsHookHolderIdentity, bool, error) {
 	h := p.find(handle)
 	if h == nil {
-		return windowsHookHolderIdentity{}, false, errors.New("no such handle")
+		// What DuplicateHandle says of a value that is no longer a handle.
+		return windowsHookHolderIdentity{}, false, fmt.Errorf("no such handle: %w", windows.ERROR_INVALID_HANDLE)
 	}
 	if h.notFile {
 		p.system.t.Errorf("process %d: a handle whose object type is not File was probed", p.facts.PID)

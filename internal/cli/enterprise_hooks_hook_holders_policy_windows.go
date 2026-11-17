@@ -258,7 +258,7 @@ type windowsHolderScan struct {
 	Entries  int      // handles in the system table
 	Probed   int      // handles duplicated and inspected
 	Hung     int      // probes abandoned in this pass
-	Gone     int      // listed handles gone by their probe: closed since the snapshot (a holder that rotates its handle, GAP-0068)
+	Gone     int      // listed handles whose probe found no handle (ERROR_INVALID_HANDLE): closed since the snapshot (a holder that rotates its handle, GAP-0068)
 	Unopened []uint32 // processes with a data handle that could not be opened (protected)
 	Limited  string   // why the pass stopped early, or ""
 	Elapsed  time.Duration
@@ -517,7 +517,13 @@ func scanWindowsHolders(sys windowsHolderSystem, target string, self uint32) (*w
 				continue
 			}
 			if err != nil {
-				scan.Gone++
+				// Only a value that is no longer a handle is gone: its owner
+				// closed it after the snapshot (DuplicateHandle fails with
+				// ERROR_INVALID_HANDLE). Another failure (access denied)
+				// says nothing about a rotation and costs no rescan.
+				if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+					scan.Gone++
+				}
 				continue
 			}
 			if !disk || id != scan.Identity {
@@ -1263,10 +1269,17 @@ func endWindowsExclusiveHoldOn(gate *windowsHolderState, target string, probes w
 	}
 	gate.streakLast = now
 	if now.Before(gate.nextScan) {
-		// The backoff skips the scan, not the hold: the users seen so far
-		// stay one continuous hold, so a refused holder is named again at the
-		// next scan instead of waiting two checks once more.
-		gate.seenAt = now
+		// The backoff skips the scan, not the hold: the users the last scan
+		// saw stay one continuous hold, so a refused holder is named again at
+		// the next scan instead of waiting two checks once more. Users the
+		// last scan did not see (it found nobody while the hook stayed
+		// refused, emptySince) are not kept by it: they age out in observe
+		// three checks after they were last seen, so a hold the scan cannot
+		// see (a protected process) never keeps them, and their first
+		// sighting after it starts their checks over (bound (a), GAP-0068).
+		if gate.emptySince.IsZero() {
+			gate.seenAt = now
+		}
 		return 0, gate.lastErr
 	}
 	for attempt := 0; ; attempt++ {
@@ -1297,8 +1310,9 @@ func (gate *windowsHolderState) pass(target string, probes windowsHolderProbes, 
 		// not see it end (GAP-0068): a listed handle that was gone by its
 		// probe is a holder that rotated its handle in between, so the pass
 		// looks again at once, and the users seen so far are kept (they
-		// still age out after three checks unseen, see observe) instead of
-		// starting their checks over.
+		// still age out three checks after they were last seen, see observe;
+		// the backoff does not keep them) instead of starting their checks
+		// over.
 		refused := probes.startRefused(target)
 		if refused && scan.Gone > 0 && !last {
 			return 0, true, nil
