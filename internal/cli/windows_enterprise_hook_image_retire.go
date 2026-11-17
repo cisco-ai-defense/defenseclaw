@@ -280,6 +280,9 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 	}
 	marker := windowsHookImageJoin(root, winpath.EnterpriseHookImagesRetiredMarker)
 	report.Marker = marker
+	// The marker says pending before any writer runs, and ok only once this
+	// retire ends ok: a retire over the marker of an earlier ok retire that
+	// is stopped part way must not leave it saying ok (GAP-1158).
 	if _, err := steps.FS.Lstat(marker); errors.Is(err, fs.ErrNotExist) {
 		body, _ := json.Marshal(windowsHookImageRetireMarker{SchemaVersion: 1, RetiredAt: steps.Now().UTC().Format(time.RFC3339),
 			State: windowsHookImageRetireStatePending})
@@ -288,6 +291,8 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		}
 	} else if err != nil {
 		return fail(windowsHookImageRetireRefused, "inspect %s: %v", marker, err)
+	} else if err := windowsHookImageRecordRetireState(steps, marker, windowsHookImageRetireStatePending); err != nil {
+		return fail(windowsHookImageRetireRefused, "record in %s that retire is pending: %v. Nothing was changed", marker, err)
 	}
 	// From here the writers name the transition set: have them write. A
 	// writer that failed is named in the report's error and, for each file
