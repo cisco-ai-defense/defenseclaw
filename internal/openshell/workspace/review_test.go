@@ -440,7 +440,15 @@ func TestReviewFlagsIgnoredHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, label := range []string{".claude/settings.local.json", "CLAUDE.local.md"} {
-		if f, ok := flagByLabel(rep, label); !ok || f.Kind != RiskPolicy || f.Severity != SeverityHigh || !strings.Contains(f.Detail, "git ignores") {
+		// .claude/settings.local.json also carries its agent-config flag
+		// (GAP-0473); the sensitive pattern is the flag this test checks.
+		f, ok := Flag{}, false
+		for _, x := range rep.Flags {
+			if x.Label == label && x.Kind == RiskPolicy {
+				f, ok = x, true
+			}
+		}
+		if !ok || f.Severity != SeverityHigh || !strings.Contains(f.Detail, "git ignores") {
 			t.Errorf("flag %s = %+v, %v; flags: %+v", label, f, ok, rep.Flags)
 		}
 	}

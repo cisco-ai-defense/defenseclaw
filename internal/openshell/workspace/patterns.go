@@ -195,6 +195,9 @@ const (
 	RiskDependencies   RiskKind = "dependencies"
 	RiskPolicy         RiskKind = "sensitive-pattern"
 	RiskIgnoreRules    RiskKind = "ignore-rules"
+	RiskAgentConfig    RiskKind = "agent-config"
+	RiskMCPServer      RiskKind = "mcp-server"
+	RiskShellRC        RiskKind = "shell-rc"
 	// RiskUnreadable is a folder the session made unreadable: nothing
 	// inside it can be checked.
 	RiskUnreadable RiskKind = "unreadable"
@@ -234,6 +237,12 @@ type riskRule struct {
 // opens the folder in an editor, enters it with direnv, installs
 // dependencies, commits, builds, or pushes to CI.
 var riskRules = []riskRule{
+	// An agent that starts in the folder reads these and runs what they
+	// register (hooks, commands, MCP servers): one pull could add a hook
+	// on this machine (GAP-0473).
+	{patterns: []string{".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/**", ".codex/config.toml", ".codex/hooks.json", ".cursor/hooks.json", ".gemini/settings.json", ".gemini/config/hooks.json"}, kind: RiskAgentConfig, severity: SeverityHigh, detail: "an agent started in this folder runs the hooks and commands it registers"},
+	{patterns: []string{".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json"}, kind: RiskMCPServer, severity: SeverityHigh, detail: "an agent started in this folder launches these MCP servers as commands"},
+	{patterns: []string{".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc", ".tcshrc"}, kind: RiskShellRC, severity: SeverityHigh, detail: "runs in every shell that reads it"},
 	{patterns: []string{".envrc", ".env.sh"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "sourced by direnv when you enter the folder"},
 	{patterns: []string{".vscode/tasks.json", ".vscode/launch.json", ".vscode/settings.json", "*.code-workspace"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "editor tasks and settings can run commands when the folder is opened"},
 	{patterns: []string{".idea/**", ".fleet/**", ".zed/**"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "IDE run configurations execute on the host"},
