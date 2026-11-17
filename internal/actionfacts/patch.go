@@ -508,8 +508,11 @@ func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
 	// the unknown tier at least (CommandPatchNamesUnplacedTarget), as it
 	// judges the same envelope given to the native tool. The placed headers
 	// stay complete facts, so a block they prove stays a block
-	// (rel-1-0-10:GAP-1077).
-	command.PatchUnplacedTarget = patch.unplaced
+	// (rel-1-0-10:GAP-1077). A body the shell expands (shellView) carries the
+	// mark too: an expansion in any line, a content line included, may hold
+	// newlines and add a header no reader sees, so the header set of the
+	// envelope is not known (rel-1-0-10:GAP-1093).
+	command.PatchUnplacedTarget = patch.unplaced || shellView
 	if patch.status != StatusComplete {
 		if patch.status == StatusLimitExceeded {
 			out.markLimit(patch.issue)
@@ -564,10 +567,11 @@ func PatchNamesUnplacedTarget(tool string, args json.RawMessage) bool {
 
 // CommandPatchNamesUnplacedTarget reports a shell command of facts that feeds
 // apply_patch an envelope, by a here-document (applyPatchStdinText), with a
-// header no reader places: the shell route of PatchNamesUnplacedTarget. The
-// caller judges the call at the unknown tier of the pack at least, and the
-// placed headers of the same envelope are path facts the rules judge
-// (rel-1-0-10:GAP-1077).
+// header no reader places, or with a body the shell expands, whose headers
+// are not all known (rel-1-0-10:GAP-1093): the shell route of
+// PatchNamesUnplacedTarget. The caller judges the call at the unknown tier of
+// the pack at least, and the placed headers of the same envelope are path
+// facts the rules judge (rel-1-0-10:GAP-1077).
 func CommandPatchNamesUnplacedTarget(facts Facts) bool {
 	return slices.ContainsFunc(facts.Commands, func(command CommandFact) bool {
 		return command.PatchUnplacedTarget

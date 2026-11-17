@@ -160,15 +160,20 @@ func TestPatchHeredocHeaderTheShellExpandsIsUnplaced(t *testing.T) {
 		})
 	}
 	// Quoted, the same name is a plain file name; and a backslash before an
-	// ordinary character stays as written in an expanding body.
-	for name, document := range map[string]string{
-		"quoted": "apply_patch <<'PATCH'\n" + patchBeginLine + "\n*** Add File: $HOME/decoy.txt\n+x\n" + patchEndLine + "\nPATCH\n",
-		"plain backslash": "apply_patch <<PATCH\n" + patchBeginLine + "\n*** Add File: notes0.txt\n+$PWD\n*** Add File: dir\\decoy.txt\n+x\n" +
-			patchEndLine + "\nPATCH\n",
+	// ordinary character stays as written in an expanding body. The
+	// expanding body is still marked: its expansion may add a header no
+	// reader sees (rel-1-0-10:GAP-1093).
+	for name, document := range map[string]struct {
+		text   string
+		marked bool
+	}{
+		"quoted": {"apply_patch <<'PATCH'\n" + patchBeginLine + "\n*** Add File: $HOME/decoy.txt\n+x\n" + patchEndLine + "\nPATCH\n", false},
+		"plain backslash": {"apply_patch <<PATCH\n" + patchBeginLine + "\n*** Add File: notes0.txt\n+$PWD\n*** Add File: dir\\decoy.txt\n+x\n" +
+			patchEndLine + "\nPATCH\n", true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			facts := patchDecoyShellFacts(t, document)
-			if facts.Parse.Status != StatusComplete || CommandPatchNamesUnplacedTarget(facts) {
+			facts := patchDecoyShellFacts(t, document.text)
+			if facts.Parse.Status != StatusComplete || CommandPatchNamesUnplacedTarget(facts) != document.marked {
 				t.Fatalf("parse = %#v, unplaced %t", facts.Parse, CommandPatchNamesUnplacedTarget(facts))
 			}
 			if !slices.ContainsFunc(facts.Paths, func(path PathFact) bool { return strings.Contains(path.Value, "decoy") }) {
