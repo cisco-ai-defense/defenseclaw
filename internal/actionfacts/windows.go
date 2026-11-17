@@ -1871,9 +1871,12 @@ func windowsClassifyPowerShell(
 			windowsAddOperation(command, OperationWrite)
 		}
 		windowsAddPowerShellPrimaryPath(name, command.ID, access, args, true, builder)
-	case "add-content":
+	case "add-content", "ac":
+		// ac is Add-Content's alias in Windows PowerShell and PowerShell 7 on
+		// Windows; the structured reading already reads it so
+		// (rel-1-0-10:GAP-1115).
 		windowsAddOperation(command, OperationAppend)
-		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessAppend, args, true, builder)
+		windowsAddPowerShellPrimaryPath("add-content", command.ID, PathAccessAppend, args, true, builder)
 	case "remove-item", "ri", "rm", "del", "erase", "rmdir", "rd":
 		windowsAddOperation(command, OperationDelete)
 		windowsAddPowerShellPaths(
