@@ -354,8 +354,6 @@ actor EventStreamReader {
         }
     }
 
-    /// Runtime projections are already redacted. Defense in depth for older
-    /// producers: never render obvious secret/content fields from an inspector.
     /// The payload of a canonical row. A legacy.audit.* compatibility row
     /// keeps no payload_json since 1.0.10 (S8 R4): its body is the canonical
     /// record body (projected_record_json body, byte-equal to the old
@@ -368,6 +366,8 @@ actor EventStreamReader {
         return body
     }
 
+    /// Runtime projections are already redacted. Defense in depth for older
+    /// producers: never render obvious secret/content fields from an inspector.
     private static func safeProjectionJSON(_ text: String) -> [String: Any] {
         guard let data = text.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }

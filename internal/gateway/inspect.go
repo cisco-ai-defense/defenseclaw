@@ -3064,10 +3064,10 @@ func (a *APIServer) writeInspectVerdict(w http.ResponseWriter, r *http.Request, 
 	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
-// inspectToolAuditEvent is the inspect-tool-* audit row.
 // auditInspectScanTimeout writes the one audit row of a direct inspect call
 // that answered 504 because no verdict was reached within the scan budget
-// (GAP-0919). The gateway decided nothing, so the row has its own action,
+// (GAP-0919), or whose caller went away first. The gateway decided
+// nothing, so the row has its own action,
 // neither an allow nor a block: the caller decides by its fail mode (the
 // OpenClaw plugin and the shared hook script block, the Secure Client
 // template allows). A verdict the worker reaches after the 504 writes no
@@ -3077,18 +3077,28 @@ func (a *APIServer) auditInspectScanTimeout(r *http.Request, route string, actio
 	if a.logger == nil {
 		return
 	}
-	details := fmt.Sprintf("verdict=none reason=scan_timeout elapsed_ms=%d budget_ms=%d",
-		elapsed.Milliseconds(), a.inspectScanBudget().Milliseconds())
+	// The scan context ends at the budget or when the caller goes away; a
+	// caller that gave up first (its own timeout shorter than the budget)
+	// also decides the call by its fail mode, so it gets the same row with
+	// its own reason. The write outlives the cancelled request: a row
+	// written with the ended request context would be dropped.
+	reason := "scan_timeout"
+	if r.Context().Err() != nil {
+		reason = "caller_canceled"
+	}
+	details := fmt.Sprintf("verdict=none reason=%s elapsed_ms=%d budget_ms=%d",
+		reason, elapsed.Milliseconds(), a.inspectScanBudget().Milliseconds())
 	if requestID := RequestIDFromContext(r.Context()); requestID != "" {
 		details += " request_id=" + requestID
 	}
 	event := a.inspectAuditEvent(r, route, string(action), target, details)
 	event.Severity = "MEDIUM"
-	if err := a.logger.LogEventCtx(r.Context(), event); err != nil {
+	if err := a.logger.LogEventCtx(context.WithoutCancel(r.Context()), event); err != nil {
 		fmt.Fprintf(os.Stderr, "[inspect] scan-timeout audit persistence failed route=%s: %v\n", route, err)
 	}
 }
 
+// inspectToolAuditEvent is the inspect-tool-* audit row.
 func (a *APIServer) inspectToolAuditEvent(r *http.Request, action, tool, details string) audit.Event {
 	return a.inspectAuditEvent(r, "/api/v1/inspect/tool", action, tool, details)
 }

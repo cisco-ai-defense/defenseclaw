@@ -236,7 +236,12 @@ func (s *Store) TrimRejectedRecords(ctx context.Context, maxRows, limit int) (de
 
 // rejectedRecordsPastCap reports whether any row is past maxRows: rows are
 // past the cap only when MAX(id) - MIN(id) >= maxRows (see
-// TrimRejectedRecords). One indexed read on the rowid, no write turn.
+// TrimRejectedRecords). Two rowid lookups, no write turn: each aggregate is
+// its own subquery, because SQLite's MIN/MAX shortcut applies only to a
+// query with a single aggregate; MAX(id) - MIN(id) in one SELECT scans the
+// whole table.
+const rejectedRecordsSpanQuery = `SELECT (SELECT MAX(id) FROM rejected_records) - (SELECT MIN(id) FROM rejected_records)`
+
 func (s *Store) rejectedRecordsPastCap(ctx context.Context, maxRows int) (bool, error) {
 	release, err := s.acquireReady()
 	if err != nil {
@@ -244,7 +249,7 @@ func (s *Store) rejectedRecordsPastCap(ctx context.Context, maxRows int) (bool, 
 	}
 	defer release()
 	var span sql.NullInt64
-	if err := s.db.QueryRowContext(ctx, `SELECT MAX(id) - MIN(id) FROM rejected_records`).Scan(&span); err != nil {
+	if err := s.db.QueryRowContext(ctx, rejectedRecordsSpanQuery).Scan(&span); err != nil {
 		return false, fmt.Errorf("audit: rejected records: %w", err)
 	}
 	return span.Valid && span.Int64 >= int64(maxRows), nil

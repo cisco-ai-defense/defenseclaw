@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -157,5 +158,58 @@ func TestInspectContentRoutesScanTimeoutWritesOneAuditRow(t *testing.T) {
 				t.Fatalf("audit rows after the 504 = %+v, want one %s row target %s with reason=scan_timeout", rows, tc.action, tc.target)
 			}
 		})
+	}
+}
+
+// A caller that goes away before the budget (its own timeout is shorter)
+// also gets the call's one row, with its own reason; the write outlives the
+// cancelled request instead of being dropped with it (GAP-0919 review).
+func TestInspectToolCallerCancelStillWritesTheTimeoutRow(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	api.inspectToolScanTimeout = 30 * time.Second
+	stub := &cancelGatedAIDInspector{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	api.SetCiscoInspector(stub)
+	workerDone := make(chan struct{})
+	api.inspectToolWorkerDone = func() { close(workerDone) }
+	defer func() {
+		close(stub.release)
+		<-workerDone
+	}()
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool",
+		bytes.NewBufferString(`{"tool":"exec","args":{"command":"echo gap0919"}}`)).WithContext(parent)
+	request = request.WithContext(withAuthenticatedInspectConnector(request.Context(), "openclaw"))
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		api.handleInspectTool(response, request)
+	}()
+	select {
+	case <-stub.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the inspector")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled handler did not return")
+	}
+	if response.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status %d, want 504", response.Code)
+	}
+	rows := gap0919Rows(t, store, "inspect-tool")
+	if len(rows) != 1 || rows[0].Action != "inspect-tool-timeout" || !strings.Contains(rows[0].Details, "reason=caller_canceled") {
+		t.Fatalf("rows after a caller cancel = %+v, want one inspect-tool-timeout row with reason=caller_canceled", rows)
 	}
 }
