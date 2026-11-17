@@ -264,6 +264,7 @@ jobs:
             -run "$test_regex" \
             ./internal/gateway 2>&1 |
             python3 scripts/go_test_report.py --timings "go-test-timings-gateway-$GO_TEST_SHARD.json" \
+              --untimed-against scripts/test-timings/go-linux.json \
               --annotate "Gateway shard $GO_TEST_SHARD failed"
           test_status=${PIPESTATUS[0]}
           set -e

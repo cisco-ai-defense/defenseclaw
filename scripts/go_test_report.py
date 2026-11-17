@@ -29,12 +29,24 @@ side weigh their part of that time, not each the whole of it (their wall
 spans overlap: internal/actionfacts summed 653 s of test time in a package
 run of 165 s, run 43229287498). The shares of a package add up to the time
 its tests ran, which is what a shard of them takes. A top-level test still
-running when the stream ends (the package -timeout killed it) is written as
-a fail with the share it had until the last event, after the end event
-of its package: a refresh (scripts/update_test_timings.py) reads that
-place as a cut-off and weighs the test by at least that time and at least
-its recorded time, never as an unlisted test. An event without a Time keeps
+running when the stream ends (the package -timeout killed it, or the job
+was killed first) is written as a fail with the share it had until the last
+event and "CutOff": true: a refresh (scripts/update_test_timings.py) reads
+it as a cut-off and weighs the test by at least that time and at least its
+recorded time, never as an unlisted test. The mark, not the place after the
+package end event, says so: a job killed before go test's own -timeout
+writes no package end event (GAP-1033). An event without a Time keeps
 go test's Elapsed.
+
+--untimed-against FILE (a scripts/test-timings/*.json file) names the
+top-level tests that ran UNTIMED_MIN_SECONDS or more and that FILE does not
+time in a package it times by test: the shard planner weighs such a test as
+one of the package's fast tests ("*", about 0.25 s), so one new slow test
+can overfill its shard (TestGAP0980Round2ReviewRows, 391 s under -race,
+weighed 0.25 s). The planner cannot tell a new test from a fast one (the
+file keeps only the tests of two seconds or more), so the run that first
+times it names it: a summary line and a GitHub warning per test (at most
+20), the list a refresh adds (GAP-1053).
 
 --annotate TITLE prints a GitHub error annotation per failed top-level test
 (at most 20). The exit status is always 0; the caller keeps go test's.
@@ -49,6 +61,9 @@ import sys
 from datetime import datetime
 
 _FRACTION = re.compile(r"(\.\d{6})\d+")
+# The shortest test a timings refresh keeps by name (update_test_timings.py
+# keeps faster tests only as their mean "*").
+UNTIMED_MIN_SECONDS = 2.0
 
 
 def _time(event: dict) -> datetime | None:
@@ -133,6 +148,21 @@ def expected_names(pattern: str) -> set[str] | None:
     return names
 
 
+def untimed_tests(times: dict[tuple[str, str], float], timings: dict) -> list[tuple[str, str, float]]:
+    """(package, test, seconds) of each test of times that ran at least
+    UNTIMED_MIN_SECONDS and that timings does not name in a package it times
+    by test, slowest first."""
+    by_test = timings.get("tests", {})
+    untimed = []
+    for (package, test), seconds in times.items():
+        if seconds < UNTIMED_MIN_SECONDS:
+            continue
+        rel = next((rel for rel in by_test if package == rel or package.endswith("/" + rel)), None)
+        if rel is not None and test not in by_test[rel]:
+            untimed.append((package, test, seconds))
+    return sorted(untimed, key=lambda item: (-item[2], item[1]))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timings", help="write the pass/fail events (no output) to this file")
@@ -143,7 +173,17 @@ def main() -> int:
         help="the go test -run pattern of this run, ^(A|B|...)$ or ^(?:A|B|...)$: exit 1 unless every test it names "
         "reported a pass, fail or skip (a name the binary does not have runs nothing, and go test passes)",
     )
+    parser.add_argument(
+        "--untimed-against",
+        metavar="TIMINGS",
+        help="name the tests of UNTIMED_MIN_SECONDS or more this timings file does not time (warnings only)",
+    )
     args = parser.parse_args()
+    known = None
+    if args.untimed_against is not None:
+        with open(args.untimed_against, encoding="utf-8") as file:
+            known = json.load(file)
+    times: dict[tuple[str, str], float] = {}
     expected = None
     if args.expect_run is not None:
         expected = expected_names(args.expect_run)
@@ -217,20 +257,24 @@ def main() -> int:
                 out.flush()
                 if "/" not in test:
                     failed.append(test)
-            if action in ("pass", "fail") and "/" not in test and timings is not None:
+            if action in ("pass", "fail") and "/" not in test and (timings is not None or known is not None):
                 elapsed = event.get("Elapsed", 0)
                 share = shares.seconds(package, test)
                 if key in started and at is not None and share is not None:
                     elapsed = share
                 started.discard(key)
-                record = {"Action": action, "Package": package, "Test": test, "Elapsed": elapsed}
-                timings.write(json.dumps(record) + "\n")
-        if timings is not None and last is not None:
+                times[key] = float(elapsed or 0)
+                if timings is not None:
+                    record = {"Action": action, "Package": package, "Test": test, "Elapsed": elapsed}
+                    timings.write(json.dumps(record) + "\n")
+        if (timings is not None or known is not None) and last is not None:
             shares.finish(last)
             for package, test in sorted(started):
                 elapsed = shares.seconds(package, test) or 0.0
-                record = {"Action": "fail", "Package": package, "Test": test, "Elapsed": elapsed}
-                timings.write(json.dumps(record) + "\n")
+                times[(package, test)] = max(times.get((package, test), 0.0), elapsed)
+                if timings is not None:
+                    record = {"Action": "fail", "Package": package, "Test": test, "Elapsed": elapsed, "CutOff": True}
+                    timings.write(json.dumps(record) + "\n")
     finally:
         if timings is not None:
             timings.close()
@@ -246,6 +290,11 @@ def main() -> int:
                 out.write(f"::error title={args.annotate}::{test} was still running\n")
         elif not names and package_failed:
             out.write(f"::error title={args.annotate}::No named failing test was reported\n")
+    if known is not None:
+        untimed = untimed_tests(times, known)
+        out.write(f"{len(untimed)} tests of {UNTIMED_MIN_SECONDS:g} s or more have no time in {args.untimed_against}\n")
+        for package, test, seconds in untimed[:20]:
+            out.write(f"::warning title=untimed test::{test} ({package}) ran {seconds:.1f} s with no time in {args.untimed_against}\n")
     status = 0
     if expected is not None:
         ran = expected & reported

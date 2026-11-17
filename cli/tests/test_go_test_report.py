@@ -102,7 +102,32 @@ def test_a_test_the_timeout_killed_keeps_the_time_it_ran(tmp_path: Path) -> None
 
     assert timings == [
         {"Action": "fail", "Package": "p", "Elapsed": 662.0},
-        {"Action": "fail", "Package": "p", "Test": "TestSlow", "Elapsed": 660.0},
+        {"Action": "fail", "Package": "p", "Test": "TestSlow", "Elapsed": 660.0, "CutOff": True},
+    ]
+
+
+def test_a_test_running_when_the_job_died_is_marked_cut_off(tmp_path: Path) -> None:
+    # A job killed before go test's own -timeout leaves no package end
+    # event: the test still running is written with the time it had run and
+    # the CutOff mark, so a refresh does not take that lower bound as its
+    # time (GAP-1033).
+    def at(seconds: int) -> str:
+        return f"2026-11-10T20:{seconds // 60:02d}:{seconds % 60:02d}.000000000Z"
+
+    _, timings = _run(
+        [
+            {"Action": "run", "Package": "p", "Test": "TestEnded", "Time": at(0)},
+            {"Action": "pass", "Package": "p", "Test": "TestEnded", "Time": at(4), "Elapsed": 4.0},
+            {"Action": "run", "Package": "p", "Test": "TestSlow", "Time": at(4)},
+            _out("TestSlow", "still working\n"),
+            {"Action": "output", "Package": "p", "Test": "TestSlow", "Time": at(25), "Output": "x\n"},
+        ],
+        tmp_path,
+    )
+
+    assert timings == [
+        {"Action": "pass", "Package": "p", "Test": "TestEnded", "Elapsed": 4.0},
+        {"Action": "fail", "Package": "p", "Test": "TestSlow", "Elapsed": 21.0, "CutOff": True},
     ]
 
 
@@ -265,3 +290,34 @@ def test_expect_run_refuses_a_pattern_that_is_not_a_name_list() -> None:
 
 def test_without_expect_run_the_exit_status_stays_zero() -> None:
     assert _report([_result("TestA", "fail")]).returncode == 0
+
+
+def test_untimed_against_names_the_slow_tests_the_timings_do_not_time(tmp_path: Path) -> None:
+    # The shard planner weighs a test the timings do not name as a fast one
+    # (about 0.25 s): TestGAP0980Round2ReviewRows took 391 s under -race and
+    # overfilled its shard. The run names such tests; a fast test, a timed
+    # test and a test of a package not timed by test are not named (GAP-1053).
+    known = tmp_path / "go-linux.json"
+    known.write_text(json.dumps({"tests": {"internal/gateway": {"TestTimed": 50.0, "*": 0.25}}}), encoding="utf-8")
+    gateway = "github.com/example/internal/gateway"
+    events = [
+        {"Action": "pass", "Package": gateway, "Test": "TestTimed", "Elapsed": 40.0},
+        {"Action": "pass", "Package": gateway, "Test": "TestFast", "Elapsed": 1.5},
+        {"Action": "pass", "Package": gateway, "Test": "TestNewSlow", "Elapsed": 391.0},
+        {"Action": "fail", "Package": gateway, "Test": "TestNewFailing", "Elapsed": 3.0},
+        {"Action": "pass", "Package": "github.com/example/internal/other", "Test": "TestElsewhere", "Elapsed": 90.0},
+    ]
+    result = _report(events, "--untimed-against", str(known))
+    assert result.returncode == 0
+    assert f"2 tests of 2 s or more have no time in {known}" in result.stdout
+    warnings = [line for line in result.stdout.splitlines() if line.startswith("::warning")]
+    assert warnings == [
+        f"::warning title=untimed test::TestNewSlow ({gateway}) ran 391.0 s with no time in {known}",
+        f"::warning title=untimed test::TestNewFailing ({gateway}) ran 3.0 s with no time in {known}",
+    ]
+
+
+def test_every_linux_gateway_race_shard_names_its_untimed_tests() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    step = workflow.split("name: Run gateway race/coverage shard", 1)[1].split("- uses:", 1)[0]
+    assert "--untimed-against scripts/test-timings/go-linux.json" in step
