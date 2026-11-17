@@ -881,7 +881,7 @@ func heredocScriptText(redir *syntax.Redirect) (string, bool) {
 		return "", false
 	}
 	var out strings.Builder
-	var params []int
+	params := map[int]int{}
 	names := map[string]bool{}
 	printer := syntax.NewPrinter()
 	for _, part := range body.Parts {
@@ -893,11 +893,13 @@ func heredocScriptText(redir *syntax.Redirect) (string, bool) {
 			if !heredocParamNames(typed, names) {
 				return "", false
 			}
-			params = append(params, out.Len())
+			start := out.Len()
+			if err := printer.Print(&out, &syntax.Word{Parts: []syntax.WordPart{part}}); err != nil {
+				return "", false
+			}
+			params[start] = out.Len()
+			continue
 		default:
-			return "", false
-		}
-		if err := printer.Print(&out, &syntax.Word{Parts: []syntax.WordPart{part}}); err != nil {
 			return "", false
 		}
 	}
@@ -914,21 +916,62 @@ func heredocScriptText(redir *syntax.Redirect) (string, bool) {
 // $0, ...) is the holding shell's own, and ${NAME=word} or ${NAME:=word}
 // assigns it there (rel-1-0-10:GAP-1193).
 func heredocParamNames(param *syntax.ParamExp, names map[string]bool) bool {
-	shared := true
-	syntax.Walk(param, func(node syntax.Node) bool {
-		nested, ok := node.(*syntax.ParamExp)
-		if !ok {
-			return shared
-		}
-		if nested.Param == nil || !simpleVariableName(nested.Param.Value) || nested.Excl ||
-			nested.Exp != nil && (nested.Exp.Op == syntax.AssignUnset || nested.Exp.Op == syntax.AssignUnsetOrNull) {
-			shared = false
+	if param.Param == nil || !simpleVariableName(param.Param.Value) ||
+		param.Excl || param.Index != nil || param.Slice != nil || param.Repl != nil ||
+		param.Names != 0 || param.Width || param.IsSet || param.Flags != nil ||
+		len(param.Modifiers) != 0 || param.NestedParam != nil {
+		return false
+	}
+	name := param.Param.Value
+	if heredocShellOwnedName(name) {
+		return false
+	}
+	names[name] = true
+	if param.Exp == nil {
+		return true
+	}
+	switch param.Exp.Op {
+	case syntax.AlternateUnset, syntax.AlternateUnsetOrNull,
+		syntax.DefaultUnset, syntax.DefaultUnsetOrNull,
+		syntax.RemSmallSuffix, syntax.RemLargeSuffix,
+		syntax.RemSmallPrefix, syntax.RemLargePrefix:
+	default:
+		return false
+	}
+	if param.Exp.Word == nil {
+		return true
+	}
+	for _, part := range param.Exp.Word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(part.Value, "'\"\\~`") {
+				return false
+			}
+		case *syntax.ParamExp:
+			if !heredocParamNames(part, names) {
+				return false
+			}
+		default:
 			return false
 		}
-		names[nested.Param.Value] = true
+	}
+	return true
+}
+
+// These values are initialized or changed independently by each shell.
+func heredocShellOwnedName(name string) bool {
+	switch name {
+	case "_", "OLDPWD", "SHLVL", "LINENO", "RANDOM", "SRANDOM", "SECONDS",
+		"PPID", "BASHPID", "REPLY", "MAPFILE", "COPROC", "OPTIND", "OPTARG",
+		"OPTERR", "DIRSTACK", "IFS":
 		return true
-	})
-	return shared
+	}
+	for _, prefix := range []string{"PS", "HIST", "BASH_", "EPOCH", "COMP_", "ZSH_"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // heredocParamsExpandAsWritten reports a here-document text, its parameters
@@ -938,12 +981,12 @@ func heredocParamNames(param *syntax.ParamExp, names map[string]bool) bool {
 // escaping backslash), or sits in a comment, and the text binds none of the
 // names they read (NAME=, for NAME, read NAME, ((NAME++)), ...), which the
 // holding shell expands before the text runs (rel-1-0-10:GAP-1193).
-func heredocParamsExpandAsWritten(text string, at []int, names map[string]bool) bool {
+func heredocParamsExpandAsWritten(text string, at map[int]int, names map[string]bool) bool {
 	file, ok := shellparse.ParseWithComments(text)
 	if !ok {
 		return false
 	}
-	expanded := map[int]bool{}
+	expanded := map[int]int{}
 	var comments [][2]int
 	bound := false
 	bind := func(name string) {
@@ -951,10 +994,11 @@ func heredocParamsExpandAsWritten(text string, at []int, names map[string]bool) 
 			bound = true
 		}
 	}
+	bindAll := func() { bound = true }
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
 		case *syntax.ParamExp:
-			expanded[int(typed.Pos().Offset())] = true
+			expanded[int(typed.Pos().Offset())] = int(typed.End().Offset())
 			if typed.Param != nil && typed.Exp != nil &&
 				(typed.Exp.Op == syntax.AssignUnset || typed.Exp.Op == syntax.AssignUnsetOrNull) {
 				bind(typed.Param.Value)
@@ -965,28 +1009,53 @@ func heredocParamsExpandAsWritten(text string, at []int, names map[string]bool) 
 			if typed.Name != nil {
 				bind(typed.Name.Value)
 			}
+		case *syntax.DeclClause:
+			// A declaration can carry a dynamic option or a name reference.
+			bindAll()
+		case *syntax.LetClause:
+			bindAll()
+		case *syntax.CoprocClause:
+			if typed.Name != nil {
+				if name, known := simpleStaticWord(typed.Name, nil); known {
+					bind(name)
+				} else {
+					bindAll()
+				}
+			}
+		case *syntax.Redirect:
+			if typed.N != nil {
+				bind(strings.Trim(typed.N.Value, "{}"))
+			}
 		case *syntax.ForClause:
 			if iter, ok := typed.Loop.(*syntax.WordIter); ok && iter.Name != nil {
 				bind(iter.Name.Value)
 			}
 		case *syntax.BinaryArithm:
 			if heredocArithmAssigns(typed.Op) {
-				bind(arithmWordName(typed.X))
+				if name := arithmWordName(typed.X); name != "" {
+					bind(name)
+				} else {
+					bindAll()
+				}
 			}
 		case *syntax.UnaryArithm:
 			if typed.Op == syntax.Inc || typed.Op == syntax.Dec {
-				bind(arithmWordName(typed.X))
+				if name := arithmWordName(typed.X); name != "" {
+					bind(name)
+				} else {
+					bindAll()
+				}
 			}
 		case *syntax.CallExpr:
-			heredocCallBinds(typed, bind)
+			heredocCallBinds(typed, bind, bindAll)
 		}
 		return !bound
 	})
 	if bound {
 		return false
 	}
-	for _, offset := range at {
-		if expanded[offset] {
+	for offset, end := range at {
+		if expanded[offset] == end {
 			continue
 		}
 		inComment := false
@@ -1015,45 +1084,82 @@ func heredocArithmAssigns(op syntax.BinAritOperator) bool {
 	return false
 }
 
-// arithmWordName is the variable an arithmetic operand names, if it is one
-// bare name.
+// arithmWordName is the variable an arithmetic operand names, including an
+// indexed assignment such as NAME[0]=value.
 func arithmWordName(expr syntax.ArithmExpr) string {
 	word, ok := expr.(*syntax.Word)
 	if !ok || len(word.Parts) != 1 {
 		return ""
 	}
 	if lit, ok := word.Parts[0].(*syntax.Lit); ok {
-		return lit.Value
+		name, _, _ := strings.Cut(lit.Value, "[")
+		if simpleVariableName(name) {
+			return name
+		}
 	}
 	return ""
 }
 
-// heredocCallBinds calls bind for the operand names of the builtins that
-// assign variables by name: read, getopts, mapfile, readarray and unset take
-// names as operands, printf -v NAME one.
-func heredocCallBinds(call *syntax.CallExpr, bind func(string)) {
+// heredocCallBinds marks names that a command can change in the receiving
+// shell. A static command outside the proven non-binding set can change any
+// name, including through a builtin, alias or shell function.
+func heredocCallBinds(call *syntax.CallExpr, bind func(string), bindAll func()) {
 	if len(call.Args) == 0 {
 		return
 	}
 	program, static := simpleStaticWord(call.Args[0], nil)
 	if !static {
+		// A computed command with no fixed path may name a builtin or
+		// function that changes any variable.
+		if !strings.Contains(call.Args[0].Lit(), "/") {
+			bindAll()
+		}
 		return
 	}
 	switch program {
-	case "read", "getopts", "mapfile", "readarray", "unset":
+	case "cd", "pushd", "popd":
+		bind("PWD")
+	case "read", "getopts", "mapfile", "readarray", "unset", "wait":
 		for _, arg := range call.Args[1:] {
-			if name, static := simpleStaticWord(arg, nil); static {
-				bind(name)
+			name, known := simpleStaticWord(arg, nil)
+			if !known {
+				bindAll()
+				continue
 			}
-		}
-	case "printf":
-		for index := 1; index+1 < len(call.Args); index++ {
-			if flag, _ := simpleStaticWord(call.Args[index], nil); flag == "-v" {
-				if name, static := simpleStaticWord(call.Args[index+1], nil); static {
-					bind(name)
+			bind(name)
+			// An option can carry its destination in the same word.
+			if len(name) > 2 && name[0] == '-' {
+				for i := 2; i < len(name); i++ {
+					bind(name[i:])
 				}
 			}
 		}
+	case "printf":
+		for index := 1; index < len(call.Args); index++ {
+			flag, known := simpleStaticWord(call.Args[index], nil)
+			if !known {
+				bindAll()
+				continue
+			}
+			switch {
+			case flag == "-v" && index+1 < len(call.Args):
+				if name, known := simpleStaticWord(call.Args[index+1], nil); known {
+					bind(name)
+				} else {
+					bindAll()
+				}
+			case strings.HasPrefix(flag, "-v") && len(flag) > 2:
+				bind(flag[2:])
+			}
+		}
+	case ":", "true", "false", "echo", "test", "[", "[[", "pwd", "times",
+		"type", "hash", "umask", "ulimit", "jobs", "dirs",
+		"rm", "ls", "cat", "tee", "make", "grep", "sed", "git", "curl",
+		"chmod", "sleep", "date", "jq", "mysql", "python3", "ssh",
+		"sh", "bash", "zsh", "env", "sudo":
+		// These commands do not assign a parameter in the calling shell.
+	default:
+		bindAll()
 	}
 }
 
