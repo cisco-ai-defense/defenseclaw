@@ -122,12 +122,15 @@ func TestGAP0322NativeGatewayUnderShellOptions(t *testing.T) {
 			// other budget tests do, and a deadline answer measures again,
 			// doubles and tries once more; the asserted verdicts are unchanged.
 			slow := testenv.HostSlowdown()
-			call := func(want int) int {
+			call := func(want int, stretch bool) int {
 				var code int
 				for try := 0; try < 2; try++ {
 					out.Reset()
 					errOut.Reset()
-					startedAt := time.Now().Add(testenv.Scale(3500*time.Millisecond, slow) - 3500*time.Millisecond)
+					startedAt := time.Now()
+					if stretch {
+						startedAt = startedAt.Add(testenv.Scale(3500*time.Millisecond, slow) - 3500*time.Millisecond)
+					}
 					code = run(home, addr, strings.NewReader(payload), &out, &errOut, startedAt)
 					deadline := strings.Contains(errOut.String(), "incomplete gateway response") ||
 						strings.Contains(errOut.String(), "did not answer in time")
@@ -138,15 +141,18 @@ func TestGAP0322NativeGatewayUnderShellOptions(t *testing.T) {
 				}
 				return code
 			}
-			if code := call(2); code != 2 {
+			if code := call(2, true); code != 2 {
 				t.Fatalf("protected exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
 			reply.Store(`{"action":"allow"}`)
-			if code := call(0); code != 0 {
+			if code := call(0, true); code != 0 {
 				t.Fatalf("ordinary exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
 			server.Close()
-			if code := call(0); code != 0 ||
+			// No gateway: the hook resends a refused call until its restart
+			// deadline (startedAt + 3 s), so this leg keeps the real start; a
+			// stretched one would wait the stretch out on every subtest.
+			if code := call(0, false); code != 0 ||
 				!strings.Contains(out.String(), `"permissionDecision":"deny"`) {
 				t.Fatalf("unavailable exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
