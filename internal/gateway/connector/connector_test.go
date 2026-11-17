@@ -1364,15 +1364,18 @@ func TestOpenClaw_SetupAndTeardownDropTheRejectedPluginApprovalsBlock(t *testing
 		approvals, _ := cfg["approvals"].(map[string]interface{})
 		return approvals
 	}
+	// refusedOnWindows: native Windows guards OpenClaw only through its
+	// native plugin hooks (2026.8.35 and later), so setup refuses these
+	// versions there before it writes anything (rel-1-0-10:GAP-1171).
 	for _, tc := range []struct {
-		name, version, config string
-		wantPlugin            bool
+		name, version, config        string
+		wantPlugin, refusedOnWindows bool
 	}{
-		{"old OpenClaw drops the written block", "OpenClaw 2026.3.24 (cff6dc9)", written, false},
-		{"plugin approvals supported keeps it", "OpenClaw 2026.6.8 (844f405)", written, true},
-		{"unknown version keeps it", "", written, true},
+		{"old OpenClaw drops the written block", "OpenClaw 2026.3.24 (cff6dc9)", written, false, true},
+		{"plugin approvals supported keeps it", "OpenClaw 2026.6.8 (844f405)", written, true, true},
+		{"unknown version keeps it", "", written, true, false},
 		{"another shape is the operator's", "OpenClaw 2026.3.24 (cff6dc9)",
-			`{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session","agentFilter":["main"]}}}`, true},
+			`{"approvals":{"exec":{"enabled":true},"plugin":{"enabled":true,"mode":"session","agentFilter":["main"]}}}`, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1389,10 +1392,8 @@ func TestOpenClaw_SetupAndTeardownDropTheRejectedPluginApprovalsBlock(t *testing
 
 			c := NewOpenClawConnector()
 			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", AgentVersion: tc.version}
-			if openClawHooksGOOS == "windows" && openClawLacksNativeHooks(openClawObservedVersion(opts)) {
-				// Native Windows guards OpenClaw only through its native
-				// plugin hooks (2026.8.35 and later): setup refuses an older
-				// OpenClaw before it writes anything (rel-1-0-10:GAP-1171).
+			var approvals map[string]interface{}
+			if openClawHooksGOOS == "windows" && tc.refusedOnWindows {
 				err := c.Setup(context.Background(), opts)
 				if err == nil || !strings.Contains(err.Error(), "native plugin hooks") {
 					t.Fatalf("Setup on Windows with %q: %v, want the native-hooks refusal", tc.version, err)
@@ -1404,7 +1405,7 @@ func TestOpenClaw_SetupAndTeardownDropTheRejectedPluginApprovalsBlock(t *testing
 				if err := c.Setup(context.Background(), opts); err != nil {
 					t.Fatalf("Setup: %v", err)
 				}
-				approvals := readApprovals(t, configPath)
+				approvals = readApprovals(t, configPath)
 				if _, ok := approvals["plugin"]; ok != tc.wantPlugin {
 					t.Fatalf("after Setup approvals.plugin present = %v, want %v (%v)", ok, tc.wantPlugin, approvals)
 				}
