@@ -3,10 +3,7 @@
 
 package gateway
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
 // substrate-1 GAP-0267: a PreToolUse decision forgotten on its replica (its
 // answer unconfirmed, its audit row not written) is forgotten on every
@@ -22,12 +19,8 @@ func TestGAP0267ForgottenPreToolUseIsForgottenOnEveryReplica(t *testing.T) {
 	a.recordPreToolDecision(ctx, key)
 	a.forgetPreToolDecision(ctx, key)
 	decided, forgotten := key.sharedHashes()
-	for i := 0; i < 200; i++ {
-		known, _ := shared.Seen(ctx, key.sharedScope(), []historyHash{decided, forgotten})
-		if len(known) == 2 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if known, _ := shared.Seen(ctx, key.sharedScope(), []historyHash{decided, forgotten}); len(known) != 2 {
+		t.Fatalf("the shared record holds %d of the decided and forgotten marks, want both", len(known))
 	}
 	if b.preToolDecided(ctx, key) {
 		t.Fatal("replica B still finds a PreToolUse decision replica A forgot")
