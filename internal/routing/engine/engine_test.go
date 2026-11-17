@@ -342,3 +342,41 @@ func TestDecideBindFallsBackForTheGate(t *testing.T) {
 		t.Fatalf("bind without survivor = %+v, want fallback for the gate", d)
 	}
 }
+
+// GAP-1104: a rule's default alias that cannot serve the request API is only a
+// preference; another allowed alias that can serve it is used.
+func TestDecideBoundRuleDefaultThatCannotServeTheAPIFallsToAnotherAllowedAlias(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Routing = config.RoutingConfig{
+		Enabled: true, Classifier: "rules",
+		Models: []config.RoutingModelBackend{
+			{Name: "fast", Provider: "bedrock", Model: "us.anthropic.claude-haiku-4-5", APIs: []string{"converse"}},
+			{Name: "deep", Provider: "bedrock", Model: "us.anthropic.claude-sonnet-5-5", APIs: []string{"converse"}},
+			{Name: "luna", Provider: "openai", Model: "gpt-x", APIs: []string{"responses"}},
+		},
+	}
+	policy := Policy{AllowedAliases: []string{"fast", "deep", "luna"}, DefaultAlias: "deep"}
+	responses := Request{Text: "write a haiku", APIFamily: "responses", Connector: "codex", Listener: ListenerRouteOnly, Caller: Caller{Key: "1000"}}
+
+	bound := mustEngine(t, cfg, Options{Managed: true, Admin: fakeAdmin{verdict: AdminVerdict{Bind: true, Policy: policy, RuleIDs: []string{"eng1-fast-and-deep"}}}})
+	d := bound.Decide(context.Background(), responses)
+	if d.Outcome != OutcomeApplied || d.Backend == nil || d.Backend.Alias != "luna" || d.Source != SourceDefault {
+		t.Fatalf("bound rule, default cannot serve Responses: %+v", d)
+	}
+	// The default serves a Converse request as before.
+	converse := responses
+	converse.APIFamily = "converse"
+	if d := bound.Decide(context.Background(), converse); d.Backend == nil || d.Backend.Alias != "deep" {
+		t.Fatalf("default that can serve: %+v", d)
+	}
+	// A rule that names no default tries nothing else: the request is refused at the gate, as before.
+	noDefault := mustEngine(t, cfg, Options{Managed: true, Admin: fakeAdmin{verdict: AdminVerdict{Bind: true, Policy: Policy{AllowedAliases: []string{"fast", "deep", "luna"}}}}})
+	if d := noDefault.Decide(context.Background(), responses); d.Outcome != OutcomeFallback || d.Backend != nil {
+		t.Fatalf("a bound rule with no default: %+v", d)
+	}
+	// A rule with no allow list does not bind: nothing else is tried.
+	open := mustEngine(t, cfg, Options{Admin: fakeAdmin{verdict: AdminVerdict{Policy: policy}}})
+	if d := open.Decide(context.Background(), responses); d.Outcome != OutcomeFallback || d.Backend != nil {
+		t.Fatalf("unbound rule: %+v", d)
+	}
+}

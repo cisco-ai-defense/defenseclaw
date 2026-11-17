@@ -146,6 +146,22 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	if !classifierFailed {
 		order = append(order, cand{pol.DefaultAlias, SourceDefault}, cand{e.unconditional, SourceDefault})
+		if verdict.Bind && pol.DefaultAlias != "" {
+			// A routing.admin rule that lists the allowed aliases binds the
+			// request to them (the original request is refused when it is
+			// outside the list). Its default is only a preference: when the
+			// default cannot serve this request (another API, a missing
+			// capability or credential) the next allowed alias that can is
+			// used, in the list's order, instead of refusing a request an
+			// allowed model could answer (rel-1-0-10:GAP-1104). A request
+			// whose model the rule does not allow is still refused with the
+			// rule named, and a rule with no default tries nothing new.
+			if _, why := e.eligible(pol, pol.DefaultAlias, req); why == "api" || why == "capability" || why == "credential" {
+				for _, a := range pol.AllowedAliases {
+					order = append(order, cand{a, SourceDefault})
+				}
+			}
+		}
 	}
 	localWhy := ""
 	for _, c := range order {
