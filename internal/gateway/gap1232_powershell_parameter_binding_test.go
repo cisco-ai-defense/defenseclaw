@@ -28,9 +28,10 @@ const gap1232Home = `C:\Users\Alice`
 // as parameters that only take a value, dropped them with the state path
 // and allowed the write. A prefix that only valued parameters of the other
 // cmdlets start, read with its value (-T x, -T:x), and the RV15-2 forms
-// keep their block. mv -t <state folder> <file> is the GAP-1209 statement
-// with the state folder: PowerShell refuses -t, the POSIX reading moves the
-// file elsewhere, and it is allowed like the agent folder row.
+// keep their block. mv -t <state folder> notes.txt is the GAP-1209
+// statement with the state folder: PowerShell refuses -t, and the POSIX
+// reading moves notes.txt into the folder, a new file the state rule allows
+// (a state file name moved there: TestGAP1250TargetDirectoryStateWrite).
 func TestGAP1232StateWriteThroughABoundPrefix(t *testing.T) {
 	state := `$HOME\.defenseclaw\config.yaml`
 	backup := `$HOME\c.bak`

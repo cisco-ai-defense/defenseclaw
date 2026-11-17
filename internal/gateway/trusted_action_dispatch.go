@@ -1846,7 +1846,8 @@ func withActiveStateTargetMention(
 				// client placed there (GAP-1023).
 				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
 				proven := spelled && provenCMDSlashCStateWrite(request) ||
-					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)
+					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request) ||
+					spelled && provenTargetDirectoryStateWrite(request)
 				if !proven {
 					return findings
 				}
@@ -1854,7 +1855,7 @@ func withActiveStateTargetMention(
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
-			!provenPowerShellStateWrite(request) {
+			!provenPowerShellStateWrite(request) && !provenTargetDirectoryStateWrite(request) {
 			return findings
 		}
 	}
