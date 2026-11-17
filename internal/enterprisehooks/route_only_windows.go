@@ -68,9 +68,11 @@ func restoreWindowsRouteOnlyAsTarget(conn connector.Connector, sid *windows.SID,
 // Only LocalSystem can read a file as the account (the session token needs
 // SeTcbPrivilege). An elevated administrator running verify is refused the
 // agent files, which the route-only render publishes for the account and
-// SYSTEM only, so that render is reported as not verified, never as drift:
-// the guardian, which runs as SYSTEM, still checks and repairs it (GAP-1111).
-func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, dataDir string, route *connector.RouteOnlySetup) error {
+// SYSTEM only, so that render is neither proven nor drift: verify returns
+// RouteOnlyUnverified and no error, and the caller reports the target as not
+// verified (route_config_unverified, never ok). As LocalSystem the same
+// failure stays drift, which the guardian repairs (GAP-1111).
+func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, dataDir string, route *connector.RouteOnlySetup) (string, error) {
 	unverified := false
 	read := func(path string) ([]byte, error) {
 		data, _, err := readWindowsAccountConfig(path, sid, home)
@@ -79,16 +81,18 @@ func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, da
 		}
 		return data, windowsRouteOnlyReadError(err)
 	}
-	return connector.WithUserHomeDir(home, func() error {
+	status := ""
+	err := connector.WithUserHomeDir(home, func() error {
 		if err := connector.RouteOnlyDriftWithReader(conn, connector.SetupOpts{DataDir: dataDir}, route, read); err != nil {
 			if unverified {
-				windowsRouteOnlyWarn(fmt.Sprintf("enterprise hooks: %s route-only settings not verified: the agent files are read as the account, which needs LocalSystem; run verify as SYSTEM (the guardian checks them)", conn.Name()))
+				status = RouteOnlyUnverified
 				return nil
 			}
 			return fmt.Errorf("enterprise hooks: %w", err)
 		}
 		return nil
 	})
+	return status, err
 }
 
 // windowsRouteOnlyVerifierIsLocalSystem reports whether verify runs as

@@ -68,10 +68,10 @@ func TestWindowsRouteOnlyRenderDriftRestore(t *testing.T) {
 				t.Fatal(err)
 			}
 			route := &connector.RouteOnlySetup{BaseURL: "http://127.0.0.1:18970/r/" + tc.name, Token: "dcr1-" + tc.name, Custody: true}
-			if err := verifyWindowsRouteOnly(conn, account, home, dataDir, nil); err != nil {
+			if _, err := verifyWindowsRouteOnly(conn, account, home, dataDir, nil); err != nil {
 				t.Fatalf("no render yet and none wanted: %v", err)
 			}
-			if err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); !errors.Is(err, connector.ErrRouteConfigDrift) {
+			if _, err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); !errors.Is(err, connector.ErrRouteConfigDrift) {
 				t.Fatalf("a missing render must be drift, got %v", err)
 			}
 			if err := connector.WithUserHomeDir(home, func() error { return applyWindowsRouteOnly(conn, dataDir, route) }); err != nil {
@@ -84,14 +84,14 @@ func TestWindowsRouteOnlyRenderDriftRestore(t *testing.T) {
 			if strings.Contains(string(raw), "sk-ant-user-own") {
 				t.Fatal("a custody render keeps the user key")
 			}
-			if err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); err != nil {
+			if _, err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); err != nil {
 				t.Fatalf("fresh render drift = %v", err)
 			}
 			rotated := &connector.RouteOnlySetup{BaseURL: route.BaseURL, Token: "dcr1-rotated", Custody: true}
-			if err := verifyWindowsRouteOnly(conn, account, home, dataDir, rotated); !errors.Is(err, connector.ErrRouteConfigDrift) {
+			if _, err := verifyWindowsRouteOnly(conn, account, home, dataDir, rotated); !errors.Is(err, connector.ErrRouteConfigDrift) {
 				t.Fatalf("a rotated credential must be drift, got %v", err)
 			}
-			if err := verifyWindowsRouteOnly(conn, account, home, dataDir, nil); !errors.Is(err, connector.ErrRouteConfigDrift) {
+			if _, err := verifyWindowsRouteOnly(conn, account, home, dataDir, nil); !errors.Is(err, connector.ErrRouteConfigDrift) {
 				t.Fatalf("a left-over render must be drift, got %v", err)
 			}
 			if err := restoreWindowsRouteOnlyAsTarget(conn, sid, home, dataDir); err != nil {
@@ -101,7 +101,7 @@ func TestWindowsRouteOnlyRenderDriftRestore(t *testing.T) {
 			if strings.Contains(string(after), "/r/"+tc.name) || strings.Contains(string(after), route.Token) {
 				t.Fatalf("restore left the render:\n%s", after)
 			}
-			if err := verifyWindowsRouteOnly(conn, account, home, dataDir, nil); err != nil {
+			if _, err := verifyWindowsRouteOnly(conn, account, home, dataDir, nil); err != nil {
 				t.Fatalf("after restore = %v", err)
 			}
 			if _, err := os.Stat(machineWide); !errors.Is(err, os.ErrNotExist) {
@@ -176,7 +176,7 @@ func TestVerifyWindowsRouteOnlyReadsBoundedWithoutPaths(t *testing.T) {
 	account := currentWindowsTestSID(t)
 	conn, _ := newWindowsEnterpriseConnectorRegistry().Get("claudecode")
 	route := &connector.RouteOnlySetup{BaseURL: "http://127.0.0.1:18970/r/claudecode", Token: "dcr1-claudecode", Custody: true}
-	err := verifyWindowsRouteOnly(conn, account, home, dataDir, route)
+	_, err := verifyWindowsRouteOnly(conn, account, home, dataDir, route)
 	if !errors.Is(err, connector.ErrRouteConfigDrift) || !strings.Contains(err.Error(), "larger than the read limit") || strings.Contains(err.Error(), home) {
 		t.Fatalf("oversize settings = %v; want drift with the fixed reason and no path", err)
 	}
@@ -184,8 +184,9 @@ func TestVerifyWindowsRouteOnlyReadsBoundedWithoutPaths(t *testing.T) {
 
 // TestVerifyWindowsRouteOnlyUnreadableAsAdministratorIsNotDrift: an elevated
 // administrator is refused the account-only agent file and cannot read it as
-// the account; verify reports the render as not verified instead of drift.
-// As LocalSystem the same failure stays drift (GAP-1111).
+// the account; verify reports the render as unverified (no error, status
+// RouteOnlyUnverified) instead of drift. As LocalSystem the same failure
+// stays drift (GAP-1111).
 func TestVerifyWindowsRouteOnlyUnreadableAsAdministratorIsNotDrift(t *testing.T) {
 	home := t.TempDir()
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -217,28 +218,25 @@ func TestVerifyWindowsRouteOnlyUnreadableAsAdministratorIsNotDrift(t *testing.T)
 	}
 	setDACL("D:P(D;;0x1;;;" + account.String() + ")(A;;FA;;;" + account.String() + ")(A;;FA;;;SY)")
 	t.Cleanup(func() { setDACL("D:P(A;;FA;;;" + account.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)") })
-	previousReadAs, previousSystem, previousWarn := windowsAccountConfigReadAs, windowsRouteOnlyVerifierIsLocalSystem, windowsRouteOnlyWarn
+	previousReadAs, previousSystem := windowsAccountConfigReadAs, windowsRouteOnlyVerifierIsLocalSystem
 	windowsAccountConfigReadAs = func(*windows.SID, string, func() error) error {
 		return errors.New("no session token for this caller")
 	}
-	var warnings []string
-	windowsRouteOnlyWarn = func(message string) { warnings = append(warnings, message) }
 	t.Cleanup(func() {
-		windowsAccountConfigReadAs, windowsRouteOnlyVerifierIsLocalSystem, windowsRouteOnlyWarn = previousReadAs, previousSystem, previousWarn
+		windowsAccountConfigReadAs, windowsRouteOnlyVerifierIsLocalSystem = previousReadAs, previousSystem
 	})
 	conn, _ := newWindowsEnterpriseConnectorRegistry().Get("claudecode")
 	route := &connector.RouteOnlySetup{BaseURL: "http://127.0.0.1:18970/r/claudecode", Token: "dcr1-claudecode", Custody: true}
 
 	windowsRouteOnlyVerifierIsLocalSystem = func() bool { return false }
-	if err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); err != nil {
-		t.Fatalf("administrator verify = %v; want not verified, not drift", err)
-	}
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "not verified") {
-		t.Fatalf("warnings = %q; want one not-verified note", warnings)
+	status, err := verifyWindowsRouteOnly(conn, account, home, dataDir, route)
+	if err != nil || status != RouteOnlyUnverified {
+		t.Fatalf("administrator verify = %q, %v; want %q and no drift error", status, err, RouteOnlyUnverified)
 	}
 
 	windowsRouteOnlyVerifierIsLocalSystem = func() bool { return true }
-	if err := verifyWindowsRouteOnly(conn, account, home, dataDir, route); !errors.Is(err, connector.ErrRouteConfigDrift) {
-		t.Fatalf("LocalSystem verify = %v; want route_config_drift", err)
+	status, err = verifyWindowsRouteOnly(conn, account, home, dataDir, route)
+	if status != "" || !errors.Is(err, connector.ErrRouteConfigDrift) {
+		t.Fatalf("LocalSystem verify = %q, %v; want route_config_drift", status, err)
 	}
 }

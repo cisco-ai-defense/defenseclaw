@@ -349,7 +349,8 @@ func verifyWindowsCodexManagedResult(
 		return InstallResult{}, err
 	}
 	// Route-only drift (S1 DESIGN 18.3, 21): the guardian repair re-renders.
-	if err := verifyWindowsRouteOnly(target.conn, target.sid, target.home, target.dataDir, opts.RouteOnly); err != nil {
+	routeOnly, err := verifyWindowsRouteOnly(target.conn, target.sid, target.home, target.dataDir, opts.RouteOnly)
+	if err != nil {
 		return InstallResult{}, err
 	}
 	otlpReport, err := windowsManagedUserNativeOTLPCheck("codex", target.home, target.dataDir, target.sid, opts.APIAddr, opts.ProxyAddr)
@@ -400,6 +401,7 @@ func verifyWindowsCodexManagedResult(
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
 		AgentConfig:     otlpReport,
+		RouteOnly:       routeOnly,
 	}, nil
 }
 

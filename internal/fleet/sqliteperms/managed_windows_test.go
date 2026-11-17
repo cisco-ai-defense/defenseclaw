@@ -97,3 +97,41 @@ func TestPrepareManagedStoreRefusesUserWritableFolder(t *testing.T) {
 		}
 	})
 }
+
+// A store folder a standard account owns is refused in managed mode: the
+// owner rule admits only SYSTEM, Administrators, TrustedInstaller and the
+// gateway service.
+func TestPrepareManagedStoreRefusesStandardUserOwnedFolder(t *testing.T) {
+	dir, _ := managedStoreDir(t, "S-1-5-21-1000-2000-3000-1001", "")
+	testenv.AsAdministratorsOwner(t, func() {
+		if err := Prepare(filepath.Join(dir, "model_usage.db")); err == nil {
+			t.Fatal("Prepare accepted a store folder owned by a standard account")
+		}
+	})
+}
+
+// A database file that Users can modify is refused in a trusted folder.
+func TestPrepareManagedStoreRefusesUserWritableDatabaseFile(t *testing.T) {
+	dir, service := managedStoreDir(t, "BA", "")
+	db := filepath.Join(dir, "model_usage.db")
+	if err := os.WriteFile(db, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	testenv.SetSecurity(t, db, "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;"+service+")(A;;0x1301bf;;;BU)")
+	testenv.AsAdministratorsOwner(t, func() {
+		if err := Prepare(db); err == nil {
+			t.Fatal("Prepare accepted a database file that Users can modify")
+		}
+	})
+}
+
+// A process without the managed deployment pin keeps the per-user rule: the
+// Administrators-owned runtime folder is foreign to it.
+func TestPrepareWithoutManagedPinKeepsPrivateRule(t *testing.T) {
+	dir, _ := managedStoreDir(t, "BA", "")
+	t.Setenv(managed.DeploymentModeEnv, "")
+	err := Prepare(filepath.Join(dir, "model_usage.db"))
+	if err == nil || !strings.Contains(err.Error(), "foreign-owned") {
+		t.Fatalf("Prepare outside the managed service = %v; want the foreign-owned refusal", err)
+	}
+}
