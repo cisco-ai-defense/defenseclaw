@@ -136,6 +136,10 @@ type Store struct {
 	AnchorsFile string
 	// Base is config.yaml; bundles are verified as layered over it.
 	Base *config.Config
+	// Live, when set, is config.yaml in force now (the gateway and the
+	// controller follow launcher_atespaces and assignments live, GAP-0276).
+	// It decides which atespaces a stage may name (GAP-0494); nil uses Base.
+	Live func() *config.Config
 	Now  func() time.Time
 }
 
@@ -258,6 +262,17 @@ func normalizeStage(stage string, atespaces []string) (string, []string, error) 
 	return stage, out, nil
 }
 
+// managedBase is the config that decides which atespaces DefenseClaw
+// manages: the live one when the caller follows config.yaml, else Base.
+func (s *Store) managedBase() *config.Config {
+	if s.Live != nil {
+		if c := s.Live(); c != nil {
+			return c
+		}
+	}
+	return s.Base
+}
+
 // unmanagedAtespace returns the first atespace of a named stage that
 // DefenseClaw does not manage (GAP-0438): neither a launcher atespace nor
 // one a match.substrate assignment of config.yaml or of the bundle lists by
@@ -339,7 +354,7 @@ func (s *Store) apply(ctx context.Context, archive []byte, stage string, atespac
 	if err != nil {
 		return err
 	}
-	if a, ok := unmanagedAtespace(s.Base, v.Policy, stage, atespaces); ok {
+	if a, ok := unmanagedAtespace(s.managedBase(), v.Policy, stage, atespaces); ok {
 		return refuse(CodeStageInvalid, "atespaces", "atespace %s is not managed by DefenseClaw: it is not a launcher atespace and no match.substrate assignment of config.yaml or of this bundle lists it by name", a)
 	}
 	if v.AlreadyApplied && slices.Equal(cur.Atespaces, atespaces) {
