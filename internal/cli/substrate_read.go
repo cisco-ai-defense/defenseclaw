@@ -435,7 +435,7 @@ is gone.`,
 // substrateConfirm asks a yes/no question on a terminal; without one it
 // refuses and names --yes.
 func substrateConfirm(cmd *cobra.Command, q string) (bool, error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !substrateInteractive() {
 		return false, errors.New("this needs a yes: pass --yes to answer it from a script")
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "%s [y/N] ", q)

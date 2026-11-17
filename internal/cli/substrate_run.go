@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/launcherpresence"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
 // substrateAsks adapts the admin client to attach.AskSource for one person.
@@ -311,10 +313,13 @@ func newSubstrateID(n int) string {
 //     Bedrock model (lane A10, TST-0125, TST-0184).
 //   - cursor, devin, amp: vendor sign-in connectors (PLAN E9, lane A11, J41
 //     TST-0286 to TST-0299). The gateway decides at create with
-//     signin.Evaluate: open source runs the agent and the create answer
-//     carries the warning that the sign-in token sits in the actor and its
-//     snapshots, which run prints; a managed deployment refuses it with
-//     subscription_signin_refused before any actor exists. Kiro and
+//     signin.Evaluate: open source answers a create 428
+//     signin_ack_required with the warning that the sign-in token sits in
+//     the actor and its snapshots, before any actor exists; run shows it,
+//     asks for a yes (or takes --yes) and creates again with the
+//     acknowledgement, which the gateway audits (GAP-0482). A managed
+//     deployment refuses it with subscription_signin_refused before any
+//     actor exists. Kiro and
 //     Antigravity are verified harnesses with no entry here; the same rule
 //     applies to them.
 var substrateProven = map[string]string{
@@ -457,6 +462,18 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 			return a, cliusage.WithExitCode(fmt.Errorf("template %s is not a %s template; name one with --template TEMPLATE, for example --template %s", req.Template, t.spec.DisplayName, t.agentTemplate), 2)
 		}
 	}
+	// GAP-0482: an open-source cluster warns about a vendor sign-in before
+	// it creates anything; the person's yes (or --yes) sends the create
+	// again, and the cluster audits it.
+	acked := ""
+	if e, ok := api.AsError(err); ok && e.Status == http.StatusPreconditionRequired && e.Reason == signin.AckRequiredCode {
+		acked = substrateFirst(e.Message, "the cluster warns about this agent's vendor sign-in.")
+		if err = substrateAckSignin(cmd, t, f, req, acked); err != nil {
+			return a, err
+		}
+		req.AcknowledgeSignin = true
+		a, err = s.Client.Create(ctx, req)
+	}
 	if err != nil {
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
 			return a, cliusage.WithExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
@@ -464,9 +481,12 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 		return a, substrateFail(err)
 	}
 	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
-	// E9: in open source the cluster says what a vendor sign-in costs.
+	// E9: in open source the cluster says what a vendor sign-in costs; the
+	// warning the person just acknowledged is not printed twice.
 	for _, warn := range a.Warnings {
-		fmt.Fprintf(w, "Warning: %s\n", warn)
+		if warn != acked {
+			fmt.Fprintf(w, "Warning: %s\n", warn)
+		}
 	}
 	if t.note != "" {
 		fmt.Fprintf(w, "Note: %s\n", t.note)
@@ -493,6 +513,32 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 		}
 	}
 	return a, nil
+}
+
+// substrateAckSignin shows the cluster's sign-in warning and takes the
+// person's yes before anything is created or uploaded (GAP-0482). --yes
+// answers it; a batch, or a run with no terminal, needs --yes. No is a run
+// that started nothing.
+func substrateAckSignin(cmd *cobra.Command, t substrateRunTarget, f *substrateRunFlags, req api.CreateRequest, warning string) error {
+	w := cmd.ErrOrStderr()
+	switch {
+	case f.yes:
+		fmt.Fprintf(w, "Warning: %s\nAcknowledged with --yes.\n", warning)
+		return nil
+	case req.BatchID != "":
+		return cliusage.WithExitCode(fmt.Errorf("%s signs in to a vendor account, and the cluster asks for a yes first; nothing was started. Run the batch again with --yes to acknowledge it", t.spec.DisplayName), 2)
+	case !substrateInteractive():
+		return cliusage.WithExitCode(fmt.Errorf("%s Nothing was started: run it again with --yes to acknowledge this warning", warning), 2)
+	}
+	fmt.Fprintf(w, "Warning: %s\n", warning)
+	ok, err := substrateConfirm(cmd, "Start "+t.spec.DisplayName+" anyway?")
+	if err != nil {
+		return cliusage.WithExitCode(err, 2)
+	}
+	if !ok {
+		return cliusage.WithExitCode(errors.New("not started: the warning was not acknowledged, so nothing was created or uploaded"), 1)
+	}
+	return nil
 }
 
 // substrateCloneInActor clones --clone into the actor through the relay

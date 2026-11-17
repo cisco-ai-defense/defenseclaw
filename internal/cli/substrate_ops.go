@@ -239,8 +239,8 @@ func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor,
 
 // substrateInteractive is true when stdin is a terminal. A char device is
 // not enough: /dev/null is one, and a script that gives pull no input must
-// get the hint, not a question.
-func substrateInteractive() bool {
+// get the hint, not a question. Tests replace it.
+var substrateInteractive = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 

@@ -65,6 +65,12 @@ type SubstrateCreate struct {
 	// Unattended is a --task or --batch run (fail closed, D8).
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
+	// AcknowledgeSignin is the person's yes to the open-source sign-in
+	// warning (GAP-0482). A create whose agent signs in to a vendor account
+	// (or keeps the hook in a folder it owns) and does not carry it is
+	// answered 428 signin_ack_required with the warning, before any actor
+	// exists; the acknowledged create is audited.
+	AcknowledgeSignin bool `json:"acknowledge_signin,omitempty"`
 	// Atespace is filled by the gateway from the profile; a request value
 	// is refused unless it is one of the profile's launcher atespaces.
 	Atespace string `json:"atespace,omitempty"`
@@ -393,8 +399,16 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		// vendor account, before any actor exists. The connector is now the
 		// template's whenever the template has one; it is checked again
 		// below on what the created actor runs.
-		if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
-			writeSubstrateSigninRefusal(w, d)
+		preDecision := st.cfg.signinDecision(req.Connector, req.Secrets)
+		if !preDecision.Allowed {
+			writeSubstrateSigninRefusal(w, preDecision)
+			return
+		}
+		if preDecision.Warn && !req.AcknowledgeSignin {
+			// GAP-0482: open source asks first. The warning goes back
+			// before anything is created or uploaded; the launcher asks the
+			// person and sends the create again with their yes.
+			writeSubstrateSigninAckRequired(w, preDecision)
 			return
 		}
 		created, err := st.cfg.Actions.Create(r.Context(), req)
@@ -414,6 +428,14 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		if !signinDecision.Allowed {
 			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
 			writeSubstrateSigninRefusal(w, signinDecision)
+			return
+		}
+		if signinDecision.Warn && !req.AcknowledgeSignin {
+			// The actor runs another connector than the one checked above
+			// (a template with no label): it never ran, so remove it and
+			// ask as above.
+			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
+			writeSubstrateSigninAckRequired(w, signinDecision)
 			return
 		}
 		if signinDecision.Warn {
@@ -480,6 +502,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		out := substrateActorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)
+			st.auditSigninAcknowledged(r.Context(), c, reg, signinDecision)
 		}
 		if len(createWarnings) > 0 {
 			out["warnings"] = createWarnings

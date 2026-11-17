@@ -102,6 +102,10 @@ type CreateRequest struct {
 	BatchID    string   `json:"batch_id,omitempty"`
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
+	// AcknowledgeSignin is the person's yes to the cluster's sign-in
+	// warning (GAP-0482). Without it an open-source cluster answers 428
+	// signin_ack_required with the warning and creates nothing.
+	AcknowledgeSignin bool `json:"acknowledge_signin,omitempty"`
 }
 
 // ListOptions filters ListActors.

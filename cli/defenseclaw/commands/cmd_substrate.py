@@ -569,10 +569,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "claude,\n"
             "codex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that "
             "sign in to a\n"
-            "vendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, "
-            "because the\n"
-            "sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows "
-            "the guard profile, model, allowed hosts and how to leave. When the\n"
+            "vendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you "
+            "say yes to a\n"
+            "warning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed "
+            "cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When "
+            "the\n"
             "guard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, "
             "always or deny.\n"
             "\n"
@@ -658,7 +659,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
             ),
             _Flag("workload-token-file", "string", "CI: file holding the workload identity token", metavar="FILE"),
-            _Flag("yes", "bool", "answer questions with their defaults", short="y"),
+            _Flag("yes", "bool", "say yes to the vendor sign-in warning without asking", short="y"),
         ),
     ),
     _Cmd(
