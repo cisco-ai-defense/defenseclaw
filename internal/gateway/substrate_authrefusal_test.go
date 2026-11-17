@@ -117,8 +117,15 @@ func TestSubstrateRefusedTokensAreLoggedAndAuditedGAP0407GAP0408(t *testing.T) {
 		}
 	}
 	for _, k := range []string{`"listener":"actor","reason":"missing_token"`, `"listener":"admin","reason":"missing_token"`, `"listener":"admin","reason":"signature"`} {
-		if per[k] != 1 {
-			t.Errorf("%s: %d audit rows, want exactly 1 (the flood of 201 is one row per window); rows: %d", k, per[k], len(rows))
+		// One row per listener, reason, route and client class per window:
+		// the actor's two refused routes (hook, llm) are two rows; the
+		// admin flood of 201 is one.
+		want := 1
+		if strings.HasPrefix(k, `"listener":"actor"`) {
+			want = 2
+		}
+		if per[k] != want {
+			t.Errorf("%s: %d audit rows, want exactly %d (a flood is one row per window); rows: %d", k, per[k], want, len(rows))
 		}
 	}
 	// The forged-token row is an alert (MEDIUM); a missing token is INFO.
