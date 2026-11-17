@@ -91,7 +91,7 @@ func gap0971LauncherChains(t *testing.T, tierIndex int) {
 			for form, got := range forms(`git log --oneline -5`) {
 				action := boundedParse(got.Action)
 				limited := containsString(got.RuleIDs, evaluationLimitRuleID)
-				if action != bounded.Allow && !(limited && action == floor) {
+				if action != bounded.Allow && (!limited || action != floor) {
 					t.Errorf("%s/%s/%s benign %s: action %s %v, want allow or the unknown tier %s with %s",
 						tier.name, w.name, l.name, form, got.Action, got.RuleIDs, floor, evaluationLimitRuleID)
 				}
