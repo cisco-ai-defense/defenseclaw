@@ -411,8 +411,13 @@ homeSizeLimit: 4Gi
 # gateway account (0700, running as root with only CHOWN and FOWNER), as the
 # audit store's directory trust check requires. Memory: a memory emptyDir
 # (tmpfs) and no init container, for a namespace whose policy refuses a root
-# init container; it counts against the pod's memory limit, so raise the
-# limits by homeSizeLimit.
+# init container. A tmpfs counts against the memory limit of the container
+# that writes it, so the chart refuses Memory unless every DefenseClaw pod
+# (gateway, leader, controller, callout) sets resources.limits.memory and
+# resources.requests.memory with limit >= homeSizeLimit + request (the
+# request is the process headroom; GAP-0537). The defaults do not fit; a
+# sized example: homeSizeLimit 512Mi, max_store_mb 128, and controller and
+# callout limits 768Mi (README, homeMedium).
 homeMedium: ""
 
 podAnnotations: {}

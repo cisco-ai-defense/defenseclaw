@@ -230,6 +230,22 @@ layout, seeded by the init container and read-only to the gateway. */}}
 local audit database (audit.db and its write-ahead log) and local state. */}}
 {{- define "dc.homeDir" -}}/var/lib/defenseclaw/run{{- end -}}
 
+{{/* A Kubernetes memory quantity in MiB, as an integer: (list quantity key
+round), round "up" or "down". It reads a number with an optional exponent
+and Ki, Mi, Gi, Ti, k, M, G, T or no unit (bytes), and fails naming key on
+anything else (validate.yaml, GAP-0402 and GAP-0537). */}}
+{{- define "dc.mib" -}}
+{{- $q := toString (index . 0) -}}
+{{- $num := regexFind "^[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?" $q -}}
+{{- $unit := trimPrefix $num $q -}}
+{{- $bytes := dict "" 1 "Ki" 1024 "Mi" 1048576 "Gi" 1073741824 "Ti" 1099511627776 "k" 1000 "M" 1000000 "G" 1000000000 "T" 1000000000000 -}}
+{{- if or (not $num) (not (hasKey $bytes $unit)) -}}
+{{- fail (printf "%s %q is not a memory quantity (a number with Ki, Mi, Gi, Ti, k, M, G, T or no unit)" (index . 1) $q) -}}
+{{- end -}}
+{{- $mib := divf (mulf (float64 $num) (index $bytes $unit)) 1048576 -}}
+{{- if eq (index . 2) "up" }}{{ ceil $mib | int }}{{ else }}{{ floor $mib | int }}{{ end -}}
+{{- end -}}
+
 {{/* "true" when DEFENSECLAW_HOME is on a disk emptyDir that the init
 container gives to the gateway account: every install outside managed mode
 unless homeMedium is Memory (GAP-0402). */}}

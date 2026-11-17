@@ -121,6 +121,16 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"cap too large for the volume":  "config.observability.local.max_store_mb=4096",
 		"managed data volume too small": "config.deployment_mode=managed_enterprise,config.substrate.templates.allowed_images={reg.example.com/dc/*},managed.dataSizeLimit=512Mi",
 		"home medium not known":         "homeMedium=Disk",
+		// GAP-0537: a memory home volume counts against the memory limit of
+		// the container that writes it: every pod that mounts it needs
+		// limits.memory >= homeSizeLimit + requests.memory, or the store
+		// grows into an OOM kill instead of a full store.
+		"memory home on the default sizes": "homeMedium=Memory", // 4Gi tmpfs, cap 1024, gateway limit 1Gi
+		"memory home, no memory limit":     memoryHomeExample + ",callout.resources.limits=null",
+		"memory home, no memory request":   memoryHomeExample + ",gateway.resources.requests=null",
+		"memory home, limit below size":    "homeMedium=Memory,homeSizeLimit=512Mi,config.observability.local.max_store_mb=128", // controller and callout 512Mi < 512Mi + 128Mi
+		"memory home, decimal limit short": memoryHomeExample + ",callout.resources.limits.memory=600M",                         // 572 MiB < 640 MiB
+		"memory home, unreadable limit":    memoryHomeExample + ",leader.resources.limits.memory=lots",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
@@ -128,6 +138,14 @@ func TestChartRefusesBadValues(t *testing.T) {
 		}
 	}
 }
+
+// memoryHomeExample is the README's memory home volume (homeMedium Memory):
+// a 512Mi tmpfs holds the 128 MiB cap twice over plus the 256 MiB WAL
+// ceiling, and each pod's memory limit holds the tmpfs plus its memory
+// request (gateway 1Gi >= 768Mi, leader 2Gi >= 1Gi, controller and callout
+// 768Mi >= 640Mi) (GAP-0537).
+const memoryHomeExample = "homeMedium=Memory,homeSizeLimit=512Mi,config.observability.local.max_store_mb=128," +
+	"controller.resources.limits.memory=768Mi,callout.resources.limits.memory=768Mi"
 
 // GAP-0402 (E3, 15 actors): DEFENSECLAW_HOME was a 256 MiB memory emptyDir,
 // the audit write-ahead log's flood ceiling is also 256 MiB, and once the
@@ -147,7 +165,10 @@ func TestChartAuditStoreVolumeIsBoundedDisk(t *testing.T) {
 		{values: "default"},
 		{values: "minimal"},
 		{values: "managed"},
-		{values: "default", extra: []string{"--set", "homeMedium=Memory"}, memory: true},
+		{values: "default", extra: []string{"--set", memoryHomeExample}, memory: true},
+		// Decimal and byte quantities read as Kubernetes reads them: 700M is
+		// 667 MiB and 805306368 is 768 MiB, both above 640 MiB (GAP-0537).
+		{values: "default", extra: []string{"--set", memoryHomeExample + ",callout.resources.limits.memory=700M,controller.resources.limits.memory=805306368"}, memory: true},
 	} {
 		name := c.values + strings.Join(c.extra, "")
 		objs := decodeObjects(t, renderChart(t, helm, c.values, c.extra...))
