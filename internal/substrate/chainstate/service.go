@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/historystore"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 )
 
 // Egress actions for a detected secret-read-then-egress chain.
@@ -164,6 +165,9 @@ type Service struct {
 	// seed is the migrated store a new actor's store is copied from
 	// (seed.go, GAP-0564).
 	seed storeSeed
+	// shares are the gateway replicas' request counts for the fair-share
+	// limits (GAP-0566).
+	shares ratelimit.Shares
 	// diskHook, set by tests only, runs before every disk operation on an
 	// actor's files: a store open or access (storeOf), a state file write
 	// and a purge's removals. A test blocks it to stand for a disk that does
@@ -392,6 +396,22 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
 	srv.Handle(MethodCopilotJoinRecord, s.logged(MethodCopilotJoinRecord, leader.Typed(s.CopilotJoinRecord)))
 	srv.Handle(MethodCopilotJoinTake, s.logged(MethodCopilotJoinTake, leader.Typed(s.CopilotJoinTake)))
+	// A read: the newest report of each replica replaces its last one, so
+	// a retry is harmless and its answer is not kept for replay.
+	srv.HandleRead(ratelimit.MethodShare, leader.Typed(s.rateShare))
+}
+
+// rateShare is the fair-share limits' exchange of the gateway replicas
+// (ratelimit.Shares, GAP-0566).
+func (s *Service) rateShare(ctx context.Context, in ratelimit.ShareReport) (ratelimit.ShareAnswer, error) {
+	out, err := s.shares.Share(ctx, in)
+	switch {
+	case errors.Is(err, ratelimit.ErrBadShare):
+		return out, bad(err)
+	case err != nil:
+		return out, &leader.WireError{Code: leader.CodeUnavailable, Message: err.Error()}
+	}
+	return out, nil
 }
 
 // logged logs the errors a handler returns that the transport reports only

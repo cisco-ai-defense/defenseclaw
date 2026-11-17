@@ -285,6 +285,11 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 		if cfg.Limiter == nil {
 			cfg.Limiter = ratelimit.New(ratelimit.Config{})
 		}
+		if cfg.Chains != nil {
+			// The fair-share budgets are the actor's across the gateway
+			// replicas, counted through the leader (GAP-0566).
+			cfg.Limiter.ShareThrough(cfg.Chains.RateShare)
+		}
 	}
 	if cfg.AdminAddr != "" && (cfg.People == nil || cfg.Registrations == nil) {
 		return errors.New("substrate: the admin listener needs the person verifier and the registrations")

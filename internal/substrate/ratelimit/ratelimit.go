@@ -25,7 +25,8 @@
 // atespace to per_atespace_rps; an actor is refused there only while it
 // has already taken more than its fair share of the atespace (the
 // atespace's rate divided by its active actors), so a quiet actor still
-// gets through when the atespace is busy.
+// gets through when the atespace is busy. The rates are the cluster's:
+// the gateway replicas share them through the leader (share.go).
 package ratelimit
 
 import (
@@ -88,11 +89,14 @@ type actorState struct {
 	// current one-second window.
 	window      int64
 	windowStart time.Time
+	// attempts counts its requests since the last share report.
+	attempts int64
 }
 
 type atespaceState struct {
-	lim    *rate.Limiter
-	active map[string]time.Time // actor UID -> last request
+	lim      *rate.Limiter
+	active   map[string]time.Time // actor UID -> last request
+	attempts int64
 }
 
 // Limiter is safe for concurrent use.
@@ -101,6 +105,14 @@ type Limiter struct {
 	mu        sync.Mutex
 	actors    map[string]*actorState
 	atespaces map[string]*atespaceState
+
+	// The share exchange with the leader (share.go): send is nil on a
+	// limiter that keeps per-replica budgets.
+	send       ShareFunc
+	replica    string
+	lastReport time.Time
+	sharing    bool
+	shareAt    time.Time
 }
 
 // New returns a limiter.
@@ -131,6 +143,9 @@ func (l *Limiter) Acquire(atespace, actorUID string) (func(), error) {
 	s := l.atespace(atespace)
 	a.last = now
 	s.active[actorUID] = now
+	a.attempts++
+	s.attempts++
+	l.shareLocked(now)
 	if len(s.active) > maxTracked {
 		l.activeCount(s, now) // drops actors idle past the window (GAP-0061)
 	}
@@ -148,7 +163,7 @@ func (l *Limiter) Acquire(atespace, actorUID string) (func(), error) {
 		// share of the atespace this second gets through; one past its
 		// share is refused. The overshoot is bounded by one share per
 		// active actor, so at most twice the atespace rate.
-		share := l.cfg.PerAtespaceRPS / float64(l.activeCount(s, now))
+		share := float64(s.lim.Limit()) / float64(l.activeCount(s, now))
 		if float64(a.window) >= share {
 			return nil, &ErrLimited{Scope: ScopeAtespace}
 		}
