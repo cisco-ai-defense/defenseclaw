@@ -502,7 +502,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			Proxy:         llmProxy,
 			BedrockModels: c.Substrate.LLM.BedrockModels,
 			// actor_secrets: exact-value DLP on prompts (PLAN §7.2), from
-			// the callout's actor-secrets Secret mounted in the gateway.
+			// the callout's actor-secrets Secret mounted in the gateway; the
+			// hook route masks the same values before any audit row
+			// (GAP-0504).
 			ExposedValues: gateway.SubstrateExposedValues(c, c.Substrate.Extproc.ActorSecretsDir),
 		})
 		if err != nil {

@@ -201,6 +201,15 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 				return
 			}
 		}
+		// GAP-0504: an exposed actor_secrets value never reaches the hook
+		// rows (tool results, typed prompts).
+		if reg, ok := substrateRegistrationFrom(r.Context()); ok {
+			if masked, names := substrateMaskExposed(env.Payload, st.exposedValues(reg.Profile)); len(names) > 0 {
+				env.Payload = masked
+				st.logRefusal("hook payload of %s/%s carried the exposed value(s) %s (actor_secrets); replaced before evaluation and audit",
+					reg.Atespace, reg.Name, strings.Join(names, ", "))
+			}
+		}
 		// The facts stay on the envelope (substrateEnvelopeFrom); the skill
 		// scan below reads the attached files from it.
 		ctx := context.WithValue(r.Context(), substrateEnvelopeKey{}, env)
