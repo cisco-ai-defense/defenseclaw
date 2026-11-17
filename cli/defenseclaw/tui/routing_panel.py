@@ -75,6 +75,7 @@ class RoutingPanelMixin:
                     model.apply_usage_json(out)
                 else:
                     model.usage = {"rows": [], "error": _plain_error(err, "usage is not available; run defenseclaw routing usage")}
+                    model.usage_loaded = True
         except Exception as exc:  # noqa: BLE001 - never a stack trace in the TUI
             model.set_error(f"routing status failed: {exc}")
         finally:
@@ -91,7 +92,9 @@ class RoutingPanelMixin:
             # leaving "on" and "disabled" side by side.
             self.set_timer(APPLYING_POLL_SECONDS, self._schedule_routing_load)  # type: ignore[attr-defined]
         if getattr(self, "active_panel", "") == "routing":
-            self._update_body_only()  # type: ignore[attr-defined]
+            # Redraw the table too: the body alone left the model table under
+            # the usage heading until the next refresh (GAP-1169).
+            self._render_chrome()  # type: ignore[attr-defined]
 
     def _routing_body_text(self) -> str:
         model = self.routing_model
@@ -101,7 +104,7 @@ class RoutingPanelMixin:
             more = f" (+{len(warnings) - 1} more: defenseclaw routing status)" if len(warnings) > 1 else ""
             lines.append("[yellow]" + rich_escape(warnings[0]) + more + "[/]")
         empty = not (model.usage_rows() if model.view == VIEW_USAGE else model.rows())
-        if model.loaded and empty and not model.error:
+        if model.loaded and empty and not model.error and model.view_loaded():
             lines.append(rich_escape(model.empty_state()))
         return "\n".join(lines)
 
@@ -117,7 +120,7 @@ class RoutingPanelMixin:
             return True
         if kind in ("view", "refresh"):
             self._schedule_routing_load()
-            self._update_body_only()  # type: ignore[attr-defined]
+            self._render_chrome()  # type: ignore[attr-defined]
             return True
         if kind == "intent" and action.intent is not None:
             intent = action.intent
