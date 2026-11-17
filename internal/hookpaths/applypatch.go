@@ -368,11 +368,17 @@ func isApplyPatchToolName(tool string) bool {
 // shared by the hook client (ResolveConnector) and the gateway
 // (agentHookTrustedActionTool) so both read the call as the same tool.
 // OpenCode V2 names its native patch tool "patch" and sends the reviewed
-// apply_patch envelope in patchText (GAP-0073). Any other name is returned
-// unchanged.
+// apply_patch envelope in patchText (GAP-0073). agy's send_command_input
+// writes text to the stdin of a command run_command started, and is judged
+// as run_command input (antigravityargs.TrustedShellArgs). Any other name is
+// returned unchanged.
 func ConnectorActionTool(connector, tool string) string {
 	if strings.EqualFold(strings.TrimSpace(connector), "opencode") && tool == "patch" {
 		return "apply_patch"
+	}
+	if strings.EqualFold(strings.TrimSpace(connector), "antigravity") &&
+		strings.EqualFold(strings.TrimSpace(tool), "send_command_input") {
+		return "run_command"
 	}
 	return tool
 }

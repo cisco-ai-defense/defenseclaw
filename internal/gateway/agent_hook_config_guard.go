@@ -1128,7 +1128,8 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	// A PowerShell call names its write targets in cmdlet parameters and .NET
 	// method arguments, which the POSIX readers below do not read: the shared
 	// PowerShell write reader hands each of them to the same hook-file check
-	// (rel-1-0-10:GAP-1115).
+	// (rel-1-0-10:GAP-1115), also in the script of each PowerShell launcher
+	// a Linux or macOS call runs (rel-1-0-10:GAP-1134).
 	if written, place, owned := agentHookConfigPowerShellWrite(request, guard); owned {
 		add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", place)
 	} else if written {
@@ -1359,10 +1360,20 @@ func sandboxAgentHookConfigFormat(target, home string) string {
 // of other files add nothing. A call past the reading bounds is a write
 // with no place (rel-1-0-10:GAP-1115).
 func agentHookConfigPowerShellWrite(request trustedActionRequest, guard *agentHookConfigGuard) (written bool, place string, owned bool) {
-	command, ok := powerShellReadingCommand(request)
-	if !ok || !guard.shellMentionsFileName(command) {
-		return false, "", false
+	for _, command := range powerShellReadingCommands(request) {
+		if !guard.shellMentionsFileName(command) {
+			continue
+		}
+		if written, place, owned = agentHookConfigPowerShellWriteOf(request, guard, command); written {
+			return written, place, owned
+		}
 	}
+	return false, "", false
+}
+
+// agentHookConfigPowerShellWriteOf is agentHookConfigPowerShellWrite for one
+// PowerShell reading command of the call.
+func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agentHookConfigGuard, command string) (written bool, place string, owned bool) {
 	written = powerShellWriteReading(request, command, guard.shellMentionsFileName,
 		func(facts actionfacts.Facts, _ trustedActionRequest) bool {
 			for _, candidate := range facts.Paths {
@@ -1503,7 +1514,7 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 	// Antigravity command that stops or disables DefenseClaw, or rewrites an
 	// agent's hook configuration, raised no guard finding where every other
 	// hook connector blocks it.
-	if command, ok := trustedShellCommandArgument(input.Args); ok {
+	if command, ok := actionfacts.ShellCommandArgument(input.Args); ok {
 		return command
 	}
 	return ""
