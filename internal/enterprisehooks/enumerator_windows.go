@@ -141,6 +141,10 @@ type EnumerateOptions struct {
 	// the cycle can take the gateway's inventory read access off it
 	// (GAP-1024).
 	ReportExcluded func(ManifestTarget)
+	// Progress, when set, is told each step the walk starts, naming the
+	// profile it inspects, so a caller that gives up on a cycle can say what
+	// it was waiting on (GAP-1109).
+	Progress func(step string)
 	// RunningAgents names, by account SID and connector, an agent session
 	// the cycle saw running (a label such as "codex (pid 4242)"). The
 	// standalone enumerator reports, through ReportUnprotected, a running
@@ -251,6 +255,12 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			return enrolled
 		}
 	}
+	progress := func(format string, args ...any) {
+		if opts.Progress != nil {
+			opts.Progress(fmt.Sprintf(format, args...))
+		}
+	}
+	progress("listing the user profiles in ProfileList")
 	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, checkHome)
 	if err != nil {
 		return Manifest{}, err
@@ -267,6 +277,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	var sessionErr error
 	var groups *windowsEnrollmentGroups
 	if standalone {
+		progress("reading the groups of the active sessions")
 		sessions, sessionErr = windowsActiveSessionGroups()
 		if sessionErr != nil {
 			logfSafely(opts.Logger, "sessions", fmt.Sprintf("the groups of some active sessions are unreadable; a user whose group decision rests on groups cached at an earlier sign-in keeps their rows and gets no new ones this cycle, and a user whose session was not listed keeps their agent versions: %v", sessionErr))
@@ -304,6 +315,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	signedIn, sessionListed := windowsSignedInCheck(opts.Logger)
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for profileIndex, profile := range profiles {
+		progress("inspecting the profile %s (%s), %d of %d", filepath.Clean(profile.Home), profile.SID, profileIndex+1, len(profiles))
 		// Leave time to write the manifest and coverage record. A timed-out
 		// profile must never discard rows already decided in this cycle.
 		if standalone && windowsPrivateProfileBudget(ctx, len(profiles)-profileIndex) <= 0 {
@@ -470,6 +482,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				continue
 			}
 			judged[sid] = true
+			progress("inspecting the administrator-enrolled account %s (%s)", subject.Home, sid)
 			if windowsPrivateProfileBudget(ctx, 1) <= 0 {
 				for _, conn := range subject.Connectors {
 					agent := privateInstallIncompleteAgent(conn, PrivateInstallSkippedUnresolved)
