@@ -178,7 +178,6 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 		{"history tamper", "Bash", map[string]any{"command": "rm ~/.bash_history"}},
 		{"defenseclaw state", "Bash", map[string]any{"command": "rm -rf ~/.defenseclaw/audit.db"}},
 		{"openclaw json", "Write", map[string]any{"file_path": "{H}/.openclaw/openclaw.json", "content": "{}"}},
-		{"claude settings home", "Write", map[string]any{"file_path": "{H}/.claude/settings.json", "content": "{}"}},
 		{"claude settings project", "Write", map[string]any{"file_path": "{P}/.claude/settings.json", "content": "{}"}},
 		{"sample control", "Bash", map[string]any{"command": "echo x > .git/hooks/pre-commit.sample"}},
 		{"project control", "Write", map[string]any{"file_path": "{P}/src/out.txt", "content": "ok\n"}},

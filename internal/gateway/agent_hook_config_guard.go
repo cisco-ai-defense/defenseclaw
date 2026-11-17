@@ -440,6 +440,8 @@ type agentHookConfigChange struct {
 	// text is the call's own text for the file, judged when the change
 	// cannot be applied to the file as it is.
 	text string
+	// edits are an Edit or MultiEdit call's replacements.
+	edits []agentHookConfigTextEdit
 	// after is the document the call leaves (exists false: it removes the
 	// file); ok false when the change does not apply to the file as read.
 	after func(read func(string) ([]byte, bool)) (body []byte, exists, ok bool)
@@ -556,7 +558,7 @@ func agentHookConfigEditChange(path string, edits []agentHookConfigTextEdit) age
 		text.WriteString(edit.new)
 		text.WriteString("\n")
 	}
-	return agentHookConfigChange{path: path, text: text.String(),
+	return agentHookConfigChange{path: path, text: text.String(), edits: edits,
 		after: func(read func(string) ([]byte, bool)) ([]byte, bool, bool) {
 			before, exists := read(path)
 			return agentHookConfigApplyEdits(before, exists, edits)
@@ -1234,9 +1236,11 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 //   - a shell write, whose content is not known, is
 //     tamper.agent_hook_config_write as an alert only, never a block.
 //
-// The guard only adds findings. A file the laptop would read first (a hook
-// entry removed from an existing document) is judged without that file, so
-// the sandbox verdict is never stricter than the laptop's.
+// The guard only adds findings. A file the laptop would read first is judged
+// without that file, except the per-user file where the connector's setup
+// registers DefenseClaw's hooks on the laptop
+// (sandboxAgentHookRegistrationFiles): a change there is judged against a file
+// that holds them, as on the laptop (GAP-0433).
 func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	ruleID, note, target := sandboxAgentHookConfigChange(request)
 	if target == "" ||
@@ -1279,7 +1283,12 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 	if changes, native := agentHookConfigFileChanges(input.Tool, input.Args); native {
 		noRead := func(string) ([]byte, bool) { return nil, false }
 		for _, change := range changes {
-			target := change.path
+			target := strings.TrimSpace(change.path)
+			// "~" is the guest's HOME, as the laptop guard reads it
+			// against the account home (resolvePlaces).
+			if home := input.ActiveHome; path.IsAbs(home) && (target == "~" || strings.HasPrefix(target, "~/")) {
+				target = path.Join(home, target[1:])
+			}
 			if !path.IsAbs(target) && path.IsAbs(input.CWD) {
 				target = path.Join(input.CWD, target)
 			}
@@ -1287,8 +1296,12 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 			if format == "" {
 				continue
 			}
+			registered := sandboxAgentHookRegistrationFile(request.Connector, target, input.ActiveHome)
 			after, afterExists, ok := change.after(noRead)
 			if !ok {
+				if registered && agentHookConfigEditsChangeDefenseClaw(change.edits) {
+					return agentHookConfigDisableRuleID, "removes or changes DefenseClaw's hook entries", target
+				}
 				if agentHookConfigTextMayDisable(change.text) {
 					return agentHookConfigWriteRuleID, "may turn the hooks off", target
 				}
@@ -1296,6 +1309,11 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 			}
 			if reason := agentHookConfigTurnsOff(format, nil, false, after, afterExists); reason != "" {
 				return agentHookConfigDisableRuleID, reason, target
+			}
+			if registered {
+				if reason := agentHookConfigDropsRegistration(format, after, afterExists); reason != "" {
+					return agentHookConfigDisableRuleID, reason, target
+				}
 			}
 		}
 		return "", "", ""
@@ -1316,6 +1334,58 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		}
 	}
 	return "", "", ""
+}
+
+// sandboxAgentHookRegistrationFiles are, per connector, the per-user files
+// under the home where the connector's per-user setup registers DefenseClaw's
+// hooks on a laptop (Claude Code: claudeCodeSettingsPath). An actor keeps its
+// hooks in managed settings, so its own copy holds none, and the gateway does
+// not read it; the laptop reads its copy and blocks a change that drops them.
+var sandboxAgentHookRegistrationFiles = map[string][]string{
+	"claudecode": {".claude/settings.json"},
+}
+
+// sandboxAgentHookRegistrationFile reports a guest path that is, under the
+// guest home, a file where connector registers DefenseClaw's hooks on a laptop.
+func sandboxAgentHookRegistrationFile(connector, target, home string) bool {
+	if !path.IsAbs(home) {
+		return false
+	}
+	for _, name := range sandboxAgentHookRegistrationFiles[connector] {
+		if path.Clean(target) == path.Join(path.Clean(home), name) {
+			return true
+		}
+	}
+	return false
+}
+
+// agentHookConfigDropsRegistration names how the document a call leaves in a
+// file that holds DefenseClaw's hooks drops them all, "" when it still names
+// one (judged as agentHookConfigTurnsOff judges a file that held them).
+func agentHookConfigDropsRegistration(format string, after []byte, afterExists bool) string {
+	if !afterExists {
+		return "removes the file that registers DefenseClaw's hooks"
+	}
+	updated := agentHookConfigDocument(format, after)
+	if updated == nil {
+		return "leaves the file unreadable, so the agent drops DefenseClaw's hooks"
+	}
+	if len(agentHookConfigFingerprint(updated["hooks"])) == 0 {
+		return "removes or changes DefenseClaw's hook entries"
+	}
+	return ""
+}
+
+// agentHookConfigEditsChangeDefenseClaw reports an Edit replacement whose old
+// text names DefenseClaw and does not survive in its new text: applied to a
+// file that holds DefenseClaw's hooks, it changes one of their entries.
+func agentHookConfigEditsChangeDefenseClaw(edits []agentHookConfigTextEdit) bool {
+	for _, edit := range edits {
+		if strings.Contains(strings.ToLower(edit.old), "defenseclaw") && !strings.Contains(edit.new, edit.old) {
+			return true
+		}
+	}
+	return false
 }
 
 // sandboxAgentHookConfigFormat is the hook-file format of a sandbox path by
