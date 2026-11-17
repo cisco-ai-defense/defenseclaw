@@ -278,6 +278,10 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
+		// A statement of a read-only group reads as a direct one does, and
+		// the folder a cd among them names is no target
+		// (actionReadOnlyGroupStatements).
+		groupedReads := actionReadOnlyGroupStatements(file, home)
 		var plainReads map[*syntax.Stmt]bool
 		if !stateOnly && depth == 0 {
 			// A nested shell body keeps the whole-body reading
@@ -401,7 +405,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			}
 			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKeyIn(word, effectiveCWD, home, inSSHFolder)
 		}
-		syntax.Walk(file, func(node syntax.Node) bool {
+		actionWalkDirectoryScoped(file, &effectiveCWD, &directoryStack, func(node syntax.Node) bool {
 			if found {
 				return false
 			}
@@ -596,9 +600,16 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// are judged above. The walk keeps the old reading when a link is
 				// removed or replaced (a word then names a removed entry).
 				blankReads := memo.nonWritesExcused() && !callHasGlob && readOnly && direct[stmt] && !actionCallChangesDirectory(call, home)
+				// A cd in a read-only group moves only the group, where
+				// nothing writes: its folder word is no write target.
+				groupedCD := groupedReads[stmt] && actionCallChangesDirectory(call, home)
 				for _, word := range call.Args {
 					if blankReads && len(removedEntries) == 0 && len(replacedEntries) == 0 {
 						judgedWords = append(judgedWords, word)
+					}
+					if groupedCD {
+						judgedWords = append(judgedWords, word)
+						continue
 					}
 					if roleUnknown && !actionOptionWithAttachedValue(word, home) {
 						// A word handed to a program the scan has no model of is
@@ -632,7 +643,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					}
 					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) || opaqueMentions(word) {
 						read := readOnly && plainReads[stmt] && !actionWordHasUnquotedGlob(word, command)
-						if readOnly && (direct[stmt] || read) {
+						if readOnly && (direct[stmt] || read || groupedReads[stmt]) {
 							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), enters: actionCallChangesDirectory(call, home) || callHasGlob, read: read})
 							judgedWords = append(judgedWords, word)
 							continue
