@@ -228,7 +228,7 @@ Asks appear on the bottom line; press Ctrl-\ to answer one.
 Ctrl-] detaches; the agent keeps running.
 ```
 
-Claude Code starts below the banner, in `/work/myapp`. The first start takes about 30 to 40 seconds, because the actor is created, your folder is copied and the actor is resumed from its template snapshot. Claude Code asks whether you trust the folder, in each new agent.
+Claude Code starts below the banner, in `/work/myapp`. The first start takes about 30 to 40 seconds, because the actor is created, your folder is copied and the actor is resumed from its template snapshot. The agent is the sandbox, so the folder is already trusted there: Claude Code opens on its own prompt, without asking whether you trust the folder.
 
 ![defenseclaw substrate run claude in Terminal on a Mac: Started dc-eng/claude-955e765b (Claude Code, profile eng), Copying this folder into the agent, Held back from the copy: .env (1 file) with the --unmask hint, the DefenseClaw agent banner with the profile eng, the notes that asks appear on the bottom line (Ctrl-\ answers) and Ctrl-) detaches, then Claude Code's own first screen in /work/myapp asking whether you trust the folder](/images/substrate/oss/run-banner-macos.png)
 

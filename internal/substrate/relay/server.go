@@ -146,6 +146,17 @@ func (s *Server) init() error {
 			env = append(env, k+"="+v)
 		}
 		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env}
+		if f := rc.ClaudeStateFile; f != "" {
+			root := relayWorkdir(rc.Workdir)
+			s.agent.BeforeStart = func(dir string) {
+				if dir == "" {
+					dir = root
+				}
+				if err := claudeTrust(f, root, dir); err != nil {
+					s.log.Warn("relay.claude_trust_failed", "error", err.Error())
+				}
+			}
+		}
 		// E9: no agent that signs in to a vendor account in a managed
 		// image; an open-source image says what the sign-in costs.
 		d := s.signinDecision()
