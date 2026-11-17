@@ -57,6 +57,19 @@ func ArchiveExtractionDestinations(program string, words []string) []string {
 			return nil
 		}
 		return []string{operands[len(operands)-1]}
+	case "expand-archive":
+		for i, word := range words {
+			switch strings.ToLower(word) {
+			case "-destinationpath", "-literalpathdestination":
+				if i+1 < len(words) {
+					return []string{words[i+1]}
+				}
+			}
+		}
+		if len(words) >= 2 && !strings.HasPrefix(words[0], "-") {
+			return []string{words[1]}
+		}
+		return []string{"."}
 	}
 	return nil
 }
@@ -215,12 +228,40 @@ func ArchiveExtractionReading(command, cwd, home string) ([]string, bounded.CapS
 // -s). Whatever such an extraction writes below its folder is unknown
 // (rel-1-0-10:GAP-0142).
 func ArchiveExtractionUnknown(command, cwd, home string) (paths, unknown []string, caps bounded.CapSet) {
+	paths, unknown, caps = archiveExtractionUnknownAs(command, cwd, home)
+	for _, name := range pythonArchiveExtractCalls {
+		if strings.Contains(command, name) {
+			paths = append(paths, LiteralWriteOperands(command, cwd, home)...)
+			break
+		}
+	}
+	if reading, windows := WindowsShellReading(command); windows {
+		morePaths, moreUnknown, moreCaps := archiveExtractionUnknownAs(reading, cwd, home)
+		paths = append(paths, morePaths...)
+		unknown = append(unknown, moreUnknown...)
+		caps = caps.Union(moreCaps)
+	}
+	return paths, unknown, caps
+}
+
+var pythonArchiveExtractCalls = []string{"extractall(", "extract(", "unpack_archive("}
+
+func archiveExtractionUnknownAs(command, cwd, home string) (paths, unknown []string, caps bounded.CapSet) {
 	file, parsed := parseShell(command)
 	if !parsed || !filepath.IsAbs(cwd) {
 		return nil, nil, bounded.CapSet{}
 	}
 	var trunc bounded.Truncated
-	archiveWalk(file, cwd, home, 0, &paths, &unknown, &trunc)
+	if statements, placed := TopLevelStatements(command, cwd, home); placed && len(statements) > 0 &&
+		(len(statements) > 1 || statements[0].Dir != cwd || statements[0].Command != command) {
+		for _, statement := range statements {
+			if inner, ok := parseShell(statement.Command); ok {
+				archiveWalk(inner, statement.Dir, home, 0, &paths, &unknown, &trunc)
+			}
+		}
+	} else {
+		archiveWalk(file, cwd, home, 0, &paths, &unknown, &trunc)
+	}
 	return paths, unknown, trunc.Set()
 }
 
@@ -277,6 +318,23 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, out, unknown *[
 			return true
 		}
 		members := ArchiveExtractionMembers(words[0], words[1:])
+		// Whole-archive calls name no members in the command. A bounded
+		// archive listing supplies their actual names when the file is present.
+		listed := false
+		if len(members) == 0 {
+			static := make([]bool, len(words)-1)
+			for i := range static {
+				static[i] = words[i+1] != ""
+			}
+			if archive, ok := extractionArchive(filepath.Base(words[0]), words[1:], static, cwd); ok {
+				switch strings.ToLower(filepath.Base(words[0])) {
+				case "tar", "gtar", "bsdtar":
+					members, listed = tarArchiveMembers(archive)
+				case "unzip":
+					members, listed = zipArchiveMembers(archive)
+				}
+			}
+		}
 		for _, folder := range ArchiveExtractionDestinations(words[0], words[1:]) {
 			if folder == "" || strings.HasPrefix(folder, "~") {
 				continue
@@ -285,7 +343,7 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, out, unknown *[
 				folder = filepath.Join(cwd, folder)
 			}
 			*out = append(*out, filepath.Clean(folder))
-			if archiveMembersUnknown(words[0], words[1:]) {
+			if archiveMembersUnknown(words[0], words[1:]) || len(members) == 0 && !listed && archiveInputExists(words[0], words[1:], cwd) {
 				*unknown = append(*unknown, filepath.Clean(folder))
 			}
 			for _, member := range members {
@@ -294,6 +352,19 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, out, unknown *[
 		}
 		return true
 	})
+}
+
+func archiveInputExists(program string, args []string, cwd string) bool {
+	static := make([]bool, len(args))
+	for i := range static {
+		static[i] = args[i] != ""
+	}
+	archive, ok := extractionArchive(filepath.Base(program), args, static, cwd)
+	if !ok {
+		return false
+	}
+	_, err := pathStat(archive)
+	return err == nil
 }
 
 // archiveProgramWords drops the launchers before the program word.

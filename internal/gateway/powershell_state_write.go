@@ -1230,6 +1230,7 @@ func psFileWriteMethod(prefix string) []int {
 		{"::createtext", []int{0}}, {"::create", []int{0}}, {"::openwrite", []int{0}},
 		{"::delete", []int{0}}, {"::move", []int{0, 1}}, {"::copy", []int{1}},
 		{"::replace", []int{0, 1, 2}}, {"streamwriter]::new", []int{0}},
+		{"::extracttodirectory", []int{1}},
 	} {
 		if strings.HasSuffix(prefix, method.name) {
 			return method.args

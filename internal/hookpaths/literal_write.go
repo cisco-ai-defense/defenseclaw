@@ -21,12 +21,13 @@ var (
 	literalOpenCall = lazyregexp.New(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
 	// The writer APIs whose first argument is the file they write. writeFile
 	// and appendFile are Node's callback and fs.promises forms (GAP-0366).
-	literalWriteCall      = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|appendFile|writeFile|File\.write|File\.binwrite)\s*\(`)
-	literalNodeStream     = lazyregexp.New(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
-	literalPathWrite      = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPathOpen       = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
-	literalPythonPathCall = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(`)
-	literalPerlOpen       = lazyregexp.New(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	literalWriteCall         = lazyregexp.New(`\b(?:appendFileSync|writeFileSync|appendFile|writeFile|File\.write|File\.binwrite)\s*\(`)
+	literalNodeStream        = lazyregexp.New(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
+	literalPathWrite         = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
+	literalPathOpen          = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPythonPathCall    = lazyregexp.New(`\b(?:pathlib\.)?Path\s*\(`)
+	literalPythonExtractCall = lazyregexp.New(`\b(?:extractall|extract|shutil\.unpack_archive)\s*\(`)
+	literalPerlOpen          = lazyregexp.New(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
 	// The copy and move APIs whose second argument is the file they write;
 	// literalCopyAPI says which names each language really has
 	// (rel-1-0-2:GAP-0429).
@@ -1144,6 +1145,30 @@ func literalInterpreterWrites(code, language, cwd, home string) []string {
 		}
 	}
 	if language == "python" || strings.HasPrefix(language, "python3") {
+		for _, loc := range literalPythonExtractCall.FindAllStringIndex(code, -1) {
+			if !pythonExecutableCodePosition(code, loc[0]) {
+				continue
+			}
+			name := strings.TrimSpace(code[loc[0] : loc[1]-1])
+			if name != "shutil.unpack_archive" && !strings.Contains(code, "tarfile") && !strings.Contains(code, "zipfile") {
+				continue
+			}
+			call, fixed := literalBoundedCall(code, loc[1]-1)
+			if !fixed {
+				continue
+			}
+			args := literalCallArgs(call)
+			position, keyword := 0, "path"
+			if name == "extract" || name == "shutil.unpack_archive" {
+				position, keyword = 1, "path"
+			}
+			if name == "shutil.unpack_archive" {
+				keyword = "extract_dir"
+			}
+			if dest, ok := literalPythonString(literalCallArgument(args, position, keyword)); ok {
+				paths = append(paths, dest)
+			}
+		}
 		for _, loc := range unprovenWriter.FindAllStringIndex(code, -1) {
 			name := strings.TrimSpace(code[loc[0] : loc[1]-1])
 			if (name != "write_text" && name != "write_bytes") || !pythonExecutableCodePosition(code, loc[0]) {

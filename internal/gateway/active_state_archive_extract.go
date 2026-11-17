@@ -17,10 +17,10 @@ import (
 // state root or a path in it, spelled there or reached through a link
 // (followed with the hook's target map first, a managed gateway cannot read
 // the home, then the local filesystem when the hook allows it). ok is false
-// when the home is not a POSIX one.
+// when the home is not an absolute local or UNC path.
 func stateReachFunc(facts actionfacts.Facts, request trustedActionRequest) (func(string) bool, bool) {
-	home := strings.TrimRight(facts.ActiveHome, "/")
-	if !strings.HasPrefix(home, "/") {
+	home := strings.TrimRight(filepath.ToSlash(facts.ActiveHome), "/")
+	if !strings.HasPrefix(home, "/") && !filepath.IsAbs(facts.ActiveHome) {
 		return nil, false
 	}
 	resolve := stateLinkResolver(request)
@@ -35,7 +35,12 @@ func stateReachFunc(facts actionfacts.Facts, request trustedActionRequest) (func
 		return value == spelledRoot || strings.HasPrefix(value, spelledRoot+"/")
 	}
 	return func(full string) bool {
-		full = path.Clean(filepath.ToSlash(full))
+		full = filepath.ToSlash(full)
+		unc := strings.HasPrefix(full, "//")
+		full = path.Clean(full)
+		if unc {
+			full = "/" + full
+		}
 		if spelledInState(full) {
 			return true
 		}
@@ -43,7 +48,7 @@ func stateReachFunc(facts actionfacts.Facts, request trustedActionRequest) (func
 		if !ok {
 			physical, ok = request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+full]
 		}
-		return ok && path.IsAbs(physical) && inState(physical)
+		return ok && (path.IsAbs(physical) || filepath.IsAbs(physical)) && inState(physical)
 	}, true
 }
 

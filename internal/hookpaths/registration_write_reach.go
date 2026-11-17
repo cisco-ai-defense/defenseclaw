@@ -1537,7 +1537,17 @@ func registrationCopyReach(file *syntax.File, cwd, home string, protected protec
 // registrationArchivePossibleReachAs is RegistrationArchivePossibleReach in
 // one reading of the command.
 func registrationArchivePossibleReachAs(command, cwd, home string, names []string) string {
-	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") && !strings.Contains(command, "7z") {
+	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") && !strings.Contains(command, "7z") &&
+		!strings.Contains(strings.ToLower(command), "expand-archive") {
+		return ""
+	}
+	if statements, placed := TopLevelStatements(command, cwd, home); placed && len(statements) > 0 &&
+		(len(statements) > 1 || statements[0].Dir != cwd || statements[0].Command != command) {
+		for _, statement := range statements {
+			if found := registrationArchivePossibleReachAs(statement.Command, statement.Dir, home, names); found != "" {
+				return found
+			}
+		}
 		return ""
 	}
 	file, ok := parseShell(command)
