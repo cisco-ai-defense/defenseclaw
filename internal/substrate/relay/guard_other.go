@@ -10,12 +10,8 @@ import (
 	"os"
 )
 
-// watchGuarded checks only that the folders exist: actors are Linux.
-func watchGuardedAs(ctx context.Context, dirs []string, broken func(string), _ agentCred) error {
-	return watchGuarded(ctx, dirs, broken)
-}
-
-func watchGuarded(_ context.Context, dirs []string, _ func(string)) error {
+// watchGuardedAs checks only that the folders exist: actors are Linux.
+func watchGuardedAs(_ context.Context, dirs []string, _ func(string), _ agentCred) error {
 	if len(dirs) == 0 {
 		return nil
 	}

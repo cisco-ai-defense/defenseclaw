@@ -82,20 +82,6 @@ const (
 	DefaultGatewayName = "openshell"
 )
 
-// DefaultBaseImageEnv is the image environment (ENV) of DefaultBaseImage,
-// the same on every platform of it. The actor environment of a Substrate
-// template is an allowlist (substrate-1 GAP-0354): every name here must
-// pass it, which a kitspec test checks for every connector (GAP-0447). A
-// new DefaultBaseImage pin updates this list from the image config.
-var DefaultBaseImageEnv = map[string]string{
-	"PATH":                    "/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin",
-	"DEBIAN_FRONTEND":         "noninteractive",
-	"PYTHONDONTWRITEBYTECODE": "1",
-	"PYTHONUNBUFFERED":        "1",
-	"UV_PYTHON_INSTALL_DIR":   "/sandbox/.uv/python",
-	"VIRTUAL_ENV":             "/sandbox/.venv",
-}
-
 // TarballBaseURL is where NVIDIA publishes the release tarballs and their
 // checksum files: TarballBaseURL + "v<version>/<asset>".
 const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
