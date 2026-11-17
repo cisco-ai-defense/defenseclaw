@@ -226,23 +226,40 @@ two releases never share one). */}}
 layout, seeded by the init container and read-only to the gateway. */}}
 {{- define "dc.managedPolicyDir" -}}/opt/defenseclaw/share/policies{{- end -}}
 
-{{/* Init containers of a DefenseClaw pod: in managed mode one gives the
-data volume to the gateway account (the gateway image has no shell, so
-its own hidden substrate-datadir step does it; it needs CHOWN and FOWNER
-as root, nothing else). */}}
+{{/* DEFENSECLAW_HOME outside managed mode: the volume root that holds the
+local audit database (audit.db and its write-ahead log) and local state. */}}
+{{- define "dc.homeDir" -}}/var/lib/defenseclaw/run{{- end -}}
+
+{{/* "true" when DEFENSECLAW_HOME is on a disk emptyDir that the init
+container gives to the gateway account: every install outside managed mode
+unless homeMedium is Memory (GAP-0402). */}}
+{{- define "dc.homeOnDisk" -}}
+{{- if and (not (include "dc.managed" .)) (ne (toString .Values.homeMedium) "Memory") }}true{{ end -}}
+{{- end -}}
+
+{{/* Init containers of a DefenseClaw pod: one gives the volume that holds
+the audit store (the managed data volume, or the disk home volume) to the
+gateway account with 0700, which the audit store's directory trust check
+needs: an emptyDir root is root-owned and world-writable. The gateway image
+has no shell, so its own hidden substrate-datadir step does it; it needs
+CHOWN and FOWNER as root, nothing else. In managed mode it also writes the
+policy volume. */}}
 {{- define "dc.initContainers" -}}
-{{- if include "dc.managed" . }}
+{{- $managed := include "dc.managed" . -}}
+{{- if or $managed (include "dc.homeOnDisk" .) }}
 initContainers:
-- name: data-dir
+- name: {{ ternary "data-dir" "home-dir" (not (empty $managed)) }}
   image: {{ include "dc.image" . }}
   imagePullPolicy: {{ .Values.image.pullPolicy }}
   args:
   - substrate-datadir
-  - --path={{ include "dc.managedDataDir" . }}
+  - --path={{ ternary (include "dc.managedDataDir" .) (include "dc.homeDir" .) (not (empty $managed)) }}
   - --uid={{ .Values.podSecurityContext.runAsUser }}
   - --gid={{ .Values.podSecurityContext.runAsGroup }}
   - --mode=0700
+  {{- if $managed }}
   - --policies={{ include "dc.managedPolicyDir" . }}
+  {{- end }}
   resources:
     requests: {cpu: 10m, memory: 16Mi}
     limits: {memory: 64Mi}
@@ -255,10 +272,15 @@ initContainers:
       drop: [ALL]
       add: [CHOWN, FOWNER]
   volumeMounts:
+  {{- if $managed }}
   - name: data
     mountPath: {{ include "dc.managedDataDir" . }}
   - name: policies
     mountPath: {{ include "dc.managedPolicyDir" . }}
+  {{- else }}
+  - name: run
+    mountPath: {{ include "dc.homeDir" . }}
+  {{- end }}
 {{- end }}
 {{- end -}}
 
@@ -269,6 +291,11 @@ initContainers:
     # Read-only for everyone (managed: the config trust check wants an
     # admin-owned file nobody else can write).
     defaultMode: 0444
+# The audit store's volume is a disk emptyDir that the init container gives
+# to the gateway account (0700): the managed data volume, or the home volume
+# outside managed mode. A memory home volume (homeMedium Memory) needs no init
+# container, as its root is root-owned and sticky (3777), which the trust
+# check accepts; it counts against the pod's memory (GAP-0402).
 {{- if include "dc.managed" .ctx }}
 - name: data
   emptyDir:
@@ -276,16 +303,16 @@ initContainers:
 - name: policies
   emptyDir:
     sizeLimit: 64Mi
+{{- else }}
+- name: run
+  emptyDir:
+    {{- if not (include "dc.homeOnDisk" .ctx) }}
+    medium: Memory
+    {{- end }}
+    sizeLimit: {{ .ctx.Values.homeSizeLimit }}
 {{- end }}
 - name: tmp
   emptyDir: {}
-# DEFENSECLAW_HOME lives under a memory emptyDir: its root is root-owned and
-# sticky (3777), which the audit store's directory trust check accepts; a
-# disk emptyDir (2777) or a PVC root (0777 or 2775) is refused.
-- name: run
-  emptyDir:
-    medium: Memory
-    sizeLimit: {{ .ctx.Values.homeSizeLimit }}
 - name: ate
   projected:
     sources:
@@ -361,11 +388,11 @@ initContainers:
 - name: config
   mountPath: /etc/defenseclaw
   readOnly: true
+- name: run
+  mountPath: {{ include "dc.homeDir" .ctx }}
 {{- end }}
 - name: tmp
   mountPath: /tmp
-- name: run
-  mountPath: /var/lib/defenseclaw/run
 - name: ate
   mountPath: /var/run/ate
   readOnly: true
@@ -397,7 +424,7 @@ initContainers:
   value: {{ .Values.managed.serviceAccountName | quote }}
 {{- else }}
 - name: DEFENSECLAW_HOME
-  value: /var/lib/defenseclaw/run/home
+  value: {{ include "dc.homeDir" . }}/home
 {{- end }}
 - name: POD_NAME
   valueFrom:

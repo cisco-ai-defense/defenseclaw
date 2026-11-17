@@ -114,10 +114,122 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"managed no allowed_images": "config.deployment_mode=managed_enterprise",
 		"managed unattested":        "config.deployment_mode=managed_enterprise,config.substrate.require_attested_templates=false,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
 		"unknown value":             "gateway.surprise=1",
+		// GAP-0402: the audit store's volume holds its cap twice over plus
+		// the 256 MiB WAL ceiling, and the store has a cap.
+		"home volume too small":         "homeSizeLimit=256Mi",
+		"no audit store cap":            "config.observability.local.max_store_mb=0",
+		"cap too large for the volume":  "config.observability.local.max_store_mb=4096",
+		"managed data volume too small": "config.deployment_mode=managed_enterprise,config.substrate.templates.allowed_images={reg.example.com/dc/*},managed.dataSizeLimit=512Mi",
+		"home medium not known":         "homeMedium=Disk",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// GAP-0402 (E3, 15 actors): DEFENSECLAW_HOME was a 256 MiB memory emptyDir,
+// the audit write-ahead log's flood ceiling is also 256 MiB, and once the
+// volume was full every audit write failed and every hook failed closed. The
+// audit store of every DefenseClaw pod is now a disk emptyDir that holds the
+// store's size cap (observability.local.max_store_mb) twice over plus the WAL
+// ceiling, given to the gateway account (0700) by an init container, as the
+// audit store's directory trust check needs. homeMedium Memory keeps a tmpfs
+// and no init container.
+func TestChartAuditStoreVolumeIsBoundedDisk(t *testing.T) {
+	helm := helmBinary(t)
+	for _, c := range []struct {
+		values string
+		extra  []string
+		memory bool
+	}{
+		{values: "default"},
+		{values: "minimal"},
+		{values: "managed"},
+		{values: "default", extra: []string{"--set", "homeMedium=Memory"}, memory: true},
+	} {
+		name := c.values + strings.Join(c.extra, "")
+		objs := decodeObjects(t, renderChart(t, helm, c.values, c.extra...))
+		capMB := 0
+		for _, o := range objs {
+			if o.Kind == "ConfigMap" && o.Metadata["name"] == "defenseclaw-config" {
+				var cfg map[string]any
+				if err := yaml.Unmarshal([]byte(fmt.Sprint(o.Data["config.yaml"])), &cfg); err != nil {
+					t.Fatalf("%s: config.yaml: %v", name, err)
+				}
+				capMB, _ = dig(cfg, "observability", "local", "max_store_mb").(int)
+			}
+		}
+		if capMB <= 0 {
+			t.Errorf("%s: config.yaml has no observability.local.max_store_mb (the audit store has no size cap)", name)
+		}
+		pods := 0
+		for _, o := range objs {
+			if o.Kind != "Deployment" || o.Metadata["name"] == "defenseclaw-otel-collector" {
+				continue
+			}
+			pods++
+			pod := dig(o.Spec, "template", "spec")
+			ctr := dig(pod, "containers").([]any)[0]
+			home := ""
+			for _, e := range dig(ctr, "env").([]any) {
+				if dig(e, "name") == "DEFENSECLAW_HOME" {
+					home, _ = dig(e, "value").(string)
+				}
+			}
+			volName, mountPath := "", ""
+			for _, m := range dig(ctr, "volumeMounts").([]any) {
+				mp, _ := dig(m, "mountPath").(string)
+				if home != "" && (home == mp || strings.HasPrefix(home, mp+"/")) && len(mp) > len(mountPath) {
+					volName, mountPath = dig(m, "name").(string), mp
+				}
+			}
+			var vol any
+			for _, v := range dig(pod, "volumes").([]any) {
+				if dig(v, "name") == volName {
+					vol = v
+				}
+			}
+			if vol == nil || dig(vol, "emptyDir") == nil {
+				t.Errorf("%s: %v: DEFENSECLAW_HOME %q is not on an emptyDir volume (%v)", name, o.Metadata["name"], home, vol)
+				continue
+			}
+			medium, _ := dig(vol, "emptyDir", "medium").(string)
+			if c.memory != (medium == "Memory") {
+				t.Errorf("%s: %v: the audit store volume %s has medium %q", name, o.Metadata["name"], volName, medium)
+			}
+			size, _ := dig(vol, "emptyDir", "sizeLimit").(string)
+			sizeMB := 0
+			if n, unit, ok := strings.Cut(size, "Gi"); ok && unit == "" {
+				_, _ = fmt.Sscan(n, &sizeMB)
+				sizeMB *= 1024
+			} else if n, unit, ok := strings.Cut(size, "Mi"); ok && unit == "" {
+				_, _ = fmt.Sscan(n, &sizeMB)
+			}
+			if sizeMB < 2*capMB+256 {
+				t.Errorf("%s: %v: the audit store volume %s is %q, smaller than twice the %d MiB cap plus the 256 MiB WAL ceiling", name, o.Metadata["name"], volName, size, capMB)
+			}
+			// A disk volume's root is world-writable: an init container gives
+			// it to the gateway account, or the trust check refuses it.
+			given := false
+			inits, _ := dig(pod, "initContainers").([]any)
+			for _, ic := range inits {
+				args, _ := yaml.Marshal(dig(ic, "args"))
+				if strings.Contains(string(args), "- substrate-datadir\n") && strings.Contains(string(args), "--path="+mountPath+"\n") &&
+					strings.Contains(string(args), "--mode=0700") {
+					given = true
+				}
+			}
+			if !c.memory && !given {
+				t.Errorf("%s: %v: no init container gives %s to the gateway account", name, o.Metadata["name"], mountPath)
+			}
+			if c.memory && len(inits) != 0 {
+				t.Errorf("%s: %v: a memory home volume runs init containers %v", name, o.Metadata["name"], inits)
+			}
+		}
+		if pods < 3 {
+			t.Errorf("%s: %d DefenseClaw Deployments rendered", name, pods)
 		}
 	}
 }
@@ -325,8 +437,23 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 				}
 			}
 		}
-	} else if strings.Contains(string(out), "substrate-datadir") {
-		t.Errorf("%s: a non-managed render runs the data dir init container", name)
+	} else if strings.Contains(string(out), "--policies=") || strings.Contains(string(out), "mountPath: /var/lib/defenseclaw/data") {
+		t.Errorf("%s: a non-managed render runs the managed data dir init container", name)
+	}
+	// The init container that gives a volume to the gateway account (managed
+	// data, or the disk home volume, GAP-0402) has CHOWN and FOWNER, nothing else.
+	for _, o := range objs {
+		if o.Kind != "Deployment" {
+			continue
+		}
+		inits, _ := dig(o.Spec, "template", "spec", "initContainers").([]any)
+		for _, ic := range inits {
+			add, drop := fmt.Sprint(dig(ic, "securityContext", "capabilities", "add")), fmt.Sprint(dig(ic, "securityContext", "capabilities", "drop"))
+			if dig(ic, "securityContext", "allowPrivilegeEscalation") != false || dig(ic, "securityContext", "readOnlyRootFilesystem") != true ||
+				add != "[CHOWN FOWNER]" || drop != "[ALL]" {
+				t.Errorf("%s: %v init container: add %s, drop %s", name, o.Metadata["name"], add, drop)
+			}
+		}
 	}
 	// A pre-install hook Job cannot use a release ServiceAccount: install
 	// creates those after the pre-install hooks.

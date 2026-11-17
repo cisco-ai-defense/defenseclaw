@@ -42,3 +42,19 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- /* GAP-0402: the volume of the local audit store (the managed data volume,
+else the home volume) holds the store's size cap twice over (retention never
+deletes the last hour) plus 256 MiB, the audit write-ahead log's flood
+ceiling. A 256 MiB volume filled under about 15 actors, and every hook then
+failed closed. */ -}}
+{{- $capMB := int (dig "observability" "local" "max_store_mb" 0 $cfg) -}}
+{{- $sizeKey := ternary "managed.dataSizeLimit" "homeSizeLimit" (not (empty (include "dc.managed" .))) -}}
+{{- $size := toString (ternary .Values.managed.dataSizeLimit .Values.homeSizeLimit (not (empty (include "dc.managed" .)))) -}}
+{{- $sizeMB := atoi (regexFind "^[0-9]+" $size) -}}
+{{- if hasSuffix "Gi" $size }}{{ $sizeMB = mul $sizeMB 1024 }}{{ end -}}
+{{- if le $capMB 0 -}}
+{{- fail "config.observability.local.max_store_mb must be set (64 or more): without a size cap the local audit store can fill its volume, and every hook then fails closed (GAP-0402)" -}}
+{{- end -}}
+{{- if lt $sizeMB (add (mul $capMB 2) 256) -}}
+{{- fail (printf "%s %s is too small for config.observability.local.max_store_mb %d: it must be at least %dMi (twice the cap plus 256 MiB for the audit write-ahead log), or the audit store fills it and every hook fails closed (GAP-0402)" $sizeKey $size $capMB (add (mul $capMB 2) 256)) -}}
+{{- end -}}
