@@ -118,7 +118,7 @@ func TestOpenClawInstallPolicyUnknownVersionKeepsARegisteredPolicy(t *testing.T)
 			if policy, present := installPolicyIn(t, configPath); !present || !reflect.DeepEqual(policy, want) {
 				t.Fatalf("setup under an unknown OpenClaw version removed the install policy:\n%s", mustReadFileString(t, configPath))
 			}
-			if _, ok := loadOpenClawInstallPolicyRecord(opts.DataDir); !ok {
+			if _, ok, err := loadOpenClawInstallPolicyRecord(opts.DataDir); !ok || err != nil {
 				t.Fatal("the install policy record was dropped")
 			}
 			if state, version := openClawInstallPolicySavedState(t, opts.DataDir); state != openClawInstallPolicyRegistered || version != "2026.11.3" {

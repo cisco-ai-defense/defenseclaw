@@ -280,16 +280,28 @@ func openClawInstallPolicyRecordPath(dataDir string) string {
 	return filepath.Join(dataDir, "openclaw-install-policy.json")
 }
 
-func loadOpenClawInstallPolicyRecord(dataDir string) (openClawInstallPolicyRecord, bool) {
+// loadOpenClawInstallPolicyRecord returns the record setup wrote and whether
+// there is one. Only a missing record is none: a record that is there but
+// cannot be read (Windows access denied or delete pending) is an error, so
+// a refresh fails and is retried instead of taking the registered block for
+// the operator's and dropping the record (GAP-1234). A record that does not
+// parse is none.
+func loadOpenClawInstallPolicyRecord(dataDir string) (openClawInstallPolicyRecord, bool, error) {
 	var rec openClawInstallPolicyRecord
 	if dataDir == "" {
-		return rec, false
+		return rec, false, nil
 	}
 	data, err := os.ReadFile(openClawInstallPolicyRecordPath(dataDir))
-	if err != nil || json.Unmarshal(data, &rec) != nil || rec.Block == nil {
-		return openClawInstallPolicyRecord{}, false
+	if errors.Is(err, os.ErrNotExist) {
+		return rec, false, nil
 	}
-	return rec, true
+	if err != nil {
+		return rec, false, fmt.Errorf("read the install policy record: %w", err)
+	}
+	if json.Unmarshal(data, &rec) != nil || rec.Block == nil {
+		return openClawInstallPolicyRecord{}, false, nil
+	}
+	return rec, true, nil
 }
 
 func saveOpenClawInstallPolicyRecord(dataDir string, rec openClawInstallPolicyRecord) error {
@@ -309,17 +321,39 @@ func discardOpenClawInstallPolicyRecord(dataDir string) {
 // OpenClawInstallPolicyStateVersion is the OpenClaw version the last setup
 // or refresh wrote the install policy state under, normalized; "" when there
 // is no state or it names no version. The gateway compares the cached
-// version with it (GAP-1198).
-func OpenClawInstallPolicyStateVersion(dataDir string) string {
+// version with it (GAP-1198). A state file that is there but cannot be read
+// is an error, not "no state" (GAP-1234).
+func OpenClawInstallPolicyStateVersion(dataDir string) (string, error) {
 	if dataDir == "" {
-		return ""
+		return "", nil
 	}
 	data, err := os.ReadFile(openClawInstallPolicyStatePath(dataDir))
-	var rec openClawInstallPolicyStateRecord
-	if err != nil || json.Unmarshal(data, &rec) != nil {
-		return ""
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
 	}
-	return NormalizeAgentVersion("openclaw", rec.OpenClawVersion)
+	if err != nil {
+		return "", err
+	}
+	var rec openClawInstallPolicyStateRecord
+	if json.Unmarshal(data, &rec) != nil {
+		return "", nil
+	}
+	return NormalizeAgentVersion("openclaw", rec.OpenClawVersion), nil
+}
+
+// OpenClawInstallPolicyNotChanged starts every state of a refresh that
+// decided nothing: it returned before it looked at the OpenClaw version (no
+// data folder, the separate-user layout, no openclaw.json, setup has not
+// registered the plugin) or found the version unknown. The gateway moves
+// the version it compares the cache with only for a refresh that decided
+// (GAP-1234).
+const OpenClawInstallPolicyNotChanged = "not changed: "
+
+// OpenClawInstallPolicyDecided reports a refresh state that judged the
+// install policy under the OpenClaw version it was given (registered, off,
+// or not registered: why).
+func OpenClawInstallPolicyDecided(state string) bool {
+	return !strings.HasPrefix(state, OpenClawInstallPolicyNotChanged)
 }
 
 // Install policy states applyOpenClawInstallPolicy reports.
@@ -335,7 +369,7 @@ const (
 	// DefenseClaw (fail-open), so it stays as it is and the state file keeps
 	// the version it was written under. A known version that is too old
 	// still removes it.
-	openClawInstallPolicyVersionUnknown = "not changed: OpenClaw version unknown"
+	openClawInstallPolicyVersionUnknown = OpenClawInstallPolicyNotChanged + "OpenClaw version unknown"
 )
 
 // applyOpenClawInstallPolicy writes, refreshes or removes the DefenseClaw
@@ -355,7 +389,10 @@ func applyOpenClawInstallPolicyState(configPath string, opts SetupOpts) (string,
 	if opts.DataDir == "" {
 		return "not registered: no DefenseClaw data folder", nil
 	}
-	rec, hasRec := loadOpenClawInstallPolicyRecord(opts.DataDir)
+	rec, hasRec, err := loadOpenClawInstallPolicyRecord(opts.DataDir)
+	if err != nil {
+		return "", err
+	}
 	original, err := readConnectorStateFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("read %s: %w", configPath, err)
@@ -442,21 +479,37 @@ func applyOpenClawInstallPolicyState(configPath string, opts SetupOpts) (string,
 // left alone; the next setup writes them.
 func (c *OpenClawConnector) RefreshInstallPolicy(opts SetupOpts) (string, error) {
 	if opts.DataDir == "" {
-		return "not changed: no DefenseClaw data folder", nil
+		return OpenClawInstallPolicyNotChanged + "no DefenseClaw data folder", nil
 	}
 	if openClawSeparateUser(opts) {
-		return "not changed: the separate-user layout (run defenseclaw setup openclaw for the block to merge)", nil
+		return OpenClawInstallPolicyNotChanged + "the separate-user layout (run defenseclaw setup openclaw for the block to merge)", nil
 	}
 	configPath := c.pathsFor(opts).config
-	if _, err := os.Stat(configPath); err != nil {
-		return "not changed: no " + configPath + " yet", nil
+	// Only a missing openclaw.json is "not yet". Another error (Windows
+	// access denied or delete pending while OpenClaw rewrites it on its
+	// first start) fails the refresh, so it is retried instead of reading as
+	// a refresh that ran (GAP-1234).
+	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
+		return OpenClawInstallPolicyNotChanged + "no " + configPath + " yet", nil
+	} else if err != nil {
+		return "", fmt.Errorf("openclaw install policy: %w", err)
 	}
-	if _, hasRec := loadOpenClawInstallPolicyRecord(opts.DataDir); !hasRec && !openClawConfigRegistersDefenseClaw(configPath) {
-		return "not changed: setup has not registered the DefenseClaw plugin yet", nil
+	_, hasRec, err := loadOpenClawInstallPolicyRecord(opts.DataDir)
+	if err != nil {
+		return "", fmt.Errorf("openclaw install policy: %w", err)
+	}
+	if !hasRec {
+		registered, err := openClawConfigRegistersDefenseClawErr(configPath)
+		if err != nil {
+			return "", fmt.Errorf("openclaw install policy: %w", err)
+		}
+		if !registered {
+			return OpenClawInstallPolicyNotChanged + "setup has not registered the DefenseClaw plugin yet", nil
+		}
 	}
 	// The same steps on openclaw.json and its pre-setup record as Setup.
 	var state string
-	err := openClawConfigLocked(configPath, func() error {
+	err = openClawConfigLocked(configPath, func() error {
 		keepSnapshot, err := openClawSnapshotUsable(opts.DataDir, c.Name(), configPath)
 		if err != nil {
 			return fmt.Errorf("openclaw config backup: %w", err)
@@ -484,9 +537,9 @@ func (c *OpenClawConnector) RefreshInstallPolicy(opts SetupOpts) (string, error)
 // drops the record. Only those members are cut from the text, so the rest of
 // the JSON5 file keeps its bytes. The caller holds the openclaw.json lock.
 func removeOpenClawInstallPolicy(configPath, dataDir string) error {
-	rec, ok := loadOpenClawInstallPolicyRecord(dataDir)
-	if !ok {
-		return nil
+	rec, ok, err := loadOpenClawInstallPolicyRecord(dataDir)
+	if err != nil || !ok {
+		return err
 	}
 	data, err := readConnectorStateFile(configPath)
 	if errors.Is(err, os.ErrNotExist) {

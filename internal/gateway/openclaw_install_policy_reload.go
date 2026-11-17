@@ -52,13 +52,13 @@ func openClawInstallPolicyInputsOf(cfg *config.Config) openClawInstallPolicyInpu
 var openClawInstallPolicyRefresher = func(opts connector.SetupOpts) (string, error) {
 	conn, ok := connector.NewDefaultRegistry().Get("openclaw")
 	if !ok {
-		return "not changed: no openclaw connector", nil
+		return connector.OpenClawInstallPolicyNotChanged + "no openclaw connector", nil
 	}
 	refresher, ok := conn.(interface {
 		RefreshInstallPolicy(connector.SetupOpts) (string, error)
 	})
 	if !ok {
-		return "not changed: the openclaw connector cannot refresh it", nil
+		return connector.OpenClawInstallPolicyNotChanged + "the openclaw connector cannot refresh it", nil
 	}
 	return refresher.RefreshInstallPolicy(opts)
 }
@@ -91,9 +91,11 @@ var (
 )
 
 // openClawInstallPolicyWrittenUnder is the OpenClaw version the install
-// policy was last written under: the state file's when the watch starts
-// (else the cached one), then the version of each refresh that ran. The
-// watcher compares the cached version with it, not with the last one it
+// policy was last decided under: the state file's when the watch starts
+// (else the cached one), then the version of each refresh that decided
+// (connector.OpenClawInstallPolicyDecided). A refresh that returned before
+// it looked at the version, or found it unknown, moves nothing (GAP-1234).
+// The watcher compares the cached version with it, not with the last one it
 // saw, so a refresh that failed past every retry runs again at its next
 // look while the policy is still judged under the old version (GAP-1198).
 var (
@@ -173,7 +175,13 @@ func (s *Sidecar) startOpenClawInstallPolicyWatch(ctx context.Context) (stop fun
 	cfg := s.currentConfig()
 	written := openClawCachedVersion(cfg)
 	if cfg != nil {
-		if recorded := connector.OpenClawInstallPolicyStateVersion(cfg.DataDir); recorded != "" {
+		recorded, err := connector.OpenClawInstallPolicyStateVersion(cfg.DataDir)
+		switch {
+		case err != nil:
+			// A state file that is there but cannot be read says nothing
+			// about the version: the first version that parses refreshes.
+			written = ""
+		case recorded != "":
 			written = recorded
 		}
 	}
@@ -299,6 +307,12 @@ func (s *Sidecar) refreshOpenClawInstallPolicy() {
 	s.refreshOpenClawInstallPolicyAttempt(0, "the config reload", "")
 }
 
+// openClawInstallPolicyLastUndecided is the last log line of a refresh that
+// decided nothing. The watcher runs such a refresh again at each look until
+// one decides; the same line is not logged again. Guarded by
+// openClawInstallPolicyRefreshMu.
+var openClawInstallPolicyLastUndecided string
+
 // refreshOpenClawInstallPolicyAttempt is one try; reason says what asked for
 // the refresh in the log, version is the OpenClaw version to judge under when
 // the cache no longer parses ("" for none).
@@ -322,10 +336,19 @@ func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason, versi
 	state, err := openClawInstallPolicyRefresher(opts)
 	if err == nil {
 		openClawInstallPolicyPending.Store(false)
+		line := fmt.Sprintf("[connector] openclaw: install admission after %s (install_policy %s): %s\n", reason, setting, state)
+		if !connector.OpenClawInstallPolicyDecided(state) {
+			if line != openClawInstallPolicyLastUndecided {
+				fmt.Fprint(os.Stderr, line)
+			}
+			openClawInstallPolicyLastUndecided = line
+			return
+		}
+		openClawInstallPolicyLastUndecided = ""
 		if written := connector.NormalizeAgentVersion("openclaw", opts.AgentVersion); written != "" {
 			setOpenClawInstallPolicyWrittenVersion(written)
 		}
-		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission after %s (install_policy %s): %s\n", reason, setting, state)
+		fmt.Fprint(os.Stderr, line)
 		return
 	}
 	openClawInstallPolicyPending.Store(true)
