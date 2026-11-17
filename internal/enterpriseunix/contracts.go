@@ -711,6 +711,10 @@ func (l *lifecycle) describeUnprotectedAgents(record *Deployment) {
 		return
 	}
 	info, err := os.Stat(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)))
+	var scanAt time.Time
+	if err == nil {
+		scanAt = info.ModTime()
+	}
 	if err != nil {
 		message := "the enumerator's unprotected-agents record's scan time cannot be read: " + err.Error()
 		if l.opts.Action == ActionVerify {
@@ -734,7 +738,7 @@ func (l *lifecycle) describeUnprotectedAgents(record *Deployment) {
 	// not one per account (GAP-0071); every account still counts below.
 	sharedLines, sharedEntry := enterprisehooks.CollapseSharedOpenCodeV1(agents, enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath))
 	for _, line := range sharedLines {
-		r.AddWarning(line.Code, line.Message())
+		r.AddWarning(line.Code, line.Message()+openCodeV1ScanNote(line.Code, scanAt))
 	}
 	hookVerified := l.guardianVerifiedHook(record)
 	for _, agent := range agents {
@@ -755,7 +759,7 @@ func (l *lifecycle) describeUnprotectedAgents(record *Deployment) {
 			continue
 		}
 		if !sharedEntry(agent) {
-			r.AddWarning(agent.Code, agent.Message())
+			r.AddWarning(agent.Code, agent.Message()+openCodeV1ScanNote(agent.Code, scanAt))
 		}
 		if agent.InstallPath != "" && (l.opts.Action == ActionStatus || l.opts.Action == ActionVerify) && env.ReportLaunchCoverage != nil && agent.UID != nil {
 			reason := "unsupported_installed_version"
@@ -775,6 +779,19 @@ func (l *lifecycle) describeUnprotectedAgents(record *Deployment) {
 			r.MarkSecurityIncomplete(agent.Code)
 		}
 	}
+}
+
+// openCodeV1ScanNote says when the scan behind an OpenCode V1 warning
+// finished. Status reads the enumerator's record and never rescans, so after
+// the administrator replaces V1 with V2 the warning stays until the next
+// scan cycle writes a new record; the note makes that visible instead of
+// leaving the line to read as a stale verdict (rel-1-0-10 GAP-0107).
+func openCodeV1ScanNote(code string, scanAt time.Time) string {
+	if code != enterprisehooks.UnprotectedCodeOpenCodeV1 || scanAt.IsZero() {
+		return ""
+	}
+	return " (from the enumerator's scan that finished at " + scanAt.UTC().Format("2006-01-02 15:04:05") +
+		" UTC; status does not rescan, so after the fix this line clears when the next scan cycle runs)"
 }
 
 // codeGuardianCleanupPending names a DefenseClaw hook registration the hook
