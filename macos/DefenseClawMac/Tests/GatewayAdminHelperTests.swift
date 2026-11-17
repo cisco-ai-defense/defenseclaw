@@ -627,28 +627,8 @@ private enum GatewayAdminHelperTests {
               "The hard link is reported and the rest of the folder is returned: \(hardLinked) \(changed)")
         check(unlink(linked.path) == 0, "Could not remove the hard-link fixture")
 
-        // A file swapped in between the checks and the open (another inode,
-        // one link) is never changed.
-        var swappedAtCheck = false
-        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in
-            guard relative == "agents/defenseclaw.json" else { return }
-            swappedAtCheck = true
-            guard rename(listed.path, moved.path) == 0 else { fatalError("Could not move the swap fixture") }
-            try? Data("{}".utf8).write(to: listed)
-            _ = chmod(listed.path, 0o600)
-        }
-        changed = []
-        let swapped = GatewayAdminAgentConfigRepair.restore(
-            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
-            change: { _, relative in changed.append(relative); return 0 })
-        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
-        check(swappedAtCheck, "The folder walk must reach the swap point between a file's checks and its open")
-        check(!changed.contains("~/.kiro/agents/defenseclaw.json") && swapped.skipped == ["~/.kiro/agents/defenseclaw.json"],
-              "A file swapped after its checks must be reported, not changed: \(swapped) \(changed)")
-        _ = unlink(listed.path)
-        check(rename(moved.path, listed.path) == 0, "Could not restore the swap fixture")
-
-        // The attack itself, with no test hook: another thread hard-links the
+        // The attack itself, with no test hook (run first, so it decides a
+        // run of the helper before this fix): another thread hard-links the
         // file outside the folder into it and unlinks the link again while the
         // walk runs. Before the fix the walk opened the link and, when the
         // unlink landed before its fstat, read one link and handed the file
@@ -680,6 +660,27 @@ private enum GatewayAdminHelperTests {
         _ = unlink(race)
         check(handedOver == 0, "A hard link unlinked between the open and the fstat handed a file outside the folder over "
             + "(walk \(walks))")
+
+        // A file swapped in between the checks and the open (another inode,
+        // one link) is never changed.
+        var swappedAtCheck = false
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in
+            guard relative == "agents/defenseclaw.json" else { return }
+            swappedAtCheck = true
+            guard rename(listed.path, moved.path) == 0 else { fatalError("Could not move the swap fixture") }
+            try? Data("{}".utf8).write(to: listed)
+            _ = chmod(listed.path, 0o600)
+        }
+        changed = []
+        let swapped = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
+            change: { _, relative in changed.append(relative); return 0 })
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
+        check(swappedAtCheck, "The folder walk must reach the swap point between a file's checks and its open")
+        check(!changed.contains("~/.kiro/agents/defenseclaw.json") && swapped.skipped == ["~/.kiro/agents/defenseclaw.json"],
+              "A file swapped after its checks must be reported, not changed: \(swapped) \(changed)")
+        _ = unlink(listed.path)
+        check(rename(moved.path, listed.path) == 0, "Could not restore the swap fixture")
     }
 
     /// GAP-0141 real-root cases: run as root by sudo (the runner script does
