@@ -1877,7 +1877,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// (rel-1-0-10:GAP-0415: managed is never weaker than per-user).
 	if input.Command != "" && trustedShellCommandInput(request.Input) {
 		if reason := hookpaths.UncertainGlobWriteReason(input.Command, input.CWD, facts.ActiveHome, request.ShellStartup); reason != "" &&
-			!(request.ProtectedHomeHook && reason == hookpaths.UnprovenTargetUnresolved && clientAnswersReading(request, input.Command)) {
+			(!request.ProtectedHomeHook || reason != hookpaths.UnprovenTargetUnresolved || !clientAnswersReading(request, input.Command)) {
 			return unproven(reason, "")
 		}
 	}

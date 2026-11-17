@@ -418,8 +418,6 @@ func resolveShellWordReadings(word *syntax.Word, values actionValues, cwd string
 	return out
 }
 
-func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
-
 // resolverAttachedValue is the word after the equals sign of an attached
 // option value (dd of=PATH, --output=PATH) and the text before it: the text
 // after the first equals sign of the word's leading literal and the rest of
