@@ -280,11 +280,18 @@ func (writer *rejectedRecordWriter) run() {
 			for {
 				batch = writer.fill(batch[:0])
 				if len(batch) == 0 {
-					writer.logCounters(true)
-					return
+					break
 				}
 				writer.write(batch)
 			}
+			// The final drain keeps the cap too: without this trim the
+			// rows it wrote stayed past the cap until the next run of the
+			// store, and for good when the gateway stopped (GAP-0072).
+			// trim does one batch now that stop is closed; that covers a
+			// full queue (rejectedRecordQueueItems < RejectedRecordTrimBatch).
+			writer.trim()
+			writer.logCounters(true)
+			return
 		}
 	}
 }

@@ -434,20 +434,24 @@ func (p *GuardrailProxy) recordRouteDeny(ctx context.Context, path string, d *en
 }
 
 // auditRouteDeny writes the audit row of a routing refusal: a managed
-// admin rule (target routing.admin) or a sensitive request no local model
-// could serve (target routing.sensitive). Code and path only, no text.
+// admin rule (action routing.admin_denied, target routing.admin) or a
+// sensitive request no local model could serve (routing.sensitive_refused,
+// target routing.sensitive). Code and path only, no text. These are routing
+// decisions, not guardrail verdicts: their own actions keep them out of the
+// guardrail block counts (inspect-request-block, which they shared before,
+// GAP-1126). The request is refused either way.
 func auditRouteDeny(ctx context.Context, logger *audit.Logger, path string, d *engine.DenyReason) {
 	if logger == nil {
 		return
 	}
-	code, target := "routing_admin_denied", "routing.admin"
+	code, target, action := "routing_admin_denied", "routing.admin", audit.ActionRoutingAdminDenied
 	if d != nil && d.Code != "" {
 		code = d.Code
 	}
 	if code == engine.DenyCodeSensitiveLocal {
-		target = "routing.sensitive"
+		target, action = "routing.sensitive", audit.ActionRoutingSensitiveRefused
 	}
-	_ = logger.LogActionCtx(ctx, string(audit.ActionInspectRequestBlock), target, "routing refused the model request: "+boundedRouterLabel(code, 96)+" path="+boundedRouterLabel(path, 128))
+	_ = logger.LogActionCtx(ctx, string(action), target, "routing refused the model request: "+boundedRouterLabel(code, 96)+" path="+boundedRouterLabel(path, 128))
 }
 
 // routerActive reports whether this request is routed at all.

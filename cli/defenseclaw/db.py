@@ -269,6 +269,7 @@ _HOOK_STATS_PROXY_ACTIONS = (
     "inspect-tool-alert",
     "inspect-tool-confirm",
     "inspect-tool-block",
+    "inspect-tool-timeout",
     "guardrail-verdict",
     "block",
     "guardrail-block",
@@ -1249,13 +1250,15 @@ class Store:
         # their guardrail records tool inspections (inspect-tool-*) and LLM
         # evaluations (guardrail-verdict), and a blocked LLM turn adds a
         # ``block`` row. Without them an OpenClaw-only Overview read "Blocks 0"
-        # after a tool block and a prompt block (GAP-2496).
+        # after a tool block and a prompt block (GAP-2496). A check that timed
+        # out (inspect-tool-timeout) is a call with no gateway verdict, as
+        # /health counts it, never a block (GAP-0919).
         cur = self.db.execute(
             f"""SELECT rowid >> {bits},
                       LOWER(TRIM(connector)) AS connector_name,
                       SUM(CASE WHEN action IN ('inspect-tool-allow', 'inspect-tool-alert',
                                                'inspect-tool-confirm', 'inspect-tool-block',
-                                               'guardrail-verdict')
+                                               'inspect-tool-timeout', 'guardrail-verdict')
                                THEN 1 ELSE 0 END) AS calls,
                       SUM(CASE WHEN action IN ('inspect-tool-block', 'block', 'guardrail-block')
                                THEN 1 ELSE 0 END) AS blocks,
