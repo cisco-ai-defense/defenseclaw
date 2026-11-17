@@ -53,6 +53,10 @@ func gatewayOutOfReachFix(action string) string {
 	return "Run defenseclaw-gateway " + action + " from an elevated shell, or from the session that started it"
 }
 
+// gatewayOutOfReachGenericFix is the next step for any other command that
+// needs the gateway (policy reload, scan, ...).
+const gatewayOutOfReachGenericFix = "Run the command from an elevated shell, or from the session that started the gateway"
+
 // gatewayOutOfReachLifecycleError refuses action (stop, restart) with nothing
 // changed: this shell cannot stop that process, so it never claims it did, and
 // never says no gateway runs.

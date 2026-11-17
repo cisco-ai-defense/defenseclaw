@@ -248,6 +248,11 @@ func foreignGatewayListenerFix(cfg *config.Config) string {
 // foreignGatewayListenerFixAt is foreignGatewayListenerFix for the API
 // listener at host:apiPort (the observability-v8 helpers, GAP-1670).
 func foreignGatewayListenerFixAt(host string, apiPort int) string {
+	if _, ok := gatewayOutOfReachAt(config.DefaultDataPath(), host, apiPort); ok {
+		// GAP-1212 review: this account's gateway out of this shell's
+		// reach is neither another account's nor movable from here.
+		return gatewayOutOfReachGenericFix
+	}
 	holder, err := gatewayPortHolder(host, apiPort)
 	if err != nil {
 		holder = daemon.PortHolder{UID: -1}

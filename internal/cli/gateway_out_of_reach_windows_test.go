@@ -124,6 +124,11 @@ func TestLifecycleNamesThisAccountsGatewayOutOfReach(t *testing.T) {
 	if err := safefile.ProtectFile(record); err != nil {
 		t.Fatal(err)
 	}
+	tokenFile := filepath.Join(home, runningGatewayTokenFilename)
+	const tokenSentinel = "disposable-running-token"
+	if err := os.WriteFile(tokenFile, []byte(tokenSentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	oldHost, oldPort := sidecarHost, sidecarPort
 	sidecarHost, sidecarPort = "", 0
 	t.Cleanup(func() { sidecarHost, sidecarPort = oldHost, oldPort })
@@ -150,8 +155,13 @@ func TestLifecycleNamesThisAccountsGatewayOutOfReach(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &doc); err != nil {
 			t.Fatalf("status --json is not JSON (%v):\n%s", err, out)
 		}
-		if !doc.Running || strings.Contains(doc.Error, "not by this account") || strings.Contains(doc.Error, "another account") {
-			t.Fatalf("status of this account's out-of-reach gateway = %+v (err %v), want it running and this account's", doc, runErr)
+		if runErr == nil || !doc.Running || strings.Contains(doc.Error, "not by this account") || strings.Contains(doc.Error, "another account") {
+			t.Fatalf("status of this account's out-of-reach gateway = %+v (err %v), want it running and this account's, exit non-zero (unreadable)", doc, runErr)
+		}
+		gatewayStatusJSON = false
+		out = captureStdout(t, func() { runErr = runSidecarStatus(nil, nil) })
+		if runErr == nil || !strings.Contains(out, "RUNNING") || strings.Contains(out, "NOT THIS ACCOUNT") || strings.Contains(out, "another account") {
+			t.Fatalf("status text = %v:\n%s\nwant RUNNING, this account's", runErr, out)
 		}
 	})
 	t.Run("start", func(t *testing.T) {
@@ -174,6 +184,12 @@ func TestLifecycleNamesThisAccountsGatewayOutOfReach(t *testing.T) {
 		}
 		if after := listing(); after != before {
 			t.Fatalf("a refused stop changed the home: %s -> %s", before, after)
+		}
+		if got, err := os.ReadFile(tokenFile); err != nil || string(got) != tokenSentinel {
+			t.Fatalf("a refused stop touched the running-gateway token: %q %v", got, err)
+		}
+		if _, err := os.Stat(filepath.Join(home, gatewayStoppedMarkerName)); !os.IsNotExist(err) {
+			t.Fatalf("a refused stop wrote the stop marker: %v", err)
 		}
 	})
 	t.Run("restart", func(t *testing.T) {
