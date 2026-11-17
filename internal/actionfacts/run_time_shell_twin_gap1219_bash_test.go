@@ -41,6 +41,9 @@ func TestRunTimeShellTwinGAP1219MatchesBash(t *testing.T) {
 		{"underscore", "true zz; printf '<%s>' $_", false},
 		{"read-reply", "read <<< zz; printf '<%s>' $REPLY", false},
 		{"shell-level", "printf '<%s>' $SHLVL", false},
+		{"B07-named-coproc-pid", "coproc WORK { :; }; printf '<%s>' $WORK_PID", false},
+		{"B08-unnamed-coproc-pid", "coproc { :; }; printf '<%s>' $COPROC_PID", false},
+		{"B15-shell-opt-prefix", "printf '<%s>' $OPT_EXTRA", false},
 		{"joined-parameter", "printf '<%s>' $HOME\\\nx", true},
 		{"plain", "printf '<%s>' $HOME/x", true},
 		{"nested-plain", "printf '<%s>' ${HOME:+$HOME}", true},
@@ -49,7 +52,13 @@ func TestRunTimeShellTwinGAP1219MatchesBash(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			command := "cat <<EOF | bash\n" + row.body + "\nEOF"
+			if strings.HasPrefix(row.name, "B15-") {
+				command = "OPT_EXTRA=outer; " + command
+			}
 			real := run(command)
+			if strings.HasPrefix(row.name, "B") && real == run(row.body) {
+				t.Fatalf("bash did not show a holding/receiving shell difference: %q", real)
+			}
 			twin, ok, _, unread := RunTimeShellTwin(command)
 			if row.known {
 				if !ok || unread || run(twin) != real {

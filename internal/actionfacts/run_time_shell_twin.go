@@ -960,13 +960,18 @@ func heredocParamNames(param *syntax.ParamExp, names map[string]bool) bool {
 
 // These values are initialized or changed independently by each shell.
 func heredocShellOwnedName(name string) bool {
-	switch name {
-	case "_", "OLDPWD", "SHLVL", "LINENO", "RANDOM", "SRANDOM", "SECONDS",
-		"PPID", "BASHPID", "REPLY", "MAPFILE", "COPROC", "OPTIND", "OPTARG",
-		"OPTERR", "DIRSTACK", "IFS":
+	// A named coprocess can also be started by the holding shell before the
+	// here-document. Bash does not export its generated NAME_PID value to the
+	// receiving shell, so no NAME_PID expansion is provably shared.
+	if strings.HasSuffix(name, "_PID") {
 		return true
 	}
-	for _, prefix := range []string{"PS", "HIST", "BASH_", "EPOCH", "COMP_", "ZSH_"} {
+	switch name {
+	case "_", "OLDPWD", "SHLVL", "LINENO", "RANDOM", "SRANDOM", "SECONDS",
+		"PPID", "BASHPID", "REPLY", "MAPFILE", "COPROC", "DIRSTACK", "IFS":
+		return true
+	}
+	for _, prefix := range []string{"PS", "HIST", "OPT", "BASH_", "EPOCH", "COMP_", "ZSH_"} {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}
@@ -1015,12 +1020,17 @@ func heredocParamsExpandAsWritten(text string, at map[int]int, names map[string]
 		case *syntax.LetClause:
 			bindAll()
 		case *syntax.CoprocClause:
-			if typed.Name != nil {
-				if name, known := simpleStaticWord(typed.Name, nil); known {
-					bind(name)
-				} else {
-					bindAll()
-				}
+			// Bash creates both an array of descriptors and a PID variable.
+			// An unnamed coprocess uses COPROC and COPROC_PID. The holding
+			// shell expands these before the receiving shell runs this body.
+			if typed.Name == nil {
+				bind("COPROC")
+				bind("COPROC_PID")
+			} else if name, known := simpleStaticWord(typed.Name, nil); known && simpleVariableName(name) {
+				bind(name)
+				bind(name + "_PID")
+			} else {
+				bindAll()
 			}
 		case *syntax.Redirect:
 			if typed.N != nil {

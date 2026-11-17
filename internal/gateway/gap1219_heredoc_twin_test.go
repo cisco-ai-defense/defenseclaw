@@ -31,6 +31,8 @@ func TestGAP1219HeredocTwinRejectsUnsharedParameters(t *testing.T) {
 		"descriptor-name":               "cat <<EOF | bash\n{D}>/tmp/out\nrm -rf $D/*\nEOF",
 		"getopts-name":                  "cat <<EOF | bash\ngetopts a D\nrm -rf $D/*\nEOF",
 		"dynamic-program":               "cat <<EOF | bash\n$TOOL D=/tmp/build\nrm -rf $D/*\nEOF",
+		"R07-named-coproc-pid":          "cat <<EOF | bash\ncoproc WORK { :; }\nrm -rf /tmp/$WORK_PID/*\nEOF",
+		"R08-unnamed-coproc-pid":        "cat <<EOF | bash\ncoproc { :; }\nrm -rf /tmp/$COPROC_PID/*\nEOF",
 	}
 	benign := map[string]string{
 		"commit-file":  "git commit -F - <<EOF\nfix for $USER\nEOF",
