@@ -59,3 +59,50 @@ func TestHookImageRetireOverAnOkMarkerSaysPendingWhileItsWritersRun(t *testing.T
 		t.Fatalf("marker state after the retire ended ok = %v, want ok", got)
 	}
 }
+
+// rel-1-0-10 GAP-1158 review: a marker that exists but does not parse (cut
+// short by a crash) made every later retire refuse ("Nothing was changed"),
+// so retire could never finish. Retire replaces it with a fresh pending body
+// before its writers run and ends ok.
+func TestHookImageRetireOverAMarkerThatDoesNotParseRecordsPending(t *testing.T) {
+	r := newRetireFixture(t)
+	r.named = []map[string][]string{{}}
+	steps := r.steps()
+	steps.ReadMarker = func(path string) ([]byte, error) {
+		node, ok := r.fs.get(path)
+		if !ok {
+			return nil, errors.New("not found")
+		}
+		return []byte(node.data), nil
+	}
+	state := func(marker string) any {
+		t.Helper()
+		node, ok := r.fs.get(marker)
+		if !ok {
+			t.Fatal("no marker")
+		}
+		var body map[string]any
+		if err := json.Unmarshal([]byte(node.data), &body); err != nil {
+			t.Fatalf("marker %q: %v", node.data, err)
+		}
+		return body["state"]
+	}
+	first := retireWindowsHookImages(steps)
+	if !first.OK || first.Marker == "" {
+		t.Fatalf("first retire = %+v, want ok", first)
+	}
+	r.fs.file(first.Marker, `{"schema_version":1,"retired_at":"x","sta`)
+	var during []any
+	steps.ReconcileCodex = func() error { during = append(during, state(first.Marker)); return nil }
+	r.scans = 0
+	again := retireWindowsHookImages(steps)
+	if !again.OK {
+		t.Fatalf("retire over a marker that does not parse = %+v, want ok (it must not refuse)", again)
+	}
+	if len(during) != 1 || during[0] != "pending" {
+		t.Fatalf("marker state while the writers ran = %v, want pending", during)
+	}
+	if got := state(again.Marker); got != "ok" {
+		t.Fatalf("marker state after the retire ended ok = %v, want ok", got)
+	}
+}

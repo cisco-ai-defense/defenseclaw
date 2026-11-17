@@ -487,7 +487,11 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 }
 
 // windowsHookImageRecordRetireState records state in the marker, keeping
-// its skips; a marker that already records it is not written again.
+// its skips; a marker that already records it is not written again. A
+// marker that does not parse (cut short by a crash, edited) records no state
+// and no skips: recording pending replaces it with a fresh pending body
+// rather than refusing every later retire; any other state leaves it, and
+// status reads it as pending.
 func windowsHookImageRecordRetireState(steps windowsHookImageRetireSteps, marker, state string) error {
 	if steps.ReadMarker == nil {
 		return nil
@@ -498,7 +502,10 @@ func windowsHookImageRecordRetireState(steps windowsHookImageRetireSteps, marker
 	}
 	var body windowsHookImageRetireMarker
 	if err := json.Unmarshal(current, &body); err != nil {
-		return err
+		if state != windowsHookImageRetireStatePending {
+			return err
+		}
+		body = windowsHookImageRetireMarker{SchemaVersion: 1, RetiredAt: steps.Now().UTC().Format(time.RFC3339)}
 	}
 	if body.State == state {
 		return nil
@@ -513,7 +520,8 @@ func windowsHookImageRecordRetireState(steps windowsHookImageRetireSteps, marker
 // line): hook_image_retire_pending when the marker records that the last
 // retire ended pending (GAP-1158), else hook_image_retired, then the
 // skipped profiles (windowsHookImageSkippedProfileIssues). A marker that
-// cannot be read gives hook_image_retired alone.
+// cannot be read gives hook_image_retired alone; one that does not parse
+// records no finished retire and reads as pending.
 func windowsHookImageRetiredIssues(problem string, marker []byte, markerErr error, bin string,
 	read func(windowsHookImageConfigFile) ([]byte, error), callerDenied func(error) bool) []windowsHookImageStatusIssue {
 	if markerErr != nil {
@@ -521,9 +529,14 @@ func windowsHookImageRetiredIssues(problem string, marker []byte, markerErr erro
 	}
 	var body windowsHookImageRetireMarker
 	issue := windowsHookImageStatusIssue{Code: "hook_image_retired", Text: problem}
-	if json.Unmarshal(marker, &body) == nil && body.State == windowsHookImageRetireStatePending {
+	why := "the last retire ended pending"
+	parseErr := json.Unmarshal(marker, &body)
+	if parseErr != nil {
+		why = "the retire marker does not parse, so it does not record that the last retire ended ok"
+	}
+	if parseErr != nil || body.State == windowsHookImageRetireStatePending {
 		issue = windowsHookImageStatusIssue{Code: windowsHookImageRetirePending, Text: "hook-image retire has not finished: " + problem +
-			", but the last retire ended pending, so some file DefenseClaw wrote may still name a launch folder. Run " +
+			", but " + why + ", so some file DefenseClaw wrote may still name a launch folder. Run " +
 			"`enterprise windows hook-image retire` again until it ends ok. " + windowsHookImageRetirePendingNextStep()}
 	}
 	return append([]windowsHookImageStatusIssue{issue}, windowsHookImageSkippedProfileIssues(marker, bin, read, callerDenied)...)

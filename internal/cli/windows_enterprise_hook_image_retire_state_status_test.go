@@ -25,6 +25,7 @@ func TestHookImageStatusReportsAPendingRetireMarker(t *testing.T) {
 		{"ok", `{"schema_version":1,"retired_at":"x","state":"ok"}`, nil, "hook_image_retired"},
 		{"before the state field", `{"schema_version":1,"retired_at":"x"}`, nil, "hook_image_retired"},
 		{"unreadable marker", "", errors.New("access denied"), "hook_image_retired"},
+		{"marker that does not parse", `{"schema_version":1,"retired_at":"x","sta`, nil, windowsHookImageRetirePending},
 	} {
 		issues := windowsHookImageRetiredIssues(problem, []byte(tc.marker), tc.err, hookImageTestBin, read, nil)
 		if len(issues) != 1 || issues[0].Code != tc.want {
