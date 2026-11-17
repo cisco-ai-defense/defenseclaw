@@ -19,6 +19,7 @@ import (
 // still starting at the readiness deadline instead of stopping it; a
 // gateway that reports a fatal error is still stopped.
 func TestWaitForStartedDaemonKeepsSlowLiveProcessForInteractiveStart(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
 	starting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
 	}))
@@ -57,5 +58,22 @@ func TestWaitForStartedDaemonKeepsSlowLiveProcessForInteractiveStart(t *testing.
 		25*time.Millisecond, 5*time.Millisecond, daemonReadinessRequirements{keepSlowStart: true})
 	if err == nil || errors.Is(err, errGatewayStillStarting) || process.stopCalls != 1 {
 		t.Fatalf("error = %v, stop calls = %d, want the failed gateway stopped", err, process.stopCalls)
+	}
+}
+
+// GAP-1160: a gateway that is still starting when the readiness deadline ends
+// is left running. Started by a systemd unit (Type=forking, ExecStart
+// "defenseclaw-gateway start") the command exits 0 so the unit becomes active;
+// a non-zero exit failed the unit, ExecStop stopped the gateway and
+// Restart=on-failure looped. An interactive start still exits non-zero.
+func TestReportGatewayStillStartingExitsZeroUnderSystemd(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "0123456789abcdef0123456789abcdef")
+	if err := reportGatewayStillStarting(errGatewayStillStarting, 42, "/tmp/gateway.log", nil, errors.New("no config")); err != nil {
+		t.Fatalf("under systemd the still-starting gateway must exit 0, got %v", err)
+	}
+	t.Setenv("INVOCATION_ID", "")
+	err := reportGatewayStillStarting(errGatewayStillStarting, 42, "/tmp/gateway.log", nil, errors.New("no config"))
+	if err == nil || !strings.Contains(err.Error(), "still starting and was left running") {
+		t.Fatalf("an interactive start must keep the non-zero exit, got %v", err)
 	}
 }
