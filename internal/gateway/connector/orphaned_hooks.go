@@ -44,6 +44,18 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 			found = append(found, path)
 		}
 	}
+	// A connector whose commands do not survive as plain text in its files
+	// (Kiro on Windows wraps them in an -EncodedCommand script, and a data
+	// folder name JSON escapes) names its files itself (GAP-1092, GAP-1174).
+	if owner, ok := conn.(interface {
+		orphanedHookFiles(SetupOpts) ([]string, error)
+	}); ok {
+		paths, err := owner.orphanedHookFiles(opts)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, paths...)
+	}
 	exact := ownedHookCommandNeedles(opts, conn)
 	scripts := ownedHookScriptPaths(conn, opts)
 	var registrationPrefixes []string

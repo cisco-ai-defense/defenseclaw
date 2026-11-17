@@ -20,9 +20,9 @@ import (
 // file a rollback had rewritten: Kiro was in no active roster and no lock,
 // so no boot tore it down, and every Kiro call failed closed for want of the
 // token the earlier teardown had revoked (rel-1-0-10:GAP-0275). A boot
-// removes the DefenseClaw hooks of a connector this install once set up (its
-// hook script is in the hooks folder) that it no longer guards, and leaves a
-// guarded, a rostered and a never set up connector alone.
+// removes the DefenseClaw hooks of a connector it no longer guards, with or
+// without its hook script, and leaves a guarded and a rostered connector and
+// the hooks of another data directory alone.
 func TestBootRemovesHooksOfAConnectorTheInstallNoLongerGuards(t *testing.T) {
 	home := t.TempDir()
 	restore, err := connector.BindUserHomeDir(home)
@@ -60,11 +60,13 @@ func TestBootRemovesHooksOfAConnectorTheInstallNoLongerGuards(t *testing.T) {
 		return err == nil && strings.Contains(string(data), "defenseclaw-")
 	}
 
-	// Never set up by this install (no kiro-hook.sh): left alone.
+	// Without a kiro-hook.sh (a rollback's data swap dropped it) the entries
+	// still name this install's script: they run a script that is not there
+	// and block every Kiro call, so a boot removes them (GAP-1092).
 	write(hooksFile, stale)
 	s.reclaimUnguardedConnectorHooks(context.Background(), registry)
-	if !kiroHasHooks() {
-		t.Fatal("hooks of a connector this install never set up were removed")
+	if kiroHasHooks() {
+		t.Fatal("hooks naming this install, left with no hook script, were not removed")
 	}
 
 	// Set up once, now unguarded and in no roster or lock, but the hooks name

@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -28,13 +27,15 @@ import (
 // only OpenClaw, whose hook token the earlier teardown had revoked, so every
 // Kiro prompt and tool call failed closed.
 //
-// A connector qualifies only when this install wrote its hook script (one
-// of its HookScriptNames is in the hooks folder), it is not configured, not
-// in the active roster and not in the lock, its VerifyClean reports
-// DefenseClaw hooks left ("teardown incomplete"; a file it cannot read is
-// no proof), and, outside Windows, one of the files it patches names this
-// install's own hook command, so the hooks of another DefenseClaw data
-// directory on the account stay. Windows commands name the per-account
+// A connector qualifies only when it is not configured, not in the active
+// roster and not in the lock, its VerifyClean reports DefenseClaw hooks left
+// ("teardown incomplete"; a file it cannot read is no proof), and, outside
+// Windows, one of the files it patches names this install's own hook command,
+// so the hooks of another DefenseClaw data directory on the account stay. The
+// hook entries are the proof of ownership: a hook script this install wrote
+// is not required, because a data folder swapped in by a rollback, or an
+// earlier reclaim, drops the script and leaves the entries running a script
+// that is not there (rel-1-0-10 GAP-1092). Windows commands name the per-account
 // launcher, not a data directory. Its own Teardown removes only what
 // DefenseClaw wrote, then the hook script goes and its hook token is
 // revoked as for a removed connector, so the next boot finds nothing to do.
@@ -80,7 +81,7 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 		if !ok {
 			continue
 		}
-		if _, hooked := conn.(connector.HookEndpoint); !hooked || !installWroteHookScript(conn, opts) {
+		if _, hooked := conn.(connector.HookEndpoint); !hooked {
 			continue
 		}
 		if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "teardown incomplete") {
@@ -110,19 +111,4 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 			)
 		}
 	}
-}
-
-// installWroteHookScript reports whether the hooks folder holds one of the
-// hook scripts of the connector, that is, this install set the connector up once.
-func installWroteHookScript(conn connector.Connector, opts connector.SetupOpts) bool {
-	owner, ok := conn.(connector.HookScriptOwner)
-	if !ok {
-		return false
-	}
-	for _, script := range owner.HookScriptNames(opts) {
-		if info, err := os.Lstat(filepath.Join(opts.DataDir, "hooks", script)); err == nil && info.Mode().IsRegular() {
-			return true
-		}
-	}
-	return false
 }

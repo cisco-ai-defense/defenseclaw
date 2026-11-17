@@ -293,6 +293,32 @@ func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 	return nil
 }
 
+// orphanedHookFiles are the Kiro files that still hold a DefenseClaw hook
+// entry, read as the decoded entries Setup writes rather than as raw bytes: a
+// Windows command is an -EncodedCommand wrapper that holds no plain
+// "hook --connector kiro", so the raw match of OrphanedHookConfigPaths reported
+// an unconfigured connector "already absent" with its hook file still there
+// (rel-1-0-10 GAP-1092, GAP-1174).
+func (c *KiroConnector) orphanedHookFiles(opts SetupOpts) ([]string, error) {
+	command := c.hookCommand(opts)
+	var found []string
+	for _, path := range c.hookCleanupPaths(opts) {
+		if present, err := kiroV3FileReferencesHook(path, command); err != nil {
+			return nil, err
+		} else if present {
+			found = append(found, path)
+		}
+	}
+	for _, path := range append(c.agentCleanupPaths(opts), kiroBuiltInDefaultAgentPath()) {
+		if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
+			return nil, err
+		} else if present {
+			found = append(found, path)
+		}
+	}
+	return uniqueNonEmptyStrings(found), nil
+}
+
 // reclaimKiroHookFile puts one v3 hook file back as Setup found it when it is
 // unchanged since, and otherwise removes only DefenseClaw's entries; either
 // way its backup record is settled.

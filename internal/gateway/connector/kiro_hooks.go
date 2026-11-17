@@ -487,7 +487,7 @@ func kiroV2AgentIsDefenseClawOverlay(cfg map[string]interface{}) bool {
 	if len(cfg) == 0 {
 		return true
 	}
-	if !kiroV2AgentAllowsSeed(cfg) {
+	if !kiroV2AgentAllowsSeed(cfg) && !kiroV2AgentCarriesOnlyMetadata(cfg) {
 		return false
 	}
 	name, _ := cfg["name"].(string)
@@ -512,7 +512,7 @@ func seedKiroDefaultAgentOverlay(cfg map[string]interface{}) {
 		return
 	}
 	if description, ok := cfg["description"].(string); !ok || strings.TrimSpace(description) == "" {
-		cfg["description"] = "DefenseClaw-guarded Kiro agent"
+		cfg["description"] = kiroManagedAgentDescription
 	}
 	if _, ok := cfg["tools"]; !ok {
 		cfg["tools"] = []interface{}{"*"}
@@ -520,6 +520,35 @@ func seedKiroDefaultAgentOverlay(cfg map[string]interface{}) {
 	if _, ok := cfg["includeMcpJson"]; !ok {
 		cfg["includeMcpJson"] = true
 	}
+}
+
+// kiroManagedAgentDescription is the description Setup gives the defenseclaw
+// agent; it marks the file as DefenseClaw's own.
+const kiroManagedAgentDescription = "DefenseClaw-guarded Kiro agent"
+
+// kiroAgentBehaviorKeys are the keys of a Kiro agent that change what it does.
+// A defenseclaw agent that carries one was edited by its operator.
+var kiroAgentBehaviorKeys = []string{
+	"prompt", "mcpServers", "toolAliases", "allowedTools", "toolsSettings",
+	"resources", "useLegacyMcpJson", "model", "keyboardShortcut", "welcomeMessage",
+}
+
+// kiroV2AgentCarriesOnlyMetadata reports whether an agent that holds a key
+// Setup does not seed is still DefenseClaw's own file: it carries Setup's
+// description, and every other key is metadata (Kiro's own upgrade record of
+// an agent it converted) rather than a setting that changes the agent. Teardown
+// then removes it with its last DefenseClaw hook instead of leaving an orphaned
+// "DefenseClaw-guarded" agent behind (rel-1-0-10 GAP-1174).
+func kiroV2AgentCarriesOnlyMetadata(cfg map[string]interface{}) bool {
+	if description, _ := cfg["description"].(string); strings.TrimSpace(description) != kiroManagedAgentDescription {
+		return false
+	}
+	for _, key := range kiroAgentBehaviorKeys {
+		if _, ok := cfg[key]; ok {
+			return false
+		}
+	}
+	return true
 }
 
 func kiroV2AgentAllowsSeed(cfg map[string]interface{}) bool {
