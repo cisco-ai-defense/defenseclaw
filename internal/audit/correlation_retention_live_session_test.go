@@ -64,6 +64,11 @@ func TestGAP0034LiveSessionEdgesOlderThanTheWindowAreReaped(t *testing.T) {
 			t.Fatal(err)
 		}
 	}})
+	// An old event of the open tool call: its edge to the operation node
+	// stays whatever the age (the operation is still open).
+	toolEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		link(tx, event, CorrelationNodeTool, "live-tool", old)
+	}})
 	// The session was resumed an hour ago: its cursor is fresh and names
 	// that last event, whose edges are also old (first seen ten days ago).
 	lastEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
@@ -81,8 +86,8 @@ func TestGAP0034LiveSessionEdgesOlderThanTheWindowAreReaped(t *testing.T) {
 	recentEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: fresh, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
 		link(tx, event, CorrelationNodeSession, "live-session", fresh)
 	}})
-	if got := countRetentionRows(t, store.db, "correlation_relationships"); got != 18 {
-		t.Fatalf("seeded relationships=%d, want 18", got)
+	if got := countRetentionRows(t, store.db, "correlation_relationships"); got != 19 {
+		t.Fatalf("seeded relationships=%d, want 19", got)
 	}
 
 	reaper := newRetentionReaperAt(t, store, nil, 7, now, RetentionOptions{}, retentionHooks{yield: noRetentionYield})
@@ -93,7 +98,7 @@ func TestGAP0034LiveSessionEdgesOlderThanTheWindowAreReaped(t *testing.T) {
 	if got := result.RowsDeleted[RetentionCorrelationRelationships]; got != 15 {
 		t.Fatalf("deleted relationships=%d, want the 15 history edges older than the window", got)
 	}
-	for _, event := range []SemanticEventID{lastEvent.SemanticEventID, pendingEvent.SemanticEventID, recentEvent.SemanticEventID} {
+	for _, event := range []SemanticEventID{lastEvent.SemanticEventID, pendingEvent.SemanticEventID, recentEvent.SemanticEventID, toolEvent.SemanticEventID} {
 		if edges := countRelationshipsFrom(t, store, event); edges != 1 {
 			t.Fatalf("edge of kept event %s: %d", event, edges)
 		}
@@ -157,6 +162,16 @@ func TestGAP0034SizeCapKeepsLiveSessionEdgesInsideTheWindow(t *testing.T) {
 		return event.SemanticEventID
 	}
 	inWindow := link(now.Add(-3 * time.Hour))
+	otherEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: now.Add(-3 * time.Hour), mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		if _, err := tx.PutRelationship(t.Context(), CorrelationRelationshipInput{
+			FromKind: CorrelationNodeSemanticEvent, FromID: string(event.SemanticEventID),
+			ToKind: CorrelationNodeSession, ToID: "ended-session", Type: CorrelationBelongsTo,
+			Method: CorrelationMethodReported, RuleID: "membership", RuleVersion: "v1",
+			Status: CorrelationRelationshipActive, ObservedAt: now.Add(-3 * time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}})
 	pastWindow := link(now.Add(-8 * 24 * time.Hour))
 	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: now, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
 		if err := tx.PutCursor(t.Context(), CorrelationCursor{
@@ -178,6 +193,9 @@ func TestGAP0034SizeCapKeepsLiveSessionEdgesInsideTheWindow(t *testing.T) {
 	}
 	if edges := countRelationshipsFrom(t, store, pastWindow); edges != 0 {
 		t.Fatalf("live session edge past the window kept: %d", edges)
+	}
+	if edges := countRelationshipsFrom(t, store, otherEvent.SemanticEventID); edges != 0 {
+		t.Fatalf("size cap kept an edge past its cutoff that touches no live node: %d", edges)
 	}
 }
 

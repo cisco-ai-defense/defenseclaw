@@ -1252,7 +1252,10 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 		// the fourth argument: the size cap's shorter cutoff never takes the
 		// recent graph of a live session, and an edge older than the window
 		// goes even on a session resumed every day, which used to keep its
-		// whole history for as long as it lived (rel-1-0-10:GAP-0034).
+		// whole history for as long as it lived (rel-1-0-10:GAP-0034). With
+		// day retention off (0 days) and on a Secure Client store the fourth
+		// argument is the epoch: live state keeps its edges at any age there,
+		// as before.
 		return `DELETE FROM correlation_relationships WHERE rowid IN (
 			WITH protected_nodes(kind, id) AS (
 				SELECT 'semantic_event', semantic_event_id FROM correlation_receipts
