@@ -142,8 +142,9 @@ type EnumerateOptions struct {
 	// (GAP-1024).
 	ReportExcluded func(ManifestTarget)
 	// Progress, when set, is told each step the walk starts, naming the
-	// profile it inspects, so a caller that gives up on a cycle can say what
-	// it was waiting on (GAP-1109).
+	// profile it inspects by folder name and SID (never the absolute path),
+	// so a caller that gives up on a cycle can say what it was waiting on
+	// (GAP-1109).
 	Progress func(step string)
 	// RunningAgents names, by account SID and connector, an agent session
 	// the cycle saw running (a label such as "codex (pid 4242)"). The
@@ -315,7 +316,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	signedIn, sessionListed := windowsSignedInCheck(opts.Logger)
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for profileIndex, profile := range profiles {
-		progress("inspecting the profile %s (%s), %d of %d", filepath.Clean(profile.Home), profile.SID, profileIndex+1, len(profiles))
+		progress("inspecting the profile %s (%s), %d of %d", filepath.Base(filepath.Clean(profile.Home)), profile.SID, profileIndex+1, len(profiles))
 		// Leave time to write the manifest and coverage record. A timed-out
 		// profile must never discard rows already decided in this cycle.
 		if standalone && windowsPrivateProfileBudget(ctx, len(profiles)-profileIndex) <= 0 {
@@ -459,6 +460,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			reportUnenrolledRunningAgents(profile, connectors, running[canonicalManifestTargetSID(profile.SID)], covered, decision, reason, rowContext)
 		}
 	}
+	progress("finishing the profile walk")
 	if standalone {
 		reportRunningAgentsOfUnknownOwners(running, judged, connectors, opts.ReportUnprotected)
 	}
@@ -482,7 +484,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				continue
 			}
 			judged[sid] = true
-			progress("inspecting the administrator-enrolled account %s (%s)", subject.Home, sid)
+			progress("inspecting the administrator-enrolled account %s (%s)", filepath.Base(filepath.Clean(subject.Home)), sid)
 			if windowsPrivateProfileBudget(ctx, 1) <= 0 {
 				for _, conn := range subject.Connectors {
 					agent := privateInstallIncompleteAgent(conn, PrivateInstallSkippedUnresolved)

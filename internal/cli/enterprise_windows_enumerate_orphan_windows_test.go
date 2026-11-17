@@ -15,8 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
@@ -36,56 +34,66 @@ func orphanExcludedProfiles() []enterprisehooks.ManifestTarget {
 	return out
 }
 
-// blockingOrphanRevoker replaces the inventory revoker with one that blocks
-// every call until the test ends, as taking an inherited grant off a large
-// profile tree does. Cleanup releases it and waits until every orphan's
-// revoke has returned before the seams are restored.
-type blockingOrphanRevoker struct {
+// orphanRevoker replaces the inventory revoker. With block set every call
+// waits until the test ends, as taking an inherited grant off a large
+// profile tree does. Cleanup releases it and waits until the background
+// revoke is idle before the seams are restored.
+type orphanRevoker struct {
 	mu      sync.Mutex
 	calls   int
-	targets int
 	release chan struct{}
+	once    sync.Once
 }
 
-func installBlockingOrphanRevoker(t *testing.T) *blockingOrphanRevoker {
+func (r *orphanRevoker) unblock() { r.once.Do(func() { close(r.release) }) }
+
+func installOrphanRevoker(t *testing.T, block bool) *orphanRevoker {
 	t.Helper()
-	r := &blockingOrphanRevoker{release: make(chan struct{})}
+	r := &orphanRevoker{release: make(chan struct{})}
+	if !block {
+		r.unblock()
+	}
 	previous := enterpriseWindowsInventoryReadRevoker
-	enterpriseWindowsInventoryReadRevoker = func(m enterprisehooks.Manifest) error {
+	enterpriseWindowsInventoryReadRevoker = func(enterprisehooks.Manifest) error {
 		r.mu.Lock()
 		r.calls++
-		r.targets += len(m.Targets)
 		r.mu.Unlock()
 		<-r.release
 		return nil
 	}
 	t.Cleanup(func() {
-		close(r.release)
-		deadline := time.Now().Add(30 * time.Second)
-		for time.Now().Before(deadline) {
-			r.mu.Lock()
-			calls, targets := r.calls, r.targets
-			r.mu.Unlock()
-			if calls == 0 || targets >= orphanProfileCount {
+		r.unblock()
+		state := &enterpriseWindowsExcludedRevoked
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+			state.Lock()
+			idle := len(state.queued) == 0
+			state.Unlock()
+			if idle {
 				break
 			}
-			time.Sleep(20 * time.Millisecond)
 		}
-		// The background revoke clears its queue right after the last call.
-		time.Sleep(100 * time.Millisecond)
 		enterpriseWindowsInventoryReadRevoker = previous
-		enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+		resetEnterpriseWindowsExcludedRevoked()
 	})
 	return r
 }
 
-func (r *blockingOrphanRevoker) callCount() int {
+func (r *orphanRevoker) callCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
 }
 
-func stubOrphanExcludedCycle(t *testing.T) string {
+func resetEnterpriseWindowsExcludedRevoked() {
+	state := &enterpriseWindowsExcludedRevoked
+	state.Lock()
+	state.sids, state.queued, state.wanted, state.current = map[string]bool{}, map[string]bool{}, map[string]bool{}, ""
+	state.Unlock()
+}
+
+// stubOrphanExcludedCycle stubs a cycle whose walk excludes the profiles
+// excludedFor(cycle) returns (cycle counts from 0).
+func stubOrphanExcludedCycle(t *testing.T, excludedFor func(cycle int) []enterprisehooks.ManifestTarget) string {
 	t.Helper()
 	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"dcw-orphan00"}})
 	manifest := filepath.Join(t.TempDir(), "targets.yaml")
@@ -93,18 +101,23 @@ func stubOrphanExcludedCycle(t *testing.T) string {
 	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
 	previousWriter := enterpriseWindowsEnumerateManifestWriter
 	previousWaiter := enterpriseWindowsEnumerateOnceWalkWaiter
+	previousWait := enterpriseWindowsExcludedRevokeWait
 	t.Cleanup(func() {
 		enterpriseWindowsEnumerateConfigLoader = previousConfig
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
 		enterpriseWindowsEnumerateManifestWriter = previousWriter
 		enterpriseWindowsEnumerateOnceWalkWaiter = previousWaiter
+		enterpriseWindowsExcludedRevokeWait = previousWait
 	})
-	enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+	resetEnterpriseWindowsExcludedRevoked()
+	enterpriseWindowsExcludedRevokeWait = 300 * time.Millisecond
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	cycle := 0
 	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
-		for _, orphan := range orphanExcludedProfiles() {
+		for _, orphan := range excludedFor(cycle) {
 			opts.ReportExcluded(orphan)
 		}
+		cycle++
 		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
 	}
 	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
@@ -112,40 +125,68 @@ func stubOrphanExcludedCycle(t *testing.T) string {
 	return manifest
 }
 
-// GAP-1109: Setup's enumerate --once on a computer with 37 orphan profiles
-// of deleted (excluded) accounts ran past Setup's 900 seconds, near idle,
-// and the first install rolled back. --once must publish without waiting on
-// the excluded profiles' revoke, which the enumerator service does.
-func TestEnterpriseWindowsEnumerateOnceDoesNotWaitOnExcludedOrphanRevoke(t *testing.T) {
-	manifest := stubOrphanExcludedCycle(t)
-	revoker := installBlockingOrphanRevoker(t)
-	cmd := &cobra.Command{}
-	var stdout, stderr bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetErr(&stderr)
+func allOrphansEveryCycle(int) []enterprisehooks.ManifestTarget { return orphanExcludedProfiles() }
+
+// runEnumerateCommand runs the enumerate subcommand with args, as Setup and
+// the hot config apply start it, and fails the test after limit.
+func runEnumerateCommand(t *testing.T, limit time.Duration, args ...string) (string, error) {
+	t.Helper()
+	cmd := newEnterpriseWindowsEnumerateCommand()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
 	done := make(chan error, 1)
-	go func() {
-		done <- runEnterpriseWindowsEnumerate(context.Background(), cmd, &enterpriseWindowsEnumerateOptions{manifestPath: manifest, once: true})
-	}()
+	go func() { done <- cmd.ExecuteContext(context.Background()) }()
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatalf("enumerate --once: %v", err)
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatalf("enumerate --once still waits on the excluded orphan profiles' revoke after 20 s (%d revoke call(s) blocked)", revoker.callCount())
+		return out.String(), err
+	case <-time.After(limit):
+		t.Fatalf("enumerate %s still runs after %s", strings.Join(args, " "), limit)
+		return "", nil
+	}
+}
+
+// GAP-1109: Setup's enumerate --once on a computer with 37 orphan profiles
+// of deleted (excluded) accounts ran past Setup's 900 seconds, near idle,
+// and the first install rolled back. Setup's --once --defer-excluded-revoke
+// publishes without the excluded profiles' revoke, which the enumerator
+// service does after activation.
+func TestEnterpriseWindowsEnumerateSetupOnceDefersExcludedOrphanRevoke(t *testing.T) {
+	manifest := stubOrphanExcludedCycle(t, allOrphansEveryCycle)
+	revoker := installOrphanRevoker(t, true)
+	out, err := runEnumerateCommand(t, 20*time.Second, "--manifest", manifest, "--once", "--defer-excluded-revoke")
+	if err != nil {
+		t.Fatalf("enumerate --once --defer-excluded-revoke: %v\n%s", err, out)
 	}
 	if calls := revoker.callCount(); calls != 0 {
-		t.Fatalf("enumerate --once started %d revoke(s) of excluded profiles; the process exits after its cycle and would stop one halfway", calls)
+		t.Fatalf("Setup's --once started %d revoke(s) of excluded profiles; the process exits after its cycle and would stop one halfway", calls)
+	}
+	if !strings.Contains(out, "enumerator service's first cycle after Setup") {
+		t.Fatalf("output does not say who takes the access off:\n%s", out)
+	}
+}
+
+// Another --once caller (the hot config apply) still takes the access off
+// a newly excluded profile before it exits.
+func TestEnterpriseWindowsEnumerateOnceStillRevokesExcludedProfiles(t *testing.T) {
+	manifest := stubOrphanExcludedCycle(t, allOrphansEveryCycle)
+	revoker := installOrphanRevoker(t, false)
+	if out, err := runEnumerateCommand(t, 20*time.Second, "--manifest", manifest, "--once"); err != nil {
+		t.Fatalf("enumerate --once: %v\n%s", err, out)
+	}
+	if calls := revoker.callCount(); calls != orphanProfileCount {
+		t.Fatalf("revoke calls = %d before --once exited, want %d", calls, orphanProfileCount)
 	}
 }
 
 // GAP-1109: the enumerator service's cycle waits for the excluded profiles'
-// revoke a bounded time, names the profile it is at, and starts no second
-// revoke of a queued profile.
+// revoke a bounded time, names the profile it is at by folder name and SID
+// (never the absolute path), and starts no second revoke of a queued
+// profile.
 func TestEnterpriseWindowsEnumerateCycleBoundsExcludedOrphanRevoke(t *testing.T) {
-	manifest := stubOrphanExcludedCycle(t)
-	revoker := installBlockingOrphanRevoker(t)
+	manifest := stubOrphanExcludedCycle(t, allOrphansEveryCycle)
+	revoker := installOrphanRevoker(t, true)
 	var stderr bytes.Buffer
 	done := make(chan error, 1)
 	go func() { done <- runEnterpriseWindowsEnumerateSingleCycle(context.Background(), &stderr, manifest) }()
@@ -158,8 +199,12 @@ func TestEnterpriseWindowsEnumerateCycleBoundsExcludedOrphanRevoke(t *testing.T)
 		t.Fatalf("the cycle still waits on the excluded orphan profiles' revoke after 30 s (%d revoke call(s) blocked)", revoker.callCount())
 	}
 	first := orphanExcludedProfiles()[0]
-	if log := stderr.String(); !strings.Contains(log, first.UserHome) || !strings.Contains(log, first.SID) {
+	log := stderr.String()
+	if !strings.Contains(log, "dcw-orphan00 ("+first.SID+")") {
 		t.Fatalf("the cycle did not name the excluded profile its revoke is at:\n%s", log)
+	}
+	if strings.Contains(log, `C:\Users\`) {
+		t.Fatalf("the log names an excluded profile's absolute path:\n%s", log)
 	}
 	var again bytes.Buffer
 	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), &again, manifest); err != nil {
@@ -167,5 +212,35 @@ func TestEnterpriseWindowsEnumerateCycleBoundsExcludedOrphanRevoke(t *testing.T)
 	}
 	if calls := revoker.callCount(); calls != 1 {
 		t.Fatalf("revoke calls = %d after a second cycle, want the one still running and no second start", calls)
+	}
+}
+
+// A profile queued for the revoke that a later cycle no longer excludes
+// (enrolled again) is skipped, so its new grant stays.
+func TestEnterpriseWindowsEnumerateSkipsQueuedRevokeOfReenrolledProfile(t *testing.T) {
+	manifest := stubOrphanExcludedCycle(t, func(cycle int) []enterprisehooks.ManifestTarget {
+		if cycle == 0 {
+			return orphanExcludedProfiles()
+		}
+		return nil
+	})
+	revoker := installOrphanRevoker(t, true)
+	for cycle := 0; cycle < 2; cycle++ {
+		if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+	}
+	revoker.unblock()
+	state := &enterpriseWindowsExcludedRevoked
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		state.Lock()
+		idle := len(state.queued) == 0
+		state.Unlock()
+		if idle {
+			break
+		}
+	}
+	if calls := revoker.callCount(); calls != 1 {
+		t.Fatalf("revoke calls = %d, want only the one in flight before the profiles were enrolled again", calls)
 	}
 }

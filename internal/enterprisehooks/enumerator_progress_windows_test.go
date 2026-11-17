@@ -37,7 +37,7 @@ func TestWindowsEnumerateProgressNamesEachProfile(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	want := fmt.Sprintf("inspecting the profile %s (%s), 1 of 1", filepath.Clean(home), testDeletedLocalSID)
+	want := fmt.Sprintf("inspecting the profile %s (%s), 1 of 1", filepath.Base(filepath.Clean(home)), testDeletedLocalSID)
 	if !slices.Contains(steps, want) {
 		t.Fatalf("progress = %q, want %q", steps, want)
 	}

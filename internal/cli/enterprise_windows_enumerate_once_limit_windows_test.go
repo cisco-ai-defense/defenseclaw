@@ -24,7 +24,7 @@ import (
 // Past its own limit --once fails first and names the step and the profile
 // it was waiting on, on stdout, which Setup's diagnostic starts with.
 func TestEnterpriseWindowsEnumerateOnceLimitNamesTheProfile(t *testing.T) {
-	const step = `inspecting the profile C:\Users\dcw-orphan07 (S-1-5-21-1004336348-1177238915-682003330-2008), 8 of 46`
+	const step = `inspecting the profile dcw-orphan07 (S-1-5-21-1004336348-1177238915-682003330-2008), 8 of 46`
 	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{})
 	manifest := filepath.Join(t.TempDir(), "targets.yaml")
 	previousConfig := enterpriseWindowsEnumerateConfigLoader
