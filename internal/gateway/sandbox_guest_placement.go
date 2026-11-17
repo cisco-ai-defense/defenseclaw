@@ -154,24 +154,55 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	var dirs, targets []string
 	dirs = keep(dirs, input.CWD)
 	targets = keep(targets, input.CWD)
+	// A pass first lists its readings in source order, as the folders evolve,
+	// then places those whose text may name a path in another folder
+	// before the rest (guestReadingFirst): when the readings bound cuts a
+	// pass, it cuts touch f1 ... touch f150, not the cat ../.ssh/id_ed25519
+	// after them, which read keeps the laptop's block next to the limit
+	// (substrate-1 GAP-0501).
+	type pending struct {
+		text, cwd string
+		candidate bool
+	}
+	// collect keeps the distinct readings of a pass; past the readings bound
+	// only those read first are kept, and the pass is cut (dropped).
+	collect := func(list []pending, listed map[key]bool, dropped *bool, reading pending) []pending {
+		if listed[key{reading.text, reading.cwd}] {
+			return list
+		}
+		if len(list) >= maxSandboxGuestPlacements && !guestReadingFirst(reading.text) {
+			*dropped = true
+			return list
+		}
+		listed[key{reading.text, reading.cwd}] = true
+		return append(list, reading)
+	}
+	placeAll := func(p *pass, list []pending) bool {
+		for _, first := range []bool{true, false} {
+			for _, reading := range list {
+				if guestReadingFirst(reading.text) == first && !place(p, reading.text, reading.cwd, reading.candidate) {
+					return false
+				}
+			}
+		}
+		return true
+	}
 	simples := &pass{statements: map[string]bool{}}
+	var simpleReadings []pending
+	simplesDropped, simplesListed := false, map[key]bool{}
 	for _, simple := range actionfacts.SimpleCommands(input, facts) {
 		if guestPlacementSkips(simple) {
 			continue
 		}
 		cwd := simple.CWD
-		if path.IsAbs(cwd) && !place(simples, simple.Text, cwd, false) {
-			return placements, true
+		if path.IsAbs(cwd) {
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesDropped, pending{simple.Text, cwd, false})
 		}
 		for _, dir := range dirs {
-			if !place(simples, simple.Text, dir, false) {
-				return placements, true
-			}
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesDropped, pending{simple.Text, dir, false})
 		}
 		for _, dir := range targets {
-			if !place(simples, simple.Text, dir, true) {
-				return placements, true
-			}
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesDropped, pending{simple.Text, dir, true})
 		}
 		bases := slices.Concat(dirs, targets)
 		if path.IsAbs(cwd) {
@@ -191,15 +222,20 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 			targets = keep(targets, target)
 		}
 	}
+	// A cut pass does not end the others: each has its own bound, and the
+	// call is reported cut.
+	simplesCut := !placeAll(simples, simpleReadings) || simplesDropped
 	command := input.Command
 	if command == "" || len(command) > agentHookConfigMaxPlacedBytes {
-		return placements, false
+		return placements, simplesCut
 	}
+	topCut := false
 	if statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome); ok {
 		top := &pass{statements: map[string]bool{}}
 		for _, statement := range statements {
 			if path.IsAbs(statement.Dir) && !place(top, statement.Command, statement.Dir, false) {
-				return placements, true
+				topCut = true
+				break
 			}
 		}
 	}
@@ -208,22 +244,29 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// parse failure), while a static cd anywhere in the text is still a
 	// directory the laptop's readers keep.
 	calls := &pass{statements: map[string]bool{}}
+	var callReadings []pending
+	callsDropped, callsListed := false, map[key]bool{}
 	for _, call := range guestScriptCalls(command) {
 		for _, dir := range dirs {
-			if !place(calls, call, dir, false) {
-				return placements, true
-			}
+			callReadings = collect(callReadings, callsListed, &callsDropped, pending{call, dir, false})
 		}
 		for _, dir := range targets {
-			if !place(calls, call, dir, true) {
-				return placements, true
-			}
+			callReadings = collect(callReadings, callsListed, &callsDropped, pending{call, dir, true})
 		}
 		for _, target := range guestCDTargets(call, slices.Concat(dirs, targets), input.ActiveHome) {
 			targets = keep(targets, target)
 		}
 	}
-	return placements, false
+	callsCut := !placeAll(calls, callReadings) || callsDropped
+	return placements, simplesCut || topCut || callsCut
+}
+
+// guestReadingFirst reports a command text whose reading in another folder
+// may reach a different protected path: a word with a dot or a slash
+// (../.ssh/id_ed25519, .bashrc, a/b), a ~, an expansion or a pattern. A text
+// of plain words (touch f1, ls, cd sub) is read after them.
+func guestReadingFirst(text string) bool {
+	return strings.ContainsAny(text, "./~$`*?[{\\")
 }
 
 // guestPlacementSkips reports a simple command the guest placement does not

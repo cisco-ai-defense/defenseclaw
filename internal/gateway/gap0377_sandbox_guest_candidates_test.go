@@ -423,3 +423,33 @@ func TestGAP0500CandidateOnlyHookConfigWriteKeepsLaptopAnswer(t *testing.T) {
 	}
 	gap0377Check(t, rows)
 }
+
+// TestGAP0501PlacementCutKeepsTheProtectedTail: a here-string call whose cd
+// fan-out after $CMD passes the guest placement's readings bound (~150
+// statements, RKGUEST4 fan-hs-150/200) is cut with the evaluation limit, as
+// before. The cut now falls on the plain statements (touch fN), not on the
+// protected tail after them, so the actor keeps the laptop's block and names
+// its rules next to the limit (substrate-1 GAP-0501: the ssh tail was an
+// actor alert where the laptop blocks). Benign tails stay a fail-closed
+// alert (gap0377Check, non-benign rows only).
+func TestGAP0501PlacementCutKeepsTheProtectedTail(t *testing.T) {
+	lines := func(k int, format string) string {
+		var b strings.Builder
+		for i := range k {
+			fmt.Fprintf(&b, format, i)
+		}
+		return b.String()
+	}
+	var rows []gap0377Row
+	for _, m := range []int{150, 200} {
+		for _, tail := range []struct{ name, cmd string }{
+			{"ssh", "cat ../.ssh/id_ed25519"},
+			{"settings", "echo '{}' > ../.claude/settings.json"},
+			{"audit", "rm ../.defenseclaw/audit.db"},
+		} {
+			rows = append(rows, gap0377Row{name: fmt.Sprintf("fan-hs-%d %s", m, tail.name),
+				command: "cd .cache\nbash <<< 'true'\n$CMD\n" + lines(7, "cd s%d\n") + lines(m, "touch f%d\n") + tail.cmd})
+		}
+	}
+	gap0377Check(t, rows)
+}
