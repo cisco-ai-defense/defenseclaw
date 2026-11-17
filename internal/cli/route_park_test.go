@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -79,5 +80,21 @@ func TestParkRouteOnlyWithoutGatewayParksOnlyAnUnownedPort(t *testing.T) {
 	parkRouteOnlyWithoutGateway(nil, false)
 	if probes != 0 {
 		t.Fatal("no route-only connector: the port is not probed")
+	}
+}
+
+// The ownership check reads the socket table only: with no listener it never
+// opens a connection to the port (live, GAP-1133 round 2: a probe
+// connection reached the other account's listener as an empty connection).
+func TestRouteOnlyPortUnownedNeverConnects(t *testing.T) {
+	prevHolder, prevAnswers := gatewayPortHolder, gatewayPortAnswers
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers = prevHolder, prevAnswers })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{UID: -1}, daemon.ErrNoListener }
+	gatewayPortAnswers = func(string) bool { t.Fatal("the park check connected to the API port"); return false }
+	cfg := &config.Config{}
+	cfg.Gateway.APIBind = "127.0.0.1"
+	cfg.Gateway.APIPort = 18970
+	if !routeOnlyPortUnowned(cfg) {
+		t.Fatal("no listener: the port is unowned")
 	}
 }

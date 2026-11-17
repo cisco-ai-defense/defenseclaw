@@ -120,13 +120,19 @@ def _parked_row(label: str, where: str) -> Row:
     )
 
 
-def _unparked_row(label: str, where: str, connector: str) -> Row:
+def _unparked_row(label: str, where: str, connector: str, *, unverified: bool = False) -> Row:
     """GAP-1133: the real route is in place while no gateway of this account
-    holds the API port (a crash, a logoff or a reboot left it there)."""
+    holds the API port (a crash, a logoff or a reboot left it there), or while
+    doctor cannot verify that it does."""
+    holds = (
+        "while doctor cannot verify that this account's gateway holds it"
+        if unverified
+        else "while this account's gateway does not hold it"
+    )
     return Row(
         "fail",
         label,
-        f"{where} still points at the gateway port while this account's gateway does not hold it: "
+        f"{where} still points at the gateway port {holds}: "
         "a process of another account that binds the port gets this agent's model calls",
         "run defenseclaw-gateway start (it parks the route before it binds and renders it again once it holds "
         f"the port), then restart the agent; or restore direct model access: {restore_direct(connector)}",
@@ -171,7 +177,13 @@ def _drift_fix(cfg: Any, connector: str, signing_failed: bool) -> str:
 
 
 def agent_config_row(
-    cfg: Any, connector: str, upstream: dict[str, Any], *, signing_failed: bool = False, gateway_down: bool = False
+    cfg: Any,
+    connector: str,
+    upstream: dict[str, Any],
+    *,
+    signing_failed: bool = False,
+    gateway_down: bool = False,
+    unverified: bool = False,
 ) -> Row:
     """Whether the agent config DefenseClaw renders from config.yaml is in place (OSS).
     A broken agent file gives a warn row for that connector only. gateway_down: no
@@ -195,7 +207,7 @@ def agent_config_row(
                 detail = f"settings.json env ANTHROPIC_CUSTOM_HEADERS has no {ro.ROUTE_HEADER} line"
                 return Row("warn", label, detail, _drift_fix(cfg, connector, signing_failed))
             if gateway_down:
-                return _unparked_row(label, f"settings.json env {key}", connector)
+                return _unparked_row(label, f"settings.json env {key}", connector, unverified=unverified)
             return Row("pass", label, f"settings.json points at {want}")
         if connector == "codex":
             doc = ro.codex_config()
@@ -207,7 +219,9 @@ def agent_config_row(
                 detail = f"config.toml model_provider is not {ro.CODEX_ROUTE_PROVIDER} at {want}"
                 return Row("warn", label, detail, _drift_fix(cfg, connector, signing_failed))
             if gateway_down:
-                return _unparked_row(label, "config.toml model_providers.defenseclaw_route base_url", connector)
+                return _unparked_row(
+                    label, "config.toml model_providers.defenseclaw_route base_url", connector, unverified=unverified
+                )
             return Row("pass", label, f"config.toml points at {want}")
     except (ro.RouteOnlyError, OSError, ValueError, AttributeError, TypeError) as exc:
         text = " ".join(str(exc).split())[:200]
@@ -635,8 +649,14 @@ def route_only_rows(
         signed = signing_rows(name, up, signing if live is not None and isinstance(signing, dict) else None)
         if renders and str(up.get("base_url") or "").strip():
             failed = any(row.tag == "fail" for row in signed)
-            down = live is None and gateway in ("", GATEWAY_FOREIGN)
-            rows.append(agent_config_row(cfg, name, up, signing_failed=failed, gateway_down=down))
+            # A crashed gateway leaves its PID record: doctor sees an unverified
+            # listener state then (live, GAP-1133 round 2), not "stopped".
+            down = live is None and gateway in ("", GATEWAY_FOREIGN, GATEWAY_UNVERIFIED)
+            rows.append(
+                agent_config_row(
+                    cfg, name, up, signing_failed=failed, gateway_down=down, unverified=gateway == GATEWAY_UNVERIFIED
+                )
+            )
         rows.extend(signed)
     held = port_held_row(cfg, platform)
     if held is not None:

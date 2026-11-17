@@ -4,13 +4,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
-	"net"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
@@ -18,12 +18,17 @@ import (
 var parkRouteOnlyAgents = gateway.ParkRouteOnlyAgents
 
 // routeOnlyPortUnowned reports whether no process of this account holds the
-// gateway API port: nothing answers there, or another account's process
-// does. A foreground gateway of this account keeps its route. Tests
-// replace it.
+// gateway API port: the socket table lists no listener there, or another
+// account's process holds it. It reads the socket table and never connects
+// to the port (a probe connection would reach another account's listener);
+// on macOS, where lsof does not list other accounts' sockets, "no listener"
+// can mean another account's, and parking is right for both. A foreground
+// gateway of this account keeps its route. Tests replace it.
 var routeOnlyPortUnowned = func(cfg *config.Config) bool {
-	addr := net.JoinHostPort(gatewayClientHost(cfg), strconv.Itoa(cfg.Gateway.APIPort))
-	return !gatewayPortAnswers(addr) || foreignGatewayListener(cfg) != ""
+	if _, err := gatewayPortHolder(gatewayClientHost(cfg), cfg.Gateway.APIPort); errors.Is(err, daemon.ErrNoListener) {
+		return true
+	}
+	return foreignGatewayListener(cfg) != ""
 }
 
 // parkRouteOnlyWithoutGateway parks the route-only agent settings of an OSS

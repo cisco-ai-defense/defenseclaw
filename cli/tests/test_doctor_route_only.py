@@ -582,6 +582,9 @@ def test_agent_config_fails_a_real_route_with_the_gateway_down(tmp_path: Path) -
     assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "fail"
     rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_FOREIGN, holder="PID 7")
     assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "fail"
+    rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_UNVERIFIED)
+    row = next(r for r in rows if r.label == "Route-only claudecode agent config")
+    assert row.tag == "fail" and "cannot verify" in row.detail
     # A foreground gateway of this account holds the port: not this failure.
     rows = dro.route_only_rows(cfg, None, gateway=dro.GATEWAY_FOREGROUND)
     assert next(r for r in rows if r.label == "Route-only claudecode agent config").tag == "pass"
