@@ -35,8 +35,9 @@ import (
 // GAP-1135: a managed gateway gave a Claude Code or Codex shell call no
 // working directory (it cannot resolve the session cwd in the home), so a
 // bare name written in the state folder, or a link in the project onto the
-// state, was placed nowhere and allowed. The session directory is now kept
-// lexically, as for the Devin and Antigravity calls that name theirs.
+// state, was placed nowhere and allowed. The call keeps the cwd it had, and
+// the state-write proof also runs on the call placed in the hook client's
+// folder (managedLinkWalkView), so these rows block.
 func TestGAP1134ProtectedWritesManagedAndPerUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Linux and macOS pwsh launcher reading; Windows reads the call in PowerShell (GAP-1115)")
