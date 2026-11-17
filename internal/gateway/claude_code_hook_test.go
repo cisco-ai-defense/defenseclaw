@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *testing.T) {
@@ -167,6 +168,50 @@ func TestEvaluateClaudeCodeHook_SubmittedContentRedactsBearerWithoutDirective(t 
 			if !strings.Contains(resp.InspectedContent, "request failed: Authorization: Bearer ") ||
 				!strings.Contains(resp.InspectedContent, " after retry") {
 				t.Fatalf("non-credential content changed: %q", resp.InspectedContent)
+			}
+		})
+	}
+}
+
+func TestRedactInspectedBearerCredentials(t *testing.T) {
+	const token = "abc123._~+/=-"
+	redacted := redaction.ForSinkEntity(token)
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "authorization header",
+			content: "Authorization: Bearer " + token,
+			want:    "Authorization: Bearer " + redacted,
+		},
+		{
+			name:    "quoted JSON header",
+			content: `"Authorization": "Bearer ` + token + `"`,
+			want:    `"Authorization": "Bearer ` + redacted + `"`,
+		},
+		{
+			name:    "quoted assignment",
+			content: `'authorization'='bearer ` + token + `'`,
+			want:    `'authorization'='bearer ` + redacted + `'`,
+		},
+		{
+			name:    "bare bearer",
+			content: "request failed with Bearer " + token + " after retry",
+			want:    "request failed with Bearer " + redacted + " after retry",
+		},
+		{
+			name:    "embedded word is not bearer scheme",
+			content: "NotBearer " + token,
+			want:    "NotBearer " + token,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := redactInspectedBearerCredentials(test.content); got != test.want {
+				t.Fatalf("redacted content = %q, want %q", got, test.want)
 			}
 		})
 	}

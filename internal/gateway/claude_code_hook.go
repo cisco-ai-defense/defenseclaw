@@ -139,7 +139,7 @@ type claudeCodeHookResponse struct {
 	laneVerdict bool
 }
 
-var inspectedBearerCredential = regexp.MustCompile(`(?i)(authorization[ \t]*:[ \t]*bearer[ \t]+)([A-Za-z0-9._~+/=-]+)`)
+var inspectedBearerCredential = regexp.MustCompile(`(?i)((?:\bauthorization["']?[ \t]*[:=][ \t]*["']?)?\bbearer[ \t]+)([A-Za-z0-9._~+/=-]+)`)
 
 // redactInspectedBearerCredentials removes bearer values from the telemetry
 // copy of submitted event content when AI Defense supplied no redaction
