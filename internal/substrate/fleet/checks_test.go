@@ -95,6 +95,9 @@ func TestCheckGrants(t *testing.T) {
 	expect(t, CheckOpenFGAGrants(o), Warn, "global owner")
 	o.PoliciesReadable = false
 	expect(t, CheckOpenFGAGrants(o), Warn, "could not read")
+	// GAP-0384: refused to the gateway's own ServiceAccount is a lost grant.
+	o.PoliciesDenied = true
+	expect(t, CheckOpenFGAGrants(o), Fail, "lacks a grant it needs")
 }
 
 func TestCheckCallout(t *testing.T) {

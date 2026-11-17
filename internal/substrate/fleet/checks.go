@@ -127,9 +127,12 @@ type Observed struct {
 	Editors           []string
 	GlobalViewers     []string
 	// PoliciesReadable is false when the access policies could not be
-	// read; PoliciesNote says why.
+	// read; PoliciesNote says why. PoliciesDenied is true when Substrate
+	// refused the read to the gateway's own ServiceAccount (permission
+	// denied): that is a reading, the gateway lacks a grant (GAP-0384).
 	PoliciesReadable bool
 	PoliciesNote     string
+	PoliciesDenied   bool
 
 	// The SubstrateInstall settings in effect: the callout service, the
 	// router clients, and whether the body opt-in is on (nil when the
@@ -192,6 +195,11 @@ func RunChecks(o Observed) []Check {
 }
 
 // CheckVersion: the Substrate release is inside substrate.supported_versions.
+// A release outside the range is a warning, not a failure, on purpose
+// (GAP-0384): the range is what this DefenseClaw was tested with, and an
+// untested Substrate release (a newer patch or minor) may well work, so
+// verify says so and names the fix but does not fail the cluster. A range
+// that does not parse fails: the check cannot be made.
 func CheckVersion(o Observed) Check {
 	if o.SubstrateVersion == "" {
 		return result(CheckSubstrateVersion, Warn, "", "could not read the Substrate version (ate-api-server image tag)")
@@ -327,6 +335,14 @@ func CheckSnapshotBucket(o Observed) Check {
 // (E2, E3, E17).
 func CheckOpenFGAGrants(o Observed) Check {
 	if !o.PoliciesReadable {
+		if o.PoliciesDenied {
+			// The read ran as the gateway's ServiceAccount: a refusal means
+			// it lost a grant (GAP-0384).
+			return result(CheckGrants, Fail, "E2", "Substrate refused the gateway's ServiceAccount the access policies (%s): "+
+				"DefenseClaw lacks a grant it needs, so inventory and live actor checks fail. Run the chart bootstrap "+
+				"(bootstrap.ownerTokenSecret) or apply `defenseclaw substrate setup --print-access-policies` as a global owner",
+				o.PoliciesNote)
+		}
 		return result(CheckGrants, Warn, "E2", "could not read the access policies as the gateway's ServiceAccount (%s)",
 			o.PoliciesNote)
 	}

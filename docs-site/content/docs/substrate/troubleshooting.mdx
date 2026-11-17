@@ -95,7 +95,7 @@ Substrate has one slot for an egress callout. DefenseClaw refuses to replace ano
 
 ### `verify` says the Substrate version is outside the tested range
 
-DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may work but aren't supported. Upgrade or downgrade Substrate with the upstream runbook, then run `setup` and `verify`.
+DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may work but aren't supported, so `substrate_version` warns and `verify` still exits 0; a `supported_versions` range that does not parse fails. Upgrade or downgrade Substrate with the upstream runbook, then run `setup` and `verify`.
 
 ### `verify` says two clusters share an issuer
 
@@ -137,7 +137,7 @@ The cluster uses a private OIDC issuer (`substrate.identity.oidc.issuer`), and t
 
 ### `verify` cannot read the access policies or the actor routes
 
-`openfga_grants` and `actor_service_routes` warn with the reason when `kubectl` may not create the gateway's token or port-forward (see [what `verify` needs](/docs/substrate/reference#what-verify-needs)). With the access they pass or fail on what they read: `openfga_grants` fails when someone else edits or owns a launcher atespace, when DefenseClaw is not an editor in a managed atespace you named with `--managed-atespaces`, or when it is not a global viewer. `actor_service_routes` fails when the actor Service answers any route that is not a hook, notify, inspect, model, OTLP or relay check route.
+`openfga_grants` and `actor_service_routes` warn with the reason when `kubectl` may not create the gateway's token or port-forward (see [what `verify` needs](/docs/substrate/reference#what-verify-needs)). With the access they pass or fail on what they read: `openfga_grants` fails when Substrate refuses the access policies to the gateway's own ServiceAccount (it lost its global viewer grant, so inventory and live actor checks fail), when someone else edits or owns a launcher atespace, when DefenseClaw is not an editor in a managed atespace you named with `--managed-atespaces`, or when it is not a global viewer. `actor_service_routes` fails when the actor Service answers any route that is not a hook, notify, inspect, model, OTLP or relay check route.
 
 ### `verify` warns that other router clients can reach every actor
 
