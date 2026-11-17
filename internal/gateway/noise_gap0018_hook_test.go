@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // Routine work that is no attack: a user copies their own SSH key inside
@@ -155,10 +156,11 @@ var gap0018PendingGlobCopyRows = []gap0018RoutineRow{
 // /dev (a tmpfs at /dev/shm): actionfacts tags such a path flavor=device and
 // the home-based POSIX rules do not fire there, so a test that builds its home
 // under t.TempDir would pass or fail with the box (rel-1-0-10:GAP-0018).
+// t.TempDir reads GOTMPDIR first, so both move (GAP-0423).
 func keepTempDirOffDevice(t *testing.T) {
 	t.Helper()
-	if strings.HasPrefix(os.TempDir(), "/dev/") {
-		t.Setenv("TMPDIR", "/var/tmp")
+	if strings.HasPrefix(testenv.TempRoot(), "/dev/") || strings.HasPrefix(os.TempDir(), "/dev/") {
+		testenv.SetTempRoot(t, "/var/tmp")
 	}
 }
 

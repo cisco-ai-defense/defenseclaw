@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // deepFolderFixture is the managed fixture in a project folder about 200
@@ -43,8 +45,14 @@ func deepFolderFixtureOf(t *testing.T, parts, width int) b36ManagedHookFixture {
 	if err := os.MkdirAll(deep, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TMPDIR", deep)
-	return newB36ManagedHookFixture(t)
+	// t.TempDir reads GOTMPDIR before TMPDIR; a box that sets it (the gate
+	// boxes) kept the fixture shallow when only TMPDIR moved (GAP-0423).
+	testenv.SetTempRoot(t, deep)
+	f := newB36ManagedHookFixture(t)
+	if !strings.HasPrefix(f.project, deep+string(filepath.Separator)) {
+		t.Fatalf("fixture project %q is not below the deep folder (%d bytes): t.TempDir ran before the fixture", f.project, len(deep))
+	}
+	return f
 }
 
 // TestLongOperandListInADeepFolderIsAllowedAndKeepsProtectedTargets is
