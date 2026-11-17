@@ -6,7 +6,9 @@ package gateway
 import (
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -14,16 +16,20 @@ import (
 // an apply_patch envelope the Codex shell tool feeds by a here-document the
 // shell expands is judged at the unknown tier of the pack at least (alert in
 // default, permissive and managed, block in strict and managed-strict), and
-// at least as the same envelope fed byte for byte by a quoted delimiter (the
-// placed block): never a clean allow. An expansion in any line, a content
-// line too, may hold newlines and add a header no reader sees, so the header
-// set of the envelope is not known (rel-1-0-10:GAP-1093).
+// each decoy envelope at least as its single-header reference on the same
+// route is (the placed block): never a clean allow. An expansion in any line,
+// a content line too, may hold newlines and add a header no reader sees, so
+// the header set of the envelope is not known (rel-1-0-10:GAP-1093). A
+// target name the shell expands is itself a header no reader places
+// (GAP-1077), so its reference is judged at the unknown tier, not by the
+// path rule its quoted spelling meets.
 //
 // The envelopes are the decoy shapes of
 // TestPatchDecoyHeaderNeverWeakerThanTheSinglePatch (patchDecoyShapes, each
 // envelope and its single-header reference) on the codex/heredoc-expanding
-// route, for the wincred Write and Edit fixture targets, rotated as there,
-// and for a benign target in every shape. Before GAP-1093, an envelope whose
+// route, for the wincred Write and Edit fixture targets in
+// patchHeredocExpandingShapesPerCase of the shapes, rotated by case, and for a
+// benign target in every shape. Before GAP-1093, an envelope whose
 // headers were all placed (the single-header reference, every benign
 // reference) with an expansion in a content line was a complete read with no
 // unknown finding: allow in every tier, strict too.
@@ -46,6 +52,13 @@ func TestPatchHeredocExpandingBodyIsNeverAllowedManaged(t *testing.T) {
 func TestPatchHeredocExpandingBodyIsNeverAllowedManagedStrict(t *testing.T) {
 	patchHeredocExpandingNeverAllowed(t, "managed-strict")
 }
+
+// patchHeredocExpandingShapesPerCase is how many of the patchDecoyShapes each
+// fixture target is checked in (the benign target is checked in all of them).
+const patchHeredocExpandingShapesPerCase = 2
+
+// patchHeredocExpandingWorkers is how many parallel subtests share the targets.
+const patchHeredocExpandingWorkers = 8
 
 // patchHeredocExpandingTarget is one placed change the envelopes carry.
 type patchHeredocExpandingTarget struct {
@@ -98,62 +111,66 @@ func patchHeredocExpandingNeverAllowed(t *testing.T, tier string) {
 
 	cwd := t.TempDir()
 	handlers := shapeParityHandlers(t, p)
-	var expanding, quoted patchDecoyRoute
+	var expanding patchDecoyRoute
 	for _, route := range patchDecoyRoutes(cwd) {
-		switch route.name {
-		case "codex/heredoc-expanding":
+		if route.name == "codex/heredoc-expanding" {
 			expanding = route
-		case "codex/heredoc-quoted":
-			quoted = route
 		}
 	}
-	if expanding.call == nil || quoted.call == nil {
-		t.Fatal("no codex here-document routes in patchDecoyRoutes")
+	if expanding.call == nil {
+		t.Fatal("no codex/heredoc-expanding route in patchDecoyRoutes")
 	}
-	verdict := func(route patchDecoyRoute, envelope string) string {
-		call := route.call(envelope)
+	verdict := func(t *testing.T, envelope string) string {
+		call := expanding.call(envelope)
 		return shapeParityHook(t, handlers[call.conn], call, p.managed)
 	}
-	placedBlocks, benignChecked := 0, 0
-	for n, target := range targets {
-		shapes := make([]int, 0, len(patchDecoyShapes))
-		if target.rotate {
-			for k := range patchDecoyShapesPerCase {
-				shapes = append(shapes, (n+k*len(patchDecoyShapes)/patchDecoyShapesPerCase)%len(patchDecoyShapes))
-			}
-		} else {
-			for s := range patchDecoyShapes {
-				shapes = append(shapes, s)
-			}
+	var placedBlocks, benignChecked atomic.Int64
+	// The targets are independent; patchHeredocExpandingWorkers subtests take
+	// them in turn, in parallel, so the -race shards finish in time.
+	t.Run("targets", func(t *testing.T) {
+		for w := range patchHeredocExpandingWorkers {
+			t.Run(strconv.Itoa(w), func(t *testing.T) {
+				t.Parallel()
+				for n := w; n < len(targets); n += patchHeredocExpandingWorkers {
+					target := targets[n]
+					shapes := make([]int, 0, len(patchDecoyShapes))
+					if target.rotate {
+						for k := range patchHeredocExpandingShapesPerCase {
+							shapes = append(shapes, (n+k*len(patchDecoyShapes)/patchHeredocExpandingShapesPerCase)%len(patchDecoyShapes))
+						}
+					} else {
+						for s := range patchDecoyShapes {
+							shapes = append(shapes, s)
+						}
+					}
+					for _, s := range shapes {
+						shape := patchDecoyShapes[s]
+						u := expanding.unplaced[(n+s)%len(expanding.unplaced)]
+						u2 := expanding.unplaced[(n+s+1)%len(expanding.unplaced)]
+						reference := verdict(t, shape.reference(target.target, target.body, target.hunk, u, u2))
+						if reference == "block" {
+							placedBlocks.Add(1)
+						}
+						got := verdict(t, shape.envelope(target.target, target.body, target.hunk, u, u2))
+						if !target.rotate {
+							benignChecked.Add(1)
+						}
+						if shapeParityRank[reference] < unknown {
+							t.Errorf("%s %s reference: %q, want the unknown tier at least", target.id, shape.name, reference)
+						}
+						if shapeParityRank[got] < max(unknown, shapeParityRank[reference]) {
+							t.Errorf("%s %s envelope (%s): %q, want the unknown tier or the placed %q", target.id, shape.name,
+								u, got, reference)
+						}
+					}
+				}
+			})
 		}
-		for _, s := range shapes {
-			shape := patchDecoyShapes[s]
-			u := expanding.unplaced[(n+s)%len(expanding.unplaced)]
-			u2 := expanding.unplaced[(n+s+1)%len(expanding.unplaced)]
-			for kind, envelope := range map[string]string{
-				"envelope":  shape.envelope(target.target, target.body, target.hunk, u, u2),
-				"reference": shape.reference(target.target, target.body, target.hunk, u, u2),
-			} {
-				placed := verdict(quoted, envelope)
-				if placed == "block" {
-					placedBlocks++
-				}
-				want := max(unknown, shapeParityRank[placed])
-				got := verdict(expanding, envelope)
-				if !target.rotate {
-					benignChecked++
-				}
-				if shapeParityRank[got] < want {
-					t.Errorf("%s %s %s (%s): %q, want the unknown tier or the placed %q", target.id, shape.name, kind,
-						u, got, placed)
-				}
-			}
-		}
+	})
+	if n := benignChecked.Load(); n != int64(len(patchDecoyShapes)) {
+		t.Errorf("benign shapes checked %d, want %d", n, len(patchDecoyShapes))
 	}
-	if benignChecked != 2*len(patchDecoyShapes) {
-		t.Errorf("benign envelopes checked %d, want %d", benignChecked, 2*len(patchDecoyShapes))
-	}
-	if placedBlocks == 0 {
-		t.Fatal("no quoted envelope of the fixture targets blocks: the test no longer pins a placed block")
+	if placedBlocks.Load() == 0 {
+		t.Fatal("no single-header reference of the fixture targets blocks: the test no longer pins a placed block")
 	}
 }
