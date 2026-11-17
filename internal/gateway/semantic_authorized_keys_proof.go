@@ -1054,6 +1054,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// protected target (a link to the actor's authorized_keys): the
 		// managed hook client's ActionDecisionKey proof below, made where
 		// the links are (substrate-1 GAP-0471).
+		if request.guestWriteClaimOnly != nil {
+			// Whether this gateway finds the write without the claim: only a
+			// write the claim alone holds may be read as an own SSH folder
+			// copy through the kit's places (substrate-1 GAP-0549).
+			own := request
+			own.guestProtectedWriteCommand, own.guestWriteClaimOnly = "", nil
+			own.resolvedTarget, own.unprovenTarget, own.unresolvedTarget, own.overBudgetOmission, own.nonWriteMention =
+				nil, nil, nil, nil, nil
+			*request.guestWriteClaimOnly = !trustedExistingAuthorizedKeysSymlinkWrite(own, facts)
+		}
 		return confirmed()
 	}
 	// unproven answers true for a write whose target is unknown, not a

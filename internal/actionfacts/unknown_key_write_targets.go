@@ -303,6 +303,12 @@ func unknownKeyFileTool(tool string) bool {
 // target, in the order their readings are judged.
 var unknownKeyTargetKeys = []string{"filePath", "file_path", "path", "notebook_path", "root"}
 
+// FileToolPathKeys returns the reviewed keys that name a file-tool call's
+// target (the closed coding-agent file-tool schemas read each as the path).
+// A Substrate actor's kit resolves each of them in the actor's file system
+// (substrate-1 GAP-0545).
+func FileToolPathKeys() []string { return slices.Clone(unknownKeyTargetKeys) }
+
 // closedFileToolArgumentKeys are the keys the closed coding-agent file-tool
 // schemas review (extractClosedCodingAgentArgs) and the patch fields.
 var closedFileToolArgumentKeys = map[string]bool{

@@ -104,19 +104,21 @@ type SubstrateSkillFingerprint struct {
 
 // SubstratePathFact is one path argument as the actor resolves it.
 type SubstratePathFact struct {
-	Field     string   `json:"field"`
-	Path      string   `json:"path"`
-	Abs       string   `json:"abs"`
-	Resolved  string   `json:"resolved,omitempty"`
-	LinkChain []string `json:"link_chain,omitempty"`
-	Type      string   `json:"type"`
-	Mode      string   `json:"mode,omitempty"`
-	UID       int      `json:"uid"`
-	GID       int      `json:"gid"`
-	NLink     uint64   `json:"nlink,omitempty"`
-	Size      int64    `json:"size,omitempty"`
-	InsideCWD bool     `json:"inside_cwd"`
-	Error     string   `json:"error,omitempty"`
+	Field       string   `json:"field"`
+	Path        string   `json:"path"`
+	Abs         string   `json:"abs"`
+	Resolved    string   `json:"resolved,omitempty"`
+	Entry       string   `json:"entry,omitempty"`
+	PrivateHome bool     `json:"private_home,omitempty"`
+	LinkChain   []string `json:"link_chain,omitempty"`
+	Type        string   `json:"type"`
+	Mode        string   `json:"mode,omitempty"`
+	UID         int      `json:"uid"`
+	GID         int      `json:"gid"`
+	NLink       uint64   `json:"nlink,omitempty"`
+	Size        int64    `json:"size,omitempty"`
+	InsideCWD   bool     `json:"inside_cwd"`
+	Error       string   `json:"error,omitempty"`
 }
 
 // SubstrateAttachedFile is a file the kit read for the gateway.

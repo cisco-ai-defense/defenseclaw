@@ -1125,6 +1125,19 @@ func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRe
 // the proxy ran the rule packs alone). secureClient is a Secure Client
 // install, which keeps its own tool policy (GAP-0048 adds no finding there).
 func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
+	findings := trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
+	if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok {
+		// A Substrate actor's shell call as it reads once the actor's file
+		// system has followed its links (cd -P a/b/ssh, eval "cat key-link",
+		// echo x > claude-dir/settings.json): every reading of the call,
+		// the hook config guard included, judges it too, and it only adds
+		// findings (substrate-1 GAP-0546, GAP-0547).
+		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
+	}
+	return findings
+}
+
+func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
 	findings := inspectDispatchTrustedAction(ctx, action)
 	findings = provedHighWriteFindings(ctx, action, findings)
 	findings = outboundPIIFindings(action, findings)
@@ -1189,6 +1202,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		if (cfg == nil || !cfg.SecureClientIntegration()) &&
 			(len(provedHighWriteFindings(ctx, action, nil)) != 0 ||
 				len(agentHookConfigFindings(ctx, action, nil)) != 0) {
+			allowed = false
+		}
+		// A Substrate actor's shell call that writes one through a link
+		// is not allowed by the tool name either (substrate-1 GAP-0547).
+		if twin, ok := substrateGuestCommandTwinRequest(action, substrateGuestClaimsFrom(ctx)); ok && allowed &&
+			(cfg == nil || !cfg.SecureClientIntegration()) &&
+			(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
 			allowed = false
 		}
 		// An allowed tool name does not authorize turning DefenseClaw off.

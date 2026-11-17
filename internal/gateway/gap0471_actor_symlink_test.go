@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
@@ -273,11 +274,12 @@ func TestGAP0475SubstrateHookRowSaysWhatTheKitClaimed(t *testing.T) {
 }
 
 // TestGAP0471KitClaimsOnlyMatchTheirCall: a kit claim counts only for the
-// call it came with, an argument it names exactly, and a link that moves
-// the path; anything else is dropped (substrate-1 GAP-0471).
+// call it came with: a proof for the call's shell command as the connector
+// registry reads it (a file tool's command argument is none), a link for an
+// argument it names exactly that the link moves; anything else is dropped
+// (substrate-1 GAP-0471, GAP-0545).
 func TestGAP0471KitClaimsOnlyMatchTheirCall(t *testing.T) {
-	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"./key-link","command":"cat key-link"}}`)
-	env := substrateEnvelope{V: "1", Payload: payload, Facts: &SubstrateFacts{
+	facts := &SubstrateFacts{
 		Proofs: []string{kit.ProofPrivateKeyRead, kit.ProofProtectedWrite, "unknown_proof"},
 		Paths: []SubstratePathFact{
 			{Field: "tool_input.file_path", Path: "./key-link", Abs: "/sandbox/app/key-link", Resolved: "/sandbox/.ssh/id_ed25519"},
@@ -286,20 +288,32 @@ func TestGAP0471KitClaimsOnlyMatchTheirCall(t *testing.T) {
 			{Field: "tool_input.file_path", Path: "./key-link", Abs: "/sandbox/app/key-link", Resolved: "relative"},
 			{Field: "tool_input.file_path", Path: "./key-link", Abs: "/sandbox/app/key-link", Resolved: "/sandbox/app/key-link"},
 			{Field: "tool_input.command", Path: "/sandbox/app/a", Abs: "/sandbox/app/a", Resolved: "/sandbox/.ssh"},
+			{Field: kit.CommandWordField, Path: "key-link", Abs: "/sandbox/app/key-link", Resolved: "/sandbox/.ssh/id_ed25519"},
+			{Field: kit.CommandWordField, Path: "not-in-the-command", Abs: "/sandbox/app/n", Resolved: "/sandbox/.ssh/id_ed25519"},
+			{Field: kit.CommandWordField, Path: "cat", Abs: "/sandbox/app/cat", Resolved: "relative/place"},
 		},
-	}}
-	claims := substrateGuestClaimsOf(env)
-	if claims == nil || claims.keyReadCommand != "cat key-link" || claims.protectedWriteCommand != "cat key-link" {
-		t.Fatalf("claims = %+v, want both proofs for the payload's command", claims)
+	}
+	read := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"./key-link","command":"cat key-link"}}`)
+	claims := substrateGuestClaimsOf(substrateEnvelope{V: "1", Connector: "claudecode", Payload: read, Facts: facts})
+	if claims == nil || claims.keyReadCommand != "" || claims.protectedWriteCommand != "" || len(claims.words) != 0 {
+		t.Fatalf("Read claims = %+v, want no proof or command word: a Read runs no shell command", claims)
 	}
 	if len(claims.links) != 1 || claims.links[0] != (substrateGuestLinkClaim{key: "file_path", value: "./key-link", resolved: "/sandbox/.ssh/id_ed25519"}) {
 		t.Fatalf("links = %+v, want only the file_path link", claims.links)
+	}
+	bash := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat key-link"}}`)
+	claims = substrateGuestClaimsOf(substrateEnvelope{V: "1", Connector: "claudecode", Payload: bash, Facts: facts})
+	if claims == nil || claims.keyReadCommand != "cat key-link" || claims.protectedWriteCommand != "cat key-link" {
+		t.Fatalf("Bash claims = %+v, want both proofs for the payload's command", claims)
+	}
+	if len(claims.words) != 1 || claims.words["key-link"] != (hookpaths.CommandWordPlace{Followed: "/sandbox/.ssh/id_ed25519"}) {
+		t.Fatalf("words = %+v, want only key-link", claims.words)
 	}
 	request := trustedActionRequest{guestKeyReadCommand: claims.keyReadCommand}
 	if !request.substrateGuestClaimsProveKeyRead("cat key-link") || request.substrateGuestClaimsProveKeyRead("cat key-link; true") {
 		t.Fatal("the key-read claim must hold for its own command only")
 	}
-	if substrateGuestClaimsOf(substrateEnvelope{V: "1", Payload: payload}) != nil {
+	if substrateGuestClaimsOf(substrateEnvelope{V: "1", Payload: bash}) != nil {
 		t.Fatal("no facts: no claims")
 	}
 }

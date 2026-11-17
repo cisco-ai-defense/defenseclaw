@@ -316,6 +316,19 @@ type trustedActionRequest struct {
 	// guestLinkTwin marks the twin of a file-tool call whose path arguments
 	// the kit resolved through a link (substrateGuestLinkTwinRequest).
 	guestLinkTwin bool
+	// guestCommandTwin marks the twin of a shell call whose path words the
+	// kit placed through a link (substrateGuestCommandTwinRequest).
+	guestCommandTwin bool
+	// guestClaimHomePlaces reads, from a Substrate actor's kit facts, which
+	// places of the actor's home only their owner can reach; nil without
+	// such facts. guestHomePlaces is the view the home copy checks read:
+	// nil (this host's file system) except on the command twin and where
+	// only a kit claim holds a finding (homePlaceView, substrate-1
+	// GAP-0549). guestWriteClaimOnly receives whether the kit's protected
+	// write claim alone holds a key write.
+	guestClaimHomePlaces homePlaceView
+	guestHomePlaces      homePlaceView
+	guestWriteClaimOnly  *bool
 	// windowsShellDialect is set when Input.DialectHint is inferred from
 	// the call's command (agentHookWindowsShellDialect, Windows host hooks):
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
@@ -476,10 +489,13 @@ func dispatchTrustedAction(
 	if claims := substrateGuestClaimsFrom(parent); claims != nil {
 		// A Substrate actor's kit proved, in the actor's file system, what the
 		// laptop's gateway proves in its own (substrate-1 GAP-0471): a
-		// private-key read of the call's command, and the link targets of
-		// its path arguments. Both only add findings.
+		// private-key read of the call's command, the link targets of its
+		// path arguments, and which places of the home are private
+		// (GAP-0549). All only add findings; the command twin is judged in
+		// trustedToolCallFindings (GAP-0546).
 		request.guestKeyReadCommand = claims.keyReadCommand
 		request.guestProtectedWriteCommand = claims.protectedWriteCommand
+		request.guestClaimHomePlaces = claims.homePlaceView()
 		if twin, ok := substrateGuestLinkTwinRequest(parent, request); ok {
 			defer func() {
 				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))

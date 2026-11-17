@@ -21,6 +21,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
@@ -154,16 +156,23 @@ func substrateFactsAuditExtra(ctx context.Context) map[string]string {
 }
 
 // auditFactToken is a kit-claimed value made safe for a key=value audit
-// field: no spaces, separators or control bytes, at most 256 bytes.
+// field: no spaces, separators, control or format runes (C0, C1, bidi
+// controls, zero-width marks), line or paragraph separators or invalid
+// UTF-8, at most 256 bytes cut on a rune boundary (substrate-1 GAP-0549).
 func auditFactToken(value string) string {
 	value = strings.Map(func(r rune) rune {
-		if r <= ' ' || r == 0x7f || r == ',' || r == '=' || r == '"' || r == '\\' {
+		if r <= ' ' || r == 0x7f || r == ',' || r == '=' || r == '"' || r == '\\' || r == utf8.RuneError ||
+			unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return '_'
 		}
 		return r
 	}, value)
 	if len(value) > 256 {
-		value = value[:256]
+		cut := 256
+		for cut > 0 && !utf8.RuneStart(value[cut]) {
+			cut--
+		}
+		value = value[:cut]
 	}
 	return value
 }

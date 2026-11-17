@@ -1500,6 +1500,28 @@ func sshPrivateKeyMutationPrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
+// trustedKeyWriteFindingWithoutClaim reports whether
+// appendTrustedHomeResolvedSSHKeyWriteFinding makes its key write finding
+// for a call without the existing-link write a Substrate kit claim holds: a
+// call it returns early for (an ordinary variable target, a command that
+// names no authorized keys file) gets none, and any other gets one only
+// from a key write proof of its own (substrate-1 GAP-0549).
+func trustedKeyWriteFindingWithoutClaim(request trustedActionRequest, input actionfacts.Input, facts actionfacts.Facts, commandText string) bool {
+	if !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
+		(request.Connector == "claudecode" || request.Connector == "codex") &&
+		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
+		return false
+	}
+	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
+		!strings.Contains(commandText, "administrators_authorized") &&
+		!strings.Contains(commandText, "base64") &&
+		!trustedWindowsLocationAuthorizedKeysWriteWith(input, request.targetMemo) {
+		return false
+	}
+	return trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) ||
+		trustedSandboxGuestAuthorizedKeysWrite(request)
+}
+
 // appendTrustedHomeResolvedSSHKeyWriteFinding adds the authorized-keys write
 // check when a bounded positive proof can recover the active path from a
 // partial tool call. It also retains PATH-SSH-DIR's alert for a home-resolved
@@ -1537,6 +1559,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
 	evidence.unprovenTarget = &unprovenTarget
+	claimOnly := false
+	if request.guestClaimHomePlaces != nil {
+		evidence.guestWriteClaimOnly = &claimOnly
+	}
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1587,6 +1613,12 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 					named = sudoers
 				}
 			}
+			// Whether a finding this one replaces blocks, read before the
+			// filter below reuses the slice.
+			replacesBlock := slices.ContainsFunc(findings, func(finding RuleFinding) bool {
+				return (finding.RuleID == "PATH-SSH-DIR" || finding.RuleID == "persistence.ssh_authorized_keys_command" ||
+					finding.RuleID == named.ID) && finding.contributesToEnforcement()
+			})
 			kept := findings[:0]
 			for _, finding := range findings {
 				if finding.RuleID != "PATH-SSH-DIR" &&
@@ -1620,8 +1652,19 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// A copy of the user's own SSH folder content to a private place of the
 			// same home, with nothing else written, alerts in every pack: it is
 			// no mutation of the keys the user's ssh reads (rel-1-0-10:GAP-0018).
+			// In a Substrate actor whose kit alone found the write, only the
+			// kit sees whether the copy's destination is private: its places
+			// decide (substrate-1 GAP-0549). Only for a finding this gateway
+			// does not make without the kit's claim, replacing none that
+			// blocks: the kit's places never lower a finding the gateway
+			// reaches on its own.
+			copyRequest := request
+			if claimOnly && !replacesBlock && copyRequest.guestHomePlaces == nil &&
+				!trustedKeyWriteFindingWithoutClaim(request, input, facts, commandText) {
+				copyRequest.guestHomePlaces = request.guestClaimHomePlaces
+			}
 			ownFolderCopy := !unprovenOnly && !readsOnly && named.ID == rule.ID &&
-				trustedActionOwnSSHFolderCopy(request, input)
+				trustedActionOwnSSHFolderCopy(copyRequest, input)
 			if ownFolderCopy {
 				enforcement = findingEnforcementAlertOnly
 			}
