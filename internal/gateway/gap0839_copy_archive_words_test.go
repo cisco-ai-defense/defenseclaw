@@ -29,7 +29,8 @@ import (
 //     fixed (at/claude-code/e8246b44e638b28f/169).
 //
 // The controls keep their reading: a name the body or a later statement may
-// rebind, a pattern that may start with a dash, a relative dynamic target.
+// rebind, a program word read from a name before the copy, a pattern that
+// may start with a dash, a relative dynamic target, a body that writes in the background.
 func TestGAP0839CopyAndArchiveWordsClaudeCode(t *testing.T) {
 	gap0839EveryCell(t, "claudecode")
 }
@@ -61,12 +62,14 @@ func gap0839EveryCell(t *testing.T, connectorName string) {
 		{"redirect from the root after an unplaced cd", `cd "$WORK" || exit 1; [p]grep -f marker >/tmp/g0839d.$$; rm -f /tmp/g0839d.$$`, true},
 		{"loop copy over plain names", "for f in a.log b-2.tsv; do sudo cp /var/tmp/g0839stage/$f /var/tmp/g0839-$f; sudo chmod 600 /var/tmp/g0839-$f; done; " +
 			"cat /var/tmp/g0839-a.log > ~/evidence/c03/readback.raw", true},
-		{"copy to an assigned folder", "E=~/evidence/b01; D=$E/run; printf x > /tmp/g0839b.txt; scp -q /tmp/g0839b.txt box:/tmp/; " +
-			"cp /tmp/g0839b.txt $E/scripts/; $S status >/dev/null", true},
+		{"copy to an assigned folder", `S="ssh -n box"; E=~/evidence/b01; D=$E/run; date > /tmp/g0839b.txt; scp -q /tmp/g0839b.txt box:/tmp/; ` +
+			`cp /tmp/g0839b.txt $E/scripts/; $S 'type a' | cut -c1-9 | tee $D/a.raw`, true},
 		{"control: the loop body may rebind the name", "for f in a.log b-2.tsv; do read f; sudo cp /var/tmp/g0839stage/$f /var/tmp/g0839-$f; done; " +
 			"cat /var/tmp/g0839-a.log > ~/evidence/c03/readback.raw", false},
-		{"control: a statement may rebind the assigned name", "E=~/evidence/b01; read E; printf x > /tmp/g0839b.txt; " +
-			"cp /tmp/g0839b.txt $E/scripts/; $S status >/dev/null", false},
+		{"control: a statement may rebind the assigned name", `S="ssh -n box"; E=~/evidence/b01; D=$E/run; read E; date > /tmp/g0839b.txt; ` +
+			`scp -q /tmp/g0839b.txt box:/tmp/; cp /tmp/g0839b.txt $E/scripts/; $S 'type a' | cut -c1-9 | tee $D/a.raw`, false},
+		{"control: a program word read from a name before the copy", `E=~/evidence/b01; D=$E/run; date > /tmp/g0839b.txt; ` +
+			`$S E; cp /tmp/g0839b.txt $E/scripts/; ssh -n box 'type a' | cut -c1-9 | tee $D/a.raw`, false},
 		{"control: a pattern that may start with a dash", "sudo bash -c 'cd ~/proj && tar -czf /tmp/g0839a.tgz *.raw'; " +
 			"scp -q box:/tmp/g0839a.tgz /tmp/g0839a.tgz; tar -C ~/evidence/a04 -xzf /tmp/g0839a.tgz", false},
 		{"control: a relative target after an unplaced cd", `cd "$WORK" || exit 1; [p]grep -f marker >g0839d.$$`, false},
