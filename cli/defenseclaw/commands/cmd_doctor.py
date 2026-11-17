@@ -13184,6 +13184,56 @@ def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> str:
+    """The OpenClaw plugin rows: hook mode, remediation and install admission.
+
+    Returns the configured hook mode.
+    """
+    from defenseclaw.openclaw_plugin_config import (
+        configured_openclaw_hook_mode,
+        openclaw_plugin_evidence,
+    )
+
+    hook_mode = configured_openclaw_hook_mode(cfg)
+    if hook_mode != "proxy":
+        # Proxy mode has the interception row below as its evidence.
+        live_mode, live_detail, _seen = openclaw_plugin_evidence(cfg, live_health)
+        if live_mode == "unverified":
+            _emit("warn", "OpenClaw hook mode", live_detail, r=r)
+        else:
+            _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
+    from defenseclaw.openclaw_plugin_config import (
+        openclaw_install_policy_remediation,
+        openclaw_install_policy_state,
+        openclaw_install_policy_wanted,
+        openclaw_operator_admin_off,
+    )
+
+    if openclaw_operator_admin_off():
+        _emit(
+            "skip",
+            "OpenClaw remediation",
+            "off (no operator.admin): blocks are enforced by DefenseClaw, OpenClaw is not told to disable them",
+            r=r,
+        )
+
+    policy_state = openclaw_install_policy_state(cfg)
+    if policy_state == "ours":
+        _emit(
+            "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
+        )
+    elif openclaw_install_policy_wanted(cfg):
+        _emit(
+            "warn",
+            "OpenClaw install admission",
+            "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
+            + (" (another security.installPolicy is configured)" if policy_state == "operator" else ""),
+            remediation=openclaw_install_policy_remediation(policy_state),
+            r=r,
+        )
+    return hook_mode
+
+
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Fail closed when a proxy connector's :4000 listener is unused.
 
@@ -13194,8 +13244,6 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     """
     if not cfg.guardrail.enabled:
         return
-    if _guardrail_proxy_intentionally_closed(cfg):
-        return
     connectors = [
         c
         for c in _doctor_active_connectors(cfg)
@@ -13203,53 +13251,20 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     ]
     if not connectors:
         return
+    # The OpenClaw plugin rows (hook mode, remediation, install admission)
+    # are not about the proxy port: native OpenClaw (Windows) closes it on
+    # purpose, and doctor skipped them there (GAP-1139).
+    hook_mode = _check_openclaw_plugin_rows(cfg, r, live_health=live_health) if "openclaw" in connectors else ""
+    if _guardrail_proxy_intentionally_closed(cfg):
+        return
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     if "openclaw" in connectors:
         from defenseclaw.openclaw_plugin_config import (
-            configured_openclaw_hook_mode,
             configured_openclaw_plugin_config_issue,
             openclaw_plugin_config_unreadable,
-            openclaw_plugin_evidence,
         )
 
-        hook_mode = configured_openclaw_hook_mode(cfg)
-        if hook_mode != "proxy":
-            # Proxy mode has the interception row below as its evidence.
-            live_mode, live_detail, _seen = openclaw_plugin_evidence(cfg, live_health)
-            if live_mode == "unverified":
-                _emit("warn", "OpenClaw hook mode", live_detail, r=r)
-            else:
-                _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
-        from defenseclaw.openclaw_plugin_config import (
-            openclaw_install_policy_remediation,
-            openclaw_install_policy_state,
-            openclaw_install_policy_wanted,
-            openclaw_operator_admin_off,
-        )
-
-        if openclaw_operator_admin_off():
-            _emit(
-                "skip",
-                "OpenClaw remediation",
-                "off (no operator.admin): blocks are enforced by DefenseClaw, OpenClaw is not told to disable them",
-                r=r,
-            )
-
-        policy_state = openclaw_install_policy_state(cfg)
-        if policy_state == "ours":
-            _emit(
-                "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
-            )
-        elif openclaw_install_policy_wanted(cfg):
-            _emit(
-                "warn",
-                "OpenClaw install admission",
-                "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
-                + (" (another security.installPolicy is configured)" if policy_state == "operator" else ""),
-                remediation=openclaw_install_policy_remediation(policy_state),
-                r=r,
-            )
         if hook_mode == "native" and connectors == ["openclaw"]:
             # No guardrail proxy carries OpenClaw traffic in native mode, so
             # there is no proxy hop to prove; the plugin hooks guard it.

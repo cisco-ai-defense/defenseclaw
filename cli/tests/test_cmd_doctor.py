@@ -436,6 +436,34 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.failed, 1, result.checks)
         self.assertIn("not being intercepted", result.checks[0]["detail"])
 
+    def test_native_openclaw_still_reports_install_admission(self):
+        # GAP-1139: native OpenClaw (Windows) closes the proxy port on
+        # purpose; doctor returned before the install admission row, so a
+        # strict tier whose admission was not registered said nothing.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor._guardrail_proxy_intentionally_closed", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.configured_openclaw_hook_mode", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_plugin_evidence", return_value=("native", "plugin seen", True)),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_state", return_value="none"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_wanted", return_value=True),
+        ):
+            _check_proxy_interception(cfg, result, live_health={})
+        rows = {c["label"]: c for c in result.checks}
+        self.assertIn("OpenClaw install admission", rows, result.checks)
+        self.assertEqual(rows["OpenClaw install admission"]["status"], "warn")
+        self.assertEqual(result.failed, 0, result.checks)
+
     def test_proxy_interception_waits_for_first_report_after_restart(self):
         # GAP-2487: right after a sidecar restart the plugin has not reported
         # yet; it does within a minute, so this is not a FAIL.
