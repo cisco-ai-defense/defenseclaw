@@ -61,3 +61,27 @@ func TestGAP1183TopLevelHereDocConsumerOnClaudeHook(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP1183OrdinaryHereDocDataOnClaudeHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms")
+	}
+	commands := []string{
+		"python3 - <<'EOF'\nprint('hello')\nEOF",
+		"cat <<'EOF' | python3 -\nprint('hello')\nEOF",
+		"env FOO=1 python3 - <<'EOF'\nprint('hello')\nEOF",
+		"PATH=/tmp/x:$PATH cat <<'EOF'\nordinary data\nEOF",
+		"newgrp <<'EOF'\nordinary data\nEOF",
+		"/tmp/x/wrap sh <<'EOF'\nordinary data\nEOF",
+	}
+	for _, pack := range gap0437Packs {
+		hook := gap0437Server(t, pack, "claudecode", "action")
+		cwd := t.TempDir()
+		for i, command := range commands {
+			out := gap0437Hook(t, hook, cwd, pack.name+string(rune('a'+i)), command)
+			if out["action"] != "allow" || gap0526Names(out, parseFailureRuleID) {
+				t.Errorf("%s data shape %d: unexpected verdict: %v", pack.name, i, out)
+			}
+		}
+	}
+}

@@ -54,3 +54,22 @@ func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 		t.Errorf("an uncalled function is not a here-document consumer: %+v", got)
 	}
 }
+
+func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
+	for _, command := range []string{
+		"python3 - <<'EOF'\nprint('hello')\nEOF",
+		"cat <<'EOF' | python3 -\nprint('hello')\nEOF",
+		"env FOO=1 python3 - <<'EOF'\nprint('hello')\nEOF",
+		"PATH=/tmp/x:$PATH cat <<'EOF'\nordinary data\nEOF",
+		"newgrp <<'EOF'\nordinary data\nEOF",
+		"/tmp/x/wrap sh <<'EOF'\nordinary data\nEOF",
+	} {
+		input := Input{Tool: "Bash", Command: command, CWD: "/work", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
+		if got := SimpleCommands(input, Analyze(input)); slices.ContainsFunc(got, func(s SimpleCommand) bool {
+			return s.EvaluationFailure == EvaluationFailureUnresolvedBody || s.Text == "print('hello')\n"
+		}) {
+			t.Errorf("ordinary data changed reading: %+v", got)
+		}
+	}
+}

@@ -405,6 +405,14 @@ func simpleTopLevelHereDocBodies(source, cwd string) []SimpleCommand {
 				return false
 			}
 			body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
+			// A valid here-document fed to an ordinary program is data even
+			// when the closed syntax-tail reader cannot prove that program's
+			// stdin semantics. Only the GAP-1183 launcher forms with a possible
+			// state write need the unknown tier at the top level.
+			if reading == hereDocUnknown && (!topLevelHereDocUnknownStateConsumer(stmt.Cmd) ||
+				!hereDocBodyMayNameState(body)) {
+				return false
+			}
 			if !posixHeredocDelimiterQuoted(redirection.Word) || !exact || len(body) > maxScalarBytes {
 				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
 				return false
@@ -421,6 +429,43 @@ func simpleTopLevelHereDocBodies(source, cwd string) []SimpleCommand {
 		}
 	}
 	return result
+}
+
+// topLevelHereDocUnknownStateConsumer is the small set of valid opener
+// shapes in GAP-1183. Other unknown stdin consumers retain their release
+// behavior; the syntax-error tail has its separate conservative contract.
+func topLevelHereDocUnknownStateConsumer(cmd syntax.Command) bool {
+	call, ok := cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	for _, assign := range call.Assigns {
+		if assign.Name != nil && assign.Name.Value == "PATH" {
+			return true
+		}
+	}
+	first, known := simpleStaticWord(call.Args[0], nil)
+	if !known {
+		return false
+	}
+	if commandProgram(first) == "newgrp" {
+		return true
+	}
+	if commandProgram(first) != "" || len(call.Args) < 2 {
+		return false
+	}
+	for _, arg := range call.Args[1:] {
+		word, known := simpleStaticWord(arg, nil)
+		if known && (posixShellProgram(commandProgram(word)) || hereDocExtraShells[commandProgram(word)]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hereDocBodyMayNameState(body string) bool {
+	lower := strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(body))
+	return strings.Contains(lower, "defense") || strings.Contains(lower, "claw")
 }
 
 func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []SimpleCommand {
