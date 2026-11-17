@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -82,19 +83,20 @@ func commandNewItemLinkSpelled(command string) bool {
 }
 
 // newItemTextMayMakeLink reads every New-Item spelling of a text from its
-// words alone: the words after it up to the end of its statement (a
-// separator, a pipe, a closing bracket), without their quotes and without
-// redirections, bind as powerShellNewItemMayMakeLink binds a call's words; a
-// word that may expand at run time is not static.
+// words alone: the words of its statement (newItemTextWords), without their
+// quotes and without redirections, bind as powerShellNewItemMayMakeLink binds
+// a call's words; a word that may expand at run time is not static. A
+// statement whose bracket is still open at the end of the text is not read,
+// so it may make a link.
 func newItemTextMayMakeLink(command string) bool {
 	for _, loc := range newItemText.FindAllStringIndex(command, -1) {
-		rest := command[loc[1]:]
-		if end := strings.IndexAny(rest, ";|&\n\r)}"); end >= 0 {
-			rest = rest[:end]
+		texts, closed := newItemTextWords(command[loc[1]:])
+		if !closed {
+			return true
 		}
 		var words []string
 		var static []bool
-		for _, word := range strings.Fields(rest) {
+		for _, word := range texts {
 			word = strings.Trim(word, "'\"`\\")
 			if word == "" || strings.ContainsAny(word, "<>") {
 				continue
@@ -107,6 +109,47 @@ func newItemTextMayMakeLink(command string) bool {
 		}
 	}
 	return false
+}
+
+// newItemTextWords splits the text after a New-Item spelling into the words
+// of its statement. The statement ends at a separator, a pipe or a closing
+// bracket outside any bracket, and a bracketed expression, such as
+// (Split-Path $out) or a script block, is one word with its spaces and
+// separators, as PowerShell reads it (rel-1-0-10:GAP-0849: the words of
+// New-Item -ItemType Directory (Split-Path $out) were split at the space and
+// cut at the parenthesis, so $out read as a second positional word and a
+// folder as a possible link). closed is false when a bracket opened in the
+// statement is still open at the end of the text.
+func newItemTextWords(rest string) (words []string, closed bool) {
+	var word strings.Builder
+	flush := func() {
+		if word.Len() > 0 {
+			words = append(words, word.String())
+			word.Reset()
+		}
+	}
+	depth := 0
+	for _, r := range rest {
+		switch {
+		case r == '(' || r == '{':
+			depth++
+		case r == ')' || r == '}':
+			if depth == 0 {
+				flush()
+				return words, true
+			}
+			depth--
+		case depth == 0 && strings.ContainsRune(";|&\n\r", r):
+			flush()
+			return words, true
+		case depth == 0 && unicode.IsSpace(r):
+			flush()
+			continue
+		}
+		word.WriteRune(r)
+	}
+	flush()
+	return words, depth == 0
 }
 
 // newItemCallsMayMakeLink reads the New-Item calls of a command as

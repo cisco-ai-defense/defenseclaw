@@ -131,7 +131,8 @@ func TestNewItemSpellingsReadAsThePlainLink(t *testing.T) {
 // reading. A folder or a file stays no link, as before; a link stays a
 // possible link in every spelling (rel-1-0-10:GAP-0849: the first fix took
 // every such New-Item for a possible link, and the owner A/B showed benign
-// folder scripts sent to a Windows host blocked).
+// folder scripts sent to a Windows host blocked; a parenthesized path is one
+// word, and a bracket left open keeps the possible link).
 func TestNewItemInAnotherProgramsTextReadsByItsWords(t *testing.T) {
 	rows := []struct {
 		command string
@@ -144,6 +145,11 @@ func TestNewItemInAnotherProgramsTextReadsByItsWords(t *testing.T) {
 		{`ssh h "powershell -c 'New-Item -ItemType SymbolicLink -Path .\l -Target $t'"`, true},
 		{`ssh h "powershell -c 'New-Item -ItemType Junction -Path .\l -Target .\a'"`, true},
 		{`run h 'New-Item -Path .\l -ItemType $kind -Target .\a'`, true},
+		{"cat > s.ps1 <<'EOF'\nNew-Item -ItemType Directory -Force (Split-Path $out) | Out-Null\nEOF", false},
+		{`run h 'New-Item -ItemType File -Path (Join-Path $d "a b.txt"; $x) -Force'`, false},
+		{`run h 'New-Item -ItemType SymbolicLink -Path (Join-Path $d l) -Target $t'`, true},
+		{`run h 'New-Item (Join-Path $d l) .\x -ItemType Directory'`, true},
+		{`run h 'New-Item -ItemType Directory -Path (Join-Path $d l'`, true},
 	}
 	for _, spelling := range newItemSpellings {
 		for _, row := range rows {
