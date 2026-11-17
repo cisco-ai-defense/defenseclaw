@@ -290,3 +290,66 @@ func TestWindowsShippedRulePacksRealTrustAcceptsAnAdministratorOwnedChild(t *tes
 		t.Fatalf("run over an administrator-owned folder changed %v, %v; want no change", changed, err)
 	}
 }
+
+// rel-1-0-10:GAP-0085: a folder a user names like a moved-aside root beside
+// the root is not Setup's: status does not warn about it and Setup does not
+// touch it (it gave a warning no run could clear).
+func TestWindowsShippedRulePacksRealTrustIgnoresAFolderNamedLikeAMovedAsideRoot(t *testing.T) {
+	root := windowsShippedRulePacksTestRoot(t)
+	planted := root + ".untrusted-0123456789ab"
+	if err := os.MkdirAll(filepath.Join(planted, "inside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsShippedRulePacksTestOwner(t, planted, windowsShippedRulePacksStandardOwner(t))
+	if left := windowsShippedRulePacksUntrusted(root); len(left) != 0 {
+		t.Fatalf("a folder beside the root is listed as moved aside: %v", left)
+	}
+	if _, _, notes, err := installWindowsShippedRulePacks(); err != nil {
+		t.Fatal(err)
+	} else if len(notes) != 0 {
+		t.Fatalf("notes = %v, want none", notes)
+	}
+	if _, err := os.Stat(filepath.Join(planted, "inside")); err != nil {
+		t.Fatalf("Setup removed a folder it did not create: %v", err)
+	}
+	if left := windowsShippedRulePacksUntrusted(root); len(left) != 0 {
+		t.Fatalf("moved-aside folders after the run: %v", left)
+	}
+}
+
+// rel-1-0-10:GAP-0085: a root a standard account created with a junction in
+// it to another folder is moved aside and removed without following the
+// junction: the folder it points at and its file stay, and nothing is left
+// beside or inside the root.
+func TestWindowsShippedRulePacksRealTrustRemovesAMovedAsideRootWithoutFollowingAJunction(t *testing.T) {
+	root := windowsShippedRulePacksTestRoot(t)
+	victim := t.TempDir()
+	kept := filepath.Join(victim, "kept.yaml")
+	if err := os.WriteFile(kept, []byte("kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	windowsSecretTestJunction(t, filepath.Join(root, "linked"), victim)
+	setWindowsShippedRulePacksTestOwner(t, root, windowsShippedRulePacksStandardOwner(t))
+	folder, changed, notes, err := installWindowsShippedRulePacks()
+	if err != nil || !changed {
+		t.Fatalf("run over an untrusted root with a junction = %q changed %v, %v", folder, changed, err)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "aside") || strings.Contains(notes[0], "could not be removed") {
+		t.Errorf("notes = %v, want the move named and the folder removed", notes)
+	}
+	if body, err := os.ReadFile(kept); err != nil || string(body) != "kept\n" {
+		t.Fatalf("the junction was followed: %q, %v", body, err)
+	}
+	if left, _ := filepath.Glob(root + ".untrusted-*"); len(left) != 0 {
+		t.Fatalf("left beside the root: %v", left)
+	}
+	if left := windowsShippedRulePacksUntrusted(root); len(left) != 0 {
+		t.Fatalf("left inside the root: %v", left)
+	}
+	if problem := windowsShippedRulePacksProblem(folder, windowsShippedRulePacksTestFiles(t), ""); problem != "" {
+		t.Fatalf("written folder: %s", problem)
+	}
+}

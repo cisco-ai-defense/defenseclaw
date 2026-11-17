@@ -90,3 +90,47 @@ func TestWindowsShippedRulePackResolution(t *testing.T) {
 	}
 	restore()
 }
+
+// rel-1-0-10:GAP-0085: while the trusted ProgramData registration cannot be
+// read, a managed Windows standalone config that selects strict or
+// permissive says so, with the read error; default, another install and a
+// readable root do not.
+func TestWindowsShippedRulePacksUnreadableRootIsNamed(t *testing.T) {
+	restore := SetWindowsShippedRulePacksRootForTest("")
+	defer restore()
+	win := shippedTestConfig(managed.ProfileStandalone, windowsStandaloneConfigPath)
+	for _, pack := range []string{"strict", "permissive"} {
+		win.Guardrail.RulePack = pack
+		if name, err := win.WindowsShippedRulePacksUnreadable(); name != pack || err == nil {
+			t.Errorf("%s with an unreadable root = %q, %v; want the pack and the error", pack, name, err)
+		}
+		if err := win.WindowsShippedRulePackRootError(pack); err == nil {
+			t.Errorf("%s: no root error", pack)
+		}
+	}
+	win.Guardrail.RulePack = "default"
+	if name, err := win.WindowsShippedRulePacksUnreadable(); name != "" || err != nil {
+		t.Errorf("default with an unreadable root = %q, %v; want none (embedded)", name, err)
+	}
+	if err := win.WindowsShippedRulePackRootError("default"); err != nil {
+		t.Errorf("default: root error %v", err)
+	}
+	win.Guardrail.RulePack = "strict"
+	if win.ResolveRulePackDir(RulePackRef{Name: "strict"}) != "" {
+		t.Error("the stand-in folder leaked into the config's own resolution")
+	}
+	for label, cfg := range map[string]*Config{
+		"secure client": shippedTestConfig(managed.ProfileSecureClient, windowsStandaloneConfigPath),
+		"linux layout":  shippedTestConfig(managed.ProfileStandalone, "/etc/defenseclaw/config.yaml"),
+	} {
+		cfg.Guardrail.RulePack = "strict"
+		if name, err := cfg.WindowsShippedRulePacksUnreadable(); name != "" || err != nil || cfg.WindowsShippedRulePackRootError("strict") != nil {
+			t.Errorf("%s: %q, %v; want none", label, name, err)
+		}
+	}
+	restore()
+	defer SetWindowsShippedRulePacksRootForTest(t.TempDir())()
+	if name, err := win.WindowsShippedRulePacksUnreadable(); name != "" || err != nil || win.WindowsShippedRulePackRootError("strict") != nil {
+		t.Errorf("a readable root = %q, %v; want none", name, err)
+	}
+}

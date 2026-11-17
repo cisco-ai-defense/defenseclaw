@@ -146,3 +146,18 @@ func TestShippedRulePacksOnManagedWindows(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0085: strict on a managed Windows install whose trusted
+// ProgramData registration cannot be read is refused with that reason and
+// the repair, not with "policy_dir is not set".
+func TestShippedRulePackWithAnUnreadableRootNamesTheRegistration(t *testing.T) {
+	defer config.SetWindowsShippedRulePacksRootForTest("")()
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, ConfigFilePath: `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Guardrail.RulePack = "strict"
+	_, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global")
+	if err == nil || strings.Contains(err.Error(), "policy_dir is not set") || !strings.Contains(err.Error(), "ProgramData registration cannot be read") ||
+		!strings.Contains(err.Error(), "/repair") {
+		t.Fatalf("strict with an unreadable root = %v, want the registration and the repair named", err)
+	}
+}
