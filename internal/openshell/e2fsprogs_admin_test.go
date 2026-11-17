@@ -13,11 +13,41 @@ import (
 	"testing"
 )
 
+// traversableTempDir is a temporary folder every account can pass through
+// (o+x on it and each folder above it). The tool choice refuses tools below a
+// folder another account cannot search, which is the product rule these tests
+// check, so a fixture under a private TMPDIR (a gate box's
+// /var/tmp/<private>/tmp) read as a refusal: os.TempDir() when it qualifies,
+// else /tmp (rel-1-0-10 INT accepted rows TestManagedE2fsprogs*).
+func traversableTempDir(t *testing.T) string {
+	t.Helper()
+	traversable := func(dir string) bool {
+		for {
+			info, err := os.Stat(dir)
+			if err != nil || info.Mode().Perm()&0o001 == 0 {
+				return false
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return true
+			}
+			dir = parent
+		}
+	}
+	for _, dir := range []string{os.TempDir(), "/tmp"} {
+		if abs, err := filepath.Abs(dir); err == nil && traversable(abs) {
+			return abs
+		}
+	}
+	t.Skip("no temporary folder that every account can traverse")
+	return ""
+}
+
 func TestManagedE2fsprogsPackageFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("macOS tool selection")
 	}
-	root, err := os.MkdirTemp(os.TempDir(), "e2fs-package-test-")
+	root, err := os.MkdirTemp(traversableTempDir(t), "e2fs-package-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +103,7 @@ func TestManagedE2fsprogsInaccessibleCandidatesNameTheRepair(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX process")
 	}
-	root, err := os.MkdirTemp("", "e2fs-inaccessible-")
+	root, err := os.MkdirTemp(traversableTempDir(t), "e2fs-inaccessible-")
 	if err != nil {
 		t.Fatal(err)
 	}
