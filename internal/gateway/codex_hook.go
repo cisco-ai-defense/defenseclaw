@@ -3650,11 +3650,14 @@ func trustedPhysicalWorkspaceRelativePath(path, cwd string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	realCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+	// Read as the hook path reads an operand: a working folder on another
+	// machine's share is never opened, and its paths are not trusted
+	// (rel-1-0-10:GAP-1074).
+	realCWD, err := hookpaths.EvalSymlinks(filepath.Clean(cwd))
 	if err != nil || !filepath.IsAbs(realCWD) {
 		return "", false
 	}
-	realPath, err := filepath.EvalSymlinks(filepath.Join(filepath.Clean(cwd), relative))
+	realPath, err := hookpaths.EvalSymlinks(filepath.Join(filepath.Clean(cwd), relative))
 	if err != nil || !filepath.IsAbs(realPath) {
 		return "", false
 	}

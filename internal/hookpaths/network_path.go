@@ -30,8 +30,20 @@ import (
 // and passed its 3.5 s answer budget, so its hook denied an ordinary
 // command as a gateway that did not answer (rel-1-0-6 GAP-0127).
 //
-// The scans therefore read below a network share only after the share has
-// answered. The first read of a share asks it once, for every call that
+// A share on another machine is never read at all (rel-1-0-10:GAP-1074): even
+// a probe that the hook call does not wait for opens an SMB session to the
+// server the operand text names, with the user's credentials, before any
+// verdict and for a call the gateway then blocks. Such a share reads as
+// unknown at once, as a share that did not answer: a write below it cannot be
+// placed, a path below it is no proven protected file, and the protected
+// target rules judge its text. A script body below it is a body the call could
+// not read (ShareBodyUnread), judged by the policy tier as the unknown tier
+// is, never as a body that writes nothing. Only a share of this machine
+// (localhost, a loopback address, a name of this host:
+// actionfacts.WindowsServerIsThisMachine) is asked, as below.
+//
+// The scans therefore read below a share of this machine only after the share
+// has answered. The first read of a share asks it once, for every call that
 // names it, and waits at most networkShareAnswerWait. A share that has not
 // answered by then reads as unknown, as an unreadable path does: a write
 // below it cannot be placed and a path below it is no proven protected
@@ -102,6 +114,9 @@ var (
 	// local path); probeNetworkShare asks the share once. Tests replace both.
 	networkShareRootOf = networkShareRoot
 	probeNetworkShare  = func(root string) { _, _ = os.Stat(root) }
+	// networkShareOfThisMachine reports a share root whose server is this
+	// machine, the only shares the gate asks (rel-1-0-10:GAP-1074).
+	networkShareOfThisMachine = shareOfThisMachine
 )
 
 // networkShareCallShares is how many full answer waits one hook call may
@@ -287,6 +302,9 @@ const (
 	// shareReadLinkBound: the link bound stopped the walk before it could
 	// tell whether a further link leads into a share.
 	shareReadLinkBound
+	// shareReadRemote: the share is on another machine, which the hook path
+	// never reads (rel-1-0-10:GAP-1074); what is below it is unknown.
+	shareReadRemote
 )
 
 // linkUnanswered is networkPathUnanswered for a read that opens no link at
@@ -322,6 +340,9 @@ func networkPathReadAs(path string, followLast bool) (unanswered bool, cut share
 	var seen map[string]bool
 	for range networkLinkHopLimit + 1 {
 		if root := networkShareRootOf(path); root != "" {
+			if !networkShareOfThisMachine(root) {
+				return true, shareReadRemote
+			}
 			if silent, budgetCut := askNetworkShare(root); silent {
 				if budgetCut {
 					return true, shareReadBudgetCut
@@ -426,16 +447,39 @@ func askNetworkShare(root string) (unanswered, budgetCut bool) {
 // OverrideNetworkSharesForTest replaces which paths are network shares
 // (rootOf names the share of a path, "" for none) and how a share is asked,
 // and forgets the shares asked so far, for tests of the gateway on a host
-// with no share. The restore puts all back.
+// with no share. The shares rootOf names are taken as shares of this machine,
+// the ones the gate asks, so that a test sees every share a reader would ask
+// (OverrideRemoteSharesForTest keeps the real split). The restore puts all
+// back.
 func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root string)) (restore func()) {
-	oldRoot, oldProbe, oldWalk := networkShareRootOf, probeNetworkShare, networkShareLinkWalk
+	return overrideNetworkShares(rootOf, ask, func(string) bool { return true })
+}
+
+// OverrideRemoteSharesForTest reads paths as Windows names network shares
+// (every spelling of windowsShareRoot, on any host, with the link walk on),
+// keeps which shares are this machine's as the product does, and calls ask
+// for every share the gate asks: a test of the gateway counts the shares a
+// call contacts (rel-1-0-10:GAP-1074). thisMachine, when not nil, replaces
+// which shares are this machine's. The restore puts all back.
+func OverrideRemoteSharesForTest(ask func(root string), thisMachine func(root string) bool) (restore func()) {
+	if thisMachine == nil {
+		thisMachine = shareOfThisMachine
+	}
+	return overrideNetworkShares(func(path string) string {
+		root, _ := windowsShareRoot(path)
+		return root
+	}, ask, thisMachine)
+}
+
+func overrideNetworkShares(rootOf func(path string) string, ask func(root string), thisMachine func(root string) bool) (restore func()) {
+	oldRoot, oldProbe, oldWalk, oldLocal := networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine
 	networkShares.mu.Lock()
 	oldProbes := networkShares.probes
 	networkShares.probes = nil
 	networkShares.mu.Unlock()
-	networkShareRootOf, probeNetworkShare, networkShareLinkWalk = rootOf, ask, true
+	networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine = rootOf, ask, true, thisMachine
 	return func() {
-		networkShareRootOf, probeNetworkShare, networkShareLinkWalk = oldRoot, oldProbe, oldWalk
+		networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine = oldRoot, oldProbe, oldWalk, oldLocal
 		networkShares.mu.Lock()
 		networkShares.probes = oldProbes
 		networkShares.mu.Unlock()
@@ -444,7 +488,7 @@ func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root
 
 // ShareBodyUnread reports that the hook call on the calling goroutine
 // could not read the body of a script on a network share because its share
-// budget was spent. The body might have written a protected file; the
+// budget was spent or the share is on another machine (never read). The body might have written a protected file; the
 // caller judges the call by the policy tier: the strict tier as it judges
 // one it cannot evaluate, the others with an alert.
 func ShareBodyUnread() bool {
@@ -453,7 +497,7 @@ func ShareBodyUnread() bool {
 }
 
 // ShareBodyUnreadCauses tells why ShareBodyUnread is set: the call budget
-// kept the share from being asked, or the path to the script passes more
+// kept the share from being asked or the share is on another machine (budget), or the path to the script passes more
 // links than the walk follows, so a share on it may not have been asked
 // (rel-1-0-9:GAP-0621). Both can hold in one call.
 func ShareBodyUnreadCauses() (budget, linkBound bool) {
@@ -535,7 +579,7 @@ func noteBodyCut(cut shareReadCut) {
 		return
 	}
 	switch cut {
-	case shareReadBudgetCut:
+	case shareReadBudgetCut, shareReadRemote:
 		call.bodyUnread = true
 	case shareReadLinkBound:
 		call.bodyLinks = true
