@@ -54,7 +54,11 @@ def status_of(doc: dict[str, Any]) -> dict[str, Any]:
 
 @click.command("tokenomics")
 @click.option("--enable", is_flag=True, help="Record per-call model usage, cost and the local usage aggregate.")
-@click.option("--disable", is_flag=True, help="Stop recording model usage. The price table stays in config.yaml.")
+@click.option(
+    "--disable",
+    is_flag=True,
+    help="Stop recording model usage and turn the local usage store off. The price table stays in config.yaml.",
+)
 @click.option("--status", "show_status", is_flag=True, help="Show whether tokenomics is on.")
 @click.option("--seed-pricing", is_flag=True, help="Write the reviewed default price table if config.yaml has none.")
 @click.option("--json", "as_json", is_flag=True, help="Print JSON.")
@@ -91,7 +95,14 @@ def tokenomics(
             config_writer.Change("observability.tokenomics.local_store.enabled", True),
         ]
     if disable:
-        changes.append(config_writer.Change("observability.tokenomics.enabled", False))
+        # Off is off: the local store goes off with tokenomics, as --enable
+        # turns both on. The gateway never opens the store while tokenomics
+        # is off, but a store left on in config.yaml read as still recording
+        # (rel-1-0-10 GAP-1166).
+        changes += [
+            config_writer.Change("observability.tokenomics.enabled", False),
+            config_writer.Change("observability.tokenomics.local_store.enabled", False),
+        ]
     if enable or seed_pricing:
         changes += pricing_changes(doc)
     try:
@@ -107,6 +118,22 @@ def tokenomics(
     except config_writer.ConfigWriteError as exc:
         raise click.ClickException(str(exc)) from exc
     _print(status_of(_read(path)), as_json)
+    data_dir = getattr(app.cfg, "data_dir", None)
+    if disable and not as_json and data_dir:
+        _print_kept_store(Path(data_dir))
+
+
+def _print_kept_store(data_dir: Path) -> None:
+    """Say what --disable leaves on disk: the gateway writes the calls it still
+    buffers (up to 15 s), closes the store and writes it no more (the store is
+    data_dir/model_usage, internal/gateway/sidecar_modelusage.go)."""
+    store = data_dir / "model_usage"
+    if not store.is_dir():
+        return
+    click.echo(
+        f"  The gateway writes the usage it still buffers and closes the local store; the usage already "
+        f"recorded stays in {store} (delete that folder to remove it)."
+    )
 
 
 def _onoff(flag: Any) -> str:
@@ -119,6 +146,9 @@ def _print(state: dict[str, Any], as_json: bool) -> None:
         return
     enabled = _onoff(state["enabled"])
     store = _onoff(state["local_store"])
+    if state["local_store"] and not state["enabled"]:
+        # The gateway opens the store only while tokenomics is on.
+        store += ", idle while tokenomics is off"
     days = state["retention_days"]
     models = state["priced_models"]
     click.echo(f"  Tokenomics:     {enabled}")
