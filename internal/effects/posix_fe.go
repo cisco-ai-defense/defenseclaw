@@ -36,6 +36,16 @@ type posixWalker struct {
 	// link is the && / || relation of the statement being lowered to the one
 	// before it; every statement lowered while it is set carries it (round 8 F).
 	link Op
+	// dead, while set, is the guard of the right side of a provably false `&&`
+	// or a provably true `||`: every statement lowered under it carries it as
+	// its DeadGuard (GAP-0218).
+	dead []string
+	// bg counts the backgrounded statements being lowered: every command under
+	// one runs in a child shell (Cmd.ChildList).
+	bg int
+	// marks maps a compound statement with redirects to the mark statement
+	// lowered before its body.
+	marks map[*syntax.Stmt]*Stmt
 }
 
 // linked lowers the right side of && / || with the link set.
@@ -51,6 +61,14 @@ func (w *posixWalker) add(st *Stmt) {
 	if st.Link == OpNone {
 		st.Link = w.link
 	}
+	if st.DeadGuard == nil && w.dead != nil {
+		st.DeadGuard = w.dead
+	}
+	if w.bg > 0 {
+		for _, c := range st.Cmds {
+			c.ChildList = true
+		}
+	}
 	w.out.Stmts = append(w.out.Stmts, st)
 }
 
@@ -63,6 +81,21 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 		return
 	}
 	cond = cond || st.Negated
+	if st.Background {
+		w.bg++
+		defer func() { w.bg-- }()
+	}
+	if len(st.Redirs) > 0 {
+		switch st.Cmd.(type) {
+		case *syntax.Block, *syntax.IfClause, *syntax.WhileClause, *syntax.ForClause, *syntax.CaseClause:
+			mark := &Stmt{ExecMark: true, Span: span(st)}
+			w.add(mark)
+			if w.marks == nil {
+				w.marks = map[*syntax.Stmt]*Stmt{}
+			}
+			w.marks[st] = mark
+		}
+	}
 	switch cmd := st.Cmd.(type) {
 	case nil:
 		w.emitCall(st, nil, cond, pipeIn)
@@ -158,7 +191,7 @@ func (w *posixWalker) compoundRedirs(st *syntax.Stmt, cond bool) {
 	c := &Cmd{Cond: cond, Span: span(st)}
 	w.redirs(st, c)
 	if len(c.Redirs) > 0 {
-		w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
+		w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, ExecFrom: w.marks[st], Span: span(st)})
 	}
 }
 
@@ -166,10 +199,10 @@ func (w *posixWalker) binary(st *syntax.Stmt, cmd *syntax.BinaryCmd, cond bool) 
 	switch cmd.Op {
 	case syntax.AndStmt:
 		w.stmt(cmd.X, cond, false)
-		w.linked(OpAnd, func() { w.stmt(cmd.Y, true, false) })
+		w.linked(OpAnd, func() { w.unlessConst(cmd.X, false, func() { w.stmt(cmd.Y, true, false) }) })
 	case syntax.OrStmt:
 		w.stmt(cmd.X, cond, false)
-		w.linked(OpOr, func() { w.stmt(cmd.Y, true, false) })
+		w.linked(OpOr, func() { w.unlessConst(cmd.X, true, func() { w.stmt(cmd.Y, true, false) }) })
 	case syntax.Pipe, syntax.PipeAll:
 		w.pipeDepth++
 		w.stmt(cmd.X, cond, false)
@@ -178,6 +211,71 @@ func (w *posixWalker) binary(st *syntax.Stmt, cmd *syntax.BinaryCmd, cond bool) 
 	default:
 		w.unknown(ReasonUnparsedConstruct, cmd)
 	}
+}
+
+// unlessConst lowers the right side of && / || (fn). When the left side x has
+// the constant status that skips it (false before &&, true before ||), the
+// right side never runs: it is lowered with the guard's names as its dead
+// guard (GAP-0218).
+func (w *posixWalker) unlessConst(x *syntax.Stmt, skipWhenSuccess bool, fn func()) {
+	success, names, ok := constStatus(x)
+	if !ok || success != skipWhenSuccess {
+		fn()
+		return
+	}
+	prev := w.dead
+	w.dead = append(append([]string(nil), prev...), names...)
+	fn()
+	w.dead = prev
+}
+
+// constStatus is the exit status of a statement made only of the builtins
+// true, false and : (with ! and && / || between them), with the names it
+// relies on. false fails whatever its arguments, assignments and redirects do
+// (a failed expansion or redirect fails too); true and : succeed only bare,
+// since an argument expansion or a redirect can fail. ok is false for anything
+// else, and for a background or coprocess statement (its status is 0).
+func constStatus(st *syntax.Stmt) (success bool, names []string, ok bool) {
+	if st == nil || st.Background || st.Coprocess {
+		return false, nil, false
+	}
+	switch c := st.Cmd.(type) {
+	case *syntax.CallExpr:
+		if len(c.Args) == 0 {
+			return false, nil, false
+		}
+		switch lit := c.Args[0].Lit(); {
+		case lit == "false":
+			success, names = false, []string{lit}
+		case (lit == "true" || lit == ":") && len(c.Args) == 1 && len(c.Assigns) == 0 && len(st.Redirs) == 0:
+			success, names = true, []string{lit}
+		default:
+			return false, nil, false
+		}
+	case *syntax.BinaryCmd:
+		if c.Op != syntax.AndStmt && c.Op != syntax.OrStmt {
+			return false, nil, false
+		}
+		xs, xn, xok := constStatus(c.X)
+		if !xok {
+			return false, nil, false
+		}
+		success, names = xs, xn
+		// The right side runs after a true left side of &&, a false one of ||.
+		if xs == (c.Op == syntax.AndStmt) {
+			ys, yn, yok := constStatus(c.Y)
+			if !yok {
+				return false, nil, false
+			}
+			success, names = ys, append(append([]string(nil), xn...), yn...)
+		}
+	default:
+		return false, nil, false
+	}
+	if st.Negated {
+		success = !success
+	}
+	return success, names, true
 }
 
 func (w *posixWalker) ifClause(cmd *syntax.IfClause, cond bool) {
