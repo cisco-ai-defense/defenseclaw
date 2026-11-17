@@ -12,10 +12,6 @@ import (
 
 // The connected reverse tuple identifies the process that accepted this
 // request, including while another process binds the configured listener.
-func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
-	return perUserConnectedPeerPIDWithin(context.Background(), client, server)
-}
-
 func perUserConnectedPeerPIDWithin(ctx context.Context, client, server *net.TCPAddr) (int, bool) {
 	if ctx.Err() != nil {
 		return 0, false
