@@ -13205,6 +13205,7 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
     from defenseclaw.openclaw_plugin_config import (
         openclaw_install_policy_recorded_state,
         openclaw_install_policy_remediation,
+        openclaw_install_policy_stale_remediation,
         openclaw_install_policy_stale_version,
         openclaw_install_policy_state,
         openclaw_install_policy_wanted,
@@ -13229,7 +13230,7 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
             "warn",
             "OpenClaw install admission",
             stale,
-            remediation=openclaw_install_policy_remediation("ours", recorded=stale),
+            remediation=openclaw_install_policy_stale_remediation(),
             r=r,
         )
     elif policy_state == "ours":

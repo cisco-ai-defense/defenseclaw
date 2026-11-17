@@ -107,7 +107,7 @@ func stopOpenClawInstallPolicyRetries() {
 
 // scheduleOpenClawInstallPolicyRetry arms the retry unless the gateway is
 // stopping or one is already armed.
-func (s *Sidecar) scheduleOpenClawInstallPolicyRetry(attempt int, delay time.Duration) bool {
+func (s *Sidecar) scheduleOpenClawInstallPolicyRetry(attempt int, reason string, delay time.Duration) bool {
 	openClawInstallPolicyRetryTimerMu.Lock()
 	defer openClawInstallPolicyRetryTimerMu.Unlock()
 	if openClawInstallPolicyStopped.Load() || !openClawInstallPolicyRetrying.CompareAndSwap(false, true) {
@@ -118,7 +118,7 @@ func (s *Sidecar) scheduleOpenClawInstallPolicyRetry(attempt int, delay time.Dur
 		if openClawInstallPolicyStopped.Load() {
 			return
 		}
-		s.refreshOpenClawInstallPolicyAttempt(attempt + 1)
+		s.refreshOpenClawInstallPolicyAttempt(attempt+1, reason)
 	})
 	return true
 }
@@ -130,9 +130,12 @@ func (s *Sidecar) startOpenClawInstallPolicyWatch(ctx context.Context) (stop fun
 	openClawInstallPolicyStopped.Store(false)
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
+	// The version the policy is judged under now is read here, not in the
+	// goroutine, so a change right after start is a change.
+	last := openClawCachedVersion(s.currentConfig())
 	go func() {
 		defer close(done)
-		s.watchOpenClawInstallPolicy(wctx)
+		s.watchOpenClawInstallPolicy(wctx, last)
 	}()
 	return func() {
 		cancel()
@@ -155,11 +158,10 @@ func openClawCachedVersion(cfg *config.Config) string {
 // reinstall below 2026.8.35, or below 2026.11.3 on a hardened Windows root,
 // leaves a registered command OpenClaw refuses, and the reload refresh only
 // follows config changes (GAP-1198).
-func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context) {
+func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context, last string) {
 	if s == nil {
 		return
 	}
-	last := openClawCachedVersion(s.currentConfig())
 	ticker := time.NewTicker(openClawInstallPolicyVersionPoll)
 	defer ticker.Stop()
 	for {
@@ -169,15 +171,20 @@ func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context) {
 		case <-ticker.C:
 			cfg := s.currentConfig()
 			version := openClawCachedVersion(cfg)
-			if version == last {
+			if version == "" || version == last {
+				// An empty or unparsable version is no evidence about
+				// OpenClaw: discovery writes "" while an executable is
+				// replaced mid-scan, when a probe times out and from a shell
+				// without openclaw on PATH. An empty version reads as "not
+				// wanted" and would remove a registered policy (fail-open),
+				// so it is skipped and last stays the version we acted on.
 				continue
 			}
 			last = version
 			if !openClawInstallPolicyGuarded(cfg) {
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "[connector] openclaw: OpenClaw version is now %q; checking the install admission\n", version)
-			s.refreshOpenClawInstallPolicy()
+			s.refreshOpenClawInstallPolicyAttempt(0, "an OpenClaw version change to "+version)
 		}
 	}
 }
@@ -240,10 +247,12 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config) connector.SetupOpts {
 // admission off. Every refresh logs the state it left and why. OpenClaw
 // reads openclaw.json at each install, so no restart is needed.
 func (s *Sidecar) refreshOpenClawInstallPolicy() {
-	s.refreshOpenClawInstallPolicyAttempt(0)
+	s.refreshOpenClawInstallPolicyAttempt(0, "the config reload")
 }
 
-func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int) {
+// refreshOpenClawInstallPolicyAttempt is one try; reason says what asked for
+// the refresh in the log.
+func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason string) {
 	if s == nil {
 		return
 	}
@@ -262,11 +271,11 @@ func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int) {
 	state, err := openClawInstallPolicyRefresher(openClawInstallPolicyRefreshOpts(cfg))
 	if err == nil {
 		openClawInstallPolicyPending.Store(false)
-		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission after the config reload (install_policy %s): %s\n", setting, state)
+		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission after %s (install_policy %s): %s\n", reason, setting, state)
 		return
 	}
 	openClawInstallPolicyPending.Store(true)
-	if attempt < len(delays) && s.scheduleOpenClawInstallPolicyRetry(attempt, delays[attempt]) {
+	if attempt < len(delays) && s.scheduleOpenClawInstallPolicyRetry(attempt, reason, delays[attempt]) {
 		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; retrying in %s\n", setting, err, delays[attempt])
 		return
 	}

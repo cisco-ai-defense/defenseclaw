@@ -500,6 +500,8 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(row["status"], "warn")
         self.assertIn("2026.8.35 is too old for strict install policy", row["detail"])
         self.assertIn("upgrade OpenClaw to 2026.11.3", row["remediation"])
+        # d: the drive-root ACL advice is for a command OpenClaw refuses, not for a downgrade.
+        self.assertNotIn("drive root", row["remediation"])
 
     def test_registered_install_admission_passes_for_a_current_version(self):
         row = self._openclaw_rows("")["OpenClaw install admission"]

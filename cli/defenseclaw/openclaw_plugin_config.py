@@ -225,39 +225,55 @@ def openclaw_install_policy_recorded_state(cfg: object) -> str:
 
 
 def openclaw_install_policy_stale_version(cfg: object, platform: str | None = None) -> str:
-    # GAP-1198: the install policy in openclaw.json is DefenseClaw's, but the
-    # OpenClaw the last discovery cached is not the one it was registered
-    # under, and this one cannot run it: below 2026.8.35 it has no
-    # security.installPolicy, and on Windows below 2026.11.3 it refuses every
-    # command below a hardened root. Returns the sentence for doctor and
-    # status, or "" when the cached version is unknown, is the recorded one,
-    # or is new enough.
+    # GAP-1198: the install policy in openclaw.json is DefenseClaw's and was
+    # registered under an OpenClaw that could run it, but the OpenClaw the
+    # last discovery cached cannot. The state file records the version it was
+    # registered under; a floor is crossed when recorded >= floor > cached:
+    #   2026.8.35: below it OpenClaw has no security.installPolicy (any host);
+    #   2026.11.3: on Windows, below it OpenClaw counts inherit-only ACEs and
+    #   refuses the command below a hardened root. Go decides that from the
+    #   folder ACLs; a policy that was registered under an older rule passed
+    #   them, so only a registration made under 2026.11.3 or later is at risk.
+    # No record (a separate-user layout, or setup never wrote the state), an
+    # unknown cached version, or the same version says nothing. Returns the
+    # sentence for doctor and status, or "".
     import sys
 
     from defenseclaw.connector_contracts import compare_agent_versions, normalize_agent_version
 
     cached = normalize_agent_version(_cached_openclaw_version(cfg))
-    if not cached:
-        return ""
     recorded_raw = _openclaw_install_policy_state_record(cfg).get("openclaw_version")
     recorded = normalize_agent_version(recorded_raw) if isinstance(recorded_raw, str) else ""
-    if recorded == cached:
+    if not cached or not recorded or recorded == cached:
         return ""
-    if compare_agent_versions(cached, OPENCLAW_INSTALL_POLICY_SINCE) < 0:
-        need, why = OPENCLAW_INSTALL_POLICY_SINCE, "has no security.installPolicy"
-    elif (platform or sys.platform) == "win32" and (
-        compare_agent_versions(cached, OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE) < 0
+    if compare_agent_versions(cached, OPENCLAW_INSTALL_POLICY_SINCE) < 0 <= compare_agent_versions(
+        recorded, OPENCLAW_INSTALL_POLICY_SINCE
     ):
-        need, why = OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE, "counts inherit-only entries"
-    else:
-        return ""
-    under = f"registered under OpenClaw {recorded}" if recorded else "registered under an earlier OpenClaw"
-    if need == OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE:
         return (
-            f"OpenClaw {cached} is too old for strict install policy on Windows (needs {need} or later): "
-            f"it {why}; the install admission was {under}"
+            f"OpenClaw {cached} has no security.installPolicy (needs {OPENCLAW_INSTALL_POLICY_SINCE} or later); "
+            f"the install admission was registered under OpenClaw {recorded}"
         )
-    return f"OpenClaw {cached} {why} (needs {need} or later); the install admission was {under}"
+    if (
+        (platform or sys.platform) == "win32"
+        and compare_agent_versions(cached, OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE) < 0
+        and compare_agent_versions(recorded, OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE) >= 0
+    ):
+        return (
+            f"OpenClaw {cached} is too old for strict install policy on Windows "
+            f"(needs {OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE} or later): it counts inherit-only entries; "
+            f"the install admission was registered under OpenClaw {recorded}"
+        )
+    return ""
+
+
+def openclaw_install_policy_stale_remediation() -> str:
+    # What doctor says for openclaw_install_policy_stale_version: upgrade
+    # OpenClaw; the gateway re-checks the policy by itself.
+    return (
+        "upgrade OpenClaw to 2026.11.3 or later (npm install -g openclaw@latest), then run "
+        "`defenseclaw setup openclaw`; until then installed skills and plugins are checked "
+        "when DefenseClaw finds them"
+    )
 
 
 def openclaw_install_policy_remediation(policy_state: str, platform: str | None = None, recorded: str = "") -> str:

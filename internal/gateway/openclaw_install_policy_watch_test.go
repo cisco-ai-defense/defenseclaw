@@ -31,7 +31,12 @@ import (
 func writeOpenClawDiscoveryVersion(t *testing.T, dataDir, version string) {
 	t.Helper()
 	body := `{"agents":{"openclaw":{"installed":true,"version":"` + version + `"}}}`
-	if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"), []byte(body), 0o600); err != nil {
+	// Atomic, like discovery: the watcher reads it every few milliseconds.
+	tmp := filepath.Join(dataDir, "agent_discovery.json.tmp")
+	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, filepath.Join(dataDir, "agent_discovery.json")); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -87,25 +92,52 @@ func TestOpenClawInstallPolicyWatchRefreshesOnACachedVersionChange(t *testing.T)
 	stop()
 }
 
-// GAP-1198: a host whose openclaw connector is not guarded does not touch
-// openclaw.json because its cached version changed.
-func TestOpenClawInstallPolicyWatchIgnoresAnUnguardedHost(t *testing.T) {
+// GAP-1198 review: discovery caches an empty version while an executable is
+// replaced mid-scan, when a probe times out and from a shell without openclaw
+// on PATH. An empty version reads as "not wanted" and removes a registered
+// install policy, so the watcher acts only on a version that parses: a change
+// to "" or to garbage refreshes nothing and does not move what it last acted
+// on (2026.11.3 -> "" -> 2026.11.3 stays quiet, 2026.11.3 -> "" -> 2026.8.35
+// refreshes once with 2026.8.35).
+func TestOpenClawInstallPolicyWatchIgnoresAVersionThatDoesNotParse(t *testing.T) {
 	resetOpenClawInstallPolicyRetryState(t)
 	dir := t.TempDir()
 	writeOpenClawDiscoveryVersion(t, dir, "2026.11.3")
 	var calls atomic.Int32
-	openClawInstallPolicyRefresher = func(connector.SetupOpts) (string, error) { calls.Add(1); return "ok", nil }
+	versions := make(chan string, 8)
+	openClawInstallPolicyRefresher = func(opts connector.SetupOpts) (string, error) {
+		calls.Add(1)
+		versions <- opts.AgentVersion
+		return "ok", nil
+	}
 	openClawInstallPolicyVersionPoll = 5 * time.Millisecond
-	cfg := openClawInstallPolicyTestConfig(t, dir, "on")
-	cfg.Guardrail.Connector = "codex"
 	s := &Sidecar{}
-	s.cfgCurrent.Store(cfg)
+	s.cfgCurrent.Store(openClawInstallPolicyTestConfig(t, dir, "on"))
 	stop := s.startOpenClawInstallPolicyWatch(context.Background())
-	writeOpenClawDiscoveryVersion(t, dir, "2026.8.35")
-	time.Sleep(100 * time.Millisecond)
-	stop()
+	defer stop()
+
+	for _, bad := range []string{"", "garbage"} {
+		writeOpenClawDiscoveryVersion(t, dir, bad)
+		time.Sleep(80 * time.Millisecond)
+		if calls.Load() != 0 {
+			t.Fatalf("a cached version %q refreshed the install policy (%d calls): the policy would be removed", bad, calls.Load())
+		}
+	}
+	writeOpenClawDiscoveryVersion(t, dir, "2026.11.3")
+	time.Sleep(80 * time.Millisecond)
 	if calls.Load() != 0 {
-		t.Fatalf("a host without the openclaw connector refreshed the install policy %d times", calls.Load())
+		t.Fatalf("returning to the version the policy was written under refreshed it (%d calls)", calls.Load())
+	}
+	writeOpenClawDiscoveryVersion(t, dir, "")
+	time.Sleep(40 * time.Millisecond)
+	writeOpenClawDiscoveryVersion(t, dir, "2026.8.35")
+	select {
+	case got := <-versions:
+		if got != "2026.8.35" {
+			t.Errorf("refreshed from %q, want 2026.8.35", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a real downgrade after an empty reading did not refresh")
 	}
 }
 
