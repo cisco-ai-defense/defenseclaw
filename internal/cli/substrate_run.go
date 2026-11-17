@@ -340,6 +340,10 @@ type substrateRunTarget struct {
 	// the cluster says the login default is another agent's.
 	loginTemplate bool
 	agentTemplate string
+	// loginProfile marks a profile taken from the login's default
+	// (GAP-0527): when the cluster says it is not the person's, the run
+	// lets the cluster pick the person's own instead.
+	loginProfile bool
 	// note is the substrateProven note, printed when the agent starts.
 	note string
 }
@@ -357,6 +361,7 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	// No profile named: the cluster gives the person the profile their
 	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
+	t.loginProfile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE")) == "" && strings.TrimSpace(s.Ctx.Profile) != ""
 	t.agentTemplate = sandboxcli.HarnessArg(spec)
 	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, t.agentTemplate)
 	t.loginTemplate = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE")) == "" && strings.TrimSpace(s.Ctx.Template) != ""
@@ -449,6 +454,17 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
 	a, err = s.Client.Create(ctx, req)
+	// GAP-0527: the profile login saved (--default-profile) is a preference,
+	// not the person's assignment. Refused (a contractor whose login saved
+	// eng), the run asks again with no profile, so the cluster gives the
+	// person the profile their groups map to, as policy show reports it. A
+	// profile the person named (--profile or the environment) is not
+	// replaced.
+	if e, ok := api.AsError(err); ok && e.Status == http.StatusForbidden && e.Reason == "profile_not_allowed" && t.loginProfile && req.Profile != "" {
+		fmt.Fprintf(w, "The default profile %s from login is not one you may use; using the profile the cluster gives you.\n", req.Profile)
+		req.Profile = ""
+		a, err = s.Client.Create(ctx, req)
+	}
 	// GAP-0469: the template login saved is the default for its own agent.
 	// Named another agent (run codex after a claude login), the cluster
 	// answers connector_mismatch: run that agent's own template instead.
@@ -478,9 +494,14 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
 			return a, cliusage.WithExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
 		}
+		if e, ok := api.AsError(err); ok && e.Status == http.StatusForbidden && e.Reason == "profile_not_allowed" && req.Profile == "" {
+			// No profile was sent, so "leave --profile out" is no fix: the
+			// cluster has no profile that runs agents for this person.
+			return a, cliusage.WithExitCode(errors.New("no profile that runs agents is assigned to you on this cluster; nothing was started. See yours with: defenseclaw substrate policy show, and ask your administrator to assign you one"), substrateAPIExit(e))
+		}
 		return a, substrateFail(err)
 	}
-	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
+	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, req.Profile)))
 	// E9: in open source the cluster says what a vendor sign-in costs; the
 	// warning the person just acknowledged is not printed twice.
 	for _, warn := range a.Warnings {
