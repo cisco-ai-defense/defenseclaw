@@ -19,6 +19,7 @@
 package connector
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,8 +109,39 @@ func TestOpenClawInstallPolicyACLTrustedWindows(t *testing.T) {
 // inherit-only Users and CREATOR OWNER entries, passes OpenClaw 2026.11.x,
 // so setup registers the install policy there; the default root does not.
 func TestOpenClawInstallPolicyRegisteredBelowAHardenedRootWindows(t *testing.T) {
-	configPath, command, opts := installPolicyFixture(t, openClawCombinedSpelling)
+	// The shared OpenClaw fixtures skip on Windows (requireOpenClawExtensionBundle
+	// predates native Windows OpenClaw), so this one builds its own.
+	if !OpenClawExtensionAvailable() {
+		t.Skip("OpenClaw extension bundle is optional; run `make extensions` before this test")
+	}
+	t.Cleanup(PinOpenClawHooksGOOSForTest("windows"))
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	if err := os.MkdirAll(ocHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	OpenClawHomeOverride = ocHome
+	t.Cleanup(func() { OpenClawHomeOverride = "" })
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	if err := os.WriteFile(configPath, []byte("{\"gateway\": {\"port\": 18789}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command := filepath.Join(t.TempDir(), "bin", "defenseclaw-gateway.exe")
+	if err := os.MkdirAll(filepath.Dir(command), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(command, []byte("MZ"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prevExe, prevTrust, prevOut := openClawInstallPolicyExecutable, openClawInstallPolicyTrusted, openClawTeardownNoticeOutput
+	openClawInstallPolicyExecutable = func() (string, error) { return command, nil }
 	openClawInstallPolicyTrusted = openClawInstallPolicyPathTrusted
+	openClawTeardownNoticeOutput = io.Discard
+	t.Cleanup(func() {
+		openClawInstallPolicyExecutable, openClawInstallPolicyTrusted, openClawTeardownNoticeOutput = prevExe, prevTrust, prevOut
+	})
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970",
+		AgentVersion: "2026.11.3", OpenClawInstallPolicy: true, OpenClawInstallPolicyTimeoutMs: 45000}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
