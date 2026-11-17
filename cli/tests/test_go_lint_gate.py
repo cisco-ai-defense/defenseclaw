@@ -64,7 +64,8 @@ def test_go_lint_runs_vet_then_golangci_lint() -> None:
 def test_ci_go_lint_has_the_history_for_changed_lines() -> None:
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     job = ci["jobs"]["go-lint"]
-    assert job["timeout-minutes"] == 15
+    # GAP-1090: push 5 cancelled the job at 15m17s with no finding.
+    assert job["timeout-minutes"] == 25
     steps = job["steps"]
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
     assert checkout["with"]["fetch-depth"] == "${{ github.event_name == 'pull_request' && 2 || 0 }}"
