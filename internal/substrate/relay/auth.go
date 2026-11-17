@@ -284,6 +284,23 @@ func (v *KeyVerifier) VerifyToken(tok string) (Session, error) {
 		TaskDigest: c.TaskDigest}, nil
 }
 
+// CheckedVerifier checks a session token with the gateway's public keys
+// (signature, issuer, audience, this actor), then asks the gateway, which
+// also checks that the token names the actor's own person (GAP-0435). A
+// token the keys refuse never reaches the gateway.
+type CheckedVerifier struct {
+	Keys    *KeyVerifier
+	Gateway *GatewayVerifier
+}
+
+// Verify implements Verifier.
+func (v *CheckedVerifier) Verify(ctx context.Context, r *http.Request) (Session, error) {
+	if _, err := v.Keys.Verify(ctx, r); err != nil {
+		return Session{}, err
+	}
+	return v.Gateway.Verify(ctx, r)
+}
+
 // LoadPublicKey reads a PEM public key (PKIX: P-256 ECDSA or Ed25519).
 func LoadPublicKey(path string) (crypto.PublicKey, error) {
 	b, err := os.ReadFile(path)

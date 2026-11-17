@@ -652,8 +652,9 @@ func TestSessionKeysNeedAnIssuer(t *testing.T) {
 	os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}), 0o644)
 	cfg := kit.DefaultConfig()
 	cfg.Relay.SessionKeys = map[string]string{"k1": p}
-	if _, err := NewVerifier(cfg); err == nil {
-		t.Fatal("session keys without an issuer accepted")
+	cfg.Relay.VerifyURL = kit.RelayVerifyURL(cfg.GatewayURL)
+	if _, err := NewVerifier(cfg); err == nil || !strings.Contains(err.Error(), "session_issuer") {
+		t.Fatalf("session keys without an issuer accepted: %v", err)
 	}
 	cfg.Relay.SessionIssuer = "https://defenseclaw-admin"
 	if v, err := NewVerifier(cfg); err != nil || v == nil {

@@ -19,22 +19,25 @@ import (
 )
 
 // NewVerifier builds the session verifier the configuration names: the
-// gateway check when verify_url is set, else the public keys. With neither,
-// it is nil and the relay refuses every attachment.
+// gateway check (verify_url), preceded by the public keys when the kit
+// carries them. Keys without verify_url are refused (GAP-0435): they check
+// the signature and the actor, not that the token's person owns the agent.
+// With neither, it is nil and the relay refuses every attachment.
 func NewVerifier(cfg kit.Config) (Verifier, error) {
 	rc := cfg.Relay
 	if err := rc.CheckSessions(); err != nil {
 		return nil, err
 	}
-	if rc.VerifyURL != "" {
-		t, err := kit.NewTransport(cfg)
-		if err != nil {
-			return nil, err
-		}
-		return &GatewayVerifier{URL: rc.VerifyURL, Client: t.Client()}, nil
-	}
-	if len(rc.SessionKeys) == 0 {
+	if rc.VerifyURL == "" {
 		return nil, nil
+	}
+	t, err := kit.NewTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
+	gw := &GatewayVerifier{URL: rc.VerifyURL, Client: t.Client()}
+	if len(rc.SessionKeys) == 0 {
+		return gw, nil
 	}
 	keys := map[string]crypto.PublicKey{}
 	for kid, path := range rc.SessionKeys {
@@ -44,8 +47,8 @@ func NewVerifier(cfg kit.Config) (Verifier, error) {
 		}
 		keys[kid] = k
 	}
-	return &KeyVerifier{Keys: keys, Audience: rc.SessionAudience, Issuer: rc.SessionIssuer,
-		Self: IdentityFiles(rc.IdentityDir)}, nil
+	return &CheckedVerifier{Keys: &KeyVerifier{Keys: keys, Audience: rc.SessionAudience, Issuer: rc.SessionIssuer,
+		Self: IdentityFiles(rc.IdentityDir)}, Gateway: gw}, nil
 }
 
 // Main is the defenseclaw-actor-relay entrypoint.
