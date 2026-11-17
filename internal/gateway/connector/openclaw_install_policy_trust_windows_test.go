@@ -39,8 +39,13 @@ func TestOpenClawInstallPolicyPathTrustedWindowsRefusesOpenAncestor(t *testing.T
 	if err := os.WriteFile(command, []byte("MZ"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// BUILTIN\Users may create folders in dir, as on a drive root.
-	sd, err := windows.SecurityDescriptorFromString("D:(A;CI;0x4;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)")
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// BUILTIN\Users may create folders in dir, as on a drive root; the
+	// file inherits only trusted entries.
+	sd, err := windows.SecurityDescriptorFromString("D:(A;CI;0x4;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + user.User.Sid.String() + ")")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +57,7 @@ func TestOpenClawInstallPolicyPathTrustedWindowsRefusesOpenAncestor(t *testing.T
 		t.Fatal(err)
 	}
 	err = openClawInstallPolicyPathTrusted(command, "")
-	if err == nil || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "S-1-5-32-545") {
+	if err == nil || !strings.HasPrefix(err.Error(), dir+" lets ") || !strings.Contains(err.Error(), "S-1-5-32-545") {
 		t.Fatalf("a folder BUILTIN\\Users can add entries to must be refused, naming it and the group: %v", err)
 	}
 }
