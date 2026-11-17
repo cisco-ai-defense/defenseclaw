@@ -37,15 +37,19 @@ class CodexAppServerPinDocsTest(unittest.TestCase):
         )
         for text in (
             "`check_for_update_on_startup = false`",
+            "only in the OpenShell sandbox's managed Codex config, never into your `~/.codex/config.toml`",
             "does not cover the Codex app-server daemon",
             "~/.codex/packages/app-server-daemon/releases",
             "DefenseClaw does not pin or report the daemon's release",
             "known limit",
+            "`codex app-server daemon version` prints the version that is running",
             "`codex app-server daemon restart`",
-            "401 Bearer Token has expired",
+            "A 401 from the model is a model-key problem",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, row)
+        # The model-key 401 text belongs to the model-key rows, not to a stale daemon.
+        self.assertNotIn("Bearer Token has expired", row)
 
 
 if __name__ == "__main__":
