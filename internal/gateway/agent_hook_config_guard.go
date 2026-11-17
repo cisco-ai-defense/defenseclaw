@@ -17,6 +17,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	toml "github.com/pelletier/go-toml/v2"
 	"mvdan.cc/sh/v3/syntax"
@@ -1314,8 +1315,8 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 	// up to agentHookConfigMaxPlacedBytes, past the statement budget too:
 	// such a call carries the evaluation-limit finding and still names the
 	// write, as on the laptop (substrate-1 GAP-0359). A call the whole
-	// reading did not finish (a && list past its bound) is split even
-	// without a cd: its statements were never read (substrate-1 GAP-0363).
+	// reading did not finish (a && list past its bound) is read even without
+	// a cd, through the guest placement below (substrate-1 GAP-0363).
 	command := agentHookConfigRawShellCommand(input)
 	if command == "" || len(command) > agentHookConfigMaxPlacedBytes || !path.IsAbs(input.CWD) ||
 		whole.Authoritative() && !strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
@@ -1329,7 +1330,18 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		// split declines and the settings write went unnamed where the
 		// laptop alerts (substrate-1 GAP-0378, GAP-0379).
 		placements, _ := sandboxGuestPlacements(input, whole, false)
+		dynamic := guestCallRunsUnreadCommand(command, input.ActiveHome)
 		for _, placement := range placements {
+			// A folder the call reaches only as a cd target no command runs
+			// in ((cd ~/.claude || cd /tmp), an uncalled function that cds)
+			// is not where a later write runs: the laptop guard allows
+			// (cd ~/.claude || cd /tmp) then echo '{}' > settings.json
+			// (substrate-1 GAP-0500). After a command the split cannot read
+			// ($CMD, eval, source), which may change the folder, the laptop
+			// keeps such a folder and alerts; so does this guard.
+			if placement.candidate && !dynamic || !sandboxStatementMayNameHookConfig(placement.text) {
+				continue
+			}
 			placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: placement.text, CWD: placement.cwd, ActiveHome: input.ActiveHome})
 			if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
 				return agentHookConfigWriteRuleID, "", target
@@ -1345,7 +1357,7 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 	seen := map[placement]bool{}
 	for _, statement := range statements {
 		key := placement{statement.Command, statement.Dir}
-		if seen[key] || !path.IsAbs(statement.Dir) {
+		if seen[key] || !path.IsAbs(statement.Dir) || !sandboxStatementMayNameHookConfig(statement.Command) {
 			continue
 		}
 		seen[key] = true
@@ -1355,6 +1367,44 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		}
 	}
 	return "", "", ""
+}
+
+// sandboxHookConfigNames are the file names of every hook file
+// sandboxAgentHookConfigFormat matches.
+var sandboxHookConfigNames = sync.OnceValue(func() []string {
+	var names []string
+	for _, file := range agentHookConfigProjectFiles {
+		names = append(names, path.Base(file.suffix))
+	}
+	for _, file := range agentHookConfigHomeFiles {
+		names = append(names, file.parts[len(file.parts)-1])
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
+})
+
+// sandboxStatementMayNameHookConfig reports a placed statement that may
+// write a hook file: its text, with quotes taken out, names a hook file's
+// name, or it has an expansion, a pattern, a backslash or a line break that
+// may make one.
+// sandboxAgentHookConfigWrite matches a write target by that name, and a
+// lexical reading (actionfacts.Analyze) takes every target from the text,
+// so a statement that names none of them writes none. The guard skips the
+// reading of such a statement: an 8 KB call of ~1,500 placed ':N'
+// statements allocated ~129 MB per call (substrate-1 GAP-0364).
+func sandboxStatementMayNameHookConfig(statement string) bool {
+	// A backslash (an escape or a line continuation inside a name) and a
+	// line break are read as the shell reads them only by the parser.
+	if strings.ContainsAny(statement, "$`*?[{\\\r\n") {
+		return true
+	}
+	plain := strings.NewReplacer("'", "", "\"", "").Replace(statement)
+	for _, name := range sandboxHookConfigNames() {
+		if strings.Contains(plain, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // agentHookConfigMaxPlacedBytes bounds the command the hook-config guards

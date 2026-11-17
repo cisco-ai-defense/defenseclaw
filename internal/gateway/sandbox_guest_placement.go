@@ -16,8 +16,13 @@ import (
 // maxSandboxGuestCandidateDirs bounds the directories a sandbox call may
 // stand in that the guest placement keeps as candidates
 // (sandboxGuestPlacements): the 64 places the laptop's statement reader
-// keeps (hookpaths.TopLevelStatements). Past it the oldest candidate other
-// than the guest's own directory is dropped.
+// keeps (hookpaths.TopLevelStatements). Past it the directories already kept
+// stay and a later one is not added, as the laptop's private-key reader
+// keeps its first candidate directories (actionPosixPrivateKeyRead): an
+// earlier cd target a later relative read depends on is never dropped.
+// Dropping the oldest one let cd .cache, a here-string, 63 cd /tmp/x && ls
+// and cat ../.ssh/id_ed25519 read the guest's key where the laptop blocks
+// (substrate-1 GAP-0499).
 const maxSandboxGuestCandidateDirs = 64
 
 // maxSandboxGuestPlacements bounds the readings of one pass of the guest
@@ -137,14 +142,12 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		return true
 	}
 	// dirs are the directories the call's commands run in, targets the cd
-	// targets no command is read in yet; each keeps the guest's directory
-	// or its oldest entry past the bound.
+	// targets no command is read in yet; each keeps its first
+	// maxSandboxGuestCandidateDirs entries, the guest's directory first
+	// (substrate-1 GAP-0499).
 	keep := func(list []string, dir string) []string {
-		if !path.IsAbs(dir) || slices.Contains(list, path.Clean(dir)) {
+		if !path.IsAbs(dir) || len(list) == maxSandboxGuestCandidateDirs || slices.Contains(list, path.Clean(dir)) {
 			return list
-		}
-		if len(list) == maxSandboxGuestCandidateDirs {
-			list = slices.Delete(list, 1, 2)
 		}
 		return append(list, path.Clean(dir))
 	}
@@ -207,16 +210,16 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	calls := &pass{statements: map[string]bool{}}
 	for _, call := range guestScriptCalls(command) {
 		for _, dir := range dirs {
-			if !place(calls, call.text, dir, false) {
+			if !place(calls, call, dir, false) {
 				return placements, true
 			}
 		}
 		for _, dir := range targets {
-			if !place(calls, call.text, dir, true) {
+			if !place(calls, call, dir, true) {
 				return placements, true
 			}
 		}
-		for _, target := range guestCDTargets(call.text, slices.Concat(dirs, targets), input.ActiveHome) {
+		for _, target := range guestCDTargets(call, slices.Concat(dirs, targets), input.ActiveHome) {
 			targets = keep(targets, target)
 		}
 	}
@@ -239,6 +242,44 @@ func guestChangesDirectory(text, home string) bool {
 	}
 	program, static := hookpaths.StaticWord(call.Args[0], home)
 	return static && (program == "cd" || program == "pushd" || program == "popd")
+}
+
+// guestCallRunsUnreadCommand reports, lexically, a script with a command the
+// statement split cannot read and that may change the folder: a program word
+// that is not static ($CMD), or one of cmdRedefiningCommands (eval, source,
+// ., trap, alias, ...) or mapfile and readarray (-C runs a string), also
+// behind builtin, command or exec (the sandbox hook-config guard,
+// substrate-1 GAP-0500). A script that does not parse counts, and so does a
+// wrapper with options.
+func guestCallRunsUnreadCommand(command, home string) bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil {
+		return true
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if found || !ok || len(call.Args) == 0 {
+			return !found
+		}
+		for index, word := range call.Args {
+			program, static := hookpaths.StaticWord(word, home)
+			if !static || cmdRedefiningCommands[program] || program == "mapfile" || program == "readarray" {
+				found = true
+				break
+			}
+			// builtin, command and exec run the word after their options.
+			if (program != "builtin" && program != "command" && program != "exec") || index == len(call.Args)-1 {
+				break
+			}
+			if next, known := hookpaths.StaticWord(call.Args[index+1], home); known && strings.HasPrefix(next, "-") {
+				found = true // an option word: read it as unread rather than parse every wrapper option
+				break
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // guestCall parses a command text that is one simple command.
@@ -299,19 +340,16 @@ func guestCDTargets(text string, bases []string, home string) []string {
 	return targets
 }
 
-// guestScriptCall is the source text of one call of a script.
-type guestScriptCall struct{ text string }
-
 // guestScriptCalls returns, in source order, the source text of every
 // simple-command statement of a Bash script, with its redirections, nested
 // ones included (a function body, a group, a subshell, a process
 // substitution), lexically; nil when the script does not parse.
-func guestScriptCalls(command string) []guestScriptCall {
+func guestScriptCalls(command string) []string {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return nil
 	}
-	var calls []guestScriptCall
+	var calls []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
@@ -323,7 +361,7 @@ func guestScriptCalls(command string) []guestScriptCall {
 		// The statement's span keeps its redirections (> ../.claude/settings.json).
 		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
 		if start >= 0 && end <= len(command) && start < end {
-			calls = append(calls, guestScriptCall{text: command[start:end]})
+			calls = append(calls, command[start:end])
 		}
 		return true
 	})

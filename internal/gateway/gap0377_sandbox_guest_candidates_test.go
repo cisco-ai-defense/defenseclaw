@@ -334,3 +334,92 @@ func gap0377Check(t *testing.T, rows []gap0377Row) {
 		})
 	}
 }
+
+// gap0499Rows are the review's candidate-window rows (RKGUEST4, substrate-1
+// review of t6/guest 24d8b6c331, evidence/substrate-1/rkguest4/
+// rkguest4_probe_test.go TestRKGuest4ProbeNearby: win-*, winls-*, rd-*,
+// fan-*) and the same window padded before the cd the read depends on, x
+// the tails of gap0377NearbyRows.
+func gap0499Rows() []gap0377Row {
+	lines := func(k int, format string) string {
+		var b strings.Builder
+		for i := range k {
+			fmt.Fprintf(&b, format, i)
+		}
+		return b.String()
+	}
+	type shape struct {
+		name string
+		f    func(string) string
+	}
+	var shapes []shape
+	// The first evicted folder (62 /tmp folders fill the window of 64 with
+	// the guest's and .cache) and past it; the window padded before the cd.
+	for _, n := range []int{63, 70} {
+		shapes = append(shapes,
+			shape{fmt.Sprintf("winls-hs-%d", n), func(x string) string { return "cd .cache\nbash <<< 'true'\n" + lines(n, "cd /tmp/rk4w%d && ls\n") + x }},
+			shape{fmt.Sprintf("pad-before-hs-%d", n), func(x string) string {
+				return "bash <<< 'true'\n" + lines(n, "cd /tmp/rk4p%d && ls\n") + "cd " + sandboxPadHome + "/.cache\n" + x
+			}})
+	}
+	shapes = append(shapes,
+		shape{"win-hs-63", func(x string) string { return "cd .cache\nbash <<< 'true'\n" + lines(63, "cd /tmp/rk4w%d\n") + x }},
+		shape{"rd-hs-64-10", func(x string) string {
+			return "cd .cache\nbash <<< 'true'\n" + lines(64, "cd /tmp/rk4r%d && ls\n") + lines(10, "touch f%d\n") + x
+		}},
+		shape{"fan-hs-118", func(x string) string {
+			return "cd .cache\nbash <<< 'true'\n$CMD\n" + lines(7, "cd s%d\n") + lines(118, "touch f%d\n") + x
+		}})
+	tails := []struct {
+		name, cmd string
+		benign    bool
+	}{
+		{"ssh", "cat ../.ssh/id_ed25519", false},
+		{"settings", "echo '{}' > ../.claude/settings.json", false},
+		{"audit", "rm ../.defenseclaw/audit.db", false},
+		{"b-cat", "cat ../notes.txt", true},
+	}
+	var rows []gap0377Row
+	for _, s := range shapes {
+		for _, tail := range tails {
+			rows = append(rows, gap0377Row{name: s.name + " " + tail.name, command: s.f(tail.cmd), benign: tail.benign})
+		}
+	}
+	return rows
+}
+
+// sandboxPadHome is replaced by each side's home ({cwd}) in gap0377Check.
+const sandboxPadHome = "{cwd}"
+
+// TestGAP0499SandboxGuestPlacementKeepsEarlyCandidates: past 64 candidate
+// folders the guest placement kept the newest and dropped the cd target a
+// later relative read depends on, so cd .cache, a here-string, 63 or more
+// cd /tmp/x && ls and cat ../.ssh/id_ed25519 was an actor allow where the
+// laptop blocks (substrate-1 GAP-0499). It keeps its first folders now, as
+// the laptop's private-key reader does. The actor is never weaker than the
+// laptop, names its rules, and gives benign rows its exact answer
+// (gap0377Check).
+func TestGAP0499SandboxGuestPlacementKeepsEarlyCandidates(t *testing.T) {
+	gap0377Check(t, gap0499Rows())
+}
+
+// TestGAP0500CandidateOnlyHookConfigWriteKeepsLaptopAnswer: a hook file
+// write after a cd the call reaches only as a candidate ((cd ~/.claude ||
+// cd /tmp), an uncalled function that cds) runs in the starting folder: the
+// actor gives the laptop's answer, not an alert (substrate-1 GAP-0500, the
+// review's RKG4C rows), and the S7 no-block rows and the writes after a cd
+// that runs keep theirs (gap0377Check).
+func TestGAP0500CandidateOnlyHookConfigWriteKeepsLaptopAnswer(t *testing.T) {
+	var rows []gap0377Row
+	for _, w := range []struct{ name, pre string }{{"hs", "bash <<< 'true'\n"}, {"dyn", "$CMD\n"}, {"none", ""}} {
+		rows = append(rows,
+			gap0377Row{name: "s7-claude-write-" + w.name, command: "(cd ~/.claude || cd /tmp)\n" + w.pre + "echo '{}' > settings.json", benign: true},
+			gap0377Row{name: "fn-uncalled-claude-" + w.name, command: "f() { cd .claude; }\n" + w.pre + "echo '{}' > settings.json", benign: true},
+			gap0377Row{name: "s7-dc-write-" + w.name, command: "(cd ~/.defenseclaw || cd /tmp)\n" + w.pre + "echo m > config.yaml", benign: true},
+			gap0377Row{name: "fn-called-claude-" + w.name, command: "f() { cd .claude; }\nf\n" + w.pre + "echo '{}' > settings.json"},
+			gap0377Row{name: "cd-or-claude-" + w.name, command: "cd /tmp || cd .claude\n" + w.pre + "echo '{}' > settings.json"},
+			gap0377Row{name: "pushd-claude-" + w.name, command: "pushd .claude\n" + w.pre + "echo '{}' > settings.json"},
+		)
+	}
+	gap0377Check(t, rows)
+}
