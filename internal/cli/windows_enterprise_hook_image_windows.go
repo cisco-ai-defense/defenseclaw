@@ -454,6 +454,22 @@ func windowsHookImageSharingViolation(err error) bool {
 	return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
 }
 
+// windowsHookImageAccessDenied reports an open or read the caller's token
+// was refused: ERROR_ACCESS_DENIED, or STATUS_ACCESS_DENIED of the
+// handle-relative opens below an account home (winpath.OpenBelow).
+func windowsHookImageAccessDenied(err error) bool {
+	var status windows.NTStatus
+	return errors.Is(err, fs.ErrPermission) || errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
+		(errors.As(err, &status) && status == windows.STATUS_ACCESS_DENIED)
+}
+
+// windowsHookImageCallerIsSystem reports whether this process runs as
+// LocalSystem, which reads every account folder.
+func windowsHookImageCallerIsSystem() bool {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	return err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
+}
+
 // windowsHookImageStandaloneBin is the bin whose launch set status, verify
 // and ensure judge: the running binary's, when it is the bin of a
 // standalone install root.
@@ -495,10 +511,16 @@ func applyWindowsEnterpriseHookImage(result *enterprisestatus.Result) {
 		// an older release: expected, and not a drift to repair.
 		result.AddWarning("hook_image_retired", image.Problem)
 		// A profile the administrator skipped (--skip-profile) stays
-		// listed until none of its configs names a launch folder.
+		// listed until none of its configs names a launch folder. A file
+		// this account is denied but LocalSystem reads proves nothing
+		// either way (rel-1-0-10 GAP-0907).
 		if marker, err := os.ReadFile(filepath.Join(winpath.EnterpriseHookImagesRoot(bin), winpath.EnterpriseHookImagesRetiredMarker)); err == nil {
-			for _, line := range windowsHookImageSkippedProfilesNotRetired(marker, bin, readWindowsHookImageConfigFile) {
-				result.AddWarning("hook_image_profile_not_retired", line)
+			callerDenied := windowsHookImageAccessDenied
+			if windowsHookImageCallerIsSystem() {
+				callerDenied = nil
+			}
+			for _, issue := range windowsHookImageSkippedProfileIssues(marker, bin, readWindowsHookImageConfigFile, callerDenied) {
+				result.AddWarning(issue.Code, issue.Text)
 			}
 		}
 		return

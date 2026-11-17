@@ -213,18 +213,18 @@ func TestHookImageSkippedProfilesNotRetired(t *testing.T) {
 		}
 		return []byte(`hooks: {}`), nil
 	}
-	lines := windowsHookImageSkippedProfilesNotRetired(marker, hookImageTestBin, read)
-	if len(lines) != 1 || !strings.Contains(lines[0], skipTestSID) || !strings.Contains(lines[0], skipTestFile) ||
-		!strings.Contains(lines[0], "not retired") || strings.Contains(lines[0], skipTestOther) {
+	lines := windowsHookImageSkippedProfileIssues(marker, hookImageTestBin, read, windowsHookImageAccessDenied)
+	if len(lines) != 1 || lines[0].Code != "hook_image_profile_not_retired" || !strings.Contains(lines[0].Text, skipTestSID) ||
+		!strings.Contains(lines[0].Text, skipTestFile) || !strings.Contains(lines[0].Text, "not retired") || strings.Contains(lines[0].Text, skipTestOther) {
 		t.Fatalf("not retired = %v", lines)
 	}
-	unreadable := windowsHookImageSkippedProfilesNotRetired(marker, hookImageTestBin, func(windowsHookImageConfigFile) ([]byte, error) {
+	unreadable := windowsHookImageSkippedProfileIssues(marker, hookImageTestBin, func(windowsHookImageConfigFile) ([]byte, error) {
 		return nil, errors.New("access denied")
-	})
-	if len(unreadable) != 2 {
+	}, windowsHookImageAccessDenied)
+	if len(unreadable) != 2 || unreadable[0].Code != "hook_image_profile_not_retired" || unreadable[1].Code != "hook_image_profile_not_retired" {
 		t.Fatalf("unreadable files must keep both profiles listed: %v", unreadable)
 	}
-	if got := windowsHookImageSkippedProfilesNotRetired([]byte(`{"schema_version":1,"retired_at":"x"}`), hookImageTestBin, read); len(got) != 0 {
+	if got := windowsHookImageSkippedProfileIssues([]byte(`{"schema_version":1,"retired_at":"x"}`), hookImageTestBin, read, windowsHookImageAccessDenied); len(got) != 0 {
 		t.Fatalf("a marker without skips lists %v", got)
 	}
 }

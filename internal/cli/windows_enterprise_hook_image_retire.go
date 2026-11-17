@@ -133,7 +133,7 @@ type windowsHookImageSkippedProfile struct {
 }
 
 // windowsHookImageRetireMarker is the body of bin\hooks\.retired. Status
-// and verify read SkippedProfiles (windowsHookImageSkippedProfilesNotRetired);
+// and verify read SkippedProfiles (windowsHookImageSkippedProfileIssues);
 // the next stage of this release removes the marker.
 type windowsHookImageRetireMarker struct {
 	SchemaVersion   int                              `json:"schema_version"`
@@ -170,6 +170,10 @@ type windowsHookImageRetireSteps struct {
 	SkipProfiles []string
 	Profiles     func() (map[string]windowsHookImageProfile, error)
 	Actor        func() string
+	// CallerSystem reports whether retire runs as LocalSystem; nil is
+	// not. A skip of a profile whose only holds are files the caller was
+	// denied is refused unless it does (rel-1-0-10 GAP-0907).
+	CallerSystem func() bool
 	Audit        func(windowsHookImageSkippedProfile) error
 	ReadMarker   func(path string) ([]byte, error)
 	Now          func() time.Time
@@ -530,17 +534,28 @@ func windowsHookImageRetireSkipSet(steps windowsHookImageRetireSteps, before win
 	if err != nil {
 		return nil, nil, fmt.Errorf("--skip-profile needs the enrolled profiles of the guardian's manifest, which could not be read: %w", err)
 	}
-	blocking := map[string]bool{}
+	// A profile holds retire back with a file that names a launch folder
+	// (named), one it could not read for another reason (unverified), or
+	// one the caller's token was denied (denied).
+	blocking, named, unverified := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	denied := map[string][]string{}
 	for key := range windowsHookImageBlockingNamedFiles(before, nil) {
 		if sid := before.FileSIDs[key]; sid != "" && before.UserFiles[key] {
 			blocking[strings.ToUpper(sid)] = true
+			named[strings.ToUpper(sid)] = true
 		}
 	}
 	for _, file := range before.Unverified {
-		if sid := strings.TrimSpace(file.File.SID); sid != "" {
-			blocking[strings.ToUpper(sid)] = true
+		if sid := strings.ToUpper(strings.TrimSpace(file.File.SID)); sid != "" {
+			blocking[sid] = true
+			if file.Denied {
+				denied[sid] = append(denied[sid], file.File.Path)
+			} else {
+				unverified[sid] = true
+			}
 		}
 	}
+	system := steps.CallerSystem != nil && steps.CallerSystem()
 	skip := map[string]bool{}
 	for _, raw := range steps.SkipProfiles {
 		sid := strings.ToUpper(strings.TrimSpace(raw))
@@ -558,6 +573,16 @@ func windowsHookImageRetireSkipSet(steps windowsHookImageRetireSteps, before win
 		}
 		if !blocking[sid] {
 			return nil, nil, fmt.Errorf("--skip-profile %s does not hold retire back: none of its own agent configs names a launch folder; run retire without it", canonical)
+		}
+		// An elevated administrator is denied some account folders that
+		// LocalSystem reads (the Codex and Copilot ones): such a profile is
+		// not known to hold retire back, so skipping it would record a
+		// healthy, converted account as unconverted (rel-1-0-10 GAP-0907).
+		if !system && !named[sid] && !unverified[sid] && len(denied[sid]) > 0 {
+			sort.Strings(denied[sid])
+			return nil, nil, fmt.Errorf("--skip-profile %s: retire, run as %s, was denied access to %s, so it is not known whether that profile holds retire back "+
+				"(an elevated administrator is denied some account folders). Run retire as LocalSystem, which reads them, and skip the profile only if it "+
+				"still holds retire back then", canonical, steps.Actor(), strings.Join(denied[sid], ", "))
 		}
 		skip[canonical] = true
 	}
@@ -695,40 +720,59 @@ func windowsHookImageRecordSkips(
 	return recorded, failures
 }
 
-// windowsHookImageSkippedProfilesNotRetired returns, for status and verify,
-// one line per profile the retire marker records as skipped whose recorded
-// files still name a launch folder of bin (or can no longer be read to
-// tell). A profile whose files no longer name one is converted and is not
-// listed. Each file is read as the account's own, below its home.
-func windowsHookImageSkippedProfilesNotRetired(marker []byte, bin string, read func(windowsHookImageConfigFile) ([]byte, error)) []string {
+// windowsHookImageStatusIssue is one warning status and verify add.
+type windowsHookImageStatusIssue struct {
+	Code string
+	Text string
+}
+
+// windowsHookImageSkippedProfileIssues returns, for status and verify, one
+// issue per profile the retire marker records as skipped and that is not
+// known to be converted: hook_image_profile_not_retired when a recorded file
+// still names a launch folder of bin (or can no longer be read to tell), and
+// hook_image_profile_unverified when the only files left unread are ones the
+// caller was denied (callerDenied; nil when the caller is LocalSystem, which
+// reads them): an Administrator's status listed a converted account as not
+// retired because it was denied the account's folders (rel-1-0-10
+// GAP-0907). A profile whose files no longer name one is converted and is
+// not listed. Each file is read as the account's own, below its home.
+func windowsHookImageSkippedProfileIssues(marker []byte, bin string, read func(windowsHookImageConfigFile) ([]byte, error), callerDenied func(error) bool) []windowsHookImageStatusIssue {
 	var body windowsHookImageRetireMarker
 	if err := json.Unmarshal(marker, &body); err != nil {
 		return nil
 	}
-	var lines []string
+	var issues []windowsHookImageStatusIssue
 	for _, profile := range body.SkippedProfiles {
-		var still []string
+		var still, unknown []string
 		for _, named := range profile.Files {
 			data, err := read(windowsHookImageConfigFile{Path: named.File, User: true, Home: profile.Home, SID: profile.SID})
 			switch {
 			case errors.Is(err, fs.ErrNotExist):
 				continue
+			case err != nil && callerDenied != nil && callerDenied(err):
+				unknown = append(unknown, named.File)
 			case err != nil:
 				still = append(still, named.File+" (could not be read: "+err.Error()+")")
 			case len(windowsHookImageFoldersNamedIn(data, bin)) > 0:
 				still = append(still, named.File)
 			}
 		}
-		if len(still) == 0 {
-			continue
-		}
 		account := profile.Account
 		if account == "" {
 			account = profile.SID
 		}
-		lines = append(lines, fmt.Sprintf("%s (%s) is not retired: %s skipped it in hook-image retire at %s, and %s still name a launch folder, "+
-			"so an older release's guardian fails this account; have it sign in (the guardian rewrites its configs), or remove it with its profile",
-			account, profile.SID, profile.SkippedBy, profile.SkippedAt, strings.Join(still, ", ")))
+		switch {
+		case len(still) > 0:
+			issues = append(issues, windowsHookImageStatusIssue{Code: "hook_image_profile_not_retired", Text: fmt.Sprintf(
+				"%s (%s) is not retired: %s skipped it in hook-image retire at %s, and %s still name a launch folder, "+
+					"so an older release's guardian fails this account; have it sign in (the guardian rewrites its configs), or remove it with its profile",
+				account, profile.SID, profile.SkippedBy, profile.SkippedAt, strings.Join(still, ", "))})
+		case len(unknown) > 0:
+			issues = append(issues, windowsHookImageStatusIssue{Code: "hook_image_profile_unverified", Text: fmt.Sprintf(
+				"%s (%s): %s skipped it in hook-image retire at %s; this account was denied reading %s, so status cannot tell whether it is converted. "+
+					"Run enterprise windows status as LocalSystem to check it",
+				account, profile.SID, profile.SkippedBy, profile.SkippedAt, strings.Join(unknown, ", "))})
+		}
 	}
-	return lines
+	return issues
 }

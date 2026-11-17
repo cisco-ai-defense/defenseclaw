@@ -326,6 +326,10 @@ type windowsHookImageConfigScan struct {
 type windowsHookImageUnverifiedFile struct {
 	File windowsHookImageConfigFile
 	Err  string
+	// Denied marks a file the caller's token was refused (access denied):
+	// an elevated administrator is denied some account folders that
+	// LocalSystem reads (windowsHookImageAccessDenied).
+	Denied bool
 }
 
 // Line is the "<file>: <error>" line of u.
@@ -388,7 +392,7 @@ func expandWindowsHookImageConfigFiles(
 	var unverified []windowsHookImageUnverifiedFile
 	refuse := func(entry windowsHookImageConfigFile, err error) {
 		if entry.User {
-			unverified = append(unverified, windowsHookImageUnverifiedFile{File: entry, Err: err.Error()})
+			unverified = append(unverified, windowsHookImageUnverifiedFile{File: entry, Err: err.Error(), Denied: windowsHookImageAccessDenied(err)})
 		} else {
 			incomplete = append(incomplete, entry.line(err))
 		}
@@ -493,7 +497,7 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 		}
 		if err != nil {
 			if file.User {
-				scan.Unverified = append(scan.Unverified, windowsHookImageUnverifiedFile{File: file, Err: err.Error()})
+				scan.Unverified = append(scan.Unverified, windowsHookImageUnverifiedFile{File: file, Err: err.Error(), Denied: windowsHookImageAccessDenied(err)})
 			} else {
 				scan.Incomplete = append(scan.Incomplete, file.line(err))
 			}

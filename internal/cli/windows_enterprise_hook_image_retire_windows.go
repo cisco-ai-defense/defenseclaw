@@ -125,13 +125,14 @@ func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireRepo
 		Profiles: func() (map[string]windowsHookImageProfile, error) {
 			return windowsHookImageEnrolledProfiles(roots)
 		},
-		Actor:      windowsHookImageRetireActor,
-		Audit:      postWindowsHookImageRetireSkip,
-		ReadMarker: os.ReadFile,
-		Now:        time.Now,
-		Sleep:      time.Sleep,
-		Wait:       windowsHookImageRetireWait,
-		Poll:       windowsHookImageRetirePoll,
+		Actor:        windowsHookImageRetireActor,
+		CallerSystem: windowsHookImageCallerIsSystem,
+		Audit:        postWindowsHookImageRetireSkip,
+		ReadMarker:   os.ReadFile,
+		Now:          time.Now,
+		Sleep:        time.Sleep,
+		Wait:         windowsHookImageRetireWait,
+		Poll:         windowsHookImageRetirePoll,
 	})
 }
 
