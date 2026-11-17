@@ -80,6 +80,21 @@ func classifyChanges(changes []TreeChange, content contentFunc, sensitive []stri
 			} else {
 				add(Flag{Path: rel, Label: rel, Kind: RiskSymlink, Severity: SeverityInfo, Detail: "symbolic link to " + t})
 			}
+			// The link's own path counts as the file it makes appear,
+			// wherever inside the project it points (GAP-0523): a run-code
+			// name or folder, a secret file name, a sensitive pattern (a
+			// directory link when a pattern reaches below it).
+			if r, ok := classifyLinkName(rel); ok {
+				add(Flag{Path: rel, Label: rel, Kind: r.kind, Severity: r.severity, Detail: r.detail + " (a symbolic link to " + t + ")"})
+			}
+			if _, ok := isSecretName(rel); ok {
+				add(Flag{Path: rel, Label: rel, Kind: RiskSecretFile, Severity: SeverityMedium, Detail: "a secret-like name, as a symbolic link to " + t})
+			}
+			if p, ok := matchAny(sensitive, rel); ok {
+				add(Flag{Path: rel, Label: rel, Kind: RiskPolicy, Severity: SeverityHigh, Detail: "matches the sensitive-change pattern " + p + " (a symbolic link to " + t + ")"})
+			} else if globsReachBelow(sensitive, rel) {
+				add(Flag{Path: rel, Label: rel, Kind: RiskPolicy, Severity: SeverityHigh, Detail: "a symbolic link to " + t + " where a sensitive-change pattern reaches below it"})
+			}
 			continue
 		}
 		switch base {

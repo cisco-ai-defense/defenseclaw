@@ -240,8 +240,15 @@ var riskRules = []riskRule{
 	// An agent that starts in the folder reads these and runs what they
 	// register (hooks, commands, MCP servers): one pull could add a hook
 	// on this machine (GAP-0473).
-	{patterns: []string{".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/**", ".codex/config.toml", ".codex/hooks.json", ".cursor/hooks.json", ".gemini/settings.json", ".gemini/config/hooks.json"}, kind: RiskAgentConfig, severity: SeverityHigh, detail: "an agent started in this folder runs the hooks and commands it registers"},
-	{patterns: []string{".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json"}, kind: RiskMCPServer, severity: SeverityHigh, detail: "an agent started in this folder launches these MCP servers as commands"},
+	// The patterns start with **/ because Claude Code, Codex and the others
+	// load project settings from the folder they are started in, which may
+	// be a subfolder (GAP-0522).
+	{patterns: []string{"**/.claude/settings.json", "**/.claude/settings.local.json", "**/.claude/hooks/**", "**/.codex/config.toml", "**/.codex/hooks.json",
+		"**/.cursor/hooks.json", "**/.gemini/settings.json", "**/.gemini/config/hooks.json", "**/.kiro/hooks/**", "**/.github/hooks/**",
+		"**/.opencode/**", "**/opencode.json", "**/opencode.jsonc", "**/.amp/settings.json", "**/.amp/settings.jsonc",
+		"**/.devin/hooks.v1.json", "**/.devin/config.json", "**/.devin/config.local.json"}, kind: RiskAgentConfig, severity: SeverityHigh, detail: "an agent started in this folder runs the hooks and commands it registers"},
+	{patterns: []string{".mcp.json", "**/.cursor/mcp.json", "**/.vscode/mcp.json", "**/.kiro/settings/mcp.json", "**/.gemini/mcp.json",
+		"**/.github/mcp.json", "**/.agents/mcp_config.json", "**/.devin/mcp_config.json", "**/.devin/mcp_config.local.json"}, kind: RiskMCPServer, severity: SeverityHigh, detail: "an agent started in this folder launches these MCP servers as commands"},
 	{patterns: []string{".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".kshrc", ".cshrc", ".tcshrc"}, kind: RiskShellRC, severity: SeverityHigh, detail: "runs in every shell that reads it"},
 	{patterns: []string{".envrc", ".env.sh"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "sourced by direnv when you enter the folder"},
 	{patterns: []string{".vscode/tasks.json", ".vscode/launch.json", ".vscode/settings.json", "*.code-workspace"}, kind: RiskAutoExec, severity: SeverityHigh, detail: "editor tasks and settings can run commands when the folder is opened"},
@@ -254,6 +261,37 @@ var riskRules = []riskRule{
 	{patterns: []string{"makefile", "gnumakefile", "*.mk", "justfile", ".justfile", "taskfile.yml", "taskfile.yaml", "rakefile", "*.rake", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew", "gradle/wrapper/**", "mvnw", ".mvn/**", "pom.xml", "cmakelists.txt", "*.cmake", "meson.build", "build.rs", ".cargo/config", ".cargo/config.toml", "build.sbt", "gemfile", "*.gemspec", "composer.json", "deno.json", "deno.jsonc"}, kind: RiskBuild, severity: SeverityHigh, detail: "build tooling runs this on the host"},
 	{patterns: []string{".github/workflows/*", ".github/actions/**", ".gitlab-ci.yml", ".gitlab/**", ".circleci/**", "jenkinsfile", "azure-pipelines.yml", ".azure-pipelines/**", ".buildkite/**", ".travis.yml", "bitbucket-pipelines.yml", ".drone.yml", ".woodpecker.yml", ".woodpecker/**"}, kind: RiskCI, severity: SeverityMedium, detail: "CI runs this with your repository's secrets"},
 	{patterns: []string{"dockerfile", "*.dockerfile", "containerfile", "docker-compose*.yml", "docker-compose*.yaml", "compose.yml", "compose.yaml"}, kind: RiskBuild, severity: SeverityMedium, detail: "container builds run this on the host"},
+}
+
+// classifyLinkName is classifyPath for a symbolic link (GAP-0523): a link
+// named like a run-code file (.mcp.json, .bashrc, .envrc), or like a folder
+// a rule names (.claude, .codex, .github, .vscode, .husky ...), makes that
+// file appear in the folder whatever it points to inside the project. The
+// folder case returns the first rule that names the folder.
+func classifyLinkName(rel string) (riskRule, bool) {
+	if r, ok := classifyPath(rel); ok {
+		return r, true
+	}
+	name := strings.ToLower(path.Base(rel))
+	for _, r := range riskRules {
+		for _, p := range r.patterns {
+			segs := strings.Split(strings.ToLower(strings.TrimPrefix(p, "**/")), "/")
+			if len(segs) > 1 && segs[0] == name {
+				return r, true
+			}
+		}
+	}
+	return riskRule{}, false
+}
+
+// RunsCode reports whether a change to the project path rel (slash form)
+// is flagged as able to run code on this machine (high or medium), the
+// rule copy mode and Substrate pull apply. The connector registry drift
+// test checks every connector's project MCP and hook config against it
+// (GAP-0522).
+func RunsCode(rel string) bool {
+	r, ok := classifyPath(rel)
+	return ok && r.severity.rank() >= SeverityMedium.rank()
 }
 
 func classifyPath(rel string) (riskRule, bool) {
