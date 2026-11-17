@@ -174,7 +174,7 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			ownCopies[literal]++
 		}
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
-		facts := actionfacts.Analyze(inner)
+		facts := analyzeAtHookFolder(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
 		for i, redirect := range redirects {
 			occurrence := RedirectOccurrence{Path: redirect}

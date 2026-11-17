@@ -60,21 +60,25 @@ func normalizePathFactsForCommands(
 }
 
 // normalizePathFactsForCommandsInShell is normalizePathFactsForCommands;
-// windowsShellCWD is Input.MovedWindowsShellCWD.
+// windowsShellCWD is Input.MovedWindowsShellCWD. It normalizes facts in place
+// and returns them with the readings of each relative operand in the other
+// folders its command may run in (working_folder.go) appended.
 func normalizePathFactsForCommandsInShell(
 	facts []PathFact,
 	cwd string,
 	activeHome string,
 	commands []CommandFact,
 	windowsShellCWD bool,
-) {
+) []PathFact {
 	commandByID := make(map[int64]*CommandFact, len(commands))
 	for i := range commands {
 		commandByID[commands[i].ID] = &commands[i]
 	}
+	windowsFolders := windowsWorkFolders(commands)
 	// One index per command: a command of thousands of operands has a path
 	// fact for each, and each fact asked the whole argument list (GAP-0483).
 	indexByID := make(map[int64]*commandPathIndex, len(commands))
+	var others []PathFact
 	for i := range facts {
 		command := commandByID[facts[i].CommandID]
 		var index *commandPathIndex
@@ -84,30 +88,55 @@ func normalizePathFactsForCommandsInShell(
 				indexByID[command.ID] = index
 			}
 		}
+		// A command that runs after a cd works in the folders the cd may have
+		// moved the call to (working_folder.go): the fact is read in the
+		// hook's folder when the command may run there, and in each other
+		// folder below; an unresolved folder keeps the hook's reading.
+		raw := facts[i]
+		facts[i].parsedFlavor = raw.Flavor
+		factCWD, otherDirs, unresolved := commandWorkFolderDirs(cwd, activeHome, command, windowsFolders)
 		context := pathContextForCommand(
 			facts[i],
-			cwd,
+			factCWD,
 			command,
 			index,
 		)
 		context.windowsShellCWD = windowsShellCWD
 		normalized, absolute, resolved := derivePathWithContext(
 			facts[i],
-			cwd,
+			factCWD,
 			activeHome,
 			context,
 		)
+		if factCWD != cwd {
+			hookNormalized, hookAbsolute, hookResolved := derivePathWithContext(facts[i], cwd, activeHome, context)
+			facts[i].atHook = &pathAtHook{normalized: hookNormalized, absolute: hookAbsolute, resolved: hookResolved}
+		}
 		facts[i].Normalized = normalized
 		facts[i].Absolute = absolute
 		facts[i].Resolved = resolved
 		facts[i].Flavor = normalizedPathFlavorWithContext(
 			facts[i],
-			cwd,
+			factCWD,
 			normalized,
 			resolved,
 			context,
 		)
+		facts[i].unresolvedFolder = unresolved
+		for _, dir := range otherDirs {
+			other := raw
+			otherContext := pathContextForCommand(raw, dir, command, index)
+			otherContext.windowsShellCWD = windowsShellCWD
+			other.Normalized, other.Absolute, other.Resolved = derivePathWithContext(raw, dir, activeHome, otherContext)
+			if other.Resolved == facts[i].Resolved && other.Normalized == facts[i].Normalized {
+				continue // an absolute operand names the same file in every folder
+			}
+			other.Flavor = normalizedPathFlavorWithContext(other, dir, other.Normalized, other.Resolved, otherContext)
+			other.otherFolder = true
+			others = append(others, other)
+		}
 	}
+	return append(facts, others...)
 }
 
 func pathContextForCommand(

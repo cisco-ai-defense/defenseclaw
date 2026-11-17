@@ -983,6 +983,11 @@ func dispatchTrustedAction(
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// An operand in a folder the call does not give: the unknown tier when
+	// it may be a protected file there (rel-1-0-10:GAP-0871).
+	defer func() {
+		findings = withUnresolvedFolderTier(findings, request, facts, false)
+	}()
 	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
@@ -1218,6 +1223,13 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.UnresolvedFolder {
+					// The walk does not know the folder this statement runs
+					// in (cd "$X", cd "$(...)"): the unknown tier when an
+					// operand may be a named protected file there
+					// (rel-1-0-10:GAP-0871).
+					childFindings = withUnresolvedFolderTier(childFindings, child, actionfacts.Analyze(child.Input), true)
+				}
 				if simple.LoginGuess {
 					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 						return !loginGuessProvedFinding(f)
@@ -1279,6 +1291,52 @@ func dispatchTrustedActionWith(
 					}
 				}
 				findings = withSimpleCommandFindings(findings, childFindings)
+			}
+			// A find hands its starting points to the program it runs: that
+			// program on each starting point is judged as the statement
+			// alone, for the call and for each of its statements, and the
+			// strictest finding is kept (rel-1-0-10:GAP-1048).
+			inputs := []actionfacts.Input{request.Input}
+			for _, simple := range simples {
+				if simple.EvaluationFailure == "" && !simple.OpaqueValueAssignment && !simple.LiteralOutputOnly &&
+					!simple.LoginGuess {
+					input := request.Input
+					input.Command, input.Args, input.Argv, input.CWD = simple.Text, nil, nil, simple.CWD
+					if simple.AbsoluteOnly {
+						input.CWD = request.Input.CWD
+					}
+					inputs = append(inputs, input)
+				}
+			}
+			for index, input := range inputs {
+				text, _ := trustedBashCommandInput(input)
+				if !strings.Contains(text, "-exec") && !strings.Contains(text, "-ok") {
+					continue
+				}
+				inputFacts := facts
+				if index != 0 {
+					inputFacts = actionfacts.Analyze(input)
+				}
+				readings, truncated := actionfacts.FindHandedReadings(inputFacts)
+				if truncated {
+					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
+				}
+				for _, reading := range readings {
+					child := request
+					child.Input = input
+					child.Input.Command, child.Input.Args, child.Input.Argv = reading, nil, nil
+					child.LegacyText = reading
+					child.conflictSource = nil
+					child.record, child.recordTelemetry = nil, nil
+					child.simpleCommandPass = true
+					parent := request.Input
+					if wholeCommandKnown {
+						parent.Command = wholeCommand
+					}
+					child.parentPatch = &parent
+					child.generation, child.budget = generation, budget
+					findings = withSimpleCommandFindings(findings, dispatchTrustedAction(ctx, child))
+				}
 			}
 		}()
 	}
@@ -4080,7 +4138,9 @@ func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trust
 	}
 	placed := request
 	placed.Input.CWD = cwd
-	return actionfacts.Analyze(placed.Input), placed, true
+	// The link-walk facts are keyed by the client walk (the hook folder
+	// reading of each path, Facts.AtHookFolder).
+	return actionfacts.Analyze(placed.Input).AtHookFolder(), placed, true
 }
 
 // protectedHomeClientDirectory is the directory a managed hook call runs in
@@ -4951,7 +5011,10 @@ func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRe
 		return facts, request
 	}
 	request.Input.CWD = client
-	return actionfacts.Analyze(request.Input), request
+	// The client keyed its link facts by its own walk of the call, which
+	// places a command by the hook folder: read the paths there too, or a
+	// write the gateway places after a cd misses its keys (GAP-0426).
+	return actionfacts.Analyze(request.Input).AtHookFolder(), request
 }
 
 // placedLinkedStateWrite reads each top-level statement in the directory
@@ -12540,7 +12603,9 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 	// an unknown directory); match the commands in order and skip those.
 	var placedCommands []actionfacts.SimpleCommand
 	for _, simple := range actionfacts.SimpleCommands(placed, actionfacts.Analyze(placed)) {
-		if simple.EvaluationFailure == "" {
+		// The readings of a statement in the other folders it may run in
+		// pair with no statement of the unplaced split.
+		if simple.EvaluationFailure == "" && !simple.OtherFolder {
 			placedCommands = append(placedCommands, simple)
 		}
 	}

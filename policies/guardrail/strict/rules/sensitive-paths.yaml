@@ -24,7 +24,8 @@ rules:
     tags: [credential, file-sensitive]
   - id: PATH-AWS-CREDS
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.aws/credentials'
@@ -51,7 +52,8 @@ rules:
     tags: [credential, password-cracking, file-sensitive, detection-only]
   - id: PATH-KUBE
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.kube/config'
@@ -61,7 +63,8 @@ rules:
     tags: [credential, file-sensitive]
   - id: PATH-DOCKER
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.docker/config\.json'
@@ -89,7 +92,8 @@ rules:
     tags: [credential, file-sensitive]
   - id: PATH-GIT-CREDS
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.git-credentials'
@@ -188,7 +192,8 @@ rules:
     tags: [system-file, privilege]
   - id: PATH-PROC-ENVIRON
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '/proc/(?:\d+|self)/environ'
@@ -199,7 +204,8 @@ rules:
   - id: secrets.cloud_credential_read
     tool_call_only: true
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|gh[/\\]hosts\.yml|anthropic[/\\]keys\.json)|AppData[/\\]Roaming[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|GitHub CLI[/\\]hosts\.yml)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
@@ -226,7 +232,8 @@ rules:
   - id: secrets.browser_session_store_read
     tool_call_only: true
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:google-chrome|chromium|microsoft-edge)|\.mozilla[/\\]firefox|Library[/\\]Application Support[/\\](?:google[/\\]chrome|chromium|microsoft edge|firefox[/\\]profiles)|AppData[/\\]Local[/\\](?:google[/\\]chrome|chromium|microsoft[/\\]edge)[/\\]User Data|AppData[/\\]Roaming[/\\]mozilla[/\\]firefox[/\\]profiles)[/\\](?:[^/\\"'']+[/\\])*(?:Login Data|Cookies|logins\.json|cookies\.sqlite|key4\.db)(?:$|["''\s])'
@@ -237,7 +244,8 @@ rules:
   - id: secrets.workload_identity_token_read
     tool_call_only: true
     expression: >-
-      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.commands.exists(c, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
     pattern: '/var/run/secrets/(?:(?:kubernetes\.io|eks\.amazonaws\.com)/serviceaccount/token|azure/tokens/azure-identity-token)(?:$|["''\s])'

@@ -40,6 +40,14 @@ type CredentialFileShape struct {
 	// StrongUpload marks the shapes whose static upload is a credential
 	// exfiltration on its own (CredentialFileUploadStrong).
 	StrongUpload bool
+	// HomeFile marks the shapes that belong in a home only: a name inside a
+	// tool folder (.aws/credentials, .kube/config, .config/gh/hosts.yml), and
+	// the dotfiles that hold nothing but credentials (.git-credentials,
+	// .netrc, .pgpass). Such a file in a project is the exception, so it is
+	// read as an account's own credentials in any home, whatever the home
+	// root is called (/mnt/home/alice, /srv/homes/carol). .npmrc, .pypirc
+	// and .env are shipped in projects and are not HomeFile.
+	HomeFile bool
 }
 
 // credentialFileShape is one row of the credentials-file table. A row
@@ -73,6 +81,9 @@ type credentialFileShape struct {
 	stemAny, stemNone []string
 	// strongUpload: see CredentialFileShape.StrongUpload.
 	strongUpload bool
+	// homeOnly: see CredentialFileShape.HomeFile (a row with a relative
+	// path of several components is one already).
+	homeOnly bool
 }
 
 // credentialFileShapes is the single credentials-file table. The semantic
@@ -113,10 +124,10 @@ var credentialFileShapes = [...]credentialFileShape{
 	{class: CredentialFilePackageRegistry, base: ".npmrc", strongUpload: true},
 	{class: CredentialFilePackageRegistry, base: ".pypirc", strongUpload: true},
 
-	{class: CredentialFileDeveloperToken, base: ".git-credentials", strongUpload: true},
-	{class: CredentialFileDeveloperToken, base: ".netrc", strongUpload: true},
-	{class: CredentialFileDeveloperToken, base: "_netrc"},
-	{class: CredentialFileDeveloperToken, base: ".pgpass"},
+	{class: CredentialFileDeveloperToken, base: ".git-credentials", strongUpload: true, homeOnly: true},
+	{class: CredentialFileDeveloperToken, base: ".netrc", strongUpload: true, homeOnly: true},
+	{class: CredentialFileDeveloperToken, base: "_netrc", homeOnly: true},
+	{class: CredentialFileDeveloperToken, base: ".pgpass", homeOnly: true},
 	{class: CredentialFileDeveloperToken, relative: ".cache/huggingface/token"},
 	{class: CredentialFileDeveloperToken, relative: ".huggingface/token"},
 	{class: CredentialFileDeveloperToken, relative: ".config/huggingface/token"},
@@ -330,6 +341,7 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 			Class:        row.class,
 			Relative:     relative,
 			StrongUpload: row.strongUpload,
+			HomeFile:     row.homeOnly || strings.Contains(relative, "/"),
 		}, true
 	}
 	return CredentialFileShape{}, false

@@ -88,6 +88,12 @@ type Input struct {
 	// such a body where it is defined and judges the apply_patch envelope
 	// in it, run or not (rel-1-0-6:GAP-0928 review 12).
 	StraightLineFunctions bool `json:"-"`
+	// folderUnknown is set by the walk (SimpleCommands) on the input of a
+	// nested shell body that starts after a cd the walk could not follow
+	// (CWD is then empty): the body starts in that unknown folder, not in no
+	// folder, so its current-folder heads and relative operands are read as
+	// the top level reads them (rel-1-0-10:GAP-1042).
+	folderUnknown bool
 	// CurrentWindowsDrive is trusted caller context: the drive letter of the
 	// directory the hook payload reported, for a gateway that could not place
 	// that directory itself (CWD is empty). A Windows path with no drive of
@@ -1090,14 +1096,18 @@ type CommandFact struct {
 	// `cd X && a && b` (b runs only after the cd succeeded) from
 	// `cd X && a; b` (b also runs after a failed cd).
 	ShortCircuitListID int64 `json:"-"`
-	Kind               CommandKind
-	Dialect            Dialect
-	Effect             CommandEffect
-	Executable         string
-	Program            string
-	Argv               []string
-	Arguments          []ArgumentFact
-	ArgvComplete       bool
+	// workFolders are the folders the command may run in after the cd,
+	// pushd and popd calls before it (working_folder.go); its path facts are
+	// read in each of them.
+	workFolders  workFolders
+	Kind         CommandKind
+	Dialect      Dialect
+	Effect       CommandEffect
+	Executable   string
+	Program      string
+	Argv         []string
+	Arguments    []ArgumentFact
+	ArgvComplete bool
 	// LiteralStdin is retained only for one bounded POSIX heredoc (any
 	// delimiter quoting, <<-) whose bytes cannot undergo shell expansion.
 	// It is private in-process evidence and is intentionally not part of
@@ -1266,6 +1276,28 @@ type PathFact struct {
 	// call already names, never a further operand, so a proof that counts
 	// the operands of a call counts it with OperandPaths (GAP-0819).
 	Linked bool
+	// atHook is the reading of the operand in the hook's own folder, kept when
+	// a cd moved the folder of its command (working_folder.go). The link and
+	// authorized-keys symlink proofs read it (Facts.AtHookFolder): they place
+	// links by the hook's folder and keep their verdicts of before the folder
+	// tracking, so a link operation they cannot place never turns a write
+	// after a cd into an unproven link write.
+	atHook *pathAtHook
+	// otherFolder marks the reading of an operand in another folder its
+	// command may run in (working_folder.go): `cd X; cat f` reads f in the
+	// hook's folder (the fact) and in X (this one), as the cd may fail. It is
+	// a path the call may reach, judged by every path rule, and not a further
+	// operand (OperandPaths leaves it out).
+	otherFolder bool
+	// unresolvedFolder marks an operand of a command that may run in a
+	// folder the call does not give (cd "$X", cd "$(...)", popd, a loop that
+	// moves on each pass): the fact keeps its reading in the hook's folder,
+	// and the gateway gives a relative operand there the unknown tier.
+	unresolvedFolder bool
+	// parsedFlavor is the flavor the parser gave the operand, before the
+	// normalization replaced it: a reading in other folders starts from it
+	// (Facts.withWorkFoldersOf).
+	parsedFlavor PathFlavor
 	// LinkedFrom is, for a Linked fact, the resolved spelling of the operand
 	// whose link reaches this file. A proof that reads the text one write
 	// puts into a file judges it only against the files that write reaches,
@@ -1273,12 +1305,59 @@ type PathFact struct {
 	LinkedFrom string
 }
 
+// pathAtHook is the Normalized, Absolute and Resolved reading of a path fact
+// against the hook's folder.
+type pathAtHook struct {
+	normalized string
+	absolute   bool
+	resolved   string
+}
+
+// AtHookFolder returns the facts with every path read against the hook's own
+// folder, as before the call's cd chain was tracked (working_folder.go). It is
+// for the proofs that place links by the hook's folder; every other rule reads
+// the path the command reaches.
+func (f Facts) AtHookFolder() Facts {
+	moved := false
+	for _, path := range f.Paths {
+		if path.atHook != nil || path.otherFolder {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		return f
+	}
+	paths := make([]PathFact, 0, len(f.Paths))
+	for _, path := range f.Paths {
+		if path.otherFolder {
+			continue
+		}
+		if reading := path.atHook; reading != nil {
+			path.Normalized, path.Absolute, path.Resolved = reading.normalized, reading.absolute, reading.resolved
+			path.atHook = nil
+		}
+		paths = append(paths, path)
+	}
+	f.Paths = paths
+	return f
+}
+
+// OtherFolderReading reports the reading of an operand in another folder its
+// command may run in (PathFact.otherFolder).
+func (p PathFact) OtherFolderReading() bool { return p.otherFolder }
+
+// UnresolvedFolder reports an operand of a command that may run in a folder
+// the call does not give (PathFact.unresolvedFolder).
+func (p PathFact) UnresolvedFolder() bool { return p.unresolvedFolder }
+
 // OperandPaths returns the path facts that are operands of the call: every
-// fact except those added for the file a link reaches.
+// fact except those added for the file a link reaches and the readings of an
+// operand in another folder its command may run in.
 func (f Facts) OperandPaths() []PathFact {
 	operands := make([]PathFact, 0, len(f.Paths))
 	for _, candidate := range f.Paths {
-		if !candidate.Linked {
+		if !candidate.Linked && !candidate.otherFolder {
 			operands = append(operands, candidate)
 		}
 	}

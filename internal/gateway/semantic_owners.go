@@ -89,7 +89,7 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	},
 	"PATH-AWS-CREDS": {
 		equivalentAliases: []string{"PATH-WIN-AWS-CREDS"},
-		prerequisite:      pathOwnerPrerequisite(matchesActiveAWSCredentials),
+		prerequisite:      pathOwnerPrerequisite(matchesAnyHomeAWSCredentials),
 		suppressFallback:  pathOwnerSafeNegative(matchesAWSCredentials, matchesActiveAWSCredentials),
 	},
 	"PATH-PASSWORD-CRACKER-POTFILE": {
@@ -100,12 +100,12 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	},
 	"PATH-KUBE": {
 		equivalentAliases: []string{"PATH-WIN-KUBE-CONFIG"},
-		prerequisite:      pathOwnerPrerequisite(matchesActiveKubeConfig),
+		prerequisite:      pathOwnerPrerequisite(matchesAnyHomeKubeConfig),
 		suppressFallback:  pathOwnerSafeNegative(matchesKubeConfig, matchesActiveKubeConfig),
 	},
 	"PATH-DOCKER": {
 		equivalentAliases: []string{"PATH-NPMRC", "PATH-PYPIRC"},
-		prerequisite:      pathOwnerPrerequisite(matchesActivePackageCredentialFile),
+		prerequisite:      pathOwnerPrerequisite(matchesAnyHomePackageCredentialFile),
 		suppressFallback:  pathOwnerSafeNegative(matchesPackageCredentialFile, matchesActivePackageCredentialFile),
 	},
 	"PATH-GIT-CREDS": {
@@ -114,7 +114,7 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 			"PATH-WIN-GIT-CREDS",
 			"PATH-WIN-NETRC",
 		},
-		prerequisite:     pathOwnerPrerequisite(matchesActiveGitCredentialFile),
+		prerequisite:     pathOwnerPrerequisite(matchesAnyHomeGitCredentialFile),
 		suppressFallback: pathOwnerSafeNegative(matchesGitCredentialFile, matchesActiveGitCredentialFile),
 	},
 	"PATH-PROC-ENVIRON": {
@@ -583,8 +583,11 @@ type semanticPathCandidate func(string) bool
 func pathOwnerPrerequisite(matches semanticPathMatcher) semanticOwnerPrerequisite {
 	return func(facts actionfacts.Facts) bool {
 		for _, command := range facts.Commands {
+			// A copy reads its source as a cat does: the credential file that
+			// `cp` moves to a staging folder was read, whatever the program.
 			if command.Effect != actionfacts.EffectExecute ||
-				!hasOperation(command, actionfacts.OperationRead) {
+				!hasOperation(command, actionfacts.OperationRead) &&
+					!hasOperation(command, actionfacts.OperationCopy) {
 				continue
 			}
 			for _, path := range facts.Paths {
@@ -649,6 +652,16 @@ func matchesContextualSSHPrivateKey(
 		return false
 	}
 	if strings.HasPrefix(value, "~/.ssh/") || strings.HasPrefix(value, "/root/.ssh/") {
+		return true
+	}
+	// A key file directly in the .ssh folder of an account home is a key in
+	// whatever account holds it, a Windows profile folder included. The home
+	// is found by its position (isRecognizedHomeRoot: /root, or the account
+	// folder one level below /home, /Users or <drive>:/Users), never by the
+	// name of a folder deeper in the path: a .ssh folder below a project folder
+	// (/work/repo/users/bob/.ssh) is not read here (rel-1-0-10:GAP-0836).
+	if keyDir := path.Dir(value); path.Base(keyDir) == ".ssh" && isAbsoluteSemanticPath(value) &&
+		isRecognizedHomeRoot(path.Dir(keyDir)) {
 		return true
 	}
 	for _, root := range []string{"/home/", "/users/"} {
@@ -1490,10 +1503,10 @@ func matchesActiveSensitivePath(
 	value := semanticPathValue(candidate)
 	return matchesContextualEnvironmentFile(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
-		matchesActiveAWSCredentials(facts, candidate) ||
-		matchesActiveKubeConfig(facts, candidate) ||
-		matchesActivePackageCredentialFile(facts, candidate) ||
-		matchesActiveGitCredentialFile(facts, candidate) ||
+		matchesAnyHomeAWSCredentials(facts, candidate) ||
+		matchesAnyHomeKubeConfig(facts, candidate) ||
+		matchesAnyHomePackageCredentialFile(facts, candidate) ||
+		matchesAnyHomeGitCredentialFile(facts, candidate) ||
 		matchesProcEnviron(value) ||
 		matchesActiveCloudCredentialFile(facts, candidate) ||
 		matchesActiveBrowserSessionStore(facts, candidate) ||
@@ -1530,6 +1543,39 @@ func activeHomeCredentialFile(
 		return strings.HasPrefix(relative, within+"/")
 	}
 	return relative == shape.Relative
+}
+
+// otherHomeCredentialFile reports a path outside the active home that is a
+// home-only credentials file of class (credentialFileShape.HomeFile) of
+// another account's home. The home is found by its position in the resolved
+// path (isRecognizedHomeRoot: /root, or an account folder directly below
+// /home, /Users or <drive>:/Users), after the path is resolved against the
+// folder the call runs in, so ../ from the working folder, a relative operand
+// in a working folder that sits in another account's home, and ~user all name
+// the home they reach. The agent that reads such a file reads another
+// account's credentials just as it would its own, so the file is judged like
+// the active home's. Nothing is read from a folder name deeper in the path:
+// a project folder that happens to be called home, homes or users is not an
+// account home (rel-1-0-10:GAP-0836), so a fixture tree below the working
+// folder stays outside, as does a name shipped in projects (.npmrc, .pypirc,
+// .env) and a relative path that did not resolve, whose folder is not known.
+// within names the folder an entry must sit in (the SSH keys are matched by
+// matchesContextualSSHPrivateKey).
+func otherHomeCredentialFile(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+	class actionfacts.CredentialFileClass,
+	within string,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if within != "" || !isAbsoluteSemanticPath(value) || integrityPathHasFixtureSegment(value) {
+		return false
+	}
+	shape, ok := actionfacts.MatchCredentialFileShape(value)
+	if !ok || shape.Class != class || !shape.HomeFile || !strings.HasSuffix(value, "/"+shape.Relative) {
+		return false
+	}
+	return isRecognizedHomeRoot(strings.TrimSuffix(value, "/"+shape.Relative))
 }
 
 func matchesEnvironmentFile(value string) bool {
@@ -1654,6 +1700,34 @@ func matchesPasswordCrackerPotfile(
 
 func matchesKubeConfig(value string) bool {
 	return credentialFileShapeIs(value, actionfacts.CredentialFileKubeconfig)
+}
+
+// The credential-file owners prove a read of the file in any home: the
+// active one (matchesActive...) or another account's (otherHomeCredentialFile).
+// Their safe negative (suppressFallback) keeps the ACTIVE home alone: a path
+// of another home that the typed reading does not prove keeps the regex
+// fallback that judged it on rel. With the other homes in the safe negative
+// too, a copy (cp, install) or an upload (curl -F f=@) of another account's
+// credentials file, which the read-only owner does not prove, lost the
+// fallback finding and was a clean allow (rel-1-0-10:GAP-0834, GAP-0835).
+func matchesAnyHomeAWSCredentials(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActiveAWSCredentials(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFileAWS, "")
+}
+
+func matchesAnyHomeKubeConfig(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActiveKubeConfig(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFileKubeconfig, "")
+}
+
+func matchesAnyHomePackageCredentialFile(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActivePackageCredentialFile(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFilePackageRegistry, "")
+}
+
+func matchesAnyHomeGitCredentialFile(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	return matchesActiveGitCredentialFile(facts, candidate) ||
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFileDeveloperToken, "")
 }
 
 func matchesActiveKubeConfig(

@@ -184,7 +184,21 @@ path_rules:
   - {id: PATH-K8S-CLUSTER-CRED, access: [read], re: "^/etc/(k8s|kubernetes)/(admin|kubelet)[.]conf$|^/etc/kubernetes/pki/.*[.]key$"}
   - {id: PATH-CRED-STORE, access: [read], re: "^/(private/)?etc/(master[.]passwd|gshadow|security/opasswd|krb5[.]keytab)$|^/var/lib/jenkins/(credentials[.]xml$|secrets/)|^/etc/(aws|azure|gcloud)/credentials$|/[^/]+[.]keytab$"}
   - {id: PATH-CRED-STORE-USER, access: [read], re: "/[.](azure/(credentials|accessTokens[.]json)|config/gh/hosts[.]yml|my[.]cnf|pgpass|vault-token)$"}
+  # A write to a repository's own .git/config runs code at the next git command (core.fsmonitor, core.hooksPath, core.sshCommand, an alias), as a
+  # git hook does (the git program's own config calls have their rule in the pack).
+  - {id: source.git_config_exec, access: [write, append], re: "(?i)(?:^|/)[.]git/config$"}
+  # The developer-token files of an account's home (the class of PATH-GIT-CREDS: .git-credentials, .netrc, _netrc, .pgpass). A native file tool reads them
+  # as the typed owner does on the shell and MCP lanes (rel-1-0-10:GAP-0816). The home is found by its position, as isRecognizedHomeRoot reads it: /root, or
+  # the account folder directly below /home, /Users or <drive>:/Users. A folder of a project that is only called home, homes or users, at any depth, is
+  # no account home (rel-1-0-10:GAP-0836).
+  - {id: PATH-GIT-CREDS, access: [read], re: "(?i)^(?:/root|/(?:home|users)/[^/]+|[a-z]:/users/[^/]+)/(?:[.](?:git-credentials|netrc|pgpass)|_netrc)$"}
   - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$", text_re: ":[^:[:space:]]*:0:0:"}
+  # A unit or launch file in the account's own scheduler folders runs at its next login or start, as a cron entry does: a systemd user unit, an XDG
+  # autostart entry, a launchd agent. home_re reads the path below the active home of the call (a laptop home, a sandbox home /sandbox), as
+  # persistence.shell_profile_write reads the profile, never a home guessed from the shape of the path (rel-1-0-10:GAP-1002).
+  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], home_re: "(?i)^(?:[.]config/systemd/user/[^/]+[.](?:service|timer|socket|path|target)|[.]config/autostart/[^/]+[.]desktop|Library/LaunchAgents/[^/]+[.]plist)$"}
+  # The system unit and launchd folders.
+  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "(?i)^/etc/systemd/system/[^/]+[.](?:service|timer|socket|path|target)$|^/Library/Launch(?:Agents|Daemons)/[^/]+[.]plist$"}
   - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "^/etc/(cron[.](d|daily|hourly|weekly|monthly)/|crontab$|sudoers[.]d/)|^/var/spool/cron/", text_re: "(?i)(^|[^a-z])root[[:space:]]+([^[:space:]]+[[:space:]]+)*(/home/|/tmp/|/var/tmp/|/dev/shm/|~/)"}
 command_rules:
   - {id: CMD-SECRET-REVEAL, any_argv: ["--show-secrets", "--reveal"]}
@@ -196,4 +210,4 @@ command_rules:
 text_rules:
   - {id: CMD-PRIV-PATH-HIJACK, re: "(?i)(^|[;&|][[:space:]]*)PATH=(/tmp|/var/tmp|/dev/shm)[^[:space:]:]*:[$][{]?PATH[}]?[[:space:]]+(sudo|pkexec|su|doas)([[:space:]]|$)"}
 # A shell text without one of these words is not parsed again for the rules above.
-shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron"]
+shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", "launchdaemons", "/systemd/system", ".git/config", "/.git", "cd .git", "pushd .git"]

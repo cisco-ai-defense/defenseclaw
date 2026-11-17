@@ -142,11 +142,21 @@ func TestReadAndNeighbourOfActiveHomeCredentialFileKeepTheirVerdict(t *testing.T
 	for _, command := range []string{
 		"echo x >> " + home + "/notes.txt",
 		"echo x >> ./netrc",
-		"cp " + home + "/.npmrc ./npmrc.copy",
 		"git status --short",
 	} {
 		if got := shell(command); got.action != "allow" || len(got.rules) != 0 {
 			t.Errorf("%q: %s, want allow with no rule", command, got)
+		}
+	}
+	// A copy of a credential file reads it as a cat does (T-DETECT, Phase-1
+	// tune side: the credential-file rules read only `cat`-like reads, so a
+	// copy to a staging file was a clean allow): it gets the verdict of the
+	// read, by the rule of its name.
+	for _, spelling := range credentialFileSpellings {
+		read := shell("cat " + home + "/" + spelling.rel)
+		copied := shell("cp " + home + "/" + spelling.rel + " ./staged.copy")
+		if copied.action != read.action || len(copied.rules) == 0 {
+			t.Errorf("copy of %s: %s, want the verdict of its read %s", spelling.rel, copied, read)
 		}
 	}
 	for _, name := range []string{".netrc", ".aws/credentials"} {

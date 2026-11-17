@@ -1918,7 +1918,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
-	facts := actionfacts.Analyze(input)
+	facts := actionfacts.Analyze(input).AtHookFolder()
 	if view, ok := overLimitBoundedTwinFacts(input, facts); ok {
 		// A command over the limit only by the white space and comments that
 		// pad it is judged by the gateway as the command without them, so the
@@ -2119,9 +2119,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
-				fallbackFacts := actionfacts.Analyze(fallback)
+				fallbackFacts := actionfacts.Analyze(fallback).AtHookFolder()
 				if twin, ok := actionfacts.OverLimitCommandBoundedTwin(fallback, fallbackFacts); ok {
-					fallback, fallbackFacts = twin, actionfacts.Analyze(twin)
+					fallback, fallbackFacts = twin, actionfacts.Analyze(twin).AtHookFolder()
 				}
 				// One per-command reading serves the move and the child
 				// readings below.
@@ -2211,7 +2211,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						}
 						twinInput := fallback
 						twinInput.Command = reading
-						twinFacts := actionfacts.Analyze(twinInput)
+						twinFacts := actionfacts.Analyze(twinInput).AtHookFolder()
 						facts.Paths = append(facts.Paths, twinFacts.Paths...)
 						truncated = truncated || twinFacts.Parse.Status == actionfacts.StatusLimitExceeded
 						twinOperands, _, _ := ShellWriteOperands(reading, cwd, home)
@@ -2804,7 +2804,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	for _, reading := range dynamicReadings {
 		readingInput := input
 		readingInput.Tool, readingInput.Args, readingInput.Command = "Bash", nil, reading
-		readingFacts := actionfacts.Analyze(readingInput)
+		readingFacts := actionfacts.Analyze(readingInput).AtHookFolder()
 		truncated = truncated || readingFacts.Parse.Status == actionfacts.StatusLimitExceeded
 		readingPaths, _, _ := ShellWriteOperands(reading, cwd, home)
 		readingPaths = append(readingPaths, LiteralWriteOperands(reading, cwd, home)...)
@@ -3023,7 +3023,7 @@ func overLimitBoundedTwinFacts(input actionfacts.Input, facts actionfacts.Facts)
 	if !ok {
 		return actionfacts.Facts{}, false
 	}
-	return actionfacts.Analyze(twin), true
+	return actionfacts.Analyze(twin).AtHookFolder(), true
 }
 
 // movedDirectorySightingPath names a directory a complete, plain move may
@@ -4409,7 +4409,7 @@ func straightLineReadings(input actionfacts.Input, command string) []actionfacts
 		return nil
 	}
 	input.LoopBindsStraightLine = true
-	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input))
+	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input).AtHookFolder())
 }
 
 // readingReachesLink reports a reading with a write operand that lies behind a

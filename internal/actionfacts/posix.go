@@ -74,6 +74,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	pipelines := posixPipelineRelations(file)
 	representedFallbacks := exactStandalonePOSIXAbsoluteCDFallbacks(file)
 	statementIDs := make(map[*syntax.Stmt]int64)
+	workFolders := posixWorkFolders(file)
 	var stack []syntax.Node
 	var credentialArgIndexes map[*syntax.CallExpr]map[*syntax.Word]int
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -119,6 +120,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 			command, ok := projectPOSIXStatement(typed, pipelines[typed], stack, statementIDs, &out)
 			if ok {
 				statementIDs[typed] = command.ID
+				command.workFolders = workFolders[typed]
 				out.appendCommand(command)
 			}
 		}
@@ -1532,6 +1534,10 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			carryPOSIXLiteralTildes(&child, command)
 		default:
 			continue
+		}
+		for i := range child.commands {
+			// The body of a wrapper starts in the folder its caller is in.
+			child.commands[i].workFolders = child.commands[i].workFolders.within(command.workFolders)
 		}
 		mergeStaticPOSIXWrapperChild(out, command, child)
 	}
