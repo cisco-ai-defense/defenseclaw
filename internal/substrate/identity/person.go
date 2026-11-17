@@ -44,7 +44,8 @@ type Person struct {
 	Issuer  string
 	Subject string
 	// Principal is the cross-device join key (email, UPN or preferred
-	// username), "" when the token carries none.
+	// username), "" when the token carries none. An email the issuer marks
+	// unverified (email_verified false) is never the principal.
 	Principal string
 	Groups    []string
 	Expires   time.Time
@@ -257,7 +258,14 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 		return Person{}, reasonf(ReasonSubject, "token subject is not a person")
 	}
 	p := Person{Kind: is.Kind, Issuer: c.Issuer, Subject: sub, Expires: time.Unix(*c.Expiry, 0)}
-	for _, cand := range []string{c.Email, c.UPN, c.Preferred} {
+	email := c.Email
+	if emailUnverified(raw["email_verified"]) {
+		// The issuer says it has not checked the address (a local user
+		// typed it in): it is not a join key a profile or an audit row may
+		// trust, so the UPN or user name stands in (GAP-0390).
+		email = ""
+	}
+	for _, cand := range []string{email, c.UPN, c.Preferred} {
 		if cand = strings.TrimSpace(cand); cand != "" && len(cand) <= 320 {
 			p.Principal = cand
 			break
@@ -274,6 +282,18 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 		}
 	}
 	return p, nil
+}
+
+// emailUnverified reports an email_verified claim that says no: false, or
+// "false" from issuers that send the claim as a string. An absent claim is
+// not a no (Entra ID and many CI issuers never send it).
+func emailUnverified(v json.RawMessage) bool {
+	var b bool
+	if json.Unmarshal(v, &b) == nil {
+		return !b
+	}
+	var str string
+	return json.Unmarshal(v, &str) == nil && strings.EqualFold(strings.TrimSpace(str), "false")
 }
 
 // SignInKeySet is the key set of the first person issuer (the OIDC issuer
