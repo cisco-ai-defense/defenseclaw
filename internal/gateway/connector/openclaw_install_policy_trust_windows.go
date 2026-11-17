@@ -148,8 +148,8 @@ func openClawInstallPolicyOwnerTrusted(p string, sd *windows.SECURITY_DESCRIPTOR
 			}
 		}
 	}
-	return fmt.Errorf("%s is owned by %s, which can change its ACL; OpenClaw would then run a command another account controls",
-		p, openClawInstallPolicySIDName(owner))
+	return &openClawInstallPolicyOwnerError{msg: fmt.Sprintf("%s is owned by %s, which can change its ACL; OpenClaw would then run a command another account controls",
+		p, openClawInstallPolicySIDName(owner))}
 }
 
 // openClawInstallPolicyACLTrusted is the OpenClaw rule for one file or

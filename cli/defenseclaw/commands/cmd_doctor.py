@@ -13231,7 +13231,7 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
             "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
             + (" (another security.installPolicy is configured)" if policy_state == "operator" else "")
             + (f"; {recorded}" if recorded.startswith("not registered:") else ""),
-            remediation=openclaw_install_policy_remediation(policy_state),
+            remediation=openclaw_install_policy_remediation(policy_state, recorded=recorded),
             r=r,
         )
     return hook_mode

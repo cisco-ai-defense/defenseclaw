@@ -213,7 +213,7 @@ def openclaw_install_policy_recorded_state(cfg: object) -> str:
     return state.strip() if isinstance(state, str) else ""
 
 
-def openclaw_install_policy_remediation(policy_state: str, platform: str | None = None) -> str:
+def openclaw_install_policy_remediation(policy_state: str, platform: str | None = None, recorded: str = "") -> str:
     # What doctor says when install_policy is on but OpenClaw does not ask
     # DefenseClaw. The gateway runs setup, so the reason is in gateway.log.
     # On Windows OpenClaw refuses every command below a drive root standard
@@ -223,6 +223,11 @@ def openclaw_install_policy_remediation(policy_state: str, platform: str | None 
 
     if policy_state == "operator":
         return "remove your own security.installPolicy from openclaw.json, then run `defenseclaw setup openclaw`"
+    if "is too old for strict install policy" in recorded:
+        return (
+            "upgrade OpenClaw to 2026.11.3 or later (npm install -g openclaw@latest), then run "
+            "`defenseclaw setup openclaw`; until then installed skills and plugins are checked when DefenseClaw finds them"
+        )
     text = (
         "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
         "gateway.log names the reason (install admission is not registered: ...)"

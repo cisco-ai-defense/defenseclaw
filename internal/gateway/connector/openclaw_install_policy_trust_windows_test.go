@@ -187,7 +187,7 @@ func TestOpenClawInstallPolicyRegisteredBelowAHardenedRootWindows(t *testing.T) 
 		{"11.3 default root", "2026.11.3", defaultRoot, own, "not registered: OpenClaw would refuse"},
 		{"8.35 hardened root", "2026.8.35", hardened, own, "not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows (needs 2026.11.3 or later)"},
 		{"8.35 default root", "2026.8.35", defaultRoot, own, "not registered: OpenClaw would refuse"},
-		{"11.3 folder owned by Users", "2026.11.3", hardened, "O:BUD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;" + me + ")", "not registered: OpenClaw would refuse"},
+		{"11.3 folder owned by Users", "2026.11.3", hardened, "O:BUD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;" + me + ")", "not registered: DefenseClaw does not register"},
 	} {
 		root, folder := tc.root, tc.folder
 		openClawInstallPolicyReadSecurity = func(p string) (*windows.SECURITY_DESCRIPTOR, error) {

@@ -1104,7 +1104,11 @@ def _print_agents(
                     _status_row(
                         "OpenClaw installs",
                         ux._style(
-                            recorded if recorded.startswith("not registered:") else "not registered (run defenseclaw doctor)",
+                            (
+                                recorded.split(":", 2)[1].strip()[:60] + "... (defenseclaw doctor)"
+                                if recorded.startswith("not registered:")
+                                else "not registered (run defenseclaw doctor)"
+                            ),
                             fg="yellow",
                         ),
                     )

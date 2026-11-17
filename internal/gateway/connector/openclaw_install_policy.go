@@ -68,13 +68,15 @@ type openClawInstallPolicyTooOldError struct {
 }
 
 func (e *openClawInstallPolicyTooOldError) Error() string {
-	version := e.version
-	if version == "" {
-		version = "of unknown version"
-	}
 	return fmt.Sprintf("OpenClaw %s is too old for strict install policy on Windows (needs %s or later): it counts inherit-only entries, and %v",
-		version, OpenClawWindowsInheritOnlySince, e.cause)
+		e.version, OpenClawWindowsInheritOnlySince, e.cause)
 }
+
+// openClawInstallPolicyOwnerError is an owner DefenseClaw refuses (OpenClaw
+// does not check owners).
+type openClawInstallPolicyOwnerError struct{ msg string }
+
+func (e *openClawInstallPolicyOwnerError) Error() string { return e.msg }
 
 func (e *openClawInstallPolicyTooOldError) Unwrap() error { return e.cause }
 
@@ -186,6 +188,10 @@ func openClawInstallPolicyCommand(opts SetupOpts) (string, error) {
 		var tooOld *openClawInstallPolicyTooOldError
 		if errors.As(err, &tooOld) {
 			return "", err
+		}
+		var owner *openClawInstallPolicyOwnerError
+		if errors.As(err, &owner) {
+			return "", fmt.Errorf("DefenseClaw does not register %s as the install policy command: %v", command, err)
 		}
 		return "", fmt.Errorf("OpenClaw would refuse %s as its install policy command (%v)", command, err)
 	}

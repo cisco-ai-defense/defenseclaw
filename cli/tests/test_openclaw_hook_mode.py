@@ -196,6 +196,12 @@ class OpenClawInstallPolicyRemediationTest(unittest.TestCase):
         self.assertIn("drive root", windows)
         self.assertIn("C:\\", windows)
 
+    def test_too_old_says_upgrade(self):
+        text = openclaw_install_policy_remediation(
+            "none", "win32", recorded="not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows"
+        )
+        self.assertIn("upgrade OpenClaw to 2026.11.3", text)
+
     def test_operator_policy(self):
         self.assertIn("remove your own security.installPolicy", openclaw_install_policy_remediation("operator", "win32"))
 
