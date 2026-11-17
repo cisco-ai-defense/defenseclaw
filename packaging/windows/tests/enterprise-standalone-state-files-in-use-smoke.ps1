@@ -1054,17 +1054,23 @@ public static class DcsfRemove {
                 $failures.Add("a failure that is not a file in use was retried ($($clock.ElapsedMilliseconds) ms)")
             }
 
-            # The Secure Client profile keeps the single deletion.
+            # The Secure Client profile keeps the single deletion. A retry is
+            # seen by its result, not by the clock: within the 2 s retry
+            # window set above, a retried deletion of a file the reader holds
+            # for 120 s ends in uninstall_in_use. The single deletion walks the
+            # whole tree with its privileged fallbacks, which took 1.5 s and
+            # more on a hosted Windows PowerShell 5.1 runner, so the former
+            # 1.5 s bound failed a deletion that ran once
+            # (rel-1-0-10:GAP-1233, #1457 run 134343225809).
             $layout = New-TestState 'secure-client'
             $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-            $clock = [Diagnostics.Stopwatch]::StartNew()
             try {
                 Remove-DefenseClawPurgedStateRoot -Layout $layout
                 $failures.Add('Secure Client deletion of a held audit.db succeeded')
             }
             catch {
-                if ($_.Exception.Message -match '^uninstall_in_use' -or $clock.ElapsedMilliseconds -ge 1500) {
+                if ($_.Exception.Message -match '^uninstall_in_use' -or -not (Test-DefenseClawFileInUseError -ErrorRecord $_)) {
                     $failures.Add("Secure Client deletion was retried or reworded: $($_.Exception.Message)")
                 }
             }
