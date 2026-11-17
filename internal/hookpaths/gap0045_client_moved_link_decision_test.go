@@ -5,7 +5,6 @@ package hookpaths
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
