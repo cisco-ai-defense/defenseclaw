@@ -226,6 +226,29 @@ func actionClientLoopWriterDestinations(call *syntax.CallExpr, home string) []*s
 	return nil
 }
 
+// actionAttachedCopyDestination returns the destination folder of a cp, mv,
+// install or ln call (after the prefix utilities lateUnwrapCall reads) when
+// the target-directory option holds it in the option word itself: -tDIR,
+// -ftDIR, --target-directory=DIR. ok is false when the destination is a word
+// of its own, which the caller judges as written.
+func actionAttachedCopyDestination(call *syntax.CallExpr, home string) (*syntax.Word, bool) {
+	if args, _, unwrapped := lateUnwrapCall(call.Args, home); unwrapped && len(args) != len(call.Args) {
+		call = &syntax.CallExpr{Args: args}
+	}
+	destinations := actionClientLoopWriterDestinations(call, home)
+	if len(destinations) == 0 {
+		return nil, false
+	}
+	// The last target-directory option given is the one the program uses.
+	destination := destinations[len(destinations)-1]
+	for _, word := range call.Args {
+		if word == destination {
+			return nil, false
+		}
+	}
+	return destination, true
+}
+
 // actionClientTargetDirectoryOption reads the option word args[i] of cp, mv,
 // install or ln, given the literal text its word starts with. It returns the
 // target directory the word names, and whether the option takes the next
