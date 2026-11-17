@@ -5,6 +5,7 @@ package attest
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -78,43 +79,116 @@ func TestGAP0480UnreadableServerSourceIsUnscanned(t *testing.T) {
 	}
 }
 
-// GAP-0524: the GAP-0480 fail mode covered only server files with an
-// extension the extractor reads. Every shape of a repository server that
-// runs folder code (no extension, a module, .pyw, ./x, another language)
-// is unscanned too; an interpreter given an absolute path (a server in the
-// image, scanned at build) and a pinned package stay with the config rules.
-func TestGAP0524EveryRepoServerShapeIsUnscanned(t *testing.T) {
-	rt := &RuntimeScanner{MCPStatic: &MCPStaticScanner{Binary: "dc-gap0524-no-mcp-scanner"}, Compiled: policy.CompileAdmission(&config.Config{})}
-	scan := func(cmd string, args []string, files ...AttachedFile) *RuntimeDecision {
-		t.Helper()
-		srv := MCPServer{Name: "evil", Transport: "stdio", Command: cmd, Args: args, Source: "/work/repo/.mcp.json"}
-		d, err := rt.Scan(context.Background(), RuntimeAsset{Kind: "mcp", Name: "evil", Path: "/work/repo/.mcp.json", Server: &srv, Files: files})
+// repoServerDecision scans the repository server "evil" as the gateway
+// does for a call of its tool: the kit attached the project's .mcp.json
+// (and extra, the server files and module records), the call runs in the
+// project. It returns the runtime decision for the server.
+func repoServerDecision(t *testing.T, cmd string, args []string, env map[string]string, extra ...AttachedFile) *RuntimeDecision {
+	t.Helper()
+	rt := &RuntimeScanner{MCPStatic: &MCPStaticScanner{Binary: "dc-gap0551-no-mcp-scanner"}, Compiled: policy.CompileAdmission(&config.Config{})}
+	srv := map[string]any{"command": cmd, "args": args}
+	if len(env) > 0 {
+		srv["env"] = env
+	}
+	cfg, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{"evil": srv}})
+	files := append([]AttachedFile{{Role: RoleMCPConfig, Path: "/work/repo/.mcp.json", Content: cfg}}, extra...)
+	payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": "/work/repo", "tool_name": "mcp__evil__add_numbers", "tool_input": map[string]any{}})
+	for _, a := range HookAssets(payload, files) {
+		if a.Kind != "mcp" || a.Server == nil || a.Server.Name != "evil" {
+			continue
+		}
+		d, err := rt.Scan(context.Background(), a)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return d
 	}
+	t.Fatalf("no asset for the repository server %s %v", cmd, args)
+	return nil
+}
+
+// GAP-0524: the GAP-0480 fail mode covered only server files with an
+// extension the extractor reads. Every shape of a repository server that
+// runs folder code (no extension, a module, .pyw, ./x, another language)
+// is unscanned too.
+func TestGAP0524EveryRepoServerShapeIsUnscanned(t *testing.T) {
 	attached := func(p string) AttachedFile {
 		return AttachedFile{Role: RoleMCPServer, Path: "/work/repo/" + p, Content: []byte(gap0480EvilServer)}
 	}
 	for name, d := range map[string]*RuntimeDecision{
-		"no extension":   scan("python3", []string{"tools/evil_server"}, attached("tools/evil_server")),
-		"module":         scan("python3", []string{"-m", "tools.evil_server"}),
-		".pyw":           scan("python3", []string{"tools/evil_server.pyw"}, attached("tools/evil_server.pyw")),
-		"./program":      scan("./tools/evil_server", nil, attached("tools/evil_server")),
-		"ruby":           scan("ruby", []string{"tools/evil_server.rb"}, attached("tools/evil_server.rb")),
-		"node, no files": scan("node", []string{"srv/index.js"}),
+		"no extension":   repoServerDecision(t, "python3", []string{"tools/evil_server"}, nil, attached("tools/evil_server")),
+		"module":         repoServerDecision(t, "python3", []string{"-m", "tools.evil_server"}, nil, attached("tools/evil_server.py")),
+		".pyw":           repoServerDecision(t, "python3", []string{"tools/evil_server.pyw"}, nil, attached("tools/evil_server.pyw")),
+		"./program":      repoServerDecision(t, "./tools/evil_server", nil, nil, attached("tools/evil_server")),
+		"ruby":           repoServerDecision(t, "ruby", []string{"tools/evil_server.rb"}, nil, attached("tools/evil_server.rb")),
+		"node, no files": repoServerDecision(t, "node", []string{"srv/index.js"}, nil),
 	} {
 		if !d.Unavailable {
 			t.Errorf("%s: %+v, want unscanned (the fail mode decides)", name, d)
 		}
 	}
+}
+
+// GAP-0551: the GAP-0524 rule was an interpreter allow-list, so shells,
+// env, uv, npm, make, go, cargo, a --require flag, code-loading env
+// variables, ${PWD} and local npx packages still escaped. A server the
+// project defines is now unscanned unless it is positively known to run
+// nothing of the folder: an installed program (also run by a runner, or
+// after -jar, GAP-0556), a registry package with no local source (pinned
+// or not: the config rules warn on unpinned), or a -m module the kit
+// did not find in the folder (GAP-0556); and no code-loading env.
+func TestGAP0551RepoServerIsUnscannedUnlessKnownSafe(t *testing.T) {
+	unknown := []struct {
+		cmd  string
+		args []string
+		env  map[string]string
+	}{
+		{"sh", []string{"-c", "python3 tools/evil_server"}, nil},
+		{"bash", []string{"-c", "exec python3 tools/evil_server.py"}, nil},
+		{"bash", []string{"-lc", "npx tsx tools/evil.ts"}, nil},
+		{"env", []string{"python3", "-m", "tools.evil_server"}, nil},
+		{"/usr/bin/env", []string{"python3", "-m", "tools.evil_server"}, nil},
+		{"uv", []string{"run", "python", "-m", "tools.evil_server"}, nil},
+		{"uv", []string{"run", "-m", "tools.evil_server"}, nil},
+		{"uvx", []string{"--from", ".", "evil-server"}, nil},
+		{"npm", []string{"run", "--silent", "mcp"}, nil},
+		{"npm", []string{"start"}, nil},
+		{"make", []string{"-s", "serve"}, nil},
+		{"node", []string{"--require=./tools/evil.js", "/usr/lib/node_modules/srv/index.js"}, nil},
+		{"npx", []string{"-y", "@pinned/pkg@1.2.3"}, map[string]string{"NODE_OPTIONS": "--require ./tools/evil.js"}},
+		{"evil_server", nil, map[string]string{"PATH": "./tools:/usr/bin"}},
+		{"/usr/local/bin/mcp-server-fetch", nil, map[string]string{"PYTHONPATH": "./tools"}},
+		{"${PWD}/tools/evil_server", nil, nil},
+		{"npx", []string{"-y", "./tools/srvpkg"}, nil},
+		{"python2", []string{"-m", "tools.evil_server"}, nil},
+		{"go", []string{"run", "./tools/srv"}, nil},
+		{"go", []string{"run", "."}, nil},
+		{"cargo", []string{"run"}, nil},
+		{"/work/repo/bin/srv", nil, nil},
+		{"mcp-server-fetch", nil, nil},
+		{"/usr/bin/java", []string{"-jar", "./srv.jar"}, nil},
+	}
+	for _, c := range unknown {
+		if d := repoServerDecision(t, c.cmd, c.args, c.env); !d.Unavailable {
+			t.Errorf("%s %v (env %v): %+v, want unscanned", c.cmd, c.args, c.env, d)
+		}
+	}
+	absent := AttachedFile{Role: "mcp_module_absent", Path: "mcp_server_time"}
 	for name, d := range map[string]*RuntimeDecision{
-		"image server": scan("node", []string{"/usr/lib/node_modules/server/dist/index.js"}),
-		"pinned pkg":   scan("npx", []string{"-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."}),
+		"installed program":     repoServerDecision(t, "/usr/local/bin/mcp-server-fetch", []string{"--stdio"}, nil),
+		"runner, installed js":  repoServerDecision(t, "/usr/bin/node", []string{"/usr/lib/node_modules/srv/index.js", "--stdio"}, nil),
+		"pinned package":        repoServerDecision(t, "npx", []string{"-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."}, nil),
+		"pinned python package": repoServerDecision(t, "uvx", []string{"mcp-server-time==0.6"}, nil),
+		"unpinned package":      repoServerDecision(t, "npx", []string{"-y", "@modelcontextprotocol/server-filesystem", "/work/repo"}, nil),
+		"java -jar /abs":        repoServerDecision(t, "java", []string{"-jar", "/opt/srv/server.jar"}, nil),
+		"image module (-m)":     repoServerDecision(t, "python3", []string{"-m", "mcp_server_time"}, nil, absent),
 	} {
 		if d.Unavailable {
 			t.Errorf("%s: %+v, want decided by the config rules", name, d)
 		}
+	}
+	// A -m module with no record from the kit (an older kit) is not known.
+	if d := repoServerDecision(t, "python3", []string{"-m", "mcp_server_time"}, nil); !d.Unavailable {
+		t.Errorf("-m with no module record: %+v, want unscanned", d)
 	}
 }

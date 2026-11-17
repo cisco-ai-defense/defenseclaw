@@ -336,6 +336,17 @@ func mcpConfigPaths(connectorName, cwd string) []string {
 	return out
 }
 
+// moduleCandidates are the files of the folder a Python module name runs
+// (python -m a.b runs a/b.py or the package a/b); attest.ModuleCandidates
+// is the gateway's copy of the same rule.
+func moduleCandidates(module string) []string {
+	p := strings.ReplaceAll(strings.TrimSpace(module), ".", "/")
+	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") {
+		return nil
+	}
+	return []string{p + ".py", p + "/__main__.py", p + "/__init__.py"}
+}
+
 // attachMCP attaches every MCP config of the connector that exists and the
 // in-repository files its stdio servers start (E20), so the gateway can
 // scan them before the agent starts or calls them.
@@ -353,6 +364,26 @@ func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
 			servers = claudeMCPServers(cfgPath, cwd)
 		}
 		for _, s := range servers {
+			// A Python module the server runs (-m a.b): its file when it is
+			// in the folder, else a record that the kit looked and found
+			// none, so the gateway can tell the image's module from the
+			// folder's (GAP-0556).
+			for i, a := range s.Args {
+				if a != "-m" || i+1 >= len(s.Args) {
+					continue
+				}
+				found := false
+				for _, c := range moduleCandidates(s.Args[i+1]) {
+					p := filepath.Join(cwd, filepath.FromSlash(c))
+					if resolved, err := filepath.EvalSymlinks(p); err == nil && within(resolved, cwd) {
+						budget = attach(f, "mcp_server", p, resolved, budget)
+						found = true
+					}
+				}
+				if !found {
+					f.Files = append(f.Files, AttachedFile{Role: "mcp_module_absent", Path: s.Args[i+1]})
+				}
+			}
 			for _, cand := range append([]string{s.Command}, s.Args...) {
 				if !looksLikePath(cand) {
 					continue

@@ -135,7 +135,8 @@ type PathFact struct {
 
 // AttachedFile is a file the kit read for the gateway.
 type AttachedFile struct {
-	// Role is skill_file, mcp_config or mcp_server.
+	// Role is skill_file, mcp_config, mcp_server or mcp_module_absent (a
+	// -m module the kit looked for in the folder and did not find).
 	Role     string `json:"role"`
 	Path     string `json:"path"`
 	Resolved string `json:"resolved,omitempty"`
