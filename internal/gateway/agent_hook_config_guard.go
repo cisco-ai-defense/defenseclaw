@@ -1300,7 +1300,7 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 			if copies := sandboxAgentHookRegisteredCopies(request.Connector, target, input.ActiveHome); len(copies) > 0 {
 				reason, judged := sandboxAgentHookRegisteredChange(format, change, copies)
 				if reason != "" {
-					return agentHookConfigDisableRuleID, reason, target
+					return agentHookConfigDisableRuleID, reason + "; " + sandboxManagedHooksNote, target
 				}
 				if judged {
 					continue
@@ -1383,6 +1383,11 @@ func sandboxAgentHookRegisteredCopies(connector, target, home string) [][]byte {
 	}
 	return copies
 }
+
+// sandboxManagedHooksNote tells the person why a change to the actor's
+// registered hook file is refused and what to do instead (GAP-0433, lead
+// ruling: the actor is stricter than the laptop here in 1.0.10).
+const sandboxManagedHooksNote = "in an actor DefenseClaw's hooks are managed by root-owned settings, so this file must keep DefenseClaw's hook entries as written: change other keys with Edit, or ask your administrator to change the managed settings"
 
 // sandboxAgentHookRegisteredChange judges a change to a file that holds
 // DefenseClaw's hooks on the laptop as the laptop judges it, against
