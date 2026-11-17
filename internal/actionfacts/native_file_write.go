@@ -178,11 +178,11 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 	patchCommands := map[int64]CommandFact{}
 	patchFiles := map[int64]map[string]bool{}
 	for _, command := range facts.Commands {
-		text, ok := applyPatchStdinText(command)
+		text, shellView, ok := applyPatchStdinText(command)
 		if !ok {
 			continue
 		}
-		envelope := parsePatchEnvelope(text)
+		envelope := readPatchEnvelope(text, shellView)
 		if envelope.status != StatusComplete {
 			continue
 		}
@@ -191,7 +191,7 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 		for _, change := range envelope.changes {
 			patchFiles[command.ID][change.path] = true
 		}
-		for _, write := range nativePatchEnvelopeWrites(envelope.canonical) {
+		for _, write := range nativePatchEnvelopeWrites(envelope.canonical, shellView) {
 			write.added = boundedNativeText(write.added)
 			write.replaced = boundedNativeText(write.replaced)
 			writes = append(writes, write)
@@ -361,27 +361,28 @@ func nativePatchWrites(object map[string]any) []nativeFileWrite {
 	if !ok || envelope.status != StatusComplete {
 		return nil
 	}
-	return nativePatchEnvelopeWrites(envelope.canonical)
+	return nativePatchEnvelopeWrites(envelope.canonical, false)
 }
 
 // nativePatchEnvelopeWrites reads the files and the added and removed lines of
 // an apply_patch envelope that parsePatchEnvelope read complete (its
-// canonical form). A file no reader places (isAcceptedPatchPath) is no write
+// canonical form; shellView as readPatchEnvelope read it). A file no reader
+// places (patchNamePlaced) is no write
 // the content rules can judge by its name, as it is no path fact: its lines
 // are skipped, and the file it moves to still gets them (rel-1-0-10:GAP-1055).
-func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
+func nativePatchEnvelopeWrites(text string, shellView bool) []nativeFileWrite {
 	var writes []nativeFileWrite
 	var current []int
 	for _, line := range strings.Split(text, "\n") {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "):
 			current = nil
-			if target := patchDirectivePath(line, line[:strings.Index(line, ": ")+2]); isAcceptedPatchPath(target) {
+			if target := patchDirectivePath(line, line[:strings.Index(line, ": ")+2]); patchNamePlaced(target, shellView) {
 				writes = append(writes, nativeFileWrite{target: target, whole: strings.HasPrefix(line, "*** Add File: ")})
 				current = []int{len(writes) - 1}
 			}
 		case strings.HasPrefix(line, "*** Move to: "):
-			if target := patchDirectivePath(line, "*** Move to: "); isAcceptedPatchPath(target) {
+			if target := patchDirectivePath(line, "*** Move to: "); patchNamePlaced(target, shellView) {
 				writes = append(writes, nativeFileWrite{target: target})
 				current = append(current, len(writes)-1)
 			}

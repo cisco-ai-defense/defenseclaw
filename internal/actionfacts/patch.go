@@ -19,6 +19,7 @@ package actionfacts
 import (
 	"encoding/json"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -44,7 +45,8 @@ type patchEnvelopeResult struct {
 	// unplaced says the envelope is well formed but a header names its file
 	// by a spelling no reader places (isAcceptedPatchPath). The tool writes
 	// that file, so the call is judged at the unknown tier
-	// (PatchNamesUnplacedTarget), never read as an envelope the tool rejects.
+	// (PatchNamesUnplacedTarget for the tool, CommandPatchNamesUnplacedTarget
+	// for a here-document), never read as an envelope the tool rejects.
 	// The changes of the other headers are kept and judged as they are in an
 	// envelope of their own (rel-1-0-10:GAP-1055); when no header is placed,
 	// the status is invalid, since the envelope names nothing a rule reads.
@@ -232,6 +234,23 @@ func appendExtractedPatch(out *extractedInput, text string) {
 }
 
 func parsePatchEnvelope(text string) patchEnvelopeResult {
+	return readPatchEnvelope(text, false)
+}
+
+// patchNamePlaced reports a header name a reader places: one
+// isAcceptedPatchPath accepts and, in the text a shell shows of a
+// here-document it expands (shellView), one the shell does not change (no
+// expansion, no escape: posixHeredocLiteralEscapes). A name the shell expands
+// is a file the tool writes whose name no rule reads, as one no reader places
+// (rel-1-0-10:GAP-1077).
+func patchNamePlaced(name string, shellView bool) bool {
+	return isAcceptedPatchPath(name) && (!shellView || !posixHeredocLiteralEscapes(name))
+}
+
+// readPatchEnvelope is parsePatchEnvelope for the text of the envelope, or
+// for the text a shell shows of a here-document it expands (shellView), whose
+// header names may change when the shell expands them (patchNamePlaced).
+func readPatchEnvelope(text string, shellView bool) patchEnvelopeResult {
 	fail := func(status ParseStatus, issue IssueCode) patchEnvelopeResult {
 		return patchEnvelopeResult{status: status, issue: issue}
 	}
@@ -348,7 +367,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if kind != "" && pathValue != "" && len(pathValue) <= maxScalarBytes &&
 			strings.IndexByte(pathValue, 0) < 0 &&
 			strings.TrimLeftFunc(pathValue, unicode.IsSpace) == pathValue &&
-			!isAcceptedPatchPath(pathValue) {
+			!patchNamePlaced(pathValue, shellView) {
 			// The tool writes this file, but no reader places its name:
 			// the rest of the envelope is still read, and a well formed
 			// one is unplaced, not invalid.
@@ -452,28 +471,25 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 
 // applyPatchStdinText is the envelope text of a POSIX apply_patch command
 // fed by a here-document, in every delimiter spelling: the document itself
-// when no shell expansion touches it, and for a document the shell expands,
-// the text it shows (LiteralStdinView) when no file directive of it holds an
-// expansion or a backslash. The expansions are then unknown content of the
-// lines that hold them; the files the patch names are as the text names them.
-// A document that is not read yields no text.
-func applyPatchStdinText(command CommandFact) (string, bool) {
+// when no shell expansion touches it (shellView false), and for a document
+// the shell expands, the text it shows (LiteralStdinView, shellView true).
+// The expansions are then unknown content of the lines that hold them, and a
+// header whose name the shell may change names a file no reader places
+// (readPatchEnvelope): the other headers are read as the text names them, so
+// that header hides none of them (rel-1-0-10:GAP-1077). A document that is
+// not read yields no text.
+func applyPatchStdinText(command CommandFact) (text string, shellView, ok bool) {
 	if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
 		!command.ArgvComplete || len(command.Argv) != 1 {
-		return "", false
+		return "", false, false
 	}
 	if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
-		return command.LiteralStdin, true
+		return command.LiteralStdin, false, true
 	}
 	if command.LiteralStdinComplete || command.LiteralStdinView == "" {
-		return "", false
+		return "", false, false
 	}
-	for _, line := range strings.Split(command.LiteralStdinView, "\n") {
-		if strings.HasPrefix(line, "*** ") && strings.ContainsAny(line, "$\\") {
-			return "", false
-		}
-	}
-	return command.LiteralStdinView, true
+	return command.LiteralStdinView, true, true
 }
 
 // classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
@@ -481,12 +497,19 @@ func applyPatchStdinText(command CommandFact) (string, bool) {
 // envelope bytes (applyPatchStdinText); other stdin forms have no
 // authoritative patch text.
 func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
-	text, ok := applyPatchStdinText(*command)
+	text, shellView, ok := applyPatchStdinText(*command)
 	if !ok {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	patch := parsePatchEnvelope(text)
+	patch := readPatchEnvelope(text, shellView)
+	// A header no reader places is a file the tool writes and no path rule
+	// can name: the command carries the mark, and the gateway judges it at
+	// the unknown tier at least (CommandPatchNamesUnplacedTarget), as it
+	// judges the same envelope given to the native tool. The placed headers
+	// stay complete facts, so a block they prove stays a block
+	// (rel-1-0-10:GAP-1077).
+	command.PatchUnplacedTarget = patch.unplaced
 	if patch.status != StatusComplete {
 		if patch.status == StatusLimitExceeded {
 			out.markLimit(patch.issue)
@@ -494,13 +517,6 @@ func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
 			out.markPartial(patch.issue)
 		}
 		return
-	}
-	if patch.unplaced {
-		// The placed files are judged below; the shell reading has no
-		// unknown-tier finding of its own for the file no reader places, so
-		// the command stays partial, as it was when that header made the
-		// whole envelope unread (rel-1-0-10:GAP-1055).
-		out.markPartial(IssueInvalidSyntax)
 	}
 	for _, change := range patch.changes {
 		switch change.access {
@@ -544,4 +560,16 @@ func PatchNamesUnplacedTarget(tool string, args json.RawMessage) bool {
 		}
 	}
 	return false
+}
+
+// CommandPatchNamesUnplacedTarget reports a shell command of facts that feeds
+// apply_patch an envelope, by a here-document (applyPatchStdinText), with a
+// header no reader places: the shell route of PatchNamesUnplacedTarget. The
+// caller judges the call at the unknown tier of the pack at least, and the
+// placed headers of the same envelope are path facts the rules judge
+// (rel-1-0-10:GAP-1077).
+func CommandPatchNamesUnplacedTarget(facts Facts) bool {
+	return slices.ContainsFunc(facts.Commands, func(command CommandFact) bool {
+		return command.PatchUnplacedTarget
+	})
 }
