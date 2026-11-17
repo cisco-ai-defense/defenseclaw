@@ -7,6 +7,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"sync"
 
 	"mvdan.cc/sh/v3/syntax"
 
@@ -116,40 +117,76 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 	})
 }
 
+// commandPathPrograms is how CommandPathWords reads a program's words, one
+// spec string parsed once (separate literals would each add forms to the
+// package's literal sweep, TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget):
+// program=kind, where kind is
+//   - name: acts on the link itself, never follows an operand link;
+//   - h: follows unless -h or --no-dereference;
+//   - copy: follows unless it keeps links (-P, -d, -a, -R, -r or their long
+//     names), or when -L or -H asks for it;
+//   - archive: follows only with -h or --dereference;
+//   - eval: runs its arguments as a command body;
+//   - shell: runs the body after -c.
+//
+// Any other program opens the files its operands name.
+const commandPathPrograms = "rm=name unlink=name mv=name ln=name ls=name stat=name lstat=name readlink=name " +
+	"find=name test=name [=name file=name rsync=name git=name lsattr=name chown=h chgrp=h touch=h " +
+	"cp=copy gcp=copy tar=archive zip=archive eval=eval sh=shell bash=shell dash=shell zsh=shell ksh=shell " +
+	"ash=shell busybox=shell"
+
+// commandPathFlags are the flags each kind reads, as short:long pairs (an
+// empty long has none): the flags that keep links, then those that follow.
+const (
+	commandPathNoFollowH    = "h:no-dereference"
+	commandPathCopyKeeps    = "P:no-dereference d: a:archive R:recursive r:"
+	commandPathCopyFollows  = "L:dereference H:"
+	commandPathArchiveFlags = "h:dereference"
+)
+
+var commandPathKinds = sync.OnceValue(func() map[string]string {
+	kinds := map[string]string{}
+	for _, entry := range strings.Fields(commandPathPrograms) {
+		program, kind, _ := strings.Cut(entry, "=")
+		kinds[program] = kind
+	}
+	return kinds
+})
+
 // commandFollowsOperandLinks reports a program that opens the files its
 // operands name, so a link that is an operand is followed; false for one
 // that acts on the link itself.
 func commandFollowsOperandLinks(program string, args []*syntax.Word, home string) bool {
-	switch program {
-	case "rm", "unlink", "mv", "ln", "ls", "stat", "lstat", "readlink", "find", "test", "[", "file",
-		"rsync", "git", "lsattr":
+	switch commandPathKinds()[program] {
+	case "name":
 		return false
-	case "chown", "chgrp", "touch":
-		return !commandHasFlag(args, home, 'h', "--no-dereference")
-	case "cp", "gcp":
-		return !commandHasFlag(args, home, 'P', "--no-dereference") && !commandHasFlag(args, home, 'd', "") &&
-			!commandHasFlag(args, home, 'a', "--archive") && !commandHasFlag(args, home, 'R', "--recursive") &&
-			!commandHasFlag(args, home, 'r', "") ||
-			commandHasFlag(args, home, 'L', "--dereference") || commandHasFlag(args, home, 'H', "")
-	case "tar", "zip":
-		return commandHasFlag(args, home, 'h', "--dereference")
+	case "h":
+		return !commandHasAnyFlag(args, home, commandPathNoFollowH)
+	case "copy":
+		return !commandHasAnyFlag(args, home, commandPathCopyKeeps) || commandHasAnyFlag(args, home, commandPathCopyFollows)
+	case "archive":
+		return commandHasAnyFlag(args, home, commandPathArchiveFlags)
 	}
 	return true
 }
 
-// commandHasFlag reports a short flag in a bundle (-rP) or the long option.
-func commandHasFlag(args []*syntax.Word, home string, short byte, long string) bool {
-	for _, arg := range args[min(1, len(args)):] {
-		value, static := StaticWord(arg, home)
-		switch {
-		case !static:
-			continue
-		case value == "--":
-			return false
-		case long != "" && value == long:
-			return true
-		case len(value) > 1 && value[0] == '-' && value[1] != '-' && strings.IndexByte(value[1:], short) >= 0:
-			return true
+// commandHasAnyFlag reports one of the short:long flags of spec, a short one
+// in a bundle (-rP) too, among the options before a `--`.
+func commandHasAnyFlag(args []*syntax.Word, home, spec string) bool {
+	for _, pair := range strings.Fields(spec) {
+		short, long, _ := strings.Cut(pair, ":")
+		for _, arg := range args[min(1, len(args)):] {
+			value, static := StaticWord(arg, home)
+			if !static {
+				continue
+			}
+			if value == "--" {
+				break
+			}
+			if long != "" && strings.HasPrefix(value, "--") && value[2:] == long ||
+				len(value) > 1 && value[0] == '-' && value[1] != '-' && strings.Contains(value[1:], short) {
+				return true
+			}
 		}
 	}
 	return false
@@ -167,13 +204,13 @@ type staticCommandBody struct {
 // place in the command.
 func staticCommandBodies(program string, args []*syntax.Word) []staticCommandBody {
 	var candidates []*syntax.Word
-	switch program {
+	switch commandPathKinds()[program] {
 	case "eval":
 		candidates = args[1:]
-	case "sh", "bash", "dash", "zsh", "ksh", "ash", "busybox":
+	case "shell":
 		for index := 1; index+1 < len(args); index++ {
 			flag, plain := plainLiteralWord(args[index])
-			if plain && strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "--") && strings.Contains(flag, "c") {
+			if plain && strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "--") && strings.IndexByte(flag, 'c') >= 0 {
 				candidates = args[index+1 : index+2]
 				break
 			}
