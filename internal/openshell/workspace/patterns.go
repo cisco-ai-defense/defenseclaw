@@ -240,9 +240,12 @@ var riskRules = []riskRule{
 	// An agent that starts in the folder reads these and runs what they
 	// register (hooks, commands, MCP servers): one pull could add a hook
 	// on this machine (GAP-0473).
-	// The patterns start with **/ because Claude Code, Codex and the others
-	// load project settings from the folder they are started in, which may
-	// be a subfolder (GAP-0522).
+	// Agent settings and hook folders. The project hook and MCP configs of
+	// every connector also come from the connector registry (registryRules,
+	// GAP-0522); these name the hook script folders and settings files the
+	// registry does not list. The patterns start with **/ because an agent
+	// loads project settings from the folder it is started in, which may be
+	// a subfolder.
 	{patterns: []string{"**/.claude/settings.json", "**/.claude/settings.local.json", "**/.claude/hooks/**", "**/.codex/config.toml", "**/.codex/hooks.json",
 		"**/.cursor/hooks.json", "**/.gemini/settings.json", "**/.gemini/config/hooks.json", "**/.kiro/hooks/**", "**/.github/hooks/**",
 		"**/.opencode/**", "**/opencode.json", "**/opencode.jsonc", "**/.amp/settings.json", "**/.amp/settings.jsonc",
@@ -273,7 +276,7 @@ func classifyLinkName(rel string) (riskRule, bool) {
 		return r, true
 	}
 	name := strings.ToLower(path.Base(rel))
-	for _, r := range riskRules {
+	for _, r := range append(append([]riskRule{}, riskRules...), registryRules()...) {
 		for _, p := range r.patterns {
 			segs := strings.Split(strings.ToLower(strings.TrimPrefix(p, "**/")), "/")
 			if len(segs) > 1 && segs[0] == name {
@@ -296,6 +299,11 @@ func RunsCode(rel string) bool {
 
 func classifyPath(rel string) (riskRule, bool) {
 	for _, r := range riskRules {
+		if _, ok := matchAny(r.patterns, rel); ok {
+			return r, true
+		}
+	}
+	for _, r := range registryRules() {
 		if _, ok := matchAny(r.patterns, rel); ok {
 			return r, true
 		}

@@ -65,3 +65,28 @@ func TestGAP0522And0523NestedSettingsAndNamedLinksAreFlagged(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0523: a link with a plain name whose target inside the project is a
+// run-code file or folder (notes -> .claude, cfg/x -> ../.mcp.json) is
+// flagged by its resolved target too: a later write through the link lands
+// there. A plain link to a plain file is not.
+func TestGAP0523LinkIsFlaggedByItsResolvedTarget(t *testing.T) {
+	links := map[string]string{"notes": ".claude", "cfg/x": "../.mcp.json", "docs/readme": "../README.md"}
+	var changes []TreeChange
+	for p := range links {
+		changes = append(changes, TreeChange{Path: p, Status: "A", NewMode: modeSymlink})
+	}
+	content := func(c TreeChange, after bool) ([]byte, bool) { return []byte(links[c.Path]), after }
+	high := map[string]bool{}
+	for _, f := range classifyChanges(changes, content, nil) {
+		if f.Severity == SeverityHigh {
+			high[f.Path] = true
+		}
+	}
+	if !high["notes"] || !high["cfg/x"] {
+		t.Errorf("links to a run-code target not flagged: %v", high)
+	}
+	if high["docs/readme"] {
+		t.Error("a link to README.md got a high flag")
+	}
+}
