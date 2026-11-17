@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -99,13 +100,15 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 			continue
 		}
 		sid := strings.TrimSpace(target.SID)
+		hermesConfig := ""
 		if name == "hermes" {
 			// The Hermes home is the account's HERMES_HOME, read from its
 			// loaded registry hive. A signed-out account's hive is not
 			// loaded: the profile default is then no proof of where its
 			// Hermes reads, so the account is unverified, never read at the
 			// default (rel-1-0-10 GAP-0884).
-			if _, err := hermespath.ConfigPathForAccount(home); err != nil {
+			resolved, err := hermespath.ConfigPathForAccount(home)
+			if err != nil {
 				reason := "Hermes home not resolvable: " + err.Error()
 				if errors.Is(err, hermespath.ErrAccountSignedOut) {
 					reason = "signed out, Hermes home not resolvable while its registry hive is not loaded (HERMES_HOME may move it): " + err.Error()
@@ -113,6 +116,7 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 				files = append(files, WindowsHookConfigFile{Path: hermespath.ConfigPathForUserHome(home), User: true, Home: home, SID: sid, Unverified: reason})
 				continue
 			}
+			hermesConfig = resolved
 		}
 		setup := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
 		var paths []string
@@ -122,6 +126,17 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 			return nil
 		}); err != nil {
 			problems = append(problems, fmt.Sprintf("%s (%s): %v", home, name, err))
+			continue
+		}
+		// The connector resolves the Hermes home again for its list, and
+		// falls back to the profile default when that lookup fails: an
+		// account that signed out between the two lookups, with a moved
+		// HERMES_HOME, had the default read as its verified config
+		// (rel-1-0-10 GAP-0905). The list must name the home resolved above;
+		// otherwise the account is unverified, never read.
+		if hermesConfig != "" && !windowsHookConfigPathListed(paths, hermesConfig) {
+			files = append(files, WindowsHookConfigFile{Path: hermesConfig, User: true, Home: home, SID: sid,
+				Unverified: "Hermes home changed while its files were listed (the account signed out, or its HERMES_HOME changed); not read, run again"})
 			continue
 		}
 		for _, path := range paths {
@@ -142,6 +157,18 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 		}
 	}
 	return files, problems
+}
+
+// windowsHookConfigPathListed reports whether paths holds want (same
+// cleaned path, compared case-insensitively).
+func windowsHookConfigPathListed(paths []string, want string) bool {
+	want = filepath.Clean(want)
+	for _, path := range paths {
+		if strings.EqualFold(filepath.Clean(path), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // newWindowsStandaloneHookConfigRegistry is every connector the standalone
