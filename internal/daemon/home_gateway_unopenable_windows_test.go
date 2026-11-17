@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -38,7 +39,10 @@ func TestHomeGatewayHoldsPortUnopenableGateway(t *testing.T) {
 		Length:             uint32(unsafe.Sizeof(syscall.SecurityAttributes{})),
 		SecurityDescriptor: uintptr(unsafe.Pointer(sd)),
 	}}
-	if err := child.Start(); err != nil {
+	err = child.Start()
+	// sd is referenced only through a uintptr while CreateProcess reads it.
+	runtime.KeepAlive(sd)
+	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })

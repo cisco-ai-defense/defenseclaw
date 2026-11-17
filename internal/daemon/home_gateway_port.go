@@ -70,7 +70,9 @@ func HomeGatewayHoldsPort(dataDir, host string, port int) bool {
 	if account == holderOtherAccount {
 		return false
 	}
-	if New(dataDir).HasManagedProcessIdentity(holder.PID) {
+	// gateway.pid is not a private-file record; only a holder of this
+	// account may be accepted through it.
+	if account == holderThisAccount && New(dataDir).HasManagedProcessIdentity(holder.PID) {
 		return true
 	}
 	record, ok := readRuntimeAPIRecord(dataDir)
