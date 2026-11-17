@@ -57,7 +57,7 @@ func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, 
 		if again < bestFull {
 			bestFull = again
 		}
-		if own := again - reading.Denied(); own < ownFull {
+		if own := again - min(reading.Denied(), again); own < ownFull {
 			ownFull = own
 		}
 		withinBudget = withinBudget || reading.Within(again, linearReaderHookBudget)
@@ -65,7 +65,7 @@ func assertLinearReaderTimeWith(t *testing.T, label string, full time.Duration, 
 	linear := func() bool { return ownFull <= bestHalf*5/2+50*time.Millisecond }
 	for try := 0; try < 3; try++ {
 		half, reading := measured(false)
-		if half -= reading.Denied(); bestHalf < 0 || half < bestHalf {
+		if half -= min(reading.Denied(), half); bestHalf < 0 || half < bestHalf {
 			bestHalf = half
 		}
 		if try > 0 {
