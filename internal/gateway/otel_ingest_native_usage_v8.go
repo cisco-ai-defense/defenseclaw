@@ -16,9 +16,10 @@ import (
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 )
 
-// nativeUsageSuppressed reports whether the route-only listener or the
-// guardrail proxy carries the model traffic of connector. While it does, that
-// path records every call, so the usage the agent reports in its own OTLP
+// nativeUsageSuppressed reports whether the route-only listener carries the
+// model traffic of connector (routing.route_only.connectors; the guardrail
+// proxy does not suppress native usage). While it does, that listener records
+// every call, so the usage the agent reports in its own OTLP
 // stream is a cross-check only: its log.model.response import still runs, but
 // nothing is counted from it (no log.model.usage, no cost or token counter,
 // no store row, no budget spend). The answer comes from the loaded config, not
