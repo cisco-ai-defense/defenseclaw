@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // s7-probe2 old-API probe for rel-1-0-10:GAP-1041: the rel hook-route tests of the fix,
-// copied with only the rel test helpers the pre-fix sha 9db84411a5 lacks (renamed),
+// copied with only the rel test helpers the pre-fix sha c312dd117b lacks (renamed),
 // so the file compiles on the pre-fix tree and on rel. Scratch, test-only branch.
 
 package gateway
@@ -38,13 +38,13 @@ func TestCCP2G1041_GAP1041NestedSubstitutionsDecideInTime(t *testing.T) {
 			for _, seed := range []string{"$T", "bash"} {
 				for _, body := range bodies {
 					name := fmt.Sprintf("%s/%d/%s/%s", tier.name, levels, seed, body.id)
-					command := ccp2g1041_gap1041ProgramWord(seed, levels) + " -c '" + body.text + "'"
+					command := gap1041ProgramWord(seed, levels) + " -c '" + body.text + "'"
 					start := time.Now()
 					action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
 					elapsed := time.Since(start)
 					t.Logf("ROW|%s|%s|ms=%d", name, action, elapsed.Milliseconds())
-					if elapsed > ccp2g1041_gap1041DecisionBudget {
-						t.Errorf("%s: decision took %v, budget %v", name, elapsed, ccp2g1041_gap1041DecisionBudget)
+					if elapsed > gap1041DecisionBudget {
+						t.Errorf("%s: decision took %v, budget %v", name, elapsed, gap1041DecisionBudget)
 					}
 					if !boundedHasLimit(findings, 0, false) {
 						t.Errorf("%s: no evaluation-limit finding: %v", name, findings)
@@ -59,19 +59,4 @@ func TestCCP2G1041_GAP1041NestedSubstitutionsDecideInTime(t *testing.T) {
 			}
 		}
 	}
-}
-
-// gap1041DecisionBudget is the time one hook decision on a nested program
-// word may take: a fifth of the hook request deadline. rel/1.0.10 decides
-// these calls in tens of milliseconds; before rel-1-0-10:GAP-1041 the
-// run-time shell reading doubled per level (12.5 s at 20 levels, 50 s at
-// 22), past the deadline.
-const ccp2g1041_gap1041DecisionBudget = 2 * time.Second
-
-func ccp2g1041_gap1041ProgramWord(seed string, levels int) string {
-	inner := seed
-	for i := 0; i < levels; i++ {
-		inner = "$(which " + inner + ")"
-	}
-	return `"` + inner + `"`
 }
