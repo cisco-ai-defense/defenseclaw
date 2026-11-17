@@ -160,7 +160,8 @@ Gateway replicas hold no state, so a finding that spans several calls needs one 
 | What happens | What DefenseClaw does |
 |---|---|
 | The agent suspends, then resumes on another machine | Nothing changes. Its approvals, sessions and audit trail carry on. Before it resumes, the controller checks its profile hasn't changed, and the first hook after resume uses a connection the relay opened in advance |
-| You undo to a checkpoint | Same agent, same approvals. The chain window gets a barrier, but egress after a secret read stays refused |
+| You undo to a checkpoint (`defenseclaw substrate undo`) | Same agent, same approvals. The undo puts the project folder back with git inside the agent, and DefenseClaw is not told, so it keeps its view of the files: running a file downloaded before the undo can still be reported as `chain.download_then_execute_same_artifact`, an alert, never a block. Egress after a secret read stays refused |
+| An administrator reverts the actor (`kubectl ate revert`) | Same agent, same approvals. The controller sees the revert and the leader puts a barrier in its chain windows, so files from before the revert no longer join a download-then-run chain. Egress after a secret read stays refused |
 | Someone starts a new agent from a saved snapshot | A new agent with a new UID and fresh approvals. An approval given to one agent can't be copied by cloning it. Actors made from one golden snapshot share the memory the snapshot captured, including the state of any random number generator in a program that started before it. Kernel randomness and IDs differ per actor. The kit starts nothing before the first resume, and partitions its state on the actor UID |
 | The agent is deleted | Its allow list and registration are removed and a tombstone stays in the audit. The snapshots are removed from the bucket |
 
