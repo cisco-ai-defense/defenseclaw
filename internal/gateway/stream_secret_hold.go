@@ -27,7 +27,10 @@ import (
 //     so a decoy header before a key does not hide the key;
 //   - the prefix of a token rule of the secret rules (streamTokenOpen) with
 //     at least one byte of the token, the token still running at the end of
-//     the lane.
+//     the lane;
+//   - a digit run that can still become a card number or an SSN the
+//     response rules block (streamPIIRules, rel-1-0-10:GAP-1091), from its
+//     first digit, still running at the end of the lane.
 //
 // While the reply has an open secret, the stream paths (the /llm proxy, the
 // passthrough stream and the raw forward stream) send nothing more in action
@@ -88,16 +91,44 @@ var streamTokenRules = []struct {
 	{[]string{"SEC-PYPI-TOKEN"}, `pypi-[A-Za-z0-9_-]+`},
 }
 
+// streamPIIRules are the PII shapes the response rules block
+// (rel-1-0-10:GAP-1091): the card numbers (ENT-CC-*, the labelled
+// PII-CARD-LABELED of privacy-high-assurance) and the SSN (ENT-BULK-SSN,
+// ENT-BULK-SSN-NOHYPHEN) of the packs, and the legacy local card and SSN
+// checks. One open shape covers them: a run of ASCII digits that starts at
+// a word boundary, with a space, a dash or a format character (zero-width,
+// which the normalized check removes) between digits, ending at the end of
+// the text, or ending in such a separator or a cut UTF-8 sequence. It has at
+// most 22 digits, more than the longest match (19), so it
+// holds a run only while it can still become a match, from its first digit.
+// TestStreamPIIOpenCoversBlockingPIIRules fails when a pack gains a card or
+// SSN rule that is not listed here.
+var streamPIIRules = []struct {
+	rules []string
+	open  string
+}{
+	{[]string{"ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER", "PII-CARD-LABELED", "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN"},
+		`\b[0-9](?:\p{Cf}*(?:` + streamPIISep + `\p{Cf}*)?[0-9]){0,21}\p{Cf}*(?:` + streamPIISep + `\p{Cf}*)?\x{FFFD}?`},
+}
+
+// streamPIISep is a separator a normalized card or SSN match may have
+// between digits: white space, a Unicode space, an ASCII or Unicode dash.
+const streamPIISep = `[\s\p{Zs}\-\x{2010}-\x{2015}\x{2212}]`
+
 // streamSecretExempt are the secret rules with no token to hold: a request
 // phrase, not a secret value (strict), and the private key, which has its own
 // hold (secretLane.pem).
 var streamSecretExempt = map[string]bool{"SEC-ENV-DUMP-REQUEST": true, "SEC-PRIVKEY": true}
 
-// streamTokenOpen matches a token still running at the end of a text.
+// streamTokenOpen matches a token, or a card or SSN digit run, still running
+// at the end of a text.
 var streamTokenOpen = func() *regexp.Regexp {
-	alts := make([]string, len(streamTokenRules))
-	for i, r := range streamTokenRules {
-		alts[i] = r.open
+	alts := make([]string, 0, len(streamTokenRules)+len(streamPIIRules))
+	for _, r := range streamTokenRules {
+		alts = append(alts, r.open)
+	}
+	for _, r := range streamPIIRules {
+		alts = append(alts, r.open)
 	}
 	return regexp.MustCompile(`(?:` + strings.Join(alts, "|") + `)$`)
 }()
