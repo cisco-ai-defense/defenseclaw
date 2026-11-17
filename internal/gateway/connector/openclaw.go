@@ -352,7 +352,7 @@ func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 			openClawConversationHooksSupported(observedVersion), openClawPluginKeysWithAllow(opts, observedVersion)); err != nil {
 			return fmt.Errorf("openclaw extension install: %w", err)
 		}
-		if err := applyOpenClawInstallPolicy(configPath, opts); err != nil {
+		if _, err := applyOpenClawInstallPolicy(configPath, opts); err != nil {
 			return fmt.Errorf("openclaw install policy: %w", err)
 		}
 		if keepSnapshot {
@@ -540,6 +540,7 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if len(errs) > 0 {
 		return fmt.Errorf("openclaw teardown errors: %s", strings.Join(errs, "; "))
 	}
+	discardOpenClawInstallPolicyState(opts.DataDir)
 	if !opts.ManagedEnterprise && opts.DataDir != "" {
 		if err := c.VerifyClean(opts); err != nil {
 			return fmt.Errorf("openclaw verify clean before token revocation: %w", err)

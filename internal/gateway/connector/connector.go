@@ -346,6 +346,12 @@ type SetupOpts struct {
 	// is still configured, so a cached hook path keeps blocking and names the
 	// failed start instead of exiting 0 unguarded (GAP-0367).
 	FailedSetupFailClosed bool
+
+	// SetupRollback is set on the Teardown that rolls back a Setup the
+	// gateway could not finish. What tells the operator how to finish that
+	// setup stays: the block to merge of the OpenClaw separate-user layout
+	// (rel-1-0-10 GAP-0081). Every other teardown removes it (GAP-1130).
+	SetupRollback bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
