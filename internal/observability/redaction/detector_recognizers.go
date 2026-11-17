@@ -749,9 +749,9 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 // rather than key material (GAP-0520): [<atespace>/]<words>[-<n>]-<hex>,
 // where the hex suffix is the launcher's 8 digits (newSubstrateID(4)) or the
 // gateway's 6 (substrateActorName). Before the suffix come at most five
-// segments and 40 characters, each a word (at most 16 lower-case letters
-// and digits, at least three letters, at most three digits, and not a
-// hex-only group of six or more) or a counter (at most four digits), and at
+// segments and 40 characters, each a word (at most 12 lower-case letters
+// and digits, at least three letters, at most three digits, no five
+// consonants in a row, and not a hex-only group of six or more) or a counter (at most four digits), and at
 // least one is a word; short parts of at most four characters (g3, r102)
 // may sit between them. The atespace, when present, is at most 32
 // characters of the same words and parts. Anything else (a bare hex token, a longer
@@ -806,6 +806,9 @@ func wordsAndCounters(segments []string, atespace bool) bool {
 		case len(segment) >= 6 && allHex(segment):
 			return false // a hex group is not a word
 		case letters >= 3 && digits <= 3:
+			if len(segment) > 12 || consonantRun(segment) >= 5 {
+				return false // random letters, not a word
+			}
 			word = true
 		case len(segment) <= 4:
 			// a short part: dc, t, l5, g3, r102
@@ -814,6 +817,22 @@ func wordsAndCounters(segments []string, atespace bool) bool {
 		}
 	}
 	return word || atespace
+}
+
+// consonantRun is the longest run of lower-case consonants in s (y counts
+// as a vowel); readable words rarely have five in a row, random letters do.
+func consonantRun(s string) int {
+	longest, run := 0, 0
+	for i := range len(s) {
+		c := s[i]
+		if isASCIILower(c) && !strings.ContainsRune("aeiouy", rune(c)) {
+			run++
+			longest = max(longest, run)
+			continue
+		}
+		run = 0
+	}
+	return longest
 }
 
 // dnsLabel reports a lower-case DNS-1123 label.

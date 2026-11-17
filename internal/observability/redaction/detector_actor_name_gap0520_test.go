@@ -50,6 +50,8 @@ func TestActorNameExceptionLetsNoSecretThroughGAP0520(t *testing.T) {
 		"hex-only group as a word":        "cafebabe-bffaeefc",
 		"random atespace in front":        "k3j4h5g6f7d8s9a0q1w2e3r4t5y6u7i8o9p0a1s2d3f4g5h6j7k8l9z0x1c2v3b/fix-tests-1a2b3c4d",
 		"too many segments":               "aaa-bbb-ccc-ddd-eee-fff-1a2b3c4d",
+		"random letters as words":         "qzkvmp-xtrbwd-bffaeefc",
+		"thirteen-letter group":           "abcdefghijklm-bffaeefc",
 	} {
 		if labelWithSuffixShaped(secret) {
 			t.Errorf("%s (%s) reads as an actor name", name, secret)
