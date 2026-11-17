@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -939,6 +940,27 @@ func substrateAuditExportWarning(c *config.Config) string {
 // observability.local.enabled (templates/_helpers.tpl, GAP-0272).
 const substrateChartCollectorDestination = "chart-collector"
 
+// substrateChartCollector reports whether destination is the one the chart
+// adds: named chart-collector and pointing at the chart's collector Service
+// (http://defenseclaw-otel-collector.<namespace>.svc:4318). The chart keeps
+// an operator's own destination of that name, so the name alone does not
+// make it the try-out collector (GAP-0299).
+func substrateChartCollector(destination config.ObservabilityV8EffectiveDestination) bool {
+	if destination.Name != substrateChartCollectorDestination {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(destination.Transport.Endpoint))
+	if err != nil || u.Scheme != "http" || u.Port() != "4318" || strings.Trim(u.Path, "/") != "" {
+		return false
+	}
+	ns, ok := strings.CutPrefix(u.Hostname(), "defenseclaw-otel-collector.")
+	if !ok {
+		return false
+	}
+	ns, ok = strings.CutSuffix(ns, ".svc")
+	return ok && ns != "" && !strings.Contains(ns, ".")
+}
+
 func substrateAuditExportWarningFor(source string, raw []byte, dataDir string) string {
 	compiled, err := config.ParseCompileObservabilityV8(source, raw, config.ObservabilityV8CompileOptions{DefaultDataDir: dataDir})
 	if err != nil || compiled == nil || compiled.Plan == nil {
@@ -954,7 +976,7 @@ func substrateAuditExportWarningFor(source string, raw []byte, dataDir string) s
 			config.ObservabilityV8DestinationHTTPJSONL:
 			// The chart's try-out collector prints what it gets and keeps
 			// nothing, so it is no audit record (GAP-0286).
-			if destination.Name == substrateChartCollectorDestination {
+			if substrateChartCollector(destination) {
 				tryOut = true
 				continue
 			}
