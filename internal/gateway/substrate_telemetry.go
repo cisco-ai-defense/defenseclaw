@@ -18,7 +18,9 @@ package gateway
 
 import (
 	"context"
+	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -30,7 +32,7 @@ import (
 
 // hookV8SubstrateFields are the correlation.sandbox Substrate attributes.
 type hookV8SubstrateFields struct {
-	Runtime, Atespace, Actor, ActorUID, Template, BatchID, KitVersion, ParentUID, RunMode observability.Optional[string]
+	Runtime, Driver, Atespace, Actor, ActorUID, Template, BatchID, KitVersion, ParentUID, RunMode observability.Optional[string]
 }
 
 func hookV8Substrate(ctx context.Context) hookV8SubstrateFields {
@@ -43,6 +45,7 @@ func hookV8Substrate(ctx context.Context) hookV8SubstrateFields {
 		return f
 	}
 	f.Runtime = observability.Present("substrate")
+	f.Driver = substrateDriver(reg.SandboxClass)
 	f.Atespace = hookV8OptionalIdentifier(reg.Atespace)
 	f.Actor = hookV8OptionalIdentifier(reg.Name)
 	f.ActorUID = hookV8OptionalIdentifier(reg.UID)
@@ -99,4 +102,14 @@ func substrateHookAuditExtra(ctx context.Context) map[string]string {
 		extra["substrate_person"], extra["substrate_person_kind"] = "", "atespace"
 	}
 	return extra
+}
+
+// substrateDriver is the defenseclaw.sandbox.driver of an actor's class
+// (GAP-0454): gvisor or microvm; absent when the registration names none.
+func substrateDriver(class string) observability.Optional[string] {
+	switch class = strings.ToLower(strings.TrimSpace(class)); class {
+	case config.SubstrateSandboxGVisor, config.SubstrateSandboxMicroVM:
+		return observability.Present(class)
+	}
+	return observability.Absent[string]()
 }
