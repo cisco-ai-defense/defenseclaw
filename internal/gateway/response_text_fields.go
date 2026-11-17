@@ -76,6 +76,7 @@ func toolInputPiece(choice, call int, text string) responsePiece {
 // order the lanes first appear.
 type responseText struct {
 	lanes  []*strings.Builder
+	secret []secretLane // the open-secret state of each lane (stream_secret_hold.go)
 	index  map[responseLane]int
 	n      int
 	joined string
@@ -94,6 +95,7 @@ func (r *responseText) Add(p responsePiece) {
 		i = len(r.lanes)
 		r.index[p.lane] = i
 		r.lanes = append(r.lanes, &strings.Builder{})
+		r.secret = append(r.secret, secretLane{})
 	}
 	r.lanes[i].WriteString(p.text)
 	r.n += len(p.text)

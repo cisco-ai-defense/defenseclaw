@@ -233,6 +233,11 @@ func (s *passthroughStream) run() {
 	ambiguousReported := false
 	streamEnded := false
 	initialFlushed := mode != "action"
+	// secretOpen: the text ended inside an open secret when last read;
+	// textAt is when the text last grew (GAP-0429).
+	secretOpen := false
+	var textAt time.Time
+	textMark := 0
 
 	writeQueue := func() {
 		if relN == 0 {
@@ -348,19 +353,54 @@ func (s *passthroughStream) run() {
 		lastScanLen = accumulated.Len()
 		return true
 	}
+	// boundHit is the verdict of a hold bound: TRUNCATED, the unknown tier
+	// of the request's pack. The caller has checked the text read before the
+	// bound. False: the stream is cut.
+	var boundHit func(c bounded.Cap, why string) bool
+	// secretBound decides an open secret at a hold bound (GAP-0429): the
+	// text read so far is checked, then boundHit. That secret is not held
+	// any more. False: the stream is cut.
+	secretBound := func(c bounded.Cap, why string) bool {
+		if !scanText() {
+			return false
+		}
+		accumulated.ReleaseOpenSecret()
+		secretOpen = false
+		return boundHit(c, why)
+	}
+	// secretWait reports that nothing may be sent now: the text ends inside
+	// an open secret (rel-1-0-10:GAP-0429, stream_secret_hold.go). ok is
+	// false when a bound on it blocked.
+	secretWait := func() (wait, ok bool) {
+		if !tailHold {
+			return false, true
+		}
+		o := accumulated.OpenSecret()
+		secretOpen = o.open
+		switch {
+		case !o.open:
+			return false, true
+		case o.overCap:
+			return false, secretBound(bounded.Bytes, fmt.Sprintf("a private-key block in a reply stream over %d bytes", streamSecretMaxPEM))
+		case queueBytes > streamSecretMaxHeld:
+			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
+		}
+		return true, true
+	}
 	// checkHeld sends the events the tool-call hold lets out, once a check
-	// has read their text. False: the check blocked and nothing is sent.
+	// has read their text and it ends inside no open secret. False: the
+	// check blocked and nothing is sent.
 	checkHeld := func() bool {
+		if wait, ok := secretWait(); !ok || wait {
+			return ok
+		}
 		if !scanText() {
 			return false
 		}
 		writeQueue()
 		return true
 	}
-	// boundHit is the verdict of a hold bound: TRUNCATED, the unknown tier
-	// of the request's pack. The caller has checked the text read before the
-	// bound. False: the stream is cut.
-	boundHit := func(c bounded.Cap, why string) bool {
+	boundHit = func(c bounded.Cap, why string) bool {
 		tv := p.streamTailTruncatedVerdict(ctx, c, why)
 		p.recordTelemetry(ctx, "completion", label, tv, 0, mode, tv.Action == "block")
 		if tv.Action == "block" {
@@ -418,6 +458,11 @@ func (s *passthroughStream) run() {
 	flushInitial := func(atEnd bool) bool {
 		if initialFlushed || (relN == 0 && !atEnd) {
 			return true
+		}
+		if !atEnd {
+			if wait, ok := secretWait(); !ok || wait {
+				return ok
+			}
 		}
 		if accumulated.Len() > lastScanLen {
 			initVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
@@ -604,7 +649,11 @@ read:
 		// event in progress, with nothing queued, is reported once
 		// streamHoldMaxPartialAge after the last byte.
 		var deadline time.Time
-		if tailHold && initialFlushed {
+		if tailHold && secretOpen {
+			// An open secret waits for more text at most
+			// streamHoldMaxPartialAge (GAP-0429).
+			deadline = textAt.Add(streamHoldMaxPartialAge)
+		} else if tailHold && initialFlushed {
 			if relN > 0 {
 				deadline = queueAt[0].Add(streamHoldMaxAge)
 			} else if len(queue) == 0 && unread() > 0 && !stallReported {
@@ -621,7 +670,19 @@ read:
 				// was busy (a long event, a slow check). The read goes
 				// first; a due hold is checked with it.
 			default:
-				if relN > 0 {
+				if secretOpen {
+					if accumulated.OpenSecret().open && !secretBound(bounded.Time,
+						fmt.Sprintf("a secret in a reply stream unfinished, no new text for %s", streamHoldMaxPartialAge)) {
+						stopped = true
+						break read
+					}
+					secretOpen = false
+					if !initialFlushed {
+						stopped = !flushInitial(false)
+					} else if relN > 0 {
+						stopped = !checkHeld()
+					}
+				} else if relN > 0 {
 					stopped = !checkHeld()
 				} else if len(queue) == 0 && unread() > 0 && !stallReported {
 					stopped = !truncateStalled()
@@ -697,6 +758,9 @@ read:
 				}
 			}
 		}
+		if accumulated.Len() > textMark {
+			textAt, textMark = time.Now(), accumulated.Len()
+		}
 		if readErr != nil {
 			if encoded && readErr != io.EOF && ctx.Err() == nil {
 				// A corrupt or oversized encoded stream cannot be read to its end.
@@ -740,7 +804,7 @@ read:
 			if !tailHold {
 				writeQueue()
 			} else if accumulated.Len()-lastScanLen >= scanInterval || queueBytes-heldBytes >= streamHoldMaxBytes ||
-				(relN > 0 && !now.Before(queueAt[0].Add(streamHoldMaxAge))) {
+				(relN > 0 && !now.Before(queueAt[0].Add(streamHoldMaxAge))) || (secretOpen && relN > 0) {
 				if !checkHeld() {
 					stopped = true
 					break read
@@ -791,6 +855,9 @@ read:
 		// Observe mode holds nothing: the final check only records.
 		writeQueue()
 	}
+	// endedInKey: the stream ended inside an open private-key block, which
+	// the checks never had whole (GAP-0429); decided after the final check.
+	endedInKey := tailHold && accumulated.OpenSecret().pem
 
 	// Final post-stream inspection on the full accumulated content, enforced
 	// in action mode: a block withholds the events still held and ends the
@@ -827,6 +894,15 @@ read:
 		if verdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (observe mode: stream delivered %d bytes to client)\n",
 				verdict.Severity, verdict.Reason, accumulated.Len())
+		}
+	}
+	if endedInKey {
+		accumulated.ReleaseOpenSecret()
+		if !boundHit(bounded.Bytes, "a reply stream ended inside a private-key block") {
+			if sseBlockMsg != "" {
+				endBlock()
+			}
+			return
 		}
 	}
 	writeQueue()
