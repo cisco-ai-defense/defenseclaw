@@ -507,6 +507,9 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 			}
 			out = append(out, v)
 		}
+		if f.OwnerID == "" {
+			a.substrateAuditAdminRead(st, r, "actors", len(out), "")
+		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"actors": out})
 	}
 }
@@ -615,6 +618,9 @@ func (a *APIServer) substrateFind(st *substrateState, r *http.Request, atespace,
 	if !ok || reg.Deleted || !substrateVisible(c, reg) {
 		return registry.Registration{}, http.StatusNotFound, "actor_not_found"
 	}
+	if c.admin && (reg.Person.Subject == "" || reg.Person.ID() != ownerOf(c.person).ID()) {
+		a.substrateAuditAdminRead(st, r, "actor", 1, reg.Atespace+"/"+reg.Name)
+	}
 	return reg, http.StatusOK, ""
 }
 
@@ -716,6 +722,9 @@ func (a *APIServer) substrateBatches(st *substrateState, r *http.Request, batchI
 	if err != nil {
 		return nil, err
 	}
+	if substrateAllView(r) {
+		a.substrateAuditAdminRead(st, r, "batches", len(regs), "")
+	}
 	out := map[substrateBatchKey][]map[string]any{}
 	for _, reg := range regs {
 		if reg.BatchID != "" {
@@ -796,6 +805,9 @@ func (a *APIServer) substrateUsage(st *substrateState) http.HandlerFunc {
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "usage_unavailable")
 			return
+		}
+		if owner == "" {
+			a.substrateAuditAdminRead(st, r, "usage", 1, "")
 		}
 		writeSubstrateJSON(w, http.StatusOK, u)
 	}
