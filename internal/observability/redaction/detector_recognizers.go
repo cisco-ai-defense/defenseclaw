@@ -745,48 +745,75 @@ func validHighEntropy(value string, fieldClass observability.FieldClass) bool {
 // rule fired. The shape needs at least three segments, at least one of them an
 // upper-case word of three or more letters, and every mixed or numeric segment
 // at most four characters; random keys with long mixed groups still match.
-// labelWithSuffixShaped reports a lower-case DNS label made of readable
-// words and a short hex suffix, such as a Substrate actor name
-// (fix-tests-1a2b3c4d, lg411gva-5-bffaeefc): attribution data, not key
-// material (GAP-0520). It needs a letters-only word of at least three
-// letters before the suffix, and the suffix is 4 to 16 hex digits.
+// labelWithSuffixShaped reports a Substrate actor name, attribution data
+// rather than key material (GAP-0520): [<atespace>/]<words>[-<n>]-<hex>,
+// where the hex suffix is the launcher's 8 digits (newSubstrateID(4)) or the
+// gateway's 6 (substrateActorName). Before the suffix come at most five
+// segments and 40 characters, each a word (at most 16 lower-case letters
+// and digits, at least three letters, at most three digits, and not a
+// hex-only group of six or more) or a counter (at most four digits), and at
+// least one is a word; short parts of at most four characters (g3, r102)
+// may sit between them. The atespace, when present, is at most 32
+// characters of the same words and parts. Anything else (a bare hex token, a longer
+// suffix, upper case, random groups) is judged by the detector as before.
 func labelWithSuffixShaped(value string) bool {
-	// atespace/name, as audit summaries write an actor.
 	if space, name, ok := strings.Cut(value, "/"); ok {
-		return dnsLabel(space) && labelWithSuffixShaped(name)
+		return len(space) <= 32 && dnsLabel(space) && wordsAndCounters(strings.Split(space, "-"), true) &&
+			!strings.Contains(name, "/") && labelWithSuffixShaped(name)
+	}
+	if !dnsLabel(value) {
+		return false
 	}
 	segments := strings.Split(value, "-")
-	if len(segments) < 2 || len(value) > 63 {
+	if len(segments) < 2 || len(segments) > 6 {
 		return false
-	}
-	for i := range len(value) {
-		if c := value[i]; !isASCIILower(c) && !isASCIIDigit(c) && c != '-' {
-			return false
-		}
 	}
 	suffix := segments[len(segments)-1]
-	if len(suffix) < 4 || len(suffix) > 16 || !allHex(suffix) {
+	if (len(suffix) != 6 && len(suffix) != 8) || !allHex(suffix) {
 		return false
 	}
+	head := segments[:len(segments)-1]
+	if len(strings.Join(head, "-")) > 40 {
+		return false
+	}
+	return wordsAndCounters(head, false)
+}
+
+// wordsAndCounters reports segments that are all words or counters (see
+// labelWithSuffixShaped), with at least one word; an atespace (atespace
+// true) may be short parts only, such as "t".
+func wordsAndCounters(segments []string, atespace bool) bool {
 	word := false
-	for _, segment := range segments[:len(segments)-1] {
-		if segment == "" {
-			return false
-		}
-		letters := 0
+	for _, segment := range segments {
+		letters, digits := 0, 0
 		for i := range len(segment) {
-			if isASCIILower(segment[i]) {
+			switch c := segment[i]; {
+			case isASCIILower(c):
 				letters++
+			case isASCIIDigit(c):
+				digits++
+			default:
+				return false
 			}
 		}
-		if letters == len(segment) && letters >= 3 {
+		switch {
+		case segment == "" || len(segment) > 16:
+			return false
+		case letters == 0:
+			if digits > 4 {
+				return false
+			}
+		case len(segment) >= 6 && allHex(segment):
+			return false // a hex group is not a word
+		case letters >= 3 && digits <= 3:
 			word = true
-		}
-		if letters >= 3 && strings.IndexFunc(segment, func(r rune) bool { return r >= '0' && r <= '9' }) > 0 {
-			word = true // a readable prefix with a counter, as lg411gva
+		case len(segment) <= 4:
+			// a short part: dc, t, l5, g3, r102
+		default:
+			return false
 		}
 	}
-	return word
+	return word || atespace
 }
 
 // dnsLabel reports a lower-case DNS-1123 label.
