@@ -63,8 +63,10 @@ var _ Attestor = (*TemplateAttestor)(nil)
 // permits (attest.CheckEnv: the kit's variables with the kit's value where it
 // fixes one, and the ordinary base-image settings), and the process is the
 // image's attested entrypoint and arguments (a different command, or extra
-// arguments, is refused), and every volume mount is one the kit allows
-// (MountRefusal, GAP-0368). Those refusals, and the image environment's
+// arguments, is refused), every volume mount is one the kit allows
+// (MountRefusal, GAP-0368), and every field set is one DefenseClaw checks,
+// with no capability added (FieldRefusal, securityContextRefusal,
+// GAP-0371). Those refusals, and the image environment's
 // (attest.Rejection.Allowlist, GAP-0355), carry Allowlist with every other
 // field filled, so the controller keeps an actor admitted before the
 // upgrade running while it refuses new ones.
@@ -74,7 +76,8 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		return Attestation{Reason: "the template has no container"}, nil
 	}
 	var out Attestation
-	allowlist := ""
+	// Every field set is one DefenseClaw checks (GAP-0371).
+	allowlist := FieldRefusal(tmpl)
 	for i, c := range cs {
 		img := c.GetImage()
 		ref, err := attest.ParseRef(img)
@@ -120,6 +123,9 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		if why := MountRefusal(c, tmpl.GetVolumes(), v); why != "" && allowlist == "" {
 			allowlist = fmt.Sprintf("container %d: %s", i, why)
 		}
+		if why := securityContextRefusal(c, v); why != "" && allowlist == "" {
+			allowlist = fmt.Sprintf("container %d: %s", i, why)
+		}
 		if !v.ValidUntil.IsZero() && (out.ValidUntil.IsZero() || v.ValidUntil.Before(out.ValidUntil)) {
 			out.ValidUntil = v.ValidUntil
 		}
@@ -132,6 +138,9 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		}
 		if i == 0 {
 			out.Digest = v.Digest
+			if !relaySeparated(v) {
+				out.Unseparated = UnseparatedReason
+			}
 			if st := v.Statement; st != nil {
 				out.Connector = st.Predicate.Template.Connector
 				out.KitVersion = st.Predicate.Kit.Version
@@ -176,7 +185,12 @@ const maxArgvShown = 200
 func ContainerSpecRefusal(c *ateapi.Container, v *attest.Verified) string {
 	env := map[string]string{}
 	var twice []string
-	for _, e := range c.GetEnv() {
+	for j, e := range c.GetEnv() {
+		// A name that is not a variable name (it holds "=" and so part of
+		// a value, or a NUL) is refused without being shown (GAP-0442).
+		if !envName(e.GetName()) {
+			return fmt.Sprintf("env[%d].name is not a variable name (letters, digits and _, not starting with a digit); set each variable by its name", j)
+		}
 		if _, seen := env[e.GetName()]; seen && !slices.Contains(twice, e.GetName()) {
 			twice = append(twice, e.GetName())
 		}
@@ -188,6 +202,11 @@ func ContainerSpecRefusal(c *ateapi.Container, v *attest.Verified) string {
 			names = names[:maxArgvShown] + "…"
 		}
 		return "env sets " + names + " more than once; set each variable once"
+	}
+	// HOME is the image's (GAP-0374): the guarded folders, the kit's HOME
+	// files and the relay's state root are below the HOME that was attested.
+	if h, ok := env["HOME"]; ok && v != nil && h != v.Env["HOME"] {
+		return "env sets HOME to another folder than the image's; remove HOME from the template"
 	}
 	if bad := attest.CheckEnv(env); len(bad) > 0 {
 		return "env sets variables the actor environment allowlist does not permit: " + attest.FormatEnvRefusals(bad) +
@@ -211,6 +230,17 @@ func ContainerSpecRefusal(c *ateapi.Container, v *attest.Verified) string {
 		return fmt.Sprintf("command %s is not the attested entrypoint %s; remove command from the template (the image starts the relay)", argvText(cmd), argvText(v.Entrypoint))
 	}
 	return fmt.Sprintf("args %s are not the attested arguments %s; remove args from the template", argvText(args), argvText(v.Cmd))
+}
+
+// envName reports whether n is a portable variable name:
+// [A-Za-z_][A-Za-z0-9_]*.
+func envName(n string) bool {
+	for i, c := range n {
+		if c != '_' && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (i == 0 || c < '0' || c > '9') {
+			return false
+		}
+	}
+	return n != ""
 }
 
 // SystemInfoMount is where a kit-built template mounts its system_info
@@ -240,7 +270,12 @@ func MountRefusal(c *ateapi.Container, vols []*ateapi.Volume, v *attest.Verified
 		return ""
 	}
 	byName := map[string]*ateapi.Volume{}
-	for _, vol := range vols {
+	for j, vol := range vols {
+		// A name given twice would be read as one volume here and as
+		// another by the runtime (GAP-0440).
+		if _, twice := byName[vol.GetName()]; twice {
+			return fmt.Sprintf("volumes[%d].name names a volume a second time; give every volume its own name", j)
+		}
 		byName[vol.GetName()] = vol
 	}
 	protected := attestedPaths(v)
@@ -274,9 +309,20 @@ func MountRefusal(c *ateapi.Container, vols []*ateapi.Volume, v *attest.Verified
 		if workdir == "" || !pathWithin(p, workdir) {
 			return field + ".mount_path is outside the image WORKDIR; DefenseClaw admits data mounts only at or below the WORKDIR"
 		}
+		// Not over a system folder either, whatever the WORKDIR (GAP-0441).
+		for _, d := range systemDirs {
+			if pathWithin(p, d) {
+				return field + ".mount_path is in a system folder; DefenseClaw admits data mounts only below a project WORKDIR"
+			}
+		}
 	}
 	return ""
 }
+
+// systemDirs are the folders a data mount never goes in (GAP-0441): a
+// WORKDIR there (WORKDIR /usr/bin) admits no data mount.
+var systemDirs = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/proc", "/sys", "/dev",
+	"/run", "/boot", "/var/run"}
 
 // attestedPaths are the paths a mount must not touch (MountRefusal).
 func attestedPaths(v *attest.Verified) []string {

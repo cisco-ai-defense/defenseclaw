@@ -53,7 +53,7 @@ func TestAllowlistKeepsRunningActorsAndRefusesNewOnes(t *testing.T) {
 		t.Fatal("no policy")
 	}
 	reason := "container 0: env sets variables the actor environment allowlist does not permit: LD_PRELOAD (not on the allowlist)"
-	r.att.Default = controller.Attestation{Allowlist: true, Reason: reason, KitVersion: "1.0.10", Connector: "claudecode"}
+	r.att.Default = controller.Attestation{Allowlist: true, Reason: reason, KitVersion: "1.0.9", Connector: "claudecode"}
 
 	// The re-check after the TTL.
 	r.clk.Add(31 * time.Second)

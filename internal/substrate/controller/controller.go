@@ -173,6 +173,9 @@ type Controller struct {
 	// allowlisted are the templates that fail only the 1.0.10 allowlist,
 	// with the reason last alerted (GAP-0354).
 	allowlisted map[string]string
+	// unseparated are the templates whose relay runs as the agent's user,
+	// already named in an audit warning (GAP-0372).
+	unseparated map[string]bool
 }
 
 type recreatedActor struct {
@@ -281,7 +284,7 @@ func New(o Options) (*Controller, error) {
 	}
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
 		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{},
-		startedAt: o.Now(), allowlisted: map[string]string{}}
+		startedAt: o.Now(), allowlisted: map[string]string{}, unseparated: map[string]bool{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
 		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter}
 	if o.Config != nil {
@@ -954,7 +957,7 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 		}
 		key := ateapi.Key(ateapi.RefOf(tmpl.GetMetadata()))
 		keep := false
-		if att.Allowlist {
+		if att.Allowlist && builtBeforeAllowlist(att) {
 			if keep, err = c.admittedBefore(ctx, a, st); err != nil {
 				return "", err
 			}
@@ -1110,6 +1113,7 @@ func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef, fresh 
 		ct.goodAt = now
 	}
 	c.alertAllowlist(k, ref.GetAtespace(), att)
+	c.alertUnseparated(k, ref.GetAtespace(), att)
 	c.mu.Lock()
 	c.templates[k] = ct
 	c.mu.Unlock()
@@ -1136,6 +1140,80 @@ func (c *Controller) alertAllowlist(k, atespace string, att Attestation) {
 	c.emit(Event{Type: EventTemplateAllowlist, Severity: SeverityAlert, Atespace: atespace,
 		Message: "template " + k + " fails the actor allowlist of DefenseClaw 1.0.10: " + att.Reason + ". " + AllowlistImpact,
 		Detail:  map[string]any{"template": k, "allowlist": att.Reason}})
+}
+
+// alertUnseparated writes one audit warning per template whose relay runs
+// as the agent's own user (GAP-0372): the image's relay prints this only on
+// its own stderr, and the operator must know the template is not covered by
+// the GAP-0116 fix until it is rebuilt. It is written again after the
+// template was fixed and then broken again.
+func (c *Controller) alertUnseparated(k, atespace string, att Attestation) {
+	c.mu.Lock()
+	seen := c.unseparated[k]
+	if att.Unseparated != "" {
+		c.unseparated[k] = true
+	} else {
+		delete(c.unseparated, k)
+	}
+	c.mu.Unlock()
+	if att.Unseparated == "" || seen {
+		return
+	}
+	c.emit(Event{Type: EventRelayUnseparated, Severity: SeverityWarn, Atespace: atespace,
+		Message: "template " + k + ": " + att.Unseparated,
+		Detail:  map[string]any{"template": k, "relay_separated": false}})
+}
+
+// allowlistSince is the first DefenseClaw release with the actor
+// allowlist: its template build and publish refuse what admission refuses.
+const allowlistSince = "1.0.10"
+
+// builtBeforeAllowlist reports whether a template that fails the allowlist
+// does so because of the upgrade (owner decision D4, GAP-0373): its
+// attestation is from a kit older than the allowlist. A template built with
+// the allowlist passed it at build, so it fails only through an edit made
+// since (an env variable or a command added by hand): its running actors
+// are refused with the new ones, as an actor booting the edit would be new.
+// An unknown kit version (a dev build) is treated as built with it.
+func builtBeforeAllowlist(att Attestation) bool {
+	return versionBefore(att.KitVersion, allowlistSince)
+}
+
+// versionBefore reports whether release v is older than w (both
+// MAJOR.MINOR.PATCH, a "v" prefix and a "-" or "+" suffix allowed); false
+// when either does not parse.
+func versionBefore(v, w string) bool {
+	a, ok1 := releaseParts(v)
+	b, ok2 := releaseParts(w)
+	if !ok1 || !ok2 {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
+}
+
+func releaseParts(v string) ([3]int, bool) {
+	var out [3]int
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	if i := strings.IndexAny(v, "-+"); i >= 0 {
+		v = v[:i]
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // AllowlistImpact is what the 1.0.10 allowlist does to a template it refuses.

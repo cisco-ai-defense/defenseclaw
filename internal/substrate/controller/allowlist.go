@@ -66,3 +66,44 @@ func AllowlistCheck(ts []AllowlistTemplate, err error) (status, detail, fix stri
 	return "warn", fmt.Sprintf("%d template(s) fail the actor allowlist of DefenseClaw 1.0.10: %s", len(ts), strings.Join(parts, "; ")),
 		AllowlistImpact
 }
+
+// UnseparatedTemplates attests every template of the cluster and lists,
+// sorted, those whose relay runs as the agent's own user (GAP-0372): the
+// GAP-0116 separation does not cover them until they are rebuilt.
+func UnseparatedTemplates(ctx context.Context, c ateapi.Client, a Attestor) ([]string, error) {
+	ts, err := ateapi.AllActorTemplates(ctx, c, "", DefaultPageSize)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, t := range ts {
+		att, err := a.Attest(ctx, t)
+		if err != nil || att.Unseparated == "" {
+			continue
+		}
+		out = append(out, ateapi.Key(ateapi.RefOf(t.GetMetadata())))
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// SeparationCheckID is the doctor row of UnseparatedTemplates.
+const SeparationCheckID = "substrate.relay_separation"
+
+// SeparationCheck is the doctor row: pass, or warn naming every template
+// (up to maxAllowlistShown) whose relay and agent share a user.
+func SeparationCheck(ts []string, err error) (status, detail, fix string) {
+	switch {
+	case err != nil:
+		return "warn", "the templates could not be listed to check that their relay runs apart from the agent: " + err.Error(), ""
+	case len(ts) == 0:
+		return "pass", "every template's relay runs as root and starts the agent as its own user", ""
+	}
+	shown := ts
+	more := ""
+	if len(shown) > maxAllowlistShown {
+		shown, more = shown[:maxAllowlistShown], fmt.Sprintf(" and %d more", len(ts)-maxAllowlistShown)
+	}
+	return "warn", fmt.Sprintf("%d template(s): %s%s: %s", len(ts), strings.Join(shown, ", "), more, UnseparatedReason),
+		"rebuild each with DefenseClaw 1.0.10 or later: defenseclaw substrate template build, then publish"
+}

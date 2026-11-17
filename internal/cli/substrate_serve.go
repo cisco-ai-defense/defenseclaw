@@ -552,7 +552,7 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks),
-					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor())}
+					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor())}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -895,6 +895,15 @@ func substrateTemplateAllowlistCheck(ctx context.Context, ate ateapi.Client, a c
 	ts, err := controller.TemplatesFailingAllowlist(ctx, ate, a)
 	status, detail, fix := controller.AllowlistCheck(ts, err)
 	return gateway.SubstrateCheck{ID: controller.AllowlistCheckID, Status: status, Detail: detail, Fix: fix}
+}
+
+// substrateRelaySeparationCheck names every template whose relay runs as
+// the agent's own user (GAP-0372): images built before 1.0.10 are admitted,
+// but the agent can stop their relay until they are rebuilt.
+func substrateRelaySeparationCheck(ctx context.Context, ate ateapi.Client, a controller.Attestor) gateway.SubstrateCheck {
+	ts, err := controller.UnseparatedTemplates(ctx, ate, a)
+	status, detail, fix := controller.SeparationCheck(ts, err)
+	return gateway.SubstrateCheck{ID: controller.SeparationCheckID, Status: status, Detail: detail, Fix: fix}
 }
 
 // substrateInfo is the admin listener's unauthenticated sign-in
