@@ -31,7 +31,8 @@ import (
 //
 // The root mount is the image itself. A table without it is not the
 // actor's mount table: errNoRootMount (GAP-0443), and the relay refuses as
-// for an unreadable one.
+// for an unreadable one. A second mount at / hides the whole image and is
+// refused as a mount over every protected path ("/", GAP-0510).
 func kitMountRefusal(mountinfo []byte, protected, guarded []string) (string, error) {
 	paths := []string{kit.LibDir, path.Dir(kit.ConfigPath)}
 	for _, p := range append(append([]string{}, protected...), guarded...) {
@@ -50,6 +51,12 @@ func kitMountRefusal(mountinfo []byte, protected, guarded []string) (string, err
 		}
 		mp := path.Clean(unescapeMount(f[4]))
 		if mp == "/" {
+			// The first root mount is the image. Another one at / (an image
+			// volume reached through a symlink to /) lies over the image and
+			// every path in it (GAP-0510).
+			if root && hidden == "" {
+				hidden = "/"
+			}
 			root = true
 			continue
 		}

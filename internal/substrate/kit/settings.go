@@ -218,6 +218,9 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 		ov.Files = append(ov.Files, ImageFile{Path: f.Path, Mode: f.Mode, User: f.Owner == connector.SandboxOwnerUser, Data: data})
 	}
 	ov.Remove = append(ov.Remove, openShellOnly...)
+	// Golden-snapshot rule (E5): no machine id in the image (an empty
+	// /etc/machine-id below, none in /var/lib/dbus).
+	ov.Remove = append(ov.Remove, "/var/lib/dbus/machine-id")
 	for _, f := range art.Files {
 		if strings.HasPrefix(f.Path, connector.SandboxHookDir+"/") && strings.HasSuffix(f.Path, ".sh") {
 			ov.Remove = append(ov.Remove, f.Path)
@@ -253,6 +256,7 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	// of the overlay (relay.protected, GAP-0439).
 	ov.Files = append(ov.Files,
 		ImageFile{Path: ConfigPath, Mode: 0o644},
+		ImageFile{Path: "/etc/machine-id", Mode: 0o444},
 		ImageFile{Path: "/etc/gitconfig", Mode: 0o644, Data: []byte(gitConfig())},
 		ImageFile{Path: CredHelper, Mode: 0o755, Data: []byte(gitCredentialHelper)},
 		ImageFile{Path: "/usr/local/etc/npmrc", Mode: 0o644, Data: []byte(npmrc)},
@@ -264,7 +268,14 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 
 	ov.Files = append(ov.Files, wave2UserFiles(art.Connector, o)...)
 	wave2Harden(&ov, art.Connector, o)
-	cfg.Relay.Protected = ProtectedPaths(ov.Files, o.Home)
+	// relay.protected names every root-owned file the template build attests
+	// (GAP-0507): the overlay, the hook and relay binaries, and the pinned
+	// agent build the template build adds (AgentReleases).
+	attested := append([]ImageFile{{Path: HookBinary}, {Path: RelayBinary}}, ov.Files...)
+	if r, pinned := AgentReleases[art.Connector]; pinned {
+		attested = append(attested, ImageFile{Path: r.Path})
+	}
+	cfg.Relay.Protected = ProtectedPaths(attested, o.Home)
 	kitJSON, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return Overlay{}, err
