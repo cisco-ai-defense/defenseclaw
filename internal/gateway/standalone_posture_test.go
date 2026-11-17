@@ -61,7 +61,16 @@ func restoreGatewayProcessPosture(t *testing.T) {
 	generation, profiles := liveGeneration.Load(), liveGuardrailProfiles.Load()
 	instance, sidecarInstance, watch := audit.ProcessAgentInstanceID(), gatewaylog.SidecarInstanceID(), gatewaylog.CurrentAgentWatchContext()
 	runEnv, runEnvSet := os.LookupEnv("DEFENSECLAW_RUN_ID")
+	// applyIdentityPosture (NewSidecar, every reload) sets the identity
+	// flags from the config; an OSS boot left identity facts on, and a later
+	// Secure Client test read no Secure Client user.
+	facts, attribution := identityFactsEnabled.Load(), secureClientUserAttribution.Load()
+	principal, blocking := userPrincipalCollectionEnabled.Load(), identityLookupBlocking.Load()
 	t.Cleanup(func() {
+		setIdentityFactsEnabled(facts)
+		setSecureClientUserAttribution(attribution)
+		SetUserPrincipalCollectionEnabled(principal)
+		setIdentityLookupBlocking(blocking)
 		setManagedEnterpriseRedactionPosture(aidOnly)
 		setStandaloneEnterpriseActive(standalone)
 		setManagedServiceHosted(hosted)
