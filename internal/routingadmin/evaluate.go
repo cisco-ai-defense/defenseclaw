@@ -284,6 +284,15 @@ func identityState(c Caller, m config.ProfileMatch) (MatchState, string) {
 	return s, fact
 }
 
+// NamesCaller reports whether the facts prove that the users and groups
+// selectors of m name c, with the matcher Evaluate uses; No and Maybe are
+// false. The caller own views (routing rules and budgets list) show only
+// what applies to the caller for certain.
+func NamesCaller(c Caller, m config.ProfileMatch) bool {
+	state, _ := identityState(c, m)
+	return state == Yes
+}
+
 func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Verdict) {
 	var strongest *compiledBudget
 	for i := range p.budgets {

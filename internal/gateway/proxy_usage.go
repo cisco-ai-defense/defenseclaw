@@ -81,6 +81,10 @@ func usageIdentity(ctx context.Context, f *modelusage.CallFacts) {
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && f.IdentityVerified {
 		f.ProfileName, f.ProfileDigest = resolved.decision.Name, resolved.decision.Digest
 	}
+	if f.IdentityVerified && len(f.Groups) == 0 {
+		caller, _ := routeCallerFromContext(ctx)
+		f.Groups = usageCallerGroups(routingRequestConfig(ctx), caller)
+	}
 }
 
 // usageResponseWriter feeds the response bytes to a usage Call.

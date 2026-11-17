@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 )
 
 // ownRoutingSummary is the routing member of the own-status answer
@@ -28,7 +29,7 @@ func ownRoutingSummary(cfg *config.Config, key string, now time.Time) map[string
 		return summary
 	}
 	var nearest *routingBudgetView
-	for _, view := range routingBudgetViews(cfg, key, false, now) {
+	for _, view := range routingBudgetViews(cfg, key, false, routingadmin.Caller{}, now) {
 		view := view
 		if view.PercentUsed == nil {
 			continue

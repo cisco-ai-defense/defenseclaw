@@ -760,6 +760,30 @@ def routing_models_add(
     models.append(entry)
     if _write(app, {"routing.models": models}):
         _key_hint(app, api_key_env)
+        _endpoint_hint(provider, base_url, entry.get("apis") or [])
+
+
+# API families a route-only connector sends that a bedrock model without a
+# base_url cannot take: the gateway forwards them unchanged in shape, and
+# Bedrock has a default endpoint only for Converse and InvokeModel.
+_BEDROCK_ROUTE_ONLY_UNREACHABLE = ("messages", "responses")
+
+
+def _endpoint_hint(provider: str, base_url: str, apis: list[str]) -> None:
+    """Say when route-only connectors can never use the model just added
+    (rel-1-0-10:GAP-1167): routing skips it for their calls (routing explain
+    shows filtered_by:endpoint) and they keep their own model."""
+    if provider.lower() != "bedrock" or base_url:
+        return
+    unreachable = [a for a in apis if a in _BEDROCK_ROUTE_ONLY_UNREACHABLE]
+    if not unreachable:
+        return
+    ux.warn(
+        f"route-only {' and '.join(unreachable)} calls (Codex sends responses, Claude Code messages) "
+        "cannot reach a bedrock model without --base-url, so routing skips it for them "
+        "(routing explain: filtered_by:endpoint). For the Bedrock OpenAI-compatible endpoint add the model "
+        "as --provider openai --base-url https://bedrock-runtime.REGION.amazonaws.com/openai/v1"
+    )
 
 
 def _key_hint(app: AppContext, env_name: str) -> None:
