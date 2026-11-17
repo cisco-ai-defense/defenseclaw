@@ -26,6 +26,10 @@ Start with `defenseclaw substrate doctor`. It checks your computer and your sign
 
 ![defenseclaw substrate doctor when the cluster cannot be reached: ok for context and token_store (the sign-in is kept in a file because DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file), fail for admin_address (cannot connect, connection refused), skip for sign_in, ok for sign_in_server, fail for agent_entrance, then not ready: 2 problem(s) with one fix line for each failed check](/images/substrate/oss/doctor-not-ready.png)
 
+### "no network route to the cluster address" on macOS
+
+The launcher's connection got "no route to host". If `nc` or `curl` reach the same address from the same session, macOS Local Network privacy refused the launcher: it gives that error to a program it has not allowed to reach a private address, and Apple's own tools are exempt. This happens when the launcher runs from a session with no terminal app to ask for it, for example under `launchctl asuser` or a background job. Run it once from Terminal and allow it, or allow the app you run it from in **System Settings > Privacy & Security > Local Network**.
+
 ### No free worker for a new agent
 
 ```text

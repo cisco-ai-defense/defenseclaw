@@ -21,9 +21,18 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
+	"runtime"
 	"strings"
 	"syscall"
 )
+
+// macLocalNetworkHint is what "no route to host" also means on macOS: the
+// Local Network privacy setting refused a program it was never asked about,
+// as for a launcher started from a launchd session with no terminal app
+// (GAP-0431). nc and curl from the same session still connect, because
+// Apple binaries are exempt.
+const macLocalNetworkHint = "; on macOS this is also how Local Network privacy refuses a program it has not allowed: " +
+	"allow the app you run defenseclaw from in System Settings > Privacy & Security > Local Network, or run it from Terminal"
 
 // transportError says in plain words why the cluster could not be reached,
 // and what to check. The cause stays reachable with errors.Is and As.
@@ -53,6 +62,11 @@ func friendlyTransport(host string, err error) error {
 		text = "cannot find the cluster address"
 	case errors.Is(err, syscall.ECONNREFUSED):
 		text = "nothing answers at the cluster address"
+	case errors.Is(err, syscall.EHOSTUNREACH), errors.Is(err, syscall.ENETUNREACH):
+		text = "no network route to the cluster address"
+		if runtime.GOOS == "darwin" {
+			text += macLocalNetworkHint
+		}
 	case errors.Is(err, context.DeadlineExceeded), isTimeout(err):
 		text = "the cluster did not answer in time"
 	case errors.Is(err, context.Canceled):
