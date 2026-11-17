@@ -22,7 +22,7 @@ var defaultRuleCategories = sync.OnceValue(func() []ruleCategory {
 			Name: "secret",
 			Rules: []PatternRule{
 				{ID: "SEC-AWS-KEY", Pattern: regexp.MustCompile("\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b"), Title: "AWS access key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-				{ID: "SEC-AWS-SECRET", Pattern: regexp.MustCompile("(?i)aws_secret_access_key\\s*[=:]\\s*[A-Za-z0-9/+=]{30,}"), Title: "AWS secret access key", Severity: "CRITICAL", Confidence: 0.9, Tags: []string{"credential"}},
+				{ID: "SEC-AWS-SECRET", Pattern: regexp.MustCompile("(?i:(?:aws[ _-]?)?secret[ _-]?access[ _-]?key|aws[ _-]?secret[ _-]?key)\\\\?[\"']?\\s*[=:]\\s*\\\\?[\"']?[A-Za-z0-9/+=]{30,}|\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b[^\\n]{0,100}?[^A-Za-z0-9/+=\\n][A-Za-z0-9/+]{40}(?:[^A-Za-z0-9/+=]|$)"), Title: "AWS secret access key", Severity: "CRITICAL", Confidence: 0.9, Tags: []string{"credential"}},
 				{ID: "SEC-ANTHROPIC", Pattern: regexp.MustCompile("sk-ant-[a-zA-Z0-9\\-_]{20,}"), Title: "Anthropic API key", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential"}},
 				{ID: "SEC-OPENAI", Pattern: regexp.MustCompile("sk-proj-[a-zA-Z0-9]{20,}"), Title: "OpenAI project key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 				{ID: "SEC-OPENAI-V2", Pattern: regexp.MustCompile("sk-[a-zA-Z0-9]{40,}"), Title: "OpenAI API key (long form)", Severity: "CRITICAL", Confidence: 0.85, Tags: []string{"credential"}},
