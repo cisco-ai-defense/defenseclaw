@@ -1976,6 +1976,7 @@ func scanLocalPatternsWithActivation(
 	// to avoid false-positive leakage from normalization.
 	lower := normalizeForTriage(content)
 	var flags []string
+	valueLabel := map[string]string{} // a value flag's label in the reason
 	isHigh := false
 	type localPIICandidate struct {
 		flag     string
@@ -2051,6 +2052,7 @@ func scanLocalPatternsWithActivation(
 				flag = "[normalized] " + match
 			}
 			flags = append(flags, flag)
+			valueLabel[flag] = detector.canonicalID + ":" + localCredentialFindingTitle
 		}
 	}
 
@@ -2078,6 +2080,7 @@ func scanLocalPatternsWithActivation(
 		}
 		seenLocalPIIEvidence[candidate.evidence] = struct{}{}
 		flags = append(flags, candidate.flag)
+		valueLabel[candidate.flag] = "LP-PII-DATA:" + localPIIFindingTitle
 		isHigh = true
 	}
 	legacySeverity := "NONE"
@@ -2115,9 +2118,22 @@ func scanLocalPatternsWithActivation(
 
 	action := guardrailFallbackActionForSeverity(severity)
 
-	top := flags
-	if len(top) > 5 {
-		top = top[:5]
+	// The reason is what the agent and the user read in a block message: a
+	// secret or PII value flag (the matched value itself) is named there by
+	// its finding, or a blocked reply would carry the secret it withheld
+	// (rel-1-0-10:GAP-0429). The findings keep the flags for the audit
+	// boundary, which classifies and redacts them.
+	var top []string
+	seenLabel := make(map[string]bool, len(flags))
+	for _, f := range flags {
+		label := f
+		if l, ok := valueLabel[f]; ok {
+			label = l
+		}
+		if !seenLabel[label] && len(top) < 5 {
+			seenLabel[label] = true
+			top = append(top, label)
+		}
 	}
 
 	return &ScanVerdict{

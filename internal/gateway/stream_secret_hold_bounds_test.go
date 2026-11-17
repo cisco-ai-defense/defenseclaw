@@ -59,6 +59,9 @@ func gap0429BoundCases(t *testing.T) []gap0429BoundCase {
 }
 
 func TestGAP0429HoldBoundsAreTheUnknownTier(t *testing.T) {
+	// The log names the bound only with reasons shown (a strict block line
+	// shows the reason redacted otherwise); stderr is captured, not printed.
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
 	for _, path := range gap0429Paths() {
 		for _, c := range gap0429BoundCases(t) {
 			for _, tier := range gap0429Tiers {
@@ -110,8 +113,10 @@ func (m *gap0429PausingProvider) ChatCompletionStream(ctx context.Context, _ *Ch
 // TestGAP0429OpenSecretIdleBound: an upstream that goes quiet inside a key
 // block holds the reply streamHoldMaxPartialAge, then the unknown tier
 // decides: default alerts and sends, strict blocks with none of the body
-// out. The paths with a reader goroutine (/llm and the passthrough stream).
+// out. The paths with a reader goroutine (/llm and the passthrough stream;
+// the raw forward reads on the handler goroutine and has no idle clock).
 func TestGAP0429OpenSecretIdleBound(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1") // the bound's reason in the captured log
 	key := gap0429Keys(t)[0]
 	filler := retestFiller(1100)[:1100]
 	text := filler + key.text + "\nDone.\n"
@@ -136,12 +141,15 @@ func TestGAP0429OpenSecretIdleBound(t *testing.T) {
 			log := captureStderr(t, func() { gap0429LLMProvider(t, rec, prov, w, tier.pack) })
 			gap0429CheckIdle(t, log, streamedContent(rec.Body.String()), text, key, tier.blocks)
 		})
-		t.Run("passthrough/openai-chat/"+tier.pack, func(t *testing.T) {
+		t.Run("passthrough/anthropic/"+tier.pack, func(t *testing.T) {
 			stall := make(chan struct{})
-			f := gap0429OpenAIChat
+			// A passthrough format read on the reader goroutine (the chat
+			// format forwards raw, with no clock of its own).
+			f := streamTailFormatNamed(t, "anthropic")
 			up := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 				rw.Header().Set("Content-Type", f.ctype)
 				fl := rw.(http.Flusher)
+				_, _ = io.WriteString(rw, f.head)
 				for i, p := range pieces {
 					if i == at {
 						select {
@@ -154,15 +162,14 @@ func TestGAP0429OpenSecretIdleBound(t *testing.T) {
 					_, _ = io.WriteString(rw, f.delta(p))
 					fl.Flush()
 				}
-				_, _ = io.WriteString(rw, f.terminal)
+				_, _ = io.WriteString(rw, f.tail+f.terminal)
 				fl.Flush()
 			}))
 			defer up.Close()
 			defer close(stall)
-			proxy := streamTailProxy(t, f.provider, retestInspector(), "action")
 			rec := httptest.NewRecorder()
 			log := captureStderr(t, func() {
-				proxy.handlePassthrough(rec, streamTailWithTier(streamTailRequest(t, f, "", up.URL), tier.pack, false))
+				gap0429Passthrough(t, f, rec, retestInspector(), streamTailWithTier(streamTailRequest(t, f, "", up.URL), tier.pack, false))
 			})
 			gap0429CheckIdle(t, log, streamTailReceivedText(f, rec.Body.String()), text, key, tier.blocks)
 		})
