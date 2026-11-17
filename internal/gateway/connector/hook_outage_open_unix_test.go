@@ -231,9 +231,18 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 				hookDir := filepath.Join(home, "hooks")
 				// A strict render can remain installed when the gateway is stopped.
 				opts := SetupOpts{DataDir: home, APIAddr: freeLoopbackAddrForOutageTest(t), APIToken: "scoped-test-token", HookFailMode: "closed"}
-				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+				// Render as the account of this case's home, never as the
+				// account running the tests: the render records the config
+				// that account runs under (.config-record), and the no_config
+				// case falls back to it. A real ~/.defenseclaw/config.yaml of
+				// the build account (default tier) then opened that case
+				// (rel-1-0-10:GAP-1176).
+				if err := WithUserHomeDir(home, func() error {
+					return WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn)
+				}); err != nil {
 					t.Fatal(err)
 				}
+				assertNoForeignConfigRecord(t, hookDir, home)
 				writeOutageTierConfig(t, home, tc.config)
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, invoke.script)}, invoke.args...)...)
 				cmd.Stdin = strings.NewReader(invoke.stdin)
@@ -365,3 +374,22 @@ var (
 	outagePortsMu   sync.Mutex
 	outagePortsUsed = map[int]bool{}
 )
+
+// assertNoForeignConfigRecord fails when the hooks rendered into hookDir
+// record a config file outside home (.config-record): the outage mode of a
+// case would then follow a config the test did not write, such as the build
+// account's own (rel-1-0-10:GAP-1176).
+func assertNoForeignConfigRecord(t *testing.T, hookDir, home string) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(hookDir, perUserConfigRecordName))
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := filepath.Clean(strings.TrimSpace(string(raw)))
+	if rel, relErr := filepath.Rel(home, recorded); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("hooks record config %s outside the case home %s", recorded, home)
+	}
+}
