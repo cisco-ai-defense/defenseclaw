@@ -151,13 +151,13 @@ func windowsClassifySetMPPreference(
 	if classifyExactWindowsSecurityControlMutation(command) {
 		return
 	}
-	_, disabled, ok := exactWindowsDefenderDisableSetting(args)
+	disabled, _, ok := exactWindowsDefenderDisableSettings(args)
 	if !ok {
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
 	windowsAddOperation(command, OperationConfigChange)
-	if disabled {
+	if len(disabled) != 0 {
 		windowsAddOperation(command, OperationPolicyBypass)
 	}
 }
@@ -212,6 +212,42 @@ func exactWindowsDefenderDisableSetting(args []windowsWord) (string, bool, bool)
 	}
 }
 
+// windowsDefenderDisableSettingCount is the number of distinct Defender
+// controls exactWindowsDefenderDisableSetting knows.
+const windowsDefenderDisableSettingCount = 5
+
+// exactWindowsDefenderDisableSettings reads the operands of one
+// Set-MpPreference call as switch/value pairs. The cmdlet takes any number of
+// its preference switches in one call, so one command can disable several
+// controls (rel-1-0-10:GAP-0329: a single call with three switches was outside
+// the one-pair grammar, so neither the direct nor the NetExec proof saw it).
+// Every pair must be an exact setting of the closed set, and a setting may
+// appear only once (PowerShell rejects a parameter bound twice and runs
+// nothing), so a call has at most one pair per known control. It returns the
+// controls the call disables and the ones it enables, in operand order.
+func exactWindowsDefenderDisableSettings(args []windowsWord) (disabled, enabled []string, ok bool) {
+	if len(args) == 0 || len(args)%2 != 0 || len(args) > 2*windowsDefenderDisableSettingCount {
+		return nil, nil, false
+	}
+	seen := make(map[string]struct{}, len(args)/2)
+	for index := 0; index < len(args); index += 2 {
+		setting, disables, exact := exactWindowsDefenderDisableSetting(args[index : index+2])
+		if !exact {
+			return nil, nil, false
+		}
+		if _, twice := seen[setting]; twice {
+			return nil, nil, false
+		}
+		seen[setting] = struct{}{}
+		if disables {
+			disabled = append(disabled, setting)
+		} else {
+			enabled = append(enabled, setting)
+		}
+	}
+	return disabled, enabled, true
+}
+
 // ExactWindowsDefenderMultiControlDisable requires at least three distinct
 // Defender protections to be disabled by unconditional Set-MpPreference
 // commands inside a four-command window. Single-control maintenance remains
@@ -240,13 +276,16 @@ func exactDirectWindowsDefenderMultiControlDisable(facts Facts) bool {
 				len(command.Redirects) != 0 || !command.ArgvComplete ||
 				command.Program != "set-mppreference" ||
 				!hasFactOperation(command, OperationPolicyBypass) ||
-				len(command.Arguments) != 3 {
+				len(command.Arguments) < 3 {
 				continue
 			}
-			setting, disabled, ok := exactWindowsDefenderDisableSetting(
+			disabled, _, ok := exactWindowsDefenderDisableSettings(
 				windowsWordsFromArguments(command.Arguments[1:]),
 			)
-			if ok && disabled {
+			if !ok {
+				continue
+			}
+			for _, setting := range disabled {
 				settings[setting] = struct{}{}
 			}
 		}
@@ -274,7 +313,7 @@ func exactNetExecWindowsDefenderMultiControlDisable(facts Facts) bool {
 			DialectHint: DialectPowerShell,
 		})
 		if !exactNetExecPowerShellParseStatus(inner.Parse) ||
-			len(inner.Commands) < 3 || len(inner.Commands) > windowsSecurityControlPairWindow {
+			len(inner.Commands) == 0 || len(inner.Commands) > windowsSecurityControlPairWindow {
 			continue
 		}
 		allDisableCommands := true
@@ -287,12 +326,14 @@ func exactNetExecWindowsDefenderMultiControlDisable(facts Facts) bool {
 				allDisableCommands = false
 				break
 			}
-			setting, disabled, exact := exactNetExecWindowsDefenderDisableCommand(child)
-			if !exact || !disabled {
+			disabled, exact := exactNetExecWindowsDefenderDisableCommand(child)
+			if !exact {
 				allDisableCommands = false
 				break
 			}
-			settings[setting] = struct{}{}
+			for _, setting := range disabled {
+				settings[setting] = struct{}{}
+			}
 		}
 		if allDisableCommands && len(settings) >= 3 {
 			return true
@@ -301,24 +342,25 @@ func exactNetExecWindowsDefenderMultiControlDisable(facts Facts) bool {
 	return false
 }
 
-// exactNetExecWindowsDefenderDisableCommand permits only the common static
-// PowerShell error-handling suffix observed in the result-backed process
-// arguments. No other common parameters or extra operands are accepted.
-func exactNetExecWindowsDefenderDisableCommand(command CommandFact) (string, bool, bool) {
-	if len(command.Arguments) != 3 && len(command.Arguments) != 5 {
-		return "", false, false
-	}
-	if len(command.Arguments) == 5 {
-		extra := windowsWordsFromArguments(command.Arguments[3:])
-		if len(extra) != 2 || !strings.EqualFold(extra[0].value, "-ErrorAction") ||
-			!strings.EqualFold(extra[1].value, "SilentlyContinue") ||
-			extra[0].expands || extra[1].expands {
-			return "", false, false
+// exactNetExecWindowsDefenderDisableCommand reads one Set-MpPreference call of
+// a NetExec body: switch/value pairs that each disable a control (one call may
+// carry several, GAP-0329), plus only the common static PowerShell
+// error-handling suffix observed in the result-backed process arguments. No
+// other common parameters, extra operands or enabling pairs are accepted.
+func exactNetExecWindowsDefenderDisableCommand(command CommandFact) ([]string, bool) {
+	words := windowsWordsFromArguments(command.Arguments[1:])
+	if n := len(words); n >= 4 && strings.EqualFold(words[n-2].value, "-ErrorAction") {
+		if !strings.EqualFold(words[n-1].value, "SilentlyContinue") ||
+			words[n-2].expands || words[n-1].expands {
+			return nil, false
 		}
+		words = words[:n-2]
 	}
-	return exactWindowsDefenderDisableSetting(
-		windowsWordsFromArguments(command.Arguments[1:3]),
-	)
+	disabled, enabled, ok := exactWindowsDefenderDisableSettings(words)
+	if !ok || len(enabled) != 0 || len(disabled) == 0 {
+		return nil, false
+	}
+	return disabled, true
 }
 
 func exactNetExecPowerShellParseStatus(parse ParseResult) bool {
