@@ -100,6 +100,57 @@ type toolChainHookCapture struct {
 	// to relative operands of a credentials-file read or an external upload
 	// (placeSecretReadPaths), and nothing is read there.
 	reportedCWD string
+	// chainEvidence is what the repositories reported of the chains this
+	// call completed, for its audit row (GAP-0445); telemetry only.
+	chainEvidence []audit.ToolChainMatchEvidence
+}
+
+// noteChainEvidence keeps the evidence of the chains a fresh observation
+// detected, from the session window and what the root window added.
+func (capture *toolChainHookCapture) noteChainEvidence(results ...audit.ToolChainObserveResult) {
+	if capture == nil {
+		return
+	}
+	for _, result := range results {
+		if result.Status != audit.ToolChainObserveFresh {
+			continue
+		}
+		for _, ev := range result.Evidence {
+			if slices.Contains(result.DetectedChainIDs, ev.ChainID) {
+				capture.chainEvidence = append(capture.chainEvidence, ev)
+			}
+		}
+	}
+}
+
+// toolChainEvidenceAuditExtra is the chain evidence of the request's audit
+// row: one key per field, the values of several chains in the order of
+// chain_match_ids (GAP-0445).
+func toolChainEvidenceAuditExtra(ctx context.Context) map[string]string {
+	if ctx == nil {
+		return nil
+	}
+	capture, _ := ctx.Value(toolChainHookCaptureContextKey{}).(*toolChainHookCapture)
+	if capture == nil || len(capture.chainEvidence) == 0 {
+		return nil
+	}
+	cols := map[string][]string{}
+	add := func(k, v string) { cols[k] = append(cols[k], v) }
+	for _, ev := range capture.chainEvidence {
+		add("chain_match_ids", ev.ChainID)
+		add("chain_match_scope", ev.Scope)
+		add("chain_match_partition", firstNonEmpty(ev.Partition, "-"))
+		add("chain_match_sequence", strconv.FormatUint(ev.Sequence, 10))
+		add("chain_match_steps", strconv.Itoa(ev.Steps))
+		add("chain_match_artifact", firstNonEmpty(ev.Artifact, "-"))
+		add("chain_match_span_ms", strconv.FormatInt(ev.SpanMillis, 10))
+		add("chain_match_horizon_s", strconv.FormatInt(ev.HorizonSeconds, 10))
+	}
+	extra := make(map[string]string, len(cols))
+	for k, v := range cols {
+		extra[k] = strings.Join(v, ",")
+	}
+	return extra
 }
 
 func (capture *toolChainHookCapture) recordArtifactTrustedAction(
@@ -749,6 +800,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		}
 	}
 	rootAdded := rootToolChainAdded(profile, req, resp, rootRepository, rootResult, result, panicState)
+	req.toolChain.noteChainEvidence(result, rootAdded)
 	if result.DeniedMask != 0 && panicState != nil {
 		// Observe commits the deny receipt before returning. Snapshot an
 		// enforcement-safe response immediately so a later connector shaper or
