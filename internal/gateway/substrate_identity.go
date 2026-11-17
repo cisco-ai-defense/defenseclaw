@@ -20,6 +20,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -93,4 +94,33 @@ func (a *APIServer) attachSubstrateSubject(ctx context.Context, reg registry.Reg
 // registration supplied.
 func isSubstrateSubjectSource(source string) bool {
 	return source == subjectSourceSubstrateActor || source == subjectSourceSubstrateWorkload
+}
+
+// substrateAgentMachine is the machine component of every Substrate
+// actor's agent identity: an actor runs on whichever worker Substrate
+// picks, so no host's machine id names it.
+var substrateAgentMachine = agentidentity.MachineHash("defenseclaw.substrate.actor.v1")
+
+// substrateAgentIdentityFacts is the agent identity (agt-) of a verified
+// actor's hooks (GAP-0418, GAP-0422). It is derived from what the gateway
+// verified, never from the request: the person the launcher bound to the
+// actor (OIDC issuer and subject) and the connector, so one person's agents
+// of one connector share one identity on every actor, fork and gateway
+// replica; an actor with no bound person (made outside the launcher) gets
+// one per atespace and connector. The session instance (ais-) is derived
+// from it, so it no longer depends on the replica that answers.
+func substrateAgentIdentityFacts(actor substrateActor, reg registry.Registration, connector string) agentIdentityFacts {
+	user, name, verified := "atespace:"+actor.Atespace, "", false
+	if !reg.Attributed && reg.Person.Subject != "" {
+		user, name, verified = "oidc:"+reg.Person.ID(), sanitizeLLMEventUser(reg.Person.Principal), true
+	}
+	facts := agentIdentityFacts{
+		MachineHash: substrateAgentMachine, UserID: user, UserName: name, Connector: connector,
+		UPNUnavailable: true, Verified: verified,
+	}
+	facts.ID = agentidentity.AgentID(agentidentity.Inputs{MachineHash: substrateAgentMachine, UserID: user, Connector: connector})
+	if facts.ID == "" {
+		return agentIdentityFacts{}
+	}
+	return facts
 }
