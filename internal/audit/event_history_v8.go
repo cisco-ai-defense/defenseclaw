@@ -1171,6 +1171,13 @@ func eventHistoryWriteFailureLogLine(class EventHistorySQLiteClass, primary uint
 		}
 		line += ": " + cause
 	}
+	if class == EventHistorySQLiteFull {
+		// GAP-0402: a full store is no transient write error. Hook calls that
+		// need an audit record fail closed until the store has room again.
+		line += "; ALERT audit_store_full: the audit store's volume has no space left, so audit records are not written " +
+			"and hook calls that need one fail closed until it has room: free space or enlarge the volume, " +
+			"and set observability.local.max_store_mb below its size"
+	}
 	return line
 }
 

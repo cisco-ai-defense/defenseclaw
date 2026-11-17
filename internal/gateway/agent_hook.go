@@ -1966,6 +1966,8 @@ func (a *APIServer) hookAuditFailureResponse(
 				connectorName, req.HookEventName),
 		},
 		cause: "because it could not write the call's audit record",
+		// A sandbox names the audit store, not an internal error (GAP-0402).
+		sandboxReason: sandboxAuditFailureReason,
 	}
 	closed := a.hookFailedCheckResponse(ctx, connectorName, req, rawBody, req.Payload, failure)
 	if closed.Action != "block" {
@@ -2645,6 +2647,9 @@ type hookCheckFailure struct {
 	base           agentHookResponse
 	cause          string
 	recoveredPanic bool
+	// sandboxReason is the plain reason of the sandbox's closed verdict;
+	// empty is sandboxInternalErrorReason.
+	sandboxReason string
 }
 
 // hookFailedCheckResponse renders the fail-mode verdict of a hook check that
@@ -2693,7 +2698,11 @@ func (a *APIServer) hookFailedCheckResponse(
 	// lifecycle rule below answers it.
 	if sandboxHookForConnector(ctx, connectorName) && action == "block" && !lifecycle {
 		resp := agentHookResponse{Action: action, RawAction: "block", Severity: base.Severity, Mode: "action", WouldBlock: wouldBlock, Reason: base.Reason, AdditionalContext: base.AdditionalContext}
-		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
+		reason := failure.sandboxReason
+		if reason == "" {
+			reason = sandboxInternalErrorReason
+		}
+		return a.failSandboxHookClosedFor(ctx, profile, connectorName, req, rawBody, payload, resp, reason)
 	}
 	cfg := a.decisionConfig(ctx)
 	// A local evaluation or audit failure is not a gateway connection outage.
