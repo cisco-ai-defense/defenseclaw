@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -154,8 +155,15 @@ func loadRouteBackupWith(read RouteOnlyFileReader, dataDir, connector string) (r
 	return b, nil
 }
 
-func saveRouteBackup(dataDir, connector string, b routeEnvBackup) error {
-	path := routeBackupPath(dataDir, connector)
+// saveRouteBackup writes (or, with nothing applied, removes) the route record
+// in the data dir. A managed Windows data dir keeps the DACL the service
+// converged (the user edits files, SYSTEM alone changes the DACL), so the
+// generic private writer, which re-protects the directory under the target's
+// token, is refused there; the record is published in the target-owned
+// managed runtime form instead, like the hook runtime files beside it
+// (rel-1-0-10:GAP-1097).
+func saveRouteBackup(opts SetupOpts, connector string, b routeEnvBackup) error {
+	path := routeBackupPath(opts.DataDir, connector)
 	if len(b.Applied) == 0 {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
@@ -165,6 +173,9 @@ func saveRouteBackup(dataDir, connector string, b routeEnvBackup) error {
 	raw, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
 		return err
+	}
+	if opts.ManagedEnterprise && runtime.GOOS == "windows" {
+		return WriteManagedTargetRuntimeFile(path, raw)
 	}
 	return safefile.WritePrivate(path, raw)
 }
