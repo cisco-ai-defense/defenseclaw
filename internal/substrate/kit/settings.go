@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
@@ -82,7 +83,23 @@ type OverlayOptions struct {
 	// HarnessVersion is the agent version the image pins (it decides the
 	// Claude Code default model, ClaudeCodeHaiku55MinVersion).
 	HarnessVersion string
+	// RegistryTokens are the npm registry hosts a substrate.secrets entry
+	// injects the Authorization header on, with the placeholder the kit's
+	// npmrc sends there (NPMRegistryTokens, GAP-0529).
+	RegistryTokens []RegistryToken
 }
+
+// RegistryToken is one npm registry host that egress injects a credential
+// on, and the placeholder npm sends it in the credential's place.
+type RegistryToken struct {
+	Host, Placeholder string
+}
+
+// NPMGlobalConfig is the kit's npm configuration. npm reads its global
+// configuration from <prefix>/etc/npmrc, and the prefix is the base image's
+// (/usr for a distribution node), so the kit names this file in
+// npm_config_globalconfig (GAP-0529).
+const NPMGlobalConfig = "/usr/local/etc/npmrc"
 
 // SubstrateIngress is the remote ingress of cfg's gateway URL.
 func SubstrateIngress(cfg Config) (connector.SandboxIngress, error) {
@@ -259,7 +276,7 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 		ImageFile{Path: "/etc/machine-id", Mode: 0o444},
 		ImageFile{Path: "/etc/gitconfig", Mode: 0o644, Data: []byte(gitConfig())},
 		ImageFile{Path: CredHelper, Mode: 0o755, Data: []byte(gitCredentialHelper)},
-		ImageFile{Path: "/usr/local/etc/npmrc", Mode: 0o644, Data: []byte(npmrc)},
+		ImageFile{Path: NPMGlobalConfig, Mode: 0o644, Data: []byte(npmConfig(o.RegistryTokens))},
 	)
 	if art.Connector == "codex" {
 		ov.Files = append(ov.Files, ImageFile{Path: path.Join(o.Home, ".codex", "config.toml"), Mode: 0o600, User: true,
@@ -300,6 +317,7 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	}
 	ov.Env["TMPDIR"] = path.Join(o.Home, ".cache", "tmp")
 	ov.Env["HOME"] = o.Home
+	ov.Env["npm_config_globalconfig"] = NPMGlobalConfig
 	for k, v := range modelEnv(art.Connector, gw, o) {
 		ov.Env[k] = v
 	}
@@ -634,10 +652,45 @@ while IFS= read -r line && [ -n "$line" ]; do :; done
 printf 'username=x-access-token\npassword=placeholder-not-a-secret\n'
 `
 
-const npmrc = `# DefenseClaw actor image (root-owned). Registry tokens are never stored
-# here: a template that binds a registry secret adds a placeholder token for
-# that registry, which Substrate egress swaps on that host only.
-update-notifier=false
-fund=false
-audit=false
-`
+// npmConfig is the kit's npmrc. It holds no token: a registry a
+// substrate.secrets entry is bound to gets the placeholder, which Substrate
+// egress swaps for the real credential on that host only (E8, D14).
+func npmConfig(tokens []RegistryToken) string {
+	var b strings.Builder
+	b.WriteString("# DefenseClaw actor image (root-owned). Registry tokens are placeholders: Substrate\n" +
+		"# egress swaps each for the real credential on its bound host only.\n" +
+		"update-notifier=false\nfund=false\naudit=false\n")
+	for _, t := range tokens {
+		fmt.Fprintf(&b, "//%s/:_authToken=%s\n", t.Host, t.Placeholder)
+	}
+	return b.String()
+}
+
+// NPMRegistryTokens are the registry placeholders for the kit's npmrc: every
+// exact host of a secret injected in the Authorization header (npm sends a
+// registry's _authToken there), with the secret's placeholder (else
+// PlaceholderSecret). A host pattern (*.example.com) cannot name an npm
+// registry and is left out. Sorted by host; the first secret wins a host.
+func NPMRegistryTokens(secrets []config.SubstrateSecret) []RegistryToken {
+	seen := map[string]bool{}
+	var out []RegistryToken
+	for _, s := range secrets {
+		if !strings.EqualFold(strings.TrimSpace(s.Inject.Header), "Authorization") {
+			continue
+		}
+		ph := s.Inject.Placeholder
+		if ph == "" {
+			ph = PlaceholderSecret
+		}
+		for _, h := range s.Inject.Hosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" || seen[h] || strings.ContainsAny(h, "*?[]/ ") {
+				continue
+			}
+			seen[h] = true
+			out = append(out, RegistryToken{Host: h, Placeholder: ph})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	return out
+}

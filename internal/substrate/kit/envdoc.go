@@ -44,8 +44,10 @@ func ImageEnv() map[string]EnvRule {
 		fixed := func(v string) EnvRule { return EnvRule{Value: v, Fixed: true} }
 		free := EnvRule{}
 		m := map[string]EnvRule{
-			"HOME":   free,
-			"TMPDIR": fixed(path.Join(ActorHome, ".cache", "tmp")),
+			"HOME": free,
+			// npm reads the kit's npmrc wherever node's prefix is (GAP-0529).
+			"npm_config_globalconfig": fixed(NPMGlobalConfig),
+			"TMPDIR":                  fixed(path.Join(ActorHome, ".cache", "tmp")),
 			// The agent's mode, set by the relay for a --task run.
 			ModeEnv: free,
 			// Claude Code's model route (modelEnv): the gateway URL and the

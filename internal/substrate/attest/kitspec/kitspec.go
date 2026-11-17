@@ -64,6 +64,9 @@ type Options struct {
 	RelayListen   string
 	// Providers recorded in the attestation.
 	Providers []string
+	// RegistryTokens are the npm registry placeholders of the kit's npmrc
+	// (kit.NPMRegistryTokens of substrate.secrets, GAP-0529).
+	RegistryTokens []kit.RegistryToken
 }
 
 // Spec returns the kit layer, the template facts and the harness version of
@@ -156,7 +159,8 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 	if err != nil {
 		return zero, attest.TemplateInfo{}, err
 	}
-	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model, HarnessVersion: agentVersion})
+	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model, HarnessVersion: agentVersion,
+		RegistryTokens: o.RegistryTokens})
 	if err != nil {
 		return zero, attest.TemplateInfo{}, err
 	}
