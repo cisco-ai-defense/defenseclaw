@@ -193,7 +193,16 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 		}
 		return matchNo, "", "", nil
 	}
-	if m.Empty() {
+	workload := false
+	if applies, selects := workloadSelects(m, subject); applies {
+		if !selects {
+			return matchNo, "", "", nil
+		}
+		workload = true
+		if m.Empty() {
+			return matchYes, profileMatchUser, "", nil
+		}
+	} else if m.Empty() {
 		return matchNo, "", "", nil
 	}
 	state = matchYes
@@ -297,6 +306,9 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 	}
 	if state != matchYes {
 		return state, "", "", needs
+	}
+	if workload && reason == "" {
+		reason = profileMatchUser
 	}
 	return matchYes, reason, group, nil
 }

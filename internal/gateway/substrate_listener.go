@@ -838,6 +838,20 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// substrateWorkloadSubject is the OIDC subject of the CI workload a verified
+// actor was started by (its registration's person), "" for a person or no
+// registration (GAP-0540).
+func substrateWorkloadSubject(ctx context.Context) string {
+	if _, ok := substrateActorFrom(ctx); !ok {
+		return ""
+	}
+	reg, ok := substrateRegistrationFrom(ctx)
+	if !ok || reg.Attributed || reg.Person.Kind != identity.PersonWorkload {
+		return ""
+	}
+	return reg.Person.Subject
+}
+
 // substrateProfileSubject is the profile subject of an actor request: the
 // person the launcher verified (OIDC subject, principal and groups) and
 // bound to the actor at create. An attributed actor has none, so only the
