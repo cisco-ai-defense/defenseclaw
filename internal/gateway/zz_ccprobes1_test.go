@@ -13,6 +13,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -373,5 +376,92 @@ func TestCCP1GAP0476QuotedDottedPasswordIsFound(t *testing.T) {
 		if act, ids := write(content); act == "allow" && len(ids) == 0 {
 			t.Errorf("%q: clean allow, want a password finding", content)
 		}
+	}
+}
+
+// rel-1-0-10:GAP-0653 (P2 security): an awk program or command word built at
+// run time (a variable, a -v value, ENVIRON) is the unknown tier: alert in
+// default, block in strict; never a clean allow.
+func TestCCP1GAP0653AwkProgramBuiltAtRunTimeIsTheUnknownTier(t *testing.T) {
+	_, cwd := ccp1Home(t)
+	if err := os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("date\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`P='{system($1)}'; awk "$P" a.txt`,
+		`X=date; awk -v c="$X" 'BEGIN{system(c)}'`,
+		`X=date; awk -v c="$X" 'BEGIN{c | getline v; print v}'`,
+		`C=date awk 'BEGIN{system(ENVIRON["C"])}'`,
+	} {
+		if act, ids := ccp1Bash(t, "claudecode", "strict", cwd, command); act != "block" {
+			t.Errorf("strict %q: action %q rules %v, want block (unknown tier)", command, act, ids)
+		}
+		if act, ids := ccp1Bash(t, "claudecode", "default", cwd, command); act == "allow" && len(ids) == 0 {
+			t.Errorf("default %q: clean allow, want the unknown tier (alert)", command)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-0552 (P2 security): a cmd /c line on the PowerShell tool is
+// read as the line cmd.exe runs: a CMD attack fixture the Bash tool's cmd /c
+// spelling catches is not a clean allow on the PowerShell tool.
+func TestCCP1GAP0552CmdLauncherOnThePowerShellToolIsRead(t *testing.T) {
+	_, cwd := ccp1Home(t)
+	var fixtures []toolCallCorpusCase
+	for _, c := range readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl") {
+		if c.IsAttack && string(c.Dialect) == "cmd" && c.Command != "" && len(c.OSOverrides) == 0 &&
+			c.ProfilePosture == "" && !strings.ContainsAny(c.Command, "\"\r\n") {
+			fixtures = append(fixtures, c)
+		}
+	}
+	clean := func(act string, ids []string) bool { return act == "allow" && len(ids) == 0 }
+	read := 0
+	for _, posture := range []string{"default", "strict"} {
+		for _, c := range fixtures {
+			if clean(ccp1Bash(t, "claudecode", posture, cwd, "cmd /c "+c.Command)) {
+				continue // the Bash tool's spelling is the reference
+			}
+			read++
+			for _, spelling := range []string{"cmd /c " + c.Command, `C:\Windows\System32\cmd.exe /c ` + c.Command, "cmd /r " + c.Command} {
+				if act, ids := ccp1Hook(t, "claudecode", posture, cwd, "PowerShell", map[string]any{"command": spelling}); clean(act, ids) {
+					t.Errorf("%s %s: the PowerShell tool's spelling %d is a clean allow", posture, c.ID, len(spelling)-len(c.Command))
+				}
+			}
+		}
+	}
+	if read == 0 {
+		t.Skipf("control: no CMD fixture (%d) is caught in the Bash tool's cmd /c spelling on this tree", len(fixtures))
+	}
+}
+
+// rel-1-0-10:GAP-0176 (P3 security): an ACP terminal/create frame is judged
+// as the shell call it performs (the command rules), not scanned as prose:
+// a DefenseClaw state write blocks.
+func TestCCP1GAP0176ACPTerminalFrameMeetsTheShellRules(t *testing.T) {
+	ccp1Home(t)
+	api := testAPIServerWithConfig(t, "action")
+	cfg := acpWordingTestConfig()
+	cfg.Guardrail = api.scannerCfg.Guardrail
+	api.scannerCfg = cfg
+	frame, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "terminal/create",
+		"params": map[string]any{"sessionId": "s", "command": ccp1StateWrite}})
+	body, err := json.Marshal(acp.Evaluation{
+		Profile: "default", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed",
+		Direction: acp.AgentToClient, Surface: acp.SurfaceTerminal, Method: "terminal/create", Payload: json.RawMessage(frame),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	api.handleACPEvaluate(rec, httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Skipf("control: the ACP route answered %d %s on this tree", rec.Code, rec.Body.String())
+	}
+	var verdict acp.Verdict
+	if err := json.Unmarshal(rec.Body.Bytes(), &verdict); err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Action != "block" {
+		t.Errorf("terminal/create state write: action %q reason %q, want block", verdict.Action, verdict.Reason)
 	}
 }
