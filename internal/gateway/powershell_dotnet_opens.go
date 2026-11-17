@@ -456,7 +456,7 @@ func psDynamicPathReadings(text, home string, budget *psBudget) []string {
 		if quoted {
 			forms = append(forms, "Set-Content "+psHomeLiteralParam("-LiteralPath "+word, home)+" -Value x")
 			if value := psUnquote(word, budget); inHome && value != "" && !strings.ContainsAny(value[:1], `\/`) &&
-				!(len(value) >= 2 && value[1] == ':') {
+				(len(value) < 2 || value[1] != ':') {
 				forms = append(forms, "Set-Content -LiteralPath "+
 					managed.PowerShellLiteral(strings.TrimRight(home, `\/`)+separator+strings.TrimLeft(value, `\/`))+" -Value x")
 			}
