@@ -214,6 +214,7 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		a.substrateAuditAdminTarget(st, r, reg, "policy explain", "INFO")
 		out := map[string]any{
 			"actor": reg.Atespace + "/" + reg.Name, "uid": reg.UID, "profile": reg.Profile, "connector": reg.Connector,
 			"template": reg.Template, "mode": substrateMode(reg), "fail_mode": substrateFailMode(st.cfg, reg),

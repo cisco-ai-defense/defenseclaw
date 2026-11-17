@@ -638,9 +638,6 @@ func (a *APIServer) substrateFind(st *substrateState, r *http.Request, atespace,
 		a.substrateAuditDenied(st, r, atespace+"/"+name, "not_owner")
 		return registry.Registration{}, http.StatusNotFound, "actor_not_found"
 	}
-	if c.admin && (reg.Person.Subject == "" || reg.Person.ID() != ownerOf(c.person).ID()) {
-		a.substrateAuditAdminRead(st, r, "actor", 1, reg.Atespace+"/"+reg.Name)
-	}
 	return reg, http.StatusOK, ""
 }
 
@@ -651,6 +648,7 @@ func (a *APIServer) substrateGetActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		a.substrateAuditAdminTarget(st, r, reg, "actor", "INFO")
 		writeSubstrateJSON(w, http.StatusOK, substrateActorView(reg))
 	}
 }
@@ -666,6 +664,7 @@ func (a *APIServer) substrateDeleteActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		a.substrateAuditAdminTarget(st, r, reg, "delete", "HIGH")
 		if err := st.cfg.Actions.Delete(r.Context(), reg.Atespace, reg.Name); err != nil {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "delete_failed")
 			return
@@ -698,7 +697,7 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "atespace_and_name_required")
 			return
 		}
-		reg, status, reason := a.substrateFind(st, r, in.Atespace, in.Name)
+		reg, status, reason := a.substrateFindSession(st, r, in.Atespace, in.Name)
 		if status != http.StatusOK {
 			writeSubstrateJSONError(w, status, reason)
 			return
@@ -713,11 +712,6 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
-		}
-		if reg.Person.ID() != ownerOf(c.person).ID() {
-			// An administrator attaching to someone else's actor is
-			// recorded as themselves (E2).
-			fmt.Fprintf(os.Stderr, "[substrate] administrator session for another person's actor %s/%s\n", reg.Atespace, reg.Name)
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{
 			"token": tok, "expires": exp, "kid": st.cfg.Sessions.KeyID(), "public_key_pem": string(st.cfg.Sessions.PublicKeyPEM()),

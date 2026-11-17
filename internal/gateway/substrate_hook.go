@@ -268,9 +268,15 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_for_another_actor")
 		return
 	}
-	// Who may attach was decided when the token was issued: the admin
-	// listener issues one only to the actor's own person or to an
-	// administrator, and audits it (E2).
+	// A session is the actor's own person's only (GAP-0435): a token for
+	// this actor that names anyone else, however it was minted, is refused.
+	if reg, ok := substrateRegistrationFrom(r.Context()); !ok || reg.Person.Subject == "" || s.Person != reg.Person.ID() {
+		a.substrateAuditRelayDenied(st, r, "HIGH", "session_not_owner", target, s.Person)
+		writeSubstrateRefusal(w, http.StatusForbidden, "session_not_owner")
+		return
+	}
+	// The admin listener issues a session only to the actor's own person,
+	// and the check above holds a token minted any other way to that too.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	out := map[string]any{
