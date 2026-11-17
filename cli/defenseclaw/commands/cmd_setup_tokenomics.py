@@ -124,15 +124,16 @@ def tokenomics(
 
 
 def _print_kept_store(data_dir: Path) -> None:
-    """Say what --disable leaves on disk: the gateway writes the calls it still
-    buffers (up to 15 s), closes the store and writes it no more (the store is
-    data_dir/model_usage, internal/gateway/sidecar_modelusage.go)."""
+    """Say what --disable leaves on disk: once the gateway applies the change it
+    writes the calls it still buffers (up to 15 s), closes the store and writes
+    it no more (the store is data_dir/model_usage,
+    internal/gateway/sidecar_modelusage.go)."""
     store = data_dir / "model_usage"
     if not store.is_dir():
         return
     click.echo(
-        f"  The gateway writes the usage it still buffers and closes the local store; the usage already "
-        f"recorded stays in {store} (delete that folder to remove it)."
+        f"  When the gateway applies this it writes the usage it still buffers and closes the local store. "
+        f"The usage already recorded stays in {store} (delete that folder to remove it)."
     )
 
 

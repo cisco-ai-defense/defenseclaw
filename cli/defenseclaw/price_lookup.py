@@ -26,11 +26,16 @@ _VENDOR_PREFIXES = ("anthropic.", "openai.", "google.", "meta.", "mistral.", "am
 FALLBACK_ENTRY = "fallback"
 
 
+def _text(value: Any) -> str:
+    # A missing value is "", as an unset Go string; anything else as written.
+    return "" if value is None else str(value)
+
+
 def model_keys(model: str) -> list[str]:
     """The lower-cased forms of a model id to try: as sent, with a Bedrock
     inference-profile ARN reduced to its id and the region prefix removed, and
     without the vendor prefix."""
-    m = str(model or "").strip().lower()
+    m = _text(model).strip().lower()
     if not m:
         return []
     if m.startswith("arn:") and "/" in m:
@@ -63,8 +68,8 @@ def _entries(pricing: dict[str, Any]) -> list[tuple[str, str, bool, str]]:
     for entry in models if isinstance(models, list) else []:
         if not _has_rates(entry):
             continue
-        provider = str(entry.get("provider") or "").strip().lower()
-        model = str(entry.get("model") or "").strip().lower()
+        provider = _text(entry.get("provider")).strip().lower()
+        model = _text(entry.get("model")).strip().lower()
         prefix = model.endswith("*")
         out.append((provider, model[:-1] if prefix else model, prefix, f"{provider}/{model}"))
     out.sort(key=lambda e: (e[2], -len(e[1]), e[3]))
@@ -76,7 +81,7 @@ def price_entry(pricing: Any, provider: str, model: str) -> str | None:
     the unknown_model fallback does), or None when its calls have no cost."""
     if not isinstance(pricing, dict):
         return None
-    provider = str(provider or "").strip().lower()
+    provider = _text(provider).strip().lower()
     entries = _entries(pricing)
     for cand in model_keys(model):
         for wild in (False, True):

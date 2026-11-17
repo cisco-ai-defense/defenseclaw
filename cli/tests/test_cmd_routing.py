@@ -309,3 +309,15 @@ def test_managed_unreadable_config_says_so(home: Path, monkeypatch) -> None:
         assert CliRunner().invoke(cmd_routing.routing_cmd, ["enable"]).exit_code == 3
     finally:
         (home / "config.yaml").chmod(0o600)
+
+
+def test_budgets_list_says_over_for_a_pooled_budget_past_its_limit(home: Path, monkeypatch) -> None:
+    # The gateway answers a pooled budget over its limit with exceeded and no total
+    # (api_routing.go routingBudgetViews); "?" read as unknown (rel-1-0-10 GAP-1108).
+    ok = run("budgets", "add", "team", "--scope", "user", "--subject", "*", "--period", "day", "--limit-usd", "20", "--on-exceed", "warn")
+    assert ok.exit_code == 0, ok.output
+    live = {"budgets": [{"id": "team", "exceeded": True, "seed": "seeded"}]}
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (live, ""))
+    assert "over/20.0 USD per day" in run("budgets", "list").output
+    live["budgets"][0]["exceeded"] = False
+    assert "?/20.0 USD per day" in run("budgets", "list").output

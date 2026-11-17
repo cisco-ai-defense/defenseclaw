@@ -95,16 +95,25 @@ def test_note_helpers() -> None:
     assert note is not None and note.panels and not note.budgets and COMMAND in note.text
     tok_on = {"observability": {"tokenomics": {"enabled": True, "local_store": {"enabled": True}}}}
     assert routing_tokenomics.note_from_doc({"routing": {"enabled": True}, **tok_on}) is None
-    # Budgets with tokenomics on but the local store off cannot count spend.
+    # Budget spend has its own ledger: the local usage store is not needed
+    # (config.BudgetFeedReady).
     store_off = {"observability": {"tokenomics": {"enabled": True}}}
     budgets = {"routing": {"enabled": True, "admin": {"budgets": [{"id": "b"}]}}, **store_off}
-    note = routing_tokenomics.note_from_doc(budgets)
+    assert routing_tokenomics.note_from_doc(budgets) is None
+    # Budgets count only agent calls with a computed cost.
+    for tok in ({"enabled": True, "cost": {"compute": False}}, {"enabled": True, "roles": ["judge"]}):
+        doc = {"routing": {"enabled": True, "admin": {"budgets": [{"id": "b"}]}}, "observability": {"tokenomics": tok}}
+        note = routing_tokenomics.note_from_doc(doc)
+        assert note is not None and note.budgets and not note.panels and "cost.compute" in note.text
+        assert COMMAND not in note.text and note.remedy == routing_tokenomics.COST_FIX
     assert (
-        note is not None
-        and note.budgets
-        and not note.panels
-        and "local usage store" in note.text
-        and COMMAND in note.text
+        routing_tokenomics.note_from_doc(
+            {
+                "routing": {"enabled": True, "admin": {"budgets": [{"id": "b"}]}},
+                "observability": {"tokenomics": {"enabled": True, "roles": ["agent", "judge"]}},
+            }
+        )
+        is None
     )
     tok = SimpleNamespace(enabled=False, local_store_enabled=False)
     on = SimpleNamespace(

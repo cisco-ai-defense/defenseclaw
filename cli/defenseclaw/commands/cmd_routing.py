@@ -917,15 +917,16 @@ def _lint(doc: dict[str, Any]) -> list[str]:
         if budget.get("scope") == "group" and not managed:
             notes.append(f"budget {budget.get('id')}: a group budget counts only this device's user here")
     obs = doc.get("observability") or {}
-    tokenomics = obs.get("tokenomics") or {}
-    if budgets and not (tokenomics.get("enabled") and (tokenomics.get("local_store") or {}).get("enabled")):
-        notes.append(
-            "budgets need observability.tokenomics.enabled and observability.tokenomics.local_store.enabled: "
-            + routing_tokenomics.ENABLE_COMMAND
-        )
-    # The gateway's own lookup (Bedrock region and vendor prefixes, ARNs, case,
-    # provider *, the unknown_model fallback), so this never warns about a
-    # model whose calls are priced (rel-1-0-10 GAP-1108).
+    # What the gateway's budget feed needs (config.BudgetFeedReady), not the
+    # local usage store: budget spend has its own ledger.
+    feed = routing_tokenomics.note_from_doc(doc)
+    if budgets and feed is not None and feed.budgets:
+        notes.append(feed.text)
+    # The gateway's lookup for the alias's model (Bedrock region and vendor
+    # prefixes, ARNs, case, provider *, the unknown_model fallback), so an
+    # alias the price table covers is not reported as unpriced (rel-1-0-10
+    # GAP-1108). The gateway also retries with the model a response names;
+    # a config cannot say which, so this checks the alias's own model.
     pricing = obs.get("pricing")
     for m in _list(routing.get("models")):
         if (
@@ -1107,8 +1108,10 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
         used = (
             f"{r['spent_usd']:.2f}"
             if isinstance(r.get("spent_usd"), (int, float))
-            else (f"{r['percent_used']:.0f}%" if isinstance(r.get("percent_used"), (int, float)) else "?")
+            else (f"{r['percent_used']:.0f}%" if isinstance(r.get("percent_used"), (int, float)) else "")
         )
+        # A pooled budget over its limit comes back as exceeded with no total.
+        used = used or ("over" if r.get("exceeded") is True else "?")
         click.echo(
             f"{r.get('id', ''):<16} {r.get('scope')}:{str(r.get('subject') or ''):<14} "
             f"{used}/{r.get('limit_usd')} USD per {r.get('period')}"
