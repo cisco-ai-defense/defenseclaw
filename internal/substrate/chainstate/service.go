@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/copilotjoin"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/historystore"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
@@ -195,6 +196,8 @@ type actorEntry struct {
 	intents  *intentstore.Process
 	// history is the proxy's inspect-once record of the actor (GAP-0266).
 	history *historystore.Process
+	// copilot is the actor's Copilot permission join (GAP-0269).
+	copilot *copilotjoin.Process
 	openMu  sync.Mutex
 	purged  bool
 	// purgeIdle is a delete that waits for the calls holding the entry.
@@ -384,6 +387,8 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(MethodChainUnrecorded, s.logged(MethodChainUnrecorded, leader.Typed(s.Unrecorded)))
 	srv.Handle(MethodHistorySeen, s.logged(MethodHistorySeen, leader.Typed(s.HistorySeen)))
 	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
+	srv.Handle(MethodCopilotJoinRecord, s.logged(MethodCopilotJoinRecord, leader.Typed(s.CopilotJoinRecord)))
+	srv.Handle(MethodCopilotJoinTake, s.logged(MethodCopilotJoinTake, leader.Typed(s.CopilotJoinTake)))
 }
 
 // logged logs the errors a handler returns that the transport reports only
