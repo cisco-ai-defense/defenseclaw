@@ -1358,6 +1358,7 @@
    "TestCaseFoldingHostLinkToACredentialFileBelowAParentGetsTheVerdictOfItsName": 2.0,
    "TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed": 3.1,
    "TestCaseFoldingHostNestedCredentialFileIsJudgedInEveryLetterCase": 3.2,
+   "TestChainBodyWritesAreJudgedInEveryFolderTheChainMayLeave": 90.0,
    "TestChainStatementFindingsAfterABackgroundStatement": 311.2,
    "TestChainStatementFindingsAreTheUnion": 140.6,
    "TestChainStatementFindingsKeepTheStrictest": 315.6,
