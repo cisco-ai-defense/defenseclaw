@@ -78,6 +78,7 @@
    "TestBoundRuleSedBackupBoundRows": 3.0,
    "TestBoundRuleSedBackupDepthCap": 2.3,
    "TestCallOverOperandBoundIsJudgedByTheTier": 6.7,
+   "TestChainBodyWritesAreJudgedInEveryFolderTheChainMayLeave": 90.0,
    "TestCodexHeredocPatchThroughALinkIntoAClosedSSHFolderIsBlocked": 11.6,
    "TestCopilotCLIFileCallThroughLinkGetsDirectPathVerdict": 2.1,
    "TestCopyInLoopIsJudgedByNameNotBySourceOrProgramFile": 22.1,
