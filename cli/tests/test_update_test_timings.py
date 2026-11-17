@@ -238,6 +238,7 @@ def test_a_refresh_reads_the_cut_off_mark_when_the_job_died_before_the_package_e
     assert data["tests"]["pkg/a"]["TestCut"] == 116.6
     assert data["tests"]["pkg/a"]["TestEnded"] == 5.0
 
+
 HEAVY_PART_SECONDS = (180.492, 164.289, 244.576)
 
 

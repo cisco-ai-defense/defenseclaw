@@ -294,7 +294,10 @@ def main() -> int:
         untimed = untimed_tests(times, known)
         out.write(f"{len(untimed)} tests of {UNTIMED_MIN_SECONDS:g} s or more have no time in {args.untimed_against}\n")
         for package, test, seconds in untimed[:20]:
-            out.write(f"::warning title=untimed test::{test} ({package}) ran {seconds:.1f} s with no time in {args.untimed_against}\n")
+            out.write(
+                f"::warning title=untimed test::{test} ({package}) ran {seconds:.1f} s"
+                f" with no time in {args.untimed_against}\n"
+            )
     status = 0
     if expected is not None:
         ran = expected & reported
