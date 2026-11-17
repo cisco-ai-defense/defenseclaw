@@ -271,10 +271,13 @@ def is_bundled_skill_dir(
     relative = os.path.relpath(candidate, root)
     if identity != os.path.basename(relative):
         return False
+    # One digest per distinct tree of this skill in the Hermes releases
+    # DefenseClaw ships (hermes_vendor_digests.py).
     want = VENDOR_DIGESTS.get(relative.replace(os.sep, "/"))
     if not want:
         return False
-    return _tree_sha256(candidate) == want
+    current = _tree_sha256(candidate)
+    return current is not None and current in want
 
 
 def is_bundled_skill_path(path: str) -> bool:

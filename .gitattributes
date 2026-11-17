@@ -76,6 +76,11 @@ benchmarks/fixtures/** -text
 # checkout changed the digest, so the pinned bundle read as a user skill.
 internal/hermesskills/testdata/vendor/** -text
 
+# The Hermes bundled-skill fixtures are git archives of one skill at Hermes
+# release tags; the digest tables beside them pin their bytes, so they are never
+# converted (rel-1-0-10:GAP-0798).
+internal/hermesskills/testdata/vendor-releases/** binary
+
 # The Hermes shipped-plugin fixtures are git archives of plugins at Hermes
 # release tags; internal/watcher/hermes_vendor_plugin_digests.go pins their
 # bytes, so they are never converted (rel-1-0-10:GAP-0765).
