@@ -299,8 +299,26 @@ func emitEndpointInventory(
 	// Skipping it would leave the cloud holding removed MCP servers forever — the
 	// stored digest would never advance past the last non-empty publish — and
 	// would silently drop the collection from the daily complete bundle.
+	const perConnectorMCPSource = "endpoint_per_connector_mcp_inventory"
+	if perConnectorPartial {
+		// A partial aggregate is not an authoritative snapshot, but connectors
+		// whose native reads completed still carry independently validated server
+		// records. Publish those records as additive observations so their tools
+		// do not reference a parent that only exists locally. The partial snapshot
+		// below remains diagnostic-only and keeps the collection digest and daily
+		// bundle clock unchanged; an incomplete connector can therefore neither
+		// suppress a complete sibling nor cause its retained cloud rows to be
+		// removed.
+		completeRows := completeConnectorMCPEntriesFromPartial(perConnectorMCP, perConnectorStatus.incompleteConnectors)
+		if err := emitEndpointInventoryComponents(
+			ctx, emitter, perConnectorMCPSource, completeRows,
+			config.ObservabilityV8ManagedMCPInventoryAction, publish,
+		); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	if err := emitEndpointInventorySnapshot(
-		ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, perConnectorPartial,
+		ctx, emitter, perConnectorMCPSource, perConnectorMCP, perConnectorPartial,
 		config.ObservabilityV8ManagedMCPInventoryAction, publish,
 	); err != nil && firstErr == nil {
 		firstErr = err
@@ -349,6 +367,28 @@ func emitEndpointInventory(
 		}
 	}
 	return firstErr
+}
+
+func completeConnectorMCPEntriesFromPartial(
+	components []endpointInventoryComponent,
+	incompleteConnectors map[string]struct{},
+) []endpointInventoryComponent {
+	// A partial result without connector attribution cannot be scoped safely.
+	if len(components) == 0 || len(incompleteConnectors) == 0 {
+		return nil
+	}
+	complete := make([]endpointInventoryComponent, 0, len(components))
+	for _, component := range components {
+		connectorName := canonicalConnectorRulePackKey(component.agentConnector)
+		if connectorName == "" {
+			continue
+		}
+		if _, incomplete := incompleteConnectors[connectorName]; incomplete {
+			continue
+		}
+		complete = append(complete, component)
+	}
+	return complete
 }
 
 // preferNativeMCPInventory removes discovery-derived MCP entries that would
@@ -1072,6 +1112,49 @@ func emitEndpointInventorySnapshot(
 		observability.SourceSystem, action, "endpoint_inventory", endpointInventoryDetector,
 		publish,
 	)
+}
+
+// emitEndpointInventoryComponents publishes independently complete rows from a
+// partial collection without claiming that they form an authoritative
+// snapshot. It deliberately emits no summary and stores no collection digest:
+// callers must also emit the partial diagnostic snapshot so the cycle remains
+// degraded until every connector can be read.
+func emitEndpointInventoryComponents(
+	ctx context.Context,
+	emitter sidecarRuntimeEmitter,
+	source string,
+	components []endpointInventoryComponent,
+	action observability.ProducerKey,
+	publish endpointInventoryCycle,
+) error {
+	if len(components) == 0 || len(components) > managedInventoryLimit(action) {
+		return nil
+	}
+	scanID := publish.scanID
+	if scanID == "" {
+		scanID = "inventory-" + uuid.NewString()
+	}
+	components = append([]endpointInventoryComponent(nil), components...)
+	sort.SliceStable(components, func(left, right int) bool {
+		if components[left].itemName != components[right].itemName {
+			return components[left].itemName < components[right].itemName
+		}
+		return components[left].id < components[right].id
+	})
+	var firstErr error
+	for _, component := range components {
+		outcome, err := emitEndpointInventoryComponent(
+			ctx, emitter, source, scanID, component,
+			observability.SourceSystem, action, "endpoint_inventory", endpointInventoryDetector,
+		)
+		if managedInventoryPublishRejected(outcome) && publish.cycle != nil {
+			publish.cycle.markDegraded()
+		}
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func emitInventorySnapshot(

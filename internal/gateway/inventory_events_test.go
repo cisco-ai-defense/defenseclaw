@@ -786,7 +786,7 @@ func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("[mcp_servers"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"notes":{"command":"npx"}}}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"notes":{"command":"npx"},"docs":{"type":"http","url":"https://example.com/private/path?token=secret"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	registry := connector.NewRegistry()
@@ -809,6 +809,18 @@ func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
 	if _, ok := status.incompleteConnectors["claudecode"]; ok {
 		t.Fatalf("valid Claude config inherited Codex partial state: %v", status.incompleteConnectors)
 	}
+	if got := completeConnectorMCPEntriesFromPartial(rows, nil); len(got) != 0 {
+		t.Fatalf("unattributed partial read exposed managed rows: %+v", got)
+	}
+	completeRows := completeConnectorMCPEntriesFromPartial(rows, status.incompleteConnectors)
+	if len(completeRows) != 2 {
+		t.Fatalf("complete Claude rows=%d, want 2: %+v", len(completeRows), completeRows)
+	}
+	for _, row := range completeRows {
+		if row.agentConnector != "claudecode" {
+			t.Fatalf("incomplete connector escaped managed subset: %+v", row)
+		}
+	}
 	var tools mcpToolInventory
 	tools.refreshCompleteParents(rows, status.incompleteConnectors)
 	if parent, recorded := tools.recordObserved("claudecode", "notes", "search", time.Now()); !recorded || parent == "" {
@@ -818,6 +830,8 @@ func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
 	if err := emitEndpointInventory(t.Context(), cfg, registry, capture, false, nil, nil, &tools); err != nil {
 		t.Fatal(err)
 	}
+	managedServer := false
+	observedTool := false
 	for _, record := range capture.snapshot() {
 		if record.Action() != string(config.ObservabilityV8ManagedMCPInventoryAction) ||
 			record.EventName() != "ai_component.observed" {
@@ -831,12 +845,31 @@ func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if fields[observability.TelemetryAttributeDefenseClawAIDiscoverySource] == "endpoint_local_mcp_observed_tool_inventory" &&
-			fields[observability.TelemetryAttributeDefenseClawInventoryItemName] == "search" {
-			return
+		source, _ := fields[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+		itemName, _ := fields[observability.TelemetryAttributeDefenseClawInventoryItemName].(string)
+		switch {
+		case source == "endpoint_per_connector_mcp_inventory" && itemName == "docs":
+			managedServer = true
+			if got := fields[observability.TelemetryAttributeDefenseClawInventoryMcpServerURL]; got != "https://example.com" {
+				t.Fatalf("managed Claude server URL=%v, want redacted origin", got)
+			}
+			encoded, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(encoded, []byte("token")) || bytes.Contains(encoded, []byte("secret")) || bytes.Contains(encoded, []byte("private/path")) {
+				t.Fatalf("managed Claude server leaked URL path or query: %s", encoded)
+			}
+		case source == "endpoint_local_mcp_observed_tool_inventory" && itemName == "search":
+			observedTool = true
 		}
 	}
-	t.Fatal("unrelated malformed Codex config suppressed managed Claude observed-tool inventory")
+	if !managedServer {
+		t.Error("unrelated malformed Codex config suppressed managed Claude native-server inventory")
+	}
+	if !observedTool {
+		t.Error("unrelated malformed Codex config suppressed managed Claude observed-tool inventory")
+	}
 }
 
 func TestPreferNativeMCPInventory(t *testing.T) {
