@@ -174,6 +174,11 @@ var credentialFileShapes = [...]credentialFileShape{
 	// Claude Code: ~/.claude/.credentials.json (Linux, Windows, the macOS
 	// keychain fallback), or .credentials.json under CLAUDE_CONFIG_DIR:
 	// https://code.claude.com/docs/en/authentication#credential-management
+	// The home row comes first: its Relative is the whole home-relative path,
+	// so the home-only owner (secrets.cloud_credential_read) reads it as the
+	// account's own login (rel-1-0-10:GAP-1179). The base row keeps the
+	// CLAUDE_CONFIG_DIR folders, whose name is not known, for the chain.
+	{class: CredentialFileCloudCLI, relative: ".claude/.credentials.json"},
 	{class: CredentialFileCloudCLI, base: ".credentials.json"},
 	// OpenAI Codex CLI: "~/.codex/auth.json" caches the login:
 	// https://developers.openai.com/codex/auth (moved to
@@ -220,6 +225,9 @@ var credentialFileShapes = [...]credentialFileShape{
 	// podman login: ${XDG_RUNTIME_DIR}/containers/auth.json on Linux,
 	// $HOME/.config/containers/auth.json on macOS and Windows:
 	// https://docs.podman.io/en/latest/markdown/podman-login.1.html
+	// The home row comes first, as for Claude Code (rel-1-0-10:GAP-1179); the
+	// runtime folder row (/run/user/<uid>/containers/auth.json) follows.
+	{class: CredentialFilePackageRegistry, relative: ".config/containers/auth.json"},
 	{class: CredentialFilePackageRegistry, relative: "containers/auth.json"},
 
 	// AWS CLI: IAM Identity Center tokens are cached under ~/.aws/sso/cache
