@@ -163,7 +163,7 @@ Antigravity keeps DefenseClaw's hook registration in `~/.gemini`, a root-owned f
 
 ### The agent did not start: "a volume is mounted at, above or below"
 
-The relay found a mount over DefenseClaw's files (the kit library under `/usr/local/lib/defenseclaw`, `/etc/defenseclaw`, or a guarded home folder), so the agent could run without its hooks. It refuses to start the agent, logs `relay.mount_refused` and writes a HIGH audit row. Admission normally refuses such a template first (`volume_mounts[N].mount_path is at, above or below a path DefenseClaw attested`); the relay catches a mount that reaches those paths through a symlink in the image. Mount data volumes at or below the image `WORKDIR` (`/work`), and make sure the image has no symlink there that points into the kit's folders.
+The relay found a mount at, above or below DefenseClaw's files (the kit library under `/usr/local/lib/defenseclaw`, `/etc/defenseclaw`, the connector's managed settings such as `/etc/claude-code` or `/etc/codex`, or a guarded home folder or the home above it), so the agent could run without its hooks. A mount table it cannot read, or one without the root mount, is refused the same way. It refuses to start the agent, logs `relay.mount_refused` and writes a HIGH audit row. Admission normally refuses such a template first (`volume_mounts[N].mount_path is at, above or below a path DefenseClaw attested`); `template build` refuses a symlink in the image that leads there, and the relay catches a mount that reaches those paths through a symlink in an image volume. Mount data volumes at or below the image `WORKDIR` (`/work`), and make sure the image has no symlink there that points into the kit's folders.
 
 ### A task ended with exit code 124
 
@@ -183,7 +183,7 @@ DefenseClaw 1.0.10 admits only the environment and entrypoint that were attested
 
 ### The relay logs "the agent runs as the relay's own user"
 
-The template was built before 1.0.10: the relay and the agent run as one user, so on gVisor the agent can stop the relay. Rebuild the template with `template build`; its image then runs the relay as root and the agent as its own user. "may not change user" means the template drops CAP_SETUID or CAP_SETGID: the relay then refuses to start the agent rather than run it as root.
+The template was built before 1.0.10: the relay and the agent run as one user, so on gVisor the agent can stop the relay. The controller names such templates once in an audit warning (`sandbox.relay_unseparated`) and `doctor --cluster` lists them (`substrate.relay_separation`). Rebuild the template with `template build`; its image then runs the relay as root and the agent as its own user. "may not change user" or "may not signal the agent's processes" means the template drops CAP_SETUID, CAP_SETGID or CAP_KILL: the relay then refuses to start the agent rather than run it as root or leave it unstoppable (admission refuses such a drop for a 1.0.10 template). "could not set no_new_privs on every thread" means a relay built with cgo: build it with `CGO_ENABLED=0`, as the release does.
 
 ### An agent that uses WebSockets can't connect (Amp)
 
