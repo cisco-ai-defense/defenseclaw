@@ -420,7 +420,8 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		return InstallResult{}, err
 	}
 	// Route-only drift (S1 DESIGN 18.3, 21): the guardian repair re-renders.
-	if err := verifyWindowsRouteOnly(conn, targetSID, home, dataDir, opts.RouteOnly); err != nil {
+	routeOnly, err := verifyWindowsRouteOnly(conn, targetSID, home, dataDir, opts.RouteOnly)
+	if err != nil {
 		return InstallResult{}, err
 	}
 	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID, setupOpts.APIAddr, setupOpts.ProxyAddr)
@@ -465,6 +466,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
 		AgentConfig:     otlpReport,
+		RouteOnly:       routeOnly,
 	}, nil
 }
 
