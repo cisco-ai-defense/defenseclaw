@@ -17,9 +17,11 @@ import (
 )
 
 // nativeUsageSuppressed reports whether the route-only listener carries the
-// model traffic of connector: routing is on and the connector is listed in
-// routing.route_only.connectors (config.RouteOnlyRouted, the same test the
-// listener answers by). The guardrail proxy does not suppress native usage.
+// model traffic of connector: routing is on, the connector is listed in
+// routing.route_only.connectors (config.RouteOnlyRouted, the test the
+// listener answers by) and has a routing.route_only.upstreams entry (without
+// one nothing points the agent at the listener, routeOnlySetupBase). The
+// guardrail proxy does not suppress native usage.
 // While the listener carries a connector it records every call, so the usage
 // the agent reports in its own OTLP stream is a cross-check only: its
 // log.model.response import still runs, but nothing is counted from it (no
@@ -47,7 +49,8 @@ func setNativeUsageSuppression(cfg *config.Config) {
 	}
 	set := map[string]struct{}{}
 	for _, c := range cfg.Routing.RouteOnly.Connectors {
-		if c = strings.ToLower(strings.TrimSpace(c)); c != "" && cfg.RouteOnlyRouted(c) {
+		c = strings.ToLower(strings.TrimSpace(c))
+		if _, upstream := cfg.Routing.RouteOnly.Upstreams[c]; c != "" && upstream && cfg.RouteOnlyRouted(c) {
 			set[c] = struct{}{}
 		}
 	}

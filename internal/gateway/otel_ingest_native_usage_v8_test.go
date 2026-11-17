@@ -484,6 +484,7 @@ func TestRouteOnlyConfigMakesNativeUsageACrossCheckSoOneProxiedCallIsOneCharge(t
 	cfg := &config.Config{}
 	cfg.Routing.Enabled = true
 	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
+	cfg.Routing.RouteOnly.Upstreams = map[string]config.RoutingUpstreamConfig{"claudecode": {BaseURL: "https://api.anthropic.com", API: config.RoutingAPIMessages}}
 	setNativeUsageSuppression(cfg)
 	t.Cleanup(func() { setNativeUsageSuppression(nil) })
 	if !nativeUsageSuppressed("claudecode") || nativeUsageSuppressed("codex") || !nativeUsageSuppressed(" ClaudeCode ") {
@@ -556,7 +557,14 @@ func TestNativeUsageIsTheSourceWhileRoutingIsOff(t *testing.T) {
 	}
 	sink.one(t)
 
+	// Routing on but no upstream for the connector: nothing points it at the
+	// listener, so its native usage is still the source.
 	cfg.Routing.Enabled = true
+	setNativeUsageSuppression(cfg)
+	if nativeUsageSuppressed("claudecode") {
+		t.Fatal("no route-only upstream: claudecode stays direct, native usage must be counted")
+	}
+	cfg.Routing.RouteOnly.Upstreams = map[string]config.RoutingUpstreamConfig{"claudecode": {BaseURL: "https://api.anthropic.com", API: config.RoutingAPIMessages}}
 	setNativeUsageSuppression(cfg)
 	if !nativeUsageSuppressed("claudecode") {
 		t.Fatal("routing on: the route-only listener carries claudecode, native usage is a cross-check")

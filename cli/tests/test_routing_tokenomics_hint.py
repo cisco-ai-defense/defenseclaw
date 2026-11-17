@@ -151,6 +151,11 @@ def test_doctor_row_gives_the_command() -> None:
     cfg.routing.admin = {"budgets": [{"id": "b"}]}
     assert _doctor_rows(cfg)[0][0] == "warn"
     cfg.observability.tokenomics.enabled = True
-    assert _doctor_rows(cfg)[0][0] == "warn"  # budgets, local store still off
+    # Budget spend has its own ledger: the local store is not needed (config.BudgetFeedReady).
+    assert _doctor_rows(cfg) == []
+    cfg.observability.tokenomics.cost_compute = False
+    rows = _doctor_rows(cfg)
+    assert rows[0][0] == "warn" and rows[0][3] == routing_tokenomics.COST_FIX
+    cfg.observability.tokenomics.cost_compute = True
     cfg.observability.tokenomics.local_store_enabled = True
     assert _doctor_rows(cfg) == []
