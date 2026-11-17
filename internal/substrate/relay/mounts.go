@@ -6,6 +6,7 @@ package relay
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"path"
 	"strconv"
 	"strings"
@@ -14,19 +15,34 @@ import (
 )
 
 // kitMountRefusal says which of DefenseClaw's paths a mount of the actor
-// hides, "" when none does (GAP-0368). Admission refuses a template whose
-// volume mounts touch the kit's paths, but it cannot see a symlink in the
-// image (a mount at /work/x where the image makes /work/x point at the
-// kit's hook folder lands on the hook folder). mountinfo (the format of
-// /proc/self/mountinfo) names where each mount really is, so the relay
-// refuses the agent when a mount is at, above or below the kit library or
-// /etc/defenseclaw, or at or below a guarded HOME folder (a mount above
-// one hides it, which the guard refuses as a missing folder). The root
-// mount is the image itself.
-func kitMountRefusal(mountinfo []byte, guarded []string) string {
-	kitPaths := []string{kit.LibDir, path.Dir(kit.ConfigPath)}
+// hides, "" when none does (GAP-0368, GAP-0439). Admission refuses a
+// template whose volume mounts touch the attested paths, but it cannot see
+// a symlink in the image or in an image volume (a mount at /work/x where
+// /work/x points at /etc/claude-code lands on /etc/claude-code). mountinfo
+// (the format of /proc/self/mountinfo) names where each mount really is, so
+// the relay refuses the agent when a mount is at, above or below
+//   - a protected path: every root-owned file the template build attested
+//     and the folders holding them (relay.protected, kit.ProtectedPaths:
+//     the connector's managed settings, its hook registration, the kit
+//     library and /etc/defenseclaw; the last two also when the
+//     configuration predates the list), or
+//   - a guarded HOME folder (Antigravity's ~/.gemini): a mount above one
+//     (HOME itself) hides it as surely as one on it.
+//
+// The root mount is the image itself. A table without it is not the
+// actor's mount table: errNoRootMount (GAP-0443), and the relay refuses as
+// for an unreadable one.
+func kitMountRefusal(mountinfo []byte, protected, guarded []string) (string, error) {
+	paths := []string{kit.LibDir, path.Dir(kit.ConfigPath)}
+	for _, p := range append(append([]string{}, protected...), guarded...) {
+		if path.IsAbs(p) && path.Clean(p) != "/" {
+			paths = append(paths, path.Clean(p))
+		}
+	}
 	sc := bufio.NewScanner(bytes.NewReader(mountinfo))
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	root := false
+	hidden := ""
 	for sc.Scan() {
 		f := strings.Fields(sc.Text())
 		if len(f) < 5 {
@@ -34,21 +50,26 @@ func kitMountRefusal(mountinfo []byte, guarded []string) string {
 		}
 		mp := path.Clean(unescapeMount(f[4]))
 		if mp == "/" {
+			root = true
 			continue
 		}
-		for _, k := range kitPaths {
-			if pathWithin(mp, k) || pathWithin(k, mp) {
-				return k
-			}
-		}
-		for _, g := range guarded {
-			if g = path.Clean(g); pathWithin(mp, g) {
-				return g
+		for _, k := range paths {
+			if hidden == "" && (pathWithin(mp, k) || pathWithin(k, mp)) {
+				hidden = k
 			}
 		}
 	}
-	return ""
+	if err := sc.Err(); err != nil {
+		return "", err
+	}
+	if !root {
+		return "", errNoRootMount
+	}
+	return hidden, nil
 }
+
+// errNoRootMount is a mount table without the root mount (GAP-0443).
+var errNoRootMount = errors.New("the mount table has no root mount")
 
 // unescapeMount undoes the octal escapes of a mountinfo path (\040 is a
 // space).

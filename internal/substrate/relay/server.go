@@ -76,8 +76,11 @@ type Server struct {
 
 	initOnce sync.Once
 	initErr  error
-	agent    *Agent
-	session  string
+	// servingSince is when the relay first served this actor (init): the
+	// first authenticated request after the actor's first resume.
+	servingSince time.Time
+	agent        *Agent
+	session      string
 
 	mu    sync.Mutex
 	polls map[string]*pollAttachment
@@ -217,7 +220,12 @@ func (s *Server) init() error {
 			s.refuseAtStart("relay.mount_refused", "DefenseClaw cannot read the actor's mounts ("+err.Error()+"), so it cannot tell that its hooks are in place; refusing to start the agent")
 			return
 		}
-		if hidden := kitMountRefusal(info, guard); hidden != "" {
+		hidden, err := kitMountRefusal(info, rc.Protected, guard)
+		if err != nil {
+			s.refuseAtStart("relay.mount_refused", "DefenseClaw cannot read the actor's mounts ("+err.Error()+"), so it cannot tell that its hooks are in place; refusing to start the agent")
+			return
+		}
+		if hidden != "" {
 			s.refuseAtStart("relay.mount_refused", "a volume is mounted at, above or below "+hidden+", which holds DefenseClaw's hooks, so the agent could run without them; refusing to start the agent (mount data folders below the working directory)")
 			return
 		}
@@ -234,6 +242,11 @@ func (s *Server) init() error {
 			return
 		}
 		s.session = newID()
+		// When this relay began serving this actor (GAP-0412): every actor
+		// of a template is restored from one golden snapshot, so the relay
+		// process (PID 1, it answers the wake-up probe) has the snapshot's
+		// start time in all of them; this is the actor's own.
+		s.servingSince = s.opts.Now().UTC()
 		go s.watchResume()
 	})
 	return s.initErr
@@ -835,7 +848,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"version": Version, "session": s.session, "agent_running": s.agent.Running(),
 		"last_preconnect_ms": float64(warm.Microseconds()) / 1000, "tasks": tasks, "workdir": relayWorkdir(s.opts.Config.Relay.Workdir),
-		"state_root": s.stateRoot(), "signin_warning": s.warning(),
+		"state_root": s.stateRoot(), "signin_warning": s.warning(), "serving_since": s.servingSince.Format(time.RFC3339Nano),
 	})
 }
 

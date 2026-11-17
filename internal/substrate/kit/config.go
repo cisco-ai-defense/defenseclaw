@@ -141,6 +141,14 @@ type RelayConfig struct {
 	// Empty (images built before 1.0.10): the agent runs as the relay's own
 	// user, and the relay warns that they are not separated.
 	AgentUser string `json:"agent_user,omitempty"`
+	// Protected are the root-owned files of the kit layer that the template
+	// build attests (the connector's managed settings, hook registration and
+	// the kit's own configuration) and the folders that hold them
+	// (ProtectedPaths). The relay refuses the agent when a mount of the
+	// actor is at, above or below one of them, also one that reached its
+	// place through a symlink admission cannot see (substrate-1 GAP-0439).
+	// The build writes it with the relay binary in the same layer.
+	Protected []string `json:"protected,omitempty"`
 }
 
 // AgentIDs parses AgentUser; ok is false when it is empty.

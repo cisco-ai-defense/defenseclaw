@@ -191,7 +191,7 @@ func TestKitMountRefusal(t *testing.T) {
 	base := "1 0 0:1 / / rw - overlay overlay rw\n" + line("/proc") + line("/dev") + line("/dev/shm") +
 		line("/etc/hosts") + line("/etc/resolv.conf") + line("/etc/hostname") + line("/run/ate") + line("/tmp") + line("/work") + line("/work/cache")
 	guarded := []string{"/sandbox/.gemini"}
-	if got := kitMountRefusal([]byte(base), guarded); got != "" {
+	if got := mountRefusal(t, []byte(base), nil, guarded); got != "" {
 		t.Errorf("the ordinary mounts of an actor are refused (%s)", got)
 	}
 	for mp, want := range map[string]string{
@@ -207,11 +207,11 @@ func TestKitMountRefusal(t *testing.T) {
 		"/sandbox/.gemini/hooks": "/sandbox/.gemini",
 		`/usr/local/lib/defense\134claw/../defenseclaw/hooks`: kit.LibDir,
 	} {
-		if got := kitMountRefusal([]byte(base+line(mp)), guarded); got != want {
+		if got := mountRefusal(t, []byte(base+line(mp)), nil, guarded); got != want {
 			t.Errorf("mount at %s: refusal %q, want %q", mp, got, want)
 		}
 	}
-	if got := kitMountRefusal([]byte(base+line(`/work/with\040space`)), guarded); got != "" {
+	if got := mountRefusal(t, []byte(base+line(`/work/with\040space`)), nil, guarded); got != "" {
 		t.Errorf("an escaped data mount is refused (%s)", got)
 	}
 }

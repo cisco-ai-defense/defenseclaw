@@ -370,6 +370,14 @@ func (g *Registry) fetchToken(ctx context.Context, host, challenge, scope string
 	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || g.scheme(host) != "http" || g.scheme(u.Host) != "http")) {
 		return "", errors.New("bad realm")
 	}
+	// Nor may an https realm name a private, loopback or link-local address
+	// literal (the cloud metadata service at 169.254.169.254, a service on
+	// the controller's node) unless the registry itself is at one: the
+	// registry chosen by an image reference must not point the controller at
+	// its own network (GAP-0361).
+	if privateLiteral(u.Hostname()) && !privateLiteral(hostOnly(host)) {
+		return "", errors.New("bad realm: a private address")
+	}
 	q := u.Query()
 	if s := params["service"]; s != "" {
 		q.Set("service", s)
@@ -613,6 +621,25 @@ func containsHost(hosts []string, host string) bool {
 	return false
 }
 
+// privateLiteral reports whether host is an IP address literal that is
+// private, loopback, link-local or unspecified (IPv4-mapped forms too).
+func privateLiteral(host string) bool {
+	a, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return false
+	}
+	a = a.Unmap()
+	return a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsUnspecified()
+}
+
+// hostOnly is host without its port.
+func hostOnly(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
 // refuseUnsafeRedirect lets a registry send blobs to its storage over https
 // and nothing else: no downgrade to http, no private or loopback address
 // literal, at most 10 hops. Authorization goes only to exactly the scheme,
@@ -626,8 +653,7 @@ func refuseUnsafeRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != "https" && (req.URL.Host != first.Host || req.URL.Scheme != first.Scheme) {
 		return errors.New("registry: redirect to a non-https URL on another host")
 	}
-	if a, err := netip.ParseAddr(req.URL.Hostname()); err == nil && req.URL.Host != first.Host &&
-		(a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified()) {
+	if req.URL.Host != first.Host && privateLiteral(req.URL.Hostname()) && !privateLiteral(first.Hostname()) {
 		return errors.New("registry: redirect to a private address")
 	}
 	if !strings.EqualFold(req.URL.Host, first.Host) || req.URL.Scheme != first.Scheme {

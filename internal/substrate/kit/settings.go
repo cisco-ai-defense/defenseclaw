@@ -249,12 +249,10 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	if cfg.LogDir == "" {
 		cfg.LogDir = path.Join(o.Home, ".defenseclaw")
 	}
-	kitJSON, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return Overlay{}, err
-	}
+	// The kit configuration is written last: it names every root-owned file
+	// of the overlay (relay.protected, GAP-0439).
 	ov.Files = append(ov.Files,
-		ImageFile{Path: ConfigPath, Mode: 0o644, Data: append(kitJSON, '\n')},
+		ImageFile{Path: ConfigPath, Mode: 0o644},
 		ImageFile{Path: "/etc/gitconfig", Mode: 0o644, Data: []byte(gitConfig())},
 		ImageFile{Path: CredHelper, Mode: 0o755, Data: []byte(gitCredentialHelper)},
 		ImageFile{Path: "/usr/local/etc/npmrc", Mode: 0o644, Data: []byte(npmrc)},
@@ -266,6 +264,16 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 
 	ov.Files = append(ov.Files, wave2UserFiles(art.Connector, o)...)
 	wave2Harden(&ov, art.Connector, o)
+	cfg.Relay.Protected = ProtectedPaths(ov.Files, o.Home)
+	kitJSON, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return Overlay{}, err
+	}
+	for i := range ov.Files {
+		if ov.Files[i].Path == ConfigPath {
+			ov.Files[i].Data = append(kitJSON, '\n')
+		}
+	}
 
 	// The image environment.
 	for k, v := range art.Env {
@@ -285,6 +293,40 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 		ov.Env[k] = v
 	}
 	return ov, nil
+}
+
+// sharedDirs are system folders that hold other software's files too: a
+// root-owned kit file directly in one of them (/etc/gitconfig,
+// /usr/local/etc/npmrc) protects only itself, not the folder.
+var sharedDirs = map[string]bool{
+	"/": true, "/etc": true, "/opt": true, "/usr": true, "/usr/bin": true, "/usr/lib": true, "/usr/share": true,
+	"/usr/local": true, "/usr/local/bin": true, "/usr/local/etc": true, "/usr/local/lib": true, "/usr/local/share": true,
+	"/var": true, "/run": true, "/tmp": true, "/home": true,
+}
+
+// ProtectedPaths are the paths a mount of the actor must not touch
+// (GAP-0439): every root-owned file of the overlay, and every folder above
+// one up to (not including) a shared system folder or HOME, such as
+// /etc/claude-code and /etc/claude-code/managed-settings.d. Sorted, without
+// duplicates. kit.LibDir and /etc/defenseclaw are among them.
+func ProtectedPaths(files []ImageFile, home string) []string {
+	seen := map[string]bool{LibDir: true, path.Dir(ConfigPath): true}
+	for _, f := range files {
+		if f.User || !path.IsAbs(f.Path) {
+			continue
+		}
+		p := path.Clean(f.Path)
+		seen[p] = true
+		for d := path.Dir(p); !sharedDirs[d] && d != path.Clean(home); d = path.Dir(d) {
+			seen[d] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func dropped(p string) bool {

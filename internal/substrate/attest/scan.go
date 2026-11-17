@@ -757,6 +757,14 @@ func checkHooks(fsys *ImageFS, env map[string]string, user string, entrypoint []
 		hc.RootOwned = false
 	}
 	hc.Files = append(hc.Files, uf)
+	for _, sf := range codeLoadingSettings(fsys, env["HOME"]) {
+		hc.RootOwned = false
+		hc.Files = append(hc.Files, sf)
+	}
+	for _, lf := range linksIntoAttested(fsys, o.Expected, env["HOME"]) {
+		hc.RootOwned = false
+		hc.Files = append(hc.Files, lf)
+	}
 
 	keys := make([]string, 0, len(o.PhoneHome))
 	for k := range o.PhoneHome {
@@ -790,6 +798,54 @@ func checkHooks(fsys *ImageFS, env map[string]string, user string, entrypoint []
 		}
 	}
 	return hc
+}
+
+// linksIntoAttested lists the symlinks of the image that lead into a path
+// the build attests (GAP-0439): the hook and settings files and the folders
+// that hold them (kit.ProtectedPaths). A volume mounted at such a link
+// lands on DefenseClaw's settings and hides them, and admission sees only
+// the mount path. A link to a regular file is left alone (a volume is a
+// folder and cannot be mounted on a file), and so is a link that is itself
+// inside an attested folder. Nothing is checked without expected files (a
+// scan of a plain base image).
+func linksIntoAttested(fsys *ImageFS, expected []ExpectedFile, home string) []HookFile {
+	if len(expected) == 0 {
+		return nil
+	}
+	files := make([]kit.ImageFile, 0, len(expected))
+	for _, ef := range expected {
+		files = append(files, kit.ImageFile{Path: ef.Path})
+	}
+	protected := kit.ProtectedPaths(files, home)
+	within := func(p string) string {
+		for _, a := range protected {
+			if p == a || strings.HasPrefix(p, a+"/") {
+				return a
+			}
+		}
+		return ""
+	}
+	var out []HookFile
+	for _, lp := range fsys.Paths() {
+		e := fsys.idx[lp]
+		if e == nil || !e.IsSymlink() || within(lp) != "" {
+			continue
+		}
+		real, ok := fsys.canon(lp, true)
+		if !ok {
+			continue
+		}
+		a := within(real)
+		if a == "" {
+			continue
+		}
+		if t, found := fsys.idx[real]; found && !t.IsDir() {
+			continue
+		}
+		out = append(out, HookFile{Path: lp, UID: e.UID, GID: e.GID, Mode: "-",
+			Note: "is a symlink into " + a + ", which DefenseClaw attests: a volume mounted at it would hide DefenseClaw's settings; remove the link from the image"})
+	}
+	return out
 }
 
 // badAncestor returns the first parent folder a non-root user can change.
