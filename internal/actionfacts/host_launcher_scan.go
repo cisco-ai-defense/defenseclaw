@@ -118,7 +118,7 @@ func launcherCommand(source string, words []layoutWord, first, depth int) bool {
 			if wrapper == "start" && (word.literal == "" || word.quoted) {
 				titled = true
 			}
-			afterFlag = launcherFlag(word)
+			afterFlag = launcherOperandFlag(word, wrapper)
 		case afterFlag:
 			// env -S takes a command text as its operand.
 			if word.quoted && strings.ContainsAny(word.literal, " \t") && hostLauncherStatements(word.literal, depth+1) {
@@ -190,13 +190,37 @@ func launcherFlag(word layoutWord) bool {
 	return len(word.literal) >= 2 && word.literal[0] == '-' && word.literal != "--" && !strings.Contains(word.literal, "=")
 }
 
+// launcherOperandFlag reports a wrapper option whose operand may be the next
+// word: an option word (launcherFlag), or a start switch that takes one
+// (/d <path>, /node <n>, /affinity <mask>, /machine <arch>, any case). The
+// operand is read both ways (rel-1-0-10:GAP-0971): read as the title, it
+// pushed the program out of the one title slot, so the launcher after it was
+// never read.
+func launcherOperandFlag(word layoutWord, wrapper string) bool {
+	if launcherFlag(word) {
+		return true
+	}
+	if wrapper != "start" {
+		return false
+	}
+	switch strings.ToLower(word.literal) {
+	case "/d", "/node", "/affinity", "/machine":
+		return true
+	}
+	return false
+}
+
 // launcherPrefix reports a word between a wrapper and the command it runs.
+// start's /d<path> with the path in the same word is one switch, whatever the
+// path holds (rel-1-0-10:GAP-0971).
 func launcherPrefix(word layoutWord, wrapper string) bool {
 	literal := word.literal
 	switch {
 	case word.assign, literal == "", literal == "--", launcherFlag(word), strings.HasPrefix(literal, "-") && strings.Contains(literal, "="):
 		return true
 	case wrapper == "start" && word.quoted:
+		return true
+	case wrapper == "start" && len(literal) > 2 && (strings.HasPrefix(literal, "/d") || strings.HasPrefix(literal, "/D")):
 		return true
 	case launcherDuration(literal), launcherSwitch(literal):
 		return true
