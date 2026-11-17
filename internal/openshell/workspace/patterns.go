@@ -267,24 +267,48 @@ var riskRules = []riskRule{
 }
 
 // classifyLinkName is classifyPath for a symbolic link (GAP-0523): a link
-// named like a run-code file (.mcp.json, .bashrc, .envrc), or like a folder
-// a rule names (.claude, .codex, .github, .vscode, .husky ...), makes that
-// file appear in the folder whatever it points to inside the project. The
-// folder case returns the first rule that names the folder.
+// named like a run-code file (.mcp.json, .bashrc, .envrc), or one that
+// stands for a folder of a rule at any segment (.claude, .kiro/settings,
+// a/.gemini/config), makes that file appear in the folder whatever it
+// points to inside the project (GAP-0552). The folder case returns the
+// first rule a path below the link would match.
 func classifyLinkName(rel string) (riskRule, bool) {
 	if r, ok := classifyPath(rel); ok {
 		return r, true
 	}
-	name := strings.ToLower(path.Base(rel))
+	segs := strings.Split(strings.ToLower(strings.Trim(rel, "/")), "/")
 	for _, r := range append(append([]riskRule{}, riskRules...), registryRules()...) {
 		for _, p := range r.patterns {
-			segs := strings.Split(strings.ToLower(strings.TrimPrefix(p, "**/")), "/")
-			if len(segs) > 1 && segs[0] == name {
+			if !strings.Contains(p, "/") {
+				continue // a bare file name: classifyPath decided
+			}
+			if patternReachesBelow(strings.Split(strings.ToLower(strings.Trim(p, "/")), "/"), segs) {
 				return r, true
 			}
 		}
 	}
 	return riskRule{}, false
+}
+
+// patternReachesBelow reports whether the link folder segs stands for a
+// folder the pattern names, with pattern segments left below it: the link's
+// last segment is matched by a named pattern segment (never absorbed by
+// "**", or every folder link would count), the segments before it by the
+// pattern before that. "**" matches any number of earlier segments.
+func patternReachesBelow(pat, segs []string) bool {
+	if len(pat) == 0 || len(segs) == 0 {
+		return false
+	}
+	if pat[0] == "**" {
+		return patternReachesBelow(pat[1:], segs) || (len(segs) > 1 && patternReachesBelow(pat, segs[1:]))
+	}
+	if ok, _ := path.Match(pat[0], segs[0]); !ok {
+		return false
+	}
+	if len(segs) == 1 {
+		return len(pat) > 1
+	}
+	return patternReachesBelow(pat[1:], segs[1:])
 }
 
 // RunsCode reports whether a change to the project path rel (slash form)
