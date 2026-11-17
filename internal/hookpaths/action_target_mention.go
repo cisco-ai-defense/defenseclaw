@@ -1939,11 +1939,13 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	for _, target := range append([]string{ssh}, ProtectedAuthorizedKeysPaths(home)...) {
 		// In a POSIX shell * and ? skip a leading dot: at the home folder
 		// echo * names no .ssh unless dotglob may be on (rel-1-0-6:GAP-0211).
-		if matched, _ := filepath.Match(pattern, target); matched && (actionGlobDotComponentsMatch(pattern, target) || dots()) {
+		if actionGlobPathMatch(pattern, target) && (actionGlobDotComponentsMatch(pattern, target) || dots()) {
 			return true
 		}
 	}
-	if _, err := filepath.Match(pattern, ""); err != nil || globs.full() {
+	// Bash has no malformed pattern (a [ with no closing ] is a literal
+	// [); only Windows keeps the Go reading, which refuses one.
+	if _, err := filepath.Match(pattern, ""); runtime.GOOS == "windows" && err != nil || globs.full() {
 		return false
 	}
 	hidden := actionGlobViewHidden(cwd, home)
@@ -2254,7 +2256,13 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 				chunk, chunkErr := directory.Readdirnames(actionGlobMaxNames)
 				entries += len(chunk)
 				for _, name := range chunk {
-					if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
+					hit, exact := actionGlobNameMatchExact(component, name, false)
+					if !exact {
+						// The user's locale or shell version decides this
+						// name: the walk cannot prove it either way.
+						complete = false
+					}
+					if (hit || !exact) && !actionGlobSkipsDotName(component, name, dots) {
 						matched = append(matched, name)
 					}
 				}
@@ -2383,14 +2391,43 @@ func actionGlobSkipsDotName(component, name string, dots func() bool) bool {
 		(strings.HasPrefix(component, "*") || strings.HasPrefix(component, "?")) && !dots()
 }
 
-// actionGlobNameMatch matches one name component; names compare without case
-// on macOS and Windows, whose file systems usually ignore it.
+// actionGlobNameMatch reports a name one pattern component may select: a
+// match, or an answer the user's locale or shell version decides
+// (bashGlobMatch).
 func actionGlobNameMatch(pattern, name string) bool {
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-		pattern, name = strings.ToLower(pattern), strings.ToLower(name)
+	matched, exact := actionGlobNameMatchExact(pattern, name, false)
+	return matched || !exact
+}
+
+// actionGlobNameMatchExact matches one name component by bash's rules
+// (bashGlobMatch); fold is nocaseglob. Names compare without case on macOS,
+// whose file systems usually ignore it. On Windows the walk reads the
+// wildcard of PowerShell and cmd, not bash's, without case, as before.
+func actionGlobNameMatchExact(pattern, name string, fold bool) (matched, exact bool) {
+	if runtime.GOOS == "windows" {
+		matched, _ = filepath.Match(strings.ToLower(pattern), strings.ToLower(name))
+		return matched, true
 	}
-	matched, _ := filepath.Match(pattern, name)
-	return matched
+	return bashGlobMatch(pattern, name, fold || runtime.GOOS == "darwin")
+}
+
+// actionGlobPathMatch is actionGlobNameMatch for a whole path: the same
+// number of components, each selected by its pattern component.
+func actionGlobPathMatch(pattern, target string) bool {
+	if runtime.GOOS == "windows" {
+		matched, _ := filepath.Match(pattern, target)
+		return matched
+	}
+	patterns, names := strings.Split(pattern, "/"), strings.Split(target, "/")
+	if len(patterns) != len(names) {
+		return false
+	}
+	for i := range patterns {
+		if !actionGlobNameMatch(patterns[i], names[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func actionPosixWindowsStatePath(value, cwd, home string) bool {
