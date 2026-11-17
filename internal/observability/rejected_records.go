@@ -207,21 +207,43 @@ func captureRejectedFamilyValues(
 }
 
 // rejectedValueBytes approximates the encoded size of a canonical value: its
-// string bytes plus a small charge per scalar and container.
+// string bytes plus a small charge per scalar and container. It measures the
+// producer's value before canonicalization, so it must end on any input: a
+// value nested deeper than a canonical value may be (a buggy producer's
+// self-referencing map, for one) or larger than one record's capture budget
+// is reported over that budget as soon as that is known, and is left out
+// (GAP-0072).
 func rejectedValueBytes(value any) int {
+	return rejectedValueBytesAt(value, 0)
+}
+
+func rejectedValueBytesAt(value any, depth int) int {
+	const over = RejectedRecordMaxCaptureBytes + 1
 	switch typed := value.(type) {
 	case string:
 		return len(typed) + 2
 	case map[string]any:
+		if depth >= MaxCanonicalValueDepth {
+			return over
+		}
 		total := 2
 		for key, child := range typed {
-			total += len(key) + 3 + rejectedValueBytes(child)
+			total += len(key) + 3 + rejectedValueBytesAt(child, depth+1)
+			if total > RejectedRecordMaxCaptureBytes {
+				return over
+			}
 		}
 		return total
 	case []any:
+		if depth >= MaxCanonicalValueDepth {
+			return over
+		}
 		total := 2
 		for _, child := range typed {
-			total += 1 + rejectedValueBytes(child)
+			total += 1 + rejectedValueBytesAt(child, depth+1)
+			if total > RejectedRecordMaxCaptureBytes {
+				return over
+			}
 		}
 		return total
 	case []string:

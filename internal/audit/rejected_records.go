@@ -177,7 +177,10 @@ func (s *Store) InsertRejectedRecords(ctx context.Context, rows []RejectedRecord
 // past the cap remain. Rows leave only oldest first (this cap and
 // retention), so the kept ids are contiguous and "past the cap" is
 // id <= MAX(id) - maxRows; a gap can only make it keep fewer rows. Callers
-// loop, yielding between calls.
+// loop, yielding between calls. A table under its cap (MAX(id) - MIN(id) <
+// maxRows: nothing is past it) costs one read and takes no write turn, so
+// the writer's trim after every batch does not queue behind hook writes
+// while the store is not full (GAP-0072).
 func (s *Store) TrimRejectedRecords(ctx context.Context, maxRows, limit int) (deleted int64, more bool, err error) {
 	if s == nil || s.db == nil {
 		return 0, false, errors.New("audit: rejected records: store is not initialized")
@@ -187,6 +190,9 @@ func (s *Store) TrimRejectedRecords(ctx context.Context, maxRows, limit int) (de
 	}
 	if maxRows < RejectedRecordsMinRows || maxRows > RejectedRecordsMaxRows || limit < 1 || limit > RejectedRecordTrimBatch {
 		return 0, false, fmt.Errorf("audit: rejected records: trim cap %d / batch %d is out of range", maxRows, limit)
+	}
+	if past, pastErr := s.rejectedRecordsPastCap(ctx, maxRows); pastErr != nil || !past {
+		return 0, false, pastErr
 	}
 	if err := s.awaitWALHeadroom(ctx); err != nil {
 		return 0, false, err
@@ -226,6 +232,22 @@ func (s *Store) TrimRejectedRecords(ctx context.Context, maxRows, limit int) (de
 		return nil
 	})
 	return deleted, err == nil && deleted == int64(limit), err
+}
+
+// rejectedRecordsPastCap reports whether any row is past maxRows: rows are
+// past the cap only when MAX(id) - MIN(id) >= maxRows (see
+// TrimRejectedRecords). One indexed read on the rowid, no write turn.
+func (s *Store) rejectedRecordsPastCap(ctx context.Context, maxRows int) (bool, error) {
+	release, err := s.acquireReady()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	var span sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(id) - MIN(id) FROM rejected_records`).Scan(&span); err != nil {
+		return false, fmt.Errorf("audit: rejected records: %w", err)
+	}
+	return span.Valid && span.Int64 >= int64(maxRows), nil
 }
 
 // boundRejectedRecordRow applies the column bounds, so a caller can never
