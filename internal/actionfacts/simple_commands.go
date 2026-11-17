@@ -65,6 +65,11 @@ type SimpleCommand struct {
 	// run in, after a cd that may fail (rel-1-0-10:GAP-0869): a reading,
 	// not a further statement of the call.
 	OtherFolder bool
+	// bodyReading marks a reading of a nested body statement in another
+	// folder its call may run in (rel-1-0-10:GAP-1144): it does not count
+	// against the evaluation budget of the statements of the call, which
+	// it would otherwise push into the limit (GAP-1228).
+	bodyReading bool
 	// UnresolvedFolder means the directory of the command is unknown and an
 	// operand of Text depends on it: the gateway reads it in each folder
 	// that holds a protected file (rel-1-0-10:GAP-0871).
@@ -523,6 +528,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars}},
 	}
 	result := make([]SimpleCommand, 0, len(parts))
+	// extra counts the readings of result that are body readings in another
+	// folder (bodyReading): the budget of the statements of the call is
+	// len(result)-extra, as on rel, where those readings did not exist.
+	extra := 0
 	changed := reduced || len(parts) != 1 || input.folderUnknown
 	unproven := false
 	// syntaxUnread: a nested body with a syntax error was read only in part
@@ -727,7 +736,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				result = append(result, command)
 				emitted[command] = true
 				own = append(own, command)
-				if len(result) > maxSimpleEvaluations {
+				if len(result)-extra > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
 			}
@@ -749,7 +758,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						result = append(result, alone)
 						emitted[alone] = true
 						changed = true
-						if len(result) > maxSimpleEvaluations {
+						if len(result)-extra > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
 						}
 					}
@@ -853,7 +862,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
 						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
 						result = append(result, child)
-						if len(result) > maxSimpleEvaluations {
+						if child.bodyReading {
+							extra++
+						}
+						if len(result)-extra > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
 						}
 					}
@@ -864,10 +876,25 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// in X or Y, so it is read in each of them as well
 					// (rel-1-0-10:GAP-1144, GAP-0183). A body that starts in
 					// a folder of its own (innerCWDUnknown) has none.
+					//
+					// These readings come on top of the statements of the
+					// call: they never make the call over its budget. Past
+					// maxSimpleEvaluations readings in all, the body is not
+					// read again folder by folder; each statement of it with a
+					// relative operand is kept as a reading in a folder the
+					// walk does not give (UnresolvedFolder), which the gateway
+					// judges by the protected files it may name there, beside
+					// every reading made before (the one bound rule,
+					// rel-1-0-10:GAP-1228).
 					if !innerCWDUnknown && innerInput.CWD != "" {
+						capped := false
 						for _, dir := range mayRunIn[partIndex] {
 							if dir == innerInput.CWD {
 								continue
+							}
+							if len(result) >= maxSimpleEvaluations {
+								capped = true
+								break
 							}
 							otherInput := innerInput
 							otherInput.CWD, otherInput.folderUnknown = dir, false
@@ -891,15 +918,35 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
 									simpleUnresolvedBoundVariable(child.Text, effective, bound)
 								child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
-								child.OtherFolder = true
+								child.OtherFolder, child.bodyReading = true, true
+								if emitted[child] {
+									continue
+								}
+								if len(result) >= maxSimpleEvaluations {
+									capped = true
+									break
+								}
+								emitted[child] = true
+								result = append(result, child)
+								extra++
+							}
+						}
+						if capped {
+							for _, child := range inner {
+								if child.EvaluationFailure != "" || child.OtherFolder || !simpleRelativePathOperand(child.Text) {
+									continue
+								}
+								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
+									simpleUnresolvedBoundVariable(child.Text, effective, bound)
+								child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+								child.CWD, child.AbsoluteOnly = "", false
+								child.OtherFolder, child.UnresolvedFolder, child.bodyReading = true, true, true
 								if emitted[child] {
 									continue
 								}
 								emitted[child] = true
 								result = append(result, child)
-								if len(result) > maxSimpleEvaluations {
-									return []SimpleCommand{{EvaluationFailure: "limit"}}
-								}
+								extra++
 							}
 						}
 					}
@@ -1003,7 +1050,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				emitted[again] = true
 				again.OtherFolder = true
 				result = append(result, again)
-				if len(result) > maxSimpleEvaluations {
+				if len(result)-extra > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
 			}
@@ -1142,12 +1189,24 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		result = append(result, SimpleCommand{Text: text, CWD: state.cwd})
 		if (len(state.others) != 0 || state.othersUnresolved) && windowsSimpleRelativePathOperand(text, facts.Parse.Dialect) {
 			// A relative operand names a file in each folder the
-			// statement may run in (rel-1-0-10:GAP-1150).
-			for _, other := range state.others {
-				result = append(result, SimpleCommand{Text: text, CWD: other.cwd, OtherFolder: true})
-				readings++
+			// statement may run in (rel-1-0-10:GAP-1150). Those readings
+			// come on top of the statements of the call, which keep the
+			// budget they have on rel. Past maxSimpleEvaluations readings
+			// in all, the statement is read once more as in a folder the
+			// walk does not give (UnresolvedFolder), as past
+			// maxSimpleWindowsFolders, beside every reading made before:
+			// never the whole-call limit (the one bound rule,
+			// rel-1-0-10:GAP-1228).
+			unresolved := state.othersUnresolved
+			if len(result)+len(state.others) <= maxSimpleEvaluations {
+				for _, other := range state.others {
+					result = append(result, SimpleCommand{Text: text, CWD: other.cwd, OtherFolder: true})
+					readings++
+				}
+			} else {
+				unresolved = true
 			}
-			if state.othersUnresolved {
+			if unresolved {
 				result = append(result, SimpleCommand{Text: text, OtherFolder: true, UnresolvedFolder: true})
 				readings++
 			}
@@ -1177,7 +1236,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			// may not have run. Do not carry either into a later command.
 			clear(variables)
 		}
-		if len(result)-readings >= maxStatementsAlone || len(result) > maxSimpleEvaluations {
+		if len(result)-readings >= maxStatementsAlone {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}
@@ -1197,9 +1256,6 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
 	appendPart(last, begin, len(runes), "")
-	if len(result) > maxSimpleEvaluations {
-		return []SimpleCommand{{EvaluationFailure: "limit"}}
-	}
 	if failed {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
 	}
