@@ -193,6 +193,12 @@ path_rules:
   # no account home (rel-1-0-10:GAP-0836).
   - {id: PATH-GIT-CREDS, access: [read], re: "(?i)^(?:/root|/(?:home|users)/[^/]+|[a-z]:/users/[^/]+)/(?:[.](?:git-credentials|netrc|pgpass)|_netrc)$"}
   - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$", text_re: ":[^:[:space:]]*:0:0:"}
+  # /etc/shadow read or changed at the path a command resolves, after any cd of the call (cd /etc && cat shadow), in Go on the
+  # parsed facts. In the default and permissive packs it was a typed path expression (GAP-0820) that cost 1.8M of the semantic
+  # catalog budget the packs keep for partner extensions (rel-1-0-10:GAP-1058). pack_typed: the finding is judged as that typed
+  # finding was, so the cd-first form gets the one-step verdict in every pack. The pack's text pattern still judges a call
+  # that spells the path, as on rel; the strict pack keeps its own expression.
+  - {id: PATH-ETC-SHADOW, access: [read, write, append, delete], re: "^/etc/shadow$", pack_typed: true}
   # A unit or launch file in the account's own scheduler folders runs at its next login or start, as a cron entry does: a systemd user unit, an XDG
   # autostart entry, a launchd agent. home_re reads the path below the active home of the call (a laptop home, a sandbox home /sandbox), as
   # persistence.shell_profile_write reads the profile, never a home guessed from the shape of the path (rel-1-0-10:GAP-1002).
@@ -210,4 +216,4 @@ command_rules:
 text_rules:
   - {id: CMD-PRIV-PATH-HIJACK, re: "(?i)(^|[;&|][[:space:]]*)PATH=(/tmp|/var/tmp|/dev/shm)[^[:space:]:]*:[$][{]?PATH[}]?[[:space:]]+(sudo|pkexec|su|doas)([[:space:]]|$)"}
 # A shell text without one of these words is not parsed again for the rules above.
-shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", "launchdaemons", "/systemd/system", ".git/config", "/.git", "cd .git", "pushd .git"]
+shell_triggers: ["path=", "/etc/", "shadow", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".git-credentials", ".netrc", "_netrc", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron", ".config/systemd", ".config/autostart", "launchagents", "launchdaemons", "/systemd/system", ".git/config", "/.git", "cd .git", "pushd .git"]

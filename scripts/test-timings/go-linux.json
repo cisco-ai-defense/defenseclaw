@@ -2810,6 +2810,7 @@
    "TestSetupConnectorsIsolatedSkipsAnActiveConnectorWhoseAgentExecutableIsGone": 2.6,
    "TestSetupConnectorsIsolated_FailedRefreshPreservesGuardsAndFails": 4.2,
    "TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer": 2.2,
+   "TestShadowLanesGetTheOneStepVerdict": 34.7,
    "TestShareBodyUnreadIsJudgedByTheStrongestEnforcingMember": 17.2,
    "TestShellApplyPatchEnvelopeIgnoresStateOfAnUncalledFunction": 4.2,
    "TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt": 24.7,
