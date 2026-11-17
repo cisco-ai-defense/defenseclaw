@@ -22,6 +22,8 @@ func TestNamingAnMCPServerDoesNotMakeAnAgentRoot(t *testing.T) {
 		{"installing is not running", "npm", "npm install @modelcontextprotocol/server-filesystem"},
 		{"node inline code", "node", "node -e console.log(1) mcp-server-x"},
 		{"uv pip install", "uv", "uv pip install mcp-server-fetch"},
+		{"Windows python inline code", "python.exe", `"C:\Python312\python.exe" -c "import time; time.sleep(45)" mcp-server-dccert`},
+		{"Windows type of a config file", "cmd.exe", `cmd.exe /c type C:\srv\mcp-server-dccert.json`},
 	} {
 		if reason := AgentCmdlineReason(test.cmdline); reason != "" {
 			t.Errorf("%s: AgentCmdlineReason(%q) = %q, want no agent", test.name, test.cmdline, reason)
@@ -56,6 +58,30 @@ func TestMCPServerLaunchShapesStayAgents(t *testing.T) {
 	} {
 		if reason := AgentCmdlineReason(cmdline); reason != "MCP server process" {
 			t.Errorf("AgentCmdlineReason(%q) = %q, want MCP server process", cmdline, reason)
+		}
+	}
+}
+
+// TestWindowsMCPServerLaunchesStayAgentRoots is the regression guard of the
+// GAP-1163 review: on Windows the interpreter carries its extension and is
+// often quoted. Before GAP-1163 these servers were agent roots through the
+// whole-command-line patterns it removed, so they must stay agent roots now
+// that only isMCPProcess recognises them. Green on da4177e225 and on head.
+func TestWindowsMCPServerLaunchesStayAgentRoots(t *testing.T) {
+	t.Parallel()
+	for _, cmdline := range []string{
+		"uvx.exe mcp-server-fetch",
+		"python.exe -m mcp_server_git",
+		`C:\Python312\python.exe -m mcp_server_git --repository C:\repo`,
+		`node.exe C:\srv\mcp-server-weather\index.js`,
+		`"C:\Program Files\nodejs\node.exe" C:\srv\mcp-server-weather\index.js`,
+		`"C:\Program Files\nodejs\node.exe" "C:\srv\mcp-server-weather\index.js"`,
+		`npx.cmd -y @modelcontextprotocol/server-filesystem C:\data`,
+		`"C:\Program Files\nodejs\npx.cmd" -y @modelcontextprotocol/server-filesystem C:\data`,
+		`C:\Users\dev\.local\bin\uvx.EXE mcp-server-time`,
+	} {
+		if root := IdentifyAgent("", "", cmdline); root.Name == "" {
+			t.Errorf("IdentifyAgent(%q) found no agent root, want the MCP server", cmdline)
 		}
 	}
 }

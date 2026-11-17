@@ -125,8 +125,13 @@ var mcpInlineCodeFlags = map[string]map[string]bool{
 // `npx @modelcontextprotocol/server-filesystem`. So the token also counts
 // when it appears in what an interpreter was asked to run -- which `vim` and
 // `grep` are not.
+//
+// Windows command lines name the interpreter with its extension and often
+// quote it ("C:\Program Files\nodejs\node.exe" ...): the interpreter is
+// looked up without either, or node.exe, python.exe, uvx.exe and npx.cmd
+// would run a server unrecognised.
 func isMCPProcess(cmdline string) bool {
-	fields := strings.Fields(cmdline)
+	fields := commandWords(cmdline)
 	if len(fields) == 0 {
 		return false
 	}
@@ -134,6 +139,7 @@ func isMCPProcess(cmdline string) bool {
 		return true
 	}
 	interpreter := strings.ToLower(BaseName(fields[0]))
+	interpreter = strings.TrimSuffix(interpreter, extensionOf(interpreter))
 	if !mcpInterpreters[interpreter] {
 		return false
 	}
@@ -168,6 +174,44 @@ func isMCPProcess(cmdline string) bool {
 		return mcpProcessPattern.MatchString(argument)
 	}
 	return false
+}
+
+// commandWords splits a command line into its words. A double- or
+// single-quoted span is one word without its quotes, and a backslash is an
+// ordinary character, so a quoted Windows path such as
+// "C:\Program Files\nodejs\node.exe" stays whole.
+func commandWords(cmdline string) []string {
+	var (
+		words   []string
+		word    strings.Builder
+		inWord  bool
+		closing rune
+	)
+	for _, r := range cmdline {
+		switch {
+		case closing != 0:
+			if r == closing {
+				closing = 0
+			} else {
+				word.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			closing, inWord = r, true
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		default:
+			word.WriteRune(r)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words
 }
 
 // IsAgentProcess reports whether an executable name is itself a known agent.
