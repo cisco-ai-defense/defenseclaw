@@ -234,13 +234,13 @@ func TestGAP0413PowerShellOverBudgetStateWriteHolds(t *testing.T) {
 		// (powershell_cap_pieces.go, rel-1-0-10:GAP-0693), so a write of the
 		// state that names its path in this host's own spelling is proven
 		// there and blocks in every mode, as a proven write of the state does.
-		// The "~" spelling is a PowerShell home this POSIX host does not
-		// resolve, so it only alerts per-user here (a Windows host blocks it).
+		// PowerShell's "~" names the home on a Linux or macOS host too, as on
+		// Windows, so that spelling is proven the same (rel-1-0-10:GAP-1134).
 		perUserBlock bool
 	}{
-		{"Set-Content of the state after 130 echoes", pad + "Set-Content -Path ~/.defenseclaw/config.yaml -Value x", true, false},
+		{"Set-Content of the state after 130 echoes", pad + "Set-Content -Path ~/.defenseclaw/config.yaml -Value x", true, true},
 		{"absolute Set-Content of the state after 130 echoes", pad + "Set-Content -Path " + state + " -Value x", true, true},
-		{"quote-split Set-Content after 200", strings.Join(assignments, "; ") + `; echo "claw\"; Set-Content -Path ~/.defenseclaw/config.yaml -Value x; \""`, true, false},
+		{"quote-split Set-Content after 200", strings.Join(assignments, "; ") + `; echo "claw\"; Set-Content -Path ~/.defenseclaw/config.yaml -Value x; \""`, true, true},
 		{"benign 200", strings.Join(assignments, "; "), false, false},
 		// rel-1-0-6:GAP-0448 (review r6 finding 1): long scripts that read,
 		// test or print the state, or only mention defense or claw, allow.
@@ -251,7 +251,7 @@ func TestGAP0413PowerShellOverBudgetStateWriteHolds(t *testing.T) {
 		{"Set-Location a claw repo + 200", "Set-Location ~/src/defenseclaw\n" + wh, false, false},
 		{"200 defense words", strings.ReplaceAll(wh, "Write-Host 'step", "Write-Output 'defense"), false, false},
 		{"200 + git log in a claw repo", wh + "\n$l = & git -C ~/src/defenseclaw log -1", false, false},
-		{"200 + Set-Content of the state", wh + "\nSet-Content -Path ~/.defenseclaw/config.yaml -Value x", true, false},
+		{"200 + Set-Content of the state", wh + "\nSet-Content -Path ~/.defenseclaw/config.yaml -Value x", true, true},
 	} {
 		for _, managed := range []bool{false, true} {
 			want := managed && row.managedBlock || !managed && row.perUserBlock

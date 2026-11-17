@@ -1095,6 +1095,13 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 				body, bodyDialect, ok = posixSoleHostCallSource(source)
 			}
 			if !ok {
+				// The home the shell expands in the launcher's words
+				// (pwsh -Command "... $HOME/f ..."), spelled out.
+				if homed, spelled := posixLauncherHomeSource(source, input.ActiveHome); spelled {
+					body, bodyDialect, ok = posixSoleHostCallSource(homed)
+				}
+			}
+			if !ok {
 				body, bodyDialect, ok = posixLauncherRequotedBody(source)
 			}
 			if !ok && (powerShellOnlyGrammar(source) || plainHostLauncherLine(source)) {

@@ -2169,6 +2169,19 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					stateOperands = append(stateOperands, quoted...)
 					truncated = truncated || over
 				}
+				// So is the script of each PowerShell launcher a Linux or
+				// macOS call runs (pwsh -Command "Add-Content -Path $HOME/f
+				// ...", actionfacts.PowerShellLauncherScripts): behind
+				// ProtectHome the gateway places its targets only from this
+				// map (rel-1-0-10:GAP-1134).
+				for _, script := range actionfacts.PowerShellLauncherScripts(fallback) {
+					scriptInput := fallback
+					scriptInput.Command, scriptInput.DialectHint = script, actionfacts.DialectPowerShell
+					facts.Paths = append(facts.Paths, actionfacts.Analyze(scriptInput).AtHookFolder().Paths...)
+					quoted, over := powerShellQuotedPathOperands(script, cwd, home)
+					stateOperands = append(stateOperands, quoted...)
+					truncated = truncated || over
+				}
 				if concreteOperands.ready {
 					literalOperands = concreteOperands.literal
 				} else {

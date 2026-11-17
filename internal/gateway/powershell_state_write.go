@@ -32,10 +32,17 @@ import (
 // that spell a path the hook client lists in the state tree, as the user's
 // walk placed it (clientStateSpellings).
 func provenPowerShellStateWrite(request trustedActionRequest) bool {
-	command, known := powerShellReadingCommand(request)
-	if !known {
-		return false
+	for _, command := range powerShellReadingCommands(request) {
+		if provenPowerShellStateWriteOf(request, command) {
+			return true
+		}
 	}
+	return false
+}
+
+// provenPowerShellStateWriteOf is provenPowerShellStateWrite for one
+// PowerShell reading command of the call.
+func provenPowerShellStateWriteOf(request trustedActionRequest, command string) bool {
 	home := request.Input.ActiveHome
 	var mentions func(string) bool
 	if !strings.Contains(strings.ToLower(command), "defenseclaw") {
@@ -52,21 +59,30 @@ func provenPowerShellStateWrite(request trustedActionRequest) bool {
 	return powerShellWriteReading(request, command, mentions, provenStateMutationPath)
 }
 
-// powerShellReadingCommand is the command text of a call the PowerShell
+// powerShellReadingCommands are the command texts of a call the PowerShell
 // reading judges: a call of a Windows home (a drive path) that runs in
 // PowerShell, or in a shell the gateway cannot tell from it (no hint, or
-// POSIX: Codex names its PowerShell tool Bash). A cmd call is not one.
-func powerShellReadingCommand(request trustedActionRequest) (string, bool) {
+// POSIX: Codex names its PowerShell tool Bash); a call of a Linux or macOS
+// home that runs in PowerShell; and, for a POSIX call of such a home, the
+// script of each PowerShell launcher it runs (pwsh -Command BODY,
+// actionfacts.PowerShellLauncherScripts): its .NET file writes, New-Item
+// -Value and home spellings were read nowhere else (rel-1-0-10:GAP-1134). A
+// cmd call is not one.
+func powerShellReadingCommands(request trustedActionRequest) []string {
 	home := request.Input.ActiveHome
-	if len(home) < 2 || home[1] != ':' {
-		return "", false
+	hint := request.Input.DialectHint
+	switch {
+	case len(home) >= 2 && home[1] == ':' &&
+		(hint == "" || hint == actionfacts.DialectPOSIX || hint == actionfacts.DialectPowerShell),
+		strings.HasPrefix(home, "/") && hint == actionfacts.DialectPowerShell:
+		if command, known := trustedBashCommandInput(request.Input); known {
+			return []string{command}
+		}
+		return nil
+	case strings.HasPrefix(home, "/"):
+		return actionfacts.PowerShellLauncherScripts(request.Input)
 	}
-	switch request.Input.DialectHint {
-	case "", actionfacts.DialectPOSIX, actionfacts.DialectPowerShell:
-	default:
-		return "", false
-	}
-	return trustedBashCommandInput(request.Input)
+	return nil
 }
 
 // powerShellWriteReading is the one reader of the files a PowerShell reading

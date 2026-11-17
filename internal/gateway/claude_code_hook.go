@@ -229,10 +229,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			}
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, shellTool, actionTool, actionArgs)
+		// A managed gateway cannot resolve the session directory in the
+		// caller's home: the call runs in it as sent, kept lexically
+		// (rel-1-0-10:GAP-1135).
 		actionInput := actionfacts.Input{
 			Tool:                                     actionTool,
 			Args:                                     actionArgs,
-			CWD:                                      req.CWD,
+			CWD:                                      agentHookTrustedActionCWDReported(ctx, "claudecode", req.CWD, req.reportedCWD, ""),
 			ActiveHome:                               hookActiveHome(ctx),
 			CurrentWindowsDrive:                      reportedWindowsDrive(req.reportedCWD),
 			ToolResourceIdentity:                     resourceIdentity,

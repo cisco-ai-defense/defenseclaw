@@ -1839,10 +1839,14 @@ func withActiveStateTargetMention(
 				// the state root (classifier-ps checker it9 RV9-2 X02, X07).
 				// A managed PowerShell call that reaches the state through a
 				// link names no state: its reading follows the paths the hook
-				// client placed there (GAP-1023).
+				// client placed there (GAP-1023). Nor does the quoted script of
+				// a pwsh launcher on Linux or macOS that names the state through
+				// a link: the mention scan reads the launcher's words, not the
+				// script, which the PowerShell reading walks (rel-1-0-10:GAP-1134).
 				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
 				proven := spelled && provenCMDSlashCStateWrite(request) ||
-					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)
+					(spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) &&
+						provenPowerShellStateWrite(request)
 				if !proven {
 					return findings
 				}
