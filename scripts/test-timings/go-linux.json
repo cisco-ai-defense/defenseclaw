@@ -2524,6 +2524,7 @@
    "TestProxyPromptBlockAlertNamesDirectionAndReason": 2.4,
    "TestProxyReadOfWindowsCredentialPathAlertsFiveTiers": 4.3,
    "TestProxyToolCallsNeverWeakerThanClaudeCode": 152.3,
+   "TestProxyToolCallsNeverWeakerThanClaudeCodeManaged": 105.0,
    "TestProxyV8ModelTraceMetricsStayPinnedAcrossRuntimeReload": 3.0,
    "TestPushdAndSubshellLinkToStateIsStateWrite": 8.4,
    "TestPythonReverseShellTrustedActionBoundary": 2.1,
