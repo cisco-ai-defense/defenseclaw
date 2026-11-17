@@ -492,6 +492,17 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						if actionURLAuthorityToken(value, span[0], token) {
 							continue
 						}
+						// Only a drive prefix reads differently here than in
+						// the text scan below. A pattern token without one is
+						// what that scan skips (a case label, patch or
+						// here-string text, not an argv glob operand): a
+						// PowerShell here-string printed to a display
+						// (Write-Output @'...'@ | CaT -n) names no target, as
+						// on rel (rel-1-0-10:GAP-1073). A drive-prefixed
+						// pattern keeps its check (GAP-0991).
+						if strings.ContainsAny(token, "*?[]") && (len(token) < 2 || token[1] != ':') {
+							continue
+						}
 						if check(token, false, effectiveCWD) {
 							return true
 						}
