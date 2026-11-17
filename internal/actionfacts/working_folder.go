@@ -598,6 +598,22 @@ func windowsWorkFolders(commands []CommandFact) map[int64]workFolders {
 	return folders
 }
 
+// MovesWindowsFolder reports a PowerShell or CMD reading with a folder move
+// (Set-Location, cd, chdir, Push-Location, pushd, Pop-Location, popd): the
+// relative operands after it are read in every folder it may leave the shell
+// in (windowsWorkFolders, SimpleCommands).
+func (f Facts) MovesWindowsFolder() bool {
+	if f.Parse.Dialect != DialectPowerShell && f.Parse.Dialect != DialectCMD {
+		return false
+	}
+	for _, command := range f.Commands {
+		if (command.Dialect == DialectPowerShell || command.Dialect == DialectCMD) && windowsFolderMove(command) {
+			return true
+		}
+	}
+	return false
+}
+
 func windowsFolderMove(command CommandFact) bool {
 	switch strings.ToLower(command.Program) {
 	case "cd", "chdir", "pushd", "set-location", "sl", "push-location", "popd", "pop-location":

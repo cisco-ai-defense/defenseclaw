@@ -1031,8 +1031,11 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	begin := 0
 	result := make([]SimpleCommand, 0, 2)
 	variables := make(map[string]string)
-	state := simpleWindowsState{cwd: input.CWD}
+	state := simpleWindowsState{cwd: input.CWD, trackOthers: windowsSimpleCallFolder(input.CWD)}
 	failed := false
+	// readings counts the readings of a statement in another folder it may
+	// run in (OtherFolder): readings, not statements of the call.
+	readings := 0
 	groupIndex := 0
 	var groups []simpleWindowsGroupSnapshot
 	processGroupEvents := func(before int) {
@@ -1048,7 +1051,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			groupIndex++
 		}
 	}
-	appendPart := func(part string, start, end int) {
+	appendPart := func(part string, start, end int, operator string) {
 		childStart := start
 		for childStart < end && unicode.IsSpace(runes[childStart]) {
 			childStart++
@@ -1059,6 +1062,8 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if dialect == windowsPowerShell {
 			if windowsSimpleLiteralOutput(part) {
 				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, LiteralOutputOnly: true})
+				// It moves nothing; the folders an && skipped come back.
+				state.advance(part, dialect, childInput, variables, operator)
 				processGroupEvents(end)
 				return
 			}
@@ -1069,6 +1074,8 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 					failed = true
 				}
 				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, OpaqueValueAssignment: true})
+				// It moves nothing; the folders an && skipped come back.
+				state.advance(part, dialect, childInput, variables, operator)
 				processGroupEvents(end)
 				return
 			}
@@ -1087,7 +1094,19 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			failed = true
 		}
 		result = append(result, SimpleCommand{Text: text, CWD: state.cwd})
-		state.next(part, dialect, childInput, variables)
+		if (len(state.others) != 0 || state.othersUnresolved) && windowsSimpleRelativePathOperand(text, facts.Parse.Dialect) {
+			// A relative operand names a file in each folder the
+			// statement may run in (rel-1-0-10:GAP-1150).
+			for _, other := range state.others {
+				result = append(result, SimpleCommand{Text: text, CWD: other.cwd, OtherFolder: true})
+				readings++
+			}
+			if state.othersUnresolved {
+				result = append(result, SimpleCommand{Text: text, OtherFolder: true, UnresolvedFolder: true})
+				readings++
+			}
+		}
+		state.advance(part, dialect, childInput, variables, operator)
 		processGroupEvents(end)
 	}
 	for _, lexeme := range lexemes {
@@ -1101,14 +1120,18 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if part == "" {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
-		appendPart(part, begin, lexeme.start)
+		operator := lexeme.operator
+		if lexeme.kind == windowsPipeLexeme {
+			operator = "|"
+		}
+		appendPart(part, begin, lexeme.start, operator)
 		begin = lexeme.end
 		if lexeme.kind == windowsPipeLexeme || lexeme.operator == "&&" || lexeme.operator == "||" {
 			// A pipeline stage has a separate scope; conditional assignments
 			// may not have run. Do not carry either into a later command.
 			clear(variables)
 		}
-		if len(result) >= maxStatementsAlone {
+		if len(result)-readings >= maxStatementsAlone || len(result) > maxSimpleEvaluations {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}
@@ -1127,7 +1150,10 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		}
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
-	appendPart(last, begin, len(runes))
+	appendPart(last, begin, len(runes), "")
+	if len(result) > maxSimpleEvaluations {
+		return []SimpleCommand{{EvaluationFailure: "limit"}}
+	}
 	if failed {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
 	}
