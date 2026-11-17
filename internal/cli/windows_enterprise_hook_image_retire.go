@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -564,6 +565,43 @@ func windowsHookImageRetireSkipSet(steps windowsHookImageRetireSteps, before win
 }
 
 var windowsHookImageSIDPattern = lazyregexp.New(`^S-1-[0-9]+(-[0-9]+)+$`)
+
+// windowsHookImageRetireSkipActivity is the HIGH audit row of one skipped
+// profile (GAP-0794 review F4), an operator mutation of the managed hook
+// state (config-update). actor is the audit actor of the account that ran
+// retire in the form the audit record keeps (configwrite.CurrentOSActor:
+// os:sid:<SID>:<DOMAIN/name>). The display form of SkippedBy
+// ("DOMAIN\name (SID)") is not an audit actor: the record dropped it, so
+// the row named nobody (rel-1-0-10 GAP-0906). after_state carries
+// SkippedBy too, so the row alone answers who accepted the profile.
+func windowsHookImageRetireSkipActivity(profile windowsHookImageSkippedProfile, actor string) map[string]any {
+	return map[string]any{"kind": "activity", "activity": map[string]any{
+		"actor":       actor,
+		"action":      string(audit.ActionConfigUpdate),
+		"target_type": "hook-image-retire-skip",
+		"target_id":   profile.SID,
+		"severity":    "HIGH",
+		"before":      map[string]any{"account": profile.Account, "still_named": profile.Files},
+		"after":       map[string]any{"skipped_at": profile.SkippedAt, "skipped_by": profile.SkippedBy, "retired": false},
+	}}
+}
+
+// windowsHookImageProfileAccount names an enrolled profile for the report,
+// the marker and the audit row: the manifest's user, else the SID's account
+// (lookup), else the profile folder's name. The standalone manifest often
+// has no user, and the skip row then had an empty account (GAP-0906).
+func windowsHookImageProfileAccount(user, home string, lookup func() string) string {
+	if user = strings.TrimSpace(user); user != "" {
+		return user
+	}
+	if lookup != nil {
+		if name := strings.TrimSpace(lookup()); name != "" {
+			return name
+		}
+	}
+	home = strings.TrimRight(strings.TrimSpace(home), `\/`)
+	return home[strings.LastIndexAny(home, `\/`)+1:]
+}
 
 // windowsHookImageBlockingNamedFiles is the set of files (lower case) of the
 // scan that name a launch folder, or may, and do not belong to a skipped
