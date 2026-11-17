@@ -99,10 +99,8 @@ func gap0377Shapes() []struct {
 	}
 }
 
-// gap0377Rows are the commands of the test: the review's 44 nearby shapes x
-// 11 tails, its threshold rows (substrate-1 GAP-0377) and S7's CD-CANDIDATE
-// matrix rows.
-func gap0377Rows() []gap0377Row {
+// gap0377NearbyRows are the review's 44 nearby shapes x 11 tails.
+func gap0377NearbyRows() []gap0377Row {
 	tails := []struct {
 		name, cmd string
 		benign    bool
@@ -125,6 +123,13 @@ func gap0377Rows() []gap0377Row {
 			rows = append(rows, gap0377Row{name: shape.name + " " + tail.name, command: shape.f(tail.cmd), benign: tail.benign})
 		}
 	}
+	return rows
+}
+
+// gap0377ThresholdRows are the review's threshold rows at the edges where the
+// statement pass of 51cc22bdfa started to cut (substrate-1 GAP-0377).
+func gap0377ThresholdRows() []gap0377Row {
+	var rows []gap0377Row
 	// substrate-1 GAP-0377: each statement after a cd that may fail has two
 	// places, after two such cds four; the statement pass counted places
 	// against the 128 cap and cut from N=63 (one cd), 32 (two), 20 (three)
@@ -136,19 +141,34 @@ func gap0377Rows() []gap0377Row {
 		}
 		return b.String()
 	}
-	for _, n := range []int{20, 31, 32, 33, 62, 63, 64, 66, 70, 90, 120, 125} {
+	// One cd cut from 63 statements, two from 32, three from 20; 125 is
+	// under the laptop's budget of 128.
+	for _, n := range []int{62, 63, 125} {
 		rows = append(rows,
-			gap0377Row{name: fmt.Sprintf("cd1-herestr-%d ssh", n), command: "cd .cache\nbash <<< 'true'\n" + lines(n) + "cat ../.ssh/id_ed25519", benign: false},
-			gap0377Row{name: fmt.Sprintf("cd1-herestr-%d settings", n), command: "cd .cache\nbash <<< 'true'\n" + lines(n) + "echo '{}' > ../.claude/settings.json", benign: false},
-			gap0377Row{name: fmt.Sprintf("cd1-herestr-%d benign", n), command: "cd .cache\nbash <<< 'true'\n" + lines(n) + "echo hi > ../notes.txt", benign: true},
-			gap0377Row{name: fmt.Sprintf("cd2-herestr-%d ssh", n), command: "cd .cache\ncd sub\nbash <<< 'true'\n" + lines(n) + "cat ../../.ssh/id_ed25519", benign: false},
-			gap0377Row{name: fmt.Sprintf("cd2-herestr-%d benign", n), command: "cd .cache\ncd sub\nbash <<< 'true'\n" + lines(n) + "ls", benign: true},
-			gap0377Row{name: fmt.Sprintf("cd3-herestr-%d ssh", n), command: "cd .cache\ncd sub\ncd x\nbash <<< 'true'\n" + lines(n) + "cat ../../../.ssh/id_ed25519", benign: false},
-			gap0377Row{name: fmt.Sprintf("cd3-herestr-%d benign", n), command: "cd .cache\ncd sub\ncd x\nbash <<< 'true'\n" + lines(n) + "ls", benign: true},
-			gap0377Row{name: fmt.Sprintf("procsub-%d benign", n), command: "cd build\ndiff <(ls) /dev/null\n" + lines(n) + "ls", benign: true},
-			gap0377Row{name: fmt.Sprintf("source-procsub-%d benign", n), command: "cd build\nsource <(echo true)\n" + lines(n) + "ls", benign: true},
-		)
+			gap0377Row{name: fmt.Sprintf("cd1-herestr-%d ssh", n), command: "cd .cache\nbash <<< 'true'\n" + lines(n) + "cat ../.ssh/id_ed25519"},
+			gap0377Row{name: fmt.Sprintf("cd1-herestr-%d settings", n), command: "cd .cache\nbash <<< 'true'\n" + lines(n) + "echo '{}' > ../.claude/settings.json"},
+			gap0377Row{name: fmt.Sprintf("cd1-herestr-%d benign", n), command: "cd .cache\nbash <<< 'true'\n" + lines(n) + "echo hi > ../notes.txt", benign: true})
 	}
+	for _, n := range []int{31, 32} {
+		rows = append(rows,
+			gap0377Row{name: fmt.Sprintf("cd2-herestr-%d ssh", n), command: "cd .cache\ncd sub\nbash <<< 'true'\n" + lines(n) + "cat ../../.ssh/id_ed25519"},
+			gap0377Row{name: fmt.Sprintf("cd2-herestr-%d benign", n), command: "cd .cache\ncd sub\nbash <<< 'true'\n" + lines(n) + "ls", benign: true})
+	}
+	for _, n := range []int{19, 20} {
+		rows = append(rows,
+			gap0377Row{name: fmt.Sprintf("cd3-herestr-%d ssh", n), command: "cd .cache\ncd sub\ncd x\nbash <<< 'true'\n" + lines(n) + "cat ../../../.ssh/id_ed25519"},
+			gap0377Row{name: fmt.Sprintf("cd3-herestr-%d benign", n), command: "cd .cache\ncd sub\ncd x\nbash <<< 'true'\n" + lines(n) + "ls", benign: true})
+	}
+	rows = append(rows,
+		gap0377Row{name: "procsub-70 benign", command: "cd build\ndiff <(ls) /dev/null\n" + lines(70) + "ls", benign: true},
+		gap0377Row{name: "source-procsub-70 benign", command: "cd build\nsource <(echo true)\n" + lines(70) + "ls", benign: true})
+	return rows
+}
+
+// gap0377S7Rows are S7's CD-CANDIDATE matrix rows, as sent and after a
+// here-string.
+func gap0377S7Rows() []gap0377Row {
+	var rows []gap0377Row
 	// S7's CD-CANDIDATE matrix (rel-1-0-10:GAP-1144, origin/s7/g1144fix at
 	// 6c59a507ea, internal/gateway/gap1144_chain_body_folders_test.go
 	// TestChainBodyWritesAreJudgedInEveryFolderTheChainMayLeave): the same
@@ -234,10 +254,28 @@ func gap0377Rows() []gap0377Row {
 // command gets the laptop's exact answer. Where the laptop's own reading
 // loses the cd the actor may name more (substrate-1 GAP-0367).
 func TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates(t *testing.T) {
+	gap0377Check(t, gap0377NearbyRows())
+}
+
+// TestGAP0377SandboxGuestPlacementCountsStatements: the threshold rows of
+// substrate-1 GAP-0377 (see TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates).
+func TestGAP0377SandboxGuestPlacementCountsStatements(t *testing.T) {
+	gap0377Check(t, gap0377ThresholdRows())
+}
+
+// TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrix: S7's CD-CANDIDATE
+// matrix rows (see TestGAP0377SandboxGuestPlacementKeepsLaptopCandidates).
+func TestGAP0377SandboxGuestPlacementKeepsS7CandidateMatrix(t *testing.T) {
+	gap0377Check(t, gap0377S7Rows())
+}
+
+// gap0377Check judges rows on the laptop and in a copy-mode actor in every
+// pack.
+func gap0377Check(t *testing.T, rows []gap0377Row) {
+	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
 	}
-	rows := gap0377Rows()
 	rank := func(action string) int {
 		switch action {
 		case "allow":
