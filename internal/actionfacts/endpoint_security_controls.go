@@ -126,10 +126,11 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 	return "", false
 }
 
-// ExactEndpointSecurityProductDisable proves one of eight source-supported,
+// ExactEndpointSecurityProductDisable proves a source-supported,
 // closed product operations: Falcon Sensor stop+disable, both Carbon Black
 // launch daemons unloaded, Little Snitch unloaded, Sysmon uninstalled, or the
-// exact WinDefend stop+disable sequence followed by its read-only status query,
+// exact WinDefend service stop or stop+disable sequence followed by its
+// read-only status query,
 // or an exact Microsoft Defender for Endpoint real-time protection disable.
 // Every top-level invocation must belong to the selected proof; unrelated
 // commands, dynamic operands, wrappers other than a literal sudo, pipelines,
@@ -164,6 +165,16 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 		return true
 	case slices.Equal(steps, []string{endpointStepSentinelDisable}):
 		return true
+	case slices.Equal(steps, []string{endpointStepWinDefendStop}):
+		// A lone bare sc in Windows PowerShell 5.1 is Set-Content. Keep the
+		// older multi-command fixture's classification, but a single stop
+		// proves the service operation only for sc.exe or CMD's bare sc.
+		for _, command := range facts.Commands {
+			if command.ParentCommandID == 0 {
+				return command.Program == "sc.exe" || command.Dialect == DialectCMD
+			}
+		}
+		return false
 	case slices.Equal(steps, []string{
 		endpointStepWinDefendStop,
 		endpointStepWinDefendDisable,
