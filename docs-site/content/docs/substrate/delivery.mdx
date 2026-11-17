@@ -50,6 +50,8 @@ cosign verify ghcr.io/cisco-ai-defense/defenseclaw-gateway:1.0.10 ...
 
 Commit the chart reference and `defenseclaw-values.yaml` to the repo Argo CD or Flux watches. Changes go through review like any other cluster change. DefenseClaw needs nothing beyond what the chart installs. Run `defenseclaw substrate setup` once, and again after a Substrate upgrade.
 
+`setup` writes the `SubstrateInstall` file but has no GitOps mode yet (no `--overlay-only` or `--no-chart`): apply the callout overlay from that file with `ate-setup deploy`, and let Argo CD or Flux own the chart. The overlay is Substrate's object, so it survives `helm uninstall` and every sync of the chart.
+
 With Argo CD, install Argo CD into the `argocd` namespace: the ClusterRoleBindings of the upstream `install.yaml` name that namespace, so an Argo CD installed anywhere else has no cluster rights until you change the namespace of their subjects.
 
 </Tab>
