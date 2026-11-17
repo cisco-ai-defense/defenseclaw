@@ -114,13 +114,18 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             '"defenseclaw substrate approve ID" or "defenseclaw substrate reject ID". An agent attached to your\n'
             "terminal shows the same question on its last line. An unattended run (--task, --batch)\n"
             "denies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n"
-            '"unattended" in the RUN column and is denied when its time runs out.'
+            '"unattended" in the RUN column and is denied when its time runs out.\n'
+            "\n"
+            'With --standing it lists the approvals given with "approve --always" that are still in force:\n'
+            "the agent, the host, what the approval covers, who approved it and when. Take one back with\n"
+            '"defenseclaw substrate revoke NAME HOST".'
         ),
         flags=(
-            _Flag("all", "bool", "every person's pending asks (administrators only)"),
+            _Flag("all", "bool", "every person's, not only yours (administrators only)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("standing", "bool", "list the approvals given with --always that are still in force"),
         ),
     ),
     _Cmd(
@@ -559,6 +564,22 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("reason", "string", "note recorded with the decision", metavar="TEXT"),
         ),
+    ),
+    _Cmd(
+        ("revoke",),
+        "Take back an approval given with --always",
+        long=(
+            'Takes back what "defenseclaw substrate approve --always" allowed for one agent and host: the '
+            "agent's\n"
+            "next request to the host asks you again. The cluster drops the host from the agent's network rules\n"
+            'within about a minute. List the approvals in force with "defenseclaw substrate approvals '
+            '--standing".\n'
+            "An administrator names another person's agent as ATESPACE/NAME; the revoke is recorded under their\n"
+            "own name."
+        ),
+        example="defenseclaw substrate revoke fix-tests-7f3a registry.example.test",
+        args=(_Arg("name"), _Arg("host")),
+        flags=(_Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),),
     ),
     _Cmd(
         ("run",),

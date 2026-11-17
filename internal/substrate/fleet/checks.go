@@ -453,7 +453,7 @@ var ActorListenerProbes = []string{
 	"/llm/bedrock", "/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task",
 	"/", "/health", "/status", "/api/v1/substrate/info", "/api/v1/substrate/actors", "/api/v1/substrate/actors/a/b",
 	"/api/v1/substrate/actors/a/b/attach", "/api/v1/substrate/session-cert", "/api/v1/substrate/batches",
-	"/api/v1/substrate/usage", "/api/v1/substrate/doctor", "/api/v1/substrate/asks", "/api/v1/substrate/decisions",
+	"/api/v1/substrate/usage", "/api/v1/substrate/doctor", "/api/v1/substrate/asks", "/api/v1/substrate/approvals", "/api/v1/substrate/decisions",
 	"/api/v1/substrate/policy/explain", "/api/v1/substrate/secrets", "/api/v1/substrate/bundle/status",
 	"/api/v1/substrate/signin", "/api/v1/fleet/", "/api/v1/claude-code/hook",
 	"/api/v1/codex/notify", "/api/v1/admin/shutdown",

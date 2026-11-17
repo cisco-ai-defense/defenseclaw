@@ -42,6 +42,7 @@ import (
 //
 //	GET  /api/v1/substrate/asks[?all=1]                 -> {"asks":[...]} pending
 //	POST /api/v1/substrate/asks/{id} {decision, always?, reason?}
+//	GET  /api/v1/substrate/approvals[?all=1]            -> standing approvals (substrate_approvals.go)
 //	GET  /api/v1/substrate/decisions[?actor=a/n][&limit=][&all=1]
 //	GET  /api/v1/substrate/policy/explain[?actor=a/n][&host=][&method=][&tool=]
 //	POST /api/v1/substrate/callout/ask   (callout token) {actor, host|tool, summary, reason, severity, ask_id?}
@@ -57,6 +58,9 @@ type SubstrateAskStore interface {
 	// every request, a once approval only the first (asks.ErrUsed after).
 	Use(ctx context.Context, in asks.UseRequest) (asks.Ask, error)
 	List(ctx context.Context, in asks.ListRequest) ([]asks.Ask, error)
+	// Revoke takes back the always approvals of a host for an actor
+	// (GAP-0492).
+	Revoke(ctx context.Context, in asks.RevokeRequest) (asks.RevokeResult, error)
 	Record(ctx context.Context, d asks.Decision) (struct{}, error)
 	Decisions(ctx context.Context, in asks.ListRequest) ([]asks.Decision, error)
 }

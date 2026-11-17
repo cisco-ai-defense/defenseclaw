@@ -230,7 +230,7 @@ func reasonOf(t *testing.T, rec *httptest.ResponseRecorder) string {
 
 func TestSubstrateActorListenerServesOnlyItsRoutes(t *testing.T) {
 	f := newSubstrateFixture(t)
-	admin := []string{"/api/v1/substrate/actors", "/api/v1/substrate/asks", "/api/v1/substrate/decisions",
+	admin := []string{"/api/v1/substrate/actors", "/api/v1/substrate/asks", "/api/v1/substrate/approvals", "/api/v1/substrate/decisions",
 		"/api/v1/substrate/policy/explain", "/api/v1/substrate/usage", "/api/v1/substrate/secrets",
 		"/api/v1/substrate/batches", "/api/v1/substrate/session-cert", substrateCalloutPath,
 		"/api/v1/substrate/hook/", "/api/v1/substrate/hook/notaconnector", "/api/v1/substrate/notify/claudecode",

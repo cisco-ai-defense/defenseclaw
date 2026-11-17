@@ -716,6 +716,11 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		}
 		return store.Put(ctx, reg)
 	}
+	// A revoked always approval leaves the registration, and so the policy
+	// on the controller's next pass (GAP-0492).
+	askStore.OnRevoke = func(ctx context.Context, in asks.RevokeRequest) (bool, error) {
+		return registry.RemoveApproved(ctx, store, in.Atespace, in.UID, in.Host, in.CallerID, in.Admin)
+	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
