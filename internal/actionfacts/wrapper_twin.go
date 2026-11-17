@@ -377,19 +377,53 @@ type PrefixWrapperRun struct {
 	Dir               string
 	DirUnknown        bool
 	ChangesResolution bool
-	// Length is the number of wrappers the chain holds. A chain longer than
-	// MaxWrapperDepth is more than the action analysis unwraps (a dynamic
-	// word after it stops that reading at the first wrapper): a caller
-	// reports it as a truncation (the bound rule, cap depth), never an
-	// ordinary command (rel-1-0-10:GAP-0689).
-	Length int
+	// Length is the number of wrappers the chain holds, Neutral the number
+	// of them that are context-neutral (posixContextNeutralWrappers). A
+	// chain past PastWrapperBound is more than the action analysis unwraps
+	// (a dynamic word after it stops that reading at the first wrapper): a
+	// caller reports it as a truncation (the bound rule, cap depth), never
+	// an ordinary command (rel-1-0-10:GAP-0689).
+	Length  int
+	Neutral int
 }
 
-// MaxPrefixWrapperChain is the most prefix wrappers (sudo, env, command,
-// nohup, ...) one simple command is unwrapped through. A chain longer than
-// this is no real call; the reading that reaches the bound says so
-// (PrefixWrapperRun.Length past MaxWrapperDepth) instead of treating the next
-// wrapper as the program.
+// PastWrapperBound reports a chain longer than the action analysis reads to
+// the program it runs: more than InlineChainWrappers context-neutral
+// wrappers, or more than MaxWrapperDepth of the others. A context-neutral
+// wrapper only runs the next program, so it spends no wrapper depth
+// (staticPOSIXWrapperDepthCost, substrate-1:GAP-0334): counting it against
+// MaxWrapperDepth cut nohup nice nohup nice nohup PROGRAM at five wrappers
+// (substrate-1:GAP-0478, rel-1-0-10:GAP-0976).
+func (r PrefixWrapperRun) PastWrapperBound() bool {
+	return r.Neutral > InlineChainWrappers || r.Length-r.Neutral > MaxWrapperDepth
+}
+
+// ReadsMore reports that a reader of a wrapper chain that has read run may
+// read one more wrapper: at most MaxPrefixWrapperChain wrappers that are not
+// context-neutral, and one context-neutral wrapper past InlineChainWrappers,
+// so the reading of a chain past the bound shows it (PastWrapperBound). It
+// is the one bound of every wrapper-chain reader, so each reads a chain of
+// context-neutral wrappers as far as the action analysis does
+// (substrate-1:GAP-0478).
+func (r PrefixWrapperRun) ReadsMore() bool {
+	return r.Length-r.Neutral < MaxPrefixWrapperChain && r.Neutral <= InlineChainWrappers
+}
+
+// Count records one more wrapper, program, read into the chain.
+func (r *PrefixWrapperRun) Count(program string) {
+	r.Length++
+	if _, contextNeutral := posixContextNeutralWrappers[program]; contextNeutral {
+		r.Neutral++
+	}
+}
+
+// MaxPrefixWrapperChain is the most prefix wrappers that are not
+// context-neutral (sudo, env, command, ...) one simple command is unwrapped
+// through; context-neutral ones (nice, time, timeout, nohup) are read up to
+// one past InlineChainWrappers on top. A chain longer than this is no real
+// call; the reading that reaches the bound says so
+// (PrefixWrapperRun.PastWrapperBound) instead of treating the next wrapper
+// as the program.
 const MaxPrefixWrapperChain = 32
 
 // StaticPrefixWrapperChild reads words (the static values of the words of
@@ -410,7 +444,7 @@ func StaticPrefixWrapperChild(words []string, static []bool) (PrefixWrapperRun, 
 	}
 	var run PrefixWrapperRun
 	index := 0
-	for depth := 0; depth < MaxPrefixWrapperChain; depth++ {
+	for run.ReadsMore() {
 		name, ok := value(index)
 		if !ok || name == "" {
 			break
@@ -420,7 +454,6 @@ func StaticPrefixWrapperChild(words []string, static []bool) (PrefixWrapperRun, 
 			break
 		}
 		index = next
-		run.Length++
 	}
 	if index == 0 {
 		return PrefixWrapperRun{}, false
@@ -509,7 +542,7 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 		return word.Value, !word.Expands
 	}
 	var run PrefixWrapperRun
-	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
+	for index < len(args) && run.ReadsMore() {
 		word, static := value(index)
 		if !static || word == "" {
 			return PrefixWrapperRun{}, false
@@ -654,7 +687,7 @@ func flockShellString(args []*syntax.Word) (int, bool) {
 	}
 	var run PrefixWrapperRun
 	index := 0
-	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
+	for index < len(args) && run.ReadsMore() {
 		word, static := value(index)
 		if !static || word == "" {
 			return 0, false
@@ -694,8 +727,16 @@ func (run *PrefixWrapperRun) setDir(dir string) bool {
 // index runs. Every wrapper word must be static; an option that splits a
 // string, starts a shell with no command, acts on a running process or is
 // not known ends the reading. A directory the wrapper sets is recorded in
-// run.
+// run, and so is the wrapper itself (PrefixWrapperRun.Count).
 func wrapperChildIndex(name string, value func(int) (string, bool), count, index int, run *PrefixWrapperRun) (int, bool) {
+	next, known := wrapperChildIndexOf(name, value, count, index, run)
+	if known {
+		run.Count(name)
+	}
+	return next, known
+}
+
+func wrapperChildIndexOf(name string, value func(int) (string, bool), count, index int, run *PrefixWrapperRun) (int, bool) {
 	next := index + 1
 	options := func(switches, valued, prefixes []string, assignments bool) bool {
 		for {

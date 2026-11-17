@@ -613,7 +613,14 @@ func dispatchTrustedAction(
 		// A call past actionfacts.MaxOperandsPerCall operands is unresolved
 		// (GAP-0943), and a statement of more argv words than the analysis
 		// reads has no path facts (GAP-1069): operandBoundDispatch judges
-		// the bounded readings.
+		// the bounded readings. They are judged under this call's cap
+		// floor, so the caps of the call's own analysis are this call's: a
+		// wrapper chain past the analysis bound in a statement of many words
+		// is TRUNCATED as in a short one, never a clean allow
+		// (rel-1-0-10:GAP-0973).
+		if !request.simpleCommandPass {
+			analyzedCaps = capFloorAnalysisCaps(actionfacts.Analyze(request.Input))
+		}
 		return bounded
 	}
 	var (

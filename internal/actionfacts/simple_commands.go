@@ -2623,6 +2623,19 @@ func simpleNestedScript(call *syntax.CallExpr, vars map[string]string, cwdUnknow
 }
 
 func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth int, cwdUnknown *bool, interpreter *string) (script string, shared, nested, static bool) {
+	return simpleNestedScriptRun(args, vars, depth, 0, cwdUnknown, interpreter)
+}
+
+// simpleNestedScriptRun is simpleNestedScriptArgs after neutral
+// context-neutral wrappers (posixContextNeutralWrappers: nice, time, timeout,
+// nohup). Such a wrapper only runs the next program, so it spends no nesting
+// depth, as in the action analysis (staticPOSIXWrapperDepthCost): a run of up
+// to InlineChainWrappers of them is read to the program it runs, whose call
+// is then judged alone as it would be without them (rel-1-0-10:GAP-1207,
+// substrate-1:GAP-0478). One more is not read (nested, not static): the call
+// is judged whole, where the chain is past the wrapper bound (TRUNCATED,
+// PrefixWrapperRun.PastWrapperBound).
+func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, neutral int, cwdUnknown *bool, interpreter *string) (script string, shared, nested, static bool) {
 	if depth >= 8 || len(args) == 0 {
 		return "", false, true, false
 	}
@@ -2711,10 +2724,17 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		if childIndex <= 0 || childIndex >= len(args) {
 			return "", false, true, false
 		}
+		if _, contextNeutral := posixContextNeutralWrappers[wrapper]; contextNeutral {
+			if neutral++; neutral > InlineChainWrappers {
+				return "", false, true, false
+			}
+		} else {
+			depth++
+		}
 		if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
 			return program, false, true, true
 		}
-		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
+		return simpleNestedScriptRun(args[childIndex:], vars, depth, neutral, cwdUnknown, interpreter)
 	}
 	shellProgram := filepath.Base(program)
 	switch shellProgram {
@@ -2791,9 +2811,16 @@ func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program stri
 	return parsePOSIXShellInvocation(program, argv).noExec
 }
 
+// simpleNestedWrapper reports a program the walk reads as a wrapper of the
+// program after it: every context-neutral wrapper (posixContextNeutralWrappers,
+// the external time program included) and the wrappers that change the
+// environment, the user or the root.
 func simpleNestedWrapper(program string) bool {
+	if _, contextNeutral := posixContextNeutralWrappers[program]; contextNeutral {
+		return true
+	}
 	switch program {
-	case "env", "sudo", "exec", "command", "nohup", "timeout", "nice", "nsenter", "chroot":
+	case "env", "sudo", "exec", "command", "nsenter", "chroot":
 		return true
 	default:
 		return false
@@ -2889,9 +2916,12 @@ func simpleEnvSplitString(argv []string) (string, bool) {
 
 // simpleWrappedProgram returns the program call that a static wrapper runs
 // when Analyze does not read it as a command of the action: env with a
-// NAME=value (PATH may change which program runs), nohup and timeout. A
-// shell or another wrapper as the program is read as a nested script
-// instead. The argv is static, so the call is judged as a simple command,
+// NAME=value (PATH may change which program runs) and every context-neutral
+// wrapper (posixContextNeutralWrappers). A wrapper of that set only runs the
+// next program, so the call keeps the verdict the program has alone: nice
+// was missing, so nohup nice PROGRAM and nice PROGRAM were never judged as
+// PROGRAM (rel-1-0-10:GAP-1207). A shell or another wrapper as the program
+// is read as a nested script instead. The argv is static, so the call is judged as a simple command,
 // where a match can only over-block (GAP-1200, #1189). env NAME=value prog
 // is written as NAME=value prog, so the assignments are judged as the same
 // prefix assignments are.
@@ -2900,9 +2930,10 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string
 		return "", false
 	}
 	var assignments []string
-	switch wrapper {
-	case "nohup", "timeout":
-	case "env":
+	_, contextNeutral := posixContextNeutralWrappers[wrapper]
+	switch {
+	case contextNeutral:
+	case wrapper == "env":
 		for _, arg := range argv[1:childIndex] {
 			name, value, found := strings.Cut(arg, "=")
 			if !found || !simpleVariableName(name) {
