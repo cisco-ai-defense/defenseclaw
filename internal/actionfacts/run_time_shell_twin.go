@@ -57,6 +57,10 @@ type shellWordReader struct {
 	trunc *bounded.Truncated
 	words bounded.Counter
 	memo  map[shellWordKey]shellWordValue
+	// unread is set when a POSIX shell of the call (its nested texts
+	// included) runs here-document or here-string text the reading cannot
+	// know (rel-1-0-10:GAP-1147).
+	unread bool
 }
 
 type shellWordKey struct {
@@ -264,12 +268,17 @@ func (r *shellWordReader) expand(word *syntax.Word, zeroIsShell bool, lastShell 
 // The gateway judges this reading beside the original and keeps the strictest
 // verdict; the hook client resolves its targets using the same reading.
 // truncated is the caps the reading hit (the one bound rule): such a call is
-// TRUNCATED, and what the twin read before the cap is still judged.
-func RunTimeShellTwin(command string) (twin string, ok bool, truncated bounded.CapSet) {
+// TRUNCATED, and what the twin read before the cap is still judged. unread
+// reports a shell that runs here-document or here-string text the reading
+// cannot know (a body with a command substitution, a document reached
+// through a command or a descriptor the reading does not follow): the
+// gateway judges such a call at the unknown tier of the pack at least, with
+// or without a twin (rel-1-0-10:GAP-1147).
+func RunTimeShellTwin(command string) (twin string, ok bool, truncated bounded.CapSet, unread bool) {
 	var trunc bounded.Truncated
 	reader := newShellWordReader(&trunc)
 	twin, ok = runTimeShellTwin(command, 0, true, reader)
-	return twin, ok, trunc.Set(&reader.words)
+	return twin, ok, trunc.Set(&reader.words), reader.unread
 }
 
 func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shellWordReader) (twin string, ok bool) {
@@ -296,9 +305,14 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 	}
 	owners := map[*syntax.CallExpr]*syntax.Stmt{}
 	// inputs is the text each stage of a pipeline reads from the stage
-	// before it, when the reading knows it (pipeStageOutput).
+	// before it, when the reading knows it (pipeStageOutput); the first
+	// command of a subshell or group stage reads it too. fed marks the
+	// commands of a stage after one that holds here-document or here-string
+	// text (rel-1-0-10:GAP-1147).
 	inputs := map[*syntax.CallExpr]stageText{}
+	fed := map[*syntax.CallExpr]bool{}
 	flattened := map[*syntax.BinaryCmd]bool{}
+	fileHereText := holdsHereText(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if stmt, ok := node.(*syntax.Stmt); ok {
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
@@ -307,12 +321,21 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 		if pipe, ok := node.(*syntax.BinaryCmd); ok && pipelineOp(pipe.Op) && !flattened[pipe] {
 			stages := pipelineStages(pipe, flattened)
-			in := stageText{}
+			in, hereText := stageText{}, false
 			for _, stage := range stages {
-				if call, ok := stage.Cmd.(*syntax.CallExpr); ok && in.known {
+				if call := stageFirstCall(stage, 0); call != nil && in.known {
 					inputs[call] = in
 				}
+				if hereText {
+					syntax.Walk(stage, func(node syntax.Node) bool {
+						if call, ok := node.(*syntax.CallExpr); ok {
+							fed[call] = true
+						}
+						return true
+					})
+				}
 				in.text, in.known = pipeStageOutput(stage, in, 0)
+				hereText = hereText || holdsHereText(stage)
 			}
 		}
 		return true
@@ -356,13 +379,19 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		// eval "$(cat <<EOF ... EOF)", source <(cat <<EOF ... EOF) and a shell
 		// whose script file is such a process substitution run the text the
 		// here-document carries (rel-1-0-10:GAP-1137, GAP-0788).
-		if script, known := substitutedScript(call.Args[at:], program, found); known && depth < maxNestedShellStrings {
+		script, known, sourced := substitutedScript(call.Args[at:], program, found)
+		if known && depth < maxNestedShellStrings {
 			if nested, changed := runTimeShellTwin(script, depth+1, true, reader); changed {
 				script = nested
 			}
 			start, end := int(call.Args[at].Pos().Offset()), int(call.End().Offset())
 			edits = append(edits, edit{start, end, "bash -c " + posixSingleQuoted(script)})
 			return false
+		}
+		if !known && sourced && holdsHereText(call.Args[at+1]) {
+			// source <(cat <<EOF ... EOF) or sh <(...) of a document the
+			// reading cannot know (rel-1-0-10:GAP-1147).
+			reader.unread = true
 		}
 		if program == "find" || program == "gfind" {
 			argv := make([]string, len(call.Args)-at)
@@ -398,7 +427,10 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 		}
 		invocation := parsePOSIXShellInvocation("bash", argv)
 		if staticArgs && invocation.valid && !invocation.noExec && invocation.mode == posixShellModeStdin {
-			body, known := inputs[call].text, inputs[call].known
+			// hereText: the script comes from here-document or here-string
+			// text, which the reading reads or reports as unread
+			// (rel-1-0-10:GAP-1147).
+			body, known, hereText := inputs[call].text, inputs[call].known, fed[call]
 			if stmt := owners[call]; stmt != nil {
 				for _, redir := range stmt.Redirs {
 					if redir.N != nil && redir.N.Value != "0" {
@@ -406,13 +438,28 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 					}
 					switch redir.Op {
 					case syntax.WordHdoc:
-						body, known = simpleStaticScriptWord(redir.Word, nil)
+						body, known = hereStringText(redir.Word)
+						hereText = holdsHereText(redir.Word)
 					case syntax.Hdoc, syntax.DashHdoc:
-						body, known = heredocScriptText(redir.Hdoc)
-					case syntax.RdrIn, syntax.RdrInOut, syntax.DplIn:
+						body, known = heredocScriptText(redir)
+						hereText = true
+					case syntax.RdrIn:
+						// sh < <(cat <<EOF ... EOF) reads what the process
+						// substitution writes.
+						body, known = procSubstOutput(redir.Word)
+						hereText = holdsHereText(redir.Word)
+					case syntax.DplIn:
+						// bash <&3 after exec 3<<EOF: the reading does not
+						// follow descriptors.
 						body, known = "", false
+						hereText = fileHereText
+					case syntax.RdrInOut:
+						body, known, hereText = "", false, false
 					}
 				}
+			}
+			if !known && hereText {
+				reader.unread = true
 			}
 			if known {
 				if depth < maxNestedShellStrings {
@@ -584,7 +631,11 @@ func pipeStageOutput(stmt *syntax.Stmt, in stageText, depth int) (string, bool) 
 		return "", false
 	}
 	if word := simpleEchoWord(stmt); word != nil {
-		return simpleStaticScriptWord(word, nil)
+		// echo and printf '%s\n' end what they write with a newline, so the
+		// next statement of a group starts a line of its own
+		// (rel-1-0-10:GAP-1146).
+		text, known := simpleStaticScriptWord(word, nil)
+		return text + echoLineEnd(stmt), known
 	}
 	for _, redir := range stmt.Redirs {
 		fd := ""
@@ -594,11 +645,11 @@ func pipeStageOutput(stmt *syntax.Stmt, in stageText, depth int) (string, bool) 
 		switch redir.Op {
 		case syntax.Hdoc, syntax.DashHdoc:
 			if fd == "" || fd == "0" {
-				in.text, in.known = heredocScriptText(redir.Hdoc)
+				in.text, in.known = heredocScriptText(redir)
 			}
 		case syntax.WordHdoc:
 			if fd == "" || fd == "0" {
-				in.text, in.known = simpleStaticScriptWord(redir.Word, nil)
+				in.text, in.known = hereStringText(redir.Word)
 				in.text += "\n"
 			}
 		case syntax.RdrIn, syntax.RdrInOut, syntax.DplIn:
@@ -709,43 +760,152 @@ func substitutionOutput(word *syntax.Word) (string, bool) {
 // substitutedScript returns the script a call runs from a substitution whose
 // output the reading knows: eval "$(...)" (one operand), source <(...) or
 // . <(...), and a POSIX shell (shell: found by shellCallProgram) whose only
-// operand is a process substitution, its script file.
-func substitutedScript(args []*syntax.Word, program string, shell bool) (string, bool) {
+// operand is a process substitution, its script file. sourced reports a call
+// of the last two shapes, whose script is its one operand.
+func substitutedScript(args []*syntax.Word, program string, shell bool) (script string, known, sourced bool) {
 	if len(args) != 2 {
-		return "", false
+		return "", false, false
 	}
 	switch {
 	case program == "eval":
-		return substitutionOutput(args[1])
+		script, known = substitutionOutput(args[1])
+		return script, known, false
 	case program == "source" || program == ".", shell && wrappedShellPrograms[program]:
-		if len(args[1].Parts) != 1 {
-			return "", false
-		}
-		sub, ok := args[1].Parts[0].(*syntax.ProcSubst)
-		if !ok || sub.Op != syntax.CmdIn {
-			return "", false
-		}
-		return stmtsOutput(sub.Stmts, stageText{}, 0)
+		script, known = procSubstOutput(args[1])
+		return script, known, true
 	}
-	return "", false
+	return "", false, false
+}
+
+// procSubstOutput returns what a word that is one input process
+// substitution, <(...), writes when the reading knows it.
+func procSubstOutput(word *syntax.Word) (string, bool) {
+	if word == nil || len(word.Parts) != 1 {
+		return "", false
+	}
+	sub, ok := word.Parts[0].(*syntax.ProcSubst)
+	if !ok || sub.Op != syntax.CmdIn {
+		return "", false
+	}
+	return stmtsOutput(sub.Stmts, stageText{}, 0)
+}
+
+// hereStringText is the text of a here-string word: a static word, or one
+// command substitution whose output the reading knows
+// (bash <<< "$(cat <<EOF ... EOF)"). The shell adds the line end.
+func hereStringText(word *syntax.Word) (string, bool) {
+	if text, known := simpleStaticScriptWord(word, nil); known {
+		return text, true
+	}
+	return substitutionOutput(word)
+}
+
+// echoLineEnd is the line end a stage simpleEchoWord reads writes after its
+// word: echo and printf '%s\n' write one, printf '%s' none.
+func echoLineEnd(stmt *syntax.Stmt) string {
+	call := stmt.Cmd.(*syntax.CallExpr)
+	if program, _ := simpleStaticWord(call.Args[0], nil); program == "printf" {
+		if format, _ := simpleStaticWord(call.Args[1], nil); format == "%s" {
+			return ""
+		}
+	}
+	return "\n"
+}
+
+// stageFirstCall is the command of a pipeline stage that reads its input
+// first: the stage itself, or the first command of a subshell or group stage
+// (cat <<EOF | (sh), cat <<EOF | { bash; }).
+func stageFirstCall(stmt *syntax.Stmt, depth int) *syntax.CallExpr {
+	if stmt == nil || depth > maxStageNesting {
+		return nil
+	}
+	var stmts []*syntax.Stmt
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.CallExpr:
+		return cmd
+	case *syntax.Subshell:
+		stmts = cmd.Stmts
+	case *syntax.Block:
+		stmts = cmd.Stmts
+	}
+	if len(stmts) == 0 || len(stmt.Redirs) != 0 {
+		return nil
+	}
+	return stageFirstCall(stmts[0], depth+1)
+}
+
+// holdsHereText reports a node that holds a here-document or a here-string
+// anywhere in it, also in a substitution (rel-1-0-10:GAP-1147).
+func holdsHereText(node syntax.Node) bool {
+	if node == nil {
+		return false
+	}
+	found := false
+	syntax.Walk(node, func(node syntax.Node) bool {
+		if redir, ok := node.(*syntax.Redirect); ok {
+			switch redir.Op {
+			case syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc:
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }
 
 // heredocScriptText is the text of a here-document body as the shell that
-// runs it reads it: the literal body, or, for an unquoted delimiter whose
-// body expands only parameters (posixHeredocBodyRunsNothing), the body as
-// written, whose parameters the shell that runs it expands as the shell
-// that holds the document would (rm -rf $HOME/* is the same delete in both).
-// A body that runs a command substitution or arithmetic is not known.
-func heredocScriptText(body *syntax.Word) (string, bool) {
-	if text, literal := literalPOSIXHeredocBody(body); literal {
-		return text, true
+// runs it reads it: the literal body of a quoted delimiter, or, for an
+// unquoted delimiter whose body expands only parameters
+// (posixHeredocBodyRunsNothing), the body with the backslash escapes the
+// holding shell undoes (\$, \`, \\ and a backslash line end;
+// rel-1-0-10:GAP-1148) undone and its parameters as written, which the shell
+// that runs it expands as the shell that holds the document would
+// (rm -rf $HOME/* is the same delete in both). A body that runs a command
+// substitution or arithmetic is not known.
+func heredocScriptText(redir *syntax.Redirect) (string, bool) {
+	body := redir.Hdoc
+	if posixHeredocDelimiterQuoted(redir.Word) {
+		return literalPOSIXHeredocBody(body)
 	}
 	if body == nil || !posixHeredocBodyRunsNothing(body) {
 		return "", false
 	}
 	var out strings.Builder
-	if err := syntax.NewPrinter().Print(&out, body); err != nil {
-		return "", false
+	printer := syntax.NewPrinter()
+	for _, part := range body.Parts {
+		if literal, ok := part.(*syntax.Lit); ok {
+			out.WriteString(unescapeHeredocLiteral(literal.Value))
+			continue
+		}
+		if err := printer.Print(&out, &syntax.Word{Parts: []syntax.WordPart{part}}); err != nil {
+			return "", false
+		}
 	}
 	return out.String(), true
+}
+
+// unescapeHeredocLiteral undoes the escapes of the literal text of an
+// unquoted here-document body: a backslash before $, a backquote or another
+// backslash is dropped, a backslash line end joins the lines, and any other
+// backslash stays (posixHeredocLiteralEscapes).
+func unescapeHeredocLiteral(text string) string {
+	if !strings.Contains(text, "\\") {
+		return text
+	}
+	var out strings.Builder
+	for index := 0; index < len(text); index++ {
+		if text[index] == '\\' && index+1 < len(text) {
+			switch text[index+1] {
+			case '$', '`', '\\':
+				out.WriteByte(text[index+1])
+				index++
+				continue
+			case '\n':
+				index++
+				continue
+			}
+		}
+		out.WriteByte(text[index])
+	}
+	return out.String()
 }
