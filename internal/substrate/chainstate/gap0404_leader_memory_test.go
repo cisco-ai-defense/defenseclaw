@@ -144,6 +144,11 @@ func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 	if largest > 16<<20 {
 		t.Fatalf("an actor's write-ahead log is %d KiB after %d calls of its actor: nothing copies it into the store", largest>>10, perActor+10)
 	}
+	if raceEnabled {
+		// The race detector's shadow memory grows with every address touched.
+		t.Logf("resident memory bound not checked under -race")
+		return
+	}
 	if grew > bound {
 		t.Fatalf("leader memory grew %d KiB over %d calls (%d B per call), over the bound of %d KiB",
 			grew>>10, calls, grew/calls, bound>>10)
