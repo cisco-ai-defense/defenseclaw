@@ -397,6 +397,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateSigninRefusal(w, d)
 			return
 		}
+		createStart := time.Now()
 		created, err := st.cfg.Actions.Create(r.Context(), req)
 		switch {
 		case errors.Is(err, ErrSubstrateTemplateNotFound):
@@ -472,6 +473,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
+		a.recordSubstratePolicyLag(time.Since(createStart))
 		out := st.actorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)

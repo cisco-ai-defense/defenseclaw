@@ -198,7 +198,8 @@ type SubstrateConfig struct {
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
 	SecretStore SubstrateSecretStore
-	// OnRateLimited counts defenseclaw.substrate.rate_limited.
+	// OnRateLimited is told of each refusal by the fair-share limits; the
+	// gateway itself records defenseclaw.substrate.rate_limited (GAP-0401).
 	OnRateLimited func(scope ratelimit.Scope, route string)
 	// Chains is the leader's chain and intent state (lane A13): a verified
 	// actor's tool-chain windows and the judge's session intent live there,
@@ -310,6 +311,9 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	a.substrateMu.Lock()
 	a.substrate = st
 	a.substrateMu.Unlock()
+	if cfg.Chains != nil && cfg.Chains.ObserveLatency == nil {
+		cfg.Chains.ObserveLatency = a.recordSubstrateLeaderObserve
+	}
 	useSubstrateChains(cfg.Chains)
 	return nil
 }
@@ -585,6 +589,7 @@ func writeSubstrateRefusal(w http.ResponseWriter, status int, reason string) {
 
 func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		route := substrateRouteFrom(r.Context())
 		tok := substrateActorToken(r)
 		// The token never reaches a handler, a log or an audit sink, and
@@ -619,6 +624,7 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		release, lerr := st.cfg.Limiter.Acquire(actor.Atespace, actor.UID)
 		if lerr != nil {
 			scope, _ := ratelimit.IsLimited(lerr)
+			a.recordSubstrateRateLimited()
 			if st.cfg.OnRateLimited != nil {
 				st.cfg.OnRateLimited(scope, substrateRouteName(route))
 			}
@@ -659,6 +665,10 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		w.Header().Set(substrateModeHeader, substrateMode(reg))
 		w.Header().Set(substrateFailModeHeader, substrateFailMode(st.cfg, reg))
 		next.ServeHTTP(w, r.WithContext(ctx))
+		if route.class == sandboxauth.RouteHook && r.Method == http.MethodPost {
+			// A hook call; the kit's GET warm-up pings are not counted.
+			a.recordSubstrateHookRTT(time.Since(start))
+		}
 	})
 }
 

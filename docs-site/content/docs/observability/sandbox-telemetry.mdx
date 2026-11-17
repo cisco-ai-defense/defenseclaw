@@ -224,20 +224,20 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 
 **Secrets.** `secret.injected` records the secret name and the host, never a value, a prefix or the placeholder.
 
-**Metrics.** None has an identity label.
+**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller sends no telemetry of its own in this release: the metrics it would record are marked below, and its `sandbox.*` events (in the controller's log) say the same things.
 
-| Metric | Type | Notes |
+| Metric | Type | Recorded |
 | --- | --- | --- |
-| `defenseclaw.substrate.policy_lag` | histogram, seconds | A policy change to the egress policy being active |
-| `defenseclaw.substrate.hook_rtt` | histogram, ms | Hook round trip from the kit to the gateway |
-| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | The first hook call after a resume |
-| `defenseclaw.substrate.leader_observe_latency` | histogram, ms | A stateless replica waiting for the leader |
-| `defenseclaw.substrate.unattested_templates` | gauge | Templates seen without a valid attestation |
-| `defenseclaw.substrate.idle_suspends` | counter | Actors suspended for being idle |
-| `defenseclaw.substrate.policy_conflicts` | counter | Actors marked `policy_conflict` |
-| `defenseclaw.substrate.rate_limited` | counter | Calls refused by the fair-share limit |
+| `defenseclaw.substrate.policy_lag` | histogram, seconds | By the gateway: a launcher create until the new actor runs with its egress policy. A policy the controller writes again after a change is not counted |
+| `defenseclaw.substrate.hook_rtt` | histogram, ms | By the gateway: an actor's hook call from its arrival on the actor listener to the answer (the network leg from the kit is not included) |
+| `defenseclaw.substrate.leader_observe_latency` | histogram, ms | By the gateway: one tool-chain step sent to the leader, until it answers |
+| `defenseclaw.substrate.rate_limited` | counter | By the gateway: calls refused by the fair-share limit |
+| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | Not recorded in this release: no component sees both the resume and the first hook call |
+| `defenseclaw.substrate.unattested_templates` | gauge | Not recorded in this release (controller). Read `sandbox.template_unverified` events |
+| `defenseclaw.substrate.idle_suspends` | counter | Not recorded in this release (controller). Read `sandbox.idle_suspend` events |
+| `defenseclaw.substrate.policy_conflicts` | counter | Not recorded in this release (controller). Read `sandbox.policy_conflict` events |
 
-The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates.
+The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability and policy lag. Its conflict and unattested-template rules stay silent until the controller records those metrics.
 
 ## What to trust
 

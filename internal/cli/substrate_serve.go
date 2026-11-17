@@ -36,8 +36,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -175,12 +173,6 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 }
 
-// substrateRateLimited is defenseclaw.substrate.rate_limited.
-var substrateRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "defenseclaw_substrate_rate_limited_total",
-	Help: "Actor requests refused by the fair-share limits (defenseclaw.substrate.rate_limited).",
-}, []string{"scope", "route"})
-
 func runServe(cmd *cobra.Command, args []string) error {
 	if !serveFlags.substrate {
 		return errors.New("serve runs only on Agent Substrate: pass --substrate")
@@ -191,10 +183,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if serveFlags.plainHTTP && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		return errors.New("serve: --plain-http is for tests outside a cluster; use --actor-plain-http to serve only the actor listener without TLS")
 	}
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(substrateRateLimited)
 	var ready atomic.Bool
-	go serveSubstrateMetrics(reg, &ready)
+	go serveSubstrateProbes(&ready)
 	switch serveFlags.role {
 	case "leader":
 		return runSubstrateLeader(cmd.Context(), &ready)
@@ -247,7 +237,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("serve: unknown --substrate-role %q (gateway or leader)", serveFlags.role)
 }
 
-func serveSubstrateMetrics(reg *prometheus.Registry, ready *atomic.Bool) {
+// serveSubstrateProbes serves the liveness and readiness probes on the
+// metrics port. The Substrate metrics go through the gateway's telemetry
+// runtime to the OTLP destinations (GAP-0401); the Prometheus /metrics page
+// held only defenseclaw_substrate_rate_limited_total, which nothing read.
+func serveSubstrateProbes(ready *atomic.Bool) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
@@ -257,10 +251,9 @@ func serveSubstrateMetrics(reg *prometheus.Registry, ready *atomic.Bool) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	srv := &http.Server{Addr: serveFlags.metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		fmt.Fprintf(os.Stderr, "[substrate] metrics listener: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[substrate] probe listener: %v\n", err)
 	}
 }
 
@@ -567,9 +560,6 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			// E9: a managed deployment refuses a vendor sign-in held in an actor.
 			Managed:            managed.IsManagedEnterprise(c.DeploymentMode),
 			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
-			OnRateLimited: func(scope ratelimit.Scope, route string) {
-				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
-			},
 		}
 		out.PolicyReset = substratePolicyResetter()
 		if people != nil {
