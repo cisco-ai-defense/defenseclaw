@@ -558,6 +558,13 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
             self.cfg_path, b"x\n"
         )
+        # setup guardrail asks whether the account has saved a config
+        # (config_path()); without this it reads the real ~/.defenseclaw of
+        # whoever runs the suite, and a box with one refused the first
+        # connector choice (rel-1-0-10:GAP-0200, GAP-1120).
+        config_env = patch.dict(os.environ, {"DEFENSECLAW_CONFIG": os.path.join(self.tmp_dir, "config.yaml")})
+        config_env.start()
+        self.addCleanup(config_env.stop)
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
