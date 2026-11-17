@@ -798,7 +798,9 @@ func windowsPreADSComponent(component string) string {
 //     extended-length path the suffix with trailing dots or spaces is read
 //     as the file too (Win32 opens it or rejects it, never another file);
 //   - the index alias of a folder (dir::$INDEX_ALLOCATION,
-//     dir:$I30:$INDEX_ALLOCATION, any case) is the folder itself.
+//     dir:$I30:$INDEX_ALLOCATION, any case) is the folder itself, as a
+//     folder on the way and as the last name (rd /s /q removes the folder,
+//     rel-1-0-10:GAP-1079).
 //
 // A named stream (file:name, file:name:$DATA) is another stream and stays as
 // written. The root (a drive spec, which keeps C:name drive-relative, a share,
@@ -849,7 +851,7 @@ func windowsOpenedName(name string, last, verbatim, relativeFirst bool) string {
 		return base
 	case last && verbatim && strings.TrimRight(stream, ". ") == "::$DATA":
 		return base
-	case !last && (stream == "::$INDEX_ALLOCATION" || stream == ":$I30:$INDEX_ALLOCATION"):
+	case stream == "::$INDEX_ALLOCATION" || stream == ":$I30:$INDEX_ALLOCATION":
 		return base
 	}
 	return trimmed

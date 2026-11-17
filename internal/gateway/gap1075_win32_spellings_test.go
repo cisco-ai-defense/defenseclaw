@@ -53,31 +53,46 @@ var gap1075Spellings = []gap1075Spelling{
 	gap1075Folder("dirDot", ".", true),
 }
 
+// gap1079FolderSpellings are Win32 spellings of a folder named as the last
+// name: its index alias in any case and the trailing dots and spaces Win32
+// strips (rel-1-0-10:GAP-1079; ground truth on Windows: rd /s /q of each
+// removes the folder and its files).
+var gap1079FolderSpellings = []gap1075Spelling{
+	gap1075Suffix("idx", "::$INDEX_ALLOCATION", false), gap1075Suffix("idxL", "::$index_allocation", false),
+	gap1075Suffix("i30", ":$I30:$INDEX_ALLOCATION", false), gap1075Suffix("i30L", ":$i30:$index_allocation", false),
+	gap1075Suffix("idxDot", "::$INDEX_ALLOCATION.", false),
+	gap1075Suffix("dot", ".", true), gap1075Suffix("space", " ", true),
+}
+
 // gap1075Routes are the Windows write routes that turn operand text into a
 // path fact: PowerShell redirection, the PowerShell content and item
 // cmdlets, and cmd (redirection and the file commands), plus the read routes
 // for the private key.
 var gap1075Routes = []struct {
-	id, text string
-	read     bool
+	id, text     string
+	read, folder bool
 }{
-	{"gt", "echo x > '%s'", false}, {"gtgt", "echo x >> '%s'", false}, {"tee", "echo x | tee '%s'", false},
-	{"setc", "Set-Content -Path '%s' -Value x", false}, {"setcLit", "Set-Content -LiteralPath '%s' -Value x", false},
-	{"addc", "Add-Content '%s' x", false}, {"outf", "Out-File -FilePath '%s' -InputObject x", false},
-	{"teeObj", "'x' | Tee-Object -FilePath '%s'", false}, {"clc", "Clear-Content '%s'", false},
-	{"copy", "Copy-Item notes.txt '%s'", false}, {"move", "Move-Item notes.txt '%s'", false},
-	{"rm", "Remove-Item '%s'", false},
-	{"cmdGt", `cmd /c "echo x> "%s""`, false}, {"cmdGtgt", `cmd /c "echo x>> "%s""`, false},
-	{"cmdCopy", `cmd /c copy /y notes.txt "%s"`, false}, {"cmdMove", `cmd.exe /c move /y notes.txt "%s"`, false},
-	{"cmdDel", `cmd /c del /f "%s"`, false},
-	{"read", "Get-Content '%s'", true}, {"cmdRead", `cmd /c type "%s"`, true},
+	{"gt", "echo x > '%s'", false, false}, {"gtgt", "echo x >> '%s'", false, false}, {"tee", "echo x | tee '%s'", false, false},
+	{"setc", "Set-Content -Path '%s' -Value x", false, false}, {"setcLit", "Set-Content -LiteralPath '%s' -Value x", false, false},
+	{"addc", "Add-Content '%s' x", false, false}, {"outf", "Out-File -FilePath '%s' -InputObject x", false, false},
+	{"teeObj", "'x' | Tee-Object -FilePath '%s'", false, false}, {"clc", "Clear-Content '%s'", false, false},
+	{"copy", "Copy-Item notes.txt '%s'", false, false}, {"move", "Move-Item notes.txt '%s'", false, false},
+	{"rm", "Remove-Item '%s'", false, false},
+	{"cmdGt", `cmd /c "echo x> "%s""`, false, false}, {"cmdGtgt", `cmd /c "echo x>> "%s""`, false, false},
+	{"cmdCopy", `cmd /c copy /y notes.txt "%s"`, false, false}, {"cmdMove", `cmd.exe /c move /y notes.txt "%s"`, false, false},
+	{"cmdDel", `cmd /c del /f "%s"`, false, false},
+	{"read", "Get-Content '%s'", true, false}, {"cmdRead", `cmd /c type "%s"`, true, false},
+	{"rmRec", "Remove-Item -Recurse -Force '%s'", false, true}, {"renDir", "Rename-Item '%s' c.bak", false, true},
+	{"cmdRd", `cmd /c rd /s /q "%s"`, false, true}, {"cmdDelDir", `cmd /c del /q "%s"`, false, true},
 }
 
 // TestGAP1075Win32SpellingsOfThePlainFile: on the PowerShell tool, every
 // Win32 spelling that opens the DefenseClaw config (or the private key) gets
 // the verdict of the plain spelling, on every write route (PowerShell
 // redirection and cmdlets, cmd) and read route, in the default, permissive
-// and strict packs (rel-1-0-10:GAP-1075, the class of GAP-1060). The
+// and strict packs (rel-1-0-10:GAP-1075, the class of GAP-1060), and every
+// spelling of the DefenseClaw state folder as the last name gets the verdict
+// of the plain folder on the folder delete and rename routes (GAP-1079). The
 // PowerShell and cmd readings took the "::" of a stream for a provider
 // qualifier and rejected the trailing dots and spaces Win32 strips, so they
 // minted no path fact and the call allowed in every tier. The same spellings
@@ -89,7 +104,7 @@ func TestGAP1075Win32SpellingsOfThePlainFile(t *testing.T) {
 	keyDir := home + `\.ssh`
 	type target struct {
 		id, dir, sep, name, cwd string
-		read                    bool
+		read, folder            bool
 		extended                bool
 	}
 	targets := []target{
@@ -102,6 +117,9 @@ func TestGAP1075Win32SpellingsOfThePlainFile(t *testing.T) {
 		{id: "cfgBare", name: "config.yaml", cwd: cfgDir},
 		{id: "cfgDriveRel", name: home[:2] + "config.yaml", cwd: cfgDir},
 		{id: "keyBack", dir: keyDir, sep: `\`, name: "id_ed25519", cwd: project, read: true},
+		{id: "stateBack", dir: home, sep: `\`, name: ".defenseclaw", cwd: project, folder: true},
+		{id: "stateFwd", dir: strings.ReplaceAll(home, `\`, "/"), sep: "/", name: ".defenseclaw", cwd: project, folder: true},
+		{id: "stateRel", dir: "..", sep: `\`, name: ".defenseclaw", cwd: project, folder: true},
 	}
 	spell := func(tg target, sp gap1075Spelling) (string, bool) {
 		if tg.extended && sp.normalized {
@@ -133,8 +151,12 @@ func TestGAP1075Win32SpellingsOfThePlainFile(t *testing.T) {
 		}
 		for _, route := range gap1075Routes {
 			for _, tg := range targets {
-				if route.read != tg.read {
+				if route.read != tg.read || route.folder != tg.folder {
 					continue
+				}
+				spellings := gap1075Spellings
+				if tg.folder {
+					spellings = gap1079FolderSpellings
 				}
 				plainText := tg.name
 				if tg.dir != "" {
@@ -144,7 +166,7 @@ func TestGAP1075Win32SpellingsOfThePlainFile(t *testing.T) {
 				if want == "allow" {
 					t.Fatalf("%s/%s|%s: the plain spelling allows %v", posture, route.id, tg.id, ids)
 				}
-				for _, sp := range gap1075Spellings {
+				for _, sp := range spellings {
 					text, ok := spell(tg, sp)
 					if !ok {
 						continue
@@ -155,7 +177,7 @@ func TestGAP1075Win32SpellingsOfThePlainFile(t *testing.T) {
 					}
 				}
 			}
-			if route.read {
+			if route.read || route.folder {
 				continue
 			}
 			benign := target{id: "benign", dir: project, sep: `\`, name: "out.txt", cwd: project}

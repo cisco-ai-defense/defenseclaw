@@ -8,7 +8,8 @@ import "testing"
 // TestWindowsOpenedNames: every Win32 spelling of a file that opens the file
 // itself reads as the plain name (rel-1-0-10:GAP-1060, GAP-1075): the
 // default-stream suffix in any case, the trailing dots and spaces Win32
-// strips, the empty stream name and the index alias of a folder. A named
+// strips, the empty stream name and the index alias of a folder (on the way
+// and as the last name, GAP-1079). A named
 // stream, a suffix on a folder name, a drive letter, a PowerShell drive and
 // the names of an extended-length path that Win32 does not normalize stay as
 // written.
@@ -39,7 +40,9 @@ func TestWindowsOpenedNames(t *testing.T) {
 		{`C:\Users\A\config.yaml:side:$DATA`, `C:\Users\A\config.yaml:side:$DATA`},
 		{`C:\Users\A\config.yaml:side`, `C:\Users\A\config.yaml:side`},
 		{`C:\Users\A::$DATA\config.yaml`, `C:\Users\A::$DATA\config.yaml`},
-		{`C:\Users\A::$INDEX_ALLOCATION`, `C:\Users\A::$INDEX_ALLOCATION`},
+		{`C:\Users\A\.defenseclaw::$INDEX_ALLOCATION`, `C:\Users\A\.defenseclaw`},
+		{`C:\Users\A\.defenseclaw:$I30:$index_allocation`, `C:\Users\A\.defenseclaw`},
+		{`C:\Users\A\.defenseclaw::$INDEX_ALLOCATION.`, `C:\Users\A\.defenseclaw`},
 		{`C::$DATA`, `C::$DATA`},
 		{`C:\Users\A\::$DATA`, `C:\Users\A\::$DATA`},
 		{`C:\Users\A\config.yaml`, `C:\Users\A\config.yaml`},

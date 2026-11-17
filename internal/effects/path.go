@@ -243,7 +243,7 @@ func normalizeWindows(p string, o Options) string {
 		// and the index alias of a folder the folder (rel-1-0-10:GAP-1075).
 		if idx := strings.Index(strings.ToUpper(out[i]), "::$DATA"); idx >= 0 {
 			out[i] = out[i][:idx]
-		} else if i+1 < len(out) {
+		} else {
 			out[i] = withoutFolderIndexAlias(out[i])
 		}
 		out[i] = strings.TrimRight(out[i], " .")
