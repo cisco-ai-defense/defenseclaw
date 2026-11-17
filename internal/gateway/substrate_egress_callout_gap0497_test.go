@@ -82,3 +82,53 @@ func TestSubstrateEgressCalloutInfoGAP0497(t *testing.T) {
 		t.Fatalf("none: %+v", m)
 	}
 }
+
+// GAP-0505 (lead ruling on the RBAC exception): a slot the controller
+// cannot read (its get is forbidden) or whose report through the leader is
+// missing or stale is unknown on /info, and the administrators' doctor row
+// says it cannot verify the egress callout; a status that carries a read
+// error is never the DefenseClaw callout, whatever else it says.
+func TestSubstrateEgressCalloutCannotVerifyGAP0505(t *testing.T) {
+	forbidden := controller.CalloutStatus{Err: "the controller cannot read it: read ConfigMap ate-system/atenet-egress: kubernetes API 403: forbidden",
+		FailMode: controller.CalloutFailClosed}
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
+		c.Info = map[string]any{"sign_in": "oidc"}
+		c.EgressCallout = func(context.Context) (controller.CalloutStatus, bool) { return forbidden, true }
+	})
+	rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/info", "", "")
+	if !strings.Contains(rec.Body.String(), `"egress_callout":{"state":"unknown","fail_mode":"closed"}`) {
+		t.Fatalf("info: %s", rec.Body)
+	}
+	rec = f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/doctor", "p-admin", "")
+	var doc struct {
+		Checks []SubstrateCheck `json:"checks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil || rec.Code != 200 {
+		t.Fatalf("doctor %d %s", rec.Code, rec.Body)
+	}
+	var row *SubstrateCheck
+	for i := range doc.Checks {
+		if doc.Checks[i].ID == "substrate.egress_callout" {
+			row = &doc.Checks[i]
+		}
+	}
+	if row == nil || row.Status != "warn" || !strings.Contains(row.Detail, "cannot verify the egress callout") || !strings.Contains(row.Detail, "403") ||
+		!strings.Contains(row.Fix, "doctor --cluster") {
+		t.Fatalf("doctor row %+v", row)
+	}
+	if strings.Contains(row.Detail, "holds Substrate's egress callout slot") {
+		t.Fatalf("an unread slot reported as the DefenseClaw callout: %+v", row)
+	}
+	// Never ours with a read error, even if a caller set Known and Ours.
+	for _, cs := range []controller.CalloutStatus{
+		{Known: true, Ours: true, Holder: "dc/defenseclaw-callout:9443", Err: "kubernetes API 403: forbidden"},
+		{Ours: true, Holder: "dc/defenseclaw-callout:9443"},
+	} {
+		if m := SubstrateEgressCalloutOf(cs); m.State != EgressCalloutUnknown {
+			t.Errorf("%+v: state %s, want unknown", cs, m.State)
+		}
+		if c := SubstrateEgressCalloutCheck(cs); c.Status != "warn" || !strings.Contains(c.Detail, "cannot verify the egress callout") {
+			t.Errorf("%+v: doctor row %+v", cs, c)
+		}
+	}
+}

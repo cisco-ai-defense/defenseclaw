@@ -220,7 +220,8 @@ func TestCalloutReplacedExtprocOffGAP0505(t *testing.T) {
 }
 
 // A slot that cannot be read is not "no callout": nothing changes, one
-// warning; a replacement already seen stays in force through read errors.
+// warning; a replacement already seen stays in force through read errors,
+// and the status says unknown.
 func TestCalloutUnreadableKeepsLastStateGAP0505(t *testing.T) {
 	r := newRig(t, nil)
 	slots := &slotReader{err: errors.New("kubernetes API 403: forbidden")}
@@ -248,8 +249,10 @@ func TestCalloutUnreadableKeepsLastStateGAP0505(t *testing.T) {
 	if !render.Equal(r.api.Policy(ref), r.denyOnly()) {
 		t.Fatal("a read error lifted the fail-closed policy")
 	}
+	// The status of a slot that cannot be read now is unknown (GAP-0505
+	// RBAC ruling), while the replacement already seen stays in force.
 	st, ok := r.ctl.CalloutStatus(context.Background())
-	if !ok || !st.Known || st.Ours || st.Holder != otherSlot.Holder || st.Err == "" || st.FailMode != controller.CalloutFailClosed {
+	if !ok || st.Known || st.Ours || st.Holder != "" || st.Err == "" || st.FailMode != controller.CalloutFailClosed {
 		t.Fatalf("status = %+v, %v", st, ok)
 	}
 	// Reads are bounded: one per interval, not one per call.

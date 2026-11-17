@@ -46,7 +46,7 @@ func TestGAP0497DoctorSaysAnotherCalloutIsInPlace(t *testing.T) {
 		{"ours", `{"sign_in":"oidc","egress_callout":{"state":"defenseclaw","fail_mode":"closed"}}`, 0,
 			[]string{"ok    egress_callout", "ready for agents"}, []string{"protections are off"}},
 		{"unknown", `{"sign_in":"oidc","egress_callout":{"state":"unknown","fail_mode":"closed"}}`, 0,
-			[]string{"warn  egress_callout", "cannot tell which egress callout", "ready for agents"}, nil},
+			[]string{"warn  egress_callout", "cannot verify the egress callout", "cannot tell which egress callout", "ready for agents"}, nil},
 		{"older gateway", "", 0, []string{"skip  egress_callout", "ready for agents"}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

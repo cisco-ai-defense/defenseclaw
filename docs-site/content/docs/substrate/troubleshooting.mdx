@@ -100,7 +100,7 @@ The callout checks each request against the actor's earlier tool calls (a secret
 
 Substrate has one slot for an egress callout. DefenseClaw refuses to replace another, because that would turn off someone's checks. Chain them on the other callout's side, or remove it deliberately. `setup --dry-run` shows what is registered.
 
-The slot can also change after DefenseClaw is set up, for example when someone runs `ate-setup deploy` with a file that names another callout. The controller and the gateway read the slot from the live atenet-egress config every 5 seconds (the chart lets them get that one ConfigMap in the Substrate namespace), so a stale install file doesn't hide it. When the slot isn't DefenseClaw's:
+The slot can also change after DefenseClaw is set up, for example when someone runs `ate-setup deploy` with a file that names another callout. The controller reads the slot from the live atenet-egress config every 5 seconds (the chart lets its ServiceAccount, and no other, get that one ConfigMap in the Substrate namespace), so a stale install file doesn't hide it. The gateway gets the controller's result through the leader. When the slot isn't DefenseClaw's:
 
 - The controller logs one `sandbox.callout_replaced` alert that names what holds the slot, and `sandbox.callout_restored` when the DefenseClaw callout is back.
 - With the default fail mode (closed, and always on a managed install and for `--task` and `--batch` runs), every managed agent keeps only the DefenseClaw rule: hooks and model calls still work, every other host is refused. Each agent's policy record says `deny-only (callout_replaced: ...)`. The full policy comes back on the first pass after the DefenseClaw callout is registered again.
@@ -109,7 +109,7 @@ The slot can also change after DefenseClaw is set up, for example when someone r
 
 People see it too. `defenseclaw substrate doctor` fails its `egress_callout` row, and `defenseclaw substrate status`, for the account and for one agent, prints an `Egress:` line. Both say that another egress callout is in place, which protections are off (ask hosts, URL rules, egress feeds, secret and DLP scans, body and MCP inspection, tool chains at egress), and what the fail mode does. DefenseClaw's hooks and Substrate's default-deny egress still apply. The gateway's `/api/v1/substrate/info` carries it as `egress_callout` without naming the other callout; the administrators' gateway doctor row `substrate.egress_callout` names it.
 
-To fix it, register the DefenseClaw callout again: `defenseclaw substrate setup --install-file FILE`, then `ate-setup deploy` with that file. If the slot can't be read (for example a chart older than 1.0.10 without the grant), the controller warns once and keeps the last state it read.
+To fix it, register the DefenseClaw callout again: `defenseclaw substrate setup --install-file FILE`, then `ate-setup deploy` with that file. If the slot can't be read (for example a chart older than 1.0.10 without the grant, or the get is forbidden), the controller warns once, a replacement it already saw stays in force, and doctor says it cannot verify the egress callout; it never reports the DefenseClaw callout without reading it. The gateway says the same when the controller's last result is more than 15 seconds old. Administrators can still check the slot with their own kubeconfig: `defenseclaw substrate doctor --cluster --install-file FILE`.
 
 ### `verify` says the Substrate version is outside the tested range
 

@@ -88,6 +88,6 @@ func doctorEgressCallout(ctx context.Context, s *substrateSession, adminOK bool)
 		return substrateCheck{ID: id, Status: doctorFail, Summary: substrateEgressSummary(e),
 			Fix: "ask your administrator to register the DefenseClaw callout again (defenseclaw substrate setup, then ate-setup deploy)"}
 	}
-	return substrateCheck{ID: id, Status: doctorWarn, Summary: "the cluster cannot tell which egress callout Substrate uses",
+	return substrateCheck{ID: id, Status: doctorWarn, Summary: "cannot verify the egress callout: the cluster cannot tell which egress callout Substrate uses",
 		Fix: "ask your administrator to run: defenseclaw substrate doctor --cluster --install-file FILE"}
 }

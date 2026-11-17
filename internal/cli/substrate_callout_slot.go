@@ -27,11 +27,11 @@ import (
 )
 
 // substrateCalloutReader reads, from inside the cluster, who holds
-// Substrate's egress callout slot (GAP-0505): the controller and the
-// gateway's create path both check it, so both write the same policy while
-// another callout holds it. The chart lets their ServiceAccounts get the
-// atenet-egress ConfigMap in the Substrate namespace. Outside a pod there is
-// no reader and the slot is not checked.
+// Substrate's egress callout slot (GAP-0505), for the controller: the chart
+// lets the controller's ServiceAccount alone get the atenet-egress ConfigMap
+// in the Substrate namespace. The gateway's create path reads the
+// controller's reports from the leader instead (controller.LeaderCallout).
+// Outside a pod there is no reader and the slot is not checked.
 func substrateCalloutReader(sub config.SubstrateConfig, warn io.Writer) controller.CalloutReader {
 	ns := os.Getenv("POD_NAMESPACE")
 	if ns == "" || os.Getenv("KUBERNETES_SERVICE_HOST") == "" {

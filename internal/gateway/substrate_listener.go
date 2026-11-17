@@ -192,8 +192,9 @@ type SubstrateConfig struct {
 	Doctor func(ctx context.Context) []SubstrateCheck
 	Info   map[string]any
 	// EgressCallout is who holds Substrate's egress callout slot, as the
-	// create path's controller reads it (nil: not reported). /info carries
-	// its class and the checks that are off, /doctor the holder (GAP-0497).
+	// controller last reported it through the leader (nil: not reported).
+	// /info carries its class and the checks that are off, /doctor the
+	// holder (GAP-0497).
 	EgressCallout func(ctx context.Context) (controller.CalloutStatus, bool)
 	// SignInServer is the OIDC issuer people sign in with (nil: none
 	// configured). The gateway checks it from its own network every

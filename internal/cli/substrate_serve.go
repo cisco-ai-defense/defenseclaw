@@ -531,10 +531,11 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
 		// The create path writes the same policy as the controller while
-		// another callout holds Substrate's egress slot (GAP-0505).
-		if r := substrateCalloutReader(c.Substrate, os.Stderr); r != nil {
-			ctl.SetCallout(r)
-		}
+		// another callout holds Substrate's egress slot (GAP-0505). The
+		// gateway may not read the slot: it reads the controller's latest
+		// report from the leader; none, or one older than three reads, is
+		// unknown.
+		ctl.SetCallout(&controller.LeaderCallout{Leader: toLeader})
 		router, routerErr := substrateRouter()
 		runtimeScan := newRuntimeSkillScanner(c)
 		out = gateway.SubstrateConfig{
@@ -731,6 +732,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
+	// The controller's egress callout slot reads, for the gateways
+	// (GAP-0505).
+	controller.ServeCallout(srv, &controller.CalloutBoard{})
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		chainOpts.EgressAction, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[chainOpts.EgressAction])
@@ -807,7 +811,8 @@ func kubeHTTPClient() (*http.Client, error) {
 // substrateLeaderPermissions is who may call what on the leader
 // (GAP-0094): gateway replicas every method; the callout only the egress
 // chain check and the name lookup of a registration (GAP-0090); the
-// controller the registrations, the chain lifecycle and the activity feed.
+// controller the registrations, the chain lifecycle, the activity feed and
+// publishing its egress callout slot read (GAP-0505).
 // An identity listed in two roles gets both sets.
 func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
 	p := leader.Permissions{}
@@ -821,7 +826,7 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 	add(gateways, "*")
 	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
-		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot)
+		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot, leader.MethodCalloutPublish)
 	return p
 }
 

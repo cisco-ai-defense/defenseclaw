@@ -20,8 +20,9 @@ import (
 const (
 	// EgressConfigMap is the ConfigMap in the Substrate namespace that
 	// holds atenet-egress's Envoy config (key EgressEnvoyKey). The chart
-	// lets the controller and gateway ServiceAccounts get this one
-	// ConfigMap and nothing else there.
+	// lets the controller's ServiceAccount alone get this one ConfigMap and
+	// nothing else there; the gateway reads the controller's result through
+	// the leader (GAP-0505).
 	EgressConfigMap = "atenet-egress"
 	EgressEnvoyKey  = "envoy.yaml"
 	// egressCalloutCluster is the Envoy cluster ate-setup renders for

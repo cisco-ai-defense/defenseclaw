@@ -134,31 +134,74 @@ type k8sObject struct {
 }
 
 // egressReadGrant reports whether a Role or RoleBinding in the Substrate
-// namespace is the chart's one standing grant there (GAP-0505): get on the
-// atenet-egress ConfigMap alone, for the controller and gateway
-// ServiceAccounts alone, so they see another callout replace DefenseClaw's.
+// namespace is the chart's one standing grant there (GAP-0505, lead ruling
+// 2026-11-17): get, and nothing else, on the atenet-egress ConfigMap alone,
+// bound to the controller's ServiceAccount alone, so that it sees another
+// callout replace DefenseClaw's. Any other verb, resource, resourceName,
+// rule key or subject is not it.
 func egressReadGrant(o k8sObject) bool {
 	name, _ := o.Metadata["name"].(string)
 	if !strings.HasPrefix(name, "defenseclaw-") || !strings.HasSuffix(name, "-egress-read") {
 		return false
 	}
+	releaseNS := strings.TrimSuffix(strings.TrimPrefix(name, "defenseclaw-"), "-egress-read")
+	if releaseNS == "" {
+		return false
+	}
 	list := func(v any) string { return fmt.Sprint(v) }
+	keys := func(m any) string {
+		mm, _ := m.(map[string]any)
+		ks := make([]string, 0, len(mm))
+		for k := range mm {
+			ks = append(ks, k)
+		}
+		slices.Sort(ks)
+		return strings.Join(ks, ",")
+	}
 	switch o.Kind {
 	case "Role":
-		return len(o.Rules) == 1 && list(dig(o.Rules[0], "apiGroups")) == "[]" && list(dig(o.Rules[0], "resources")) == "[configmaps]" &&
+		return len(o.Rules) == 1 && keys(o.Rules[0]) == "apiGroups,resourceNames,resources,verbs" &&
+			list(dig(o.Rules[0], "apiGroups")) == "[]" && list(dig(o.Rules[0], "resources")) == "[configmaps]" &&
 			list(dig(o.Rules[0], "resourceNames")) == "["+EgressConfigMap+"]" && list(dig(o.Rules[0], "verbs")) == "[get]"
 	case "RoleBinding":
-		if o.RoleRef["kind"] != "Role" || o.RoleRef["name"] != name || len(o.Subjects) == 0 {
+		if o.RoleRef["kind"] != "Role" || o.RoleRef["name"] != name || o.RoleRef["apiGroup"] != "rbac.authorization.k8s.io" {
 			return false
 		}
-		for _, sub := range o.Subjects {
-			if n := dig(sub, "name"); dig(sub, "kind") != "ServiceAccount" || (n != "defenseclaw-controller" && n != "defenseclaw-gateway") {
-				return false
-			}
+		// Exactly the controller's ServiceAccount: no gateway, no other
+		// subject (the gateway reads the controller's result through the
+		// leader).
+		if len(o.Subjects) != 1 {
+			return false
 		}
-		return true
+		sub := o.Subjects[0]
+		return keys(sub) == "kind,name,namespace" && dig(sub, "kind") == "ServiceAccount" &&
+			dig(sub, "name") == "defenseclaw-controller" && dig(sub, "namespace") == releaseNS
 	}
 	return false
+}
+
+// substrateNamespaceGrantErrors checks the standing (not hook) RBAC of the
+// Substrate namespace (GAP-0080, GAP-0505): exactly one Role and one
+// RoleBinding, and both are the egress read grant. Hook RBAC there is
+// deleted once the hooks succeed (checked apart).
+func substrateNamespaceGrantErrors(objs []k8sObject) []string {
+	var errs []string
+	count := map[string]int{}
+	for _, o := range objs {
+		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
+		if (o.Kind != "Role" && o.Kind != "RoleBinding") || dig(o.Metadata, "namespace") != "ate-system" || hook != "" {
+			continue
+		}
+		count[o.Kind]++
+		if !egressReadGrant(o) {
+			errs = append(errs, fmt.Sprintf("a standing grant in the Substrate namespace: %s %v", o.Kind, o.Metadata["name"]))
+		}
+	}
+	if count["Role"] != 1 || count["RoleBinding"] != 1 {
+		errs = append(errs, fmt.Sprintf("the Substrate namespace needs exactly one Role and one RoleBinding, the controller's get of the "+
+			"atenet-egress ConfigMap (GAP-0505): %d Role, %d RoleBinding", count["Role"], count["RoleBinding"]))
+	}
+	return errs
 }
 
 // authDelegatorGrant reports whether a cluster-scoped RBAC object is the
@@ -459,19 +502,14 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	// resources after an uninstall), and each Job's plan parses as the plan
 	// the step reads.
 	var plans []string
-	egressRead := map[string]bool{}
+	for _, e := range substrateNamespaceGrantErrors(objs) {
+		t.Errorf("%s: %s", name, e)
+	}
 	for _, o := range objs {
 		hook, _ := dig(o.Metadata, "annotations", "helm.sh/hook").(string)
 		del, _ := dig(o.Metadata, "annotations", "helm.sh/hook-delete-policy").(string)
 		if hook != "" && o.Kind != "Job" && ((o.Kind != "Role" && o.Kind != "RoleBinding" && o.Kind != "ServiceAccount") || !strings.Contains(del, "hook-succeeded")) {
 			t.Errorf("%s: hook resource %s %v outlives the release", name, o.Kind, o.Metadata["name"])
-		}
-		if (o.Kind == "Role" || o.Kind == "RoleBinding") && dig(o.Metadata, "namespace") == "ate-system" && hook == "" {
-			if egressReadGrant(o) {
-				egressRead[o.Kind] = true
-			} else {
-				t.Errorf("%s: a standing grant in the Substrate namespace: %s %v", name, o.Kind, o.Metadata["name"])
-			}
 		}
 		if o.Kind != "Job" {
 			continue
@@ -483,11 +521,6 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 				}
 			}
 		}
-	}
-	// GAP-0505: the controller and the gateway can read atenet-egress, so
-	// another callout replacing DefenseClaw's is seen.
-	if !egressRead["Role"] || !egressRead["RoleBinding"] {
-		t.Errorf("%s: no read of the atenet-egress ConfigMap for the controller and gateway (GAP-0505): %v", name, egressRead)
 	}
 	if len(plans) < 3 {
 		t.Fatalf("%s: %d hook Jobs carry a plan", name, len(plans))

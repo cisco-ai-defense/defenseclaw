@@ -205,9 +205,11 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 		// running-time clock needs none (GAP-0292).
 		ctl.SetLifecycle(&chainstate.Client{Leader: toLeader})
 		// Another callout in Substrate's egress slot follows the fail mode
-		// (GAP-0505).
+		// (GAP-0505). The controller alone may read the slot; each read goes
+		// to the leader, where the gateway's create path and /info get it.
 		if r := substrateCalloutReader(sub, cmd.ErrOrStderr()); r != nil {
 			ctl.SetCallout(r)
+			ctl.SetCalloutPublisher(&controller.LeaderCalloutPublisher{Leader: toLeader})
 		}
 	}
 	if err != nil {

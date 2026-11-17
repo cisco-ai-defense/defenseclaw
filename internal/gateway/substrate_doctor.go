@@ -150,8 +150,8 @@ func (a *APIServer) substrateInfo(st *substrateState) http.HandlerFunc {
 			info["sign_in_server"] = h
 		}
 		if st.cfg.EgressCallout != nil {
-			// At most one ConfigMap read per interval (the controller's
-			// cache), and never a slow answer for a launcher.
+			// At most one leader read per interval (the create path's
+			// controller cache), and never a slow answer for a launcher.
 			ctx, cancel := context.WithTimeout(r.Context(), egressCalloutInfoWait)
 			cs, ok := st.cfg.EgressCallout(ctx)
 			cancel()
@@ -181,7 +181,8 @@ const (
 // the administrators' /doctor row does.
 type SubstrateEgressCallout struct {
 	// State is defenseclaw, other (another callout holds the slot), none
-	// (no callout is registered) or unknown (the gateway cannot read it).
+	// (no callout is registered) or unknown (the controller could not read
+	// it, or its last report through the leader is missing or stale).
 	State string `json:"state"`
 	// FailMode is closed (managed agents reach only DefenseClaw while
 	// another callout holds the slot; unattended runs always), open
@@ -198,7 +199,8 @@ type SubstrateEgressCallout struct {
 func SubstrateEgressCalloutOf(cs controller.CalloutStatus) SubstrateEgressCallout {
 	out := SubstrateEgressCallout{FailMode: cs.FailMode}
 	switch {
-	case !cs.Known:
+	case !cs.Known || cs.Err != "":
+		// What could not be read is never the DefenseClaw callout.
 		out.State = EgressCalloutUnknown
 	case cs.Ours:
 		out.State = EgressCalloutDefenseClaw
@@ -224,8 +226,13 @@ func SubstrateEgressCalloutCheck(cs controller.CalloutStatus) SubstrateCheck {
 	case EgressCalloutDefenseClaw:
 		return SubstrateCheck{ID: id, Status: "pass", Detail: "the DefenseClaw callout holds Substrate's egress callout slot (" + cs.Holder + ")"}
 	case EgressCalloutUnknown:
-		return SubstrateCheck{ID: id, Status: "warn", Detail: "the gateway cannot read which egress callout Substrate uses: " + cs.Err,
-			Fix: "upgrade with the DefenseClaw 1.0.10 chart: it lets the gateway and controller get the atenet-egress ConfigMap in the Substrate namespace"}
+		why := cs.Err
+		if why == "" {
+			why = "the slot has not been read yet"
+		}
+		return SubstrateCheck{ID: id, Status: "warn", Detail: "cannot verify the egress callout: " + why,
+			Fix: "check the controller's log: the DefenseClaw 1.0.10 chart lets the controller's ServiceAccount get the atenet-egress ConfigMap " +
+				"in the Substrate namespace. Check the slot with your own kubeconfig: defenseclaw substrate doctor --cluster --install-file FILE"}
 	default:
 		what := "no egress callout is registered"
 		if cs.Holder != "" {

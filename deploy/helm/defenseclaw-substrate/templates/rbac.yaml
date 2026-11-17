@@ -100,11 +100,12 @@ subjects:
   name: defenseclaw-controller
   namespace: {{ .Release.Namespace }}
 ---
-# The controller and the gateway read which egress callout Substrate uses
-# from atenet-egress's live Envoy config (GAP-0505): when it is not the
+# The controller reads which egress callout Substrate uses from
+# atenet-egress's live Envoy config (GAP-0505): when it is not the
 # DefenseClaw callout, actor policies follow the fail mode. get on that one
 # ConfigMap in the Substrate namespace, nothing else there (it holds no
-# secret: certificates come through SDS files).
+# secret: certificates come through SDS files), for the controller alone:
+# the gateway reads the controller's result through the leader.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -132,9 +133,6 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-controller
-  namespace: {{ .Release.Namespace }}
-- kind: ServiceAccount
-  name: defenseclaw-gateway
   namespace: {{ .Release.Namespace }}
 
 {{- /*

@@ -69,6 +69,11 @@ const (
 	// idle check (internal/substrate/activity).
 	MethodActivityObserve  = "ActivityObserve"
 	MethodActivitySnapshot = "ActivitySnapshot"
+	// MethodCalloutPublish carries the controller's read of Substrate's
+	// egress callout slot; MethodCalloutStatus answers it to gateway
+	// replicas, which may not read the slot themselves (GAP-0505).
+	MethodCalloutPublish = "CalloutPublish"
+	MethodCalloutStatus  = "CalloutStatus"
 )
 
 // Methods lists every method a leader serves.
@@ -77,6 +82,7 @@ var Methods = []string{
 	MethodAskOpen, MethodAskResolve, MethodRegistrationWrite,
 	MethodRegistrationGet, MethodRegistrationList, MethodRegistrationLookup,
 	MethodActivityObserve, MethodActivitySnapshot,
+	MethodCalloutPublish, MethodCalloutStatus,
 }
 
 // Error codes.

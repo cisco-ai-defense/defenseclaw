@@ -295,6 +295,11 @@ func New(o Options) (*Controller, error) {
 // Run polls until ctx ends: every IdleInterval, or every FastInterval for
 // FastWindow after new or resuming actors were seen (batch starts).
 func (c *Controller) Run(ctx context.Context) error {
+	if c.calloutPublishes() {
+		// The gateway reads the egress callout slot from these reports
+		// (GAP-0505): they keep coming while a pass runs long.
+		go c.watchCallout(ctx)
+	}
 	for {
 		if err := c.Reconcile(ctx); err != nil && ctx.Err() == nil {
 			c.emit(Event{Type: EventWarning, Severity: SeverityWarn, Message: "reconcile pass failed: " + err.Error()})
