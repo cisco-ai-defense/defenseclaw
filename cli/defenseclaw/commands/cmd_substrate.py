@@ -299,6 +299,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag(
+                "fleet-contexts",
+                "stringSlice",
+                (
+                    "kubectl contexts of the other clusters whose actor token issuer must differ from this one's "
+                    "(default: every other context in the kubeconfig; none: this cluster only)"
+                ),
+            ),
+            _Flag(
                 "install-file",
                 "string",
                 "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
@@ -809,6 +817,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag(
+                "fleet-contexts",
+                "stringSlice",
+                (
+                    "kubectl contexts of the other clusters whose actor token issuer must differ from this one's "
+                    "(default: every other context in the kubeconfig; none: this cluster only)"
+                ),
+            ),
+            _Flag(
                 "install-file",
                 "string",
                 "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
@@ -1118,6 +1134,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
         flags=(
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
+            _Flag(
+                "fleet-contexts",
+                "stringSlice",
+                (
+                    "kubectl contexts of the other clusters whose actor token issuer must differ from this one's "
+                    "(default: every other context in the kubeconfig; none: this cluster only)"
+                ),
+            ),
             _Flag(
                 "install-file",
                 "string",

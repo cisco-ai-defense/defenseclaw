@@ -320,6 +320,12 @@
         "metavar": "NAME"
       },
       {
+        "name": "fleet-contexts",
+        "type": "stringSlice",
+        "default": "[]",
+        "usage": "kubectl contexts of the other clusters whose actor token issuer must differ from this one's (default: every other context in the kubeconfig; none: this cluster only)"
+      },
+      {
         "name": "install-file",
         "type": "string",
         "usage": "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
@@ -1323,6 +1329,12 @@
         "metavar": "NAME"
       },
       {
+        "name": "fleet-contexts",
+        "type": "stringSlice",
+        "default": "[]",
+        "usage": "kubectl contexts of the other clusters whose actor token issuer must differ from this one's (default: every other context in the kubeconfig; none: this cluster only)"
+      },
+      {
         "name": "install-file",
         "type": "string",
         "usage": "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
@@ -1509,6 +1521,12 @@
         "name": "config",
         "type": "string",
         "usage": "DefenseClaw config.yaml (default: read from the cluster)"
+      },
+      {
+        "name": "fleet-contexts",
+        "type": "stringSlice",
+        "default": "[]",
+        "usage": "kubectl contexts of the other clusters whose actor token issuer must differ from this one's (default: every other context in the kubeconfig; none: this cluster only)"
       },
       {
         "name": "install-file",
