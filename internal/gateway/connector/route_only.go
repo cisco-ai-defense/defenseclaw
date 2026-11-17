@@ -53,6 +53,13 @@ type RouteOnlySetup struct {
 	// to its provider directly) and when the gate already holds the port
 	// (the owner renders the real route itself).
 	ParkOnly bool
+	// HeldElsewhere, when set, reports at write time that this home's own
+	// gateway (another process) holds the API port. A gated write that
+	// would park then leaves the agent config alone: a second gateway
+	// process of the same home (a bare defenseclaw-gateway beside the
+	// background one) must not park the agents of the working gateway
+	// (GAP-1133 round 3).
+	HeldElsewhere func() bool
 }
 
 // RouteOnlyPlaceholderCredential is the fixed, non-secret value a custody

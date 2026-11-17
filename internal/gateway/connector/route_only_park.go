@@ -51,16 +51,22 @@ func (g *RouteOnlyGate) Owned() bool {
 
 // lockedRoute returns the render to write, the function that releases the
 // gate, and false when nothing is to be written: a ParkOnly render while the
-// gate holds the port. A route without a gate (managed renders, restores) is
-// written as is; a ParkOnly one always parked.
+// gate holds the port, or a write that would park while HeldElsewhere
+// reports this home's own gateway holding the port. A route without a gate
+// (managed renders, restores) is written as is; a ParkOnly one parked.
 func lockedRoute(route *RouteOnlySetup) (*RouteOnlySetup, func(), bool) {
 	noop := func() {}
 	if route == nil {
 		return nil, noop, true
 	}
+	heldElsewhere := func() bool { return route.HeldElsewhere != nil && route.HeldElsewhere() }
 	if route.Gate == nil {
 		if route.ParkOnly {
+			if heldElsewhere() {
+				return nil, noop, false
+			}
 			parked := parkedRoute(*route)
+			parked.HeldElsewhere = nil
 			return &parked, noop, true
 		}
 		return route, noop, true
@@ -68,8 +74,12 @@ func lockedRoute(route *RouteOnlySetup) (*RouteOnlySetup, func(), bool) {
 	g := route.Gate
 	g.mu.Lock()
 	effective := *route
-	effective.Gate = nil
+	effective.Gate, effective.HeldElsewhere = nil, nil
 	switch {
+	case !g.owned && heldElsewhere():
+		// This home's own gateway holds the port: its render stays.
+		g.mu.Unlock()
+		return nil, noop, false
 	case !g.owned:
 		effective = parkedRoute(effective)
 	case route.ParkOnly:

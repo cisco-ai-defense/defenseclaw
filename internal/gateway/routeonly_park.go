@@ -6,10 +6,13 @@ package gateway
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -29,7 +32,39 @@ func gatedRouteOnly(cfg *config.Config, route *connector.RouteOnlySetup) *connec
 	}
 	gated := *route
 	gated.Gate = ossRouteOnlyGate
+	gated.HeldElsewhere = func() bool { return RouteOnlyHomeGatewayHolds(cfg) }
 	return &gated
+}
+
+// routeOnlyHomeGatewayHoldsPort is daemon.HomeGatewayHoldsPort; tests
+// replace it.
+var routeOnlyHomeGatewayHoldsPort = daemon.HomeGatewayHoldsPort
+
+// RouteOnlyHomeGatewayHolds is the one rule for whether the route-only agents
+// of this home may be parked (rel-1-0-10:GAP-1133): false parks. It is true
+// only when the socket table shows this home's own gateway, another process,
+// holding the API port (daemon.HomeGatewayHoldsPort). It never connects to
+// the port, and a table-read error counts as not held. The gateway applies it
+// at every park write; defenseclaw-gateway start and stop apply it before
+// they park.
+func RouteOnlyHomeGatewayHolds(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return routeOnlyHomeGatewayHoldsPort(cfg.DataDir, routeOnlyClientHost(cfg), cfg.Gateway.APIPort)
+}
+
+// routeOnlyClientHost is the loopback address agents use for the API bind
+// address of cfg (a wildcard bind is reached on loopback).
+func routeOnlyClientHost(cfg *config.Config) string {
+	host := strings.Trim(strings.TrimSpace(config.APIBindHost(cfg)), "[]")
+	if ip := net.ParseIP(host); host == "" || host == "*" || (ip != nil && ip.IsUnspecified()) {
+		if ip != nil && ip.To4() == nil {
+			return "::1"
+		}
+		return "127.0.0.1"
+	}
+	return host
 }
 
 // routeOnlyParkSetupFor is the parked render of connectorName: the shape of
@@ -48,13 +83,15 @@ func routeOnlyParkSetupFor(cfg *config.Config, connectorName, apiAddr string) *c
 	}
 	route.ParkOnly = true
 	route.Gate = ossRouteOnlyGate
+	route.HeldElsewhere = func() bool { return RouteOnlyHomeGatewayHolds(cfg) }
 	return route
 }
 
 // ParkRouteOnlyAgents points the route-only agent config of every routed
 // connector of an OSS install at the parked address (port 0, no route
-// credential), where something is rendered, and returns the connectors it
-// parked. The gateway calls it before it binds its API port and before it
+// credential), where something is rendered and this home's own gateway does
+// not hold the port (RouteOnlyHomeGatewayHolds), and returns the connectors
+// it parked. The gateway calls it before it binds its API port and before it
 // releases it; defenseclaw-gateway start and stop call it when no gateway of
 // this account runs, which covers a stop that had to kill the process
 // (Windows TerminateProcess) and a start after a crash. It never writes the
@@ -62,6 +99,9 @@ func routeOnlyParkSetupFor(cfg *config.Config, connectorName, apiAddr string) *c
 // skipped (that gateway renders the real route itself).
 func ParkRouteOnlyAgents(cfg *config.Config) ([]string, error) {
 	if !ossRouteOnlyGateway(cfg) {
+		return nil, nil
+	}
+	if RouteOnlyHomeGatewayHolds(cfg) {
 		return nil, nil
 	}
 	registry := connector.NewDefaultRegistry()

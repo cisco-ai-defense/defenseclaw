@@ -4,32 +4,21 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
 // parkRouteOnlyAgents is gateway.ParkRouteOnlyAgents; tests replace it.
 var parkRouteOnlyAgents = gateway.ParkRouteOnlyAgents
 
-// routeOnlyPortUnowned reports whether no process of this account holds the
-// gateway API port: the socket table lists no listener there, or another
-// account's process holds it. It reads the socket table and never connects
-// to the port (a probe connection would reach another account's listener);
-// on macOS, where lsof does not list other accounts' sockets, "no listener"
-// can mean another account's, and parking is right for both. A foreground
-// gateway of this account keeps its route. Tests replace it.
-var routeOnlyPortUnowned = func(cfg *config.Config) bool {
-	if _, err := gatewayPortHolder(gatewayClientHost(cfg), cfg.Gateway.APIPort); errors.Is(err, daemon.ErrNoListener) {
-		return true
-	}
-	return foreignGatewayListener(cfg) != ""
-}
+// routeOnlyPortUnowned reports whether this home's own gateway does not hold
+// the API port, by the gateway's one rule (gateway.RouteOnlyHomeGatewayHolds:
+// the socket table only, never a connection; a table-read error parks). A
+// foreground gateway of this home keeps its route. Tests replace it.
+var routeOnlyPortUnowned = func(cfg *config.Config) bool { return !gateway.RouteOnlyHomeGatewayHolds(cfg) }
 
 // parkRouteOnlyWithoutGateway parks the route-only agent settings of an OSS
 // install while no gateway of this account holds its port
@@ -38,16 +27,23 @@ var routeOnlyPortUnowned = func(cfg *config.Config) bool {
 // logoff or a reboot before a start. The agents then send nothing to a
 // process of another account that binds the port; the gateway renders the
 // real route once it holds it.
-func parkRouteOnlyWithoutGateway(cfg *config.Config, announce bool) {
+//
+// A park that could not be written is returned: stop fails with it, so
+// "agents started after a stop send nothing" is never claimed silently.
+func parkRouteOnlyWithoutGateway(cfg *config.Config, announce bool) error {
 	if cfg == nil || !cfg.Routing.Enabled || len(cfg.Routing.RouteOnly.Connectors) == 0 || !routeOnlyPortUnowned(cfg) {
-		return
+		return nil
 	}
 	parked, err := parkRouteOnlyAgents(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not park the route-only agent settings: %v\n", err)
-	}
 	if announce && len(parked) > 0 {
 		fmt.Println(Dim("Route-only " + strings.Join(parked, ", ") +
 			" parked: model calls go nowhere until the gateway holds its port again"))
 	}
+	if err != nil {
+		return fmt.Errorf("the route-only agent settings could not be parked, so an agent started now still "+
+			"sends its model calls to whatever process takes the gateway port: %w. Fix the agent file, then run "+
+			"defenseclaw-gateway stop again; or restore direct model access: defenseclaw-gateway connector "+
+			"route-restore --all", err)
+	}
+	return nil
 }

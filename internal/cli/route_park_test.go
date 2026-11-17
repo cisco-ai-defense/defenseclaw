@@ -5,13 +5,13 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -87,14 +87,36 @@ func TestParkRouteOnlyWithoutGatewayParksOnlyAnUnownedPort(t *testing.T) {
 // opens a connection to the port (live, GAP-1133 round 2: a probe
 // connection reached the other account's listener as an empty connection).
 func TestRouteOnlyPortUnownedNeverConnects(t *testing.T) {
-	prevHolder, prevAnswers := gatewayPortHolder, gatewayPortAnswers
-	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers = prevHolder, prevAnswers })
-	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{UID: -1}, daemon.ErrNoListener }
+	prevAnswers := gatewayPortAnswers
+	t.Cleanup(func() { gatewayPortAnswers = prevAnswers })
 	gatewayPortAnswers = func(string) bool { t.Fatal("the park check connected to the API port"); return false }
 	cfg := &config.Config{}
 	cfg.Gateway.APIBind = "127.0.0.1"
 	cfg.Gateway.APIPort = 18970
+	cfg.DataDir = t.TempDir()
 	if !routeOnlyPortUnowned(cfg) {
 		t.Fatal("no listener: the port is unowned")
+	}
+}
+
+// rel-1-0-10:GAP-1133 round 3: a park that cannot be written is not stderr
+// only: stop returns it, so it exits non-zero with what to do.
+func TestParkRouteOnlyWithoutGatewayReturnsAFailedPark(t *testing.T) {
+	prevProbe, prevPark := routeOnlyPortUnowned, parkRouteOnlyAgents
+	t.Cleanup(func() { routeOnlyPortUnowned, parkRouteOnlyAgents = prevProbe, prevPark })
+	routeOnlyPortUnowned = func(*config.Config) bool { return true }
+	parkRouteOnlyAgents = func(*config.Config) ([]string, error) {
+		return nil, errors.New("claudecode: settings.json is not valid JSON")
+	}
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Routing.Enabled = true
+	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
+	err := parkRouteOnlyWithoutGateway(cfg, false)
+	if err == nil || !strings.Contains(err.Error(), "could not be parked") || !strings.Contains(err.Error(), "route-restore") {
+		t.Fatalf("a failed park = %v, want an error naming the fix", err)
+	}
+	parkRouteOnlyAgents = func(*config.Config) ([]string, error) { return []string{"claudecode"}, nil }
+	if err := parkRouteOnlyWithoutGateway(cfg, false); err != nil {
+		t.Fatal(err)
 	}
 }
