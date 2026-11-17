@@ -772,6 +772,50 @@ func TestPerConnectorMCPInventoryMarksMalformedDaemonCodexConfigPartial(t *testi
 	}
 }
 
+func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), ".codex"))
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("[mcp_servers"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"notes":{"command":"npx"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := connector.NewRegistry()
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: name, description: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
+		Gateway:     config.GatewayConfig{Token: "test-identity-key"},
+	}
+	rows, status := perConnectorMCPEntriesWithReadStatus(cfg, registry)
+	if !status.partial {
+		t.Fatal("malformed Codex config did not mark the aggregate inventory partial")
+	}
+	if _, ok := status.incompleteConnectors["codex"]; !ok {
+		t.Fatalf("incomplete connectors=%v, want codex", status.incompleteConnectors)
+	}
+	if _, ok := status.incompleteConnectors["claudecode"]; ok {
+		t.Fatalf("valid Claude config inherited Codex partial state: %v", status.incompleteConnectors)
+	}
+	var tools mcpToolInventory
+	tools.refreshCompleteParents(rows, status.incompleteConnectors)
+	if parent, recorded := tools.recordObserved("claudecode", "notes", "search", time.Now()); !recorded || parent == "" {
+		t.Fatalf("complete Claude inventory did not establish its parent: parent=%q recorded=%v rows=%+v", parent, recorded, rows)
+	}
+}
+
 func TestPreferNativeMCPInventory(t *testing.T) {
 	disabled := false
 	discovered := []endpointInventoryComponent{

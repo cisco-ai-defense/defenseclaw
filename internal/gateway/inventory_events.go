@@ -248,7 +248,8 @@ func emitEndpointInventory(
 	// published later and overwrite those fields downstream. On a partial read
 	// keep the discovery row as a fail-open fallback; partial native snapshots
 	// are local diagnostics and do not reach the managed AI Defense route.
-	perConnectorMCP, perConnectorPartial := perConnectorMCPEntriesWithStatus(cfg, reg)
+	perConnectorMCP, perConnectorStatus := perConnectorMCPEntriesWithReadStatus(cfg, reg)
+	perConnectorPartial := perConnectorStatus.partial
 
 	// Per-entry inventories derived from the latest AI-Discovery scan. Each
 	// enumerated skill / plugin / MCP server ships as its own
@@ -305,11 +306,9 @@ func emitEndpointInventory(
 		firstErr = err
 	}
 	if len(toolStates) > 0 && toolStates[0] != nil {
-		if !perConnectorPartial && !connectorDiscoveryPartial {
-			removed := toolStates[0].refreshParents(perConnectorMCP)
-			if toolStates[0].store != nil {
-				_ = toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed)
-			}
+		removed := toolStates[0].refreshCompleteParents(perConnectorMCP, perConnectorStatus.incompleteConnectors)
+		if toolStates[0].store != nil {
+			_ = toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed)
 		}
 		for _, collection := range []struct {
 			source     string
@@ -392,16 +391,50 @@ func preferNativeMCPInventory(
 // cfg.AIDiscovery.HomeDirs (populated by the installer's eligible-users
 // enumeration).
 func perConnectorMCPEntriesWithStatus(cfg *config.Config, reg *connector.Registry) ([]endpointInventoryComponent, bool) {
-	return perConnectorMCPEntriesForOSWithStatus(cfg, reg, runtime.GOOS)
+	components, status := perConnectorMCPEntriesWithReadStatus(cfg, reg)
+	return components, status.partial
 }
 
 func perConnectorMCPEntriesForOSWithStatus(cfg *config.Config, reg *connector.Registry, goos string) ([]endpointInventoryComponent, bool) {
-	return perConnectorMCPEntriesForOSWithHomeGuard(cfg, reg, goos, managed.RequireWindowsGatewayPathOutsideUserProfiles)
+	components, status := perConnectorMCPEntriesForOSWithReadStatus(cfg, reg, goos)
+	return components, status.partial
 }
 
 func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector.Registry, goos string, homeGuard func(string) error) ([]endpointInventoryComponent, bool) {
+	components, status := perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg, reg, goos, homeGuard)
+	return components, status.partial
+}
+
+type perConnectorMCPReadStatus struct {
+	partial              bool
+	incompleteConnectors map[string]struct{}
+}
+
+func (s *perConnectorMCPReadStatus) markIncomplete(connectorName string) {
+	s.partial = true
+	key := canonicalConnectorRulePackKey(connectorName)
+	if key == "" {
+		return
+	}
+	if s.incompleteConnectors == nil {
+		s.incompleteConnectors = make(map[string]struct{})
+	}
+	s.incompleteConnectors[key] = struct{}{}
+}
+
+func perConnectorMCPEntriesWithReadStatus(cfg *config.Config, reg *connector.Registry) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
+	return perConnectorMCPEntriesForOSWithReadStatus(cfg, reg, runtime.GOOS)
+}
+
+func perConnectorMCPEntriesForOSWithReadStatus(cfg *config.Config, reg *connector.Registry, goos string) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
+	return perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg, reg, goos, managed.RequireWindowsGatewayPathOutsideUserProfiles)
+}
+
+func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *connector.Registry, goos string, homeGuard func(string) error) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
+	status := perConnectorMCPReadStatus{}
 	if cfg == nil {
-		return nil, true
+		status.partial = true
+		return nil, status
 	}
 	// Union of ActiveConnectors() and reg.Available() so every registered
 	// connector is scanned. ActiveConnectors() alone is often narrower than
@@ -435,9 +468,8 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 		}
 	}
 	if len(connectors) == 0 {
-		return nil, false
+		return nil, status
 	}
-	partial := false
 	fingerprintKey := mcpInventoryFingerprintKey(cfg)
 	// homes = daemon's own HOME (via ReadMCPServersForConnector) plus every
 	// configured user home (via direct-path readers). Empty homes list falls
@@ -545,7 +577,7 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 		servers, err := cfg.ReadMCPServersForConnector(connectorName)
 		appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			partial = true
+			status.markIncomplete(connectorName)
 		}
 	}
 	// Pass 2 — every configured user home via direct-path readers.
@@ -561,13 +593,17 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 		// entire collection instead of probing each connector or publishing
 		// an apparently complete snapshot that would remove its old rows.
 		if homeGuard(home) != nil {
-			partial = true
+			for _, connectorName := range connectors {
+				status.markIncomplete(connectorName)
+			}
 			continue
 		}
 		homeScope := endpointInventoryScopeKey(home)
 		for _, connectorName := range connectors {
 			groups, readPartial := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
-			partial = partial || readPartial
+			if readPartial {
+				status.markIncomplete(connectorName)
+			}
 			var servers []config.MCPServerEntry
 			// Native readers return sources in precedence order. A later file
 			// cannot replace a name found in an earlier file. Entries within one
@@ -587,7 +623,7 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			appendServers(connectorName, homeScope, home, servers)
 		}
 	}
-	return components, partial
+	return components, status
 }
 
 // inventoryHomeOwner resolves who owns one profile directory, and which

@@ -38,6 +38,16 @@ type mcpToolInventory struct {
 // refreshParents invalidates evidence when an alias starts naming a different
 // configured server. It also withholds evidence for ambiguous aliases.
 func (m *mcpToolInventory) refreshParents(servers []endpointInventoryComponent) []string {
+	return m.refreshCompleteParents(servers, nil)
+}
+
+// refreshCompleteParents applies authoritative results connector by connector.
+// An unrelated malformed connector configuration must not prevent a complete
+// connector from accepting authenticated tool calls. Incomplete connectors
+// retain their last complete parents and evidence, but cannot add new parents;
+// this avoids attributing a call while an unreadable profile may hide a
+// colliding alias.
+func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryComponent, incompleteConnectors map[string]struct{}) []string {
 	if m == nil {
 		return nil
 	}
@@ -57,6 +67,10 @@ func (m *mcpToolInventory) refreshParents(servers []endpointInventoryComponent) 
 	defer m.mu.Unlock()
 	var removed []string
 	for key, old := range m.parents {
+		connector, _, _ := strings.Cut(key, "\x00")
+		if _, incomplete := incompleteConnectors[connector]; incomplete {
+			continue
+		}
 		if next[key] != old {
 			if old != "" {
 				removed = append(removed, old)
@@ -65,6 +79,18 @@ func (m *mcpToolInventory) refreshParents(servers []endpointInventoryComponent) 
 			delete(m.observed, key)
 			delete(m.partial, key)
 			delete(m.observedPartial, key)
+		}
+	}
+	for key := range next {
+		connector, _, _ := strings.Cut(key, "\x00")
+		if _, incomplete := incompleteConnectors[connector]; incomplete {
+			delete(next, key)
+		}
+	}
+	for key, old := range m.parents {
+		connector, _, _ := strings.Cut(key, "\x00")
+		if _, incomplete := incompleteConnectors[connector]; incomplete {
+			next[key] = old
 		}
 	}
 	m.parents = next
@@ -88,7 +114,11 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 	server, tool, valid := exactMCPToolResource(req.ToolName, payloadString(req.Payload, "mcp_server_name"))
 	if valid {
 		parentID, recorded := a.mcpTools.recordObserved(projection.connector, server, tool, at)
-		if recorded && a.mcpTools.store != nil {
+		if !recorded {
+			a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
+			return
+		}
+		if a.mcpTools.store != nil {
 			_ = a.mcpTools.store.UpsertMCPObservedTool(ctx, audit.MCPObservedTool{
 				ParentComponentID: parentID,
 				Connector:         projection.connector,

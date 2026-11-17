@@ -48,6 +48,24 @@ func TestObservedMCPToolRequiresAuthenticatedExactHookEvidence(t *testing.T) {
 	}
 }
 
+func TestObservedMCPToolReportsUnavailableParent(t *testing.T) {
+	var gotStage, gotOutcome, gotReason string
+	tools := &mcpToolInventory{metric: func(_ context.Context, stage, outcome, reason string) {
+		gotStage, gotOutcome, gotReason = stage, outcome, reason
+	}}
+	api := &APIServer{mcpTools: tools}
+	req := agentHookRequest{
+		ConnectorName: "claudecode", ConnectorInstanceID: syntheticToolResourceConnectorID,
+		ToolName: "mcp__notes__search", Payload: map[string]interface{}{"mcp_server_name": "notes"},
+	}
+	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "claudecode"), req,
+		[]byte(`{"tool_name":"mcp__notes__search","mcp_server_name":"notes"}`))
+	api.recordObservedMCPTool(ctx, req, time.Now())
+	if gotStage != "observe" || gotOutcome != "partial" || gotReason != "parent_unavailable" {
+		t.Fatalf("unavailable parent metric=%q/%q/%q", gotStage, gotOutcome, gotReason)
+	}
+}
+
 func TestManagedMCPToolInventoryJoinsConfiguredLocalServer(t *testing.T) {
 	withManagedEnterprise(t, true)
 	home := t.TempDir()
@@ -136,6 +154,34 @@ func TestManagedMCPToolInventoryJoinsConfiguredLocalServer(t *testing.T) {
 	}
 	if !recoveredTool {
 		t.Fatal("recovered config did not republish retained tool")
+	}
+}
+
+func TestManagedMCPParentRefreshIgnoresUnrelatedConnectorDiscoveryPartial(t *testing.T) {
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), ".codex"))
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("[mcp_servers.notes]\ncommand = 'uvx'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
+		Gateway:     config.GatewayConfig{Token: "tool-test-key"},
+	}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "codex", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	var tools mcpToolInventory
+	if err := emitEndpointInventory(t.Context(), cfg, registry, &endpointInventoryCapture{}, true, nil, nil, &tools); err != nil {
+		t.Fatal(err)
+	}
+	if parent, recorded := tools.recordObserved("codex", "notes", "search", time.Now()); !recorded || parent == "" {
+		t.Fatalf("unrelated connector discovery partial state suppressed MCP parent: parent=%q recorded=%v", parent, recorded)
 	}
 }
 
@@ -230,16 +276,20 @@ func TestManagedRemoteMCPToolInventoryUsesConfiguredURLIdentity(t *testing.T) {
 func TestMCPToolInventoryMetricUsesOnlyBoundedLabels(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	recordMCPToolInventoryMetric(t.Context(), runtime, "list", "success", "none")
+	recordMCPToolInventoryMetric(t.Context(), runtime, "observe", "partial", "parent_unavailable")
 	recordMCPToolInventoryMetric(t.Context(), runtime, "export", "partial", "incomplete")
 	recordMCPToolInventoryMetric(t.Context(), runtime, "list", "error", "server-secret")
 	metrics := generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawInventoryMcpToolEvents)
-	if len(metrics) != 2 {
-		t.Fatalf("metric count=%d, want two bounded outcomes", len(metrics))
+	if len(metrics) != 3 {
+		t.Fatalf("metric count=%d, want three bounded outcomes", len(metrics))
 	}
 	if got := metrics[0].Attributes()[observability.TelemetryAttributeDefenseClawInventoryMcpToolStage]; got != "list" {
 		t.Fatalf("listing stage=%v", got)
 	}
-	if got := metrics[1].Attributes()[observability.TelemetryAttributeDefenseClawInventoryMcpToolReason]; got != "incomplete" {
+	if got := metrics[1].Attributes()[observability.TelemetryAttributeDefenseClawInventoryMcpToolReason]; got != "parent_unavailable" {
+		t.Fatalf("observation reason=%v", got)
+	}
+	if got := metrics[2].Attributes()[observability.TelemetryAttributeDefenseClawInventoryMcpToolReason]; got != "incomplete" {
 		t.Fatalf("export reason=%v", got)
 	}
 }
@@ -382,6 +432,41 @@ func TestMCPToolInventoryUsesCurrentParentAndAvoidsAmbiguousAliases(t *testing.T
 	rows, partial = tools.components([]endpointInventoryComponent{parent}, false)
 	if len(rows) != 1 || partial || rows[0].mcpToolParentID != parent.id {
 		t.Fatalf("new server evidence=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestMCPToolInventoryRefreshesOnlyCompleteConnectors(t *testing.T) {
+	var tools mcpToolInventory
+	servers := []endpointInventoryComponent{
+		{id: "claude-parent", itemName: "notes", agentConnector: "claudecode"},
+		{id: "codex-parent", itemName: "database", agentConnector: "codex"},
+	}
+	tools.refreshCompleteParents(servers, map[string]struct{}{"codex": {}})
+
+	if parent, recorded := tools.recordObserved("claudecode", "notes", "search", time.Now()); !recorded || parent != "claude-parent" {
+		t.Fatalf("complete Claude parent was unavailable: parent=%q recorded=%v", parent, recorded)
+	}
+	if parent, recorded := tools.recordObserved("codex", "database", "query", time.Now()); recorded || parent != "" {
+		t.Fatalf("incomplete Codex parent accepted a new observation: parent=%q recorded=%v", parent, recorded)
+	}
+	tools.refreshParents(servers)
+	if parent, recorded := tools.recordObserved("codex", "database", "query", time.Now()); !recorded || parent != "codex-parent" {
+		t.Fatalf("complete Codex parent was unavailable: parent=%q recorded=%v", parent, recorded)
+	}
+	tools.refreshCompleteParents([]endpointInventoryComponent{
+		{id: "claude-parent", itemName: "notes", agentConnector: "claudecode"},
+		{id: "codex-new", itemName: "database", agentConnector: "codex"},
+	}, map[string]struct{}{"codex": {}})
+	if parent, recorded := tools.recordObserved("codex", "database", "write", time.Now()); !recorded || parent != "codex-parent" {
+		t.Fatalf("partial Codex refresh replaced its last complete parent: parent=%q recorded=%v", parent, recorded)
+	}
+
+	tools.refreshCompleteParents([]endpointInventoryComponent{
+		{id: "claude-a", itemName: "notes", agentConnector: "claudecode"},
+		{id: "claude-b", itemName: "notes", agentConnector: "claudecode"},
+	}, map[string]struct{}{"codex": {}})
+	if parent, recorded := tools.recordObserved("claudecode", "notes", "read", time.Now()); recorded || parent != "" {
+		t.Fatalf("ambiguous complete alias accepted an observation: parent=%q recorded=%v", parent, recorded)
 	}
 }
 

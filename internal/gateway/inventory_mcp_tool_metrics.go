@@ -18,7 +18,7 @@ func recordMCPToolInventoryMetric(ctx context.Context, runtime hookLifecycleMetr
 		return
 	}
 	switch stage {
-	case "list", "export":
+	case "list", "observe", "export":
 	default:
 		return
 	}
@@ -28,7 +28,7 @@ func recordMCPToolInventoryMetric(ctx context.Context, runtime hookLifecycleMetr
 		return
 	}
 	switch reason {
-	case "none", "scan_failed", "incomplete", "publish_error":
+	case "none", "scan_failed", "incomplete", "parent_unavailable", "publish_error":
 	default:
 		return
 	}

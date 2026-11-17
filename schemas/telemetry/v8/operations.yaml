@@ -2195,7 +2195,7 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [list, export]}
+    overrides: {enum: [list, observe, export]}
     notes: Bounded stage label only
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.tool_outcome
@@ -2223,7 +2223,7 @@ attributes:
   cardinality: low
   normalization:
     id: enum-v1
-    overrides: {enum: [none, scan_failed, incomplete, publish_error]}
+    overrides: {enum: [none, scan_failed, incomplete, parent_unavailable, publish_error]}
     notes: No server-controlled text or tool name
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.auth_provider_type

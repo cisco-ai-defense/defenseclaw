@@ -1095,9 +1095,11 @@ records this tool inventory; parent identities refresh with inventory
 publication. After a gateway restart, tool collections stay partial until
 each configured server has completed a listing, including an empty listing.
 An observed call alone does not mark a listing complete.
-The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing
-from export submission using fixed outcome and reason labels; it never uses a
-tool name, server URL, scan error text, or call argument as a label.
+The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing,
+authenticated-call observation, and export submission using fixed outcome and
+reason labels. An observation whose verified server parent is unavailable uses
+the bounded `parent_unavailable` reason; the counter never uses a tool name,
+server URL, scan error text, or call argument as a label.
 
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
