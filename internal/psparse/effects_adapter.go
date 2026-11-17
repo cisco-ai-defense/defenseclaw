@@ -251,10 +251,10 @@ func LiteralList(e Expr) ([]ListItem, bool) {
 }
 
 // DecodeEncodedCommand decodes a PowerShell -EncodedCommand value: base64 of
-// UTF-16LE text. ok is false if the input is not valid base64/UTF-16LE.
+// UTF-16LE text, read as the host reads it (HostBase64). ok is false if the
+// input is not valid base64/UTF-16LE.
 func DecodeEncodedCommand(s string) (string, bool) {
-	s = strings.TrimSpace(s)
-	raw, err := base64.StdEncoding.DecodeString(s)
+	raw, err := base64.StdEncoding.DecodeString(HostBase64(s))
 	if err != nil || len(raw)%2 != 0 {
 		return "", false
 	}
@@ -263,6 +263,25 @@ func DecodeEncodedCommand(s string) (string, bool) {
 		u16[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
 	}
 	return string(utf16.Decode(u16)), true
+}
+
+// HostBase64 is an -EncodedCommand word as the PowerShell host decodes it. pwsh
+// 7 and Windows PowerShell 5.1 hand the word to .NET Convert.FromBase64String,
+// which skips every space, tab, CR and LF wherever it stands, so a padded or
+// split base64 word still runs its script and must be read the same way
+// (rel-1-0-10:GAP-1197, a sibling of GAP-0155). Any other blank (form feed,
+// vertical tab, NBSP, ...) is kept, so the decode fails as it does on the host.
+func HostBase64(s string) string {
+	if !strings.ContainsAny(s, " \t\r\n") {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\r', '\n':
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // safeStaticLiteral reports whether every rune of s is in the Static-value

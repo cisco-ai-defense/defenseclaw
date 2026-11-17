@@ -140,11 +140,10 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 			if i+2 != len(words) {
 				return "", 0, ReasonHostShape
 			}
-			b := words[i+1].text
-			if b != strings.TrimSpace(b) {
-				return "", 0, ReasonNonLiteral
-			}
-			if _, ok := DecodeEncodedCommand(b); !ok {
+			// The base64 word is read as the host reads it (HostBase64): a blank
+			// in it is skipped by the host, so it is no reason to leave the
+			// script unread (GAP-1197).
+			if _, ok := DecodeEncodedCommand(words[i+1].text); !ok {
 				return "", 0, ReasonNonLiteral
 			}
 			return shapePSEncoded, i, ""

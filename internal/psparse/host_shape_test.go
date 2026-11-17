@@ -90,6 +90,9 @@ func expectedShapeText(argv []string) string {
 }
 
 func decodeUTF16LEBase64(s string) string {
+	// .NET Convert.FromBase64String (the host's decoder) skips space, tab, CR
+	// and LF anywhere in the word (GAP-1197).
+	s = strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "").Replace(s)
 	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil || len(b)%2 != 0 {
 		return ""

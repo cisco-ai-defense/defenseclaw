@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -487,7 +488,7 @@ func decodePowerShellCommand(value string) (string, bool) {
 	if value == "" || len(value) > 2*maxCommandBytes {
 		return "", false
 	}
-	encoded, err := base64.StdEncoding.Strict().DecodeString(value)
+	encoded, err := base64.StdEncoding.Strict().DecodeString(psparse.HostBase64(value)) // the host skips blanks (GAP-1197)
 	if err != nil || len(encoded) == 0 || len(encoded)%2 != 0 || len(encoded) > 2*maxCommandBytes {
 		return "", false
 	}
