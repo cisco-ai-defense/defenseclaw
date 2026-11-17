@@ -1262,14 +1262,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		var preKey preToolDecisionKey
 		preNoted := false
-		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
+		// A managed shell bridge post and a verified Substrate actor's kit
+		// post answer their agent with this reply and send no receipt
+		// (GAP-2614, GAP-0550).
+		synchronousPost := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell" || isSubstrateActorRequest(ctx)
 		unreceipted := func(proposal agentHookResponse) agentHookResponse {
-			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !shellBridge &&
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() && !synchronousPost &&
 				r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
 				hookexec.DeliveryReceiptEvent(connectorName, req.HookEventName) {
 				return a.deliveredHookDecision(connectorName, proposal, "")
 			}
-			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
+			return a.unreceiptedHookDecision(synchronousPost, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
 		}
 		var capacityReceipt *hookCapacityReceipt
 		if delivery != nil {
