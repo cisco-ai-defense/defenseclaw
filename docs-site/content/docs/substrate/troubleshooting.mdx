@@ -76,6 +76,7 @@ An actor with no allow list has no network. The usual causes:
 - **The controller is down.** Existing actors keep their policy; new ones have none. Check `kubectl -n defenseclaw-system get deploy defenseclaw-controller`.
 - **The profile has no matching assignment.** You get `default_profile`. `policy explain NAME` shows which one.
 - **Someone else made the actor.** An actor in a launcher atespace that DefenseClaw didn't create is removed from policy (`sandbox.foreign_actor`, `sandbox.policy.removed`).
+- **An allowed in-cluster service doesn't resolve or fails TLS.** Name it by its full name (`web.team.svc.cluster.local`, not `web.team.svc`) in the allow list and in the request: the actor's resolver does not use the cluster's search path. Over `https`, Substrate 1.0.0's egress verifies the service's certificate against public certificate authorities only, so a service with a private CA answers `503` `CERTIFICATE_VERIFY_FAILED`. Give it a publicly trusted certificate, serve it over `http`, or list it in `allow_passthrough_for` (no inspection there).
 
 ### An unattended run stopped on an ask
 
