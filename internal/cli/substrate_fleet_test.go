@@ -120,10 +120,9 @@ func TestSubstrateVerifyReadsTheClusterAndPasses(t *testing.T) {
 		status[c.ID] = c.Status
 	}
 	// Every check passes on a healthy cluster: none is left unread
-	// (GAP-0200, GAP-0209). The fake cluster has substrate.bundles off, so
-	// bundle_state skips (TestVerifyReportsTheBundleState reads bundles).
+	// (GAP-0200, GAP-0209).
 	for _, c := range doc.Checks {
-		if c.Status != fleet.Pass && (c.ID != fleet.CheckBundles || c.Status != fleet.Skip) {
+		if c.Status != fleet.Pass {
 			t.Errorf("check %s = %s %q, want pass", c.ID, c.Status, c.Message)
 		}
 	}

@@ -129,12 +129,6 @@ type kubeItem struct {
 					Name  string `json:"name"`
 					Image string `json:"image"`
 				} `json:"containers"`
-				Volumes []struct {
-					Name   string `json:"name"`
-					Secret *struct {
-						SecretName string `json:"secretName"`
-					} `json:"secret"`
-				} `json:"volumes"`
 			} `json:"spec"`
 		} `json:"template"`
 	} `json:"spec"`
@@ -319,7 +313,6 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 		o.Issuer = o.InstallIssuer
 	}
 	readOtherClusters(cctx, f, &o, name)
-	readBundles(cctx, f, &o, cfgText, bundleAnchorsSecret(loads))
 	readActorKeys(cctx, f, &o, keysCfg.EffectiveKeysURL())
 
 	// The Substrate release: the tag of the API server image.

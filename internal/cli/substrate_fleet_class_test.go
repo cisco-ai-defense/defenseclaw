@@ -43,7 +43,6 @@ var observedMayBeZero = map[string]string{
 	"SignInNote":      "the gateway's /info was read",
 	"SignInCause":     "the gateway's sign-in server check passed (no sign_in_server member)",
 	"SignInSince":     "the gateway's sign-in server check passed",
-	"Bundles":         "nil is the reading 'substrate.bundles is off' (the fake cluster's config)",
 }
 
 // TestEveryCheckedObservedMemberHasAProducer is the class test of GAP-0200
@@ -117,7 +116,6 @@ func sampleValue(t reflect.Type) reflect.Value {
 // healthy cluster: a zero is a reading there, not a missing one.
 var statusMayBeZero = map[string]string{
 	"Cluster.IssuerDefault":  "the cluster has its own issuer, so it is not the default one",
-	"Bundles":                "substrate.bundles is off in the fake cluster's config: no bundles member",
 	"PolicyConflicts.Reason": "the agents in policy_conflict were counted: no reason why not",
 }
 

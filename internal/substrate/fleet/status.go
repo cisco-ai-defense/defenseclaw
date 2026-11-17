@@ -102,11 +102,8 @@ type StatusDocument struct {
 	Health             Health     `json:"health"`
 	Atespaces          []Atespace `json:"atespaces"`
 	Inventory          *Inventory `json:"inventory,omitempty"`
-	// Bundles are the signed policy bundles in force, one per stage; left
-	// out when substrate.bundles is off (GAP-0432).
-	Bundles []BundleStage `json:"bundles,omitempty"`
 	// PolicyConflicts counts the agents in policy_conflict per atespace
-	// (GAP-0398). Always set; optional in the contract, like bundles.
+	// (GAP-0398). Always set; optional in the contract.
 	PolicyConflicts *PolicyConflicts `json:"policy_conflicts,omitempty"`
 	Checks          []Check          `json:"checks"`
 }
@@ -121,8 +118,6 @@ type VerifyDocument struct {
 	GeneratedAt        string  `json:"generated_at"`
 	Cluster            Cluster `json:"cluster"`
 	OK                 bool    `json:"ok"`
-	// Bundles: as in the status document (GAP-0432).
-	Bundles []BundleStage `json:"bundles,omitempty"`
 	// PolicyConflicts: as in the status document (GAP-0398).
 	PolicyConflicts *PolicyConflicts `json:"policy_conflicts,omitempty"`
 	Checks          []Check          `json:"checks"`
@@ -216,7 +211,6 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 		Health:             h,
 		Atespaces:          atespaces,
 		Inventory:          inv,
-		Bundles:            bundleStages(o),
 		PolicyConflicts:    policyConflicts(o),
 		Checks:             checks,
 	}
@@ -239,7 +233,6 @@ func BuildVerify(o Observed, productVersion string, now time.Time) VerifyDocumen
 		GeneratedAt:        now.UTC().Format(time.RFC3339),
 		Cluster:            ClusterOf(o),
 		OK:                 ok,
-		Bundles:            bundleStages(o),
 		PolicyConflicts:    policyConflicts(o),
 		Checks:             checks,
 	}

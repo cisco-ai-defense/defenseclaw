@@ -113,10 +113,6 @@ The launcher prints `The task did not run: the cluster gateway refused its tool 
 
 Ask your administrator to run `defenseclaw substrate verify` and look at `actor_keys`.
 
-### `verify` or `doctor` says a stage bundle no longer verifies
-
-`bundle_state` (in `verify` and `status --cluster`) and the `substrate.bundles` row of `doctor` fail when a stage's signed policy bundle no longer verifies against the trust anchors, for example after the anchors Secret was replaced with another key (`signature_invalid`) or the key was revoked (`key_revoked`). The controller stops enforcing that bundle: the stage's atespaces fall back to `config.yaml`, or keep only the DefenseClaw rule on a managed install, and it logs `sandbox.bundle.unverified`. Apply a bundle signed with a key in the current anchors (`defenseclaw substrate bundle apply FILE`), or put the anchors Secret back. `bundle_state` warns when your identity may not read the anchors Secret.
-
 ### `verify` cannot read the snapshot bucket
 
 `snapshot_bucket` is `skipped` only when the install file names no `s3://` or `gs://` snapshot location. It warns "could not be read from here" when the `aws` or `gcloud` CLI is missing, has no credentials, or your identity may not read the bucket's settings (the permissions are in [the reference](/docs/substrate/reference#what-verify-needs)). Run `verify` again with an identity that can. "does not exist" is a failure: Substrate cannot store snapshots there. On Cloud Storage, a bucket whose public access prevention is inherited gets a warning, because `verify` does not read the organization policy. Snapshots hold everything an actor held, so fix a failure before you run agents. `delete` removes an agent's snapshots.

@@ -57,9 +57,6 @@ func healthyCluster() Observed {
 		ActorRoutes:     []string{"/api/v1/substrate/hook/{connector}", "/api/v1/substrate/notify/{connector}", "/api/v1/substrate/inspect/{connector}", "/llm/{provider}", "/v1/logs", "/v1/metrics", "/v1/traces"},
 		NamespaceLabels: map[string]string{APIAccessLabel: "true"},
 		SignInIssuer:    "https://kc.cluster-a.example/realms/dc", SignInRead: true,
-		Bundles: &Bundles{Stages: []BundleStage{{Stage: "s-eng", Atespaces: []string{"eng-web"}, BundleID: "b-01AAAAAAAAAAAAAAAAAAAAAAAA", Version: 3,
-			KeyID: "acme-2026a", ManifestSHA256: strings.Repeat("ab", 32), AppliedAt: "2026-11-13T15:00:00Z", Source: "admin",
-			State: BundleVerified}}},
 		Conflicts: &Conflicts{Agents: []ConflictAgent{}},
 	}
 }
@@ -135,8 +132,6 @@ func TestMembersMatchTheSchemas(t *testing.T) {
 		"substrate-status.schema.json#/$defs/inventory":                    reflect.TypeOf(Inventory{}),
 		"substrate-status.schema.json#/$defs/check":                        reflect.TypeOf(Check{}),
 		"substrate-verify.schema.json#/$defs/check":                        reflect.TypeOf(Check{}),
-		"substrate-status.schema.json#/$defs/bundle_stage":                 reflect.TypeOf(BundleStage{}),
-		"substrate-verify.schema.json#/$defs/bundle_stage":                 reflect.TypeOf(BundleStage{}),
 		"substrate-status.schema.json#/$defs/policy_conflicts":             reflect.TypeOf(PolicyConflicts{}),
 		"substrate-verify.schema.json#/$defs/policy_conflicts":             reflect.TypeOf(PolicyConflicts{}),
 		"substrate-status.schema.json#/$defs/atespace_conflicts":           reflect.TypeOf(AtespaceConflicts{}),
