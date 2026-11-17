@@ -591,9 +591,9 @@ func TestAttachmentEndsWithItsToken(t *testing.T) {
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 	now := time.Now()
-	tok := ec.token(t, claims(now, func(c map[string]any) { c["exp"] = now.Add(2 * time.Second).Unix() }), TokenType)
-	// The token is valid for at most 2 more seconds; the relay ends the
-	// attachment at its exp.
+	tok := ec.token(t, claims(now, func(c map[string]any) { c["exp"] = now.Add(4 * time.Second).Unix() }), TokenType)
+	// exp is 3 to 4 s away (whole seconds), so the dial is inside it with no
+	// skew grace (GAP-0569); the relay ends the attachment at that exp.
 	c, _, err := dialWS(t, srv.URL, tok, nil)
 	if err != nil {
 		t.Fatal(err)
