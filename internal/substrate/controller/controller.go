@@ -232,6 +232,9 @@ type actorState struct {
 	// from how it changed (GAP-0141).
 	rid     restoreID
 	written bool
+	// foreignTemplateRead is set once the template of a foreign actor was
+	// read and, if unattested, reported (GAP-0495).
+	foreignTemplateRead bool
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -896,7 +899,7 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 			}
 			// Every actor in a launcher atespace is bound to a person at
 			// create; one nobody registered was made outside DefenseClaw.
-			if st.refused != EventForeignActor {
+			if !st.foreignTemplateRead {
 				c.foreignTemplate(ctx, a, st, base)
 			}
 			c.refuseOnce(st, base, EventForeignActor, "actor in a launcher atespace that DefenseClaw did not create", SignalForeignActor, "")
@@ -919,14 +922,19 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 // foreign actor (it gets no policy either way), so without this record
 // shadow AI would list the actor but not the template behind it, as
 // admission does for an actor of any other atespace (PLAN 6.2). It is sent
-// with the actor's first foreign_actor record.
+// once per actor, on the first pass whose template read succeeds: a read
+// error is tried again on the next pass (GAP-0495).
 func (c *Controller) foreignTemplate(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) {
 	if !c.live().RequireAttestation {
 		return
 	}
 	ref := a.GetActorTemplate()
 	_, att, err := c.template(ctx, ref, false)
-	if err != nil || att.Attested {
+	if err != nil {
+		return
+	}
+	st.foreignTemplateRead = true
+	if att.Attested {
 		return
 	}
 	reason := att.Reason
