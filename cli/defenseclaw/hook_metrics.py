@@ -520,6 +520,22 @@ def lone_hook_decision_rows_sql(alias: str = "lone") -> str:
     )
 
 
+def lone_hook_decision_range_sql(alias: str = "lone") -> str:
+    """``FROM ... WHERE ...`` of the lone hook_decision rows, driven from audit_events.
+
+    For a rowid range of audit_events (the caller adds its bounds on
+    ``{alias}.rowid``): each row of the range is looked up in audit_hook_lone
+    by key, so a range costs its own rows, not every listed entry. Use only
+    on a store that has the table.
+    """
+
+    return (
+        f"FROM audit_events AS {alias}"
+        f" WHERE {alias}.action = '{HOOK_DECISION_ACTION}'"
+        f" AND EXISTS (SELECT 1 FROM {HOOK_ROWS_TABLE} AS hook_lone WHERE hook_lone.audit_event_id = {alias}.id)"
+    )
+
+
 def lone_hook_decision_sql(alias: str = "", table: str = "audit_events") -> str:
     """SQL predicate: the row is a hook_decision row that is its decision's only hook row.
 
