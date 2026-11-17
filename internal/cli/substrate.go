@@ -238,10 +238,20 @@ func substrateAPIMessage(e *api.Error) string {
 		return "the cluster cannot check your sign-in: " + why + " (" + e.Reason + "). Ask your administrator to run defenseclaw-gateway substrate doctor --cluster"
 	}
 	switch {
+	case e.Unauthorized() && (e.Reason == "subject" || e.Reason == "claims"):
+		// The token is valid but its identity is not one the cluster
+		// allows: signing in again with it changes nothing (GAP-0543).
+		return "the cluster does not allow this identity (" + e.Reason + "): the token is valid, but its subject or claims are not ones the cluster accepts " +
+			"(for a workload, substrate.identity.workload_oidc). Signing in again with the same identity will not help; ask your administrator"
 	case e.Unauthorized():
 		return "the cluster did not accept your sign-in (" + orWord(e.Reason, "token refused") + "). Sign in again with: defenseclaw substrate login"
 	case e.NotImplemented():
 		return "this cluster does not offer that yet; ask your administrator to upgrade DefenseClaw on it"
+	case e.Status == 403 && e.Reason == "profile_no_atespace":
+		// GAP-0541: not a profile the caller asked for, one with nowhere to
+		// run on this cluster.
+		return "your profile " + orWord(safetext.Line(e.Detail), "(unnamed)") + " has no launcher atespace on this cluster, so nothing can start. " +
+			"Ask your administrator to list one for it under substrate.launcher_atespaces"
 	case e.Status == 403 && e.Reason == "profile_not_allowed":
 		return "you may not use that profile. Ask your administrator which profiles you can run, or leave --profile out to use your default"
 	case e.Status == 403 && e.Reason == "atespace_not_allowed":

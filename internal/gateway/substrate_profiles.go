@@ -33,6 +33,17 @@ const SubstrateLauncherDefaultProfile = "default"
 // caller's.
 var ErrSubstrateProfileNotAllowed = errors.New("the profile is not assigned to the caller")
 
+// ErrSubstrateProfileNoAtespace is a create whose profile (the caller's,
+// or one an administrator named) has no launcher atespace (GAP-0541).
+type ErrSubstrateProfileNoAtespace struct{ Profile string }
+
+func (e *ErrSubstrateProfileNoAtespace) Error() string {
+	return fmt.Sprintf("%v: profile %q has no launcher atespace", ErrSubstrateProfileNotAllowed, e.Profile)
+}
+
+// Unwrap keeps errors.Is(err, ErrSubstrateProfileNotAllowed) true.
+func (e *ErrSubstrateProfileNoAtespace) Unwrap() error { return ErrSubstrateProfileNotAllowed }
+
 // SubstrateLauncherProfiles resolves a create's profile from the verified
 // caller (GAP-0043): the first guardrail.profile_assignments entry that
 // selects the person (users, groups) or the workload
@@ -58,7 +69,7 @@ func SubstrateLauncherProfiles(cfg *config.Config) SubstrateProfileResolver {
 		}
 		list := spaces[profile]
 		if len(list) == 0 {
-			return "", "", fmt.Errorf("%w: profile %q has no launcher atespace", ErrSubstrateProfileNotAllowed, profile)
+			return "", "", &ErrSubstrateProfileNoAtespace{Profile: profile}
 		}
 		return profile, list[0], nil
 	}

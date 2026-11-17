@@ -254,7 +254,12 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 		ko := c.KubeOptions()
 		probe.Kube = &ko
 	}
-	if cl, err := api.New(api.Options{Base: c.AdminURL, CAFile: c.AdminCAFile, Token: auth.NewSource(name, c, store, probe).Token}); err == nil && !workload {
+	if workload {
+		// A workload token is checked like any sign-in, so a token the
+		// cluster refuses shows now and not at the first run (GAP-0543).
+		probe.Workload = &auth.WorkloadOptions{TokenFile: f.workloadFile}
+	}
+	if cl, err := api.New(api.Options{Base: c.AdminURL, CAFile: c.AdminCAFile, Token: auth.NewSource(name, c, store, probe).Token}); err == nil {
 		if _, err := cl.List(ctx, api.ListOptions{}); err != nil {
 			if e, ok := api.AsError(err); ok && !e.NotImplemented() {
 				note = "You are signed in, but the cluster did not accept it yet: " + substrateAPIMessage(e)

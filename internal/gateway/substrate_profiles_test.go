@@ -5,6 +5,9 @@ package gateway
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -125,5 +128,23 @@ func TestSubstrateLauncherProfilesMapAServiceAccount(t *testing.T) {
 		if err != nil || profile != tc.want || space != cfg.Substrate.LauncherAtespaces[tc.want][0] {
 			t.Errorf("%s: %s %s %v, want %s", tc.p.Subject, profile, space, err, tc.want)
 		}
+	}
+}
+
+// GAP-0541: the caller's own profile with no launcher atespace is its own
+// refusal, profile_no_atespace with the profile, not profile_not_allowed.
+func TestGAP0541ProfileWithNoLauncherAtespaceIsItsOwnRefusal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.DefaultProfile = "ci-profile"
+	cfg.Substrate.LauncherAtespaces = map[string][]string{"eng": {"eng-web"}}
+	_, _, err := SubstrateLauncherProfiles(cfg)(identity.Person{}, "", "claudecode", false)
+	var none *ErrSubstrateProfileNoAtespace
+	if !errors.As(err, &none) || none.Profile != "ci-profile" || !errors.Is(err, ErrSubstrateProfileNotAllowed) {
+		t.Fatalf("err = %v", err)
+	}
+	rec := httptest.NewRecorder()
+	writeSubstrateProfileRefusal(rec, err)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"reason":"profile_no_atespace"`) || !strings.Contains(rec.Body.String(), `"detail":"ci-profile"`) {
+		t.Fatalf("answer %d %s", rec.Code, rec.Body.String())
 	}
 }

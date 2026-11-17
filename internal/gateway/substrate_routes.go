@@ -215,6 +215,19 @@ func writeSubstrateAttestationRefusal(w http.ResponseWriter, code, message, deta
 	writeSubstrateJSON(w, http.StatusForbidden, body)
 }
 
+// writeSubstrateProfileRefusal answers a create whose profile cannot be
+// used: profile_no_atespace (with the profile in detail) when the caller's
+// profile has nowhere to run (GAP-0541), else profile_not_allowed.
+func writeSubstrateProfileRefusal(w http.ResponseWriter, err error) {
+	var none *ErrSubstrateProfileNoAtespace
+	if errors.As(err, &none) {
+		writeSubstrateJSON(w, http.StatusForbidden, map[string]any{"error": http.StatusText(http.StatusForbidden),
+			"reason": "profile_no_atespace", "detail": none.Profile})
+		return
+	}
+	writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
+}
+
 func writeSubstrateJSONError(w http.ResponseWriter, status int, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -308,7 +321,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		resolve := st.cfg.substrateProfiles()
 		profile, atespace, err := resolve(c.person, req.Profile, req.Connector, c.admin)
 		if err != nil {
-			writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
+			writeSubstrateProfileRefusal(w, err)
 			return
 		}
 		if req.Atespace != "" && req.Atespace != atespace {
@@ -363,7 +376,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			// template's, because a profile may be bound to one.
 			req.Connector = tmplConnector
 			if profile, atespace, err = resolve(c.person, req.Profile, req.Connector, c.admin); err != nil {
-				writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
+				writeSubstrateProfileRefusal(w, err)
 				return
 			}
 		}
