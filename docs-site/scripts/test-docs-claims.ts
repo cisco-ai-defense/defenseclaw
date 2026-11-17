@@ -132,7 +132,7 @@ describe('Cursor observe outage mode', () => {
     assert.match(perUser, /A verified gateway that accepts the call but gives no final decision before the hook.s fixed deadline blocks in every tier/i);
     assert.match(perUser, /in an open outage mode .{0,80}an ordinary tool call that plainly names nothing a protected file could be reached through runs with the warning/i);
     assert.match(page('connectors/capability-matrix.mdx'), /\*\*No answer\*\*.{0,200}with one exception for per-user Claude Code and Codex: a tool call that plainly names nothing a protected file could be reached through runs with the warning/i);
-    assert.match(perUser, /`on-failure=\(gateway down: allow with a warning; no answer: allow with a warning unless the call may reach a protected file; hook or answer error: block\)`/);
+    assert.match(perUser, /`on-failure=\(gateway down: allow with a warning; no answer: tool calls allow with a warning unless the call may reach a protected file, prompts and tool results allow with a warning when the gateway is frozen and block when a running gateway answers too late; hook or answer error: block; stop and session-end events: never blocked\)`/);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": normalizeHookFailMode\(failMode\) == "closed",/);
     assert.match(page('connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call\. Under Secure Client the flag follows the administrator's resolved fail mode instead: `open`, the default there, lets Cursor run the call when the hook process never answers, and `closed` keeps `failClosed: true`\. The administrator's resolved fail mode decides/i);
