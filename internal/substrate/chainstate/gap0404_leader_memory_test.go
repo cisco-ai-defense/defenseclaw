@@ -57,9 +57,10 @@ func settledRSS() int64 {
 // The leader's Run loop now checkpoints the open stores (guardWALs) and the
 // stores open WithSmallFootprint.
 //
-// The bound is the E1 cell's: resident growth over N calls of 8 actors at
-// most N x 2 KiB + 16 MiB once the stores are open, and every actor's log
-// stays at most a few passes of writes (16 MiB here).
+// The bound: resident growth over N calls of 8 actors at most N x 2 KiB
+// (the E1 cell's per-call bound) plus the open stores' capped page caches
+// and 16 MiB, once the stores are open; and every actor's log stays at most
+// a few passes of writes (16 MiB here).
 func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 	if leaderRSS() < 0 {
 		t.Skip("resident memory is read from /proc/self/statm (Linux)")
@@ -128,7 +129,10 @@ func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 	}
 	calls := int64(perActor * len(actors))
 	grew := settledRSS() - before
-	bound := calls*2<<10 + 16<<20
+	// 2 KiB per call (the call memory, about 1 KiB, and the replay cache),
+	// what the 8 open stores' page caches hold at most (2 connections of
+	// 512 KiB each), and 16 MiB for the runtime.
+	bound := calls*2<<10 + 8*2*512<<10 + 16<<20
 	t.Logf("%d calls: leader memory +%d KiB (%d B per call), bound %d KiB", calls, grew>>10, grew/calls, bound>>10)
 	var largest int64
 	for _, a := range actors {
@@ -141,7 +145,7 @@ func TestGAP0404LeaderMemoryStaysBoundedPerToolCall(t *testing.T) {
 		t.Fatalf("an actor's write-ahead log is %d KiB after %d calls of its actor: nothing copies it into the store", largest>>10, perActor+10)
 	}
 	if grew > bound {
-		t.Fatalf("leader memory grew %d KiB over %d calls (%d B per call), over the bound of %d KiB (2 KiB per call + 16 MiB)",
+		t.Fatalf("leader memory grew %d KiB over %d calls (%d B per call), over the bound of %d KiB",
 			grew>>10, calls, grew/calls, bound>>10)
 	}
 }
