@@ -38,10 +38,12 @@ type chainStartRow struct {
 // chainStartConnectors are the connectors the kit builds actors for.
 var chainStartConnectors = kit.Connectors()
 
-// chainStartUnpaired name no tool invocation that ties a result to its call:
-// their reads start the chain at the proposal, so a failed read of a missing
-// file refuses too (no result can clear it).
-var chainStartUnpaired = map[string]struct{}{"antigravity": {}, "devin": {}, "copilot": {}, "kiro": {}}
+// chainStartUnpaired name no tool invocation that ties a result to its call,
+// and their result carries no command and output to join it by: their reads
+// start the chain at the proposal, so a failed read of a missing file refuses
+// too (no result can clear it). Devin and Copilot join a result by session
+// and command (GAP-0340, gap0340_command_join_test.go).
+var chainStartUnpaired = map[string]struct{}{"antigravity": {}, "kiro": {}}
 
 // chainStartRows are the rows every connector runs: a read that printed and
 // failed, the benign failed read of a missing file, and a successful read.
