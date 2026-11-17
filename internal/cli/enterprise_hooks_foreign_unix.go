@@ -1144,8 +1144,9 @@ var enterpriseHookOpenCodeReadTimeout = 20 * time.Second
 // enterpriseHookOpenCodeReadBeforeWait, when set (tests only), runs in the
 // pass's goroutine for an account between the start of its read and the wait
 // for the answer, so a test can make the answer and the deadline both ready
-// before the wait looks at them (GAP-0059).
-var enterpriseHookOpenCodeReadBeforeWait func(uid int)
+// before the wait looks at them (GAP-0059). answered reports whether the
+// read's answer is already in its channel.
+var enterpriseHookOpenCodeReadBeforeWait func(uid int, answered func() bool)
 
 // enterpriseHookReadOpenCodePortsAsUsers reads, as each account, the OpenCode
 // service port of the accounts given (the eligible ones with no record entry:
@@ -1207,7 +1208,7 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 				answered <- answer{response, err}
 			}()
 			if beforeWait != nil {
-				beforeWait(account.UID)
+				beforeWait(account.UID, func() bool { return len(answered) == 1 })
 			}
 			var got answer
 			select {

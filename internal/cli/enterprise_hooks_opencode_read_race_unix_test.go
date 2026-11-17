@@ -35,19 +35,21 @@ func TestOpenCodePortReadThatAnsweredIsNotATimeoutWhenItsDeadlineIsAlsoReady(t *
 	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
 		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
 	}
-	returned := map[int]chan struct{}{} // written only here, before the pass
 	var accounts []enterprisehooks.UnixEligibleAccount
 	for uid := 2001; uid <= 2032; uid++ {
-		returned[uid] = make(chan struct{})
 		accounts = append(accounts, enterprisehooks.UnixEligibleAccount{User: fmt.Sprintf("ent%d", uid), UID: uid, GID: uid, Home: t.TempDir()})
 	}
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, _ enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
-		defer close(returned[account.UID])
 		return enterpriseHookWorkerResponse{OpenCodeServicePort: &enterpriseHookWorkerOpenCodePortReport{Port: 20000 + account.UID}}, nil
 	}
-	enterpriseHookOpenCodeReadBeforeWait = func(uid int) {
-		<-returned[uid]
-		time.Sleep(3 * readTimeout) // the answer is in and the deadline has passed
+	// The hook waits until the answer is in the read's channel (not only
+	// until the runner returned: on a loaded box the send can come later),
+	// bounded, then until the deadline has passed.
+	enterpriseHookOpenCodeReadBeforeWait = func(_ int, answered func() bool) {
+		for wait := time.Now().Add(30 * time.Second); !answered() && time.Now().Before(wait); {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(3 * readTimeout)
 	}
 	var log strings.Builder
 	ports, unknown := enterpriseHookReadOpenCodePortsAsUsers(context.Background(), &log, accounts)
