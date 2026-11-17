@@ -359,7 +359,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	rootMissed := ""
 	switch {
 	case substrateStep && substrateRegistrationNamesNoConnector(ctx):
-		rootMissed = "the actor's registration names no connector (an actor made outside DefenseClaw from a template whose attestation names none), so no reviewed hook contract applies"
+		rootMissed = "no attested connector is recorded for the actor (an actor made outside DefenseClaw whose template's attestation names none or could not be checked yet), so no reviewed hook contract applies"
 	case substrateStep && unroutedToolCall:
 		rootMissed = "the actor's hook contract routes no tool-call lifecycle event " + strconv.Quote(req.HookEventName)
 	case substrateStep && !lifecycleEligible:
@@ -903,8 +903,9 @@ func resultCallUnjoined(session audit.ToolChainPendingStatus, rootBound bool, ro
 
 // substrateRegistrationNamesNoConnector reports a verified actor whose
 // registration names no connector: an actor made outside DefenseClaw from an
-// unattested template (GAP-0347). Its binding resolves the empty hook
-// profile, so the step's real reason is that, not the lifecycle.
+// unattested template, or one the controller could not attest yet (GAP-0347,
+// GAP-0351). Its binding resolves the empty hook profile, so the step's real
+// reason is that, not the lifecycle.
 func substrateRegistrationNamesNoConnector(ctx context.Context) bool {
 	reg, ok := substrateRegistrationFrom(ctx)
 	return ok && strings.TrimSpace(reg.Connector) == ""
