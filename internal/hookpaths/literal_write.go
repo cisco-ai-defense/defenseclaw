@@ -833,13 +833,34 @@ func sedInPlaceFiles(words []string) []string {
 // ("" for none). -i takes the rest of its own word as the suffix, never the
 // next word (-i.bak, -ni.bak, --in-place=.bak, --in=.bak).
 func sedGNUInPlace(words []string) (files []string, suffix string, inPlace bool) {
+	_, files, suffix, inPlace, _ = sedGNUCommandLine(words)
+	if !inPlace {
+		return nil, "", false
+	}
+	return files, suffix, true
+}
+
+// sedGNUCommandLine is sedGNUInPlace's reading of a sed command line, with
+// the script words too: each -e or --expression value, each -f or --file
+// value (a script file), and the first operand when it is the script. The
+// other operands are files (rel-1-0-10:GAP-0758). unknown reports an option
+// GNU sed does not have (BSD sed's -I or -a, a misspelling), whose value
+// the reading may have taken for the script or a file.
+func sedGNUCommandLine(words []string) (scripts, files []string, suffix string, inPlace, unknown bool) {
 	script, options := false, true
 	operand := func(word string) {
 		if !script {
 			script = true
+			scripts = append(scripts, word)
 			return
 		}
 		files = append(files, word)
+	}
+	next := func(i int) string {
+		if i < len(words) {
+			return words[i]
+		}
+		return ""
 	}
 	for i := 1; i < len(words); i++ {
 		word := words[i]
@@ -859,11 +880,15 @@ func sedGNUInPlace(words []string) (files []string, suffix string, inPlace bool)
 				script = true
 				if !valued {
 					i++
+					value = next(i)
 				}
+				scripts = append(scripts, value)
 			case "line-length":
 				if !valued {
 					i++
 				}
+			case "":
+				unknown = true
 			}
 		default:
 			// A short option cluster (-si, -Ei, -ni): -i takes the rest of
@@ -876,21 +901,24 @@ func sedGNUInPlace(words []string) (files []string, suffix string, inPlace bool)
 					inPlace, suffix = true, word[j+1:]
 					break cluster
 				case 'e', 'f', 'l':
-					if word[j] != 'l' {
-						script = true
-					}
+					value := word[j+1:]
 					if j == len(word)-1 {
 						i++
+						value = next(i)
+					}
+					if word[j] != 'l' {
+						script = true
+						scripts = append(scripts, value)
 					}
 					break cluster
+				case 'n', 'E', 'r', 's', 'u', 'z', 'b':
+				default:
+					unknown = true
 				}
 			}
 		}
 	}
-	if !inPlace {
-		return nil, "", false
-	}
-	return files, suffix, true
+	return scripts, files, suffix, inPlace, unknown
 }
 
 // sedBSDInPlace reads a sed command line with BSD sed's grammar (macOS

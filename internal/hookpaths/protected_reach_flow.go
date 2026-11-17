@@ -449,7 +449,12 @@ func registrationNamesWriter(words []*syntax.Word, home string, command bool) bo
 }
 
 // registrationEditsInPlace reports whether a sed or perl call edits a file in
-// place (or sed runs a w / e command): without that the two only read.
+// place (or sed runs a w / e command): without that the two only read. The
+// w / e reading is of sed's script words only when every word is fixed
+// (sedGNUCommandLine), so a file operand whose path has a segment that
+// begins with w is read, not written (rel-1-0-10:GAP-0758); with a word
+// known only at run time or an option GNU sed does not have, every fixed
+// operand may be the script.
 func registrationEditsInPlace(call *syntax.CallExpr, home string) bool {
 	if len(call.Args) == 0 {
 		return false
@@ -458,13 +463,29 @@ func registrationEditsInPlace(call *syntax.CallExpr, home string) bool {
 	if !fixed || programBase(program) != "sed" && programBase(program) != "perl" {
 		return false
 	}
+	words, allFixed := []string{program}, true
 	for _, word := range call.Args[1:] {
 		value, fixed := StaticWord(word, home)
 		if !fixed {
+			allFixed = false
 			continue
 		}
-		if registrationInPlaceFlag.MatchString(value) ||
-			programBase(program) == "sed" && !strings.HasPrefix(value, "-") && registrationSedWrites.MatchString(value) {
+		if registrationInPlaceFlag.MatchString(value) {
+			return true
+		}
+		words = append(words, value)
+	}
+	if programBase(program) != "sed" {
+		return false
+	}
+	scripts := words[1:]
+	if allFixed {
+		if gnu, _, _, _, unknown := sedGNUCommandLine(words); !unknown {
+			scripts = gnu
+		}
+	}
+	for _, value := range scripts {
+		if !strings.HasPrefix(value, "-") && registrationSedWrites.MatchString(value) {
 			return true
 		}
 	}
