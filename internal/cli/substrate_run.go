@@ -55,14 +55,27 @@ func (a substrateAsks) Pending(ctx context.Context, t attach.Target) ([]attach.A
 	}
 	// Only an ask that names this exact agent is shown here: a bare name or
 	// an empty actor could be another of the person's agents (GAP-0112).
+	// The gateway lists an ask's atespace and actor name apart, so the
+	// agent is atespace/name (GAP-0483: matching the bare name against
+	// atespace/name showed no ask on the pane, ever).
 	var out []attach.Ask
 	for _, k := range asks {
-		if k.Actor != t.Atespace+"/"+t.Name {
+		ref := substrateAskActor(k)
+		if ref == "" || ref != t.Atespace+"/"+t.Name {
 			continue
 		}
-		out = append(out, attach.Ask{ID: k.ID, Actor: k.Actor, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
+		out = append(out, attach.Ask{ID: k.ID, Actor: ref, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
 	}
 	return out, nil
+}
+
+// substrateAskActor is the atespace/name of the agent that raised an ask,
+// or "" when the gateway named no atespace (never matched by name alone).
+func substrateAskActor(k api.Ask) string {
+	if k.Atespace == "" || k.Actor == "" || strings.Contains(k.Actor, "/") {
+		return ""
+	}
+	return k.Atespace + "/" + k.Actor
 }
 
 func (a substrateAsks) Decide(ctx context.Context, id string, d attach.Decision) error {

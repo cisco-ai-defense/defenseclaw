@@ -40,9 +40,9 @@ Substrate answers `503` with the reason `no_free_worker` when no worker has room
 
 A `503` with the reason `resume_busy` ("the cluster is busy starting other agents") means the worker did not finish restoring the agent in time, usually because one node is restoring many microVM agents at once. Nothing is left behind; start it again, or start fewer at once (`--parallel` for a batch).
 
-### A request to a new site hangs for several seconds after I approved it
+### A request to a site that needs approval is refused before I answer
 
-After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain NAME` and check that your profile lets you approve (`allow_unblock`).
+DefenseClaw holds a request that needs your approval for about a second and a half: Substrate's egress gateway gives it 2 seconds to answer each request. If nobody has answered by then, the request is refused with `ask_pending`, and the agent is told to retry once you approve. The ask stays open on your terminal's last line and in `defenseclaw substrate approvals`. After you approve once, the agent's next try goes through and the one after it asks again; approve always to let every later try through. If a retry after your approval is still refused, run `defenseclaw substrate policy explain NAME` and check that your profile lets you approve (`allow_unblock`).
 
 ### "could not read the template's attestation", "not attested" or "names no agent connector" when I start an agent
 

@@ -256,7 +256,7 @@ When a profile asks before an action, the question appears on the last line of y
 DefenseClaw ask 4c1f from dc-eng/claude-b66c97d1: POST api.example.test /v1/charges* -- press Ctrl-\ to answer
 ```
 
-Press `Ctrl-\`. The line becomes `... -- [o]nce [a]lways [d]eny [Esc] cancel`. One key answers. `o` lets one request through, and the agent's next request asks again. `a` asks you to press `y` to confirm, because it covers every later identical request from this agent. Typing and pasting never answer by accident: only a single key pressed after the prompt appears does. After you approve, the held request goes through within about ten seconds, once Substrate has applied the new allow list.
+Press `Ctrl-\`. The line becomes `... -- [o]nce [a]lways [d]eny [Esc] cancel`. One key answers. `o` lets one request through, and the agent's next request asks again. `a` asks you to press `y` to confirm, because it covers every later identical request from this agent. Typing and pasting never answer by accident: only a single key pressed after the prompt appears does. The line appears within about a second of the ask. The request itself waits only about a second and a half, the time Substrate's egress gateway gives DefenseClaw to answer a request. If you answer after that, the agent is told the site needs your approval and to retry once you approve; its next try after your answer goes through.
 
 </Step>
 
