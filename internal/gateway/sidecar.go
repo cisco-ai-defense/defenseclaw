@@ -1053,6 +1053,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// While it runs, report the hook calls that ran fail-open since
 	// (rel-1-0-2 GAP-0446 item 3); no timer on a managed gateway.
 	go s.watchHookFailureCalls(ctx)
+	// A changed cached OpenClaw version re-checks the install policy, and the
+	// retry timers of a failed refresh stop with the gateway (GAP-1198).
+	defer s.startOpenClawInstallPolicyWatch(ctx)()
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is

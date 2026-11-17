@@ -1089,6 +1089,7 @@ def _print_agents(
             _status_row("OpenClaw hooks", f"{hook_mode} ({hook_detail})")
             from defenseclaw.openclaw_plugin_config import (
                 openclaw_install_policy_recorded_state,
+                openclaw_install_policy_stale_version,
                 openclaw_install_policy_state,
                 openclaw_install_policy_wanted,
                 openclaw_operator_admin_off,
@@ -1098,7 +1099,13 @@ def _print_agents(
                 _status_row("OpenClaw remediation", "off (no operator.admin)")
             if openclaw_install_policy_wanted(cfg):
                 if openclaw_install_policy_state(cfg) == "ours":
-                    _status_row("OpenClaw installs", "checked by DefenseClaw before OpenClaw installs them")
+                    if openclaw_install_policy_stale_version(cfg):
+                        _status_row(
+                            "OpenClaw installs",
+                            ux._style("OpenClaw version changed; not checked (defenseclaw doctor)", fg="yellow"),
+                        )
+                    else:
+                        _status_row("OpenClaw installs", "checked by DefenseClaw before OpenClaw installs them")
                 else:
                     recorded = openclaw_install_policy_recorded_state(cfg)
                     _status_row(

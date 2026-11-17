@@ -470,6 +470,41 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("2026.8.35 is too old for strict install policy", rows["OpenClaw install admission"]["detail"])
         self.assertEqual(result.failed, 0, result.checks)
 
+    def _openclaw_rows(self, stale):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor._guardrail_proxy_intentionally_closed", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.configured_openclaw_hook_mode", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_plugin_evidence", return_value=("native", "plugin seen", True)),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_state", return_value="ours"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_stale_version", return_value=stale),
+        ):
+            _check_proxy_interception(cfg, result, live_health={})
+        return {c["label"]: c for c in result.checks}
+
+    def test_registered_install_admission_warns_when_openclaw_is_now_too_old(self):
+        # GAP-1198: setup registered the command under OpenClaw 2026.11.3; the
+        # cached version is now 2026.8.35. The row may not say PASS.
+        stale = "OpenClaw 2026.8.35 is too old for strict install policy on Windows (needs 2026.11.3 or later)"
+        row = self._openclaw_rows(stale)["OpenClaw install admission"]
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("2026.8.35 is too old for strict install policy", row["detail"])
+        self.assertIn("upgrade OpenClaw to 2026.11.3", row["remediation"])
+
+    def test_registered_install_admission_passes_for_a_current_version(self):
+        row = self._openclaw_rows("")["OpenClaw install admission"]
+        self.assertEqual(row["status"], "pass")
+
     def test_proxy_interception_waits_for_first_report_after_restart(self):
         # GAP-2487: right after a sidecar restart the plugin has not reported
         # yet; it does within a minute, so this is not a FAIL.

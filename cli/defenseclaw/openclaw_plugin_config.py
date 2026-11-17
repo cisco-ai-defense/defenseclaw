@@ -183,6 +183,12 @@ def _openclaw_document(cfg: object) -> dict:
     return document if isinstance(document, dict) else {}
 
 
+# Mirror Go connector.OpenClawInstallPolicySince and
+# OpenClawWindowsInheritOnlySince.
+OPENCLAW_INSTALL_POLICY_SINCE = "2026.8.35"
+OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE = "2026.11.3"
+
+
 def openclaw_install_policy_state(cfg: object) -> str:
     # ours: security.installPolicy runs the DefenseClaw admission command;
     # operator: another installPolicy is configured; none: no installPolicy.
@@ -195,22 +201,63 @@ def openclaw_install_policy_state(cfg: object) -> str:
     return "ours" if args[-3:] == ["connector", "openclaw", "install-policy"] else "operator"
 
 
+def _openclaw_install_policy_state_record(cfg: object) -> dict:
+    # <data_dir>/openclaw-install-policy-state.json, or {} when there is none.
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return {}
+    try:
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), encoding="utf-8") as stream:
+            record = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
 def openclaw_install_policy_recorded_state(cfg: object) -> str:
     # The state the gateway left at its last setup or reload refresh
     # (registered, off, "not registered: <reason>"), from
     # <data_dir>/openclaw-install-policy-state.json, or "" when there is none.
     # It says why OpenClaw does not ask DefenseClaw, for example that
     # OpenClaw 2026.8.35 is too old for strict install policy on Windows.
-    data_dir = str(getattr(cfg, "data_dir", "") or "")
-    if not data_dir:
-        return ""
-    try:
-        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), encoding="utf-8") as stream:
-            record = json.load(stream)
-    except (OSError, ValueError):
-        return ""
-    state = record.get("state") if isinstance(record, dict) else None
+    state = _openclaw_install_policy_state_record(cfg).get("state")
     return state.strip() if isinstance(state, str) else ""
+
+
+def openclaw_install_policy_stale_version(cfg: object, platform: str | None = None) -> str:
+    # GAP-1198: the install policy in openclaw.json is DefenseClaw's, but the
+    # OpenClaw the last discovery cached is not the one it was registered
+    # under, and this one cannot run it: below 2026.8.35 it has no
+    # security.installPolicy, and on Windows below 2026.11.3 it refuses every
+    # command below a hardened root. Returns the sentence for doctor and
+    # status, or "" when the cached version is unknown, is the recorded one,
+    # or is new enough.
+    import sys
+
+    from defenseclaw.connector_contracts import compare_agent_versions, normalize_agent_version
+
+    cached = normalize_agent_version(_cached_openclaw_version(cfg))
+    if not cached:
+        return ""
+    recorded_raw = _openclaw_install_policy_state_record(cfg).get("openclaw_version")
+    recorded = normalize_agent_version(recorded_raw) if isinstance(recorded_raw, str) else ""
+    if recorded == cached:
+        return ""
+    if compare_agent_versions(cached, OPENCLAW_INSTALL_POLICY_SINCE) < 0:
+        need, why = OPENCLAW_INSTALL_POLICY_SINCE, "has no security.installPolicy"
+    elif (platform or sys.platform) == "win32" and (
+        compare_agent_versions(cached, OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE) < 0
+    ):
+        need, why = OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE, "counts inherit-only entries"
+    else:
+        return ""
+    under = f"registered under OpenClaw {recorded}" if recorded else "registered under an earlier OpenClaw"
+    if need == OPENCLAW_WINDOWS_INHERIT_ONLY_SINCE:
+        return (
+            f"OpenClaw {cached} is too old for strict install policy on Windows (needs {need} or later): "
+            f"it {why}; the install admission was {under}"
+        )
+    return f"OpenClaw {cached} {why} (needs {need} or later); the install admission was {under}"
 
 
 def openclaw_install_policy_remediation(policy_state: str, platform: str | None = None, recorded: str = "") -> str:
@@ -226,7 +273,8 @@ def openclaw_install_policy_remediation(policy_state: str, platform: str | None 
     if "is too old for strict install policy" in recorded:
         return (
             "upgrade OpenClaw to 2026.11.3 or later (npm install -g openclaw@latest), then run "
-            "`defenseclaw setup openclaw`; until then installed skills and plugins are checked when DefenseClaw finds them"
+            "`defenseclaw setup openclaw`; until then installed skills and plugins are checked "
+            "when DefenseClaw finds them"
         )
     text = (
         "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "

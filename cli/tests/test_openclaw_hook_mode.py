@@ -12,6 +12,7 @@ from defenseclaw.openclaw_plugin_config import (
     openclaw_hook_mode_detail,
     openclaw_install_policy_recorded_state,
     openclaw_install_policy_remediation,
+    openclaw_install_policy_stale_version,
     openclaw_install_policy_state,
 )
 
@@ -41,6 +42,40 @@ class OpenClawHookModeTest(unittest.TestCase):
     def test_detail_names_the_proxy(self):
         self.assertIn("no guardrail proxy", openclaw_hook_mode_detail("native"))
         self.assertIn("proxy", openclaw_hook_mode_detail("proxy"))
+
+
+class OpenClawInstallPolicyStaleVersionTest(unittest.TestCase):
+    # GAP-1198: setup registered the command under OpenClaw 2026.11.3, then
+    # OpenClaw was reinstalled as 2026.8.35. The state file keeps the version
+    # the policy was registered under; doctor and status compare it with the
+    # cached one so a registered policy cannot read as fine while the version
+    # is too old.
+    def _cfg(self, cached, recorded):
+        data_dir = tempfile.mkdtemp()
+        with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
+            json.dump({"agents": {"openclaw": {"version": cached}}} if cached else {"agents": {}}, f)
+        if recorded is not None:
+            with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+                json.dump({"state": "registered", "openclaw_version": recorded}, f)
+        return SimpleNamespace(data_dir=data_dir)
+
+    def test_windows_downgrade_below_the_hardened_root_floor(self):
+        text = openclaw_install_policy_stale_version(self._cfg("2026.8.35", "2026.11.3"), "win32")
+        self.assertIn("OpenClaw 2026.8.35 is too old for strict install policy on Windows", text)
+        self.assertIn("needs 2026.11.3 or later", text)
+        self.assertIn("registered under OpenClaw 2026.11.3", text)
+
+    def test_same_version_new_enough_or_unknown_is_fine(self):
+        self.assertEqual(openclaw_install_policy_stale_version(self._cfg("2026.8.35", "2026.8.35"), "win32"), "")
+        self.assertEqual(openclaw_install_policy_stale_version(self._cfg("2026.11.3", "2026.8.35"), "win32"), "")
+        self.assertEqual(openclaw_install_policy_stale_version(self._cfg("", "2026.11.3"), "win32"), "")
+        # 2026.8.35 passes the rule on other platforms.
+        self.assertEqual(openclaw_install_policy_stale_version(self._cfg("2026.8.35", "2026.11.3"), "linux"), "")
+
+    def test_below_the_install_policy_floor_on_any_platform(self):
+        text = openclaw_install_policy_stale_version(self._cfg("2026.7.1", None), "linux")
+        self.assertIn("has no security.installPolicy (needs 2026.8.35 or later)", text)
+        self.assertIn("registered under an earlier OpenClaw", text)
 
 
 class OpenClawInstallPolicyStateTest(unittest.TestCase):
