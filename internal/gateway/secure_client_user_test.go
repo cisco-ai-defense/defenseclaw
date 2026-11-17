@@ -26,15 +26,20 @@ const (
 )
 
 // withSecureClientUserAttribution turns the Secure Client posture on for one
-// test, with the caller lookup and the directory replaced.
+// test, with the caller lookup and the directory replaced. The posture has
+// identity facts off (applyIdentityPosture), so the fixture turns them off
+// too: an earlier test that built a sidecar from an OSS config leaves them
+// on, and requestIdentityFor then never reads the Secure Client user.
 func withSecureClientUserAttribution(t *testing.T, account func(context.Context) (string, error), upn string) {
 	t.Helper()
+	prevFacts := identityFactsEnabled.Load()
 	prevFlag := secureClientUserAttribution.Load()
 	prevManaged := ManagedEnterpriseActive()
 	prevAccount := secureClientCallerAccount
 	prevDirectory := secureClientDirectoryFacts
 	prevSupported := secureClientUPNSupported
 	t.Cleanup(func() {
+		setIdentityFactsEnabled(prevFacts)
 		setSecureClientUserAttribution(prevFlag)
 		SetManagedEnterpriseActive(prevManaged)
 		secureClientCallerAccount = prevAccount
@@ -45,6 +50,7 @@ func withSecureClientUserAttribution(t *testing.T, account func(context.Context)
 			return true
 		})
 	})
+	setIdentityFactsEnabled(false)
 	setSecureClientUserAttribution(true)
 	SetManagedEnterpriseActive(true)
 	secureClientCallerAccount = account
@@ -237,9 +243,6 @@ func TestConnPeerAccountBudgetAndPanic(t *testing.T) {
 
 func TestSecureClientInventoryIdentity(t *testing.T) {
 	withSecureClientUserAttribution(t, kernelAccount(testSCSID), "alice@corp.example.com")
-	prev := identityFactsEnabled.Load()
-	t.Cleanup(func() { setIdentityFactsEnabled(prev) })
-	setIdentityFactsEnabled(false)
 	identity := inventoryIdentity(testSCSID)
 	if identity == nil || identity.Directory.Principal != "alice@corp.example.com" ||
 		identity.Directory.Assurance != useridentity.AssuranceVerified {
