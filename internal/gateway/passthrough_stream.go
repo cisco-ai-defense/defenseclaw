@@ -617,16 +617,24 @@ func (s *passthroughStream) run() {
 	}
 read:
 	for {
-		// The hold's time bounds, on the events the tool-call hold lets out,
-		// in the initial buffer too (GAP-0628): the oldest of them waits at
-		// most streamHoldMaxAge for a check; an event in progress, with
-		// nothing queued, is reported once streamHoldMaxPartialAge after the
-		// last byte.
+		// The hold's time bounds, on the events the tool-call hold lets out:
+		// the oldest of them waits at most streamHoldMaxAge for a check; an
+		// event in progress, with nothing queued, is reported once
+		// streamHoldMaxPartialAge after the last byte. The initial buffer
+		// (GAP-0628) is checked and sent once the upstream has sent nothing
+		// for streamHoldMaxAge, when it holds reply text and no tool call is
+		// open: a stream that keeps coming, or a call the rules have not
+		// decided, still waits for stream_buffer_bytes, so a block there
+		// still replaces the whole reply.
 		var deadline time.Time
-		if tailHold && relN > 0 {
-			deadline = queueAt[0].Add(streamHoldMaxAge)
-		} else if tailHold && len(queue) == 0 && unread() > 0 && !stallReported {
-			deadline = lastRead.Add(streamHoldMaxPartialAge)
+		if tailHold && initialFlushed {
+			if relN > 0 {
+				deadline = queueAt[0].Add(streamHoldMaxAge)
+			} else if len(queue) == 0 && unread() > 0 && !stallReported {
+				deadline = lastRead.Add(streamHoldMaxPartialAge)
+			}
+		} else if tailHold && relN > 0 && !callHold && accumulated.Len() > 0 {
+			deadline = lastRead.Add(streamHoldMaxAge)
 		}
 		var rd streamRead
 		select {
@@ -757,13 +765,7 @@ read:
 			// At the end the final check reads the tail.
 			break read
 		}
-		if n > 0 && tailHold && !initialFlushed && relN > 0 && !time.Now().Before(queueAt[0].Add(streamHoldMaxAge)) {
-			// The initial buffer's time bound (GAP-0628): checked, then sent.
-			if !flushInitial(false) {
-				stopped = true
-				break read
-			}
-		} else if n > 0 && wasFlushed {
+		if n > 0 && wasFlushed {
 			now := time.Now()
 			if !tailHold {
 				writeQueue()

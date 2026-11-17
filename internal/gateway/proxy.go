@@ -3671,7 +3671,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		streamBufSize = p.cfg.StreamBufferBytes
 	}
 	var initialChunkBuf [][]byte
-	var initialAt time.Time // arrival of the first chunk of the initial buffer
+	var lastChunkAt time.Time // when the provider last sent a chunk
 	initialBufFlushed := mode != "action"
 	// In action mode the chunks after the initial buffer wait in hold until
 	// a check has read their text (rel-1-0-10:GAP-0212, proxy_stream_tail.go).
@@ -3719,8 +3719,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		return true
 	}
 	// sendInitial sends the initial buffer after a full check has read it:
-	// at stream_buffer_bytes of text, or once its first chunk has waited
-	// streamHoldMaxAge (GAP-0628).
+	// at stream_buffer_bytes of text, or once the provider has sent nothing
+	// for streamHoldMaxAge (GAP-0628); a stream that keeps coming waits for
+	// stream_buffer_bytes, as before.
 	sendInitial := func() {
 		if accumulated.Len() > lastScanLen && !scanMid(true) {
 			return
@@ -3784,11 +3785,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 
 		if !initialBufFlushed {
-			if len(initialChunkBuf) == 0 {
-				initialAt = time.Now()
-			}
 			initialChunkBuf = append(initialChunkBuf, data)
-			if accumulated.Len() >= streamBufSize || (holding && !time.Now().Before(initialAt.Add(streamHoldMaxAge))) {
+			if accumulated.Len() >= streamBufSize {
 				sendInitial()
 			}
 			return
@@ -3826,8 +3824,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		var deadline time.Time
 		if holding && !streamBlocked && len(hold.buf) > 0 {
 			deadline = hold.since.Add(streamHoldMaxAge)
-		} else if holding && !streamBlocked && !initialBufFlushed && len(initialChunkBuf) > 0 {
-			deadline = initialAt.Add(streamHoldMaxAge)
+		} else if holding && !streamBlocked && !initialBufFlushed && len(initialChunkBuf) > 0 && accumulated.Len() > 0 {
+			deadline = lastChunkAt.Add(streamHoldMaxAge)
 		}
 		due := holdTimer.wait(deadline, time.Now())
 		select {
@@ -3836,6 +3834,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				open = false
 				break
 			}
+			lastChunkAt = time.Now()
 			handleChunk(chunk)
 		case <-due:
 			switch {

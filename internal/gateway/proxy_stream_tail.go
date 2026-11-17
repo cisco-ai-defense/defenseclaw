@@ -21,12 +21,15 @@ import (
 // block does. Observe mode holds nothing and only records the would-block.
 //
 // The initial buffer (guardrail.stream_buffer_bytes of text, checked before
-// anything of the reply is sent) has the same time bound
-// (rel-1-0-10:GAP-0628): once its oldest event has waited streamHoldMaxAge
-// it is checked and sent, so a short reply from an upstream that then goes
-// quiet is not held until the upstream ends. The reply headers are sent at
-// once; they carry no model text, and a block after them is written in the
-// stream's own shape, as it was.
+// anything of the reply is sent) is bounded in time too
+// (rel-1-0-10:GAP-0628): when the upstream has sent nothing for
+// streamHoldMaxAge while it holds reply text and no tool call is open, it
+// is checked and sent, so a short reply from an upstream that then goes
+// quiet is not held until the upstream ends. A stream that keeps coming,
+// or a call the rules have not decided, still waits for the buffer size,
+// so a block there still replaces the whole reply. The reply headers are
+// sent at once: they carry no model text, and the status and headers were
+// already fixed (a block after them is written as it was).
 //
 // The check of a held byte that is due by its age only is the cheap one
 // (rel-1-0-10:GAP-0625, inspectStreamText): the local rules and the policy,

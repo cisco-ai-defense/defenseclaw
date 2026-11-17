@@ -350,9 +350,18 @@ func (w *textWalker) replyTextMedia(key, s string) (string, bool) {
 	if !strings.Contains(mt, "/") || !textMediaType(mt) {
 		return "", false
 	}
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		b, err = base64.URLEncoding.DecodeString(s)
+	clean := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, s)
+	var b []byte
+	err := errors.New("not base64")
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err = enc.DecodeString(clean); err == nil {
+			break
+		}
 	}
 	if err != nil || !utf8.Valid(b) {
 		return s, true
