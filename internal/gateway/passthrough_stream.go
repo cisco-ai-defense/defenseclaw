@@ -191,9 +191,18 @@ func (s *passthroughStream) run() {
 	s.copyHeaders()
 
 	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		// The reply headers carry no model text: the client has them at
+		// once, also while the initial buffer waits (GAP-0628).
+		flusher.Flush()
+	}
 	var accumulated responseText
 	streamResponseModel := ""
 	lastScanLen := 0
+	// lastFullScanLen is the text the last full mid-stream check read: the
+	// scanInterval cadence counts from it, so a check due by age only (the
+	// local one) does not put off AI Defense (GAP-0625).
+	lastFullScanLen := 0
 	const scanInterval = 500
 	const maxInitialBufBytes = 1 << 20 // 1 MiB cap on what the proxy holds back
 	streamBufferSize := 1024
@@ -333,13 +342,14 @@ func (s *passthroughStream) run() {
 	}
 
 	// scanText runs the mid-stream check over the whole text when text
-	// arrived since the last one. False: it blocked.
-	scanText := func() bool {
+	// arrived since the last one: the full check, or (full false) the
+	// check of a hold due by age only (inspectStreamText). False: it
+	// blocked.
+	scanText := func(full bool) bool {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
-			[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+		midVerdict := p.inspectStreamText(ctx, accumulated.String(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -349,12 +359,16 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		lastScanLen = accumulated.Len()
+		if full {
+			lastFullScanLen = lastScanLen
+		}
 		return true
 	}
 	// checkHeld sends the events the tool-call hold lets out, once a check
-	// has read their text. False: the check blocked and nothing is sent.
-	checkHeld := func() bool {
-		if !scanText() {
+	// (full, or the one due by age) has read their text. False: the check
+	// blocked and nothing is sent.
+	checkHeld := func(full bool) bool {
+		if !scanText(full) {
 			return false
 		}
 		writeQueue()
@@ -380,7 +394,7 @@ func (s *passthroughStream) run() {
 	// checked, then the unknown tier decides.
 	truncateOverText := func() bool {
 		overText = false
-		return scanText() && boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame with over %d bytes of text", streamLineMaxText))
+		return scanText(true) && boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame with over %d bytes of text", streamLineMaxText))
 	}
 	// truncateStalled is the stall bound of an event in progress that got no
 	// new byte for streamHoldMaxPartialAge: the events before it are checked
@@ -391,7 +405,7 @@ func (s *passthroughStream) run() {
 	// rules decide first), or never, when the request or the upstream ends.
 	// Only called with nothing queued.
 	truncateStalled := func() bool {
-		if !checkHeld() || !boundHit(bounded.Time, fmt.Sprintf("a reply stream line or frame unfinished, no new byte for %s", streamHoldMaxPartialAge)) {
+		if !checkHeld(true) || !boundHit(bounded.Time, fmt.Sprintf("a reply stream line or frame unfinished, no new byte for %s", streamHoldMaxPartialAge)) {
 			return false
 		}
 		stallReported = true
@@ -406,7 +420,7 @@ func (s *passthroughStream) run() {
 	// held and checked as before, and the final check is still enforced
 	// (GAP-0313).
 	sseOversize := func() bool {
-		if tailHold && (!scanText() || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", sseEventMax))) {
+		if tailHold && (!scanText(true) || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", sseEventMax))) {
 			return false
 		}
 		if p.uninspectableReply(ctx, label, mode, "the event stream could not be framed") {
@@ -436,6 +450,7 @@ func (s *passthroughStream) run() {
 			}
 		}
 		lastScanLen = accumulated.Len()
+		lastFullScanLen = lastScanLen
 		initialFlushed = true
 		if !atEnd {
 			writeQueue()
@@ -602,17 +617,16 @@ func (s *passthroughStream) run() {
 	}
 read:
 	for {
-		// The hold's time bounds, on the events the tool-call hold lets out:
-		// the oldest of them waits at most streamHoldMaxAge for a check; an
-		// event in progress, with nothing queued, is reported once
-		// streamHoldMaxPartialAge after the last byte.
+		// The hold's time bounds, on the events the tool-call hold lets out,
+		// in the initial buffer too (GAP-0628): the oldest of them waits at
+		// most streamHoldMaxAge for a check; an event in progress, with
+		// nothing queued, is reported once streamHoldMaxPartialAge after the
+		// last byte.
 		var deadline time.Time
-		if tailHold && initialFlushed {
-			if relN > 0 {
-				deadline = queueAt[0].Add(streamHoldMaxAge)
-			} else if len(queue) == 0 && unread() > 0 && !stallReported {
-				deadline = lastRead.Add(streamHoldMaxPartialAge)
-			}
+		if tailHold && relN > 0 {
+			deadline = queueAt[0].Add(streamHoldMaxAge)
+		} else if tailHold && len(queue) == 0 && unread() > 0 && !stallReported {
+			deadline = lastRead.Add(streamHoldMaxPartialAge)
 		}
 		var rd streamRead
 		select {
@@ -624,8 +638,10 @@ read:
 				// was busy (a long event, a slow check). The read goes
 				// first; a due hold is checked with it.
 			default:
-				if relN > 0 {
-					stopped = !checkHeld()
+				if relN > 0 && !initialFlushed {
+					stopped = !flushInitial(false)
+				} else if relN > 0 {
+					stopped = !checkHeld(false)
 				} else if len(queue) == 0 && unread() > 0 && !stallReported {
 					stopped = !truncateStalled()
 				}
@@ -741,13 +757,19 @@ read:
 			// At the end the final check reads the tail.
 			break read
 		}
-		if n > 0 && wasFlushed {
+		if n > 0 && tailHold && !initialFlushed && relN > 0 && !time.Now().Before(queueAt[0].Add(streamHoldMaxAge)) {
+			// The initial buffer's time bound (GAP-0628): checked, then sent.
+			if !flushInitial(false) {
+				stopped = true
+				break read
+			}
+		} else if n > 0 && wasFlushed {
 			now := time.Now()
 			if !tailHold {
 				writeQueue()
-			} else if accumulated.Len()-lastScanLen >= scanInterval || queueBytes-heldBytes >= streamHoldMaxBytes ||
+			} else if full := accumulated.Len()-lastFullScanLen >= scanInterval || queueBytes-heldBytes >= streamHoldMaxBytes; full ||
 				(relN > 0 && !now.Before(queueAt[0].Add(streamHoldMaxAge))) {
-				if !checkHeld() {
+				if !checkHeld(full) {
 					stopped = true
 					break read
 				}
@@ -794,7 +816,7 @@ read:
 	}
 	relN = len(queue)
 	heldBytes = 0
-	if !flushInitial(true) || (tailHold && !scanText()) {
+	if !flushInitial(true) || (tailHold && !scanText(true)) {
 		// The initial buffer, or the tail, got the mid-stream check every
 		// byte before it got, and it blocked.
 		if sseBlockMsg != "" {

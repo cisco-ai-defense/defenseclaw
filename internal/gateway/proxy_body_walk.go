@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -336,6 +337,29 @@ func (w *textWalker) mediaValue(key, s string) bool {
 	return pos && encodedBytes(s)
 }
 
+// replyTextMedia is the text of a reply's inline data part whose media type
+// is text (Gemini inlineData of mimeType text/plain, base64): model text the
+// client renders, so the completion checks read it, decoded
+// (rel-1-0-10:GAP-0687). Data that is not base64 is read as it is. Other
+// media types, and a request's inline data, are not read here.
+func (w *textWalker) replyTextMedia(key, s string) (string, bool) {
+	if !w.reply || w.payload > 0 || w.cur == nil || normKey(key) != "data" || normKey(w.curKey) != "inlinedata" {
+		return "", false
+	}
+	mt := firstNonEmpty(w.cur.str("mimeType"), w.cur.str("mime_type"))
+	if !strings.Contains(mt, "/") || !textMediaType(mt) {
+		return "", false
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		b, err = base64.URLEncoding.DecodeString(s)
+	}
+	if err != nil || !utf8.Valid(b) {
+		return s, true
+	}
+	return string(b), true
+}
+
 // foldCanon is the smallest rune of every rune's simple-folding orbit, so
 // keys that encoding/json treats as one are one.
 func foldCanon(s string) string {
@@ -496,7 +520,14 @@ func (w *textWalker) checkKeys(n *jnode) {
 func (w *textWalker) walk(n *jnode, key string, depth int) {
 	switch n.kind {
 	case 's':
-		if w.payload == 0 && (walkSkipScalar[normKey(key)] || w.mediaValue(key, n.s)) {
+		if w.payload == 0 && walkSkipScalar[normKey(key)] {
+			return
+		}
+		if text, ok := w.replyTextMedia(key, n.s); ok {
+			w.add(text)
+			return
+		}
+		if w.mediaValue(key, n.s) {
 			return
 		}
 		if seg := w.add(n.s); seg != "" && w.redact != nil && w.turn >= 0 {
