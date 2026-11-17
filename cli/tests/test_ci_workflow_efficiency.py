@@ -363,6 +363,15 @@ LIVE_ONLY_JOBS = {
     ("connector-live-e2e.yml", "live-matrix"),
 }
 
+# Jobs whose one step is a whole-package compile that a slow hosted runner
+# cannot finish in 20 minutes keep a measured, longer budget (GAP-1090:
+# rel/1.0.10 push 5 cancelled Go Lint at 15m17s and the Darwin gateway test
+# binary at 20m32s, neither with a finding). Nothing else may exceed 20.
+LONG_COMPILE_JOBS = {
+    ("ci.yml", "go-lint"): 25,
+    ("ci.yml", "darwin-gateway-test-binary"): 35,
+}
+
 
 def test_every_pull_request_job_has_a_twenty_minute_budget() -> None:
     # A hung test or lane fails within the pull request's 20-minute budget
@@ -372,7 +381,17 @@ def test_every_pull_request_job_has_a_twenty_minute_budget() -> None:
             continue
         budget = job.get("timeout-minutes")
         assert isinstance(budget, int), f"{name}:{job_id} has no timeout-minutes"
-        assert budget <= 20, f"{name}:{job_id} timeout-minutes {budget} is over 20"
+        limit = LONG_COMPILE_JOBS.get((name, job_id), 20)
+        assert budget <= limit, f"{name}:{job_id} timeout-minutes {budget} is over {limit}"
+
+
+def test_long_compile_jobs_keep_exactly_their_measured_budget() -> None:
+    # The exceptions name existing jobs and their exact budget, so a renamed
+    # job or a quietly raised budget fails here.
+    jobs = {(name, job_id): job for name, job_id, job in _pull_request_jobs()}
+    for key, minutes in LONG_COMPILE_JOBS.items():
+        assert key in jobs, f"{key} is not a pull request job"
+        assert jobs[key].get("timeout-minutes") == minutes, f"{key} timeout-minutes is not {minutes}"
 
 
 def test_go_test_timeouts_stay_inside_the_job_budget() -> None:

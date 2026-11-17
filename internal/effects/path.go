@@ -239,9 +239,12 @@ func normalizeWindows(p string, o Options) string {
 		}
 	}
 	for i := range out {
-		// the default-stream alias ::$DATA names the file itself (review WP2).
+		// the default-stream alias ::$DATA names the file itself (review WP2),
+		// and the index alias of a folder the folder (rel-1-0-10:GAP-1075).
 		if idx := strings.Index(strings.ToUpper(out[i]), "::$DATA"); idx >= 0 {
 			out[i] = out[i][:idx]
+		} else {
+			out[i] = withoutFolderIndexAlias(out[i])
 		}
 		out[i] = strings.TrimRight(out[i], " .")
 		if out[i] == "" {
@@ -263,6 +266,19 @@ func normalizeWindows(p string, o Options) string {
 		res = strings.ToLower(res)
 	}
 	return res
+}
+
+// withoutFolderIndexAlias is a folder name without its index alias
+// (dir::$INDEX_ALLOCATION, dir:$I30:$INDEX_ALLOCATION, any case): NTFS opens
+// the folder itself for it, so a file below it is the file below the folder.
+func withoutFolderIndexAlias(name string) string {
+	trimmed := strings.TrimRight(name, ".")
+	for _, alias := range [...]string{"::$INDEX_ALLOCATION", ":$I30:$INDEX_ALLOCATION"} {
+		if n := len(trimmed) - len(alias); n > 0 && strings.EqualFold(trimmed[n:], alias) {
+			return trimmed[:n]
+		}
+	}
+	return name
 }
 
 func isDriveLetter(b byte) bool {

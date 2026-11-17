@@ -106,7 +106,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # make go-lint type-checks and vets the whole module (internal/gateway is
+    # one large compile unit); rel/1.0.10 push 5 (CI run 44013773983) was
+    # cancelled at 15m17s of a 15-minute budget with no finding (GAP-1090).
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1691,7 +1694,10 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: macos-latest
-    timeout-minutes: 20
+    # The paced compile above still takes up to about 20 minutes on a slow
+    # macOS runner: rel/1.0.10 push 5 (CI run 44013773983) was cancelled at
+    # 20m32s of a 20-minute budget (GAP-1090).
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:

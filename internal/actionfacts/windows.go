@@ -1604,14 +1604,20 @@ func (b *windowsFactBuilder) addCanonicalPath(
 }
 
 func windowsCanonicalPathFactValue(value string) (string, bool) {
-	if value == "" || strings.TrimSpace(value) != value ||
+	// Win32 strips the trailing spaces of a file name, so a file operand
+	// with them names the file without them (windowsOpenedNames,
+	// rel-1-0-10:GAP-1075). Leading or other white space, and trailing
+	// spaces on a registry key, leave the operand unknown.
+	body := strings.TrimRight(value, " ")
+	if body == "" || strings.TrimSpace(body) != body ||
 		windowsEnvironmentProviderPath(value) {
 		return "", false
 	}
-	if _, ok := canonicalRegistryPath(value); ok {
+	_, registry := canonicalRegistryPath(value)
+	switch {
+	case registry && body == value:
 		return value, true
-	}
-	if looksLikeRegistryPath(value) {
+	case registry, looksLikeRegistryPath(value):
 		return "", false
 	}
 	return canonicalWindowsFilesystemPath(value)
