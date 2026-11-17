@@ -245,6 +245,46 @@ def test_setup_wait_is_bounded_and_says_the_gateway_has_not_applied_it(home: Pat
     assert sum(slept) <= cmd_routing.SETUP_TEST_WAIT_SECONDS + 1
 
 
+def test_setup_route_waits_until_the_test_names_the_new_alias(home: Path, monkeypatch) -> None:
+    """GAP-1100, GAP-1102: the Test line named the alias the gateway still ran from before --route."""
+    slept = _setup_clock(monkeypatch)
+    answers = iter([({"selected_alias": "local", "candidate_alias": "local"}, "")] * 2 + [({"selected_alias": "fast", "candidate_alias": "fast"}, "")])
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: next(answers))
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert result.exit_code == 0, result.output
+    assert "Test: a coding prompt goes to fast." in result.output and "local" not in result.output
+    assert len(slept) == 2
+
+
+def test_setup_route_never_prints_the_previous_alias_when_the_gateway_does_not_reload(home: Path, monkeypatch) -> None:
+    slept = _setup_clock(monkeypatch)
+    old = ({"selected_alias": "local", "candidate_alias": "local"}, "")
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: old)
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert result.exit_code == 0, result.output
+    assert "Test: a coding prompt goes to" not in result.output
+    assert "Test skipped: the gateway still routes a coding prompt to local, not fast" in result.output
+    assert sum(slept) <= cmd_routing.SETUP_TEST_WAIT_SECONDS + 1
+
+
+def test_setup_route_prints_an_answer_that_names_no_alias(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed classifier or a filtered default names no alias: that is the outcome, not a stale configuration."""
+    slept = _setup_clock(monkeypatch)
+    answer = ({"selected_alias": "", "candidate_alias": "", "outcome": "fallback", "failure": "upstream_status"}, "")
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: answer)
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert "Test: a coding prompt goes to fallback." in result.output and slept == []
+
+
+def test_setup_route_accepts_a_candidate_the_filters_removed(home: Path, monkeypatch) -> None:
+    """The coding route is applied when the gateway names it as the candidate, even if a filter kept it from serving."""
+    slept = _setup_clock(monkeypatch)
+    answer = ({"selected_alias": "", "candidate_alias": "fast", "outcome": "fallback"}, "")
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: answer)
+    result = run("setup", "--yes", "--classifier", "rules", "--route", "coding=fast")
+    assert "Test: a coding prompt goes to fallback." in result.output and slept == []
+
+
 def test_setup_does_not_wait_for_a_stopped_gateway_or_a_reported_cause(home: Path, monkeypatch) -> None:
     slept = _setup_clock(monkeypatch)
     # The default fixture gateway is down: one try, no wait.

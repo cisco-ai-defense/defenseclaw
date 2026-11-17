@@ -1444,11 +1444,22 @@ SETUP_TEST_WAIT_SECONDS = 12.0
 SETUP_TEST_POLL_SECONDS = 1.0
 
 
-def _setup_test(app: AppContext) -> tuple[Any, str]:
+def _names_expected(answer: dict, expect: str) -> bool:
+    """Whether the dry-run answer shows the route setup just wrote: it names expect,
+    or names no alias at all (a failed classifier or a filtered default: the answer is
+    the real outcome, not a stale configuration)."""
+    named = (answer.get("candidate_alias"), answer.get("selected_alias"))
+    return expect in named or not any(named)
+
+
+def _setup_test(app: AppContext, expect: str = "") -> tuple[Any, str]:
     """(answer, error) of the setup test prompt. While the gateway has not
     applied the change yet it is asked again for a bounded time, stopping at
     once when the gateway reports why routing cannot start; a gateway that is
-    not running is not waited for."""
+    not running is not waited for. expect is the alias the coding prompt must
+    reach once the change is applied: a gateway that still answers with the
+    previous configuration is asked again, so the Test line never names the
+    alias that was just replaced (rel-1-0-10:GAP-1100, GAP-1102)."""
     import time
 
     deadline = time.monotonic() + SETUP_TEST_WAIT_SECONDS
@@ -1461,12 +1472,23 @@ def _setup_test(app: AppContext) -> tuple[Any, str]:
             json={"prompt": "Write a Python function that reverses a list."},
             timeout=10,
         )
-        if not error or not _routing_not_applied(error):
+        if error and not _routing_not_applied(error):
             return answer, error
-        if _startup_cause(app) or time.monotonic() >= deadline:
+        if not error and (not expect or not isinstance(answer, dict) or _names_expected(answer, expect)):
+            return answer, error
+        if error and _startup_cause(app) or time.monotonic() >= deadline:
             break
         waited = True
         time.sleep(SETUP_TEST_POLL_SECONDS)
+    if not error:
+        # Routing answers, but with the configuration from before the change.
+        got = (answer or {}).get("candidate_alias") or (answer or {}).get("selected_alias")
+        seconds = int(SETUP_TEST_WAIT_SECONDS)
+        return None, (
+            f"the gateway still routes a coding prompt to {got}, not {expect} (waited {seconds} s): it has not "
+            "reloaded config.yaml yet, or another rule of routing.decisions matches first; it reloads by itself, "
+            "or restart it: defenseclaw-gateway restart; check with defenseclaw routing test"
+        )
     cause = _startup_cause(app)
     if cause:
         return None, f"{error} ({cause}); {_cause_fix(cause)}"
@@ -1591,7 +1613,11 @@ def routing_setup(
             f"No route rules yet: every request goes to {default}. Send a kind of work elsewhere: "
             f"defenseclaw routing setup --route coding={other} (also reasoning and summarize)."
         )
-    answer, error = _setup_test(app)
+    # The alias the test prompt (a coding request) must reach once the gateway
+    # runs this configuration: the coding route, or the default when no rule
+    # sends work elsewhere. Anything else is not predicted.
+    expect = routes.get("coding") or (default if classifier == "rules" and not (routes or _dicts(routing.get("decisions"))) else "")
+    answer, error = _setup_test(app, expect)
     if error:
         click.echo(f'Test skipped: {error}. Run later: defenseclaw routing test "<prompt>"')
     elif isinstance(answer, dict):
