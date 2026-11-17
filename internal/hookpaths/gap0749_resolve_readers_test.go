@@ -39,7 +39,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concrete)
 	actionClientProvedSafeVariableTargetsForHook(command, cwd, home)
 	ActionCommandDecision(command, cwd, home)
-	actionSedInPlaceWrite(command, cwd, home, nil)
+	actionSedInPlaceDecision(command, cwd, home, nil)
 	SedInPlaceBackupUnresolved(command, cwd, home)
 	actionClientProvedOverwrittenRedirect(command, cwd, home)
 	actionClientLoopCopyDestinationProtected(command, cwd, home)
@@ -177,7 +177,7 @@ var gap0749ResolveReaderCalls = []string{
 	"SafeShellRedirectOccurrencesWithFacts", "ShellDirectoryWriteOperands", "ShellWriteOperands",
 	"StateNamingReading", "actionClientLoopCopyDestinationProtected", "actionClientProvedOverwrittenRedirect",
 	"actionClientProvedSafeVariableTargetsForHook",
-	"actionConcreteProtectedWriteOnWithOperands", "actionSedInPlaceWrite", "SedInPlaceBackupUnresolved", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
+	"actionConcreteProtectedWriteOnWithOperands", "actionSedInPlaceDecision", "SedInPlaceBackupUnresolved", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwinFiles", "actionfacts.RunTimeShellTwin", "addReading",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",

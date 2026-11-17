@@ -125,7 +125,7 @@ func TestSedInPlaceBackupBoundRows(t *testing.T) {
 	keys := filepath.Join(home, ".ssh")
 	for _, tc := range sedBoundRows {
 		command := strings.NewReplacer("{keys}", keys, "{home}", home).Replace(tc.command)
-		blocked, unresolved := actionSedInPlaceReading(command, proj, home, nil)
+		blocked, unresolved := actionSedInPlaceReading(command, proj, home, nil, false)
 		got := sedNone
 		switch {
 		case blocked:

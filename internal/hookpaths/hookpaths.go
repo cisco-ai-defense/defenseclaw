@@ -2106,7 +2106,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands) ||
-						actionSedInPlaceWrite(command, cwd, home, nil)
+						actionSedInPlaceDecision(command, cwd, home, nil)
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 						protectedDecision = false
 					}

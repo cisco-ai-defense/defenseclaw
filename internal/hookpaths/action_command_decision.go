@@ -81,7 +81,7 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	}
 	// The backup of sed -i or perl -i is judged before the replace-verb
 	// proof, which holds for the edited entry only (rel-1-0-10:GAP-0414).
-	if actionSedInPlaceWrite(command, cwd, home, memo) {
+	if actionSedInPlaceBackupWrite(command, cwd, home, memo) {
 		return "protected-target"
 	}
 	if replaceVerbSafeIn(command, cwd, home, startup) {
@@ -147,7 +147,8 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if actionMakeProtectedRecipe(command, cwd, home) {
 		return "protected-target"
 	}
-	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) {
+	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) ||
+		actionSedInPlaceWrite(command, cwd, home, memo) {
 		return "protected-target"
 	}
 	return ""
