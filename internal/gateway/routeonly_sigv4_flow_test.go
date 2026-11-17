@@ -75,10 +75,33 @@ func newSigV4Fixture(t *testing.T) *sigv4Fixture {
 		t.Fatal(err)
 	}
 	f.token = tok
+	// The kernel peer of these in-process requests is this account: the uid
+	// on Linux and macOS, the token user SID on OSS Windows. An httptest
+	// request carries no TCP addresses, so on Windows the real lookup found
+	// no client and refused it as peer_unverified (rel-1-0-10:GAP-1211, since
+	// the GAP-1133 peer check), as newRouteOnlyFixture already does.
 	prev := acpLoopbackPeerUID
 	acpLoopbackPeerUID = func(*http.Request) (int, error) { return os.Getuid(), nil }
 	t.Cleanup(func() { acpLoopbackPeerUID = prev })
+	prevSID := routeOSSPeerSID
+	routeOSSPeerSID = func(*http.Request) (string, error) { return f.srv.tokens.owner, nil }
+	t.Cleanup(func() { routeOSSPeerSID = prevSID })
 	return f
+}
+
+// rel-1-0-10:GAP-1211: the fixture's peer is this account; a peer of another
+// account that presents the same route credential is still refused (401)
+// before anything is signed or sent upstream (the GAP-1133 account check).
+func TestRouteOnlySigV4RefusesAPeerOfAnotherAccount(t *testing.T) {
+	f := newSigV4Fixture(t)
+	prevSID, prevUID := routeOSSPeerSID, acpLoopbackPeerUID
+	routeOSSPeerSID = func(*http.Request) (string, error) { return "S-1-5-21-1000-2000-3000-4242", nil }
+	acpLoopbackPeerUID = func(*http.Request) (int, error) { return os.Getuid() + 1, nil }
+	t.Cleanup(func() { routeOSSPeerSID, acpLoopbackPeerUID = prevSID, prevUID })
+	rec := f.post(t, "/r/claudecode"+sigv4FlowARN, "hello", nil)
+	if rec.Code != http.StatusUnauthorized || len(f.orig)+len(f.alt) != 0 {
+		t.Fatalf("another account's peer: status %d body %s upstream hits %d, want 401 and nothing sent", rec.Code, rec.Body.String(), len(f.orig)+len(f.alt))
+	}
 }
 
 // post sends what Claude Code sends with CLAUDE_CODE_SKIP_BEDROCK_AUTH=1:
