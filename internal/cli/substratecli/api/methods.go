@@ -28,19 +28,23 @@ import (
 
 // Actor is one Substrate actor as the admin listener shows it.
 type Actor struct {
-	Atespace        string    `json:"atespace"`
-	Name            string    `json:"name"`
-	UID             string    `json:"uid"`
-	RegistrationKey string    `json:"registration_key,omitempty"`
-	Profile         string    `json:"profile"`
-	Connector       string    `json:"connector"`
-	Template        string    `json:"template"`
-	BatchID         string    `json:"batch_id,omitempty"`
-	Unattended      bool      `json:"unattended,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	Owner           string    `json:"owner,omitempty"`
-	Deleted         bool      `json:"deleted,omitempty"`
-	State           string    `json:"state,omitempty"`
+	Atespace        string `json:"atespace"`
+	Name            string `json:"name"`
+	UID             string `json:"uid"`
+	RegistrationKey string `json:"registration_key,omitempty"`
+	Profile         string `json:"profile"`
+	Connector       string `json:"connector"`
+	Template        string `json:"template"`
+	BatchID         string `json:"batch_id,omitempty"`
+	Unattended      bool   `json:"unattended,omitempty"`
+	// UnattendedAsks is what an unattended actor's asks do (deny or
+	// queue) and AskTimeout how long a queued one waits (GAP-0388).
+	UnattendedAsks string    `json:"unattended_asks,omitempty"`
+	AskTimeout     string    `json:"ask_timeout,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	Owner          string    `json:"owner,omitempty"`
+	Deleted        bool      `json:"deleted,omitempty"`
+	State          string    `json:"state,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`

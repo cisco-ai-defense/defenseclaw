@@ -336,7 +336,7 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			return
 		}
 		ask := asks.Ask{
-			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(),
+			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Profile: reg.Profile,
 			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
 			Rule: strings.TrimSpace(in.Rule),
 		}
@@ -372,6 +372,22 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			// host-wide one to the policy on its next pass): not asked twice.
 			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
 			return
+		}
+		if ask.Host != "" {
+			// approve --always keeps the approval for later runs of the same
+			// person and profile: a new actor of theirs is not asked again
+			// for the same host (host-wide) or rule (GAP-0387). Before, Always
+			// was only recorded, and every new run asked again.
+			mine, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, OwnerID: ask.OwnerID})
+			if err != nil {
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+				return
+			}
+			if slices.ContainsFunc(mine, func(a asks.Ask) bool { return alwaysApprovalCovers(a, ask) }) {
+				writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved,
+					"reason": "approved with --always for this person and profile"})
+				return
+			}
 		}
 		if reg.Unattended {
 			// D12: an unattended run's ask is a deny unless the profile's
@@ -455,6 +471,17 @@ func (st *substrateState) substrateRecordDecision(ctx context.Context, reg regis
 		defer cancel()
 		_, _ = st.cfg.Asks.Record(cctx, d)
 	}()
+}
+
+// alwaysApprovalCovers reports whether approved, an earlier ask, answers
+// the egress ask asked for another actor: approved with --always, by the
+// same person (the List filter) under the same profile, for the same host,
+// and host-wide for a host-wide ask or the same rule covering every method
+// for a url_rules ask (as within one actor, GAP-0177).
+func alwaysApprovalCovers(approved, asked asks.Ask) bool {
+	return approved.Always && approved.State == asks.StateApproved && approved.Kind != "tool" &&
+		approved.OwnerID == asked.OwnerID && approved.Profile == asked.Profile && approved.Host == asked.Host &&
+		(urlRuleApprovalCovers(approved.Rule, asked.Rule) || (asks.HostWide(asked.Rule) && asks.HostWide(approved.Rule)))
 }
 
 // urlRuleApprovalCovers reports whether an approval of the url_rules key

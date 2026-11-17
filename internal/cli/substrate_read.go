@@ -121,6 +121,19 @@ func substrateAskRun(a api.Ask, now time.Time) string {
 	return "unattended, " + substrateAge(now, a.Expires) + " left"
 }
 
+// substrateUnattendedMode is the Mode line of an unattended actor: its
+// profile either denies asks or queues them for a person (GAP-0388).
+func substrateUnattendedMode(a api.Actor) string {
+	if a.UnattendedAsks == "queue" {
+		wait := ""
+		if a.AskTimeout != "" {
+			wait = " for up to " + substrateDash(a.AskTimeout)
+		}
+		return "unattended (asks wait" + wait + " for a person: defenseclaw substrate approvals)"
+	}
+	return "unattended (asks are denied)"
+}
+
 // substrateDash shows a value the cluster sent, as one safe line, or "-".
 func substrateDash(s string) string {
 	if s = safetext.Line(s); s == "" {
@@ -256,7 +269,7 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
 				}
 				if a.Unattended {
-					fmt.Fprintln(w, "Mode:      unattended (asks are denied)")
+					fmt.Fprintln(w, "Mode:      "+substrateUnattendedMode(a))
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
 				return nil

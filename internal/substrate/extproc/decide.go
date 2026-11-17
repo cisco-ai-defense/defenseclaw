@@ -126,7 +126,11 @@ type Verdict struct {
 	AdminRule string
 	Profile   string
 	AskID     string
-	Findings  []string
+	// AskUnattended and AskExpires: a pending ask an unattended run queued,
+	// open until AskExpires (the refusal hint, GAP-0387).
+	AskUnattended bool
+	AskExpires    time.Time
+	Findings      []string
 	// Retryable refusals (the callout could not decide) answer 503.
 	Retryable bool
 	// formRules marks a POST whose body may name another method (_method)
@@ -792,6 +796,14 @@ func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, 
 			reason = clip(res.Reason, 320)
 		}
 		return deny(v, CategoryAskDenied, sourceAsk, rule, reason)
+	}
+	if res.Unattended && !res.Expires.IsZero() {
+		// Nobody watches an unattended run: the callout can hold a request
+		// only for its message budget, so the agent itself waits and sends
+		// it again while a person decides (GAP-0387).
+		v.AskUnattended, v.AskExpires = true, res.Expires.UTC()
+		return deny(v, CategoryAskPending, sourceAsk, rule, "This host needs an approval that has not been given yet; a person has been asked and it stays open until "+
+			v.AskExpires.Format(time.RFC3339)+".")
 	}
 	return deny(v, CategoryAskPending, sourceAsk, rule, "This host needs an approval that has not been given yet.")
 }

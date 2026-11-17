@@ -87,7 +87,7 @@ Reading a body needs a Substrate version that lets the callout ask for it. Witho
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
 | Asks in the agent | Same | For agents that can pause (Claude Code, Codex and others) |
-| Asks for sites | Changed | Asked in your terminal session, or answered later with `defenseclaw substrate approvals` while detached. The waiting step pauses; the agent doesn't stop |
+| Asks for sites | Changed | Asked in your terminal session, or answered later with `defenseclaw substrate approvals` while detached. The request is refused at once with the ask's id (the egress gateway holds a request under 2 seconds); the agent doesn't stop, and retries once the ask is approved |
 | Unattended asks | New | Denied by default. A profile can allow a wait of up to `ask_timeout` for a person to answer. See [Unattended runs](/docs/substrate/unattended) |
 | Admin-bounded approvals | Same | The same rules decide whether you can approve, and the same request-access text appears when you can't |
 | Webhooks for approvals | Same | Sent from the gateway |

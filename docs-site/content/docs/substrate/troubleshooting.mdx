@@ -213,7 +213,7 @@ This section is for a coding agent, or an LLM working for one, that hits a Defen
 
 - **A hook answer says blocked.** Don't retry the same call. The reason names the rule. Choose a different approach, or ask the user.
 - **An egress request returns `403` from the callout.** The body names the rule or feed. Don't try another host to reach the same service, or send the data through a model call or an MCP server. Ask the user to approve the host.
-- **A tool call is waiting on an ask.** Wait. Don't poll in a loop, and don't switch to another tool to get around it. If this is an unattended run, asks are denied by default, so finish what you can without the call and say what you needed.
+- **A tool call is waiting on an ask.** Wait. Don't poll in a loop, and don't switch to another tool to get around it. If this is an unattended run, asks are denied by default, so finish what you can without the call and say what you needed. On a profile with `unattended_asks: queue` the `403` says a person has been asked and until when: don't end the task, wait about 30 seconds and send the same request again until it goes through or is denied.
 - **A `429`.** Back off for `Retry-After` seconds. Don't open parallel connections.
 - **A secret is a placeholder.** `DC_SECRET_...` values are not real. Don't print, store or transform them. The network layer swaps them on the right host.
 - **You have no network at all.** The template wasn't attested, or the policy isn't written yet. Stop and tell the user.
