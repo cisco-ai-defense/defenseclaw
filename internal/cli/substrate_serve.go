@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/configwatch"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
@@ -916,6 +917,9 @@ func substrateStartupChecks(c *config.Config) {
 	if line := substrateAuditExportWarning(c); line != "" {
 		fmt.Fprintln(os.Stderr, line)
 	}
+	for _, line := range substrateEchoHostWarnings(c.Substrate.Secrets) {
+		fmt.Fprintln(os.Stderr, line)
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -925,6 +929,33 @@ func substrateStartupChecks(c *config.Config) {
 			fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", chk.ID, chk.Detail, chk.Fix)
 		}
 	}()
+}
+
+// substrateEchoHostWarnings says, once at start, which secrets are bound to
+// a host that echoes or publishes requests (GAP-0405): egress injects the
+// real value there, and the answer hands it back to the agent and its
+// model. A warning, not a refusal: a test binding is legitimate, and no
+// list covers every echoing service.
+func substrateEchoHostWarnings(secrets []config.SubstrateSecret) []string {
+	var out []string
+	for _, sec := range secrets {
+		seen := map[string]bool{}
+		var hits []string
+		for _, h := range sec.Inject.Hosts {
+			for _, e := range egressspec.EchoHostsCovered(h) {
+				if !seen[e] {
+					seen[e] = true
+					hits = append(hits, e)
+				}
+			}
+		}
+		if len(hits) > 0 {
+			out = append(out, fmt.Sprintf("[substrate] warning: secret %s is injected on %s, which return the request they get: "+
+				"the real value comes back to the agent and its model. Bind the secret only to the API that needs it "+
+				"(docs: Substrate secrets, hosts that echo tokens).", sec.Name, strings.Join(hits, ", ")))
+		}
+	}
+	return out
 }
 
 // substrateAuditExportWarning says, once at start, that a gateway pod keeps

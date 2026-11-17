@@ -299,15 +299,35 @@ func newSubstrateLogoutCmd() *cobra.Command {
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
+			saved, _ := store.Load(name)
 			if err := auth.Logout(ctx, name, c, store, nil); err != nil {
 				return substrateFail(err)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Signed out of %s.\n", name)
+			if note := substrateLogoutNote(saved, time.Now()); note != "" {
+				fmt.Fprintln(cmd.OutOrStdout(), note)
+			}
 			return nil
 		},
 	}
 	com.add(cmd)
 	return cmd
+}
+
+// substrateLogoutNote says how long a copy of the ended sign-in still works
+// (GAP-0409). The gateway verifies sign-in tokens by signature and expiry,
+// with no revocation list, so logout ends the refresh token at the issuer
+// and forgets the stored tokens, but an access or ID token copied before
+// it stays valid until it expires. "" when nothing was stored or it has
+// already expired.
+func substrateLogoutNote(saved *auth.Token, now time.Time) string {
+	if saved == nil || saved.AccessToken == "" && saved.IDToken == "" || !saved.Expiry.After(now) {
+		return ""
+	}
+	left := max(int(saved.Expiry.Sub(now).Round(time.Minute)/time.Minute), 1)
+	return fmt.Sprintf("A copy of this sign-in's token still works on the cluster until it expires at %s (about %d min): "+
+		"the gateway does not revoke sign-in tokens. If you think a token was copied, ask an administrator to end your session at the sign-in server.",
+		saved.Expiry.UTC().Format("15:04 MST"), left)
 }
 
 func newSubstrateWhoamiCmd() *cobra.Command {
