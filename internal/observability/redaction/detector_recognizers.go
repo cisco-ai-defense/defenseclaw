@@ -119,10 +119,18 @@ func recognizeProviderTokens(input string) []candidate {
 
 // providerBoundary: a token stands alone, or follows an assignment's '='
 // (GAP-0426: AWS_ACCESS_KEY_ID=AKIA... in a .env file or a tool result was
-// never redacted, because '=' counted as part of a longer token).
+// never redacted, because '=' counted as part of a longer token), or follows
+// a URL-encoded '=' (GAP-0512: token%3DAKIA... in a logged URL or form body,
+// where the 'D' of "%3D" counted as part of a longer token).
 func providerBoundary(input string, start, end int) bool {
-	return (start == 0 || input[start-1] == '=' || !isProviderByte(input[start-1])) &&
+	return (start == 0 || input[start-1] == '=' || afterEncodedEquals(input, start) || !isProviderByte(input[start-1])) &&
 		(end == len(input) || !isProviderByte(input[end]))
+}
+
+// afterEncodedEquals reports whether input[:start] ends with "%3D" or "%3d".
+func afterEncodedEquals(input string, start int) bool {
+	return start >= 3 && input[start-3] == '%' && input[start-2] == '3' &&
+		(input[start-1] == 'D' || input[start-1] == 'd')
 }
 
 func isProviderByte(value byte) bool {
