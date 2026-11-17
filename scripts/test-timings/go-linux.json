@@ -3142,7 +3142,9 @@
    "TestWriteThroughALinkToStateIsAStateWrite": 9.7,
    "TestWriteThroughANameFromAFolderBehindManyLinksIsJudgedByTheFileItReaches": 4.7,
    "TestWriteThroughCommandLinkToActiveStateBlocks": 9.3,
-   "TestXxdOutputOperandOfActiveState": 3.0
+   "TestXxdOutputOperandOfActiveState": 3.0,
+   "TestGAP0559JudgeNoVerdictFailsClosedForUnattendedRunsAndStrict": 2.8,
+   "TestGAP0559JudgeFallbackWritesAnAlertLine": 0.4
   },
   "internal/gateway/connector": {
    "*": 0.112,
