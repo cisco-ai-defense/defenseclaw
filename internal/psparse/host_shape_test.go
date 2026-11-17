@@ -52,6 +52,14 @@ var hostShapeRows = []struct {
 	{"ps-encoded/EncodedCommand", []string{"-EncodedCommand", r6enc("Write-Output 'x y'")}},
 	{"ps-encoded/nop-enc", []string{"-nop", "-noni", "-enc", r6enc("Write-Output a")}},
 	{"ps-encoded/ep-w-enc", []string{"-ep", "Bypass", "-w", "hidden", "-enc", r6enc("Write-Output a")}},
+	// padded switch words: both hosts trim them (rel-1-0-10:GAP-0155)
+	{"ps-command/padded-c", []string{" -c", "Write-Output a"}},
+	{"ps-command/c-padded", []string{"-c ", "Write-Output a"}},
+	{"ps-command/padded-nop", []string{" -nop", "-c", "Write-Output a"}},
+	{"ps-command/two-blanks-Command", []string{"  -Command  ", "Write-Output a b"}},
+	{"ps-encoded/padded-EncodedCommand", []string{" -EncodedCommand", r6enc("Write-Output a")}},
+	{"ps-encoded/ec-padded", []string{"-ec ", r6enc("Write-Output a")}},
+	{"ps-encoded/padded-nop-padded-enc", []string{"-nop ", " -enc", r6enc("Write-Output a b")}},
 }
 
 // hostShapeSource renders a host argv as PowerShell source with every word in
@@ -78,7 +86,7 @@ func firstHostNested(src string, d Dialect) (NestedScript, bool) {
 // expectedShapeText is the script text a tested shape resolves to.
 func expectedShapeText(argv []string) string {
 	for i, w := range argv {
-		l := strings.ToLower(w)
+		l := strings.ToLower(strings.TrimSpace(w)) // the hosts trim a switch word
 		if psCommandSwitches[l] {
 			return strings.Join(argv[i+1:], " ")
 		}
@@ -181,11 +189,12 @@ var hostShapeNotStatic = []struct {
 	reason string
 }{
 	// padding and empty words (N01..N09, A13, A14)
+	// (N03, N04, N07: a padded switch word is the switch, a table row since GAP-0155)
 	{"N01", `pwsh '' -c 'Get-Date'`, ReasonHostOption},
-	{"N03", `pwsh ' -c' 'Get-Date'`, ReasonHostOption},
-	{"N04", `pwsh '-c ' 'Get-Date'`, ReasonHostOption},
-	{"N07", `pwsh ' -nop' -c 'Get-Date'`, ReasonHostOption},
+	{"blank", `pwsh ' ' -c 'Get-Date'`, ReasonHostOption},
 	{"pad-value", `pwsh -ep ' Bypass' -c 'Get-Date'`, ReasonHostOption},
+	{"pad-b64", `pwsh -ec ' ` + "ZQBjAGgAbwA=" + `'`, ReasonNonLiteral},
+	{"pad-switch-and-value", `pwsh ' -ec ` + "ZQBjAGgAbwA=" + `'`, ReasonHostOption},
 	// --% tails (S01..S12, C11, cmd)
 	{"S04", `pwsh -c Write-Output --% %DCV%`, ReasonStopParsing},
 	{"S09", `pwsh -c --% Write-Output -`, ReasonStopParsing},
@@ -369,8 +378,9 @@ func refPS(words []refWord, stop bool) (text string, ok bool) {
 	}
 	i := 0
 	for i < len(words) {
-		w := words[i].text
-		if w == "" || strings.TrimSpace(w) != w {
+		// both hosts trim a switch word before they match it (GAP-0155)
+		w := strings.TrimSpace(words[i].text)
+		if w == "" {
 			return "", false
 		}
 		l := strings.ToLower(w)
