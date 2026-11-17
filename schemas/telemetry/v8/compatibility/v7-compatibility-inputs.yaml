@@ -209,6 +209,7 @@ classes:
       ActionSetupLocalObservability: "setup-local-observability"
       ActionSetupWebhook: "setup-webhook"
       ActionSetupRouting: "setup-routing"
+      ActionRoutingListenerRefused: "routing.listener_refused"
       ActionDoctor: "doctor"
       ActionUpgrade: "upgrade"
       ActionInitGateway: "init-gateway"

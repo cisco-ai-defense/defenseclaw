@@ -203,6 +203,7 @@
             "rescan",
             "rescan-start",
             "restore",
+            "routing.listener_refused",
             "sandbox-activity",
             "sandbox-approval",
             "sandbox-egress",

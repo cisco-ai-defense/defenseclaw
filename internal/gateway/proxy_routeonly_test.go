@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
@@ -147,6 +148,61 @@ func TestRouteOnlyRefusals(t *testing.T) {
 	}
 	if atomic.LoadInt32(&f.origHits)+atomic.LoadInt32(&f.altHits) != 0 {
 		t.Fatal("a refused request reached an upstream")
+	}
+}
+
+// A refused route-only caller leaves an audit row with the connector and the
+// reason code, never the credential, and a loop of refusals is one row per
+// interval (GAP-1106).
+func TestRouteOnlyListenerRefusalIsAudited(t *testing.T) {
+	f := newRouteOnlyFixture(t)
+	store, logger := testStoreAndLogger(t)
+	f.srv.router.SetAuditLogger(logger)
+	const secret = "dcr1-not-the-credential-0123456789"
+	bad := func(r *http.Request) { r.Header.Set(routeTokenHeader, secret) }
+	for i := 0; i < 3; i++ {
+		if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hi"), bad); rec.Code != 401 {
+			t.Fatalf("status = %d", rec.Code)
+		}
+	}
+	events, err := store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []string
+	for _, e := range events {
+		if e.Action == string(audit.ActionRoutingListenerRefused) {
+			if e.Target != "routing.listener" {
+				t.Fatalf("target = %q", e.Target)
+			}
+			rows = append(rows, e.Details)
+			if strings.Contains(e.Details, secret) {
+				t.Fatalf("the audit row holds the credential: %s", e.Details)
+			}
+		}
+	}
+	for _, e := range events {
+		if e.Action == string(audit.ActionInspectRequestBlock) {
+			t.Fatalf("a refused caller is counted as a guardrail block: %+v", e)
+		}
+	}
+	if len(rows) != 1 || !strings.Contains(rows[0], "connector=claudecode") || !strings.Contains(rows[0], "reason=route_credential_invalid") {
+		t.Fatalf("listener refusal rows = %q", rows)
+	}
+	// The next interval's row says how many refusals it stands for.
+	f.srv.mu.Lock()
+	st := f.srv.refused["claudecode/route_credential_invalid"]
+	st.last = st.last.Add(-2 * routeOnlyRefusalAuditEvery)
+	f.srv.refused["claudecode/route_credential_invalid"] = st
+	f.srv.mu.Unlock()
+	f.post(t, "/r/claudecode/v1/messages", messagesBody("hi"), bad)
+	events, _ = store.ListEvents(50)
+	found := false
+	for _, e := range events {
+		found = found || e.Action == string(audit.ActionRoutingListenerRefused) && strings.Contains(e.Details, "repeated=2")
+	}
+	if !found {
+		t.Fatalf("no row with the suppressed count: %+v", events)
 	}
 }
 

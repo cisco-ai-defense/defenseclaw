@@ -50,6 +50,8 @@ defenseclaw routing test "refactor this function"
 
 Keyword matching sees the newest user message only. It cannot tell personal data in prose from other text: use `routing.sensitive` and a profile with local-only models for regulated groups.
 
+A route-only request whose caller cannot be verified (a wrong or replayed route credential, `route_credential_invalid`; an account other than the one the gateway runs as, `not_gateway_owner`; an account that is not enrolled) is answered 401 and written to the audit log (action `routing.listener_refused`, target `routing.listener`, details `connector=NAME reason=CODE`), not only to the gateway log. It is its own action: guardrail block counts and dashboards do not include it. One row is written per connector and reason every 10 s, with `repeated=N` for the refusals it stands for; the connection-limit answer (429) is not audited, and no credential is recorded.
+
 Read what routing did with `defenseclaw routing status`, `routing explain REQUEST_ID`, `routing test PROMPT` (a dry run, no model is called) and `routing usage` (needs `observability.tokenomics`).
 
 ## Configure the vLLM Semantic Router

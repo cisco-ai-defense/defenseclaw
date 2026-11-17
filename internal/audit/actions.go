@@ -337,6 +337,7 @@ const (
 	ActionSetupLocalObservability  Action = "setup-local-observability"
 	ActionSetupWebhook             Action = "setup-webhook"
 	ActionSetupRouting             Action = "setup-routing"
+	ActionRoutingListenerRefused   Action = "routing.listener_refused" // route-only caller refused (auth boundary, not a guardrail block)
 	ActionDoctor                   Action = "doctor"
 	ActionUpgrade                  Action = "upgrade"
 	ActionInitGateway              Action = "init-gateway"
@@ -589,6 +590,7 @@ func AllActions() []Action {
 		ActionSetupLocalObservability,
 		ActionSetupWebhook,
 		ActionSetupRouting,
+		ActionRoutingListenerRefused,
 		ActionDoctor,
 		ActionUpgrade,
 		ActionInitGateway,
