@@ -105,21 +105,27 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 	const maxVariants = 256
 	variants := 0
 	for _, form := range forms {
-		if proven(form) {
-			return true
-		}
 		// PowerShell takes any unique parameter prefix (-ErrorA, -Verb,
 		// -Fo), and the reader leaves an unknown parameter partial, which
 		// dropped the proof. A mutator's prefixes are resolved; one that
 		// stays unknown or ambiguous is read without it, alone and with
 		// its value, and any reading that writes state is the write
 		// (over-block, checker it15 RV15-2).
-		forms, bounded := psParameterReadings(form)
-		variants += len(forms)
+		readings, valuedOnly, bounded := psParameterReadings(form)
+		variants += len(readings)
 		if bounded || variants > maxVariants {
 			return true
 		}
-		for _, variant := range forms {
+		// A parameter that can only bind with the next word as its value
+		// makes the form itself a statement PowerShell never runs: the
+		// Windows PowerShell reader skips the unknown parameter and reads
+		// that value as an operand, so mv -t <folder> <file> moved the
+		// folder (rel-1-0-10:GAP-1209). Its readings are what PowerShell
+		// can run.
+		if !valuedOnly && proven(form) {
+			return true
+		}
+		for _, variant := range readings {
 			if proven(variant) {
 				return true
 			}
@@ -333,8 +339,9 @@ func psSwitchParameter(name string) bool {
 // abbreviated parameters: one with every unique prefix spelled out, and,
 // for each parameter that stays unknown or ambiguous, that reading without
 // it and its value, and without it alone when it may be a switch. Nothing
-// is returned for a statement whose parameters are all known. bounded
-// reports too many to read.
+// is returned for a statement whose parameters are all known. valuedOnly
+// reports a parameter that cannot be a switch among them. bounded reports
+// too many to read.
 //
 // A prefix that matches known parameters only, none of them a switch, can
 // at most bind as one of them, which takes the next word as its value
@@ -343,14 +350,14 @@ func psSwitchParameter(name string) bool {
 // alerted on a file moved into an agent settings folder
 // (rel-1-0-10:GAP-1209). An unknown name may be a parameter the list lacks,
 // a switch included, so it keeps both readings.
-func psParameterReadings(form string) ([]string, bool) {
+func psParameterReadings(form string) (readings []string, valuedOnly, bounded bool) {
 	budget := &psBudget{}
 	words := psWords(form, budget)
 	if budget.over {
-		return nil, true
+		return nil, false, true
 	}
 	if len(words) < 2 || !psMutatorCmdlet(words[0].text) {
-		return nil, false
+		return nil, false, false
 	}
 	texts := make([]string, len(words))
 	// unknown lists the words that stay unknown or ambiguous; switchable,
@@ -408,9 +415,8 @@ func psParameterReadings(form string) ([]string, bool) {
 	}
 	const maxUnknown = 8
 	if len(unknown) > maxUnknown {
-		return nil, true
+		return nil, false, true
 	}
-	var readings []string
 	without := func(skip, count int) string {
 		parts := make([]string, 0, len(texts))
 		for k, text := range texts {
@@ -426,12 +432,14 @@ func psParameterReadings(form string) ([]string, bool) {
 	for _, k := range unknown {
 		if switchable[k] || k+1 >= len(texts) {
 			readings = append(readings, without(k, 1))
+		} else {
+			valuedOnly = true
 		}
 		if k+1 < len(texts) {
 			readings = append(readings, without(k, 2))
 		}
 	}
-	return readings, false
+	return readings, valuedOnly, false
 }
 
 // psStateScanMaxRunes bounds the text the PowerShell reading copies into

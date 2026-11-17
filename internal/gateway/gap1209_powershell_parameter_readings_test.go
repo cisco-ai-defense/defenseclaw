@@ -17,23 +17,28 @@ import (
 // and alerted on a file moved into the Claude Code settings folder. A name
 // that may be a switch (-F: Force, Filter, FilePath) or that no known
 // parameter starts (-Zz) keeps both readings, so the RV15-2 rows keep their
-// proof.
+// proof. valuedOnly tells powerShellWriteReading not to prove the form as
+// written, which the Windows PowerShell reader reads with that value as an
+// operand.
 func TestGAP1209AmbiguousValuedParameterIsNeverASwitch(t *testing.T) {
 	rows := []struct {
 		name, form  string
 		want, never []string
+		valuedOnly  bool
 	}{
 		{
-			name:  "valued-only prefix takes the next word",
-			form:  `mv -t C:\Users\a\.claude notes.txt`,
-			want:  []string{`mv notes.txt`},
-			never: []string{`mv C:\Users\a\.claude notes.txt`},
+			name:       "valued-only prefix takes the next word",
+			form:       `mv -t C:\Users\a\.claude notes.txt`,
+			want:       []string{`mv notes.txt`},
+			never:      []string{`mv C:\Users\a\.claude notes.txt`},
+			valuedOnly: true,
 		},
 		{
-			name:  "valued-only prefix before the operands",
-			form:  `Move-Item -T x C:\Users\a\notes.txt C:\Users\a\old.txt`,
-			want:  []string{`Move-Item C:\Users\a\notes.txt C:\Users\a\old.txt`},
-			never: []string{`Move-Item x C:\Users\a\notes.txt C:\Users\a\old.txt`},
+			name:       "valued-only prefix before the operands",
+			form:       `Move-Item -T x C:\Users\a\notes.txt C:\Users\a\old.txt`,
+			want:       []string{`Move-Item C:\Users\a\notes.txt C:\Users\a\old.txt`},
+			never:      []string{`Move-Item x C:\Users\a\notes.txt C:\Users\a\old.txt`},
+			valuedOnly: true,
 		},
 		{
 			name: "unknown name keeps both readings",
@@ -52,9 +57,12 @@ func TestGAP1209AmbiguousValuedParameterIsNeverASwitch(t *testing.T) {
 		},
 	}
 	for _, row := range rows {
-		readings, bounded := psParameterReadings(row.form)
+		readings, valuedOnly, bounded := psParameterReadings(row.form)
 		if bounded {
 			t.Fatalf("%s: bounded", row.name)
+		}
+		if valuedOnly != row.valuedOnly {
+			t.Errorf("%s: valuedOnly %v, want %v", row.name, valuedOnly, row.valuedOnly)
 		}
 		for _, want := range row.want {
 			if !slices.Contains(readings, want) {
