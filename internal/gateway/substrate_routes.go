@@ -469,6 +469,11 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "no_free_worker")
 				return
 			}
+			if errors.Is(err, ErrSubstrateResumeBusy) {
+				// GAP-0468: busy, not broken; the person can retry.
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "resume_busy")
+				return
+			}
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}

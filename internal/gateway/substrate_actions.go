@@ -26,6 +26,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
@@ -289,16 +290,40 @@ func (s *SubstrateATEActions) Resume(ctx context.Context, atespace, name string)
 	if err := s.Ensure(ctx, atespace, name); err != nil {
 		return err
 	}
-	_, _, err := s.Client.ResumeActor(ctx, ateapi.Ref(atespace, name))
-	if ateapi.IsResourceExhausted(err) {
+	// A resume restores the actor's snapshot on a worker: seconds on an
+	// idle node, a minute or more while one node restores many microVMs at
+	// once. The control API client's default call deadline (10 s) cut those
+	// resumes off and the actor was deleted (GAP-0468), so a resume gets
+	// its own deadline.
+	rctx, cancel := context.WithTimeout(ctx, substrateResumeTimeout)
+	defer cancel()
+	_, _, err := s.Client.ResumeActor(rctx, ateapi.Ref(atespace, name))
+	switch {
+	case ateapi.IsResourceExhausted(err):
 		return fmt.Errorf("%w: %v", ErrSubstrateNoWorker, err)
+	case err != nil && ctx.Err() == nil && substrateResumeBusy(err):
+		return fmt.Errorf("%w: %v", ErrSubstrateResumeBusy, err)
 	}
 	return err
+}
+
+// substrateResumeTimeout bounds one resume (GAP-0468).
+const substrateResumeTimeout = 3 * time.Minute
+
+// substrateResumeBusy is a resume the control plane could not finish now
+// (deadline, unavailable, aborted): the node or the control plane is busy,
+// not broken.
+func substrateResumeBusy(err error) bool {
+	return ateapi.IsBusy(err) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // ErrSubstrateNoWorker is a resume that no worker of the pool has room for
 // (RESOURCE_EXHAUSTED, GAP-0167).
 var ErrSubstrateNoWorker = errors.New("no worker has room for the actor")
+
+// ErrSubstrateResumeBusy is a resume that did not finish in time because
+// the node or the control plane is busy (GAP-0468): a retry can work.
+var ErrSubstrateResumeBusy = errors.New("the cluster is busy starting other agents")
 
 // Delete implements SubstrateActorActions.
 func (s *SubstrateATEActions) Delete(ctx context.Context, atespace, name string) error {

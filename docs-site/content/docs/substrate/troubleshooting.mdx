@@ -38,6 +38,8 @@ the cluster has no free worker for a new agent right now; nothing was started. 2
 
 Substrate answers `503` with the reason `no_free_worker` when no worker has room for the actor. `run` starts nothing and says which of your agents hold workers. Delete the ones you don't need (`list` has a `STATE` column), or add workers to the pool. A finished `--task` agent gives its worker back about a minute after its task ends (it is suspended, not deleted), and a batch task waits up to 15 minutes for a free worker before it reports this. If none of your agents are running, other work holds the pool. A golden-snapshot build also takes a worker. Lowering a worker pool's replica count while it hosts a running actor crashes that actor. Revert it with `kubectl ate revert`.
 
+A `503` with the reason `resume_busy` ("the cluster is busy starting other agents") means the worker did not finish restoring the agent in time, usually because one node is restoring many microVM agents at once. Nothing is left behind; start it again, or start fewer at once (`--parallel` for a batch).
+
 ### A request to a new site hangs for several seconds after I approved it
 
 After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain NAME` and check that your profile lets you approve (`allow_unblock`).
