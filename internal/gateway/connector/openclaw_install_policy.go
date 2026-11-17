@@ -301,6 +301,49 @@ func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) error {
 	return atomicWriteFile(configPath, append(out, byte(10)), 0o644)
 }
 
+// RefreshInstallPolicy writes, refreshes or removes the DefenseClaw
+// security.installPolicy in openclaw.json for opts and nothing else of
+// setup. The gateway calls it when a config reload changes what
+// connectors.openclaw.install_policy resolves to (a rule pack switched to or
+// from strict changes auto), so the install admission follows the pack
+// without another setup (GAP-1128). An OpenClaw home setup has not written
+// yet (no DefenseClaw plugin in openclaw.json and no record), and the
+// separate-user layout, where DefenseClaw does not edit openclaw.json, are
+// left alone; the next setup writes them.
+func (c *OpenClawConnector) RefreshInstallPolicy(opts SetupOpts) error {
+	if opts.DataDir == "" || openClawSeparateUser(opts) {
+		return nil
+	}
+	configPath := c.pathsFor(opts).config
+	if _, err := os.Stat(configPath); err != nil {
+		return nil
+	}
+	if _, hasRec := loadOpenClawInstallPolicyRecord(opts.DataDir); !hasRec && !openClawConfigRegistersDefenseClaw(configPath) {
+		return nil
+	}
+	// The same steps on openclaw.json and its pre-setup record as Setup.
+	return openClawConfigLocked(configPath, func() error {
+		keepSnapshot, err := openClawSnapshotUsable(opts.DataDir, c.Name(), configPath)
+		if err != nil {
+			return fmt.Errorf("openclaw config backup: %w", err)
+		}
+		if keepSnapshot {
+			if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+				return fmt.Errorf("openclaw config backup: %w", err)
+			}
+		}
+		if err := applyOpenClawInstallPolicy(configPath, opts); err != nil {
+			return fmt.Errorf("openclaw install policy: %w", err)
+		}
+		if keepSnapshot {
+			if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+				return fmt.Errorf("openclaw config backup hash: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 // removeOpenClawInstallPolicy takes the DefenseClaw security.installPolicy
 // out of openclaw.json when it is still exactly what setup recorded, and
 // drops the record. Only those members are cut from the text, so the rest of

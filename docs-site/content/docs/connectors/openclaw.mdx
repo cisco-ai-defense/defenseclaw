@@ -223,7 +223,7 @@ WantedBy=multi-user.target
 
 Teardown, in this order:
 
-1. As the DefenseClaw account, run `defenseclaw setup remove openclaw --yes --no-restart` (add `--force` when OpenClaw is the only connector), then `sudo systemctl restart defenseclaw-gateway`, or `defenseclaw-gateway connector teardown --connector openclaw`. It deletes the published credential and prints which entries to remove. It does not touch `openclaw.json`.
+1. As the DefenseClaw account, run `defenseclaw setup remove openclaw --yes --no-restart` (add `--force` when OpenClaw is the only connector), then `sudo systemctl restart defenseclaw-gateway`, or `defenseclaw-gateway connector teardown --connector openclaw`. It deletes the published credential and `openclaw-merge.json` in the DefenseClaw data folder, and prints which entries to remove. It does not touch `openclaw.json`. A setup that fails keeps `openclaw-merge.json`, because it is the block you merge before you run setup again.
 2. As the OpenClaw account or an administrator, remove `plugins.entries.defenseclaw`, `defenseclaw` from a `plugins.allow` list if you added it there, and the `plugin_dir` path from `plugins.load.paths`, then restart the OpenClaw gateway. Until you do, the plugin has no credential and blocks every tool call.
 3. As an administrator, delete the `plugin_dir` folder when you no longer need it.
 
@@ -561,12 +561,15 @@ The block also names a few environment variables (`passEnv`, `env`) that the com
 - Setup leaves an `installPolicy` you wrote yourself in place and does not add its own. It says so once.
 - Teardown removes the block only while it is exactly what setup wrote.
 - OpenClaw older than 2026.8.35 does not know the key, so setup does not write it there.
+- A rule pack change (`defenseclaw guardrail use-pack strict`, or back to `default`) turns `auto` on or off when the running gateway reloads its config. The gateway then writes or removes the block. You do not need to run setup again.
 
 The answer is allow or block. A block names the reason and the findings, and OpenClaw shows them. DefenseClaw never answers with a warning, because OpenClaw blocks a warning for installs that have no operator prompt.
 
 If the DefenseClaw gateway does not answer, the `strict` policy and managed installs block the install. The `default` and `permissive` policies allow it and print a warning. A missing credential, a listener that does not prove it is your gateway, or an error from the gateway blocks the install with every policy.
 
 OpenClaw runs only a command it trusts. The file and every folder above it must be owned by root or by the account that runs OpenClaw, and must not be writable by the group or by others (a sticky folder such as `/tmp` is accepted). A link is refused. A per-user install in `~/.local/bin` passes when your home folder and ~/.local are not group-writable. Setup checks the same rule and does not write a command that OpenClaw would refuse, because OpenClaw then blocks every install. In the separate-user layout the binary must be owned by root, and setup adds the block to the JSON it asks the administrator to merge.
+
+On Windows the rule is the same: no account other than SYSTEM, Administrators, TrustedInstaller or you may add, change or remove entries in the file or in any folder above it, up to the drive root. OpenClaw (2026.8.35 through at least 2026.11.5) checks the drive root too. The default ACL of a Windows system drive (`C:\`) lets `BUILTIN\Users` create folders there, so OpenClaw refuses every install policy command on that drive. Setup checks this and does not register DefenseClaw. If it did, OpenClaw would block every skill and plugin install. The gateway log names the folder: `install admission is not registered: OpenClaw would refuse ... (C:\ lets BUILTIN\Users (S-1-5-32-545) change its entries ...)`. Skills and plugins installed with OpenClaw are then checked when DefenseClaw finds them in the OpenClaw folders, not before OpenClaw installs them. A blocked one is quarantined, as for any other agent.
 
 ## Subprocess policy
 

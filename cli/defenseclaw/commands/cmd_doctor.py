@@ -13222,6 +13222,7 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
             else:
                 _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
         from defenseclaw.openclaw_plugin_config import (
+            openclaw_install_policy_remediation,
             openclaw_install_policy_state,
             openclaw_install_policy_wanted,
             openclaw_operator_admin_off,
@@ -13246,12 +13247,7 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
                 "OpenClaw install admission",
                 "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
                 + (" (another security.installPolicy is configured)" if policy_state == "operator" else ""),
-                remediation=(
-                    "remove your own security.installPolicy from openclaw.json, then run `defenseclaw setup openclaw`"
-                    if policy_state == "operator"
-                    else "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
-                    "the setup output names the reason"
-                ),
+                remediation=openclaw_install_policy_remediation(policy_state),
                 r=r,
             )
         if hook_mode == "native" and connectors == ["openclaw"]:

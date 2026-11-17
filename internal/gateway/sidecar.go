@@ -2544,6 +2544,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// Route-only is hot (DESIGN 16.11): re-render the agent config of every
 	// connector whose route-only rendering changed.
 	s.applyRouteOnlyRenders(oldCfg, appliedCfg)
+	// A rule pack switched to or from strict turns the OpenClaw install
+	// admission on or off (install_policy auto). It runs off the reload
+	// path: it takes the openclaw.json lock that setup holds.
+	if openClawInstallPolicyNeedsRefresh(oldHookCfg, appliedCfg) {
+		go s.refreshOpenClawInstallPolicy(oldHookCfg, appliedCfg)
+	}
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills, plugins and MCP servers affected by a list
 		// change are readmitted now, without waiting for content drift
@@ -7290,7 +7296,9 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 				}
 			}
 		} else if applied.conn != nil {
-			if err := applied.conn.Teardown(ctx, applied.opts); err != nil {
+			opts := applied.opts
+			opts.SetupRollback = true
+			if err := applied.conn.Teardown(ctx, opts); err != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("connector %s teardown: %w", name, err))
 			}
 		}
@@ -9159,6 +9167,7 @@ func rollbackFailedConnectorSetup(conn connector.Connector, opts connector.Setup
 	// Per-user installs only: managed and Secure Client rollbacks keep the
 	// tombstone they have always written.
 	opts.FailedSetupFailClosed = !opts.ManagedEnterprise && connector.HookFailClosed(opts, conn)
+	opts.SetupRollback = true
 	var rollbackErrors []error
 	if err := conn.Teardown(ctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s: %v\n", conn.Name(), err)

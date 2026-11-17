@@ -195,6 +195,29 @@ def openclaw_install_policy_state(cfg: object) -> str:
     return "ours" if args[-3:] == ["connector", "openclaw", "install-policy"] else "operator"
 
 
+def openclaw_install_policy_remediation(policy_state: str, platform: str | None = None) -> str:
+    # What doctor says when install_policy is on but OpenClaw does not ask
+    # DefenseClaw. The gateway runs setup, so the reason is in gateway.log.
+    # On Windows OpenClaw refuses every command below a drive root standard
+    # users can create folders in, the default for C:\ (GAP-1139), and
+    # setup then leaves the command out.
+    import sys
+
+    if policy_state == "operator":
+        return "remove your own security.installPolicy from openclaw.json, then run `defenseclaw setup openclaw`"
+    text = (
+        "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
+        "gateway.log names the reason (install admission is not registered: ...)"
+    )
+    if (platform or sys.platform) == "win32":
+        text += (
+            ". On Windows OpenClaw refuses the command while a folder above it, such as the drive root C:\\, "
+            "lets standard users create folders (the Windows default), so installed skills and plugins are "
+            "checked when DefenseClaw finds them, not before OpenClaw installs them"
+        )
+    return text
+
+
 def _openclaw_connector_block() -> dict:
     # connectors.openclaw in config.yaml, or {} when it cannot be read.
     from defenseclaw.config import config_path

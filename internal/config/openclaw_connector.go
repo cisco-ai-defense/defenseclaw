@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -203,8 +204,27 @@ var openClawGOOS = runtime.GOOS
 
 var openClawAccountPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$`)
 
-// ValidateOpenClawConnector checks connectors.openclaw.
+// openClawSettingPath finds the connectors.openclaw setting a refusal names.
+var openClawSettingPath = lazyregexp.New(`\bconnectors\.openclaw\.[a-z_]+`)
+
+// ValidateOpenClawConnector checks connectors.openclaw. A refusal is a
+// SettingError at the setting its text names, so config set, config
+// validate and Windows Setup show the rule (for example that the
+// separate-user layout is Linux and macOS only) instead of "configuration
+// could not be compiled safely" at "$" (GAP-1140).
 func (c *Config) ValidateOpenClawConnector() error {
+	err := c.validateOpenClawConnector()
+	if err == nil {
+		return nil
+	}
+	path := openClawSettingPath.FindString(err.Error())
+	if path == "" {
+		path = "connectors.openclaw"
+	}
+	return settingErrorAt(path, err)
+}
+
+func (c *Config) validateOpenClawConnector() error {
 	if c == nil {
 		return nil
 	}

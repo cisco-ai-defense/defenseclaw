@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from defenseclaw.openclaw_plugin_config import (
     configured_openclaw_hook_mode,
     openclaw_hook_mode_detail,
+    openclaw_install_policy_remediation,
     openclaw_install_policy_state,
 )
 
@@ -179,3 +180,20 @@ class OpenClawPluginEvidenceEdgeTest(OpenClawPluginEvidenceTest):
         self.assertIn("started 5 s ago", detail)
         naive = {"openclaw_plugin": {"last_seen_at": datetime.utcnow().replace(microsecond=0).isoformat()}}
         self.assertEqual(self._evidence(naive)[0], "hybrid")
+
+
+class OpenClawInstallPolicyRemediationTest(unittest.TestCase):
+    # GAP-1139: the reason is in gateway.log (the gateway runs setup), and on
+    # Windows doctor names the drive-root ACL that makes OpenClaw refuse the
+    # command.
+    def test_names_gateway_log_and_the_windows_drive_root(self):
+        linux = openclaw_install_policy_remediation("none", "linux")
+        self.assertIn("gateway.log", linux)
+        self.assertNotIn("setup output", linux)
+        self.assertNotIn("drive root", linux)
+        windows = openclaw_install_policy_remediation("none", "win32")
+        self.assertIn("drive root", windows)
+        self.assertIn("C:\\", windows)
+
+    def test_operator_policy(self):
+        self.assertIn("remove your own security.installPolicy", openclaw_install_policy_remediation("operator", "win32"))
