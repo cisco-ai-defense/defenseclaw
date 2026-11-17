@@ -523,7 +523,8 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, _ := substrateCallerFrom(r.Context())
 		f := registry.Filter{OwnerID: ownerOf(c.person).ID(), BatchID: r.URL.Query().Get("batch")}
-		if c.admin && r.URL.Query().Get("all") == "1" {
+		everyone := c.admin && r.URL.Query().Get("all") == "1"
+		if everyone {
 			f.OwnerID = ""
 		}
 		regs, err := st.cfg.Registrations.List(r.Context(), f)
@@ -542,7 +543,14 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 			}
 			out = append(out, v)
 		}
-		writeSubstrateJSON(w, http.StatusOK, map[string]any{"actors": out})
+		resp := map[string]any{"actors": out}
+		if everyone {
+			// The answer is every person's agents: a person's all=1 is
+			// narrowed to their own, and verify and status --cluster count
+			// policy_conflict only over the cluster's (GAP-0398).
+			resp["all"] = true
+		}
+		writeSubstrateJSON(w, http.StatusOK, resp)
 	}
 }
 

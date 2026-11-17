@@ -48,13 +48,17 @@
       },
       "description": "The signed policy bundles in force, one per stage (from 1.0.10); left out when substrate.bundles is off. The bundle_state check fails when one no longer verifies."
     },
+    "policy_conflicts": {
+      "$ref": "#/$defs/policy_conflicts",
+      "description": "The agents in policy_conflict per atespace (from 1.0.10). The policy_conflict check fails while one is there, and warns when they could not be counted."
+    },
     "checks": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 11,
-      "maxItems": 11
+      "minItems": 12,
+      "maxItems": 12
     }
   },
   "$defs": {
@@ -209,6 +213,11 @@
         },
         "states": {
           "$ref": "#/$defs/actorStates"
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Its agents in policy_conflict (from 1.0.10); absent when they were not counted (policy_conflicts.reason says why)."
         }
       }
     },
@@ -249,7 +258,8 @@
             "callout_registered",
             "ingress_clients",
             "actor_service_routes",
-            "api_access_label"
+            "api_access_label",
+            "policy_conflict"
           ]
         },
         "status": {
@@ -343,6 +353,56 @@
           "type": "string",
           "pattern": "^[a-z_]+$",
           "description": "The bundle error code when state is unverified."
+        }
+      }
+    },
+    "policy_conflicts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "description": "The agents in policy_conflict (GAP-0398): after repeated foreign changes to an agent's network policy the controller keeps it on the DefenseClaw rule only (deny-only) until an administrator resets it. Read with the administrator's DefenseClaw sign-in (every person's agents); without one the count is unknown: read is false, reason says why, agents is null and atespaces is empty, never a 0.",
+      "properties": {
+        "read": {
+          "type": "boolean",
+          "description": "Every person's agents were listed and counted."
+        },
+        "reason": {
+          "enum": [
+            "no_sign_in",
+            "signed_out",
+            "not_administrator",
+            "unreachable",
+            "not_read"
+          ],
+          "description": "Why they were not counted (absent when read): no_sign_in no DefenseClaw context here; signed_out the sign-in expired or was refused; not_administrator the cluster listed only the caller's own agents; unreachable the admin listener did not answer; not_read this command does not count them."
+        },
+        "agents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Every agent in policy_conflict; null (not forwarded) when not counted."
+        },
+        "atespaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/atespace_conflicts"
+          },
+          "description": "Every launcher and managed atespace, and every other one with an agent in policy_conflict, sorted by name; empty when not counted."
+        }
+      }
+    },
+    "atespace_conflicts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "atespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Its agents in policy_conflict."
         }
       }
     }

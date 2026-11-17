@@ -253,8 +253,10 @@ With a name, shows that agent: where it runs, which profile guards it and its ba
 With --batch, shows every agent of a batch run.
 
 For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and callout,
-the agents and templates in the cluster (agents by state, also per launcher and managed atespace) and the setup
-checks. It reads the cluster with kubectl (give --install-file).
+the agents and templates in the cluster (agents by state, also per launcher and managed atespace), the agents
+in policy_conflict per atespace and the setup checks. It reads the cluster with kubectl (give --install-file),
+and the agents in policy_conflict with your DefenseClaw sign-in (sign in as an administrator, or the count is
+unknown).
 Exit 75 means the cluster could not be reached; there is no document.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -262,7 +264,7 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if len(args) > 0 || batch != "" {
 					return cliusage.WithExitCode(errors.New("--cluster shows the whole cluster; leave the name and --batch out"), 2)
 				}
-				return runSubstrateFleet(cmd, "status", &out, &cf)
+				return runSubstrateFleet(cmd, "status", &out, &cf, com)
 			}
 			asJSON, err := out.wantJSON()
 			if err != nil {

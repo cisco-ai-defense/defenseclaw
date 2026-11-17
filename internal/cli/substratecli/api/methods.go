@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -170,6 +171,30 @@ func (c *Client) Create(ctx context.Context, r CreateRequest) (Actor, error) {
 
 // List returns the person's actors.
 func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
+	actors, _, err := c.list(ctx, o)
+	return actors, err
+}
+
+// ErrNotAdministrator is ListEveryone's answer when the cluster listed only
+// the caller's own agents: it gives every person's only to an administrator.
+var ErrNotAdministrator = errors.New("the cluster lists only your own agents: you are not signed in as an administrator")
+
+// ListEveryone returns every person's actors, or ErrNotAdministrator. The
+// gateway narrows all=1 to the caller's own agents for a person and says
+// "all": true only when it did not, so a count over the answer is the
+// cluster's and not the caller's (GAP-0398).
+func (c *Client) ListEveryone(ctx context.Context) ([]Actor, error) {
+	actors, all, err := c.list(ctx, ListOptions{All: true})
+	if err != nil {
+		return nil, err
+	}
+	if !all {
+		return nil, ErrNotAdministrator
+	}
+	return actors, nil
+}
+
+func (c *Client) list(ctx context.Context, o ListOptions) ([]Actor, bool, error) {
 	q := url.Values{}
 	if o.Batch != "" {
 		q.Set("batch", o.Batch)
@@ -179,14 +204,15 @@ func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
 	}
 	var out struct {
 		Actors []Actor `json:"actors"`
+		All    bool    `json:"all"`
 	}
 	if err := c.do(ctx, http.MethodGet, "actors", q, nil, &out); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for i := range out.Actors {
 		out.Actors[i] = out.Actors[i].shown()
 	}
-	return out.Actors, nil
+	return out.Actors, out.All, nil
 }
 
 // Get returns one actor.

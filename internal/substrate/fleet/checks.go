@@ -41,7 +41,7 @@ const (
 
 // CheckIDs lists every check in the order doctor prints them.
 var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckBundles,
-	CheckCallout, CheckIngressClients, CheckActorRoutes, CheckAPIAccess}
+	CheckCallout, CheckIngressClients, CheckActorRoutes, CheckAPIAccess, CheckPolicyConflicts}
 
 // Check is one result. Message is for the admin (kept on the cluster);
 // EdgeCase names the plan edge case it guards, when there is one.
@@ -166,6 +166,11 @@ type Observed struct {
 	// Bundles is the signed policy bundle state; nil when substrate.bundles
 	// is off (GAP-0429, GAP-0432).
 	Bundles *Bundles
+
+	// Conflicts are the agents in policy_conflict, read with the
+	// administrator's DefenseClaw sign-in (GAP-0398); nil or a Reason when
+	// they were not counted.
+	Conflicts *Conflicts
 }
 
 // DefaultIssuer is Substrate's actor JWT issuer when actorJWT.issuer is unset.
@@ -195,6 +200,7 @@ func RunChecks(o Observed) []Check {
 	return []Check{
 		CheckVersion(o), CheckIssuerUnique(o), CheckActorKeysVerify(o), CheckSignInServerReach(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
 		CheckBundleState(o), CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
+		CheckPolicyConflict(o),
 	}
 }
 

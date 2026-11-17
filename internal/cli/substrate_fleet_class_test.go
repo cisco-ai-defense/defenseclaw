@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 )
 
@@ -53,7 +54,7 @@ var observedMayBeZero = map[string]string{
 func TestEveryCheckedObservedMemberHasAProducer(t *testing.T) {
 	fakeKubectl(t, nil)
 	f := &substrateClusterFlags{installFile: writeInstall(t, fleetInstallOK), namespace: "defenseclaw-system",
-		substrateNS: "ate-system", timeout: 10 * time.Second}
+		substrateNS: "ate-system", timeout: 10 * time.Second, everyone: fleetEveryoneWithAConflict}
 	collected, _, err := collectFleet(context.Background(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -115,8 +116,16 @@ func sampleValue(t reflect.Type) reflect.Value {
 // every element of a list) that the collector rightly leaves zero on a
 // healthy cluster: a zero is a reading there, not a missing one.
 var statusMayBeZero = map[string]string{
-	"Cluster.IssuerDefault": "the cluster has its own issuer, so it is not the default one",
-	"Bundles":               "substrate.bundles is off in the fake cluster's config: no bundles member",
+	"Cluster.IssuerDefault":  "the cluster has its own issuer, so it is not the default one",
+	"Bundles":                "substrate.bundles is off in the fake cluster's config: no bundles member",
+	"PolicyConflicts.Reason": "the agents in policy_conflict were counted: no reason why not",
+}
+
+// fleetEveryoneWithAConflict is every person's agents as an administrator's
+// sign-in lists them: one in policy_conflict (GAP-0398).
+func fleetEveryoneWithAConflict(context.Context) ([]api.Actor, error) {
+	return []api.Actor{{Atespace: "eng-web", Name: "j24a", PolicyConflict: &api.PolicyConflict{Reverts: 3}},
+		{Atespace: "eng-web", Name: "calm-1"}}, nil
 }
 
 // TestEveryPrintedStatusMemberHasAProducer is the class test of GAP-0216: a
@@ -131,7 +140,8 @@ func TestEveryPrintedStatusMemberHasAProducer(t *testing.T) {
 	appVersion = "1.0.10" // a release build sets it
 	t.Cleanup(func() { appVersion = oldVersion })
 	f := &substrateClusterFlags{installFile: writeInstall(t, fleetInstallOK), namespace: "defenseclaw-system",
-		substrateNS: "ate-system", timeout: 10 * time.Second, managedAtespaces: []string{"data-team"}}
+		substrateNS: "ate-system", timeout: 10 * time.Second, managedAtespaces: []string{"data-team"},
+		everyone: fleetEveryoneWithAConflict}
 	o, r, err := collectFleet(context.Background(), f)
 	if err != nil {
 		t.Fatal(err)

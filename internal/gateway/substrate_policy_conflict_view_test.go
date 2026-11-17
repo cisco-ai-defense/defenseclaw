@@ -131,3 +131,31 @@ func TestSubstratePolicyConflictIsShown(t *testing.T) {
 		t.Fatalf("bob-1 explain egress = %v", ex["egress"])
 	}
 }
+
+// GAP-0398: the list says "all": true only when it is every person's agents
+// (an administrator's all=1). A person's all=1 is narrowed to their own, so
+// verify and status --cluster can tell the cluster's count from a person's.
+func TestSubstrateListSaysWhenItIsEveryones(t *testing.T) {
+	f := newSubstrateFixture(t)
+	for _, c := range []struct {
+		tok, query string
+		all        bool
+	}{
+		{"p-admin", "?all=1", true},
+		{"p-admin", "", false},
+		{"p-alice", "?all=1", false},
+		{"p-alice", "", false},
+	} {
+		rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors"+c.query, c.tok, "")
+		var out map[string]any
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s %q: %d %s", c.tok, c.query, rec.Code, rec.Body)
+		}
+		if got, _ := out["all"].(bool); got != c.all {
+			t.Errorf("%s %q: all = %v, want %v (%s)", c.tok, c.query, out["all"], c.all, rec.Body)
+		}
+		if _, has := out["all"]; has != c.all {
+			t.Errorf("%s %q: the all member is there = %v, want %v", c.tok, c.query, has, c.all)
+		}
+	}
+}

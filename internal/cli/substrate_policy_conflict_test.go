@@ -102,7 +102,7 @@ func TestSubstrateListAndStatusShowPolicyConflict(t *testing.T) {
 // number of foreign changes and the reset; without --cluster it warns.
 func TestSubstrateDoctorNamesPolicyConflict(t *testing.T) {
 	f := newSubAdminFake(t)
-	f.actorsBody = `{"actors":[{"atespace":"a1","name":"n1","state":"running",` +
+	f.actorsBody = `{"all":true,"actors":[{"atespace":"a1","name":"n1","state":"running",` +
 		`"policy_conflict":{"since":"2026-11-17T15:40:00Z","reverts":3,"fix":"defenseclaw substrate policy reset a1/n1"}}]}`
 	c := f.context()
 	subAdminSeams(t, func() (*substrateSession, error) { return f.session(t, c), nil }, nil)

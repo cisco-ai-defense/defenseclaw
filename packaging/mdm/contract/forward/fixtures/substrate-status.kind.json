@@ -43,7 +43,8 @@
       "states": {
         "running": 1,
         "suspended": 2
-      }
+      },
+      "conflicts": 0
     }
   ],
   "inventory": {
@@ -54,6 +55,16 @@
       "crashed": 1
     },
     "templates": 2
+  },
+  "policy_conflicts": {
+    "read": true,
+    "agents": 0,
+    "atespaces": [
+      {
+        "atespace": "eng-web",
+        "conflicts": 0
+      }
+    ]
   },
   "checks": [
     {
@@ -111,6 +122,11 @@
       "id": "api_access_label",
       "status": "pass",
       "message": "ok"
+    },
+    {
+      "id": "policy_conflict",
+      "status": "pass",
+      "message": "no agent is in policy_conflict"
     }
   ]
 }

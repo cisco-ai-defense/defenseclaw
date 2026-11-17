@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -244,7 +245,20 @@ func printSubstrateDoctor(w io.Writer, rep substrateDoctorReport) {
 // when the agents could not be read: the sign_in row already says why.
 func doctorPolicyConflicts(ctx context.Context, s *substrateSession, cluster bool) (substrateCheck, bool) {
 	const id = "policy_conflict"
-	actors, err := s.Client.List(ctx, api.ListOptions{All: cluster})
+	// The gateway narrows a person's all=1 to their own agents: only an
+	// answer that says it is everyone's is counted as the cluster's.
+	notAdmin := false
+	var actors []api.Actor
+	var err error
+	if cluster {
+		actors, err = s.Client.ListEveryone(ctx)
+		if errors.Is(err, api.ErrNotAdministrator) {
+			notAdmin, cluster = true, false
+			actors, err = s.Client.List(ctx, api.ListOptions{})
+		}
+	} else {
+		actors, err = s.Client.List(ctx, api.ListOptions{})
+	}
 	if err != nil {
 		return substrateCheck{}, false
 	}
@@ -262,15 +276,23 @@ func doctorPolicyConflicts(ctx context.Context, s *substrateSession, cluster boo
 		whose = "in the cluster"
 	}
 	if len(names) == 0 {
+		if notAdmin {
+			return substrateCheck{ID: id, Status: doctorWarn, Summary: "no agent of yours is in policy_conflict; the cluster's " +
+				"agents were not read: you are not signed in as an administrator",
+				Fix: "sign in as an administrator (defenseclaw substrate login) and run doctor --cluster again"}, true
+		}
 		return substrateCheck{ID: id, Status: doctorOK, Summary: "no agent " + whose + " is in policy_conflict"}, true
 	}
 	status := doctorWarn
 	if cluster {
 		status = doctorFail
 	}
-	return substrateCheck{ID: id, Status: status,
-		Summary: fmt.Sprintf("%d agent(s) %s in policy_conflict, so they reach only DefenseClaw: %s", len(names), whose, strings.Join(names, "; ")),
-		Fix:     "stop whatever else writes the agent's egress policy, then an administrator runs: " + strings.Join(fixes, "; ")}, true
+	summary := fmt.Sprintf("%d agent(s) %s in policy_conflict, so they reach only DefenseClaw: %s", len(names), whose, strings.Join(names, "; "))
+	if notAdmin {
+		summary += "; the cluster's agents were not read: you are not signed in as an administrator"
+	}
+	return substrateCheck{ID: id, Status: status, Summary: summary,
+		Fix: "stop whatever else writes the agent's egress policy, then an administrator runs: " + strings.Join(fixes, "; ")}, true
 }
 
 // doctorCluster runs the checks that need the cluster and the context.
@@ -448,7 +470,11 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags) []substrat
 	if err != nil {
 		return []substrateCheck{{ID: "cluster", Status: doctorFail, Summary: doctorFirstLine(err), Fix: "check your kubectl access and the --install-file path, then run doctor again"}}
 	}
-	return doctorConvertFleet(fleet.BuildVerify(o, r.ProductVersion, r.Now).Checks)
+	// The policy_conflict row is doctor's own (doctorPolicyConflicts), read
+	// with the same sign-in: the fleet check would only say "not read".
+	checks := fleet.BuildVerify(o, r.ProductVersion, r.Now).Checks
+	checks = slices.DeleteFunc(checks, func(c fleet.Check) bool { return c.ID == fleet.CheckPolicyConflicts })
+	return doctorConvertFleet(checks)
 }
 
 func fleetCheckFix(id string) string {
