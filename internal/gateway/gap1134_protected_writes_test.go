@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -38,6 +39,18 @@ import (
 // state, was placed nowhere and allowed. The call keeps the cwd it had, and
 // the state-write proof also runs on the call placed in the hook client's
 // folder (managedLinkWalkView), so these rows block.
+// gap1134PwshForms are the pwsh launcher writes of GAP-1134; %s is the
+// target, spelled as the row's spelling says. GAP-1214 runs the script of
+// each as a PowerShell tool call (gap1214ToolBody).
+var gap1134PwshForms = []struct{ id, text string }{
+	{"Add-Content", `pwsh -NoProfile -Command "Add-Content -Path %s -Value zz"`},
+	{"Set-Content", `pwsh -NoProfile -Command "Set-Content -Path %s -Value zz"`},
+	{"New-Item -Value", `pwsh -NoProfile -Command "New-Item -Path %s -ItemType File -Value zz -Force"`},
+	{"WriteAllText", `pwsh -NoProfile -Command "[IO.File]::WriteAllText('%s', 'zz')"`},
+	{"AppendAllText", `pwsh -NoProfile -Command "[System.IO.File]::AppendAllText('%s', 'zz')"`},
+	{"StreamWriter", `pwsh -NoProfile -Command '$w = [System.IO.StreamWriter]::new("%s", $true); $w.WriteLine("zz"); $w.Close()'`},
+}
+
 func TestGAP1134ProtectedWritesManagedAndPerUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Linux and macOS pwsh launcher reading; Windows reads the call in PowerShell (GAP-1115)")
@@ -76,16 +89,7 @@ func TestGAP1134ProtectedWritesManagedAndPerUser(t *testing.T) {
 	if err := os.Symlink(filepath.Join(home, ".defenseclaw", "config.yaml"), filepath.Join(project, "link-state")); err != nil {
 		t.Fatal(err)
 	}
-	// %s is the target, spelled as the row's spelling says.
-	forms := []struct{ id, text string }{
-		{"Add-Content", `pwsh -NoProfile -Command "Add-Content -Path %s -Value zz"`},
-		{"Set-Content", `pwsh -NoProfile -Command "Set-Content -Path %s -Value zz"`},
-		{"New-Item -Value", `pwsh -NoProfile -Command "New-Item -Path %s -ItemType File -Value zz -Force"`},
-		{"WriteAllText", `pwsh -NoProfile -Command "[IO.File]::WriteAllText('%s', 'zz')"`},
-		{"AppendAllText", `pwsh -NoProfile -Command "[System.IO.File]::AppendAllText('%s', 'zz')"`},
-		{"StreamWriter", `pwsh -NoProfile -Command '$w = [System.IO.StreamWriter]::new("%s", $true); $w.WriteLine("zz"); $w.Close()'`},
-		{"python open", `python3 -c "open('%s','a').write('zz')"`},
-	}
+	forms := append(slices.Clone(gap1134PwshForms), struct{ id, text string }{"python open", `python3 -c "open('%s','a').write('zz')"`})
 	spellings := map[string][]string{
 		"Add-Content":     {"$HOME", "~", "abs"},
 		"Set-Content":     {"$HOME", "~", "abs"},

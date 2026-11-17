@@ -256,14 +256,15 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 			(dialect == DialectPowerShell || dialect == DialectCMD) {
 			// The same for $HOME, ~ and %USERPROFILE% under a Windows
 			// ActiveHome (GAP-0912), and for PowerShell's $HOME and ~ in a
-			// launcher body under a Linux or macOS one (rel-1-0-10:GAP-1134,
-			// Input.PowerShellLauncherBody). A program
+			// script pwsh runs under a Linux or macOS one: a launcher body
+			// (rel-1-0-10:GAP-1134) or the command of a PowerShell tool
+			// (rel-1-0-10:GAP-1214), posixPowerShellScript. A program
 			// with no operand grammar stays partial the same way after the
 			// rewrite (type nul > %USERPROFILE%\f), so its static redirect
 			// targets keep their path facts, as for the POSIX home
 			// (GAP-2225, GAP-2408).
 			home, _ := normalizeActiveHome(input.ActiveHome)
-			if rewrite, ok := rewriteTrustedShellHome(command, home, dialect, input.PowerShellLauncherBody); ok {
+			if rewrite, ok := rewriteTrustedShellHome(command, home, dialect, posixPowerShellScript(input)); ok {
 				// As for a POSIX home, a rewrite that only narrows the issues
 				// is kept: a redirect to a home path in a command list the
 				// classifier reads only in part (type a.txt & type nul >

@@ -21,7 +21,10 @@ import (
 // DefenseClaw state folder) gets the evaluation-limit finding the profile
 // decides, as it does when a managed hook client reports the same bound: it
 // alerts in default and blocks in strict (rel-1-0-6:GAP-0534). An ordinary
-// call allows in both profiles.
+// call allows in both profiles. Claude Code runs the call in its PowerShell
+// tool, whose ~ names the home on Linux and macOS: the removal statement is
+// then proven as the state folder written out is, and blocks in default too
+// (rel-1-0-10:GAP-1214); Codex runs it as a shell command.
 func TestRecoveredParseHookCallIsGradedWithoutClientEvidence(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX home reading; the Windows reader parses the whole call")
@@ -69,8 +72,12 @@ func TestRecoveredParseHookCallIsGradedWithoutClientEvidence(t *testing.T) {
 				if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 					t.Fatalf("status %d answer %.300s: %v", recorder.Code, recorder.Body.String(), err)
 				}
-				if answer.Action != row.want {
-					t.Fatalf("action = %q (raw %q), want %q; findings %v", answer.Action, answer.RawAction, row.want, answer.Findings)
+				want := row.want
+				if connector == "claudecode" && row.name == "state folder/default" {
+					want = guardrailActionBlock
+				}
+				if answer.Action != want {
+					t.Fatalf("action = %q (raw %q), want %q; findings %v", answer.Action, answer.RawAction, want, answer.Findings)
 				}
 			})
 		}
