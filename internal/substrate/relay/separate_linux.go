@@ -6,6 +6,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -207,15 +208,39 @@ func hasCaps(caps ...int) bool {
 	return true
 }
 
-// openPTMX opens a new pseudo-terminal master. For a separated relay it is
-// opened with the agent's file-system identity: devpts makes the new
+// openPTY opens a new pseudo-terminal and returns its master and slave
+// sides, both unlocked and open. For a separated relay both are opened with
+// the agent's file-system identity (GAP-0458): devpts makes the new
 // terminal the opener's, so the agent owns the terminal it runs on, as
-// after a login, without CAP_CHOWN (GAP-0458).
-func openPTMX(cred *syscall.Credential) (*os.File, error) {
-	var f *os.File
-	var err error
-	if !withFSCred(cred, func() { f, err = os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0) }) {
-		f, err = os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+// after a login, without CAP_CHOWN; and the relay, which keeps no
+// DAC_OVERRIDE, could not open the agent's 0620 terminal as itself.
+func openPTY(cred *syscall.Credential) (master, slave *os.File, err error) {
+	open := func() {
+		master, err = os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+		if err != nil {
+			err = fmt.Errorf("open pty: %w", err)
+			return
+		}
+		fd := int(master.Fd())
+		if err = unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
+			master.Close()
+			err = fmt.Errorf("unlock pty: %w", err)
+			return
+		}
+		n, gerr := unix.IoctlGetInt(fd, unix.TIOCGPTN)
+		if gerr != nil {
+			master.Close()
+			err = fmt.Errorf("pty number: %w", gerr)
+			return
+		}
+		slave, err = os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|syscall.O_NOCTTY, 0)
+		if err != nil {
+			master.Close()
+			err = fmt.Errorf("open pty slave: %w", err)
+		}
 	}
-	return f, err
+	if !withFSCred(cred, open) {
+		return nil, nil, errors.New("open pty: cannot take the agent's file-system identity")
+	}
+	return master, slave, err
 }

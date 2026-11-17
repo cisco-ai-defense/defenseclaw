@@ -268,9 +268,12 @@ func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 	if resp, b := do("PUT", "/dcrelay/1/files?dir="+work, &buf, nil); resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("files-put: %d %s", resp.StatusCode, b)
 	}
+	// Looked at as the agent: the relay itself may not enter its 0700 folder.
 	var st syscall.Stat_t
-	if err := syscall.Stat(filepath.Join(work, "a.txt"), &st); err != nil || st.Uid != 65534 {
-		t.Fatalf("files-put: owned by %d (%v)", st.Uid, err)
+	var serr error
+	withFSCred(sp.cred, func() { serr = syscall.Stat(filepath.Join(work, "a.txt"), &st) })
+	if serr != nil || st.Uid != 65534 {
+		t.Fatalf("files-put: owned by %d (%v)", st.Uid, serr)
 	}
 	if resp, b := do("GET", "/dcrelay/1/files?path="+filepath.Join(work, "a.txt"), nil, nil); resp.StatusCode != http.StatusOK || !bytes.Contains(b, []byte("hi")) {
 		t.Fatalf("files-get: %d %q", resp.StatusCode, b)
@@ -298,7 +301,8 @@ func TestSeparatedRelayKeepsOnlyItsCapabilities(t *testing.T) {
 		if dec.Decode(&ev) != nil {
 			break
 		}
-		text.WriteString(ev.Data)
+		// One event per output line, without its newline.
+		text.WriteString(ev.Data + "\n")
 	}
 	resp.Body.Close()
 	if !strings.Contains(text.String(), "prompt:go") {

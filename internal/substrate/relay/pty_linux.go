@@ -6,7 +6,6 @@
 package relay
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -21,24 +20,9 @@ func startPTY(cmd *exec.Cmd, cols, rows uint16) (*os.File, error) {
 	if cmd.SysProcAttr != nil {
 		cred = cmd.SysProcAttr.Credential
 	}
-	master, err := openPTMX(cred)
+	master, slave, err := openPTY(cred)
 	if err != nil {
-		return nil, fmt.Errorf("open pty: %w", err)
-	}
-	fd := int(master.Fd())
-	if err := unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
-		master.Close()
-		return nil, fmt.Errorf("unlock pty: %w", err)
-	}
-	n, err := unix.IoctlGetInt(fd, unix.TIOCGPTN)
-	if err != nil {
-		master.Close()
-		return nil, fmt.Errorf("pty number: %w", err)
-	}
-	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		master.Close()
-		return nil, fmt.Errorf("open pty slave: %w", err)
+		return nil, err
 	}
 	defer slave.Close()
 	if err := setSize(master, cols, rows); err != nil {
