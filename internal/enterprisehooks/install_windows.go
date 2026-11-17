@@ -441,7 +441,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		conn.Name(),
 		targetSID,
 		dataDir,
-		hookExecutable,
+		windowsPriorReleaseTargetHookImage(opts, conn.Name(), targetSID, hookExecutable),
 		setupOpts.APIAddr,
 		setupOpts.HookAPIToken,
 		lock.ContractID,
@@ -472,9 +472,24 @@ type windowsGenericManagedTarget struct {
 	home           string
 	dataDir        string
 	hookExecutable string
-	sid            *windows.SID
-	conn           connector.Connector
-	setup          connector.SetupOpts
+	// runtimeHookExecutable is the hook image the target records (its
+	// runtime generation, enrollment and agent configs) are checked
+	// against: hookExecutable, or in a verification that accepts an earlier
+	// release render the earlier image they name
+	// (windowsPriorReleaseTargetHookImage, GAP-1096).
+	runtimeHookExecutable string
+	sid                   *windows.SID
+	conn                  connector.Connector
+	setup                 connector.SetupOpts
+}
+
+// recordsHookExecutable is runtimeHookExecutable, or hookExecutable for a
+// target built without it.
+func (t windowsGenericManagedTarget) recordsHookExecutable() string {
+	if t.runtimeHookExecutable != "" {
+		return t.runtimeHookExecutable
+	}
+	return t.hookExecutable
 }
 
 func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericManagedTarget, error) {
@@ -601,13 +616,20 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if err := applyWindowsStandalonePluginOptions(name, &setup); err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
+	runtimeHookExecutable := windowsPriorReleaseTargetHookImage(opts, name, targetSID, hookExecutable)
+	if runtimeHookExecutable != hookExecutable {
+		// The read-only check of an earlier release render compares the
+		// account agent configs with the render for the image they name.
+		setup.HookExecutable = runtimeHookExecutable
+	}
 	return windowsGenericManagedTarget{
-		home:           home,
-		dataDir:        dataDir,
-		hookExecutable: hookExecutable,
-		sid:            targetSID,
-		conn:           conn,
-		setup:          setup,
+		home:                  home,
+		dataDir:               dataDir,
+		hookExecutable:        hookExecutable,
+		runtimeHookExecutable: runtimeHookExecutable,
+		sid:                   targetSID,
+		conn:                  conn,
+		setup:                 setup,
 	}, nil
 }
 
