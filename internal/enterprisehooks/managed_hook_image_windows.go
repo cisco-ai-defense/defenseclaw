@@ -6,7 +6,14 @@
 
 package enterprisehooks
 
-import "github.com/defenseclaw/defenseclaw/internal/winpath"
+import (
+	"os"
+	"strings"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+)
 
 // sameWindowsManagedHookImage reports that a recorded hook executable and a
 // hook executable name the same managed hook (GAP-0751): the same file, or
@@ -31,4 +38,45 @@ func sameWindowsManagedHookImageExact(recorded, hook string) bool {
 		return sameWindowsEnterprisePath(recorded, hook)
 	}
 	return winpath.SameEnterpriseHookImageFamilyExact(recorded, hook)
+}
+
+// windowsPriorReleaseTargetHookImage is the hook image a read-only
+// verification that accepts an earlier release render
+// (InstallOptions.AcceptPriorReleaseRender) checks the records of one target
+// against: its runtime selector entry, its runtime bundle, the per-user
+// enrollment and its own agent configs. That is the image the protected
+// runtime selector records for the SID when it is another image of this
+// install (sameWindowsManagedHookImageExact), is a regular file and passes
+// the hook trust check; otherwise, and in every other verification, it is
+// current. Releases up to 1.0.9 named the transition image
+// bin\defenseclaw-hook.exe, which Setup replaces in place with this release
+// hook, and the hook admits it (GAP-0751). An account with no active Windows
+// session through the upgrade keeps those records until the guardian rewrites
+// them in its own session, so the exact check against the launch image failed
+// it, and with it the upgrade, although this install hook still guards it
+// (GAP-1096). Machine-wide files (the Claude Code policy, the Codex
+// requirements) are still checked against current.
+func windowsPriorReleaseTargetHookImage(opts InstallOptions, connectorName string, targetSID *windows.SID, current string) string {
+	if !opts.AcceptPriorReleaseRender || targetSID == nil {
+		return current
+	}
+	selector, _, exists, err := readWindowsManagedRuntimeSelector(strings.ToLower(strings.TrimSpace(connectorName)), true)
+	if err != nil || !exists {
+		return current
+	}
+	entry, selected := windowsManagedRuntimeSelectorTargetForSID(selector, targetSID.String())
+	if !selected {
+		return current
+	}
+	recorded := entry.HookExecutable
+	if recorded == current || !sameWindowsManagedHookImageExact(recorded, current) {
+		return current
+	}
+	if info, err := os.Lstat(recorded); err != nil || !info.Mode().IsRegular() {
+		return current
+	}
+	if err := windowsEnterpriseHookTrustCheck(recorded); err != nil {
+		return current
+	}
+	return recorded
 }

@@ -381,7 +381,7 @@ func verifyWindowsCodexManagedResult(
 		"codex",
 		target.sid,
 		target.dataDir,
-		target.hookExecutable,
+		target.recordsHookExecutable(),
 		target.setup.APIAddr,
 		target.setup.HookAPIToken,
 		lock.ContractID,
