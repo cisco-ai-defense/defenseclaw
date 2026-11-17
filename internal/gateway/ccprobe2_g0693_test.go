@@ -3,7 +3,12 @@
 
 // s7-probe2 old-API probe for rel-1-0-10:GAP-0693: the rel hook-route tests of the fix,
 // copied with only the rel test helpers the pre-fix sha f17fb4ce5e lacks (renamed),
-// so the file compiles on the pre-fix tree and on rel. Scratch, test-only branch.
+// so the file compiles on the pre-fix tree and on rel. Round 2: the rel test holds
+// the fixture's rule only for a fixture of one statement (len(powerShellCapPieces)
+// == 1, a product helper new since the pre-fix sha); this copy uses
+// ccp2g0693SingleStatement instead (no line end and no ;), which picks the same
+// fixture of windowsAtomicParityPositives[2:4] (the UAC policy suppression; the
+// event viewer chain has two lines). Scratch, test-only branch.
 
 package gateway
 
@@ -114,7 +119,7 @@ func ccp2g0693_gap0693PaddingMatrix(t *testing.T, fillers []struct{ name, text s
 						// A fixture of more than one statement is a chain: its
 						// statements judged one by one prove less than the chain
 						// does, so only the verdict above is held for it.
-						if u.ruleID != "" && !gap0589HasRule(findings, u.ruleID) {
+						if u.ruleID != "" && ccp2g0693SingleStatement(u.command) && !gap0589HasRule(findings, u.ruleID) {
 							t.Errorf("%s/%s %s %s %s: the fixture's %s is missing: %v", tier.name, route.name, u.name, filler.name, layout, u.ruleID, findings)
 						}
 					}
@@ -130,4 +135,10 @@ func ccp2g0693_gap0693PaddingMatrix(t *testing.T, fillers []struct{ name, text s
 			}
 		}
 	}
+}
+
+// ccp2g0693SingleStatement reports a fixture of one statement: no line end
+// and no ; (the fixtures used here hold no string with either).
+func ccp2g0693SingleStatement(command string) bool {
+	return !strings.ContainsAny(command, "\n;")
 }
