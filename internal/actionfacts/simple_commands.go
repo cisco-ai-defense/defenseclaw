@@ -491,7 +491,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		// A body that names USER or LOGNAME is read with the values its
 		// caller hands over (inherited).
 		inheritsUser := inherited != nil && (strings.Contains(parts[0].text, "USER") || strings.Contains(parts[0].text, "LOGNAME"))
-		if !prefix && !duplication && !nested && !inheritsUser && !simpleRedirectDefaultExpansion(stmt) {
+		// A current-folder head ($PWD/, ${PWD}/, "$PWD"/, "$PWD/...") is the
+		// folder the call runs in: the walk writes it as that folder, as it
+		// does for $(pwd)/ (a statement of its own there), so cat "$PWD"/.env
+		// in a known folder reads the file cat .env reads
+		// (rel-1-0-10:GAP-0878).
+		folderHead := input.CWD != "" && strings.Contains(parts[0].text, "PWD")
+		if !prefix && !duplication && !nested && !inheritsUser && !folderHead && !simpleRedirectDefaultExpansion(stmt) {
 			return nil
 		}
 	}
