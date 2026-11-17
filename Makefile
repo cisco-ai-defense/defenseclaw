@@ -1227,10 +1227,11 @@ else ifneq ($(filter gateway-%,$(CONNECTOR_MATRIX_PART)),)
 		go test -json -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway -run "$$run" 2>&1 | \
 		$(HOST_PYTHON) scripts/go_test_report.py --annotate "connector matrix $(CONNECTOR_MATRIX_PART) failed" --expect-run "$$run"
 else
-	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector \
+	run="$$($(HOST_PYTHON) scripts/go_test_shards.py --package-dir internal/gateway/connector --built-files \
 		--match '$(CONNECTOR_MATRIX_RUN)' --timings scripts/test-timings/go-linux-connector-matrix.json \
 		--shard-count $(CONNECTOR_MATRIX_CONNECTOR_PARTS) --shard-index $(CONNECTOR_MATRIX_PART))" && \
-		go test -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run"
+		go test -json -count=1 -timeout $(GO_TEST_TIMEOUT) ./internal/gateway/connector -run "$$run" 2>&1 | \
+		$(HOST_PYTHON) scripts/go_test_report.py --annotate "connector matrix part $(CONNECTOR_MATRIX_PART) failed" --expect-run "$$run"
 endif
 
 py-connector-matrix-test: pycli

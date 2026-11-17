@@ -488,4 +488,12 @@ def test_connector_matrix_runs_the_gateway_matrix_tests_in_guarded_parts() -> No
     assert "./internal/gateway" not in packages
     assert "--package-dir internal/gateway --built-files" in makefile
     assert '--expect-run "$$run"' in makefile
+    # The connector parts carry the same run-count guard: a selected test
+    # that never ran (a name this GOOS does not build) failed nothing before
+    # (GAP-1054, the GAP-1051 class).
+    recipe = makefile.split("go-connector-matrix-test: sync-openclaw-extension", 1)[1].split("\nendif", 1)[0]
+    connector = recipe.split("\nelse\n")[-1]
+    assert "--package-dir internal/gateway/connector --built-files" in connector
+    assert "go test -json" in connector
+    assert '--expect-run "$$run"' in connector
     assert "go-connector-matrix-test: .SHELLFLAGS := -o pipefail -c" in makefile
