@@ -3137,7 +3137,10 @@
    "TestWriteThroughALinkToStateIsAStateWrite": 9.7,
    "TestWriteThroughANameFromAFolderBehindManyLinksIsJudgedByTheFileItReaches": 4.7,
    "TestWriteThroughCommandLinkToActiveStateBlocks": 9.3,
-   "TestXxdOutputOperandOfActiveState": 3.0
+   "TestXxdOutputOperandOfActiveState": 3.0,
+   "TestWindowsCodexLiveShapeDefenderMultiControlInOneCall": 7.8,
+   "TestWindowsCodexLiveShapePaddedHostSwitch": 12.9,
+   "TestWindowsCodexLiveShapeClaimedRules": 16.9
   },
   "internal/gateway/connector": {
    "*": 0.112,
