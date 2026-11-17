@@ -508,20 +508,19 @@ func applyWindowsEnterpriseHookImage(result *enterprisestatus.Result) {
 	image := windowsHookImageResolve(bin)
 	if image.State == winpath.EnterpriseHookImageRetired {
 		// An administrator retired the launch folders before a rollback to
-		// an older release: expected, and not a drift to repair.
-		result.AddWarning("hook_image_retired", image.Problem)
-		// A profile the administrator skipped (--skip-profile) stays
-		// listed until none of its configs names a launch folder. A file
-		// this account is denied but LocalSystem reads proves nothing
-		// either way (rel-1-0-10 GAP-0907).
-		if marker, err := os.ReadFile(filepath.Join(winpath.EnterpriseHookImagesRoot(bin), winpath.EnterpriseHookImagesRetiredMarker)); err == nil {
-			callerDenied := windowsHookImageAccessDenied
-			if windowsHookImageCallerIsSystem() {
-				callerDenied = nil
-			}
-			for _, issue := range windowsHookImageSkippedProfileIssues(marker, bin, readWindowsHookImageConfigFile, callerDenied) {
-				result.AddWarning(issue.Code, issue.Text)
-			}
+		// an older release: expected, and not a drift to repair; one whose
+		// last retire ended pending is reported as such (GAP-1158). A
+		// profile the administrator skipped (--skip-profile) stays listed
+		// until none of its configs names a launch folder; a file this
+		// account is denied but LocalSystem reads proves nothing either way
+		// (rel-1-0-10 GAP-0907).
+		marker, err := os.ReadFile(filepath.Join(winpath.EnterpriseHookImagesRoot(bin), winpath.EnterpriseHookImagesRetiredMarker))
+		callerDenied := windowsHookImageAccessDenied
+		if windowsHookImageCallerIsSystem() {
+			callerDenied = nil
+		}
+		for _, issue := range windowsHookImageRetiredIssues(image.Problem, marker, err, bin, readWindowsHookImageConfigFile, callerDenied) {
+			result.AddWarning(issue.Code, issue.Text)
 		}
 		return
 	}

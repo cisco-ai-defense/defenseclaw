@@ -54,6 +54,19 @@ const (
 	windowsHookImageRetirePending = "hook_image_retire_pending"
 )
 
+// The state bin\hooks\.retired records of the last retire. The marker is a
+// progress marker: it is what makes every writer name the transition set,
+// so it is written before the writers run and stays while retire is
+// pending (removing it would turn the configs of the accounts already
+// converted back to the launch folder). Status and verify report a pending
+// one as hook_image_retire_pending, not as retired, so it is never read as
+// a finished retire (rel-1-0-10 GAP-1158). An older release's Setup does
+// not read the marker; this release's Setup stage removes it.
+const (
+	windowsHookImageRetireStatePending = "pending"
+	windowsHookImageRetireStateOK      = "ok"
+)
+
 // windowsHookImageRetireWait bounds the wait for the guardian's rewrite.
 const (
 	windowsHookImageRetireWait = 3 * time.Minute
@@ -136,8 +149,12 @@ type windowsHookImageSkippedProfile struct {
 // and verify read SkippedProfiles (windowsHookImageSkippedProfileIssues);
 // the next stage of this release removes the marker.
 type windowsHookImageRetireMarker struct {
-	SchemaVersion   int                              `json:"schema_version"`
-	RetiredAt       string                           `json:"retired_at"`
+	SchemaVersion int    `json:"schema_version"`
+	RetiredAt     string `json:"retired_at"`
+	// State is how the last retire ended: windowsHookImageRetireStatePending
+	// or windowsHookImageRetireStateOK. A marker written before the field
+	// existed has none and reads as retired.
+	State           string                           `json:"state,omitempty"`
 	SkippedProfiles []windowsHookImageSkippedProfile `json:"skipped_profiles,omitempty"`
 }
 
@@ -175,10 +192,12 @@ type windowsHookImageRetireSteps struct {
 	// denied is refused unless it does (rel-1-0-10 GAP-0907).
 	CallerSystem func() bool
 	Audit        func(windowsHookImageSkippedProfile) error
-	ReadMarker   func(path string) ([]byte, error)
-	Now          func() time.Time
-	Sleep        func(time.Duration)
-	Wait, Poll   time.Duration
+	// ReadMarker also reads the marker to record how retire ended (State);
+	// nil leaves the state as first written (pending).
+	ReadMarker func(path string) ([]byte, error)
+	Now        func() time.Time
+	Sleep      func(time.Duration)
+	Wait, Poll time.Duration
 }
 
 func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImageRetireReport {
@@ -262,7 +281,8 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 	marker := windowsHookImageJoin(root, winpath.EnterpriseHookImagesRetiredMarker)
 	report.Marker = marker
 	if _, err := steps.FS.Lstat(marker); errors.Is(err, fs.ErrNotExist) {
-		body, _ := json.Marshal(windowsHookImageRetireMarker{SchemaVersion: 1, RetiredAt: steps.Now().UTC().Format(time.RFC3339)})
+		body, _ := json.Marshal(windowsHookImageRetireMarker{SchemaVersion: 1, RetiredAt: steps.Now().UTC().Format(time.RFC3339),
+			State: windowsHookImageRetireStatePending})
 		if err := steps.WriteMarker(marker, append(body, '\n')); err != nil {
 			return fail(windowsHookImageRetireRefused, "write %s: %v", marker, err)
 		}
@@ -405,10 +425,18 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		}
 	}
 	sort.Strings(report.Rewritten)
+	// The marker records how this retire ended, so status never reads a
+	// pending one as finished (GAP-1158).
+	recordState := func(state string) {
+		if err := windowsHookImageRecordRetireState(steps, marker, state); err != nil {
+			report.Notes = append(report.Notes, "retire_state_not_recorded: "+marker+" could not record that retire ended "+state+": "+err.Error())
+		}
+	}
 	for _, note := range after.Incomplete {
 		report.Notes = append(report.Notes, "scan_incomplete: "+note)
 	}
 	if len(after.Incomplete) > 0 {
+		recordState(windowsHookImageRetireStatePending)
 		return fail(windowsHookImageRetirePending, "%s", withWriterErrors("some machine files could not be read, so it is not known whether they still name a launch folder; fix the reason in notes, then run retire again")+". "+windowsHookImageRetirePendingNextStep())
 	}
 	if len(report.StillNamed) > 0 {
@@ -444,11 +472,56 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 			parts[len(parts)-1] += "; an administrator who accepts that a profile stays unconverted can name it with --skip-profile <SID> (audited, and listed by enterprise windows status and verify until it is converted)"
 		}
 		parts = append(parts, auditErrors...)
+		recordState(windowsHookImageRetireStatePending)
 		return fail(windowsHookImageRetirePending, "%s", strings.Join(parts, "; ")+". "+windowsHookImageRetirePendingNextStep())
 	}
+	recordState(windowsHookImageRetireStateOK)
 	report.OK = true
 	report.Error = strings.Join(writerErrors, "; ")
 	return report
+}
+
+// windowsHookImageRecordRetireState records state in the marker, keeping
+// its skips; a marker that already records it is not written again.
+func windowsHookImageRecordRetireState(steps windowsHookImageRetireSteps, marker, state string) error {
+	if steps.ReadMarker == nil {
+		return nil
+	}
+	current, err := steps.ReadMarker(marker)
+	if err != nil {
+		return err
+	}
+	var body windowsHookImageRetireMarker
+	if err := json.Unmarshal(current, &body); err != nil {
+		return err
+	}
+	if body.State == state {
+		return nil
+	}
+	body.State = state
+	data, _ := json.Marshal(body)
+	return steps.WriteMarker(marker, append(data, '\n'))
+}
+
+// windowsHookImageRetiredIssues are the status and verify warnings of an
+// install whose launch folders are retired (problem is the resolver's
+// line): hook_image_retire_pending when the marker records that the last
+// retire ended pending (GAP-1158), else hook_image_retired, then the
+// skipped profiles (windowsHookImageSkippedProfileIssues). A marker that
+// cannot be read gives hook_image_retired alone.
+func windowsHookImageRetiredIssues(problem string, marker []byte, markerErr error, bin string,
+	read func(windowsHookImageConfigFile) ([]byte, error), callerDenied func(error) bool) []windowsHookImageStatusIssue {
+	if markerErr != nil {
+		return []windowsHookImageStatusIssue{{Code: "hook_image_retired", Text: problem}}
+	}
+	var body windowsHookImageRetireMarker
+	issue := windowsHookImageStatusIssue{Code: "hook_image_retired", Text: problem}
+	if json.Unmarshal(marker, &body) == nil && body.State == windowsHookImageRetireStatePending {
+		issue = windowsHookImageStatusIssue{Code: windowsHookImageRetirePending, Text: "hook-image retire has not finished: " + problem +
+			", but the last retire ended pending, so some file DefenseClaw wrote may still name a launch folder. Run " +
+			"`enterprise windows hook-image retire` again until it ends ok. " + windowsHookImageRetirePendingNextStep()}
+	}
+	return append([]windowsHookImageStatusIssue{issue}, windowsHookImageSkippedProfileIssues(marker, bin, read, callerDenied)...)
 }
 
 // windowsHookImageRetirePendingNextStep is what an administrator does when
