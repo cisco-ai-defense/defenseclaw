@@ -45,8 +45,8 @@
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 10,
-      "maxItems": 10
+      "minItems": 11,
+      "maxItems": 11
     }
   },
   "$defs": {
@@ -116,7 +116,8 @@
             "callout_registered",
             "ingress_clients",
             "actor_service_routes",
-            "api_access_label"
+            "api_access_label",
+            "worker_drain"
           ]
         },
         "status": {
@@ -205,6 +206,11 @@
         },
         {
           "id": "api_access_label",
+          "status": "pass",
+          "message": "ok"
+        },
+        {
+          "id": "worker_drain",
           "status": "pass",
           "message": "ok"
         }

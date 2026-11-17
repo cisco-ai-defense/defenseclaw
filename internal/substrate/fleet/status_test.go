@@ -37,7 +37,7 @@ func healthyCluster() Observed {
 		editors[i] = setup.Member(e)
 	}
 	return Observed{
-		ClusterName: "dc-substrate-e1", Namespace: "defenseclaw-system",
+		ClusterName: "dc-substrate-e1", Namespace: "defenseclaw-system", WorkerDrain: &WorkerDrain{},
 		SubstrateVersion: "v1.0.0", SupportedVersions: ">=1.0.0 <1.1.0",
 		Issuer: "https://idp.cluster-a.example", SubstrateNamespace: "ate-system",
 		OtherIssuers: []string{"https://idp.cluster-b.example"}, Clusters: 2,

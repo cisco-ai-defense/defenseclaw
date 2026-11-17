@@ -41,7 +41,7 @@ const (
 
 // CheckIDs lists every check in the order doctor prints them.
 var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckCallout,
-	CheckIngressClients, CheckActorRoutes, CheckAPIAccess}
+	CheckIngressClients, CheckActorRoutes, CheckAPIAccess, CheckWorkerDrain}
 
 // Check is one result. Message is for the admin (kept on the cluster);
 // EdgeCase names the plan edge case it guards, when there is one.
@@ -81,6 +81,9 @@ type Bucket struct {
 type Observed struct {
 	ClusterName string
 	Namespace   string
+
+	// WorkerDrain is the workers' drain state (GAP-0449); nil when not read.
+	WorkerDrain *WorkerDrain
 
 	SubstrateVersion  string
 	SupportedVersions string
@@ -185,6 +188,7 @@ func RunChecks(o Observed) []Check {
 	return []Check{
 		CheckVersion(o), CheckIssuerUnique(o), CheckActorKeysVerify(o), CheckSignInServerReach(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
 		CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
+		CheckWorkerDrainRunning(o),
 	}
 }
 
