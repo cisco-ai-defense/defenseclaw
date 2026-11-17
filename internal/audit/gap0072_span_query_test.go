@@ -32,9 +32,19 @@ func TestRejectedRecordsSpanQueryReadsOnlyTheRowidEnds(t *testing.T) {
 	if len(plan) == 0 {
 		t.Fatal("no query plan")
 	}
+	// The outer SELECT has no FROM ("SCAN CONSTANT ROW"); each aggregate must
+	// be a rowid SEARCH, never a SCAN of the table.
+	searches := 0
 	for _, detail := range plan {
-		if strings.HasPrefix(strings.TrimSpace(detail), "SCAN") {
+		detail = strings.TrimSpace(detail)
+		if strings.HasPrefix(detail, "SCAN rejected_records") {
 			t.Fatalf("span query plan %q scans the table", plan)
 		}
+		if strings.HasPrefix(detail, "SEARCH rejected_records") {
+			searches++
+		}
+	}
+	if searches != 2 {
+		t.Fatalf("span query plan %q, want two rowid searches of rejected_records", plan)
 	}
 }
