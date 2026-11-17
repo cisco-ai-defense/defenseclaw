@@ -1119,6 +1119,8 @@ func (c *Controller) dropForeignPolicy(ctx context.Context, a *ateapi.Actor, st 
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
 	ev := base
+	// DefenseClaw's own delete: the next create is no foreign change.
+	st.written, st.ourVersion = false, 0
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: it is not DefenseClaw's and the actor is not registered yet"
 	c.emit(ev)
 	return nil
@@ -1170,20 +1172,36 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	state := a.GetStatus().GetState()
 	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ref)
 	if ateapi.IsNotFound(err) {
+		// A policy this controller wrote or confirmed that is gone was
+		// deleted by another writer: a foreign change like an edit, so it
+		// counts toward policy_conflict (GAP-0400).
+		foreign := st.ourVersion != 0
+		counted, enter := c.countRevert(st, foreign)
+		if enter {
+			want = deny
+		}
 		c.markStale(st, lv)
 		created, err := c.o.Client.CreateActorEgressPolicy(ctx, ref, want)
 		if ateapi.IsAlreadyExists(err) {
+			c.uncountRevert(st, counted)
 			return errWriteRace // another writer won: read it again and compare
 		}
 		if err != nil {
+			c.uncountRevert(st, counted)
 			c.fail(base, "create policy: "+err.Error())
 			return fmt.Errorf("%s: create policy: %w", st.key, err)
 		}
 		how := "created"
-		if st.conflict {
+		switch {
+		case foreign && st.conflict:
+			how = "restored deny-only (policy_conflict)"
+		case foreign:
+			how = "restored"
+		case st.conflict:
 			how = "created deny-only (policy_conflict)"
 		}
-		c.wrote(st, created, base, state, how, res)
+		c.landed(st, created, base, state, how, res, foreign, enter,
+			"the actor's egress policy was deleted by another writer and restored", map[string]any{"deleted": true})
 		return nil
 	}
 	if err != nil {
@@ -1209,40 +1227,20 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 		c.recheck(st, a, base, "confirmed")
 		return nil
 	}
-	now := c.o.Now()
 	foreign := st.ourVersion != 0 && !ours
-	enter := false
-	counted := foreign && !st.conflict
-	if counted {
-		st.reverts = append(st.reverts, now)
-		cut := now.Add(-c.o.ConflictWindow)
-		kept := st.reverts[:0]
-		for _, t := range st.reverts {
-			if t.After(cut) {
-				kept = append(kept, t)
-			}
-		}
-		st.reverts = kept
-		if len(st.reverts) >= c.o.ConflictReverts {
-			st.conflict, enter, want = true, true, deny
-		}
+	counted, enter := c.countRevert(st, foreign)
+	if enter {
+		want = deny
 	}
 	c.markStale(st, lv)
 	upd := &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Uid: m.GetUid(), Version: m.GetVersion()}, Rules: want.GetRules()}
 	updated, err := c.o.Client.UpdateActorEgressPolicy(ctx, ref, upd)
 	if ateapi.IsConflict(err) {
-		if counted {
-			// Decided again on the next try: this revert did not happen.
-			st.conflict = false
-			st.reverts = st.reverts[:len(st.reverts)-1]
-		}
+		c.uncountRevert(st, counted)
 		return errWriteRace // changed under us: read again and decide again
 	}
 	if err != nil {
-		if enter {
-			st.conflict = false
-			st.reverts = st.reverts[:len(st.reverts)-1]
-		}
+		c.uncountRevert(st, counted)
 		c.fail(base, "update policy: "+err.Error())
 		return fmt.Errorf("%s: update policy: %w", st.key, err)
 	}
@@ -1259,17 +1257,62 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	case st.forcedDeny != "":
 		how = "deny-only (" + st.forcedDeny + ")"
 	}
-	// One foreign_rule event per revert outside a conflict; inside one, at
-	// most one per conflict window (a GitOps loop would flood otherwise).
+	c.landed(st, updated, base, state, how, res, foreign, enter,
+		"a foreign change to the actor's egress policy was reverted", map[string]any{"foreign_version": m.GetVersion()})
+	return nil
+}
+
+// countRevert counts a foreign change (an edit or a delete) toward the
+// conflict rule: ConflictReverts in ConflictWindow mark policy_conflict
+// (enter). Inside a conflict nothing is counted.
+func (c *Controller) countRevert(st *actorState, foreign bool) (counted, enter bool) {
+	if !foreign || st.conflict {
+		return false, false
+	}
+	now := c.o.Now()
+	st.reverts = append(st.reverts, now)
+	cut := now.Add(-c.o.ConflictWindow)
+	kept := st.reverts[:0]
+	for _, t := range st.reverts {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	st.reverts = kept
+	if len(st.reverts) >= c.o.ConflictReverts {
+		st.conflict = true
+		return true, true
+	}
+	return true, false
+}
+
+// uncountRevert takes back a counted revert whose write did not land: the
+// next try decides again.
+func (c *Controller) uncountRevert(st *actorState, counted bool) {
+	if counted {
+		st.conflict = false
+		st.reverts = st.reverts[:len(st.reverts)-1]
+	}
+}
+
+// landed reports a policy write: the foreign_rule event of a revert (one
+// per revert outside a conflict; inside one, at most one per conflict
+// window, or a GitOps loop would flood), the write, and the conflict
+// alert when this revert marked one.
+func (c *Controller) landed(st *actorState, p *ateapi.EgressPolicy, base Event, state ateapi.ActorState, how string, res render.Result,
+	foreign, enter bool, foreignMsg string, foreignDetail map[string]any) {
+	now := c.o.Now()
 	if foreign && (!st.conflict || enter || now.Sub(st.lastForeign) >= c.o.ConflictWindow) {
 		st.lastForeign = now
 		ev := base
-		ev.Type, ev.Severity, ev.Message = EventForeignRule, SeverityWarn, "a foreign change to the actor's egress policy was reverted"
-		ev.Detail = map[string]any{"foreign_version": m.GetVersion(), "reverts_in_window": len(st.reverts), "window": c.o.ConflictWindow.String(),
-			"policy_conflict": st.conflict}
+		ev.Type, ev.Severity, ev.Message = EventForeignRule, SeverityWarn, foreignMsg
+		ev.Detail = map[string]any{"reverts_in_window": len(st.reverts), "window": c.o.ConflictWindow.String(), "policy_conflict": st.conflict}
+		for k, v := range foreignDetail {
+			ev.Detail[k] = v
+		}
 		c.emit(ev)
 	}
-	c.wrote(st, updated, base, state, how, res)
+	c.wrote(st, p, base, state, how, res)
 	if enter {
 		ev := base
 		ev.Type, ev.Severity = EventPolicyConflict, SeverityAlert
@@ -1278,7 +1321,6 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 		ev.Signal = c.signal(base, SignalPolicyConflict, "", st.firstSeen)
 		c.emit(ev)
 	}
-	return nil
 }
 
 // markStale records when the controller saw that the actor's policy needs
