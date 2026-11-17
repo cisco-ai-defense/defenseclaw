@@ -107,7 +107,7 @@ Reading a body needs a Substrate version that lets the callout ask for it. Witho
 
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
-| OpenTelemetry events, metrics, traces | Same | Same names and fields, plus the Substrate attributes (`defenseclaw.sandbox.substrate.*`, `ate.actor.uid`) so Substrate's own records line up. An agent's hook events carry no turn step number (`step_idx`): each gateway replica sees only some of a session's hooks, so the replicas can't number its turns alike |
+| OpenTelemetry events, metrics, traces | Same | Same names and fields, plus the Substrate attributes (`defenseclaw.sandbox.substrate.*`, `ate.actor.uid`) so Substrate's own records line up. An agent's hook events carry no turn step number (`step_idx`): each gateway replica sees only some of a session's hooks, so the replicas can't number its turns alike. For an agent that sends no turn id of its own (Claude Code), the turn id (`turn_id`) DefenseClaw gives its hook events is chosen by the replica that sees the turn start and can differ between replicas within one session; `session_id`, `tool_use_id` and the actor attributes are the same on every replica |
 | Local observability stack, Grafana dashboards | Changed | The chart can install a local collector. A [Substrate agents board](/docs/observability/grafana-dashboards) sits next to the existing ones |
 | Agent 360 | Same | Drill-down per agent, with suspend and resume shown in the lifecycle |
 | Sandbox telemetry | Changed | `runtime=substrate`, `driver=gvisor` or `microvm`. See [Sandbox telemetry](/docs/observability/sandbox-telemetry) |
