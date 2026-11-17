@@ -222,7 +222,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 
 **Egress.** `egress.allowed` and `egress.blocked` from the callout add `defenseclaw.network.body_inspected` (the callout read the body of an MCP or listed-host POST) and `defenseclaw.network.body_over_cap` (the body was over the cap and was not read).
 
-**Secrets.** `secret.injected` records the secret name and the host, never a value, a prefix or the placeholder.
+**Secrets.** `log.secret.injected` records the secret name, the host, the actor (atespace, name and UID, which join to the person on the agent's registration) and the profile, never a value, a prefix or the placeholder. Substrate's egress swaps the value in after DefenseClaw's callout has allowed the request, so the callout writes the record, one per bound secret on every allowed request to a host the secret is bound to, in its log next to `log.egress.allowed`.
 
 **Metrics.** None has an identity label.
 
