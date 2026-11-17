@@ -265,14 +265,22 @@ func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest)
 func placeArtifactIntentPaths(facts actionfacts.Facts, reported string) actionfacts.Facts {
 	if facts.CWD != "" || toolChainDriveMounts || !strings.HasPrefix(reported, "/") ||
 		hasParentElement(reported) || strings.ContainsRune(reported, 0) ||
-		facts.Parse.Status != actionfacts.StatusComplete || facts.Parse.Dialect != actionfacts.DialectPOSIX {
+		(facts.Parse.Status != actionfacts.StatusComplete && facts.Parse.Status != actionfacts.StatusPartial) ||
+		facts.Parse.Dialect != actionfacts.DialectPOSIX {
+		// Partial is what a call with an unresolved relative operand parses
+		// as when there is no directory: that operand is what is placed.
 		return facts
 	}
 	reported = path.Clean(reported)
 	var placed []actionfacts.PathFact
 	for i, candidate := range facts.Paths {
 		value := candidate.Value
-		if candidate.Absolute || candidate.Resolved != "" || candidate.Flavor != actionfacts.PathFlavorPOSIX ||
+		// A bare relative operand (tool.sh) has no flavor of its own: the
+		// facts give a POSIX one only to ./x, ../x, ~/x and /x. In a POSIX
+		// call it is a POSIX path, placed as one.
+		if candidate.Absolute || candidate.Resolved != "" ||
+			(candidate.Flavor != actionfacts.PathFlavorPOSIX && candidate.Flavor != actionfacts.PathFlavorUnknown) ||
+			strings.ContainsAny(value, ":") ||
 			(candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessExecute) ||
 			value == "" || strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") || hasParentElement(value) ||
 			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
@@ -291,7 +299,7 @@ func placeArtifactIntentPaths(facts actionfacts.Facts, reported string) actionfa
 		if placed == nil {
 			placed = slices.Clone(facts.Paths)
 		}
-		placed[i].Resolved = path.Join(reported, value)
+		placed[i].Resolved, placed[i].Flavor = path.Join(reported, value), actionfacts.PathFlavorPOSIX
 	}
 	if placed != nil {
 		facts.Paths = placed
