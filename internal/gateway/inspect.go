@@ -1125,6 +1125,18 @@ func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRe
 // the proxy ran the rule packs alone). secureClient is a Secure Client
 // install, which keeps its own tool policy (GAP-0048 adds no finding there).
 func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
+	findings := trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
+	if twin, ok := localCommandLinkTwinRequest(action); ok {
+		// The shell call as it runs once its links are followed (command
+		// cat key-link, echo x > cfg-link): every reading of the call, the
+		// hook config guard included, judges it too, and it only adds
+		// findings (rel-1-0-10:GAP-1243).
+		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
+	}
+	return findings
+}
+
+func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
 	findings := inspectDispatchTrustedAction(ctx, action)
 	findings = provedHighWriteFindings(ctx, action, findings)
 	findings = outboundPIIFindings(action, findings)
@@ -1189,6 +1201,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		if (cfg == nil || !cfg.SecureClientIntegration()) &&
 			(len(provedHighWriteFindings(ctx, action, nil)) != 0 ||
 				len(agentHookConfigFindings(ctx, action, nil)) != 0) {
+			allowed = false
+		}
+		// A shell call that writes one through a link is not allowed by the
+		// tool name either (rel-1-0-10:GAP-1243).
+		if twin, ok := localCommandLinkTwinRequest(action); ok && allowed &&
+			(cfg == nil || !cfg.SecureClientIntegration()) &&
+			(len(provedHighWriteFindings(ctx, twin, nil)) != 0 || len(agentHookConfigFindings(ctx, twin, nil)) != 0) {
 			allowed = false
 		}
 		// An allowed tool name does not authorize turning DefenseClaw off.
