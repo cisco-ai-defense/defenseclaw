@@ -617,6 +617,7 @@
    "TestManagedHermesVerifyFailsWhenTheAccountNamesAnotherHermesHome": 3.8,
    "TestManagedHermesVerifyIgnoresARedirectSetupSuperseded": 7.1,
    "TestManagedPluginVerificationRequiresEachRenderedSafeguard": 2.9,
+   "TestManagedWindowsRouteOnlyKeepsTheManagedDataDirDACL": 3.0,
    "TestOTLPShapeOnlyValueKeepsOperatorBytes": 59.5,
    "TestOpenCodeClosedPluginRejectsUnusableAnswers": 3.2,
    "TestOpenCodeOwnedHooksPresentRejectsManagedPluginDrift": 2.6,
