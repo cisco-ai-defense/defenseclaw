@@ -825,7 +825,7 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		ConditionConnectorKnown:             connectorKnown, ConditionOperationTerminal: true,
 	}
 	caller := auditCallerIdentity(ctx)
-	if !ManagedEnterpriseActive() {
+	if v8RecordNamesCaller(ctx, caller.ID) {
 		input.UserID = hookV8OptionalIdentifier(caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
@@ -897,7 +897,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 			ConditionSecuritySeverityAvailable:  true,
 		}
 		caller := auditCallerIdentity(ctx)
-		if !ManagedEnterpriseActive() {
+		if v8RecordNamesCaller(ctx, caller.ID) {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)

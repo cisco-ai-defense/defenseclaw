@@ -627,7 +627,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	setManagedEnterpriseRedactionPosture(cfg.ManagedAIDOnly())
 	setStandaloneEnterpriseActive(cfg.StandaloneEnterprise())
 	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
-	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
+	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail || cfg.SecureClientIntegration())
 	setAgentIdentityConfig(cfg)
 	applyIdentityPosture(cfg)
 	setProviderRegistryManagedEnterprise(managed.IsManagedEnterprise(cfg.DeploymentMode))
@@ -2422,7 +2422,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
 	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
 	setManagedServiceHosted(nextManagedEnterprise)
-	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
+	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail || next.SecureClientIntegration())
 	setAgentIdentityConfig(&next)
 	applyIdentityPosture(&next)
 	setProviderRegistryManagedEnterprise(nextManagedEnterprise)
@@ -3295,12 +3295,14 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		return nil
 	}
 	m.bindObservabilityV8(metricRuntime)
-	// Wire per-request availability into /health so a dropped CMID
-	// auth after inspector construction is visible without a reload.
-	// The client fires this on every Inspect() call — failure paths
-	// publish the error to setInspectionAvailability, success paths
-	// publish nil so a self-healing lane clears the fail flag.
-	m.bindAvailabilityObserver(s.setInspectionAvailability)
+	// Wire per-request availability into /health and the endpoint health
+	// report so a dropped CMID auth after construction is visible without
+	// a reload, and a working lane reads as observed rather than unknown.
+	// The client fires this on every Inspect() call: failures publish the
+	// error, successes publish nil so a self-healing lane clears the flag.
+	// The observer is epoch-bound, so a replaced client cannot overwrite
+	// its successor's state.
+	m.bindAvailabilityObserver(s.inspectionAvailabilityObserver())
 	return m
 }
 
