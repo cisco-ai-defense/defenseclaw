@@ -30,7 +30,7 @@ func shellTextTiers(t *testing.T, check func(tier string, decide func(string) (s
 			return boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
 		}
 		oracle := func(script string, verdict bool) (string, []string) {
-			got, findings := decide("sh <<'EOF'\n"+script+"\nEOF")
+			got, findings := decide("sh <<'EOF'\n" + script + "\nEOF")
 			if verdict && got == "allow" && tier.posture != "permissive" {
 				t.Errorf("%s: the direct form of %q is allowed (%q), the oracle needs a verdict", tier.name, script, findings)
 			}
