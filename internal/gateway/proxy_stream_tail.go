@@ -137,6 +137,22 @@ func (p *GuardrailProxy) inspectStreamText(ctx context.Context, content, model, 
 	return p.inspector.InspectMidStream(ctx, "completion", content, msgs, model, mode)
 }
 
+// midStreamFinalInspector is an inspector that says whether its mid-stream
+// check decides as its final check (GuardrailInspector.MidStreamDecidesAsFinal).
+type midStreamFinalInspector interface {
+	MidStreamDecidesAsFinal() bool
+}
+
+// initialEarlyRelease reports that the initial buffer of a stream may go out
+// before the stream ends, once the upstream went quiet (GAP-0628): only when
+// the mid-stream check that reads it decides as the final check, so a reply
+// the final check would refuse whole is not sent first. An inspector that
+// does not say keeps the initial buffer to the end, as before.
+func (p *GuardrailProxy) initialEarlyRelease() bool {
+	fi, ok := p.inspector.(midStreamFinalInspector)
+	return ok && fi.MidStreamDecidesAsFinal()
+}
+
 // streamHoldTimer is the one timer of a stream's hold.
 type streamHoldTimer struct{ t *time.Timer }
 

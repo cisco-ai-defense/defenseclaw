@@ -226,6 +226,9 @@ func (s *passthroughStream) run() {
 	// The tail hold (GAP-0212): in action mode the first relN events are
 	// sent only by a check that has read their text.
 	tailHold := mode == "action"
+	// earlyInitial: the initial buffer may go out once the upstream went
+	// quiet (GAP-0628, initialEarlyRelease).
+	earlyInitial := tailHold && p.initialEarlyRelease()
 	var holdTimer streamHoldTimer
 	defer holdTimer.stop()
 	var lastRead time.Time // when the upstream last sent a byte
@@ -623,9 +626,10 @@ read:
 		// streamHoldMaxPartialAge after the last byte. The initial buffer
 		// (GAP-0628) is checked and sent once the upstream has sent nothing
 		// for streamHoldMaxAge, when it holds reply text and no tool call is
-		// open: a stream that keeps coming, or a call the rules have not
-		// decided, still waits for stream_buffer_bytes, so a block there
-		// still replaces the whole reply.
+		// open, and only when the mid-stream check decides as the final one
+		// (initialEarlyRelease): a stream that keeps coming, or a call the
+		// rules have not decided, still waits for stream_buffer_bytes, so a
+		// block there still replaces the whole reply.
 		var deadline time.Time
 		if tailHold && initialFlushed {
 			if relN > 0 {
@@ -633,7 +637,7 @@ read:
 			} else if len(queue) == 0 && unread() > 0 && !stallReported {
 				deadline = lastRead.Add(streamHoldMaxPartialAge)
 			}
-		} else if tailHold && relN > 0 && !callHold && accumulated.Len() > 0 {
+		} else if earlyInitial && relN > 0 && !callHold && accumulated.Len() > 0 {
 			deadline = lastRead.Add(streamHoldMaxAge)
 		}
 		var rd streamRead

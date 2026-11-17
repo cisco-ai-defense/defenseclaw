@@ -3676,6 +3676,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// In action mode the chunks after the initial buffer wait in hold until
 	// a check has read their text (rel-1-0-10:GAP-0212, proxy_stream_tail.go).
 	holding := mode == "action"
+	// earlyInitial: the initial buffer may go out once the provider went
+	// quiet (GAP-0628, initialEarlyRelease).
+	earlyInitial := holding && p.initialEarlyRelease()
 	var hold streamHold
 	var holdTimer streamHoldTimer
 	defer holdTimer.stop()
@@ -3824,7 +3827,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		var deadline time.Time
 		if holding && !streamBlocked && len(hold.buf) > 0 {
 			deadline = hold.since.Add(streamHoldMaxAge)
-		} else if holding && !streamBlocked && !initialBufFlushed && len(initialChunkBuf) > 0 && accumulated.Len() > 0 {
+		} else if earlyInitial && !streamBlocked && !initialBufFlushed && len(initialChunkBuf) > 0 && accumulated.Len() > 0 {
 			deadline = lastChunkAt.Add(streamHoldMaxAge)
 		}
 		due := holdTimer.wait(deadline, time.Now())

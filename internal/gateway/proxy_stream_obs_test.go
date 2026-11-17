@@ -174,8 +174,8 @@ func TestGAP0628InitialBufferIsTimeBounded(t *testing.T) {
 	}{
 		{"short-clean", short, 0, false},
 		{"short-finding", append(append([]string(nil), short...), "and "+streamTailMarker), 0, true},
-		{"finding-after-first-text", []string{streamTailProse(120), " more words here ", " and " + streamTailMarker}, 150 * time.Millisecond, true},
-		{"continuous-finding", append(append([]string(nil), short...), "and "+streamTailMarker), 20 * time.Millisecond, true},
+		{"finding-after-first-text", []string{streamTailProse(120), " more words here ", " and " + streamTailMarker}, 250 * time.Millisecond, true},
+		{"continuous-finding", append(append([]string(nil), short...), "and "+streamTailMarker), 5 * time.Millisecond, true},
 	}
 	// sentEarly reports whether the case's first text is released before
 	// the finding ends the stream: only when the upstream paused first.
@@ -183,7 +183,7 @@ func TestGAP0628InitialBufferIsTimeBounded(t *testing.T) {
 	for _, f := range streamTailFormats {
 		for _, tc := range cases {
 			t.Run(f.name+"/"+tc.name, func(t *testing.T) {
-				insp := &streamTailInspector{mockInspector: newMockInspector(), mid: true, final: true}
+				insp := &obsFinalInspector{&streamTailInspector{mockInspector: newMockInspector(), mid: true, final: true}, true}
 				c := obsStreamStart(t, obsIdleUpstream(t, f, insp, tc.deltas, tc.gap), bound)
 				if !tc.finding {
 					last := f.delta(tc.deltas[len(tc.deltas)-1])
@@ -214,7 +214,7 @@ func TestGAP0628InitialBufferIsTimeBounded(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run("llm/"+tc.name, func(t *testing.T) {
-			insp := &streamTailInspector{mockInspector: newMockInspector(), mid: true, final: true}
+			insp := &obsFinalInspector{&streamTailInspector{mockInspector: newMockInspector(), mid: true, final: true}, true}
 			c := obsStreamStart(t, obsIdleLLM(t, insp, tc.deltas, tc.gap), bound)
 			if !tc.finding {
 				body, ok := c.waitFor(bound, func(body string, _ bool) bool { return strings.Contains(body, "closing words here") })
@@ -236,6 +236,42 @@ func TestGAP0628InitialBufferIsTimeBounded(t *testing.T) {
 		})
 	}
 }
+
+// When the mid-stream check does not decide as the final one (a managed
+// install, a judge strategy: MidStreamDecidesAsFinal false), the headers
+// still go out at once but the initial buffer waits for the end of the
+// stream, as before: the final check may refuse the whole reply
+// (rel-1-0-10:GAP-0628).
+func TestGAP0628InitialBufferWaitsWhenTheFinalCheckDecides(t *testing.T) {
+	bound := streamHoldMaxAge + 2*time.Second
+	short := streamTailDeltas(300, 24, "closing words here")
+	wait := func(t *testing.T, c *obsStreamClient) {
+		t.Helper()
+		if body, ok := c.waitFor(5*streamHoldMaxAge, func(body string, ended bool) bool {
+			return ended || strings.Contains(body, "closing words here") || strings.Contains(streamTailReceivedText(streamTailFormatNamed(t, "anthropic"), body), "closing")
+		}); ok {
+			t.Fatalf("the initial buffer went out before the final check (%d bytes)", len(body))
+		}
+	}
+	t.Run("anthropic", func(t *testing.T) {
+		f := streamTailFormatNamed(t, "anthropic")
+		insp := &obsFinalInspector{&streamTailInspector{mockInspector: newMockInspector(), mid: true, final: true}, false}
+		wait(t, obsStreamStart(t, obsIdleUpstream(t, f, insp, short, 0), bound))
+	})
+	t.Run("llm", func(t *testing.T) {
+		insp := &obsFinalInspector{&streamTailInspector{mockInspector: newMockInspector(), mid: true, final: true}, false}
+		wait(t, obsStreamStart(t, obsIdleLLM(t, insp, short, 0), bound))
+	})
+}
+
+// obsFinalInspector says whether its mid-stream check decides as its final
+// check (midStreamFinalInspector).
+type obsFinalInspector struct {
+	*streamTailInspector
+	asFinal bool
+}
+
+func (i *obsFinalInspector) MidStreamDecidesAsFinal() bool { return i.asFinal }
 
 // obsCountingAID is an AI Defense client that counts its calls and flags a
 // message that carries marker (when set).
@@ -466,6 +502,33 @@ func TestGAP0687ReplyExtractorReadsImagePromptAndTextInlineData(t *testing.T) {
 			return map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"role": "model", "parts": []any{textPart("text/plain", text)}}, "finishReason": "STOP", "index": 0}}}
 		}},
 	}
+	textBytes := func(mime string, raw []byte) map[string]any {
+		return map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": base64.StdEncoding.EncodeToString(raw)}}
+	}
+	utf16le := func(s string) []byte {
+		out := []byte{0xFF, 0xFE}
+		for _, r := range s {
+			out = append(out, byte(r), byte(r>>8))
+		}
+		return out
+	}
+	gemReply := func(part map[string]any) map[string]any {
+		return map[string]any{"candidates": []any{map[string]any{"content": map[string]any{"role": "model", "parts": []any{part}}, "finishReason": "STOP", "index": 0}}}
+	}
+	buffered = append(buffered,
+		struct {
+			name, provider, path string
+			reply                func(text string) map[string]any
+		}{"gemini/utf-16", "gemini", "/v1beta/models/gemini-test:generateContent", func(text string) map[string]any {
+			return gemReply(textBytes("text/plain; charset=utf-16", utf16le(text)))
+		}},
+		struct {
+			name, provider, path string
+			reply                func(text string) map[string]any
+		}{"gemini/latin-1", "gemini", "/v1beta/models/gemini-test:generateContent", func(text string) map[string]any {
+			return gemReply(textBytes("text/plain; charset=iso-8859-1", append([]byte{'c', 'a', 'f', 0xE9, ' '}, text...)))
+		}},
+	)
 	for _, c := range buffered {
 		for _, finding := range []bool{true, false} {
 			t.Run(fmt.Sprintf("buffered/%s/finding=%v", c.name, finding), func(t *testing.T) {

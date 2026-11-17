@@ -1153,6 +1153,16 @@ func (g *GuardrailInspector) InspectMidStreamLocal(ctx context.Context, directio
 	return g.inspectRegexOnlyRemote(context.WithValue(ctx, guardrailNoSpansKey{}, true), direction, content, messages, model, mode, false)
 }
 
+// MidStreamDecidesAsFinal reports that the mid-stream check of a completion
+// decides as its final check does: not on a managed install (the mid-stream
+// check reads nothing there; AI Defense reads the whole completion after the
+// stream), and only with the regex_only strategy for completions (a judge
+// runs in the final check only). Only then does the proxy send the initial
+// buffer of a stream that went quiet before its end (rel-1-0-10:GAP-0628).
+func (g *GuardrailInspector) MidStreamDecidesAsFinal() bool {
+	return !g.managedMode && g.effectiveStrategy("completion") == "regex_only"
+}
+
 // guardrailNoSpansKey marks a check that opens no phase span
 // (InspectMidStreamLocal).
 type guardrailNoSpansKey struct{}
