@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // oss-outage-open (owner decision 2026-10-23): a per-user shell hook in the
@@ -205,6 +207,12 @@ func TestPerUserShellHookOutageIgnoresStaleRecord(t *testing.T) {
 // close the outage, whatever the record says; the default and permissive
 // packs and another connector's strict pack leave it open.
 func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
+	// The hook files are rendered in this process, which writes the config and
+	// install-home records from the account's own config.yaml when there is
+	// one; the hook then reads that record instead of the case's home. A build
+	// box with a real ~/.defenseclaw/config.yaml failed every "no config" case
+	// (rel-1-0-10 GAP-0167), so the account is an empty one (GAP-0137).
+	testenv.IsolateAccount(t)
 	for _, conn := range []Connector{NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(),
 		NewDevinConnector(), NewKiroConnector(), NewAntigravityConnector(), NewHermesConnector()} {
 		other := "claudecode"
