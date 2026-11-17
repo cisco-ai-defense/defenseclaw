@@ -107,7 +107,7 @@ func TestSubstrateWorkloadSelectorCannotBeForgedGAP0540(t *testing.T) {
 	if _, _, ok := assignmentMatches(m, &forged, &subjectGroups{}, true, "claudecode", ""); ok {
 		t.Error("a subject whose user fields name the workload was selected without the registration's workload subject")
 	}
-	real := profileSubject{UserID: sub, substrateWorkload: sub}
+	bound := profileSubject{UserID: sub, substrateWorkload: sub}
 	if _, _, ok := assignmentMatches(m, &bound, &subjectGroups{}, false, "claudecode", ""); ok {
 		t.Error("an unverified subject was selected by a workloads entry")
 	}
