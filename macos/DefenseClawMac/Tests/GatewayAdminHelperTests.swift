@@ -27,6 +27,12 @@ extension GatewayAdminAgentConfigRepair {
     static var fileCheckedForTesting: ((String) -> Void)?
 }
 
+extension GatewayAdminOwnershipRepair {
+    /// Runs after a walked file passed its checks, before it is opened
+    /// (main.swift calls it in GATEWAY_ADMIN_HELPER_TESTING builds only).
+    static var walkFileCheckedForTesting: ((String) -> Void)?
+}
+
 @main
 private enum GatewayAdminHelperTests {
     private static var checks = 0
@@ -186,6 +192,7 @@ private enum GatewayAdminHelperTests {
         try testAgentConfigRepair(root: root, account: account)
         try testAgentConfigFolderRules(root: root)
         try testAgentConfigFileEdgeCases(root: root)
+        try testAgentConfigFolderWalkSwap(root: root)
         try testRepairOrder()
         try testRootProcessRecord(root: root)
         try testStop()
@@ -568,6 +575,111 @@ private enum GatewayAdminHelperTests {
             _ = unlink(settings.path)
             check(rename(moved.path, settings.path) == 0, "Could not restore the swap fixture")
         }
+    }
+
+    /// GAP-0141 review: a file inside a root-owned agent config folder that
+    /// the walk returns is changed only when it had one link when inspected
+    /// and the opened file is that inode. Before, the walk checked the link
+    /// count only through the opened descriptor: the account could hard-link
+    /// a root file (a LaunchDaemon plist) into the folder and unlink the link
+    /// between the open and the fstat, so the count read 1 and the root file
+    /// was handed over. This account stands in for root; the repaired account
+    /// is another uid, so the folder counts as root-owned and is walked.
+    private static func testAgentConfigFolderWalkSwap(root: URL) throws {
+        let home = root.appendingPathComponent("agent-walk-home", isDirectory: true)
+        let outside = root.appendingPathComponent("agent-walk-outside", isDirectory: true)
+        try makeFolders(home, ["", ".kiro", ".kiro/agents"])
+        try makeFolders(outside, [""])
+        let listed = home.appendingPathComponent(".kiro/agents/defenseclaw.json")
+        let moved = home.appendingPathComponent(".kiro/agents/defenseclaw.moved")
+        let secret = outside.appendingPathComponent("system-file")
+        let linked = home.appendingPathComponent(".kiro/linked.json")
+        try makeFile(listed)
+        try makeFile(secret)
+        var secretStatus = stat()
+        check(lstat(secret.path, &secretStatus) == 0, "Could not inspect the hard-link fixture")
+        let secretInode = secretStatus.st_ino
+        let secretDevice = secretStatus.st_dev
+        func handsOverSecret(_ opened: Int32) -> Bool {
+            var status = stat()
+            return fstat(opened, &status) == 0 && status.st_ino == secretInode && status.st_dev == secretDevice
+        }
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+
+        // A hard link (two links when inspected) is reported and never opened.
+        check(link(secret.path, linked.path) == 0, "Could not prepare the hard-link fixture")
+        var opened: [String] = []
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in opened.append(relative) }
+        var changed: [String] = []
+        var handedLinked = false
+        let hardLinked = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
+            change: { file, relative in
+                if handsOverSecret(file) { handedLinked = true }
+                changed.append(relative)
+                return 0
+            })
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
+        check(!handedLinked && !opened.contains("linked.json"),
+              "A file with two links when inspected must be neither opened nor handed over: \(opened)")
+        check(hardLinked.skipped == ["~/.kiro/linked.json"] && changed.contains("~/.kiro/agents/defenseclaw.json"),
+              "The hard link is reported and the rest of the folder is returned: \(hardLinked) \(changed)")
+        check(unlink(linked.path) == 0, "Could not remove the hard-link fixture")
+
+        // A file swapped in between the checks and the open (another inode,
+        // one link) is never changed.
+        var swappedAtCheck = false
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = { relative in
+            guard relative == "agents/defenseclaw.json" else { return }
+            swappedAtCheck = true
+            guard rename(listed.path, moved.path) == 0 else { fatalError("Could not move the swap fixture") }
+            try? Data("{}".utf8).write(to: listed)
+            _ = chmod(listed.path, 0o600)
+        }
+        changed = []
+        let swapped = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
+            change: { _, relative in changed.append(relative); return 0 })
+        GatewayAdminOwnershipRepair.walkFileCheckedForTesting = nil
+        check(swappedAtCheck, "The folder walk must reach the swap point between a file's checks and its open")
+        check(!changed.contains("~/.kiro/agents/defenseclaw.json") && swapped.skipped == ["~/.kiro/agents/defenseclaw.json"],
+              "A file swapped after its checks must be reported, not changed: \(swapped) \(changed)")
+        _ = unlink(listed.path)
+        check(rename(moved.path, listed.path) == 0, "Could not restore the swap fixture")
+
+        // The attack itself, with no test hook: another thread hard-links the
+        // file outside the folder into it and unlinks the link again while the
+        // walk runs. Before the fix the walk opened the link and, when the
+        // unlink landed before its fstat, read one link and handed the file
+        // over; now the inspected entry has two links and is never opened.
+        let race = home.appendingPathComponent(".kiro/race.json").path
+        let secretPath = secret.path
+        let finished = DispatchSemaphore(value: 0)
+        let toggler = Thread {
+            while !Thread.current.isCancelled {
+                _ = link(secretPath, race)
+                _ = unlink(race)
+            }
+            finished.signal()
+        }
+        toggler.start()
+        var handedOver = 0
+        var walks = 0
+        while walks < 20_000 && handedOver == 0 {
+            walks += 1
+            _ = GatewayAdminAgentConfigRepair.restore(
+                home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()), paths: [".kiro/agents/defenseclaw.json"],
+                change: { file, _ in
+                    if handsOverSecret(file) { handedOver += 1 }
+                    return 0
+                })
+        }
+        toggler.cancel()
+        finished.wait()
+        _ = unlink(race)
+        check(handedOver == 0, "A hard link unlinked between the open and the fstat handed a file outside the folder over "
+            + "(walk \(walks))")
     }
 
     /// GAP-0141 real-root cases: run as root by sudo (the runner script does

@@ -740,6 +740,18 @@ enum GatewayAdminOwnershipRepair {
                     if !folder(child, opened, relative, relative, depth + 1) { complete = false }
                 case S_IFREG:
                     guard entry.st_uid == owner else { continue }
+                    // One link when inspected, and the opened file is that
+                    // inode: a hard link to a file elsewhere (another link
+                    // count) opened and then unlinked before the fstat, or a
+                    // file swapped in after the fstatat, is never changed.
+                    guard entry.st_nlink == 1 else {
+                        outcome.skipped.append(relative)
+                        continue
+                    }
+                    #if GATEWAY_ADMIN_HELPER_TESTING
+                    // Declared by Tests/GatewayAdminHelperTests.swift.
+                    GatewayAdminOwnershipRepair.walkFileCheckedForTesting?(relative)
+                    #endif
                     let file = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
                     guard file >= 0 else {
                         outcome.incomplete = true
@@ -748,7 +760,8 @@ enum GatewayAdminOwnershipRepair {
                     }
                     defer { close(file) }
                     var opened = stat()
-                    guard fstat(file, &opened) == 0, opened.st_mode & S_IFMT == S_IFREG,
+                    guard fstat(file, &opened) == 0, opened.st_ino == entry.st_ino, opened.st_dev == entry.st_dev,
+                          opened.st_mode & S_IFMT == S_IFREG,
                           opened.st_uid == owner, opened.st_dev == metadata.st_dev, opened.st_nlink == 1,
                           !privateOnly || opened.st_mode & 0o6022 == 0 else {
                         outcome.skipped.append(relative)
