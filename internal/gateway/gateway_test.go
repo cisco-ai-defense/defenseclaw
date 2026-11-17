@@ -5562,8 +5562,10 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 		}
 	})
 
-	t.Run("untrusted labels use fixed identity", func(t *testing.T) {
+	t.Run("custom labels use inert identity and sanitized display", func(t *testing.T) {
 		marker := "producer-label-" + strings.Repeat("z", 40)
+		ruleName := "custom-\x00" + marker
+		displayName := "custom-" + marker
 		v := normalizeCiscoResponse(map[string]interface{}{
 			"is_safe": false,
 			"action":  "Block",
@@ -5571,23 +5573,24 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 				marker,
 			},
 			"rules": []interface{}{
-				map[string]interface{}{"rule_name": "custom-" + marker, "classification": "VIOLATION"},
+				map[string]interface{}{"rule_name": ruleName, "classification": "VIOLATION"},
 			},
 		})
-		if len(v.Findings) != 1 || v.Findings[0] != ciscoUnknownFindingID {
-			t.Fatalf("untrusted Cisco findings=%v, want fixed unknown identities", v.Findings)
+		wantID, wantName := canonicalCiscoRuleFinding(ruleName)
+		if len(v.Findings) != 1 || v.Findings[0] != wantID ||
+			!strings.HasPrefix(v.Findings[0], ciscoCustomFindingPrefix) || strings.Contains(v.Findings[0], marker) {
+			t.Fatalf("custom Cisco findings=%v, want inert hashed identity %q", v.Findings, wantID)
 		}
-		if strings.Contains(v.Reason, marker) || v.Reason !=
-			"Cisco AI Defense: Custom Policy Violation" {
-			t.Fatalf("untrusted Cisco labels reached reason: %q", v.Reason)
+		if wantName != displayName || v.Reason != "Cisco AI Defense: "+displayName || strings.ContainsRune(v.Reason, '\x00') {
+			t.Fatalf("custom Cisco display name was not sanitized: name=%q reason=%q", wantName, v.Reason)
 		}
-		if projected := redaction.ForSinkReason(v.Reason); projected != v.Reason || strings.Contains(projected, marker) {
-			t.Fatalf("Cisco reason redaction projection=%q, want fixed display labels", projected)
+		if projected := redaction.ForSinkReason(v.Reason); projected != v.Reason || strings.ContainsRune(projected, '\x00') {
+			t.Fatalf("Cisco reason redaction projection=%q, want sanitized display label", projected)
 		}
 		for _, finding := range NormalizeScanVerdict(v) {
-			if finding.CanonicalID != ciscoUnknownFindingID || strings.Contains(finding.CanonicalID, marker) ||
+			if finding.CanonicalID != wantID || strings.Contains(finding.CanonicalID, marker) ||
 				strings.Contains(finding.OriginalID, marker) || strings.HasPrefix(finding.CanonicalID, "UNKNOWN-") {
-				t.Fatalf("untrusted Cisco label reached normalized identity: %+v", finding)
+				t.Fatalf("custom Cisco label reached normalized identity: %+v", finding)
 			}
 		}
 
@@ -5605,8 +5608,8 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 			t.Fatalf("persisted Cisco events=%#v err=%v", events, err)
 		}
 		persistedEvent := fmt.Sprintf("%s %#v", events[0].Details, events[0].Structured)
-		if strings.Contains(persistedEvent, marker) || !strings.Contains(persistedEvent, "Custom Policy Violation") {
-			t.Fatalf("persisted Cisco reason retained cloud label: %s", persistedEvent)
+		if strings.ContainsRune(persistedEvent, '\x00') || !strings.Contains(persistedEvent, displayName) {
+			t.Fatalf("persisted Cisco reason did not retain the sanitized display name: %s", persistedEvent)
 		}
 	})
 }
