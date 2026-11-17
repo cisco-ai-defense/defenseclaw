@@ -1138,8 +1138,9 @@ func heredocCallBinds(call *syntax.CallExpr, bind func(string), bindAll func()) 
 		for index := 1; index < len(call.Args); index++ {
 			flag, known := simpleStaticWord(call.Args[index], nil)
 			if !known {
+				// Before the format, this could expand to -v.
 				bindAll()
-				continue
+				break
 			}
 			switch {
 			case flag == "-v" && index+1 < len(call.Args):
@@ -1148,8 +1149,14 @@ func heredocCallBinds(call *syntax.CallExpr, bind func(string), bindAll func()) 
 				} else {
 					bindAll()
 				}
+				index++
 			case strings.HasPrefix(flag, "-v") && len(flag) > 2:
 				bind(flag[2:])
+			case strings.HasPrefix(flag, "-"):
+				continue
+			default:
+				// Arguments after the format are data, not options.
+				return
 			}
 		}
 	case ":", "true", "false", "echo", "test", "[", "[[", "pwd", "times",
