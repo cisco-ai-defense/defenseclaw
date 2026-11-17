@@ -140,9 +140,14 @@ func openClawInstallPolicyWritten() openClawObservation {
 	return openClawInstallPolicyWrittenUnder
 }
 
+// setOpenClawInstallPolicyWritten moves written-under, and the last seen
+// OpenClaw with it: a refresh that decided, or a setup the watcher follows,
+// is newer than what the watcher last saw, and a refresh that falls back to
+// the last seen one must not go back to an older version (GAP-1237 review).
 func setOpenClawInstallPolicyWritten(written openClawObservation) {
 	openClawInstallPolicyWrittenMu.Lock()
 	openClawInstallPolicyWrittenUnder = written
+	openClawInstallPolicyLastSeen = written
 	openClawInstallPolicyWrittenMu.Unlock()
 }
 
@@ -268,7 +273,6 @@ func (s *Sidecar) startOpenClawInstallPolicyWatch(ctx context.Context) (stop fun
 		}
 	}
 	setOpenClawInstallPolicyWritten(written)
-	setOpenClawInstallPolicySeen(openClawObservation{})
 	go func() {
 		defer close(done)
 		s.watchOpenClawInstallPolicy(wctx, written)
@@ -313,14 +317,18 @@ func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context, recorded openC
 			// A setup that ran outside this watch (the CLI, the gateway's
 			// own connector setup) records what it wrote the policy under
 			// in the state file: follow it, or a new executable it chose
-			// reads as another openclaw (GAP-1237).
-			if cfg != nil {
+			// reads as another openclaw (GAP-1237). Read under the refresh
+			// lock, so a refresh that runs meanwhile is not overwritten with
+			// the state from before it; a look that finds a refresh running
+			// follows at the next one.
+			if cfg != nil && openClawInstallPolicyRefreshMu.TryLock() {
 				if version, binaryPath, err := connector.OpenClawInstallPolicyStateWritten(cfg.DataDir); err == nil && version != "" {
 					if state := (openClawObservation{version: version, binaryPath: binaryPath}); state != recorded {
 						recorded = state
 						setOpenClawInstallPolicyWritten(state)
 					}
 				}
+				openClawInstallPolicyRefreshMu.Unlock()
 			}
 			seen := openClawCachedObservation(cfg)
 			// An empty or unparsable version is no evidence about OpenClaw
@@ -328,6 +336,7 @@ func (s *Sidecar) watchOpenClawInstallPolicy(ctx context.Context, recorded openC
 			// cache from another openclaw than the one the policy was
 			// written under is not the OpenClaw the user runs (GAP-1237).
 			if seen.version == "" {
+				goneLooks = 0
 				continue
 			}
 			written := openClawInstallPolicyWritten()
@@ -424,6 +433,11 @@ func openClawInstallPolicyRefreshOpts(cfg *config.Config, watch bool) connector.
 		}
 	case watch && connector.NormalizeAgentVersion("openclaw", agentVersion) == "":
 		instead = seen
+	case agentExecutable == "":
+		// A cache that names no executable is taken for the recorded one
+		// (openClawExecutableSame); keep it recorded, or the next decided
+		// refresh would drop it and the guard with it.
+		agentExecutable = written.binaryPath
 	}
 	if instead.version != "" {
 		agentVersion, agentExecutable = instead.version, instead.binaryPath
@@ -510,5 +524,5 @@ func (s *Sidecar) refreshOpenClawInstallPolicyAttempt(attempt int, reason string
 		fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; a retry is already scheduled\n", setting, err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; the next config reload tries again, or run defenseclaw setup openclaw\n", setting, err)
+	fmt.Fprintf(os.Stderr, "[connector] openclaw: install admission (install_policy %s) was not updated: %v; the gateway tries again at its next version look or config reload, or run defenseclaw setup openclaw\n", setting, err)
 }

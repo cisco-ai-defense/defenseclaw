@@ -46,7 +46,7 @@ func TestOpenClawInstallPolicyReloadDoesNotAdoptAnotherOpenClawOnPATH(t *testing
 // the policy to another openclaw a stale cache names; the watcher needs it
 // gone on openClawInstallPolicyGoneLooks looks in a row.
 func TestOpenClawInstallPolicyWatchNeedsTheRecordedOpenClawGoneOnLooksInARow(t *testing.T) {
-	s, dataDir, first, second, _, calls := openClawExecutableFixture(t, true)
+	s, dataDir, first, second, refreshed, calls := openClawExecutableFixture(t, true)
 	openClawInstallPolicyGoneLooks = 1 << 30
 	stop := s.startOpenClawInstallPolicyWatch(context.Background())
 	defer stop()
@@ -57,6 +57,56 @@ func TestOpenClawInstallPolicyWatchNeedsTheRecordedOpenClawGoneOnLooksInARow(t *
 	time.Sleep(300 * time.Millisecond)
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("the watcher followed another openclaw before the recorded one stayed gone (%d refreshes)", n)
+	}
+	// The watcher is looking: the recorded openclaw back with another
+	// version refreshes.
+	if err := os.WriteFile(first, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeOpenClawDiscoveryAt(t, dataDir, "2026.7.1", first)
+	if opts := waitOpenClawRefresh(t, refreshed, "a downgrade of the recorded openclaw"); opts.AgentExecutable != first {
+		t.Fatalf("refreshed from %q, want %s", opts.AgentExecutable, first)
+	}
+}
+
+// GAP-1237 review r2: a reload decides under 2026.12.1 of the recorded
+// openclaw while the watcher last saw 2026.11.3; then a cache from another
+// openclaw on PATH arrives and another reload runs. It judges under
+// 2026.12.1, what the policy was last written under, not under the older
+// version the watcher saw (that could be below 2026.8.35 and remove the
+// block).
+func TestOpenClawInstallPolicyReloadAfterADecidedReloadDoesNotGoBackToAnOlderSeenVersion(t *testing.T) {
+	s, dataDir, first, second, refreshed, _ := openClawExecutableFixture(t, true)
+	stop := s.startOpenClawInstallPolicyWatch(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for openClawInstallPolicySeen().version != "2026.11.3" && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	// No watcher from here: only reloads move what was written and seen.
+	stop()
+	writeOpenClawDiscoveryAt(t, dataDir, "2026.12.1", first)
+	s.refreshOpenClawInstallPolicy()
+	if opts := waitOpenClawRefresh(t, refreshed, "the first reload"); opts.AgentVersion != "2026.12.1" {
+		t.Fatalf("the first reload judged under %q, want 2026.12.1", opts.AgentVersion)
+	}
+	writeOpenClawDiscoveryAt(t, dataDir, "2026.7.1", second)
+	s.refreshOpenClawInstallPolicy()
+	opts := waitOpenClawRefresh(t, refreshed, "the second reload")
+	if opts.AgentVersion != "2026.12.1" || opts.AgentExecutable != first {
+		t.Fatalf("the reload after a cache from another openclaw judged under %q from %q, want 2026.12.1 from %s", opts.AgentVersion, opts.AgentExecutable, first)
+	}
+}
+
+// GAP-1237 review r2: a cache that names no executable does not drop the
+// recorded one: a refresh that decides under it keeps it recorded, so
+// another openclaw on PATH is still told apart afterwards.
+func TestOpenClawInstallPolicyCacheWithoutAnExecutableKeepsTheRecordedOne(t *testing.T) {
+	s, dataDir, first, _, refreshed, _ := openClawExecutableFixture(t, true)
+	stop := s.startOpenClawInstallPolicyWatch(context.Background())
+	defer stop()
+	writeOpenClawDiscoveryVersion(t, dataDir, "2026.12.1")
+	if opts := waitOpenClawRefresh(t, refreshed, "a version change in a cache without an executable"); opts.AgentExecutable != first {
+		t.Fatalf("refreshed with executable %q, want the recorded %s", opts.AgentExecutable, first)
 	}
 }
 

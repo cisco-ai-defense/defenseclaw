@@ -67,6 +67,7 @@ func resetOpenClawInstallPolicyRetryState(t *testing.T) {
 	// which the watcher now runs.
 	openClawInstallPolicyPending.Store(false)
 	openClawInstallPolicyRetrying.Store(false)
+	setOpenClawInstallPolicyWritten(openClawObservation{})
 	t.Cleanup(func() {
 		openClawInstallPolicyRefresher, openClawInstallPolicyRetryDelays, openClawInstallPolicyVersionPoll = prevRefresher, prevDelays, prevPoll
 		openClawInstallPolicyGoneLooks = prevGone
