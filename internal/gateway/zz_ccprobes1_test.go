@@ -9,10 +9,12 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -463,5 +465,105 @@ func TestCCP1GAP0176ACPTerminalFrameMeetsTheShellRules(t *testing.T) {
 	}
 	if verdict.Action != "block" {
 		t.Errorf("terminal/create state write: action %q reason %q, want block", verdict.Action, verdict.Reason)
+	}
+}
+
+func ccp1Token(seed int64) string {
+	const alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	b := make([]byte, 36)
+	x := uint64(seed)*6364136223846793005 + 1442695040888963407
+	for i := range b {
+		x = x*6364136223846793005 + 1442695040888963407
+		b[i] = alnum[(x>>33)%uint64(len(alnum))]
+	}
+	return "gh" + "p_" + string(b)
+}
+
+func ccp1JSONText(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func ccp1PassthroughBody(provider string) string {
+	if provider == "anthropic" {
+		return `{"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	}
+	return `{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`
+}
+
+// ccp1Passthrough sends one call through the host passthrough route to an
+// upstream that answers body with contentType (gzip-compressed when gz) and
+// returns what the client got, decompressed.
+func ccp1Passthrough(t *testing.T, provider, path, contentType, body string, gz bool) string {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		if gz {
+			var buf bytes.Buffer
+			zw := gzip.NewWriter(&buf)
+			_, _ = zw.Write([]byte(body))
+			_ = zw.Close()
+			w.Header().Set("Content-Encoding", "gzip")
+			_, _ = w.Write(buf.Bytes())
+			return
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	defer upstream.Close()
+	registerRawForwardProviderDomain(t, upstream.URL, provider)
+	allowRawForwardPrivateTargets(t)
+	proxy := newTestProxy(t, &mockProvider{}, NewGuardrailInspector("local", nil, nil), "action")
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(ccp1PassthroughBody(provider)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer test-key")
+	if gz {
+		req.Header.Set("Accept-Encoding", "gzip")
+	}
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	proxy.handlePassthrough(rec, req)
+	out := rec.Body.Bytes()
+	if strings.Contains(rec.Header().Get("Content-Encoding"), "gzip") || len(out) > 2 && out[0] == 0x1f && out[1] == 0x8b {
+		if zr, err := gzip.NewReader(bytes.NewReader(out)); err == nil {
+			if plain, err := io.ReadAll(zr); err == nil {
+				out = plain
+			}
+		}
+	}
+	return string(out)
+}
+
+// rel-1-0-10:GAP-0370 (P2 security): streamed thinking text and streamed
+// tool input are checked on the passthrough route; a token in them does not
+// reach the client.
+func TestCCP1GAP0370ThinkingAndToolInputAreChecked(t *testing.T) {
+	token := ccp1Token(7)
+	sse := func(e string) string { return "data: " + e + "\n\n" }
+	control := sse(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + ccp1JSONText("the token is "+token) + `}}`)
+	if got := ccp1Passthrough(t, "anthropic", "/v1/messages", "text/event-stream", control, false); strings.Contains(got, token) {
+		t.Skipf("control: a token in text_delta reaches the client on this tree")
+	}
+	for name, body := range map[string]string{
+		"thinking_delta":   sse(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":` + ccp1JSONText("the token is "+token) + `}}`),
+		"input_json_delta": sse(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":` + ccp1JSONText(`{"token":"`+token+`"}`) + `}}`),
+	} {
+		if got := ccp1Passthrough(t, "anthropic", "/v1/messages", "text/event-stream", body, false); strings.Contains(got, token) {
+			t.Errorf("anthropic %s: the token reached the client", name)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-0087 (P2 security): a compressed provider reply on the
+// host passthrough route is decoded and inspected; a token in it does not
+// reach the client.
+func TestCCP1GAP0087CompressedReplyIsInspected(t *testing.T) {
+	token := ccp1Token(11)
+	body := `{"choices":[{"index":0,"message":{"role":"assistant","content":` + ccp1JSONText("the token is "+token) + `}}]}`
+	if got := ccp1Passthrough(t, "openai", "/v1/chat/completions", "application/json", body, false); strings.Contains(got, token) {
+		t.Skipf("control: a token in a plain reply reaches the client on this tree")
+	}
+	if got := ccp1Passthrough(t, "openai", "/v1/chat/completions", "application/json", body, true); strings.Contains(got, token) {
+		t.Errorf("gzip reply: the token reached the client uninspected")
 	}
 }
