@@ -83,11 +83,22 @@ var slimHookKnownHeavy = []string{
 // landed, against 1213 to 1237 for the full-CLI main.
 const slimHookMaxPackages = 540
 
+// goToolOrSkip is the go tool for a go list of this package, or a skip
+// where there is none: no go on PATH, or no module source around the test
+// (a test binary copied to another host, as the native Windows gates run
+// it, where go list failed and both link-set tests read as reds; INT
+// accepted rows TestOutageGoldenSeesTheLinkSetOfTheMain and
+// TestSlimHookLinksNoGatewayPackages). The Linux gates and CI run them
+// from the source tree.
 func goToolOrSkip(t *testing.T) string {
 	t.Helper()
 	path, err := exec.LookPath("go")
 	if err != nil {
 		t.Skip("go tool not on PATH")
+	}
+	out, err := exec.Command(path, "env", "GOMOD").Output()
+	if gomod := strings.TrimSpace(string(out)); err != nil || gomod == "" || gomod == os.DevNull {
+		t.Skipf("no module source here for go list (go env GOMOD = %q, %v)", gomod, err)
 	}
 	return path
 }
