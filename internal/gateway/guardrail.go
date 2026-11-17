@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -1904,23 +1905,52 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 }
 
 // withZeroWidthSecretFindings adds to findings the secret rules found on
-// content with only its invisible characters removed (stripZeroWidth; no
-// letter folding: a credential is matched byte for byte). A key with a
-// zero-width space spliced between its name and its value, or into the
-// value, reads the same to a model and to a shell. The proxy's own secret
-// regexes had this fallback and the pack did not, on any surface; the hook
-// path (messageRuleFindings) and the proxy (scanUntrustedContentRules) now
-// share it (rel-1-0-10:GAP-0210). A rule found on the text as written keeps
-// the stronger of its two findings (unionRuleFindings). Off under Secure
-// Client, like the folded trust pass: callers skip it there.
+// content with only its invisible characters removed (credentialVisibleText;
+// no letter folding: a credential is matched byte for byte). A key with a
+// zero-width space, a Hangul filler or another invisible character spliced
+// between its name and its value, or into the value, reads the same to a
+// model and to a shell. The proxy's own secret regexes had a zero-width
+// fallback for five shapes and the pack had none, on any surface; the hook
+// prompt check (messageRuleFindings), the tool-result check
+// (toolResultChecks) and the proxy (scanUntrustedContentRules) now share it
+// (rel-1-0-10:GAP-0210, GAP-1076). Only the copy the secret rules read is
+// folded: the text the client receives and the other rules read is the text
+// as written. A rule found on the text as written keeps the stronger of its
+// two findings (unionRuleFindings). Off under Secure Client, like the folded
+// trust pass: callers skip it there.
 func withZeroWidthSecretFindings(generation *compiledRulePackCategories, findings []RuleFinding, content, toolName string, scope ruleContentScope) []RuleFinding {
-	invisible := stripZeroWidth(content)
+	invisible := credentialVisibleText(content)
 	if invisible == content {
 		return findings
 	}
 	return unionRuleFindings(findings, scanRuleGeneration(generation, invisible, toolName, ruleScanOptions{
 		contentScope: scope, onlyCategory: "secret",
 	}))
+}
+
+// credentialVisibleText is content without the characters that render as
+// nothing (rel-1-0-10:GAP-1076): every Unicode format character (Cf: the
+// zero-width space, joiners, word joiner, BOM, soft hyphen, bidi controls,
+// invisible operators, tag characters, shorthand format controls), the
+// fillers and joiners stripZeroWidth lists that are not Cf (Hangul fillers
+// U+115F, U+1160, U+3164, U+FFA0, Khmer U+17B4/U+17B5, the combining grapheme
+// joiner, interlinear annotation marks), variation selectors (U+FE00-FE0F,
+// U+E0100-E01EF) and the Mongolian free variation selectors (U+180B-180D,
+// U+180F). ASCII text is returned as it is, without a copy.
+func credentialVisibleText(content string) string {
+	if strings.IndexFunc(content, func(r rune) bool { return r >= utf8.RuneSelf }) < 0 {
+		return content
+	}
+	return stripZeroWidth(strings.Map(func(r rune) rune {
+		switch {
+		case unicode.Is(unicode.Cf, r),
+			r >= '\uFE00' && r <= '\uFE0F',
+			r >= '\U000E0100' && r <= '\U000E01EF',
+			r >= '\u180B' && r <= '\u180D', r == '\u180F':
+			return -1
+		}
+		return r
+	}, content))
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
