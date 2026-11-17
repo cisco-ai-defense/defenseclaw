@@ -96,3 +96,27 @@ func TestGAP0495ForeignTemplateRecordRetriesAfterAReadError(t *testing.T) {
 		t.Fatalf("template_unverified after the read recovered = %+v, want one", tu)
 	}
 }
+
+// GAP-0531: a foreign actor whose template is gone (NotFound) is not read
+// again every pass.
+func TestGAP0531ForeignActorMissingTemplateIsNotReReadEveryPass(t *testing.T) {
+	r := newRig(t, nil)
+	r.actor("eng-web", "orphan", ateapi.ActorStateSuspended, "")
+	r.api.Err = func(method, key string) error {
+		if method == "GetActorTemplate" {
+			return status.Error(codes.NotFound, "actor template eng-web/claude not found")
+		}
+		return nil
+	}
+	r.pass()
+	r.clk.Add(16 * time.Second)
+	_ = r.ctl.Reconcile(context.Background())
+	first := r.api.Calls("GetActorTemplate")
+	for range 5 {
+		r.clk.Add(time.Minute)
+		_ = r.ctl.Reconcile(context.Background())
+	}
+	if n := r.api.Calls("GetActorTemplate"); n != first {
+		t.Fatalf("template reads went from %d to %d over 5 passes, want no more", first, n)
+	}
+}

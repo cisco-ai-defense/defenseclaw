@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -59,8 +60,13 @@ func TestGAP0481RefusedPolicyDeleteAlertsOnceAndDoesNotFailThePass(t *testing.T)
 	if r.api.Policy(ref) == nil {
 		t.Fatal("the fake removed the policy despite the refusal")
 	}
-	// The right is granted: the next pass removes the policy.
+	// GAP-0531: the refused delete is retried on a backoff, not every pass.
+	if n := r.api.Calls("DeleteActorEgressPolicy"); n != 1 {
+		t.Fatalf("delete tried %d times in 5 passes, want 1 (backoff)", n)
+	}
+	// The right is granted: the pass after the backoff removes the policy.
 	denied = false
+	r.clk.Add(2 * time.Minute)
 	r.pass()
 	if r.api.Policy(ref) != nil {
 		t.Fatal("the policy stayed after the right was granted")

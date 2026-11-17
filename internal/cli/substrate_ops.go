@@ -137,6 +137,11 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	if modes > 1 {
 		return cliusage.WithExitCode(errors.New("choose one of --apply, --branch NAME or --patch-out FILE"), 2)
 	}
+	if f.allowFlagged && !f.apply {
+		// Refused before anything is read, also on an empty pull
+		// (GAP-0531).
+		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply (a branch or a patch writes nothing that runs)"), 2)
+	}
 	s, err := substrateOpen(cmd, &f.com)
 	if err != nil {
 		return err
@@ -185,9 +190,6 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	}
 	if rev.Empty {
 		return nil
-	}
-	if f.allowFlagged && !f.apply {
-		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply (a branch or a patch writes nothing that runs)"), 2)
 	}
 	mode, branch, patch := workspace.ModeApply, f.branch, f.patch
 	switch {
@@ -279,7 +281,9 @@ func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.App
 	if err != nil {
 		var sens *workspace.SensitiveError
 		if errors.As(err, &sens) {
-			return cliusage.WithExitCode(fmt.Errorf("%w; choose --branch NAME or --patch-out FILE to look at them first", err), substrateExitRefused)
+			// The refusal already names --allow-flagged, --branch and
+			// --patch-out; the advice is said once (GAP-0531).
+			return cliusage.WithExitCode(err, substrateExitRefused)
 		}
 		return err
 	}

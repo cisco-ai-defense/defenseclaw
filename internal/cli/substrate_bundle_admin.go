@@ -60,7 +60,14 @@ func substrateBundleStore(c *config.Config, live func() *config.Config) (gateway
 	if err != nil {
 		return nil, fmt.Errorf("substrate.bundles: %w", err)
 	}
-	path := b.EffectiveAnchorsFile()
-	return substrateBundleAdapter{&bundle.Store{CM: cms, Base: c, Live: live, AnchorsFile: path,
-		Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}}, nil
+	return substrateBundleAdapter{newSubstrateBundleStore(cms, c, live)}, nil
+}
+
+// newSubstrateBundleStore is the bundle store of a gateway or controller
+// pod: the boot config verifies, the live config (GAP-0494) decides which
+// atespaces a stage may name, and the anchors come from the mounted file.
+func newSubstrateBundleStore(cms bundle.ConfigMaps, c *config.Config, live func() *config.Config) *bundle.Store {
+	path := c.Substrate.Bundles.EffectiveAnchorsFile()
+	return &bundle.Store{CM: cms, Base: c, Live: live, AnchorsFile: path,
+		Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}
 }

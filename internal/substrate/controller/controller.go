@@ -233,8 +233,11 @@ type actorState struct {
 	rid     restoreID
 	written bool
 	// deleteDenied is set while the access policies refuse the delete of the
-	// actor's policy; the alert is sent once (GAP-0481).
+	// actor's policy; the alert is sent once (GAP-0481). deleteRetry is when
+	// the delete is tried again, deleteWait the current backoff (GAP-0531).
 	deleteDenied bool
+	deleteRetry  time.Time
+	deleteWait   time.Duration
 	// foreignTemplateRead is set once the template of a foreign actor was
 	// read and, if unattested, reported (GAP-0495).
 	foreignTemplateRead bool
@@ -937,6 +940,11 @@ func (c *Controller) foreignTemplate(ctx context.Context, a *ateapi.Actor, st *a
 	ref := a.GetActorTemplate()
 	_, att, err := c.template(ctx, ref, false)
 	if err != nil {
+		if ateapi.IsNotFound(err) {
+			// The template is gone: there is nothing to name, and reading it
+			// again every pass would only cost (GAP-0531).
+			st.foreignTemplateRead = true
+		}
 		return
 	}
 	st.foreignTemplateRead = true
@@ -1197,17 +1205,31 @@ func (c *Controller) removePolicy(ctx context.Context, a *ateapi.Actor, st *acto
 	if err != nil {
 		return fmt.Errorf("%s: get policy: %w", st.key, err)
 	}
+	if c.deleteBackingOff(st) {
+		return nil
+	}
 	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
 		if c.deleteRefused(st, base, err) {
 			return nil
 		}
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
-	st.written, st.ourVersion, st.deleteDenied = false, 0, false
+	st.written, st.ourVersion, st.deleteDenied, st.deleteRetry = false, 0, false, time.Time{}
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: the actor is refused ("+st.refused+")"
 	c.emit(ev)
 	return nil
+}
+
+// The backoff of a policy delete the access policies refuse (GAP-0531).
+const (
+	deleteRetryMin = time.Minute
+	deleteRetryMax = 30 * time.Minute
+)
+
+// deleteBackingOff reports that a refused delete is not due again yet.
+func (c *Controller) deleteBackingOff(st *actorState) bool {
+	return st.deleteDenied && c.o.Now().Before(st.deleteRetry)
 }
 
 // deleteRefused handles a policy delete the access policies refuse
@@ -1220,6 +1242,11 @@ func (c *Controller) deleteRefused(st *actorState, base Event, err error) bool {
 	if status.Code(err) != codes.PermissionDenied {
 		return false
 	}
+	// Try again after a backoff that doubles, 1 minute up to 30, so a
+	// refused delete costs a GET and a DELETE now and then, not every pass
+	// (GAP-0531).
+	st.deleteWait = min(max(2*st.deleteWait, deleteRetryMin), deleteRetryMax)
+	st.deleteRetry = c.o.Now().Add(st.deleteWait)
 	if !st.deleteDenied {
 		st.deleteDenied = true
 		ev := base
@@ -1466,6 +1493,9 @@ func (c *Controller) unmanaged(ctx context.Context, a *ateapi.Actor, st *actorSt
 		st.unmanagedChecked = true
 		return nil
 	}
+	if c.deleteBackingOff(st) {
+		return nil
+	}
 	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
 		if c.deleteRefused(st, base, err) {
 			return nil
@@ -1473,6 +1503,7 @@ func (c *Controller) unmanaged(ctx context.Context, a *ateapi.Actor, st *actorSt
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
 	st.unmanagedChecked, st.written, st.ourVersion, st.conflict, st.reverts, st.deleteDenied = true, false, 0, false, nil, false
+	st.deleteRetry = time.Time{}
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: DefenseClaw no longer manages the actor"
 	c.emit(ev)
