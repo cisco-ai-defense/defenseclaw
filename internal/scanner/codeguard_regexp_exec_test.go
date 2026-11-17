@@ -109,3 +109,129 @@ func TestCodeGuardExecRegExpReadingKeepsCustomRules(t *testing.T) {
 		t.Fatalf("custom CG-EXEC-001 finding dropped: %v", got)
 	}
 }
+
+// rel-1-0-10:GAP-1185: the regular expression proof read the file line by
+// line and by keyword, so a binding it did not see (a class or object method
+// parameter, a parameter on its own line, a second binding on the const
+// line, a const in an inner block, a const whose initializer only starts
+// with a literal, a const inside a comment or a string) let exec on the name
+// drop CG-EXEC-001. The proof now reads the code of the whole file: one
+// const whose whole initializer is the regular expression, every other
+// occurrence a member use or a pattern argument, all in the const's block.
+func TestCodeGuardExecRegExpProofReadsTheWholeFile(t *testing.T) {
+	s := &CodeGuardScanner{}
+	fires := func(filename, content string) bool {
+		for _, f := range s.ScanContent(filename, content) {
+			if f.RuleID == codeGuardExecRuleID {
+				return true
+			}
+		}
+		return false
+	}
+	lines := func(l ...string) string { return strings.Join(l, "\n") }
+	for _, tc := range []struct{ name, content string }{
+		{"method shorthand parameter", lines(
+			`const re = /x/;`,
+			`class R { run(re, cmd) { return re.exec(cmd) } }`)},
+		{"object method parameter", lines(
+			`const re = /x/;`,
+			`const o = { run(re, cmd) { return re.exec(cmd) } };`)},
+		{"parameter on its own line", lines(
+			`const re = /x/;`,
+			`function run(`,
+			`  re,`,
+			`  cmd`,
+			`) { return re.exec(cmd) }`)},
+		{"second binding on the const line", `const re = /x/; const run = (re) => re.exec(cmd);`},
+		{"const in an inner block", lines(
+			`Object.assign(globalThis, { re: cp });`,
+			`{ const re = /x/; }`,
+			`re.exec(id);`)},
+		{"const in an inner block on its own lines", lines(
+			`function setup() {`,
+			`  const re = /x/;`,
+			`}`,
+			`re.exec(id);`)},
+		{"initializer only starts with a literal", lines(
+			`const re = /x/.test(s) ? require("child_process") : null;`,
+			`re.exec(id);`)},
+		{"initializer continues on the next line", lines(
+			`const re = /x/`,
+			`  .test(s) ? require("child_process") : null;`,
+			`re.exec(id);`)},
+		{"const in a line comment", lines(
+			`// const re = /x/;`,
+			`re.exec(cmd);`)},
+		{"const in a block comment", lines(
+			`/*`,
+			`const re = /x/;`,
+			`*/`,
+			`re.exec(cmd);`)},
+		{"const in a string", lines(
+			`const doc = "const re = /x/;";`,
+			`re.exec(cmd);`)},
+		{"const in a template", lines(
+			"const doc = `",
+			`const re = /x/;`,
+			"`;",
+			`re.exec(cmd);`)},
+		{"destructured parameter", lines(
+			`const re = /x/;`,
+			`const run = ({ re }) => re.exec(cmd);`)},
+		{"rest binding", lines(
+			`const re = /x/;`,
+			`{ const [...re] = list; re.exec(cmd); }`)},
+		{"exec member overwritten", lines(
+			`const re = /x/;`,
+			`re.exec = require("child_process").exec;`,
+			`re.exec(cmd);`)},
+		{"prototype patched", lines(
+			`const re = /x/;`,
+			`RegExp.prototype.exec = require("child_process").exec;`,
+			`re.exec(cmd);`)},
+		{"RegExp rebound", lines(
+			`function RegExp() { return require("child_process"); }`,
+			`const re = new RegExp("x");`,
+			`re.exec(cmd);`)},
+		{"with statement", lines(
+			`const re = /x/;`,
+			`with (shell) { re.exec(cmd); }`)},
+		{"callback parameter", lines(
+			`const re = /x/;`,
+			`list.map(re => re.exec(cmd));`)},
+		{"unterminated string", lines(
+			`const re = /x/;`,
+			`const s = "open`,
+			`re.exec(cmd);`)},
+	} {
+		if !fires("src/run.js", tc.content) || !fires("src/run.ts", tc.content) {
+			t.Errorf("%s: CG-EXEC-001 did not fire", tc.name)
+		}
+	}
+	for _, tc := range []struct{ name, content string }{
+		{"const inside the function that uses it", lines(
+			`export function parse(line: string) {`,
+			`  const entry = /^(\w+)\s+(.+)$/;`,
+			`  return entry.exec(line);`,
+			`}`)},
+		{"matching loop resets lastIndex", lines(
+			`const word = /[a-z]+/g;`,
+			`word.lastIndex = 0;`,
+			`let m;`,
+			`while ((m = word.exec(text)) !== null) { out.push(m[0]); }`)},
+		{"pattern argument of a string method", lines(
+			`const sep = /[,;]/;`,
+			`const parts = text.split(sep);`,
+			`const first = sep.exec(text);`)},
+		{"slash in a class, comment and template around it", lines(
+			`// a path matcher: exec here is RegExp matching`,
+			"const label = `path ${name}`;",
+			`const path = /[/\\]+(\w+)/;`,
+			`const half = total / 2;`,
+			`const hit = path.exec(label);`)},
+	} {
+		if fires("src/parse.ts", tc.content) {
+			t.Errorf("%s: CG-EXEC-001 fired on RegExp matching", tc.name)
+		}
+	}
+}
