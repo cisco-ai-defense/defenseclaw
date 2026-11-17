@@ -168,6 +168,20 @@ func captureCredentialPathWord(
 			name:      typed.Name.Value,
 			argument:  projectPOSIXWord(typed.Value),
 		})
+	case *syntax.WordIter:
+		// for NAME in ITEMS: each item is a value of NAME, as an assignment
+		// is (substrate-1:GAP-0349).
+		if typed.Name == nil {
+			return
+		}
+		for _, item := range typed.Items {
+			out.credentialWords = append(out.credentialWords, credentialPathWord{
+				commandID: nearestPOSIXStatementID(stack, statementIDs),
+				role:      credentialWordAssignment,
+				name:      typed.Name.Value,
+				argument:  projectPOSIXWord(item),
+			})
+		}
 	case *syntax.ParamExp:
 		if typed.Param == nil {
 			return
@@ -253,6 +267,9 @@ const (
 	credentialReadsOptionValue
 	// jq: the first operand is the filter unless -f gives it.
 	credentialReadsJSON
+	// yq: an optional eval subcommand, then the expression unless
+	// --expression or --from-file gives it, then the files.
+	credentialReadsYAML
 )
 
 func credentialReaderFormOf(program string) credentialReaderForm {
@@ -277,6 +294,8 @@ func credentialReaderFormOf(program string) credentialReaderForm {
 		return credentialReadsOptionValue
 	case "jq":
 		return credentialReadsJSON
+	case "yq":
+		return credentialReadsYAML
 	}
 	if strings.HasPrefix(program, "python3.") || strings.HasPrefix(program, "python2.") {
 		return credentialReadsInterpreter
@@ -416,8 +435,10 @@ type credentialPathResolver struct {
 	commands   []CommandFact
 	held       map[credentialHeldRead]bool
 	links      []credentialPathLink
-	seen       map[PathFact]bool
-	reads      []PathFact
+	// stdinRedirected is the commands with an input redirect.
+	stdinRedirected []int64
+	seen            map[PathFact]bool
+	reads           []PathFact
 }
 
 // resolveCredentialPathReads makes the private record of one call (nil when
@@ -446,6 +467,11 @@ func resolveCredentialPathReadsWithin(
 		return nil
 	}
 	r := &credentialPathResolver{cwd: cwd, home: home, commands: commands}
+	for _, word := range words {
+		if word.role == credentialWordInputRedirect {
+			r.stdinRedirected = append(r.stdinRedirected, word.commandID)
+		}
+	}
 	counted := make(map[int64]bool)
 	for _, command := range commands {
 		if command.Effect == EffectExecute && slices.ContainsFunc(command.Operations, func(op OperationKind) bool {
@@ -558,7 +584,13 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 				case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename":
 					i++
 					if value := command.Arguments[i]; !value.Expands {
-						r.candidate(command.ID, value.Value, strings.ContainsAny(value.Value, "*?["), true)
+						if strings.ContainsAny(value.Value, "*?[") {
+							// find's wildcards match a leading dot, unlike
+							// the shell's (substrate-1:GAP-0349).
+							r.findGlob(command.ID, value.Value)
+						} else {
+							r.candidate(command.ID, value.Value, false, true)
+						}
 					}
 				}
 			}
@@ -595,6 +627,24 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 			r.argument(word.commandID, word.argument, true)
 		}
 	}
+}
+
+// searchReadsStdin reports a search whose standard input is a pipe (it is
+// not the first command of its pipeline) or an input redirect.
+func (r *credentialPathResolver) searchReadsStdin(command CommandFact) bool {
+	if slices.Contains(r.stdinRedirected, command.ID) {
+		return true
+	}
+	if command.PipelineID == 0 {
+		return false
+	}
+	for _, other := range r.commands {
+		if other.ID < command.ID && other.PipelineID == command.PipelineID &&
+			other.ParentCommandID == command.ParentCommandID {
+			return true
+		}
+	}
+	return false
 }
 
 // credentialFindExecReads reports a find whose -exec, -execdir, -ok or -okdir
@@ -683,6 +733,12 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 				r.searchFolder(command.ID, argument.Value)
 			}
 		}
+		// With no folder operand a recursive grep searches the working
+		// folder, and so does rg unless its standard input is a pipe or a
+		// redirect (substrate-1:GAP-0344).
+		if recursive && len(operands) == 0 && (program == "grep" || !r.searchReadsStdin(command)) {
+			r.searchFolder(command.ID, ".")
+		}
 		return operands
 	case credentialReadsSources:
 		operands = credentialOperandIndexes(argv, sets[command.Program])
@@ -707,6 +763,8 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 		return operands
 	case credentialReadsJSON:
 		operands = r.jsonOperands(command)
+	case credentialReadsYAML:
+		operands = yamlOperands(command.Argv)
 	}
 	for _, index := range operands {
 		r.argument(command.ID, command.Arguments[index], false)
@@ -754,48 +812,130 @@ func (r *credentialPathResolver) jsonOperands(command CommandFact) []int {
 	return operands
 }
 
+// yamlOperands is yq's input files (mikefarah yq: [eval|e|eval-all|ea]
+// [options] EXPRESSION FILE...; kislyuk yq takes jq's form, which this
+// reading covers): the operands after the expression, none taken by a valued
+// option, and the --from-file expression file.
+func yamlOperands(argv []string) []int {
+	var operands []int
+	expression := true
+	options := true
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		switch {
+		case i == 1 && (arg == "eval" || arg == "e" || arg == "eval-all" || arg == "ea"):
+		case options && arg == "--":
+			options = false
+		case options && (arg == "--from-file" || arg == "-f"):
+			if i+1 < len(argv) {
+				operands = append(operands, i+1)
+			}
+			i++
+			expression = false
+		case options && arg == "--expression":
+			i++
+			expression = false
+		case options && (arg == "-o" || arg == "-p" || arg == "-I" || arg == "-s" ||
+			arg == "--output-format" || arg == "--input-format" || arg == "--indent" || arg == "--split-exp" ||
+			arg == "--arg" || arg == "--argjson"):
+			if arg == "--arg" || arg == "--argjson" {
+				i++
+			}
+			i++
+		case options && strings.HasPrefix(arg, "-") && arg != "-":
+		case expression:
+			expression = false
+		default:
+			operands = append(operands, i)
+		}
+	}
+	return operands
+}
+
 // credentialInterpreterWords is the argv indexes of an interpreter's inline
-// program (python -c, node -e/-p, perl and ruby -e/-E, php -r, deno eval,
-// bun -e) and, for perl and ruby with -n or -p, of its input files. Words
-// after a script or module name are its arguments: no reads.
+// program (python -c, node -e/-p, perl -e/-E, ruby -e, php -r, deno eval,
+// bun -e) and of its input files: for perl and ruby with -n or -p the
+// operands after the program, and for perl, ruby and python the words after
+// the inline program when that program reads its arguments (perl <> and
+// ARGV, ruby ARGF, ARGV and gets, python sys.argv and fileinput). An option
+// that takes a value (python -W, -X; ruby -I, -r, -C, -E) takes the next
+// word when it is not attached (substrate-1:GAP-0349). Words after a script
+// or module name are its arguments: no reads (rel-1-0-10:GAP-1030).
 func credentialInterpreterWords(program string, argv []string) (code, inputs []int) {
-	codeLetters, loopLetters := "c", ""
+	code, inputs, args := credentialInterpreterWordsOf(program, argv)
+	for _, index := range code {
+		if credentialCodeReadsArguments(program, argv[index]) {
+			return code, append(inputs, args...)
+		}
+	}
+	return code, inputs
+}
+
+// credentialCodeReadsArguments reports inline program text that reads the
+// files named by its arguments.
+func credentialCodeReadsArguments(program, code string) bool {
+	var readers []string
+	switch {
+	case program == "perl":
+		readers = []string{"<>", "ARGV"}
+	case program == "ruby":
+		readers = []string{"ARGF", "ARGV", "gets", "$<"}
+	case strings.HasPrefix(program, "python"):
+		readers = []string{"sys.argv", "fileinput", "argv["}
+	}
+	return slices.ContainsFunc(readers, func(reader string) bool { return strings.Contains(code, reader) })
+}
+
+// credentialInterpreterWordsOf is credentialInterpreterWords before the
+// program text is read: args is the words after the inline program of an
+// interpreter whose program may read its arguments.
+func credentialInterpreterWordsOf(program string, argv []string) (code, inputs, args []int) {
+	codeLetters, loopLetters, valueLetters := "c", "", ""
 	switch program {
 	case "node", "nodejs", "bun":
 		codeLetters = "ep"
-	case "perl", "ruby":
+	case "perl":
 		codeLetters, loopLetters = "eE", "np"
+	case "ruby":
+		codeLetters, loopLetters, valueLetters = "e", "np", "IrCE"
 	case "php":
 		codeLetters = "r"
 	case "deno":
 		for i := 1; i+1 < len(argv); i++ {
 			if argv[i] == "eval" {
-				return []int{i + 1}, nil
+				return []int{i + 1}, nil, nil
 			}
 		}
-		return nil, nil
+		return nil, nil, nil
 	}
+	python := strings.HasPrefix(program, "python")
+	if python {
+		valueLetters = "WX"
+	}
+	argsRead := python || program == "perl" || program == "ruby"
 	loop := false
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
 		switch {
 		case arg == "--":
-			if loop {
-				for j := i + 1; j < len(argv); j++ {
+			for j := i + 1; j < len(argv); j++ {
+				if loop {
 					inputs = append(inputs, j)
+				} else if argsRead && len(code) > 0 {
+					args = append(args, j)
 				}
 			}
-			return code, inputs
+			return code, inputs, args
 		case arg == "--eval" || arg == "--print":
 			if i+1 < len(argv) {
 				code = append(code, i+1)
 			}
 			i++
 			if program != "node" && program != "nodejs" && program != "bun" {
-				return code, inputs
+				return code, inputs, args
 			}
 		case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && len(arg) > 1:
-			takesCode := false
+			takesCode, takesValue := false, false
 			for j, letter := range arg[1:] {
 				if strings.ContainsRune(loopLetters, letter) {
 					loop = true
@@ -804,28 +944,44 @@ func credentialInterpreterWords(program string, argv []string) (code, inputs []i
 					takesCode = j == len(arg)-2 // the code is the next word
 					break
 				}
-				if letter == 'm' && strings.HasPrefix(program, "python") {
-					return code, inputs // a module: the rest are its arguments
+				if strings.ContainsRune(valueLetters, letter) {
+					takesValue = j == len(arg)-2 // else the rest of the word
+					break
 				}
+				if letter == 'm' && python {
+					return code, inputs, args // a module: the rest are its arguments
+				}
+			}
+			if takesValue {
+				i++
+				continue
 			}
 			if takesCode && i+1 < len(argv) {
 				code = append(code, i+1)
 				i++
-				if strings.HasPrefix(program, "python") || program == "php" {
-					return code, inputs // the rest are the program's arguments
+				if python {
+					for j := i + 1; j < len(argv); j++ {
+						args = append(args, j) // sys.argv[1:]
+					}
+					return code, inputs, args
+				}
+				if program == "php" {
+					return code, inputs, args // the rest are the program's arguments
 				}
 			}
 		case strings.HasPrefix(arg, "--"):
 		default:
 			if len(code) == 0 {
-				return code, inputs // a script: the rest are its arguments
+				return code, inputs, args // a script: the rest are its arguments
 			}
 			if loop {
 				inputs = append(inputs, i)
+			} else if argsRead {
+				args = append(args, i)
 			}
 		}
 	}
-	return code, inputs
+	return code, inputs, args
 }
 
 // credentialProgramEditsInPlace: sed -i, perl -i and ruby -i write the file
@@ -993,10 +1149,27 @@ func (r *credentialPathResolver) candidate(id int64, value string, glob, unknown
 	}
 }
 
+// findGlob checks one find name test: a glob whose wildcards also match a
+// leading dot. A match is file-unknown.
+func (r *credentialPathResolver) findGlob(id int64, glob string) {
+	if !strings.ContainsAny(glob, "./_") || r.stopped() || !r.candidates.Take() || !r.work.TakeN(len(glob)) {
+		return
+	}
+	if r.globMatchesCredentialFile(glob, true) {
+		r.add(id, "", true)
+	}
+}
+
 // globNamesCredentialFile reports a glob that matches a probe of the
 // credentials table on the probe's own trailing segments, a wildcard never
 // matching a leading dot, with a literal byte in those segments.
 func (r *credentialPathResolver) globNamesCredentialFile(glob string) bool {
+	return r.globMatchesCredentialFile(glob, false)
+}
+
+// globMatchesCredentialFile is globNamesCredentialFile; dotMatches lets a
+// wildcard match a leading dot (find).
+func (r *credentialPathResolver) globMatchesCredentialFile(glob string, dotMatches bool) bool {
 	segments := trailingPathSegments(strings.ToLower(strings.TrimRight(glob, "/")), credentialProbeDepth())
 	for _, probe := range credentialProbes() {
 		if !r.work.Take() {
@@ -1009,7 +1182,7 @@ func (r *credentialPathResolver) globNamesCredentialFile(glob string) bool {
 		aligned := segments[len(segments)-k:]
 		literal, match := false, true
 		for i, pattern := range aligned {
-			if !credentialGlobSegmentMatches(pattern, probe.segments[i]) {
+			if !credentialGlobSegmentMatchesDot(pattern, probe.segments[i], dotMatches) {
 				match = false
 				break
 			}
@@ -1039,7 +1212,13 @@ func trailingPathSegments(value string, n int) []string {
 }
 
 func credentialGlobSegmentMatches(pattern, name string) bool {
-	if strings.HasPrefix(name, ".") && !strings.HasPrefix(pattern, ".") && !strings.HasPrefix(pattern, `\.`) {
+	return credentialGlobSegmentMatchesDot(pattern, name, false)
+}
+
+// credentialGlobSegmentMatchesDot is credentialGlobSegmentMatches; dotMatches
+// lets a wildcard match a leading dot (a find name test).
+func credentialGlobSegmentMatchesDot(pattern, name string, dotMatches bool) bool {
+	if !dotMatches && strings.HasPrefix(name, ".") && !strings.HasPrefix(pattern, ".") && !strings.HasPrefix(pattern, `\.`) {
 		return false
 	}
 	ok, err := path.Match(pattern, name)

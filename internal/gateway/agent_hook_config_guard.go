@@ -1437,8 +1437,12 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 
 // agentHookConfigPlacedCommands keeps each literal shell body and each
 // statement's directory. All shell decisions consume this same placement.
+// It reads a command up to the hook payload cap, the bound of every hookpaths
+// reader it calls: a guard-only bound below it (8192 bytes) left a call with
+// one large data word unplaced, so a hook-config write in it named no finding
+// (substrate-1:GAP-0365).
 func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookpaths.PlacedStatement {
-	if depth > 4 || command == "" || len(command) > 8192 {
+	if depth > 4 || command == "" || len(command) > hookpaths.MaxPayloadBytes {
 		return nil
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}
@@ -2960,7 +2964,7 @@ func agentHookConfigRunSettingsWritten(raw string, guard *agentHookConfigGuard, 
 }
 
 func agentHookConfigPrefixOverrideOne(command string, guard *agentHookConfigGuard) (reason, target string) {
-	if len(command) > 8192 || !strings.Contains(command, "=") {
+	if len(command) > hookpaths.MaxPayloadBytes || !strings.Contains(command, "=") {
 		return "", ""
 	}
 	file, err := syntax.NewParser().Parse(shellparse.Reader(command), "")
