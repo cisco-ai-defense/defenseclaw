@@ -54,9 +54,8 @@ func withOwnViewAccounts(t *testing.T) {
 		identityFactsEnabled.Store(prevFacts)
 	})
 	identityFactsEnabled.Store(true)
-	groupSIDs := map[string]string{"eng": ownViewEngSID, "contractors": ownViewCtrSID}
 	lookup := func(name string) (string, error) {
-		if sid, ok := groupSIDs[strings.ToLower(name)]; ok {
+		if sid := ownViewGroupSID(name); sid != "" {
 			return sid, nil
 		}
 		return "", errProfileGroupUnknown
@@ -71,6 +70,19 @@ func withOwnViewAccounts(t *testing.T) {
 		return subject, known
 	}
 	profileGroupExists = func(context.Context, string) (bool, error) { return true, nil }
+}
+
+// ownViewGroupSID is the SID of a fixture group ("" for an unknown name).
+func ownViewGroupSID(name string) string {
+	switch name = strings.ToLower(name); {
+	case name == "eng":
+		return ownViewEngSID
+	case name == "contractors":
+		return ownViewCtrSID
+	case len(name) == 3 && name[0] == 'g':
+		return "S-1-5-21-1111111111-2222222222-3333333333-30" + name[1:]
+	}
+	return ""
 }
 
 func ownViewConfig(t *testing.T) *config.Config {
@@ -261,7 +273,7 @@ func TestUsageRecordsCarryTheProvedRoutingAdminGroups(t *testing.T) {
 	member := ownViewAccounts()["4101"]
 	for i := 0; i < 20; i++ {
 		name := fmt.Sprintf("g%02d", i)
-		member.Groups = append(member.Groups, name)
+		member.Groups = append(member.Groups, name, ownViewGroupSID(name))
 		many.Routing.Admin.Rules = append(many.Routing.Admin.Rules, config.RoutingAdminRule{ID: "r-" + name, Match: config.RoutingAdminMatch{Groups: []string{name}}, Allow: []string{"fast"}})
 	}
 	member.Groups = append(member.Groups, "not-in-config")
