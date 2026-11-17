@@ -336,6 +336,12 @@ func New(opts Options) (*Service, error) {
 		if err := os.MkdirAll(filepath.Join(opts.Dir, d), 0o700); err != nil {
 			return nil, err
 		}
+		// A pod fsGroup makes the store volume 2770/0660 on every mount
+		// (EKS with EBS); the leader takes its own entries back to
+		// owner-only, or the audit store refuses every chain (GAP-0394).
+		if err := audit.ReclaimOwnTree(filepath.Join(opts.Dir, d)); err != nil {
+			return nil, err
+		}
 	}
 	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{},
 		calls: newCallTable()}
