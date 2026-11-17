@@ -59,32 +59,74 @@ const (
 // PID was created later, so it never matches. With a start identity in the
 // record, this account's holder must match it too.
 func HomeGatewayHoldsPort(dataDir, host string, port int) bool {
-	if !filepath.IsAbs(dataDir) || port < 1 || port > 65535 {
+	holder, ok := homeGatewayCandidate(dataDir, host, port)
+	if !ok {
 		return false
+	}
+	switch homeGatewayHolderAccount(holder) {
+	case holderAccountUnreadable:
+		// gateway.pid is not a private-file record: an unreadable holder is
+		// accepted only through gateway-api.json and its creation time.
+		return runtimeRecordNamesProcess(dataDir, holder.PID, port)
+	case holderThisAccount:
+		if New(dataDir).HasManagedProcessIdentity(holder.PID) {
+			return true
+		}
+		record, ok := readRuntimeAPIRecord(dataDir)
+		if !ok || record.PID != holder.PID || record.Port != port {
+			return false
+		}
+		if record.StartIdentity == "" {
+			// A gateway older than 1.0.10 wrote no start identity: the
+			// account check is all its record has, until it restarts.
+			return true
+		}
+		return startIdentityMatches(holder.PID, record.StartIdentity)
+	default:
+		return false
+	}
+}
+
+// HomeGatewayOutOfReach reports the PID of this data directory's own gateway
+// when it holds host:port but this process may not open it or read its token:
+// on Windows, a gateway this account started elevated in another logon
+// session (a scheduled task, an administrator's SSH session). It is the
+// unreadable branch of HomeGatewayHoldsPort, with the same binding: the
+// creation time the kernel's process list gives must be the one the gateway
+// recorded in its private gateway-api.json. Any other holder, a lookup error,
+// no record, a record without a start identity or another creation time is
+// false. It never authorizes process control or a token-bearing request;
+// callers only name the gateway and refuse what they cannot do from here
+// (rel-1-0-10:GAP-1212).
+func HomeGatewayOutOfReach(dataDir, host string, port int) (int, bool) {
+	holder, ok := homeGatewayCandidate(dataDir, host, port)
+	if !ok || homeGatewayHolderAccount(holder) != holderAccountUnreadable ||
+		!runtimeRecordNamesProcess(dataDir, holder.PID, port) {
+		return 0, false
+	}
+	return holder.PID, true
+}
+
+// homeGatewayCandidate is the socket table's holder of host:port when it can
+// be this home's gateway: an absolute data directory, a valid port, a holder
+// PID that is not the caller.
+func homeGatewayCandidate(dataDir, host string, port int) (PortHolder, bool) {
+	if !filepath.IsAbs(dataDir) || port < 1 || port > 65535 {
+		return PortHolder{}, false
 	}
 	holder, err := homeGatewayPortHolder(host, port)
 	if err != nil || holder.PID <= 0 || holder.PID == os.Getpid() {
-		return false
+		return PortHolder{}, false
 	}
-	account := homeGatewayHolderAccount(holder)
-	if account == holderOtherAccount {
-		return false
-	}
-	// gateway.pid is not a private-file record; only a holder of this
-	// account may be accepted through it.
-	if account == holderThisAccount && New(dataDir).HasManagedProcessIdentity(holder.PID) {
-		return true
-	}
+	return holder, true
+}
+
+// runtimeRecordNamesProcess reports whether the private gateway-api.json of
+// dataDir names pid listening on port with the start identity pid has now.
+func runtimeRecordNamesProcess(dataDir string, pid, port int) bool {
 	record, ok := readRuntimeAPIRecord(dataDir)
-	if !ok || record.PID != holder.PID || record.Port != port {
-		return false
-	}
-	if record.StartIdentity == "" {
-		// A gateway older than 1.0.10 wrote no start identity: the account
-		// check is all its record has, until that gateway restarts.
-		return account == holderThisAccount
-	}
-	return startIdentityMatches(holder.PID, record.StartIdentity)
+	return ok && record.PID == pid && record.Port == port &&
+		record.StartIdentity != "" && startIdentityMatches(pid, record.StartIdentity)
 }
 
 // startIdentityMatches reports whether process pid is the process a record

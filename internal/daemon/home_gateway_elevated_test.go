@@ -62,9 +62,25 @@ func TestHomeGatewayHoldsPortElevatedHolder(t *testing.T) {
 	if HomeGatewayHoldsPort(dir, "127.0.0.1", 18974) {
 		t.Fatal("the record names another port")
 	}
+	// rel-1-0-10:GAP-1212: the same binding names it out of reach.
+	if got, ok := HomeGatewayOutOfReach(dir, "127.0.0.1", port); !ok || got != pid {
+		t.Fatalf("HomeGatewayOutOfReach = %d, %v; want %d, true", got, ok, pid)
+	}
+	account = holderThisAccount
+	if _, ok := HomeGatewayOutOfReach(dir, "127.0.0.1", port); ok {
+		t.Fatal("a holder this caller can read is not out of reach")
+	}
+	account = holderOtherAccount
+	if _, ok := HomeGatewayOutOfReach(dir, "127.0.0.1", port); ok {
+		t.Fatal("another account's holder is not this home's gateway out of reach")
+	}
+	account = holderAccountUnreadable
 	live = "133000000000000999"
 	if held() {
 		t.Fatal("token denied, another creation time (a reused PID): not held")
+	}
+	if _, ok := HomeGatewayOutOfReach(dir, "127.0.0.1", port); ok {
+		t.Fatal("a reused PID is not this home's gateway out of reach")
 	}
 	live, liveErr = "", errors.New("access denied")
 	if held() {
