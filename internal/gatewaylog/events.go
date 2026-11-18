@@ -176,6 +176,12 @@ const (
 	// envelope payload and no envelope row: the v7 ai_discovery envelope shape
 	// was retired, so the schema's event_type enum deliberately omits it.
 	EventAIDiscovery EventType = "ai_discovery"
+
+	// EventEndpointHealth is the classification key of the periodic managed
+	// endpoint health report (observability.ProducerGatewayEvent with
+	// ProducerKey("endpoint_health")). Like EventAIDiscovery it exists only as a
+	// v8 log identity and has no envelope payload or envelope row.
+	EventEndpointHealth EventType = "endpoint_health"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
