@@ -82,3 +82,30 @@ func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP1183EmptyHereDocBodyReadsNothing: an empty here-document (the
+// parser gives it no body word) hands its consumer no input, so the
+// top-level reader adds nothing and never dereferences the missing body
+// (the FU9 owner A/B rows where a recovered panic became a parse-failure
+// alert).
+func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
+	for _, command := range []string{
+		"python3 - <<EOF\nEOF",
+		"cd /work && python3 - <<EOF\nEOF",
+		"cd /work && grep -n x <<EOF\nEOF",
+		"newgrp <<EOF\nEOF",
+		"PATH=/tmp/x:$PATH cat <<'EOF'\nEOF",
+		"yash <<EOF\nEOF",
+	} {
+		input := Input{Tool: "Bash", Command: command, CWD: "/work", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
+		if got := simpleTopLevelHereDocBodies(command, input); len(got) != 0 {
+			t.Errorf("%q: want no reading, got %+v", command, got)
+		}
+		if got := SimpleCommands(input, Analyze(input)); slices.ContainsFunc(got, func(s SimpleCommand) bool {
+			return s.EvaluationFailure == EvaluationFailureUnresolvedBody
+		}) {
+			t.Errorf("%q: an empty document is not an unread body: %+v", command, got)
+		}
+	}
+}

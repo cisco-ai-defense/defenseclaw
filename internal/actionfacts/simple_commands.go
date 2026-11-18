@@ -457,6 +457,10 @@ func simpleTopLevelHereDocBodies(source string, input Input) []SimpleCommand {
 			if !isRedirect || redirection.Op != syntax.Hdoc && redirection.Op != syntax.DashHdoc {
 				return true
 			}
+			if redirection.Hdoc == nil {
+				// An empty here-document: the consumer gets no input.
+				return false
+			}
 			// The body as the shell that runs it reads it: the literal body,
 			// or an unquoted body that expands only parameters, as written
 			// (heredocScriptText, the reading of the shell twin).
@@ -465,13 +469,9 @@ func simpleTopLevelHereDocBodies(source string, input Input) []SimpleCommand {
 				// A valid here-document fed to an ordinary program is data
 				// even when the closed syntax-tail reader cannot prove the
 				// stdin semantics of that program. Only the GAP-1183 launcher
-				// forms with a possible state write need the unknown tier.
-				if !known {
-					var raw strings.Builder
-					if syntax.NewPrinter().Print(&raw, redirection.Hdoc) == nil {
-						body = raw.String()
-					}
-				}
+				// forms with a possible state write need the unknown tier. A
+				// body the twin cannot read (a command substitution) shows no
+				// state write here, as on the lane branch.
 				if topLevelHereDocUnknownStateConsumer(stmt.Cmd) && hereDocBodyMayWriteState(body, input) {
 					result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
 				}
