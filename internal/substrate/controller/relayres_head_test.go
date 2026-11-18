@@ -83,14 +83,14 @@ func TestAdmissionGivesTheRelayItsCapabilitiesAndNoMore(t *testing.T) {
 		mut func(*ateapi.ActorTemplate)
 		ok  bool
 	}{
-		"the kit's adjustment":           {nil, true},
-		"none (Substrate's default set)": {func(m *ateapi.ActorTemplate) { m.Containers[0].SecurityContext = nil }, false},
-		"drop ALL, add the three":        {sc([]string{"SETUID", "SETGID", "KILL"}, []string{"ALL"}), true},
-		"add SETUID only":                {sc([]string{"SETUID"}, nil), false},
-		"add CHOWN too":                  {sc([]string{"SETUID", "SETGID", "CHOWN"}, nil), false},
-		"add DAC_OVERRIDE":               {sc([]string{"SETUID", "SETGID", "DAC_OVERRIDE"}, nil), false},
-		"drop KILL":                      {sc([]string{"SETUID", "SETGID"}, []string{"KILL"}), false},
-		"the kit's, CAP_ prefixed":       {sc([]string{"CAP_SETUID", "cap_setgid"}, []string{"AUDIT_WRITE", "cap_net_bind_service"}), true},
+		"the kit's adjustment":                     {nil, true},
+		"none (Substrate's default set)":           {func(m *ateapi.ActorTemplate) { m.Containers[0].SecurityContext = nil }, false},
+		"drop ALL, add the three":                  {sc([]string{"SETUID", "SETGID", "KILL"}, []string{"ALL"}), true},
+		"add SETUID only":                          {sc([]string{"SETUID"}, nil), false},
+		"add CHOWN too":                            {sc([]string{"SETUID", "SETGID", "CHOWN"}, nil), false},
+		"add DAC_OVERRIDE":                         {sc([]string{"SETUID", "SETGID", "DAC_OVERRIDE"}, nil), false},
+		"drop KILL":                                {sc([]string{"SETUID", "SETGID"}, []string{"KILL"}), false},
+		"CAP_ prefixed (not Substrate's spelling)": {sc([]string{"CAP_SETUID", "cap_setgid"}, []string{"AUDIT_WRITE", "cap_net_bind_service"}), false},
 	} {
 		att := kitAttest(t, c.mut)
 		if att.Attested != c.ok || (!c.ok && (!att.Allowlist || !strings.Contains(att.Reason, "security_context"))) {

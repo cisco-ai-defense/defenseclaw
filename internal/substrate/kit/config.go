@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -380,6 +381,39 @@ var (
 	// when its template asks for no adjustment (Substrate v1.0.0).
 	SubstrateDefaultCapabilities = []string{"AUDIT_WRITE", "KILL", "NET_BIND_SERVICE"}
 )
+
+// SystemDirs are the folders a data mount never goes in (GAP-0441):
+// admission refuses a mount path in one (a WORKDIR there admits no data
+// mount).
+var SystemDirs = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/proc", "/sys", "/dev",
+	"/run", "/boot", "/var/run"}
+
+// LoadDirs are the system folders whose files programs load, run or read
+// at start (libraries, binaries, /etc/ld.so.preload, profiles): the relay
+// refuses a data mount that resolves into one through a symlink in the
+// image or an image volume, which admission cannot see (GAP-0576). /proc,
+// /sys, /dev and /run hold the runtime's and the host's own mounts (the
+// actor's /run/ate, a host's /run and /boot/efi in the relay's tests), so
+// the relay leaves them, and /boot, to admission. RuntimeMountFiles are
+// the files a container runtime binds into /etc.
+var (
+	LoadDirs          = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc"}
+	RuntimeMountFiles = []string{"/etc/hosts", "/etc/resolv.conf", "/etc/hostname"}
+)
+
+// InLoadDir reports whether the clean mount point p is in one of LoadDirs
+// and is not a file the runtime binds.
+func InLoadDir(p string) bool {
+	if slices.Contains(RuntimeMountFiles, p) {
+		return false
+	}
+	for _, d := range LoadDirs {
+		if p == d || strings.HasPrefix(p, d+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // ActorCapabilities is the capability set Substrate gives an actor
 // container: the default, minus drop ("ALL" clears it), plus add; sorted.

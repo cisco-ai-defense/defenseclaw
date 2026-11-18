@@ -27,14 +27,13 @@ func TestGAP0509SeparatedImageGetsExactlyTheRelayCapabilities(t *testing.T) {
 		ok   bool
 		name string
 	}{
-		"template publish's adjustment":           {nil, true, ""},
-		"add SETUID and SETGID, no drop":          {sc(two, nil), false, "AUDIT_WRITE"},
-		"add the three, no drop":                  {sc(three, nil), false, "AUDIT_WRITE"},
-		"drop AUDIT_WRITE only":                   {sc(two, []string{"AUDIT_WRITE"}), false, "NET_BIND_SERVICE"},
-		"drop NET_BIND_SERVICE only":              {sc(two, []string{"NET_BIND_SERVICE"}), false, "AUDIT_WRITE"},
-		"drop ALL, add the three":                 {sc(three, []string{"ALL"}), true, ""},
-		"drop more than template publish":         {sc(two, []string{"AUDIT_WRITE", "NET_BIND_SERVICE", "CHOWN"}), true, ""},
-		"template publish's, CAP_ and lower case": {sc([]string{"CAP_SETUID", "cap_setgid"}, []string{"cap_audit_write", "NET_BIND_SERVICE"}), true, ""},
+		"template publish's adjustment":   {nil, true, ""},
+		"add SETUID and SETGID, no drop":  {sc(two, nil), false, "AUDIT_WRITE"},
+		"add the three, no drop":          {sc(three, nil), false, "AUDIT_WRITE"},
+		"drop AUDIT_WRITE only":           {sc(two, []string{"AUDIT_WRITE"}), false, "NET_BIND_SERVICE"},
+		"drop NET_BIND_SERVICE only":      {sc(two, []string{"NET_BIND_SERVICE"}), false, "AUDIT_WRITE"},
+		"drop ALL, add the three":         {sc(three, []string{"ALL"}), true, ""},
+		"drop more than template publish": {sc(two, []string{"AUDIT_WRITE", "NET_BIND_SERVICE", "CHOWN"}), true, ""},
 	} {
 		att := kitAttest(t, c.mut)
 		if att.Attested != c.ok {
