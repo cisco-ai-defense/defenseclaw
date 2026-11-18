@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -618,5 +619,37 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	// verify's openfga_grants check derives the same principals (GAP-0209).
 	if !slices.Equal(p.Editors, ChartEditors(p.Namespace)) || !slices.Equal(p.GlobalViewers, ChartGlobalViewers(p.Namespace)) {
 		t.Errorf("%s: plan editors %v / viewers %v differ from ChartEditors / ChartGlobalViewers", name, p.Editors, p.GlobalViewers)
+	}
+}
+
+// substrate-1:GAP-0578 (f): validate.yaml floors each pod's process headroom
+// at its chart default requests.memory, copied there by hand; a default that
+// changes without its floor must fail here.
+func TestChartMemoryHomeFloorsAreTheDefaultRequests(t *testing.T) {
+	tmpl, err := os.ReadFile(filepath.Join(chartDir, "templates", "validate.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`\$floors := dict "gateway" (\d+) "leader" (\d+) "controller" (\d+) "callout" (\d+)`).FindStringSubmatch(string(tmpl))
+	if m == nil {
+		t.Fatal("validate.yaml has no $floors dict for gateway, leader, controller and callout")
+	}
+	raw, err := os.ReadFile(filepath.Join(chartDir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		t.Fatal(err)
+	}
+	for i, pod := range []string{"gateway", "leader", "controller", "callout"} {
+		request, _ := dig(values, pod, "resources", "requests", "memory").(string)
+		mib, ok := strings.CutSuffix(request, "Mi")
+		if !ok {
+			t.Fatalf("%s.resources.requests.memory %q is not in Mi; teach this test the unit", pod, request)
+		}
+		if mib != m[i+1] {
+			t.Errorf("validate.yaml floors %s at %s MiB, but its default request is %s", pod, m[i+1], request)
+		}
 	}
 }

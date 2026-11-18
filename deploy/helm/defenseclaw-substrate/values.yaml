@@ -90,8 +90,9 @@ config:
   observability:
     local:
       # The audit store size cap (MiB). Retention deletes the oldest audit
-      # history above it (never the last hour) and checks it every 10
-      # minutes, so audit.db stays inside homeSizeLimit (GAP-0402).
+      # history once the store passes nine tenths of it, down to seven tenths
+      # (the newest hour too when the cap needs it), and checks it every 30
+      # seconds, so audit.db stays inside homeSizeLimit (GAP-0402, GAP-0570).
       max_store_mb: 1024
   substrate:
     enabled: true

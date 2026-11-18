@@ -43,8 +43,9 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- end -}}
 {{- end -}}
 {{- /* GAP-0402: the volume of the local audit store (the managed data volume,
-else the home volume) holds the store's size cap twice over (retention never
-deletes the last hour) plus 256 MiB, the audit write-ahead log's flood
+else the home volume) holds the store's size cap twice over (a capped pass starts
+at nine tenths of the cap, a 30-second check lets in about 40 MiB at 50 hook
+posts a second, and the file keeps its freed pages) plus 256 MiB, the audit write-ahead log's flood
 ceiling. A 256 MiB volume filled under about 15 actors, and every hook then
 failed closed. */ -}}
 {{- $capMB := int (dig "observability" "local" "max_store_mb" 0 $cfg) -}}
