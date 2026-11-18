@@ -1634,8 +1634,7 @@ func clientStatementBudgetExceeded(connector, tool string, facts actionfacts.Fac
 // PowerShell, as clientStatementBudgetExceeded counts it: a PowerShell tool,
 // a PowerShell parse, or on Windows any shell tool not known to run POSIX.
 func clientPowerShellReading(connector, tool string, facts actionfacts.Facts) bool {
-	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+	if clientPowerShellTool(tool) {
 		return true
 	}
 	switch facts.Parse.Dialect {
@@ -1645,6 +1644,16 @@ func clientPowerShellReading(connector, tool string, facts actionfacts.Facts) bo
 		return false
 	}
 	return runtime.GOOS == "windows" && hookShellDialect(connector, tool) != actionfacts.DialectPOSIX
+}
+
+// clientPowerShellTool reports a tool that runs its command in PowerShell
+// (Claude Code's PowerShell tool).
+func clientPowerShellTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		return true
+	}
+	return false
 }
 
 func hookShellDialect(connector, tool string) actionfacts.Dialect {
@@ -2173,8 +2182,14 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// macOS call runs (pwsh -Command "Add-Content -Path $HOME/f
 				// ...", actionfacts.PowerShellLauncherScripts): behind
 				// ProtectHome the gateway places its targets only from this
-				// map (rel-1-0-10:GAP-1134).
-				for _, script := range actionfacts.PowerShellLauncherScripts(fallback) {
+				// map (rel-1-0-10:GAP-1134). The command of a PowerShell tool
+				// of such a home is the script pwsh runs, read the same way
+				// (rel-1-0-10:GAP-1214).
+				scripts := actionfacts.PowerShellLauncherScripts(fallback)
+				if strings.HasPrefix(home, "/") && clientPowerShellTool(tool) {
+					scripts = append([]string{command}, scripts...)
+				}
+				for _, script := range scripts {
 					scriptInput := fallback
 					scriptInput.Command, scriptInput.DialectHint = script, actionfacts.DialectPowerShell
 					scriptInput.PowerShellLauncherBody = true
