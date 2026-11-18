@@ -174,12 +174,18 @@ func TestGAP0551RepoServerIsUnscannedUnlessKnownSafe(t *testing.T) {
 		}
 	}
 	absent := AttachedFile{Role: "mcp_module_absent", Path: "mcp_server_time"}
+	// The kit's record that it looked at the folder for a registry fetcher
+	// and found nothing it resolves there (GAP-0573). Without it (an older
+	// kit) a fetched package is not known: npx runs the project's own
+	// program and reads its .npmrc, pinned or not, so the GAP-0551 unpinned
+	// case needs the kit's facts now.
+	checked := AttachedFile{Role: RoleFetchChecked, Path: "/work/repo"}
 	for name, d := range map[string]*RuntimeDecision{
 		"installed program":     repoServerDecision(t, "/usr/local/bin/mcp-server-fetch", []string{"--stdio"}, nil),
 		"runner, installed js":  repoServerDecision(t, "/usr/bin/node", []string{"/usr/lib/node_modules/srv/index.js", "--stdio"}, nil),
-		"pinned package":        repoServerDecision(t, "npx", []string{"-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."}, nil),
-		"pinned python package": repoServerDecision(t, "uvx", []string{"mcp-server-time==0.6"}, nil),
-		"unpinned package":      repoServerDecision(t, "npx", []string{"-y", "@modelcontextprotocol/server-filesystem", "/work/repo"}, nil),
+		"pinned package":        repoServerDecision(t, "npx", []string{"-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."}, nil, checked),
+		"pinned python package": repoServerDecision(t, "uvx", []string{"mcp-server-time==0.6"}, nil, checked),
+		"unpinned package":      repoServerDecision(t, "npx", []string{"-y", "@modelcontextprotocol/server-filesystem", "/work/repo"}, nil, checked),
 		"java -jar /abs":        repoServerDecision(t, "java", []string{"-jar", "/opt/srv/server.jar"}, nil),
 		"image module (-m)":     repoServerDecision(t, "python3", []string{"-m", "mcp_server_time"}, nil, absent),
 	} {

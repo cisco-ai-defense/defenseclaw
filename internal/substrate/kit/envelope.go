@@ -135,8 +135,11 @@ type PathFact struct {
 
 // AttachedFile is a file the kit read for the gateway.
 type AttachedFile struct {
-	// Role is skill_file, mcp_config, mcp_server or mcp_module_absent (a
-	// -m module the kit looked for in the folder and did not find).
+	// Role is skill_file, mcp_config, mcp_server, mcp_module_absent (a
+	// -m module the kit looked for in the folder and did not find), or one
+	// of the folder facts of a registry fetcher and a bare command
+	// (mcp_fetch_checked, mcp_fetch_local, mcp_fetch_config,
+	// mcp_fetch_names, mcp_command_path; fetchfacts.go, GAP-0573).
 	Role     string `json:"role"`
 	Path     string `json:"path"`
 	Resolved string `json:"resolved,omitempty"`

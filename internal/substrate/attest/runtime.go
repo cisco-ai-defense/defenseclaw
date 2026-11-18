@@ -692,28 +692,60 @@ func serverModuleFile(s MCPServer, p string) bool {
 
 // codeLoadingEnv are environment variables that make a program load code
 // from where they point (a project folder): a server that sets one is not
-// known to run nothing of the folder (GAP-0551).
+// known to run nothing of the folder (GAP-0551). Names compare without
+// case (Windows reads them so, and npm reads npm_config_* in any case).
 var codeLoadingEnv = map[string]bool{"PATH": true, "NODE_OPTIONS": true, "NODE_PATH": true, "PYTHONPATH": true, "PYTHONSTARTUP": true,
-	"PYTHONHOME": true, "PYTHONUSERBASE": true, "LD_PRELOAD": true, "LD_LIBRARY_PATH": true, "PERL5LIB": true, "PERL5OPT": true, "RUBYOPT": true,
+	"PYTHONHOME": true, "PYTHONUSERBASE": true, "PERL5LIB": true, "PERL5OPT": true, "RUBYOPT": true,
 	"RUBYLIB": true, "BASH_ENV": true, "ENV": true, "JAVA_TOOL_OPTIONS": true, "_JAVA_OPTIONS": true, "GEM_PATH": true, "GEM_HOME": true,
-	"CLASSPATH": true, "GOFLAGS": true, "DENO_DIR": true, "BUN_INSTALL": true, "npm_config_prefix": true}
+	"CLASSPATH": true, "GOFLAGS": true, "DENO_DIR": true, "XDG_CONFIG_HOME": true, "HOME": true}
+
+// codeLoadingEnvPrefixes are families of variables that set where a
+// fetcher, a container client or the loader reads code or config from
+// (npm_config_node_options, UV_FIND_LINKS, PIP_INDEX_URL, DOCKER_CONFIG,
+// LD_PRELOAD, DYLD_INSERT_LIBRARIES): every member is code-loading
+// (GAP-0573).
+var codeLoadingEnvPrefixes = []string{"NPM_CONFIG_", "YARN_", "PNPM_", "BUN_", "COREPACK_", "UV_", "PIP_", "PIPX_", "DOCKER_",
+	"CONTAINERS_", "LD_", "DYLD_"}
+
+func codeLoadingEnvKey(k string) bool {
+	k = strings.ToUpper(strings.TrimSpace(k))
+	if codeLoadingEnv[k] {
+		return true
+	}
+	for _, p := range codeLoadingEnvPrefixes {
+		if strings.HasPrefix(k, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // runners run code they are given or find in the working folder (a script,
 // a module, a package.json script, a Makefile, a Go or Cargo package): an
-// installed one is safe only when given an installed program to run.
+// installed one is safe only when given an installed program to run. The
+// wrappers (timeout, nohup, xargs, sudo, ...) run the program they are
+// given, and git runs what the repository's config names.
 var runners = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ash": true, "ksh": true, "fish": true, "env": true,
 	"python": true, "python2": true, "python3": true, "py": true, "pypy": true, "pypy3": true, "node": true, "nodejs": true, "deno": true,
 	"bun": true, "ruby": true, "perl": true, "php": true, "java": true, "lua": true, "Rscript": true, "julia": true, "uv": true, "poetry": true,
 	"pipenv": true, "hatch": true, "pdm": true, "npm": true, "pnpm": true, "yarn": true, "make": true, "gmake": true, "just": true, "task": true,
-	"go": true, "cargo": true, "dotnet": true, "mvn": true, "gradle": true, "rake": true, "bundle": true, "tsx": true, "ts-node": true}
+	"go": true, "cargo": true, "dotnet": true, "mvn": true, "gradle": true, "rake": true, "bundle": true, "tsx": true, "ts-node": true,
+	"timeout": true, "nohup": true, "nice": true, "ionice": true, "stdbuf": true, "setsid": true, "xargs": true, "sudo": true, "doas": true,
+	"su": true, "runuser": true, "chroot": true, "unshare": true, "nsenter": true, "flock": true, "script": true, "strace": true, "ltrace": true,
+	"time": true, "watch": true, "busybox": true, "taskset": true, "chrt": true, "prlimit": true, "systemd-run": true, "firejail": true,
+	"bwrap": true, "tini": true, "dumb-init": true, "awk": true, "gawk": true, "mawk": true, "tclsh": true, "expect": true, "git": true,
+	"pwsh": true, "powershell": true, "cmd": true, "luajit": true, "R": true, "elixir": true, "escript": true, "dart": true, "swift": true}
 
 // runsNothingOfFolder reports a stdio server positively known to run no
 // code of the project folder: an installed program (an absolute path
-// outside it; for a runner, given an installed program and nothing else
-// before it), or a registry package fetched by a runtime fetcher with no
-// local source. Neither may set a code-loading environment variable
+// outside it, or a bare name the kit found outside it on the actor's
+// PATH; for a runner, given an installed program and nothing else before
+// it), a registry package fetched by a runtime fetcher that the folder
+// cannot redirect (GAP-0573), or a container image run with nothing of
+// the folder (GAP-0575). None may set a code-loading environment variable
 // or name the folder through a variable. Anything else (a shell, a runner,
-// a bare name found on PATH, a local package) is not known (GAP-0551).
+// a bare name the kit did not resolve, a local package) is not known
+// (GAP-0551).
 func runsNothingOfFolder(s MCPServer, project string, files []AttachedFile) bool {
 	project = path.Clean("/" + filepath.ToSlash(project))
 	inFolder := func(p string) bool {
@@ -721,7 +753,7 @@ func runsNothingOfFolder(s MCPServer, project string, files []AttachedFile) bool
 		return p == project || strings.HasPrefix(p, project+"/")
 	}
 	for _, k := range s.EnvKeys {
-		if codeLoadingEnv[k] {
+		if codeLoadingEnvKey(k) {
 			return false
 		}
 	}
@@ -733,28 +765,32 @@ func runsNothingOfFolder(s MCPServer, project string, files []AttachedFile) bool
 	}
 	cmd := filepath.ToSlash(s.Command)
 	base := strings.TrimSuffix(path.Base(cmd), ".exe")
-	switch {
-	case runtimeFetchers[base]:
-		// A registry package (npx, uvx): not the folder's when its first
-		// operand is a package name, pinned or not (an unpinned one is the
-		// config rules' warning). A local package (., ./dir, a path in the
-		// folder) or a local source (--from, --directory) is the folder's.
-		// Operands after the package are its own (data such as /work).
-		for _, a := range s.Args {
-			switch {
-			case a == "--from" || strings.HasPrefix(a, "--from=") || a == "--with-editable" || a == "--directory":
-				return false
-			case strings.HasPrefix(a, "-"):
-				continue
-			case a == "." || strings.HasPrefix(a, "./") || strings.HasPrefix(a, "../") ||
-				(path.IsAbs(filepath.ToSlash(a)) && inFolder(a)) || strings.HasPrefix(a, "file:"):
-				return false
-			default:
-				return true
-			}
+	resolved := ""
+	if !strings.Contains(cmd, "/") {
+		// Where the kit found a bare command on the actor's PATH: a
+		// program of the folder (./node_modules/.bin, a venv) is the
+		// folder's, whatever its name (GAP-0575).
+		resolved = commandPath(s.Command, files)
+		if resolved != "" && inFolder(resolved) {
+			return false
 		}
-		return false
-	case (runners[base] || strings.HasPrefix(base, "python3.")) && (!path.IsAbs(cmd) || !inFolder(cmd)):
+	}
+	switch {
+	case strings.Contains(cmd, "/") && !path.IsAbs(cmd):
+		return false // a relative path (./.venv/bin/python, node_modules/.bin/npx): the folder's
+	case path.IsAbs(cmd) && inFolder(cmd):
+		return false // a program of the folder
+	case runtimeFetchers[base]:
+		// A registry package (npx, uvx, pipx run): every option read with
+		// its value, the package from the registry, and nothing in the
+		// folder the fetcher resolves first (GAP-0573). Operands after the
+		// package are its own (data such as /work).
+		return fetchRunsNothingOfFolder(base, s.Args, project, files)
+	case base == "docker" || base == "podman":
+		// An image run with no mount, working folder, env file or entry
+		// point sees nothing of the folder (GAP-0575).
+		return containerRun(s.Args)
+	case runners[base] || strings.HasPrefix(base, "python3."):
 		// A runner (installed, or found on PATH): safe only when what it
 		// runs is not the folder's: an installed program (an absolute path
 		// outside the folder, also after -jar, GAP-0556), or a module (-m)
@@ -772,14 +808,13 @@ func runsNothingOfFolder(s MCPServer, project string, files []AttachedFile) bool
 		default:
 			return path.IsAbs(first) && !inFolder(first)
 		}
-	case !path.IsAbs(cmd) || inFolder(cmd):
-		return false // a bare name on PATH, or a program of the folder
+	case !path.IsAbs(cmd) && resolved == "":
+		return false // a bare name the kit did not find on PATH
 	}
-	for _, a := range s.Args {
-		if p := filepath.ToSlash(a); path.IsAbs(p) && inFolder(p) {
-			return false
-		}
-	}
+	// An installed program (not a runner): its operands are data, a
+	// project path too (mcp-server-filesystem /work/repo), as for a
+	// fetched package; a file of the folder it names is attached by the
+	// kit and scanned as the server's source (GAP-0575).
 	return true
 }
 
@@ -809,7 +844,8 @@ func serverStarts(s MCPServer, p string) bool {
 func serverFiles(all []AttachedFile) []AttachedFile {
 	var out []AttachedFile
 	for _, f := range all {
-		if f.Role == RoleMCPServer || f.Role == RoleMCPConfig || f.Role == RoleMCPModuleAbsent {
+		switch f.Role {
+		case RoleMCPServer, RoleMCPConfig, RoleMCPModuleAbsent, RoleFetchChecked, RoleFetchLocal, RoleFetchConfig, RoleFetchNames, RoleCommandPath:
 			out = append(out, f)
 		}
 	}
