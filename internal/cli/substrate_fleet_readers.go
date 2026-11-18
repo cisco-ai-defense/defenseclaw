@@ -42,6 +42,9 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
@@ -343,6 +346,7 @@ func readAccessPolicies(ctx context.Context, f *substrateClusterFlags, o *fleet.
 				what = "the access policy of " + atespace
 			}
 			o.PoliciesNote = what + ": " + policyErrWords(err)
+			o.PoliciesDenied = status.Code(err) == codes.PermissionDenied
 			return nil, false
 		}
 		return p, true

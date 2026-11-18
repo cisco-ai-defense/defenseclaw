@@ -51,13 +51,17 @@
       "$ref": "#/$defs/inventory",
       "description": "Every actor and template in the cluster, as the gateway's ServiceAccount (a global viewer) reads them. Absent when they could not be read."
     },
+    "policy_conflicts": {
+      "$ref": "#/$defs/policy_conflicts",
+      "description": "The agents in policy_conflict per atespace (from 1.0.10). The policy_conflict check fails while one is there, and warns when they could not be counted."
+    },
     "checks": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 10,
-      "maxItems": 10
+      "minItems": 11,
+      "maxItems": 11
     }
   },
   "$defs": {
@@ -244,6 +248,11 @@
         },
         "states": {
           "$ref": "#/$defs/actorStates"
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Its agents in policy_conflict (from 1.0.10); absent when they were not counted (policy_conflicts.reason says why)."
         }
       }
     },
@@ -291,7 +300,8 @@
             "callout_registered",
             "ingress_clients",
             "actor_service_routes",
-            "api_access_label"
+            "api_access_label",
+            "policy_conflict"
           ]
         },
         "status": {
@@ -323,6 +333,66 @@
         "minimum": 1
       },
       "description": "Actors by lifecycle state (Substrate's ActorState in lower case); a state with no actor is absent."
+    },
+    "policy_conflicts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agents",
+        "atespaces",
+        "read"
+      ],
+      "description": "The agents in policy_conflict (GAP-0398): after repeated foreign changes to an agent's network policy the controller keeps it on the DefenseClaw rule only (deny-only) until an administrator resets it. Read with the administrator's DefenseClaw sign-in (every person's agents); without one the count is unknown: read is false, reason says why, agents is null and atespaces is empty, never a 0.",
+      "properties": {
+        "read": {
+          "type": "boolean",
+          "description": "Every person's agents were listed and counted."
+        },
+        "reason": {
+          "enum": [
+            "no_sign_in",
+            "signed_out",
+            "not_administrator",
+            "unreachable",
+            "not_read"
+          ],
+          "description": "Why they were not counted (absent when read): no_sign_in no DefenseClaw context here; signed_out the sign-in expired or was refused; not_administrator the cluster listed only the caller's own agents; unreachable the admin listener did not answer; not_read this command does not count them."
+        },
+        "agents": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Every agent in policy_conflict; null when not counted."
+        },
+        "atespaces": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/atespace_conflicts"
+          },
+          "description": "Every launcher and managed atespace, and every other one with an agent in policy_conflict, sorted by name; empty when not counted."
+        }
+      }
+    },
+    "atespace_conflicts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "atespace",
+        "conflicts"
+      ],
+      "properties": {
+        "atespace": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "conflicts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Its agents in policy_conflict."
+        }
+      }
     }
   },
   "examples": [
@@ -371,7 +441,8 @@
           "states": {
             "running": 1,
             "suspended": 2
-          }
+          },
+          "conflicts": 0
         }
       ],
       "inventory": {
@@ -382,6 +453,16 @@
           "crashed": 1
         },
         "templates": 2
+      },
+      "policy_conflicts": {
+        "read": true,
+        "agents": 0,
+        "atespaces": [
+          {
+            "atespace": "eng-web",
+            "conflicts": 0
+          }
+        ]
       },
       "checks": [
         {
@@ -434,6 +515,11 @@
           "id": "api_access_label",
           "status": "pass",
           "message": "ok"
+        },
+        {
+          "id": "policy_conflict",
+          "status": "pass",
+          "message": "no agent is in policy_conflict"
         }
       ]
     }

@@ -49,7 +49,7 @@ func (ks *KeySet) DiagnoseIssuer(ctx context.Context) IssuerDiagnosis {
 	defer cancel()
 	discoveryURL := ks.issuer + "/.well-known/openid-configuration"
 	var doc discovery
-	if err := ks.getJSON(ctx, discoveryURL, &doc); err != nil {
+	if err := ks.getJSON(ctx, discoveryURL, acceptJSON, &doc); err != nil {
 		d.Cause, d.Detail = issuerCause(err), fmt.Sprintf("discovery %s: %v", discoveryURL, err)
 		return d
 	}
@@ -65,7 +65,7 @@ func (ks *KeySet) DiagnoseIssuer(ctx context.Context) IssuerDiagnosis {
 	var set struct {
 		Keys []jwk `json:"keys"`
 	}
-	if err := ks.getJSON(ctx, doc.JWKSURI, &set); err != nil {
+	if err := ks.getJSON(ctx, doc.JWKSURI, acceptKeySet, &set); err != nil {
 		cause := issuerCause(err)
 		if cause == IssuerHTTP {
 			cause = IssuerKeys

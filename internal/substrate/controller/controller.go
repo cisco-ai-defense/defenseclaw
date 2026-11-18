@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
@@ -59,6 +60,9 @@ const (
 	// idle; DefaultCPUSampleMaxAge how fresh the sample must be.
 	DefaultIdleCPU         = 0.05
 	DefaultCPUSampleMaxAge = 2 * time.Minute
+	// DefaultAttachMaxAge is three of the gateway's attachment reports
+	// (one a minute, gateway.substrateAttachReportEvery).
+	DefaultAttachMaxAge = 3 * time.Minute
 	// DefaultTaskEndGrace is how long a finished --task actor keeps its
 	// worker before it is suspended (GAP-0274): time for the launcher that
 	// followed it to read the end; pull, logs and connect wake it.
@@ -91,7 +95,10 @@ type Options struct {
 	Client   ateapi.Client
 	Attestor Attestor
 	Activity ActivitySource
-	// CPU is the CPU source of idle suspend; without one nothing is idle.
+	// CPU, when set, is the CPU source of idle suspend: an idle actor also
+	// needs a fresh low sample. Without one an idle actor needs no open
+	// terminal attachment (AttachSource, GAP-0534), unless
+	// IdleSuspendWithoutCPU makes silence alone enough (GAP-0465).
 	CPU      CPUSource
 	Registry Registry
 	Resolver ProfileResolver
@@ -120,8 +127,14 @@ type Options struct {
 	KitVersion string
 	// IdleSuspendAfter 0 turns idle suspend off.
 	IdleSuspendAfter time.Duration
-	IdleCPU          float64
-	CPUSampleMaxAge  time.Duration
+	// IdleSuspendWithoutCPU (substrate.idle_suspend_without_cpu): without
+	// a CPU source, silence alone is idle, an attached actor's too.
+	IdleSuspendWithoutCPU bool
+	// AttachMaxAge is how long an attachment report means an attachment is
+	// open; default DefaultAttachMaxAge.
+	AttachMaxAge    time.Duration
+	IdleCPU         float64
+	CPUSampleMaxAge time.Duration
 	// TaskEndGrace is how long a finished --task actor runs on before it
 	// is suspended; default DefaultTaskEndGrace.
 	TaskEndGrace time.Duration
@@ -208,6 +221,9 @@ type actorState struct {
 	ourVersion int64
 	reverts    []time.Time
 	conflict   bool
+	// conflictMarkWarned is set while the registration's policy_conflict
+	// mark cannot be written (one warning per outage, GAP-0398).
+	conflictMarkWarned bool
 	// lastForeign is the last foreign change seen while in conflict.
 	lastForeign time.Time
 	refused     string
@@ -235,8 +251,10 @@ type actorState struct {
 	// registration in use (one warning per outage).
 	regStaleWarned bool
 	// forkQueued and inventoried make the once-per-incarnation fork event
-	// and inventory event survive a failed first pass.
-	forkQueued, inventoried bool
+	// and inventory event survive a failed first pass; forkReported is the
+	// sandbox.fork event of a fork that is never registered (refused in a
+	// launcher atespace), once.
+	forkQueued, inventoried, forkReported bool
 	// rid is the snapshot identity seen on the last pass; a revert is told
 	// from how it changed (GAP-0141).
 	rid     restoreID
@@ -247,6 +265,11 @@ type actorState struct {
 	// foreignTemplateRead is set once the template of a foreign actor was
 	// read and, if unattested, reported (GAP-0495).
 	foreignTemplateRead bool
+	// syncedAt is when the controller last wrote or confirmed the actor's
+	// policy; staleSince when it saw that the policy needs a write (zero
+	// while it does not). policy_lag_ms of a write is measured from
+	// staleSince, not from when the actor was first seen (GAP-0392).
+	syncedAt, staleSince time.Time
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -274,6 +297,7 @@ func New(o Options) (*Controller, error) {
 	def(&o.ConflictWindow, DefaultConflictWindow)
 	def(&o.CPUSampleMaxAge, DefaultCPUSampleMaxAge)
 	def(&o.TaskEndGrace, DefaultTaskEndGrace)
+	def(&o.AttachMaxAge, DefaultAttachMaxAge)
 	if o.IdleCPU <= 0 {
 		o.IdleCPU = DefaultIdleCPU
 	}
@@ -296,7 +320,8 @@ func New(o Options) (*Controller, error) {
 		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{},
 		startedAt: o.Now(), allowlisted: map[string]string{}, unseparated: map[string]bool{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
-		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter}
+		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter,
+		IdleSuspendWithoutCPU: o.IdleSuspendWithoutCPU, LoadedAt: o.Now()}
 	if o.Config != nil {
 		_, lv.Digest = o.Config.Current()
 	}
@@ -539,6 +564,13 @@ type Tombstoner interface {
 	MarkDeleted(ctx context.Context, atespace, uid string) error
 }
 
+// ConflictMarker is a Registry that can record an actor's policy_conflict on
+// its registration (LeaderRegistry), so the gateway shows it to the person
+// and to administrators (GAP-0398); c nil clears the mark.
+type ConflictMarker interface {
+	MarkConflict(ctx context.Context, atespace, uid string, c *registry.PolicyConflict) error
+}
+
 // FreshRegistry is a Registry that can read past its own miss cache
 // (LeaderRegistry over registry.Remote).
 type FreshRegistry interface {
@@ -736,6 +768,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	if err != nil {
 		return err
 	}
+	// Whatever this pass decides, the registration then carries the
+	// conflict state it leaves (GAP-0398).
+	defer c.markConflict(ctx, st, base)
 	if !st.forkQueued && reg.Source == SourceFork && reg.ParentUID != "" {
 		// Once per incarnation, on the first pass whose attribution
 		// succeeds (a leader outage on the first pass must not lose it).
@@ -883,21 +918,32 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 				// A fork inherits chain windows (keyed on the parent in the
 				// leader) but never the parent's ask approvals (PLAN §5.3).
 				reg.Approved = nil
+				// DefenseClaw makes no forks (neither the launcher nor the
+				// gateway creates an actor from a tag), so a fork with no
+				// registration of its own was made outside DefenseClaw, in
+				// a launcher atespace too: forked_by is unknown, and it is
+				// not that person's actor, so it gets no person binding (no
+				// per-person secrets) (GAP-0425).
 				reg.ForkedBy = ForkedByUnknown
-				if launcher {
-					// Only DefenseClaw may fork in a launcher atespace (the
-					// access policy grants it alone).
-					reg.ForkedBy = ForkedByDefenseClaw
-				} else {
-					// Someone else forked it: it is not that person's actor,
-					// so it gets no person binding (no per-person secrets).
-					reg.Person, reg.Workload = "", ""
+				reg.Person, reg.Workload = "", ""
+				if !st.forkReported {
+					st.forkReported = true
+					ev := base
+					ev.Type, ev.Severity, ev.Message = EventFork, SeverityInfo, "fork adopted with its parent's attribution"
+					if launcher {
+						ev.Message = "fork made outside DefenseClaw in a launcher atespace"
+					}
+					ev.Detail = map[string]any{"parent_uid": parent.UID, "parent": parent.Atespace + "/" + parent.Name,
+						"tag": ateapi.Key(tag), "forked_by": reg.ForkedBy, "person_bound": false}
+					c.emit(ev)
 				}
-				ev := base
-				ev.Type, ev.Severity, ev.Message = EventFork, SeverityInfo, "fork adopted with its parent's attribution"
-				ev.Detail = map[string]any{"parent_uid": parent.UID, "parent": parent.Atespace + "/" + parent.Name,
-					"tag": ateapi.Key(tag), "forked_by": reg.ForkedBy, "person_bound": reg.Person != ""}
-				c.emit(ev)
+				if launcher {
+					// Only DefenseClaw may fork in a launcher atespace
+					// (PLAN E17): the fork is refused like any actor made
+					// there outside DefenseClaw.
+					c.refuseOnce(st, base, EventForeignActor, "fork in a launcher atespace that DefenseClaw did not make", SignalForeignActor, "")
+					return reg, "foreign_actor", nil
+				}
 			default:
 				// The parent is gone or never registered.
 				reg.ForkedBy = ForkedByUnknown
@@ -1339,6 +1385,8 @@ func (c *Controller) dropForeignPolicy(ctx context.Context, a *ateapi.Actor, st 
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
 	ev := base
+	// DefenseClaw's own delete: the next create is no foreign change.
+	st.written, st.ourVersion = false, 0
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: it is not DefenseClaw's and the actor is not registered yet"
 	c.emit(ev)
 	return nil
@@ -1415,19 +1463,36 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	state := a.GetStatus().GetState()
 	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ref)
 	if ateapi.IsNotFound(err) {
+		// A policy this controller wrote or confirmed that is gone was
+		// deleted by another writer: a foreign change like an edit, so it
+		// counts toward policy_conflict (GAP-0400).
+		foreign := st.ourVersion != 0
+		counted, enter := c.countRevert(st, foreign)
+		if enter {
+			want = deny
+		}
+		c.markStale(st, lv)
 		created, err := c.o.Client.CreateActorEgressPolicy(ctx, ref, want)
 		if ateapi.IsAlreadyExists(err) {
+			c.uncountRevert(st, counted)
 			return errWriteRace // another writer won: read it again and compare
 		}
 		if err != nil {
+			c.uncountRevert(st, counted)
 			c.fail(base, "create policy: "+err.Error())
 			return fmt.Errorf("%s: create policy: %w", st.key, err)
 		}
 		how := "created"
-		if st.conflict {
+		switch {
+		case foreign && st.conflict:
+			how = "restored deny-only (policy_conflict)"
+		case foreign:
+			how = "restored"
+		case st.conflict:
 			how = "created deny-only (policy_conflict)"
 		}
-		c.wrote(st, created, base, state, how, res)
+		c.landed(st, created, base, state, how, res, foreign, enter,
+			"the actor's egress policy was deleted by another writer and restored", map[string]any{"deleted": true})
 		return nil
 	}
 	if err != nil {
@@ -1440,6 +1505,7 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 		// conflict is over.
 		st.conflict, st.reverts = false, nil
 		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
+		c.synced(st)
 		ev := base
 		ev.Type, ev.Severity, ev.Message = EventConflictCleared, SeverityInfo, "the actor's policy matches DefenseClaw's again"
 		c.emit(ev)
@@ -1448,42 +1514,24 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	}
 	if render.Equal(cur, want) {
 		st.ourUID, st.ourVersion, st.written = m.GetUid(), m.GetVersion(), true
+		c.synced(st)
 		c.recheck(st, a, base, "confirmed")
 		return nil
 	}
-	now := c.o.Now()
 	foreign := st.ourVersion != 0 && !ours
-	enter := false
-	counted := foreign && !st.conflict
-	if counted {
-		st.reverts = append(st.reverts, now)
-		cut := now.Add(-c.o.ConflictWindow)
-		kept := st.reverts[:0]
-		for _, t := range st.reverts {
-			if t.After(cut) {
-				kept = append(kept, t)
-			}
-		}
-		st.reverts = kept
-		if len(st.reverts) >= c.o.ConflictReverts {
-			st.conflict, enter, want = true, true, deny
-		}
+	counted, enter := c.countRevert(st, foreign)
+	if enter {
+		want = deny
 	}
+	c.markStale(st, lv)
 	upd := &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Uid: m.GetUid(), Version: m.GetVersion()}, Rules: want.GetRules()}
 	updated, err := c.o.Client.UpdateActorEgressPolicy(ctx, ref, upd)
 	if ateapi.IsConflict(err) {
-		if counted {
-			// Decided again on the next try: this revert did not happen.
-			st.conflict = false
-			st.reverts = st.reverts[:len(st.reverts)-1]
-		}
+		c.uncountRevert(st, counted)
 		return errWriteRace // changed under us: read again and decide again
 	}
 	if err != nil {
-		if enter {
-			st.conflict = false
-			st.reverts = st.reverts[:len(st.reverts)-1]
-		}
+		c.uncountRevert(st, counted)
 		c.fail(base, "update policy: "+err.Error())
 		return fmt.Errorf("%s: update policy: %w", st.key, err)
 	}
@@ -1500,17 +1548,62 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 	case st.forcedDeny != "":
 		how = "deny-only (" + st.forcedDeny + ")"
 	}
-	// One foreign_rule event per revert outside a conflict; inside one, at
-	// most one per conflict window (a GitOps loop would flood otherwise).
+	c.landed(st, updated, base, state, how, res, foreign, enter,
+		"a foreign change to the actor's egress policy was reverted", map[string]any{"foreign_version": m.GetVersion()})
+	return nil
+}
+
+// countRevert counts a foreign change (an edit or a delete) toward the
+// conflict rule: ConflictReverts in ConflictWindow mark policy_conflict
+// (enter). Inside a conflict nothing is counted.
+func (c *Controller) countRevert(st *actorState, foreign bool) (counted, enter bool) {
+	if !foreign || st.conflict {
+		return false, false
+	}
+	now := c.o.Now()
+	st.reverts = append(st.reverts, now)
+	cut := now.Add(-c.o.ConflictWindow)
+	kept := st.reverts[:0]
+	for _, t := range st.reverts {
+		if t.After(cut) {
+			kept = append(kept, t)
+		}
+	}
+	st.reverts = kept
+	if len(st.reverts) >= c.o.ConflictReverts {
+		st.conflict = true
+		return true, true
+	}
+	return true, false
+}
+
+// uncountRevert takes back a counted revert whose write did not land: the
+// next try decides again.
+func (c *Controller) uncountRevert(st *actorState, counted bool) {
+	if counted {
+		st.conflict = false
+		st.reverts = st.reverts[:len(st.reverts)-1]
+	}
+}
+
+// landed reports a policy write: the foreign_rule event of a revert (one
+// per revert outside a conflict; inside one, at most one per conflict
+// window, or a GitOps loop would flood), the write, and the conflict
+// alert when this revert marked one.
+func (c *Controller) landed(st *actorState, p *ateapi.EgressPolicy, base Event, state ateapi.ActorState, how string, res render.Result,
+	foreign, enter bool, foreignMsg string, foreignDetail map[string]any) {
+	now := c.o.Now()
 	if foreign && (!st.conflict || enter || now.Sub(st.lastForeign) >= c.o.ConflictWindow) {
 		st.lastForeign = now
 		ev := base
-		ev.Type, ev.Severity, ev.Message = EventForeignRule, SeverityWarn, "a foreign change to the actor's egress policy was reverted"
-		ev.Detail = map[string]any{"foreign_version": m.GetVersion(), "reverts_in_window": len(st.reverts), "window": c.o.ConflictWindow.String(),
-			"policy_conflict": st.conflict}
+		ev.Type, ev.Severity, ev.Message = EventForeignRule, SeverityWarn, foreignMsg
+		ev.Detail = map[string]any{"reverts_in_window": len(st.reverts), "window": c.o.ConflictWindow.String(), "policy_conflict": st.conflict}
+		for k, v := range foreignDetail {
+			ev.Detail[k] = v
+		}
 		c.emit(ev)
 	}
-	c.wrote(st, updated, base, state, how, res)
+	c.wrote(st, p, base, state, how, res)
 	if enter {
 		ev := base
 		ev.Type, ev.Severity = EventPolicyConflict, SeverityAlert
@@ -1519,11 +1612,38 @@ func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorSt
 		ev.Signal = c.signal(base, SignalPolicyConflict, "", st.firstSeen)
 		c.emit(ev)
 	}
-	return nil
+}
+
+// markStale records when the controller saw that the actor's policy needs
+// the write it is about to make, unless an earlier failed try did: the
+// actor's first policy from when the controller first saw the actor, a
+// config change from when it was applied, anything else (a foreign change,
+// a new approval or registration) from now, the pass that found it.
+func (c *Controller) markStale(st *actorState, lv *Live) {
+	switch {
+	case !st.staleSince.IsZero():
+	case st.syncedAt.IsZero():
+		st.staleSince = st.firstSeen
+	case lv.LoadedAt.After(st.syncedAt):
+		st.staleSince = lv.LoadedAt
+	default:
+		st.staleSince = c.o.Now()
+	}
+}
+
+// synced marks the actor's policy as right now (written or confirmed).
+func (c *Controller) synced(st *actorState) {
+	st.syncedAt, st.staleSince = c.o.Now(), time.Time{}
 }
 
 func (c *Controller) wrote(st *actorState, p *ateapi.EgressPolicy, base Event, state ateapi.ActorState, how string, res render.Result) {
 	st.ourUID, st.ourVersion, st.written = p.GetMetadata().GetUid(), p.GetMetadata().GetVersion(), true
+	now := c.o.Now()
+	lag := time.Duration(0)
+	if !st.staleSince.IsZero() && now.After(st.staleSince) {
+		lag = now.Sub(st.staleSince)
+	}
+	c.synced(st)
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyWritten, SeverityInfo, "egress policy "+how
 	drops := make([]string, 0, len(res.Dropped))
@@ -1535,7 +1655,7 @@ func (c *Controller) wrote(st *actorState, p *ateapi.EgressPolicy, base Event, s
 		bound = append(bound, b.Secret+"@"+b.Host)
 	}
 	ev.Detail = map[string]any{"how": how, "version": p.GetMetadata().GetVersion(), "rules": len(p.GetRules()),
-		"actor_state": state.String(), "policy_lag_ms": c.o.Now().Sub(st.firstSeen).Milliseconds(), "dropped": drops, "secrets_bound": bound,
+		"actor_state": state.String(), "policy_lag_ms": lag.Milliseconds(), "dropped": drops, "secrets_bound": bound,
 		"config_digest": c.live().Digest}
 	c.emit(ev)
 }

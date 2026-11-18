@@ -128,13 +128,13 @@ func TestLeaderRegistrations(t *testing.T) {
 	}
 }
 
-// A fork DefenseClaw makes in a launcher atespace is written back with the
-// parent's full person; the person's issuer survives the round trip.
-func TestLeaderRegistrationForkKeepsOwner(t *testing.T) {
+// A fork is written back attributed, with its parent's lineage but never
+// the parent's person (GAP-0082, GAP-0425).
+func TestLeaderRegistrationForkIsAttributed(t *testing.T) {
 	store := &leaderStore{m: map[string]registry.Registration{}}
 	r := newRig(t, func(_ *config.Config, o *controller.Options) { o.Registry = &controller.LeaderRegistry{Store: store} })
-	p := r.actor("eng-web", "alice-1", ateapi.ActorStateSuspended, "")
-	_ = store.Put(context.Background(), registry.Registration{Atespace: "eng-web", Name: "alice-1", UID: p.GetMetadata().GetUid(),
+	p := r.actor("ci-runs", "alice-1", ateapi.ActorStateSuspended, "")
+	_ = store.Put(context.Background(), registry.Registration{Atespace: "ci-runs", Name: "alice-1", UID: p.GetMetadata().GetUid(),
 		Person: registry.Person{Kind: "person", Issuer: "https://idp.example", Subject: "sub-alice"}, Profile: "eng",
 		Connector: "claudecode", CreatedAt: time.Now()})
 	r.pass()
@@ -143,8 +143,8 @@ func TestLeaderRegistrationForkKeepsOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pass()
-	got, ok, _ := store.Get(context.Background(), "eng-web", child.GetMetadata().GetUid())
-	if !ok || got.Attributed || got.Person.Issuer != "https://idp.example" || got.ParentUID != p.GetMetadata().GetUid() || got.Connector != "claudecode" {
+	got, ok, _ := store.Get(context.Background(), "ci-runs", child.GetMetadata().GetUid())
+	if !ok || !got.Attributed || got.Person.Subject != "" || got.ParentUID != p.GetMetadata().GetUid() || got.ForkedBy != controller.ForkedByUnknown {
 		t.Fatalf("fork registration = %+v", got)
 	}
 	if r.api.Policy(ateapi.RefOf(child.GetMetadata())) == nil {

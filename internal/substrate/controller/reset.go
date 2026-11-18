@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
@@ -166,4 +167,32 @@ func (c *Controller) applyResets(ctx context.Context) {
 		// handled entries are applied again next pass, which is harmless.
 		_ = c.o.Resets.UpdateConfigMap(ctx, cm)
 	}
+}
+
+// markConflict keeps the registration's policy_conflict mark equal to the
+// actor's conflict state: marked when the conflict starts, cleared when an
+// admin resets it, when the policy is DefenseClaw's again or when the actor
+// leaves management. The gateway reads the mark for list, status, policy
+// explain and doctor (GAP-0398). A failed write is tried again next pass.
+func (c *Controller) markConflict(ctx context.Context, st *actorState, base Event) {
+	m, ok := c.o.Registry.(ConflictMarker)
+	if !ok || !st.regOK || st.reg.UID != st.uid || st.reg.PolicyConflict == st.conflict {
+		return
+	}
+	var mark *registry.PolicyConflict
+	if st.conflict {
+		mark = &registry.PolicyConflict{Since: c.o.Now().UTC(), Reverts: len(st.reverts)}
+	}
+	if err := m.MarkConflict(ctx, base.Atespace, st.uid, mark); err != nil {
+		if !st.conflictMarkWarned {
+			st.conflictMarkWarned = true
+			ev := base
+			ev.Type, ev.Severity = EventWarning, SeverityWarn
+			ev.Message = "policy_conflict not recorded on the registration (list and doctor do not show it yet): " + err.Error()
+			c.emit(ev)
+		}
+		return
+	}
+	st.conflictMarkWarned = false
+	st.reg.PolicyConflict = st.conflict
 }

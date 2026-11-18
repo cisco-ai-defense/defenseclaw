@@ -76,7 +76,9 @@ deploymentMode: ""
 managed:
   # The account of the gateway UID in the image (distroless: nonroot).
   serviceAccountName: nonroot
-  dataSizeLimit: 512Mi
+  # The disk emptyDir of the managed data dir, which holds the local audit
+  # store (DEFENSECLAW_HOME): sized as homeSizeLimit is (GAP-0402).
+  dataSizeLimit: 4Gi
 
 # DefenseClaw config.yaml, rendered as is into the defenseclaw-config
 # ConfigMap: the single source of the gateway, controller and callout config.
@@ -85,6 +87,12 @@ managed:
 # reference (substrate section).
 config:
   config_version: 9
+  observability:
+    local:
+      # The audit store size cap (MiB). Retention deletes the oldest audit
+      # history above it (never the last hour) and checks it every 10
+      # minutes, so audit.db stays inside homeSizeLimit (GAP-0402).
+      max_store_mb: 1024
   substrate:
     enabled: true
     supported_versions: ">=1.0.0 <1.1.0"
@@ -286,14 +294,15 @@ networkPolicy:
   adminFrom: []
   # Peers that may scrape the metrics ports.
   metricsFrom: []
-  # Egress limits for the pods that hold keys (gateway, leader, callout):
+  # Egress limits for the pods that hold keys or dial out (gateway, leader,
+  # callout, controller):
   # DNS, the Kubernetes and Substrate APIs, the release's own Services,
   # OTLP, and (gateway and leader only) model providers on 443.
   egress:
     enabled: true
     # Ports of the OTLP collector(s) the pods export to.
     otlpPorts: [4317, 4318]
-    # Extra egress rules (NetworkPolicyEgressRule) for every key-holding pod.
+    # Extra egress rules (NetworkPolicyEgressRule) for each of those pods.
     extra: []
 
 # How launchers on laptops reach the admin listener (TLS). The actor
@@ -383,13 +392,33 @@ containerSecurityContext:
   capabilities:
     drop: [ALL]
 
-# The memory emptyDir that holds DEFENSECLAW_HOME (the audit database and
-# local state) in every DefenseClaw pod; it counts against the pod's memory.
-# It is working state, not the audit record: it is lost when the pod is
-# replaced (a rollout, an eviction, a node move), and each gateway replica
-# holds only the requests it handled. Keep the record with an export
-# destination in config.observability.destinations (GAP-0275).
-homeSizeLimit: 256Mi
+# The emptyDir that holds DEFENSECLAW_HOME (the local audit database, audit.db,
+# and local state) in every DefenseClaw pod outside managed mode (managed:
+# managed.dataSizeLimit). It is working state, not the audit record: it is
+# lost when the pod is replaced (a rollout, an eviction, a node move), and
+# each gateway replica holds only the requests it handled. Keep the record
+# with an export destination in config.observability.destinations (GAP-0275).
+# On this disk volume the kubelet evicts the pod at once when the volume passes
+# this size, and the local store is lost: ALERT audit_store_full is logged only
+# when a write finds no space (a memory volume or a full node disk). The pods
+# set no ephemeral-storage request, so leave room for this size per
+# DefenseClaw pod on the nodes' disks (GAP-0538).
+# The size must hold the audit store cap (config.observability.local
+# .max_store_mb) twice over plus 256 MiB for the audit write-ahead log, whose
+# flood ceiling is 256 MiB; the chart refuses a smaller one (GAP-0402).
+homeSizeLimit: 4Gi
+# "" (the default): a disk emptyDir, which an init container gives to the
+# gateway account (0700, running as root with only CHOWN and FOWNER), as the
+# audit store's directory trust check requires. Memory: a memory emptyDir
+# (tmpfs) and no init container, for a namespace whose policy refuses a root
+# init container. A tmpfs counts against the memory limit of the container
+# that writes it, so the chart refuses Memory unless every DefenseClaw pod
+# (gateway, leader, controller, callout) sets resources.limits.memory and
+# resources.requests.memory with limit >= homeSizeLimit + request (the
+# request is the process headroom; GAP-0537). The defaults do not fit; a
+# sized example: homeSizeLimit 512Mi, max_store_mb 128, and controller and
+# callout limits 768Mi (README, homeMedium).
+homeMedium: ""
 
 podAnnotations: {}
 podLabels: {}

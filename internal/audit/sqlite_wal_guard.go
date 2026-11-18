@@ -559,6 +559,9 @@ func (s *Store) boundedCatchUpPolicy(writerBudget time.Duration) walCatchUpPolic
 // stopped short at a reader on an older snapshot, or its copy failed. None of
 // those says the disk caught up. It returns whether the log is over.
 func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limitBytes int64) (over bool) {
+	// A checkpoint that cannot copy the log into a full volume
+	// (substrate-1:GAP-0554).
+	s.NoteWriteError("WAL checkpoint", err)
 	over = !result.Restarted && logBytes > limitBytes
 	if logBytes < 0 {
 		over = s.walPressure.Load()

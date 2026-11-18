@@ -76,6 +76,7 @@ type Fake struct {
 	actors    map[string]*ateapi.Actor
 	policies  map[string]*ateapi.EgressPolicy
 	tags      map[string]*ateapi.Tag
+	workers   map[string]*ateapi.Worker       // by name (global)
 	access    map[string]*ateapi.AccessPolicy // by atespace, "" global
 	calls     map[string]int
 	writes    []PolicyWrite
@@ -94,6 +95,7 @@ func New() *Fake {
 		actors:    map[string]*ateapi.Actor{},
 		policies:  map[string]*ateapi.EgressPolicy{},
 		tags:      map[string]*ateapi.Tag{},
+		workers:   map[string]*ateapi.Worker{},
 		access:    map[string]*ateapi.AccessPolicy{},
 		calls:     map[string]int{},
 	}
@@ -147,6 +149,21 @@ func (f *Fake) PutAtespace(name string) *ateapi.Atespace {
 	a := &ateapi.Atespace{Metadata: f.newMeta("", name)}
 	f.atespaces[name] = a
 	return clone(a)
+}
+
+// PutWorker stores a worker under its metadata name (a uuid when unset)
+// and returns it.
+func (f *Fake) PutWorker(w *ateapi.Worker) *ateapi.Worker {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w = clone(w)
+	name := w.GetMetadata().GetName()
+	if name == "" {
+		name = uuid.NewString()
+	}
+	w.Metadata = f.newMeta("", name)
+	f.workers[name] = w
+	return clone(w)
 }
 
 // PutTemplate stores a template (its atespace is created if missing) and
@@ -843,6 +860,15 @@ func (f *Fake) ListAtespaces(_ context.Context, opts ateapi.ListOptions) (ateapi
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return page(f.atespaces, "", opts, f.pageSize())
+}
+
+func (f *Fake) ListWorkers(_ context.Context, opts ateapi.ListOptions) (ateapi.Page[*ateapi.Worker], error) {
+	if err := f.enter("ListWorkers", ""); err != nil {
+		return ateapi.Page[*ateapi.Worker]{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return page(f.workers, "", opts, f.pageSize())
 }
 
 func (f *Fake) pageSize() int {

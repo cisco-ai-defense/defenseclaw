@@ -270,7 +270,7 @@ Press `Ctrl-]` to detach. The agent keeps working.
 Detached. The agent keeps running. Come back with: defenseclaw substrate connect claude-b66c97d1
 ```
 
-When it has nothing to do, DefenseClaw suspends it (after 30 minutes without hooks, model calls, terminal traffic, web requests or CPU use), and Substrate frees the machine. Later, from this laptop or another one:
+When it has nothing to do, DefenseClaw suspends it (after 30 minutes detached, without hooks, model calls or web requests; CPU use also counts when the controller has a usage feed), and Substrate frees the machine. Without a CPU feed, a detached actor running a silent job can be suspended after `idle_suspend_after`; attach, or run it with `--task`, to keep it running. Later, from this laptop or another one:
 
 ```bash
 defenseclaw substrate list
