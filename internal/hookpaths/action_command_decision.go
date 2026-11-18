@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -490,6 +491,37 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 				actionPosixPrivateKeyRead(command, cwd, home, dialect)
 	}
 	return actionPosixPrivateKeyRead(command, cwd, home, dialect)
+}
+
+// ActionPrivateKeyReadBounded is ActionPrivateKeyReadWithDialect that also
+// reports the caps its pattern expansions hit (actionBoundedGlob): a pattern
+// expanded on this host only up to its cap, with no key among the matches
+// read before it, is a truncated reading the caller judges at least at the
+// unknown tier (the one bound rule). A call with no folder reads $PWD/*/* as
+// /*/*: the walk of the host's root ran past the inspect scan budget and the
+// route answered 504 (rel-1-0-10:GAP-1066). It runs in the hook call of the
+// calling goroutine, or in one of its own.
+func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
+	truncated = globCutOf(func() { read = ActionPrivateKeyReadWithDialect(command, cwd, home, dialect) })
+	return read, truncated
+}
+
+// globCutOf runs read in the hook call of the calling goroutine (or one of
+// its own) and returns the caps the pattern expansions of read hit
+// (noteGlobCut), which the call also keeps.
+func globCutOf(read func()) bounded.CapSet {
+	defer HookCall()()
+	call := currentHookCall()
+	if call == nil {
+		read()
+		return bounded.CapSet{}
+	}
+	outer := call.globCut
+	call.globCut = bounded.CapSet{}
+	read()
+	truncated := call.globCut
+	call.globCut = outer.Union(truncated)
+	return truncated
 }
 
 // actionPosixPrivateKeyRead is the POSIX shell's private-key reader.
@@ -1198,11 +1230,7 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 		// On the Windows host itself the pattern is expanded and each match
 		// resolved through junctions and symlinks, as on POSIX (GAP-1780).
 		if runtime.GOOS == "windows" {
-			for _, match := range actionBoundedGlob(filepath.FromSlash(native), dotglob) {
-				if actionPrivateReadPath(match, cwd, home) {
-					return true
-				}
-			}
+			return actionGlobReadsPrivateKey(filepath.FromSlash(native), dotglob, cwd, home)
 		}
 		return false
 	}
@@ -1222,11 +1250,25 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 			return true
 		}
 	}
-	for _, match := range actionBoundedGlob(pattern, dotglob) {
-		if actionPrivateReadPath(match, cwd, home) {
-			return true
+	return actionGlobReadsPrivateKey(pattern, dotglob, cwd, home)
+}
+
+// actionGlobReadsPrivateKey reports a match of an absolute pattern, expanded
+// on this host (actionBoundedGlob), that reads an active private key. When
+// the expansion hit its cap and no match read before it is a key, the cap is
+// recorded on the hook call (ActionPrivateKeyReadBounded): the reading is
+// truncated, not "reads no key".
+func actionGlobReadsPrivateKey(pattern string, dotglob bool, cwd, home string) bool {
+	matches, truncated := actionBoundedGlob(pattern, dotglob)
+	if len(matches) != 0 {
+		keys := actionPrivateKeyFilesOf(home)
+		for _, match := range matches {
+			if keys.read(match, cwd) {
+				return true
+			}
 		}
 	}
+	noteGlobCut(truncated)
 	return false
 }
 
@@ -1250,12 +1292,25 @@ func actionKeyPatternMatch(pattern, name string, dotglob bool) bool {
 	return true
 }
 
+// actionGlobEntryCap bounds the directory entries one pattern expansion
+// reads (bounded.Paths).
+const actionGlobEntryCap = 4096
+
 // actionBoundedGlob expands an absolute pattern on this host, following
-// directory links, with the shell's leading-dot rule. It stops after a
-// bounded number of directory entries.
-func actionBoundedGlob(pattern string, dotglob bool) []string {
+// directory links, with the shell's leading-dot rule. It examines at most
+// actionGlobEntryCap directory entries in all: one count for every directory
+// of the expansion, as rel's budget was (22db7a8362). Each directory is
+// walked in name order, so past the cap the expansion is what the first
+// entries by name matched, as on rel, and truncated names the cap (the one
+// bound rule). The cap was a count of its own that ended the walk silently
+// (rel-1-0-10:GAP-1066); pathReadDirLimit holds at most twice the cap of a
+// directory past it, where os.ReadDir held and sorted the whole of it, and
+// still reads it to its end so the first names are the same
+// (rel-1-0-10:GAP-1468).
+func actionBoundedGlob(pattern string, dotglob bool) ([]string, bounded.CapSet) {
+	var trunc bounded.Truncated
 	if !filepath.IsAbs(pattern) {
-		return nil
+		return nil, trunc.Set()
 	}
 	components := strings.Split(strings.TrimPrefix(filepath.ToSlash(pattern), "/"), "/")
 	paths := []string{string(filepath.Separator)}
@@ -1263,7 +1318,7 @@ func actionBoundedGlob(pattern string, dotglob bool) []string {
 		paths = []string{volume + string(filepath.Separator)}
 		components = strings.Split(strings.TrimPrefix(filepath.ToSlash(pattern[len(volume):]), "/"), "/")
 	}
-	budget := 4096
+	entriesRead := bounded.NewCounter(&trunc, bounded.Paths, actionGlobEntryCap)
 	for _, component := range components {
 		var next []string
 		for _, dir := range paths {
@@ -1271,13 +1326,13 @@ func actionBoundedGlob(pattern string, dotglob bool) []string {
 				next = append(next, filepath.Join(dir, component))
 				continue
 			}
-			entries, err := pathReadDir(dir)
+			entries, err := pathReadDirLimit(dir, actionGlobEntryCap+1)
 			if err != nil {
 				continue
 			}
 			for _, entry := range entries {
-				if budget--; budget < 0 {
-					return next
+				if !entriesRead.Take() {
+					return next, trunc.Set(&entriesRead)
 				}
 				name := entry.Name()
 				if !dotglob && strings.HasPrefix(name, ".") && !strings.HasPrefix(component, ".") {
@@ -1290,10 +1345,10 @@ func actionBoundedGlob(pattern string, dotglob bool) []string {
 		}
 		paths = next
 		if len(paths) == 0 {
-			return nil
+			return nil, trunc.Set(&entriesRead)
 		}
 	}
-	return paths
+	return paths, trunc.Set(&entriesRead)
 }
 
 // actionMSYSDrivePath maps /c/... and /cygdrive/c/... to c:/... (Git Bash and
@@ -1311,18 +1366,75 @@ func actionMSYSDrivePath(value string) string {
 }
 
 func actionPrivateReadPath(value, cwd, home string) bool {
-	resolved, ok := ResolveWriteTarget(OperandPath(value, cwd))
+	return actionPrivateKeyFilesOf(home).read(value, cwd)
+}
+
+// actionPrivateKeyFiles are the active private key paths of a home and the
+// file each names on this host (nil: none), read once for a whole pattern
+// expansion: each match stat-ed every key and itself again for each key,
+// eight stats a match (rel-1-0-10:GAP-1066).
+type actionPrivateKeyFiles struct {
+	paths []string
+	infos []os.FileInfo
+}
+
+func actionPrivateKeyFilesOf(home string) actionPrivateKeyFiles {
+	keys := actionPrivateKeyFiles{
+		paths: make([]string, len(actionPrivateKeyNames)),
+		infos: make([]os.FileInfo, len(actionPrivateKeyNames)),
+	}
+	for index, name := range actionPrivateKeyNames {
+		keys.paths[index] = filepath.Join(home, ".ssh", name)
+		if info, err := pathStat(keys.paths[index]); err == nil {
+			keys.infos[index] = info
+		}
+	}
+	return keys
+}
+
+// read reports an operand that, resolved through links, is one of the keys:
+// by its name, or as the same file (a hard link).
+func (keys actionPrivateKeyFiles) read(value, cwd string) bool {
+	target := OperandPath(value, cwd)
+	if runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
+		// An operand that is there is a key exactly when it is the same file
+		// as one: the path its links lead to is a key path only if that key
+		// is there and is this file. One stat answers it, where the walk of
+		// each link and folder on the path read the file system again for
+		// each match of a pattern (rel-1-0-10:GAP-1066). An operand that is
+		// not there (a link to a key that is not) is resolved by name. On
+		// darwin and Windows a key name is matched in any case (samePathName),
+		// which a file identity does not show on a case-sensitive volume.
+		if info, err := pathStat(target); err == nil {
+			for _, keyInfo := range keys.infos {
+				if keyInfo != nil && os.SameFile(info, keyInfo) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	resolved, ok := ResolveWriteTarget(target)
 	if !ok {
 		return false
 	}
-	for _, name := range actionPrivateKeyNames {
-		key := filepath.Join(home, ".ssh", name)
+	for _, key := range keys.paths {
 		if samePathName(resolved, key) {
 			return true
 		}
-		resolvedInfo, err1 := pathStat(resolved)
-		keyInfo, err2 := pathStat(key)
-		if err1 == nil && err2 == nil && os.SameFile(resolvedInfo, keyInfo) {
+	}
+	var info os.FileInfo
+	for _, keyInfo := range keys.infos {
+		if keyInfo == nil {
+			continue
+		}
+		if info == nil {
+			var err error
+			if info, err = pathStat(resolved); err != nil {
+				return false
+			}
+		}
+		if os.SameFile(info, keyInfo) {
 			return true
 		}
 	}
