@@ -1089,11 +1089,18 @@ restored after a gateway restart, and retained until an authoritative parent
 refresh retires the configured alias. A restored complete advertised listing
 remains complete once its configured parent is matched again; a restored
 partial listing remains partial until that server completes a later listing,
-including an empty one. If durable restore is incomplete, advertised and
-observed tool collections remain diagnostic-only until the read succeeds. A
+including an empty one. Durable restore completeness is tracked separately for
+advertised and observed tools: an unreadable advertised snapshot keeps only the
+advertised collection diagnostic, while unresolved observed rows keep the
+observed collection diagnostic until their read succeeds. A newly observed
+tool also remains diagnostic until SQLite confirms its write; a failed write is
+retried on a later inventory cycle without delaying the hook response. A
 listing that completes before its newly configured parent has been refreshed
 is retained in memory, persisted, and published after that parent is
-established. This flow does not reconcile a central
+established. Tool components use the managed route only when their parent
+server component is eligible for that route. An over-limit or otherwise
+diagnostic-only parent therefore cannot leave an authoritative orphan tool.
+This flow does not reconcile a central
 principal catalog. Remote tool lineage follows the alias-based server ID.
 DefenseClaw reuses the scanner's existing remote
 `tools/list` request and does not start an additional endpoint probe. If an

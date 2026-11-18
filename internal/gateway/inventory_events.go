@@ -248,7 +248,20 @@ func emitEndpointInventory(
 	// published later and overwrite those fields downstream. On a partial read
 	// keep the discovery row as a fail-open fallback; partial native snapshots
 	// are local diagnostics and do not reach the managed AI Defense route.
-	perConnectorMCP, perConnectorStatus := perConnectorMCPEntriesWithReadStatus(cfg, reg)
+	var toolState *mcpToolInventory
+	if len(toolStates) > 0 {
+		toolState = toolStates[0]
+	}
+	readMCP := func() ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
+		return perConnectorMCPEntriesWithReadStatus(cfg, reg)
+	}
+	var perConnectorMCP []endpointInventoryComponent
+	var perConnectorStatus perConnectorMCPReadStatus
+	if toolState != nil {
+		perConnectorMCP, perConnectorStatus = toolState.readAndReconcileParents(ctx, readMCP)
+	} else {
+		perConnectorMCP, perConnectorStatus = readMCP()
+	}
 	perConnectorPartial := perConnectorStatus.partial
 
 	// Per-entry inventories derived from the latest AI-Discovery scan. Each
@@ -300,6 +313,7 @@ func emitEndpointInventory(
 	// stored digest would never advance past the last non-empty publish — and
 	// would silently drop the collection from the daily complete bundle.
 	const perConnectorMCPSource = "endpoint_per_connector_mcp_inventory"
+	var completeRows []endpointInventoryComponent
 	if perConnectorPartial {
 		// A partial aggregate is not an authoritative snapshot, but connectors
 		// whose native reads completed still carry independently validated server
@@ -309,7 +323,7 @@ func emitEndpointInventory(
 		// bundle clock unchanged; an incomplete connector can therefore neither
 		// suppress a complete sibling nor cause its retained cloud rows to be
 		// removed.
-		completeRows := completeConnectorMCPEntriesFromPartial(perConnectorMCP, perConnectorStatus.incompleteConnectors)
+		completeRows = completeConnectorMCPEntriesFromPartial(perConnectorMCP, perConnectorStatus.incompleteConnectors)
 		if err := emitEndpointInventoryComponents(
 			ctx, emitter, perConnectorMCPSource, completeRows,
 			config.ObservabilityV8ManagedMCPInventoryAction, publish,
@@ -323,26 +337,16 @@ func emitEndpointInventory(
 	); err != nil && firstErr == nil {
 		firstErr = err
 	}
-	if len(toolStates) > 0 && toolStates[0] != nil {
-		toolStates[0].retryRestoreFromStore(ctx)
-		// A partial aggregate without connector attribution cannot prove which
-		// parent set is authoritative. Preserve every current parent and its
-		// durable children until a later scoped or complete read can reconcile it.
+	managedParentIDs := managedMCPParentIDs(perConnectorMCP, completeRows, perConnectorPartial)
+	if toolState != nil {
 		incompleteConnectors := perConnectorStatus.incompleteConnectors
-		var removed []string
-		unscopedPartial := perConnectorPartial && len(incompleteConnectors) == 0
-		if !unscopedPartial {
-			removed = toolStates[0].refreshCompleteParents(perConnectorMCP, incompleteConnectors)
-		}
-		if toolStates[0].store != nil && len(removed) > 0 {
-			if err := toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed); err == nil {
-				toolStates[0].acknowledgeRemovedParents(removed)
-			}
-		}
-		if err := toolStates[0].flushPendingAdvertised(ctx); err != nil && firstErr == nil {
+		if err := toolState.flushPendingAdvertised(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		observedReadPartial := toolStates[0].observedIncomplete(incompleteConnectors)
+		if err := toolState.flushPendingObserved(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		observedReadPartial := toolState.observedIncomplete(incompleteConnectors)
 		if perConnectorPartial && len(perConnectorStatus.incompleteConnectors) == 0 {
 			// A partial result without connector attribution is not safe to scope.
 			observedReadPartial = true
@@ -357,12 +361,16 @@ func emitEndpointInventory(
 			{"endpoint_local_mcp_observed_tool_inventory", false, "observed"},
 			{"endpoint_remote_mcp_observed_tool_inventory", true, "observed"},
 		} {
-			rows, toolPartial := toolStates[0].components(perConnectorMCP, collection.remote, collection.toolSource)
+			rows, toolPartial := toolState.components(perConnectorMCP, collection.remote, collection.toolSource)
+			parentsEligible := mcpToolParentsManaged(rows, managedParentIDs)
 			readPartial := perConnectorPartial
 			if collection.toolSource == "observed" {
 				readPartial = observedReadPartial
 			}
-			snapshotPartial := readPartial || toolPartial
+			// A child can use the managed route only when its parent did too. In
+			// particular, an over-limit parent collection is diagnostic-only even
+			// when a small child collection would pass its independent limit.
+			snapshotPartial := readPartial || toolPartial || !parentsEligible
 			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, snapshotPartial,
 				config.ObservabilityV8ManagedMCPInventoryAction, publish)
 			if err != nil && firstErr == nil {
@@ -377,10 +385,37 @@ func emitEndpointInventory(
 			case len(rows) == 0:
 				outcome = "empty"
 			}
-			toolStates[0].recordMetric(ctx, "export", outcome, reason)
+			toolState.recordMetric(ctx, "export", outcome, reason)
 		}
 	}
 	return firstErr
+}
+
+func managedMCPParentIDs(
+	all, complete []endpointInventoryComponent,
+	partial bool,
+) map[string]struct{} {
+	parents := all
+	if partial {
+		parents = complete
+	}
+	eligible := make(map[string]struct{}, len(parents))
+	if len(parents) > maxManagedMCPInventory {
+		return eligible
+	}
+	for _, parent := range parents {
+		eligible[parent.id] = struct{}{}
+	}
+	return eligible
+}
+
+func mcpToolParentsManaged(rows []endpointInventoryComponent, eligible map[string]struct{}) bool {
+	for _, row := range rows {
+		if _, ok := eligible[row.mcpToolParentID]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func completeConnectorMCPEntriesFromPartial(
@@ -472,6 +507,33 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 type perConnectorMCPReadStatus struct {
 	partial              bool
 	incompleteConnectors map[string]struct{}
+}
+
+// readAndReconcileParents serializes the native read, parent replacement, and
+// durable retirement as one state transition. A slower older emit therefore
+// cannot resume after a newer read and delete the newer parents' tool rows.
+func (m *mcpToolInventory) readAndReconcileParents(
+	ctx context.Context,
+	read func() ([]endpointInventoryComponent, perConnectorMCPReadStatus),
+) ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
+	if m == nil || read == nil {
+		return nil, perConnectorMCPReadStatus{partial: true}
+	}
+	m.reconcileMu.Lock()
+	defer m.reconcileMu.Unlock()
+	components, status := read()
+	m.retryRestoreFromStore(ctx)
+	unscopedPartial := status.partial && len(status.incompleteConnectors) == 0
+	var removed []string
+	if !unscopedPartial {
+		removed = m.refreshCompleteParents(components, status.incompleteConnectors)
+	}
+	if m.store != nil && len(removed) > 0 {
+		if err := m.store.DeleteMCPObservedToolsForParents(ctx, removed); err == nil {
+			m.acknowledgeRemovedParents(removed)
+		}
+	}
+	return components, status
 }
 
 func (s *perConnectorMCPReadStatus) markIncomplete(connectorName string) {

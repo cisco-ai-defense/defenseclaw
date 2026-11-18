@@ -164,8 +164,12 @@ func (s *Store) UpsertMCPObservedToolIf(ctx context.Context, input MCPObservedTo
 		return upsertMCPObservedToolTx(runCtx, tx, tool)
 	}
 	if batch := deferringBatch(ctx, s); batch != nil {
+		report, _ := ctx.Value(callWriteReportKey{}).(*CallWriteReport)
+		if !report.claim() {
+			report = nil
+		}
 		if batch.add(&deferredCallWrite{
-			ctx: ctx,
+			ctx: ctx, report: report,
 			run: run,
 			alone: func(aloneCtx context.Context) error {
 				return s.callGroupWrite(aloneCtx, run)
@@ -173,6 +177,7 @@ func (s *Store) UpsertMCPObservedToolIf(ctx context.Context, input MCPObservedTo
 		}) {
 			return nil
 		}
+		report.unclaim()
 	}
 	return s.callGroupWrite(ctx, run)
 }

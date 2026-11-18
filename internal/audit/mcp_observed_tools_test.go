@@ -100,6 +100,36 @@ func TestMCPObservedToolDeferredUpsertRevalidatesParent(t *testing.T) {
 	}
 }
 
+func TestMCPObservedToolDeferredUpsertReportsCommit(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	ctx := WithCallWriteBatch(context.Background(), store)
+	settled := make(chan error, 1)
+	writeCtx, report := WithCallWriteReport(ctx, store, func(err error) { settled <- err })
+	if err := store.UpsertMCPObservedToolIf(writeCtx, MCPObservedTool{
+		ParentComponentID: "parent", Connector: "claudecode", ServerName: "notes",
+		ToolName: "search", LastObservedAt: time.Now(),
+	}, func() bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if !report.Deferred() {
+		t.Fatal("deferred observed-tool write did not claim its commit report")
+	}
+	select {
+	case err := <-settled:
+		t.Fatalf("write settled before the batch flush: %v", err)
+	default:
+	}
+	FlushCallWrites(ctx)
+	select {
+	case err := <-settled:
+		if err != nil {
+			t.Fatalf("deferred observed-tool write failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deferred observed-tool write did not report its commit")
+	}
+}
+
 func TestMCPObservedToolOverflowIsDurableAndDoesNotReplaceSiblings(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	at := time.Date(2026, 11, 17, 1, 2, 3, 0, time.UTC)

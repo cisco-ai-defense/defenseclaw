@@ -25,6 +25,15 @@ type mcpToolObservation struct {
 	at   time.Time
 }
 
+type pendingMCPObservedTool struct {
+	parentID  string
+	connector string
+	server    string
+	tool      string
+	at        time.Time
+	version   uint64
+}
+
 type mcpObservedToolStore interface {
 	UpsertMCPObservedToolIf(context.Context, audit.MCPObservedTool, func() bool) error
 	ListMCPObservedTools(context.Context) ([]audit.MCPObservedTool, error)
@@ -38,21 +47,26 @@ type mcpObservedToolStore interface {
 // so they survive a restart. It never retains arguments, descriptions, schemas,
 // results, or the scanner's target URL.
 type mcpToolInventory struct {
-	mu                 sync.Mutex
-	metric             func(context.Context, string, string, string)
-	store              mcpObservedToolStore
-	advertised         map[string][]mcpToolObservation
-	advertisedListedAt map[string]time.Time
-	observed           map[string]map[string]time.Time
-	partial            map[string]bool
-	advertisedVersion  map[string]uint64
-	pendingAdvertised  map[string]uint64
-	observedPartial    map[string]bool
-	parents            map[string]string
-	restored           map[string]map[string][]audit.MCPObservedTool
-	restoredAdvertised map[string]map[string]audit.MCPAdvertisedToolSnapshot
-	pendingRemoval     map[string]struct{}
-	restoreIncomplete  bool
+	reconcileMu                 sync.Mutex
+	mu                          sync.Mutex
+	metric                      func(context.Context, string, string, string)
+	store                       mcpObservedToolStore
+	advertised                  map[string][]mcpToolObservation
+	advertisedListedAt          map[string]time.Time
+	observed                    map[string]map[string]time.Time
+	partial                     map[string]bool
+	advertisedVersion           map[string]uint64
+	pendingAdvertised           map[string]uint64
+	pendingObserved             map[string]map[string]pendingMCPObservedTool
+	observedVersion             uint64
+	observedPartial             map[string]bool
+	parents                     map[string]string
+	blockedObserved             map[string]bool
+	restored                    map[string]map[string][]audit.MCPObservedTool
+	restoredAdvertised          map[string]map[string]audit.MCPAdvertisedToolSnapshot
+	pendingRemoval              map[string]struct{}
+	observedRestoreIncomplete   bool
+	advertisedRestoreIncomplete bool
 }
 
 // refreshParents invalidates evidence when an alias starts naming a different
@@ -85,6 +99,24 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.blockedObserved == nil {
+		m.blockedObserved = make(map[string]bool)
+	}
+	// An incomplete read may retain a last-known parent, but a collision that
+	// was visible in that same read makes the alias unsafe for new calls. Keep
+	// the evidence while refusing observations until a complete read proves the
+	// alias unique again.
+	for key := range m.blockedObserved {
+		connector, _, _ := strings.Cut(key, "\x00")
+		if _, incomplete := incompleteConnectors[connector]; !incomplete {
+			delete(m.blockedObserved, key)
+		}
+	}
+	for key, count := range counts {
+		if count != 1 {
+			m.blockedObserved[key] = true
+		}
+	}
 	if m.pendingRemoval == nil {
 		m.pendingRemoval = make(map[string]struct{})
 	}
@@ -109,6 +141,7 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 			delete(m.advertisedListedAt, key)
 			delete(m.advertisedVersion, key)
 			delete(m.pendingAdvertised, key)
+			delete(m.pendingObserved, key)
 			delete(m.observed, key)
 			delete(m.partial, key)
 			delete(m.observedPartial, key)
@@ -224,6 +257,13 @@ func (m *mcpToolInventory) recordMetric(ctx context.Context, stage, outcome, rea
 	}
 }
 
+func (a *APIServer) recordObservedMCPToolIfManaged(ctx context.Context, req agentHookRequest) {
+	if !ManagedEnterpriseActive() {
+		return
+	}
+	a.recordObservedMCPTool(ctx, req, time.Now())
+}
+
 func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequest, at time.Time) {
 	if a == nil || ctx == nil {
 		return
@@ -240,7 +280,15 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 			return
 		}
 		if a.mcpTools.store != nil {
-			_ = a.mcpTools.store.UpsertMCPObservedToolIf(ctx, audit.MCPObservedTool{
+			pending, ok := a.mcpTools.beginObservedWrite(projection.connector, server, tool, parentID, at)
+			if !ok {
+				a.mcpTools.recordMetric(ctx, "observe", "partial", "persistence_queue_full")
+				return
+			}
+			writeCtx, report := audit.WithCallWriteReport(ctx, a.store, func(err error) {
+				a.mcpTools.settleObservedWrite(pending, err)
+			})
+			err := a.mcpTools.store.UpsertMCPObservedToolIf(writeCtx, audit.MCPObservedTool{
 				ParentComponentID: parentID,
 				Connector:         projection.connector,
 				ServerName:        server,
@@ -249,6 +297,9 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 			}, func() bool {
 				return a.mcpTools.parentIsCurrent(projection.connector, server, parentID)
 			})
+			if report == nil || !report.Deferred() {
+				a.mcpTools.settleObservedWrite(pending, err)
+			}
 		}
 	}
 }
@@ -259,7 +310,99 @@ func (m *mcpToolInventory) parentIsCurrent(connector, server, parentID string) b
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.parents[mcpToolServerKey(connector, server)] == parentID
+	key := mcpToolServerKey(connector, server)
+	return m.parents[key] == parentID && !m.blockedObserved[key]
+}
+
+func (m *mcpToolInventory) beginObservedWrite(connector, server, tool, parentID string, at time.Time) (pendingMCPObservedTool, bool) {
+	if m == nil || parentID == "" {
+		return pendingMCPObservedTool{}, false
+	}
+	key := mcpToolServerKey(connector, server)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.parents[key] != parentID || m.blockedObserved[key] {
+		return pendingMCPObservedTool{}, false
+	}
+	if m.pendingObserved == nil {
+		m.pendingObserved = make(map[string]map[string]pendingMCPObservedTool)
+	}
+	if m.pendingObserved[key] == nil {
+		m.pendingObserved[key] = make(map[string]pendingMCPObservedTool)
+	}
+	if _, exists := m.pendingObserved[key][tool]; !exists && len(m.pendingObserved[key]) >= maxMCPToolObservations {
+		return pendingMCPObservedTool{}, false
+	}
+	m.observedVersion++
+	pending := pendingMCPObservedTool{
+		parentID: parentID, connector: connector, server: server, tool: tool,
+		at: at.UTC(), version: m.observedVersion,
+	}
+	m.pendingObserved[key][tool] = pending
+	return pending, true
+}
+
+func (m *mcpToolInventory) observedWriteIsCurrent(pending pendingMCPObservedTool) bool {
+	if m == nil || pending.version == 0 {
+		return false
+	}
+	key := mcpToolServerKey(pending.connector, pending.server)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.pendingObserved[key][pending.tool]
+	return ok && current.version == pending.version && m.parents[key] == pending.parentID && !m.blockedObserved[key]
+}
+
+func (m *mcpToolInventory) settleObservedWrite(pending pendingMCPObservedTool, err error) {
+	if m == nil || pending.version == 0 || err != nil {
+		return
+	}
+	key := mcpToolServerKey(pending.connector, pending.server)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.pendingObserved[key][pending.tool]
+	if !ok || current.version != pending.version {
+		return
+	}
+	delete(m.pendingObserved[key], pending.tool)
+	if len(m.pendingObserved[key]) == 0 {
+		delete(m.pendingObserved, key)
+	}
+}
+
+func (m *mcpToolInventory) flushPendingObserved(ctx context.Context) error {
+	if m == nil || m.store == nil {
+		return nil
+	}
+	m.mu.Lock()
+	writes := make([]pendingMCPObservedTool, 0)
+	for _, tools := range m.pendingObserved {
+		for _, pending := range tools {
+			writes = append(writes, pending)
+		}
+	}
+	m.mu.Unlock()
+	sort.Slice(writes, func(i, j int) bool {
+		if writes[i].parentID != writes[j].parentID {
+			return writes[i].parentID < writes[j].parentID
+		}
+		return writes[i].tool < writes[j].tool
+	})
+	var firstErr error
+	for _, pending := range writes {
+		err := m.store.UpsertMCPObservedToolIf(ctx, audit.MCPObservedTool{
+			ParentComponentID: pending.parentID,
+			Connector:         pending.connector,
+			ServerName:        pending.server,
+			ToolName:          pending.tool,
+			LastObservedAt:    pending.at,
+		}, func() bool { return m.observedWriteIsCurrent(pending) })
+		m.settleObservedWrite(pending, err)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func mcpToolServerKey(connector, server string) string {
@@ -411,25 +554,34 @@ func (m *mcpToolInventory) recordListingFailureContext(ctx context.Context, conn
 	if m.partial == nil {
 		m.partial = make(map[string]bool)
 	}
+	if m.advertisedVersion == nil {
+		m.advertisedVersion = make(map[string]uint64)
+	}
+	if m.pendingAdvertised == nil {
+		m.pendingAdvertised = make(map[string]uint64)
+	}
+	m.advertisedVersion[key]++
+	version := m.advertisedVersion[key]
+	m.pendingAdvertised[key] = version
 	m.partial[key] = true
 	parentID := m.parents[key]
 	items := append([]mcpToolObservation(nil), m.advertised[key]...)
-	m.mu.Unlock()
-	if m.store == nil || parentID == "" {
-		return
-	}
 	names := make([]string, 0, len(items))
-	listedAt := time.Now().UTC()
+	listedAt := m.advertisedListedAt[key]
+	if listedAt.IsZero() {
+		listedAt = time.Now().UTC()
+	}
 	for _, item := range items {
 		names = append(names, item.name)
-		if item.at.Before(listedAt) {
-			listedAt = item.at
-		}
 	}
-	_ = m.store.ReplaceMCPAdvertisedToolsIf(ctx, audit.MCPAdvertisedToolSnapshot{
+	snapshot := audit.MCPAdvertisedToolSnapshot{
 		ParentComponentID: parentID, Connector: connector, ServerName: server,
 		ToolNames: names, ListedAt: listedAt, Partial: true,
-	}, func() bool { return m.parentIsCurrent(connector, server, parentID) })
+	}
+	m.mu.Unlock()
+	if m.store != nil && parentID != "" {
+		_ = m.persistAdvertisedSnapshot(ctx, key, version, snapshot)
+	}
 }
 
 func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at time.Time) (string, bool) {
@@ -444,7 +596,7 @@ func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	parentID := m.parents[key]
-	if parentID == "" {
+	if parentID == "" || m.blockedObserved[key] {
 		return "", false
 	}
 	if m.observed == nil {
@@ -473,7 +625,7 @@ func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.restoreIncomplete = false
+	m.observedRestoreIncomplete = false
 	m.restored = make(map[string]map[string][]audit.MCPObservedTool)
 	for _, tool := range tools {
 		name := inventorySafeItemName(tool.ToolName, 256)
@@ -494,6 +646,7 @@ func (m *mcpToolInventory) restoreAdvertised(snapshots []audit.MCPAdvertisedTool
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.advertisedRestoreIncomplete = false
 	m.restoredAdvertised = make(map[string]map[string]audit.MCPAdvertisedToolSnapshot)
 	for _, snapshot := range snapshots {
 		key := mcpToolServerKey(snapshot.Connector, snapshot.ServerName)
@@ -511,18 +664,22 @@ func (m *mcpToolInventory) restoreToolLocked(key string, tool audit.MCPObservedT
 	if m.observed[key] == nil {
 		m.observed[key] = make(map[string]time.Time)
 	}
-	if _, exists := m.observed[key][tool.ToolName]; !exists && len(m.observed[key]) >= maxMCPToolObservations {
-		return
-	}
-	restoredAt := tool.LastObservedAt.UTC()
-	if current := m.observed[key][tool.ToolName]; current.IsZero() || restoredAt.After(current) {
-		m.observed[key][tool.ToolName] = restoredAt
-	}
 	if tool.Overflowed {
 		if m.observedPartial == nil {
 			m.observedPartial = make(map[string]bool)
 		}
 		m.observedPartial[key] = true
+	}
+	if _, exists := m.observed[key][tool.ToolName]; !exists && len(m.observed[key]) >= maxMCPToolObservations {
+		if m.observedPartial == nil {
+			m.observedPartial = make(map[string]bool)
+		}
+		m.observedPartial[key] = true
+		return
+	}
+	restoredAt := tool.LastObservedAt.UTC()
+	if current := m.observed[key][tool.ToolName]; current.IsZero() || restoredAt.After(current) {
+		m.observed[key][tool.ToolName] = restoredAt
 	}
 }
 
@@ -533,7 +690,10 @@ func (m *mcpToolInventory) restoreFromStore(ctx context.Context) error {
 	tools, err := m.store.ListMCPObservedTools(ctx)
 	if err != nil {
 		m.mu.Lock()
-		m.restoreIncomplete = true
+		m.observedRestoreIncomplete = true
+		// The advertised read is ordered after the observed read. If the first
+		// read fails, neither durable projection is authoritative yet.
+		m.advertisedRestoreIncomplete = true
 		m.mu.Unlock()
 		return err
 	}
@@ -541,7 +701,7 @@ func (m *mcpToolInventory) restoreFromStore(ctx context.Context) error {
 	advertised, err := m.store.ListMCPAdvertisedToolSnapshots(ctx)
 	if err != nil {
 		m.mu.Lock()
-		m.restoreIncomplete = true
+		m.advertisedRestoreIncomplete = true
 		m.mu.Unlock()
 		return err
 	}
@@ -554,7 +714,7 @@ func (m *mcpToolInventory) retryRestoreFromStore(ctx context.Context) {
 		return
 	}
 	m.mu.Lock()
-	retry := m.restoreIncomplete
+	retry := m.observedRestoreIncomplete || m.advertisedRestoreIncomplete
 	m.mu.Unlock()
 	if retry {
 		_ = m.restoreFromStore(ctx)
@@ -573,7 +733,7 @@ func (m *mcpToolInventory) observedIncomplete(incompleteConnectors map[string]st
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.restoreIncomplete || len(m.restored) > 0 || len(m.restoredAdvertised) > 0 || len(m.pendingRemoval) > 0 {
+	if m.observedRestoreIncomplete || len(m.restored) > 0 || len(m.pendingRemoval) > 0 {
 		return true
 	}
 	for key, tools := range m.observed {
@@ -605,7 +765,7 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 		includeAdvertised = onlySource[0] == "advertised"
 		includeObserved = onlySource[0] == "observed"
 	}
-	if includeAdvertised && m.restoreIncomplete {
+	if includeAdvertised && m.advertisedRestoreIncomplete {
 		partial = true
 	}
 	for _, server := range servers {
@@ -638,6 +798,7 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 		}
 		if includeObserved {
 			partial = partial || m.observedPartial[key]
+			partial = partial || len(m.pendingObserved[key]) > 0
 		}
 		add := func(name, source string, at time.Time) {
 			if len(rows) >= maxMCPToolCollection {
