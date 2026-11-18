@@ -1061,9 +1061,9 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		// configuration change on the launched agent is still a proved
 		// disablement of this call's hooks.
 		parts := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
+		placed := len(parts) > 1 && hookpaths.ChangesDirectory(managedRaw)
 		for _, part := range parts {
-			if len(parts) > 1 && part.Command == managedRaw &&
-				(strings.Contains(managedRaw, "cd ") || strings.Contains(managedRaw, "pushd ")) {
+			if placed && part.Command == managedRaw {
 				continue
 			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
@@ -1157,9 +1157,9 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	// The registration set is read by hookpaths' shared shell writer. A
 	// placed statement carries its own directory, including after literal cd.
 	parts := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
+	placed := len(parts) > 1 && hookpaths.ChangesDirectory(rawCommand)
 	for _, part := range parts {
-		if len(parts) > 1 && part.Command == rawCommand &&
-			(strings.Contains(rawCommand, "cd ") || strings.Contains(rawCommand, "pushd ")) {
+		if placed && part.Command == rawCommand {
 			continue
 		}
 		partGuard := guard
@@ -1642,7 +1642,7 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookp
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}
 	out := []hookpaths.PlacedStatement{root}
 	placed := []hookpaths.PlacedStatement{root}
-	if strings.Contains(command, "cd ") || strings.Contains(command, "cd\t") || strings.Contains(command, "pushd ") {
+	if hookpaths.ChangesDirectory(command) {
 		if statements, ok := hookpaths.TopLevelStatements(command, cwd, home); ok {
 			placed = statements
 			out = append(out, statements...)
