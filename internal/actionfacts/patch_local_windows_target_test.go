@@ -34,6 +34,7 @@ func patchOf(directive, target string) string {
 // forms of a drive path, the admin share of this machine under every local
 // name, and a share of another host.
 func TestPatchTargetThatOpensALocalWindowsFileIsAPathFact(t *testing.T) {
+	windowsPatchNames(t)
 	for _, target := range []string{
 		`\\?\C:\Users\fixture\.netrc`, `\\.\C:\Users\fixture\.netrc`, `\\?\c:\Users\fixture\.netrc`,
 		`\\localhost\c$\Users\fixture\.netrc`, `\\LOCALHOST\C$\Users\fixture\.netrc`,
@@ -67,6 +68,7 @@ func TestPatchTargetThatOpensALocalWindowsFileIsAPathFact(t *testing.T) {
 // without a path, and a name with an empty server. The gateway judges such a
 // call at the unknown tier (PatchNamesUnplacedTarget).
 func TestPatchTargetThatIsNoLocalWindowsFileStaysUnread(t *testing.T) {
+	windowsPatchNames(t)
 	for _, target := range []string{
 		`\\localhost\c$`, `\\localhost\c$\`, `\\server\share`, `\\?\UNC\server\share`,
 		`\\?\GLOBALROOT\Device\x\file.txt`,

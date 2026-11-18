@@ -436,6 +436,40 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.failed, 1, result.checks)
         self.assertIn("not being intercepted", result.checks[0]["detail"])
 
+    def test_native_openclaw_still_reports_install_admission(self):
+        # GAP-1139: native OpenClaw (Windows) closes the proxy port on
+        # purpose; doctor returned before the install admission row, so a
+        # strict tier whose admission was not registered said nothing.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor._guardrail_proxy_intentionally_closed", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.configured_openclaw_hook_mode", return_value="native"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_plugin_evidence", return_value=("native", "plugin seen", True)),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_state", return_value="none"),
+            patch("defenseclaw.openclaw_plugin_config.openclaw_install_policy_wanted", return_value=True),
+            patch(
+                "defenseclaw.openclaw_plugin_config.openclaw_install_policy_recorded_state",
+                return_value="not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows (needs 2026.11.3 or later)",
+            ),
+        ):
+            _check_proxy_interception(cfg, result, live_health={})
+        rows = {c["label"]: c for c in result.checks}
+        self.assertIn("OpenClaw install admission", rows, result.checks)
+        self.assertEqual(rows["OpenClaw install admission"]["status"], "warn")
+        # GAP-1170: the row names the reason the gateway recorded.
+        self.assertIn("2026.8.35 is too old for strict install policy", rows["OpenClaw install admission"]["detail"])
+        self.assertEqual(result.failed, 0, result.checks)
+
     def test_proxy_interception_waits_for_first_report_after_restart(self):
         # GAP-2487: right after a sidecar restart the plugin has not reported
         # yet; it does within a minute, so this is not a FAIL.
@@ -2390,6 +2424,33 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
                 api_key_env="CISCO_AI_DEFENSE_API_KEY",
             ),
         )
+
+    def test_remote_or_both_without_a_key_setting_is_a_config_error_gap0464(self):
+        # GAP-0464: scanner_mode remote or both with no AI Defense key configured
+        # never runs the remote scan; doctor names the setting and the two fixes.
+        for mode in ("remote", "both"):
+            cfg = self._make_cfg()
+            cfg.guardrail.scanner_mode = mode
+            cfg.cisco_ai_defense.api_key_env = ""
+            r = _DoctorResult()
+            _check_cisco_ai_defense(cfg, r)
+            self.assertEqual(r.failed, 1, r.checks)
+            detail = r.checks[0]["detail"]
+            self.assertIn(f"guardrail.scanner_mode is {mode}", detail)
+            self.assertIn("no AI Defense API key is configured", detail)
+            self.assertIn("set guardrail.scanner_mode to local", detail)
+
+    def test_inline_api_key_is_not_a_missing_key_gap0464(self):
+        # The deprecated inline cisco_ai_defense.api_key still works: doctor must
+        # not tell that host its remote scanner never runs.
+        cfg = self._make_cfg()
+        cfg.guardrail.scanner_mode = "both"
+        cfg.cisco_ai_defense.api_key_env = ""
+        cfg.cisco_ai_defense.api_key = "inline-key"
+        r = _DoctorResult(passive=True)
+        _check_cisco_ai_defense(cfg, r)
+        details = " ".join(str(c.get("detail", "")) for c in r.checks)
+        self.assertNotIn("no AI Defense API key is configured", details)
 
     @patch("defenseclaw.commands.cmd_doctor.click.echo")
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(401, "invalid api key"))

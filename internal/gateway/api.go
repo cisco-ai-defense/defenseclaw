@@ -1737,6 +1737,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		// OSS: a route key another account could have received is replaced
 		// before the first request (S1 DESIGN 17.1).
 		a.rotateRouteKeyAfterHeldPort()
+		// OSS: route-only agents get the real route only now that the port
+		// is ours; until then their render is parked (GAP-1133).
+		a.routeOnlyPortOwned(true)
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1749,6 +1752,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	var tcpBound chan net.Listener
 	retryCtx, stopRetry := context.WithCancel(ctx)
 	defer stopRetry()
+	// OSS: a render a crash, a forced stop or a logoff left in place points
+	// the agents at a port this gateway does not hold yet; park it before
+	// the bind, the real route follows once the port is ours (GAP-1133).
+	a.parkRouteOnly("this gateway is starting and does not hold its API port yet")
 	ln, lnErr := a.acquireAPIListener(ctx)
 	switch {
 	case lnErr == nil:
@@ -1807,11 +1814,15 @@ func (a *APIServer) Run(ctx context.Context) error {
 			a.health.SetAPI(StateRunning, "", apiDetails)
 		case err := <-errCh:
 			a.health.SetAPI(StateError, err.Error(), nil)
+			// Park route-only agents before the port is released (GAP-1133).
+			a.routeOnlyPortOwned(false)
 			_ = shutdown()
 			return fmt.Errorf("api: listen %s: %w", a.addr, err)
 		case <-ctx.Done():
 			a.health.SetAPI(StateStopped, "", nil)
 			_, _ = systemd.Notify(systemd.StateStopping)
+			// Park route-only agents before the port is released (GAP-1133).
+			a.routeOnlyPortOwned(false)
 			return shutdown()
 		}
 	}

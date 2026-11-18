@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from defenseclaw.openclaw_plugin_config import (
     configured_openclaw_hook_mode,
     openclaw_hook_mode_detail,
+    openclaw_install_policy_recorded_state,
+    openclaw_install_policy_remediation,
     openclaw_install_policy_state,
 )
 
@@ -179,3 +181,44 @@ class OpenClawPluginEvidenceEdgeTest(OpenClawPluginEvidenceTest):
         self.assertIn("started 5 s ago", detail)
         naive = {"openclaw_plugin": {"last_seen_at": datetime.utcnow().replace(microsecond=0).isoformat()}}
         self.assertEqual(self._evidence(naive)[0], "hybrid")
+
+
+class OpenClawInstallPolicyRemediationTest(unittest.TestCase):
+    # GAP-1139: the reason is in gateway.log (the gateway runs setup), and on
+    # Windows doctor names the drive-root ACL that makes OpenClaw refuse the
+    # command.
+    def test_names_gateway_log_and_the_windows_drive_root(self):
+        linux = openclaw_install_policy_remediation("none", "linux")
+        self.assertIn("gateway.log", linux)
+        self.assertNotIn("setup output", linux)
+        self.assertNotIn("drive root", linux)
+        windows = openclaw_install_policy_remediation("none", "win32")
+        self.assertIn("drive root", windows)
+        self.assertIn("C:\\", windows)
+
+    def test_too_old_says_upgrade(self):
+        text = openclaw_install_policy_remediation(
+            "none", "win32", recorded="not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows"
+        )
+        self.assertIn("upgrade OpenClaw to 2026.11.3", text)
+
+    def test_operator_policy(self):
+        self.assertIn("remove your own security.installPolicy", openclaw_install_policy_remediation("operator", "win32"))
+
+
+class OpenClawInstallPolicyRecordedStateTest(unittest.TestCase):
+    # GAP-1170: doctor and status read the reason the gateway recorded.
+    def test_reads_the_gateway_state(self):
+        data_dir = tempfile.mkdtemp()
+        cfg = SimpleNamespace(data_dir=data_dir)
+        self.assertEqual(openclaw_install_policy_recorded_state(cfg), "")
+        reason = (
+            "not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows "
+            "(needs 2026.11.3 or later): it counts inherit-only entries"
+        )
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            json.dump({"state": reason, "openclaw_version": "2026.8.35"}, f)
+        self.assertEqual(openclaw_install_policy_recorded_state(cfg), reason)
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertEqual(openclaw_install_policy_recorded_state(cfg), "")

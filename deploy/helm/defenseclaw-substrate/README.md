@@ -124,6 +124,19 @@ or the kept copy was changed), an alert event is written and that stage's atespa
 Inside the cluster, `defenseclaw-gateway substrate-bundle test --bundle v3.dcbundle --atespace team-a`
 shows the profile and egress an actor would get before you apply.
 
+A stage names only atespaces DefenseClaw manages: a launcher atespace, or one that a `match.substrate` assignment of
+`config.yaml` or of the bundle lists by name. Any other name is refused with a receipt (`stage_invalid`), and no stage is
+made for it.
+
+Known limits in 1.0.10:
+
+- **Bundles come from a file or the inbox ConfigMap only.** `bundle apply FILE` and the inbox are the two sources; there is
+  no OCI registry source yet. A GitOps tool that pulls bundles from a registry writes them to the inbox ConfigMap.
+- **The fleet documents carry no bundle block.** `substrate status --json` and `verify --json` do not name the applied
+  bundles. `defenseclaw substrate bundle status --json` (administrators) is the bundle document: each stage's active and
+  previous bundle (id, version, signer key id), its problems and the receipts. `defenseclaw substrate doctor`, as an
+  administrator, fails its `policy_bundles` check when a stage's bundle no longer verifies.
+
 ## Upgrade, rollback, uninstall
 
 - `helm upgrade` checks the new config, refuses a skipped minor (N-1 to N only) and rolls under the PDBs. The leader

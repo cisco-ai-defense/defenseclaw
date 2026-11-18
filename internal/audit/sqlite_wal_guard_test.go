@@ -1179,9 +1179,13 @@ func TestCheckpointWALIfLargeTakesTheWriterAfterOneFastSync(t *testing.T) {
 // Review of G-flood-wal round 3 (P1): on a slow audit disk the syncs before
 // the catch-up took 8-26 s each, so a pass over the limit could spend its time
 // on copies and syncs off the writer and run out of it before its bounded hold
-// while the hooks kept appending. Over the limit the pass goes to the bounded
-// catch-up right after the copy that found it over: no more copies, no syncs.
-func TestCheckpointWALIfLargeOverTheLimitHoldsTheWriterWithoutSettling(t *testing.T) {
+// while the hooks kept appending. rel-1-0-10:GAP-1153: with no sync at all,
+// though, the copy under the writer synced every page the copies since the
+// last restart had written, which outlasted even the emergency hold under a
+// 50-100 calls/s flood, so the log never restarted. Over the limit the pass
+// runs at most walBoundedSettleRounds settle rounds off the writer, each copy
+// followed by a sync, and then takes the writer whether or not they settled.
+func TestCheckpointWALIfLargeOverTheLimitSettlesBrieflyThenHoldsTheWriter(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
@@ -1224,22 +1228,31 @@ func TestCheckpointWALIfLargeOverTheLimitHoldsTheWriterWithoutSettling(t *testin
 		time.Sleep(4 * walSettledSpan)
 	}
 	var endSnapshot sync.Once
+	var copiesAtWriter, syncsAtWriter atomic.Int64
 	walWriterPhaseHook = func(context.Context) {
-		endSnapshot.Do(func() { _ = snapshot.Rollback() })
+		endSnapshot.Do(func() {
+			copiesAtWriter.Store(copies.Load())
+			syncsAtWriter.Store(syncs.Load())
+			_ = snapshot.Rollback()
+		})
 	}
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, 2*overLimitTestHoldCap)
-	if err != nil || !pass.Bounded || !pass.Restarted || pass.Syncs != 0 {
-		t.Fatalf("pass over the limit: %+v, %v; want a bounded catch-up with no sync before it that restarts the log", pass, err)
+	rounds := int64(walBoundedSettleRounds + 1)
+	if err != nil || !pass.Bounded || !pass.Restarted || int64(pass.Syncs) != rounds {
+		t.Fatalf("pass over the limit: %+v, %v; want a bounded catch-up after %d syncs that restarts the log", pass, err, rounds)
 	}
-	if copies.Load() != 1 || syncs.Load() != 0 {
-		t.Fatalf("pass over the limit ran %d copies and %d syncs off the writer; want 1 and 0", copies.Load(), syncs.Load())
+	if copiesAtWriter.Load() != rounds || syncsAtWriter.Load() != rounds {
+		t.Fatalf("pass over the limit ran %d copies and %d syncs off the writer before it; want %d of each, every copy followed by a sync",
+			copiesAtWriter.Load(), syncsAtWriter.Load(), rounds)
 	}
 }
 
 // A missed bounded pass remains over the limit. Its next pass must still
-// attempt the writer promptly: a slow off-writer sync in this branch used to
-// consume the pass deadline while hooks kept appending frames.
-func TestCheckpointWALIfLargeRepeatedOverLimitPassesNeverSettleBeforeTheWriter(t *testing.T) {
+// attempt the writer after a short settle: unbounded off-writer settling in
+// this branch used to consume the pass deadline while hooks kept appending
+// frames (G-flood-wal round 3), and none let the work under the writer grow
+// with every pass (rel-1-0-10:GAP-1153).
+func TestCheckpointWALIfLargeRepeatedOverLimitPassesSettleBrieflyBeforeTheWriter(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
@@ -1252,8 +1265,8 @@ func TestCheckpointWALIfLargeRepeatedOverLimitPassesNeverSettleBeforeTheWriter(t
 	t.Cleanup(func() { walWriterPhaseHook, walSyncPhaseHook = originalWriter, originalSync })
 	for passNumber := range 3 {
 		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
-		if err != nil || !pass.Bounded || !pass.WriterDeferred || pass.Syncs != 0 || syncs.Load() != 0 {
-			t.Fatalf("over-limit pass %d: %+v, %v; sync hooks %d, want immediate bounded catch-up", passNumber, pass, err, syncs.Load())
+		if err != nil || !pass.Bounded || !pass.WriterDeferred || pass.Syncs == 0 || pass.Syncs > walBoundedSettleRounds+1 {
+			t.Fatalf("over-limit pass %d: %+v, %v; sync hooks %d, want a bounded catch-up after 1 to %d syncs", passNumber, pass, err, syncs.Load(), walBoundedSettleRounds+1)
 		}
 		if !store.WALOverLimit() || pass.WriterHeld > testWALWriterBudget {
 			t.Fatalf("over-limit pass %d lost pressure or exceeded writer budget: %+v", passNumber, pass)

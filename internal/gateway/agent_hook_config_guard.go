@@ -1125,6 +1125,15 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 			add(agentHookConfigWriteRuleID, "", resolved)
 		}
 	}
+	// A PowerShell call names its write targets in cmdlet parameters and .NET
+	// method arguments, which the POSIX readers below do not read: the shared
+	// PowerShell write reader hands each of them to the same hook-file check
+	// (rel-1-0-10:GAP-1115).
+	if written, place, owned := agentHookConfigPowerShellWrite(request, guard); owned {
+		add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", place)
+	} else if written {
+		add(agentHookConfigWriteRuleID, "", place)
+	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
 	rawCommand := agentHookConfigRawShellCommand(request.Input)
 	guard.gitIndexRedirected = agentHookConfigRedirectsGitIndex(rawCommand)
@@ -1340,6 +1349,71 @@ func sandboxAgentHookConfigFormat(target, home string) string {
 		}
 	}
 	return ""
+}
+
+// agentHookConfigPowerShellWrite reads a Windows-home shell call as
+// PowerShell (powerShellWriteReading, the reader the state proof uses) and
+// reports whether it writes, appends to or removes a hook file of guard:
+// place is that file, owned that it is an installed DefenseClaw artifact.
+// Only a call that spells the name of a hook file is read; reads and writes
+// of other files add nothing. A call past the reading bounds is a write
+// with no place (rel-1-0-10:GAP-1115).
+func agentHookConfigPowerShellWrite(request trustedActionRequest, guard *agentHookConfigGuard) (written bool, place string, owned bool) {
+	command, ok := powerShellReadingCommand(request)
+	if !ok || !guard.shellMentionsFileName(command) {
+		return false, "", false
+	}
+	written = powerShellWriteReading(request, command, guard.shellMentionsFileName,
+		func(facts actionfacts.Facts, _ trustedActionRequest) bool {
+			for _, candidate := range facts.Paths {
+				switch candidate.Access {
+				case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+				default:
+					continue
+				}
+				target := strings.TrimSpace(candidate.Resolved)
+				if target == "" {
+					target = strings.TrimSpace(candidate.Value)
+				}
+				if target = filepath.FromSlash(target); !filepath.IsAbs(target) {
+					continue
+				}
+				// A removed or moved folder takes the hook files it holds
+				// with it; a file written into a folder is judged by its own
+				// name.
+				folder := candidate.Access == actionfacts.PathAccessDelete
+				if guard.ownedFile(target) || folder && guard.ownedFolder(target) {
+					place, owned = target, true
+					return true
+				}
+				if guard.format(target) != "" || folder && guard.shellTarget(target) {
+					place = target
+					return true
+				}
+			}
+			return false
+		})
+	return written, place, owned
+}
+
+// shellMentionsFileName reports text that spells, in any case, the file name
+// of one of the guard's hook files or a dot folder that holds one (.codex,
+// .copilot, .github, ...): a write of a hook file names one of them, in a
+// path, a link's path or a value, so text that names none writes none.
+func (g *agentHookConfigGuard) shellMentionsFileName(text string) bool {
+	text = strings.ToLower(text)
+	for _, file := range g.files {
+		path := file.Path
+		if relative, ok := strings.CutPrefix(path, g.home+string(filepath.Separator)); ok && g.home != "" {
+			path = relative
+		}
+		for _, name := range strings.Split(strings.ToLower(filepath.ToSlash(path)), "/") {
+			if len(name) > 2 && (name[0] == '.' || name == strings.ToLower(filepath.Base(file.Path))) && strings.Contains(text, name) {
+				return true
+			}
+		}
+	}
+	return strings.Contains(text, "defenseclaw-hook")
 }
 
 // agentHookConfigShellWriteOperands lists the absolute write operands of a

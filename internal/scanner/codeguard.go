@@ -119,9 +119,11 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 	ext := filepath.Ext(filename)
 	var findings []Finding
 	rules := s.allRules()
+	receivers := newJSRegExpReceivers(ext)
 
 	lines := strings.Split(content, "\n")
 	for lineNum, line := range lines {
+		receivers.observe(line)
 		for _, r := range rules {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
@@ -146,7 +148,7 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 		}
 	}
 
-	return CodeGuardContentScan{findings: findings, complete: true}
+	return CodeGuardContentScan{findings: receivers.drop(findings), complete: true}
 }
 
 func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
@@ -443,10 +445,12 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	// scanner-invisible. Raise the buffer to 8 MiB which is well
 	// above any realistic source-line length.
 	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	receivers := newJSRegExpReceivers(ext)
 	lineNum := 0
 	for sc.Scan() {
 		lineNum++
 		line := sc.Text()
+		receivers.observe(line)
 
 		for _, r := range rules {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
@@ -472,7 +476,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 		}
 	}
 
-	return findings, sc.Err()
+	return receivers.drop(findings), sc.Err()
 }
 
 // RuleMeta exposes rule metadata for skill generation without leaking the
