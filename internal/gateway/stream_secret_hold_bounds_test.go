@@ -37,6 +37,7 @@ type gap0429BoundCase struct {
 	name   string
 	secret gap0429Secret
 	text   string
+	piece  int // piece size; 0: gap0429BoundPieceSize
 }
 
 func gap0429BoundCases(t *testing.T) []gap0429BoundCase {
@@ -53,8 +54,12 @@ func gap0429BoundCases(t *testing.T) []gap0429BoundCase {
 		body: key.body, end: len(big)}
 	filler := retestFiller(1100)[:1100]
 	return []gap0429BoundCase{
-		{"ends-inside-key", cut, filler + cut.text},
-		{"block-over-cap", over, filler + over.text + "\nDone.\n"},
+		{"ends-inside-key", cut, filler + cut.text, 0},
+		// 4096-byte pieces: every frame is checked over the whole reply
+		// text, so 64 KiB in 24-byte pieces (2700 frames) took 300 s plain
+		// and in 512-byte pieces 295 s under -race, for a bound that is the
+		// same at any piece size (it is crossed by the byte count).
+		{"block-over-cap", over, filler + over.text + "\nDone.\n", 4096},
 	}
 }
 
@@ -79,7 +84,11 @@ func TestGAP0429HoldBoundsAreTheUnknownTier(t *testing.T) {
 				name := fmt.Sprintf("%s/%s/%s", path.name, c.name, tier.pack)
 				rec := httptest.NewRecorder()
 				w := &gap0429Watch{GuardrailInspector: retestInspector(), secret: c.secret.text, rec: rec}
-				log := captureStderr(t, func() { path.run(t, rec, w, tier.pack, gap0429Pieces(c.text, gap0429BoundPieceSize(), nil)) })
+				size := c.piece
+				if size == 0 {
+					size = gap0429BoundPieceSize()
+				}
+				log := captureStderr(t, func() { path.run(t, rec, w, tier.pack, gap0429Pieces(c.text, size, nil)) })
 				got := path.text(rec.Body.String())
 				released := gap0429Released(got, c.secret)
 				if !strings.Contains(log, "TRUNCATED") && !strings.Contains(log, boundedTruncatedTitle) {
