@@ -34,20 +34,26 @@ func TestGAP1183TopLevelHereDocConsumerOnClaudeHook(t *testing.T) {
 		t.Skip("POSIX shell forms")
 	}
 	rows := []struct {
-		name, prefix string
-		code         bool
+		name, prefix, delimiter string
+		code                    bool
 	}{
-		{"shell", "sh", true},
-		{"newgrp", "newgrp", false},
-		{"untrusted wrapper", "/tmp/x/wrap sh", false},
-		{"assigned PATH", "PATH=/tmp/x:$PATH cat", false},
-		{"yash", "yash", true},
+		{"shell", "sh", "'EOF'", true},
+		{"shell unquoted", "sh", "EOF", true},
+		{"newgrp", "newgrp", "'EOF'", false},
+		{"newgrp unquoted", "newgrp", "EOF", false},
+		{"untrusted wrapper", "/tmp/x/wrap sh", "'EOF'", false},
+		{"assigned PATH", "PATH=/tmp/x:$PATH cat", "'EOF'", false},
+		{"yash", "yash", "'EOF'", true},
+		// An unquoted body is read as the shell twin reads it
+		// (heredocScriptText), not left unread.
+		{"yash unquoted", "yash", "EOF", true},
+		{"yash behind nohup", "nohup yash", "EOF", true},
 	}
 	for _, pack := range gap0437Packs {
 		hook := gap0437Server(t, pack, "claudecode", "action")
 		cwd := t.TempDir()
 		for _, row := range rows {
-			command := row.prefix + " <<'EOF'\n: >> ~/.defenseclaw/config.yaml\nEOF"
+			command := row.prefix + " <<" + row.delimiter + "\n: >> ~/.defenseclaw/config.yaml\nEOF"
 			out := gap0437Hook(t, hook, cwd, pack.name+row.name, command)
 			if row.code {
 				if out["action"] != "block" || !gap0526Names(out, "tamper.detector_state_write") {

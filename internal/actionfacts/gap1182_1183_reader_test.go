@@ -24,15 +24,23 @@ func TestGAP1182WrapperChildShellBodyReadings(t *testing.T) {
 
 func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 	skipPOSIXPathsOnWindows(t)
+	// want: "body", the body is read here as the script of the consumer;
+	// "unknown", the unknown tier; "none", this reader adds nothing because
+	// the consumer is data, or the ordinary readers already judge its stdin
+	// (topLevelHereDocReadElsewhere: the gateway rows of
+	// TestGAP1183TopLevelHereDocConsumerOnClaudeHook, TestCapFloorHeredocConsumer
+	// and TestStdinCodeWrapperKeepsTheStrictSignal hold their verdicts).
 	for _, row := range []struct {
-		prefix string
-		code   bool
+		prefix, delimiter, want string
 	}{
-		{"sh", true}, {"yash", true}, {"newgrp", false},
-		{"/tmp/x/wrap sh", false}, {"PATH=/tmp/x:$PATH cat", false},
-		{"cat", false},
+		{"sh", "'EOF'", "none"}, {"sh", "EOF", "none"}, {"sudo sh", "EOF", "none"},
+		{"bash run.sh", "'EOF'", "none"}, {"crontab -", "'EOF'", "none"},
+		{"cat", "'EOF'", "none"},
+		{"yash", "'EOF'", "body"}, {"yash", "EOF", "body"}, {"nohup yash", "EOF", "body"},
+		{"newgrp", "'EOF'", "unknown"}, {"newgrp", "EOF", "unknown"},
+		{"/tmp/x/wrap sh", "'EOF'", "unknown"}, {"PATH=/tmp/x:$PATH cat", "'EOF'", "unknown"},
 	} {
-		command := row.prefix + " <<'EOF'\n: >> ~/.defenseclaw/config.yaml\nEOF"
+		command := row.prefix + " <<" + row.delimiter + "\n: >> ~/.defenseclaw/config.yaml\nEOF"
 		input := Input{Tool: "Bash", Command: command, CWD: "/work", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
 		got := SimpleCommands(input, Analyze(input))
 		body := slices.ContainsFunc(got, func(s SimpleCommand) bool {
@@ -41,9 +49,8 @@ func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 		unknown := slices.ContainsFunc(got, func(s SimpleCommand) bool {
 			return s.EvaluationFailure == EvaluationFailureUnresolvedBody
 		})
-		if row.code && !body || row.prefix == "cat" && (body || unknown) ||
-			!row.code && row.prefix != "cat" && !unknown {
-			t.Errorf("%q: body=%t unknown=%t: %+v", command, body, unknown, got)
+		if body != (row.want == "body") || unknown != (row.want == "unknown") {
+			t.Errorf("%q: body=%t unknown=%t, want %s: %+v", command, body, unknown, row.want, got)
 		}
 	}
 	command := "unused() { sh <<'EOF'\n: >> ~/.defenseclaw/config.yaml\nEOF\n}\ntrue"
@@ -72,6 +79,33 @@ func TestGAP1183OrdinaryHereDocDataKeepsReleaseReading(t *testing.T) {
 			return s.EvaluationFailure == EvaluationFailureUnresolvedBody || s.Text == "print('hello')\n"
 		}) {
 			t.Errorf("ordinary data changed reading: %+v", got)
+		}
+	}
+}
+
+// TestGAP1183EmptyHereDocBodyReadsNothing: an empty here-document (the
+// parser gives it no body word) hands its consumer no input, so the
+// top-level reader adds nothing and never dereferences the missing body
+// (the FU9 owner A/B rows where a recovered panic became a parse-failure
+// alert).
+func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
+	for _, command := range []string{
+		"python3 - <<EOF\nEOF",
+		"cd /work && python3 - <<EOF\nEOF",
+		"cd /work && grep -n x <<EOF\nEOF",
+		"newgrp <<EOF\nEOF",
+		"PATH=/tmp/x:$PATH cat <<'EOF'\nEOF",
+		"yash <<EOF\nEOF",
+	} {
+		input := Input{Tool: "Bash", Command: command, CWD: "/work", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
+		if got := simpleTopLevelHereDocBodies(command, input); len(got) != 0 {
+			t.Errorf("%q: want no reading, got %+v", command, got)
+		}
+		if got := SimpleCommands(input, Analyze(input)); slices.ContainsFunc(got, func(s SimpleCommand) bool {
+			return s.EvaluationFailure == EvaluationFailureUnresolvedBody
+		}) {
+			t.Errorf("%q: an empty document is not an unread body: %+v", command, got)
 		}
 	}
 }
