@@ -841,7 +841,8 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
             labels["Mode"]["detail"],
             f"action; fail-mode=closed; provenance={provenance}; "
             # What each kind of hook failure does (#1441).
-            "on failure: gateway down: block; no answer: block; hook or answer error: block",
+            "on failure: gateway down: block; no answer: block; hook or answer error: block; "
+            "stop and session-end events: never blocked",
         )
         self.assertIn("Rule pack", labels)
 

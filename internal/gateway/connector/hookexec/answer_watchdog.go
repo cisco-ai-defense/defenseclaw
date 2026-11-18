@@ -134,10 +134,18 @@ type answerWatchdog struct {
 	stdout, stderr io.Writer
 	out, err       bytes.Buffer
 
-	fallback         watchdogAnswer
-	noDecision       watchdogAnswer
-	secureClient     bool
-	visibleOutage    func() ([]byte, []byte, int)
+	fallback      watchdogAnswer
+	noDecision    watchdogAnswer
+	secureClient  bool
+	visibleOutage func() ([]byte, []byte, int)
+	// ordinaryGiven is the ordinary open answer useOrdinaryAtDeadline made
+	// the answer, and ordinaryVisible renders its text again with the
+	// once-per-session warning marker when the watchdog gives it
+	// (rel-1-0-10 GAP-1123). A call with a pending decision (closedKnown)
+	// still gets the ordinary answer, so this is not visibleOutage, which
+	// such a call never uses.
+	ordinaryGiven    watchdogAnswer
+	ordinaryVisible  func() ([]byte, []byte, int)
 	exit             func(int)
 	deliveryReceipt  func(bool, bool)
 	deadlineDelivery *hookDeliveryRequest
@@ -306,7 +314,11 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // payload the shared reader proved ordinary (startOrdinaryLook); it is
 // given only if the account tier read at the deadline is open.
 type ordinaryAnswer struct {
-	answer       watchdogAnswer
+	answer watchdogAnswer
+	// visible renders answer again when the watchdog gives it, with the
+	// once-per-session warning marker: answer itself is rendered ahead of
+	// the deadline without it, so it always carries the warning.
+	visible      func() ([]byte, []byte, int)
 	tier         func() string
 	installCheck func() bool
 	install      watchdogAnswer
@@ -337,10 +349,18 @@ func (w *answerWatchdog) startOrdinaryLook(gen int, opts Options, sp spec, failM
 			return
 		}
 		installCheck, install := renderInstallAnswer(opts, sp, answer.mode)
+		// The answer the deadline gives shows the outage warning only when
+		// this session has not seen it yet (GAP-1352): a prompt that already
+		// warned leaves this tool call's allow silent (rel-1-0-10 GAP-1123).
+		outage := withPerUserOutage(opts)
+		outage.answerWatch = nil
+		visible := func() ([]byte, []byte, int) {
+			return renderVisibleOutage(outage, sp, answer.mode, answer.reason)
+		}
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		if gen == w.lookGen {
-			w.ordinary = &ordinaryAnswer{answer: answer, tier: opts.OutageFailModeNow, installCheck: installCheck, install: install}
+			w.ordinary = &ordinaryAnswer{answer: answer, visible: visible, tier: opts.OutageFailModeNow, installCheck: installCheck, install: install}
 		}
 	}()
 }
@@ -445,6 +465,7 @@ func (w *answerWatchdog) useOrdinaryAtDeadline(until time.Time) {
 		return
 	}
 	w.fallback, w.noDecision = ordinary.answer, ordinary.answer
+	w.ordinaryGiven, w.ordinaryVisible = ordinary.answer, ordinary.visible
 	if w.failureLog.markerEnabled {
 		w.failureLog.replaceFallbackFrame(ordinary.answer.frame)
 	}
@@ -1262,13 +1283,21 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	if w.finished || w.answeredInTime.Load() {
 		return
 	}
-	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
+	// The ordinary open answer replaces the closed one also for a call with
+	// a pending decision (closedKnown), so its install window is checked as
+	// well: an install that holds the lock closes it (rel-1-0-10 GAP-1187).
+	ordinaryGiven := w.ordinaryVisible != nil && sameWatchdogAnswer(w.fallback, w.ordinaryGiven)
+	if installing && (!w.closedKnown || ordinaryGiven) && !w.claimedAnswer && w.installCheck != nil {
 		w.fallback = w.install
 		if len(w.install.frame) != 0 {
 			w.failureLog.replaceFallbackFrame(w.install.frame)
 		}
 	} else if !w.closedKnown && !w.claimedAnswer && !w.failureLogged && w.visibleOutage != nil {
 		w.fallback.out, w.fallback.err, w.fallback.code = w.visibleOutage()
+	} else if ordinaryGiven && !w.claimedAnswer && !w.failureLogged {
+		// Only the text: the decision (exit code) and the failure row stay
+		// the prepared ordinary answer's.
+		w.fallback.out, w.fallback.err, _ = w.ordinaryVisible()
 	}
 	w.fired = true
 	// Whatever of the prepared failure log (the ordinary log, the marker) the

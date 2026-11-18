@@ -932,10 +932,13 @@ def failure_outcomes(cfg: Any, connector: str, effective: str) -> dict[str, str]
       (allow-if-service-stopped).
     - no_answer: a verified gateway took the call, or holds its listener
       and accepts nothing (frozen), and gave no decision before the hook
-      deadline. In a per-user open mode Claude Code and Codex allow it with
-      the warning when the call names nothing a protected file could be
-      reached through (allow-ordinary); every other call, connector and
-      deployment blocks.
+      deadline. In a per-user open mode Claude Code and Codex allow a tool
+      call with the warning when it names nothing a protected file could be
+      reached through, and a prompt or tool result when the gateway is
+      frozen (a probe of its listener gets no answer either, GAP-1107); a
+      running gateway that answers a prompt or tool result too late blocks
+      it (allow-ordinary). Every other call, connector and deployment
+      blocks.
     - hook_error: an answer the gateway gave (an error status, a
       malformed or cut-off answer), a missing token, another listener on the
       port, an install in progress or a local failure of the hook itself.
@@ -961,24 +964,20 @@ def failure_outcomes(cfg: Any, connector: str, effective: str) -> dict[str, str]
         return {"gateway_down": "block", "no_answer": "block", "hook_error": "block"}
     if deployment == "managed":
         return {"gateway_down": "allow-if-service-stopped", "no_answer": "block", "hook_error": "block"}
-    if name in _LATE_ORDINARY_CONNECTORS:
-        no_answer = "allow-ordinary"
-    elif sys.platform == "win32":
-        # The Windows native hook gives the no-answer allow by payload shape
-        # today, so an ordinary shell call of another hook connector can run
-        # too (GAP-0030, the hook answer path). Status says so rather than
-        # overstate the block.
-        no_answer = "block-windows-shell-may-run"
-    else:
-        no_answer = "block"
+    # The Windows native hook reads the connector too since GAP-0030 (Go
+    # lateOrdinaryConnector), so another connector's late call blocks there.
+    no_answer = "allow-ordinary" if name in _LATE_ORDINARY_CONNECTORS else "block"
     return {"gateway_down": "allow", "no_answer": no_answer, "hook_error": "block"}
 
 
 _FAILURE_OUTCOME_TEXT = {
     "allow": "allow with a warning",
     "allow-if-service-stopped": "allow with a warning when the hook proves the gateway service is stopped",
-    "allow-ordinary": "allow with a warning unless the call may reach a protected file",
-    "block-windows-shell-may-run": "block, but on Windows an ordinary shell call may run with a warning",
+    "allow-ordinary": (
+        "tool calls allow with a warning unless the call may reach a protected file, "
+        "prompts and tool results allow with a warning when the gateway is frozen "
+        "and block when a running gateway answers too late"
+    ),
     "block": "block",
 }
 
@@ -992,7 +991,13 @@ def failure_outcomes_summary(outcomes: dict[str, str] | None) -> str:
     for key, label in FAILURE_KINDS:
         outcome = outcomes.get(key) or "unknown"
         parts.append(label + ": " + _FAILURE_OUTCOME_TEXT.get(outcome, outcome))
+    # No failure blocks a stop, session-end or idle event (a block there would
+    # keep the agent running), whatever the outcomes above say (GAP-1107).
+    parts.append(STOP_EVENTS_OUTCOME)
     return "; ".join(parts)
+
+
+STOP_EVENTS_OUTCOME = "stop and session-end events: never blocked"
 
 
 def connector_fail_mode_report(

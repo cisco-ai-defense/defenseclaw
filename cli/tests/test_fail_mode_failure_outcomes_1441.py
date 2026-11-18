@@ -77,8 +77,11 @@ def test_summary_names_every_failure_kind_in_order() -> None:
     summary = fail_mode.failure_outcomes_summary(fail_mode.failure_outcomes(_cfg(), "claudecode", "open"))
     assert summary == (
         "gateway down: allow with a warning; "
-        "no answer: allow with a warning unless the call may reach a protected file; "
-        "hook or answer error: block"
+        "no answer: tool calls allow with a warning unless the call may reach a protected file, "
+        "prompts and tool results allow with a warning when the gateway is frozen "
+        "and block when a running gateway answers too late; "
+        "hook or answer error: block; "
+        "stop and session-end events: never blocked"
     )
     assert fail_mode.failure_outcomes_summary(None) == ""
 
@@ -96,23 +99,31 @@ def test_status_prints_the_outcomes_after_the_fail_mode(monkeypatch: pytest.Monk
     monkeypatch.setattr(sys, "platform", "linux")
     report = {"effective": "open", "on_failure": fail_mode.failure_outcomes(_cfg(), "cursor", "open")}
     assert cmd_status._status_failure_outcomes_suffix(report) == (
-        " on-failure=(gateway down: allow with a warning; no answer: block; hook or answer error: block)"
+        " on-failure=(gateway down: allow with a warning; no answer: block; hook or answer error: block; "
+        "stop and session-end events: never blocked)"
     )
     assert cmd_status._status_failure_outcomes_suffix({"effective": "unknown"}) == ""
 
 
-def test_windows_names_the_shell_call_another_hook_connector_may_run(monkeypatch):
-    """GAP-0030: on Windows the native hook gives the no-answer allow by payload
-    shape, so status does not claim a plain block for another hook connector."""
-    import sys as _sys
-
-    from defenseclaw import fail_mode
-
-    monkeypatch.setattr(_sys, "platform", "win32")
+@pytest.mark.parametrize("platform", ["win32", "linux", "darwin"])
+def test_another_connector_blocks_a_no_answer_on_every_os(platform: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """GAP-0030: the Windows native hook reads the connector before the
+    late-ordinary allow, so another hook connector blocks there too and status
+    no longer names a Windows shell call that may run."""
+    monkeypatch.setattr(sys, "platform", platform)
     cfg = _cfg()
-    outcomes = fail_mode.failure_outcomes(cfg, "kiro", "open")
-    assert outcomes is not None and outcomes["no_answer"] == "block-windows-shell-may-run"
-    assert "on Windows an ordinary shell call may run" in fail_mode.failure_outcomes_summary(outcomes)
-    assert fail_mode.failure_outcomes(cfg, "codex", "open")["no_answer"] == "allow-ordinary"
-    monkeypatch.setattr(_sys, "platform", "linux")
     assert fail_mode.failure_outcomes(cfg, "kiro", "open")["no_answer"] == "block"
+    assert fail_mode.failure_outcomes(cfg, "codex", "open")["no_answer"] == "allow-ordinary"
+
+
+@pytest.mark.parametrize("mode", ["open", "closed"])
+def test_gap1107_summary_describes_prompt_tool_result_and_stop_events(mode: str) -> None:
+    """GAP-1107: the on-failure line said "no answer: allow with a warning"
+    while a hung gateway blocked prompts and tool results and stalled stop
+    hooks. It names each event class."""
+    saved = "closed" if mode == "closed" else ""
+    summary = fail_mode.failure_outcomes_summary(fail_mode.failure_outcomes(_cfg(saved=saved), "claudecode", mode))
+    assert summary.endswith("; stop and session-end events: never blocked")
+    if mode == "open":
+        assert "tool calls allow with a warning" in summary
+        assert "prompts and tool results allow with a warning when the gateway is frozen" in summary
