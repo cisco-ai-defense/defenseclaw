@@ -132,6 +132,29 @@ def test_gap1252_rules_classifier_status_names_gateway_errors(routing_app) -> No
     assert "Runtime:    gateway not reachable" in down.output
 
 
+@pytest.mark.parametrize("classifier", ["rules", "systemone"])
+def test_gap1284_in_process_classifier_enable_needs_no_docker(routing_app, classifier) -> None:
+    # rel-1-0-10 GAP-1284: --enable with an in-process classifier refused
+    # without Docker and printed the managed-Docker and Router API lines.
+    app, saved = routing_app
+    app.cfg.routing.classifier = classifier
+    app.cfg.routing.models = [_local_model()]
+    with (
+        patch("defenseclaw.commands.cmd_setup.shutil.which", return_value=None),
+        patch("defenseclaw.commands.cmd_setup.subprocess.run") as run,
+        patch("defenseclaw.commands.cmd_setup._log_setup_action"),
+    ):
+        result = CliRunner().invoke(setup, ["routing", "--enable"], obj=app)
+    assert result.exit_code == 0, result.output
+    run.assert_not_called()
+    assert saved == [True]
+    assert app.cfg.routing.enabled is True
+    assert f"Classifier: {classifier} (in process" in result.output
+    for stale in ("Docker is", "Docker is running", "managed Docker", "Router API", "Version:"):
+        assert stale not in result.output, result.output
+    assert "gateway restart required" in result.output
+
+
 def test_routing_on_native_windows_says_unsupported_and_refuses_enable(routing_app) -> None:
     # rel-1-0-4 GAP-2260: the page says native Windows is not supported, but
     # --status offered --enable and --enable failed only on models or Docker.
