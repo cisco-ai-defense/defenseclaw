@@ -9,6 +9,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -64,7 +65,8 @@ func TestSubstrateRelayTaskEnd(t *testing.T) {
 	if rec := f.do(t, f.actor, http.MethodPost, substrateRelayTask, "", `{"exit_code":0}`); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no actor token: %d", rec.Code)
 	}
-	// GAP-0291: no report is dropped; those after the first are repeats.
+	// GAP-0291: no report goes uncounted; those after the first are repeats.
+	// GAP-0303: the first few of a kind are audited one by one.
 	for range 4 {
 		f.do(t, f.actor, http.MethodPost, substrateRelayTask, "tok-bob", `{"exit_code":0}`)
 	}
@@ -78,7 +80,114 @@ func TestSubstrateRelayTaskEnd(t *testing.T) {
 			}
 		}
 	}
-	if n != 5 || repeats != 4 {
-		t.Fatalf("%d task-end rows (%d repeats) for 5 reports, want 5 (4 repeats)", n, repeats)
+	if n != 4 || repeats != 3 {
+		t.Fatalf("%d task-end rows (%d repeats) for 5 reports, want 4 (3 repeats)", n, repeats)
+	}
+}
+
+// GAP-0303 (expected item 3): repeats of one kind of end collapse after a few
+// rows, the count is kept, and a different kind of end still gets its row, so
+// the agent cannot mint HIGH rows at the actor rate limit.
+func TestGAP0303TaskEndRepeatsCollapse(t *testing.T) {
+	f := newSubstrateFixture(t)
+	store, logger := testStoreAndLogger(t)
+	f.api.store, f.api.logger = store, logger
+	ctx := context.Background()
+	reg, _, _ := f.regs.Get(ctx, "eng-web", subUID2)
+	reg.TaskDigest = "3f0a9c2e8b7d6f5a4c3b2a1908f7e6d5c4b3a29180f7e6d5c4b3a2918f7e6d5c"
+	if err := f.regs.Put(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	const flood = 100
+	stalled := `{"exit_code":124,"stalled":true,"duration_ms":1000,"cause":"agent chosen"}`
+	for i := range flood {
+		if rec := f.do(t, f.actor, http.MethodPost, substrateRelayTask, "tok-bob", stalled); rec.Code != http.StatusNoContent {
+			t.Fatalf("report %d: %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	// The relay's own end, a different kind, after the flood.
+	own := `{"exit_code":124,"stalled":true,"duration_ms":901000,"cause":"the task made no progress for 10m0s"}`
+	if rec := f.do(t, f.actor, http.MethodPost, substrateRelayTask, "tok-bob", own); rec.Code != http.StatusNoContent {
+		t.Fatalf("relay end: %d %s", rec.Code, rec.Body)
+	}
+	f.mu.Lock()
+	marks := 0
+	for _, m := range f.activity {
+		if m == SubstrateActivityTaskEnd+":"+subUID2 {
+			marks++
+		}
+	}
+	f.mu.Unlock()
+	if marks != flood+1 {
+		t.Fatalf("%d task_end marks for %d reports: the collapse must not drop the mark", marks, flood+1)
+	}
+	events, err := store.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, sawOwn, sawGap := 0, false, false
+	for _, e := range events {
+		if !strings.Contains(e.Details, "task_end") || !strings.Contains(e.Details, "eng-web/bob-1") {
+			continue
+		}
+		rows++
+		if strings.Contains(e.Details, "no progress for 10m0s") {
+			sawOwn = true
+		}
+		// The 8th report of the flood says how many repeats it stands for.
+		if strings.Contains(e.Details, "4 earlier reports of this kind not audited") && strings.Contains(e.Details, `"kind_count":8`) {
+			sawGap = true
+		}
+	}
+	// 3 plain rows, then 8, 16, 32 and 64 of the flood, plus the relay's end.
+	if want := 3 + 4 + 1; rows != want {
+		t.Fatalf("%d task-end rows for %d reports, want %d", rows, flood+1, want)
+	}
+	if !sawOwn {
+		t.Fatal("the relay's own end was not audited after the agent's flood")
+	}
+	if !sawGap {
+		t.Fatal("the row at the 8th report does not say how many repeats were not audited")
+	}
+}
+
+// GAP-0303: distinct causes cannot defeat the collapse; the kinds tracked per
+// actor are bounded, the rest share one kind per severity.
+func TestGAP0303TaskEndKindsAreBounded(t *testing.T) {
+	f := newSubstrateFixture(t)
+	store, logger := testStoreAndLogger(t)
+	f.api.store, f.api.logger = store, logger
+	ctx := context.Background()
+	reg, _, _ := f.regs.Get(ctx, "eng-web", subUID2)
+	reg.TaskDigest = "3f0a9c2e8b7d6f5a4c3b2a1908f7e6d5c4b3a29180f7e6d5c4b3a2918f7e6d5c"
+	if err := f.regs.Put(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	const reports = 200
+	for i := range reports {
+		body := fmt.Sprintf(`{"exit_code":124,"stalled":true,"cause":"cause %d"}`, i)
+		if rec := f.do(t, f.actor, http.MethodPost, substrateRelayTask, "tok-bob", body); rec.Code != http.StatusNoContent {
+			t.Fatalf("report %d: %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	events, err := store.ListEvents(500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, last := 0, 0
+	for _, e := range events {
+		if strings.Contains(e.Details, "task_end") && strings.Contains(e.Details, "eng-web/bob-1") {
+			rows++
+			if strings.Contains(e.Details, `"report":200,`) {
+				last++
+			}
+		}
+	}
+	// 16 kinds x 3 plain rows, then the shared kind: 3 plain rows and 8, 16, 32, 64, 128.
+	if rows > 16*3+3+5 || rows < 16*3 {
+		t.Fatalf("%d of %d distinct-cause reports audited, want 48 to 56", rows, reports)
+	}
+	if last != 0 {
+		t.Fatalf("report 200 of a shared kind (count 185) was audited")
 	}
 }

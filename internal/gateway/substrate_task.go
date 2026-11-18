@@ -24,35 +24,85 @@ import (
 //
 // The route takes the actor's verified JWT like every actor route, and the
 // agent shares that token: it could post here itself. So the row says the
-// actor reported it, and no report is dropped (GAP-0291): every one is
-// audited, numbered per actor on this replica, and those after the first
-// are marked as repeats, so ends the agent posted first cannot hide the
-// relay's own. The actor listener's per-actor rate limit bounds the rows,
-// as it bounds hook rows. Early ends cost the agent only its own worker
-// (the controller suspends a task actor that stays quiet after its end).
-// A relay-only credential is the root fix (tracked in GAP-0291).
+// actor reported it, and no report goes uncounted (GAP-0291): every one is
+// numbered per actor on this replica and marks the actor's activity. Rows
+// are collapsed per kind of end (severity, exit code, cause), so the agent
+// cannot mint HIGH rows at the actor listener's 20 calls a second
+// (GAP-0303): the first few reports of a kind are audited, as repeats, so
+// ends the agent posted first cannot hide the relay's own; after that a
+// row is written only when the count of the kind reaches a power of two
+// (8, 16, 32, ...), and says how many repeats since the last row were not
+// audited. At most substrateTaskEndMaxKinds kinds are tracked per actor;
+// later ones share one kind per severity. Early ends cost the agent only
+// its own worker (the controller suspends a task actor that stays quiet
+// after its end). A relay-only credential is the root fix (tracked in
+// GAP-0291).
 
 const (
 	// substrateTaskEndMaxActors bounds the per-actor report counts.
 	substrateTaskEndMaxActors = 10000
-	substrateTaskCauseMax     = 512
+	// substrateTaskEndMaxKinds bounds the distinct kinds of end counted per actor.
+	substrateTaskEndMaxKinds = 16
+	// substrateTaskEndPlainRows is how many reports of a kind are audited one by one.
+	substrateTaskEndPlainRows = 3
+	// substrateTaskEndFirstSummary is the first count of a kind, after the plain
+	// rows, at which a row is written (then each power of two).
+	substrateTaskEndFirstSummary = 8
+	substrateTaskCauseMax        = 512
 )
+
+// substrateTaskEndCounts is one actor's report counts.
+type substrateTaskEndCounts struct {
+	total int
+	kinds map[string]int
+}
 
 // substrateTaskEnds counts the end reports per actor UID.
 type substrateTaskEnds struct {
 	mu   sync.Mutex
-	rows map[string]int
+	rows map[string]*substrateTaskEndCounts
 }
 
-// next numbers uid's report: 1 for its first on this replica.
-func (t *substrateTaskEnds) next(uid string) int {
+// substrateTaskEndNumber says how a report is counted: its number among the
+// actor's reports, its number among the reports of its kind, whether it is
+// audited, and how many reports of its kind since the last audited row were not.
+type substrateTaskEndNumber struct {
+	total, count, unaudited int
+	audit                   bool
+}
+
+// next numbers uid's report of the given kind (and of the coarse kind that
+// stands in for it once the actor has substrateTaskEndMaxKinds kinds).
+func (t *substrateTaskEnds) next(uid, kind, coarse string) substrateTaskEndNumber {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.rows == nil || len(t.rows) >= substrateTaskEndMaxActors {
-		t.rows = map[string]int{}
+		t.rows = map[string]*substrateTaskEndCounts{}
 	}
-	t.rows[uid]++
-	return t.rows[uid]
+	c := t.rows[uid]
+	if c == nil {
+		c = &substrateTaskEndCounts{kinds: map[string]int{}}
+		t.rows[uid] = c
+	}
+	if _, seen := c.kinds[kind]; !seen && len(c.kinds) >= substrateTaskEndMaxKinds {
+		kind = coarse
+	}
+	c.total++
+	c.kinds[kind]++
+	n := c.kinds[kind]
+	out := substrateTaskEndNumber{total: c.total, count: n}
+	switch {
+	case n <= substrateTaskEndPlainRows:
+		out.audit = true
+	case n >= substrateTaskEndFirstSummary && n&(n-1) == 0:
+		out.audit = true
+		written := substrateTaskEndPlainRows
+		for p := substrateTaskEndFirstSummary; p < n; p *= 2 {
+			written++
+		}
+		out.unaudited = n - 1 - written
+	}
+	return out
 }
 
 // serveSubstrateRelayTask takes a task end: POST {"exit_code", "stalled",
@@ -88,7 +138,6 @@ func (a *APIServer) serveSubstrateRelayTask(st *substrateState, w http.ResponseW
 		st.cfg.Activity.ObserveActivity(SubstrateActivityTaskEnd, actor.Atespace, actor.UID, time.Now())
 	}
 	if st.alert != nil {
-		n := st.taskEnds.next(actor.UID)
 		severity, outcome := "INFO", "finished"
 		switch {
 		case in.Stalled:
@@ -96,19 +145,27 @@ func (a *APIServer) serveSubstrateRelayTask(st *substrateState, w http.ResponseW
 		case in.ExitCode != 0:
 			severity, outcome = "MEDIUM", "failed"
 		}
+		cause := substrateReportText(in.Cause)
+		num := st.taskEnds.next(actor.UID, fmt.Sprintf("%s|%d|%s", severity, in.ExitCode, cause), severity)
+		if !num.audit {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		took := (time.Duration(max(in.DurationMS, 0)) * time.Millisecond).Round(time.Second)
 		summary := fmt.Sprintf("task %s: %s/%s exit %d after %s (reported by the actor)", outcome, actor.Atespace, actor.Name, in.ExitCode, took)
-		cause := substrateReportText(in.Cause)
 		if cause != "" {
 			summary += "; " + cause
 		}
-		if n > 1 {
-			summary = fmt.Sprintf("repeat %d: %s", n, summary)
+		if num.total > 1 {
+			summary = fmt.Sprintf("repeat %d: %s", num.total, summary)
+		}
+		if num.unaudited > 0 {
+			summary += fmt.Sprintf(" (%d earlier reports of this kind not audited)", num.unaudited)
 		}
 		st.alert(r.Context(), severity, summary, map[string]any{
 			"event": "task_end", "atespace": actor.Atespace, "actor": actor.Name, "actor_uid": actor.UID,
 			"batch_id": reg.BatchID, "exit_code": in.ExitCode, "stalled": in.Stalled, "cause": cause, "duration_ms": max(in.DurationMS, 0),
-			"report": n, "repeat": n > 1,
+			"report": num.total, "kind_count": num.count, "unaudited": num.unaudited, "repeat": num.total > 1,
 		})
 	}
 	w.WriteHeader(http.StatusNoContent)
