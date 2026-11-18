@@ -125,10 +125,6 @@ func kiroV3HookEntry(name, description, trigger, matcher, hookScript string) map
 	return entry
 }
 
-func removeKiroV3Hooks(path, hookScript string) error {
-	return removeKiroV3HooksKeeping(path, hookScript, false, nil)
-}
-
 // kiroReclaimScope limits the teardown of an unconfigured connector to what
 // this install provably wrote (KiroConnector.reclaimScope): the files in
 // files, and in them only the entries that run exactly one of commands. A
@@ -142,6 +138,27 @@ type kiroReclaimScope struct {
 
 func (s *kiroReclaimScope) covers(path string) bool {
 	return s == nil || s.files[filepath.Clean(path)]
+}
+
+// remaining lists, sorted, the scope's files that still hold an entry running
+// one of its commands, read as the scope found them (kiroV3FileHoldsCommand,
+// kiroAgentFileHoldsCommand): what the reclaim had to remove and did not.
+func (s *kiroReclaimScope) remaining() ([]string, error) {
+	var left []string
+	for path := range s.files {
+		present, err := kiroV3FileHoldsCommand(path, s.commands)
+		if err == nil && !present {
+			present, err = kiroAgentFileHoldsCommand(path, s.commands)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			left = append(left, path)
+		}
+	}
+	slices.Sort(left)
+	return left, nil
 }
 
 // runsOwnCommand reports whether raw, a CLI 2.x hook handler or the action of
@@ -184,9 +201,10 @@ func (s *kiroReclaimScope) keepV2(raw interface{}, hookScript string) []interfac
 	return slices.DeleteFunc(slices.Clone(list), s.runsOwnCommand)
 }
 
-// removeKiroV3HooksKeeping is removeKiroV3Hooks that, with operatorFile,
-// keeps a file left with no hooks: the operator had it before Setup
-// (kiroPristineIsOperators). With a scope only its entries go.
+// removeKiroV3HooksKeeping removes DefenseClaw's entries from a v3 hook file,
+// and the file when nothing else is left in it unless operatorFile: the
+// operator had it before Setup (kiroPristineIsOperators). With a scope only
+// its entries go.
 func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -339,14 +357,10 @@ func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
 	return true
 }
 
-func removeKiroV2AgentHooks(path, hookScript string) error {
-	return removeKiroV2AgentHooksKeeping(path, hookScript, false, nil)
-}
-
-// removeKiroV2AgentHooksKeeping is removeKiroV2AgentHooks that, with
-// operatorFile, keeps an agent file left looking like DefenseClaw's overlay:
-// the operator had it before Setup (kiroPristineIsOperators). With a scope
-// only its entries go.
+// removeKiroV2AgentHooksKeeping removes DefenseClaw's entries from a CLI 2.x
+// agent file, in either form, and the file when it is left looking like
+// DefenseClaw's overlay unless operatorFile: the operator had it before Setup
+// (kiroPristineIsOperators). With a scope only its entries go.
 func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {

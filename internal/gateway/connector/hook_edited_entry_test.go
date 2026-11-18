@@ -172,7 +172,7 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 				return patchKiroV2AgentHooks(path, hookScript(root, "kiro-hook.sh"))
 			},
 			teardown: func(t *testing.T, root, path string) error {
-				return removeKiroV2AgentHooks(path, hookScript(root, "kiro-hook.sh"))
+				return removeKiroV2AgentHooksKeeping(path, hookScript(root, "kiro-hook.sh"), false, nil)
 			},
 		},
 		"kiro-universal": {script: "kiro-hook.sh", file: "universal.json", seed: `{"hooks": []}`, foreign: true,
@@ -180,7 +180,7 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 				return patchKiroV2AgentHooks(path, hookScript(root, "kiro-hook.sh"))
 			},
 			teardown: func(t *testing.T, root, path string) error {
-				return removeKiroV2AgentHooks(path, hookScript(root, "kiro-hook.sh"))
+				return removeKiroV2AgentHooksKeeping(path, hookScript(root, "kiro-hook.sh"), false, nil)
 			},
 		},
 		"kiro-v3": {script: "kiro-hook.sh", file: "hooks.json",
@@ -188,7 +188,7 @@ func TestEditedHookEntriesReplacedAndRemoved(t *testing.T) {
 				return patchKiroV3Hooks(path, hookScript(root, "kiro-hook.sh"))
 			},
 			teardown: func(t *testing.T, root, path string) error {
-				return removeKiroV3Hooks(path, hookScript(root, "kiro-hook.sh"))
+				return removeKiroV3HooksKeeping(path, hookScript(root, "kiro-hook.sh"), false, nil)
 			},
 		},
 		"hermes": {script: "hermes-hook.sh", file: "config.yaml", foreign: true,

@@ -60,14 +60,15 @@ func orphanedHookConfigPathsFor(goos string, conn Connector, opts SetupOpts) ([]
 		if err != nil {
 			return nil, err
 		}
-		found = append(found, paths...)
-		// Its own answer asks for proof in this data folder where the
-		// commands do not name it. The raw `hook --connector` match below
-		// would match another data folder's Windows entries (an earlier
+		// Its own answer is the whole one, on every OS: the files that hold
+		// one of this install's exact commands are the ones its reclaim
+		// (SetupOpts.ReclaimOwnHooksOnly) touches, so a file reported here is
+		// a file the prune changed. The generic match below also takes a
+		// command that only names the script (a wrapped or edited form) the
+		// reclaim leaves alone, and on Windows the raw `hook --connector`
+		// match would take another data folder's entries (an earlier
 		// release's `& '<launcher>'` form holds it in plain text).
-		if goos == "windows" {
-			return found, nil
-		}
+		return append(found, paths...), nil
 	}
 	exact := ownedHookCommandNeedlesFor(goos, opts, conn)
 	scripts := ownedHookScriptPaths(goos, conn, opts)
