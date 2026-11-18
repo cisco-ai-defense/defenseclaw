@@ -585,9 +585,12 @@ const doctorComponentsID = "cluster.components"
 const doctorUserSummary = "your sign-in, token store and attach checks pass; the cluster components were not checked " +
 	"(an administrator runs defenseclaw substrate doctor --install-file FILE)"
 
-// doctorComponents fails, naming each component, when a component the chart
-// runs (desired > 0) has no ready pod: with the callout down every agent's
-// egress is refused, so the cluster is not ready for agents (GAP-0593).
+// doctorComponents fails, naming each component, when one of the four the
+// chart always deploys (gateway, leader, controller, callout) has no ready
+// pod: scaled to 0, not deployed, or not ready. With the callout down every
+// agent's hook and egress is refused, so the cluster is not ready for agents
+// (GAP-0593, GAP-0608: kubectl scale --replicas=0 sets desired to 0, so a
+// desired > 0 test would miss the J46 shape).
 func doctorComponents(h fleet.Health, ns string) substrateCheck {
 	comps := []struct {
 		name           string
@@ -604,20 +607,19 @@ func doctorComponents(h fleet.Health, ns string) substrateCheck {
 	var down, up []string
 	for _, c := range comps {
 		switch {
-		case c.desired > 0 && c.ready == 0:
-			down = append(down, fmt.Sprintf("%s has 0 of %d pods ready", c.name, c.desired))
-		case c.desired > 0:
+		case c.ready > 0:
 			up = append(up, fmt.Sprintf("%s %d/%d", c.name, c.ready, c.desired))
+		case c.desired == 0:
+			down = append(down, c.name+" has no pod (scaled to 0 or not deployed)")
+		default:
+			down = append(down, fmt.Sprintf("%s has 0 of %d pods ready", c.name, c.desired))
 		}
 	}
 	if len(down) > 0 {
 		return substrateCheck{ID: doctorComponentsID, Status: doctorFail, Summary: strings.Join(down, "; "),
-			Fix: "kubectl -n " + ns + " get deployments,statefulsets shows the component; kubectl -n " + ns +
-				" describe pods and kubectl -n " + ns + " logs say why it is not ready"}
-	}
-	if len(up) == 0 {
-		return substrateCheck{ID: doctorComponentsID, Status: doctorWarn, Summary: "no DefenseClaw component found in namespace " + ns,
-			Fix: "check --namespace (the chart's release namespace) and helm status"}
+			Fix: "kubectl -n " + ns + " get deployments,statefulsets shows the component (wrong --namespace if none is listed); " +
+				"scale it back with kubectl -n " + ns + " scale, or redeploy it with helm upgrade; kubectl -n " + ns +
+				" describe pods and logs say why a pod is not ready"}
 	}
 	return substrateCheck{ID: doctorComponentsID, Status: doctorOK, Summary: "ready pods: " + strings.Join(up, ", ")}
 }

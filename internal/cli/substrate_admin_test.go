@@ -594,13 +594,32 @@ func TestDoctorConvertFleetNamesTheFix(t *testing.T) {
 	}
 }
 
-// GAP-0593: with the callout scaled to 0, doctor --install-file exits 1 and
-// names the callout; with every component up the row is ok.
+// GAP-0593, GAP-0608: doctor --install-file exits 1 and names the
+// component when one of the four has no ready pod: not ready, scaled to 0
+// (the J46 shape: desired 0), not deployed, or none in the namespace. With
+// every component up the row is ok.
 func TestSubstrate_Admin_Doctor_ComponentsDown(t *testing.T) {
+	const (
+		gw     = `{"metadata":{"name":"defenseclaw-gateway"},"spec":{"replicas":2},"status":{"readyReplicas":2}}`
+		leader = `{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"replicas":1},"status":{"readyReplicas":1}}`
+		ctrl   = `{"metadata":{"name":"defenseclaw-controller"},"spec":{"replicas":1},"status":{"readyReplicas":1}}`
+		callUp = `{"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":2},"status":{"readyReplicas":2}}`
+	)
 	for _, tc := range []struct {
-		name        string
-		calloutDown bool
-	}{{"callout down", true}, {"all up", false}} {
+		name  string
+		items []string
+		want  []string // nil: the row is ok
+	}{
+		{"callout not ready", []string{gw, leader, ctrl, `{"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":2},"status":{}}`},
+			[]string{"callout has 0 of 2 pods ready"}},
+		{"callout scaled to 0", []string{gw, leader, ctrl, `{"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":0},"status":{}}`},
+			[]string{"callout has no pod (scaled to 0 or not deployed)"}},
+		{"callout not deployed", []string{gw, leader, ctrl},
+			[]string{"callout has no pod (scaled to 0 or not deployed)"}},
+		{"none of the four", nil,
+			[]string{"gateway has no pod", "leader has no pod", "controller has no pod", "callout has no pod"}},
+		{"all up", []string{gw, leader, ctrl, callUp}, nil},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSubAdminFake(t)
 			c := f.context()
@@ -608,33 +627,30 @@ func TestSubstrate_Admin_Doctor_ComponentsDown(t *testing.T) {
 			fakeKubectl(t, nil)
 			base := substrateKubectl
 			t.Cleanup(func() { substrateKubectl = base })
+			loads := `{"items":[` + strings.Join(tc.items, ",") + `]}`
 			substrateKubectl = func(ctx context.Context, kf *substrateClusterFlags, args ...string) ([]byte, error) {
-				if tc.calloutDown && strings.HasPrefix(strings.Join(args, " "), "get deployments,statefulsets -n defenseclaw-system") {
-					return []byte(`{"items":[
-					 {"metadata":{"name":"defenseclaw-gateway"},"spec":{"replicas":2},"status":{"readyReplicas":2}},
-					 {"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
-					 {"metadata":{"name":"defenseclaw-controller"},"spec":{"replicas":1},"status":{"readyReplicas":1}},
-					 {"metadata":{"name":"defenseclaw-callout"},"spec":{"replicas":2},"status":{}}]}`), nil
+				if strings.HasPrefix(strings.Join(args, " "), "get deployments,statefulsets -n defenseclaw-system") {
+					return []byte(loads), nil
 				}
 				return base(ctx, kf, args...)
 			}
 			out, _, err := runSubAdmin(newSubstrateDoctorCmd(), "--install-file", writeInstall(t, fleetInstallOK))
-			if tc.calloutDown {
-				if got := cliusage.ExitCode(err); err == nil || got != 1 {
-					t.Fatalf("exit %d (err %v), want 1\n%s", got, err, out)
-				}
-				for _, w := range []string{"fail  cluster.components", "callout has 0 of 2 pods ready", "cluster.components: kubectl -n defenseclaw-system"} {
-					if !strings.Contains(out, w) {
-						t.Errorf("output lacks %q:\n%s", w, out)
-					}
-				}
-				if strings.Contains(out, "ready for agents") {
-					t.Errorf("a doctor with the callout down says it is ready:\n%s", out)
+			if tc.want == nil {
+				if !strings.Contains(out, "ok    cluster.components ") || !strings.Contains(out, "ready pods: gateway 2/2, leader 1/1, controller 1/1, callout 2/2") {
+					t.Errorf("components row not ok:\n%s", out)
 				}
 				return
 			}
-			if !strings.Contains(out, "ok    cluster.components ") || !strings.Contains(out, "ready pods: gateway 2/2, leader 1/1, controller 1/1, callout 2/2") {
-				t.Errorf("components row not ok:\n%s", out)
+			if got := cliusage.ExitCode(err); err == nil || got != 1 {
+				t.Fatalf("exit %d (err %v), want 1\n%s", got, err, out)
+			}
+			for _, w := range append([]string{"fail  cluster.components", "cluster.components: kubectl -n defenseclaw-system"}, tc.want...) {
+				if !strings.Contains(out, w) {
+					t.Errorf("output lacks %q:\n%s", w, out)
+				}
+			}
+			if strings.Contains(out, "ready for agents") {
+				t.Errorf("a doctor with a component down says it is ready:\n%s", out)
 			}
 		})
 	}
