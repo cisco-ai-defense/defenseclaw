@@ -255,9 +255,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ("delete",),
         "Delete agents with their work and snapshots",
         long=(
-            "Deletes the named agents (or every agent of --batch) and the snapshots the cluster\n"
-            'holds for them. Pull the changes first with "defenseclaw substrate pull": what is not pulled\n'
-            "is gone."
+            "Deletes the named agents (or every agent of --batch), the snapshots the cluster\n"
+            "holds for them and the checkpoints saved inside them. The question and the output say how\n"
+            'many snapshots each agent had. Pull the changes first with "defenseclaw substrate pull":\n'
+            "what is not pulled is gone."
         ),
         args=(_Arg("name", required=False, many=True),),
         flags=(

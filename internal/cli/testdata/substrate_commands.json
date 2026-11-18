@@ -265,7 +265,7 @@
     "path": "substrate delete",
     "use": "delete [name...]",
     "short": "Delete agents with their work and snapshots",
-    "long": "Deletes the named agents (or every agent of --batch) and the snapshots the cluster\nholds for them. Pull the changes first with \"defenseclaw substrate pull\": what is not pulled\nis gone.",
+    "long": "Deletes the named agents (or every agent of --batch), the snapshots the cluster\nholds for them and the checkpoints saved inside them. The question and the output say how\nmany snapshots each agent had. Pull the changes first with \"defenseclaw substrate pull\":\nwhat is not pulled is gone.",
     "args": [
       {
         "name": "name",
