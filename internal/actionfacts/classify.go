@@ -8903,6 +8903,7 @@ func windowsDriveRoot(value string) bool {
 type nsenterInvocation struct {
 	paths      []string
 	childIndex int
+	childKnown bool
 	preview    bool
 	complete   bool
 }
@@ -9026,6 +9027,10 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			"/proc/"+canonicalTarget+"/ns/"+selection.name,
 		)
 	}
+	// Even without a namespace selector, the option grammar can identify the
+	// child command. The facts stay partial, while readers of its shell body
+	// can still hand that body to the ordinary checks.
+	result.childKnown = result.complete && result.childIndex > 0 && !result.preview
 	if len(selections) == 0 && !result.preview {
 		result.complete = false
 	}
