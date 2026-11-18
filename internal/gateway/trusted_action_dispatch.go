@@ -4091,13 +4091,17 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 // /missing; cp a.txt ../.defenseclaw/config.yaml had no proof, although the
 // failed pushd leaves the shell where it was and the cp writes the state
 // file (GAP-2574). A statement proven alone that mutates active state is
-// the state write; it only adds this block.
+// the state write; it only adds this block. The reading needs a cd, pushd or
+// popd program word in the call (hookpaths.ChangesDirectory), not those
+// letters anywhere in its text: a home under a folder named 1cd7970ba0a3
+// turned it on and raised the severity of a call with no directory change
+// (rel-1-0-10:GAP-1014).
 func placedStatementStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return false
 	}
 	text, known := trustedBashCommandInput(request.Input)
-	if !known || !strings.Contains(text, "cd") && !strings.Contains(text, "pushd") && !strings.Contains(text, "popd") {
+	if !known || !hookpaths.ChangesDirectory(text) {
 		return false
 	}
 	facts, request = protectedHomePlacedReading(facts, request)

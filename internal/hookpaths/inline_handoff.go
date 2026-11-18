@@ -95,7 +95,7 @@ func InlineHandedPaths(command, cwd, home string) ([]InlineHandedPath, bounded.C
 	reading := &inlineReading{cwd: cwd, home: home, trunc: &trunc}
 	reading.file(file, 0)
 	// A relative word is read in the folder a cd of the list leads to.
-	if strings.Contains(command, "cd") || strings.Contains(command, "pushd") {
+	if ChangesDirectory(command) {
 		if statements, placed := TopLevelStatements(command, cwd, home); placed && len(statements) > 1 {
 			for _, statement := range statements {
 				more, caps := InlineHandedPaths(statement.Command, statement.Dir, home)

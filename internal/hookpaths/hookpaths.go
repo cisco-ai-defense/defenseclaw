@@ -4685,7 +4685,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	boundPrograms := actionBoundProgramWords(file, home)
 	// A literal shell -c body is read in this directory only when nothing in
 	// the command changes directory first.
-	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
+	changesDirectory := ChangesDirectory(command)
 	sequential := sequentialListCalls(file)
 	pipedCalls := pipedInputCalls(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -5711,6 +5711,19 @@ func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
 		out = append(out, PlacedStatement{Command: command[start:end], Dir: dirs[i], User: reads})
 	}
 	return out, true
+}
+
+// ChangesDirectory reports a command that may run cd, pushd or popd as a
+// program word (tactics.RunsProgram over cdPrograms: past assignments and
+// wrappers, in lists, pipelines, subshells and the scripts handed to sh -c
+// or eval, and fail closed on a word whose program is uncertain). It is the
+// gate of every reading that places the statements of a list in the folder
+// a directory change leads to (TopLevelStatements): the letters cd, pushd or
+// popd inside a path, a hash or another word (a fixture root 1cd7970ba0a3,
+// abcd, xpushd.txt) change no directory and turn no such reading on, so they
+// cannot change a verdict or its severity (rel-1-0-10:GAP-1014).
+func ChangesDirectory(command string) bool {
+	return tactics.RunsProgram(command, cdPrograms...)
 }
 
 // statementLoopReadsActive reports a statement that is a for or select loop

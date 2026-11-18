@@ -123,7 +123,7 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		registrationFindRsyncReach(file, cwd, home, protected) {
 		return true
 	}
-	if strings.Contains(command, "cd ") || strings.Contains(command, "pushd ") {
+	if ChangesDirectory(command) {
 		if statements, ok := TopLevelStatements(command, cwd, home); ok {
 			for _, statement := range statements {
 				if readOperands(statement.Command, statement.Dir, statement.User) {
