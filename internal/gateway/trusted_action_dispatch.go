@@ -1890,9 +1890,12 @@ func withActiveStateTargetMention(
 					proven, unknown = provenPowerShellStateWrite(request)
 				}
 				// A proven GNU target-directory write (rel-1-0-10:GAP-1250) keeps its
-				// own verdict over the unknown tier of a .NET open.
+				// own verdict over the unknown tier of a .NET open; one that moves or
+				// copies a source of unknown name into the state root is the unknown
+				// tier (rel-1-0-10:GAP-1260).
 				if !proven && spelled {
-					proven = provenTargetDirectoryStateWrite(request)
+					written, unknownSource := provenTargetDirectoryStateWrite(request)
+					proven, unknown = written, unknown || unknownSource
 				}
 				if !proven && unknown {
 					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
@@ -1903,12 +1906,16 @@ func withActiveStateTargetMention(
 			}
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
-			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
-			!provenTargetDirectoryStateWrite(request) {
-			if proven, unknown := provenPowerShellStateWrite(request); unknown {
-				return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
-			} else if !proven {
-				return findings
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
+			// A proven target-directory write keeps its verdict (GAP-1250); a
+			// source of unknown name in one (GAP-1260) or a .NET open known
+			// only at run time (GAP-1138) is the unknown tier.
+			if written, unknownSource := provenTargetDirectoryStateWrite(request); !written {
+				if proven, unknown := provenPowerShellStateWrite(request); unknown || !proven && unknownSource {
+					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+				} else if !proven {
+					return findings
+				}
 			}
 		}
 	}
