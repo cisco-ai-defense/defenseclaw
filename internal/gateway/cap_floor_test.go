@@ -119,8 +119,8 @@ func init() {
 // reads fill(n).
 func capFloorAnalysisDepthLimit(fill func(int) string) int {
 	for n := 1; n < shellparse.MaxNestingDepth; n++ {
-		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: fill(n)})
-		if capFloorAnalysisCaps(facts).Any() {
+		input := actionfacts.Input{Tool: "Bash", Command: fill(n)}
+		if capFloorAnalysisCaps(input, actionfacts.Analyze(input)).Any() {
 			return n - 1
 		}
 	}

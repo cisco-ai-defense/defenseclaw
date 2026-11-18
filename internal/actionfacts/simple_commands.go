@@ -2896,7 +2896,9 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 // is judged whole, where the chain is past the wrapper bound (TRUNCATED,
 // PrefixWrapperRun.PastWrapperBound). A programWord that is not nil is set
 // to the last word of args the chain of wrappers reached, the program they
-// run when it is no wrapper itself (simpleNeutralWrapperFreeReading).
+// run when it is no wrapper itself (simpleNeutralWrapperFreeReading): the
+// wrapper a word made at run time among its own words stopped the chain at,
+// whatever the program's own arguments are.
 func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, neutral int, cwdUnknown *bool, interpreter *string, programWord **syntax.Word) (script string, shared, nested, static bool) {
 	if depth >= 8 || len(args) == 0 {
 		return "", false, true, false
@@ -3022,7 +3024,12 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 			// The word the chain has reached. chroot and nsenter run it in
 			// another root, and a word made at run time among its arguments
 			// is not read here (simpleWrappedProgram): no program word.
-			if wrapper == "chroot" || wrapper == "nsenter" || unknown >= 0 {
+			// A word made at run time among the wrapper words stopped the
+			// chain above (unread) at the wrapper it belongs to, so the
+			// word set here is that wrapper; one among the program's own
+			// arguments leaves the program static and read
+			// (rel-1-0-10:GAP-1474).
+			if wrapper == "chroot" || wrapper == "nsenter" {
 				*programWord, programWord = nil, nil
 			} else {
 				*programWord = args[childIndex]
@@ -3298,9 +3305,10 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int, afterNe
 // tier (rel-1-0-10:GAP-1321, and GAP-1323 for one wrapper). The reading
 // keeps every other word, so the program keeps the verdict it has alone,
 // alert included; like every reading of the walk it only adds findings. A
-// command with a prefix assignment or a redirect among its wrapper words, a
-// word made at run time in it, chroot or nsenter in the chain, and a chain
-// past the bound (TRUNCATED) are not read so.
+// command with a prefix assignment, a redirect or a word made at run time
+// among its wrapper words, chroot or nsenter in the chain, and a chain past
+// the bound (TRUNCATED) are not read so; a word made at run time among the
+// program's own arguments is kept as written (rel-1-0-10:GAP-1474).
 func simpleNeutralWrapperFreeReading(input Input, source string) (SimpleCommand, bool) {
 	file, parsed := shellparse.Parse(source)
 	if !parsed {
@@ -3361,6 +3369,76 @@ func simpleNeutralWrapperFreeReading(input Input, source string) (SimpleCommand,
 		return SimpleCommand{}, false
 	}
 	return SimpleCommand{Text: reading, CWD: input.CWD}, true
+}
+
+// WrapperFreeCalls is the top-level calls of the wrapper-free reading of a
+// call (simpleNeutralWrapperFreeReading) as Analyze reads them.
+type WrapperFreeCalls []CommandFact
+
+// NeutralWrapperFreeCalls is the top-level calls of the wrapper-free reading
+// SimpleCommands adds for input, the reading judged on its own: nil when the
+// call has none, or when a top-level call of the reading still starts with a
+// wrapper. Such a call is a chain the reading does not read (a prefix
+// assignment, a redirect or a word made at run time among its wrapper words,
+// chroot or nsenter in it, the time keyword before it): the program it runs is
+// judged alone by no reader, and a rule on its pipeline or list (CMD-PIPE-CURL
+// for curl URL | sh) is not judged either (rel-1-0-10:GAP-1474).
+func NeutralWrapperFreeCalls(input Input, facts Facts) (calls WrapperFreeCalls) {
+	defer func() {
+		if recover() != nil {
+			calls = nil
+		}
+	}()
+	if facts.Parse.Dialect != DialectPOSIX || facts.Parse.Status != StatusPartial {
+		return nil
+	}
+	source := input.Command
+	if source == "" {
+		_, capture := analyzeWithRedirectTargets(input, "")
+		source = capture.source
+	}
+	if len(source) > maxCommandBytes {
+		return nil
+	}
+	reading, ok := simpleNeutralWrapperFreeReading(input, source)
+	if !ok {
+		return nil
+	}
+	readingInput := input
+	readingInput.Command, readingInput.CWD = reading.Text, reading.CWD
+	readingInput.Args, readingInput.Argv = nil, nil
+	for _, command := range Analyze(readingInput).Commands {
+		if command.ParentCommandID != 0 {
+			continue
+		}
+		if len(command.Argv) > 0 && (len(command.Wrappers) > 0 || simpleNestedWrapper(commandProgram(command.Argv[0])) ||
+			WrapperChildIndex(command.Argv, staticArgvWords(command)) >= 0) {
+			return nil
+		}
+		calls = append(calls, command)
+	}
+	return calls
+}
+
+// Runs reports that calls hold program (the argv a chain of prefix wrappers
+// runs, from the child word on) as a bare call, with every redirect of the
+// chain: the program is judged where it runs, at the verdict it has alone.
+func (calls WrapperFreeCalls) Runs(program []string, redirects []RedirectFact) bool {
+	return slices.ContainsFunc(calls, func(call CommandFact) bool {
+		return slices.Equal(call.Argv, program) && !slices.ContainsFunc(redirects, func(redirect RedirectFact) bool {
+			return !slices.Contains(call.Redirects, redirect)
+		})
+	})
+}
+
+// staticArgvWords is the static mask of the argv of command: false for a word
+// the shell makes at run time.
+func staticArgvWords(command CommandFact) []bool {
+	static := make([]bool, len(command.Argv))
+	for i := range static {
+		static[i] = len(command.Arguments) != len(command.Argv) || !command.Arguments[i].Expands
+	}
+	return static
 }
 
 // simpleQuotedArgv writes argv as one shell command line.

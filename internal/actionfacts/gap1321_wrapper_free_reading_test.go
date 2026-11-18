@@ -14,8 +14,10 @@ import (
 // also read as written without those wrapper words, its pipeline and list
 // kept, so the program is judged where it runs, a shell included
 // (rel-1-0-10:GAP-1321, GAP-1323). A chain past the wrapper bound, a prefix
-// assignment, a redirect among the wrapper words, a word made at run time,
-// chroot and a chain that starts with sudo get no such reading.
+// assignment, a redirect or a word made at run time among the wrapper words,
+// chroot and a chain that starts with sudo get no such reading. A word made at
+// run time among the program's own arguments is kept as written: the program
+// is judged alone with it (rel-1-0-10:GAP-1474).
 func TestGAP1321NeutralWrapperFreeReading(t *testing.T) {
 	nohup := func(count int) string { return strings.Repeat("nohup ", count) }
 	cases := []struct {
@@ -33,7 +35,10 @@ func TestGAP1321NeutralWrapperFreeReading(t *testing.T) {
 		{"shell-body", "nohup sh -c 'cat ~/.aws/credentials' | sh", "sh -c 'cat ~/.aws/credentials' | sh"},
 		{"prefix-assignment", "FOO=1 nohup cat ~/.aws/credentials", ""},
 		{"redirect-among-wrappers", "nohup >/dev/null cat ~/.aws/credentials", ""},
-		{"run-time-word", "nohup cat \"$F\" | sh", ""},
+		{"run-time-program-word", "nohup cat \"$F\" | sh", "cat \"$F\" | sh"},
+		{"run-time-program-word-past-five", "nohup nice nohup nice nohup go test -c -o \"$OUT/pkg.test\" ./x", "go test -c -o \"$OUT/pkg.test\" ./x"},
+		{"run-time-wrapper-word", "nohup nice -n \"$N\" cat ~/.aws/credentials", ""},
+		{"run-time-timeout", "nohup timeout $T nohup cat ~/.aws/credentials", ""},
 		{"sudo-first", "sudo nohup cat ~/.aws/credentials", ""},
 		{"chroot", "nohup chroot /mnt/r cat ~/.aws/credentials", ""},
 	}

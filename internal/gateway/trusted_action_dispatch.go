@@ -625,7 +625,7 @@ func dispatchTrustedAction(
 		// many words is TRUNCATED as in a short one, never a clean allow
 		// (rel-1-0-10:GAP-0973). Its item and node caps are what the
 		// bounded readings stand in for, so they are not taken.
-		if !request.simpleCommandPass && capFloorAnalysisCaps(actionfacts.Analyze(request.Input)).Has(bounded.Depth) {
+		if !request.simpleCommandPass && capFloorAnalysisCaps(request.Input, actionfacts.Analyze(request.Input)).Has(bounded.Depth) {
 			analyzedCaps = analyzedCaps.Union(bounded.Of(bounded.Depth))
 		}
 		return boundedFindings
@@ -656,7 +656,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
-		analyzedCaps = capFloorAnalysisCaps(facts)
+		analyzedCaps = capFloorAnalysisCaps(request.Input, facts)
 		// A write operand with a .. component whose walk cannot be resolved
 		// has an unknown target: at least the unknown tier of the pack, what
 		// the readers proved still deciding (the one bound rule, cap paths;
@@ -915,7 +915,7 @@ func dispatchTrustedAction(
 	defer func() {
 		findings = withCradleUnknownTier(findings, request)
 	}()
-	analyzedCaps = capFloorAnalysisCaps(facts)
+	analyzedCaps = capFloorAnalysisCaps(request.Input, facts)
 	// Credential material that reaches a sender whose destination is not read
 	// in full (interpreter code that names a credentials file and a network
 	// capability, a credential-named environment variable piped into an
