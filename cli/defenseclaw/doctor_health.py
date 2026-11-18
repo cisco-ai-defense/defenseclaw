@@ -359,6 +359,11 @@ class InstalledVersionCheck:
     discovery: Any | None
     changed: Mapping[str, str]
     unchecked: Mapping[str, str]
+    #: ``(recorded executable, executable read now)`` of a connector whose
+    #: version was read from another executable than the one the evidence
+    #: recorded: a second install, not an update of the recorded one, so its
+    #: row names both instead of saying the agent updated (GAP-0195).
+    moved: Mapping[str, tuple[str, str]] = dataclasses.field(default_factory=dict)
 
 
 #: One answer is shared by everything one Doctor run judges: the connector
@@ -709,6 +714,7 @@ def recheck_installed_versions(
     replaced = False
     changed: dict[str, str] = {}
     unchecked: dict[str, str] = {}
+    moved_from: dict[str, tuple[str, str]] = {}
     for raw_name, signal in agents.items():
         name = normalize_connector(raw_name) if isinstance(raw_name, str) and len(raw_name) <= 128 else ""
         recorded = getattr(signal, "version", "")
@@ -721,6 +727,7 @@ def recheck_installed_versions(
             continue
         if name == "kiro":
             before = _kiro_installed_token(signal)
+            before_path = _kiro_selected_path(signal)
             fresh, did_change, why = _recheck_kiro(signal, data_dir)
             if why:
                 unchecked[name] = why
@@ -728,6 +735,13 @@ def recheck_installed_versions(
                 changed[name] = before
                 updated[raw_name] = fresh
                 replaced = True
+                after_path = _kiro_selected_path(fresh)
+                if (
+                    before_path
+                    and after_path
+                    and agent_discovery._path_key(before_path) != agent_discovery._path_key(after_path)
+                ):
+                    moved_from[name] = (before_path, after_path)
             continue
         if name not in agent_discovery._SPECS:
             unchecked[name] = "no version probe is defined for it"
@@ -742,6 +756,8 @@ def recheck_installed_versions(
         moved = agent_discovery._path_key(path) != agent_discovery._path_key(recorded_path) if recorded_path else True
         if version_changed and recorded.strip():
             changed[name] = _safe_semver_from_agent(recorded)
+            if recorded_path and moved:
+                moved_from[name] = (recorded_path, path)
         if version_changed or moved:
             updated[raw_name] = dataclasses.replace(
                 signal,
@@ -753,12 +769,18 @@ def recheck_installed_versions(
             replaced = True
     if not replaced:
         return InstalledVersionCheck(discovery, {}, unchecked)
-    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked)
+    return InstalledVersionCheck(dataclasses.replace(discovery, agents=updated), changed, unchecked, moved_from)
 
 
 def _kiro_installed_token(signal: Any) -> str:
     selected = assess_kiro_signal(signal).selected
     return _safe_semver_from_agent(selected.normalized) if selected is not None else ""
+
+
+def _kiro_selected_path(signal: Any) -> str:
+    selected = assess_kiro_signal(signal).selected
+    path = getattr(selected, "path", "") if selected is not None else ""
+    return path if isinstance(path, str) else ""
 
 
 def assess_component_health(

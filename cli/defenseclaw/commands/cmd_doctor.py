@@ -5050,7 +5050,17 @@ def _check_component_connector_compatibility(
             )
         elif finding.installed_version:
             detail += f"; installed={finding.installed_version}"
-            if finding.connector in rechecked.changed:
+            if finding.connector in rechecked.moved:
+                # Another install answered, not an update of the recorded one
+                # (GAP-0195): name the executable read and the one recorded.
+                recorded_path, read_path = rechecked.moved[finding.connector]
+                was = rechecked.changed.get(finding.connector, "")
+                detail += (
+                    f" (read from {read_path}, the install this shell launches first; recorded"
+                    + (f" as {was}" if was else "")
+                    + f" from {recorded_path}, another install)"
+                )
+            elif finding.connector in rechecked.changed:
                 # Only a plain semver of the recorded text reaches the row.
                 was = rechecked.changed[finding.connector]
                 detail += (
