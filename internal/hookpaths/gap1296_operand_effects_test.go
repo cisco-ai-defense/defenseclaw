@@ -21,7 +21,9 @@ import (
 // shows no key: the effects model reads it as a write, so dd stays a writer
 // and its operand walk still reads of=$X, of=$(...) and of=k[0-9] (the
 // GAP-0379 attached dd rows). A dd whose expanding word is another key
-// (if=$X) writes nothing.
+// (if=$X) is no writer, but the model proves no read of it either (the input
+// expands), so it stays unclassified and its operands are still walked: only
+// a program with a read, list or search and nothing else is harmless.
 func TestGAP1296OperandEffectsDecideTheWriteWalk(t *testing.T) {
 	home := t.TempDir()
 	for _, tc := range []struct {
@@ -41,7 +43,7 @@ func TestGAP1296OperandEffectsDecideTheWriteWalk(t *testing.T) {
 		{"dd if=a.txt of=$UNSET", "dd", true, false},
 		{"dd if=a.txt of=k[0-9]", "dd", true, false},
 		{`dd if=a.txt "$ARGS"`, "dd", true, false},
-		{"dd if=$IN", "dd", false, true},
+		{"dd if=$IN", "dd", false, false},
 	} {
 		writers, harmless := callPrograms(tc.command, home, home)
 		if writers[tc.program] != tc.writer || harmless[tc.program] != tc.harmless {
