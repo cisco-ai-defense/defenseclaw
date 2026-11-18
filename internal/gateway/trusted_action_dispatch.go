@@ -1844,10 +1844,19 @@ func withActiveStateTargetMention(
 				// A managed PowerShell call that reaches the state through a
 				// link names no state: its reading follows the paths the hook
 				// client placed there (GAP-1023).
+				// A GNU target-directory call that moves or copies a source of
+				// unknown name into the state root is the unknown tier
+				// (rel-1-0-10:GAP-1260); a proven write keeps its own verdict.
 				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
 				proven := spelled && provenCMDSlashCStateWrite(request) ||
-					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request) ||
-					spelled && provenTargetDirectoryStateWrite(request)
+					(spelled || request.ProtectedHomeHook) && provenPowerShellStateWrite(request)
+				unknown := false
+				if !proven && spelled {
+					proven, unknown = provenTargetDirectoryStateWrite(request)
+				}
+				if !proven && unknown {
+					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+				}
 				if !proven {
 					return findings
 				}
@@ -1855,8 +1864,12 @@ func withActiveStateTargetMention(
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
-			!provenPowerShellStateWrite(request) && !provenTargetDirectoryStateWrite(request) {
-			return findings
+			!provenPowerShellStateWrite(request) {
+			if proven, unknown := provenTargetDirectoryStateWrite(request); !proven && unknown {
+				return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+			} else if !proven {
+				return findings
+			}
 		}
 	}
 	return withProvenActiveStateMutation(request, findings)
