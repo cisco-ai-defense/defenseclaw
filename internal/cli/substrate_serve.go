@@ -1113,8 +1113,15 @@ func leaderChainOptions(cfg *config.Config, store registry.Store, dir string, re
 	opts := substrateChainRegistrations(store)
 	action, source := leaderChainEgressAction(cfg)
 	opts.Dir, opts.EgressAction, opts.Retention = dir, action, retention
+	opts.StartGrace = leaderChainStartGrace
 	return opts, source
 }
+
+// leaderChainStartGrace covers a gateway's note of a tool step it could not
+// record during a leader outage: retried every 5 s with a 2 s timeout
+// (internal/gateway substrateNotes), so 15 s holds two tries of a small
+// backlog (GAP-0601).
+const leaderChainStartGrace = 15 * time.Second
 
 // gatewayRoleChainEgressAction is the chain egress action the gateway role
 // hands to gateway.SetSubstrateChainEgressAction: the verified actor's hook

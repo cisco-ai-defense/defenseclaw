@@ -8188,6 +8188,9 @@
                 "check_budget": {
                   "$ref": "#/$defs/duration"
                 },
+                "send_budget": {
+                  "$ref": "#/$defs/duration"
+                },
                 "queue_size": {
                   "type": "integer",
                   "minimum": 0,

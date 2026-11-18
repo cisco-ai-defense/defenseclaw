@@ -46,7 +46,11 @@
 //     exact-value DLP for the profile's actor_secrets, and placeholders sent
 //     to hosts their secret is not bound to;
 //  7. an egress-type tool chain whose predecessor is in the actor's window
-//     (ChainChecker, 20 ms budget; a miss or timeout allows);
+//     (ChainChecker, 20 ms budget, 250 ms where a miss refuses): a hit refuses; a check that can't
+//     answer, or that saw an unrecorded step, follows chain.failure_mode
+//     for GET and HEAD and refuses, in every mode, a request with a body or
+//     any other method (GAP-0601; an actor with no registration has no
+//     window, so chain.failure_mode decides for it);
 //  8. ask-required hosts (AskSink);
 //  9. body mode (D9): MCP and admin-listed hosts only, when the egress
 //     filter allows a mode_override (upstream #3817), 1 MiB cap, never SSE

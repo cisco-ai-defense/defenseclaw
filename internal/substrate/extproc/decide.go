@@ -203,9 +203,11 @@ func NewEngine(o Options) (*Engine, error) {
 	}
 	e.uids = NewUIDCache(o.UIDs, cfg.UID.CacheTTL, cfg.UID.StaleMax)
 	e.uids.now = e.now
-	if cfg.Chain.CheckBudget > 0 {
-		e.uids.refreshBudget = cfg.Chain.CheckBudget
-	}
+	// A cached refusal waits check_budget for its refresh, since it stands
+	// either way (GAP-0243). Anything else is refused unless the refresh
+	// confirms the pass, so it waits as long as a check whose miss refuses
+	// (GAP-0601).
+	e.uids.refreshBudget, e.uids.confirmBudget = cfg.Chain.CheckBudget, cfg.Chain.SendBudget
 	e.secrets = newSecretValues(cfg.ActorSecretsDir)
 	e.secrets.now = e.now
 	e.red = newRedactor(cfg, e.secrets)
@@ -351,7 +353,8 @@ func policyRefusal(v Verdict) bool {
 // never its predecessor's (GAP-0237). The last pass decides as it is.
 //
 // A refresh is bounded (GAP-0243): one lookup per name in flight, and a
-// request waits a short budget for it. Unconfirmed, a refusal of the policy
+// request waits a short budget for it (chain.check_budget; chain.send_budget
+// for anything but a refusal of the policy stages). Unconfirmed, a refusal of the policy
 // stages stands (it is a refusal), and only such a refusal may stand on a
 // refresh made within refusalReuse.
 //
@@ -360,7 +363,8 @@ func policyRefusal(v Verdict) bool {
 // the actor was deleted, so chain.failure_mode decides, from the first
 // request of the outage, as it does once the entry ages out (an alert on an
 // attended OSS install; refused on a managed install or for an unattended
-// actor). While the leader is reachable, an unchecked step or a cached
+// actor), except that a request that can carry data out is refused in every
+// mode (GAP-0601). While the leader is reachable, an unchecked step or a cached
 // delete needs its answer: one that misses this request's budget is
 // refused, retryable (registration_unconfirmed), and a stale or not-live
 // answer refuses.
@@ -398,7 +402,8 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 	// attendance (GAP-0090). A lookup outage (the leader, past the stale
 	// window) does not stop the actor's traffic: the actor is matched by
 	// atespace, and only its chain check is missing, which
-	// chain.failure_mode decides (refused on a managed install). The
+	// chain.failure_mode decides (refused on a managed install; a request
+	// that can carry data out is refused in every mode, GAP-0601). The
 	// actor's last known registration still names its profile and
 	// attendance; with none, nobody can say a person watches the actor, so
 	// it counts as unattended, and under auto its unchecked egress is
@@ -477,8 +482,22 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		v.Findings = append(v.Findings, f.String())
 	}
 
+	// A check whose miss refuses the request waits chain.send_budget, so a
+	// slow but healthy leader still answers it (GAP-0601): a send (refused
+	// in every mode), a request whose policy refuses unchecked egress, and a
+	// pass on a cached registration, which the check's answer confirms (an
+	// unconfirmed pass is refused, GAP-0243). HTTPS git starts every fetch
+	// and push with a GET of info/refs, so it needs each case. Only a GET or
+	// HEAD whose miss is allowed with an alert (attended, its registration
+	// resolved for this request) keeps check_budget. One check, so the
+	// leader records the step once. During a lookup outage the actor has no
+	// UID, so no check is made.
+	budget := e.cfg.Chain.CheckBudget
+	if carriesData(req, methods) || e.chainFailClosed(pol) || !p.confirmed {
+		budget = e.cfg.Chain.SendBudget
+	}
 	cv, outcome, chainWhy := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
-		Method: req.Method, Allowed: true, Time: e.now()})
+		Method: req.Method, Allowed: true, Time: e.now()}, budget)
 	if lookupDown && e.checker != nil {
 		outcome, chainWhy = chainUnchecked, uncheckedLookup
 	}
@@ -519,6 +538,15 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 				return deny(v, CategoryChainUnchecked, sourceChain, uncheckedUnrecorded,
 					clip("DefenseClaw could not record one of this actor's earlier tool calls, so it can't check this request against them, and this actor's policy refuses unchecked egress. Why: "+cv.Unrecorded, 320))
 			}
+			// A send is refused in every mode, as for an unchecked step: a
+			// secret read during a leader outage is such a step once the
+			// leader is back (GAP-0601).
+			if carriesData(req, methods) {
+				v = deny(v, CategoryChainUnchecked, sourceChain, uncheckedUnrecorded,
+					clip(uncheckedSendReason(uncheckedUnrecorded)+" Why: "+cv.Unrecorded, 420))
+				v.Retryable = true
+				return v
+			}
 			v.Alert = true
 			v.Findings = append(v.Findings, "chain_unrecorded:"+clip(cv.Unrecorded, 160))
 		}
@@ -534,6 +562,19 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		if e.chainFailClosed(pol) {
 			v = deny(v, CategoryChainUnchecked, sourceChain, chainWhy,
 				"DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress.")
+			v.Retryable = true
+			return v
+		}
+		// A laptop's chain check needs no cluster, so it never lets a send
+		// through unchecked: here a request that can carry data out (a body,
+		// or any method but GET and HEAD) is refused in every mode while its
+		// check is missing (a leader outage, a slow leader, the actor's own
+		// flood), and only GET and HEAD keep the alert (GAP-0601). Data put
+		// in a GET's URL or headers is alerted, not refused: the known limit
+		// of the GET/HEAD rule. An actor with no registration has no window
+		// to check.
+		if chainWhy != uncheckedUnregistered && carriesData(req, methods) {
+			v = deny(v, CategoryChainUnchecked, sourceChain, chainWhy, uncheckedSendReason(chainWhy))
 			v.Retryable = true
 			return v
 		}
@@ -557,6 +598,41 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		v.WantBody = true
 	}
 	return e.uninspected(v, why)
+}
+
+// carriesData reports whether a request can carry data out: it has a body
+// (its headers do not end the stream), or it is, or stands for through an
+// override header or parameter, a method other than GET and HEAD
+// (GAP-0601). methods is requestMethods(req).
+func carriesData(req *Request, methods []string) bool {
+	if !req.EndOfStream {
+		return true
+	}
+	for _, m := range methods {
+		if m != "GET" && m != "HEAD" {
+			return true
+		}
+	}
+	return false
+}
+
+// uncheckedSendReason is the refusal text of a request that can carry data
+// out while its chain check is missing, naming why (GAP-0601).
+func uncheckedSendReason(why string) string {
+	cause := "DefenseClaw could not check this request against the actor's earlier tool calls"
+	switch why {
+	case uncheckedLookup, uncheckedError:
+		cause = "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached or failed the check"
+	case uncheckedTimeout:
+		cause = "DefenseClaw's gateway leader did not answer the check in time (it is slow, overloaded or can't be reached)"
+	case uncheckedInternal:
+		cause = "DefenseClaw's chain check hit an internal error"
+	case uncheckedBusy:
+		cause = "This actor has too many requests waiting for their check"
+	case uncheckedUnrecorded:
+		cause = "DefenseClaw could not record one of this actor's earlier tool calls"
+	}
+	return cause + ", so DefenseClaw can't tell whether it read a secret earlier. Requests that can carry data out (a body, or any method but GET and HEAD) are refused until the check works; GET and HEAD go through with an alert."
 }
 
 // askStage raises the asks a request standing for methods needs: every
