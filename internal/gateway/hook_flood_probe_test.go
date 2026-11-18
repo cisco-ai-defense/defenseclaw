@@ -36,7 +36,7 @@ import (
 // and every session/tool pair must retain its own pending audit operation.
 func TestHookFloodKeepsPendingIdentityPerCall(t *testing.T) {
 	const calls = 60
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -323,7 +323,7 @@ func TestHookFloodProbe(t *testing.T) {
 	}
 	out := os.Getenv("DEFENSECLAW_HOOK_FLOOD_OUT")
 
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

@@ -197,7 +197,7 @@ func TestClaudeNativePromptExpansionHonorsScopedRuntimeDisable(t *testing.T) {
 }
 
 func TestClaudeNativePromptExpansionCorrelatesRuntimeDisableFromProductionIdentityVariants(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	tests := []struct {
 		name       string
 		targetType string

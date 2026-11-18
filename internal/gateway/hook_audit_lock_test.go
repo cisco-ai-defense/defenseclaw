@@ -39,7 +39,7 @@ const hookAnswerWithHeldAuditLock = time.Second
 func TestBenignHookAnswersWhileAnotherProcessHoldsTheAuditLock(t *testing.T) {
 	for _, mode := range []string{"observe", "action"} {
 		t.Run(mode, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			installDefaultProfileConnector(t, "claudecode")
 			fixture := newSidecarRuntimeFixture(t, true)
 			fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

@@ -84,7 +84,7 @@ func TestSubstrateChartInstallSecretReadRefusedGAP0201(t *testing.T) {
 }
 
 func chartInstallSecretRead(t *testing.T, tier string) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	action := ""
 	if tier == "alert" {
@@ -160,7 +160,7 @@ func chartInstallSecretRead(t *testing.T, tier string) {
 // actor window: the hook answers with an alert finding on the default
 // pack, and a block on strict, instead of skipping it silently.
 func TestSubstrateUnrecordedChainStepIsNeverSilentGAP0201(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	_, chains := newTestChainLeaderService(t)
 	r := chartReplica{newSubstrateFixture(t, func(c *SubstrateConfig) { c.Chains = chains })}
@@ -206,7 +206,7 @@ func withHarness(t *testing.T, f *substrateFixture, name, version, contract stri
 // the same two-step chain that a host call shows on the strict pack is
 // absent once managed_enterprise is active.
 func TestHostChainLaneKeepsTheManagedSwitchGAP0211(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	for _, managedOn := range []bool{false, true} {
 		installDefaultProfileConnector(t, "claudecode")
 		store, logger := testStoreAndV8Logger(t)

@@ -12,7 +12,33 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
+
+// GAP-1253: a per-user receipt test must not activate correlation HMACs for
+// the next test's fresh session.
+func TestGAP1253PerUserReceiptLeavesDefaultSeedForFollowingSession(t *testing.T) {
+	previous := gatewaylog.SwapTelemetryHMACKeyForTest(nil)
+	t.Cleanup(func() { gatewaylog.SwapTelemetryHMACKeyForTest(previous) })
+
+	t.Run("GAP0271-style per-user call", func(t *testing.T) {
+		f := newManagedHookAuditFixture(t, nil)
+		f.api.scannerCfg.DeploymentMode = "per_user"
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook",
+			strings.NewReader(managedHookBody("per-user-seed-cleanup", "PreToolUse")))
+		reply := httptest.NewRecorder()
+		f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
+		if reply.Code != http.StatusOK || !strings.Contains(reply.Body.String(), `"action":"allow"`) {
+			t.Fatalf("per-user answer status=%d body=%q", reply.Code, reply.Body.String())
+		}
+	})
+
+	t.Run("following fresh session", func(t *testing.T) {
+		if digest := gatewaylog.ComputePayloadHMAC(struct{ Session string }{"fresh-session"}); digest != "" {
+			t.Fatal("the preceding per-user call left the correlation HMAC seed active")
+		}
+	})
+}
 
 // A per-user tool call is recorded from the answer the hook confirmed.
 func TestGAP0271PerUserReceiptRecordsDeliveredDecision(t *testing.T) {

@@ -62,7 +62,7 @@ func walCommits(before, after []byte) (commits, frames int, ok bool) {
 // metrics write no observation rows, and the 2 relationship change records
 // are kept in correlation_relationships, not again as audit rows (#1384).
 func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

@@ -15,7 +15,7 @@ import (
 )
 
 func TestLLMRailCanonicalEmissionFailureLeavesReceiptRetryable(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	meta := llmEventMeta{
@@ -85,7 +85,7 @@ func correlateOpenClawStream(
 }
 
 func TestLLMStreamRailRestoresExactPromptAcrossRestartWithoutTreatingMessageAsTurn(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	store := newLLMRailCorrelationStore(t, path)
 
@@ -151,7 +151,7 @@ func TestLLMStreamRailRestoresExactPromptAcrossRestartWithoutTreatingMessageAsTu
 }
 
 func TestLLMStreamRailSuppressesAcceptedReplayAndRetainsFingerprintConflict(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	meta := llmEventMeta{
@@ -200,7 +200,7 @@ func TestLLMStreamRailSuppressesAcceptedReplayAndRetainsFingerprintConflict(t *t
 }
 
 func TestLLMRailReceiptsAreScopedByRail(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	spec := connector.DefaultCorrelationSpec("openclaw")
@@ -243,7 +243,7 @@ func TestLLMRailReceiptsAreScopedByRail(t *testing.T) {
 }
 
 func TestLLMProxyTransportRequestNeverBecomesTurn(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	store := newLLMRailCorrelationStore(t, path)
 	defer store.Close() //nolint:errcheck
@@ -278,7 +278,7 @@ func TestLLMProxyTransportRequestNeverBecomesTurn(t *testing.T) {
 }
 
 func TestLLMRailGraphFailureEmitsNothing(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	capture := &correlationRelationshipRecordCapture{}
 	if err := store.Close(); err != nil {

