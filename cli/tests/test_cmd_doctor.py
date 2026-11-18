@@ -496,9 +496,9 @@ class DoctorGuardrailTests(unittest.TestCase):
         # GAP-1198: setup registered the command under OpenClaw 2026.11.3; the
         # cached version is now 2026.8.35. The row may not say PASS. The
         # stale result is the real function's, for Windows.
-        from defenseclaw.openclaw_plugin_config import openclaw_install_policy_stale_version
-
         import shutil
+
+        from defenseclaw.openclaw_plugin_config import openclaw_install_policy_stale_version
 
         data_dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, data_dir, True)

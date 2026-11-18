@@ -109,9 +109,8 @@ class OpenClawInstallPolicyStatusRowTest(unittest.TestCase):
     # rule the gateway settles and "not checked" for an OpenClaw below
     # 2026.8.35, from the real stale-version result, not from its wording.
     def _row(self, cached, recorded, platform):
-        from unittest.mock import patch
-
         import shutil
+        from unittest.mock import patch
 
         from defenseclaw.commands import cmd_status
 
