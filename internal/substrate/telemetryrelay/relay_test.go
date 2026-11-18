@@ -39,8 +39,8 @@ func TestPosterKeepsOnlyTheNewestGaugeValue(t *testing.T) {
 	p := &Poster{}
 	p.Add(Record{Kind: KindGauge, Metric: MetricUnattestedTemplates, Value: 1}, Record{Kind: KindEgress, Host: "h"},
 		Record{Kind: KindGauge, Metric: MetricUnattestedTemplates, Value: 2})
-	if len(p.pending) != 2 || p.pending[1].Value != 2 {
-		t.Fatalf("pending %+v", p.pending)
+	if pending := p.Pending(); len(pending) != 2 || pending[1].Value != 2 {
+		t.Fatalf("pending %+v", pending)
 	}
 }
 
