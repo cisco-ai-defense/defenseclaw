@@ -39,7 +39,7 @@ func TestGAP0208ClaudeActorHookContractIsKnown(t *testing.T) {
 		{"attested-template", version, contract, connector.HookCompatibilityKnown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			installDefaultProfileConnector(t, "claudecode")
 			_, chains := newTestChainLeaderServiceWith(t, "")
 			regs, err := registry.OpenFileStore(t.TempDir())

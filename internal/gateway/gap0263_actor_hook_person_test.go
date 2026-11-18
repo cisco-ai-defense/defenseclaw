@@ -25,7 +25,7 @@ func TestGAP0263ActorHookRowsNameTheVerifiedPerson(t *testing.T) {
 	prev := identityFactsEnabled.Load()
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(prev) })
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	f := newSubstrateFixture(t)
 	f.api.store, f.api.logger = testStoreAndV8Logger(t)
