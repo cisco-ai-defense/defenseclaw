@@ -107,6 +107,7 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	if event == "SessionStart" || event == "sessionStart" || (isPre && strings.HasPrefix(view.ToolName, "mcp__")) {
 		budget = attachMCP(f, connector, cwd, budget)
 	} else if isPre {
+		budget = attachAgentHookBefore(f, connector, view.ToolName, budget)
 		// A Write or Edit of one of those configs: its next content.
 		budget = attachMCPWrite(f, connector, cwd, input, budget)
 		// A command that may add an MCP server (claude mcp add, codex mcp
@@ -122,6 +123,74 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		return nil
 	}
 	return f
+}
+
+// attachAgentHookBefore supplies exact current settings bytes for semantic
+// native-edit and replacement judgement. One bounded read per settings target;
+// the shared post budget also bounds multi-file patches. Unrelated calls attach
+// nothing, and oversized files receive no digest pass.
+func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) int64 {
+	if connectorName != "claudecode" {
+		return budget
+	}
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "edit", "edit_file", "str_replace", "multiedit", "multi_edit", "multi-edit",
+		"write", "write_file", "writefile", "write-file", "create", "create_file",
+		"apply_patch", "applypatch", "apply-patch", "patch":
+	default:
+		return budget
+	}
+	attached := map[string]bool{}
+	for _, pf := range f.Paths {
+		if pf.Field != "tool_input.file_path" && pf.Field != "tool_input.filePath" && pf.Field != "tool_input.path" && !strings.HasSuffix(pf.Field, ".patch") {
+			continue
+		}
+		p := filepath.ToSlash(pf.Abs)
+		if !strings.HasSuffix(p, "/.claude/settings.json") && !strings.HasSuffix(p, "/.claude/settings.local.json") {
+			continue
+		}
+		if attached[pf.Abs] {
+			continue
+		}
+		attached[pf.Abs] = true
+		a := AttachedFile{Role: "agent_hook_config_before", Path: pf.Abs, Resolved: pf.Resolved, Size: -1, Truncated: true}
+		limit := budget
+		if limit > 64<<10 {
+			limit = 64 << 10
+		}
+		if limit < 0 {
+			limit = 0
+		}
+		file, err := os.Open(pf.Abs)
+		if err == nil {
+			info, statErr := file.Stat()
+			if statErr == nil && info.Mode().IsRegular() {
+				a.Size = info.Size()
+				if info.Size() <= limit {
+					content, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+					if readErr == nil && int64(len(content)) == info.Size() {
+						a.Content = content
+						a.Truncated = false
+						sum := sha256.Sum256(content)
+						a.SHA256 = hex.EncodeToString(sum[:])
+					}
+				}
+			}
+			file.Close()
+		}
+		if os.IsNotExist(err) && pf.Type == "missing" {
+			// A missing file is an exact empty before-state, not a failed read.
+			a.Size, a.Truncated = 0, false
+			sum := sha256.Sum256(nil)
+			a.SHA256 = hex.EncodeToString(sum[:])
+		}
+		if a.Truncated {
+			f.Truncated = true
+		}
+		f.Files = append(f.Files, a)
+		budget -= int64(len(a.Content))
+	}
+	return budget
 }
 
 // walkPaths calls add for every path-valued key and for every file an
