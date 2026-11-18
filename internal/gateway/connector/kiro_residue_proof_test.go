@@ -18,7 +18,7 @@ import (
 func TestKiroResidueKeepsALockSomeoneHolds(t *testing.T) {
 	path := filepath.Join(t.TempDir(), kiroManagedHooksName)
 	if err := withFileLock(path, func() error {
-		removeKiroFileResidue(path, "/home/u/.defenseclaw/hooks/kiro-hook.sh", false)
+		removeKiroFileResidue(path, "/home/u/.defenseclaw/hooks/kiro-hook.sh", false, nil)
 		if _, err := os.Lstat(path + ".lock"); err != nil {
 			return fmt.Errorf("a held lock was removed: %w", err)
 		}
@@ -29,7 +29,7 @@ func TestKiroResidueKeepsALockSomeoneHolds(t *testing.T) {
 	if err := os.WriteFile(path+".lock", nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	removeKiroFileResidue(path, "/home/u/.defenseclaw/hooks/kiro-hook.sh", false)
+	removeKiroFileResidue(path, "/home/u/.defenseclaw/hooks/kiro-hook.sh", false, nil)
 	if _, err := os.Lstat(path + ".lock"); !os.IsNotExist(err) {
 		t.Fatalf("an idle empty lock stayed: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestKiroResidueKeepsABackupCopyOfAnotherInstallsAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	removeKiroFileResidue(agent, own, true)
+	removeKiroFileResidue(agent, own, true, nil)
 	if got, err := os.ReadFile(agent + ".bak"); err != nil || string(got) != string(before) {
 		t.Fatalf("the backup copy of another install's agent was removed or changed: %v", err)
 	}

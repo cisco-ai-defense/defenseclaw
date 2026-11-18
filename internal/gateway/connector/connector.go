@@ -346,6 +346,16 @@ type SetupOpts struct {
 	// is still configured, so a cached hook path keeps blocking and names the
 	// failed start instead of exiting 0 unguarded (GAP-0367).
 	FailedSetupFailClosed bool
+
+	// ReclaimOwnHooksOnly is set on the Teardown of a connector that is not
+	// configured (the boot reclaim of an unguarded connector, connector
+	// prune-orphans). The agent files are shared by every DefenseClaw data
+	// folder of the account, and a connector that proves ownership per file
+	// (Kiro, orphanedHookFiles) then removes only the entries that run one of
+	// this install's exact commands, in the files that hold them, so another
+	// install's live hooks stay (review P2 of rel-1-0-10 GAP-1092). The
+	// teardown of a configured connector leaves it false.
+	ReclaimOwnHooksOnly bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

@@ -95,7 +95,7 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	var staleErr error
 	if !kiroManaged(opts) {
 		for _, path := range c.staleRecordedKiroHookPaths(opts, c.hookConfigPaths(opts)) {
-			staleErr = errors.Join(staleErr, c.reclaimKiroHookFile(opts, path, v3Command))
+			staleErr = errors.Join(staleErr, c.reclaimKiroHookFile(opts, path, v3Command, nil))
 		}
 	}
 	for _, path := range c.hookConfigPaths(opts) {
@@ -121,7 +121,7 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 			return fmt.Errorf("kiro record agent backup %s: %w", path, err)
 		}
 	}
-	if err := removeStaleKiroDefaultOverlay(command); err != nil {
+	if err := removeStaleKiroDefaultOverlay(command, nil); err != nil {
 		return fmt.Errorf("kiro remove stale kiro_default overlay: %w", err)
 	}
 	var reclaimErr error
@@ -150,6 +150,10 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	command := c.hookCommand(opts)
+	scope, err := c.reclaimScope(opts)
+	if err != nil {
+		return err
+	}
 	var errs []error
 	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
 		errs = append(errs, fmt.Errorf("kiro migrate hook backup: %w", err))
@@ -157,7 +161,10 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	cleanup := c.hookCleanupPaths(opts)
 	cleanup = append(cleanup, c.staleRecordedKiroHookPaths(opts, cleanup)...)
 	for _, path := range cleanup {
-		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
+		if !scope.covers(path) {
+			continue
+		}
+		if err := c.reclaimKiroHookFile(opts, path, command, scope); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -166,6 +173,9 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 		written[path] = true
 	}
 	for _, path := range c.agentCleanupPaths(opts) {
+		if !scope.covers(path) {
+			continue
+		}
 		if !written[path] {
 			// A managed install never writes the user's default agent; only
 			// remove DefenseClaw hooks an earlier build left there, and
@@ -177,25 +187,31 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 				continue
 			}
 		}
-		if err := c.reclaimKiroAgentFile(opts, path, command); err != nil {
+		if err := c.reclaimKiroAgentFile(opts, path, command, scope); err != nil {
 			errs = append(errs, err)
 		}
 	}
-	if err := removeStaleKiroDefaultOverlay(command); err != nil {
-		errs = append(errs, fmt.Errorf("kiro remove stale kiro_default overlay: %w", err))
+	if scope.covers(kiroBuiltInDefaultAgentPath()) {
+		if err := removeStaleKiroDefaultOverlay(command, scope); err != nil {
+			errs = append(errs, fmt.Errorf("kiro remove stale kiro_default overlay: %w", err))
+		}
 	}
 	// The settings file is the user's: only DefenseClaw's default-agent
 	// setting comes out, never a whole earlier copy, which would drop the
-	// keys added since Setup captured it.
-	settingsPath := kiroSettingsPath()
-	backup, err := loadManagedFileBackupForTransform(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath)
-	if err == nil {
-		err = removeKiroDefaultAgentSetting(settingsPath, backup)
-	}
-	if err != nil && !os.IsNotExist(err) {
-		errs = append(errs, fmt.Errorf("kiro remove default agent setting: %w", err))
-	} else {
-		discardManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName)
+	// keys added since Setup captured it. A reclaim takes it out only with
+	// this install's defenseclaw agent: the setting selects that agent, which
+	// may now be another install's.
+	if scope.covers(kiroManagedAgentPath()) {
+		settingsPath := kiroSettingsPath()
+		backup, err := loadManagedFileBackupForTransform(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath)
+		if err == nil {
+			err = removeKiroDefaultAgentSetting(settingsPath, backup)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("kiro remove default agent setting: %w", err))
+		} else {
+			discardManagedFileBackup(opts.DataDir, c.Name(), kiroSettingsLogicalName)
+		}
 	}
 	if err := writeDisabledHookTombstone(opts, kiroHookScriptName, c.Name()); err != nil {
 		errs = append(errs, fmt.Errorf("kiro disabled hook tombstone: %w", err))
@@ -207,11 +223,41 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 		return err
 	}
 	if !opts.ManagedEnterprise && opts.DataDir != "" {
-		if err := c.VerifyClean(opts); err != nil {
+		if scope != nil {
+			// Another install's entries may stay: what must be gone is this
+			// install's own.
+			if left, err := c.orphanedHookFiles(opts); err != nil || len(left) != 0 {
+				return fmt.Errorf("kiro verify clean before token revocation: this install's hooks remain in %v: %w", left, err)
+			}
+		} else if err := c.VerifyClean(opts); err != nil {
 			return fmt.Errorf("kiro verify clean before token revocation: %w", err)
 		}
 	}
 	return revokePerUserHookAPIToken(opts, c.Name())
+}
+
+// reclaimScope is the part of the Kiro footprint the teardown of an
+// unconfigured connector may touch (SetupOpts.ReclaimOwnHooksOnly): the
+// files that hold one of this install's exact commands (orphanedHookFiles),
+// and in them only those entries. The hook files and agents under ~/.kiro are
+// shared by every data folder of the account: a data folder that set Kiro up
+// for a workspace, while another install later took over the global files,
+// proved ownership by its workspace file, then had its teardown strip the
+// other install's live global hooks by name (review P2 of GAP-1092). nil, for
+// the teardown of a configured connector, is the whole footprint.
+func (c *KiroConnector) reclaimScope(opts SetupOpts) (*kiroReclaimScope, error) {
+	if !opts.ReclaimOwnHooksOnly {
+		return nil, nil
+	}
+	files, err := c.orphanedHookFiles(opts)
+	if err != nil {
+		return nil, fmt.Errorf("kiro find the files that hold this install's hooks: %w", err)
+	}
+	scope := &kiroReclaimScope{files: map[string]bool{}, commands: c.installHookCommands(opts)}
+	for _, path := range files {
+		scope.files[filepath.Clean(path)] = true
+	}
+	return scope, nil
 }
 
 // kiroCreatedDirsFile, in the DefenseClaw data directory, lists the Kiro
@@ -333,8 +379,9 @@ func (c *KiroConnector) orphanedHookFilesFor(goos string, opts SetupOpts) ([]str
 // hook files under ~/.kiro are shared by every DefenseClaw data folder of the
 // account, so a file that merely holds an entry named defenseclaw-* may be
 // another install's: ownership is the decoded action.command being one of
-// these. A managed install's footprint belongs to the hook guardian, so no
-// command is owned there.
+// these, and the reclaim of an unconfigured connector removes only entries
+// that run one of them (reclaimScope). A managed install's footprint belongs
+// to the hook guardian, so no command is owned there.
 func (c *KiroConnector) installHookCommands(opts SetupOpts) []string {
 	return c.installHookCommandsFor(runtime.GOOS, opts)
 }
@@ -414,7 +461,7 @@ func (c *KiroConnector) InstallOwnsHookEntries(opts SetupOpts) (bool, error) {
 // reclaimKiroHookFile puts one v3 hook file back as Setup found it when it is
 // unchanged since, and otherwise removes only DefenseClaw's entries; either
 // way its backup record is settled.
-func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string) error {
+func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string, scope *kiroReclaimScope) error {
 	logical := kiroBackupLogicalName(path)
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
 	if err != nil {
@@ -422,7 +469,7 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 	}
 	if !restored {
 		operatorFile := kiroPristineIsOperators(opts.DataDir, c.Name(), logical, command)
-		if err := removeKiroV3HooksKeeping(path, command, operatorFile); err != nil && !os.IsNotExist(err) {
+		if err := removeKiroV3HooksKeeping(path, command, operatorFile, scope); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove hook %s: %w", path, err)
 		}
 		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
@@ -434,13 +481,13 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 		// A backup captured while the account still held an earlier
 		// enrollment's hooks (whose own backup is gone) put DefenseClaw's
 		// entries back; they go too (GAP-1932).
-		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
+		if err := removeKiroV3HooksKeeping(path, command, false, scope); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove hook %s: %w", path, err)
 		}
 	}
 	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		removeKiroFileResidue(path, command, false)
+		removeKiroFileResidue(path, command, false, scope)
 	}
 	return nil
 }
@@ -476,7 +523,7 @@ func kiroPristineIsOperators(dataDir, connectorName, logical, command string) bo
 }
 
 // reclaimKiroAgentFile is reclaimKiroHookFile for a CLI 2.x agent file.
-func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command string) error {
+func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command string, scope *kiroReclaimScope) error {
 	logical := kiroAgentBackupLogicalName(path)
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), logical, path)
 	if err != nil {
@@ -484,7 +531,7 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 	}
 	if !restored {
 		operatorFile := kiroPristineIsOperators(opts.DataDir, c.Name(), logical, command)
-		if err := removeKiroV2AgentHooksKeeping(path, command, operatorFile); err != nil && !os.IsNotExist(err) {
+		if err := removeKiroV2AgentHooksKeeping(path, command, operatorFile, scope); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
 		}
 		if err := keepPristineEmptyHooks(opts.DataDir, c.Name(), logical, path); err != nil {
@@ -495,13 +542,13 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 	} else if present {
 		// The restored agent came from a backup that already held
 		// DefenseClaw's hooks (GAP-1932).
-		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
+		if err := removeKiroV2AgentHooksKeeping(path, command, false, scope); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
 		}
 	}
 	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
-		removeKiroFileResidue(path, command, true)
+		removeKiroFileResidue(path, command, true, scope)
 	}
 	return nil
 }
@@ -528,7 +575,7 @@ func (c *KiroConnector) reclaimEarlierKiroFootprint(opts SetupOpts, command stri
 		if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil || !present {
 			continue
 		}
-		if err := c.reclaimKiroAgentFile(opts, path, command); err != nil {
+		if err := c.reclaimKiroAgentFile(opts, path, command, nil); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -543,7 +590,7 @@ func (c *KiroConnector) reclaimEarlierKiroFootprint(opts SetupOpts, command stri
 		if present, err := kiroV3FileReferencesHook(path, command); err != nil || !present {
 			continue
 		}
-		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
+		if err := c.reclaimKiroHookFile(opts, path, command, nil); err != nil {
 			errs = append(errs, err)
 		}
 	}

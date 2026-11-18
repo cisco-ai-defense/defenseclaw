@@ -45,8 +45,9 @@ import (
 // names the account's launcher, this data folder also holds the live hook
 // script or a backup record of the connector) qualifies with or without the
 // script, by that proof alone. When ownership cannot be proven, the entries
-// stay and the boot says so. Its own Teardown removes only what
-// DefenseClaw wrote, then the hook script goes and its hook token is
+// stay and the boot says so. Its own Teardown, in reclaim mode
+// (SetupOpts.ReclaimOwnHooksOnly), removes only what this install wrote and
+// leaves another install's entries in the shared files, then the hook script goes and its hook token is
 // revoked as for a removed connector, so the next boot finds nothing to do.
 // A managed install leaves it to the hook guardian. A failure is logged and
 // never fails a boot.
@@ -109,10 +110,12 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 			continue
 		}
 		result := "removed"
-		if err := conn.Teardown(ctx, opts); err != nil {
+		reclaim := opts
+		reclaim.ReclaimOwnHooksOnly = true
+		if err := conn.Teardown(ctx, reclaim); err != nil {
 			result = "failed"
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded but its DefenseClaw hooks could not be removed: %v\n", name, err)
-		} else if err := conn.VerifyClean(opts); err != nil {
+		} else if err := verifyOwnHooksGone(conn, owner, decoded, opts); err != nil {
 			result = "incomplete"
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded and its DefenseClaw hooks are not all gone: %v\n", name, err)
 		} else {
@@ -129,6 +132,24 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 			)
 		}
 	}
+}
+
+// verifyOwnHooksGone checks a reclaim: for a connector that proves ownership
+// from its decoded entries, that none of this install's is left (another
+// install's entries in the shared files stay, so VerifyClean, which reads
+// every DefenseClaw entry, would report them); for any other, VerifyClean.
+func verifyOwnHooksGone(conn connector.Connector, owner connector.InstallHookEntryOwner, decoded bool, opts connector.SetupOpts) error {
+	if !decoded {
+		return conn.VerifyClean(opts)
+	}
+	owns, err := owner.InstallOwnsHookEntries(opts)
+	if err != nil {
+		return err
+	}
+	if owns {
+		return fmt.Errorf("%s teardown incomplete: hook entries of this install remain", conn.Name())
+	}
+	return nil
 }
 
 // installWroteHookScript reports whether the hooks folder holds one of the

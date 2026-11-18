@@ -32,6 +32,12 @@ import (
 // every tool call. A config file that cannot be read or parsed is an error,
 // so nothing is removed on a guess.
 func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
+	return orphanedHookConfigPathsFor(runtime.GOOS, conn, opts)
+}
+
+// orphanedHookConfigPathsFor is OrphanedHookConfigPaths with the commands of
+// goos, so the Windows rules are tested on every host.
+func orphanedHookConfigPathsFor(goos string, conn Connector, opts SetupOpts) ([]string, error) {
 	var found []string
 	if plugin, ok := conn.(interface {
 		orphanedPluginArtifact(SetupOpts) (string, error)
@@ -48,9 +54,9 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 	// (Kiro on Windows wraps them in an -EncodedCommand script, and a data
 	// folder name JSON escapes) names its files itself (GAP-1092, GAP-1174).
 	if owner, ok := conn.(interface {
-		orphanedHookFiles(SetupOpts) ([]string, error)
+		orphanedHookFilesFor(string, SetupOpts) ([]string, error)
 	}); ok {
-		paths, err := owner.orphanedHookFiles(opts)
+		paths, err := owner.orphanedHookFilesFor(goos, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -59,12 +65,12 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 		// commands do not name it. The raw `hook --connector` match below
 		// would match another data folder's Windows entries (an earlier
 		// release's `& '<launcher>'` form holds it in plain text).
-		if runtime.GOOS == "windows" {
+		if goos == "windows" {
 			return found, nil
 		}
 	}
-	exact := ownedHookCommandNeedles(opts, conn)
-	scripts := ownedHookScriptPaths(conn, opts)
+	exact := ownedHookCommandNeedlesFor(goos, opts, conn)
+	scripts := ownedHookScriptPaths(goos, conn, opts)
 	var registrationPrefixes []string
 	if owner, ok := conn.(interface{ orphanedRegistrationKeyPrefixes() []string }); ok {
 		registrationPrefixes = owner.orphanedRegistrationKeyPrefixes()
@@ -196,9 +202,9 @@ func managedPluginTokenFile(data []byte) (string, bool) {
 
 // ownedHookScriptPaths lists the absolute paths of conn's Unix hook scripts in
 // opts.DataDir. Windows registers the native launcher instead.
-func ownedHookScriptPaths(conn Connector, opts SetupOpts) []string {
+func ownedHookScriptPaths(goos string, conn Connector, opts SetupOpts) []string {
 	owner, ok := conn.(HookScriptOwner)
-	if !ok || runtime.GOOS == "windows" || strings.TrimSpace(opts.DataDir) == "" {
+	if !ok || goos == "windows" || strings.TrimSpace(opts.DataDir) == "" {
 		return nil
 	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")

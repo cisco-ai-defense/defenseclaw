@@ -1305,6 +1305,9 @@ func pruneOrphanedConnector(ctx context.Context, dataDir, name string, conn conn
 	if err != nil || len(paths) == 0 {
 		return nil, err
 	}
+	// The connector is not configured here: its teardown removes only this
+	// install's entries, never another data folder's in the shared files.
+	opts.ReclaimOwnHooksOnly = true
 	restoreState, err := connector.MarkConnectorInactive(dataDir, name)
 	if err != nil {
 		return nil, fmt.Errorf("mark connector inactive: %w", err)

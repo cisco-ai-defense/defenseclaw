@@ -126,13 +126,68 @@ func kiroV3HookEntry(name, description, trigger, matcher, hookScript string) map
 }
 
 func removeKiroV3Hooks(path, hookScript string) error {
-	return removeKiroV3HooksKeeping(path, hookScript, false)
+	return removeKiroV3HooksKeeping(path, hookScript, false, nil)
+}
+
+// kiroReclaimScope limits the teardown of an unconfigured connector to what
+// this install provably wrote (KiroConnector.reclaimScope): the files in
+// files, and in them only the entries that run exactly one of commands. A
+// nil scope, the teardown of a configured connector, covers every Kiro file
+// and every DefenseClaw entry (kiroOwnedV3Hook, kiroV2EntryOwned and the
+// edited forms).
+type kiroReclaimScope struct {
+	files    map[string]bool
+	commands []string
+}
+
+func (s *kiroReclaimScope) covers(path string) bool {
+	return s == nil || s.files[filepath.Clean(path)]
+}
+
+// runsOwnCommand reports whether raw, a CLI 2.x hook handler or the action of
+// a v3 or universal entry, runs exactly one of the scope's commands.
+func (s *kiroReclaimScope) runsOwnCommand(raw interface{}) bool {
+	for _, command := range s.commands {
+		if managedHookCommandEntry(raw, command) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownsActionEntry is the ownership of a v3 or universal-form entry: with no
+// scope kiroOwnedV3Hook, with one an action that runs one of its commands.
+func (s *kiroReclaimScope) ownsActionEntry(item interface{}, hookScript string) bool {
+	if s == nil {
+		return kiroOwnedV3Hook(item, hookScript)
+	}
+	obj, _ := item.(map[string]interface{})
+	return obj != nil && s.runsOwnCommand(obj["action"])
+}
+
+// keepUniversal drops the scope's universal-form entries from list.
+func (s *kiroReclaimScope) keepUniversal(list []interface{}, hookScript string) []interface{} {
+	if s == nil {
+		return removeKiroOwnedUniversalHooks(list, hookScript)
+	}
+	return slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+		return s.ownsActionEntry(item, hookScript)
+	})
+}
+
+// keepV2 drops the scope's entries from one CLI 2.x event's hook list.
+func (s *kiroReclaimScope) keepV2(raw interface{}, hookScript string) []interface{} {
+	if s == nil {
+		return removeKiroOwnedV2Hooks(raw, hookScript)
+	}
+	list, _ := raw.([]interface{})
+	return slices.DeleteFunc(slices.Clone(list), s.runsOwnCommand)
 }
 
 // removeKiroV3HooksKeeping is removeKiroV3Hooks that, with operatorFile,
 // keeps a file left with no hooks: the operator had it before Setup
-// (kiroPristineIsOperators).
-func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool) error {
+// (kiroPristineIsOperators). With a scope only its entries go.
+func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -140,7 +195,7 @@ func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool) error 
 	hooks, _ := cfg["hooks"].([]interface{})
 	kept := make([]interface{}, 0, len(hooks))
 	for _, item := range hooks {
-		if kiroOwnedV3Hook(item, hookScript) {
+		if scope.ownsActionEntry(item, hookScript) {
 			continue
 		}
 		kept = append(kept, item)
@@ -285,13 +340,14 @@ func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
 }
 
 func removeKiroV2AgentHooks(path, hookScript string) error {
-	return removeKiroV2AgentHooksKeeping(path, hookScript, false)
+	return removeKiroV2AgentHooksKeeping(path, hookScript, false, nil)
 }
 
 // removeKiroV2AgentHooksKeeping is removeKiroV2AgentHooks that, with
 // operatorFile, keeps an agent file left looking like DefenseClaw's overlay:
-// the operator had it before Setup (kiroPristineIsOperators).
-func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) error {
+// the operator had it before Setup (kiroPristineIsOperators). With a scope
+// only its entries go.
+func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -300,7 +356,7 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 		return nil
 	}
 	if list, ok := cfg["hooks"].([]interface{}); ok {
-		if kept := removeKiroOwnedUniversalHooks(list, hookScript); len(kept) == 0 {
+		if kept := scope.keepUniversal(list, hookScript); len(kept) == 0 {
 			delete(cfg, "hooks")
 		} else {
 			cfg["hooks"] = kept
@@ -318,7 +374,7 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 		return nil
 	}
 	for event, raw := range hooks {
-		remaining := removeKiroOwnedV2Hooks(raw, hookScript)
+		remaining := scope.keepV2(raw, hookScript)
 		if len(remaining) == 0 {
 			delete(hooks, event)
 		} else {
@@ -572,11 +628,14 @@ func kiroEmptyJSONValue(value interface{}) bool {
 // a lock file still there may belong to a live holder, and unlinking a held
 // one lets a second writer lock a new file), and, for a CLI 2.x agent, the
 // <agent>.json.bak copies Kiro's /upgrade-agent keeps, when each is itself
-// only DefenseClaw's overlay: every hook's command exactly one of this
-// install's (kiroV2EntryOwned; a copy with another data folder's kiro-hook.sh
-// is that install's) and no operator key. A copy with anything else in it
+// only DefenseClaw's overlay and no operator key. Its hooks must each run
+// exactly a command this teardown owns: in a reclaim the install's own
+// (the scope's), otherwise kiroOwnedHookCommands, the install's script
+// command on POSIX (a copy with another data folder's kiro-hook.sh is that
+// install's) and on Windows every launcher form of the account, managed ones
+// included, which do not name a data folder. A copy with anything else in it
 // stays.
-func removeKiroFileResidue(path, hookScript string, agent bool) {
+func removeKiroFileResidue(path, hookScript string, agent bool, scope *kiroReclaimScope) {
 	removeIdleLockFile(path + ".lock")
 	if !agent {
 		return
@@ -600,6 +659,9 @@ func removeKiroFileResidue(path, hookScript string, agent bool) {
 		}
 		if list, ok := cfg["hooks"].([]interface{}); ok {
 			kept := slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+				if scope != nil {
+					return scope.ownsActionEntry(item, hookScript)
+				}
 				return kiroUniversalEntryOwned(item, hookScript)
 			})
 			if len(kept) == 0 {
@@ -611,6 +673,9 @@ func removeKiroFileResidue(path, hookScript string, agent bool) {
 			for event, raw := range hooks {
 				list, _ := raw.([]interface{})
 				remaining := slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+					if scope != nil {
+						return scope.runsOwnCommand(item)
+					}
 					return kiroV2EntryOwned(item, hookScript)
 				})
 				if len(remaining) == 0 {
@@ -827,8 +892,8 @@ func kiroSettingsSelectsManagedAgent(path string) (bool, error) {
 	return strings.TrimSpace(current) == kiroManagedAgentName, nil
 }
 
-func removeStaleKiroDefaultOverlay(hookScript string) error {
-	return removeKiroV2AgentHooks(kiroBuiltInDefaultAgentPath(), hookScript)
+func removeStaleKiroDefaultOverlay(hookScript string, scope *kiroReclaimScope) error {
+	return removeKiroV2AgentHooksKeeping(kiroBuiltInDefaultAgentPath(), hookScript, false, scope)
 }
 
 func kiroCommandOwned(command, hookScript string) bool {

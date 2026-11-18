@@ -147,11 +147,25 @@ func TestKiroV3FileHoldsCommandComparesTheDecodedCommand(t *testing.T) {
 // guardian's, never a boot or remove cleanup's.
 func TestKiroInstallHookCommandsAreEmptyForAManagedInstall(t *testing.T) {
 	conn := NewKiroConnector()
-	if got := conn.installHookCommands(SetupOpts{DataDir: t.TempDir(), ManagedEnterprise: true}); len(got) != 0 {
-		t.Fatalf("a managed install owns commands %v", got)
+	// A per-user data folder that set Kiro up: on Windows that is what ties
+	// the launcher commands to it (kiroDataDirSetUpKiro).
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if got := conn.installHookCommands(SetupOpts{DataDir: t.TempDir()}); len(got) == 0 {
-		t.Fatal("a per-user install owns no command")
+	if err := os.WriteFile(filepath.Join(dataDir, "hooks", kiroHookScriptName), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		if got := conn.installHookCommandsFor(goos, SetupOpts{DataDir: dataDir, ManagedEnterprise: true}); len(got) != 0 {
+			t.Fatalf("%s: a managed install owns commands %v", goos, got)
+		}
+		if got := conn.installHookCommandsFor(goos, SetupOpts{DataDir: dataDir}); len(got) == 0 {
+			t.Fatalf("%s: a per-user install owns no command", goos)
+		}
+	}
+	if got := conn.installHookCommands(SetupOpts{DataDir: dataDir}); len(got) == 0 {
+		t.Fatal("a per-user install owns no command on this host")
 	}
 }
 
