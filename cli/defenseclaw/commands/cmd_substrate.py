@@ -552,7 +552,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "takes\n"
             "that safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged "
             "files,\n"
-            "--allow-flagged writes them too."
+            "--allow-flagged writes them too.\n"
+            "\n"
+            "Run it on the computer you started the agent from: it compares the changes with the folder you\n"
+            "sent, and only that computer keeps a record of it. From another computer, connect to the agent and\n"
+            "git push its work from inside it."
         ),
         example=(
             "defenseclaw substrate pull fix-tests-7f3a\n"
