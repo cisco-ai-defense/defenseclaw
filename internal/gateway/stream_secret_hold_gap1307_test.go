@@ -326,7 +326,8 @@ func gap1307MaskedOnly(got, want string, pauseAt int) bool {
 			continue
 		}
 		c := want[i]
-		if got[i] != '*' || i >= pauseAt || !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+		alnum := c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+		if got[i] != '*' || i >= pauseAt || !alnum {
 			return false
 		}
 	}
