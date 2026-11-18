@@ -20,18 +20,20 @@ import (
 // path or a stream variable; and the FileInfo opens and writes (Delete,
 // CopyTo, MoveTo, Replace) of a FileInfo variable (also a typed one), a
 // [IO.FileInfo] cast, a [IO.FileInfo]::new(f) or New-Object IO.FileInfo
-// result, a (Get-Item f) or (Get-ChildItem f) group, or the pipeline item of
-// a ForEach-Object block such a command feeds. A read-only open (FileMode
-// Open with FileAccess Read) writes nothing. An open whose mode, access or
-// path is known only at run time may write: its twin is the unknown tier,
-// never the write. So is a FileInfo write on a receiver the reader cannot
-// place (any other pipeline item, call result or variable, or a variable the
-// command assigns more than once) and a System.IO call it does not classify:
-// every file the command spells may be the one written (rel-1-0-10:GAP-1230,
-// GAP-1257). A Get-ChildItem result of a folder is its children, and a
-// Get-Item result of one is a DirectoryInfo whose Delete and MoveTo take what
-// it holds: such a write may write every file the folder holds, the unknown
-// tier (rel-1-0-10:GAP-1257).
+// result, a (Get-Item f) or (Get-ChildItem f) group (each path of a path
+// array), or the pipeline item of a ForEach-Object block such a command, read
+// whole, feeds. A read-only open (FileMode Open with FileAccess Read) writes
+// nothing. An open whose mode, access or path is known only at run time may
+// write: its twin is the unknown tier, never the write. So is a FileInfo
+// write on a receiver the reader cannot place (any other pipeline item, call
+// result or variable, a variable with an assignment the reader does not
+// place, and any variable of a command that may bind one by a name built at
+// run time) and a System.IO call it does not classify: every file the
+// command spells may be the one written (rel-1-0-10:GAP-1230, GAP-1257,
+// GAP-1275, GAP-1276, GAP-1277). A Get-ChildItem result of a folder is its
+// children, and a Get-Item result of one is a DirectoryInfo whose Delete and
+// MoveTo take what it holds: such a write may write every file the folder
+// holds, the unknown tier (rel-1-0-10:GAP-1257).
 
 // psOpenTarget is the twin parameter (-LiteralPath 'f' or -Path f) of a file
 // a .NET open writes; unknown when it may write it only. folder reports an
@@ -43,11 +45,23 @@ type psOpenTarget struct {
 }
 
 // psFileInfo is the FileInfo (or DirectoryInfo) the reader places a receiver
-// at: param is the twin parameter of its path ("" when not placed), kind
-// what the receiver is of that path.
+// at: params are the twin parameters of its paths (one per element of a
+// path array, none when not placed), kind what the receiver is of them, and
+// maybe the earlier bindings of a variable it may still be (a binding in a
+// block or a branch need not have run): their writes are the unknown tier
+// (rel-1-0-10:GAP-1277, GAP-1278).
 type psFileInfo struct {
-	param string
-	kind  psFileInfoKind
+	params []string
+	kind   psFileInfoKind
+	maybe  []psFileInfo
+}
+
+// placed reports a receiver the reader places.
+func (f psFileInfo) placed() bool { return len(f.params) > 0 }
+
+// psLiteralFileInfo is the FileInfo of the literal .NET path argument arg.
+func psLiteralFileInfo(arg string) psFileInfo {
+	return psFileInfo{params: []string{"-LiteralPath " + arg}}
 }
 
 // psFileInfoKind is what a placed receiver is of its path.
@@ -176,7 +190,7 @@ func (s *psStateScan) dotNetCall(method, statement string, receiver *psReceiver,
 		args := args()
 		s.dotNetConstruct(kind, variable, args)
 		if kind == psCallFileInfo && len(args) == 1 && args[0] != "" && psLiteralArgument(args[0], s.budget) {
-			return psFileInfo{param: "-LiteralPath " + args[0]}
+			return psLiteralFileInfo(args[0])
 		}
 	case s.newObjectArguments(statement, args):
 	case s.unclassifiedIOCall(statement, open, end):
@@ -187,7 +201,7 @@ func (s *psStateScan) dotNetCall(method, statement string, receiver *psReceiver,
 		}
 		name := method[dot+1:]
 		if effect, ok := psFileInfoMethods[name]; ok {
-			s.fileInfoMethod(name, effect, statement, receiver, variable, args())
+			s.fileInfoMethod(name, effect, statement, receiver, variable, args(), open)
 		}
 	}
 	return psFileInfo{}
@@ -195,10 +209,10 @@ func (s *psStateScan) dotNetCall(method, statement string, receiver *psReceiver,
 
 // fileInfoMethod reads the FileInfo instance method name (effect) called
 // with args on receiver (or the variable before .name in statement), whose
-// result is assigned to variable.
-func (s *psStateScan) fileInfoMethod(name string, effect psFileInfoMethod, statement string, receiver *psReceiver, variable string, args []string) {
-	file := s.fileInfoOf(statement, name, receiver)
-	if file.param == "" {
+// result is assigned to variable; its argument list opens at rune index open.
+func (s *psStateScan) fileInfoMethod(name string, effect psFileInfoMethod, statement string, receiver *psReceiver, variable string, args []string, open int) {
+	file := s.fileInfoOf(statement, name, receiver, open)
+	if !file.placed() {
 		// A receiver the reader cannot place: an Open without a FileMode
 		// and Replace are calls of other types (a connection, a string),
 		// and an Open with a literal read mode reads whatever file it is
@@ -229,10 +243,17 @@ func (s *psStateScan) fileInfoMethod(name string, effect psFileInfoMethod, state
 		return
 	}
 	if verdict != psOpenRead {
-		s.opens = append(s.opens, psOpenTarget{file.param, verdict == psOpenUnknown, file.writesFolder(name)})
+		for _, param := range file.params {
+			s.opens = append(s.opens, psOpenTarget{param, verdict == psOpenUnknown, file.writesFolder(name)})
+		}
+		for _, maybe := range file.maybe {
+			for _, param := range maybe.params {
+				s.opens = append(s.opens, psOpenTarget{param, true, maybe.writesFolder(name)})
+			}
+		}
 	}
-	if variable != "" && effect.stream {
-		s.bind(&s.streams, variable, file.param)
+	if variable != "" && effect.stream && len(file.params) == 1 && len(file.maybe) == 0 {
+		s.bind(&s.streams, variable, file.params[0])
 	}
 }
 
@@ -262,12 +283,11 @@ func (s *psStateScan) dotNetConstruct(kind, variable string, args []string) {
 		if variable == "" {
 			return
 		}
+		// A FileInfo of a path known only at run time is not placed: its
+		// assignment leaves the variable unplaced (variableFileInfo).
 		if len(args) > 0 && args[0] != "" && psLiteralArgument(args[0], s.budget) {
-			s.bindFileInfo(variable, psFileInfo{param: "-LiteralPath " + args[0]})
-			return
+			s.bindFileInfo(variable, psLiteralFileInfo(args[0]))
 		}
-		// A FileInfo of a path known only at run time is not placed.
-		delete(s.fileInfos, variable)
 	}
 }
 
@@ -398,19 +418,21 @@ func (s *psStateScan) bind(vars *map[string]string, variable, param string) {
 	(*vars)[variable] = param
 }
 
+// bindFileInfo records a placed binding of variable, in reading order.
 func (s *psStateScan) bindFileInfo(variable string, file psFileInfo) {
 	if s.fileInfos == nil {
-		s.fileInfos = map[string]psFileInfo{}
+		s.fileInfos = map[string][]psFileInfo{}
 	}
-	s.fileInfos[variable] = file
+	s.fileInfos[variable] = append(s.fileInfos[variable], file)
 }
 
-// fileInfoOf returns the FileInfo the method name is called on: the
-// receiver, else the variable before .name in statement (the pipeline item
-// of the ForEach-Object block being read, for $_ and $PSItem); unplaced when
-// the reader cannot place it, also a variable the command may bind more than
-// once (rel-1-0-10:GAP-1257).
-func (s *psStateScan) fileInfoOf(statement, name string, receiver *psReceiver) psFileInfo {
+// fileInfoOf returns the FileInfo the method name, whose argument list opens
+// at rune index at, is called on: the receiver, else the variable before
+// .name in statement (variableFileInfo; the pipeline item of the
+// ForEach-Object block being read, for $_ and $PSItem); unplaced when the
+// reader cannot place it, also when the command may bind a variable by a
+// name built at run time (rel-1-0-10:GAP-1257, GAP-1276).
+func (s *psStateScan) fileInfoOf(statement, name string, receiver *psReceiver, at int) psFileInfo {
 	switch {
 	case receiver != nil && receiver.call:
 		return receiver.file
@@ -430,37 +452,424 @@ func (s *psStateScan) fileInfoOf(statement, name string, receiver *psReceiver) p
 		return psFileInfo{}
 	}
 	variable := before[k:]
+	if s.dynamicVariables() {
+		return psFileInfo{}
+	}
 	if variable == "_" || variable == "psitem" {
-		if s.item.param != "" {
+		if s.item.placed() {
 			s.itemUses++
 		}
 		return s.item
 	}
-	file := s.fileInfos[variable]
-	if file.param == "" || !s.soleBinding(variable) {
-		return psFileInfo{}
-	}
-	return file
+	return s.variableFileInfo(variable, at)
 }
 
-// soleBinding reports a variable (lower case) the command binds once, with
-// the assignment the reader read: any other assignment, anywhere (also in a
-// script block or after the use), and any use that may bind it (psVariableUses)
-// leave it unplaced (rel-1-0-10:GAP-1257).
-func (s *psStateScan) soleBinding(variable string) bool {
-	if sole, ok := s.sole[variable]; ok {
-		return sole
-	}
+// psVariableCount is what psVariableUses reads of one variable in the whole
+// command.
+type psVariableCount struct {
+	assignments int
+	rebinds     bool
+}
+
+// lowerText returns the command in lower case, read once; false past the
+// reading bounds.
+func (s *psStateScan) lowerText() (string, bool) {
 	if s.lower == "" && s.account(len(s.runes)) {
 		s.lower = strings.ToLower(string(s.runes))
 	}
-	assignments, rebinds := psVariableUses(s.lower, variable, true)
-	sole := !s.budget.over && assignments == 1 && !rebinds
-	if s.sole == nil {
-		s.sole = map[string]bool{}
+	return s.lower, !s.budget.over
+}
+
+// dynamicVariables reports a command that may bind a variable by a name
+// built at run time (psDynamicVariableWrite), read once; also past the
+// reading bounds.
+func (s *psStateScan) dynamicVariables() bool {
+	if s.dynamic == 0 {
+		s.dynamic = 1
+		if lower, ok := s.lowerText(); !ok || psDynamicVariableWrite(lower, s.budget) {
+			s.dynamic = 2
+		}
 	}
-	s.sole[variable] = sole
-	return sole
+	return s.dynamic == 2
+}
+
+// variableFileInfo returns the FileInfo the variable (lower case) is when a
+// method whose argument list opens at rune index at is called on it: the
+// binding read last, and the earlier ones it may still be (maybe). It is
+// unplaced when an assignment of it before the call is one the reader does
+// not place, when one after the call may run before it (the call is in a
+// block, which may run again, or a trap block may run first), and when a use
+// may bind it otherwise (psVariableUses). A plain read of the variable binds
+// nothing (rel-1-0-10:GAP-1257, GAP-1278).
+func (s *psStateScan) variableFileInfo(variable string, at int) psFileInfo {
+	bindings := s.fileInfos[variable]
+	lower, ok := s.lowerText()
+	if len(bindings) == 0 || !ok {
+		return psFileInfo{}
+	}
+	count, ok := s.uses[variable]
+	if !ok {
+		count.assignments, count.rebinds = psVariableUses(lower, variable)
+		if s.uses == nil {
+			s.uses = map[string]psVariableCount{}
+		}
+		s.uses[variable] = count
+	}
+	if count.rebinds || at > len(s.runes) || !s.account(at) {
+		return psFileInfo{}
+	}
+	before, _ := psVariableUses(strings.ToLower(string(s.runes[:at])), variable)
+	if before != len(bindings) || count.assignments > before && (s.braces > 0 || psHasWord(lower, "trap")) {
+		return psFileInfo{}
+	}
+	file := bindings[len(bindings)-1]
+	file.maybe = append([]psFileInfo(nil), bindings[:len(bindings)-1]...)
+	return file
+}
+
+// psHasWord reports the lower-case word in text (lower case), not part of a
+// longer name, a parameter or a variable.
+func psHasWord(text, word string) bool {
+	for k := 0; k < len(text); {
+		j := strings.Index(text[k:], word)
+		if j < 0 {
+			return false
+		}
+		start, end := k+j, k+j+len(word)
+		k = end
+		if (start == 0 || !psCommandWordByte(text[start-1]) && text[start-1] != '$') && (end == len(text) || !psCommandWordByte(text[end])) {
+			return true
+		}
+	}
+	return false
+}
+
+// psCommandWordByte reports a byte of a command or parameter name.
+func psCommandWordByte(c byte) bool { return psVariableNameByte(c) || c == '-' }
+
+// psDynamicMarkers are the lower-case texts of the APIs, drives and
+// commands that can bind a variable by a name known only at run time.
+var psDynamicMarkers = []string{"psvariable", "sessionstate", "variable:", "scriptblock", "invokecommand", "invoke-expression", "powershell]::"}
+
+// psVariableCmdlets are the commands that bind (or return the PSVariable
+// of) a variable they name, with whether they set it; the short aliases are
+// read in command position only.
+var psVariableCmdlets = map[string]bool{
+	"set-variable": true, "new-variable": true, "get-variable": false,
+	"set": true, "sv": true, "nv": true, "gv": false,
+}
+
+// psItemCmdlets are the provider commands that can write a variable: drive
+// item, or its content, at a path built at run time, and Tee-Object, whose
+// -Variable can be one.
+var psItemCmdlets = map[string]bool{
+	"set-item": true, "si": true, "new-item": true, "ni": true, "copy-item": true, "cpi": true, "copy": true, "cp": true,
+	"move-item": true, "mi": true, "move": true, "mv": true, "rename-item": true, "rni": true, "ren": true,
+	"set-content": true, "sc": true, "add-content": true, "ac": true, "tee-object": true, "tee": true,
+}
+
+// psAliasCmdlets make an alias, which can name a variable command (sal q
+// sv) the reader does not read as one.
+var psAliasCmdlets = map[string]bool{"set-alias": true, "sal": true, "new-alias": true, "nal": true, "import-alias": true, "ipal": true}
+
+// psDynamicVariableWrite reports a command (lower case) that may bind a
+// variable by a name the reader cannot read as text: the PSVariable and
+// SessionState APIs, the variable: drive, a script block made of text,
+// Invoke-Expression (iex), [PowerShell]::Create (which may run in this
+// runspace), an alias made by the command, a .Value assignment (of a PSVariable from
+// Get-Variable or Get-Item), Set-Variable, New-Variable or Get-Variable with
+// a name that is not one plain name (psVariableCmdletLiteral), an
+// -OutVariable (or another common variable parameter) of one, a provider
+// item command at a path built at run time (the variable: drive) and a call
+// of a command whose name is known only at run time (& $c, & (...)). A
+// variable a command names literally is read by psVariableUses
+// (rel-1-0-10:GAP-1276).
+func psDynamicVariableWrite(lower string, budget *psBudget) bool {
+	for _, marker := range psDynamicMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	for k := 0; k < len(lower); {
+		j := strings.Index(lower[k:], ".value")
+		if j < 0 {
+			break
+		}
+		k += j + len(".value")
+		if (k == len(lower) || !psVariableNameByte(lower[k])) && psAssignmentNext(lower[k:]) {
+			return true
+		}
+	}
+	for k := 0; k < len(lower); k++ {
+		if !budget.step() {
+			return true
+		}
+		c := lower[k]
+		if k > 0 && (psCommandWordByte(lower[k-1]) || strings.IndexByte("$.:/\\", lower[k-1]) >= 0) {
+			continue
+		}
+		switch {
+		case c == '&' && k+1 < len(lower) && lower[k+1] == '&':
+			k++
+			continue
+		case c == '&' || c == '.' && psCommandPosition(lower, k):
+			if psRunTimeCall(lower[k+1:], budget) {
+				return true
+			}
+			continue
+		case !psCommandWordByte(c):
+			continue
+		}
+		start, end := k, k
+		for end < len(lower) && psCommandWordByte(lower[end]) {
+			end++
+		}
+		word, rest := lower[start:end], lower[end:]
+		k = end - 1
+		setter, cmdlet := psVariableCmdlets[word]
+		switch {
+		case word == "iex", psAliasCmdlets[word] && psCommandPosition(lower, start):
+			return true
+		case cmdlet && (len(word) > 3 || psCommandPosition(lower, start)):
+			if !psVariableCmdletLiteral(rest, setter, budget) {
+				return true
+			}
+		case psItemCmdlets[word] && psCommandPosition(lower, start):
+			if strings.ContainsAny(psStatementRest(rest), "($@") {
+				return true
+			}
+		case psCommonVariableParameter(word):
+			if !psPlainVariableName(strings.TrimPrefix(psFirstWord(strings.TrimLeft(rest, ": \t")), "+")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// psRunTimeCall reports the text after a call operator (& or .) that runs a
+// command whose name is known only at run time ($c, (...)), or a string
+// naming a variable command (psVariableCmdlets) the name of whose variable
+// is not plain, or a provider item command at a path built at run time.
+func psRunTimeCall(rest string, budget *psBudget) bool {
+	rest = strings.TrimLeft(rest, " \t")
+	switch {
+	case rest == "":
+		return false
+	case rest[0] == '$' || rest[0] == '(':
+		return true
+	case rest[0] != '\'' && rest[0] != '"':
+		return false
+	}
+	end := strings.IndexByte(rest[1:], rest[0])
+	if end < 0 {
+		return true
+	}
+	name, args := rest[1:1+end], rest[2+end:]
+	if setter, ok := psVariableCmdlets[name]; ok {
+		return !psVariableCmdletLiteral(args, setter, budget)
+	}
+	return psItemCmdlets[name] && strings.ContainsAny(psStatementRest(args), "($@")
+}
+
+// psCommandPosition reports index k of text in command position: after the
+// start, a statement or pipeline break, a ( or { or an =.
+func psCommandPosition(text string, k int) bool {
+	j := k - 1
+	for j >= 0 && (text[j] == ' ' || text[j] == '\t') {
+		j--
+	}
+	return j < 0 || strings.IndexByte(";|&({}=\r\n", text[j]) >= 0
+}
+
+// psAssignmentNext reports an assignment operator (=, not ==, or a compound
+// one) after optional blanks at the start of text.
+func psAssignmentNext(text string) bool {
+	t := strings.TrimLeft(text, " \t")
+	return strings.HasPrefix(t, "=") && !strings.HasPrefix(t, "==") ||
+		len(t) > 1 && t[1] == '=' && strings.IndexByte("+-*/%?", t[0]) >= 0
+}
+
+// psStatementRest is text up to the end of its statement or pipeline
+// element.
+func psStatementRest(text string) string {
+	if end := strings.IndexAny(text, ";|}\r\n"); end >= 0 {
+		return text[:end]
+	}
+	return text
+}
+
+// psFirstWord is the first argument word of text (psArgumentWordEnd).
+func psFirstWord(text string) string {
+	return text[:psArgumentWordEnd(text, 0, &psBudget{})]
+}
+
+// psCommonVariableParameter reports a common parameter (lower case) that
+// names a variable it binds: -OutVariable, -PipelineVariable,
+// -ErrorVariable, -WarningVariable and -InformationVariable, their aliases
+// and unambiguous prefixes.
+func psCommonVariableParameter(word string) bool {
+	switch word {
+	case "-ov", "-pv", "-ev", "-wv", "-iv":
+		return true
+	}
+	for _, parameter := range []struct {
+		name string
+		min  int
+	}{{"-outvariable", 5}, {"-pipelinevariable", 5}, {"-errorvariable", 7}, {"-warningvariable", 9}, {"-informationvariable", 13}} {
+		if len(word) >= parameter.min && strings.HasPrefix(parameter.name, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// psPlainVariableName reports one variable name (lower case), also quoted
+// or with a scope: no wildcard, expression or variable.
+func psPlainVariableName(word string) bool {
+	if len(word) >= 2 && (word[0] == '\'' || word[0] == '"') && word[len(word)-1] == word[0] {
+		word = word[1 : len(word)-1]
+	}
+	if word == "" {
+		return false
+	}
+	for i := 0; i < len(word); i++ {
+		if !psVariableNameByte(word[i]) && word[i] != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// psArgumentWordEnd returns the index after the argument word of text that
+// starts at k: through its strings, escapes and (...), [...] and {...}
+// groups, to a blank or a statement break outside them.
+func psArgumentWordEnd(text string, k int, budget *psBudget) int {
+	depth := 0
+	for k < len(text) && budget.step() {
+		c := text[k]
+		switch {
+		case c == '`':
+			k += 2
+			continue
+		case c == '\'' || c == '"':
+			end := k + 1
+			for end < len(text) && text[end] != c {
+				if c == '"' && text[end] == '`' {
+					end++
+				}
+				end++
+			}
+			k = end + 1
+			continue
+		case c == '(' || c == '[' || c == '{':
+			depth++
+		case c == ')' || c == ']' || c == '}':
+			if depth == 0 {
+				return k
+			}
+			depth--
+		case depth == 0 && strings.IndexByte(" \t;|&\r\n", c) >= 0:
+			return k
+		}
+		k++
+	}
+	return min(k, len(text))
+}
+
+// psVariableCmdletLiteral reports that the Set-Variable, New-Variable or
+// Get-Variable call (setter: one of the first two) whose arguments (lower
+// case) start at text names one plain variable (psPlainVariableName): by
+// -Name or its first positional word. Besides it only the value (-Value, or
+// the positional word after the name of a setter), -Scope, -Option,
+// -Visibility, -Description and the switches may follow; any other
+// parameter (-Include, -Exclude) or word leaves it not literal.
+func psVariableCmdletLiteral(text string, setter bool, budget *psBudget) bool {
+	var words []string
+	for k := 0; k < len(text) && budget.step(); {
+		c := text[k]
+		if c == ' ' || c == '\t' {
+			k++
+			continue
+		}
+		if strings.IndexByte(";|&)}\r\n", c) >= 0 {
+			break
+		}
+		end := max(psArgumentWordEnd(text, k, budget), k+1)
+		words = append(words, text[k:end])
+		k = end
+	}
+	named := false
+	for _, word := range words {
+		if name, _, _ := psParameterWord(word); name != "" && strings.HasPrefix("name", name) {
+			named = true
+		}
+	}
+	names, positional := 0, 0
+	for k := 0; k < len(words); k++ {
+		name, value, glued := psParameterWord(words[k])
+		if name == "" {
+			switch {
+			case !named && positional == 0:
+				if !psPlainVariableName(words[k]) {
+					return false
+				}
+				names++
+			case !setter || positional > 1 || named && positional > 0:
+				return false
+			}
+			positional++
+			continue
+		}
+		takes := func() (string, bool) {
+			if glued && value != "" {
+				return value, true
+			}
+			if k+1 < len(words) {
+				k++
+				return words[k], true
+			}
+			return "", false
+		}
+		switch {
+		case strings.HasPrefix("name", name):
+			if word, ok := takes(); !ok || !psPlainVariableName(word) {
+				return false
+			}
+			names++
+		case strings.HasPrefix("scope", name),
+			setter && (strings.HasPrefix("value", name) || strings.HasPrefix("visibility", name) ||
+				strings.HasPrefix("option", name) || strings.HasPrefix("description", name)):
+			if _, ok := takes(); !ok {
+				return false
+			}
+		case psVariableCmdletSwitch(name):
+		default:
+			return false
+		}
+	}
+	return names == 1
+}
+
+// psParameterWord splits a parameter word (-name or -name:value, lower case)
+// into its name and glued value; name is "" for any other word.
+func psParameterWord(word string) (name, value string, glued bool) {
+	if len(word) < 2 || word[0] != '-' || word[1] < 'a' || word[1] > 'z' {
+		return "", "", false
+	}
+	name, value, glued = strings.Cut(word[1:], ":")
+	return name, value, glued
+}
+
+// psVariableCmdletSwitch reports a switch (lower-case name or prefix) of
+// the variable cmdlets and the common switches.
+func psVariableCmdletSwitch(name string) bool {
+	for _, full := range []string{"force", "passthru", "valueonly", "whatif", "confirm", "verbose", "debug"} {
+		if len(name) >= 2 && strings.HasPrefix(full, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // psVariableUses reads every use of the variable name in text (both lower
@@ -469,9 +878,9 @@ func (s *psStateScan) soleBinding(variable string) bool {
 // assignment, a foreach variable, a [ref] or parameter ($name after [, ( or
 // ,), a braced, scoped or splatted spelling, and the bare name (Set-Variable
 // name, -OutVariable name, variable:name). A member use ($name.Open, also a
-// file name.txt), a path segment and a -name are not uses; a plain read
-// ($name as an argument) is one when reads is set.
-func psVariableUses(text, name string, reads bool) (assignments int, rebinds bool) {
+// file name.txt), a path segment, a -name and a plain read ($name as an
+// argument or in a string) are not (rel-1-0-10:GAP-1278).
+func psVariableUses(text, name string) (assignments int, rebinds bool) {
 	for k := 0; k < len(text); {
 		j := strings.Index(text[k:], name)
 		if j < 0 {
@@ -507,19 +916,18 @@ func psVariableUses(text, name string, reads bool) (assignments int, rebinds boo
 			strings.HasPrefix(rest, "in") && (len(rest) == 2 || !psVariableNameByte(rest[2])):
 			return assignments, true
 		}
-		if reads {
-			return assignments, true
-		}
 	}
 	return assignments, false
 }
 
 // openBlock reads the { at i, after the statement text, of a pipeline
 // element fed by pipedFrom: the block of a ForEach-Object fed by Get-Item or
-// Get-ChildItem of one path places its pipeline item there. A block inside
-// that one may bind the item: it is unplaced from there to the end of the
-// block (rel-1-0-10:GAP-1257).
-func (s *psStateScan) openBlock(statement, pipedFrom string, i int) {
+// Get-ChildItem of known paths places its pipeline item there, only when
+// whole, that feeding element read whole (no group, block or call cut it,
+// and no pipeline fed it), is that command (rel-1-0-10:GAP-1275). A block
+// inside that one may bind the item: it is unplaced from there to the end of
+// the block (rel-1-0-10:GAP-1257).
+func (s *psStateScan) openBlock(statement, pipedFrom string, whole bool, i int) {
 	s.braces++
 	if s.itemDepth != 0 {
 		s.item = psFileInfo{}
@@ -530,10 +938,10 @@ func (s *psStateScan) openBlock(statement, pipedFrom string, i int) {
 	default:
 		return
 	}
-	if strings.TrimSpace(pipedFrom) == "" {
+	if !whole || strings.TrimSpace(pipedFrom) == "" {
 		return
 	}
-	if item := psFileInfoExpression(pipedFrom, s.budget); item.param != "" {
+	if item := psFileInfoExpression(pipedFrom, s.budget); item.placed() {
 		s.item, s.itemDepth, s.itemOpen, s.itemUses = item, s.braces, i+1, 0
 	}
 }
@@ -563,7 +971,7 @@ func (s *psStateScan) itemBlockSound(end int) bool {
 	}
 	body := strings.ToLower(string(s.runes[s.itemOpen:end]))
 	for _, name := range []string{"_", "psitem"} {
-		if assignments, rebinds := psVariableUses(body, name, false); assignments > 0 || rebinds {
+		if assignments, rebinds := psVariableUses(body, name); assignments > 0 || rebinds {
 			return false
 		}
 	}
@@ -622,11 +1030,11 @@ func (s *psStateScan) dotNetStatement(text string) {
 			return
 		}
 		file := psFileInfoExpression(rest, s.budget)
-		if file.param == "" && psFileInfoType(typeName) {
+		if !file.placed() && psFileInfoType(typeName) {
 			// A variable typed [IO.FileInfo] converts what it is given.
 			file = psFileInfoExpression("[IO.FileInfo]"+strings.TrimSpace(rest), s.budget)
 		}
-		if file.param != "" {
+		if file.placed() {
 			s.bindFileInfo(variable, file)
 		}
 		return
@@ -689,8 +1097,8 @@ func psNewObjectParts(words []psWord) (typeName, arguments string) {
 
 // psFileInfoExpression returns the FileInfo an expression evaluates to: a
 // [IO.FileInfo] cast of a literal, [IO.FileInfo]::new(literal), New-Object
-// IO.FileInfo of a literal (psFileInfoFile), Get-Item or gi of one path
-// (psFileInfoItem), or Get-ChildItem, gci, dir or ls of one path
+// IO.FileInfo of a literal (psFileInfoFile), Get-Item or gi of known paths
+// (psFileInfoItem), or Get-ChildItem, gci, dir or ls of known paths
 // (psFileInfoChildren); unplaced otherwise.
 func psFileInfoExpression(text string, budget *psBudget) psFileInfo {
 	text = strings.TrimSpace(text)
@@ -710,7 +1118,7 @@ func psFileInfoExpression(text string, budget *psBudget) psFileInfo {
 		if value == "" || strings.HasPrefix(value, "::") || !psLiteralArgument(value, budget) {
 			return psFileInfo{}
 		}
-		return psFileInfo{param: "-LiteralPath " + value}
+		return psLiteralFileInfo(value)
 	}
 	words := psWords(text, budget)
 	if len(words) < 2 || budget.over {
@@ -726,7 +1134,7 @@ func psFileInfoExpression(text string, budget *psBudget) psFileInfo {
 		if len(args) != 1 || args[0] == "" || !psLiteralArgument(args[0], budget) {
 			return psFileInfo{}
 		}
-		return psFileInfo{param: "-LiteralPath " + args[0]}
+		return psLiteralFileInfo(args[0])
 	}
 	children := false
 	switch program {
@@ -736,14 +1144,16 @@ func psFileInfoExpression(text string, budget *psBudget) psFileInfo {
 	default:
 		return psFileInfo{}
 	}
-	param := ""
+	// A comma list written with blanks ('a', 'b') is one path array.
+	words = psJoinListWords(words, budget)
+	flag, value := "", ""
 	for k := 1; k < len(words); k++ {
 		word := words[k].text
 		if words[k].quoted || len(word) < 2 || word[0] != '-' {
-			if param != "" {
+			if flag != "" {
 				return psFileInfo{}
 			}
-			param = "-Path " + word
+			flag, value = "-Path", word
 			continue
 		}
 		name := strings.ToLower(word[1:])
@@ -756,22 +1166,31 @@ func psFileInfoExpression(text string, budget *psBudget) psFileInfo {
 		k++
 		switch {
 		case name == "lp" || name == "pspath" || strings.HasPrefix("literalpath", name):
-			param = "-LiteralPath " + words[k].text
+			flag, value = "-LiteralPath", words[k].text
 		case len(name) >= 2 && strings.HasPrefix("path", name):
-			param = "-Path " + words[k].text
+			flag, value = "-Path", words[k].text
 		case children:
 			// A filter, a recursion or any other selection of children
 			// leaves the file unplaced.
 			return psFileInfo{}
 		}
 	}
-	if param == "" || !psLiteralArgument(param[strings.IndexByte(param, ' ')+1:], budget) {
+	if flag == "" {
 		return psFileInfo{}
 	}
+	// A path array (a, b) is each of its paths; one the reader cannot read
+	// leaves the result unplaced (rel-1-0-10:GAP-1277).
+	file := psFileInfo{kind: psFileInfoItem}
 	if children {
-		return psFileInfo{param, psFileInfoChildren}
+		file.kind = psFileInfoChildren
 	}
-	return psFileInfo{param, psFileInfoItem}
+	for _, element := range psSplitArgumentTexts(value, budget) {
+		if element == "" || !psLiteralArgument(element, budget) {
+			return psFileInfo{}
+		}
+		file.params = append(file.params, flag+" "+element)
+	}
+	return file
 }
 
 // psOpenVerdictOf is what a .NET open whose FileMode is args[mode] and
