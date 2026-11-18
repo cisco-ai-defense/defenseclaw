@@ -125,7 +125,9 @@ func g0672Tree(t *testing.T, n, subs, flat int) (string, []string) {
 	for i := 1; i <= n; i++ {
 		name := "h" + strconv.Itoa(i)
 		if err := os.Symlink(filepath.Join(dir, "t"), filepath.Join(dir, name)); err != nil {
-			t.Fatal(err)
+			// A standard Windows user may not hold the symbolic-link
+			// privilege; TestGAP0674WalkMemoBounded skips the same way.
+			t.Skipf("no symbolic links here: %v", err)
 		}
 		names = append(names, name)
 	}
