@@ -4,13 +4,11 @@
 package hookpaths
 
 import (
-	"bytes"
 	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -127,7 +125,7 @@ var networkShares struct {
 }
 
 // hookCalls are the hook calls in progress, by the goroutine that runs
-// each; a call's wait is read and spent only by that goroutine.
+// each (hookCallKey); a call's wait is read and spent only by that goroutine.
 var hookCalls struct {
 	mu    sync.Mutex
 	calls map[uint64]*hookCall
@@ -167,10 +165,10 @@ func callStat(name string) (os.FileInfo, error) {
 }
 
 // stat is callStat for the hook call call (nil: none, pathStat). A loop that
-// stats many paths finds its call once and stats through it: finding the
-// call is a traceback of the goroutine's stack (goroutineID), which cost
-// more than the stats it saved, half of a Windows hook decision for the
-// registration names alone (rel-1-0-10:GAP-1293).
+// stats many paths finds its call once and stats through it: off Windows
+// finding the call is a traceback of the goroutine's stack (goroutineID),
+// and on Windows it was too until hookCallKey, half of a Windows hook
+// decision for the registration names alone (rel-1-0-10:GAP-1293).
 func (call *hookCall) stat(name string) (os.FileInfo, error) {
 	if call == nil {
 		return pathStat(name)
@@ -206,13 +204,16 @@ func (call *hookCall) shareWait() time.Duration {
 // networkShareCallShares answer waits and a tail in all. Within a call it begins
 // nothing more, so the gateway's request and the target resolution it runs are one call.
 func HookCall() (end func()) {
-	id := goroutineID()
+	unlock := lockHookCallKey()
+	id := hookCallKey()
 	if id == 0 {
+		unlock()
 		return func() {}
 	}
 	hookCalls.mu.Lock()
 	defer hookCalls.mu.Unlock()
 	if _, open := hookCalls.calls[id]; open {
+		unlock()
 		return func() {}
 	}
 	if hookCalls.calls == nil {
@@ -224,6 +225,7 @@ func HookCall() (end func()) {
 		hookCalls.mu.Lock()
 		delete(hookCalls.calls, id)
 		hookCalls.mu.Unlock()
+		unlock()
 	}
 }
 
@@ -249,30 +251,13 @@ func memoHookCall() *hookCall {
 
 // currentHookCall is the hook call the calling goroutine runs (nil: none).
 func currentHookCall() *hookCall {
-	id := goroutineID()
+	id := hookCallKey()
 	if id == 0 {
 		return nil
 	}
 	hookCalls.mu.Lock()
 	defer hookCalls.mu.Unlock()
 	return hookCalls.calls[id]
-}
-
-// goroutineID is the runtime's number of the calling goroutine (0: not
-// read), from the first line of its stack: "goroutine N [...". Numbers are
-// not reused while the process runs.
-func goroutineID() uint64 {
-	var buf [64]byte
-	line, ok := bytes.CutPrefix(buf[:runtime.Stack(buf[:], false)], []byte("goroutine "))
-	if !ok {
-		return 0
-	}
-	digits, _, _ := bytes.Cut(line, []byte(" "))
-	id, err := strconv.ParseUint(string(digits), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return id
 }
 
 // networkPathUnanswered reports a path below a network share that has not
