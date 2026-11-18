@@ -177,17 +177,35 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		text, cwd string
 		candidate bool
 	}
-	// collect keeps the distinct readings of a pass; past the readings bound
-	// only those read first are kept, and the pass is cut (dropped).
-	collect := func(list []pending, listed map[key]bool, dropped *bool, reading pending) []pending {
-		if listed[key{reading.text, reading.cwd}] {
+	// collect keeps the distinct readings of a pass, at most
+	// maxSandboxGuestPlacements. Past the bound the pass is cut (dropped): a
+	// plain reading is not kept, and a first reading (guestReadingFirst)
+	// takes the place of the last plain one kept, so the list stays at the
+	// bound (substrate-1 GAP-0624: a here-string call listed ~200k readings)
+	// and a protected tail is still read next to the limit (GAP-0501).
+	// plain holds the indexes of the plain readings kept.
+	collect := func(list []pending, listed map[key]bool, plain *[]int, dropped *bool, reading pending) []pending {
+		at := key{reading.text, reading.cwd}
+		if listed[at] {
 			return list
 		}
-		if len(list) >= maxSandboxGuestPlacements && !guestReadingFirst(reading.text) {
+		first := guestReadingFirst(reading.text)
+		if len(list) >= maxSandboxGuestPlacements {
 			*dropped = true
+			if !first || len(*plain) == 0 {
+				return list
+			}
+			last := (*plain)[len(*plain)-1]
+			*plain = (*plain)[:len(*plain)-1]
+			delete(listed, key{list[last].text, list[last].cwd})
+			listed[at] = true
+			list[last] = reading
 			return list
 		}
-		listed[key{reading.text, reading.cwd}] = true
+		if !first {
+			*plain = append(*plain, len(list))
+		}
+		listed[at] = true
 		return append(list, reading)
 	}
 	placeAll := func(p *pass, list []pending) bool {
@@ -203,19 +221,20 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	simples := &pass{statements: map[string]bool{}}
 	var simpleReadings []pending
 	simplesDropped, simplesListed := false, map[key]bool{}
+	var simplesPlain []int
 	for _, simple := range actionfacts.SimpleCommands(input, facts) {
 		if guestPlacementSkips(simple) {
 			continue
 		}
 		cwd := simple.CWD
 		if path.IsAbs(cwd) {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesDropped, pending{simple.Text, cwd, false})
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, cwd, false})
 		}
 		for _, dir := range dirs {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesDropped, pending{simple.Text, dir, false})
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, false})
 		}
 		for _, dir := range targets {
-			simpleReadings = collect(simpleReadings, simplesListed, &simplesDropped, pending{simple.Text, dir, true})
+			simpleReadings = collect(simpleReadings, simplesListed, &simplesPlain, &simplesDropped, pending{simple.Text, dir, true})
 		}
 		bases := slices.Concat(dirs, targets)
 		if path.IsAbs(cwd) {
@@ -259,12 +278,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	calls := &pass{statements: map[string]bool{}}
 	var callReadings []pending
 	callsDropped, callsListed := false, map[key]bool{}
+	var callsPlain []int
 	for _, call := range guestScriptCalls(command) {
 		for _, dir := range dirs {
-			callReadings = collect(callReadings, callsListed, &callsDropped, pending{call, dir, false})
+			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, false})
 		}
 		for _, dir := range targets {
-			callReadings = collect(callReadings, callsListed, &callsDropped, pending{call, dir, true})
+			callReadings = collect(callReadings, callsListed, &callsPlain, &callsDropped, pending{call, dir, true})
 		}
 		for _, target := range guestCDTargets(call, slices.Concat(dirs, targets), input.ActiveHome) {
 			targets = keep(targets, target)

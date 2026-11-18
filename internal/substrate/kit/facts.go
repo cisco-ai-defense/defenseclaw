@@ -32,11 +32,16 @@ const (
 // in the connectors' file tools: every key the reviewed file-tool schemas
 // read as the path (actionfacts.FileToolPathKeys, root included; substrate-1
 // GAP-0545) and the other file tools' names for a file.
-var pathKeys = map[string]bool{
-	"file_path": true, "filePath": true, "path": true, "notebook_path": true, "root": true,
-	"target_file": true, "filename": true, "old_path": true, "new_path": true,
-	"source": true, "destination": true,
-}
+var pathKeys = func() map[string]bool {
+	keys := map[string]bool{
+		"target_file": true, "filename": true, "old_path": true, "new_path": true,
+		"source": true, "destination": true,
+	}
+	for _, key := range actionfacts.FileToolPathKeys() {
+		keys[key] = true
+	}
+	return keys
+}()
 
 // readTools are tools whose PreToolUse target the gateway may want to see:
 // the kit attaches the file it is about to read.

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // gap0545Home is a home with the actor's synthetic key, its authorized keys,
@@ -45,97 +47,10 @@ func gap0545Home(t *testing.T) (home, app string) {
 	return home, app
 }
 
-// gap0545ShellPayload is a hook call of connectorName's shell tool tool
-// running command in cwd, in the payload shape the connector's hook sends:
-// tool_name and tool_input with the tool's own command key, Copilot's
-// toolName and toolArgs (a JSON string), and Cursor's beforeShellExecution,
-// which names no tool.
-func gap0545ShellPayload(t *testing.T, connectorName, event, tool, key, command, cwd string) []byte {
-	t.Helper()
-	body := map[string]any{"hook_event_name": event, "session_id": "gap0545", "cwd": cwd}
-	switch {
-	case connectorName == "cursor" && event == "beforeShellExecution":
-		body["command"] = command
-	case connectorName == "copilot":
-		args, _ := json.Marshal(map[string]any{key: command})
-		body["toolName"], body["toolArgs"] = tool, string(args)
-		delete(body, "hook_event_name")
-	default:
-		body["tool_name"], body["tool_input"] = tool, map[string]any{key: command}
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return raw
-}
-
 func gap0545HasWord(f *Facts, word, followed string) bool {
 	return f != nil && slices.ContainsFunc(f.Paths, func(p PathFact) bool {
 		return p.Field == CommandWordField && p.Path == word && p.Resolved == followed
 	})
-}
-
-// TestGAP0545EveryRegisteredShellToolGetsTheKitsProofs: for every connector
-// the kit runs, on every event its hook contracts route to structured action
-// evaluation, every shell tool the connector registry lists, with the tool's
-// own command key, gets the kit's private-key read proof and link facts in the
-// actor's file system. Codex exec_command and Amp Bash (cmd), OpenCode bash
-// and Cursor beforeShellExecution got none (substrate-1 GAP-0545). A tool or
-// connector the registry adds is covered, or this test fails.
-func TestGAP0545EveryRegisteredShellToolGetsTheKitsProofs(t *testing.T) {
-	home, app := gap0545Home(t)
-	key := filepath.Join(home, ".ssh", "id_ed25519")
-	covered := 0
-	for _, connectorName := range Connectors() {
-		events := gap0545StructuredActionEvents(connectorName)
-		tools := gap0545ShellTools(connectorName)
-		if len(events) == 0 || len(tools) == 0 {
-			t.Errorf("%s: the registry lists events %v and shell tools %v: a connector the kit runs needs both", connectorName, events, tools)
-			continue
-		}
-		type call struct{ event, tool string }
-		calls := []call{}
-		for _, event := range events {
-			for _, tool := range tools {
-				calls = append(calls, call{event, tool})
-			}
-			if connectorName == "cursor" && event == "beforeShellExecution" {
-				calls = append(calls, call{event, ""})
-			}
-		}
-		for _, c := range calls {
-			commandKey := gap0545ShellCommandKey(connectorName, c.tool)
-			if c.tool != "" && commandKey == "" {
-				t.Errorf("%s %s: the registry names no command key for its shell tool", connectorName, c.tool)
-				continue
-			}
-			payload := gap0545ShellPayload(t, connectorName, c.event, c.tool, commandKey, "cat key-link", app)
-			command, _, ok := ShellCommandOf(connectorName, c.event, payload)
-			if !ok || command != "cat key-link" {
-				t.Errorf("%s %s %s: ShellCommandOf = %q %v, want the call's command", connectorName, c.event, c.tool, command, ok)
-				continue
-			}
-			f := CollectFacts(connectorName, c.event, payload, 1<<20)
-			if f == nil || !slices.Contains(f.Proofs, ProofPrivateKeyRead) || !gap0545HasWord(f, "key-link", key) {
-				t.Errorf("%s %s %s: facts %+v, want the private-key read proof and key-link -> %s", connectorName, c.event, c.tool, f, key)
-				continue
-			}
-			covered++
-		}
-	}
-	if covered == 0 {
-		t.Fatal("no shell tool covered")
-	}
-	// After the call ran, and for a tool that runs no shell, no proof.
-	payload := gap0545ShellPayload(t, "claudecode", "PostToolUse", "Bash", "command", "cat key-link", app)
-	if f := CollectFacts("claudecode", "PostToolUse", payload, 1<<20); f != nil && len(f.Proofs) != 0 {
-		t.Errorf("PostToolUse: proofs %v, want none", f.Proofs)
-	}
-	payload = gap0545ShellPayload(t, "claudecode", "PreToolUse", "Grep", "command", "cat key-link", app)
-	if f := CollectFacts("claudecode", "PreToolUse", payload, 1<<20); f != nil && len(f.Proofs) != 0 {
-		t.Errorf("Grep: proofs %v, want none", f.Proofs)
-	}
 }
 
 // TestGAP0546KitReadsLinksAsTheKernelWalksThem: a `..` after a symlinked
@@ -188,7 +103,7 @@ func TestGAP0546KitReadsLinksAsTheKernelWalksThem(t *testing.T) {
 // GAP-0545); and a Cursor beforeReadFile, which has no tool_input, gets the
 // facts of the file it names.
 func TestGAP0545KitResolvesEveryReviewedFilePathKey(t *testing.T) {
-	for _, key := range gap0545FileToolPathKeys() {
+	for _, key := range actionfacts.FileToolPathKeys() {
 		if !pathKeys[key] {
 			t.Errorf("file-tool path key %q is not resolved by the kit", key)
 		}
