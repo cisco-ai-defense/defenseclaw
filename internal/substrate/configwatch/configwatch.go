@@ -14,8 +14,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package configwatch is the one way a running Substrate component sees a
-// config.yaml change (GAP-0276). Every component used to load config.yaml
+// Package configwatch is how the Substrate code of a running component (the
+// controller, the leader, and the gateway's Substrate settings) sees a
+// config.yaml change (GAP-0276). The gateway's guardrail (hook and /llm
+// modes, rules, profiles) does not follow it: the gateway's config manager
+// reloads the mounted file, on a directory mount when the kubelet swaps its
+// ..data link (GAP-0579), on a managed subPath mount at the pod's restart
+// (GAP-0590). Every component used to load config.yaml
 // once at start, so an edit of the defenseclaw-config ConfigMap reached
 // nothing until a pod restart. A Watcher reads the ConfigMap through the
 // Kubernetes API (no kubelet volume delay, and it works for the managed

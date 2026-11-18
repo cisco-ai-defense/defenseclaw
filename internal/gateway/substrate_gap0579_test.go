@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -153,6 +154,37 @@ func TestGAP0579ConfigMapProfileModeReachesLLMWithoutRestart(t *testing.T) {
 	if got := up.take(); rec.Code != http.StatusOK || len(got) != 1 || !strings.Contains(got[0], gap0487Canary) {
 		t.Fatalf("observe precondition: code=%d upstream=%d body=%.200s", rec.Code, len(got), rec.Body)
 	}
+	// The hook path decides with the generation the actor API server pins
+	// (GAP-0487), so it must see the edit too (GAP-0591). This fixture's
+	// actor API server resolves profiles without the sidecar's profile set,
+	// so its hook answers a CRITICAL call with a block in either mode: the
+	// switch is asserted on the pinned generation, the block after it.
+	hookMode := func() string {
+		t.Helper()
+		g := f.api.generation()
+		if g == nil || g.Config == nil {
+			t.Fatal("the actor API server pins no generation")
+		}
+		return g.Config.Guardrail.Profiles["eng"].Mode
+	}
+	if got := hookMode(); got != "" {
+		t.Fatalf("observe precondition: the hook path's generation has eng mode %q", got)
+	}
+	hook := func(id string) agentHookResponse {
+		t.Helper()
+		ev := claudeToolEvent("PreToolUse", "s579", id, "rm -rf /")
+		ev["cwd"] = "/work"
+		rec := f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-eng2", envelope("claudecode", ev))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("hook %s: %d %s", id, rec.Code, rec.Body)
+		}
+		var out agentHookResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("hook %s: %v %s", id, err, rec.Body)
+		}
+		t.Logf("hook %s: action=%s rules=%v", id, out.Action, out.RuleIDs)
+		return out
+	}
 
 	gap0579KubeletWrite(t, mount, "..2026_11_17_23_48_00.000000002", gap0579Config(t, fixture.dataDir, "action"))
 	deadline := time.Now().Add(10 * time.Second)
@@ -173,6 +205,38 @@ func TestGAP0579ConfigMapProfileModeReachesLLMWithoutRestart(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "SEC-AWS-KEY") {
 		t.Fatalf("the refusal does not name the rule: %.300s", rec.Body)
+	}
+	if got := hookMode(); got != "action" {
+		t.Fatalf("after the live edit the hook path's generation has eng mode %q, want action", got)
+	}
+	if got := hook("h2"); got.Action != "block" || !strings.Contains(strings.Join(got.RuleIDs, ","), "CMD-RM-RF") {
+		t.Fatalf("after the live edit to mode: action the PreToolUse canary was not blocked: %s %v", got.Action, got.RuleIDs)
+	}
+}
+
+// substrate-1:GAP-0591, the negative side of GAP-0579: only the ..data link
+// beside config.yaml stands for a config.yaml change. The kubelet's
+// ..data_tmp link and ..<timestamp> directory, and a ..data entry in any
+// other directory, are no config event, so they start no reload.
+func TestGAP0579DataLinkElsewhereIsNoConfigEvent(t *testing.T) {
+	dir := t.TempDir()
+	m := &ConfigManager{path: filepath.Join(dir, config.DefaultConfigName)}
+	for _, c := range []struct{ name, want string }{
+		{filepath.Join(dir, "..data"), "config"},
+		{filepath.Join(dir, config.DefaultConfigName), "config"},
+		{filepath.Join(dir, "..data_tmp"), ""},
+		{filepath.Join(dir, "..2026_11_17_23_48_00.000000002"), ""},
+		{filepath.Join(dir, "..2026_11_17_23_48_00.000000002", "..data"), ""},
+		{filepath.Join(filepath.Dir(dir), "..data"), ""},
+		{filepath.Join(t.TempDir(), "..data"), ""},
+	} {
+		name, want := c.name, c.want
+		if got := m.classify(name); got != want {
+			t.Errorf("classify(%s) = %q, want %q", name, got, want)
+		}
+		if got := m.matches(name); got != (want == "config") {
+			t.Errorf("matches(%s) = %t", name, got)
+		}
 	}
 }
 

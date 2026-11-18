@@ -2231,11 +2231,14 @@ func (m *ConfigManager) isMountDataSwap(cleaned string) bool {
 }
 
 // classify reports which watched file the fsnotify event refers to:
-// "config" for the primary config.yaml, "env_config" for the AVC-authored
-// env_config.json, or "" for anything else in the watched dirs (state
-// files, sidecar caches, unrelated writes). We watch entire directories
-// rather than files because atomic-write dances (tempfile + rename) fire
-// events on the target's *parent*, not the target itself.
+// "config" for the primary config.yaml or the ..data link beside it (a
+// Kubernetes volume update, isMountDataSwap), "env_config" for the
+// AVC-authored env_config.json, "generation" for config.generation.json, or
+// "" for anything else in the watched dirs (state files, sidecar caches,
+// the kubelet's ..data_tmp and ..<timestamp> entries, unrelated writes). We
+// watch entire directories rather than files because atomic-write dances
+// (tempfile + rename) fire events on the target's *parent*, not the target
+// itself.
 func (m *ConfigManager) classify(path string) string {
 	cleaned := filepath.Clean(path)
 	if equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) || m.isMountDataSwap(cleaned) {
