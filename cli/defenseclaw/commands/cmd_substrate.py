@@ -285,8 +285,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "kubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without "
             "it says what is missing.\n"
             "\n"
-            'The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each '
-            "failed check says how to fix\n"
+            'The last line is "ready for agents" when no check failed and the cluster components (gateway, '
+            "leader, controller,\n"
+            "callout) were checked, which needs --install-file. Without it the last line says that the checks on "
+            "this computer pass\n"
+            'and that the cluster components were not checked. Otherwise it is "not ready" and each failed check '
+            "says how to fix\n"
             "it, and the exit code is 1."
         ),
         example="defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
