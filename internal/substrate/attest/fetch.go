@@ -226,16 +226,62 @@ func fetchFolderClean(family, project string, pkgs []string, command string, fil
 				return false
 			}
 			for _, n := range strings.Split(string(f.Content), "\n") {
-				// Any program in node_modules/.bin may shadow the fetched
-				// package's program (npx puts it first on PATH); the
-				// package itself in node_modules is run from there.
-				if strings.HasPrefix(n, ".bin/") || names[n] {
+				// The package itself in node_modules is run from there.
+				if names[n] {
+					return false
+				}
+				// npx puts node_modules/.bin first on PATH, so a program
+				// there can stand in for the fetched package's program or
+				// for the runtime its script starts. The project's other
+				// tools (tsc, eslint) change nothing.
+				if b, ok := strings.CutPrefix(n, ".bin/"); ok && binShadows(b, names, pkgs, family) {
 					return false
 				}
 			}
 		}
 	}
 	return checked
+}
+
+// fetchRuntimes are the programs npx, or the script of a fetched npm
+// package, start through PATH (#!/usr/bin/env node, the run-script shell).
+var fetchRuntimes = map[string]bool{"node": true, "nodejs": true, "bun": true, "deno": true, "sh": true, "bash": true,
+	"env": true, "npm": true, "npx": true, "pnpm": true, "pnpx": true, "bunx": true, "yarn": true, "corepack": true}
+
+// binShadows reports a node_modules/.bin program that npx could run in
+// place of the fetched package's program or of the runtime it starts: a
+// name of the server, a runtime, or a name that carries the package's own
+// name or scope (the program of @modelcontextprotocol/server-filesystem is
+// mcp-server-filesystem). Compared without case and without the Windows
+// shim suffixes.
+func binShadows(bin string, names map[string]bool, pkgs []string, family string) bool {
+	b := strings.ToLower(bin)
+	for _, ext := range []string{".cmd", ".ps1", ".exe", ".bat"} {
+		b = strings.TrimSuffix(b, ext)
+	}
+	if b == "" {
+		return false
+	}
+	if fetchRuntimes[b] {
+		return true
+	}
+	for n := range names {
+		if strings.EqualFold(n, bin) || strings.EqualFold(n, b) {
+			return true
+		}
+	}
+	for _, p := range pkgs {
+		scope, base := "", strings.ToLower(specName(family, p))
+		if s, r, ok := strings.Cut(strings.TrimPrefix(base, "@"), "/"); ok && strings.HasPrefix(base, "@") {
+			scope, base = s, r
+		}
+		for _, part := range []string{base, scope} {
+			if len(part) >= 3 && strings.Contains(b, part) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // packageJSONClean reports a package.json that gives npx nothing of the

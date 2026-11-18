@@ -71,6 +71,7 @@ func TestGAP0573FetcherFolderShapesFollowTheFailMode(t *testing.T) {
 		"F10 npx unpinned server-everything":             {srv(`{"command":"npx","args":["-y","@modelcontextprotocol/server-everything"]}`), clean, true},
 		"F11 npx in a project with a plain package.json": {srv(`{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}`), map[string]string{"package.json": `{"name":"app","version":"1.0.0","scripts":{"test":"x"}}`}, true},
 		"F12 uvx in a Python project":                    {srv(`{"command":"uvx","args":["mcp-server-git"]}`), map[string]string{"pyproject.toml": "[project]\nname='app'\n"}, true},
+		"F13 npx in a JS project after npm install":      {srv(`{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}`), map[string]string{"package.json": `{"name":"app","version":"1.0.0","devDependencies":{"typescript":"5.6.3"}}`, "node_modules/typescript/package.json": `{"name":"typescript","bin":{"tsc":"bin/tsc"}}`, "node_modules/.bin/tsc": js}, true},
 	}
 	// An installed program outside the folder, and the folder's own bin on
 	// the actor's PATH (E17: the kit resolves it into the folder).
