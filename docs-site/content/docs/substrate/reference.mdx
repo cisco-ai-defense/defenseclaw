@@ -146,7 +146,7 @@ Keys of the `sandbox` section (and of `substrate.admin`) for the runtime:
 | `runtimes` | `[openshell, substrate]` | Where the profile's agents may run. Left out: both. Without `substrate`, its actors get no policy | Intersection |
 | `sandbox_class` | `gvisor`, `microvm` | The weakest isolation an actor may run in. Unset: `substrate.default_sandbox_class` | `microvm` wins |
 | `idle_suspend_after` | Go duration, 1m or more | Replaces `substrate.idle_suspend_after` | The minimum |
-| `idle_suspend_tasks` | `true` or `false` | A running `--task` or `--batch` run of the profile may be idle-suspended (by default it is exempt). Idle needs low CPU from the controller's CPU feed (`--usage-listen`); without one nothing running is idle | `true` wins |
+| `idle_suspend_tasks` | `true` or `false` | A running `--task` or `--batch` run of the profile may be idle-suspended (by default it is exempt). Without the controller's CPU feed (`--usage-listen`), idle follows `substrate.idle_suspend_without_cpu` | `true` wins |
 | `unattended_asks` | `deny`, `queue` | What an unattended run's ask does. Unset: `substrate.unattended.asks` | `deny` wins |
 | `ask_timeout` | Go duration, 1m to 24h | How long a queued ask waits before it is denied. Unset: `substrate.unattended.ask_timeout` | The minimum |
 | `ask_hosts` | host names or `*.<host>` | Allowed hosts an agent reaches only after a person approves (the egress callout asks; `substrate approvals` answers). They never open a host the agent's allow list doesn't have | Added together |
