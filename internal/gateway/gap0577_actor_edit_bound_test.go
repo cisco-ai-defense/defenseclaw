@@ -68,13 +68,13 @@ func TestGAP0577SemanticWorkBounds(t *testing.T) {
 		for i := range edits {
 			edits[i] = agentHookConfigTextEdit{old: "ZZ", new: "ZZ"}
 		}
-		reason, _ := sandboxAgentHookRegisteredChange(context.Background(), gatewayconnector.AgentHookConfigClaudeSettings, agentHookConfigChange{edits: edits}, [][]byte{base})
+		reason, _ := sandboxAgentHookRegisteredChange(context.Background(), gatewayconnector.AgentHookConfigClaudeSettings, agentHookConfigChange{edits: edits}, base)
 		if reason == "" {
 			t.Fatalf("%d applicable edits were allowed", n)
 		}
 	}
 	for _, n := range []int{65536, 65537, 131072} {
-		reason, _ := sandboxAgentHookRegisteredChange(context.Background(), gatewayconnector.AgentHookConfigClaudeSettings, agentHookConfigChange{edits: []agentHookConfigTextEdit{{old: "ZZ", new: strings.Repeat("x", n)}}}, [][]byte{base})
+		reason, _ := sandboxAgentHookRegisteredChange(context.Background(), gatewayconnector.AgentHookConfigClaudeSettings, agentHookConfigChange{edits: []agentHookConfigTextEdit{{old: "ZZ", new: strings.Repeat("x", n)}}}, base)
 		if reason == "" {
 			t.Fatalf("%d text bytes were allowed", n)
 		}
@@ -99,7 +99,7 @@ func TestGAP0577SemanticWorkBounds(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	reason, _ := sandboxAgentHookRegisteredChange(ctx, gatewayconnector.AgentHookConfigClaudeSettings, agentHookConfigChange{edits: []agentHookConfigTextEdit{{old: "ZZ", new: "YY"}}}, [][]byte{base})
+	reason, _ := sandboxAgentHookRegisteredChange(ctx, gatewayconnector.AgentHookConfigClaudeSettings, agentHookConfigChange{edits: []agentHookConfigTextEdit{{old: "ZZ", new: "YY"}}}, base)
 	if !strings.Contains(reason, "canceled") {
 		t.Fatalf("cancellation ignored: %s", reason)
 	}

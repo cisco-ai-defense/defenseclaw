@@ -87,7 +87,7 @@ func TestGAP0577SemanticProperty(t *testing.T) {
 			request.Input.Args, _ = json.Marshal(actorInput)
 			request.Input.ActiveHome = sandboxauth.SandboxHome
 			request.Input.CWD = gap0264ActorWorkdir
-			actor := sandboxAgentHookConfigFindings(gapNF6Facts(context.Background(), row.file), request, nil)
+
 			verdict := func(findings []RuleFinding) string {
 				if len(findings) == 0 {
 					return "allow/NONE"
@@ -101,14 +101,32 @@ func TestGAP0577SemanticProperty(t *testing.T) {
 				}
 				return "alert/" + f.Severity + "/" + f.RuleID
 			}
-			l, a := verdict(laptop), verdict(actor)
-			gapNF6Probe(t, row.name, row.file, row.input, l, a)
-			if !strings.HasPrefix(l, row.want+"/") {
-				t.Fatalf("laptop=%s want %s", l, row.want)
-			}
-			// Equality is stronger than never-weaker, and also pins benign controls.
-			if l != a {
-				t.Errorf("laptop=%s actor=%s", l, a)
+			for _, withFacts := range []bool{true, false} {
+				ctx := context.Background()
+				if withFacts {
+					ctx = gapNF6Facts(ctx, row.file)
+				}
+				actor := sandboxAgentHookConfigFindings(ctx, request, nil)
+				l, a := verdict(laptop), verdict(actor)
+				gapNF6Probe(t, fmt.Sprintf("%s/facts=%t", row.name, withFacts), row.file, row.input, l, a)
+				if !strings.HasPrefix(l, row.want+"/") {
+					t.Fatalf("laptop=%s want %s", l, row.want)
+				}
+				// T6: without a snapshot every changed substring lacks its
+				// actual key context, including whole-JSON old_string values
+				// that could be nested under a reserved env key. Pin the
+				// ambiguity refusal separately from exact benign parity.
+				ambiguous := !withFacts
+				if ambiguous {
+					if a != "block/CRITICAL/"+agentHookConfigDisableRuleID {
+						t.Errorf("no-copy ambiguous span: laptop=%s actor=%s", l, a)
+					}
+					continue
+				}
+				// Equality proves both actor >= laptop and benign parity.
+				if l != a {
+					t.Errorf("facts=%t laptop=%s actor=%s", withFacts, l, a)
+				}
 			}
 		})
 	}
@@ -118,11 +136,12 @@ const gapNF6Seed int64 = 5770600
 
 func gapNF6PropertyRows(t *testing.T) []gapNF6ParityRow {
 	t.Helper()
-	// 128 renderings x 10 mutations x 3 edit shapes = 3840 deterministic cases.
+	// 128 renderings x 12 mutations x 3 edit shapes x 2 fact modes = 9216 cases.
+	// Half the mutations are benign. Shape 2 splits the mutation across steps.
 	// Sorted input plus seeded key shuffling makes the byte corpus reproducible.
 	var rows []gapNF6ParityRow
 	for rendering := 0; rendering < 128; rendering++ {
-		for mutation := 0; mutation < 10; mutation++ {
+		for mutation := 0; mutation < 12; mutation++ {
 			seed := gapNF6Seed + int64(rendering)
 			var doc map[string]any
 			if err := json.Unmarshal([]byte(gap0433LaptopSettings), &doc); err != nil {
@@ -132,7 +151,7 @@ func gapNF6PropertyRows(t *testing.T) []gapNF6ParityRow {
 			doc["x"] = []any{"array", map[string]any{"model": "nested"}}
 			doc["disableAllHooks"] = false
 			doc["env"] = map[string]any{"NODE_OPTIONS": "--max-old-space-size=4096", "LD_LIBRARY_PATH": "/opt/lib", "BASH_ENV": "/opt/good.sh"}
-			if mutation == 9 {
+			if rendering%2 == 0 && mutation == 5 {
 				doc["env"].(map[string]any)["NODE_OPTIONS"] = "--require=/opt/good.js"
 			}
 			before := gapNF6Render(doc, rand.New(rand.NewSource(seed)))
@@ -148,23 +167,31 @@ func gapNF6PropertyRows(t *testing.T) []gapNF6ParityRow {
 			case 3:
 				doc["disableAllHooks"] = true
 			case 4:
-				doc["env"].(map[string]any)["LD_LIBRARY_PATH"] = "/tmp/evil"
+				if rendering%2 == 0 {
+					doc["env"].(map[string]any)["LD_LIBRARY_PATH"] = "/tmp/evil"
+				} else {
+					doc["env"].(map[string]any)["BASH_ENV"] = "/tmp/evil.sh"
+				}
 			case 5:
 				doc["env"].(map[string]any)["NODE_OPTIONS"] = []string{"--require=/tmp/x.js", "--require=\"/tmp/x.js\"", "--require /tmp/x.js", "--require '/tmp/x.js'"}[rendering%4]
 			case 6:
-				doc["env"].(map[string]any)["BASH_ENV"] = "/tmp/evil.sh"
+				doc["model"] = "LD_LIBRARY_PATH --require=/tmp/benign.js"
+				want = "allow"
 			case 7:
-				if rendering%2 == 0 {
-					doc["model"] = "LD_LIBRARY_PATH --require=/tmp/benign.js"
-				} else {
-					doc["x"] = []any{"LD_LIBRARY_PATH --require=/tmp/benign.js", map[string]any{"model": "changed nested"}}
-				}
-				doc["alwaysThinkingEnabled"] = true
+				doc["x"] = []any{"LD_LIBRARY_PATH --require=/tmp/benign.js", map[string]any{"model": "changed nested"}}
 				want = "allow"
 			case 8:
-				doc["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)["command"] = "/bin/true"
+				doc["env"].(map[string]any)["ORDINARY"] = "normal"
+				want = "allow"
 			case 9:
-				doc["env"].(map[string]any)["NODE_OPTIONS"] = "--require=/tmp/evil.js"
+				doc["alwaysThinkingEnabled"] = true
+				want = "allow"
+			case 10:
+				doc["permissions"] = map[string]any{"allow": []any{"Read"}}
+				want = "allow"
+			case 11:
+				doc["model"] = "after quote\" slash/ newline\n"
+				want = "allow"
 			}
 			after := gapNF6Render(doc, rand.New(rand.NewSource(seed)))
 			for shape := 0; shape < 3; shape++ {
@@ -177,17 +204,19 @@ func gapNF6PropertyRows(t *testing.T) []gapNF6ParityRow {
 				tool := "Edit"
 				if shape == 2 {
 					tool = "MultiEdit"
-					// First a JSON-equivalent layout edit, followed by the semantic change.
+					// A temporary token splits the protected/benign change over
+					// multiple replacements. Only the final document is written.
 					input = map[string]any{"file_path": "{H}/.claude/settings.json", "edits": []any{
 						map[string]any{"old_string": before, "new_string": " \n" + before},
-						map[string]any{"old_string": old, "new_string": newText},
+						map[string]any{"old_string": old, "new_string": "__nf7_transition__"},
+						map[string]any{"old_string": "__nf7_transition__", "new_string": newText},
 					}}
 				}
 				rows = append(rows, gapNF6ParityRow{name: fmt.Sprintf("property seed=%d render=%d mutation=%d shape=%d", seed, rendering, mutation, shape), tool: tool, input: input, file: before, want: want})
 			}
 		}
 	}
-	t.Logf("PROPERTY seed=%d..%d cases=%d", gapNF6Seed, gapNF6Seed+127, len(rows))
+	t.Logf("PROPERTY seed=%d..%d cases=%d", gapNF6Seed, gapNF6Seed+127, len(rows)*2)
 	return rows
 }
 

@@ -83,7 +83,9 @@ type gapNF6ParityRow struct {
 	want, file, actor string
 }
 
-func gapNF6Parity(t *testing.T) {
+func gapNF6Parity(t *testing.T) { gapNF6ParityModes(t, true) }
+
+func gapNF6ParityModes(t *testing.T, withFacts bool) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
 	}
@@ -369,7 +371,7 @@ func gapNF6Parity(t *testing.T) {
 	}
 
 	gap0577 = append(gap0577,
-		parityRow{name: "nf6 prefix switch then restore", file: withSwitch, tool: "MultiEdit", want: "allow", actor: "block", input: map[string]any{"file_path": settings, "edits": []any{
+		parityRow{name: "nf6 prefix switch then restore", file: withSwitch, tool: "MultiEdit", want: "allow", input: map[string]any{"file_path": settings, "edits": []any{
 			map[string]any{"old_string": `"disableAllHooks":false`, "new_string": `"disableAllHooks":true`},
 			map[string]any{"old_string": `"disableAllHooks":true`, "new_string": `"disableAllHooks":false`},
 		}}},
@@ -378,6 +380,10 @@ func gapNF6Parity(t *testing.T) {
 			map[string]any{"old_string": `"hooksDisabled":false`, "new_string": `"hooksDisabled":true`},
 		}}},
 	)
+	gap0577 = append(gap0577, parityRow{
+		name: "nf7 ambiguous LD-vs-model value", file: with(`"model":"/opt/lib"`), tool: "Edit", want: "allow",
+		input: map[string]any{"file_path": settings, "old_string": `"/opt/lib"`, "new_string": `"/tmp/evil"`},
+	})
 	rows = append(rows, gap0577...)
 	for _, probe := range rows {
 		t.Run(probe.name, func(t *testing.T) {
@@ -391,13 +397,30 @@ func gapNF6Parity(t *testing.T) {
 			laptopInput := gap0264Expand(probe.input, project, home).(map[string]any)
 			actorInput := gap0264Expand(probe.input, gap0264ActorWorkdir, sandboxauth.SandboxHome).(map[string]any)
 			lAction, lSeverity, lRules := gap0433Verdict(t, api, context.Background(), project, probe.tool, laptopInput)
-			cAction, cSeverity, cRules := gap0433Verdict(t, api, gapNF6Facts(actor(false), file), gap0264ActorWorkdir, probe.tool, actorInput)
-			mAction, mSeverity, mRules := gap0433Verdict(t, api, gapNF6Facts(actor(true), file), gap0264ActorWorkdir, probe.tool, actorInput)
+			copyCtx, mountCtx := actor(false), actor(true)
+			if withFacts {
+				copyCtx, mountCtx = gapNF6Facts(copyCtx, file), gapNF6Facts(mountCtx, file)
+			}
+			cAction, cSeverity, cRules := gap0433Verdict(t, api, copyCtx, gap0264ActorWorkdir, probe.tool, actorInput)
+			mAction, mSeverity, mRules := gap0433Verdict(t, api, mountCtx, gap0264ActorWorkdir, probe.tool, actorInput)
 			t.Logf("PARITY %-42s laptop=%s/%s %v copy=%s/%s %v mount=%s/%s %v", probe.name,
 				lAction, lSeverity, lRules, cAction, cSeverity, cRules, mAction, mSeverity, mRules)
-			gapNF6Probe(t, probe.name, file, probe.input, lAction+"/"+lSeverity+"/"+strings.Join(lRules, ","), cAction+"/"+cSeverity+"/"+strings.Join(cRules, ",")+";"+mAction+"/"+mSeverity+"/"+strings.Join(mRules, ","))
+			gapNF6Probe(t, fmt.Sprintf("%s/facts=%t", probe.name, withFacts), file, probe.input, lAction+"/"+lSeverity+"/"+strings.Join(lRules, ","), cAction+"/"+cSeverity+"/"+strings.Join(cRules, ",")+";"+mAction+"/"+mSeverity+"/"+strings.Join(mRules, ","))
 			if lAction != probe.want {
 				t.Fatalf("laptop oracle %s/%s %v, want %s", lAction, lSeverity, lRules, probe.want)
+			}
+			if !withFacts && (probe.tool == "Edit" || probe.tool == "MultiEdit") {
+				expected := "block"
+				if probe.name == "settings home Edit keeps hooks" || probe.name == "rvnf5 count bound 64" {
+					expected = "allow"
+				}
+				if cAction != expected || mAction != expected {
+					t.Errorf("no-copy: copy=%s mount=%s, want %s (T6 ambiguity ruling)", cAction, mAction, expected)
+				}
+				if expected == "block" && (cSeverity != "CRITICAL" || mSeverity != "CRITICAL") {
+					t.Errorf("ambiguous edits must be CRITICAL, copy=%s mount=%s", cSeverity, mSeverity)
+				}
+				return
 			}
 			if probe.actor != "" {
 				if cAction != probe.actor || mAction != probe.actor {

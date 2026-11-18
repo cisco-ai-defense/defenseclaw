@@ -196,6 +196,9 @@ func (a *APIServer) substrateEvaluationContext(ctx context.Context, reg registry
 		Routes:  []sandboxauth.Route{class},
 		Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy}, RegistrationID: reg.Key,
 	}
+	// ext_proc supplies MCP arguments, not an actor filesystem view.
+	// Preserve any existing kit envelope on ctx; never manufacture facts
+	// by reading this gateway's same-named files for a no-copy callout.
 	ctx = sandboxauth.WithRequest(ctx, binding, nil)
 	ctx = withSubstrateActor(ctx, verifiedSubstrateActor(reg.Atespace, reg.Name, reg.UID,
 		identity.ActorSubjectPrefix+reg.Atespace+"/"+reg.Name, reg.Key))

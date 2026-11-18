@@ -119,14 +119,20 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 }
 
 // attachAgentHookBefore supplies exact current settings bytes for semantic
-// Edit/MultiEdit judgement. One bounded read, only for Claude settings edits;
+// native-edit and replacement judgement. One bounded read for Claude settings;
 // unrelated calls attach nothing. No digest pass over an oversized file.
 func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) int64 {
-	if connectorName != "claudecode" || (tool != "Edit" && tool != "MultiEdit") {
+	if connectorName != "claudecode" {
+		return budget
+	}
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "edit", "edit_file", "str_replace", "multiedit", "multi_edit", "multi-edit",
+		"write", "write_file", "writefile", "write-file", "create", "create_file":
+	default:
 		return budget
 	}
 	for _, pf := range f.Paths {
-		if pf.Field != "tool_input.file_path" {
+		if pf.Field != "tool_input.file_path" && pf.Field != "tool_input.filePath" && pf.Field != "tool_input.path" {
 			continue
 		}
 		p := filepath.ToSlash(pf.Abs)
@@ -157,6 +163,12 @@ func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) i
 				}
 			}
 			file.Close()
+		}
+		if os.IsNotExist(err) && pf.Type == "missing" {
+			// A missing file is an exact empty before-state, not a failed read.
+			a.Size, a.Truncated = 0, false
+			sum := sha256.Sum256(nil)
+			a.SHA256 = hex.EncodeToString(sum[:])
 		}
 		if a.Truncated {
 			f.Truncated = true
