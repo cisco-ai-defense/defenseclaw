@@ -571,7 +571,7 @@ func (g *GuardrailInspector) recordRecoveredPanic(ctx context.Context) {
 // Returns (ctx, endFn). endFn is always non-nil so callers can
 // unconditionally `defer end(...)` without a nil guard.
 func (g *GuardrailInspector) startPhaseSpan(ctx context.Context, phase string) (context.Context, func(action, severity string, latency time.Duration)) {
-	if g.tracer == nil || g.tracer.startPhase == nil {
+	if g.tracer == nil || g.tracer.startPhase == nil || ctx.Value(guardrailNoSpansKey{}) != nil {
 		return ctx, func(string, string, time.Duration) {}
 	}
 	phaseCtx, end := g.tracer.startPhase(ctx, phase)
@@ -1136,9 +1136,49 @@ func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, co
 	return verdict
 }
 
+// InspectMidStreamAgeDue is the mid-stream check of a stream hold that is due
+// by age only (rel-1-0-10:GAP-0625, proxy_stream_tail.go). A held byte waits
+// at most streamHoldMaxAge for a check, so a slow stream runs this one about
+// every 100 ms. With scanner_mode remote or both and an AI Defense client,
+// it is the full check (InspectMidStream: AI Defense reads every byte before
+// it is sent, as before the age bound; full true). Otherwise it is the
+// local rules and the policy, as scanner_mode local decides, with no span
+// (full false): the span per tick is the cost it saves.
+func (g *GuardrailInspector) InspectMidStreamAgeDue(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) (*ScanVerdict, bool) {
+	if sm := g.scannerMode; (sm == "remote" || sm == "both") && !g.managedMode && g.currentCiscoInspector() != nil {
+		return g.InspectMidStream(ctx, direction, content, messages, model, mode), true
+	}
+	if g.managedMode {
+		// As InspectMidStream: the managed install's mid-stream check is
+		// the AI Defense check of the full completion after the stream.
+		return allowVerdict("ai-defense"), false
+	}
+	return g.inspectRegexOnlyRemote(context.WithValue(ctx, guardrailNoSpansKey{}, true), direction, content, messages, model, mode, false), false
+}
+
+// MidStreamDecidesAsFinal reports that the mid-stream check of a completion
+// decides as its final check does: not on a managed install (the mid-stream
+// check reads nothing there; AI Defense reads the whole completion after the
+// stream), and only with the regex_only strategy for completions (a judge
+// runs in the final check only). Only then does the proxy send the initial
+// buffer of a stream that went quiet before its end (rel-1-0-10:GAP-0628).
+func (g *GuardrailInspector) MidStreamDecidesAsFinal() bool {
+	return !g.managedMode && g.effectiveStrategy("completion") == "regex_only"
+}
+
+// guardrailNoSpansKey marks a check that opens no phase span
+// (InspectMidStreamAgeDue).
+type guardrailNoSpansKey struct{}
+
 // inspectRegexOnly is the original flow: regex patterns produce verdicts,
 // no LLM involvement. Backward-compatible with pre-strategy behavior.
 func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	return g.inspectRegexOnlyRemote(ctx, direction, content, messages, model, mode, true)
+}
+
+// inspectRegexOnlyRemote is inspectRegexOnly; remote false leaves AI
+// Defense out whatever the scanner mode (InspectMidStreamAgeDue).
+func (g *GuardrailInspector) inspectRegexOnlyRemote(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string, remote bool) *ScanVerdict {
 	ciscoClient := g.currentCiscoInspector()
 	var localResult *ScanVerdict
 	var ciscoResult *ScanVerdict
@@ -1166,7 +1206,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 		return g.finalize(ctx, direction, model, mode, content, localResult, localResult, nil)
 	}
 
-	if (sm == "remote" || sm == "both") && ciscoClient != nil && len(messages) > 0 {
+	if remote && (sm == "remote" || sm == "both") && ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
 		ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)

@@ -997,7 +997,7 @@ func (reaper *RetentionReaper) drainCorrelationState(
 		correlationStage{RetentionCorrelationReceipts, []any{unixNano(now)}, false},
 		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff), unixNano(staleActive)}, false},
 		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff), reaper.batchSize(), unixNano(staleActive), reaper.batchSize()}, false},
-		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff), unixNano(staleActive)}, false},
 		correlationStage{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}, false},
 	)
 	deadline := reaper.hooks.now().Add(reaper.correlationBudget())
@@ -1241,6 +1241,21 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 		// held the writer connection for 86 s at 100% CPU after every gateway
 		// start, and every hook waiting for that connection failed closed
 		// (GAP-1862, GAP-1908).
+		//
+		// protected_nodes keep their edges whatever the age: the events of
+		// unexpired receipts, the last event of an active cursor, and the start
+		// event and operation node of an open pending operation. Nothing that
+		// resumes a session reads a relationship (the hook path reads its
+		// cursor and pending operations, and records again an edge it reports
+		// again), so the session, agent, lifecycle, execution and turn nodes of
+		// live state (live_nodes) keep their edges only inside the day window,
+		// the fourth argument: the size cap's shorter cutoff never takes the
+		// recent graph of a live session, and an edge older than the window
+		// goes even on a session resumed every day, which used to keep its
+		// whole history for as long as it lived (rel-1-0-10:GAP-0034). With
+		// day retention off (0 days) and on a Secure Client store the fourth
+		// argument is the epoch: live state keeps its edges at any age there,
+		// as before.
 		return `DELETE FROM correlation_relationships WHERE rowid IN (
 			WITH protected_nodes(kind, id) AS (
 				SELECT 'semantic_event', semantic_event_id FROM correlation_receipts
@@ -1249,7 +1264,13 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 					WHERE expires_time_unix_nano >= ? AND conflicts_with_semantic_event_id IS NOT NULL
 				UNION SELECT 'semantic_event', last_semantic_event_id FROM correlation_cursors
 					WHERE active=1 AND last_semantic_event_id IS NOT NULL
-				UNION SELECT 'session', session_id FROM correlation_cursors WHERE active=1
+				UNION SELECT 'semantic_event', start_semantic_event_id FROM correlation_pending_operations
+					WHERE status='active'
+				UNION SELECT CASE operation_type WHEN 'model' THEN 'model_request'
+					ELSE 'tool_invocation' END, operation_id FROM correlation_pending_operations
+					WHERE status='active'
+			), live_nodes(kind, id) AS (
+				SELECT 'session', session_id FROM correlation_cursors WHERE active=1
 				UNION SELECT 'agent', agent_id FROM correlation_cursors WHERE active=1
 				UNION SELECT 'lifecycle', lifecycle_id FROM correlation_cursors
 					WHERE active=1 AND lifecycle_id IS NOT NULL
@@ -1257,8 +1278,6 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 					WHERE active=1 AND execution_id IS NOT NULL
 				UNION SELECT 'turn', active_turn_id FROM correlation_cursors
 					WHERE active=1 AND active_turn_id IS NOT NULL
-				UNION SELECT 'semantic_event', start_semantic_event_id FROM correlation_pending_operations
-					WHERE status='active'
 				UNION SELECT 'session', session_id FROM correlation_pending_operations
 					WHERE status='active' AND session_id IS NOT NULL
 				UNION SELECT 'turn', turn_id FROM correlation_pending_operations
@@ -1267,9 +1286,6 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 					WHERE status='active' AND agent_id IS NOT NULL
 				UNION SELECT 'execution', execution_id FROM correlation_pending_operations
 					WHERE status='active' AND execution_id IS NOT NULL
-				UNION SELECT CASE operation_type WHEN 'model' THEN 'model_request'
-					ELSE 'tool_invocation' END, operation_id FROM correlation_pending_operations
-					WHERE status='active'
 			)
 			SELECT relationship.rowid FROM correlation_relationships AS relationship
 			WHERE relationship.last_seen_time_unix_nano < ?
@@ -1283,6 +1299,11 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				AND EXISTS (SELECT 1 FROM protected_nodes AS node
 					WHERE node.id=evidence.semantic_event_id AND node.kind='semantic_event')
 			)
+			AND (relationship.last_seen_time_unix_nano < ? OR (
+				NOT EXISTS (SELECT 1 FROM live_nodes AS live_node WHERE
+					live_node.kind=relationship.from_kind AND live_node.id=relationship.from_id)
+				AND NOT EXISTS (SELECT 1 FROM live_nodes AS live_node WHERE
+					live_node.kind=relationship.to_kind AND live_node.id=relationship.to_id)))
 			ORDER BY relationship.last_seen_time_unix_nano, relationship.relationship_id LIMIT ?
 		)`, nil
 	case RetentionCorrelationEvents:
