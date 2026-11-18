@@ -67,7 +67,7 @@ func (reaper *checkingFakeRetentionReaper) StoreOverCapStart(context.Context) (b
 // substrate-1:GAP-0538 (b): a size-check tick under the cap only reads the
 // page counts; the full pass runs when the store is near the cap or the
 // six-hour pass is due. After a pass that left the store over the cap with
-// nothing it could delete, the checks wait ten minutes before another pass.
+// nothing it could delete, the checks wait RetentionSizeCapShortfallInterval before another pass.
 func TestRetentionControllerSizeCheckRunsAPassOnlyNearTheCapOrWhenDue(t *testing.T) {
 	reaper := &checkingFakeRetentionReaper{cappedFakeRetentionReaper: &cappedFakeRetentionReaper{
 		fakeRetentionReaper: newFakeRetentionReaper(7),
@@ -132,13 +132,13 @@ func TestRetentionControllerSizeCheckRunsAPassOnlyNearTheCapOrWhenDue(t *testing
 		t.Fatalf("near the cap: %d passes, want 2", got)
 	}
 
-	// That pass could not meet the cap: the checks wait ten minutes.
+	// That pass could not meet the cap: the checks wait RetentionSizeCapShortfallInterval.
 	checks := reaper.checks.Load()
 	for elapsed := RetentionSizeCapCheckInterval; elapsed < RetentionSizeCapShortfallInterval; elapsed += RetentionSizeCapCheckInterval {
 		tick()
 	}
 	if got := runs(); got != 2 || reaper.checks.Load() != checks {
-		t.Fatalf("after a shortfall: %d passes, %d new checks; want no pass and no check for ten minutes",
+		t.Fatalf("after a shortfall: %d passes, %d new checks; want no pass and no check for RetentionSizeCapShortfallInterval",
 			got, reaper.checks.Load()-checks)
 	}
 	advance(RetentionSizeCapCheckInterval)
