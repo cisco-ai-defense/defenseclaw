@@ -72,10 +72,13 @@ var (
 // resource anchor; body-level device IDs and hostnames are deliberately not
 // duplicated.
 type endpointInventoryComponent struct {
-	id                          string
-	componentType               string
-	signal                      string
-	product                     string
+	id            string
+	componentType string
+	signal        string
+	product       string
+	// vendor is the catalog vendor of the agent whose folder holds a skill or
+	// plugin entry; who published the skill is skillPublisher.
+	vendor                      string
 	active                      bool
 	itemName                    string
 	itemDescription             string
@@ -134,6 +137,8 @@ type endpointInventoryComponent struct {
 	// part skillManifestPart of skillManifestParts of its text
 	// (managed_skill_manifest.go).
 	skillManifestHash  string
+	skillManifestSize  int64
+	skillVersion       string
 	skillManifest      string
 	skillManifestPart  int
 	skillManifestParts int
@@ -1612,6 +1617,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawAIDiscoveryScanID:                    observability.Present(scanID),
 			DefenseClawAIDiscoverySignalID:                  observability.Present(component.id),
 			DefenseClawAIDiscoverySource:                    observability.Present(source),
+			DefenseClawAIComponentVendor:                    aiDiscoveryV8OptionalText(component.vendor),
 			DefenseClawAIComponentProduct:                   aiDiscoveryV8OptionalText(component.product),
 			DefenseClawInventoryItemName:                    aiDiscoveryV8OptionalText(component.itemName),
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
@@ -1664,6 +1670,10 @@ func emitEndpointInventoryComponent(
 		}
 		if component.skillManifestHash != "" {
 			input.DefenseClawInventorySkillManifestHash = observability.Present(component.skillManifestHash)
+			input.DefenseClawInventorySkillManifestSize = observability.Present(component.skillManifestSize)
+		}
+		if component.skillVersion != "" {
+			input.DefenseClawInventorySkillVersion = observability.Present(component.skillVersion)
 		}
 		if component.skillManifest != "" {
 			input.DefenseClawInventorySkillManifest = observability.Present(component.skillManifest)
@@ -1989,19 +1999,19 @@ func discoveredEntriesFromReport(
 			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
 			shared[scope+"/"+name] = append(shared[scope+"/"+name], len(components))
 			components = append(components, endpointInventoryComponent{
-				id:              endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
-				componentType:   kind,
-				signal:          inventoryStableToken(signal.SignatureID, 128),
-				product:         inventoryStableToken(signal.Product, 128),
-				active:          true,
-				itemName:        name,
-				itemDescription: "",
-				agentConnector:  connectorSlug,
-				agentInstalled:  &installed,
-				userID:          signal.UserID,
-				userIDKind:      discoveryUserIDKind(signal.UserID),
-				userName:        signal.UserName,
-				userEmail:       discoveryUserEmail(signal),
+				id:             endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
+				componentType:  kind,
+				signal:         inventoryStableToken(signal.SignatureID, 128),
+				product:        inventoryStableToken(signal.Product, 128),
+				vendor:         inventorySafeBounded(signal.Vendor, 256),
+				active:         true,
+				itemName:       name,
+				agentConnector: connectorSlug,
+				agentInstalled: &installed,
+				userID:         signal.UserID,
+				userIDKind:     discoveryUserIDKind(signal.UserID),
+				userName:       signal.UserName,
+				userEmail:      discoveryUserEmail(signal),
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
@@ -2012,6 +2022,11 @@ func discoveredEntriesFromReport(
 				row.skillContentHash, row.skillContentStatus = facts.ContentHash, facts.ContentStatus
 				row.skillScope, row.skillLocation = facts.Scope, facts.Location
 				row.skillManifestHash = facts.ManifestHash
+				if facts.ManifestHash != "" {
+					row.skillManifestSize = facts.ManifestSize
+				}
+				row.itemDescription = inventorySafeBounded(facts.Description, 512)
+				row.skillVersion = inventorySafeBounded(facts.Version, 64)
 				applySkillPublisher(row, signal.Vendor, *facts)
 			}
 		}
