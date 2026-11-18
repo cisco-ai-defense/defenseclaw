@@ -149,8 +149,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g1058fix on s7/td327fix7 a41329ba08): the td327 train on the delta 4 packs;
             # the typed path check of PATH-ETC-SHADOW is a Go rule of internal/toolshape (rel-1-0-10:GAP-1058).
             "142564606e41360723658f06c3d71f449b80849d789767370e9b948697316882",
-            # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210): SEC-HF-TOKEN in secrets.yaml.
-            "561824431929ace79f8e14c08de7b643efc42f10de71d718632ec67c50af8216",
+            # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
+            # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
+            "ca7e62eec5d39e2f6f1f3eeec648c25c5bfd32c19d05380e19aa44aaa1bddf1e",
         }
     ),
     "permissive": frozenset(
@@ -256,8 +257,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g1058fix on s7/td327fix7 a41329ba08): the td327 train on the delta 4 packs;
             # the typed path check of PATH-ETC-SHADOW is a Go rule of internal/toolshape (rel-1-0-10:GAP-1058).
             "ec4d531ac9c39d223b257ebb032fab8c62a945e528557622d7bd4cc460fd7089",
-            # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210): SEC-HF-TOKEN in secrets.yaml.
-            "7dd619dbec8611684ac1a358431a4af80f99dcf8e82fa89a89e5b1168c15793a",
+            # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
+            # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
+            "185cf3ac23ddfdb95542daad3d62f3e165da9d62edfc08802497c722ea367a10",
         }
     ),
     "strict": frozenset(
@@ -362,8 +364,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g1058fix on s7/td327fix7 a41329ba08): the td327 train on the delta 4 packs
             # (b1d66c243c: a copy of a credential file is a read of it).
             "2f4db7a9e2296cac025499b7785766eec2f82d4d75c2cb78873b542b8292a18d",
-            # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210): SEC-HF-TOKEN in secrets.yaml.
-            "c6fe9f616d8e454bb6f484b0a6b21045c1ae98a300f853a144182dc9f75da67e",
+            # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
+            # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
+            "51cc060958667eaea175b46c6ce542175e0af2667646ffe69b56b9a917218670",
         }
     ),
 }

@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // GAP-0371. Two credential shapes rel found only on the proxy content path
@@ -32,6 +33,13 @@ import (
 // passwordReset is not a password key. The validator below only reads the
 // structure of the match: the separator, whether the value is quoted, and
 // the value.
+//
+// The pattern reads the value as a model writes it (rel-1-0-10:GAP-1267,
+// GAP-1268): in inline-code backticks (password=`...`), on the line after
+// the key (YAML: password:, then the value indented on the next line), and
+// with a comma inside it. The validator keeps those readings to a value:
+// a value on the next line is the whole of that line and not a YAML key, and
+// a comma that starts the next field (password=...,user=bob) ends the value.
 
 const (
 	passwordAssignRuleID = "SEC-PASSWORD-ASSIGN"
@@ -68,7 +76,7 @@ type passwordReading uint8
 const (
 	// passwordReadAsNone: not a password. A reference, slot, path, code, a
 	// mask (********, xxxxxxxxxx), a well-known documentation placeholder
-	// (changeme, placeholder, example: obviousCredentialPlaceholder) or text
+	// (changeme, placeholder, example: namedCredentialPlaceholder) or text
 	// about a password (a rule list, a regex, a fill-in naming its key).
 	passwordReadAsNone passwordReading = iota
 	// passwordReadAsWeak: a literal password, but a stand-in made of
@@ -93,11 +101,17 @@ func readPasswordAssignment(text, match string, start int) passwordReading {
 		return passwordReadAsNone
 	}
 	key, value, quoted, ok := passwordAssignmentValue(match)
-	if !ok || len(value) < 8 {
+	if !ok {
 		return passwordReadAsNone
 	}
-	if credentialReference(value) || pathLikeValue(value) ||
-		obviousCredentialPlaceholder(value) || maskedCredentialValue(value) {
+	if strings.IndexByte(match[len(key):len(match)-len(value)], '\n') >= 0 && !valueIsItsLine(text, match, start, value) {
+		return passwordReadAsNone
+	}
+	if value = valueBeforeNextField(value); len(value) < 8 {
+		return passwordReadAsNone
+	}
+	if credentialReference(value) || pathLikeValue(value) || maskedCredentialValue(value) ||
+		obviousCredentialPlaceholder(value) && !sequenceCredentialPlaceholder(strings.ToLower(value)) {
 		return passwordReadAsNone
 	}
 	if !quoted && unquotedCodeValue(value) {
@@ -118,19 +132,82 @@ func readPasswordAssignment(text, match string, start int) passwordReading {
 		}
 	}
 	switch {
-	case !letter:
+	case !letter && (!digitOrSymbol || symbolRunValue(value)):
+		// A run of one symbol (********, --------) masks a value or rules a
+		// line; it is not one.
 		return passwordReadAsNone
-	case !digitOrSymbol || secretAssignmentPlaceholderValue(value):
+	case !letter:
+		// Digits or symbols only (12345678, a date, !@#$%^&*): a weak
+		// password, not a reference (rel-1-0-10:GAP-1266). The rule does not
+		// report it, as on rel; the proxy reads it on a bare password key.
+		return passwordReadAsWeak
+	case !digitOrSymbol || secretAssignmentPlaceholderValue(value) || sequenceCredentialPlaceholder(strings.ToLower(value)):
+		// A bare word, a stand-in made of placeholder words, or a run or a
+		// repeat (abcdefgh1, 12345678): the token placeholder shapes are weak
+		// passwords, not documentation placeholders (rel-1-0-10:GAP-1266).
 		return passwordReadAsWeak
 	}
 	return passwordReadAsPassword
 }
 
+// symbolRunValue reports a value of one repeated character that is not a
+// letter or a digit (********, ••••••••, ========).
+func symbolRunValue(v string) bool {
+	first, _ := utf8.DecodeRuneInString(v)
+	if unicode.IsLetter(first) || unicode.IsDigit(first) {
+		return false
+	}
+	for _, r := range v {
+		if r != first {
+			return false
+		}
+	}
+	return true
+}
+
+// valueIsItsLine reports a value that starts on the line after its key and
+// is the whole of that line (YAML: password:, then the value indented below
+// it), maybe closed by its quote: not the first word of a sentence and not
+// a YAML key of a nested map (description:).
+func valueIsItsLine(text, match string, start int, value string) bool {
+	end := start + len(match)
+	if start < 0 || end > len(text) || text[start:end] != match || strings.HasSuffix(value, ":") {
+		return false
+	}
+	rest := text[end:]
+	if rest != "" && strings.IndexByte("\"'`", rest[0]) >= 0 {
+		rest = rest[1:]
+	}
+	rest = strings.TrimLeft(rest, " \t\r")
+	return rest == "" || rest[0] == '\n'
+}
+
+// valueBeforeNextField is value up to a comma that starts the next field of
+// a list of assignments (password=...,user=bob; {password:...,user:bob}): a
+// name and = or : after the comma. A comma inside a value is the value's.
+func valueBeforeNextField(value string) string {
+	for i := 0; i < len(value); i++ {
+		if value[i] != ',' {
+			continue
+		}
+		j := i + 1
+		for j < len(value) && isIdentByte(value[j]) {
+			j++
+		}
+		if j > i+1 && j < len(value) && (value[j] == '=' || value[j] == ':') {
+			return value[:i]
+		}
+	}
+	return value
+}
+
 // bareWeakPasswordAssignment reports a match whose value is a weak password
 // (passwordReadAsWeak) assigned to a bare password key: an unquoted key of
 // one word (password, PASSWORD, pwd, passwd, as in password=, --password=,
-// pwd: ). That is the reach of rel's proxy password regex, which the proxy
-// content check keeps (rel-1-0-10:GAP-0210 review r1); a prefixed key
+// pwd: ). It covers the reach of rel's proxy password regex, which the proxy
+// content check keeps (rel-1-0-10:GAP-0210 review r1), and is a little wider:
+// the rule's key and separators also take passphrase, a digit after the key
+// word (password1=) and the := and => separators. A prefixed key
 // (DB_PASSWORD) or a quoted field ("password": ...) with a weak value was
 // never reported there and is not now.
 func bareWeakPasswordAssignment(text, match string, start int) bool {
@@ -147,7 +224,8 @@ func bareWeakPasswordAssignment(text, match string, start int) bool {
 // passwordAssignmentValue splits a match of key, separator and value: the
 // key, the value and whether a quote opens it. The key is an identifier,
 // maybe quoted or escaped as in JSON text; the separator is =>, :=, ==, =
-// or :.
+// or :. The value may start on the next line or after an inline-code
+// backtick, which is not a quote.
 func passwordAssignmentValue(match string) (key, value string, quoted, ok bool) {
 	i := 0
 	for i < len(match) && (isIdentByte(match[i])) {
@@ -165,11 +243,16 @@ func passwordAssignmentValue(match string) (key, value string, quoted, ok bool) 
 	default:
 		return "", "", false, false
 	}
-	for i < len(match) && (match[i] == ' ' || match[i] == '\t' || match[i] == '\\') {
+	for i < len(match) && strings.IndexByte(" \t\r\n\\", match[i]) >= 0 {
 		i++
 	}
-	if i < len(match) && (match[i] == '"' || match[i] == '\'') {
+	switch {
+	case i < len(match) && (match[i] == '"' || match[i] == '\''):
 		quoted = true
+		i++
+	case i < len(match) && match[i] == '`':
+		// Inline code shows a value; it is not a string literal, so the
+		// code reading still applies (`opts.Password` is code).
 		i++
 	}
 	return key, match[i:], quoted, i < len(match)
@@ -452,8 +535,9 @@ func pathLikeValue(v string) bool {
 }
 
 // unquotedCodeValue reports an unquoted value that is code: an identifier
-// path of two or more names (a.b, a->b, A::B, a?.b), or a call or index on
-// a name (getpass(, env[, Optional[str]).
+// path of two or more names (a.b, a->b, A::B, a?.b), a call or index on a
+// name (getpass(, env[, Optional[str]), or a name and the colon that ends a
+// condition (stored_password:).
 func unquotedCodeValue(v string) bool {
 	names, i := 0, 0
 	for {
@@ -492,6 +576,10 @@ func unquotedCodeValue(v string) bool {
 		return true
 	case '{', '<', '!', '?', ')', ']', '}':
 		return names >= 2
+	case ':':
+		// A name that ends a condition or opens a block: the right side of
+		// a comparison (if password == stored_password:), not a value.
+		return rest == ":"
 	}
 	return false
 }

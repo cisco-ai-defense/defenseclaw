@@ -3144,7 +3144,7 @@
                 },
                 {
                   "id": "SEC-PASSWORD-ASSIGN",
-                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*(?:\\r?\\n[ \\t]*)?\\\\*[\"'`]?[^\\s\"'`\\\\,;][^\\s\"'`\\\\;]{6,126}[^\\s\"'`\\\\,;]",
                   "title": "Password assigned to a password-named key",
                   "severity": "MEDIUM",
                   "confidence": 0.6,
@@ -7592,7 +7592,7 @@
                 },
                 {
                   "id": "SEC-PASSWORD-ASSIGN",
-                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*(?:\\r?\\n[ \\t]*)?\\\\*[\"'`]?[^\\s\"'`\\\\,;][^\\s\"'`\\\\;]{6,126}[^\\s\"'`\\\\,;]",
                   "title": "Password assigned to a password-named key",
                   "severity": "MEDIUM",
                   "confidence": 0.6,
@@ -11766,7 +11766,7 @@
                 },
                 {
                   "id": "SEC-PASSWORD-ASSIGN",
-                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+                  "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*(?:\\r?\\n[ \\t]*)?\\\\*[\"'`]?[^\\s\"'`\\\\,;][^\\s\"'`\\\\;]{6,126}[^\\s\"'`\\\\,;]",
                   "title": "Password assigned to a password-named key",
                   "severity": "MEDIUM",
                   "confidence": 0.6,

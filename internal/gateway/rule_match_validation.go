@@ -1315,6 +1315,15 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	canonical = strings.Join(strings.FieldsFunc(canonical, func(char rune) bool {
 		return char == '_'
 	}), "_")
+	if namedCredentialPlaceholder(canonical) {
+		return true
+	}
+	return sequenceCredentialPlaceholder(normalized)
+}
+
+// namedCredentialPlaceholder reports a canonical value (lower case, - . / as
+// _) that is a stand-in word a document puts where a credential goes.
+func namedCredentialPlaceholder(canonical string) bool {
 	switch canonical {
 	case "example", "example_token", "example_secret", "exampleexample",
 		"placeholder", "placeholder_token", "placeholder_secret", "placeholderplaceholder",
@@ -1324,7 +1333,14 @@ func obviousCredentialPlaceholder(candidate string) bool {
 		"not_a_real_token", "not_a_real_secret", "fake_token", "fake_secret":
 		return true
 	}
+	return false
+}
 
+// sequenceCredentialPlaceholder reports a lower-case value that is a run of
+// the alphabet or the digits (12345678, abcdefgh) or one short unit repeated:
+// a stand-in for a token. As a password it is a weak one
+// (readPasswordAssignment, rel-1-0-10:GAP-1266).
+func sequenceCredentialPlaceholder(normalized string) bool {
 	compact := compactCredential(normalized)
 	if len(compact) < 8 {
 		return false
