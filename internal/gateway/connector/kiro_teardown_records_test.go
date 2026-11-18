@@ -180,13 +180,20 @@ func TestKiroVerifyCleanReportsTheEntriesOfAFileOnlyItsRecordNames(t *testing.T)
 // Review round 4 P3 of rel-1-0-10 GAP-1092/GAP-1174: one file only a record
 // names that cannot be parsed failed the whole reclaim and prune, on every
 // boot, and a UTF-8 BOM (a Windows editor's) was such a file. A BOM is read
-// through; a file that is not JSON is skipped and keeps its record, which
-// then proves nothing, and the other files are cleaned.
+// through, and the reclaim and prune skip a file that is not JSON: its record
+// stays and proves nothing, so no boot reclaims on it.
+//
+// rel-1-0-10 GAP-1298: the skip also made `setup remove kiro` succeed and
+// VerifyClean pass with this install's hooks possibly still in that file.
+// This test pinned that silent skip; it now pins the loud one: the removal of
+// the configured connector fails and names the file, VerifyClean reports it
+// (not as "teardown incomplete", which would start a reclaim on every boot),
+// the record stays, and once the file parses the removal finishes.
 func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		body       string
-		keepRecord bool
+		unreadable bool
 	}{
 		{"not JSON", `{"hooks": [`, true},
 		{"a JSON list", "[]\r\n", true},
@@ -237,10 +244,15 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 					t.Errorf("prune-orphans lists %v, want %s (a BOM is read through) and not %s", listed, mine, w1Hooks)
 				}
 				opts.ReclaimOwnHooksOnly = reclaim
-				if err := conn.Teardown(context.Background(), opts); err != nil {
+				err = conn.Teardown(context.Background(), opts)
+				opts.ReclaimOwnHooksOnly = false
+				if tc.unreadable && !reclaim {
+					if err == nil || !strings.Contains(err.Error(), w1Hooks) {
+						t.Errorf("setup remove kiro = %v, want it to fail and name %s, which it cannot parse", err, w1Hooks)
+					}
+				} else if err != nil {
 					t.Fatalf("Teardown failed on the file it cannot parse: %v", err)
 				}
-				opts.ReclaimOwnHooksOnly = false
 				if held, err := kiroAgentFileHoldsCommand(mine, own); err != nil || held {
 					t.Errorf("install B's entries stayed in the agent saved with a BOM: %v, %v", held, err)
 				}
@@ -250,26 +262,137 @@ func TestKiroTeardownSkipsARecordedFileItCannotParse(t *testing.T) {
 				if got, err := os.ReadFile(w1Hooks); err != nil || string(got) != tc.body {
 					t.Errorf("the file it cannot parse changed (%v): %q", err, got)
 				}
-				var want []string
-				if tc.keepRecord {
-					want = []string{kiroBackupLogicalName(w1Hooks)}
+				names := kiroRecordNames(t, dataB)
+				if !tc.unreadable {
+					if len(names) != 0 {
+						t.Errorf("Kiro backup records after the teardown = %v, want none", names)
+					}
+					if err := conn.VerifyClean(opts); err != nil {
+						t.Errorf("VerifyClean: %v", err)
+					}
+					return
 				}
-				if names := kiroRecordNames(t, dataB); !slices.Equal(names, want) {
-					t.Errorf("Kiro backup records after the teardown = %v, want %v", names, want)
+				if !slices.Contains(names, kiroBackupLogicalName(w1Hooks)) {
+					t.Errorf("Kiro backup records after the teardown = %v, want the record of %s kept for the retry", names, w1Hooks)
 				}
-				// The record kept for the file proves nothing and flags
-				// nothing, so the next boot does no work.
+				// The record kept for the file proves no ownership of Kiro's
+				// commands.
 				if kiroDataDirSetUpKiro(dataB) {
 					t.Error("the record of a file that cannot be parsed keeps the data folder an owner of Kiro's commands")
 				}
+				if reclaim {
+					// The reclaim finished everything else: the file alone is
+					// reported, and not as a teardown the next boot retries.
+					err := conn.VerifyClean(opts)
+					if err == nil || !strings.Contains(err.Error(), w1Hooks) || strings.Contains(err.Error(), "teardown incomplete") {
+						t.Errorf("VerifyClean = %v, want %s reported as a cleanup the boot reclaim does not retry", err, w1Hooks)
+					}
+					if owns, err := conn.InstallOwnsHookEntries(opts); err != nil || owns {
+						t.Errorf("the next boot would reclaim again: %v, %v", owns, err)
+					}
+					if err := conn.Teardown(context.Background(), opts); err == nil || !strings.Contains(err.Error(), w1Hooks) {
+						t.Errorf("setup remove kiro after the reclaim = %v, want it to fail and name %s", err, w1Hooks)
+					}
+				} else if err := conn.VerifyClean(opts); err == nil {
+					t.Error("VerifyClean passed after setup remove failed on the file it cannot parse")
+				}
+				// The user fixes the file; the next removal takes install B's
+				// entry out of it, keeps the user's, and finishes.
+				fixed := map[string]interface{}{"hooks": []interface{}{
+					kiroV3Entry("defenseclaw-pre-tool", "PreToolUse", conn.hookCommandForV3Surface(opts)),
+					kiroV3Entry("lint", "PostToolUse", kiroUserLint),
+				}}
+				if err := writeJSONObject(w1Hooks, fixed); err != nil {
+					t.Fatal(err)
+				}
+				if err := conn.Teardown(context.Background(), opts); err != nil {
+					t.Fatalf("setup remove kiro once the file parses: %v", err)
+				}
+				if held, err := kiroV3FileHoldsCommand(w1Hooks, conn.installHookCommands(opts)); err != nil || held {
+					t.Errorf("install B's entry stayed in the fixed file: %v, %v", held, err)
+				}
+				if held, err := kiroV3FileHoldsCommand(w1Hooks, []string{kiroUserLint}); err != nil || !held {
+					t.Errorf("the user's own hook went from the fixed file: %v, %v", held, err)
+				}
+				if names := kiroRecordNames(t, dataB); len(names) != 0 {
+					t.Errorf("the finished removal kept Kiro backup records %v", names)
+				}
 				if err := conn.VerifyClean(opts); err != nil {
-					t.Errorf("VerifyClean: %v", err)
+					t.Errorf("VerifyClean after the finished removal: %v", err)
 				}
 				if owns, err := conn.InstallOwnsHookEntries(opts); err != nil || owns {
-					t.Errorf("the next boot would reclaim again: %v, %v", owns, err)
+					t.Errorf("after the finished removal the boot would reclaim: %v, %v", owns, err)
 				}
 			})
 		}
+	}
+}
+
+// rel-1-0-10 GAP-1297: the teardown of the configured connector took out of a
+// file only its records name just the commands Setup writes now, so a file
+// that held this install's hook script in another command form (a shell or
+// env wrapper, an --event binding) was skipped and its record dropped, and
+// nothing cleaned it afterwards. Those entries go too; another install's
+// script in the same form and the user's hook stay.
+func TestKiroRemoveCleansAnOlderCommandFormFromAFileOnlyItsRecordNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX command forms; a Windows command runs the account's launcher and its ownership stays exact")
+	}
+	home := t.TempDir()
+	KiroHomeOverride = home
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	root := t.TempDir()
+	dataB := filepath.Join(root, "b", ".defenseclaw")
+	w1 := filepath.Join(root, "w1")
+	for _, dir := range []string{dataB, w1} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conn := NewKiroConnector()
+	opts := SetupOpts{DataDir: dataB, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed", WorkspaceDir: w1}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	script := filepath.Join(dataB, "hooks", kiroHookScriptName)
+	otherScript := filepath.Join(root, "a", ".defenseclaw", "hooks", kiroHookScriptName)
+	older := []string{
+		"/bin/bash '" + script + "' --hook-surface " + KiroHookSurfaceV3,
+		"/usr/bin/env DEFENSECLAW_TRACE=1 " + script + " --event preToolUse",
+	}
+	keep := []string{"/bin/bash '" + otherScript + "' --hook-surface " + KiroHookSurfaceV3, kiroUserLint}
+	w1Hooks := filepath.Join(w1, ".kiro", "hooks", kiroManagedHooksName)
+	if err := writeJSONObject(w1Hooks, map[string]interface{}{"version": "v1", "hooks": []interface{}{
+		kiroV3Entry("defenseclaw-pre-tool", "PreToolUse", older[0]),
+		kiroV3Entry("defenseclaw-prompt", "UserPromptSubmit", older[1]),
+		kiroV3Entry("defenseclaw-pre-tool", "PreToolUse", keep[0]),
+		kiroV3Entry("lint", "PostToolUse", keep[1]),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if held, err := kiroV3FileHoldsCommand(w1Hooks, conn.installHookCommands(opts)); err != nil || held {
+		t.Fatalf("the file holds a command Setup writes now (%v, %v); this test checks nothing", held, err)
+	}
+	// Only the record names W1 now.
+	opts.WorkspaceDir = ""
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	for _, form := range older {
+		if held, err := kiroV3FileHoldsCommand(w1Hooks, []string{form}); err != nil || held {
+			t.Errorf("setup remove kiro left install B's %q in the file only its record names: %v, %v", form, held, err)
+		}
+	}
+	for _, form := range keep {
+		if held, err := kiroV3FileHoldsCommand(w1Hooks, []string{form}); err != nil || !held {
+			t.Errorf("setup remove kiro took %q, which is not install B's, out of %s: %v, %v", form, w1Hooks, held, err)
+		}
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Errorf("VerifyClean after the removal: %v", err)
+	}
+	if names := kiroRecordNames(t, dataB); len(names) != 0 {
+		t.Errorf("the removal kept Kiro backup records %v", names)
 	}
 }
 

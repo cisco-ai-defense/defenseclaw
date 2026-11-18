@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -178,9 +179,21 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	// of an install that set Kiro up afterwards (review round 5 P2 of
 	// GAP-1092). A file that cannot be read as JSON is left with its record.
 	recorded := c.recordedKiroFiles(opts, hooks, append(slices.Clone(agents), kiroBuiltInDefaultAgentPath()))
-	for _, path := range recorded.unreadable {
-		fmt.Fprintf(os.Stderr, "[guardrail] connector kiro: %s is not a JSON object, so its DefenseClaw hooks, if any, stay; "+
-			"its backup record is kept and the cleanup retried once the file can be read\n", path)
+	if scope == nil && !kiroManaged(opts) {
+		// `setup remove` fails on it, as it did before such a file was
+		// skipped, and VerifyClean reports it (kiroUnreadableRecordedFiles):
+		// skipped, the removal succeeded with this install's hooks possibly
+		// still in it (rel-1-0-10 GAP-1298). Its record stays for the retry.
+		if err := kiroUnreadableRecordedFiles(recorded); err != nil {
+			errs = append(errs, err)
+		}
+	} else {
+		// The boot reclaim and the managed teardown skip it: it failed the
+		// reclaim on every boot. It proves no ownership (kiroPendingRecords).
+		for _, path := range recorded.unreadable {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector kiro: %s is not a JSON object, so its DefenseClaw hooks, if any, stay; "+
+				"its backup record is kept and the cleanup retried once the file can be read\n", path)
+		}
 	}
 	recordScope := scope
 	if scope == nil && kiroManaged(opts) {
@@ -320,6 +333,20 @@ type kiroRecordedFiles struct {
 	unreadable []string
 }
 
+// kiroUnreadableRecordedFiles reports the files only this install's records
+// name that cannot be read as a JSON object: their DefenseClaw hooks, if
+// any, stay until they parse. The message does not say "teardown
+// incomplete", the boot reclaim's trigger: such a file proves nothing, and a
+// reclaim started on it would fail on every boot.
+func kiroUnreadableRecordedFiles(recorded kiroRecordedFiles) error {
+	if len(recorded.unreadable) == 0 {
+		return nil
+	}
+	return fmt.Errorf("kiro cleanup incomplete: %s, which a backup record of this install names, is not a JSON object, "+
+		"so its DefenseClaw hooks, if any, stay; fix or remove the file and run the removal again (its record is kept for that)",
+		strings.Join(recorded.unreadable, ", "))
+}
+
 // recordedKiroFiles lists the v3 hook files and CLI 2.x agent files this
 // install's backup records name that are not in currentHooks or
 // currentAgents.
@@ -344,23 +371,24 @@ func (c *KiroConnector) recordedKiroFiles(opts SetupOpts, currentHooks, currentA
 
 // exactScope is the reclaim scope, for the teardown of a configured
 // connector, of the files only this install's records name: those that hold
-// one of this install's exact commands, and in them only those entries.
+// an entry of this install, and in them only those entries. An entry is this
+// install's when it runs one of its exact commands or, on POSIX, its own hook
+// script in a command form an earlier build or an edit left
+// (kiroCommandRunsScript): such a file held only that form and was skipped
+// while its record was dropped (rel-1-0-10 GAP-1297). Windows commands run
+// the account's launcher and stay exact.
 func (c *KiroConnector) exactScope(opts SetupOpts, recorded kiroRecordedFiles) (*kiroReclaimScope, error) {
 	scope := &kiroReclaimScope{files: map[string]bool{}, commands: c.installHookCommands(opts)}
 	if len(scope.commands) == 0 {
 		return scope, nil
 	}
-	var errs []error
-	for _, path := range recorded.hooks {
-		if held, err := kiroV3FileHoldsCommand(path, scope.commands); err != nil {
-			errs = append(errs, fmt.Errorf("kiro inspect hook %s: %w", path, err))
-		} else if held {
-			scope.files[filepath.Clean(path)] = true
-		}
+	if runtime.GOOS != "windows" {
+		scope.script = filepath.Join(opts.DataDir, "hooks", kiroHookScriptName)
 	}
-	for _, path := range recorded.agents {
-		if held, err := kiroAgentFileHoldsCommand(path, scope.commands); err != nil {
-			errs = append(errs, fmt.Errorf("kiro inspect agent %s: %w", path, err))
+	var errs []error
+	for _, path := range slices.Concat(recorded.hooks, recorded.agents) {
+		if held, err := scope.holds(path); err != nil {
+			errs = append(errs, fmt.Errorf("kiro inspect %s: %w", path, err))
 		} else if held {
 			scope.files[filepath.Clean(path)] = true
 		}
@@ -517,14 +545,23 @@ func recordKiroCreatedDirs(opts SetupOpts, missing []string) {
 }
 
 // VerifyClean reports DefenseClaw Kiro hooks left in the files the settings
-// name (verifyHooksClean), this install's exact entries left in a file only
-// its backup records name, and what an unfinished teardown left in the data
-// folder (kiroUnfinishedTeardown).
+// name (verifyHooksClean), this install's entries left in a file only its
+// backup records name, what an unfinished teardown left in the data folder
+// (kiroUnfinishedTeardown), and a file only its records name that cannot be
+// read as JSON (kiroUnreadableRecordedFiles), which `setup remove` fails on.
 func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 	if err := c.verifyHooksClean(opts); err != nil {
 		return err
 	}
-	return c.kiroUnfinishedTeardown(opts)
+	if err := c.kiroUnfinishedTeardown(opts); err != nil {
+		return err
+	}
+	if kiroManaged(opts) {
+		return nil
+	}
+	hooks := c.hookCleanupPaths(opts)
+	agents := append(c.agentCleanupPaths(opts), kiroBuiltInDefaultAgentPath())
+	return kiroUnreadableRecordedFiles(c.recordedKiroFiles(opts, hooks, agents))
 }
 
 // verifyHooksClean is VerifyClean without kiroUnfinishedTeardown: the check
@@ -552,29 +589,18 @@ func (c *KiroConnector) verifyHooksClean(opts SetupOpts) error {
 	} else if present {
 		return fmt.Errorf("kiro teardown incomplete: %s still selects %s", kiroDefaultAgentSettingKey, kiroManagedAgentName)
 	}
-	// A file only a record names holds only this install's exact entries as
-	// proof: another install's entries there are named defenseclaw-* too.
-	// The settings record is read above (agentCleanupPaths names the agent
-	// it recorded as the default). A file that cannot be read as JSON proves
-	// nothing and is left (kiroRecordedFiles.unreadable).
-	commands := c.installHookCommands(opts)
-	if len(commands) == 0 {
-		return nil
+	// A file only a record names holds only this install's entries as proof
+	// (exactScope): another install's entries there are named defenseclaw-*
+	// too. The settings record is read above (agentCleanupPaths names the
+	// agent it recorded as the default). A file that cannot be read as JSON
+	// proves nothing here (kiroRecordedFiles.unreadable); VerifyClean reports
+	// it.
+	scope, err := c.exactScope(opts, c.recordedKiroFiles(opts, hooks, agents))
+	if err != nil {
+		return err
 	}
-	recorded := c.recordedKiroFiles(opts, hooks, agents)
-	for _, path := range recorded.hooks {
-		if held, err := kiroV3FileHoldsCommand(path, commands); err != nil {
-			return err
-		} else if held {
-			return fmt.Errorf("kiro teardown incomplete: %s, which only a backup record of this install names, still holds its hooks", path)
-		}
-	}
-	for _, path := range recorded.agents {
-		if held, err := kiroAgentFileHoldsCommand(path, commands); err != nil {
-			return err
-		} else if held {
-			return fmt.Errorf("kiro teardown incomplete: agent config %s, which only a backup record of this install names, still holds its hooks", path)
-		}
+	if left := slices.Sorted(maps.Keys(scope.files)); len(left) != 0 {
+		return fmt.Errorf("kiro teardown incomplete: %s, which only a backup record of this install names, still holds its hooks", left[0])
 	}
 	return nil
 }
@@ -605,8 +631,8 @@ func (c *KiroConnector) orphanedHookFilesFor(goos string, opts SetupOpts) ([]str
 	hooks := c.hookCleanupPaths(opts)
 	agents := append(c.agentCleanupPaths(opts), kiroBuiltInDefaultAgentPath())
 	// A recorded file that cannot be read as JSON is skipped, not an error: it
-	// failed the whole reclaim and prune on every boot (the teardown keeps its
-	// record and says so once).
+	// failed the whole reclaim and prune on every boot (`setup remove` fails
+	// on it and VerifyClean reports it, kiroUnreadableRecordedFiles).
 	recorded := c.recordedKiroFiles(opts, hooks, agents)
 	for _, path := range slices.Concat(hooks, recorded.hooks) {
 		if present, err := kiroV3FileHoldsCommand(path, commands); err != nil {
