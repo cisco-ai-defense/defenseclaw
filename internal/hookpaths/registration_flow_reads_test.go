@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -18,9 +19,6 @@ import (
 // call only reads are left out of the net; the destinations, redirect
 // targets and the calls that hand a name on still reach it.
 func TestGAP0104FlowNetLeavesReadOnlyWordsOut(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX home fixture")
-	}
 	home := filepath.Join(t.TempDir(), "home")
 	cwd := filepath.Join(home, "proj")
 	var names []string
@@ -36,8 +34,12 @@ func TestGAP0104FlowNetLeavesReadOnlyWordsOut(t *testing.T) {
 			names = append(names, path)
 		}
 	}
-	settings := filepath.Join(home, ".claude", "settings.json")
-	for _, row := range []struct {
+	// The Python code names the file as a drive path (C:/Users/x/...) on
+	// Windows: a backslash path in a Python string is no read the grammar
+	// proves (and C:\Users is a syntax error there).
+	settings := filepath.ToSlash(filepath.Join(home, ".claude", "settings.json"))
+	bak := filepath.ToSlash(filepath.Join(t.TempDir(), "bak"))
+	rows := []struct {
 		command string
 		reach   bool
 	}{
@@ -64,7 +66,30 @@ func TestGAP0104FlowNetLeavesReadOnlyWordsOut(t *testing.T) {
 		{`f=~/.claude/settings.json; sha256sum "$f"; : > "$f"`, true},
 		{`while read -r f; do : > "$f"; done <<< "$(ls ~/.claude/settings.json)"`, true},
 		{"python3 - <<'PY'\nopen('" + settings + "', 'w').write('')\nPY\necho ok > /tmp/gap0104-py", true},
-	} {
+		// A copy out to a drive-path folder, and copies onto the hook
+		// config by its drive path.
+		{`mkdir -p ` + bak + `; cp -p ~/.claude/settings.json ` + bak + `/settings.json; cp -p ~/.codex/config.toml ` + bak + `/`, false},
+		{`cp -p /tmp/gap0104-x ` + settings + `; echo ok > /tmp/gap0104-x`, true},
+		{`cp -p ~/.codex/config.toml ` + settings + `; echo ok > /tmp/gap0104-x`, true},
+	}
+	if runtime.GOOS == "windows" {
+		// Git Bash names a drive as /c/...; a rooted name other than /tmp
+		// and /var/tmp may be mounted anywhere, so it is not placed.
+		msys := func(path string) string { return "/" + strings.ToLower(path[:1]) + path[2:] }
+		rows = append(rows, []struct {
+			command string
+			reach   bool
+		}{
+			{`cp -p ~/.claude/settings.json ` + msys(bak) + `/settings.json; echo ok > /tmp/gap0104-x`, false},
+			{`cp -p ~/.claude/settings.json /var/tmp/settings.json; echo ok > /tmp/gap0104-x`, false},
+			{`cp -p ~/.codex/config.toml ` + msys(settings) + `; echo ok > /tmp/gap0104-x`, true},
+			{`cp -p ~/.codex/config.toml /cygdrive/` + msys(settings)[1:] + `; echo ok > /tmp/gap0104-x`, true},
+			{`cp -p ~/.claude/settings.json /home/u/.claude/settings.json; echo ok > /tmp/gap0104-x`, true},
+			{`cp -p ~/.claude/settings.json //host/share/.claude/settings.json; echo ok > /tmp/gap0104-x`, true},
+			{`cp -p ~/.codex/config.toml /tmp/../` + msys(settings)[1:] + `; echo ok > /tmp/gap0104-x`, true},
+		}...)
+	}
+	for _, row := range rows {
 		if got := len(RegistrationWriteReached(row.command, cwd, home, names)) > 0; got != row.reach {
 			t.Errorf("%q: reaches %v, want %v", row.command, got, row.reach)
 		}

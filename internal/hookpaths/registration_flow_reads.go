@@ -4,8 +4,10 @@
 package hookpaths
 
 import (
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -356,11 +358,12 @@ func registrationCopySources(call *syntax.CallExpr, home string, protected prote
 	if len(operands) < 2 {
 		return nil
 	}
-	dest := values[len(values)-1]
-	if !filepath.IsAbs(dest) {
+	spelled := values[len(values)-1]
+	dest, placed := registrationCopyDestination(spelled)
+	if !placed {
 		return nil
 	}
-	folder := len(values) > 2 || strings.HasSuffix(dest, "/")
+	folder := len(values) > 2 || strings.HasSuffix(spelled, "/") || strings.HasSuffix(spelled, `\`)
 	if info, err := callStat(dest); err == nil && info.IsDir() {
 		folder = true
 	}
@@ -374,6 +377,39 @@ func registrationCopySources(call *syntax.CallExpr, home string, protected prote
 		}
 	}
 	return operands[:len(operands)-1]
+}
+
+// registrationCopyDestination is the cp destination as a path of this
+// host's file system, or false when the reader cannot place it. An absolute
+// path is one. On Windows the POSIX shell the agents run (Git Bash) also
+// names a drive as /c/... or /cygdrive/c/..., read as that drive path, and
+// roots its scratch folders /tmp and /var/tmp at its own install: a copy out
+// to one of them lands on no drive path a hook config has. There the copy
+// out of a hook config (cp -p ~/.claude/settings.json /tmp/bak/) kept its
+// tamper.agent_hook_config_write alert, as /tmp/... is not absolute
+// (rel-1-0-10:GAP-0104, native Windows). Any other rooted name (/home/x, an
+// fstab mount, //host) may be mapped anywhere, so it is not placed.
+func registrationCopyDestination(dest string) (string, bool) {
+	if runtime.GOOS != "windows" {
+		return dest, filepath.IsAbs(dest)
+	}
+	if drive := actionfacts.MSYSDrivePath(dest); drive != dest {
+		dest = filepath.FromSlash(drive)
+	}
+	if filepath.IsAbs(dest) {
+		return dest, true
+	}
+	slashed := filepath.ToSlash(dest)
+	if strings.HasPrefix(slashed, "//") {
+		return "", false
+	}
+	clean := path.Clean(slashed)
+	for _, root := range []string{"/tmp", "/var/tmp"} {
+		if clean == root || strings.HasPrefix(clean, root+"/") {
+			return dest, true
+		}
+	}
+	return "", false
 }
 
 func registrationCopyOption(option string) bool {

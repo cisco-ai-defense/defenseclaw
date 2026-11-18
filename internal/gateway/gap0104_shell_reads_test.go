@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -116,7 +117,8 @@ func p34fbTamperFindings(findings []string) []string {
 // are allowed.
 func TestGAP0104ShellReadsOfHookConfigsNameNoTamperRule(t *testing.T) {
 	home, cwd := p34fbHome(t)
-	rows := p34fbReadRows(filepath.Join(home, ".claude", "settings.json"))
+	driveReads, _ := p34fbDriveRows(t, home)
+	rows := append(p34fbReadRows(filepath.ToSlash(filepath.Join(home, ".claude", "settings.json"))), driveReads...)
 	for _, tier := range p34fbTiers {
 		for _, connector := range []string{"claudecode", "codex"} {
 			t.Run(tier.name+"/"+connector, func(t *testing.T) {
@@ -142,7 +144,9 @@ func TestGAP0104ShellReadsOfHookConfigsNameNoTamperRule(t *testing.T) {
 // per-user paths are judged there as before (no tamper rule at rel either).
 func TestGAP0104WritesIntoHookConfigsStillFire(t *testing.T) {
 	home, cwd := p34fbHome(t)
-	rows := p34fbWriteRows(filepath.Join(home, ".claude", "settings.json"))
+	_, driveWrites := p34fbDriveRows(t, home)
+	rows := append(p34fbWriteRows(filepath.Join(home, ".claude", "settings.json")), driveWrites...)
+	rows = append(rows, p34fbWriteRows(filepath.ToSlash(filepath.Join(home, ".claude", "settings.json")))[7:9]...)
 	for _, tier := range p34fbTiers {
 		if tier.managed {
 			continue
@@ -168,15 +172,23 @@ func TestGAP0104WritesIntoHookConfigsStillFire(t *testing.T) {
 // write, and the pack's text match stayed in the findings. The read names
 // no state rule in any tier; a here-string write of state still blocks.
 func TestGAP0376HereStringReadNamesNoStateRule(t *testing.T) {
-	_, cwd := p34fbHome(t)
+	home, cwd := p34fbHome(t)
+	// The state as a drive path (C:/Users/x/.defenseclaw/...) is how a
+	// native Windows user names it under Git Bash; elsewhere it is the home
+	// path itself.
+	state := filepath.ToSlash(filepath.Join(home, ".defenseclaw", "config.yaml"))
 	reads := []string{
 		`python3 - <<< 'import os; print(open(os.path.expanduser("~/.defenseclaw/config.yaml")).read())'`,
 		`python3 - <<< "print(open('$HOME/.defenseclaw/config.yaml').read())"`,
 		`cat <<< ~/.defenseclaw/config.yaml`,
+		`cat <<< ` + state,
 	}
 	writes := []string{
 		`tee ~/.defenseclaw/config.yaml <<< 'x: 1'`,
 		`xargs rm -f <<< ~/.defenseclaw/config.yaml`,
+		`xargs rm -f <<< ` + state,
+		`cat > ~/.defenseclaw/config.yaml <<< 'x: 1'`,
+		`xargs rm -rf <<< ~/.defenseclaw/hooks`,
 	}
 	for _, tier := range p34fbTiers {
 		for _, connector := range []string{"claudecode", "codex"} {
@@ -199,6 +211,29 @@ func TestGAP0376HereStringReadNamesNoStateRule(t *testing.T) {
 			})
 		}
 	}
+}
+
+// p34fbDriveRows are copy rows spelled with drive paths, as a native
+// Windows user writes them under Git Bash: a backup folder and the hook
+// config as C:/Users/x/... (elsewhere the plain absolute path), and on
+// Windows also as the MSYS mount /c/Users/x/.... The reads copy a hook
+// config out; the writes copy onto one.
+func p34fbDriveRows(t *testing.T, home string) (reads, writes []string) {
+	t.Helper()
+	bak := filepath.ToSlash(filepath.Join(t.TempDir(), "bak"))
+	settings := filepath.ToSlash(filepath.Join(home, ".claude", "settings.json"))
+	reads = []string{`mkdir -p ` + bak + `; cp -p ~/.claude/settings.json ` + bak + `/settings.json; cp -p ~/.codex/config.toml ` + bak + `/`}
+	writes = []string{`cp -p /tmp/gap0104-x ` + settings, `cp -p ~/.codex/config.toml ` + settings}
+	if runtime.GOOS == "windows" {
+		reads = append(reads, `cp -p ~/.claude/settings.json `+p34fbMSYS(bak)+`/settings.json`)
+		writes = append(writes, `cp -p /tmp/gap0104-x `+p34fbMSYS(settings), `cp -p ~/.codex/config.toml `+p34fbMSYS(settings))
+	}
+	return reads, writes
+}
+
+// p34fbMSYS spells a drive path C:/x as its MSYS mount /c/x.
+func p34fbMSYS(path string) string {
+	return "/" + strings.ToLower(path[:1]) + path[2:]
 }
 
 func p34fbReadRows(settings string) []string {

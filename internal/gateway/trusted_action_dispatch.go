@@ -1836,7 +1836,14 @@ func withActiveStateTargetMention(
 	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
 		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
 	if hereStringJudged && !hereStringMutates && !xargsMutates {
-		return withoutUnprovenStateWrite(findings)
+		if strings.HasPrefix(facts.ActiveHome, "/") {
+			return withoutUnprovenStateWrite(findings)
+		}
+		// Under a Windows drive home the twin only clears the pack's text
+		// match; every later proof (the cmd and PowerShell readings among
+		// them) still runs and adds the gateway's own finding for a write it
+		// proves (rel-1-0-10:GAP-0376).
+		findings = withoutUnprovenStateWrite(findings)
 	}
 	// A managed call whose cwd the gateway cannot see is also judged for
 	// links in the directory the hook client walked its words from
