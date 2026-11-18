@@ -35,6 +35,12 @@ func TestCredentialContextKeepsBenignTextGAP0426(t *testing.T) {
 		"token: Optional[str] = None",
 		`{"token": "Hello", "logprob": -0.1}`,
 		`{\"token\": \"world\"}`,
+		`{"token":" world","logprob":-0.2}`,
+		`{"token":"Hello!"}`,
+		"{\"token\":\"\u0120the\"}",
+		"this.apiToken = apiToken;",
+		"api_token = None",
+		"prompt_token: 12345678",
 	} {
 		for _, found := range [][]candidate{recognizeInlineCredentials(input), recognizeCredentialKeys(input)} {
 			for _, item := range found {

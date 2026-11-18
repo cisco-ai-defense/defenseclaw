@@ -51,6 +51,8 @@ func TestCredentialContextIsRedactedGAP0426(t *testing.T) {
 		{`{\"CANARY_BEARER\":\"t6audbearerprobe4e8b1d\"}`, "t6audbearerprobe4e8b1d"},
 		{`{"command":"echo '{\"SERVICE_API_TOKEN\":\"opaque-v4lue\"}' > c.json"}`, "opaque-v4lue"},
 		{`{\"password\": \"` + opaque + `\"}`, opaque},
+		{"DB_PASSWORD='p@ss w0rd here'", "w0rd here"},
+		{`{"token": "ab12cd34"}`, "ab12cd34"},
 		{`{\"headers\": {\"Authorization\": \"Bearer ` + opaque + `\"}}`, opaque},
 	} {
 		for _, class := range []observability.FieldClass{observability.FieldClassContent, observability.FieldClassEvidence} {

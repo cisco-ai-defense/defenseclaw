@@ -28,7 +28,9 @@ var (
 	gap0426AWS      = "AKIA" + "Z3Q7XK9M2P4W8R5T"
 	gap0426Password = "Vq7-r2LmXp9w-audprobe"
 	gap0426JWT      = "eyJhbGciOiJIUzI1NiJ9" + ".eyJzdWIiOiJhdWQwNDI2In0" + ".c2lnbmF0dXJlLWF1ZDA0MjY"
-	// A git SHA outside a credential context stays readable.
+	// A git SHA outside a credential context: the guardrail classifier never
+	// flags it (the unit test checks); secrets.high_entropy already redacts
+	// a bare 40-hex in text at rel, so the store test does not assert it.
 	gap0426SHA = "0123456789abcdef0123456789abcdef01234567"
 )
 

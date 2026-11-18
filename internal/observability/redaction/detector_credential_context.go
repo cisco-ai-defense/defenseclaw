@@ -134,6 +134,8 @@ func recognizeCredentialKeys(input string) []candidate {
 			} else {
 				_, end, valid = parseAssignmentValue(input, start, false)
 			}
+		} else if closing := singleQuotedEnd(input, position); closing > 0 {
+			start, end, valid, quoted = position+1, closing, closing > position+1, true
 		} else {
 			start, end, valid = parseAssignmentValue(input, position, false)
 			quoted = position < len(input) && input[position] == '"'
@@ -151,15 +153,17 @@ func recognizeCredentialKeys(input string) []candidate {
 			}
 		}
 		valid = valid && end-keyStart <= 8192 && !credentialPlaceholder(decoded) && len(decoded) >= 4
-		if valid && !quoted && (strings.ContainsAny(decoded, "()") || identifierPathRE.MatchString(decoded)) {
-			valid = false // a call or a field path (os.Getenv("X"), cfg.Token) is code
+		if valid && !quoted && (strings.ContainsAny(decoded, "()") || identifierPathRE.MatchString(decoded) ||
+			codeValue(decoded, input[keyStart:wordEnd], word)) {
+			valid = false // a call, a field path or a name (os.Getenv("X"), cfg.Token, x = x, None) is code
 		}
-		if valid && strings.HasSuffix(word, "token") && allDigits(decoded) && len(decoded) <= 7 {
-			valid = false // a count (last_token: 4096)
+		if valid && strings.HasSuffix(word, "token") && allDigits(decoded) && len(decoded) <= 10 {
+			valid = false // a count (prompt_token: 12345678)
 		}
 		if valid && word == "token" && keyStart == wordStart && len(decoded) < 16 &&
-			!byteAny(decoded, func(c byte) bool { return !isASCIIUpper(c) && !isASCIILower(c) }) {
-			valid = false // a bare token key holding a word ({"token": "Hello"}, tokenizer output)
+			!(byteAny(decoded, isASCIIDigit) && byteAny(decoded, func(c byte) bool { return isASCIIUpper(c) || isASCIILower(c) }) &&
+				!strings.ContainsAny(decoded, " \t")) {
+			valid = false // a bare token key holding a word ({"token": " world"}, logprob and tokenizer output)
 		}
 		if valid && !quoted && strings.ContainsAny(decoded, "[]") {
 			valid = false // a type annotation (token: Optional[str] = None)
@@ -225,4 +229,32 @@ func escapedQuoteBefore(input string, keyStart int) int {
 		slash--
 	}
 	return keyStart - 2 - slash
+}
+
+// singleQuotedEnd is the index of the closing quote of a single-quoted value
+// at position on the same line, or 0.
+func singleQuotedEnd(input string, position int) int {
+	if position >= len(input) || input[position] != '\'' {
+		return 0
+	}
+	for current := position + 1; current < len(input); current++ {
+		switch input[current] {
+		case '\'':
+			return current
+		case '\n', '\r':
+			return 0
+		}
+	}
+	return 0
+}
+
+// codeValue reports an unquoted value that is a name rather than a literal:
+// a null of some language, or the key's own name (apiToken = apiToken).
+func codeValue(value, key, word string) bool {
+	switch value {
+	case "None", "nil", "undefined", "NULL", "Nothing":
+		return true
+	}
+	lowerValue, lowerKey := strings.ToLower(value), strings.ToLower(key)
+	return lowerValue == lowerKey || lowerValue == word || strings.HasSuffix(lowerKey, "."+lowerValue)
 }
