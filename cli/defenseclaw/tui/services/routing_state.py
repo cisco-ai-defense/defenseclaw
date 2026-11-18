@@ -82,6 +82,9 @@ class RoutingPanelModel:
     cursor: int = 0
     status: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, Any] = field(default_factory=dict)
+    # The usage rows match the current view and period (False from the key
+    # press until the read ends, so a stale table is never shown).
+    usage_loaded: bool = False
     period: str = "week"
     error: str = ""
     loaded: bool = False
@@ -102,6 +105,7 @@ class RoutingPanelModel:
     def apply_usage_json(self, stdout: str | bytes) -> None:
         data = _json_object(stdout)
         self.usage = data if data is not None else {"rows": [], "error": "usage did not answer with JSON"}
+        self.usage_loaded = True
 
     def set_error(self, message: str) -> None:
         self.error, self.loaded = message, True
@@ -136,6 +140,10 @@ class RoutingPanelModel:
         rows = self.usage.get("rows") if isinstance(self.usage, dict) else None
         return [r for r in rows or [] if isinstance(r, dict)]
 
+    def view_loaded(self) -> bool:
+        """The current view's data is read (the usage view waits for its own read)."""
+        return self.usage_loaded if self.view == VIEW_USAGE else True
+
     def data_table_columns(self, compact: bool) -> tuple[str, ...]:
         if self.view == VIEW_USAGE:
             return ("Model", "Calls", "Cost") if compact else ("Model", "Calls", "Input", "Output", "Cost")
@@ -164,6 +172,8 @@ class RoutingPanelModel:
             return self.error
         if not self.loaded:
             return "Loading routing status..."
+        if self.view == VIEW_USAGE and not self.usage_loaded:
+            return f"Loading usage for the last {self.period}..."
         if self.view == VIEW_USAGE and self.usage.get("error"):
             return str(self.usage["error"])
         if self.view == VIEW_USAGE:
@@ -230,11 +240,13 @@ class RoutingPanelModel:
             return RoutingPanelAction("refresh")
         if key == "u":
             self.view, self.cursor = (VIEW_ROUTING if self.view == VIEW_USAGE else VIEW_USAGE), 0
+            self.usage, self.usage_loaded = {}, False
             return RoutingPanelAction("view")
         if self.view == VIEW_USAGE:
             for letter, period, _since in USAGE_PERIODS:
                 if key == letter:
                     self.period = period
+                    self.usage, self.usage_loaded = {}, False
                     return RoutingPanelAction("refresh")
             return RoutingPanelAction("none")
         if key == "t":

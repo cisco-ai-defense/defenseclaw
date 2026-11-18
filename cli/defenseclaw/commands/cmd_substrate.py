@@ -274,8 +274,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "answers\n"
             "over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through "
             "the gateway works and\n"
-            "you have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, "
-            "and nothing in the\n"
+            "you have what it asks for, your sign-in can be kept safely, and (for administrators, when the "
+            "cluster uses signed policy\n"
+            "bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in "
+            "the\n"
             "cluster changes.\n"
             "\n"
             "Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, "
@@ -522,9 +524,17 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Reads the agent's work back to this machine and shows what changed, with the files that need a\n"
             "careful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary "
             "files,\n"
-            "links that leave the folder). Nothing touches your folder until you choose: --apply writes the "
-            "changes\n"
-            "into the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch."
+            "links that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches "
+            "your folder\n"
+            "until you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git "
+            "branch,\n"
+            "--patch-out FILE writes a patch.\n"
+            "\n"
+            "When a change can run code on this machine, --apply asks first (the default answer is no). --yes "
+            "takes\n"
+            "that safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged "
+            "files,\n"
+            "--allow-flagged writes them too."
         ),
         example=(
             "defenseclaw substrate pull fix-tests-7f3a\n"
@@ -532,6 +542,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
         args=(_Arg("name"),),
         flags=(
+            _Flag(
+                "allow-flagged",
+                "bool",
+                "with --apply: also write the files flagged as able to run code (review them first)",
+            ),
             _Flag("apply", "bool", "write the changes into this folder"),
             _Flag("branch", "string", "put the changes on a new git branch of this name", metavar="NAME"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),

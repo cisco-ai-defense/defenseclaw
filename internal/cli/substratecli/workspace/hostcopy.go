@@ -840,7 +840,7 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 		return nil, errors.New("pull first: there is nothing reviewed to bring back")
 	}
 	pr := rec.Pulled
-	if pr.Review.Sensitive() && !opts.AcceptSensitive && opts.Mode != ModePatch {
+	if needsDecision(pr) && !opts.AcceptSensitive && opts.Mode != ModePatch {
 		if opts.Mode != ModeBranch || len(pr.Review.SecretPaths()) != 0 {
 			return nil, &SensitiveError{Files: flaggedPaths(pr)}
 		}

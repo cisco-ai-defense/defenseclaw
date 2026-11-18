@@ -106,6 +106,17 @@ func (c *ConfigDoc) Container() (user, workdir string, env []string, labels map[
 	return cc.User, cc.WorkingDir, cc.Env, cc.Labels, nil
 }
 
+// Argv returns the image ENTRYPOINT and CMD.
+func (c *ConfigDoc) Argv() (entrypoint, cmd []string, err error) {
+	var cc containerCfg
+	if raw, ok := c.raw["config"]; ok && len(raw) > 0 && string(raw) != "null" {
+		if err = json.Unmarshal(raw, &cc); err != nil {
+			return nil, nil, fmt.Errorf("image config: config: %w", err)
+		}
+	}
+	return cc.Entrypoint, cc.Cmd, nil
+}
+
 // EnvMap returns the image environment as a map; the last assignment wins.
 func (c *ConfigDoc) EnvMap() (map[string]string, error) {
 	_, _, env, _, err := c.Container()

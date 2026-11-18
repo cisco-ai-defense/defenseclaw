@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 )
 
@@ -100,7 +101,8 @@ func newSubstrateDoctorCmd() *cobra.Command {
 		Short: "Check that this computer can run agents in the cluster",
 		Long: `Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers
 over TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and
-you have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, and nothing in the
+you have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy
+bundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the
 cluster changes.
 
 Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router
@@ -286,6 +288,61 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 
 	// 6. Attach through the gateway.
 	d.checks = append(d.checks, doctorAttach(ctx, s, mine, signedIn))
+
+	// 7. Policy bundles (administrators, when the cluster has them on).
+	if c, ok := doctorBundles(ctx, s, signedIn); ok {
+		d.checks = append(d.checks, c)
+	}
+}
+
+const doctorBundleFix = "apply a bundle signed by a key of the bundle-anchors Secret (defenseclaw substrate bundle apply), " +
+	"or put the Secret's keys back; defenseclaw substrate bundle status shows each stage"
+
+// doctorBundles is the policy_bundles row (GAP-0429): every stage's active
+// bundle verifies now against the anchors the cluster reads. A stage that
+// no longer verifies has fallen back to config.yaml (deny-only on a managed
+// install), which the controller reports only as an alert event, so the
+// row fails. There is no row when the caller is not an administrator, when
+// bundles are off or when the cluster predates them.
+func doctorBundles(ctx context.Context, s *substrateSession, signedIn bool) (substrateCheck, bool) {
+	const id = "policy_bundles"
+	if !signedIn {
+		return substrateCheck{}, false
+	}
+	res, err := s.Client.BundleStatus(ctx)
+	if err != nil {
+		if e, ok := api.AsError(err); ok && (e.Status == http.StatusForbidden || e.Status == http.StatusNotFound || e.NotImplemented()) {
+			return substrateCheck{}, false
+		}
+		return substrateCheck{ID: id, Status: doctorWarn, Summary: "the policy bundle state could not be read: " + doctorFirstLine(err),
+			Fix: "run doctor again in a minute; defenseclaw substrate bundle status shows it"}, true
+	}
+	stages, _ := res["stages"].(map[string]any)
+	anchorsErr, _ := res["anchors_error"].(string)
+	problems, _ := res["problems"].([]any)
+	if len(problems) > 0 {
+		names := make([]string, 0, len(problems))
+		for _, p := range problems {
+			pm, _ := p.(map[string]any)
+			stage, _ := pm["stage"].(string)
+			code, _ := pm["code"].(string)
+			if code = safetext.Line(code); code == "" {
+				code = "does not verify"
+			}
+			names = append(names, safetext.Line(stage)+" ("+code+")")
+		}
+		return substrateCheck{ID: id, Status: doctorFail, Fix: doctorBundleFix,
+			Summary: fmt.Sprintf("%d of %d stage(s) no longer verify, so their atespaces have fallen back to config.yaml (deny-only on a managed install): %s",
+				len(problems), len(stages), strings.Join(names, ", "))}, true
+	}
+	if anchorsErr != "" {
+		return substrateCheck{ID: id, Status: doctorWarn, Fix: "create the bundle-anchors Secret before a bundle is applied",
+			Summary: "no bundle is applied and the cluster cannot read its bundle trust anchors: " + safetext.Line(anchorsErr)}, true
+	}
+	if len(stages) == 0 {
+		return substrateCheck{ID: id, Status: doctorOK, Summary: "no policy bundle is applied; config.yaml is in force"}, true
+	}
+	return substrateCheck{ID: id, Status: doctorOK, Summary: fmt.Sprintf("the active bundle of each of %d stage(s) verifies", len(stages))}, true
 }
 
 func doctorSignInServer(ctx context.Context, c auth.Context) substrateCheck {

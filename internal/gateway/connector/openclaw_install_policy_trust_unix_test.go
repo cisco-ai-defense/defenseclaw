@@ -41,13 +41,13 @@ func TestOpenClawInstallPolicyPathTrusted(t *testing.T) {
 	if err := os.Chmod(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := openClawInstallPolicyPathTrusted(command, ""); err != nil {
+	if err := openClawInstallPolicyPathTrusted(command, "", ""); err != nil {
 		t.Skipf("the test folder itself fails the rule (%v); the checks below need a trusted temp folder", err)
 	}
 	if err := os.Chmod(command, 0o775); err != nil {
 		t.Fatal(err)
 	}
-	if err := openClawInstallPolicyPathTrusted(command, ""); err == nil || !strings.Contains(err.Error(), "writable") {
+	if err := openClawInstallPolicyPathTrusted(command, "", ""); err == nil || !strings.Contains(err.Error(), "writable") {
 		t.Fatalf("a group-writable command passed: %v", err)
 	}
 	if err := os.Chmod(command, 0o755); err != nil {
@@ -56,23 +56,23 @@ func TestOpenClawInstallPolicyPathTrusted(t *testing.T) {
 	if err := os.Chmod(bin, 0o775); err != nil {
 		t.Fatal(err)
 	}
-	if err := openClawInstallPolicyPathTrusted(command, ""); err == nil {
+	if err := openClawInstallPolicyPathTrusted(command, "", ""); err == nil {
 		t.Fatal("a group-writable parent folder passed")
 	}
 	if err := os.Chmod(bin, 0o777|os.ModeSticky); err != nil {
 		t.Fatal(err)
 	}
-	if err := openClawInstallPolicyPathTrusted(command, ""); err != nil {
+	if err := openClawInstallPolicyPathTrusted(command, "", ""); err != nil {
 		t.Fatalf("a sticky world-writable parent is accepted by OpenClaw: %v", err)
 	}
 	link := filepath.Join(root, "link")
 	if err := os.Symlink(command, link); err != nil {
 		t.Fatal(err)
 	}
-	if err := openClawInstallPolicyPathTrusted(link, ""); err == nil {
+	if err := openClawInstallPolicyPathTrusted(link, "", ""); err == nil {
 		t.Fatal("a symlinked command passed")
 	}
-	if err := openClawInstallPolicyPathTrusted(command, "no-such-account-dc-test"); err == nil {
+	if err := openClawInstallPolicyPathTrusted(command, "no-such-account-dc-test", ""); err == nil {
 		t.Fatal("an unknown OpenClaw account passed")
 	}
 }

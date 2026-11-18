@@ -183,7 +183,46 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 			}))
 		}
 	}
-	return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings)
+	return withSecondReadingDetections(
+		mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings),
+		findings,
+	)
+}
+
+// withSecondReadingDetections records on verdict the detection-only findings
+// of loaded rule-pack rules that the second reading proved, as the first
+// reading records its own: listed with their severity, the action unchanged.
+// On a Windows host Codex runs its Bash tool in PowerShell, and the call's own
+// reading of PowerShell text it infers as POSIX can fail, so the PowerShell
+// reading here is the only one that reads the call. The merge keeps only the
+// findings that decide, so a detection-only rule proved by that reading (the
+// PowerShell TCP command loop) never reached the verdict or the audit, while
+// the same text on a PowerShell tool reported it (rel-1-0-10:GAP-0161).
+// Findings of no rule-pack rule (parse and limit records of the second
+// reading) are not added: the call's own reading reports its own.
+func withSecondReadingDetections(verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
+	if verdict == nil {
+		return nil
+	}
+	var detections []RuleFinding
+	for _, finding := range findings {
+		if finding.contributesToEnforcement() || finding.contributesToAlertOnly() ||
+			!activeRulePackRuleID(finding.RuleID) {
+			continue
+		}
+		detections = append(detections, finding)
+	}
+	if len(detections) == 0 {
+		return verdict
+	}
+	out := withSandboxShellCommandFindings(verdict, detections)
+	if severity := HighestSeverity(detections); severityRank[severity] > severityRank[strings.ToUpper(strings.TrimSpace(out.Severity))] {
+		raised := *out
+		raised.Severity = severity
+		raised.Confidence = HighestConfidence(detections, severity)
+		out = &raised
+	}
+	return out
 }
 
 // codexPlainShellCommand is the command of a Codex shell call in the plain

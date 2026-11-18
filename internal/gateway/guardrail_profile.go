@@ -1313,6 +1313,15 @@ func subjectInDomain(subject *profileSubject, domain string) bool {
 // each group as its SID and DOMAIN\name, so a bare group name in an
 // assignment also matches the name part of a DOMAIN\name group.
 //
+// A qualified name is one group identity on every OS: name@domain and
+// DOMAIN\name name the same group when their domains are the same domain,
+// by name or as the NetBIOS and DNS names of the subject's own verified
+// domain (groupDomains). Each OS lists that group in its own form (SSSD
+// dc-devs@corp.example.com, macOS and Windows CORP\dc-devs), so an
+// assignment or budget written in one form selected nobody on the others
+// (rel-1-0-10:GAP-1124). Only the verified list is folded; a group of another
+// domain keeps its domain and never matches.
+//
 // It indexes the groups on first use. A request is matched against every
 // assignment in order, and scanning the whole group list for each one made
 // a request cost assignments x groups comparisons (11 ms at 2,000
@@ -1324,9 +1333,12 @@ type subjectGroups struct {
 	// writes its SID: the name matches the SID of the group and nothing
 	// else (GAP-0860).
 	sids *profileGroupSIDs
+	// domains is the subject's own verified domain, for qualified names.
+	domains groupDomains
 	// exact holds every group, tails the name part after the last
-	// backslash of those that have one, both folded.
-	exact, tails map[string]struct{}
+	// backslash of those that have one, qualified the domain key and name
+	// of each qualified group (groupQualifiedKey), all folded.
+	exact, tails, qualified map[string]struct{}
 }
 
 func (g *subjectGroups) has(want string) bool {
@@ -1354,7 +1366,10 @@ func (g *subjectGroups) has(want string) bool {
 	if _, ok := g.exact[key]; ok {
 		return true
 	}
-	if strings.Contains(want, `\`) {
+	if domain, name, form := splitGroupName(want); form == groupNameQualified {
+		_, ok := g.qualified[g.domains.qualifiedKey(domain, name)]
+		return ok
+	} else if form == groupNameOpaque {
 		return false
 	}
 	_, ok := g.tails[key]
@@ -1370,11 +1385,20 @@ func (g *subjectGroups) build() {
 			continue
 		}
 		g.exact[foldKey(group)] = struct{}{}
-		if i := strings.LastIndexByte(group, '\\'); i >= 0 {
-			if g.tails == nil {
-				g.tails = map[string]struct{}{}
+		// Only a DOMAIN\name group gives a bare name its name part; a name
+		// splitGroupName does not read as qualified (X\CORP\name) is matched
+		// by itself alone.
+		if domain, name, form := splitGroupName(group); form == groupNameQualified {
+			if strings.Contains(group, `\`) {
+				if g.tails == nil {
+					g.tails = map[string]struct{}{}
+				}
+				g.tails[foldKey(name)] = struct{}{}
 			}
-			g.tails[foldKey(strings.TrimSpace(group[i+1:]))] = struct{}{}
+			if g.qualified == nil {
+				g.qualified = map[string]struct{}{}
+			}
+			g.qualified[g.domains.qualifiedKey(domain, name)] = struct{}{}
 		}
 	}
 }

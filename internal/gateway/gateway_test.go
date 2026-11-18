@@ -972,10 +972,12 @@ type rollbackConnector struct {
 	stubConnector
 	teardownCalled bool
 	verifyCalled   bool
+	teardownOpts   connector.SetupOpts
 }
 
-func (r *rollbackConnector) Teardown(context.Context, connector.SetupOpts) error {
+func (r *rollbackConnector) Teardown(_ context.Context, opts connector.SetupOpts) error {
 	r.teardownCalled = true
+	r.teardownOpts = opts
 	return nil
 }
 
@@ -1015,6 +1017,11 @@ func TestRecordAndRollbackFailedConnectorSetup_DoesNotPublishFailedConnector(t *
 
 	if !conn.teardownCalled {
 		t.Fatal("rollback did not call connector Teardown")
+	}
+	// The connector can keep what tells the operator how to finish the
+	// setup (the OpenClaw separate-user block to merge, GAP-1130).
+	if !conn.teardownOpts.SetupRollback {
+		t.Fatal("rollback Teardown did not carry SetupRollback")
 	}
 	if !conn.verifyCalled {
 		t.Fatal("rollback did not call connector VerifyClean")

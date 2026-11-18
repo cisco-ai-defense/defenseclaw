@@ -485,7 +485,35 @@ def test_hook_binary_from_another_release_is_named() -> None:
     with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran('{"version":"1.0.1"}')):
         assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[0] == "pass"
     with mock.patch.object(cmd_doctor.subprocess, "run", return_value=ran("", rc=2)):
-        assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[:2] == ("warn", f"{hook} did not report its release")
+        assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[:2] == (
+            "warn",
+            f"{hook} did not report its release: it exited 2 for --version-json",
+        )
+
+
+def test_hook_binary_that_cannot_report_a_release_says_why_gap0252() -> None:
+    # GAP-0252: "did not report its release" gave no reason, so a hook built
+    # without the release version read like a hook that failed to run.
+    import subprocess
+
+    def ran(stdout: str, rc: int = 0) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(["hook"], rc, stdout=stdout, stderr="")
+
+    hook = r"C:\Users\u\.local\bin\defenseclaw-hook.exe"
+    cases = [
+        (ran('{"version":"dev"}'), "it reported version 'dev', which is not a release number "
+         "(a build made without the release version)"),
+        (ran('{"name":"defenseclaw-hook"}'), "it reported no version"),
+        (ran("not json"), "it printed no JSON for --version-json"),
+        (subprocess.TimeoutExpired(["hook"], 10), "it did not answer --version-json within 10 seconds"),
+        (FileNotFoundError(), "it could not be started (FileNotFoundError)"),
+    ]
+    for outcome, why in cases:
+        kwargs = {"side_effect": outcome} if isinstance(outcome, BaseException) else {"return_value": outcome}
+        with mock.patch.object(cmd_doctor.subprocess, "run", **kwargs) as run:
+            tag, detail, _ = cmd_doctor._hook_binary_release_check(hook, "1.0.10")
+        assert (tag, detail) == ("warn", f"{hook} did not report its release: {why}")
+        assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
 
 
 @pytest.mark.usefixtures("own_pids_outside_fake_listings")

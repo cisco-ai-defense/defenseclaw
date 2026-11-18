@@ -4156,19 +4156,42 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
                 f"moved since then. Its value is kept in {path}: {json.dumps(value, sort_keys=True)}; add it "
                 f"to {where} in config.yaml, then remove that entry from {path}"
             )
+    refused: dict[str, object] = {}  # rel-1-0-10:GAP-1145: kept in the record, set by hand
     if put:
-        try:
-            apply(
-                [Change(key, value) for key, value in put.items()],
-                ACTOR_MIGRATION,
-                f"put back after the downgrade to {record.get('for') or 'an older release'}",
-                path=config_path,
-            )
-        except Exception as exc:  # noqa: BLE001 - a refused value is named, the upgrade goes on
-            commands = "; ".join(f"defenseclaw config set {key} {value}" for key, value in put.items())
-            ux.warn(f"Could not put back {', '.join(put)} ({plain_error(exc)}); set it again with: {commands}")
-            return
-        ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
+        why = f"put back after the downgrade to {record.get('for') or 'an older release'}"
+
+        def put_back(group: dict[str, object]) -> Exception | None:
+            try:
+                apply([Change(key, value) for key, value in group.items()], ACTOR_MIGRATION, why, path=config_path)
+            except Exception as exc:  # noqa: BLE001 - a refused value is named, the upgrade goes on
+                return exc
+            return None
+
+        # One try keeps the keys together, as one edit. A refused value must not hold back the
+        # others: then the routing.* keys (an alias, a classifier, a threshold refer to each
+        # other) are retried as one group and every other key alone, each validated as before.
+        failures: list[tuple[dict[str, object], Exception]] = []
+        failure = put_back(put)
+        if failure is None:
+            ux.ok(f"Put back {', '.join(put)}, set aside by the downgrade", indent="    ")
+        else:
+            routing_keys = {key: value for key, value in put.items() if key.startswith("routing.")}
+            groups = [{key: value} for key, value in put.items() if key not in routing_keys]
+            if routing_keys:
+                groups.append(routing_keys)
+            if len(groups) == 1:
+                failures.append((put, failure))
+            else:
+                for group in groups:
+                    group_failure = put_back(group)
+                    if group_failure is None:
+                        ux.ok(f"Put back {', '.join(group)}, set aside by the downgrade", indent="    ")
+                    else:
+                        failures.append((group, group_failure))
+        for group, group_failure in failures:
+            refused.update(group)
+            commands = "; ".join(f"defenseclaw config set {key} {value}" for key, value in group.items())
+            ux.warn(f"Could not put back {', '.join(group)} ({plain_error(group_failure)}); set it again with: {commands}")
     if returned:
         # Apart from the keys: a decision the older release's edits no longer fit (a model or
         # signal it names is gone) is refused alone and kept, and never holds the rest back.
@@ -4212,7 +4235,7 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
                     f"Could not put back the Substrate profile assignment of {held.get('profile')} "
                     f"({plain_error(exc)}). It is kept in {path}: {json.dumps(held['value'], sort_keys=True)}"
                 )
-    later = {key: value for key, value in keys.items() if newer_config_key(key) is None or key in moved}
+    later = {key: value for key, value in keys.items() if newer_config_key(key) is None or key in moved or key in refused}
     try:
         if later or kept_decisions or kept_assignments:
             from defenseclaw.upgrade_shim import _write_private_json
@@ -4221,6 +4244,8 @@ def _restore_set_aside_keys(data_dir: str, config_path: str) -> None:
                 key: value for key, value in record.items() if key not in ("items", "decisions", "assignments", "switched")
             }
             kept["keys"] = later
+            if "routing.enabled" in refused and isinstance(switched, dict) and "routing.enabled" in switched:
+                kept["switched"] = {"routing.enabled": switched["routing.enabled"]}
             later_items = {item: name for item, name in items.items() if any(k.startswith(item + ".") for k in later)}
             if later_items:
                 kept["items"] = later_items

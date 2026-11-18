@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -494,7 +495,7 @@ func TestTrustedShellCommandArgumentReadsEveryCommandKey(t *testing.T) {
 		{`{"path":"/tmp/x"}`, "", false},
 		{`{"command":7}`, "", false},
 	} {
-		got, ok := trustedShellCommandArgument(json.RawMessage(tc.raw))
+		got, ok := actionfacts.ShellCommandArgument(json.RawMessage(tc.raw))
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("%s: got %q %v, want %q %v", tc.raw, got, ok, tc.want, tc.ok)
 		}

@@ -130,28 +130,22 @@ func relayWorkdir(configured string) string {
 
 // stateRoot is where launchers keep the private state of a project copy
 // (pull bundles, baselines, checkpoints; GAP-0163): a 0700 folder under the
-// relay user's home, outside the working directory, so it is not in the
-// folder the agent works in or lists. "" (the launcher then uses a folder
-// beside the copy) when there is no such home or it is inside the
-// working directory. The agent runs as the same user, so it could still
-// read it on purpose; that is a documented limit.
+// agent's home, outside the working directory, so it is not in the folder
+// the agent works in or lists. "" (the launcher then uses a folder beside
+// the copy) when there is no such home or it is inside the working
+// directory. It belongs to the agent's user (a separated relay makes it as
+// that user), so the agent could still read it on purpose; that is a
+// documented limit.
 func (s *Server) stateRoot() string {
 	home, err := os.UserHomeDir()
-	if err != nil || !filepath.IsAbs(home) || filepath.Clean(home) == "/" {
+	if err != nil {
 		return ""
 	}
-	work := filepath.Clean(relayWorkdir(s.opts.Config.Relay.Workdir))
-	d := filepath.Join(home, ".local", "state", "defenseclaw", "copies")
-	if d == work || strings.HasPrefix(d, work+string(filepath.Separator)) || strings.HasPrefix(work, d+string(filepath.Separator)) {
-		return ""
+	work := relayWorkdir(s.opts.Config.Relay.Workdir)
+	if s.opts.sep != nil {
+		return s.opts.sep.stateDir(home, work)
 	}
-	if err := os.MkdirAll(d, 0o700); err != nil {
-		return ""
-	}
-	if fi, err := os.Lstat(d); err != nil || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 {
-		return ""
-	}
-	return d
+	return makeStateRoot(home, work)
 }
 
 // projectDir checks the directory a person asks the agent to start in (the
@@ -276,13 +270,13 @@ func (s *Server) fileExec(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
-	RunExec(r.Context(), req, dir, w, func() { _ = rc.Flush() })
+	runExec(r.Context(), req, dir, w, func() { _ = rc.Flush() }, s.opts.sep)
 }
 
-// RunExec runs req in dir and writes its frames to w, ending with the exit
-// frame (or nothing when the client went away). Exported for the actor-side
-// tools that want the same framing.
-func RunExec(ctx context.Context, req ExecRequest, dir string, w io.Writer, flush func()) {
+// runExec runs req in dir and writes its frames to w, ending with the exit
+// frame (or nothing when the client went away), as the agent's user when
+// sep is set (GAP-0116).
+func runExec(ctx context.Context, req ExecRequest, dir string, w io.Writer, flush func(), sep *separation) {
 	timeout := time.Duration(req.TimeoutSeconds) * time.Second
 	if timeout == 0 {
 		timeout = DefaultExecTimeout
@@ -307,6 +301,7 @@ func RunExec(ctx context.Context, req ExecRequest, dir string, w io.Writer, flus
 	cmd.Stdout = execWriter{es, ExecStdout}
 	cmd.Stderr = execWriter{es, ExecStderr}
 	setProcessGroup(cmd)
+	sep.asAgent(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	// A grandchild that keeps the pipes open must not hold the reply.
 	cmd.WaitDelay = 2 * time.Second
@@ -597,14 +592,18 @@ func (s *Server) filePut(w http.ResponseWriter, r *http.Request) {
 	}
 	dir = s.resolvePath(dir)
 	limit := filesMaxBytes()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		http.Error(w, "relay: files: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 	// Content is capped by ExtractTar; the body (headers and padding
 	// included) by a looser bound.
 	body := http.MaxBytesReader(w, r.Body, 2*limit+tarOverhead)
-	res, err := ExtractTar(body, dir, ExtractOptions{MaxBytes: limit})
+	var res ExtractResult
+	var err error
+	if s.opts.sep != nil {
+		// As the agent's user: the files are the agent's, and a link the
+		// agent planted cannot make a root relay write outside its reach.
+		res, err = s.opts.sep.extract(r.Context(), body, dir, limit)
+	} else if err = os.MkdirAll(dir, 0o755); err == nil {
+		res, err = ExtractTar(body, dir, ExtractOptions{MaxBytes: limit})
+	}
 	var tooBig *http.MaxBytesError
 	switch {
 	case err == nil:
@@ -633,10 +632,35 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p = s.resolvePath(p)
-	if _, err := os.Stat(p); err != nil {
+	if s.opts.sep != nil {
+		// As the agent's user: a root relay reads only what the agent may.
+		started := false
+		err := s.opts.sep.tarTo(r.Context(), w, p, func() {
+			w.Header().Set("Content-Type", "application/x-tar")
+			w.WriteHeader(http.StatusOK)
+			started = true
+		})
+		switch {
+		case err == nil:
+		case errors.Is(err, errChildNotFound):
+			http.Error(w, "relay: files: "+p+": no such file or directory", http.StatusNotFound)
+		case errors.Is(err, errChildDenied):
+			http.Error(w, "relay: files: "+p+": the agent may not read all of it (permission denied)", http.StatusForbidden)
+		case !started:
+			http.Error(w, "relay: files: "+err.Error(), http.StatusInternalServerError)
+		default:
+			s.log.Warn("relay.files.get", "error", err.Error())
+			panic(http.ErrAbortHandler)
+		}
+		return
+	}
+	if err := readable(p); err != nil {
 		code := http.StatusInternalServerError
-		if errors.Is(err, fs.ErrNotExist) {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
 			code = http.StatusNotFound
+		case errors.Is(err, fs.ErrPermission):
+			code = http.StatusForbidden
 		}
 		http.Error(w, "relay: files: "+err.Error(), code)
 		return
@@ -649,6 +673,32 @@ func (s *Server) fileGet(w http.ResponseWriter, r *http.Request) {
 		// broken stream and not a short archive.
 		panic(http.ErrAbortHandler)
 	}
+}
+
+// readable checks, before the first byte of a files-get, that WriteTar can
+// read everything at p: every folder can be listed and every regular file
+// opened (GAP-0375). A path the reader may not read all of is then a clean
+// refusal (fs.ErrPermission) instead of a 200 that ends in a cut stream
+// after a tar header. A mode changed between the check and the copy still
+// cuts the stream.
+func readable(p string) error {
+	top, err := filepath.EvalSymlinks(filepath.Clean(p))
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(top, func(cur string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		f, err := os.Open(cur)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	})
 }
 
 // WriteTar writes the file or directory at p to w as a tar whose entry names

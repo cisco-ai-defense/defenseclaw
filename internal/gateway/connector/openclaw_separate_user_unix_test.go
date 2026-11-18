@@ -148,14 +148,23 @@ func TestOpenClawSeparateUserUnreadableConfigAndRuntimePromptGate(t *testing.T) 
 	}
 	// A failed setup rolls back through Teardown: the block stays (GAP-0081),
 	// the credential goes.
-	if err := c.Teardown(context.Background(), opts); err != nil && !strings.Contains(err.Error(), "revoke") {
+	rollback := opts
+	rollback.SetupRollback = true
+	if err := c.Teardown(context.Background(), rollback); err != nil && !strings.Contains(err.Error(), "revoke") {
 		t.Fatalf("Teardown: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(opts.DataDir, "openclaw-merge.json")); err != nil {
-		t.Fatalf("teardown removed openclaw-merge.json: %v", err)
+		t.Fatalf("rollback teardown removed openclaw-merge.json: %v", err)
 	}
 	if _, err := os.Stat(opts.OpenClawPluginTokenFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("teardown left the token file: %v", err)
+	}
+	// Removing the connector takes the block to merge too (GAP-1130).
+	if err := c.Teardown(context.Background(), opts); err != nil && !strings.Contains(err.Error(), "revoke") {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opts.DataDir, "openclaw-merge.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("teardown left openclaw-merge.json: %v", err)
 	}
 
 	opts.AgentVersion = ""

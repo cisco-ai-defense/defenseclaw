@@ -45,11 +45,15 @@ type AdminVerdict struct {
 	// request must also be inside it (managed deny otherwise).
 	Bind bool
 	// Force lists budget-downgrade aliases, first compatible wins.
-	Force      []string
-	Deny       *DenyReason
-	Warnings   []string
-	RuleIDs    []string
-	ChargeKeys []string
+	Force    []string
+	Deny     *DenyReason
+	Warnings []string
+	// RuleIDs are the rules proven to match; BindRuleIDs the rules whose
+	// allow list binds the request (also an unconfirmed one on a managed
+	// device), which a gate refusal names.
+	RuleIDs     []string
+	BindRuleIDs []string
+	ChargeKeys  []string
 }
 
 // GateTarget is a forwarded exit the evaluator checks (a routed backend or

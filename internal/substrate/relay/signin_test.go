@@ -18,7 +18,8 @@ func signinServer(connector string, managed bool, env map[string]string) *Server
 	cfg.Relay.Connector = connector
 	cfg.Relay.Interactive = []string{"/bin/true"}
 	cfg.Relay.Env = env
-	return NewServer(Options{Config: cfg, Warm: func(context.Context, string) error { return nil }})
+	// No guarded folder: these tests are about E9, not the hook folder (GAP-0120).
+	return NewServer(Options{Config: cfg, Warm: func(context.Context, string) error { return nil }, Guard: []string{}})
 }
 
 // E9 inside the actor: a managed image does not start an agent that signs in

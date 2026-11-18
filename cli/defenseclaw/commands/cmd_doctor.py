@@ -1637,6 +1637,24 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         r=r,
         check_id=check_id,
     )
+    # A routing.admin group this host knows by no spelling the matcher
+    # selects: its deny never acts here (rel-1-0-10:GAP-1124).
+    for warning in getattr(validation, "warnings", None) or []:
+        if isinstance(warning, str) and warning.endswith(f"({_ROUTING_GROUP_UNMATCHED})"):
+            _emit(
+                "warn",
+                "Routing policy",
+                warning.removesuffix(f" ({_ROUTING_GROUP_UNMATCHED})"),
+                r=r,
+                remediation=(
+                    "write the group as this host lists an account's groups (id -Gn on Linux and macOS, "
+                    "whoami /groups on Windows); name@domain and DOMAIN\\name of one domain both match"
+                ),
+            )
+
+
+# The Go config validate code of a routing.admin group no spelling matches.
+_ROUTING_GROUP_UNMATCHED = "routing_admin_group_unmatched"
 
 
 # The managed enumerator's unprotected-agents record and the command that runs
@@ -13184,6 +13202,59 @@ def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> str:
+    """The OpenClaw plugin rows: hook mode, remediation and install admission.
+
+    Returns the configured hook mode.
+    """
+    from defenseclaw.openclaw_plugin_config import (
+        configured_openclaw_hook_mode,
+        openclaw_plugin_evidence,
+    )
+
+    hook_mode = configured_openclaw_hook_mode(cfg)
+    if hook_mode != "proxy":
+        # Proxy mode has the interception row below as its evidence.
+        live_mode, live_detail, _seen = openclaw_plugin_evidence(cfg, live_health)
+        if live_mode == "unverified":
+            _emit("warn", "OpenClaw hook mode", live_detail, r=r)
+        else:
+            _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
+    from defenseclaw.openclaw_plugin_config import (
+        openclaw_install_policy_recorded_state,
+        openclaw_install_policy_remediation,
+        openclaw_install_policy_state,
+        openclaw_install_policy_wanted,
+        openclaw_operator_admin_off,
+    )
+
+    if openclaw_operator_admin_off():
+        _emit(
+            "skip",
+            "OpenClaw remediation",
+            "off (no operator.admin): blocks are enforced by DefenseClaw, OpenClaw is not told to disable them",
+            r=r,
+        )
+
+    policy_state = openclaw_install_policy_state(cfg)
+    if policy_state == "ours":
+        _emit(
+            "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
+        )
+    elif openclaw_install_policy_wanted(cfg):
+        recorded = openclaw_install_policy_recorded_state(cfg)
+        _emit(
+            "warn",
+            "OpenClaw install admission",
+            "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
+            + (" (another security.installPolicy is configured)" if policy_state == "operator" else "")
+            + (f"; {recorded}" if recorded.startswith("not registered:") else ""),
+            remediation=openclaw_install_policy_remediation(policy_state, recorded=recorded),
+            r=r,
+        )
+    return hook_mode
+
+
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Fail closed when a proxy connector's :4000 listener is unused.
 
@@ -13194,8 +13265,6 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     """
     if not cfg.guardrail.enabled:
         return
-    if _guardrail_proxy_intentionally_closed(cfg):
-        return
     connectors = [
         c
         for c in _doctor_active_connectors(cfg)
@@ -13203,57 +13272,20 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     ]
     if not connectors:
         return
+    # The OpenClaw plugin rows (hook mode, remediation, install admission)
+    # are not about the proxy port: native OpenClaw (Windows) closes it on
+    # purpose, and doctor skipped them there (GAP-1139).
+    hook_mode = _check_openclaw_plugin_rows(cfg, r, live_health=live_health) if "openclaw" in connectors else ""
+    if _guardrail_proxy_intentionally_closed(cfg):
+        return
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     if "openclaw" in connectors:
         from defenseclaw.openclaw_plugin_config import (
-            configured_openclaw_hook_mode,
             configured_openclaw_plugin_config_issue,
             openclaw_plugin_config_unreadable,
-            openclaw_plugin_evidence,
         )
 
-        hook_mode = configured_openclaw_hook_mode(cfg)
-        if hook_mode != "proxy":
-            # Proxy mode has the interception row below as its evidence.
-            live_mode, live_detail, _seen = openclaw_plugin_evidence(cfg, live_health)
-            if live_mode == "unverified":
-                _emit("warn", "OpenClaw hook mode", live_detail, r=r)
-            else:
-                _emit("pass", "OpenClaw hook mode", f"{live_mode}: {live_detail}", r=r)
-        from defenseclaw.openclaw_plugin_config import (
-            openclaw_install_policy_state,
-            openclaw_install_policy_wanted,
-            openclaw_operator_admin_off,
-        )
-
-        if openclaw_operator_admin_off():
-            _emit(
-                "skip",
-                "OpenClaw remediation",
-                "off (no operator.admin): blocks are enforced by DefenseClaw, OpenClaw is not told to disable them",
-                r=r,
-            )
-
-        policy_state = openclaw_install_policy_state(cfg)
-        if policy_state == "ours":
-            _emit(
-                "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
-            )
-        elif openclaw_install_policy_wanted(cfg):
-            _emit(
-                "warn",
-                "OpenClaw install admission",
-                "connectors.openclaw.install_policy is on, but OpenClaw does not ask DefenseClaw before installs"
-                + (" (another security.installPolicy is configured)" if policy_state == "operator" else ""),
-                remediation=(
-                    "remove your own security.installPolicy from openclaw.json, then run `defenseclaw setup openclaw`"
-                    if policy_state == "operator"
-                    else "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
-                    "the setup output names the reason"
-                ),
-                r=r,
-            )
         if hook_mode == "native" and connectors == ["openclaw"]:
             # No guardrail proxy carries OpenClaw traffic in native mode, so
             # there is no proxy hop to prove; the plugin hooks guard it.
@@ -15563,8 +15595,20 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         return
 
     dotenv_path = os.path.join(cfg.data_dir, ".env")
-    api_key = _resolve_api_key(key_env, dotenv_path) if key_env else ""
+    api_key = _resolve_api_key(key_env, dotenv_path) if key_env else cfg.cisco_ai_defense.resolved_api_key()
 
+    if not key_env and not api_key:
+        # GAP-0464: a configuration error, not an outage. The gateway builds no
+        # AI Defense client without a key, so the remote scan never runs.
+        _emit(
+            "fail",
+            "Cisco AI Defense",
+            f"guardrail.scanner_mode is {gc.scanner_mode} but no AI Defense API key is configured "
+            "(cisco_ai_defense.api_key_env), so the remote scan never runs; set the key, "
+            "or set guardrail.scanner_mode to local",
+            r=r,
+        )
+        return
     if not api_key:
         display = key_env if key_env.isupper() and len(key_env) < 50 else "(env var not configured properly)"
         _emit("fail", "Cisco AI Defense", f"{display} not set", r=r)
@@ -17809,10 +17853,13 @@ def _hook_binary_release_check(hook_path: str, cli_version: str) -> tuple[str, s
     backup can leave an older hook beside a newer gateway; every agent hook
     call runs it, so doctor names it instead of reporting healthy hooks.
     """
-    from defenseclaw.doctor_health import _safe_semver
+    from defenseclaw.doctor_health import _safe_semver, _safe_token
 
     reinstall = "rerun the DefenseClaw installer (install.ps1) for this release to replace it"
     expected = _safe_semver(cli_version)
+    installed = ""
+    # GAP-0252: say why no release came back, instead of only that it did not.
+    why = ""
     try:
         proc = subprocess.run(
             [hook_path, "--version-json"],
@@ -17820,13 +17867,36 @@ def _hook_binary_release_check(hook_path: str, cli_version: str) -> tuple[str, s
             text=True,
             timeout=10.0,
             check=False,
+            # The hook is a GUI-subsystem program: give it a closed stdin, as
+            # setup does, rather than whatever this console has inherited.
+            stdin=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        installed = _safe_semver(json.loads(proc.stdout or "{}").get("version")) if proc.returncode == 0 else ""
-    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
-        installed = ""
+        if proc.returncode != 0:
+            why = f"it exited {proc.returncode} for --version-json"
+        else:
+            try:
+                identity = json.loads(proc.stdout or "{}")
+            except ValueError:
+                identity = None
+            if not isinstance(identity, dict):
+                why = "it printed no JSON for --version-json"
+            else:
+                installed = _safe_semver(identity.get("version"))
+                if not installed:
+                    reported = _safe_token(identity.get("version"))
+                    why = (
+                        f"it reported version {reported!r}, which is not a release number "
+                        "(a build made without the release version)"
+                        if reported
+                        else "it reported no version"
+                    )
+    except subprocess.TimeoutExpired:
+        why = "it did not answer --version-json within 10 seconds"
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+        why = f"it could not be started ({type(exc).__name__})"
     if not installed:
-        return "warn", f"{hook_path} did not report its release", reinstall
+        return "warn", f"{hook_path} did not report its release: {why}", reinstall
     if expected and installed != expected:
         return "warn", f"{hook_path} is {installed}; this CLI is {expected}", reinstall
     return "pass", f"{installed}, the same release as this CLI", ""

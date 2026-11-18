@@ -262,11 +262,12 @@ type Installer struct {
 	Geteuid func() int
 	// HomebrewPrefixProblem says, on a Mac, why Homebrew cannot install a
 	// formula as this account (a HomebrewPrefixError), nil when it can
-	// (default: the folders Homebrew writes under homebrewPrefix).
+	// (default: the folders Homebrew writes under BrewPrefix).
 	HomebrewPrefixProblem func() error
 	// BrewPrefix is the Homebrew prefix NVIDIA's script installs into on a
 	// Mac (default: HOMEBREW_PREFIX, else the brew LookPath finds, else
-	// /opt/homebrew). Writable reports whether this account can create
+	// /opt/homebrew; an installed OpenShell CLI that a Homebrew prefix owns
+	// moves it to that prefix, GAP-1119). Writable reports whether this account can create
 	// entries in a directory (default: access(2)).
 	BrewPrefix string
 	Writable   func(dir string) bool
@@ -415,7 +416,7 @@ func (i *Installer) defaults() {
 		i.Geteuid = os.Geteuid
 	}
 	if i.HomebrewPrefixProblem == nil {
-		i.HomebrewPrefixProblem = func() error { return homebrewPrefixProblem(homebrewPrefix(), dirWritable) }
+		i.HomebrewPrefixProblem = func() error { return homebrewPrefixProblem(i.BrewPrefix, dirWritable) }
 	}
 }
 
@@ -482,6 +483,7 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		return nil, fmt.Errorf("openshell: installer URL must be https, got %q", i.URL)
 	}
 	existing := i.findExisting(ctx)
+	ownBrew := i.adoptBrewOfCLI(existing)
 	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS, ConfigDir: i.configDir()}
 	target, targetErr := ParseVersion(i.Release)
 	if existing != nil && existing.Version != (Version{}) {
@@ -545,6 +547,13 @@ func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, 
 		plan.Notes = append(plan.Notes,
 			fmt.Sprintf("Homebrew is at %s, not at /opt/homebrew or /usr/local: %s tells the OpenShell CLI where the gateway's client certificates are", tildePath(i.BrewPrefix), EnvLocalTLSDir),
 			"Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)")
+	}
+	if ownBrew != "" {
+		// NVIDIA's script runs the first brew on PATH, and the Homebrew
+		// that owns the installed CLI is the one that upgrades it
+		// (GAP-1119: another account's /opt/homebrew came first).
+		plan.Env = append(plan.Env, "PATH="+filepath.Join(ownBrew, "bin")+string(os.PathListSeparator)+os.Getenv("PATH"))
+		plan.Notes = append(plan.Notes, fmt.Sprintf("the installed OpenShell belongs to the Homebrew at %s, which is not the first brew on PATH: the installer runs that Homebrew", tildePath(ownBrew)))
 	}
 	if i.GOOS == "linux" && rpmBasedHost(i.OSRelease) {
 		plan.Notes = append(plan.Notes, installerAwkNote)
@@ -708,6 +717,23 @@ func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 		return err
 	}
 	return brewTerminal(ctx, i.Runner, "install", "e2fsprogs")
+}
+
+// adoptBrewOfCLI makes BrewPrefix the Homebrew prefix that owns the
+// installed OpenShell CLI, on a Mac: the Homebrew that installed a formula
+// is the one that upgrades it, not the first brew on PATH, which may belong
+// to another account (GAP-1119). It returns that prefix when it differs
+// from the one BrewPrefix named, else "".
+func (i *Installer) adoptBrewOfCLI(existing *ExistingInstall) string {
+	if i.GOOS != "darwin" || existing == nil {
+		return ""
+	}
+	prefix := brewPrefixOfCLI(func(p string) (string, error) { return p, nil }, existing.Path)
+	if prefix == "" || filepath.Clean(prefix) == filepath.Clean(i.BrewPrefix) {
+		return ""
+	}
+	i.BrewPrefix = prefix
+	return prefix
 }
 
 // brewTLSDir is the certificates directory the script's registration

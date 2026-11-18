@@ -1433,6 +1433,9 @@ go-lint: sync-openclaw-extension
 		exit 1; \
 	fi
 	go vet ./...
+	@# The live Claude Code run-config test is behind a build tag, so
+	@# `go vet ./...` does not compile it; vet it here so it cannot rot (GAP-0280).
+	go vet -tags openshell_integration ./internal/openshell/image/
 	@$(MAKE) --no-print-directory go-lint-analyzers
 
 # golangci-lint $(GOLANGCI_LINT_VERSION) on the lines changed since the merge

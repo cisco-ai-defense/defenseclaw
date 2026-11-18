@@ -60,6 +60,8 @@ type (
 	ActorMetadataSource  = pb.ActorMetadataDataSource
 	ActorMetadataItem    = pb.ActorMetadataItem
 	WakeupProbe          = pb.WakeupProbe
+	SecurityContext      = pb.SecurityContext
+	Capabilities         = pb.Capabilities
 	HttpGetAction        = pb.HttpGetAction
 	Selector             = pb.Selector
 	SnapshotConfig       = pb.SnapshotConfig

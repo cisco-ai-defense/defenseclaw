@@ -222,6 +222,16 @@ func (r *inlineReading) call(words, assigned []string, depth int) {
 	if handoff.Fed {
 		add("", true)
 	}
+	// A file the code itself opens for writing (open(PATH, 'a'),
+	// writeFileSync(PATH, ...)) is a path it writes, read by the interpreter
+	// literal reader the hook client lists its write targets with: python3 -c
+	// "open('<home>/.defenseclaw/config.yaml','a').write(x)" handed no word
+	// and was allowed in every pack (rel-1-0-10:GAP-1134).
+	if handoff.Access == actionfacts.InlineWrites {
+		for _, target := range literalInterpreterWrites(handoff.Code, handoff.Language, r.cwd, r.home) {
+			add(OperandPath(target, r.cwd), false)
+		}
+	}
 	for _, word := range assigned {
 		if actionfacts.InlineHandedWordIsPath(word) {
 			add(r.abs(word), false)

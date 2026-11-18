@@ -34,26 +34,102 @@ import (
 // Before GAP-1077, the shell routes read an envelope with an unplaced header
 // as partial and added no unknown finding: allow in every tier, strict too,
 // where the single-header here-document blocks. One top-level test per tier,
-// so the -race shards can take them apart.
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefault(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "default")
+// so the -race shards can take them apart. Each tier takes 430-470 s under
+// -race on the hosted runners of #1457, about what one shard holds, so each
+// runs as two tests, the even and the odd fixture cases (each case keeps its
+// index, so its shapes and unplaced names are the ones the whole run checks).
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefaultEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "default", 0)
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchStrict(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "strict")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefaultOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "default", 1)
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchPermissive(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "permissive")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchStrictEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "strict", 0)
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManaged(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "managed")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchStrictOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "strict", 1)
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrict(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "managed-strict")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchPermissiveEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "permissive", 0)
 }
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchPermissiveOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "permissive", 1)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "managed", 0)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "managed", 1)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "managed-strict", 0)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "managed-strict", 1)
+}
+
+// patchDecoyTiers are the tiers the decoy-header tests check, each as two
+// tests: the even and the odd fixture cases (patchDecoyParts).
+var patchDecoyTiers = []string{"default", "strict", "permissive", "managed", "managed-strict"}
+
+// patchDecoyParts are the parts the two tests of a tier check, of
+// len(patchDecoyParts) parts.
+var patchDecoyParts = []int{0, 1}
+
+func patchDecoyHeaderNeverWeakerHalf(t *testing.T, tier string, half int) {
+	patchDecoyHeaderNeverWeakerPart(t, tier, patchDecoyParts[half], len(patchDecoyParts))
+}
+
+// TestPatchDecoyHeaderHalvesCoverEveryCase: in every tier, the even and the
+// odd test together check exactly the fixture cases the single test of the
+// tier checked: every case in one half, none in both, none lost.
+func TestPatchDecoyHeaderHalvesCoverEveryCase(t *testing.T) {
+	var cases []string
+	for _, c := range shapeParityCases(t) {
+		if patchDecoyCase(c.id, c.tool) {
+			cases = append(cases, c.id+" "+c.tool)
+		}
+	}
+	if len(cases) == 0 {
+		t.Fatal("no wincred Write or Edit fixture cases")
+	}
+	parts := len(patchDecoyParts)
+	for _, tier := range patchDecoyTiers {
+		if !slices.ContainsFunc(gap0437Packs, func(p gap0437Pack) bool { return p.name == tier }) {
+			t.Errorf("no tier %q in gap0437Packs", tier)
+		}
+		for n, c := range cases {
+			in := 0
+			for _, part := range patchDecoyParts {
+				if patchDecoyInPart(n, part, parts) {
+					in++
+				}
+			}
+			if in != 1 {
+				t.Errorf("%s: case %d (%s) is in %d of the halves, want 1", tier, n, c, in)
+			}
+		}
+	}
+}
+
+// patchDecoyCase reports whether a shape-parity fixture case is one the
+// decoy-header test checks: a wincred Write or Edit.
+func patchDecoyCase(id, tool string) bool {
+	return strings.HasPrefix(id, "wincred/") && (tool == "Write" || tool == "Edit")
+}
+
+// patchDecoyInPart reports whether case index n is in part of parts.
+func patchDecoyInPart(n, part, parts int) bool { return n%parts == part }
 
 // patchDecoyUnplaced are header names no reader places on the host of the
 // gateway, on every patch route: home forms, which the patch tool expands on
@@ -185,7 +261,9 @@ func patchDecoyRoutes(cwd string) []patchDecoyRoute {
 	}
 }
 
-func patchDecoyHeaderNeverWeaker(t *testing.T, tier string) {
+// patchDecoyHeaderNeverWeakerPart checks the fixture cases whose index n has
+// n%parts == part; parts 1 checks them all.
+func patchDecoyHeaderNeverWeakerPart(t *testing.T, tier string, part, parts int) {
 	index := slices.IndexFunc(gap0437Packs, func(p gap0437Pack) bool { return p.name == tier })
 	if index < 0 {
 		t.Fatalf("no tier %q in gap0437Packs", tier)
@@ -194,7 +272,7 @@ func patchDecoyHeaderNeverWeaker(t *testing.T, tier string) {
 	all := shapeParityCases(t)
 	cases := all[:0]
 	for _, c := range all {
-		if strings.HasPrefix(c.id, "wincred/") && (c.tool == "Write" || c.tool == "Edit") {
+		if patchDecoyCase(c.id, c.tool) {
 			cases = append(cases, c)
 		}
 	}
@@ -217,6 +295,9 @@ func patchDecoyHeaderNeverWeaker(t *testing.T, tier string) {
 					return shapeParityHook(t, handlers[call.conn], call, p.managed)
 				}
 				for n, c := range cases {
+					if !patchDecoyInPart(n, part, parts) {
+						continue
+					}
 					str := func(key string) string { value, _ := c.args[key].(string); return value }
 					// The fixture name on Windows; elsewhere the same name
 					// with forward slashes, the spelling whose single-header

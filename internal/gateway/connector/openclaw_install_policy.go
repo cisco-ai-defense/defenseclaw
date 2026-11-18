@@ -28,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
@@ -44,6 +45,40 @@ import (
 // OpenClawInstallPolicySince is the first OpenClaw release whose
 // security.installPolicy runs an exec command.
 const OpenClawInstallPolicySince = "2026.8.35"
+
+// OpenClawWindowsInheritOnlySince is the first OpenClaw release (fs-safe
+// 0.26) whose Windows install-policy check skips inherit-only ACEs.
+// OpenClaw 2026.8.35 (fs-safe 0.5) counts them, so below a drive root that
+// keeps the default inherit-only Users and CREATOR OWNER entries it refuses
+// the command (rel-1-0-10 GAP-1170).
+const OpenClawWindowsInheritOnlySince = "2026.11.3"
+
+// openClawSkipsInheritOnlyACEs reports an OpenClaw known to skip
+// inherit-only ACEs; an unknown version is held to the older rule.
+func openClawSkipsInheritOnlyACEs(rawVersion string) bool {
+	version := NormalizeAgentVersion("openclaw", rawVersion)
+	return version != "" && CompareAgentVersions(version, OpenClawWindowsInheritOnlySince) >= 0
+}
+
+// openClawInstallPolicyTooOldError is a Windows command that passes only on
+// an OpenClaw that skips inherit-only ACEs.
+type openClawInstallPolicyTooOldError struct {
+	version string
+	cause   error
+}
+
+func (e *openClawInstallPolicyTooOldError) Error() string {
+	return fmt.Sprintf("OpenClaw %s is too old for strict install policy on Windows (needs %s or later): it counts inherit-only entries, and %v",
+		e.version, OpenClawWindowsInheritOnlySince, e.cause)
+}
+
+// openClawInstallPolicyOwnerError is an owner DefenseClaw refuses (OpenClaw
+// does not check owners).
+type openClawInstallPolicyOwnerError struct{ msg string }
+
+func (e *openClawInstallPolicyOwnerError) Error() string { return e.msg }
+
+func (e *openClawInstallPolicyTooOldError) Unwrap() error { return e.cause }
 
 // OpenClawInstallPolicyArgs are the static arguments setup writes.
 var OpenClawInstallPolicyArgs = []string{"connector", "openclaw", "install-policy"}
@@ -149,7 +184,15 @@ func openClawInstallPolicyCommand(opts SetupOpts) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := openClawInstallPolicyTrusted(command, strings.TrimSpace(opts.OpenClawPluginAccount)); err != nil {
+	if err := openClawInstallPolicyTrusted(command, strings.TrimSpace(opts.OpenClawPluginAccount), openClawObservedVersion(opts)); err != nil {
+		var tooOld *openClawInstallPolicyTooOldError
+		if errors.As(err, &tooOld) {
+			return "", err
+		}
+		var owner *openClawInstallPolicyOwnerError
+		if errors.As(err, &owner) {
+			return "", fmt.Errorf("DefenseClaw does not register %s as the install policy command: %v", command, err)
+		}
 		return "", fmt.Errorf("OpenClaw would refuse %s as its install policy command (%v)", command, err)
 	}
 	return command, nil
@@ -202,6 +245,37 @@ type openClawInstallPolicyRecord struct {
 	SecurityBefore bool                   `json:"security_before"`
 }
 
+// openClawInstallPolicyStatePath is where setup and the reload refresh keep
+// the last install policy state (registered, off, not registered: why), so
+// doctor and status can say why OpenClaw does not ask DefenseClaw.
+func openClawInstallPolicyStatePath(dataDir string) string {
+	return filepath.Join(dataDir, "openclaw-install-policy-state.json")
+}
+
+type openClawInstallPolicyStateRecord struct {
+	State           string `json:"state"`
+	OpenClawVersion string `json:"openclaw_version,omitempty"`
+	At              string `json:"at"`
+}
+
+func saveOpenClawInstallPolicyState(dataDir, state, version string) {
+	if dataDir == "" || state == "" {
+		return
+	}
+	data, err := json.MarshalIndent(openClawInstallPolicyStateRecord{
+		State: state, OpenClawVersion: NormalizeAgentVersion("openclaw", version), At: time.Now().UTC().Format(time.RFC3339),
+	}, "", "  ")
+	if err == nil {
+		_ = atomicWriteFile(openClawInstallPolicyStatePath(dataDir), append(data, byte(10)), 0o600)
+	}
+}
+
+func discardOpenClawInstallPolicyState(dataDir string) {
+	if dataDir != "" {
+		_ = os.Remove(openClawInstallPolicyStatePath(dataDir))
+	}
+}
+
 func openClawInstallPolicyRecordPath(dataDir string) string {
 	return filepath.Join(dataDir, "openclaw-install-policy.json")
 }
@@ -232,35 +306,55 @@ func discardOpenClawInstallPolicyRecord(dataDir string) {
 	}
 }
 
+// Install policy states applyOpenClawInstallPolicy reports.
+const (
+	openClawInstallPolicyRegistered = "registered"
+	openClawInstallPolicyOff        = "off"
+)
+
 // applyOpenClawInstallPolicy writes, refreshes or removes the DefenseClaw
 // security.installPolicy in openclaw.json after the plugin registration. The
 // caller holds the openclaw.json lock. A block the operator wrote, or
-// changed, is left as it is.
-func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) error {
+// changed, is left as it is. It returns the state: registered, off, or
+// "not registered: <reason>".
+func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) (string, error) {
+	state, err := applyOpenClawInstallPolicyState(configPath, opts)
+	if err == nil {
+		saveOpenClawInstallPolicyState(opts.DataDir, state, openClawObservedVersion(opts))
+	}
+	return state, err
+}
+
+func applyOpenClawInstallPolicyState(configPath string, opts SetupOpts) (string, error) {
 	if opts.DataDir == "" {
-		return nil
+		return "not registered: no DefenseClaw data folder", nil
 	}
 	rec, hasRec := loadOpenClawInstallPolicyRecord(opts.DataDir)
 	original, err := readConnectorStateFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read %s: %w", configPath, err)
+		return "", fmt.Errorf("read %s: %w", configPath, err)
 	}
 	cfg := map[string]interface{}{}
 	if len(original) > 0 {
 		if cfg, err = parseOpenClawConfig(configPath, original); err != nil {
-			return err
+			return "", err
 		}
 	}
 	current, present, securityBefore := openClawInstallPolicyOf(cfg)
 	ours := hasRec && present && reflect.DeepEqual(current, rec.Block)
 	if !openClawInstallPolicyWanted(opts) {
+		state := openClawInstallPolicyOff
+		if opts.OpenClawInstallPolicy {
+			state = fmt.Sprintf("not registered: OpenClaw %q has no security.installPolicy (needs %s or later)",
+				NormalizeAgentVersion("openclaw", openClawObservedVersion(opts)), OpenClawInstallPolicySince)
+		}
 		if ours {
-			return removeOpenClawInstallPolicy(configPath, opts.DataDir)
+			return state, removeOpenClawInstallPolicy(configPath, opts.DataDir)
 		}
 		if hasRec {
 			discardOpenClawInstallPolicyRecord(opts.DataDir)
 		}
-		return nil
+		return state, nil
 	}
 	if present && !ours {
 		if hasRec {
@@ -268,25 +362,26 @@ func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) error {
 		}
 		noteOpenClawInstallPolicyOnce("operator|"+configPath,
 			"%s already has a security.installPolicy; DefenseClaw left it and does not add its install admission (remove it to let setup add DefenseClaw)", configPath)
-		return nil
+		return "not registered: openclaw.json already has a security.installPolicy of its own", nil
 	}
 	command, err := openClawInstallPolicyCommand(opts)
 	if err != nil {
 		noteOpenClawInstallPolicyOnce("command|"+configPath, "install admission is not registered: %v", err)
+		state := "not registered: " + err.Error()
 		if ours {
-			return removeOpenClawInstallPolicy(configPath, opts.DataDir)
+			return state, removeOpenClawInstallPolicy(configPath, opts.DataDir)
 		}
-		return nil
+		return state, nil
 	}
 	block := openClawInstallPolicyBlock(opts, command)
 	if ours && reflect.DeepEqual(current, block) {
-		return nil
+		return openClawInstallPolicyRegistered, nil
 	}
 	if ours {
 		securityBefore = rec.SecurityBefore
 	}
 	if err := saveOpenClawInstallPolicyRecord(opts.DataDir, openClawInstallPolicyRecord{Block: block, SecurityBefore: securityBefore}); err != nil {
-		return fmt.Errorf("record the install policy: %w", err)
+		return "", fmt.Errorf("record the install policy: %w", err)
 	}
 	security, _ := cfg["security"].(map[string]interface{})
 	if security == nil {
@@ -296,9 +391,61 @@ func applyOpenClawInstallPolicy(configPath string, opts SetupOpts) error {
 	cfg["security"] = security
 	out, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal %s: %w", configPath, err)
+		return "", fmt.Errorf("marshal %s: %w", configPath, err)
 	}
-	return atomicWriteFile(configPath, append(out, byte(10)), 0o644)
+	if err := atomicWriteFile(configPath, append(out, byte(10)), 0o644); err != nil {
+		return "", err
+	}
+	return openClawInstallPolicyRegistered, nil
+}
+
+// RefreshInstallPolicy writes, refreshes or removes the DefenseClaw
+// security.installPolicy in openclaw.json for opts and nothing else of
+// setup, and returns the state it left (registered, off, or why not). The
+// gateway calls it when a config reload changes what
+// connectors.openclaw.install_policy resolves to (a rule pack switched to or
+// from strict changes auto), so the install admission follows the pack
+// without another setup (GAP-1128). An OpenClaw home setup has not written
+// yet (no DefenseClaw plugin in openclaw.json and no record), and the
+// separate-user layout, where DefenseClaw does not edit openclaw.json, are
+// left alone; the next setup writes them.
+func (c *OpenClawConnector) RefreshInstallPolicy(opts SetupOpts) (string, error) {
+	if opts.DataDir == "" {
+		return "not changed: no DefenseClaw data folder", nil
+	}
+	if openClawSeparateUser(opts) {
+		return "not changed: the separate-user layout (run defenseclaw setup openclaw for the block to merge)", nil
+	}
+	configPath := c.pathsFor(opts).config
+	if _, err := os.Stat(configPath); err != nil {
+		return "not changed: no " + configPath + " yet", nil
+	}
+	if _, hasRec := loadOpenClawInstallPolicyRecord(opts.DataDir); !hasRec && !openClawConfigRegistersDefenseClaw(configPath) {
+		return "not changed: setup has not registered the DefenseClaw plugin yet", nil
+	}
+	// The same steps on openclaw.json and its pre-setup record as Setup.
+	var state string
+	err := openClawConfigLocked(configPath, func() error {
+		keepSnapshot, err := openClawSnapshotUsable(opts.DataDir, c.Name(), configPath)
+		if err != nil {
+			return fmt.Errorf("openclaw config backup: %w", err)
+		}
+		if keepSnapshot {
+			if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+				return fmt.Errorf("openclaw config backup: %w", err)
+			}
+		}
+		if state, err = applyOpenClawInstallPolicy(configPath, opts); err != nil {
+			return fmt.Errorf("openclaw install policy: %w", err)
+		}
+		if keepSnapshot {
+			if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+				return fmt.Errorf("openclaw config backup hash: %w", err)
+			}
+		}
+		return nil
+	})
+	return state, err
 }
 
 // removeOpenClawInstallPolicy takes the DefenseClaw security.installPolicy

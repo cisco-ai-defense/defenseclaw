@@ -59,7 +59,7 @@ func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tpl.Connector != name || tpl.AgentVersion == "" || spec.HookContract == "" || spec.User != "1000:1000" {
+			if tpl.Connector != name || tpl.AgentVersion == "" || spec.HookContract == "" || spec.User != "0:0" || spec.AgentUser != "1000:1000" {
 				t.Fatalf("spec: %+v", tpl)
 			}
 			layer, err := attest.BuildLayer(spec.Files, nil, spec.HomeOwners, nil)

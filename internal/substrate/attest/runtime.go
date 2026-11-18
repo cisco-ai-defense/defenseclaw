@@ -89,8 +89,11 @@ type RuntimeDecision struct {
 	// not installed, or a host that refuses scanner containment). For a
 	// skill the action is then block and the caller applies its fail mode
 	// (GAP-0164). For an MCP server only the tool scan is missing: the
-	// config rules decided the action (GAP-0185).
+	// config rules decided the action (GAP-0185), and an MCP server whose
+	// tools cannot be read from its source counts the same (GAP-0480).
 	Unavailable bool
+	// Unscanned says what was not scanned when Unavailable is set.
+	Unscanned string
 }
 
 // RuntimeScanner scans assets added mid-session.
@@ -189,7 +192,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	if so.Admission == nil {
 		so.Admission = FallbackAdmission
 	}
-	unavailable := false
+	unavailable, unscanned := false, ""
 	var res *scanner.ScanResult
 	switch a.Kind {
 	case config.AdmissionTypeSkill:
@@ -227,13 +230,30 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 		res.Findings = append(res.Findings, ConfigRules(*a.Server, r.AllowedMCPHosts)...)
 		if r.MCPStatic != nil && a.Server.Transport == "stdio" {
 			var src strings.Builder
+			// hasSource: the server runs code of the folder, which only a tool
+			// scan could judge: a file it starts, whatever its extension, or
+			// an interpreter given a module or a path (GAP-0524). Only the
+			// extensions the extractor reads are read for tools.
+			hasSource := localInterpreterServer(*a.Server)
 			for _, f := range files {
-				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] && serverStarts(*a.Server, f.Path) {
-					src.Write(f.Content)
-					src.WriteByte('\n')
+				if f.Role == RoleMCPServer && serverStarts(*a.Server, f.Path) {
+					hasSource = true
+					if sourceExt[path.Ext(f.Path)] {
+						src.Write(f.Content)
+						src.WriteByte('\n')
+					}
 				}
 			}
-			if tools := ExtractToolDefs(src.String()); len(tools) > 0 {
+			tools := ExtractToolDefs(src.String())
+			if hasSource && len(tools) == 0 {
+				// The server's own source is here but declares its tools in a
+				// shape the extractor cannot read: its tool descriptions were
+				// not scanned, so the fail mode decides, never a silent
+				// allow (GAP-0480).
+				unavailable = true
+				unscanned = "the tools of the server could not be read from its source, so their descriptions were not scanned"
+			}
+			if len(tools) > 0 {
 				tf := filepath.Join(work, "tools.json")
 				raw, _ := json.Marshal(map[string]any{"tools": tools})
 				if err := os.WriteFile(tf, raw, 0o600); err != nil {
@@ -245,6 +265,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 					// still decide, and the fail mode decides the rest
 					// (Unavailable; GAP-0185, as for skills in GAP-0164).
 					unavailable = true
+					unscanned = "the MCP tool scan cannot run in the gateway (no mcp-scanner)"
 				} else {
 					if err != nil || sr == nil {
 						sr = failedScan(r.MCPStatic.Name(), a.Name, err)
@@ -278,7 +299,8 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			verdict, reason = VerdictBlock, "a HIGH finding, refused at run time as at the template build: "+strings.Join(high, ", ")
 		}
 	}
-	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete, Unavailable: unavailable}
+	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete,
+		Unavailable: unavailable, Unscanned: unscanned}
 	switch verdict {
 	case VerdictBlock:
 		d.Action = "block"
@@ -593,6 +615,42 @@ func skillDirOf(file, name string) string {
 // file p: the kit attaches the in-repository files of every server of a
 // config (E20), and one server's source must not decide another server's
 // tool calls (GAP-0185: a package server beside a local one).
+// interpreters run a program named on their command line. A server
+// started by one with a module (-m) or a path to run is code the tool scan
+// would have to read; a pinned package from a runtime fetcher (npx, uvx) is
+// decided by the config rules (GAP-0524).
+var interpreters = map[string]bool{"python": true, "python3": true, "py": true, "node": true, "nodejs": true, "deno": true, "bun": true,
+	"ruby": true, "perl": true, "php": true, "java": true, "lua": true, "Rscript": true, "julia": true}
+
+// localInterpreterServer reports a stdio server that runs code of the
+// folder: a program started by a relative path (./x), or an interpreter
+// given a relative script, a module (-m), a jar or inline code. An
+// absolute path is a program installed in the image, which the template
+// build scanned; a pinned package fetcher is decided by the config rules.
+func localInterpreterServer(s MCPServer) bool {
+	base := path.Base(filepath.ToSlash(s.Command))
+	if strings.HasPrefix(s.Command, "./") || strings.HasPrefix(s.Command, "../") {
+		return true
+	}
+	if !interpreters[strings.TrimSuffix(base, ".exe")] && !strings.HasPrefix(base, "python3.") {
+		return false
+	}
+	for i, a := range s.Args {
+		switch {
+		case a == "-m" || a == "-jar":
+			return i+1 < len(s.Args)
+		case a == "-c" || a == "-e" || a == "--eval":
+			return true
+		case strings.HasPrefix(a, "-"):
+			continue
+		default:
+			// The script the interpreter runs: the folder's when relative.
+			return !path.IsAbs(filepath.ToSlash(a)) && !filepath.IsAbs(a)
+		}
+	}
+	return false
+}
+
 func serverStarts(s MCPServer, p string) bool {
 	p = path.Clean("/" + filepath.ToSlash(p))
 	for _, cand := range append([]string{s.Command}, s.Args...) {
