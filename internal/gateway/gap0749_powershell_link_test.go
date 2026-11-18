@@ -42,7 +42,11 @@ func powerShellProtectedRoute(t *testing.T, home, cwd, connector, posture string
 	case "claudecode":
 		req.ToolName = "PowerShell"
 	case "copilot":
-		req.ToolName = "powershell"
+		// Copilot CLI names its pre-tool event preToolUse (the registered
+		// hook route, TestR104WindowsRegisteredHookNativeRefix3); under
+		// PreToolUse its Windows route answered allow for every row, a
+		// direct write of the keys file too (rel-1-0-10:GAP-0849, native).
+		req.ToolName, req.HookEventName = "powershell", "preToolUse"
 	default:
 		req.ToolName = "shell_command"
 	}

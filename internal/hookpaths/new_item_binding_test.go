@@ -88,11 +88,13 @@ func TestNewItemBindingThisReadingCannotFollowMayMakeALink(t *testing.T) {
 }
 
 // TestNewItemSpellingsReadAsThePlainLink: the link reading of a command
-// (commandLinks) is the same in every spelling of -ItemType, also when the
-// shell parser cannot read the command (rel-1-0-10:GAP-0849, cert L73: a
-// first statement that assigns a parenthesized expression left only the
-// literal -ItemType text to find the link, so -Ty, an en dash and -ItemType:
-// read as no link).
+// (commandLinks) is the same in every spelling of -ItemType, and with New-Item
+// spelled as its ni alias, also when the shell parser cannot read the command
+// (rel-1-0-10:GAP-0849, cert L73: a first statement that assigns a
+// parenthesized expression left only the literal -ItemType text to find the
+// link, so -Ty, an en dash and -ItemType: read as no link; native T12: ni with
+// a computed target read as no link, and a ni link to a static target kept
+// the opaque reading). CommandMayMakeLink is the same in every spelling too.
 func TestNewItemSpellingsReadAsThePlainLink(t *testing.T) {
 	home := t.TempDir()
 	const computed = `$t = Join-Path $env:TEMP ("gap0849-" + [guid]::NewGuid()); `
@@ -103,10 +105,10 @@ func TestNewItemSpellingsReadAsThePlainLink(t *testing.T) {
 		`New-Item -ItemType Directory -Path ./d; Add-Content ./d/f.txt marker`,
 		`New-Item -ItemType File -Path ./f.txt; Add-Content ./f.txt marker`,
 	}
-	type reading struct{ known, unread, opaque bool }
+	type reading struct{ known, unread, opaque, mayMakeLink bool }
 	read := func(command string) reading {
 		links := commandLinks(command, home, home, nil, false, false)
-		return reading{links.known, links.unread, links.opaque}
+		return reading{links.known, links.unread, links.opaque, CommandMayMakeLink(command)}
 	}
 	for _, row := range rows {
 		for _, prefix := range []string{"", computed} {
@@ -115,10 +117,12 @@ func TestNewItemSpellingsReadAsThePlainLink(t *testing.T) {
 			if prefix != "" && strings.Contains(row, "SymbolicLink -Path ./l -Target $t") && want.known {
 				t.Errorf("%q: the plain link reads as known, want unread", plain)
 			}
-			for _, spelling := range newItemSpellings {
-				command := strings.Replace(plain, "-ItemType ", spelling.spelling, 1)
-				if got := read(command); got != want {
-					t.Errorf("%s: commandLinks(%q) = %+v, want the plain reading %+v", spelling.id, command, got, want)
+			for _, name := range []string{"New-Item ", "ni ", "NI "} {
+				for _, spelling := range newItemSpellings {
+					command := strings.Replace(strings.Replace(plain, "New-Item ", name, 1), "-ItemType ", spelling.spelling, 1)
+					if got := read(command); got != want {
+						t.Errorf("%s %q: commandLinks(%q) = %+v, want the plain reading %+v", spelling.id, name, command, got, want)
+					}
 				}
 			}
 		}

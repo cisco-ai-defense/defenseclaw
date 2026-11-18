@@ -18,7 +18,7 @@ import (
 // prefix of the Type alias, an en dash, em dash or horizontal bar, -ItemType:
 // with the value in the next word or attached. Each is applied to the plain
 // "New-Item -ItemType " of a row, so the row text is otherwise the plain
-// row's; the last one also spells New-Item as its ni alias.
+// row's; the last three also spell New-Item as its ni alias.
 var gap0849ItemTypeSpellings = []struct{ id, newItem, itemType string }{
 	{"T1-alias-prefix-ty", "New-Item ", "-Ty "},
 	{"T2-alias-prefix-typ", "New-Item ", "-typ "},
@@ -28,6 +28,8 @@ var gap0849ItemTypeSpellings = []struct{ id, newItem, itemType string }{
 	{"T10-hbar-name", "New-Item ", "―ItemType "},
 	{"T11-colon-inline", "New-Item ", "-ItemType:"},
 	{"T12-ni-alias-ty", "ni ", "-Ty "},
+	{"T13-ni-alias-name", "ni ", "-ItemType "},
+	{"T14-ni-alias-endash", "NI ", "–ItemType "},
 }
 
 // rel-1-0-10:GAP-0849 (cert L73, TST-6523: Codex strict on Windows): a

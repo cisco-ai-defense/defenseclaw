@@ -58,6 +58,16 @@ var (
 	newItemAliasText = lazyregexp.New(`(?i)(?:^|[\s;|&({])ni\s`)
 )
 
+// newItemSpellingIndexes are the New-Item spellings of PowerShell text: the
+// name, and its ni alias in a command position. The alias counts as the name
+// does, so a ni call the PowerShell reading leaves without argv (a dynamic
+// operand) is an unread spelling, as such a New-Item call is
+// (rel-1-0-10:GAP-0849, native T12: ni -Ty SymbolicLink with a computed
+// target read as no link, and with a static one it kept the opaque reading).
+func newItemSpellingIndexes(command string) [][]int {
+	return append(newItemText.FindAllStringIndex(command, -1), newItemAliasText.FindAllStringIndex(command, -1)...)
+}
+
 // commandNewItemMayMakeLink reports a command whose New-Item calls may make
 // a link: unless the text reads as PowerShell and every New-Item
 // spelling in it is a call whose item type is fixed as a file or a folder
@@ -66,7 +76,7 @@ var (
 // creates one with New-Item -ItemType File kept its authorized-keys block
 // in the default tier (rel-1-0-10:GAP-0801).
 func commandNewItemMayMakeLink(command string) bool {
-	mayMakeLink, unread := newItemCallsMayMakeLink(command)
+	mayMakeLink, unread, _ := newItemCallsMayMakeLink(command)
 	return mayMakeLink || unread
 }
 
@@ -78,8 +88,8 @@ func commandNewItemMayMakeLink(command string) bool {
 // folder or a file New-Item in such text keeps the reading it had before
 // (rel-1-0-10:GAP-0849: only the -ItemType link spelling was read there).
 func commandNewItemLinkSpelled(command string) bool {
-	mayMakeLink, unread := newItemCallsMayMakeLink(command)
-	return mayMakeLink || unread && newItemTextMayMakeLink(command)
+	mayMakeLink, unread, powerShell := newItemCallsMayMakeLink(command)
+	return mayMakeLink || unread && newItemTextMayMakeLink(command, powerShell)
 }
 
 // newItemTextMayMakeLink reads every New-Item spelling of a text from its
@@ -87,9 +97,15 @@ func commandNewItemLinkSpelled(command string) bool {
 // quotes and without redirections, bind as powerShellNewItemMayMakeLink binds
 // a call's words; a word that may expand at run time is not static. A
 // statement whose bracket is still open at the end of the text is not read,
-// so it may make a link.
-func newItemTextMayMakeLink(command string) bool {
-	for _, loc := range newItemText.FindAllStringIndex(command, -1) {
+// so it may make a link. In text that reads as PowerShell (powerShell) the ni
+// alias is read as New-Item is; in text of another dialect it is not read, as
+// in newItemCallsMayMakeLink.
+func newItemTextMayMakeLink(command string, powerShell bool) bool {
+	spellings := newItemText.FindAllStringIndex(command, -1)
+	if powerShell {
+		spellings = newItemSpellingIndexes(command)
+	}
+	for _, loc := range spellings {
 		texts, closed := newItemTextWords(command[loc[1]:])
 		if !closed {
 			return true
@@ -156,11 +172,12 @@ func newItemTextWords(rest string) (words []string, closed bool) {
 // PowerShell: mayMakeLink is a read call that may make a link
 // (powerShellNewItemMayMakeLink); unread is a New-Item spelling that is no
 // read call (the text is not PowerShell, or the spelling is in a string or a
-// script block).
-func newItemCallsMayMakeLink(command string) (mayMakeLink, unread bool) {
+// script block); powerShell is text that reads as PowerShell.
+func newItemCallsMayMakeLink(command string) (mayMakeLink, unread, powerShell bool) {
 	spellings := len(newItemText.FindAllStringIndex(command, -1))
-	if spellings == 0 && !newItemAliasText.MatchString(command) {
-		return false, false
+	aliases := len(newItemAliasText.FindAllStringIndex(command, -1))
+	if spellings == 0 && aliases == 0 {
+		return false, false, false
 	}
 	facts := analyzeAtHookFolder(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell})
 	// A partial parse (a dynamic value) still names each call it read; a
@@ -168,7 +185,7 @@ func newItemCallsMayMakeLink(command string) (mayMakeLink, unread bool) {
 	// leaves the counts unequal.
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell {
 		// The ni alias is read in PowerShell text only.
-		return false, spellings > 0
+		return false, spellings > 0, false
 	}
 	// A call after the first of its pipeline reads pipeline input.
 	pipelineHead := make(map[int64]int64)
@@ -179,7 +196,8 @@ func newItemCallsMayMakeLink(command string) (mayMakeLink, unread bool) {
 	}
 	read := 0
 	for _, call := range facts.Commands {
-		// ni is the built-in alias of New-Item; its text is not counted.
+		// ni is the built-in alias of New-Item; in PowerShell text its
+		// spelling counts as the name's does.
 		alias := len(call.Argv) > 0 && strings.EqualFold(call.Argv[0], "ni")
 		if len(call.Argv) == 0 || !alias && !strings.EqualFold(call.Argv[0], "new-item") {
 			continue
@@ -191,13 +209,11 @@ func newItemCallsMayMakeLink(command string) (mayMakeLink, unread bool) {
 			static[i] = call.ArgvComplete || !strings.ContainsAny(word, "$@(){}`")
 		}
 		if powerShellNewItemMayMakeLink(call.Argv[1:], static, call.PipelineID != 0 && pipelineHead[call.PipelineID] != call.ID) {
-			return true, false
+			return true, false, true
 		}
-		if !alias {
-			read++
-		}
+		read++
 	}
-	return false, read != spellings
+	return false, read != spellings+aliases, true
 }
 
 // powerShellNewItemMayMakeLink reports a New-Item call (the words after the

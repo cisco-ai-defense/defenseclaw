@@ -32,10 +32,10 @@ var powerShellDirectoryChangers = []string{"set-location", "sl", "cd", "chdir", 
 // ok is false, and the call keeps the opaque reading, unless every
 // link-making text of the call is such a New-Item that was read: every
 // -ItemType link text opaqueLink finds is a read link call, every New-Item
-// spelling is a read call (a link spelled another way, -Ty or an en dash,
-// is found by its call: rel-1-0-10:GAP-0849), no other link API, directory
-// change, copy, rename or archive command is in the call, and no operand is
-// dynamic.
+// spelling, the ni alias too, is a read call (a link spelled another way, -Ty
+// or an en dash, is found by its call: rel-1-0-10:GAP-0849), no other link
+// API, directory change, copy, rename or archive command is in the call, and
+// no operand is dynamic.
 func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
 	plainTexts := 0
 	for _, match := range opaqueLink.FindAllString(command, -1) {
@@ -44,7 +44,7 @@ func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
 		}
 		plainTexts++
 	}
-	spellings := len(newItemText.FindAllStringIndex(command, -1))
+	spellings := len(newItemSpellingIndexes(command))
 	if plainTexts == 0 && spellings == 0 {
 		return "", false
 	}
@@ -67,9 +67,7 @@ func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
 		}
 		switch program {
 		case "new-item", "ni":
-			if program == "new-item" {
-				newItems++
-			}
+			newItems++
 			flavor, name, target, isLink, read := powerShellNewItemLink(command.Argv[1:])
 			if !read {
 				return "", false
