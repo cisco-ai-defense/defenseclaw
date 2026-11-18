@@ -1184,6 +1184,14 @@ func dispatchTrustedActionWith(
 						findings = withSimpleCommandFindings(findings, trustedActionUnresolvedBodyFindings(request.EnforcementCapable))
 						continue
 					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer {
+						// A here-document that may write DefenseClaw state goes
+						// to a program whose use of its input is not known: the
+						// unknown tier of the pack, a block in strict
+						// (rel-1-0-10:GAP-1183, GAP-1240).
+						findings = withUnknownFinding(findings, unknownReasonFinding(unknownStdinConsumerTitle, unknownStdinConsumerReason, request.EnforcementCapable))
+						continue
+					}
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntaxCap {
 						// The reading of the syntax error stopped at a cap:
 						// the unknown tier, and the statements read before it
@@ -10651,7 +10659,8 @@ func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfac
 	if facts.Parse.Dialect == actionfacts.DialectPOSIX && facts.Parse.Status != actionfacts.StatusLimitExceeded &&
 		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
 			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax ||
-				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody ||
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer
 		}) {
 		// A complete POSIX split already enforced the limit. The extra
 		// count is needed only when the analyzer reached its own bound or
@@ -10950,6 +10959,15 @@ func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding 
 const (
 	runtimeHomeTitle  = "Shell command reads the home folder through a HOME set at run time, judged as unknown"
 	runtimeHomeReason = "home_set_at_run_time"
+)
+
+// unknownStdinConsumerTitle and unknownStdinConsumerReason are the
+// unknown-tier finding of a here-document whose body may write DefenseClaw
+// state, fed to a program whose use of its standard input is not known
+// (actionfacts.EvaluationFailureUnknownStdinConsumer, rel-1-0-10:GAP-1240).
+const (
+	unknownStdinConsumerTitle  = "Here-document that may change DefenseClaw state goes to a program whose use of its input is not known, judged as unknown"
+	unknownStdinConsumerReason = "heredoc_consumer_unknown"
 )
 
 // shellReadingBound is the reading bound a command is past
