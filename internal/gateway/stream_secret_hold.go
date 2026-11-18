@@ -55,7 +55,10 @@ import (
 // number or a token the upstream pauses inside never goes out in part. Past
 // streamSecretMaxHeld bytes held behind open runs (a long numeric table keeps
 // one open at almost every piece end) the held bytes go out once the check
-// has read them, with no verdict, and what follows is held again.
+// has read them, with no verdict, and what follows is held again. While
+// the upstream is quiet behind an open run the client gets a keep-alive, or
+// the held bytes with the run masked, every streamKeepAliveAfter
+// (rel-1-0-10:GAP-1307, stream_keepalive.go).
 const (
 	// streamSecretMaxPEM is the largest block secretshape reads as a key
 	// (maxPrivateKeyPEMBytes).
@@ -224,14 +227,21 @@ func (s *secretLane) pemSkip() {
 }
 
 // token reports a token of a secret rule still running at the end of t.
-func (s *secretLane) token(t string) bool {
+func (s *secretLane) token(t string) bool { return s.tokenStart(t) >= 0 }
+
+// tokenStart is the start of the token or digit run still running at the
+// end of t, -1 for none.
+func (s *secretLane) tokenStart(t string) int {
 	from := max(len(t)-streamSecretTail, 0)
 	loc := streamTokenOpen.FindStringIndex(t[from:])
 	if loc == nil {
-		return false
+		return -1
 	}
 	start := from + loc[0]
-	return start >= s.tokenFrom && len(t)-start < streamSecretMaxToken
+	if start < s.tokenFrom || len(t)-start >= streamSecretMaxToken {
+		return -1
+	}
+	return start
 }
 
 // giveUp stops holding what is open in t (a bound was hit): its block and

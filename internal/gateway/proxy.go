@@ -3702,6 +3702,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// the text last grew.
 	secretOpen, secretKey := false, false
 	var textAt time.Time
+	// keepAt: when the client last got a keep-alive behind an open token or
+	// digit run (GAP-1307, stream_keepalive.go).
+	var keepAt time.Time
 	// secretBound decides an open secret at a hold bound: TRUNCATED, the
 	// unknown tier of the pack, once the text read so far passed its check.
 	// False: it blocked; the stream is cut.
@@ -3867,15 +3870,19 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}()
 	for open := true; open; {
 		var deadline time.Time
+		keepDue := false
 		switch {
 		case !holding || streamBlocked:
 		case secretKey:
 			// An open private-key block waits for more text at most
 			// streamHoldMaxPartialAge (GAP-0429).
 			deadline = textAt.Add(streamHoldMaxPartialAge)
-		case secretOpen:
+		case secretOpen && (len(hold.buf) > 0 || len(initialChunkBuf) > 0):
 			// A token or a digit run has no clock: the next text or the end
-			// of the stream decides it (GAP-1265).
+			// of the stream decides it (GAP-1265). The client gets an SSE
+			// comment line after streamKeepAliveAfter of no new text, and
+			// every streamKeepAliveAfter after it (GAP-1307).
+			deadline, keepDue = laterTime(textAt, keepAt).Add(streamKeepAliveAfter), true
 		case len(hold.buf) > 0:
 			deadline = hold.since.Add(streamHoldMaxAge)
 		}
@@ -3889,6 +3896,12 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			handleChunk(chunk)
 		case <-due:
 			if streamBlocked {
+				break
+			}
+			if keepDue {
+				_, _ = w.Write(sseKeepAlive)
+				flusher.Flush()
+				keepAt = time.Now()
 				break
 			}
 			if secretKey {
@@ -6483,11 +6496,13 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	// In action mode no frame goes out while the text ends inside an open
 	// secret (rel-1-0-10:GAP-0429, stream_secret_hold.go): the frames wait in
 	// heldFrames, in stream order, until it has ended and the frame check has
-	// read it whole. This path reads the upstream on the handler goroutine,
-	// so the hold has no clock of its own: it is bounded in bytes, and the
-	// end of the stream ends it.
+	// read it whole. The hold has no clock of its own: it is bounded in
+	// bytes, and the end of the stream ends it. While frames are held the
+	// client gets an SSE comment line every streamKeepAliveAfter (GAP-1307):
+	// heldAt is when the hold began, keepAt the last keep-alive.
 	var heldFrames [][]byte
 	heldSize := 0
+	var heldAt, keepAt time.Time
 	flushHeldFrames := func() {
 		for _, frame := range heldFrames {
 			_, _ = w.Write(frame)
@@ -6652,6 +6667,9 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		if wait, ok := secretWait(len(frame)); !ok {
 			return false
 		} else if wait {
+			if len(heldFrames) == 0 {
+				heldAt = time.Now()
+			}
 			heldFrames = append(heldFrames, append([]byte(nil), frame...))
 			heldSize += len(frame)
 			return true
@@ -6662,29 +6680,67 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		return true
 	}
 
+	// The upstream is read on its own goroutine, so that a client whose
+	// frames are held gets its keep-alive while the upstream is quiet
+	// (GAP-1307). The caller closes the body, which ends a Read that waits.
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10<<20)
-	var frame bytes.Buffer
-	stopped := false
-	for scanner.Scan() {
-		line := scanner.Text()
-		frame.WriteString(line)
-		frame.WriteByte('\n')
-		if line == "" {
-			if !processFrame(frame.Bytes()) {
-				stopped = true
-				break
+	lines := make(chan string)
+	linesDone := make(chan struct{})
+	defer close(linesDone)
+	var scanErr error
+	go func() {
+		defer close(lines)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-linesDone:
+				return
 			}
-			frame.Reset()
-			if streamDone {
-				break
+		}
+		scanErr = scanner.Err()
+	}()
+	var keepTimer streamHoldTimer
+	defer keepTimer.stop()
+	var frame bytes.Buffer
+	stopped, linesEnded := false, false
+scan:
+	for {
+		var deadline time.Time
+		if len(heldFrames) > 0 {
+			deadline = laterTime(heldAt, keepAt).Add(streamKeepAliveAfter)
+		}
+		select {
+		case <-keepTimer.wait(deadline, time.Now()):
+			_, _ = w.Write(sseKeepAlive)
+			flusher.Flush()
+			keepAt = time.Now()
+		case line, ok := <-lines:
+			if !ok {
+				linesEnded = true
+				break scan
+			}
+			frame.WriteString(line)
+			frame.WriteByte('\n')
+			if line == "" {
+				if !processFrame(frame.Bytes()) {
+					stopped = true
+					break scan
+				}
+				frame.Reset()
+				if streamDone {
+					break scan
+				}
 			}
 		}
 	}
 	if !stopped && frame.Len() > 0 {
 		processFrame(frame.Bytes())
 	}
-	streamReadErr := scanner.Err()
+	var streamReadErr error
+	if linesEnded {
+		streamReadErr = scanErr
+	}
 	if streamReadErr == nil && !streamBlocked && (!inspectFinalText() || !endedInKey() || !inspectBufferedToolCalls()) {
 		streamBlocked = true
 	}
