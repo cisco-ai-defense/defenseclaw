@@ -153,10 +153,14 @@ type Controller struct {
 	mu        sync.Mutex
 	actors    map[string]*actorState // by actor UID
 	templates map[string]cachedTemplate
-	// inUse is the templates of the actors the last pass listed: only
-	// their verdicts count for the unattested-templates gauge, and an
-	// expired verdict of another template is dropped (GAP-0583).
-	inUse     map[string]bool
+	// inUse is, by template, the atespaces of the actors the last pass
+	// listed that use it: only these templates' verdicts count for the
+	// unattested-templates gauge, and an expired verdict of another
+	// template is dropped (GAP-0583). An actor's template reference names
+	// its own atespace, which can be another than the actor's, so an
+	// atespace the pass could not list keeps its actors' templates by the
+	// actors' atespace.
+	inUse     map[string]map[string]bool
 	fastUntil time.Time
 	scoped    bool
 	// unlisted are atespaces the last pass could not list: their known
@@ -388,19 +392,28 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	seen := make(map[string]bool, len(actors))
 	var urgent, rest []*ateapi.Actor
 	var recreated []recreatedActor
-	inUse := map[string]bool{}
+	inUse := map[string]map[string]bool{}
+	use := func(tmpl, ns string) {
+		if inUse[tmpl] == nil {
+			inUse[tmpl] = map[string]bool{}
+		}
+		inUse[tmpl][ns] = true
+	}
 	c.mu.Lock()
-	for k := range c.inUse {
-		// An atespace this pass could not list keeps its templates.
-		if ns, _, _ := strings.Cut(k, "/"); c.unlisted[ns] {
-			inUse[k] = true
+	for k, by := range c.inUse {
+		for ns := range by {
+			// An atespace this pass could not list keeps its actors'
+			// templates.
+			if c.unlisted[ns] {
+				use(k, ns)
+			}
 		}
 	}
 	for _, a := range actors {
 		uid := a.GetMetadata().GetUid()
 		seen[uid] = true
 		if t := a.GetActorTemplate(); t != nil {
-			inUse[ateapi.Key(t)] = true
+			use(ateapi.Key(t), a.GetMetadata().GetAtespace())
 		}
 		_, known := c.actors[uid]
 		if !known {
@@ -423,7 +436,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	}
 	c.inUse = inUse
 	for k, ct := range c.templates {
-		if !inUse[k] && now.Sub(ct.at) >= templateCacheTTL {
+		if len(inUse[k]) == 0 && now.Sub(ct.at) >= templateCacheTTL {
 			delete(c.templates, k)
 		}
 	}
