@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 import unittest
 from unittest import mock
@@ -50,7 +49,9 @@ class HookCapacityRowTests(unittest.TestCase):
         r = self._row(_capacity(shed=4))
         self.assertEqual((r.passed, r.warned, r.failed), (0, 1, 0))
         detail = r.checks[-1]["detail"]
-        self.assertIn("4 call(s) refused by the admission limits; their hooks block them when the budget ends", detail)
+        # GAP-0742 N1: counted at least once; a resend may have got it in.
+        self.assertIn("4 call(s) refused by the admission limits at least once; a call no resend got in is blocked when its budget ends", detail)
+        self.assertNotIn("their hooks block them", detail)
         self.assertIn("An account is over its hook budget or this host is over its hook capacity", detail)
         self.assertNotIn("ran unchecked", detail)
 
@@ -76,9 +77,6 @@ class _Cfg:
 
 class HookCapacityDoctorPathTests(unittest.TestCase):
     """Review P2-2: the row is on the common doctor path, not Windows only."""
-
-    def test_windows_diagnostics_no_longer_emit_the_row(self):
-        self.assertNotIn("hook_capacity", inspect.getsource(cmd_doctor._check_windows_gateway_diagnostics))
 
     def test_linux_reads_the_authenticated_status_when_health_lacks_it(self):
         r = cmd_doctor._DoctorResult()
@@ -110,6 +108,82 @@ class HookCapacityDoctorPathTests(unittest.TestCase):
         ):
             cmd_doctor._check_hook_capacity(_Cfg(), {}, r)
         self.assertEqual((r.passed, r.warned, r.failed), (0, 0, 0))
+
+    def _run_doctor(self, platform, document, extra_stubs=None):
+        """Drive the doctor command with every other check stubbed."""
+        stubs = {
+            name: mock.MagicMock(return_value=None)
+            for name in dir(cmd_doctor)
+            if name.startswith("_check_") and name != "_check_hook_capacity" and callable(getattr(cmd_doctor, name))
+        }
+        stubs["_check_sidecar"] = mock.MagicMock(return_value={"status": "ok"})
+        stubs["_check_windows_gateway_diagnostics"] = mock.MagicMock(return_value=True)
+        stubs.update(extra_stubs or {})
+        app = AppContext()
+        app.cfg = mock.MagicMock()
+        patches = [mock.patch.object(cmd_doctor, name, stub) for name, stub in stubs.items()]
+        patches += [
+            mock.patch.object(cmd_doctor.sys, "platform", platform),
+            mock.patch.object(cmd_doctor, "_doctor_config_present", return_value=True),
+            mock.patch("defenseclaw.config_writer.managed_leftover_config", return_value=None),
+            mock.patch.object(cmd_doctor, "_prefetch_sandbox_report", return_value=(None, None)),
+            mock.patch.object(cmd_doctor, "_write_doctor_cache", return_value=None),
+        ]
+        if document is not None:
+            patches.append(
+                mock.patch.object(
+                    cmd_doctor, "_authenticated_gateway_status_document", return_value=(document, "", True)
+                )
+            )
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        result = CliRunner().invoke(cmd_doctor.doctor, ["--json"], obj=app)
+        start = result.output.find("{")
+        self.assertGreaterEqual(start, 0, result.output)
+        return json.loads(result.output[start:])
+
+    def test_windows_doctor_emits_the_row_once(self):
+        # Review P2-2, as behavior: the Windows run has one Hook capacity row,
+        # from the common Services path, not a second from its diagnostics.
+        payload = self._run_doctor("win32", {"health": {}, "hook_capacity": _capacity(shed=2)})
+        rows = [c for c in payload["checks"] if c["label"] == "Hook capacity"]
+        self.assertEqual(len(rows), 1, payload["checks"])
+
+    def test_the_doctor_run_fetches_the_authenticated_status_once(self):
+        # GAP-0742 N4: the hook capacity row and another row that reads the
+        # authenticated status (connector activity, Cowork, OpenCode) share
+        # one fetch per doctor run.
+        trust = mock.Mock(trusted=True, pid=4242, code="", detail="")
+        body = json.dumps({"health": {"status": "ok"}, "hook_capacity": _capacity(denies=1)})
+        probe = mock.MagicMock(return_value=(200, body))
+
+        def authenticated():
+            # The token-bound /status fetches (the public /health probe of
+            # another row is not one).
+            return sum(1 for call in probe.call_args_list if "Authorization" in (call.kwargs.get("headers") or {}))
+
+        other = mock.MagicMock(side_effect=lambda cfg, *a, **k: cmd_doctor._authenticated_gateway_health(cfg))
+        network = [
+            mock.patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("tok", "", "")),
+            mock.patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
+            mock.patch.object(cmd_doctor, "_gateway_api_url", return_value="http://127.0.0.1:18970/status"),
+            mock.patch.object(cmd_doctor, "_http_probe", probe),
+            mock.patch.object(cmd_doctor, "_authenticated_runtime_matches", return_value=(True, "")),
+        ]
+        for patcher in network:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        payload = self._run_doctor("linux", None, extra_stubs={"_check_policy_state": other})
+        other.assert_called_once()
+        rows = [c for c in payload["checks"] if c["label"] == "Hook capacity"]
+        self.assertEqual([row["status"] for row in rows], ["warn"], payload["checks"])
+        self.assertEqual(authenticated(), 1, probe.call_args_list)
+        # Outside a run every read fetches again: no stale document.
+        cfg = mock.MagicMock()
+        cmd_doctor._authenticated_gateway_status_document(cfg)
+        cmd_doctor._authenticated_gateway_status_document(cfg)
+        self.assertEqual(authenticated(), 3)
 
     def test_the_doctor_command_on_linux_emits_the_row(self):
         # Every other check is stubbed: this drives the doctor command itself

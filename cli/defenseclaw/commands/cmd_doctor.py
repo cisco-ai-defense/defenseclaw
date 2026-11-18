@@ -7900,8 +7900,10 @@ def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
         )
     if shed:
         # A refused call is blocked by its hook when its budget ends unless a
-        # resend is admitted (review P2-3).
-        clauses.append(f"{shed} call(s) refused by the admission limits; their hooks block them when the budget ends")
+        # resend is admitted (review P2-3); the clause is the status one.
+        from defenseclaw.commands.cmd_status import _hook_capacity_shed_clause
+
+        clauses.append(_hook_capacity_shed_clause(shed))
     verdict = (
         "This host is over its hook capacity"
         if denies + late
@@ -10998,7 +11000,44 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     return health, "", True
 
 
+#: The authenticated ``/status`` documents of the current Doctor run, by
+#: config object, or None outside a run. Several rows read the document (hook
+#: capacity, connector activity, Cowork, the OpenCode heartbeat); each read
+#: was a trusted-listener check, a runtime binding and an HTTP probe of up to
+#: 3 s, so a per-user run fetched it two or more times (GAP-0742 N4). A run
+#: fetches it once, after its repairs (a repair may restart the gateway).
+_status_document_run: dict[int, tuple[dict | None, str, bool]] | None = None
+
+
+def _begin_status_document_run() -> None:
+    """Share one authenticated /status fetch until the Doctor run ends."""
+
+    global _status_document_run
+    _status_document_run = {}
+
+
+def _end_status_document_run() -> None:
+    """Forget the run's /status document; every later call fetches again."""
+
+    global _status_document_run
+    _status_document_run = None
+
+
 def _authenticated_gateway_status_document(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's authenticated ``/status`` document, once per Doctor run.
+
+    See ``_fetch_authenticated_gateway_status_document``.
+    """
+    run = _status_document_run
+    if run is None:
+        return _fetch_authenticated_gateway_status_document(cfg)
+    key = id(cfg)
+    if key not in run:
+        run[key] = _fetch_authenticated_gateway_status_document(cfg)
+    return run[key]
+
+
+def _fetch_authenticated_gateway_status_document(cfg) -> tuple[dict | None, str, bool]:
     """The gateway's authenticated ``/status`` document.
 
     The document counts only when the listener is this profile's gateway
@@ -16832,6 +16871,7 @@ def doctor(
     begin_installed_version_run()
     if (click_ctx := click.get_current_context(silent=True)) is not None:
         click_ctx.call_on_close(end_installed_version_run)
+        click_ctx.call_on_close(_end_status_document_run)
     if dry_run and not do_fix:
         raise click.UsageError("--dry-run requires --fix")
     if assume_yes and not do_fix:
@@ -16917,6 +16957,10 @@ def doctor(
             dry_run=dry_run,
             fix_ids=fix_ids,
         )
+
+    # The checks share one authenticated /status fetch (after the repairs).
+    if click_ctx is not None:
+        _begin_status_document_run()
 
     r.set_section("configuration")
     _check_config(cfg, r)

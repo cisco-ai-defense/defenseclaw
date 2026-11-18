@@ -1429,13 +1429,26 @@ def _hook_capacity_status(health: dict | None) -> dict | None:
     }
 
 
+def _hook_capacity_shed_clause(shed: int) -> str:
+    """The clause of the calls the admission limits refused (status and doctor).
+
+    A refused call whose hook resent it and got in ran with a policy answer,
+    so the clause says the count is of calls refused at least once and names
+    the block only for a call no resend got in (GAP-0742 N1).
+    """
+    return (
+        f"{shed} call(s) refused by the admission limits at least once; "
+        "a call no resend got in is blocked when its budget ends"
+    )
+
+
 def _hook_capacity_clauses(denies: int, late: int, shed: int) -> list[str]:
-    """What the window holds, one clause per kind (shared with doctor)."""
+    """What the window holds, one clause per kind (doctor shares the shed clause)."""
     clauses = []
     if denies + late:
         clauses.append(f"{denies} denied and {late} unchecked tool call(s) ran out of their answer budget")
     if shed:
-        clauses.append(f"{shed} call(s) refused by the admission limits; their hooks block them when the budget ends")
+        clauses.append(_hook_capacity_shed_clause(shed))
     return clauses
 
 

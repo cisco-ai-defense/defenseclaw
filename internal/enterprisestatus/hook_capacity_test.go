@@ -20,7 +20,7 @@ func TestHookCapacityWarning(t *testing.T) {
 		t.Fatal("no warning for 12 deadline denies")
 	}
 	for _, want := range []string{"12 agent tool call(s) were blocked", "0 ran unchecked", "4000 answered in time",
-		"7 call(s) refused by the admission limits; their hooks block them when the budget ends",
+		"7 call(s) refused by the admission limits at least once; a call no resend got in is blocked when its budget ends",
 		"this host is over its hook capacity, not a policy result", "busiest minute 2026-11-14T15:02:00Z", "sizing: /docs/reference/hook-sizing"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("warning %q lacks %q", message, want)
@@ -35,7 +35,7 @@ func TestHookCapacityWarningForShedAlone(t *testing.T) {
 	if !ok {
 		t.Fatal("no warning for 5 calls refused by the admission limits")
 	}
-	for _, want := range []string{"in the last 60 min 5 call(s) refused by the admission limits; their hooks block them when the budget ends",
+	for _, want := range []string{"in the last 60 min 5 call(s) refused by the admission limits at least once; a call no resend got in is blocked when its budget ends",
 		"(300 answered in time)", "an account is over its hook budget or this host is over its hook capacity, not a policy result"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("warning %q lacks %q", message, want)
