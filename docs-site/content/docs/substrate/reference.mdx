@@ -45,6 +45,8 @@ Every read command has `--output text|json` and `--json`, and every command take
 
 There is no `--api`: the cluster checks come from `kubectl` with `--install-file`, and the bucket check is skipped when the file names no `storage.snapshotLocation`. [Troubleshooting](/docs/substrate/troubleshooting#verify-cannot-read-the-snapshot-bucket) lists each warning.
 
+Two warnings are in the text output of `verify` and `status --cluster`, and in `doctor` and `doctor --json` (rows `cluster.atespace_globs` and `group_forms`), but not in `verify --json`: an atespace that holds actors, that DefenseClaw did not create and that a `match.substrate` glob meets (the profile does not apply there; list the atespace by name), and a profile assignment whose groups are in another form than the sign-in server sends. The `verify --json` management contract is version 1, with exactly ten checks, and stays as it is in 1.0.10; the two warnings are planned for its version 2 (`schema_version` 2). `doctor --json` is not a management contract.
+
 ### Template flags
 
 | Command | Flags that matter |
