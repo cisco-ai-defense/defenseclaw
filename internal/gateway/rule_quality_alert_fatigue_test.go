@@ -750,7 +750,7 @@ func TestAlertFatigueLocalAndCatalogPIIAreDeduplicated(t *testing.T) {
 		verdict := scanLocalPatterns("completion", sample)
 		catalogCount := 0
 		for _, finding := range verdict.Findings {
-			if strings.HasPrefix(finding, "pii-data:") {
+			if finding == localPIIDataFinding {
 				t.Errorf("duplicate legacy PII finding remained for one catalog match")
 			}
 			if strings.HasPrefix(finding, "ENT-") {
@@ -773,7 +773,7 @@ func TestAlertFatigueLocalAndCatalogPIIAreDeduplicated(t *testing.T) {
 	// GAP-2062: a float whose fraction is Luhn-valid raises no local PII finding.
 	floatStat := `{"frame_duration_ms_p99": 9.` + alertFatiguePAN(t, "37", 15) + `}`
 	for _, finding := range scanLocalPatterns("completion", floatStat).Findings {
-		if strings.HasPrefix(finding, "ENT-CC-") || strings.HasPrefix(finding, "pii-data:") {
+		if strings.HasPrefix(finding, "ENT-CC-") || finding == localPIIDataFinding {
 			t.Errorf("float fraction produced card finding %q", finding)
 		}
 	}

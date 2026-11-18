@@ -535,7 +535,9 @@ func (w *textWalker) add(s string) string {
 			w.probe, s = true, rest
 		}
 	}
-	if strings.TrimSpace(s) == "" {
+	if strings.TrimSpace(s) == "" && (s == "" || !w.stream) {
+		// A stream event's whitespace-only string is a delta of the reply
+		// text: a newline or space a secret is split by (rel-1-0-10:GAP-1086).
 		return ""
 	}
 	if w.history > 0 {

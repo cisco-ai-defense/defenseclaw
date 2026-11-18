@@ -138,6 +138,9 @@ func normalizeFindingString(raw, source, verdictSeverity string) NormalizedFindi
 	// otherwise a directive beginning with TRUST-/LP-/PII- could become its own
 	// persisted RuleID.
 	if localPatternSource {
+		if local, ok := localValueFreeFinding(id, structuredTitle, raw, source, nf.Severity); ok {
+			return local
+		}
 		if activeLocalPatternRuleIdentity(id, structuredTitle) {
 			canonicalID := canonicalIDFromRuleID(id)
 			nf.CanonicalID = canonicalID
@@ -215,6 +218,27 @@ func activeLocalPatternRuleIdentity(ruleID, title string) bool {
 	}
 	ruleCategoriesMu.RUnlock()
 	return present
+}
+
+// localValueFreeFinding reads a value-free legacy secret or PII finding
+// ("<rule id>:<local title>", scanLocalPatternsWithActivation, GAP-1085).
+func localValueFreeFinding(id, title, raw, source, severity string) (NormalizedFinding, bool) {
+	switch title {
+	case localCredentialFindingTitle:
+		if id == "LP-SECRET-MATCH" {
+			return normalizedSensitiveLocalFinding(id, CatCredentialLeak, title, raw, source, severity), true
+		}
+		for _, detector := range secretPatternDetectors {
+			if detector.canonicalID == id {
+				return normalizedSensitiveLocalFinding(id, CatCredentialLeak, title, raw, source, severity), true
+			}
+		}
+	case localPIIFindingTitle:
+		if id == "LP-PII-DATA" {
+			return normalizedSensitiveLocalFinding(id, CatPIIExposure, title, raw, source, severity), true
+		}
+	}
+	return NormalizedFinding{}, false
 }
 
 func normalizeUntrustedLocalPatternFinding(raw, apparentID, source, severity string) NormalizedFinding {
