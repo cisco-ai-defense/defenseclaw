@@ -3,9 +3,14 @@
 
 package hookexec
 
-// ordinaryNoAnswerPayloadInHome is the strict (PreToolUse, no cd) reader for
-// one home; only the GAP-0641 tests ask it directly. Production code asks
+// ordinaryNoAnswerPayloadInHome and ordinaryNoAnswerPayloadInHomes are the
+// strict (PreToolUse, no cd) reader for one home and for a list of homes;
+// only tests ask them directly. Production code asks
 // noAnswerPayloadInHomes through OrdinaryNoAnswerPayload or the late use.
 func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 	return noAnswerPayloadInHome(body, home, false)
+}
+
+func ordinaryNoAnswerPayloadInHomes(body []byte, homes []string) bool {
+	return noAnswerPayloadInHomes(body, homes, false)
 }
