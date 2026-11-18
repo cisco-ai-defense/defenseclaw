@@ -235,3 +235,80 @@ func TestCodeGuardExecRegExpProofReadsTheWholeFile(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-1185 review r1. R13: a prototype write through bracketed
+// keys reached RegExp.prototype.exec from a proven name (re.constructor),
+// and the masked string text hid "prototype", so the proof held and exec on
+// the name dropped CG-EXEC-001 (rel fired). R14/R15: the name used as a
+// value (an object shorthand, a log argument) left it unproven, so plain
+// RegExp matching alerted (rel did not). A proven name may now only read
+// RegExp members, the text of strings counts for the prototype check, a
+// write of an exec member anywhere is a change of meaning, a value use is a
+// read, and rel's line reading is the floor of the whole-file reading.
+func TestCodeGuardExecRegExpProofReviewRows(t *testing.T) {
+	s := &CodeGuardScanner{}
+	fires := func(filename, content string) bool {
+		for _, f := range s.ScanContent(filename, content) {
+			if f.RuleID == codeGuardExecRuleID {
+				return true
+			}
+		}
+		return false
+	}
+	lines := func(l ...string) string { return strings.Join(l, "\n") }
+	for _, tc := range []struct{ name, content string }{
+		{"R13 bracketed prototype write", lines(
+			`const re = /x/;`,
+			`re.constructor["prototype"]["exec"] = require("child_process").exec;`,
+			`re.exec(cmd);`)},
+		{"constructor of the name, no require on the line", lines(
+			`const cp = require("child_process");`,
+			`const re = /x/;`,
+			`const proto = re.constructor[name];`,
+			`re.exec(cmd);`)},
+		{"prototype named in a string", lines(
+			`const cp = require("child_process");`,
+			`const re = /x/;`,
+			`Reflect.set(Reflect.get(RegExp, "prototype"), "exec", cp.exec);`,
+			`re.exec(cmd);`)},
+		{"exec written through an alias", lines(
+			`const cp = require("child_process");`,
+			`const re = /x/;`,
+			`const alias = re;`,
+			`alias.exec = cp.exec;`,
+			`re.exec(cmd);`)},
+		{"computed member of the name", lines(
+			`const re = /x/;`,
+			`re[key] = handler;`,
+			`re.exec(cmd);`)},
+		{"value use on a line rel reads as a binding", lines(
+			`const re = /x/;`,
+			`register(re, require("./plugins"));`,
+			`re.exec(cmd);`)},
+		{"value use beside an arrow rel reads as a parameter", lines(
+			`const re = /x/;`,
+			`register(re, () => setup());`,
+			`re.exec(cmd);`)},
+	} {
+		if !fires("src/run.js", tc.content) || !fires("src/run.ts", tc.content) {
+			t.Errorf("%s: CG-EXEC-001 did not fire", tc.name)
+		}
+	}
+	for _, tc := range []struct{ name, content string }{
+		{"R14 object shorthand", lines(`const re = /x/;`, `const obj = {re};`, `re.exec(cmd);`)},
+		{"R15 log argument", lines(`const re = /x/;`, `console.log(re);`, `re.exec(cmd);`)},
+		{"array element", lines(`const re = /x/;`, `const rules = [re, /y/];`, `const m = re.exec(s);`)},
+		{"returned in an object", lines(
+			`const re = /^v(\d+)/;`,
+			`export function version(s) { return { re, hit: re.exec(s) } }`)},
+		{"ternary and comparison", lines(
+			`const re = /x/;`,
+			`const pick = flag ? re : null;`,
+			`if (pick === re) { out = re.exec(s); }`)},
+		{"exported by name", lines(`const re = /x/;`, `export { other, re };`, `const m = re.exec(s);`)},
+	} {
+		if fires("src/parse.js", tc.content) || fires("src/parse.ts", tc.content) {
+			t.Errorf("%s: CG-EXEC-001 fired on RegExp matching", tc.name)
+		}
+	}
+}

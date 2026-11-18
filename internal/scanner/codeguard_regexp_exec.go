@@ -4,6 +4,7 @@
 package scanner
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -16,25 +17,40 @@ import (
 // raised a HIGH Unsafe command execution finding (rel-1-0-10:GAP-1152).
 //
 // A call of exec on a name the file proves is a regular expression is
-// matching, so CG-EXEC-001 does not read that call. The proof reads the code
-// of the whole file, with comments, string text and regular expression
-// bodies masked out:
-//   - one statement const name = <initializer> whose whole initializer is a
-//     regular expression literal or a RegExp(...) call;
-//   - every other occurrence of the name is a member use (name.x or
-//     name?.x, not assigned to) or the first argument of a string method
-//     that takes a pattern (s.match(name), s.replace(name, ...));
-//   - every occurrence lies inside the block that holds the const.
+// matching, so CG-EXEC-001 does not read that call. Two readings of the file
+// must both prove the name:
 //
-// Any other occurrence (a parameter of a function, method or arrow, on one
-// line or many; a destructuring; an object key; an import; a rebinding in
-// the same line) leaves the name unproven, and so does a file the masking
-// cannot read (an unterminated string or comment) or one that can change
-// what a name or RegExp.prototype.exec means (with, a RegExp.prototype
-// write) (rel-1-0-10:GAP-1185). exec on any other receiver (child_process
-// or an alias of it, shelljs, a member such as this.re, a name the file
-// does not prove) still fires, and so does every other part of a line the
-// rule matched.
+//   - The line reading of rel (rel-1-0-10:GAP-1152): one line declares
+//     const name = a regular expression literal or a RegExp, and no other
+//     line binds the name (a declaration, an import or require, a parameter,
+//     an assignment). It is the floor: the whole-file reading only takes
+//     names away from it, so this narrowing never drops a finding rel keeps
+//     (rel-1-0-10:GAP-1185 review r1).
+//   - The whole-file reading (rel-1-0-10:GAP-1185), over the code of the
+//     file with comments, string and template text and regular expression
+//     bodies masked out:
+//   - one statement const name = <initializer> whose whole initializer is
+//     a regular expression literal or a RegExp(...) call, RegExp not
+//     bound or assigned anywhere;
+//   - every other occurrence of the name lies inside the block that holds
+//     the const and only reads it: a RegExp member that is not written
+//     (name.exec, name.test, name.source; name.lastIndex may be written),
+//     or the name as a value (a call argument, an object or array element,
+//     the right side of =, an operand);
+//   - nothing in the file can change what exec on a regular expression
+//     means: no with statement, no reach into a prototype or a constructor
+//     (prototype, __proto__, getPrototypeOf, also as the text of a string
+//     such as a bracketed key, or a string "constructor"), and no write of
+//     an exec member on anything.
+//
+// An occurrence that binds or writes the name (a parameter of a function,
+// method, arrow or catch, on one line or many; a destructuring or import; a
+// declaration; an assignment, ++ or --; a for-in or for-of head), a computed
+// member name[...] or a member that is not a RegExp member, and a file the
+// masking cannot read (an unterminated string, comment or bracket), leave
+// the name unproven. exec on any other receiver (child_process or an alias
+// of it, shelljs, a member such as this.re, a name the file does not prove)
+// still fires, and so does every other part of a line the rule matched.
 
 // codeGuardExecRuleID is the builtin rule this file narrows.
 const codeGuardExecRuleID = "CG-EXEC-001"
@@ -50,6 +66,26 @@ var jsIdentifier = lazyregexp.New(`[A-Za-z_$][\w$]*`)
 // name?.exec(.
 var jsExecCall = lazyregexp.New(`([A-Za-z_$][\w$]*)\s*(?:\?\.|\.)\s*exec\s*\(`)
 
+// The line reading (rel). jsLineRegExpConst is a const declaration of a
+// name bound to a regular expression literal or to a RegExp object.
+var jsLineRegExpConst = lazyregexp.New(`\bconst\s+([A-Za-z_$][\w$]*)\s*(?::\s*RegExp\s*)?=\s*(?:/[^/*\s]|(?:new\s+)?RegExp\s*\()`)
+
+// jsLineDeclaration marks a line that declares names: the names before the
+// first = are bound there (all of them when there is no =).
+var jsLineDeclaration = lazyregexp.New(`\b(?:const|let|var|class)\b`)
+
+// jsLineParameters marks a line that may bind parameters: the names before
+// the body ({) or the arrow (=>) are bound there.
+var jsLineParameters = lazyregexp.New(`\bfunction\b|=>|\bcatch\b`)
+
+// jsLineImport marks a line that brings names in from a module: every name
+// of the line is bound there.
+var jsLineImport = lazyregexp.New(`\bimport\b|\brequire\s*\(`)
+
+// jsLineAssignment is an assignment (plain or compound) of a name that is
+// not a member: name =, name +=, name ??= ... but not ==, === or =>.
+var jsLineAssignment = lazyregexp.New(`(?:^|[^\w$.])([A-Za-z_$][\w$]*)\s*(?:\*\*|<<|>>>|>>|&&|\|\||\?\?|[-+*/%&|^])?=(?:[^=>]|$)`)
+
 // jsConstHead is the start of a statement const name = (export const, and
 // a TypeScript RegExp annotation, allowed). The initializer follows.
 var jsConstHead = lazyregexp.New(`(?m)(?:^|[;{}])[ \t]*(?:export[ \t]+)?const[ \t]+([A-Za-z_$][\w$]*)[ \t]*(?::[ \t]*RegExp[ \t]*)?=[ \t]*`)
@@ -58,14 +94,18 @@ var jsConstHead = lazyregexp.New(`(?m)(?:^|[;{}])[ \t]*(?:export[ \t]+)?const[ \
 var jsRegExpCall = lazyregexp.New(`^(?:new[ \t]+)?RegExp[ \t]*\(`)
 
 // jsMeaningChange is code that can change what a name or the exec method of
-// a regular expression means: a with statement, or any reach into a
-// prototype (prototype, __proto__, getPrototypeOf, setPrototypeOf).
-var jsMeaningChange = lazyregexp.New(`(?i)\bwith\s*\(|prototype|__proto__`)
+// a regular expression means: a with statement, any reach into a prototype
+// (prototype, __proto__, getPrototypeOf, setPrototypeOf), or a write of an
+// exec member (x.exec = ..., x.exec ??= ...).
+var jsMeaningChange = lazyregexp.New(`(?i)\bwith\s*\(|prototype|__proto__|\.\s*exec\s*(?:\*\*|<<|>>>|>>|&&|\|\||\?\?|[-+*/%&|^])?=(?:[^=]|$)`)
 
-// jsPatternMethods are the string methods whose first argument is a
-// pattern: a call argument there is a use, not a binding.
-var jsPatternMethods = map[string]bool{
-	"match": true, "matchAll": true, "replace": true, "replaceAll": true, "search": true, "split": true,
+// jsRegExpMembers are the members of a RegExp object. Any other member of a
+// proven name (constructor, __proto__, a name the object was given) reaches
+// past the regular expression.
+var jsRegExpMembers = map[string]bool{
+	"exec": true, "test": true, "source": true, "flags": true, "lastIndex": true, "global": true,
+	"ignoreCase": true, "multiline": true, "sticky": true, "unicode": true, "unicodeSets": true,
+	"dotAll": true, "hasIndices": true, "toString": true, "compile": true,
 }
 
 // jsRegexAfterWords are the keywords after which a slash starts a regular
@@ -79,19 +119,51 @@ var jsRegexAfterWords = map[string]bool{
 // whose initializer is followed by one of them is not a whole literal.
 var jsContinuationWords = map[string]bool{"in": true, "instanceof": true, "as": true, "satisfies": true}
 
+// jsBindingWords bind, declare or name the name that follows them.
+var jsBindingWords = map[string]bool{
+	"const": true, "let": true, "var": true, "function": true, "class": true, "import": true, "as": true,
+	"enum": true, "interface": true, "type": true, "namespace": true, "module": true, "declare": true,
+	"get": true, "set": true, "static": true, "readonly": true, "public": true, "private": true,
+	"protected": true, "abstract": true, "override": true, "accessor": true, "infer": true,
+}
+
+// jsExpressionWords are keywords an expression can follow: a [ after them
+// starts an array, not a computed member.
+var jsExpressionWords = map[string]bool{
+	"return": true, "typeof": true, "case": true, "in": true, "of": true, "new": true, "delete": true,
+	"void": true, "throw": true, "yield": true, "await": true, "else": true, "do": true, "instanceof": true,
+	"const": true, "let": true, "var": true, "export": true, "default": true, "extends": true,
+}
+
+// jsObjectLiteralAfter are the tokens after which a { starts an object
+// literal rather than a block.
+var jsObjectLiteralAfter = map[string]bool{
+	"=": true, "(": true, ",": true, ":": true, "[": true, "?": true, "!": true, "...": true, "|": true,
+	"&": true, "+": true, "-": true, "==": true, "!=": true, "<": true, ">": true, "return": true,
+	"yield": true, "await": true, "throw": true, "default": true, "case": true, "export": true,
+}
+
+// jsMultiByteTokens are the tokens of more than one byte that the use of a
+// name is read against (longest first).
+var jsMultiByteTokens = []string{"...", "=>", "++", "--", "?.", "==", "!="}
+
 // jsRegExpReceivers collects the lines of a JavaScript or TypeScript file
 // and drops the CG-EXEC-001 findings whose only exec( calls are the RegExp
 // method of names the file proves are regular expressions. A nil collector
 // (any other file type) keeps every finding.
 type jsRegExpReceivers struct {
 	source strings.Builder
+	// The line reading (rel): the names a line declares as a regular
+	// expression const, and how many lines bind each name.
+	lineRegExp map[string]bool
+	lineBinds  map[string]int
 }
 
 func newJSRegExpReceivers(ext string) *jsRegExpReceivers {
 	if !jsLikeExtensions[ext] {
 		return nil
 	}
-	return &jsRegExpReceivers{}
+	return &jsRegExpReceivers{lineRegExp: map[string]bool{}, lineBinds: map[string]int{}}
 }
 
 // observe reads one line of the file.
@@ -101,13 +173,49 @@ func (r *jsRegExpReceivers) observe(line string) {
 	}
 	r.source.WriteString(line)
 	r.source.WriteByte('\n')
+
+	bound := map[string]bool{}
+	bindAll := func(text string) {
+		for _, name := range jsIdentifier.FindAllString(text, -1) {
+			bound[name] = true
+		}
+	}
+	if jsLineImport.MatchString(line) {
+		bindAll(line)
+	}
+	if loc := jsLineDeclaration.FindStringIndex(line); loc != nil {
+		head := line[loc[0]:]
+		if eq := strings.Index(head, "="); eq >= 0 {
+			head = head[:eq]
+		}
+		bindAll(head)
+	}
+	if jsLineParameters.MatchString(line) {
+		head := line
+		for _, end := range []string{"=>", "{"} {
+			if cut := strings.Index(head, end); cut >= 0 {
+				head = head[:cut]
+			}
+		}
+		bindAll(head)
+	}
+	for _, match := range jsLineAssignment.FindAllStringSubmatch(line, -1) {
+		bound[match[1]] = true
+	}
+	for _, match := range jsLineRegExpConst.FindAllStringSubmatch(line, -1) {
+		r.lineRegExp[match[1]] = true
+		bound[match[1]] = true
+	}
+	for name := range bound {
+		r.lineBinds[name]++
+	}
 }
 
 // drop removes each builtin CG-EXEC-001 finding whose line no longer
 // matches the rule once the RegExp exec calls of proven names are taken
 // out. A custom rule that reuses the ID is kept: it is not this rule.
 func (r *jsRegExpReceivers) drop(findings []Finding) []Finding {
-	if r == nil {
+	if r == nil || len(r.lineRegExp) == 0 {
 		return findings
 	}
 	builtin := false
@@ -118,6 +226,11 @@ func (r *jsRegExpReceivers) drop(findings []Finding) []Finding {
 		return findings
 	}
 	proven := jsProvenRegExpNames(r.source.String())
+	for name := range proven {
+		if !r.lineRegExp[name] || r.lineBinds[name] != 1 {
+			delete(proven, name)
+		}
+	}
 	if len(proven) == 0 {
 		return findings
 	}
@@ -162,11 +275,11 @@ func withoutRegExpExec(line string, proven map[string]bool) string {
 // regular expressions (see the top of this file). It is empty when the
 // masking cannot read the source.
 func jsProvenRegExpNames(source string) map[string]bool {
-	code, literalEnd, ok := jsMaskCode(source)
-	if !ok || jsMeaningChange.MatchString(code) {
+	code, literalEnd, textReachesPrototype, ok := jsMaskCode(source)
+	if !ok || textReachesPrototype || jsMeaningChange.MatchString(code) {
 		return nil
 	}
-	closeOf, ok := jsBraceMatches(code)
+	groups, ok := jsGroupsOf(code)
 	if !ok {
 		return nil
 	}
@@ -178,7 +291,7 @@ func jsProvenRegExpNames(source string) map[string]bool {
 			continue
 		}
 		name := code[head[2]:head[3]]
-		blockStart, blockEnd := jsEnclosingBlock(code, head[2], closeOf)
+		blockStart, blockEnd := groups.block(head[2])
 		declared[name] = append(declared[name], declaration{head[2], blockStart, blockEnd})
 	}
 	unproven := map[string]bool{}
@@ -188,12 +301,15 @@ func jsProvenRegExpNames(source string) map[string]bool {
 	for _, loc := range jsIdentifier.FindAllStringIndex(code, -1) {
 		name := code[loc[0]:loc[1]]
 		declarations, ok := declared[name]
-		if !ok || unproven[name] || loc[0] == declarations[0].name || jsPropertyName(code, loc[0]) {
+		if !ok || unproven[name] || loc[0] == declarations[0].name {
+			continue
+		}
+		use := groups.use(loc[0], loc[1])
+		if use == jsUseKey {
 			continue
 		}
 		decl := declarations[0]
-		unproven[name] = loc[0] < decl.blockStart || loc[1] > decl.blockEnd ||
-			(!jsMemberUse(code, loc[1]) && !jsPatternArgument(code, loc[0], loc[1]))
+		unproven[name] = loc[0] < decl.blockStart || loc[1] > decl.blockEnd || use != jsUseReads
 	}
 	proven := map[string]bool{}
 	for name := range declared {
@@ -208,15 +324,20 @@ func jsProvenRegExpNames(source string) map[string]bool {
 // literals and the bodies of regular expression literals replaced by
 // spaces (lengths and newlines kept, ${...} of a template kept as code),
 // and the end (after the flags) of each regular expression literal by its
-// start. ok is false when a string, comment, template or literal does not
-// end where the language says it must.
-func jsMaskCode(source string) (string, map[int]int, bool) {
-	code := []byte(source)
-	literalEnd := map[int]int{}
+// start. textReachesPrototype reports a string or template text that names
+// a prototype or a constructor (a bracketed key such as x["prototype"]):
+// masking would hide that reach. ok is false when a string, comment,
+// template or literal does not end where the language says it must.
+func jsMaskCode(source string) (code string, literalEnd map[int]int, textReachesPrototype bool, ok bool) {
+	masked := []byte(source)
+	literalEnd = map[int]int{}
 	mask := func(from, to int) {
+		if jsTextReachesPrototype(source[from:to]) {
+			textReachesPrototype = true
+		}
 		for i := from; i < to; i++ {
-			if code[i] != '\n' {
-				code[i] = ' '
+			if masked[i] != '\n' {
+				masked[i] = ' '
 			}
 		}
 	}
@@ -236,7 +357,7 @@ func jsMaskCode(source string) (string, map[int]int, bool) {
 				i++
 			}
 			if i >= len(source) {
-				return "", nil, false
+				return "", nil, false, false
 			}
 			mask(start, i)
 			inTemplate = false
@@ -258,22 +379,28 @@ func jsMaskCode(source string) (string, map[int]int, bool) {
 			if end < 0 {
 				end = len(source) - i
 			}
-			mask(i, i+end)
+			for k := i; k < i+end; k++ {
+				masked[k] = ' '
+			}
 			i += end
 			continue
 		case c == '/' && i+1 < len(source) && source[i+1] == '*':
 			end := strings.Index(source[i+2:], "*/")
 			if end < 0 {
-				return "", nil, false
+				return "", nil, false, false
 			}
-			mask(i, i+2+end+2)
+			for k := i; k < i+2+end+2; k++ {
+				if masked[k] != '\n' {
+					masked[k] = ' '
+				}
+			}
 			i += 2 + end + 2
 			continue
 		case c == '\'' || c == '"':
 			j := i + 1
 			for j < len(source) && source[j] != c {
 				if source[j] == '\n' {
-					return "", nil, false
+					return "", nil, false, false
 				}
 				if source[j] == '\\' {
 					j++
@@ -281,7 +408,7 @@ func jsMaskCode(source string) (string, map[int]int, bool) {
 				j++
 			}
 			if j >= len(source) {
-				return "", nil, false
+				return "", nil, false, false
 			}
 			mask(i+1, j)
 			i = j + 1
@@ -296,7 +423,7 @@ func jsMaskCode(source string) (string, map[int]int, bool) {
 			for j < len(source) && (inClass || source[j] != '/') {
 				switch source[j] {
 				case '\n':
-					return "", nil, false
+					return "", nil, false, false
 				case '\\':
 					j++
 				case '[':
@@ -307,9 +434,11 @@ func jsMaskCode(source string) (string, map[int]int, bool) {
 				j++
 			}
 			if j >= len(source) {
-				return "", nil, false
+				return "", nil, false, false
 			}
-			mask(i+1, j)
+			for k := i + 1; k < j; k++ {
+				masked[k] = ' '
+			}
 			j++
 			for j < len(source) && source[j] >= 'a' && source[j] <= 'z' {
 				j++
@@ -348,9 +477,18 @@ func jsMaskCode(source string) (string, map[int]int, bool) {
 		i++
 	}
 	if inTemplate || len(templateDepth) > 0 {
-		return "", nil, false
+		return "", nil, false, false
 	}
-	return string(code), literalEnd, true
+	return string(masked), literalEnd, textReachesPrototype, true
+}
+
+// jsTextReachesPrototype reports string or template text that names a
+// prototype (prototype, __proto__, getPrototypeOf) or is the key
+// "constructor".
+func jsTextReachesPrototype(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "prototype") || strings.Contains(lower, "__proto__") ||
+		strings.TrimSpace(text) == "constructor"
 }
 
 // jsSlashStartsRegExp reports a slash that starts a regular expression
@@ -363,42 +501,245 @@ func jsSlashStartsRegExp(prevByte byte, prevWord string) bool {
 	return prevByte != ')' && prevByte != ']' && (prevByte < '0' || prevByte > '9') && prevByte != 'a'
 }
 
-// jsBraceMatches maps each { of the masked code to its }. ok is false when
-// the braces do not balance.
-func jsBraceMatches(code string) (map[int]int, bool) {
-	closeOf := map[int]int{}
+// jsGroup is one bracket pair of the masked code: (), [] or {}. parent is
+// the index of the pair that holds it (-1 at the top level).
+type jsGroup struct {
+	open, close, parent int
+}
+
+// jsGroups are the bracket pairs of the masked code, in the order they
+// open.
+type jsGroups struct {
+	code string
+	list []jsGroup
+}
+
+// jsCloses maps each opening bracket to its closing one.
+var jsCloses = map[byte]byte{'(': ')', '[': ']', '{': '}'}
+
+// jsGroupsOf pairs the brackets of the masked code. ok is false when they
+// do not balance.
+func jsGroupsOf(code string) (*jsGroups, bool) {
+	groups := &jsGroups{code: code}
 	var open []int
 	for i := 0; i < len(code); i++ {
-		switch code[i] {
-		case '{':
-			open = append(open, i)
-		case '}':
+		switch c := code[i]; c {
+		case '(', '[', '{':
+			parent := -1
+			if len(open) > 0 {
+				parent = open[len(open)-1]
+			}
+			groups.list = append(groups.list, jsGroup{open: i, close: -1, parent: parent})
+			open = append(open, len(groups.list)-1)
+		case ')', ']', '}':
 			if len(open) == 0 {
 				return nil, false
 			}
-			closeOf[open[len(open)-1]] = i
+			top := open[len(open)-1]
+			if jsCloses[code[groups.list[top].open]] != c {
+				return nil, false
+			}
+			groups.list[top].close = i
 			open = open[:len(open)-1]
 		}
 	}
-	return closeOf, len(open) == 0
+	return groups, len(open) == 0
 }
 
-// jsEnclosingBlock is the span of the innermost block holding pos (the
-// whole file at the top level).
-func jsEnclosingBlock(code string, pos int, closeOf map[int]int) (int, int) {
-	depth := 0
-	for i := pos - 1; i >= 0; i-- {
-		switch code[i] {
-		case '}':
-			depth++
-		case '{':
-			if depth == 0 {
-				return i, closeOf[i] + 1
-			}
-			depth--
+// kind is the opening bracket of group i.
+func (g *jsGroups) kind(i int) byte { return g.code[g.list[i].open] }
+
+// innermost is the index of the innermost group that holds pos (-1 at the
+// top level).
+func (g *jsGroups) innermost(pos int) int {
+	i := sort.Search(len(g.list), func(k int) bool { return g.list[k].open >= pos }) - 1
+	for i >= 0 && g.list[i].close < pos {
+		i = g.list[i].parent
+	}
+	return i
+}
+
+// block is the span of the innermost { } holding pos (the whole file at
+// the top level).
+func (g *jsGroups) block(pos int) (int, int) {
+	for i := g.innermost(pos); i >= 0; i = g.list[i].parent {
+		if g.kind(i) == '{' {
+			return g.list[i].open, g.list[i].close + 1
 		}
 	}
-	return 0, len(code)
+	return 0, len(g.code)
+}
+
+// jsUse is how one occurrence uses a declared name.
+type jsUse int
+
+const (
+	// jsUseBinds binds or writes the name, or reaches past the regular
+	// expression: the name is not proven.
+	jsUseBinds jsUse = iota
+	// jsUseReads only reads the name or a RegExp member of it.
+	jsUseReads
+	// jsUseKey is a property key or a member name: not the name.
+	jsUseKey
+)
+
+// use reads the occurrence of a declared name at [start, end).
+func (g *jsGroups) use(start, end int) jsUse {
+	code := g.code
+	if jsPropertyName(code, start) {
+		return jsUseKey
+	}
+	before, _ := jsTokenBefore(code, start)
+	next := jsTokenAfter(code, end)
+	inner := g.innermost(start)
+	switch {
+	case next == "." || next == "?.":
+		if jsRegExpMemberRead(code, end) {
+			return jsUseReads
+		}
+		return jsUseBinds
+	case next == ":" && (before == "{" || before == ",") && (inner < 0 || g.kind(inner) == '{'):
+		return jsUseKey
+	case next == "[" || next == "=>" || next == "++" || next == "--" || next == "of" || next == "in" ||
+		before == "++" || before == "--" || before == "*" || jsBindingWords[before] ||
+		jsAssignmentAt(code, jsSkipSpace(code, end)):
+		return jsUseBinds
+	}
+	if inner < 0 {
+		// a comma at the top level may continue a declaration list
+		if before == "," {
+			return jsUseBinds
+		}
+		return jsUseReads
+	}
+	switch g.kind(inner) {
+	case '(':
+		if g.parameters(inner) || g.forHead(inner) {
+			return jsUseBinds
+		}
+	case '[':
+		if !g.computedMember(inner) && g.pattern(inner) {
+			return jsUseBinds
+		}
+	case '{':
+		if g.pattern(inner) || before == "," && !g.objectLiteral(inner) {
+			return jsUseBinds
+		}
+	}
+	return jsUseReads
+}
+
+// parameters reports a ( ) group that is a parameter list: of a catch, a
+// function, a method or an arrow (its ) followed by {, => or a type).
+func (g *jsGroups) parameters(i int) bool {
+	before, at := jsTokenBefore(g.code, g.list[i].open)
+	switch before {
+	case "catch", "function":
+		return true
+	case "if", "while", "switch", "for", "with":
+		return false
+	}
+	if before != "" && jsWordByte(before[0]) {
+		if word, _ := jsTokenBefore(g.code, at); word == "function" {
+			return true
+		}
+	}
+	next := jsTokenAfter(g.code, g.list[i].close+1)
+	return next == "=>" || next == "{" || next == ":"
+}
+
+// forHead reports the ( ) of a for statement.
+func (g *jsGroups) forHead(i int) bool {
+	before, at := jsTokenBefore(g.code, g.list[i].open)
+	if before == "await" {
+		before, _ = jsTokenBefore(g.code, at)
+	}
+	return before == "for"
+}
+
+// computedMember reports a [ ] that follows an operand: obj[key].
+func (g *jsGroups) computedMember(i int) bool {
+	before, _ := jsTokenBefore(g.code, g.list[i].open)
+	switch {
+	case before == ")" || before == "]" || before == "?." || before == `"` || before == "'" || before == "`":
+		return true
+	case before != "" && jsWordByte(before[0]):
+		return !jsExpressionWords[before]
+	}
+	return false
+}
+
+// objectLiteral reports a { } that starts an object literal, not a block.
+func (g *jsGroups) objectLiteral(i int) bool {
+	before, _ := jsTokenBefore(g.code, g.list[i].open)
+	return jsObjectLiteralAfter[before]
+}
+
+// pattern reports a [ ] or { } that binds the names in it: a destructuring
+// declaration or assignment, an import list, a for-in or for-of target, or
+// one inside a parameter list or another pattern.
+func (g *jsGroups) pattern(i int) bool {
+	group := g.list[i]
+	if before, _ := jsTokenBefore(g.code, group.open); before == "const" || before == "let" || before == "var" {
+		return true
+	}
+	if next := jsTokenAfter(g.code, group.close+1); next == "from" || next == "of" || next == "in" ||
+		jsAssignmentAt(g.code, jsSkipSpace(g.code, group.close+1)) {
+		return true
+	}
+	parent := group.parent
+	if parent < 0 {
+		return false
+	}
+	switch g.kind(parent) {
+	case '(':
+		return g.parameters(parent) || g.forHead(parent)
+	case '[':
+		return !g.computedMember(parent) && g.pattern(parent)
+	default:
+		return g.pattern(parent)
+	}
+}
+
+// jsTokenBefore is the token that ends right before i, and where it starts:
+// a name or keyword, one of the multi-byte tokens, or one byte ("" at the
+// start of the code).
+func jsTokenBefore(code string, i int) (string, int) {
+	end := jsSkipSpaceBack(code, i)
+	if end == 0 {
+		return "", 0
+	}
+	if jsWordByte(code[end-1]) {
+		start := end
+		for start > 0 && jsWordByte(code[start-1]) {
+			start--
+		}
+		return code[start:end], start
+	}
+	for _, token := range jsMultiByteTokens {
+		if strings.HasSuffix(code[:end], token) {
+			return token, end - len(token)
+		}
+	}
+	return code[end-1 : end], end - 1
+}
+
+// jsTokenAfter is the token that starts at or after i: a name or keyword,
+// one of the multi-byte tokens, or one byte ("" at the end of the code).
+func jsTokenAfter(code string, i int) string {
+	start := jsSkipSpace(code, i)
+	if start >= len(code) {
+		return ""
+	}
+	if end := jsWordEnd(code, start); end > start {
+		return code[start:end]
+	}
+	for _, token := range jsMultiByteTokens {
+		if strings.HasPrefix(code[start:], token) {
+			return token
+		}
+	}
+	return code[start : start+1]
 }
 
 // jsWholeRegExpInitializer reports an initializer at pos that is one
@@ -496,9 +837,9 @@ func jsPropertyName(code string, start int) bool {
 	return i < 2 || code[i-2] != '.'
 }
 
-// jsMemberUse reports a name followed by a member access (name.x or
-// name?.x) whose member is not assigned to.
-func jsMemberUse(code string, end int) bool {
+// jsRegExpMemberRead reports a name followed by a member access (name.x or
+// name?.x) whose member is a RegExp member that is not assigned to.
+func jsRegExpMemberRead(code string, end int) bool {
 	i := jsSkipSpace(code, end)
 	switch {
 	case strings.HasPrefix(code[i:], "?."):
@@ -510,32 +851,13 @@ func jsMemberUse(code string, end int) bool {
 	}
 	start := jsSkipSpace(code, i)
 	end = jsWordEnd(code, start)
-	if end == start {
+	member := code[start:end]
+	if !jsRegExpMembers[member] {
 		return false
 	}
 	// lastIndex is the one member a matching loop writes; it is a number
 	// and cannot change what exec does.
-	return code[start:end] == "lastIndex" || !jsAssignmentAt(code, jsSkipSpace(code, end))
-}
-
-// jsPatternArgument reports a name that is the first argument of a string
-// method taking a pattern: s.match(name) or s.replace(name, ...).
-func jsPatternArgument(code string, start, end int) bool {
-	i := jsSkipSpaceBack(code, start)
-	if i <= 0 || code[i-1] != '(' {
-		return false
-	}
-	methodEnd := jsSkipSpaceBack(code, i-1)
-	methodStart := methodEnd
-	for methodStart > 0 && jsWordByte(code[methodStart-1]) {
-		methodStart--
-	}
-	dot := jsSkipSpaceBack(code, methodStart)
-	if !jsPatternMethods[code[methodStart:methodEnd]] || dot <= 0 || code[dot-1] != '.' {
-		return false
-	}
-	after := jsSkipSpace(code, end)
-	return after < len(code) && (code[after] == ')' || code[after] == ',')
+	return member == "lastIndex" || !jsAssignmentAt(code, jsSkipSpace(code, end))
 }
 
 // jsAssignmentAt reports an assignment operator at i (=, +=, ??= ...), not
