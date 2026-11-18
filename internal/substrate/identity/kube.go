@@ -24,8 +24,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -93,8 +95,12 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	now := k.now()
 	// A JWT (a ServiceAccount token, or an OIDC token in a kubeconfig) is
 	// refused from the second it expires, without a review: the API server
-	// allows its own leeway past exp (GAP-0569).
-	exp, hasExp := kubeTokenExpiry(token)
+	// allows its own leeway past exp (GAP-0569). A JWT whose exp cannot be
+	// read is refused too, so no exp form skips the check (GAP-0587).
+	exp, isJWT, hasExp := kubeTokenExpiry(token)
+	if isJWT && !hasExp {
+		return Person{}, reasonf(ReasonClaims, "the Kubernetes token has no readable exp")
+	}
 	if hasExp && !now.Before(exp) {
 		return Person{}, reasonf(ReasonExpired, "the Kubernetes token expired")
 	}
@@ -135,6 +141,9 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 		until = exp
 	}
 	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username, Expires: until}
+	if hasExp {
+		p.TokenExpires = exp
+	}
 	for _, g := range u.Groups {
 		if g = strings.TrimSpace(g); g != "" && len(p.Groups) < 512 {
 			p.Groups = append(p.Groups, g)
@@ -152,28 +161,42 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 // kubeTokenExpiry reads the exp claim of a bearer token that is a JWT,
 // without verifying it: the TokenReview authenticates the token, and exp
 // only shortens how long the answer is used, never lengthens it
-// (GAP-0569). ok is false for a token that is not a JWT or has no integer
-// exp.
-func kubeTokenExpiry(token string) (time.Time, bool) {
+// (GAP-0569). isJWT is false for a token whose middle part is not a
+// base64url JSON object (a static or provider token): it has no exp to
+// read. For a JWT, ok is false when exp is missing, is not a finite JSON
+// number (RFC 7519 NumericDate: an integer or a decimal such as
+// 1799999990.0 or 1.79999999e9), or the claims repeat a member; the caller
+// refuses it (GAP-0587).
+func kubeTokenExpiry(token string) (exp time.Time, isJWT, ok bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
 	cb, err := b64url(parts[1])
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, false, false
 	}
-	var c struct {
-		Expiry json.Number `json:"exp"`
+	var c map[string]json.RawMessage
+	if err := json.Unmarshal(cb, &c); err != nil || c == nil {
+		return time.Time{}, false, false
 	}
-	if json.Unmarshal(cb, &c) != nil {
-		return time.Time{}, false
+	if checkDuplicateKeys(cb) != nil {
+		return time.Time{}, true, false
 	}
-	n, err := c.Expiry.Int64()
-	if err != nil {
-		return time.Time{}, false
+	raw := bytes.TrimSpace(c["exp"])
+	if len(raw) == 0 || (raw[0] != '-' && (raw[0] < '0' || raw[0] > '9')) {
+		return time.Time{}, true, false // missing, null, a string, an object
 	}
-	return time.Unix(n, 0), true
+	f, err := strconv.ParseFloat(string(raw), 64)
+	if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+		return time.Time{}, true, false
+	}
+	// Beyond 1e15 s (about 30 million years) either way only the side of
+	// now matters; the bound keeps the int64 conversion defined.
+	const far = 1e15
+	f = max(min(f, far), -far)
+	sec := math.Floor(f)
+	return time.Unix(int64(sec), int64((f-sec)*1e9)), true, true
 }
 
 // kubeUser is the user of an authenticated TokenReview.

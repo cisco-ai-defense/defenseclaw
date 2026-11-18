@@ -59,8 +59,29 @@ type Person struct {
 	Groups    []string
 	// Expires is when the admin listener stops accepting the token: its
 	// exp, or for a person sign-in iat plus MaxPersonSignInAge when that
-	// comes first.
+	// comes first. For a Kubernetes caller it is when the gateway asks the
+	// API server again (the review cache), not the end of the token: that
+	// is TokenExpires.
 	Expires time.Time
+	// TokenExpires is a Kubernetes caller's own token exp, zero for a
+	// token that carries none (a static or provider token). Only the
+	// Kubernetes verifier sets it (GAP-0588).
+	TokenExpires time.Time
+}
+
+// SessionBound is the latest a token the gateway derives from this
+// caller's bearer (a relay session token) may live: the end of the bearer
+// itself. For a person sign-in that is also the sign-in age bound of
+// GAP-0409, so a session token never outlives a logout by more than
+// MaxPersonSignInAge. Zero means the end is unknown (an opaque Kubernetes
+// token): the derived token keeps its own cap (GAP-0588).
+func (p Person) SessionBound() time.Time {
+	if p.Kind == PersonKube {
+		// Expires is the review cache here; never cap a session at the
+		// cache time.
+		return p.TokenExpires
+	}
+	return p.Expires
 }
 
 // ID is the stable owner key of a person: issuer and subject.

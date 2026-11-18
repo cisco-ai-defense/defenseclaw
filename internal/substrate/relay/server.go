@@ -632,7 +632,7 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	// The attachment ends with its token (GAP-0070); the launcher
 	// reconnects with a new one.
 	expiry := time.AfterFunc(s.untilExpiry(sess), func() {
-		send(Control{Type: CtlError, Message: "session token expired"})
+		send(Control{Type: CtlError, Message: SessionExpiredMessage})
 		a.Close()
 	})
 	defer expiry.Stop()
@@ -752,7 +752,7 @@ loop:
 		case <-p.done:
 			break loop
 		case <-expiry.C:
-			p.out.Append(EncodeControl(Control{Type: CtlError, Message: "session token expired"}))
+			p.out.Append(EncodeControl(Control{Type: CtlError, Message: SessionExpiredMessage}))
 			p.end()
 			break loop
 		case <-t.C:

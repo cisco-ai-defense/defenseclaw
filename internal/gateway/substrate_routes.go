@@ -565,7 +565,10 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			out["warnings"] = createWarnings
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
+			// The token ends with the caller's sign-in, at the latest
+			// (GAP-0588); with no time left the answer carries none and
+			// the launcher attaches through the attach route.
+			tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), 0, c.person.SessionBound())
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -817,8 +820,13 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 			ttl = substrateSessionMaxTTL
 		}
 		// The token names the person as issuer#subject: two issuers may
-		// use the same subject (GAP-0061).
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), ttl)
+		// use the same subject (GAP-0061). It ends with the caller's
+		// sign-in, at the latest (GAP-0588).
+		tok, exp, err := st.cfg.Sessions.IssueUntil(c.person.ID(), substrateSessionActor(reg), ttl, c.person.SessionBound())
+		if errors.Is(err, identity.ErrSessionBound) {
+			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonExpired))
+			return
+		}
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
