@@ -277,7 +277,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if !known && activeGlob {
 				value, known = actionWordValueWithGlob(word, values, effectiveCWD, home, true)
 			}
-			if resolverWord {
+			// A word with a part the resolver cannot read (a command
+			// substitution such as $(pwd), an unknown parameter) has no
+			// resolver pattern. Its plain reading, which places $(pwd) and
+			// $PWD in the folder the command runs in, still judges it, as on
+			// rel/1.0.10: without it cd -- "$(mktemp -d)" && cat "$(pwd)"/.*/*
+			// was no longer read as a key pattern in an unknown folder while
+			// cat .*/* was (rel-1-0-10:GAP-1296, the GAP-1023 cells).
+			if resolverWord && resolverWordKnown(word, values) {
 				// The resolver reads this word: its escaped pattern is the
 				// one recorded and judged, not the flattened value.
 				// A pattern form the resolver does not model exactly is never

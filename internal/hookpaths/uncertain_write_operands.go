@@ -18,24 +18,32 @@ import (
 // them (actionfacts classify.go; this package keeps no list of verbs): writers
 // are those it reads as a write, an append, a permission or attribute change,
 // a copy, a move or a disk write; harmless are those whose every operation is
-// a read, a list or a search. A program in neither group is one the model does
-// not classify, and an unclassified program is not proven harmless: its
-// operands are read as a writer's (rel-1-0-10 GAP-0415).
+// a read, a list or a search, beside the execute every call has. A program in
+// neither group is one the model does not classify, and an unclassified
+// program is not proven harmless: its operands are read as a writer's
+// (rel-1-0-10 GAP-0415).
 func callPrograms(command, cwd, home string) (writers, harmless map[string]bool) {
 	facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home})
 	writers, harmless = map[string]bool{}, map[string]bool{}
 	for _, fact := range facts.Commands {
-		writes, reads := false, len(fact.Operations) > 0
+		writes, reads, other := false, false, false
 		for _, operation := range fact.Operations {
 			switch operation {
 			case actionfacts.OperationWrite, actionfacts.OperationAppend, actionfacts.OperationPermissionChange,
 				actionfacts.OperationCopy, actionfacts.OperationMove, actionfacts.OperationDiskWrite:
 				writes = true
 			case actionfacts.OperationRead, actionfacts.OperationList, actionfacts.OperationSearch:
+				reads = true
+			case actionfacts.OperationExecute:
+				// Every call runs its program (actionfacts adds execute to each
+				// command fact), so execute says nothing about the operands.
+				// Counting it as another operation left no program harmless:
+				// ls, cat and base64 glob operands were read as unproven writes.
 			default:
-				reads = false
+				other = true
 			}
 		}
+		reads = reads && !other
 		for _, name := range []string{programBase(fact.Program), programBase(fact.Executable)} {
 			switch {
 			case writes:
