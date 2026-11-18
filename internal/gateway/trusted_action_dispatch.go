@@ -1803,6 +1803,21 @@ func dispatchTrustedActionWith(
 	return withTwinProvenBlocks(finalized, twinFindings)
 }
 
+// withoutUnprovenStateWrite drops the state-write findings that do not
+// take part in enforcement from the findings of a bash here-string call
+// whose POSIX twins were judged and write no state (hereStringStateMutation).
+// The POSIX parse rejects `<<<`, so the pack's text match of a state name
+// (python3 - <<< 'print(open("~/.defenseclaw/config.yaml").read())') stayed
+// in the verdict as a CRITICAL tamper.detector_state_write row although the
+// twin proved the call changes no state: an allowed read named a rule the
+// call did not trigger (rel-1-0-10:GAP-0376). A finding that enforces is
+// kept as it is.
+func withoutUnprovenStateWrite(findings []RuleFinding) []RuleFinding {
+	return slices.DeleteFunc(findings, func(f RuleFinding) bool {
+		return f.RuleID == "tamper.detector_state_write" && !f.contributesToEnforcement()
+	})
+}
+
 // The action target check uses a resolved active security-state mention to
 // find candidates, then requires the executing operand's mutation role and
 // physical target before adding a finding. Keep it separate from SSH keys.
@@ -1852,7 +1867,14 @@ func withActiveStateTargetMention(
 	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
 		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
 	if hereStringJudged && !hereStringMutates && !xargsMutates {
-		return findings
+		if strings.HasPrefix(facts.ActiveHome, "/") {
+			return withoutUnprovenStateWrite(findings)
+		}
+		// Under a Windows drive home the twin only clears the pack's text
+		// match; every later proof (the cmd and PowerShell readings among
+		// them) still runs and adds the gateway's own finding for a write it
+		// proves (rel-1-0-10:GAP-0376).
+		findings = withoutUnprovenStateWrite(findings)
 	}
 	// A managed call whose cwd the gateway cannot see is also judged for
 	// links in the directory the hook client walked its words from

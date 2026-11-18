@@ -243,7 +243,12 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 		// An option value spelled as its own word (`--exclude cache/`) is
 		// not a source.
 		rsyncOperands, rsyncOptions := rsyncStateOperands(words)
-		if len(rsyncOperands) < 2 {
+		// A dry run or a listing writes nothing. A wrapper keeps the call
+		// whole (`sudo rsync -anrc --delete x/ ~/.defenseclaw/hooks/`), so
+		// the preview reading of the rsync fact never applied to it; the
+		// wrapped words are read with the same rsync grammar
+		// (rel-1-0-10:GAP-0104).
+		if len(rsyncOperands) < 2 || actionfacts.RsyncPreview(append([]string{"rsync"}, words...)) {
 			return false
 		}
 		destination := rsyncOperands[len(rsyncOperands)-1]

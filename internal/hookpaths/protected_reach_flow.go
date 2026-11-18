@@ -57,8 +57,12 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 	if !registrationWriteCapable(file, home) || !registrationHasFlow(file, home) {
 		return named
 	}
-	text := registrationHomeText(command, home)
-	words := registrationStaticWords(file, home)
+	// The words a call only reads are left out of the match: a name that
+	// only a reader, a cp source or a tar member spells is not a write of
+	// it (registrationFlowReadSpans, rel-1-0-10:GAP-0104).
+	blanked, readOnly := registrationFlowBlank(command, registrationFlowReadSpans(file, cwd, home, protected))
+	text := registrationHomeText(blanked, home)
+	words := registrationStaticWords(file, home, readOnly)
 	// resolved holds each distinct word of the command as the hook resolves it,
 	// read once for the whole registration set: the answer for a word does not
 	// depend on the member it is compared with, and a long script cost one
@@ -168,11 +172,15 @@ func registrationMentions(text, name string, component bool) bool {
 	return false
 }
 
-// registrationStaticWords lists the literal words of the command.
-func registrationStaticWords(file *syntax.File, home string) []string {
+// registrationStaticWords lists the literal words of the command but the
+// ones skip reports.
+func registrationStaticWords(file *syntax.File, home string, skip func(*syntax.Word) bool) []string {
 	var out []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if word, ok := node.(*syntax.Word); ok {
+			if skip(word) {
+				return false
+			}
 			if value, fixed := StaticWord(word, home); fixed && value != "" && !strings.HasPrefix(value, "-") {
 				out = append(out, value)
 			}
