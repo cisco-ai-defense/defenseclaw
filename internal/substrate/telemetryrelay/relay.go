@@ -17,6 +17,9 @@ package telemetryrelay
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -131,15 +134,18 @@ const (
 	DefaultMaxQueueBytes = 16 << 20
 	maxPostRecords       = 2000
 	DefaultTakeMax       = 2000
-	// maxTakeBytes bounds one take's records in bytes (at least one record
-	// is handed on).
+	// maxTakeBytes bounds one take's records, and maxPostBytes one post's,
+	// in JSON bytes (recordSize), well under the 4 MiB a leader call's
+	// request or answer may have; at least one record is sent (GAP-0580).
 	maxTakeBytes = 1 << 20
+	maxPostBytes = 1 << 20
 	// MaxFieldBytes is the longest text field a record keeps; a longer one
 	// is cut at a character boundary (the callout cuts paths to the same
 	// 512 bytes).
 	MaxFieldBytes = 512
-	// recordOverhead is what a queued record costs besides its text.
-	recordOverhead = 128
+	// recordOverhead bounds a record's JSON besides its text values: every
+	// key, the time, the flags and the value (TestGAP0580RecordSizeBoundsItsJSON).
+	recordOverhead = 512
 	// maxTakeReplay answers of the newest takes are kept, each for
 	// takeReplayTTL (longer than a leader client retries), so a retried take
 	// gets the same records (GAP-0582).
@@ -202,6 +208,18 @@ func (q *queue) push(r Record, maxN int, maxBytes int64) int64 {
 	return dropped
 }
 
+// unshift puts recs, of used bytes, back at the front, then drops the
+// oldest records past maxN or maxBytes.
+func (q *queue) unshift(recs []Record, used int64, maxN int, maxBytes int64) {
+	q.recs = append(recs, q.recs...)
+	q.bytes += used
+	for len(q.recs) > maxN || (len(q.recs) > 1 && q.bytes > maxBytes) {
+		q.bytes -= recordSize(q.recs[0])
+		q.recs[0] = Record{}
+		q.recs = q.recs[1:]
+	}
+}
+
 // take removes and returns up to n records and about maxBytes from the
 // front; it never returns more than n, and returns one record at least
 // when one is queued and n > 0.
@@ -221,13 +239,46 @@ func (q *queue) take(n int, maxBytes int64) ([]Record, int64) {
 	return out, used
 }
 
-// recordSize is what r costs in the queue.
+// recordSize bounds r's JSON size, what it costs in the queue, a take's
+// answer and a post: each text value as encoding/json writes it, where
+// < > & and control characters are 6-byte escapes (GAP-0580), plus
+// recordOverhead.
 func recordSize(r Record) int64 {
 	n := recordOverhead
 	for _, f := range textFields(&r) {
-		n += len(*f)
+		n += jsonTextLen(*f)
 	}
 	return int64(n)
+}
+
+// jsonTextLen is at least how many bytes encoding/json writes for s between
+// its quotes: \" \\ \n \r \t take 2, other control characters, < > &, U+2028,
+// U+2029 and each invalid byte (written as \ufffd) take 6.
+func jsonTextLen(s string) int {
+	n := 0
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b < utf8.RuneSelf {
+			switch {
+			case b == '"' || b == '\\' || b == '\n' || b == '\r' || b == '\t':
+				n += 2
+			case b < 0x20 || b == '<' || b == '>' || b == '&':
+				n += 6
+			default:
+				n++
+			}
+			i++
+			continue
+		}
+		c, size := utf8.DecodeRuneInString(s[i:])
+		if (c == utf8.RuneError && size == 1) || c == '\u2028' || c == '\u2029' {
+			n += 6
+		} else {
+			n += size
+		}
+		i += size
+	}
+	return n
 }
 
 // textFields are r's text fields.
@@ -374,7 +425,7 @@ func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
 }
 
 // Take implements MethodTake: lifecycle records and counts first, then
-// egress decisions, at most in.Max records and about 1 MiB. A retry of a
+// egress decisions, at most in.Max records and about 1 MiB of JSON. A retry of a
 // recent take (the same request id) gets the same answer.
 func (s *Store) Take(ctx context.Context, in TakeRequest) (TakeResponse, error) {
 	n := in.Max
@@ -441,9 +492,15 @@ func Serve(srv *leader.Server, s *Store) {
 	srv.HandleRead(MethodTake, leader.Typed(s.Take))
 }
 
+// ErrRefused reports a batch the leader refused as a bad request (too
+// large, or one it cannot read): sending it again would be refused again,
+// so it is dropped rather than kept at the front of the queue (GAP-0580).
+var ErrRefused = errors.New("telemetryrelay: the leader refused a batch")
+
 // Poster batches records for the leader (the controller and the callout).
 // Add never blocks on the network; a failed send keeps the batch, within
-// the same bound, for the next one.
+// the same bounds as the leader's queue, for the next one. Each send is at
+// most 2,000 records and about 1 MiB of JSON.
 type Poster struct {
 	Leader *leader.Client
 	// Method is MethodPostCounts (the controller) or MethodPostEgress (the
@@ -452,7 +509,7 @@ type Poster struct {
 	Interval time.Duration
 
 	mu      sync.Mutex
-	pending []Record
+	pending queue
 }
 
 // Add queues records for the next flush.
@@ -465,48 +522,53 @@ func (p *Poster) Add(recs ...Record) {
 	for _, r := range recs {
 		if r.Kind == KindGauge {
 			// Only the newest value of a gauge matters.
-			kept := p.pending[:0]
-			for _, o := range p.pending {
+			kept := p.pending.recs[:0]
+			for _, o := range p.pending.recs {
 				if o.Kind != KindGauge || o.Metric != r.Metric {
 					kept = append(kept, o)
+				} else {
+					p.pending.bytes -= recordSize(o)
 				}
 			}
-			p.pending = kept
+			clear(p.pending.recs[len(kept):])
+			p.pending.recs = kept
 		}
-		if len(p.pending) >= DefaultMaxQueue {
-			p.pending = p.pending[1:]
-		}
-		p.pending = append(p.pending, cutRecord(r))
+		p.pending.push(cutRecord(r), DefaultMaxQueue, DefaultMaxQueueBytes)
 	}
 }
 
-// Flush sends what is pending.
+// Flush sends the oldest pending records, at most 2,000 and about 1 MiB of
+// JSON. A batch the leader refuses as a bad request is dropped (ErrRefused);
+// after any other failure it goes back to the front.
 func (p *Poster) Flush(ctx context.Context) error {
 	p.mu.Lock()
-	batch := p.pending
-	if len(batch) > maxPostRecords {
-		batch = batch[:maxPostRecords]
-	}
-	p.pending = append([]Record(nil), p.pending[len(batch):]...)
+	batch, used := p.pending.take(maxPostRecords, maxPostBytes)
 	p.mu.Unlock()
 	if len(batch) == 0 || p.Leader == nil {
 		return nil
 	}
 	err := p.Leader.Call(ctx, p.Method, leader.NewRequestID(), PostRequest{Records: batch}, nil)
-	if err != nil {
-		p.mu.Lock()
-		p.pending = append(batch, p.pending...)
-		if over := len(p.pending) - DefaultMaxQueue; over > 0 {
-			p.pending = p.pending[over:]
-		}
-		p.mu.Unlock()
+	if err == nil {
+		return nil
 	}
+	var we *leader.WireError
+	if errors.As(err, &we) && we.Code == leader.CodeBadRequest {
+		return fmt.Errorf("%w: %d records dropped: %w", ErrRefused, len(batch), err)
+	}
+	p.mu.Lock()
+	p.pending.unshift(batch, used, DefaultMaxQueue, DefaultMaxQueueBytes)
+	p.mu.Unlock()
 	return err
 }
 
-// Run flushes every Interval until ctx ends, and once more then.
+// Run flushes every Interval until ctx ends, and once more then. A batch
+// the leader refused is logged; other failures are retried quietly.
 func (p *Poster) Run(ctx context.Context) {
-	runEvery(ctx, p.Interval, true, func(ctx context.Context) { _ = p.Flush(ctx) })
+	runEvery(ctx, p.Interval, true, func(ctx context.Context) {
+		if err := p.Flush(ctx); errors.Is(err, ErrRefused) {
+			fmt.Fprintf(os.Stderr, "[substrate] telemetry relay: %v\n", err)
+		}
+	})
 }
 
 // Taker is a gateway replica's loop: it takes batches from the leader and
@@ -563,5 +625,5 @@ func runEvery(ctx context.Context, iv time.Duration, final bool, fn func(context
 func (p *Poster) Pending() []Record {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]Record(nil), p.pending...)
+	return append([]Record(nil), p.pending.recs...)
 }
