@@ -90,9 +90,6 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(gap0433LaptopSettings), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	t.Setenv("HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
@@ -164,8 +161,100 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 		{"settings.local home Write {}", "Write", map[string]any{"file_path": "{H}/.claude/settings.local.json", "content": "{}"}, "allow"},
 		{"project settings Write {}", "Write", map[string]any{"file_path": "{P}/.claude/settings.json", "content": "{}"}, "allow"},
 	}
+	type parityRow struct {
+		name, tool string
+		input      map[string]any
+		want       string // the laptop's action, pinned so the oracle stays a real one
+		// file is the laptop's ~/.claude/settings.json before the call, the
+		// state earlier allowed calls left; "" for gap0433LaptopSettings.
+		file string
+		// actor is the actor's action where it is stricter than the laptop
+		// (lead ruling on GAP-0577); "" for the laptop's verdict.
+		actor string
+	}
+	// GAP-0577 (RKNF2 review of the GAP-0536 fix): an Edit or MultiEdit that
+	// applies to no synthetic copy as a whole, because the laptop's file holds
+	// another key or the hooks in another layout, was allow/NONE in the actor
+	// and block/CRITICAL on the laptop. Each row sets its own laptop file.
+	withModel := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"model":"zzz","hooks"`, 1)
+	spaced := strings.Replace(gap0433LaptopSettings, `"PreToolUse":[`, `"PreToolUse" :[`, 1)
+	spacedModel := strings.Replace(spaced, `{"hooks"`, `{"model":"zzz","hooks"`, 1)
+	spacedPath := strings.Replace(gap0433LaptopSettings, `.sh","timeout"`, `.sh" ,"timeout"`, 1)
+	withEnv := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"env":{"A":"1"},"model":"zzz","permissions":{"allow":["Read"]},"hooks"`, 1)
+	withStatus := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"statusLine":{"type":"command","command":"a.sh"},"hooks"`, 1)
+	settings := "{H}/.claude/settings.json"
+	gap0577 := []parityRow{
+		// The RKNF2 probes: one call with an extra "model" edit, and the
+		// two-call chains (a layout or key the copies lack, then the change).
+		{name: "gap0577 one-call MultiEdit timeout + model", file: withModel, tool: "MultiEdit", want: "block", input: map[string]any{"file_path": settings, "edits": []any{
+			map[string]any{"old_string": `"timeout":30`, "new_string": `"timeout":0`},
+			map[string]any{"old_string": `"model":"zzz"`, "new_string": `"model":"y"`}}}},
+		{name: "gap0577 chain 1 Write adds model", tool: "Write", want: "allow", input: map[string]any{"file_path": settings, "content": withModel}},
+		{name: "gap0577 chain 2 MultiEdit renames PreToolUse + model", file: withModel, tool: "MultiEdit", want: "block", input: map[string]any{"file_path": settings, "edits": []any{
+			map[string]any{"old_string": `"PreToolUse"`, "new_string": `"PreToolUseOff"`},
+			map[string]any{"old_string": `"zzz"`, "new_string": `"zzy"`}}}},
+		{name: "gap0577 chain 2 MultiEdit narrows matcher + model", file: withModel, tool: "MultiEdit", want: "block", input: map[string]any{"file_path": "~/.claude/settings.json", "edits": []any{
+			map[string]any{"old_string": `"matcher":"*"`, "new_string": `"matcher":"Read"`},
+			map[string]any{"old_string": `"zzz"`, "new_string": `"zzy"`}}}},
+		{name: "gap0577 chain 1 Edit spaces PreToolUse", tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"PreToolUse":[`, "new_string": `"PreToolUse" :[`}},
+		{name: "gap0577 chain 2 Edit renames spaced PreToolUse", file: spaced, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"PreToolUse" :[`, "new_string": `"PreToolUseOff" :[`}},
+		{name: "gap0577 chain 2 Edit narrows spaced matcher", file: spaced, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"PreToolUse" :[{"matcher":"*"`, "new_string": `"PreToolUse" :[{"matcher":"Read"`}},
+		// The same class in other spellings: a fragment of the key, text
+		// appended to it, a fragment of the hook path, a file left unreadable,
+		// a reserved hook process variable and disableAllHooks beside another
+		// key.
+		{name: "gap0577 Edit renames spaced key fragment", file: spaced, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `ToolUse" :[`, "new_string": `ToolUseOff" :[`}},
+		{name: "gap0577 Edit appends to spaced key", file: spaced, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `" :[`, "new_string": `Off" :[`}},
+		{name: "gap0577 Edit changes spaced hook path tail", file: spacedPath, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `.sh" ,`, "new_string": `.shx" ,`}},
+		{name: "gap0577 Edit leaves the file unreadable", file: withModel, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"model":"zzz"`, "new_string": `"model":"zzz",,`}},
+		{name: "gap0577 Edit sets a reserved env", file: withEnv, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"A":"1"`, "new_string": `"A":"1","BASH_ENV":"/tmp/x"`}},
+		{name: "gap0577 Edit adds disableAllHooks beside model", file: withModel, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"model":"zzz"`, "new_string": `"model":"zzz","disableAllHooks":true`}},
+		// Controls: edits that name no hook key keep the laptop's verdict.
+		{name: "gap0577 Edit changes model beside hooks", file: withModel, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"model":"zzz"`, "new_string": `"model":"claude-sonnet"`}},
+		{name: "gap0577 Edit changes a value only", file: withModel, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"zzz"`, "new_string": `"claude-opus"`}},
+		{name: "gap0577 MultiEdit model + permission", file: withEnv, tool: "MultiEdit", want: "allow", input: map[string]any{"file_path": settings, "edits": []any{
+			map[string]any{"old_string": `"model":"zzz"`, "new_string": `"model":"y"`},
+			map[string]any{"old_string": `"allow":["Read"]`, "new_string": `"allow":["Read","Bash(npm run typecheck)"]`}}}},
+		{name: "gap0577 Edit env value", file: withEnv, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"A":"1"`, "new_string": `"A":"2"`}},
+		{name: "gap0577 Edit adds NODE_OPTIONS memory", file: withEnv, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"A":"1"`, "new_string": `"A":"1","NODE_OPTIONS":"--max-old-space-size=4096"`}},
+		{name: "gap0577 Edit changes model in spaced file", file: spacedModel, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"model":"zzz"`, "new_string": `"model":"y"`}},
+		// Stricter by the lead's ruling: a statusLine command names the keys
+		// the hook entries are written with, so the actor cannot tell it
+		// from theirs.
+		{name: "gap0577 Edit statusLine command (stricter)", file: withStatus, tool: "Edit", want: "allow", actor: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"command":"a.sh"`, "new_string": `"command":"b.sh"`}},
+		// GAP-0578 (a): inline code that writes the registered file.
+		{name: "gap0578 Bash python -c writes settings", tool: "Bash", want: "alert", input: map[string]any{
+			"command": `python3 -c "open('{H}/.claude/settings.json','w').write('{}')"`}},
+	}
+	rows := make([]parityRow, 0, len(probes)+len(gap0577))
 	for _, probe := range probes {
+		rows = append(rows, parityRow{name: probe.name, tool: probe.tool, input: probe.input, want: probe.want})
+	}
+	rows = append(rows, gap0577...)
+	for _, probe := range rows {
 		t.Run(probe.name, func(t *testing.T) {
+			file := probe.file
+			if file == "" {
+				file = gap0433LaptopSettings
+			}
+			if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(file), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			laptopInput := gap0264Expand(probe.input, project, home).(map[string]any)
 			actorInput := gap0264Expand(probe.input, gap0264ActorWorkdir, sandboxauth.SandboxHome).(map[string]any)
 			lAction, lSeverity, lRules := gap0433Verdict(t, api, context.Background(), project, probe.tool, laptopInput)
@@ -175,6 +264,12 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 				lAction, lSeverity, lRules, cAction, cSeverity, cRules, mAction, mSeverity, mRules)
 			if lAction != probe.want {
 				t.Fatalf("laptop oracle %s/%s %v, want %s", lAction, lSeverity, lRules, probe.want)
+			}
+			if probe.actor != "" {
+				if cAction != probe.actor || mAction != probe.actor {
+					t.Errorf("actor copy=%s mount=%s, want the stricter %s", cAction, mAction, probe.actor)
+				}
+				return
 			}
 			if cAction != lAction || cSeverity != lSeverity || !slices.Equal(cRules, lRules) {
 				t.Errorf("copy-mode actor %s/%s %v, laptop %s/%s %v", cAction, cSeverity, cRules, lAction, lSeverity, lRules)
