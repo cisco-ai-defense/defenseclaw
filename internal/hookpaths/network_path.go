@@ -605,29 +605,6 @@ func readGated[T any](op, name string, read func(path string) (T, error), discar
 	return value, shareReadFinal, err
 }
 
-// gatedPath is the share gate for a read this file does not make itself (a
-// Windows API call on the path): ok is false when it must not be made, and
-// otherwise read is the path to hand it, held as readGated holds it until
-// release.
-func gatedPath(name string) (read string, release func() bool, ok bool) {
-	gate := networkPathGate(name, true)
-	if gate.unanswered {
-		return "", nil, false
-	}
-	if !gate.proved {
-		return gate.read, func() bool { return true }, true
-	}
-	still, err := pathidentity.HoldUnlinked(fixturefs.Map(gate.read))
-	switch {
-	case errors.Is(err, pathidentity.ErrLinked):
-		return "", nil, false
-	case err != nil:
-		// Nothing to hold (a missing file): the call fails as it would.
-		return gate.read, func() bool { return true }, true
-	}
-	return gate.read, still, true
-}
-
 // pathStat is os.Stat of name. When the share walk read the whole path, the
 // stat is the walk's own read of its last component: nothing reads the
 // name again after the share decision.

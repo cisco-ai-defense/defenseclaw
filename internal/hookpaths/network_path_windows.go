@@ -5,6 +5,13 @@
 
 package hookpaths
 
+import (
+	"errors"
+
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+)
+
 // networkShareRoot is the \\server\share volume of a path on a network share,
 // in every spelling Windows opens one by (windowsShareRoot), as the path
 // spells it; "" for a drive path, a relative path and every other device
@@ -12,4 +19,27 @@ package hookpaths
 func networkShareRoot(path string) string {
 	root, _ := windowsShareRoot(path)
 	return root
+}
+
+// gatedPath is the share gate for a read network_path.go does not make
+// itself (a Windows API call on the path: file identity, link count, DACL):
+// ok is false when it must not be made, and otherwise read is the path to
+// hand it, held as readGated holds it until release.
+func gatedPath(name string) (read string, release func() bool, ok bool) {
+	gate := networkPathGate(name, true)
+	if gate.unanswered {
+		return "", nil, false
+	}
+	if !gate.proved {
+		return gate.read, func() bool { return true }, true
+	}
+	still, err := pathidentity.HoldUnlinked(fixturefs.Map(gate.read))
+	switch {
+	case errors.Is(err, pathidentity.ErrLinked):
+		return "", nil, false
+	case err != nil:
+		// Nothing to hold (a missing file): the call fails as it would.
+		return gate.read, func() bool { return true }, true
+	}
+	return gate.read, still, true
 }
