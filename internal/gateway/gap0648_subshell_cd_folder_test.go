@@ -20,6 +20,11 @@ import (
 // benign rows, and keep the laptop's block where the write does land in the
 // state folder (the cd outside a group, a cd again after the group, the
 // write inside the group, a here-string call).
+//
+// A group in the last stage of a pipeline or in an & list does not end its
+// folder for the laptop (zsh and Bash with lastpipe run the last stage in
+// the shell itself): a hook-config write after it keeps the laptop's
+// tamper.agent_hook_config_write alert on the actor (GAP-0648 review P2-1).
 func TestGAP0648SubshellCdFolderEndsWithTheGroup(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
@@ -44,12 +49,19 @@ func TestGAP0648SubshellCdFolderEndsWithTheGroup(t *testing.T) {
 		{"{ cd ~/.defenseclaw && ls; }; echo m > config.yaml", false},
 		{"cat <<< x; cd ~/.defenseclaw && ls; echo m > config.yaml", false},
 		{"cat <<< x; (cd ~/.defenseclaw; ls; echo m > config.yaml)", false},
+		// A hook-config write after a group the laptop does not end: the
+		// last stage of a pipeline (lastpipe, zsh) and an & list.
+		{"shopt -s lastpipe; true | { cd ~/.claude && ls; }; echo x > settings.json", false},
+		{"true | { cd ~/.claude && ls; }; echo x > settings.json", false},
+		{"cd ~/.claude && ls &\nwait; echo x > settings.json", false},
+		{"zsh -c 'true | { cd ~/.claude && ls; }; echo x > settings.json'", false},
+		{"{ cd ~/.claude && ls; } & wait; echo x > settings.json", false},
 	}
 	for _, pack := range []string{"default", "permissive", "strict"} {
 		t.Run(pack, func(t *testing.T) {
 			installToolCallCorpusProfileConnector(t, "claudecode", pack)
 			home := filepath.Join(t.TempDir(), "home", "alice")
-			for _, dir := range []string{".defenseclaw", ".cache"} {
+			for _, dir := range []string{".defenseclaw", ".cache", ".claude"} {
 				if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
 					t.Fatal(err)
 				}

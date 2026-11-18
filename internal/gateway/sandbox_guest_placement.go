@@ -239,15 +239,22 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// change, held until the next command of the split shows whether the
 	// call still stands there. When the split places the next command in
 	// another folder with no directory change between them, a ( ... )
-	// group, a pipeline stage or a command substitution ended: its folder
-	// is a candidate for the later commands (the laptop's CD-CANDIDATE
-	// rule), not a folder they run in. Kept as a folder the call runs in,
+	// group, a pipeline stage before the last or a command substitution
+	// ended: its folder is a candidate for the later commands (the
+	// laptop's CD-CANDIDATE rule), not a folder they run in. Kept as a
+	// folder the call runs in,
 	// it gave (cd ~/.defenseclaw && ls); echo m > config.yaml the reading
 	// echo m > config.yaml in ~/.defenseclaw, and the actor blocked with
 	// tamper.detector_state_write where the laptop allows
 	// (substrate-1 GAP-0648). A next reading in another folder the same
 	// statement may run in (OtherFolder), or in a folder the split cannot
 	// tell, settles nothing: the folder stays one the call runs in.
+	// The folder of a command in the last stage of a pipeline or in an &
+	// list (LastStageOrBackground) is one the call runs in at once, as
+	// before GAP-0648: zsh and Bash with lastpipe run the last stage in the
+	// shell itself, and the laptop keeps both folders, so
+	// true | { cd ~/.claude && ls; }; echo x > settings.json keeps the
+	// laptop's tamper.agent_hook_config_write alert (GAP-0648 review P2-1).
 	stoodIn, standing := "", false
 	settle := func(simple actionfacts.SimpleCommand) {
 		if !standing || simple.OtherFolder {
@@ -288,7 +295,7 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 		switch {
 		case guestChangesDirectory(simple.Text, input.ActiveHome):
 			targets = keep(targets, cwd)
-		case simple.OtherFolder || simple.UnresolvedFolder || !path.IsAbs(cwd):
+		case simple.OtherFolder || simple.UnresolvedFolder || simple.LastStageOrBackground || !path.IsAbs(cwd):
 			dirs = keep(dirs, cwd)
 		default:
 			stoodIn, standing = path.Clean(cwd), true

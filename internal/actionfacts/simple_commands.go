@@ -91,6 +91,15 @@ type SimpleCommand struct {
 	// (rel-1-0-10:GAP-0996). A write there is judged against the previous
 	// home only (GAP-2476): a scratch HOME=$(mktemp -d) keeps its writes.
 	UnprovenHome bool
+	// LastStageOrBackground marks a command in the last stage of a pipeline
+	// or in a statement run in the background (&), or in a body such a
+	// command runs. Bash runs it in a subshell, so the walk drops a folder
+	// it moves to there, but zsh and Bash with lastpipe run the last stage
+	// in the shell itself, and the laptop's readers keep that folder for the
+	// later commands; the copy-mode guest placement keeps it as a folder the
+	// call runs in (substrate-1 GAP-0648 review P2-1). It is no other
+	// reading: a piece of the call is the same piece without it.
+	LastStageOrBackground bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced, EvaluationFailureInternal when the reader
 	// itself failed, and EvaluationFailureSyntax when a text with a syntax
@@ -538,11 +547,11 @@ func (pieces *simplePieces) add(command SimpleCommand) {
 }
 
 // has reports a command that is one of the pieces. A reading marked
-// LoginGuess is judged as the piece it repeats.
+// LoginGuess or LastStageOrBackground is judged as the piece it repeats.
 func (pieces *simplePieces) has(command SimpleCommand) bool {
-	command.LoginGuess = false
+	command.LoginGuess, command.LastStageOrBackground = false, false
 	return slices.ContainsFunc(*pieces, func(piece SimpleCommand) bool {
-		piece.LoginGuess = false
+		piece.LoginGuess, piece.LastStageOrBackground = false, false
 		return piece == command
 	})
 }
@@ -1313,6 +1322,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative,
 				UnresolvedFolder:        relative,
+				LastStageOrBackground:   lastStageOrBackgroundScope(part.scope),
 				UnprovenHome:            simpleReadsThroughUnprovenHome(input, state, part.text, text, resolvedVariable)}
 			if text == part.text {
 				pieces.add(command)
@@ -1335,6 +1345,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
 						AbsoluteOnly:            command.AbsoluteOnly,
+						LastStageOrBackground:   command.LastStageOrBackground,
 						UnprovenHome:            command.UnprovenHome}
 					if reading == unprefixed {
 						pieces.add(alone)
@@ -1459,6 +1470,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
 						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+						child.LastStageOrBackground = child.LastStageOrBackground || command.LastStageOrBackground
 						result = append(result, child)
 						if child.bodyReading {
 							extra++
