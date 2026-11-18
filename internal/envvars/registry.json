@@ -6481,6 +6481,30 @@
       "since": "0.7.0"
     },
     {
+      "name": "DEFENSECLAW_K8S_CLUSTER_NAME",
+      "category": "telemetry",
+      "purpose": "Cluster name the Agent Substrate chart sets from its clusterName value; the gateway exports it as the k8s.cluster.name resource attribute (Kubernetes has no API that names the cluster).",
+      "default": "unset (no k8s.cluster.name attribute)",
+      "accepted_values": [
+        "cluster name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar_observability_v8_bootstrap.go",
+          "description": "Gateway pod on Agent Substrate reads it for the k8s.* resource attributes"
+        },
+        {
+          "location": "deploy/helm/defenseclaw-substrate/templates/_helpers.tpl",
+          "description": "Chart sets it from .Values.clusterName"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_TRACESTATE",
       "category": "telemetry",
       "purpose": "W3C tracestate header value propagated alongside traceparent for vendor-specific trace baggage on hook and Codex telemetry outbound requests.",
