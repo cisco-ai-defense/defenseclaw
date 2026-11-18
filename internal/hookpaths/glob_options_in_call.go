@@ -91,8 +91,18 @@ func globOptionsInCall(command string, start shellGlobOptions) shellGlobOptions 
 // A modeled option change is read both on and off. An unmodeled change
 // remains distinct and cannot justify a negative answer (GAP-0380, GAP-0415).
 func CallGlobOptionsCoverStatement(call, statement string) bool {
-	parent := globReadings(globOptionsInCall(call, shellGlobOptions{}))
-	for _, child := range globReadings(globOptionsInCall(statement, shellGlobOptions{})) {
+	parentOptions := globOptionsInCall(call, shellGlobOptions{})
+	childOptions := globOptionsInCall(statement, shellGlobOptions{})
+	// A globstar change gives **/ a different folder walk. The client's
+	// whole-call reading cannot stand in for an isolated statement's blind
+	// walk over that structure (GAP-0415).
+	if strings.Contains(statement, "**") &&
+		(parentOptions.globStar != childOptions.globStar ||
+			parentOptions.may&globMayStar != childOptions.may&globMayStar) {
+		return false
+	}
+	parent := globReadings(parentOptions)
+	for _, child := range globReadings(childOptions) {
 		covered := false
 		for _, reading := range parent {
 			if reading == child {

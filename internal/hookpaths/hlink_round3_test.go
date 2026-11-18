@@ -331,9 +331,9 @@ func TestHLinkRealBashOracle(t *testing.T) {
 
 // The startup header carries the agent's glob options, and a call that may
 // change them makes the glob words of the call uncertain.
-// A statement read alone means the same words as in its call only when it
-// changes the glob options as the call does (rel-1-0-10:GAP-0415: the
-// managed gateway's per-command pass).
+// A statement read alone is covered when the client's whole-call readings
+// include its glob-option states. Globstar changes the folder walk of **/,
+// so that word needs the same globstar state (GAP-0415).
 func TestCallGlobOptionsCoverStatement(t *testing.T) {
 	for _, tc := range []struct {
 		call, statement string
@@ -342,7 +342,7 @@ func TestCallGlobOptionsCoverStatement(t *testing.T) {
 		{"touch -h a*", "touch -h a*", true},
 		{"cd sub\ntouch -h a*", "touch -h a*", true},
 		{"set -e\ntouch -h a*", "touch -h a*", true},
-		{"shopt -s globstar\ntouch -h **/a", "touch -h **/a", true},
+		{"shopt -s globstar\ntouch -h **/a", "touch -h **/a", false},
 		{"shopt -s globstar\ntouch -h **/a", "shopt -s globstar", true},
 		{"shopt -s nocaseglob; touch -h A?", "touch -h A?", true},
 		{"set -f\ntouch -h a*", "touch -h a*", true},
