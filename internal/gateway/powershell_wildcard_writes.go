@@ -102,10 +102,10 @@ type psWildcardPath struct {
 }
 
 // psWildcardWriteTwins returns the unknown-tier twins of the protected files
-// the path patterns of a write cmdlet statement may write: one
-// Set-Content -LiteralPath <file> -Value x for an item written in place, one
-// Remove-Item -LiteralPath <item> -Recurse -Force for an item removed, moved
-// or copied over (and every file it holds). A pattern whose folder the
+// the path patterns of a write cmdlet statement may write (an item written in
+// place, or removed, moved or copied over with every file it holds), each as
+// Set-Content -LiteralPath <item> -Value x and as
+// Remove-Item -LiteralPath <item> -Recurse -Force. A pattern whose folder the
 // reading cannot place is read as the removal of that folder (psFolderTwin).
 func psWildcardWriteTwins(statement string, reading psReading, budget *psBudget) []string {
 	if !strings.ContainsAny(statement, "*?[") || reading.protected.empty() {
@@ -237,13 +237,13 @@ func psWildcardElementTwins(element string, role psWildcardRole, filters []strin
 				reading.placed[path] = psComponentsPath(append(psPathComponents(physical, true), rel...))
 			}
 			file := managed.PowerShellLiteral(path)
-			// The write of the item: under a Linux or macOS home only a
-			// Set-Content twin is read as the file write it is
-			// (psPOSIXWriteTwin).
-			twins = append(twins, "Set-Content -LiteralPath "+file+" -Value x")
-			if role == psWildcardRemove {
-				twins = append(twins, "Remove-Item -LiteralPath "+file+" -Recurse -Force")
-			}
+			// Each match is read as written in place and as removed, in
+			// every role: under a Linux or macOS home only the Set-Content
+			// twin is read as the file write it is (psPOSIXWriteTwin), and a
+			// managed gateway on Windows proves a state write only as the
+			// removal of the entry of the folder the hook client placed
+			// (stateDirectoryEntryTarget). Either is the unknown tier.
+			twins = append(twins, "Set-Content -LiteralPath "+file+" -Value x", "Remove-Item -LiteralPath "+file+" -Recurse -Force")
 		}
 	}
 	return twins

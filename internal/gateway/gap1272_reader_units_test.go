@@ -29,7 +29,7 @@ func TestGAP1272WildcardReaderUnits(t *testing.T) {
 		[]string{".claude/settings.json", ".defenseclaw/config.yaml", ".defenseclaw/policies"})
 	remove := func(path string) string { return "Remove-Item -LiteralPath '" + path + "' -Recurse -Force" }
 	write := func(path string) string { return "Set-Content -LiteralPath '" + path + "' -Value x" }
-	// An item removed is also read as written in place (psPOSIXWriteTwin).
+	// Each match is read as written in place and as removed.
 	both := func(paths ...string) (out []string) {
 		for _, path := range paths {
 			out = append(out, write(path), remove(path))
@@ -41,7 +41,7 @@ func TestGAP1272WildcardReaderUnits(t *testing.T) {
 		want      []string
 	}{
 		{"Remove-Item -Path ~/.claude/*", both("/h/u/.claude/settings.json")},
-		{"Set-Content -Path $HOME/.codex/c* -Value x", []string{write("/h/u/.codex/config.toml")}},
+		{"Set-Content -Path $HOME/.codex/c* -Value x", both("/h/u/.codex/config.toml")},
 		{"Remove-Item ~/* -Recurse", both("/h/u/.claude", "/h/u/.claude/settings.json", "/h/u/.codex", "/h/u/.codex/config.toml")},
 		{"Remove-Item ~/.c*/settings.json", both("/h/u/.claude/settings.json")},
 		{"Set-Content ~/.claude/x.txt 'set*'", nil},
@@ -54,7 +54,7 @@ func TestGAP1272WildcardReaderUnits(t *testing.T) {
 		{"Remove-Item ~/.codex/sessions/* -Recurse", nil},
 		{"Remove-Item ~/.claude -Include s* -Recurse", both("/h/u/.claude/settings.json")},
 		{"Remove-Item ../.defenseclaw/* -Filter conf*", both("/h/u/.defenseclaw/config.yaml")},
-		{"Set-Content -Path ~/.defenseclaw/policies/*.rego -Value x", []string{write("/h/u/.defenseclaw/policies/*.rego")}},
+		{"Set-Content -Path ~/.defenseclaw/policies/*.rego -Value x", both("/h/u/.defenseclaw/policies/*.rego")},
 		{"Rename-Item -Path ~/.claude/s* -NewName ~/.claude/x*", both("/h/u/.claude/settings.json")},
 		{"Remove-Item -Path $env:CFG/.claude/*", []string{"Remove-Item -Path $env:CFG/.claude -Recurse -Force"}},
 	} {
