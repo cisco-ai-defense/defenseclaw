@@ -131,7 +131,7 @@ func TestGAP0344GAP0349ChainOnTheHook(t *testing.T) {
 	for i, row := range g0344Rows() {
 		t.Run(row.id, func(t *testing.T) {
 			dir := g0344Folder(t, row.files...)
-			session := "g0344-" + string(rune('a'+i))
+			session := "g0344-" + strconv.Itoa(i)
 			ev := claudeToolEvent("PreToolUse", session, "read", row.cmd)
 			ev["cwd"] = dir
 			callAgentHookForTest(t, handler, ev)
