@@ -79,7 +79,6 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 	}
 	for _, p := range gap0437Packs {
 		for _, route := range []string{"claudecode", "codex", "codex-cmd", "copilot"} {
-			a := gap0437Server(t, p, strings.SplitN(route, "-", 2)[0], "action")
 			rows := powerShell
 			if route == "codex-cmd" {
 				rows = cmd
@@ -91,6 +90,10 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 					// rel-1-0-10:GAP-1157 (same at rel).
 					continue
 				}
+				// A gateway of its own for each call: gap1150Post sends one
+				// tool use id, and a second call with it on one gateway is a
+				// correlation collision whose audit write may fail closed.
+				a := gap0437Server(t, p, strings.SplitN(route, "-", 2)[0], "action")
 				out := gap1150Post(t, a, route, project, r.command, home, p.managed)
 				raw, _ := json.Marshal(out)
 				action, _ := out["action"].(string)

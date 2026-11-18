@@ -318,6 +318,8 @@
    "TestGAP0700GAP0721OrdinaryCommandsAreDecidedWithoutHangOrPanic": 6.1,
    "TestGAP0805LauncherSpellingsDefault": 21.0,
    "TestGAP1060DefaultStreamWriteNativeEveryTier": 153.7,
+   "TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers": 190.0,
+   "TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers": 300.0,
    "TestHandlePassthrough_SSRFHardening": 2.8,
    "TestHandleSkillScanRejectsJudgeFailure": 2.9,
    "TestHookCallWALFramesBounded": 2.1,
