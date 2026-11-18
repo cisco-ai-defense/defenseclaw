@@ -212,6 +212,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | --- | --- |
 | `defenseclaw.sandbox.substrate.atespace`, `.actor` | The atespace and the actor name. They are unique only together |
 | `defenseclaw.sandbox.substrate.actor_uid`, `ate.actor.uid` | The actor UID. The second is the name Substrate uses on its own records, so the two join. A fork has a new UID |
+| `defenseclaw.sandbox.substrate.registered` | On `log.egress.*`: `false` when the leader could not tie the decision to a registration of the actor (a deleted actor, one DefenseClaw never registered, or a registration lookup outage at the callout). The atespace and actor name then come from the egress gateway's verified identity, and the actor UID and guardrail profile are absent |
 | `defenseclaw.sandbox.substrate.template`, `.worker_pool`, `.kit_version` | The template the actor came from, the pool that runs it (absent while suspended) and the DefenseClaw kit release inside |
 | `defenseclaw.sandbox.substrate.batch_id` | The batch an unattended actor belongs to |
 | `defenseclaw.sandbox.substrate.parent_uid` | The actor a fork was made from |

@@ -1142,6 +1142,7 @@
   },
   "internal/gateway": {
    "*": 0.252,
+   "TestGAP0581EgressRecordsSayWhetherTheActorIsRegistered": 0.5,
    "TestGAP0487LLMRequestCanaryIsRefusedInActionMode": 7.68,
    "TestGAP0487LLMStreamedReplyCanaryIsInspected": 1.78,
    "TestACPActionParityWithKiroHook": 153.3,

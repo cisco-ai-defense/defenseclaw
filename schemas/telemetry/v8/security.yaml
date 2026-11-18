@@ -2643,7 +2643,9 @@ groups:
   - security.network.egress
   - correlation.policy.effective
   - correlation.sandbox
-  attributes: []
+  attributes:
+  - ref: defenseclaw.sandbox.substrate.registered
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.network.target_ref
     requirement_level: required

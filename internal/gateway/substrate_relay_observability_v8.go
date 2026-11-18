@@ -181,7 +181,8 @@ func (a *APIServer) emitSubstrateLifecycleV8(ctx context.Context, r telemetryrel
 }
 
 // emitSubstrateEgressV8 is log.egress.allowed or log.egress.blocked for a
-// callout decision.
+// callout decision. defenseclaw.sandbox.substrate.registered is false when
+// the leader could not tie it to a registration (GAP-0581).
 func (a *APIServer) emitSubstrateEgressV8(ctx context.Context, r telemetryrelay.Record) {
 	if r.Host == "" || (r.Decision != "allow" && r.Decision != "block") {
 		return
@@ -211,7 +212,8 @@ func (a *APIServer) emitSubstrateEgressV8(ctx context.Context, r telemetryrelay.
 					DefenseClawSandboxRuntime: observability.Present("substrate"), DefenseClawGuardrailProfileName: hookV8OptionalIdentifier(r.Profile),
 					DefenseClawSandboxSubstrateAtespace: substrateRelayText(r.Atespace), DefenseClawSandboxSubstrateActor: substrateRelayText(r.Actor),
 					DefenseClawSandboxSubstrateActorUid: substrateRelayText(r.UID), AteActorUid: substrateRelayText(r.UID),
-					MandatoryEnforcedOutcome: true,
+					DefenseClawSandboxSubstrateRegistered: observability.Present(!r.Unregistered),
+					MandatoryEnforcedOutcome:              true,
 				})
 			}
 			return builder.BuildLogEgressAllowed(observability.LogEgressAllowedInput{
@@ -224,6 +226,7 @@ func (a *APIServer) emitSubstrateEgressV8(ctx context.Context, r telemetryrelay.
 				DefenseClawSandboxRuntime: observability.Present("substrate"), DefenseClawGuardrailProfileName: hookV8OptionalIdentifier(r.Profile),
 				DefenseClawSandboxSubstrateAtespace: substrateRelayText(r.Atespace), DefenseClawSandboxSubstrateActor: substrateRelayText(r.Actor),
 				DefenseClawSandboxSubstrateActorUid: substrateRelayText(r.UID), AteActorUid: substrateRelayText(r.UID),
+				DefenseClawSandboxSubstrateRegistered: observability.Present(!r.Unregistered),
 			})
 		})
 }
