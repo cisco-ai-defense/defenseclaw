@@ -126,7 +126,10 @@ type ChainConfig struct {
 	// before a git fetch or push is refused (GAP-0601). Default 250 ms, at
 	// most 500 ms, never shorter than CheckBudget. An ask is raised after the
 	// check, within MessageBudget: the defaults (250 ms and Ask.Hold 1.5 s)
-	// fit, and a longer pair shortens the hold when the leader is slow.
+	// fit when the check answers; a check that misses, and the refresh that
+	// may follow the ask, shorten the hold. The wait for one of the actor's
+	// chainPerActorInflight slots counts against the budget, so an actor
+	// with more checks in flight on a slow leader gets refusals sooner.
 	SendBudget time.Duration `yaml:"send_budget"`
 	// QueueSize bounds the observed_egress queue; a full queue drops.
 	QueueSize int `yaml:"queue_size"`

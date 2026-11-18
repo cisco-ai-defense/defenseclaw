@@ -246,6 +246,33 @@ func TestSendBudgetIsBoundedGAP0601(t *testing.T) {
 	}
 }
 
+// The refresh that confirms a pass its check could not waits send_budget
+// (UIDCache.confirmBudget): an attended GET on a cached registration whose
+// check fails at once is confirmed by a 150 ms lookup; with the refresh at
+// check_budget (20 ms) it is refused as registration_unconfirmed.
+func TestConfirmingRefreshWaitsSendBudgetGAP0601(t *testing.T) {
+	ctx := context.Background()
+	for _, send := range []time.Duration{0, 20 * time.Millisecond} {
+		h := newHarness(t, func(c *Config, o *Options) {
+			o.ChainChecker = fakeChecker{err: errors.New("leader check failed")}
+			c.Chain.SendBudget = send
+		})
+		if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); !v.Allow {
+			t.Fatalf("send_budget %s, registration resolved now: %+v", send, v)
+		}
+		h.uids.mu.Lock()
+		h.uids.delay = 150 * time.Millisecond
+		h.uids.mu.Unlock()
+		v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
+		if send == 0 && (!v.Allow || !v.Alert || !slices.Contains(v.Findings, "chain_unchecked:"+uncheckedError)) {
+			t.Fatalf("default send_budget, cached registration, 150 ms lookup: want allowed with an alert: %+v", v)
+		}
+		if send != 0 && (v.Allow || v.Rule != uncheckedUnconfirmed) {
+			t.Fatalf("send_budget 20ms, cached registration, 150 ms lookup: want registration_unconfirmed: %+v", v)
+		}
+	}
+}
+
 // The leader down keeps the refusal, without waiting for send_budget.
 func TestSendBudgetLeaderDownStillRefusedGAP0601(t *testing.T) {
 	ctx := context.Background()
@@ -273,7 +300,8 @@ func TestSendBudgetConfigGAP0601(t *testing.T) {
 	if _, err := ParseConfig([]byte(testConfig + "\nchain:\n  send_budget: 600ms\n")); err == nil {
 		t.Fatal("send_budget 600ms accepted, want at most 500ms")
 	}
-	// The defaults leave an ask, raised after the check, its whole hold.
+	// The defaults leave an ask raised after an answered check its whole
+	// hold (a check that misses, and the refresh after it, come out of it).
 	if cfg.Chain.SendBudget+cfg.Ask.Hold > MessageBudget {
 		t.Fatalf("default send_budget %s plus ask.hold %s is over the %s message budget", cfg.Chain.SendBudget, cfg.Ask.Hold, MessageBudget)
 	}

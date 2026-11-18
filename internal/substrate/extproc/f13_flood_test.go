@@ -108,7 +108,7 @@ func TestADeletedUIDUnderASlowLeaderIsNeverAllowed(t *testing.T) {
 	})
 	h := newHarness(t, func(_ *Config, o *Options) { o.UIDs = u; o.ChainChecker = slowChain })
 	h.eng.DecideHeaders(context.Background(), req("ops", "GET", "example.com", "/")) // caches uid-1
-	u.set(ActorRecord{}, false, 300*time.Millisecond)                                // deleted; the leader is slow
+	u.set(ActorRecord{}, false, 700*time.Millisecond)                                // deleted; the leader is slow
 	for i, v := range flood(h.eng, 100, func() *Request { return req("ops", "POST", "example.com", "/") }) {
 		if v.Allow {
 			t.Fatalf("request %d of a deleted actor under a slow leader allowed: %+v", i, v)
@@ -120,8 +120,9 @@ func TestADeletedUIDUnderASlowLeaderIsNeverAllowed(t *testing.T) {
 	if n := u.calls.Load() - 1; n > 1 {
 		t.Fatalf("the flood made %d leader lookups, want at most 1", n)
 	}
-	// Once the lookup lands, the actor is refused as deleted.
-	time.Sleep(400 * time.Millisecond)
+	// Once the lookup lands, the actor is refused as deleted. The lookup is
+	// slower than a send's check plus its refresh (send_budget each, 500 ms).
+	time.Sleep(800 * time.Millisecond)
 	if v := h.eng.DecideHeaders(context.Background(), req("ops", "POST", "example.com", "/")); v.Allow {
 		t.Fatalf("after the lookup: %+v", v)
 	}
