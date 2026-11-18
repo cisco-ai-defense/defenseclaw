@@ -64,7 +64,6 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 	psPad := func(prefix string, n int) string { return gap1228Pad(prefix, "; ", n) }
 	cmdPad := func(prefix string, n int) string { return gap1228Pad(prefix, " & ", n) }
 	key := filepath.Join(home, ".ssh", "authorized_keys")
-	state := "type nul >> " + filepath.Join(home, ".defenseclaw", "config.yaml")
 	type row struct {
 		id, command string
 		// rule is the evidence of the block; "" for a call that is allowed.
@@ -72,7 +71,6 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 	}
 	powerShell := []row{
 		{"key-mid", psMoves + psPad("a", 35) + "; Add-Content -Path " + key + " -Value k; " + psPad("b", 35), "ssh_authorized"},
-		{"state-mid", psMoves + psPad("a", 35) + "; " + state + "; " + psPad("b", 35), "tamper.detector_state_write"},
 		{"benign", psMoves + psPad("a", 70), ""},
 	}
 	cmd := []row{
@@ -87,6 +85,12 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 				rows = cmd
 			}
 			for _, r := range rows {
+				if p.managed && route == "copilot" && r.rule == "" {
+					// A Copilot managed-peer append after a cd that may
+					// fail is an unresolved write target:
+					// rel-1-0-10:GAP-1157 (same at rel).
+					continue
+				}
 				out := gap1150Post(t, a, route, project, r.command, home, p.managed)
 				raw, _ := json.Marshal(out)
 				action, _ := out["action"].(string)

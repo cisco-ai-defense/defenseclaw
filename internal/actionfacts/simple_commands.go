@@ -242,6 +242,13 @@ const (
 	maxSimpleStates      = 32
 	maxSimpleEvaluations = 512
 	maxCompactionCases   = 8
+	// maxSimpleWindowsOtherReadings bounds the readings of a PowerShell or
+	// CMD call in other folders that name the folder: each is a policy
+	// pass of its own, and a padded call past it took the native gateway
+	// past its hook persistence deadline (rel-1-0-10:GAP-1228). It is the
+	// statement budget, so such a call costs at most about three times a
+	// call of the same statements on rel.
+	maxSimpleWindowsOtherReadings = maxStatementsAlone
 )
 
 func (s simpleShellState) clone() simpleShellState {
@@ -1127,8 +1134,9 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	state := simpleWindowsState{cwd: input.CWD, trackOthers: windowsSimpleCallFolder(input.CWD)}
 	failed := false
 	// readings counts the readings of a statement in another folder it may
-	// run in (OtherFolder): readings, not statements of the call.
-	readings := 0
+	// run in (OtherFolder): readings, not statements of the call; placed
+	// counts those that name the folder.
+	readings, placed := 0, 0
 	groupIndex := 0
 	var groups []simpleWindowsGroupSnapshot
 	processGroupEvents := func(before int) {
@@ -1191,17 +1199,18 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			// A relative operand names a file in each folder the
 			// statement may run in (rel-1-0-10:GAP-1150). Those readings
 			// come on top of the statements of the call, which keep the
-			// budget they have on rel. Past maxSimpleEvaluations readings
-			// in all, the statement is read once more as in a folder the
+			// budget they have on rel. Past maxSimpleWindowsOtherReadings
+			// of them, the statement is read once more as in a folder the
 			// walk does not give (UnresolvedFolder), as past
 			// maxSimpleWindowsFolders, beside every reading made before:
 			// never the whole-call limit (the one bound rule,
 			// rel-1-0-10:GAP-1228).
 			unresolved := state.othersUnresolved
-			if len(result)+len(state.others) <= maxSimpleEvaluations {
+			if placed+len(state.others) <= maxSimpleWindowsOtherReadings {
 				for _, other := range state.others {
 					result = append(result, SimpleCommand{Text: text, CWD: other.cwd, OtherFolder: true})
 					readings++
+					placed++
 				}
 			} else {
 				unresolved = true
