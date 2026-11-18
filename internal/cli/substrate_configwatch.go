@@ -172,14 +172,46 @@ func (f *substrateFollower) step(ctx context.Context) {
 			f.role, ch.Digest, prev, f.guardrail)
 	}
 	if pending := substrateRestartOnly(f.boot, ch.Config); len(pending) > 0 {
-		restart := "kubectl rollout restart deploy/" + substrateRoleDeployment[f.role]
-		if len(substrateControllerRestartOnly(f.boot, ch.Config)) > 0 {
-			restart = substrateRestartAll
-		}
-		msg += "; these keys changed and apply when this pod restarts: " + strings.Join(pending, ", ") +
-			" (helm upgrade rolls the pods; after a direct ConfigMap edit run " + restart + ")"
+		msg += "; " + substrateRestartAdvice(f.role, pending, substrateControllerRestartOnly(f.boot, ch.Config))
 	}
 	fmt.Fprintln(f.out, msg)
+}
+
+// substrateHelmOnlyKey is the restart-only key no pod restart applies:
+// substrate.extproc renders the callout's ConfigMap, which only helm
+// upgrade writes (GAP-0607).
+const substrateHelmOnlyKey = "substrate.extproc"
+
+// substrateRestartAdvice says how the restart-only keys in pending apply: a
+// rollout restart of the role's Deployment (of every Deployment when the
+// controller keeps one of them too, controllerKeys), and helm upgrade only
+// for substrate.extproc.
+func substrateRestartAdvice(role string, pending, controllerKeys []string) string {
+	isHelmOnly := func(k string) bool { return strings.HasPrefix(k, substrateHelmOnlyKey) }
+	var restartKeys, helmKeys []string
+	for _, k := range pending {
+		if isHelmOnly(k) {
+			helmKeys = append(helmKeys, k)
+		} else {
+			restartKeys = append(restartKeys, k)
+		}
+	}
+	var parts []string
+	if len(restartKeys) > 0 {
+		restart := "kubectl rollout restart deploy/" + substrateRoleDeployment[role]
+		for _, k := range controllerKeys {
+			if !isHelmOnly(k) {
+				restart = substrateRestartAll
+				break
+			}
+		}
+		parts = append(parts, "these keys changed and apply when this pod restarts: "+strings.Join(restartKeys, ", ")+
+			" (helm upgrade rolls the pods; after a direct ConfigMap edit run "+restart+")")
+	}
+	if len(helmKeys) > 0 {
+		parts = append(parts, "these keys changed and apply only by helm upgrade (a pod restart does not change them): "+strings.Join(helmKeys, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // substrateRestartOnly names the config keys that differ between boot and
@@ -206,7 +238,7 @@ func substrateRestartOnly(boot, cur *config.Config) []string {
 		{"substrate.llm", b.LLM, c.LLM},
 		{"substrate.workspace_max_bytes", b.WorkspaceMaxBytes, c.WorkspaceMaxBytes},
 		{"substrate.secrets (the gateway's injection; the egress bindings apply live)", b.Secrets, c.Secrets},
-		{"substrate.extproc (the callout: helm upgrade only)", b.Extproc, c.Extproc},
+		{"substrate.extproc (it renders the callout's ConfigMap)", b.Extproc, c.Extproc},
 		{"substrate.unattended.ask_timeout (the leader)", b.Unattended.AskTimeout, c.Unattended.AskTimeout},
 		{"substrate.bundles", b.Bundles, c.Bundles},
 	} {
