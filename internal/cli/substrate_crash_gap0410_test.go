@@ -69,3 +69,32 @@ func TestGAP0410UndoRecoversACrashedAgent(t *testing.T) {
 		t.Fatalf("undo did not bring the crashed agent back (calls %v, stderr %q)", f.calls, errOut)
 	}
 }
+
+// GAP-0410: undo of an agent that came back from its crash at its
+// template's start (no snapshot of its own was stored) says plainly that
+// the folder is lost and how to start again, instead of failing with "exit
+// 91: /work/proj-a does not exist in the actor" (IB5-E2, TST-2648).
+func TestGAP0410UndoSaysPlainlyWhenTheFolderIsLost(t *testing.T) {
+	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
+		"GET actors": jsonReply(crashedActors()),
+		"POST actors/eng-web/fix-tests-1/recover": jsonReply(map[string]any{"atespace": "eng-web", "name": "fix-tests-1", "state": "running", "recovered_from": "template"}),
+	}}
+	useFakeAdmin(t, f)
+	_, _, err := runSubstrate(t, newSubstrateUndoCmd(), "fix-tests-1", "--yes")
+	if err == nil {
+		t.Fatal("undo of an agent whose folder is gone reported success")
+	}
+	msg := err.Error()
+	for _, want := range []string{"crashed before the cluster stored a snapshot", "lost", "nothing to undo to", "defenseclaw substrate run <agent>", "defenseclaw substrate delete fix-tests-1"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("undo error lacks %q:\n%s", want, msg)
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if strings.Contains(c, "/attach") {
+			t.Fatalf("undo still ran the restore in the agent (calls %v)", f.calls)
+		}
+	}
+}

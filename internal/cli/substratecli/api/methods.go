@@ -62,6 +62,12 @@ type Actor struct {
 	// the DefenseClaw rule (deny-only) until an administrator resets it
 	// (GAP-0398).
 	PolicyConflict *PolicyConflict `json:"policy_conflict,omitempty"`
+	// RecoveredFrom comes with a recover: "snapshot" (the actor's own last
+	// snapshot) or "template" (it had none of its own, so the folder copied
+	// into it is gone; GAP-0410). Empty from an older gateway.
+	RecoveredFrom string `json:"recovered_from,omitempty"`
+	// SnapshotGeneration comes with a snapshot: the generation stored.
+	SnapshotGeneration int32 `json:"snapshot_generation,omitempty"`
 }
 
 // PolicyConflict is an actor's policy_conflict as the cluster shows it.
@@ -79,7 +85,7 @@ type PolicyConflict struct {
 // tables, status lines, prompts and errors. The identifiers the launcher
 // sends back (UID, registration key, session token) are left as they are.
 func (a Actor) shown() Actor {
-	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State} {
+	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State, &a.RecoveredFrom} {
 		*f = safetext.Line(*f)
 	}
 	if a.PolicyConflict != nil {
@@ -249,6 +255,16 @@ func (c *Client) Get(ctx context.Context, atespace, name string) (Actor, error) 
 func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, error) {
 	var a Actor
 	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/recover", nil, map[string]any{}, &a)
+	return a.shown(), err
+}
+
+// Snapshot has the cluster store the running actor's state durably (it
+// pauses for the seconds that takes), so a crash recovery returns to it
+// rather than to the template's start (GAP-0410). The gateway answers 409
+// not_running for an actor that is not running and 501 when it cannot.
+func (c *Client) Snapshot(ctx context.Context, atespace, name string) (Actor, error) {
+	var a Actor
+	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/snapshot", nil, map[string]any{}, &a)
 	return a.shown(), err
 }
 

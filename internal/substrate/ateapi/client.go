@@ -485,6 +485,27 @@ type Reverter interface {
 	RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error)
 }
 
+// DurableSuspender is a Client that can also suspend a running actor with
+// synchronous durability: the call returns once the snapshot is in object
+// storage, so a later revert (a crash recovery) returns to it rather than
+// to an older snapshot or the template's golden one. The launcher's
+// checkpoint keeps the person's work this way (GAP-0410).
+type DurableSuspender interface {
+	SuspendActorDurable(ctx context.Context, actor *ObjectRef) (*Actor, error)
+}
+
+// SuspendActorDurable implements DurableSuspender.
+func (c *GRPCClient) SuspendActorDurable(ctx context.Context, actor *ObjectRef) (*Actor, error) {
+	resp, err := c.ctl.SuspendActor(ctx, &pb.SuspendActorRequest{
+		Actor:   actor,
+		Options: &pb.SuspendOptions{Mode: pb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetActor(), nil
+}
+
 // RevertActor implements Reverter.
 func (c *GRPCClient) RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error) {
 	resp, err := c.ctl.RevertActor(ctx, &pb.RevertActorRequest{Actor: actor})
