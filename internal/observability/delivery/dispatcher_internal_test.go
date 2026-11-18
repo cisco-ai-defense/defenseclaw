@@ -133,6 +133,23 @@ func waitForCircuitSnapshot(t *testing.T, dispatcher *Dispatcher, predicate func
 	}
 }
 
+// waitForCounters polls the dispatcher's counters until predicate holds; the
+// worker updates them after the health snapshot a test waited on.
+func waitForCounters(t *testing.T, dispatcher *Dispatcher, predicate func(Counters) bool) Counters {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		counters := dispatcher.Counters()
+		if predicate(counters) {
+			return counters
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("counters not reached; counters=%+v", counters)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func closeCircuitTestDispatcher(t *testing.T, dispatcher *Dispatcher) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -477,7 +494,12 @@ func TestTransientCircuitPersistsAcrossBatchesAndFailsFastWhileOpen(t *testing.T
 	if got := adapter.callCount(); got != 3 {
 		t.Fatalf("open circuit touched adapter %d times", got)
 	}
-	counters := dispatcher.Counters()
+	// The worker publishes the failure count and the open circuit (the
+	// snapshot waited on above) before it releases the failed batch as
+	// dropped (dispatcher.go, transient outcome at the last attempt), so a
+	// read made at once can miss the third drop (GAP-0331: Dropped:2). Wait
+	// for it; the exact check below still refuses any other count.
+	counters := waitForCounters(t, dispatcher, func(counters Counters) bool { return counters.Dropped >= 3 })
 	if counters.Accepted != 23 || counters.Dropped != 3 || counters.Failed != 3 ||
 		counters.Retried != 0 || counters.Delivered != 0 {
 		t.Fatalf("counters=%+v", counters)
