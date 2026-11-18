@@ -46,6 +46,11 @@ func TestCascadeLaneHotReloadEveryLane(t *testing.T) {
 		t.Run(lane, func(t *testing.T) {
 			dir := t.TempDir()
 			t.Setenv("DEFENSECLAW_HOME", dir)
+			// The refused reloads set the process-wide last_reload_error and
+			// the stub apply never publishes the good one, which is what
+			// clears it in a gateway; clear it so a later test does not read
+			// this lane's refusal as its own (GAP-1215).
+			t.Cleanup(clearGenerationBuildError)
 			path := filepath.Join(dir, config.DefaultConfigName)
 			write := func(v string) {
 				raw := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  mode: observe\n  cascade:\n    lanes:\n      " + lane + ": " + v + "\nobservability: {}\n"

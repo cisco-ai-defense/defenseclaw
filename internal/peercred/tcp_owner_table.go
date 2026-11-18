@@ -230,6 +230,19 @@ var ErrNotAccepted = errors.New("peercred: the asking process did not accept thi
 // process (PID and connection creation time) the request named.
 var ErrOwnerChanged = errors.New("peercred: the loopback connection is not owned by the process the request names")
 
+// account is the Secure Client caller account lookup
+// (LoopbackTCPPeerAccount): the account of the process that owns the client
+// end of a connection this process accepted. It reads the client row, then
+// applies the same PID-reuse rule as verify (openOwner); it does not check
+// the server end, which this process owns.
+func (l ownerSIDLookup) account(local, remote *net.TCPAddr) (PeerIdentity, error) {
+	want, err := l.clientOwner(local, remote)
+	if err != nil {
+		return PeerIdentity{}, err
+	}
+	return l.openOwner(local, remote, want, nil)
+}
+
 // verify is the peer broker answer (S1 Q7). The server end must be owned by
 // serverPID (the authenticated gateway) and the client end by want (the
 // PID and creation time the gateway read). It opens that PID and refuses
@@ -246,26 +259,41 @@ func (l ownerSIDLookup) verify(local, remote *net.TCPAddr, serverPID uint32, wan
 	if want.PID == 0 || want.CreateTime == 0 {
 		return PeerIdentity{}, ErrOwnerChanged
 	}
-	check := func() error {
-		rows, err := l.rows()
-		if err != nil {
-			return err
-		}
-		if err := serverRowOwnedBy(rows, local, remote, serverPID); err != nil {
-			return err
-		}
-		row, err := clientRow(rows, local, remote)
-		if err != nil {
-			return err
-		}
-		if row.PID != want.PID || row.CreateTime != want.CreateTime {
-			return ErrOwnerChanged
-		}
-		return nil
-	}
-	if err := check(); err != nil {
+	server := func(rows []tcpOwnerRow) error { return serverRowOwnedBy(rows, local, remote, serverPID) }
+	if err := l.ownedBy(local, remote, want, server); err != nil {
 		return PeerIdentity{}, err
 	}
+	return l.openOwner(local, remote, want, server)
+}
+
+// ownedBy reads the table and checks that the client end of the connection
+// is still the row want names (PID and creation time) and, when server is
+// set, that the server end passes it.
+func (l ownerSIDLookup) ownedBy(local, remote *net.TCPAddr, want TCPConnOwner, server func([]tcpOwnerRow) error) error {
+	rows, err := l.rows()
+	if err != nil {
+		return err
+	}
+	if server != nil {
+		if err := server(rows); err != nil {
+			return err
+		}
+	}
+	row, err := clientRow(rows, local, remote)
+	if err != nil {
+		return err
+	}
+	if row.PID != want.PID || row.CreateTime != want.CreateTime {
+		return ErrOwnerChanged
+	}
+	return nil
+}
+
+// openOwner is the PID-reuse rule both lookups share: it opens want.PID,
+// refuses a process that started after the connection was created, reads
+// its token user, and reads the table again with the process open (ownedBy
+// with server).
+func (l ownerSIDLookup) openOwner(local, remote *net.TCPAddr, want TCPConnOwner, server func([]tcpOwnerRow) error) (PeerIdentity, error) {
 	process, err := l.open(want.PID)
 	if err != nil {
 		return PeerIdentity{}, err
@@ -288,7 +316,7 @@ func (l ownerSIDLookup) verify(local, remote *net.TCPAddr, serverPID uint32, wan
 	if identity.SID == "" {
 		return PeerIdentity{}, errors.New("peercred: the client token has no user SID")
 	}
-	if err := check(); err != nil {
+	if err := l.ownedBy(local, remote, want, server); err != nil {
 		if errors.Is(err, ErrOwnerChanged) {
 			return PeerIdentity{}, errors.New("peercred: the loopback connection changed owner while it was read")
 		}

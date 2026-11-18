@@ -761,7 +761,9 @@ func TestHookImageRetirePendsOnAnAccountFileItIsDenied(t *testing.T) {
 	scan := func() windowsHookImageConfigScan {
 		return scanWindowsHookImageConfigFiles([]windowsHookImageConfigFile{file}, hookImageTestBin, readWindowsHookImageConfigFile)
 	}
-	if got := scan(); len(got.Unverified) != 1 || len(got.Incomplete) != 0 {
+	// The handle-relative open's STATUS_ACCESS_DENIED counts as a denial
+	// of the caller (rel-1-0-10 GAP-0907).
+	if got := scan(); len(got.Unverified) != 1 || len(got.Incomplete) != 0 || !got.Unverified[0].Denied {
 		t.Fatalf("scan of the denied file = %+v", got)
 	}
 	s := newSkipFixture(t)
@@ -771,5 +773,13 @@ func TestHookImageRetirePendsOnAnAccountFileItIsDenied(t *testing.T) {
 	if report.OK || report.Reason != windowsHookImageRetirePending || len(report.StillNamed) != 1 ||
 		!report.StillNamed[0].Unreadable || !report.StillNamed[0].Account || !strings.Contains(report.Error, "LocalSystem") {
 		t.Fatalf("retire over a denied account file = %+v", report)
+	}
+	// A skip of that profile by this (non-LocalSystem) caller is refused.
+	steps = s.skipSteps(skipTestSID)
+	steps.Scan = scan
+	steps.CallerSystem = windowsHookImageCallerIsSystem
+	if refused := retireWindowsHookImages(steps); !windowsHookImageCallerIsSystem() &&
+		(refused.OK || refused.Reason != windowsHookImageRetireRefused || !strings.Contains(refused.Error, "LocalSystem")) {
+		t.Fatalf("a skip of a profile this caller was only denied = %+v", refused)
 	}
 }

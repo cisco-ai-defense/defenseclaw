@@ -217,6 +217,10 @@ func installWindowsShippedRulePacks() (string, bool, []string, error) {
 // folders, and the owner of a folder keeps WRITE_DAC over it, so a root
 // that Administrators or LocalSystem do not own (or a link) is moved aside,
 // never adopted, and created again with its access list set at creation.
+// The moved folder is then moved into the new root (.untrusted-<suffix>) and
+// removed; one that cannot be removed stays there, where only Setup could
+// have put it, so a folder a user names like it beside the root is never
+// taken for one (GAP-0085: it gave a warning no administrator could clear).
 func ensureWindowsShippedRulePacksRoot(root string) (string, error) {
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
@@ -251,16 +255,26 @@ func ensureWindowsShippedRulePacksRoot(root string) (string, error) {
 		return "", err
 	}
 	note := fmt.Sprintf("moved %s, which an account other than Administrators or LocalSystem created, aside and created it again", root)
+	if inside := filepath.Join(root, windowsShippedRulePacksUntrustedPrefix+suffix); os.Rename(aside, inside) == nil {
+		aside = inside
+	}
+	// os.RemoveAll deletes a link or junction inside it as a link and never
+	// follows it.
 	if err := os.RemoveAll(aside); err != nil {
 		note += fmt.Sprintf("; the moved folder %s could not be removed (%v): remove it", aside, err)
 	}
 	return note, nil
 }
 
+// windowsShippedRulePacksUntrustedPrefix names a folder
+// ensureWindowsShippedRulePacksRoot moved aside and into the root.
+const windowsShippedRulePacksUntrustedPrefix = ".untrusted-"
+
 // windowsShippedRulePacksUntrusted lists the folders
-// ensureWindowsShippedRulePacksRoot moved aside beside root.
+// ensureWindowsShippedRulePacksRoot moved aside into root and could not
+// remove. Only Administrators and LocalSystem can create anything in root.
 func windowsShippedRulePacksUntrusted(root string) []string {
-	matches, err := filepath.Glob(root + ".untrusted-*")
+	matches, err := filepath.Glob(filepath.Join(root, windowsShippedRulePacksUntrustedPrefix+"*"))
 	if err != nil {
 		return nil
 	}
@@ -456,9 +470,17 @@ func windowsEnterpriseShippedRulePackProblems(cfg *config.Config) []string {
 		return nil
 	}
 	selected := configSelectsShippedRulePack(cfg)
-	folder := config.WindowsShippedRulePacksFolder()
-	if selected == "" || folder == "" {
+	if selected == "" {
 		return nil
+	}
+	folder := config.WindowsShippedRulePacksFolder()
+	if folder == "" {
+		// The root cannot be read (GAP-0085): status said nothing, while
+		// the gateway could not load the pack.
+		_, rootErr := cfg.WindowsShippedRulePacksUnreadable()
+		return []string{fmt.Sprintf("the config selects the %s rule pack, which this release ships under the trusted ProgramData folder, and that folder cannot be found because %v, so the gateway cannot load it; "+
+			"run %s as LocalSystem or from an elevated PowerShell prompt to register and write it again.%s",
+			selected, rootErr, windowsEnterpriseSetupCommand("/repair", "JSON=1"), windowsEnterpriseSetupSourceNote)}
 	}
 	files, err := policyassets.ShippedRulePackFiles()
 	if err != nil {
@@ -490,7 +512,7 @@ func applyWindowsEnterpriseShippedRulePacks(result *enterprisestatus.Result) {
 		for _, aside := range windowsShippedRulePacksUntrusted(root) {
 			result.AddWarning("shipped_rule_packs_untrusted_left", fmt.Sprintf(
 				"%s is a folder an account other than Administrators or LocalSystem created where the shipped rule packs go; "+
-					"Setup moved it aside and could not remove it: remove it as an administrator", aside))
+					"Setup moved it aside into the shipped rule pack folder and could not remove it: remove it as an administrator", aside))
 		}
 	}
 }

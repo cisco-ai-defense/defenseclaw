@@ -318,6 +318,10 @@ type Config struct {
 	// under the target layout's shipped policy folder to a private copy of
 	// the policies this binary embeds (UseOfflineVendorPolicies).
 	offlineVendorPolicyDir, offlineVendorPolicyRoot string
+	// shippedRulePacksStandIn makes a probe copy resolve the shipped rule
+	// packs of a managed Windows install to a stand-in folder while their
+	// root cannot be read (WindowsShippedRulePacksUnreadable).
+	shippedRulePacksStandIn bool
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string

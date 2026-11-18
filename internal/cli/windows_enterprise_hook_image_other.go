@@ -12,6 +12,15 @@
 
 package cli
 
+import (
+	"errors"
+	"io/fs"
+)
+
+// windowsHookImageAccessDenied reports an open or read the caller's token
+// was refused (fs.ErrPermission here; on Windows also STATUS_ACCESS_DENIED).
+func windowsHookImageAccessDenied(err error) bool { return errors.Is(err, fs.ErrPermission) }
+
 // windowsHookImageSharingViolation is Windows' ERROR_SHARING_VIOLATION;
 // other systems have no such refusal (the decisions run in their tests with
 // fs.ErrPermission).
