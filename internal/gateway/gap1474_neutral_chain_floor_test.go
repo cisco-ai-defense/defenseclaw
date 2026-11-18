@@ -10,8 +10,9 @@ import (
 // TestGAP1474NeutralChainTheReadingRefusesKeepsTheFloor: a chain of more
 // than MaxWrapperDepth context-neutral wrappers lost the truncation floor
 // (ACTION-COMPOUND-LIMIT) whatever reader stood in for it, so a chain the
-// wrapper-free reading does not read (a redirect, a prefix assignment or a
-// word made at run time among the wrapper words, chroot, the time keyword,
+// wrapper-free reading does not read (a redirect before the program word, the
+// first wrapper word included, a prefix assignment or a word made at run time
+// among the wrapper words, chroot, the time keyword,
 // sudo before it, a shell -c body around it) put the program below what it
 // has alone: rm -rf ~/.defenseclaw, the metadata fetch, curl URL | sh and cat
 // ~/.aws/credentials were a clean allow in every tier at e3684ca15e, where
@@ -24,6 +25,8 @@ func TestGAP1474NeutralChainTheReadingRefusesKeepsTheFloor(t *testing.T) {
 	n8 := n("nohup nice ", 4)
 	refused := []struct{ id, prefix, suffix string }{
 		{"redir-mid", "nohup nice nohup nice 2>/dev/null nohup nice nohup nice ", ""},
+		{"redir-first", ">/dev/null " + n8, ""},
+		{"redir-first-err", "2>&1 " + n8, ""},
 		{"assign", "X=1 " + n8, ""},
 		{"dyn-timeout", n("nohup nice ", 16) + "timeout $T " + n("nohup nice ", 16), ""},
 		{"chroot", n8 + "chroot / ", ""},

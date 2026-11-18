@@ -3305,10 +3305,13 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int, afterNe
 // tier (rel-1-0-10:GAP-1321, and GAP-1323 for one wrapper). The reading
 // keeps every other word, so the program keeps the verdict it has alone,
 // alert included; like every reading of the walk it only adds findings. A
-// command with a prefix assignment, a redirect or a word made at run time
-// among its wrapper words, chroot or nsenter in the chain, and a chain past
-// the bound (TRUNCATED) are not read so; a word made at run time among the
-// program's own arguments is kept as written (rel-1-0-10:GAP-1474).
+// command with a prefix assignment, a redirect before the program word (among
+// the wrapper words or before the first of them: >/dev/null nohup curl URL |
+// sh still runs the script curl fetches, and rel kept the floor on it), a word
+// made at run time among its wrapper words, chroot or nsenter in the chain,
+// and a chain past the bound (TRUNCATED) are not read so; a word made at run
+// time among the program's own arguments is kept as written
+// (rel-1-0-10:GAP-1474).
 func simpleNeutralWrapperFreeReading(input Input, source string) (SimpleCommand, bool) {
 	file, parsed := shellparse.Parse(source)
 	if !parsed {
@@ -3342,9 +3345,10 @@ func simpleNeutralWrapperFreeReading(input Input, source string) (SimpleCommand,
 			return true
 		}
 		cut := span{int(call.Args[0].Pos().Offset()), int(program.Pos().Offset())}
+		// A redirect anywhere before the program word, the first wrapper word
+		// included, is refused: the cut would move it onto the program.
 		if slices.ContainsFunc(stmt.Redirs, func(redirect *syntax.Redirect) bool {
-			at := int(redirect.Pos().Offset())
-			return at >= cut.start && at < cut.end
+			return int(redirect.Pos().Offset()) < cut.end
 		}) {
 			return true
 		}
@@ -3379,7 +3383,8 @@ type WrapperFreeCalls []CommandFact
 // SimpleCommands adds for input, the reading judged on its own: nil when the
 // call has none, or when a top-level call of the reading still starts with a
 // wrapper. Such a call is a chain the reading does not read (a prefix
-// assignment, a redirect or a word made at run time among its wrapper words,
+// assignment, a redirect before its program word, a word made at run time
+// among its wrapper words,
 // chroot or nsenter in it, the time keyword before it): the program it runs is
 // judged alone by no reader, and a rule on its pipeline or list (CMD-PIPE-CURL
 // for curl URL | sh) is not judged either (rel-1-0-10:GAP-1474).
