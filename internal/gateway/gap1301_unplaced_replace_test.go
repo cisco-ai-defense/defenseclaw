@@ -22,7 +22,7 @@ func TestGAP1301UnsureReceiverReplace(t *testing.T) {
 		gap1275Unknown("R06 copyto arg + sessionstate text", "$f = Get-Item 'notes.txt'; $f.CopyTo(%s, $true); Write-Host 'sessionstate'"),
 		gap1275Unknown("R07 delete receiver + psvariable text", "$f = Get-Item %s; $f.Delete(); Write-Host 'psvariable'"),
 		gap1275Unknown("R08 replace receiver + iex literal", "$f = Get-Item %s; $f.Replace('notes.txt', 'notes.bak'); iex 'Write-Host hi'"),
-		gap1275Unknown("R09 replace receiver + unplaced re-assignment", "$f = Get-Item %s; $f = $f; $f.Replace('notes.txt', 'notes.bak')"),
+		gap1275Unknown("R09 replace receiver + self copy (rule tier: GAP-1315)", "$f = Get-Item %s; $f = $f; $f.Replace('notes.txt', 'notes.bak')"),
 		gap1275Unknown("R10 replace psitem + iex literal", "Get-Item %s | ForEach-Object { $PSItem.Replace('notes.txt', 'notes.bak') }; iex 'Write-Host hi'"),
 	})
 }
@@ -40,7 +40,9 @@ func TestGAP1301UnsureReadings(t *testing.T) {
 		{"$s = 'x.txt'; $s.Replace('x', 'y'); iex 'Write-Host hi'", 0, false},
 		{"$s = 'x.txt'; $s.Replace('x', 'y')", 0, false},
 		{"$f = Get-Item 'a'; $f.Replace('b', 'c'); iex 'Write-Host hi'", 3, true},
-		{"$f = Get-Item 'a'; $f = $f; $f.Replace('b', 'c')", 3, true},
+		{"$f = Get-Item 'a'; $f = Get-Date; $f.Replace('b', 'c')", 3, true},
+		// A copy of the variable itself keeps it placed (rel-1-0-10:GAP-1315).
+		{"$f = Get-Item 'a'; $f = $f; $f.Replace('b', 'c')", 3, false},
 		{"$f = Get-Item 'a'; $f.Replace('b', 'c')", 3, false},
 	} {
 		scan := newPSScan([]rune(row.text), nil)

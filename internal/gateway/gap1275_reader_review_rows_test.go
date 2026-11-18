@@ -92,18 +92,18 @@ func TestGAP1275PipelineItemWholeFeeder(t *testing.T) {
 	})
 }
 
-// GAP-1276 (s7-rv1257 N03 N04 N07 N09 N12 N13): a command that may bind a
+// GAP-1276 (s7-rv1257 N03 N04 N07 N09 N13): a command that may bind a
 // variable by a name built at run time (Set-Variable with a computed name,
 // the PSVariable API, a Get-Variable wildcard, Invoke-Expression of run-time
 // text) leaves the pipeline item and every FileInfo variable unplaced, as
-// does a second assignment the reader cannot place.
+// does a second assignment the reader cannot place. N12, a copy of the
+// variable itself, keeps the rule tier: TestGAP1315SameFileRebinds.
 func TestGAP1276RunTimeVariableNames(t *testing.T) {
 	gap1275Check(t, []gap1257Row{
 		gap1275Unknown("N03 item set-variable char", "Get-Item 'notes.txt' | ForEach-Object { Set-Variable -Name ([char]95) -Value (Get-Item %s); $_.Delete() }"),
 		gap1275Unknown("N04 var set-variable char", "$f = Get-Item 'notes.txt'; Set-Variable -Name ([char]102) -Value (Get-Item %s); $f.Delete()"),
 		gap1275Unknown("N07 item psvariable set char", "Get-Item 'notes.txt' | ForEach-Object { $ExecutionContext.SessionState.PSVariable.Set([char]95, (Get-Item %s)); $_.Delete() }"),
 		gap1275Unknown("N09 get-variable wildcard", "$f = Get-Item 'notes.txt'; (Get-Variable -Name '[e-g]').Value = (Get-Item %s); $f.Delete()"),
-		gap1275Unknown("N12 unplaced open mode only", "$x = Get-Item %s; $x = $x; $x.Open('Open')"),
 		gap1275Unknown("N13 iex char rebind", "$f = Get-Item 'notes.txt'; iex ([char]36 + [char]102 + ' = Get-Item ' + %s); $f.Delete()"),
 	})
 }

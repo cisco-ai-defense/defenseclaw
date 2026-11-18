@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -66,7 +67,38 @@ func (f psFileInfo) unsure() psFileInfo {
 	if !f.placed() {
 		return f
 	}
-	return psFileInfo{maybe: append([]psFileInfo{{params: f.params, kind: f.kind}}, f.maybe...)}
+	return psFileInfo{maybe: psReadings(psFileInfo{}, []psFileInfo{f})}
+}
+
+// same reports a reading of the same paths, of the same kind, as g.
+func (f psFileInfo) same(g psFileInfo) bool {
+	return f.kind == g.kind && slices.Equal(f.params, g.params)
+}
+
+// psReadings returns every reading the bindings may be (each placed binding
+// and each of its maybes), once each, in reading order, without the
+// readings that are the same as placed: a binding that is the same file as
+// the receiver's own reading can change nothing (rel-1-0-10:GAP-1315).
+func psReadings(placed psFileInfo, bindings []psFileInfo) []psFileInfo {
+	var readings []psFileInfo
+	var add func(f psFileInfo)
+	add = func(f psFileInfo) {
+		if f.placed() {
+			reading := psFileInfo{params: f.params, kind: f.kind}
+			if !placed.placed() || !reading.same(placed) {
+				if !slices.ContainsFunc(readings, reading.same) {
+					readings = append(readings, reading)
+				}
+			}
+		}
+		for _, maybe := range f.maybe {
+			add(maybe)
+		}
+	}
+	for _, binding := range bindings {
+		add(binding)
+	}
+	return readings
 }
 
 // psLiteralFileInfo is the FileInfo of the literal .NET path argument arg.
@@ -438,7 +470,9 @@ func (s *psStateScan) bind(vars *map[string]string, variable, param string) {
 	(*vars)[variable] = param
 }
 
-// bindFileInfo records a placed binding of variable, in reading order.
+// bindFileInfo records a binding of variable, in reading order: placed, or
+// a copy of a variable the reader is not sure of (no params, its readings
+// as maybes).
 func (s *psStateScan) bindFileInfo(variable string, file psFileInfo) {
 	if s.fileInfos == nil {
 		s.fileInfos = map[string][]psFileInfo{}
@@ -540,7 +574,7 @@ func (s *psStateScan) variableFileInfo(variable string, at int) psFileInfo {
 		}
 		s.uses[variable] = count
 	}
-	unsure := psFileInfo{maybe: append([]psFileInfo(nil), bindings...)}
+	unsure := psFileInfo{maybe: psReadings(psFileInfo{}, bindings)}
 	if count.rebinds || at > len(s.runes) || !s.account(at) {
 		return unsure
 	}
@@ -548,8 +582,12 @@ func (s *psStateScan) variableFileInfo(variable string, at int) psFileInfo {
 	if before != len(bindings) || count.assignments > before && (s.braces > 0 || psHasWord(lower, "trap")) {
 		return unsure
 	}
-	file := bindings[len(bindings)-1]
-	file.maybe = append([]psFileInfo(nil), bindings[:len(bindings)-1]...)
+	// The binding read last, and every other reading it may still be: the
+	// earlier bindings and what the last one may be (a copy of a variable
+	// with earlier bindings), less the readings of the same file.
+	last := bindings[len(bindings)-1]
+	file := psFileInfo{params: last.params, kind: last.kind}
+	file.maybe = psReadings(file, append(append([]psFileInfo(nil), bindings[:len(bindings)-1]...), last.maybe...))
 	return file
 }
 
@@ -1037,8 +1075,14 @@ func psFolderTwin(param, home string) string {
 // dotNetStatement reads a statement that binds a FileInfo or opens a file
 // without an argument list in parentheses: New-Object T -ArgumentList a, b
 // (or T a, b), $f = Get-Item f, $f = Get-ChildItem f, $f = [IO.FileInfo]'f'
-// and [IO.FileInfo]$f = 'f'.
-func (s *psStateScan) dotNetStatement(text string) {
+// and [IO.FileInfo]$f = 'f'; and $f = $g, a copy of a FileInfo variable
+// (copyFileInfo). start is the rune index the statement starts at, and
+// whole reports a statement that ends there (no pipeline, block or call
+// takes the value further).
+func (s *psStateScan) dotNetStatement(text string, start int, whole bool) {
+	if whole && s.copyFileInfo(text, start) {
+		return
+	}
 	lower := strings.ToLower(text)
 	if !strings.Contains(lower, "new-object") && !strings.Contains(lower, "fileinfo") &&
 		!strings.Contains(lower, "get-item") && !strings.Contains(lower, "gi ") &&
@@ -1122,6 +1166,39 @@ func psNewObjectParts(words []psWord) (typeName, arguments string) {
 }
 
 // psFileInfoExpression returns the FileInfo an expression evaluates to: a
+// copyFileInfo reads a statement $f = $g ([T]$f = $g) that copies the
+// FileInfo variable g: f is bound to what g is there (variableFileInfo at
+// start), so a copy, also of f itself ($f = $f) or through a chain of
+// copies ($g = $f; $f = $g), keeps f placed at the same file and changes
+// which file it is only when g may be another one. False for any other
+// statement, and for a g the reader binds to no FileInfo: such an
+// assignment leaves f unplaced, as before (rel-1-0-10:GAP-1257, GAP-1315).
+func (s *psStateScan) copyFileInfo(text string, start int) bool {
+	if len(s.fileInfos) == 0 {
+		return false
+	}
+	variable, _, rest := psTypedAssignment(text)
+	source, ok := strings.CutPrefix(strings.TrimSpace(rest), "$")
+	if variable == "" || !ok || source == "" {
+		return false
+	}
+	for k := 0; k < len(source); k++ {
+		if !psVariableNameByte(source[k]) {
+			return false
+		}
+	}
+	source = strings.ToLower(source)
+	if len(s.fileInfos[source]) == 0 {
+		return false
+	}
+	file := s.variableFileInfo(source, start)
+	if !file.placed() && len(file.maybe) == 0 {
+		return false
+	}
+	s.bindFileInfo(variable, file)
+	return true
+}
+
 // [IO.FileInfo] cast of a literal, [IO.FileInfo]::new(literal), New-Object
 // IO.FileInfo of a literal (psFileInfoFile), Get-Item or gi of known paths
 // (psFileInfoItem), or Get-ChildItem, gci, dir or ls of known paths
