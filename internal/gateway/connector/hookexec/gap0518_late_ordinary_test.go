@@ -19,6 +19,8 @@ import (
 // and a plain file; HOME points at the home (the scan reads it).
 func lateOrdinaryProject(t *testing.T) string {
 	t.Helper()
+	// The rows must not read the home of the account running the tests (GAP-0277).
+	hermeticAccountHome(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

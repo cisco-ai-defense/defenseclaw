@@ -115,6 +115,12 @@ type LifecycleSink interface {
 	Lifecycle(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error)
 }
 
+// RunningSink is a LifecycleSink that also takes the controller's report of
+// the actors it saw running (chainstate.Client; substrate-1 GAP-0539).
+type RunningSink interface {
+	Running(ctx context.Context, actors []chainstate.Actor) error
+}
+
 // Attribution sources of a Registration.
 const (
 	SourceLauncher = "launcher" // created by the DefenseClaw launcher for a verified person or workload

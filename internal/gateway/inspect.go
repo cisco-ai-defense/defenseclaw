@@ -2335,24 +2335,26 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return noJudgeVerdict()
 	}
 
-	if strategy == "regex_judge" && regexJudgeEscalatedCritical(cfg, current) &&
-		sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) == "action" &&
-		cfg.EffectiveHookOutageFailModeForConnector(connector) == "closed" {
-		// The call is here only because its CRITICAL finding cannot block on
-		// its own: the judge is what decides it. When the judge gives no
-		// verdict (an error, a timeout, a late answer, no capacity or hook
-		// budget left), the call follows the connector's hook fail mode, as
-		// for a gateway outage: closed (strict tier, managed hosts, or an
-		// explicit closed) refuses it; open (the default and permissive
-		// tiers of a per-user install) keeps the rule verdict with the
-		// fallback warning and metric below. Secure Client never escalates.
+	if cause := judgeNoVerdictFailsClosed(ctx, cfg, strategy, connector, current); cause != judgeNoVerdictKeeps &&
+		sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) == "action" {
+		// When the judge gives no verdict (an error, a timeout, a late
+		// answer, no capacity or hook budget left), a call that must fail
+		// closed is refused instead of keeping the rule verdict: see
+		// judgeNoVerdictFailsClosed. Every other call keeps the rule verdict
+		// with the fallback warning and metric below.
 		defer func() {
 			// A decision-model floor is not a judge verdict: it never
-			// replaces the closed-mode refusal (review round 3, P3-2).
-			if out == nil || out.decisionFloorOnly || out.decisionAbstain {
-				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict on an escalated CRITICAL finding connector=%s direction=%s; hook_fail_mode closed: refusing\n",
-					connector, strategyDirection)
-				out = escalatedJudgeFailClosedVerdict()
+			// replaces the fail-closed refusal (review round 3, P3-2). Only
+			// a confident System One block, already a refusal, stands for a
+			// call that is not escalated.
+			noVerdict := out == nil || out.decisionAbstain
+			if out != nil && out.decisionFloorOnly {
+				noVerdict = cause == judgeNoVerdictEscalated || normalizedGuardrailAction(out.Action) != guardrailActionBlock
+			}
+			if noVerdict {
+				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict connector=%s direction=%s; %s: refusing\n",
+					connector, strategyDirection, cause)
+				out = judgeNoVerdictFailClosedVerdict(cause, hookJudgeFallbackReason(ctx))
 			}
 		}()
 	}
@@ -2546,8 +2548,84 @@ func regexJudgeEscalatedCritical(cfg *config.Config, current *ToolInspectVerdict
 }
 
 // escalatedJudgeUnavailableFinding names the refusal of an escalated call
-// whose judge gave no verdict under hook_fail_mode closed.
-const escalatedJudgeUnavailableFinding = "JUDGE-UNAVAILABLE-ESCALATED"
+// whose judge gave no verdict under hook_fail_mode closed;
+// judgeUnavailableFinding the refusal of any other judged call that must
+// fail closed (GAP-0559).
+const (
+	escalatedJudgeUnavailableFinding = "JUDGE-UNAVAILABLE-ESCALATED"
+	judgeUnavailableFinding          = "JUDGE-UNAVAILABLE"
+)
+
+// judgeNoVerdictCause is why a judged call whose judge gave no verdict is
+// refused (judgeNoVerdictFailsClosed); judgeNoVerdictKeeps keeps the rule
+// verdict.
+type judgeNoVerdictCause string
+
+const (
+	judgeNoVerdictKeeps judgeNoVerdictCause = ""
+	// The call is judged only because its CRITICAL finding cannot block on
+	// its own, and its hook fail mode is closed.
+	judgeNoVerdictEscalated judgeNoVerdictCause = "escalated CRITICAL finding, hook_fail_mode closed"
+	// An unattended Agent Substrate run fails closed in every tier (D8).
+	judgeNoVerdictUnattended judgeNoVerdictCause = "unattended Agent Substrate run (closed in every tier)"
+	// The strict policy closes on any judge outage.
+	judgeNoVerdictStrict judgeNoVerdictCause = "strict policy"
+)
+
+// judgeNoVerdictFailsClosed reports whether a call the hook judge was asked
+// about is refused when the judge gives no verdict, and why:
+//   - a call the rules escalated (regexJudgeEscalatedCritical) under a
+//     closed hook fail mode: the strict tier, a managed host, an explicit
+//     closed, or an unattended Agent Substrate run. The actor's D8 mode
+//     counts, not only the gateway's: an unattended run on an open gateway
+//     is closed (GAP-0559);
+//   - any judged call of an unattended Agent Substrate run (D8: closed in
+//     every tier) or under the strict policy (GAP-0559).
+//
+// Every other call keeps the rule verdict and reports the judge fallback
+// (judge_fallback on the audit row, the fallback counter and the gateway
+// health that status and doctor show). Secure Client never closes on a
+// judge outage (its hooks fail open, owner rule).
+func judgeNoVerdictFailsClosed(ctx context.Context, cfg *config.Config, strategy, connector string, current *ToolInspectVerdict) judgeNoVerdictCause {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return judgeNoVerdictKeeps
+	}
+	reg, actor := substrateRegistrationFrom(ctx)
+	unattended := actor && reg.Unattended
+	if strategy == "regex_judge" && regexJudgeEscalatedCritical(cfg, current) &&
+		(unattended || cfg.EffectiveHookOutageFailModeForConnector(connector) == "closed") {
+		return judgeNoVerdictEscalated
+	}
+	if unattended {
+		return judgeNoVerdictUnattended
+	}
+	if cfg.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict {
+		return judgeNoVerdictStrict
+	}
+	return judgeNoVerdictKeeps
+}
+
+// judgeNoVerdictFailClosedVerdict is the refusal of a judged call whose
+// judge gave no verdict, for cause; fallback names how the judge failed
+// (judgeFallbackTimeout and the others) when known.
+func judgeNoVerdictFailClosedVerdict(cause judgeNoVerdictCause, fallback string) *ScanVerdict {
+	if cause == judgeNoVerdictEscalated {
+		return escalatedJudgeFailClosedVerdict()
+	}
+	how := "no verdict"
+	if fallback != "" {
+		how = fallback
+	}
+	return &ScanVerdict{
+		Action:   guardrailActionBlock,
+		Severity: "HIGH",
+		Reason: "judge-unavailable (" + how + "): the LLM judge this call needs gave no verdict " +
+			"(timeout, error, late answer or no free slot), and this call fails closed: " + string(cause),
+		Findings:       []string{judgeUnavailableFinding},
+		Scanner:        "llm-judge",
+		ScannerSources: []string{"llm-judge"},
+	}
+}
 
 func escalatedJudgeFailClosedVerdict() *ScanVerdict {
 	return &ScanVerdict{

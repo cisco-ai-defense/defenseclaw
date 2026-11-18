@@ -327,7 +327,7 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TOOL-BLOCK severity=%s %s\n", v.Severity, redaction.Reason(v.Reason))
-		p.enqueueBlockNotification(v, "tool_call", s.model)
+		p.enqueueBlockNotification(ctx, v, "tool_call", s.model)
 		sseBlockMsg = blockMessage(s.customBlockMsg, "tool_call", v.Reason)
 		return true
 	}

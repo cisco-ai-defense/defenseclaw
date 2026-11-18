@@ -3262,7 +3262,7 @@ func TestEnqueueBlockNotification_PushesToQueue(t *testing.T) {
 		Reason:   "regex matched 'password=hunter2'",
 		Findings: []string{"secret in prompt"},
 	}
-	proxy.enqueueBlockNotification(verdict, "prompt", "gpt-4")
+	proxy.enqueueBlockNotification(context.Background(), verdict, "prompt", "gpt-4")
 
 	sysMsg := q.FormatSystemMessage()
 	if sysMsg == "" {
@@ -3287,11 +3287,11 @@ func TestEnqueueBlockNotification_PushesToQueue(t *testing.T) {
 func TestEnqueueBlockNotification_NilGuards(t *testing.T) {
 	t.Run("nil notify queue", func(t *testing.T) {
 		proxy := &GuardrailProxy{notify: nil}
-		proxy.enqueueBlockNotification(&ScanVerdict{Action: "block", Severity: "HIGH", Reason: "x"}, "prompt", "m")
+		proxy.enqueueBlockNotification(context.Background(), &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "x"}, "prompt", "m")
 	})
 	t.Run("nil verdict", func(t *testing.T) {
 		proxy := &GuardrailProxy{notify: NewNotificationQueue()}
-		proxy.enqueueBlockNotification(nil, "prompt", "m")
+		proxy.enqueueBlockNotification(context.Background(), nil, "prompt", "m")
 		if proxy.notify.FormatSystemMessage() != "" {
 			t.Error("expected queue to remain empty on nil verdict")
 		}

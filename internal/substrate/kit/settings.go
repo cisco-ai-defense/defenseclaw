@@ -267,6 +267,9 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	if o.Home == "" || o.Workdir == "" {
 		return Overlay{}, fmt.Errorf("actor overlay: home and workdir are required")
 	}
+	if err := checkModelRoute(o.Provider, o.Model); err != nil {
+		return Overlay{}, err
+	}
 	gw := strings.TrimRight(cfg.GatewayURL, "/")
 	ov := Overlay{Connector: art.Connector, HookContract: art.HookContract, Env: map[string]string{}}
 	hookCmd := HookBinary + " --connector " + art.Connector
@@ -567,6 +570,28 @@ func ModelProvider(connectorName, provider string, served []string) (string, err
 		return vendor, nil
 	}
 	return "bedrock", nil
+}
+
+// bedrockModelPrefixes start a Bedrock model or inference profile id
+// (us.openai.gpt-5.6-luna, anthropic.claude-...): a vendor API names its
+// models without them.
+var bedrockModelPrefixes = []string{"us.", "eu.", "apac.", "global.", "anthropic.", "openai.", "amazon.", "meta.", "mistral."}
+
+// checkModelRoute refuses a Bedrock model id on a vendor API route
+// (openai, anthropic). Such a template points the agent at /llm/openai or
+// /llm/anthropic, which a Bedrock install does not serve, and every model
+// call is refused with provider_credential_unavailable (GAP-0413: the E1
+// Codex template asked Luna on /llm/openai/v1).
+func checkModelRoute(provider, model string) error {
+	if provider != "openai" && provider != "anthropic" {
+		return nil
+	}
+	for _, p := range bedrockModelPrefixes {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), p) {
+			return fmt.Errorf("--model %q is a Bedrock model id, and the %s route serves that vendor's API: build the template with --provider bedrock", model, provider)
+		}
+	}
+	return nil
 }
 
 func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {

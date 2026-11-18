@@ -1497,7 +1497,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// assistant turn the client persists in its local
 			// history informs the LLM — which is (a) client-dependent
 			// and (b) semantically weaker than a system directive.
-			p.enqueueBlockNotification(verdict, "prompt", partial.Model)
+			p.enqueueBlockNotification(r.Context(), verdict, "prompt", partial.Model)
 			// The OpenClaw event router marks the turn that carries this
 			// text as blocked (GAP-2231).
 			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
@@ -1565,7 +1565,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// surface carries the notification forward as either a system
 	// message or merged instructions string.
 	if p.notify != nil && !signedBody {
-		if sysMsg, receipt := p.notify.PrepareSystemMessage(); sysMsg != "" {
+		if sysMsg, receipt := p.notify.PrepareSystemMessage(notificationScope(r.Context())); sysMsg != "" {
 			if patched, site, err := injectNotificationForPassthrough(json.RawMessage(body), sysMsg, r.URL.Path); err == nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
 				body = []byte(patched)
@@ -1834,7 +1834,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 			if verdict.Action == "block" && mode == "action" {
 				msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
-				p.enqueueBlockNotification(verdict, "completion", partial.Model)
+				p.enqueueBlockNotification(r.Context(), verdict, "completion", partial.Model)
 				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
 				return
 			}
@@ -1850,7 +1850,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					verdict.Action == "block" && mode == "action")
 				if verdict.Action == "block" && mode == "action" {
 					msg := blockMessage(customBlockMsg, "tool_call", verdict.Reason)
-					p.enqueueBlockNotification(verdict, "tool_call", partial.Model)
+					p.enqueueBlockNotification(r.Context(), verdict, "tool_call", partial.Model)
 					p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
 					return
 				}
@@ -2941,7 +2941,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// --- Inject pending security notifications as a system message ---
 	if p.notify != nil {
-		if sysMsg, receipt := p.notify.PrepareSystemMessage(); sysMsg != "" {
+		if sysMsg, receipt := p.notify.PrepareSystemMessage(notificationScope(r.Context())); sysMsg != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into LLM request\n")
 			notification := ChatMessage{Role: "system", Content: sysMsg}
 			if len(req.RawBody) > 0 {
@@ -3122,7 +3122,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			blamed := p.refusedSegments(r.Context(), verdict, chatSide.Segments, chatSide.Turn, freshHistory, req.Model, mode)
 			p.history.record(r.Context(), historyCaller, historyScope, promptSegments(blamed, []string{msg, requestPrint}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
-			p.enqueueBlockNotification(verdict, "prompt", req.Model)
+			p.enqueueBlockNotification(r.Context(), verdict, "prompt", req.Model)
 			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			if req.Stream {
 				p.writeBlockedStream(w, req.Model, msg)
@@ -3518,7 +3518,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			finishReasons = append(finishReasons, "blocked")
 			p.emitLLMResponseEventV8(llmCtx, responseMeta, "", "", finishReasons)
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
-			p.enqueueBlockNotification(verdict, "completion", aliasModel)
+			p.enqueueBlockNotification(r.Context(), verdict, "completion", aliasModel)
 			p.writeBlockedResponse(w, aliasModel, msg)
 			return
 		}
@@ -3538,7 +3538,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 				p.emitLLMResponseEventV8(llmCtx, responseMeta, "", "", finishReasons)
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
-				p.enqueueBlockNotification(verdict, "completion", aliasModel)
+				p.enqueueBlockNotification(r.Context(), verdict, "completion", aliasModel)
 				p.writeBlockedResponse(w, aliasModel, msg)
 				return
 			}
@@ -3687,7 +3687,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				midVerdict.Severity, logDisplayReason(midVerdict.Reason), len(hold.buf))
 			overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, midVerdict, 0, mode, true)
 			modelTrace.AddGuardrailOverlay(overlay)
-			p.enqueueBlockNotification(midVerdict, "completion", aliasModel)
+			p.enqueueBlockNotification(r.Context(), midVerdict, "completion", aliasModel)
 			streamBlocked = true
 			streamCancel()
 			return false
@@ -3840,7 +3840,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 					initVerdict.Severity, logDisplayReason(initVerdict.Reason))
 				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, initVerdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
-				p.enqueueBlockNotification(initVerdict, "completion", aliasModel)
+				p.enqueueBlockNotification(r.Context(), initVerdict, "completion", aliasModel)
 				streamBlocked = true
 			}
 		}
@@ -3886,7 +3886,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if enforced {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (final check, %d bytes held back)\n",
 				verdict.Severity, logDisplayReason(verdict.Reason), len(hold.buf))
-			p.enqueueBlockNotification(verdict, "completion", aliasModel)
+			p.enqueueBlockNotification(r.Context(), verdict, "completion", aliasModel)
 			streamBlocked = true
 		}
 	}
@@ -4052,7 +4052,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 // Companion to blockMessage() — both should be called at every block
 // site. No-op when notify is nil or verdict is nil so callers don't
 // need a guard at each site.
-func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, direction, model string) {
+func (p *GuardrailProxy) enqueueBlockNotification(ctx context.Context, verdict *ScanVerdict, direction, model string) {
 	if verdict == nil {
 		return
 	}
@@ -4078,6 +4078,7 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	policy := sinkPolicyFor(context.Background(), verdict.RedactionEnabled)
 	if p.notify != nil {
 		p.notify.Push(SecurityNotification{
+			scope:       notificationScope(ctx),
 			SubjectType: subject,
 			// SkillName is rendered verbatim in the enforcement notice.
 			// Use the model name so operators and the LLM both see which
@@ -6172,7 +6173,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 			}
 			p.emitLLMResponseEventV8(llmCtx, responseMeta, "", "", observedResult.FinishReasons)
 			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
-			p.enqueueBlockNotification(verdict, "completion", req.Model)
+			p.enqueueBlockNotification(r.Context(), verdict, "completion", req.Model)
 			if req.Stream {
 				p.writeBlockedStream(w, req.Model, msg)
 			} else {
@@ -6196,7 +6197,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 				p.emitLLMResponseEventV8(llmCtx, responseMeta, "", "", observedResult.FinishReasons)
 				msg := blockMessage(customBlockMsg, "completion",
 					fmt.Sprintf("tool call blocked — %s", verdict.Reason))
-				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				p.enqueueBlockNotification(r.Context(), verdict, "completion", req.Model)
 				p.writeBlockedResponse(w, req.Model, msg)
 				return
 			}
@@ -6355,7 +6356,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, verdict, 0, mode, enforced)
 		modelTrace.AddGuardrailOverlay(overlay)
 		if verdict != nil && verdict.Action == "block" && mode == "action" {
-			p.enqueueBlockNotification(verdict, "completion", req.Model)
+			p.enqueueBlockNotification(r.Context(), verdict, "completion", req.Model)
 			blockStream(verdict.Reason)
 			return false
 		}
@@ -6372,7 +6373,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				verdict.Action == "block" && mode == "action")
 			modelTrace.AddGuardrailOverlay(overlay)
 			if verdict.Action == "block" && mode == "action" {
-				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				p.enqueueBlockNotification(r.Context(), verdict, "completion", req.Model)
 				blockStream(fmt.Sprintf("tool call blocked — %s", verdict.Reason))
 				return false
 			}
@@ -6451,7 +6452,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			if verdict != nil && verdict.Action == "block" {
 				overlay := p.recordTelemetry(llmCtx, "completion", req.Model, verdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
-				p.enqueueBlockNotification(verdict, "completion", req.Model)
+				p.enqueueBlockNotification(r.Context(), verdict, "completion", req.Model)
 				blockStream(verdict.Reason)
 				return false
 			}

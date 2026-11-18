@@ -1204,7 +1204,7 @@ func validateObservabilityV8PrometheusTransport(listen, pathValue, path string) 
 	if strings.TrimSpace(listen) == "" {
 		return fmt.Errorf("%s.listen: required for prometheus", path)
 	}
-	_, port, err := net.SplitHostPort(listen)
+	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return fmt.Errorf("%s.listen: expected host:port", path)
 	}
@@ -1212,10 +1212,32 @@ func validateObservabilityV8PrometheusTransport(listen, pathValue, path string) 
 	if err != nil || portNumber < 1 || portNumber > 65_535 {
 		return fmt.Errorf("%s.listen: port must be from 1 through 65535", path)
 	}
+	// The Prometheus page has no authentication, so the destination binds
+	// only a loopback address. Checked here, at load, with the reason: the
+	// runtime refused the same listen with a bare runtime_unavailable and the
+	// pod crash-looped (GAP-0455).
+	if !observabilityV8LoopbackListenHost(host) {
+		shown := host
+		if shown == "" {
+			shown = "every interface"
+		}
+		return fmt.Errorf("%s.listen: %q listens on %s; the Prometheus page has no authentication, so listen must be a loopback address such as 127.0.0.1:%s, [::1]:%s or localhost:%s", path, listen, shown, port, port, port)
+	}
 	if !strings.HasPrefix(pathValue, "/") {
 		return fmt.Errorf("%s.path: required and must begin with /", path)
 	}
 	return nil
+}
+
+// observabilityV8LoopbackListenHost is the host rule of the Prometheus
+// destination's listener (prometheus.validateListen): localhost or a
+// loopback IP literal.
+func observabilityV8LoopbackListenHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func isObservabilityV8OTLPProtocol(protocol string) bool {

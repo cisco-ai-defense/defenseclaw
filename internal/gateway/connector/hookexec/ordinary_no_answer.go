@@ -6,7 +6,6 @@ package hookexec
 import (
 	"encoding/json"
 	"os"
-	osuser "os/user"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -27,8 +26,8 @@ func OrdinaryNoAnswerPayload(body []byte) bool {
 	if home, err := os.UserHomeDir(); err == nil {
 		homes = append(homes, home)
 	}
-	if account, err := osuser.Current(); err == nil {
-		homes = append(homes, account.HomeDir)
+	if account, err := hookpaths.AccountHomeDir(); err == nil {
+		homes = append(homes, account)
 	}
 	return ordinaryNoAnswerPayloadInHomes(body, homes)
 }

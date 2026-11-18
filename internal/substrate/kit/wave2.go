@@ -168,6 +168,15 @@ func rewriteHookCommands(name string, data []byte) ([]byte, bool, error) {
 // model to Hermes' managed layer. The provider entry the OpenShell render
 // ships reads its base URL and key from the environment; the headers carry
 // the actor placeholder (model calls need it for egress to inject the JWT).
+//
+// The headers go on the model too (model.extra_headers): Hermes applies a
+// provider's extra_headers to the main agent client only, and builds every
+// auxiliary client (title generation, compression, vision, web extract)
+// with model.default_headers / model.extra_headers alone
+// (agent/auxiliary_client.py _apply_user_default_headers, 0.19.0). Without
+// them the title call after a streamed answer reached /llm with no
+// placeholder, so egress injected no actor token and the gateway answered
+// 401 missing_token (GAP-0544).
 func hermesManagedConfig(data []byte, o OverlayOptions) ([]byte, error) {
 	s := string(data)
 	anchor := "        key_env: HERMES_DEFENSECLAW_API_KEY\n"
@@ -190,7 +199,10 @@ func hermesManagedConfig(data []byte, o OverlayOptions) ([]byte, error) {
 	if strings.Contains(s, "\nmodel:") {
 		return nil, fmt.Errorf("actor overlay: the Hermes managed config already sets a model")
 	}
-	s = strings.TrimRight(s, "\n") + "\nmodel:\n    default: " + modelOrDefault(o) + "\n    provider: defenseclaw\n"
+	s = strings.TrimRight(s, "\n") + "\nmodel:\n    default: " + modelOrDefault(o) + "\n    provider: defenseclaw\n    extra_headers:\n"
+	for _, h := range hdr {
+		s += fmt.Sprintf("        %s: %s\n", h[0], h[1])
+	}
 	s = strings.Replace(s, "(OpenShell sandbox image, root-owned)", "(Agent Substrate actor image, root-owned)", 1)
 	return []byte(s), nil
 }

@@ -90,19 +90,23 @@ func substrateChainActor(ctx context.Context) (chainstate.Actor, bool) {
 	return chainstate.Actor{Atespace: actor.Atespace, UID: actor.UID}, true
 }
 
-// useSubstrateChains points the judges' session intent and the proxy's
-// inspect-once record at the leader (nil restores the process-local ones). Each judge role has its own namespace on
+// useSubstrateChains points the judges' session intent, the proxy's
+// inspect-once record and the Copilot permission join at the leader (nil restores the process-local ones). Each judge role has its own namespace on
 // the leader, as each judge has its own store on a host; a call that is not
 // an actor's keeps a process-local store per judge.
 func useSubstrateChains(client *chainstate.Client) {
 	if client == nil {
 		setJudgeIntentStores(nil)
 		setSubstrateHistoryStore(nil)
+		setSubstrateCopilotJoin(nil)
 		return
 	}
 	// The proxy's inspect-once record of an actor is the leader's, so every
 	// replica knows a turn refused on another one (GAP-0266).
 	setSubstrateHistoryStore(&chainstate.HistoryStore{Client: client, ActorOf: substrateChainActor, Fallback: &historystore.Process{}})
+	// An actor's Copilot preToolUse and its permission callback can land on
+	// different replicas: the join is the leader's too (GAP-0269).
+	setSubstrateCopilotJoin(&chainstate.CopilotJoinStore{Client: client, ActorOf: substrateChainActor})
 	setJudgeIntentStores(func(role string) intentstore.Store {
 		return &chainstate.IntentStore{
 			Client:    client,

@@ -6,6 +6,7 @@ package chainstate
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
@@ -16,6 +17,9 @@ import (
 // of the leader's chain state.
 type Client struct {
 	Leader *leader.Client
+	// ObserveLatency, when set, is told how long each tool-chain step took
+	// at the leader, answer or error (defenseclaw.substrate.leader_observe_latency).
+	ObserveLatency func(time.Duration)
 }
 
 func (c *Client) call(ctx context.Context, method string, in, out any) error {
@@ -77,7 +81,12 @@ func (b *Binding) op(ctx context.Context, op Op, semantic audit.SemanticEventID,
 			SessionDigest: b.session}
 	}
 	var resp ObserveResponse
-	if err := b.client.call(ctx, leader.MethodChainObserve, req, &resp); err != nil {
+	start := time.Now()
+	err = b.client.call(ctx, leader.MethodChainObserve, req, &resp)
+	if b.client.ObserveLatency != nil {
+		b.client.ObserveLatency(time.Since(start))
+	}
+	if err != nil {
 		return err
 	}
 	return decodeGob(resp.Result, out)
@@ -129,6 +138,11 @@ func (c *Client) Lifecycle(ctx context.Context, ev LifecycleEvent) (LifecycleRes
 	var out LifecycleResult
 	err := c.call(ctx, MethodChainLifecycle, ev, &out)
 	return out, err
+}
+
+// Running reports the actors the controller saw running (GAP-0539).
+func (c *Client) Running(ctx context.Context, actors []Actor) error {
+	return c.call(ctx, MethodChainRunning, RunningRequest{Actors: actors}, nil)
 }
 
 // Unrecorded tells the leader that a tool step of the actor is not in its

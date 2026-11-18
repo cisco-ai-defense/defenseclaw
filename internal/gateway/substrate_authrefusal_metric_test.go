@@ -17,19 +17,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
-// GAP-0408: the metric counts every refusal by listener and closed reason;
-// the verifier's message (attacker text) never reaches the log, the row or
-// a label, and an unknown reason is "other".
+// GAP-0408: the rows count every refusal by listener and closed reason (no
+// metric does in 1.0.10, so the rows' counts are the total); the verifier's
+// message (attacker text) never reaches the log or the row, and an unknown
+// reason is "other".
 func TestSubstrateAuthRefusedMetricAndWindowGAP0408(t *testing.T) {
-	var mu sync.Mutex
-	counts := map[string]int{}
 	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
 		c.People = canaryPeople{}
-		c.OnAuthRefused = func(listener, reason string) {
-			mu.Lock()
-			counts[listener+"/"+reason]++
-			mu.Unlock()
-		}
 	})
 	store, logger := testStoreAndLogger(t)
 	f.api.store, f.api.logger = store, logger
@@ -50,23 +44,27 @@ func TestSubstrateAuthRefusedMetricAndWindowGAP0408(t *testing.T) {
 	f.do(t, f.actor, http.MethodPost, substrateRelayTask, "tok-stale", `{"exit_code":0}`)
 	waitAuthRefusalRows(t, store, 3)
 
-	mu.Lock()
-	if counts["admin/algorithm"] != 51 || counts["actor/actor_uid_mismatch"] != 1 || len(counts) != 2 {
-		t.Errorf("metric counts %v, want admin/algorithm 51 and actor/actor_uid_mismatch 1", counts)
-	}
-	mu.Unlock()
 	rows := authRefusalRows(t, store)
-	var admin []string
+	var admin, actor []string
 	for _, e := range rows {
 		if strings.Contains(e.Details, authCanary) {
 			t.Errorf("row carries token or verifier text: %s", e.Details)
 		}
-		if strings.Contains(e.Details, `"listener":"admin"`) {
+		switch {
+		case strings.Contains(e.Details, `"listener":"admin"`):
 			admin = append(admin, e.Details)
+		case strings.Contains(e.Details, `"listener":"actor"`):
+			actor = append(actor, e.Details)
 		}
 	}
-	if len(admin) != 2 || !strings.Contains(admin[0]+admin[1], `"count":1,`) || !strings.Contains(admin[0]+admin[1], `"count":50,`) {
-		t.Errorf("admin rows %v, want 2 (count 1, then count 50 after the window)", admin)
+	// 51 admin refusals: one row at once (count 1), then one row for the
+	// other 50 after the window (count 50).
+	if len(admin) != 2 || !strings.Contains(admin[0]+admin[1], `"count":1,`) || !strings.Contains(admin[0]+admin[1], `"count":50,`) ||
+		!strings.Contains(admin[0], `"reason":"algorithm"`) || !strings.Contains(admin[1], `"reason":"algorithm"`) {
+		t.Errorf("admin rows %v, want 2 with reason algorithm (count 1, then count 50 after the window)", admin)
+	}
+	if len(actor) != 1 || !strings.Contains(actor[0], `"reason":"actor_uid_mismatch"`) || !strings.Contains(actor[0], `"count":1,`) {
+		t.Errorf("actor rows %v, want 1 with reason actor_uid_mismatch and count 1", actor)
 	}
 	if strings.Contains(log.String(), authCanary) || strings.Count(log.String(), "admin listener refused a token: algorithm") != 2 {
 		t.Errorf("log:\n%s", log.String())

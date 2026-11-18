@@ -342,7 +342,7 @@ func (p *GuardrailProxy) enforceProxyToolResults(ctx context.Context, results []
 		return false
 	}
 	msg := proxyToolResultBlockMessage(customBlockMsg, v.Reason)
-	p.enqueueBlockNotification(v, "tool_result", model)
+	p.enqueueBlockNotification(ctx, v, "tool_result", model)
 	fmt.Fprintf(defaultLogWriter, "[guardrail] tool_result block model=%s severity=%s\n", model, v.Severity)
 	write(msg)
 	return true

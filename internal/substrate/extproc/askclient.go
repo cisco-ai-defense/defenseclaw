@@ -87,10 +87,12 @@ type askWire struct {
 }
 
 type askAnswer struct {
-	ID     string `json:"id"`
-	State  string `json:"state"`
-	Reason string `json:"reason"`
-	Note   string `json:"note"`
+	ID         string    `json:"id"`
+	State      string    `json:"state"`
+	Reason     string    `json:"reason"`
+	Note       string    `json:"note"`
+	Unattended bool      `json:"unattended"`
+	Expires    time.Time `json:"expires"`
 }
 
 // Ask implements AskSink.
@@ -108,11 +110,13 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 		in.Rule = req.Rule
 		in.Reason = "the egress policy asks first (" + req.Rule + ")"
 	}
+	// pending is the last pending answer: the hold ends on it.
+	var pending AskResult
 	for {
 		got, err := c.post(ctx, in)
 		if err != nil {
 			if in.AskID != "" && ctx.Err() != nil {
-				return AskResult{Outcome: AskPending, ID: in.AskID}, nil
+				return pending, nil
 			}
 			// The gateway never answered (refused, unreachable, or still
 			// dialling when the hold ended): no ask exists, so this is an
@@ -142,12 +146,13 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 				return AskResult{}, errors.New("callout ask: a pending ask without an id")
 			}
 			in.AskID = got.ID
+			pending = AskResult{Outcome: AskPending, ID: got.ID, Unattended: got.Unattended, Expires: got.Expires}
 		default:
 			return AskResult{}, fmt.Errorf("callout ask: unknown state %q", got.State)
 		}
 		select {
 		case <-ctx.Done():
-			return AskResult{Outcome: AskPending, ID: in.AskID}, nil
+			return pending, nil
 		case <-time.After(c.poll):
 		}
 	}

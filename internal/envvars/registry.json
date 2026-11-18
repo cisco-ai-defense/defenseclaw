@@ -373,6 +373,26 @@
       "since": "1.0.6"
     },
     {
+      "name": "DEFENSECLAW_TASK_FAULTS",
+      "category": "hook_internal",
+      "purpose": "Path of the fault file the Agent Substrate relay gives a --task run; the actor kit hook adds one line for each hook call the gateway did not answer, so an agent that still exits 0 is not reported as a success (GAP-0326). Set by the relay, not by people.",
+      "default": "unset (no task run)",
+      "accepted_values": [
+        "absolute file path",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/substrate/kit/taskfaults.go",
+          "description": "Written by the relay for a task run and appended to by the kit hook"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
       "category": "test_fixture",
       "purpose": "Marks the child process of the Windows gateway priority-class test (GAP-0050), so the class checks run in a child and the test binary keeps its own priority class.",
@@ -6483,6 +6503,30 @@
         }
       ],
       "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_K8S_CLUSTER_NAME",
+      "category": "telemetry",
+      "purpose": "Cluster name the Agent Substrate chart sets from its clusterName value; the gateway exports it as the k8s.cluster.name resource attribute (Kubernetes has no API that names the cluster).",
+      "default": "unset (no k8s.cluster.name attribute)",
+      "accepted_values": [
+        "cluster name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar_observability_v8_bootstrap.go",
+          "description": "Gateway pod on Agent Substrate reads it for the k8s.* resource attributes"
+        },
+        {
+          "location": "deploy/helm/defenseclaw-substrate/templates/_helpers.tpl",
+          "description": "Chart sets it from .Values.clusterName"
+        }
+      ],
+      "since": "1.0.10"
     },
     {
       "name": "DEFENSECLAW_TRACESTATE",

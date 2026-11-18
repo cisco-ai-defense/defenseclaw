@@ -373,6 +373,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		DefenseClawInstanceID: gatewaylog.SidecarInstanceID(),
 		TenantID:              cfg.TenantID, WorkspaceID: cfg.WorkspaceID,
 		DeploymentMode: cfg.DeploymentMode, ConnectorMode: observabilityClawMode(cfg),
+		K8sClusterName: observabilitySubstrateK8s(cfg, substrateClusterNameEnv), K8sNamespaceName: observabilitySubstrateK8s(cfg, "POD_NAMESPACE"),
 		DiscoverySource: cfg.DiscoverySource, DeviceKeyFile: cfg.Gateway.DeviceKeyFile,
 		GenerationPipelines: destinationFactory.GenerationPipelineFactory(prometheus.Options{}),
 	})
@@ -1330,8 +1331,24 @@ var (
 // agent's traffic as another's; each record already names its own agent, so
 // the attribute is left out then.
 func observabilityClawMode(cfg *config.Config) string {
-	if cfg == nil || len(cfg.ActiveConnectors()) > 1 {
+	// A gateway on Agent Substrate serves every actor's connector, so the
+	// configured claw mode (openclaw by default) named none of them
+	// (GAP-0454).
+	if cfg == nil || len(cfg.ActiveConnectors()) > 1 || cfg.Substrate.Enabled {
 		return ""
 	}
 	return string(cfg.Claw.Mode)
+}
+
+// substrateClusterNameEnv is the variable the Substrate chart sets from its
+// clusterName value (Kubernetes has no API that names the cluster).
+const substrateClusterNameEnv = "DEFENSECLAW_K8S_CLUSTER_NAME"
+
+// observabilitySubstrateK8s is a k8s.* resource attribute of a gateway pod
+// on Agent Substrate, from the pod's environment; "" elsewhere (GAP-0454).
+func observabilitySubstrateK8s(cfg *config.Config, env string) string {
+	if cfg == nil || !cfg.Substrate.Enabled {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(env))
 }

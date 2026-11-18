@@ -76,6 +76,9 @@ type Ask struct {
 	Actor    string `json:"actor"`
 	UID      string `json:"uid"`
 	OwnerID  string `json:"owner_id"`
+	// Profile is the actor's profile when the ask was raised: an Always
+	// approval covers later actors of the same person and profile only.
+	Profile string `json:"profile,omitempty"`
 	// Kind is egress (a host) or tool.
 	Kind string `json:"kind"`
 	Host string `json:"host,omitempty"`
@@ -92,7 +95,9 @@ type Ask struct {
 	Expires  time.Time `json:"expires"`
 	State    string    `json:"state"`
 	// DecidedBy is the deciding person's owner key; Always keeps the
-	// approval for later runs of the same person and profile (recorded).
+	// approval for later runs of the same person and profile (the gateway's
+	// callout ask route answers their asks for the same host or rule with
+	// it, GAP-0387).
 	DecidedBy string    `json:"decided_by,omitempty"`
 	DecidedAt time.Time `json:"decided_at,omitzero"`
 	Always    bool      `json:"always,omitempty"`

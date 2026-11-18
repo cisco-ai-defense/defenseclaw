@@ -189,6 +189,9 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	call.FailMode = outageMode(call.FailMode, resp, mode)
 	if err != nil {
 		if errors.Is(err, ErrUnreachable) {
+			// A --task run's relay must know that this step was refused
+			// for an outage, not by policy (GAP-0326).
+			recordTaskFault(o.Getenv, call.Event, time.Now())
 			cause := strings.TrimPrefix(strings.TrimPrefix(err.Error(), ErrUnreachable.Error()), ": ")
 			reason := "the DefenseClaw gateway in the cluster did not answer"
 			if cause != "" {

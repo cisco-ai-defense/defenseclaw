@@ -340,6 +340,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	readAccessPolicies(cctx, f, &o, launcherAtespaceList(keysCfg.LauncherAtespaces), cluster, apiErr)
 	readInventory(cctx, &r, o.LauncherAtespaces, o.WritableAtespaces, cluster, apiErr)
 	readPolicyConflicts(cctx, f, &o)
+	readWorkerDrain(cctx, &o, cluster, apiErr)
 	readActorRoutes(cctx, f, &o, keysCfg.Services.Actor)
 	if o.SignInIssuer != "" {
 		readSignInServer(cctx, f, &o, adminService)

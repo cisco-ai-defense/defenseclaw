@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -35,8 +36,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -56,6 +55,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -175,18 +175,6 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 }
 
-// substrateRateLimited is defenseclaw.substrate.rate_limited.
-var substrateRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "defenseclaw_substrate_rate_limited_total",
-	Help: "Actor requests refused by the fair-share limits (defenseclaw.substrate.rate_limited).",
-}, []string{"scope", "route"})
-
-// substrateAuthRefused is defenseclaw.substrate.auth_refused (GAP-0408).
-var substrateAuthRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "defenseclaw_substrate_auth_refused_total",
-	Help: "Tokens refused on the Substrate actor or admin listener, by listener and closed reason (defenseclaw.substrate.auth_refused).",
-}, []string{"listener", "reason"})
-
 func runServe(cmd *cobra.Command, args []string) error {
 	if !serveFlags.substrate {
 		return errors.New("serve runs only on Agent Substrate: pass --substrate")
@@ -197,10 +185,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if serveFlags.plainHTTP && os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		return errors.New("serve: --plain-http is for tests outside a cluster; use --actor-plain-http to serve only the actor listener without TLS")
 	}
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(substrateRateLimited, substrateAuthRefused)
 	var ready atomic.Bool
-	go serveSubstrateMetrics(reg, &ready)
+	go serveSubstrateProbes(&ready)
 	switch serveFlags.role {
 	case "leader":
 		return runSubstrateLeader(cmd.Context(), &ready)
@@ -208,6 +194,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if cfg == nil {
 			return errors.New("serve: no configuration loaded")
 		}
+		// The chart's LLM credentials Secret is where a managed cluster
+		// keeps the keys its enterprise.inspection.llm.credential names (the
+		// LLM judge's, GAP-0560), as the /llm route reads its provider keys.
+		managed.UseClusterCredentialDir(serveFlags.llmCredDir)
 		if !cfg.Substrate.Enabled {
 			return errors.New("serve: substrate.enabled is false in the configuration")
 		}
@@ -253,7 +243,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("serve: unknown --substrate-role %q (gateway or leader)", serveFlags.role)
 }
 
-func serveSubstrateMetrics(reg *prometheus.Registry, ready *atomic.Bool) {
+// serveSubstrateProbes serves the liveness and readiness probes on the
+// metrics port. The Substrate metrics go through the gateway's telemetry
+// runtime to the OTLP destinations (GAP-0401); the Prometheus /metrics page
+// this port served before held counters nothing read.
+func serveSubstrateProbes(ready *atomic.Bool) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
@@ -263,10 +257,9 @@ func serveSubstrateMetrics(reg *prometheus.Registry, ready *atomic.Bool) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 	srv := &http.Server{Addr: serveFlags.metricsListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		fmt.Fprintf(os.Stderr, "[substrate] metrics listener: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[substrate] probe listener: %v\n", err)
 	}
 }
 
@@ -534,7 +527,10 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
 			Chains: &chainstate.Client{Leader: toLeader},
-			Asks:   &asks.Client{Leader: toLeader}, Policies: ate,
+			// The controller's, the callout's and the leader's records reach
+			// the OTLP destinations through this replica (GAP-0450, GAP-0453).
+			Relay: &telemetryrelay.Taker{Leader: toLeader},
+			Asks:  &asks.Client{Leader: toLeader}, Policies: ate,
 			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
 				return gateway.SubstrateUnattendedAskFor(live(), profile)
 			},
@@ -574,12 +570,6 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			// E9: a managed deployment refuses a vendor sign-in held in an actor.
 			Managed:            managed.IsManagedEnterprise(c.DeploymentMode),
 			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
-			OnRateLimited: func(scope ratelimit.Scope, route string) {
-				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
-			},
-			OnAuthRefused: func(listener, reason string) {
-				substrateAuthRefused.WithLabelValues(listener, reason).Inc()
-			},
 		}
 		out.PolicyReset = substratePolicyResetter()
 		if people != nil {
@@ -716,6 +706,11 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
+	// The records the gateway replicas export for the components that have
+	// no telemetry runtime: the controller's counts, the callout's egress
+	// decisions and the lifecycle events below (GAP-0450, GAP-0453).
+	relay := &telemetryrelay.Store{Registrations: store}
+	telemetryrelay.Serve(srv, relay)
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		chainOpts.EgressAction, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[chainOpts.EgressAction])
@@ -738,7 +733,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	chains.Register(srv)
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
-	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleClosesAsks(chains.Lifecycle, askStore)))
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore), store, relay)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -791,8 +786,10 @@ func kubeHTTPClient() (*http.Client, error) {
 
 // substrateLeaderPermissions is who may call what on the leader
 // (GAP-0094): gateway replicas every method; the callout only the egress
-// chain check and the name lookup of a registration (GAP-0090); the
-// controller the registrations, the chain lifecycle and the activity feed.
+// chain check, the name lookup of a registration (GAP-0090) and its egress
+// decisions for the telemetry relay; the controller the registrations, the
+// chain lifecycle, the activity feed and its counts for the relay
+// (GAP-0450). Each relay method accepts only its poster's kinds of record.
 // An identity listed in two roles gets both sets.
 func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
 	p := leader.Permissions{}
@@ -804,9 +801,9 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		}
 	}
 	add(gateways, "*")
-	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup)
+	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
-		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot)
+		chainstate.MethodChainLifecycle, chainstate.MethodChainRunning, leader.MethodActivitySnapshot, telemetryrelay.MethodPostCounts)
 	return p
 }
 
@@ -998,6 +995,27 @@ func substrateAuditExportWarning(c *config.Config) string {
 // observability.local.enabled (templates/_helpers.tpl, GAP-0272).
 const substrateChartCollectorDestination = "chart-collector"
 
+// substrateChartCollector reports whether destination is the one the chart
+// adds: named chart-collector and pointing at the chart's collector Service
+// (http://defenseclaw-otel-collector.<namespace>.svc:4318). The chart keeps
+// an operator's own destination of that name, so the name alone does not
+// make it the try-out collector (GAP-0299).
+func substrateChartCollector(destination config.ObservabilityV8EffectiveDestination) bool {
+	if destination.Name != substrateChartCollectorDestination {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(destination.Transport.Endpoint))
+	if err != nil || u.Scheme != "http" || u.Port() != "4318" || strings.Trim(u.Path, "/") != "" {
+		return false
+	}
+	ns, ok := strings.CutPrefix(u.Hostname(), "defenseclaw-otel-collector.")
+	if !ok {
+		return false
+	}
+	ns, ok = strings.CutSuffix(ns, ".svc")
+	return ok && ns != "" && !strings.Contains(ns, ".")
+}
+
 func substrateAuditExportWarningFor(source string, raw []byte, dataDir string) string {
 	compiled, err := config.ParseCompileObservabilityV8(source, raw, config.ObservabilityV8CompileOptions{DefaultDataDir: dataDir})
 	if err != nil || compiled == nil || compiled.Plan == nil {
@@ -1013,7 +1031,7 @@ func substrateAuditExportWarningFor(source string, raw []byte, dataDir string) s
 			config.ObservabilityV8DestinationHTTPJSONL:
 			// The chart's try-out collector prints what it gets and keeps
 			// nothing, so it is no audit record (GAP-0286).
-			if destination.Name == substrateChartCollectorDestination {
+			if substrateChartCollector(destination) {
 				tryOut = true
 				continue
 			}
@@ -1087,6 +1105,42 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			asksStore.CloseActor(ev.Actor.UID, "the actor was reverted to a snapshot")
 		case chainstate.LifecycleDeleted:
 			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
+		}
+		return res, nil
+	}
+}
+
+// substrateLifecycleRelays queues each actor lifecycle event the controller
+// reports, with the actor's registration, for a gateway replica to export
+// as log.sandbox.lifecycle (GAP-0453). An event the chain state ignored or
+// refused is not a transition and is not relayed.
+func substrateLifecycleRelays(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
+	regs registry.Store, relay *telemetryrelay.Store) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+		res, err := next(ctx, ev)
+		if err != nil || res.Ignored {
+			return res, err
+		}
+		at := time.Now().UTC()
+		if ev.AtUnixNano > 0 {
+			at = time.Unix(0, ev.AtUnixNano).UTC()
+		}
+		rec := telemetryrelay.Record{Kind: telemetryrelay.KindLifecycle, At: at, Lifecycle: ev.Event,
+			Atespace: ev.Actor.Atespace, UID: ev.Actor.UID}
+		if reg, ok, rerr := regs.Get(ctx, ev.Actor.Atespace, ev.Actor.UID); rerr == nil && ok {
+			rec.Actor, rec.Profile, rec.Template, rec.Connector = reg.Name, reg.Profile, reg.Template, reg.Connector
+			rec.BatchID, rec.ParentUID, rec.UserID, rec.UserName = reg.BatchID, reg.ParentUID, reg.Person.Subject, reg.Person.Principal
+			rec.Driver = reg.SandboxClass
+			rec.RunMode = "interactive"
+			if reg.Unattended {
+				rec.RunMode = "unattended"
+			}
+		}
+		if ev.Parent != nil && rec.ParentUID == "" {
+			rec.ParentUID = ev.Parent.UID
+		}
+		if rec.Actor != "" {
+			relay.Add(rec)
 		}
 		return res, nil
 	}

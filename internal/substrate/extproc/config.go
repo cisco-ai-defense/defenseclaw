@@ -478,4 +478,4 @@ func mcpHostNames(entries []string) []string {
 	return out
 }
 
-var validSecretFileName = actorNamePattern.MatchString
+var validSecretFileName = validActorName

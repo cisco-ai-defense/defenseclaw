@@ -192,6 +192,9 @@ func requestIdentityFor(ctx context.Context, userID string) *llmEventIdentity {
 	if !identityFactsEnabled.Load() {
 		return secureClientRequestIdentity(ctx, userID)
 	}
+	if identity, ok := substrateRequestIdentity(ctx, userID); ok {
+		return identity
+	}
 	if identity, ok := actingForRequestIdentity(ctx, userID); ok {
 		// The person a trusted connector acts for: facts the gateway
 		// resolved, at verified_by_connector; no session facts (the hook's

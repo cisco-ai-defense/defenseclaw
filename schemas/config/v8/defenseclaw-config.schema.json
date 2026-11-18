@@ -4634,6 +4634,7 @@
         },
         "listen": {
           "type": "string",
+          "description": "A loopback `host:port` (`127.0.0.1`, `[::1]` or `localhost`): the page has no authentication, so another address is refused at load.",
           "minLength": 1,
           "maxLength": 512
         },

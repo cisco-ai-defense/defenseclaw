@@ -1872,6 +1872,21 @@ def _validate_prometheus(listen: str, metrics_path: str, path: str, source_name:
         or not 1 <= port <= 65_535
     ):
         _semantic_error(source_name, f"{path}.listen", "use a host:port listener with a valid port")
+    # The Prometheus page has no authentication: loopback only, refused at
+    # load with the reason (GAP-0455), as the Go loader does.
+    host = parsed.hostname
+    if host.lower() != "localhost":
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            _semantic_error(
+                source_name,
+                f"{path}.listen",
+                "listen on a loopback address such as 127.0.0.1:PORT, [::1]:PORT or localhost:PORT; "
+                "the Prometheus page has no authentication",
+            )
     if not metrics_path.startswith("/"):
         _semantic_error(source_name, f"{path}.path", "use an absolute metrics path beginning with /")
 
