@@ -1890,6 +1890,8 @@
    "TestGAP1230UnplacedDotNetOpens": 64.2,
    "TestGAP1257FileInfoChildAndRebound": 14.9,
    "TestGAP1258BenignDotNetRows": 15.6,
+   "TestGAP1272BenignWildcardRows": 17.5,
+   "TestGAP1272WildcardCmdletWrites": 58.4,
    "TestGAP1275PipelineItemWholeFeeder": 50.7,
    "TestGAP1276RunTimeVariableNames": 49.0,
    "TestGAP1277PathArrays": 30.0,
