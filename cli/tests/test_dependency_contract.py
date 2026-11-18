@@ -59,6 +59,8 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
     # GHSA-6v7p-g79w-8964 is fixed in 1.2.1; msgpack comes in through
     # mcp-scanner 4.8 -> pip-audit -> cachecontrol.
     "msgpack": (">=1.2.1,<2", None),
+    # CVE-2026-126360 is fixed in 1.45.2; mcp permits older releases.
+    "opentelemetry-api": (">=1.45.2", None),
 }
 
 # CVE-2026-112906/112907/112913/112914/112937/112940 are fixed in filelock
@@ -160,6 +162,8 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
+        assert Version("1.45.1") not in requirements["opentelemetry-api"].specifier
+        assert Version("1.45.2") in requirements["opentelemetry-api"].specifier
 
 
 @pytest.mark.parametrize("python_version", ["3.11", "3.12", "3.13"])

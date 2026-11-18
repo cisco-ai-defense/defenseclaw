@@ -220,6 +220,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
+			DefenseClawGuardrailRuleNames:       hookDecisionV8RuleNames(resp.RuleNames),
 			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
 			// The connector-hook facts local readers need, now that a benign
 			// per-user allow keeps only this row (#1384, registry v4).
@@ -615,6 +616,26 @@ func hookDecisionV8RuleIDs(values []string) observability.Optional[[]string] {
 	}
 	if len(result) == 0 {
 		return observability.Absent[[]string]()
+	}
+	return observability.Present(result)
+}
+
+func hookDecisionV8RuleNames(values []string) observability.Optional[[]string] {
+	if len(values) == 0 {
+		return observability.Absent[[]string]()
+	}
+	if len(values) > 8 {
+		values = values[:8]
+	}
+	result := make([]string, 0, len(values))
+	total := 0
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 256 || !utf8.ValidString(value) || total+len(value) > 2048 {
+			return observability.Absent[[]string]()
+		}
+		total += len(value)
+		result = append(result, value)
 	}
 	return observability.Present(result)
 }

@@ -28,14 +28,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"golang.org/x/text/unicode/norm"
 )
 
 const ciscoUnknownFindingID = "CISCO-UNKNOWN"
+const ciscoCustomFindingPrefix = "CISCO-CUSTOM-"
 
 // canonicalCiscoFindingID converts cloud-controlled classification and rule
 // labels into a closed set of inert identities. Human-readable reasons are
@@ -104,6 +108,46 @@ func ciscoFindingDisplayLabel(canonicalID string) string {
 	default:
 		return "Custom Policy Violation"
 	}
+}
+
+// canonicalCiscoRuleFinding preserves a concrete AI Defense custom rule as a
+// stable, inert identity plus a bounded display label. The identity is derived
+// from normalized text, never from a lossy slug, so spaces and punctuation do
+// not leak into aggregation keys or make two names accidentally equivalent.
+func canonicalCiscoRuleFinding(value string) (string, string) {
+	if id := canonicalCiscoFindingID(value); id != ciscoUnknownFindingID {
+		return id, ciscoFindingDisplayLabel(id)
+	}
+	name := normalizeCiscoRuleName(value)
+	if name == "" {
+		return ciscoUnknownFindingID, ciscoFindingDisplayLabel(ciscoUnknownFindingID)
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(norm.NFKC.String(name)), " "))
+	sum := sha256.Sum256([]byte(normalized))
+	return fmt.Sprintf("%s%X", ciscoCustomFindingPrefix, sum[:12]), boundedCiscoRuleName(name)
+}
+
+func boundedCiscoRuleName(value string) string {
+	value = normalizeCiscoRuleName(value)
+	if len(value) <= 256 {
+		return value
+	}
+	cut := 256
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return strings.TrimSpace(value[:cut])
+}
+
+func normalizeCiscoRuleName(value string) string {
+	value = strings.TrimSpace(strings.ToValidUTF8(value, "\uFFFD"))
+	value = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // inspectCall carries the per-endpoint pieces doInspectHTTP() needs. The
@@ -778,14 +822,13 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 	var findings []string
 	var findingLabels []string
 	seenFindingIDs := make(map[string]struct{})
-	appendFinding := func(rawLabel string) {
-		canonicalID := canonicalCiscoFindingID(rawLabel)
+	appendFinding := func(canonicalID, displayLabel string) {
 		if _, duplicate := seenFindingIDs[canonicalID]; duplicate {
 			return
 		}
 		seenFindingIDs[canonicalID] = struct{}{}
 		findings = append(findings, canonicalID)
-		findingLabels = append(findingLabels, ciscoFindingDisplayLabel(canonicalID))
+		findingLabels = append(findingLabels, displayLabel)
 	}
 
 	// Cloud-controlled per-inspection redaction directive. Only the
@@ -797,13 +840,7 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 		redactionEnabled = &v
 	}
 
-	if classRaw, ok := data["classifications"].([]interface{}); ok {
-		for _, c := range classRaw {
-			if s, ok := c.(string); ok && s != "" && s != "NONE_VIOLATION" {
-				appendFinding(s)
-			}
-		}
-	}
+	hasConcreteCustom := false
 	if rulesRaw, ok := data["rules"].([]interface{}); ok {
 		for _, rr := range rulesRaw {
 			if r, ok := rr.(map[string]interface{}); ok {
@@ -812,8 +849,21 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 					continue
 				}
 				if name, ok := r["rule_name"].(string); ok && name != "" {
-					appendFinding(name)
+					id, label := canonicalCiscoRuleFinding(name)
+					appendFinding(id, label)
+					hasConcreteCustom = hasConcreteCustom || strings.HasPrefix(id, ciscoCustomFindingPrefix)
 				}
+			}
+		}
+	}
+	if classRaw, ok := data["classifications"].([]interface{}); ok {
+		for _, c := range classRaw {
+			if s, ok := c.(string); ok && s != "" && s != "NONE_VIOLATION" {
+				id := canonicalCiscoFindingID(s)
+				if id == ciscoUnknownFindingID && hasConcreteCustom {
+					continue
+				}
+				appendFinding(id, ciscoFindingDisplayLabel(id))
 			}
 		}
 	}
@@ -856,6 +906,7 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 		Severity:         severity,
 		Reason:           reason,
 		Findings:         findings,
+		findingNames:     findingLabels,
 		Scanner:          "ai-defense",
 		RedactionEnabled: redactionEnabled,
 	}
