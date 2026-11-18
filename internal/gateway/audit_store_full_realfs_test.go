@@ -36,7 +36,7 @@ import (
 // has room again.
 func TestSandboxHookOnARealFullAuditStoreFailsClosedWithOneAlert(t *testing.T) {
 	dir := testenv.RealSmallFilesystem(t, 40)
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixtureExportingToInDir(t, dir, nil, nil)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
