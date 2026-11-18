@@ -324,6 +324,7 @@
    "TestGAP0971LauncherChainsManagedStrict": 12.7,
    "TestGAP0971LauncherChainsPermissive": 12.4,
    "TestGAP0971LauncherChainsStrict": 12.7,
+   "TestGAP0971MiddleReadingsKeepTheBaseVerdict": 86.5,
    "TestGAP1060DefaultStreamWriteNativeEveryTier": 153.7,
    "TestHandlePassthrough_SSRFHardening": 2.8,
    "TestHandleSkillScanRejectsJudgeFailure": 2.9,

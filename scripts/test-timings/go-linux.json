@@ -1869,6 +1869,7 @@
    "TestGAP0971LauncherChainsManagedStrict": 12.7,
    "TestGAP0971LauncherChainsPermissive": 12.4,
    "TestGAP0971LauncherChainsStrict": 12.7,
+   "TestGAP0971MiddleReadingsKeepTheBaseVerdict": 86.5,
    "TestGAP0975RunTimeShellWriteBlocksInEveryTier": 4.5,
    "TestGAP0978ConsumerRebindSpellings": 28.2,
    "TestGAP0980Round2ReviewRows": 390.9,

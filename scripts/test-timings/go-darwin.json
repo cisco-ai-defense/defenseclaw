@@ -97,6 +97,7 @@
    "TestGAP0971LauncherChainsManagedStrict": 12.7,
    "TestGAP0971LauncherChainsPermissive": 12.4,
    "TestGAP0971LauncherChainsStrict": 12.7,
+   "TestGAP0971MiddleReadingsKeepTheBaseVerdict": 86.5,
    "TestHealthCountsALookupTheDirectoryDoesNotAnswer": 2.0,
    "TestHermesV4ATargetBound": 2.2,
    "TestHomeDeclarationInAFunctionBody": 3.4,
