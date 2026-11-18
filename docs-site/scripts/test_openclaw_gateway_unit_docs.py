@@ -61,10 +61,16 @@ class OpenClawGatewayUnitDocsTest(unittest.TestCase):
         self.assertIn("Run from a terminal, a script or as `defenseclaw-gateway restart` it exits 1", self.page)
 
     def test_page_does_not_claim_hooks_are_closed_in_every_tier(self):
-        # Default and permissive tiers fail open on a gateway outage.
+        # Default and permissive tiers fail open on a gateway outage; the page
+        # links the capability-matrix outage table instead of restating the
+        # per-tier behaviour (enterprisepolicy
+        # TestOutageBehaviourIsStatedOnlyInTheCapabilityMatrix forbids a restatement).
         self.assertNotIn("Hooks stay closed until the gateway answers", self.page)
-        self.assertIn("strict and managed installs block them (`closed`)", self.page)
-        self.assertIn("default and permissive policies let them run with a warning", self.page)
+        start = self.page.index("`defenseclaw-gateway start` waits about a minute")
+        section = self.page[start : self.page.index("With SELinux enforcing", start)]
+        self.assertIn("(/docs/connectors/capability-matrix#gateway-outage)", section)
+        self.assertNotIn("block them (`closed`)", section)
+        self.assertNotIn("let them run with a warning", section)
 
     def test_page_names_the_selinux_label_for_a_home_folder_binary(self):
         for text in (

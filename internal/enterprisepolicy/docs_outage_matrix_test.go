@@ -293,10 +293,6 @@ func pinnedOutageSentence(rel, sentence string) bool {
 		return strings.HasPrefix(sentence, "With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`") ||
 			strings.HasPrefix(sentence, "When the gateway is not running, a per-user install in the default or permissive policy lets `PreToolUse` run with one warning") ||
 			strings.HasPrefix(sentence, "On a managed host the administrator's fail mode decides an outage: `closed`, the default, denies it")
-	case "connectors/openclaw.mdx":
-		// The per-tier gateway-start sentence of the OpenClaw unit section (GAP-1160,
-		// t-uxfb 840de28dbb) is pinned by docs-site/scripts/test_openclaw_gateway_unit_docs.py.
-		return strings.HasPrefix(sentence, "Until the gateway answers, hook calls follow the outage mode of the policy tier")
 	case "connectors/cursor.mdx":
 		return strings.HasPrefix(sentence, "The administrator's resolved fail mode decides what the running hook does on a gateway outage")
 	case "connectors/hermes.mdx":
