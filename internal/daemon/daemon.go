@@ -227,8 +227,11 @@ func (d *Daemon) IsRunning() (bool, int) {
 			// kept status and stop pinned to it (CodeRabbit on #1427).
 			// An identity that cannot be read keeps the record, and so does an older
 			// Darwin record within the five-second window of its launch time (its
-			// ps lstart token depends on locale and timezone).
-			if live, err := processStartIdentity(info.PID); err == nil && live != "" && !d.verifyStartIdentityForAuthenticatedMigration(info) {
+			// ps lstart token depends on locale and timezone). On Windows the
+			// identity of a process this account may not open is the creation
+			// time from the kernel process list (holderStartIdentity): access
+			// denied alone never removes the record (rel-1-0-10:GAP-1314).
+			if live, err := holderStartIdentity(info.PID); err == nil && live != "" && !d.verifyStartIdentityForAuthenticatedMigration(info) {
 				d.removePIDFileIfStarted(info)
 			}
 			return false, 0
