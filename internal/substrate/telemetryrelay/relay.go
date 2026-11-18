@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
 // Leader methods. Each poster has its own method, which accepts only its
@@ -150,6 +151,12 @@ type Store struct {
 	// oldest records of that queue go.
 	MaxQueue      int
 	MaxQueueBytes int64
+	// Registrations are the leader's actor registrations. An egress record
+	// names its actor from the registration of its atespace and UID, not
+	// from what the callout sent, and a record of an actor with no
+	// registration is dropped (GAP-0581). Nil keeps the posted fields
+	// (tests).
+	Registrations registry.Store
 
 	mu sync.Mutex
 	// life is lifecycle records and counts, egress the egress decisions.
@@ -291,15 +298,15 @@ func (s *Store) Add(recs ...Record) {
 	}
 }
 
-// post queues the records of a batch whose kind allow accepts.
-func (s *Store) post(in PostRequest, allow func(string) bool) {
+// post queues the records of a batch that accept keeps, as it returns them.
+func (s *Store) post(in PostRequest, accept func(Record) (Record, bool)) {
 	recs := in.Records
 	if len(recs) > maxPostRecords {
 		recs = recs[:maxPostRecords]
 	}
 	kept := make([]Record, 0, len(recs))
 	for _, r := range recs {
-		if allow(r.Kind) {
+		if r, ok := accept(r); ok {
 			kept = append(kept, r)
 		}
 	}
@@ -308,14 +315,36 @@ func (s *Store) post(in PostRequest, allow func(string) bool) {
 
 // PostCounts implements MethodPostCounts.
 func (s *Store) PostCounts(_ context.Context, in PostRequest) (struct{}, error) {
-	s.post(in, func(k string) bool { return k == KindCount || k == KindGauge })
+	s.post(in, func(r Record) (Record, bool) { return r, r.Kind == KindCount || r.Kind == KindGauge })
 	return struct{}{}, nil
 }
 
 // PostEgress implements MethodPostEgress.
-func (s *Store) PostEgress(_ context.Context, in PostRequest) (struct{}, error) {
-	s.post(in, func(k string) bool { return k == KindEgress })
+func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error) {
+	s.post(in, func(r Record) (Record, bool) {
+		if r.Kind != KindEgress {
+			return r, false
+		}
+		return s.egressActor(ctx, r)
+	})
 	return struct{}{}, nil
+}
+
+// egressActor sets r's atespace, actor, UID and profile from the actor's
+// registration; false for an actor without one.
+func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
+	if s.Registrations == nil {
+		return r, true
+	}
+	if r.Atespace == "" || r.UID == "" {
+		return r, false
+	}
+	reg, ok, err := s.Registrations.Get(ctx, r.Atespace, r.UID)
+	if err != nil || !ok || reg.Atespace != r.Atespace || reg.UID != r.UID || reg.Name == "" {
+		return r, false
+	}
+	r.Actor, r.Profile = reg.Name, reg.Profile
+	return r, true
 }
 
 // Take implements MethodTake: lifecycle records and counts first, then

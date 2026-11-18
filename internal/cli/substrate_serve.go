@@ -707,7 +707,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	// The records the gateway replicas export for the components that have
 	// no telemetry runtime: the controller's counts, the callout's egress
 	// decisions and the lifecycle events below (GAP-0450, GAP-0453).
-	relay := &telemetryrelay.Store{}
+	relay := &telemetryrelay.Store{Registrations: store}
 	telemetryrelay.Serve(srv, relay)
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
