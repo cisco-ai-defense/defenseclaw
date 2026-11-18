@@ -100,3 +100,26 @@ func TestGAP0602PatchMoveNeedsSourceContext(t *testing.T) {
 		t.Fatalf("destination snapshot substituted for unrelated source: rule=%s note=%s", rule, note)
 	}
 }
+
+func TestGAP0602NoCopyJSONStringEquivalence(t *testing.T) {
+	rows := []struct {
+		old, next string
+		allow     bool
+	}{
+		{`"zzz"`, `"zz\u007a"`, true},
+		{`"PreToolUse"`, `"Pre\u0054oolUse"`, true},
+		{`"/opt/lib"`, `"\/opt\/lib"`, true},
+		{`"/opt/lib"`, `"/tmp/evil"`, false},
+		{`"zzz"`, ` "zzz"`, false},
+		{"false", " true", false},
+		{"30", "3e1", false},
+	}
+	for _, row := range rows {
+		args, _ := json.Marshal(map[string]any{"file_path": "~/.claude/settings.json", "old_string": row.old, "new_string": row.next})
+		rule, note, _ := sandboxAgentHookConfigChange(context.Background(), trustedActionRequest{
+			Connector: "claudecode", Input: actionfacts.Input{Tool: "Edit", Args: args, ActiveHome: sandboxauth.SandboxHome}})
+		if (rule == "") != row.allow {
+			t.Errorf("%q -> %q rule=%q note=%q allow=%t", row.old, row.next, rule, note, row.allow)
+		}
+	}
+}

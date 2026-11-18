@@ -1445,8 +1445,9 @@ const sandboxAgentHookNoBefore = "DefenseClaw could not see the settings file to
 // context: even a model-looking value can be a reserved env or hook value,
 // including when the spelling is escaped JSON. A complete JSON old_string
 // is still only a substring: it could be a reserved env value or a nested
-// hook object. Only byte-preserving edits can be proved harmless without a
-// snapshot; the current kit supplies that context for ordinary edits.
+// hook object. Byte-preserving edits and equivalent complete JSON string
+// tokens can be proved harmless without a snapshot; the current kit supplies
+// the actual key context for other edits.
 func sandboxAgentHookWithoutBefore(format string, change agentHookConfigChange, hooks string) string {
 	if reason := sandboxAgentHookEditWork(change); reason != "" {
 		return reason
@@ -1454,7 +1455,7 @@ func sandboxAgentHookWithoutBefore(format string, change agentHookConfigChange, 
 	if len(change.edits) > 0 {
 		unchanged := true
 		for _, edit := range change.edits {
-			unchanged = unchanged && edit.old == edit.new
+			unchanged = unchanged && (edit.old == edit.new || sandboxAgentHookSameJSONString(edit.old, edit.new))
 		}
 		if unchanged && !agentHookConfigTextMayDisable(change.text) {
 			return ""
@@ -1486,6 +1487,18 @@ func sandboxAgentHookWithoutBefore(format string, change agentHookConfigChange, 
 		}
 	}
 	return ""
+}
+
+// A quoted JSON string token has the same meaning as a key or value, even
+// if the first quote is escaped by its surrounding string. Require exact
+// token boundaries: added outer whitespace could itself change a hook string.
+func sandboxAgentHookSameJSONString(old, next string) bool {
+	if len(old) < 2 || len(next) < 2 || old[0] != '"' || old[len(old)-1] != '"' ||
+		next[0] != '"' || next[len(next)-1] != '"' {
+		return false
+	}
+	var left, right string
+	return json.Unmarshal([]byte(old), &left) == nil && json.Unmarshal([]byte(next), &right) == nil && left == right
 }
 
 // sandboxManagedHooksNote explains the registered-settings boundary.

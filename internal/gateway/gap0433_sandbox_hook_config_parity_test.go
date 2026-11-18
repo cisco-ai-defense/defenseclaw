@@ -411,7 +411,7 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 			}
 			if !withFacts && (probe.tool == "Edit" || probe.tool == "MultiEdit") {
 				expected := "block"
-				if probe.name == "settings home Edit keeps hooks" || probe.name == "rvnf5 count bound 64" {
+				if probe.name == "settings home Edit keeps hooks" || probe.name == "rvnf5 count bound 64" || probe.name == "rvnf5 escape_benign_model" {
 					expected = "allow"
 				}
 				if cAction != expected || mAction != expected {
