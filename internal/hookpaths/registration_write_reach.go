@@ -350,7 +350,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths := actionBoundedGlob(OperandPath(value, currentCWD), false)
+					paths, _ := actionBoundedGlob(OperandPath(value, currentCWD), false)
 					if len(paths) > 64 {
 						continue
 					}
@@ -642,7 +642,7 @@ func registrationItemPaths(word *syntax.Word, command, cwd, home string) []strin
 		return nil
 	}
 	if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-		matches := actionBoundedGlob(OperandPath(value, cwd), false)
+		matches, _ := actionBoundedGlob(OperandPath(value, cwd), false)
 		if len(matches) > 64 {
 			return nil
 		}

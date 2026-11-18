@@ -2486,6 +2486,7 @@
    "TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily": 125.4,
    "TestPowerShellBoundValueStateWriteIsProvenInEveryMode": 30.5,
    "TestPowerShellCradleSpellingsAreTheDownloadExecuteRule": 41.0,
+   "TestPrivateKeyGlobOfACallWithNoFolderIsBoundedOnTheInspectRoute": 19.1,
    "TestPrivateKeyReadAcrossShippedPacks": 24.0,
    "TestPrivateUpstreamAuditUsesConnectedPeerNotPreflightDNS": 3.3,
    "TestProfileRefusalTakesTheEventsNativeControl": 5.5,

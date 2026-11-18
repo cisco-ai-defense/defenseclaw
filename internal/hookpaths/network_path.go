@@ -6,10 +6,12 @@ package hookpaths
 import (
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -145,6 +148,9 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
+	// globCut holds the caps a private-key reader's pattern expansion hit
+	// (ActionPrivateKeyReadBounded).
+	globCut bounded.CapSet
 	// memo holds what the call has read of the file system: the paths it
 	// resolved and the protected set of each home (targets).
 	memo *TargetMemo
@@ -542,6 +548,17 @@ func noteBodyCut(cut shareReadCut) {
 	}
 }
 
+// noteGlobCut records on the hook call the caps a pattern expansion of the
+// private-key reader hit (ActionPrivateKeyReadBounded).
+func noteGlobCut(truncated bounded.CapSet) {
+	if !truncated.Any() {
+		return
+	}
+	if call := currentHookCall(); call != nil {
+		call.globCut = call.globCut.Union(truncated)
+	}
+}
+
 // pathBodyUnanswered is networkPathRead for the script a relative name reaches
 // below a folder already walked: a name that spells folder links of its own
 // is walked on from that folder, and a path past the links the system opens
@@ -581,6 +598,26 @@ func pathReadDir(name string) ([]os.DirEntry, error) {
 		return nil, networkShareError("readdir", name)
 	}
 	return os.ReadDir(fixturefs.Map(name))
+}
+
+// pathReadDirLimit is pathReadDir that reads at most n entries, sorted by
+// name, for a walk that stops at a bound of n-1: a directory of fewer names
+// reads as pathReadDir reads it.
+func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
+	if networkPathUnanswered(name) {
+		return nil, networkShareError("readdir", name)
+	}
+	dir, err := os.Open(fixturefs.Map(name))
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(n)
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, err
 }
 
 func pathReadlink(name string) (string, error) {
