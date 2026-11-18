@@ -5,7 +5,10 @@ package gateway
 
 import (
 	"context"
+	"runtime"
+	"slices"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -172,31 +175,90 @@ func foldedGroupQualify(qualify func(context.Context, string) string, pairs []gr
 // verifiedGroupDomainsMax bounds the identity records one pass reads.
 const verifiedGroupDomainsMax = 64
 
-// verifiedGroupDomains lists the domains the guardian's identity records of
-// this device pair by NetBIOS and DNS name (the Mac records carry the
-// NetBIOS account domain, GAP-0635), for the group checks.
-var verifiedGroupDomains = func(spoolDir string) []groupDomains {
-	if strings.TrimSpace(spoolDir) == "" {
+// verifiedGroupDomains lists the domains the matcher folds for the accounts
+// of this device, for the group checks: for each account the guardian's
+// identity records name, the own verified domain (groupDomainsOf) of the
+// subject the matcher builds from that account's facts
+// (profileSubjectFromVerified), the facts requests of the account carry
+// (cachedDirectoryFacts) or, while none are cached (config validate, a
+// gateway no hook of the account has reached yet), explain's lookup of them
+// (profileExplainDirectoryFacts). The warning thus folds by the very facts
+// and function the matcher folds by (GAP-1312): on Linux SSSD (by the SID)
+// or winbind confirms the NetBIOS domain, which the Linux records do not
+// carry, so reading the records alone paired no domain there and every
+// DOMAIN\name of the joined domain kept a respelled warning although the
+// matcher selected it; on a Mac the record's account domain (GAP-0635) is
+// in the facts. Standalone Windows matches a group by its SID
+// (profileGroupSIDs) and folds no spelling, so it has none. One lookup per
+// DNS domain is enough: every account of a domain has its pair. ctx bounds
+// the lookups.
+func verifiedGroupDomains(ctx context.Context, spoolDir string) []groupDomains {
+	if strings.TrimSpace(spoolDir) == "" || runtime.GOOS == "windows" {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cached, lookup := cachedDirectoryFacts, profileExplainDirectoryFacts
 	var out []groupDomains
+	known := func(dns string) bool {
+		return dns != "" && slices.ContainsFunc(out, func(have groupDomains) bool { return useridentity.EqualFold(have.dns, dns) })
+	}
 	for _, record := range enterprisehooks.ReadIdentitySpoolRecords(spoolDir, validateManagedGuardianAuthorization, verifiedGroupDomainsMax) {
-		pair := groupDomains{netbios: strings.TrimSpace(record.AccountDomain), dns: strings.TrimSuffix(strings.TrimSpace(record.Facts.Domain), ".")}
-		if pair.netbios == "" || strings.ContainsAny(pair.netbios, `\/@ `) || !pair.paired() {
+		if ctx.Err() != nil {
+			break
+		}
+		if known(strings.TrimSuffix(strings.TrimSpace(record.Facts.Domain), ".")) {
 			continue
 		}
-		seen := false
-		for _, have := range out {
-			if useridentity.EqualFold(have.netbios, pair.netbios) && useridentity.EqualFold(have.dns, pair.dns) {
-				seen = true
-				break
+		facts, _, ok := cached(record.Key)
+		if !ok {
+			var err error
+			if facts, err = lookup(record.Key); err != nil {
+				continue
 			}
 		}
-		if !seen {
-			out = append(out, pair)
+		if facts.ResolvedAt.IsZero() {
+			continue
 		}
+		subject := profileSubjectFromVerified(VerifiedSubject{
+			UserID: record.Key, IDKind: useridentity.KindForID(record.Key), UserName: record.User, Directory: facts,
+		}, false)
+		pair := groupDomainsOf(&subject)
+		if strings.ContainsAny(pair.netbios, `\/@ `) || !pair.paired() || known(pair.dns) {
+			continue
+		}
+		out = append(out, pair)
 	}
 	return out
+}
+
+// matcherFoldedGroupChecks is profileGroupExists and profileGroupQualifiedName
+// for the group checks, with the respellings the matcher folds
+// (foldedGroupExists, foldedGroupQualify) for the domains of spoolDir's
+// accounts (verifiedGroupDomains). The domains are read at the first check,
+// inside the pass's time budget, which can outlive the caller, so it takes
+// the lookups when it is made.
+func matcherFoldedGroupChecks(spoolDir string) (func(context.Context, string) (bool, error), func(context.Context, string) string) {
+	groupExists, groupQualify := profileGroupExists, profileGroupQualifiedName
+	var (
+		once    sync.Once
+		exists  func(context.Context, string) (bool, error)
+		qualify func(context.Context, string) string
+	)
+	load := func(ctx context.Context) {
+		once.Do(func() {
+			pairs := verifiedGroupDomains(ctx, spoolDir)
+			exists, qualify = foldedGroupExists(groupExists, pairs), foldedGroupQualify(groupQualify, pairs)
+		})
+	}
+	return func(ctx context.Context, name string) (bool, error) {
+			load(ctx)
+			return exists(ctx, name)
+		}, func(ctx context.Context, name string) string {
+			load(ctx)
+			return qualify(ctx, name)
+		}
 }
 
 // foldedGroupExists is exists for a group the matcher also selects by its
