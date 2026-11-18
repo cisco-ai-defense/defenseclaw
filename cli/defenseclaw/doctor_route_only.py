@@ -98,6 +98,47 @@ def _expected_base_url(cfg: Any, connector: str) -> str:
     return f"http://127.0.0.1:{port}/r/{connector}"
 
 
+def _parked(raw: str) -> bool:
+    """A parked render (GAP-1133): the gateway points the agent at port 0 of
+    the loopback address, with no route credential, while it does not hold
+    its API port (internal/gateway/connector ParkedRouteBaseURL)."""
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        return parts.hostname == "127.0.0.1" and parts.port == 0
+    except ValueError:
+        return False
+
+
+def _parked_row(label: str, where: str) -> Row:
+    return Row(
+        "warn",
+        label,
+        f"{where} is parked: this account's gateway did not hold its API port when it last wrote it, "
+        "so the agent sends its model calls nowhere (not to another process on the port)",
+        "start the gateway with defenseclaw-gateway start (it renders the route once it holds the port), "
+        "then restart the agent",
+    )
+
+
+def _unparked_row(label: str, where: str, connector: str, *, unverified: bool = False) -> Row:
+    """GAP-1133: the real route is in place while no gateway of this account
+    holds the API port (a crash, a logoff or a reboot left it there), or while
+    doctor cannot verify that it does."""
+    holds = (
+        "while doctor cannot verify that this account's gateway holds it"
+        if unverified
+        else "while this account's gateway does not hold it"
+    )
+    return Row(
+        "fail",
+        label,
+        f"{where} still points at the gateway port {holds}: "
+        "a process of another account that binds the port gets this agent's model calls",
+        "run defenseclaw-gateway start (it parks the route before it binds and renders it again once it holds "
+        f"the port), then restart the agent; or restore direct model access: {restore_direct(connector)}",
+    )
+
+
 def _shown_url(raw: str) -> str:
     """A configured URL as doctor prints it: the loopback render in full,
     any other URL as its origin only (a corporate URL can carry a token)."""
@@ -135,9 +176,18 @@ def _drift_fix(cfg: Any, connector: str, signing_failed: bool) -> str:
     )
 
 
-def agent_config_row(cfg: Any, connector: str, upstream: dict[str, Any], *, signing_failed: bool = False) -> Row:
+def agent_config_row(
+    cfg: Any,
+    connector: str,
+    upstream: dict[str, Any],
+    *,
+    signing_failed: bool = False,
+    gateway_down: bool = False,
+    unverified: bool = False,
+) -> Row:
     """Whether the agent config DefenseClaw renders from config.yaml is in place (OSS).
-    A broken agent file gives a warn row for that connector only."""
+    A broken agent file gives a warn row for that connector only. gateway_down: no
+    gateway of this account holds the API port, so the real route fails (GAP-1133)."""
     label = f"Route-only {connector} agent config"
     want = _expected_base_url(cfg, connector)
     try:
@@ -147,6 +197,8 @@ def agent_config_row(cfg: Any, connector: str, upstream: dict[str, Any], *, sign
                 "ANTHROPIC_BEDROCK_BASE_URL" if upstream.get("api") in ("converse", "invoke") else "ANTHROPIC_BASE_URL"
             )
             got = own.get(key, "").strip().rstrip("/")
+            if _parked(got):
+                return _parked_row(label, f"settings.json env {key}")
             if got != want:
                 shown = _shown_url(got) if got else "unset"
                 detail = f"settings.json env {key} is {shown}, not {want}"
@@ -154,14 +206,22 @@ def agent_config_row(cfg: Any, connector: str, upstream: dict[str, Any], *, sign
             if ro.ROUTE_HEADER not in own.get("ANTHROPIC_CUSTOM_HEADERS", ""):
                 detail = f"settings.json env ANTHROPIC_CUSTOM_HEADERS has no {ro.ROUTE_HEADER} line"
                 return Row("warn", label, detail, _drift_fix(cfg, connector, signing_failed))
+            if gateway_down:
+                return _unparked_row(label, f"settings.json env {key}", connector, unverified=unverified)
             return Row("pass", label, f"settings.json points at {want}")
         if connector == "codex":
             doc = ro.codex_config()
             table = (doc.get("model_providers") or {}).get(ro.CODEX_ROUTE_PROVIDER) or {}
             got = str(table.get("base_url") or "").strip().rstrip("/")
+            if doc.get("model_provider") == ro.CODEX_ROUTE_PROVIDER and _parked(got):
+                return _parked_row(label, "config.toml model_providers.defenseclaw_route base_url")
             if doc.get("model_provider") != ro.CODEX_ROUTE_PROVIDER or got != want:
                 detail = f"config.toml model_provider is not {ro.CODEX_ROUTE_PROVIDER} at {want}"
                 return Row("warn", label, detail, _drift_fix(cfg, connector, signing_failed))
+            if gateway_down:
+                return _unparked_row(
+                    label, "config.toml model_providers.defenseclaw_route base_url", connector, unverified=unverified
+                )
             return Row("pass", label, f"config.toml points at {want}")
     except (ro.RouteOnlyError, OSError, ValueError, AttributeError, TypeError) as exc:
         text = " ".join(str(exc).split())[:200]
@@ -589,7 +649,14 @@ def route_only_rows(
         signed = signing_rows(name, up, signing if live is not None and isinstance(signing, dict) else None)
         if renders and str(up.get("base_url") or "").strip():
             failed = any(row.tag == "fail" for row in signed)
-            rows.append(agent_config_row(cfg, name, up, signing_failed=failed))
+            # A crashed gateway leaves its PID record: doctor sees an unverified
+            # listener state then (live, GAP-1133 round 2), not "stopped".
+            down = live is None and gateway in ("", GATEWAY_FOREIGN, GATEWAY_UNVERIFIED)
+            rows.append(
+                agent_config_row(
+                    cfg, name, up, signing_failed=failed, gateway_down=down, unverified=gateway == GATEWAY_UNVERIFIED
+                )
+            )
         rows.extend(signed)
     held = port_held_row(cfg, platform)
     if held is not None:

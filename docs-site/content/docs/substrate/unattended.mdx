@@ -87,7 +87,7 @@ defenseclaw substrate run claude --task "triage the open dependabot PRs" --detac
 | You want to know it is alive | `status`, `list` (it has a `STATE` column) and `logs -f` show it. `checkpoint NAME --every 1h` saves a restore point on that schedule for as long as the command runs |
 | The result | Have the agent push a branch (the git credential is injected on the git host only), or `defenseclaw substrate pull` the changes |
 
-A queued ask shows `unattended` and the time left in the `RUN` column of `approvals`.
+A queued ask shows `unattended` and the time left in the `RUN` column of `approvals`, and every configured webhook gets an `approval-request` post for it, whatever its `min_severity`.
 
 A rejected or expired ask is not remembered. If the agent asks for the same site again, a new ask opens at once; there is no cooldown. To stop the asking, refuse the site with a `url_rules` rule (`action: deny`) or leave it off the allow list.
 

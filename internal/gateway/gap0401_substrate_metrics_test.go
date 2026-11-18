@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
 
 // substrateMetricDocRows reads the Agent Substrate metrics table of the
@@ -44,11 +45,12 @@ func substrateMetricDocRows(t *testing.T) map[string]string {
 	return rows
 }
 
-// GAP-0401: every defenseclaw.substrate.* metric the docs say a component
-// records is recorded, through the gateway's telemetry runtime (the OTLP
-// path), when its event happens; a metric no component records says so in
-// the docs. Before, none of the eight was ever recorded while the docs
-// listed all eight as emitted.
+// GAP-0401, GAP-0450: every defenseclaw.substrate.* metric the docs say a
+// component records is recorded, through the gateway's telemetry runtime
+// (the OTLP path), when its event happens: the gateway's own four, and the
+// controller's three relayed through the leader. A metric no component
+// records says so in the docs. Before, none of the eight was ever recorded
+// while the docs listed all eight as emitted.
 func TestGAP0401DocumentedSubstrateMetricsAreRecorded(t *testing.T) {
 	runtime, capture := newProxyGeneratedMetricRuntime(t)
 	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
@@ -73,6 +75,16 @@ func TestGAP0401DocumentedSubstrateMetricsAreRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = b.Observe(context.Background(), audit.ToolChainObserveInput{})
+	// The controller's counts and gauge, through the leader (GAP-0450).
+	relayStore, relayClient := substrateRelayLeader(t)
+	relayStore.Add(
+		telemetryrelay.Record{Kind: telemetryrelay.KindCount, Metric: telemetryrelay.MetricIdleSuspends, Value: 1},
+		telemetryrelay.Record{Kind: telemetryrelay.KindCount, Metric: telemetryrelay.MetricPolicyConflicts, Value: 1},
+		telemetryrelay.Record{Kind: telemetryrelay.KindGauge, Metric: telemetryrelay.MetricUnattestedTemplates, Value: 0},
+	)
+	if err := (&telemetryrelay.Taker{Leader: relayClient, Record: f.api.recordSubstrateRelay}).TakeOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	// A launcher create.
 	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"eng","template":"claude-wave1","connector":"claudecode"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("create %d %s", rec.Code, rec.Body)

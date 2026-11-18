@@ -133,7 +133,7 @@ Measured on real owner sessions and spliced attacks (S7 S1FLOW, Gemini Decision 
 
 ### When the judge is late, failing or busy (cascade 3)
 
-The decision model answers before the judge takes one of its slots. A confident block is the CRITICAL `JUDGE-DECISION-MODEL` block of cascade 2, and it stands whenever the judge gives no verdict: it fails, misses the hook answer window, has no free slot, or the hook's judge time is spent. A judge that answers late is ignored; it can never remove the finding. Any other answer (an escalation) keeps the rule verdict when the judge cannot run. The decision model's finding does not replace a fail-closed refusal: under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is still refused when the judge gives no verdict.
+The decision model answers before the judge takes one of its slots. A confident block is the CRITICAL `JUDGE-DECISION-MODEL` block of cascade 2, and it stands whenever the judge gives no verdict: it fails, misses the hook answer window, has no free slot, or the hook's judge time is spent. A judge that answers late is ignored; it can never remove the finding. Any other answer (an escalation) keeps the rule verdict when the judge cannot run. The decision model's finding does not replace a fail-closed refusal: under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is still refused when the judge gives no verdict, and an unattended Agent Substrate run or the strict policy refuses any call the judge gives no verdict on (`JUDGE-UNAVAILABLE`; only the decision model's own confident block stands instead).
 
 ## When it is down
 

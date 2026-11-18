@@ -34,6 +34,7 @@ package leader
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -96,8 +97,14 @@ const (
 	maxBodyBytes = 4 << 20
 	// IdempotencyTTL is how long an answer is replayed to a retry.
 	IdempotencyTTL = 10 * time.Minute
-	// maxIdempotent bounds the replay cache.
-	maxIdempotent = 200000
+	// maxIdempotent bounds the replay cache's answers in number, and
+	// maxIdempotentBytes in size (GAP-0404): past either, the oldest
+	// finished answers leave first and a retry of one runs again (GAP-0057).
+	maxIdempotent      = 200000
+	maxIdempotentBytes = 64 << 20
+	// idemEntryOverhead is what one kept answer costs besides its key and
+	// body (the map entry, the entry, the list element).
+	idemEntryOverhead = 256
 )
 
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{8,128}$`)
@@ -219,6 +226,14 @@ type Server struct {
 	// for replay (GAP-0057).
 	reads map[string]bool
 	done  map[string]*idemEntry
+	// finished is the kept answers, oldest first, and doneBytes their size.
+	// Every call prunes the front: an answer leaves at IdempotencyTTL, or
+	// earlier past maxIdempotentBytes. Before, an expired answer stayed
+	// until the map held 200,000 of them, so the leader kept every hook
+	// call's answer (about 2 KiB to 10 KiB each, 5 calls per tool call) and
+	// gave nothing back while it ran (GAP-0404).
+	finished  list.List
+	doneBytes int64
 }
 
 type idemEntry struct {
@@ -226,6 +241,10 @@ type idemEntry struct {
 	resp   Response
 	status int
 	at     time.Time
+	// key, size and elem: the entry's place in finished (nil while it runs).
+	key  string
+	size int64
+	elem *list.Element
 }
 
 // Handle registers fn for method.
@@ -360,13 +379,14 @@ func (s *Server) claim(key string) (*idemEntry, bool) {
 		s.done = map[string]*idemEntry{}
 	}
 	now := s.now()
+	s.pruneLocked(now)
 	if e, ok := s.done[key]; ok && (e.at.IsZero() || now.Sub(e.at) < IdempotencyTTL) {
 		return e, false
 	}
 	if len(s.done) >= maxIdempotent {
 		for k, e := range s.done {
 			if !e.at.IsZero() && now.Sub(e.at) >= IdempotencyTTL {
-				delete(s.done, k)
+				s.dropLocked(k, e)
 			}
 		}
 	}
@@ -379,7 +399,7 @@ func (s *Server) claim(key string) (*idemEntry, bool) {
 				break
 			}
 			if !e.at.IsZero() {
-				delete(s.done, k)
+				s.dropLocked(k, e)
 			}
 		}
 		if len(s.done) >= maxIdempotent {
@@ -391,13 +411,46 @@ func (s *Server) claim(key string) (*idemEntry, bool) {
 	return e, true
 }
 
+// pruneLocked drops the kept answers past IdempotencyTTL, oldest first, and
+// the oldest past maxIdempotentBytes.
+func (s *Server) pruneLocked(now time.Time) {
+	for f := s.finished.Front(); f != nil; f = s.finished.Front() {
+		e := f.Value.(*idemEntry)
+		if now.Sub(e.at) < IdempotencyTTL && s.doneBytes <= maxIdempotentBytes {
+			return
+		}
+		s.dropLocked(e.key, e)
+	}
+}
+
+// dropLocked forgets the answer e kept under key.
+func (s *Server) dropLocked(key string, e *idemEntry) {
+	if e.elem != nil {
+		s.finished.Remove(e.elem)
+		e.elem = nil
+		s.doneBytes -= e.size
+	}
+	if s.done[key] == e {
+		delete(s.done, key)
+	}
+}
+
 func (s *Server) finish(key string, e *idemEntry, status int, resp Response) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e.status, e.resp, e.at = status, resp, s.now()
-	if status >= 500 {
+	switch {
+	case status >= 500:
 		// A failure is not an answer to replay: a retry runs again.
 		delete(s.done, key)
+	case s.done[key] == e:
+		e.key, e.size = key, int64(len(key)+len(resp.Body)+idemEntryOverhead)
+		if resp.Error != nil {
+			e.size += int64(len(resp.Error.Code) + len(resp.Error.Message))
+		}
+		e.elem = s.finished.PushBack(e)
+		s.doneBytes += e.size
+		s.pruneLocked(e.at)
 	}
 	close(e.ready)
 }

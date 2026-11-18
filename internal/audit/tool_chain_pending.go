@@ -59,6 +59,14 @@ type ToolChainPreparePendingInput struct {
 	Projection               guardrail.ToolChainProjection
 	SQLValueSource           ToolChainPendingSQLValueSource       `json:"-"`
 	ReturnedCredentialSource actionfacts.ReturnedCredentialSource `json:"-"`
+	// PreEventFromAnyReplica is set by the Agent Substrate leader, never
+	// taken from a caller: each gateway replica mints its own semantic event
+	// ID for a hook, so the same PreToolUse delivered again to another
+	// replica (a retry, or after a restart) names another PreSemanticEventID.
+	// The same call (connector instance, session, invocation, raw input,
+	// projection and ruleset) is then a replay of the prepared proposal, not a
+	// reused invocation ID (substrate-1 GAP-0562).
+	PreEventFromAnyReplica bool `json:"-"`
 }
 
 // ToolChainPendingSQLValueSource is a value-free descriptor of one exact
@@ -312,7 +320,7 @@ func (repo *ToolChainRepository) preparePendingTx(
 			return ToolChainPreparePendingResult{}, err
 		}
 		if existing.expires > unixNano(now) {
-			if sameToolChainProposal(existing, input, session, projectionFP) {
+			if sameToolChainPending(existing, input, session, projectionFP) {
 				return ToolChainPreparePendingResult{Status: ToolChainPendingReplay}, nil
 			}
 			// A reused connector-owned invocation ID makes both proposals
@@ -1629,24 +1637,14 @@ func validatePendingToolChainProjection(projection guardrail.ToolChainProjection
 	return nil
 }
 
-// sameToolChainProposal reports a pre-tool proposal that is already
-// pending: the same call, session, hook body and projection. Its semantic
-// event id may differ. A hook client resends a post it got no answer for,
-// and a gateway replica that did not take the first delivery mints its own
-// event id for it: a Substrate kit retry after a slow answer lands on the
-// other replica about half the time (GAP-0564). The input fingerprint is
-// the digest of the exact hook body, so the resend can't change what is
-// pending; it is a replay and the first delivery's row stands. Before, it
-// read as a reused invocation id: the proposal was dropped, the actor was
-// marked unrecorded, and its egress was refused for the whole window. A
-// different proposal under the same invocation id still invalidates both.
-func sameToolChainProposal(
+func sameToolChainPending(
 	pending persistedToolChainPending,
 	input ToolChainPreparePendingInput,
 	session, projectionFP string,
 ) bool {
 	return pending.connector == string(input.ConnectorInstanceID) &&
 		pending.invocation == input.ToolInvocationDigest && pending.session == session &&
+		(pending.preEvent == string(input.PreSemanticEventID) || input.PreEventFromAnyReplica) &&
 		pending.preInput == input.PreInputFingerprint && pending.projectionFP == projectionFP &&
 		pending.ruleset == input.RulesetFingerprint &&
 		pending.parseStatus == string(input.Projection.ParseStatus) &&

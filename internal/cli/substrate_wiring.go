@@ -195,13 +195,14 @@ func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver contro
 		}
 		if keys := substrateControllerRestartOnly(boot, c); len(keys) > 0 {
 			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
-				Message: "config.yaml changed " + strings.Join(keys, ", ") + ": applies when the pods restart (helm upgrade, or kubectl rollout restart " +
-					"deploy/defenseclaw-gateway deploy/defenseclaw-gateway-leader deploy/defenseclaw-controller); until then the values the pods started with stay"})
+				Message: "config.yaml changed " + strings.Join(keys, ", ") + ": applies when the pods restart (helm upgrade, or " +
+					substrateRestartAll + "); until then the values the pods started with stay"})
 		}
 		lv.Settings.ActorService, lv.Settings.AdminService = bootSettings.ActorService, bootSettings.AdminService
 		lv.Settings.Audience, lv.Settings.TokenLifetimeSeconds = bootSettings.Audience, bootSettings.TokenLifetimeSeconds
 		// The callout reads substrate.extproc (mcp_hosts) and the gateway the
-		// LLM providers only at helm upgrade or restart: rendering their hosts
+		// LLM providers only at helm upgrade or restart (its config reload
+		// holds llm_providers on Substrate, GAP-0589): rendering their hosts
 		// live would open egress before the callout inspects it (GAP-0306).
 		lv.Settings.MCPHosts, lv.Settings.ProviderHosts = bootSettings.MCPHosts, bootSettings.ProviderHosts
 		return lv

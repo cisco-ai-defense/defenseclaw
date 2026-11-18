@@ -95,7 +95,8 @@ func fromLeader(r registry.Registration) Registration {
 
 // Put implements Registry: an attributed actor, an adopted fork, or a
 // change (approvals, forked_by) to a record that exists. An existing
-// record keeps every field the launcher wrote.
+// record keeps every field the launcher wrote. An attributed record that
+// names no kit takes the attested kit once (GAP-0351).
 func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 	cur, ok, err := l.Store.Get(ctx, in.Atespace, in.UID)
 	if err != nil {
@@ -105,6 +106,10 @@ func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 		cur.Approved, cur.ForkedBy = slices.Clone(in.Approved), in.ForkedBy
 		if cur.Template == "" {
 			cur.Template = in.Template
+		}
+		if registry.KitFillable(cur) && in.Source == SourceAtespace && in.Connector != "" {
+			cur.Connector, cur.HarnessVersion, cur.HookContract = in.Connector, in.AgentVersion, in.HookContract
+			cur.KitVersion, cur.TemplateDigest = in.KitVersion, in.TemplateDigest
 		}
 		return l.Store.Put(ctx, cur)
 	}

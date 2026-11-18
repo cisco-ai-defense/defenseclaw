@@ -35,8 +35,13 @@ func TestSubstrateGAP0564ResentProposalIsAReplay(t *testing.T) {
 	if r, err := fixture.chain.PreparePending(t.Context(), prepare); err != nil || r.Status != ToolChainPendingPrepared {
 		t.Fatalf("first delivery=%#v err=%v", r, err)
 	}
+	// The Agent Substrate leader sets PreEventFromAnyReplica (GAP-0562): the
+	// replicas mint their own event ids. A host gateway mints one per
+	// occurrence and recognizes its own replays, so there another event id
+	// is still a reused invocation id.
 	resend := prepare
 	resend.PreSemanticEventID = fixture.seed(t, "resent-session", body).SemanticEventID
+	resend.PreEventFromAnyReplica = true
 	if r, err := fixture.chain.PreparePending(t.Context(), resend); err != nil || r.Status != ToolChainPendingReplay {
 		t.Fatalf("resend under another event id=%#v err=%v, want a replay", r, err)
 	}
@@ -66,7 +71,19 @@ func TestSubstrateGAP0564ResentProposalIsAReplay(t *testing.T) {
 	}
 	other := fixture.seed(t, "resent-session", correlationDigest("another-body"))
 	reused.PreSemanticEventID, reused.PreInputFingerprint = other.SemanticEventID, other.InputFingerprint
+	reused.PreEventFromAnyReplica = true
 	if _, err := fixture.chain.PreparePending(t.Context(), reused); !errors.Is(err, ErrToolChainPendingConflict) {
 		t.Fatalf("another body under the same id: err=%v, want the conflict", err)
+	}
+
+	// A host: the same body under another event id is a reused id.
+	host := prepare
+	host.ToolInvocationDigest = correlationDigest("host-invocation")
+	if _, err := fixture.chain.PreparePending(t.Context(), host); err != nil {
+		t.Fatal(err)
+	}
+	host.PreSemanticEventID = fixture.seed(t, "resent-session", body).SemanticEventID
+	if _, err := fixture.chain.PreparePending(t.Context(), host); !errors.Is(err, ErrToolChainPendingConflict) {
+		t.Fatalf("host resend under another event id: err=%v, want the conflict", err)
 	}
 }

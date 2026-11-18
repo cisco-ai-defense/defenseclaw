@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -82,6 +83,14 @@ func substrateConfigMapFetch(kube configMapGetter, ns, name string) configwatch.
 // leader's Service, not its Deployment).
 var substrateRoleDeployment = map[string]string{"gateway": "defenseclaw-gateway", "leader": "defenseclaw-gateway-leader"}
 
+// substrateRestartAll restarts every pod that reads config.yaml at start,
+// the controller included. A change to a key the controller keeps from its
+// start (substrateControllerRestartOnly: llm_providers, substrate.identity,
+// .services, .api, .extproc) needs it: restarting only the gateway would
+// leave the controller rendering the old provider hosts (GAP-0589). The
+// controller's own warning names the same command.
+const substrateRestartAll = "kubectl rollout restart deploy/defenseclaw-gateway deploy/defenseclaw-gateway-leader deploy/defenseclaw-controller"
+
 // substrateFollower keeps a gateway or leader pod on config.yaml: on a
 // change it applies the parts this pod takes live (apply) and names the
 // ones that wait for the pod's next start (substrateRestartOnly).
@@ -94,11 +103,35 @@ type substrateFollower struct {
 	// are still its); applied the digest in force.
 	boot    *config.Config
 	applied string
+	// guardrail, for a gateway that reads the ConfigMap through the API,
+	// says when an edit reaches its guardrail (substrateGatewayGuardrail).
+	guardrail string
 }
 
 func newSubstrateFollower(w *configwatch.Watcher, role string, out io.Writer, apply func(*config.Config) error) *substrateFollower {
 	boot, d := w.Current()
-	return &substrateFollower{w: w, role: role, out: out, apply: apply, boot: boot, applied: d}
+	f := &substrateFollower{w: w, role: role, out: out, apply: apply, boot: boot, applied: d}
+	if role == "gateway" && w.Fetch != nil {
+		f.guardrail = substrateGatewayGuardrail(w.Path)
+	}
+	return f
+}
+
+// substrateGatewayGuardrail says when a ConfigMap edit the gateway follower
+// has read through the API reaches the gateway's guardrail (hook and /llm
+// modes, rules, profiles). The follower applies only the chain egress action
+// and the create path's settings; the guardrail reloads from the mounted
+// config.yaml (the gateway's config manager), so "in force" at the API read
+// was early (substrate-1:GAP-0590). The kubelet updates a directory mount
+// (a ..data link beside config.yaml, GAP-0579) about a minute after the
+// edit, and never a managed install's subPath mount of the one file.
+func substrateGatewayGuardrail(path string) string {
+	const what = "the guardrail (hook and /llm modes, rules, profiles) applies "
+	if fi, err := os.Lstat(filepath.Join(filepath.Dir(path), "..data")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return what + "when the kubelet updates the mounted config.yaml, about a minute after the edit"
+	}
+	return what + "when this pod restarts: config.yaml is mounted as one file (subPath), which the kubelet never updates " +
+		"(helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/" + substrateRoleDeployment["gateway"] + ")"
 }
 
 // run reads the source every configwatch.DefaultInterval until ctx ends.
@@ -134,11 +167,51 @@ func (f *substrateFollower) step(ctx context.Context) {
 		return
 	}
 	msg := fmt.Sprintf("[substrate] %s: config.yaml %s in force (was %s)", f.role, ch.Digest, prev)
+	if f.guardrail != "" {
+		msg = fmt.Sprintf("[substrate] %s: config.yaml %s seen (was %s): the chain egress action and the create path's settings apply now; %s",
+			f.role, ch.Digest, prev, f.guardrail)
+	}
 	if pending := substrateRestartOnly(f.boot, ch.Config); len(pending) > 0 {
-		msg += "; these keys changed and apply when this pod restarts: " + strings.Join(pending, ", ") +
-			" (helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/" + substrateRoleDeployment[f.role] + ")"
+		msg += "; " + substrateRestartAdvice(f.role, pending, substrateControllerRestartOnly(f.boot, ch.Config))
 	}
 	fmt.Fprintln(f.out, msg)
+}
+
+// substrateHelmOnlyKey is the restart-only key no pod restart applies:
+// substrate.extproc renders the callout's ConfigMap, which only helm
+// upgrade writes (GAP-0607).
+const substrateHelmOnlyKey = "substrate.extproc"
+
+// substrateRestartAdvice says how the restart-only keys in pending apply: a
+// rollout restart of the role's Deployment (of every Deployment when the
+// controller keeps one of them too, controllerKeys), and helm upgrade only
+// for substrate.extproc.
+func substrateRestartAdvice(role string, pending, controllerKeys []string) string {
+	isHelmOnly := func(k string) bool { return strings.HasPrefix(k, substrateHelmOnlyKey) }
+	var restartKeys, helmKeys []string
+	for _, k := range pending {
+		if isHelmOnly(k) {
+			helmKeys = append(helmKeys, k)
+		} else {
+			restartKeys = append(restartKeys, k)
+		}
+	}
+	var parts []string
+	if len(restartKeys) > 0 {
+		restart := "kubectl rollout restart deploy/" + substrateRoleDeployment[role]
+		for _, k := range controllerKeys {
+			if !isHelmOnly(k) {
+				restart = substrateRestartAll
+				break
+			}
+		}
+		parts = append(parts, "these keys changed and apply when this pod restarts: "+strings.Join(restartKeys, ", ")+
+			" (helm upgrade rolls the pods; after a direct ConfigMap edit run "+restart+")")
+	}
+	if len(helmKeys) > 0 {
+		parts = append(parts, "these keys changed and apply only by helm upgrade (a pod restart does not change them): "+strings.Join(helmKeys, ", "))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // substrateRestartOnly names the config keys that differ between boot and
@@ -165,7 +238,7 @@ func substrateRestartOnly(boot, cur *config.Config) []string {
 		{"substrate.llm", b.LLM, c.LLM},
 		{"substrate.workspace_max_bytes", b.WorkspaceMaxBytes, c.WorkspaceMaxBytes},
 		{"substrate.secrets (the gateway's injection; the egress bindings apply live)", b.Secrets, c.Secrets},
-		{"substrate.extproc (the callout: helm upgrade only)", b.Extproc, c.Extproc},
+		{"substrate.extproc (it renders the callout's ConfigMap)", b.Extproc, c.Extproc},
 		{"substrate.unattended.ask_timeout (the leader)", b.Unattended.AskTimeout, c.Unattended.AskTimeout},
 		{"substrate.bundles", b.Bundles, c.Bundles},
 	} {

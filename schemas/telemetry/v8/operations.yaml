@@ -5717,6 +5717,19 @@ attributes:
     overrides: {enum: [interactive, unattended]}
     notes: From the registration the launcher wrote, never from the actor. interactive (a person attached or may attach) fails as on a host; unattended (--task or --batch) fails closed and its asks deny (D8, D12)
   introduced_in: telemetry-registry-v4
+- id: defenseclaw.sandbox.substrate.registered
+  type: boolean
+  brief: Whether the leader tied an Agent Substrate egress decision to a registration of its actor
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: false for a deleted actor, one DefenseClaw never registered, a registration lookup outage at the callout, or a UID no registration of the atespace has; the atespace and actor name are then the callout's, from the egress gateway's verified SPIFFE ID, and the actor UID and guardrail profile are absent. Never a metric label
+  introduced_in: telemetry-registry-v4
 - id: ate.actor.uid
   type: string
   brief: Agent Substrate actor UID as named by Substrate

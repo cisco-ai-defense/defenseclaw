@@ -76,6 +76,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `substrate.router.relayPort` | `8080` | the relay port inside the actor |
 | `networkPolicy.egress.*` | on, OTLP 4317/4318 | egress limits for the gateway, leader and callout (DNS, Kubernetes and Substrate APIs, the release, OTLP; providers on 443 for gateway and leader) |
 | `metrics.prometheusRule.enabled` | false | alert rules |
+| `metrics.prometheusRule.namespaceLabel` | empty | empty: the policy alerts read every release's series (any OTLP receiver). `k8s_namespace_name`: they select this release, once your OTLP receiver or collector promotes `k8s.namespace.name` (without that they never fire) |
 | `homeSizeLimit` | `256Mi` | the memory `emptyDir` each pod keeps its local audit database in. It is lost when the pod is replaced, and each gateway replica holds only what it handled; the durable audit record is an export destination under `config.observability.destinations` |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart (debug exporter), and an otlp destination `chart-collector` to it in `config.observability.destinations` unless one with that name is set. For a real backend, add your own destination under `config.observability.destinations` |
 | `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |

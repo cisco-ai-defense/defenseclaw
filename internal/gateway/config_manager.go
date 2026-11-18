@@ -2208,18 +2208,40 @@ func cloneConfig(in *config.Config) *config.Config {
 }
 
 func (m *ConfigManager) matches(path string) bool {
-	return equalConfigPathForDiff(filepath.Clean(path), m.path, runtime.GOOS)
+	cleaned := filepath.Clean(path)
+	return equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) || m.isMountDataSwap(cleaned)
+}
+
+// kubeletDataLink is the link a Kubernetes ConfigMap or Secret volume
+// replaces on every update: the kubelet writes the new files to a fresh
+// ..<timestamp> directory and renames a new ..data link over the old one.
+// config.yaml in that volume is a link through ..data that never changes,
+// so the directory reports events for ..data and never for config.yaml.
+const kubeletDataLink = "..data"
+
+// isMountDataSwap reports an event for the ..data link next to config.yaml:
+// the config was replaced in a Kubernetes volume mount. Without it an edit
+// of the ConfigMap a Substrate gateway mounts reached nothing until a pod
+// restart: guardrail modes and profiles changed only after a rollout
+// (substrate-1:GAP-0579). No host install has a ..data entry beside its
+// config.yaml.
+func (m *ConfigManager) isMountDataSwap(cleaned string) bool {
+	return filepath.Base(cleaned) == kubeletDataLink &&
+		equalConfigPathForDiff(filepath.Dir(cleaned), filepath.Dir(m.path), runtime.GOOS)
 }
 
 // classify reports which watched file the fsnotify event refers to:
-// "config" for the primary config.yaml, "env_config" for the AVC-authored
-// env_config.json, or "" for anything else in the watched dirs (state
-// files, sidecar caches, unrelated writes). We watch entire directories
-// rather than files because atomic-write dances (tempfile + rename) fire
-// events on the target's *parent*, not the target itself.
+// "config" for the primary config.yaml or the ..data link beside it (a
+// Kubernetes volume update, isMountDataSwap), "env_config" for the
+// AVC-authored env_config.json, "generation" for config.generation.json, or
+// "" for anything else in the watched dirs (state files, sidecar caches,
+// the kubelet's ..data_tmp and ..<timestamp> entries, unrelated writes). We
+// watch entire directories rather than files because atomic-write dances
+// (tempfile + rename) fire events on the target's *parent*, not the target
+// itself.
 func (m *ConfigManager) classify(path string) string {
 	cleaned := filepath.Clean(path)
-	if equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) {
+	if equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) || m.isMountDataSwap(cleaned) {
 		return "config"
 	}
 	if envPath := m.getEnvConfigPath(); envPath != "" && equalConfigPathForDiff(cleaned, filepath.Clean(envPath), runtime.GOOS) {
@@ -2486,6 +2508,16 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 			hotReloadable["enterprise.enrollment"] = struct{}{}
 		}
 	}
+	// A Substrate gateway takes llm_providers at its next start, as the
+	// Substrate reference page says: the controller renders the egress hosts
+	// of the providers from its boot config (GAP-0306), so a provider added
+	// live would be one the egress path still refuses, and one removed live
+	// would stay open there. The reload keeps the running value
+	// (holdRestartRequired) and logs that it waits for a restart
+	// (substrate-1:GAP-0589). Host gateways keep it hot.
+	if oldCfg.Substrate.Enabled {
+		delete(hotReloadable, "llm_providers")
+	}
 	for _, path := range changed {
 		if path == "guardrail" && onlyRetainJudgeBodiesChanged(oldCfg, newCfg) {
 			// Report the exact restart boundary below instead of the broad
@@ -2596,6 +2628,8 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.PluginDir = running.PluginDir
 		case "connectors":
 			held.Connectors = running.Connectors
+		case "llm_providers":
+			held.LLMProviders = running.LLMProviders
 		default:
 			return nil
 		}

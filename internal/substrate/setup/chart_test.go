@@ -114,6 +114,7 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"managed no allowed_images": "config.deployment_mode=managed_enterprise",
 		"managed unattested":        "config.deployment_mode=managed_enterprise,config.substrate.require_attested_templates=false,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
 		"unknown value":             "gateway.surprise=1",
+		"bad namespace label":       "metrics.prometheusRule.enabled=true,metrics.prometheusRule.namespaceLabel=k8s.namespace.name",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
@@ -466,5 +467,29 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	// verify's openfga_grants check derives the same principals (GAP-0209).
 	if !slices.Equal(p.Editors, ChartEditors(p.Namespace)) || !slices.Equal(p.GlobalViewers, ChartGlobalViewers(p.Namespace)) {
 		t.Errorf("%s: plan editors %v / viewers %v differ from ChartEditors / ChartGlobalViewers", name, p.Editors, p.GlobalViewers)
+	}
+}
+
+// substrate-1:GAP-0584 (review 2). The policy alerts selected
+// k8s_namespace_name by default, a label a stock Prometheus OTLP receiver
+// or a collector without resource_to_telemetry_conversion never writes, so
+// they never fired. By default they read every release's series again;
+// metrics.prometheusRule.namespaceLabel scopes them.
+func TestGAP0584PolicyAlertsReadEverySeriesUnlessScoped(t *testing.T) {
+	helm := helmBinary(t)
+	out := string(renderChart(t, helm, "default", "--set", "metrics.prometheusRule.enabled=true"))
+	for _, expr := range []string{"defenseclaw_substrate_policy_lag_seconds_bucket[5m]",
+		"defenseclaw_substrate_policy_conflicts_total[10m]", "max(defenseclaw_substrate_unattested_templates) > 0"} {
+		if !strings.Contains(out, expr) {
+			t.Errorf("default rules: no %s", expr)
+		}
+	}
+	if strings.Contains(out, "k8s_namespace_name") {
+		t.Error("default rules select a namespace label no stock OTLP receiver writes")
+	}
+	scoped := string(renderChart(t, helm, "default", "--set", "metrics.prometheusRule.enabled=true",
+		"--set", "metrics.prometheusRule.namespaceLabel=k8s_namespace_name"))
+	if !strings.Contains(scoped, `defenseclaw_substrate_policy_conflicts_total{k8s_namespace_name="defenseclaw-system"}[10m]`) {
+		t.Error("namespaceLabel set: the rules do not select the release's namespace")
 	}
 }

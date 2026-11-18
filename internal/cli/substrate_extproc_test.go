@@ -30,15 +30,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
 
 // TestSubstrateCalloutLeaderPermissions is GAP-0090: the callout may make
-// the chain check and the registration name lookup, and nothing else.
+// the chain check and the registration name lookup, and post its egress
+// decisions to the telemetry relay (GAP-0453, a method that accepts egress
+// records only), and nothing else.
 func TestSubstrateCalloutLeaderPermissions(t *testing.T) {
 	const callout = "spiffe://cluster.local/ns/dc/sa/defenseclaw-callout"
 	p := substrateLeaderPermissions([]string{"spiffe://cluster.local/ns/dc/sa/defenseclaw-gateway"}, []string{callout}, nil)
 	got := p[callout]
-	want := []string{chainstate.MethodChainEgress, leader.MethodRegistrationLookup}
+	want := []string{chainstate.MethodChainEgress, leader.MethodRegistrationLookup, telemetryrelay.MethodPostEgress}
 	if !slices.Equal(got, want) {
 		t.Fatalf("callout methods %v, want %v", got, want)
 	}

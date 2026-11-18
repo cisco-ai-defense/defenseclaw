@@ -140,3 +140,19 @@ func managedSet(lv *Live) map[string]bool {
 	}
 	return set
 }
+
+// UnattestedTemplates is how many templates of the actors the last pass
+// listed carry no valid attestation now
+// (defenseclaw.substrate.unattested_templates): their actors get no
+// network. A template no listed actor uses no longer counts (GAP-0583).
+func (c *Controller) UnattestedTemplates() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for k, ct := range c.templates {
+		if len(c.inUse[k]) > 0 && !ct.att.Attested {
+			n++
+		}
+	}
+	return n
+}

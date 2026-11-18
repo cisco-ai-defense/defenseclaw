@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -81,6 +83,11 @@ func (a *APIServer) recordHookJudgeFallback(ctx context.Context, connector, reas
 	}
 	connector = hookDecisionMetricConnector(connector)
 	judgeHealth.recordFallback(connector, reason, time.Now())
+	// One alert line per hook check the judge gave no verdict on, in every
+	// tier, so an outage is never silent (GAP-0559); doctor's judge check
+	// warns while every recent judge call failed.
+	fmt.Fprintf(os.Stderr, "[guardrail] ALERT judge_unavailable connector=%s reason=%s: the LLM judge gave no verdict, so the rules decided this hook check "+
+		"(an unattended Agent Substrate run and the strict policy refuse it); run defenseclaw doctor\n", connector, reason)
 	if a == nil {
 		return
 	}

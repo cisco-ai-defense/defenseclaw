@@ -212,6 +212,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | --- | --- |
 | `defenseclaw.sandbox.substrate.atespace`, `.actor` | The atespace and the actor name. They are unique only together |
 | `defenseclaw.sandbox.substrate.actor_uid`, `ate.actor.uid` | The actor UID. The second is the name Substrate uses on its own records, so the two join. A fork has a new UID |
+| `defenseclaw.sandbox.substrate.registered` | On `log.egress.*`: `false` when the leader could not tie the decision to a registration of the actor (a deleted actor, one DefenseClaw never registered, or a registration lookup outage at the callout). The atespace and actor name then come from the egress gateway's verified identity, and the actor UID and guardrail profile are absent |
 | `defenseclaw.sandbox.substrate.template`, `.worker_pool`, `.kit_version` | The template the actor came from, the pool that runs it (absent while suspended) and the DefenseClaw kit release inside |
 | `defenseclaw.sandbox.substrate.batch_id` | The batch an unattended actor belongs to |
 | `defenseclaw.sandbox.substrate.parent_uid` | The actor a fork was made from |
@@ -224,7 +225,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 
 **Secrets.** `secret.injected` records the secret name and the host, never a value, a prefix or the placeholder.
 
-**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller sends no telemetry of its own in this release: the metrics it would record are marked below, and its `sandbox.*` events (in the controller's log) say the same things.
+**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller and the callout have no telemetry runtime: they send their counts and records to the leader, and a gateway replica records each one once. The leader keeps what is waiting in memory, egress decisions apart from lifecycle records and counts so a burst of egress never pushes those out. Each holds up to 50,000 records or 16 MiB, and each text field is cut to 512 bytes. Records past that bound, or not yet handed on when the leader restarts, are lost, and the gateway logs how many.
 
 | Metric | Type | Recorded |
 | --- | --- | --- |
@@ -232,12 +233,12 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | `defenseclaw.substrate.hook_rtt` | histogram, ms | By the gateway: an actor's hook call from its arrival on the actor listener to the answer (the network leg from the kit is not included) |
 | `defenseclaw.substrate.leader_observe_latency` | histogram, ms | By the gateway: one tool-chain step sent to the leader, until it answers |
 | `defenseclaw.substrate.rate_limited` | counter | By the gateway: calls refused by the fair-share limit |
-| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | Not recorded in this release: no component sees both the resume and the first hook call |
-| `defenseclaw.substrate.unattested_templates` | gauge | Not recorded in this release (controller). Read `sandbox.template_unverified` events |
-| `defenseclaw.substrate.idle_suspends` | counter | Not recorded in this release (controller). Read `sandbox.idle_suspend` events |
-| `defenseclaw.substrate.policy_conflicts` | counter | Not recorded in this release (controller). Read `sandbox.policy_conflict` events |
+| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | Not recorded in this release: Substrate resumes a suspended actor on its own when traffic reaches it, and no DefenseClaw component sees that resume when it happens (the controller sees it at its next pass, seconds late), so no honest start time exists to measure from |
+| `defenseclaw.substrate.unattested_templates` | gauge | By the gateway, from the controller: the templates of the actors on the controller's last pass that carry no valid attestation now. A template no actor uses any more stops counting. Every replica reports the same value |
+| `defenseclaw.substrate.idle_suspends` | counter | By the gateway, from the controller: actors suspended for being idle |
+| `defenseclaw.substrate.policy_conflicts` | counter | By the gateway, from the controller: actors entering `policy_conflict` |
 
-The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability and policy lag. Its conflict and unattested-template rules stay silent until the controller records those metrics.
+The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates. By default the rules on these metrics read every release's series, so they cover every DefenseClaw cluster that reports to that Prometheus. To scope them to one release, promote the `k8s.namespace.name` resource attribute where your metrics enter Prometheus (`otlp.promote_resource_attributes`, or the collector's `resource_to_telemetry_conversion`) and set the chart value `metrics.prometheusRule.namespaceLabel` to the label it becomes (`k8s_namespace_name`). Without the promotion that label is absent and the scoped rules never fire.
 
 ## What to trust
 

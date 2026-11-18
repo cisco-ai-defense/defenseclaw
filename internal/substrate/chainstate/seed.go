@@ -69,7 +69,8 @@ func (s *Service) seedFile() (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, "store.db")
-	st, err := audit.NewStore(path)
+	// Opened as an actor's store is (storeOf, GAP-0404).
+	st, err := audit.NewStore(path, audit.WithSmallFootprint())
 	if err == nil {
 		if err = st.Init(); err == nil {
 			// The actor window's tables too, which a store makes on its

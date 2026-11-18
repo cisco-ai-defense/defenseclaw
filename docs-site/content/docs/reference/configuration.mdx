@@ -459,6 +459,10 @@ webhooks:
     min_severity: HIGH
 ```
 
+`min_severity` filters findings. An approval request (`approval-request`, for example an ask an unattended Agent Substrate run queued for a person) is always sent; leave it out with an `events` list that does not name `approval-request`.
+
+On an Agent Substrate gateway, a generic post about an actor's tool call also names the actor: `substrate_actor`, `substrate_atespace`, `substrate_person` (the person's subject, as the audit row has it), `substrate_profile` and `substrate_unattended`. `host` is the gateway pod.
+
 ### Other top-level keys
 
 Defaults from the loader. Omitted keys take these values.

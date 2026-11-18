@@ -38,6 +38,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // The Agent Substrate gateway serves two listeners (PLAN §5.1, D15):
@@ -206,6 +208,11 @@ type SubstrateConfig struct {
 	// so every replica sees the same. Nil turns the chain lane off for
 	// actors and keeps the judge's intent per process.
 	Chains *chainstate.Client
+	// Relay takes the records the leader collects from the controller, the
+	// callout and its own lifecycle feed; RunSubstrate records each batch
+	// through this replica's telemetry runtime (GAP-0450, GAP-0453). Nil:
+	// nothing is relayed.
+	Relay *telemetryrelay.Taker
 }
 
 // SubstrateActorVerifier verifies actor tokens (identity.ActorVerifier).
@@ -375,6 +382,10 @@ func (a *APIServer) RunSubstrate(ctx context.Context) error {
 		return errors.New("substrate: no listener address")
 	}
 	a.startPendingHookRecovery(ctx)
+	if st.cfg.Relay != nil {
+		st.cfg.Relay.Record = a.recordSubstrateRelay
+		go st.cfg.Relay.Run(ctx)
+	}
 	if st.cfg.SignInServer != nil {
 		go st.watchSignIn(ctx)
 	}
@@ -773,8 +784,28 @@ func contextWithSubstratePerson(ctx context.Context, reg registry.Registration) 
 	if reg.Person.Subject != "" {
 		id.UserID = sanitizeLLMEventUser(reg.Person.Subject)
 		id.UserName = sanitizeLLMEventUser(reg.Person.Principal)
+		// The person's principal on the records' identity group
+		// (defenseclaw.user.principal, identity.source oidc, assurance
+		// verified): the registration holds what the OIDC token verified
+		// (GAP-0454). It feeds telemetry only, never profile selection.
+		ctx = context.WithValue(ctx, substratePersonIdentityKey{}, substratePersonIdentity{userID: id.UserID, principal: reg.Person.Principal})
 	}
 	return ContextWithAgentIdentity(ctx, id)
+}
+
+type substratePersonIdentityKey struct{}
+
+type substratePersonIdentity struct{ userID, principal string }
+
+// substrateRequestIdentity is the identity group of a record of userID on a
+// request a verified actor made for its person.
+func substrateRequestIdentity(ctx context.Context, userID string) (*llmEventIdentity, bool) {
+	p, ok := ctx.Value(substratePersonIdentityKey{}).(substratePersonIdentity)
+	if !ok || p.userID == "" || p.userID != userID || strings.TrimSpace(p.principal) == "" {
+		return nil, false
+	}
+	return &llmEventIdentity{Directory: useridentity.DirectoryFacts{Principal: p.principal,
+		Source: useridentity.SourceOIDC, Assurance: useridentity.AssuranceVerified}}, true
 }
 
 func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Request) {

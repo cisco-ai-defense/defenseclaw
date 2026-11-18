@@ -29,8 +29,6 @@ func hermeticAccountHome(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	restore := hookpaths.AccountHomeDir
-	hookpaths.AccountHomeDir = func() (string, error) { return home, nil }
-	t.Cleanup(func() { hookpaths.AccountHomeDir = restore })
+	t.Cleanup(hookpaths.SetAccountHomeDirForTest(home))
 	return home
 }

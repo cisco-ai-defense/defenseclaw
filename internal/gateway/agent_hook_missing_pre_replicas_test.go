@@ -57,18 +57,6 @@ func gap0267Finish(t *testing.T, ctx context.Context, api *APIServer, connector,
 	}
 }
 
-// gap0267AwaitShared waits (up to 2 s, the time a tool takes to run at
-// least) until the shared record holds something.
-func gap0267AwaitShared(shared *historystore.Process) {
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if scopes, _, _ := shared.Stats("", ""); scopes > 0 {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func TestGAP0267PostToolUseOnAnotherReplicaFindsItsPreToolUse(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, tc := range []struct {
@@ -80,11 +68,10 @@ func TestGAP0267PostToolUseOnAnotherReplicaFindsItsPreToolUse(t *testing.T) {
 			{"pre of another invocation", "tool-2", "tool-1", true, true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
-				a, b, shared, alerts := gap0267Replicas(t)
+				a, b, _, alerts := gap0267Replicas(t)
 				ctx := withSubstrateActor(t.Context(), *f14Actor(t, "gap0267", "3b6c2d1e-8f4a-4b9c-a1d2-5e6f7a8b9c0d"))
 				if tc.pre {
 					gap0267Finish(t, ctx, a, connector, "PreToolUse", "session-1", tc.preTool)
-					gap0267AwaitShared(shared)
 				}
 				gap0267Finish(t, ctx, b, connector, "PostToolUse", "session-1", tc.postTool)
 				if got := alerts(b) == 1; got != tc.wantAlert {
@@ -103,7 +90,6 @@ func TestGAP0267PostToolUseOnAnotherReplicaFindsItsPreToolUse(t *testing.T) {
 func TestGAP0267HostCallsStayProcessLocal(t *testing.T) {
 	a, b, shared, alerts := gap0267Replicas(t)
 	gap0267Finish(t, t.Context(), a, "claudecode", "PreToolUse", "session-1", "tool-1")
-	gap0267AwaitShared(shared)
 	if scopes, _, _ := shared.Stats("", ""); scopes != 0 {
 		t.Fatalf("a host call wrote %d scopes to the shared record", scopes)
 	}

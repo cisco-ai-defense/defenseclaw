@@ -120,6 +120,38 @@ func renderCopilotVSCodeLocalHooksPriorRelease(goos, hookBinary string) ([]byte,
 	return encodeOrdered(doc)
 }
 
+// renderCopilotVSCodeLocalHooksPriorReleases renders each Local harness hook
+// document an earlier release wrote for this install on goos: the render of
+// releases up to 1.0.6 for hookBinary and, when hookBinary is a Windows
+// launch image bin\hooks\<d16>\defenseclaw-hook.exe, the current and the
+// 1.0.6 render for the transition image bin\defenseclaw-hook.exe of the same
+// bin. Releases up to 1.0.9 named only the transition image, and Setup
+// replaces it in place with this release hook, so an account signed out
+// through the upgrade still runs this install hook from it (GAP-1096).
+func renderCopilotVSCodeLocalHooksPriorReleases(goos, hookBinary string) ([][]byte, error) {
+	prior, err := renderCopilotVSCodeLocalHooksPriorRelease(goos, hookBinary)
+	if err != nil {
+		return nil, err
+	}
+	renders := [][]byte{prior}
+	location, ok := winpath.ParseEnterpriseHookImagePath(hookBinary)
+	if goos != "windows" || !ok || !location.Versioned() || location.Name != winpath.EnterpriseHookImageName {
+		return renders, nil
+	}
+	transition := location.Bin + `\` + winpath.EnterpriseHookImageName
+	for _, render := range []func(string, string) ([]byte, error){
+		RenderCopilotVSCodeLocalHooks,
+		renderCopilotVSCodeLocalHooksPriorRelease,
+	} {
+		document, err := render(goos, transition)
+		if err != nil {
+			return nil, err
+		}
+		renders = append(renders, document)
+	}
+	return renders, nil
+}
+
 // renderCopilotPluginManifest is the plugin's manifest; hooks load from the
 // plugin's hooks/hooks.json.
 func renderCopilotPluginManifest() ([]byte, error) {
@@ -248,9 +280,12 @@ type CopilotVSCodeUserRequest struct {
 	// (CreatedDirs); each one still empty after this call is removed.
 	RemoveDirs []string
 	// AcceptPriorRelease, with DryRun, takes a hook document that holds exactly
-	// the render releases up to 1.0.6 wrote
-	// (connector.CopilotVSCodeLocalGuardedPriorReleaseHookCommand) as current.
-	// It never writes (GAP-0980).
+	// the render an earlier release wrote as current: the render of releases
+	// up to 1.0.6 (connector.CopilotVSCodeLocalGuardedPriorReleaseHookCommand,
+	// GAP-0980) and, on Windows with HookBinary a launch image, either render
+	// for the transition image bin\defenseclaw-hook.exe, which releases up to
+	// 1.0.9 named and Setup replaces in place (GAP-0751, GAP-1096). It never
+	// writes.
 	AcceptPriorRelease bool
 }
 
@@ -291,12 +326,12 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	var errs []error
 	hookFileWant, pluginWant := hooks, hooks
 	if req.AcceptPriorRelease && req.DryRun {
-		prior, err := renderCopilotVSCodeLocalHooksPriorRelease(goos, req.HookBinary)
+		priors, err := renderCopilotVSCodeLocalHooksPriorReleases(goos, req.HookBinary)
 		if err != nil {
 			return result, err
 		}
-		hookFileWant = holdsPriorRender(result.HookFile, hooks, prior)
-		pluginWant = holdsPriorRender(pluginHooks, hooks, prior)
+		hookFileWant = holdsPriorRender(result.HookFile, hooks, priors...)
+		pluginWant = holdsPriorRender(pluginHooks, hooks, priors...)
 	}
 	if ok, err := ensureCopilotHookDocument(&result, result.HookFile, hookFileWant, goos, req.HookBinary, true, req.HookFile, req.DryRun); err != nil {
 		errs = append(errs, err)
@@ -332,15 +367,24 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	return result, errors.Join(errs...)
 }
 
-// holdsPriorRender is prior when the regular file at path holds exactly prior,
-// else current: a verification that accepts the earlier release's render
+// holdsPriorRender is the one of priors the regular file at path holds
+// exactly, else current: a verification that accepts an earlier release's render
 // compares that document with it (GAP-0980).
-func holdsPriorRender(path string, current, prior []byte) []byte {
-	data, exists, regular, err := readUserFile(path, int64(len(prior)))
-	if err != nil || !exists || !regular || !bytes.Equal(data, prior) {
+func holdsPriorRender(path string, current []byte, priors ...[]byte) []byte {
+	limit := 0
+	for _, prior := range priors {
+		limit = max(limit, len(prior))
+	}
+	data, exists, regular, err := readUserFile(path, int64(limit))
+	if err != nil || !exists || !regular {
 		return current
 	}
-	return prior
+	for _, prior := range priors {
+		if bytes.Equal(data, prior) {
+			return prior
+		}
+	}
+	return current
 }
 
 // stripCopilotVSCodeOwnedHooks removes only the commands rendered for this
