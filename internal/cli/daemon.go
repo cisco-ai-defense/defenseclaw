@@ -359,6 +359,16 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if err != nil {
 		return err
 	}
+	if alreadyRunning && !coldStart && !rotationTransaction {
+		if unitCgroup, asUnit := systemdServiceCgroup(); asUnit && processOutsideCgroup(pid, unitCgroup) {
+			// GAP-0205: a unit's start takes over the gateway a restart from
+			// a shell left running outside the unit, so the unit runs it.
+			if err := takeOverGatewayOutsideUnit(d, cfg, client, pid, unitCgroup); err != nil {
+				return err
+			}
+			alreadyRunning = false
+		}
+	}
 	if alreadyRunning {
 		if rotationTransaction {
 			return fmt.Errorf("rotation start requires a stopped gateway; managed PID %d is already running", pid)
@@ -651,9 +661,19 @@ func runStop(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("rotation stop watchdog ownership: %w", err)
 		}
 	} else {
+		// GAP-0205: as a systemd unit's ExecStop, a gateway that runs outside
+		// the unit's cgroup is not the unit's to stop. A restart from a shell
+		// (`defenseclaw setup remove`) replaced the unit's gateway with one
+		// outside the unit; with the unit's processes gone systemd ran this
+		// stop, which stopped the replacement too. An unreadable cgroup
+		// stops the gateway as before.
+		unitCgroup, asUnit := systemdServiceCgroup()
+		outsideUnit := func() bool { return asUnit && running && processOutsideCgroup(pid, unitCgroup) }
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
-		_ = stopWatchdogForGateway()
+		if !outsideUnit() {
+			_ = stopWatchdogForGateway()
+		}
 		if hookColdStartSupported() && !hookcli.SecureClientHost() {
 			// The watchdog can be waiting for an independent cold-start child
 			// when it exits. Wait for that child's start lock before taking the
@@ -665,11 +685,23 @@ func runStop(cmd *cobra.Command, _ []string) error {
 				return fmt.Errorf("wait for gateway start before stop: %w", lockErr)
 			}
 			defer release()
+			if asUnit {
+				// The gateway a restart started while this stop waited.
+				running, pid = d.IsRunning()
+			}
 			// The child may have started a fresh watchdog while finishing.
 			// With its start lock held, stop that instance before checking
 			// the gateway and writing the final marker.
-			_ = stopWatchdogForGateway()
-			running, pid = d.IsRunning()
+			if !outsideUnit() {
+				_ = stopWatchdogForGateway()
+				running, pid = d.IsRunning()
+			}
+		}
+		if outsideUnit() {
+			// No stop marker: the gateway and its watchdog keep running.
+			fmt.Fprintf(os.Stderr, "Gateway sidecar (PID %d) runs outside the systemd unit %q and was left running; run it under the unit with: %s start %q\n",
+				pid, systemdUnitName(unitCgroup), systemctlFor(unitCgroup), systemdUnitName(unitCgroup))
+			return nil
 		}
 	}
 
@@ -928,6 +960,39 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// takeOverGatewayOutsideUnit stops, with restart's stop half (this start
+// holds the start lock), a gateway that runs outside the systemd unit this
+// start runs for, so the start goes on and runs the gateway under the unit
+// (GAP-0205).
+func takeOverGatewayOutsideUnit(d restartTargetDaemon, cfg *config.Config, client *http.Client, pid int, unitCgroup string) error {
+	fmt.Printf("Gateway sidecar (PID %d) runs outside the systemd unit %q; starting it under the unit\n", pid, systemdUnitName(unitCgroup))
+	running, stoppedPID, err := stopRestartTarget(d, cfg, client, defaultStopTimeout, func(pid int) {
+		_ = stopWatchdogForGateway()
+		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
+	})
+	if err != nil {
+		return err
+	}
+	if running {
+		fmt.Println(Style("OK", "fg=green", "bold"))
+	}
+	if err := waitForConfiguredPortFree(cfg, stoppedPID, restartPortReleaseTimeout, restartPortReleaseInterval); err != nil {
+		return fmt.Errorf("start under the systemd unit: %w", err)
+	}
+	return nil
+}
+
+// systemdUnitName is the unit a systemd service cgroup path names (its leaf).
+func systemdUnitName(cgroup string) string { return cgroup[strings.LastIndex(cgroup, "/")+1:] }
+
+// systemctlFor is the systemctl command that manages the unit of cgroup.
+func systemctlFor(cgroup string) string {
+	if strings.Contains(cgroup, "/user@") {
+		return "systemctl --user"
+	}
+	return "sudo systemctl"
+}
+
 type gracefulGatewayStopper interface {
 	StopGracefully(time.Duration, daemon.GracefulStopRequest) error
 }
@@ -977,14 +1042,6 @@ func stopGatewayGracefullyOnDataDir(d gracefulGatewayStopper, cfg *config.Config
 	return d.StopGracefully(timeout, func(pid int) error {
 		return requestGatewayShutdownOnDataDir(client, cfg, daemonGatewayToken(cfg), pid, dataDir)
 	})
-}
-
-func requestGatewayShutdown(client *http.Client, cfg *config.Config, token string, pid int) error {
-	dataDir := ""
-	if cfg != nil {
-		dataDir = cfg.DataDir
-	}
-	return requestGatewayShutdownOnDataDir(client, cfg, token, pid, dataDir)
 }
 
 func requestGatewayShutdownOnDataDir(client *http.Client, cfg *config.Config, token string, pid int, dataDir string) error {
