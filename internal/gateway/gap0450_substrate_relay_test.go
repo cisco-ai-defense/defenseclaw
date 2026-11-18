@@ -147,7 +147,7 @@ func TestGAP0453SubstrateRecordsReachTheTelemetryRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	got := map[string][]string{}
+	var got map[string][]string
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got = map[string][]string{}
