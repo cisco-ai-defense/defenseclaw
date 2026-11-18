@@ -45,8 +45,10 @@ const RetentionSizeCapCheckInterval = 30 * time.Second
 // RetentionSizeCapShortfallInterval is the wait before another full pass
 // after one that left the store over its cap with nothing it may delete
 // (open correlation state, pending work): until then the size checks do not
-// start a pass, which would find the same rows.
-const RetentionSizeCapShortfallInterval = 10 * time.Minute
+// start a pass, which would find the same rows. Two minutes: at 75 MiB a
+// minute the store gains about 150 MiB meanwhile, inside the volume the
+// chart requires (twice the cap plus 256 MiB).
+const RetentionSizeCapShortfallInterval = 2 * time.Minute
 
 // RetentionControllerState is a bounded lifecycle/health label. It never
 // contains a database error, path, SQL text, or retained record content.
