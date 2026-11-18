@@ -458,7 +458,7 @@ func WrapperChildIndex(argv []string, static []bool) int {
 			return wrapperChildProgram(argv, static, parsed.childIndex)
 		}
 	case "nsenter":
-		if parsed := parseNSEnterInvocation(argv); parsed.childKnown {
+		if parsed := parseNSEnterInvocation(argv); parsed.complete && parsed.childIndex > 0 {
 			return wrapperChildProgram(argv, static, parsed.childIndex)
 		}
 	case "xargs":

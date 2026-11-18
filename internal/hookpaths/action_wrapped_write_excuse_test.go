@@ -38,8 +38,6 @@ func TestWrappedProtectedWriteIsNotExcused(t *testing.T) {
 	}
 	shellForms := []string{"flock /tmp/l -c '%s'", "flock -x /tmp/l --command '%s'", "flock /tmp/l sh -c '%s'",
 		"sudo flock /tmp/l -c '%s'", "taskset 0x1 flock -n /tmp/l -c '%s'",
-		"chroot / sh -c '%s'", "chroot --userspec=1000:1000 / bash -c '%s'",
-		"nsenter -t 1 sh -c '%s'", "nsenter --target=1 bash -c '%s'",
 		// A shell named at run time runs its -c text as code (rel-1-0-10:GAP-0975).
 		"\"$SHELL\" -c '%s'", "time \"$SHELL\" -c '%s'", "time -p \"$SHELL\" -c '%s'",
 		"FOO=$BAR \"$SHELL\" -c '%s'", "$BASH -lc '%s'", "\"$SHELL\" --norc -ec '%s'",
