@@ -2739,6 +2739,13 @@ func TestMigrateV9ValidatesAssetsBesideARebasedPack(t *testing.T) {
 	}{{name: "invalid webhook", webhook: true}, {name: "valid"}, {name: "valid dry run", dryRun: true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			// The staging folder is looked for in a temp root only this run uses:
+			// another process on the box with the same TMPDIR leaves its own
+			// defenseclaw-rebased-packs-* folders in the shared one (GAP-1245).
+			privateTmp := t.TempDir()
+			t.Setenv("TMPDIR", privateTmp)
+			t.Setenv("TMP", privateTmp)
+			t.Setenv("TEMP", privateTmp)
 			dir := t.TempDir()
 			t.Setenv("DEFENSECLAW_HOME", dir)
 			configPath := filepath.Join(dir, "config.yaml")
@@ -2780,11 +2787,24 @@ func TestMigrateV9ValidatesAssetsBesideARebasedPack(t *testing.T) {
 			if !strings.Contains(string(result.Migrated), "path: "+acme+"-1.0") {
 				t.Errorf("want the rebased copy pinned:\n%s", result.Migrated)
 			}
-			if leftover, _ := filepath.Glob(filepath.Join(os.TempDir(), "defenseclaw-rebased-packs-*")); len(leftover) > 0 {
+			if leftover, _ := filepath.Glob(filepath.Join(privateTmp, "defenseclaw-rebased-packs-*")); len(leftover) > 0 {
 				t.Errorf("staged copies left behind: %q", leftover)
 			}
 		})
 	}
+}
+
+// The staged-copy check reads only its own temp root: a staging folder another
+// process left in the shared TMPDIR must not fail it (GAP-1245).
+func TestMigrateV9StagedCopyCheckIgnoresAnotherProcessesStagingFolders(t *testing.T) {
+	shared := t.TempDir()
+	t.Setenv("TMPDIR", shared)
+	t.Setenv("TMP", shared)
+	t.Setenv("TEMP", shared)
+	if err := os.Mkdir(filepath.Join(shared, "defenseclaw-rebased-packs-other"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("asset check beside a rebased pack", TestMigrateV9ValidatesAssetsBesideARebasedPack)
 }
 
 // A migration that stopped right after config.yaml committed left the pre-9
