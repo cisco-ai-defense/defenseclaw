@@ -4714,12 +4714,6 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				artifacts = append(artifacts, artifact)
 			}
 		}
-		if oc, ok := conn.(interface {
-			SetOpenClawPaths(home, config, external string)
-		}); ok {
-			cfg := s.currentConfig()
-			oc.SetOpenClawPaths(cfg.OpenClawHome(), cfg.OpenClawConfigPath(), cfg.OpenClawExternalPluginDir())
-		}
 		if bundled, ok := conn.(connector.BundledPluginChecker); ok && !bundledSet {
 			bundledSet = true
 			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
