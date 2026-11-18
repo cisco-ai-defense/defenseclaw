@@ -83,6 +83,14 @@ func substrateConfigMapFetch(kube configMapGetter, ns, name string) configwatch.
 // leader's Service, not its Deployment).
 var substrateRoleDeployment = map[string]string{"gateway": "defenseclaw-gateway", "leader": "defenseclaw-gateway-leader"}
 
+// substrateRestartAll restarts every pod that reads config.yaml at start,
+// the controller included. A change to a key the controller keeps from its
+// start (substrateControllerRestartOnly: llm_providers, substrate.identity,
+// .services, .api, .extproc) needs it: restarting only the gateway would
+// leave the controller rendering the old provider hosts (GAP-0589). The
+// controller's own warning names the same command.
+const substrateRestartAll = "kubectl rollout restart deploy/defenseclaw-gateway deploy/defenseclaw-gateway-leader deploy/defenseclaw-controller"
+
 // substrateFollower keeps a gateway or leader pod on config.yaml: on a
 // change it applies the parts this pod takes live (apply) and names the
 // ones that wait for the pod's next start (substrateRestartOnly).
@@ -164,8 +172,12 @@ func (f *substrateFollower) step(ctx context.Context) {
 			f.role, ch.Digest, prev, f.guardrail)
 	}
 	if pending := substrateRestartOnly(f.boot, ch.Config); len(pending) > 0 {
+		restart := "kubectl rollout restart deploy/" + substrateRoleDeployment[f.role]
+		if len(substrateControllerRestartOnly(f.boot, ch.Config)) > 0 {
+			restart = substrateRestartAll
+		}
 		msg += "; these keys changed and apply when this pod restarts: " + strings.Join(pending, ", ") +
-			" (helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/" + substrateRoleDeployment[f.role] + ")"
+			" (helm upgrade rolls the pods; after a direct ConfigMap edit run " + restart + ")"
 	}
 	fmt.Fprintln(f.out, msg)
 }

@@ -100,3 +100,51 @@ func TestGAP0590GatewayFollowerSaysWhenTheGuardrailApplies(t *testing.T) {
 		t.Errorf("gateway that reads its file only: %q", got)
 	}
 }
+
+// substrate-1:GAP-0589 (review 2). The follower's restart advice for a
+// llm_providers change named only deploy/defenseclaw-gateway, but the
+// controller keeps the provider hosts it started with
+// (substrateControllerRestartOnly), so it has to restart too. The advice
+// names the gateway, the leader and the controller, as the controller's own
+// warning does, for a key the controller keeps; other keys still name only
+// the pod's Deployment.
+func TestGAP0589FollowerRestartAdviceNamesTheController(t *testing.T) {
+	boot := gap0276Config("", nil)
+	follow := func(t *testing.T, edit func(*config.Config)) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("boot"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		next := gap0276Config("", edit)
+		w := configwatch.New(path, boot, []byte("boot"))
+		w.Load = func(_ string, b []byte) (*config.Config, error) {
+			if string(b) == "v2" {
+				return next, nil
+			}
+			return nil, errors.New("does not load")
+		}
+		now := time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC)
+		w.Now = func() time.Time { return now }
+		var out bytes.Buffer
+		f := newSubstrateFollower(w, "gateway", &out, func(*config.Config) error { return nil })
+		if err := os.WriteFile(path, []byte("v2"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(configwatch.DefaultInterval)
+		f.step(context.Background())
+		return out.String()
+	}
+	providers := follow(t, func(c *config.Config) {
+		c.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "acme", Domains: []string{"llm.acme.example"}}}
+	})
+	if !strings.Contains(providers, "llm_providers") ||
+		!strings.Contains(providers, "rollout restart deploy/defenseclaw-gateway deploy/defenseclaw-gateway-leader deploy/defenseclaw-controller)") {
+		t.Errorf("llm_providers change: the restart advice does not name the controller: %q", providers)
+	}
+	rates := follow(t, func(c *config.Config) { c.Substrate.RateLimits.PerActorRPS = 5 })
+	if !strings.Contains(rates, "substrate.rate_limits") || !strings.Contains(rates, "rollout restart deploy/defenseclaw-gateway)") ||
+		strings.Contains(rates, "defenseclaw-controller") {
+		t.Errorf("rate_limits change: want only the gateway's Deployment: %q", rates)
+	}
+}

@@ -195,8 +195,8 @@ func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver contro
 		}
 		if keys := substrateControllerRestartOnly(boot, c); len(keys) > 0 {
 			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
-				Message: "config.yaml changed " + strings.Join(keys, ", ") + ": applies when the pods restart (helm upgrade, or kubectl rollout restart " +
-					"deploy/defenseclaw-gateway deploy/defenseclaw-gateway-leader deploy/defenseclaw-controller); until then the values the pods started with stay"})
+				Message: "config.yaml changed " + strings.Join(keys, ", ") + ": applies when the pods restart (helm upgrade, or " +
+					substrateRestartAll + "); until then the values the pods started with stay"})
 		}
 		lv.Settings.ActorService, lv.Settings.AdminService = bootSettings.ActorService, bootSettings.AdminService
 		lv.Settings.Audience, lv.Settings.TokenLifetimeSeconds = bootSettings.Audience, bootSettings.TokenLifetimeSeconds
