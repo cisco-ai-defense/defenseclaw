@@ -311,7 +311,7 @@ type SubstrateExtprocChainConfig struct {
 	// SendBudget bounds a check whose miss refuses the request (a send, a
 	// policy that refuses unchecked egress, a cached registration) and the
 	// refresh that confirms one (default 250ms, at most 500ms, never shorter
-	// than CheckBudget; with ask.hold at most 1.8s).
+	// than CheckBudget).
 	SendBudget  string `mapstructure:"send_budget"  yaml:"send_budget,omitempty"`
 	QueueSize   int    `mapstructure:"queue_size"   yaml:"queue_size,omitempty"`
 	FailureMode string `mapstructure:"failure_mode" yaml:"failure_mode,omitempty"`
@@ -987,18 +987,6 @@ func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any)
 		if v, err := time.ParseDuration(strings.TrimSpace(d.v)); err != nil || v < 0 || v > d.max {
 			bad(d.key, "%q must be a Go duration from 0 to %s", d.v, d.max)
 		}
-	}
-	// The callout raises an ask after the chain check, and both fit in its
-	// 1.8s message budget (GAP-0601). Unset or 0 is the callout's default.
-	orDur := func(s string, def time.Duration) time.Duration {
-		if v, err := time.ParseDuration(strings.TrimSpace(s)); err == nil && v > 0 {
-			return v
-		}
-		return def
-	}
-	send := max(orDur(e.Chain.SendBudget, 250*time.Millisecond), orDur(e.Chain.CheckBudget, 20*time.Millisecond))
-	if hold := orDur(e.Ask.Hold, 1500*time.Millisecond); send+hold > 1800*time.Millisecond {
-		bad("extproc.ask.hold", "%s plus chain.send_budget %s must be at most 1.8s (the callout's message budget)", hold, send)
 	}
 	switch strings.ToLower(strings.TrimSpace(e.Chain.FailureMode)) {
 	case "", "auto", SubstrateFailClosed, SubstrateFailOpen:

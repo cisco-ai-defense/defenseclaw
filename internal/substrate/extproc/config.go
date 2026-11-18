@@ -124,8 +124,9 @@ type ChainConfig struct {
 	// such a pass instead (a cached refusal waits CheckBudget for its
 	// refresh, GAP-0243). A slow but healthy leader (GAP-0564) gets that long
 	// before a git fetch or push is refused (GAP-0601). Default 250 ms, at
-	// most 500 ms, never shorter than CheckBudget, and with Ask.Hold at most
-	// MessageBudget, since an ask is raised after the check.
+	// most 500 ms, never shorter than CheckBudget. An ask is raised after the
+	// check, within MessageBudget: the defaults (250 ms and Ask.Hold 1.5 s)
+	// fit, and a longer pair shortens the hold when the leader is slow.
 	SendBudget time.Duration `yaml:"send_budget"`
 	// QueueSize bounds the observed_egress queue; a full queue drops.
 	QueueSize int `yaml:"queue_size"`
@@ -140,8 +141,8 @@ type ChainConfig struct {
 
 // AskConfig configures ask-required hosts.
 type AskConfig struct {
-	// Hold is how long a request waits for an ask's outcome, with
-	// Chain.SendBudget at most MessageBudget.
+	// Hold is how long a request waits for an ask's outcome, at most
+	// MessageBudget, which also covers the chain check before the ask.
 	Hold time.Duration `yaml:"hold"`
 }
 
@@ -350,13 +351,8 @@ func (c *Config) normalize() error {
 			return err
 		}
 	}
-	// A check whose miss refuses waits at least as long as any other. An
-	// ask is raised after the check, and both fit in one message's budget.
+	// A check whose miss refuses waits at least as long as any other.
 	c.Chain.SendBudget = max(c.Chain.SendBudget, c.Chain.CheckBudget)
-	if c.Chain.SendBudget+c.Ask.Hold > MessageBudget {
-		return bad("chain.send_budget %s plus ask.hold %s is over the callout's %s message budget, so an ask would not get its whole hold",
-			c.Chain.SendBudget, c.Ask.Hold, MessageBudget)
-	}
 	switch c.Chain.FailureMode = strings.ToLower(strings.TrimSpace(c.Chain.FailureMode)); c.Chain.FailureMode {
 	case "":
 		c.Chain.FailureMode = ChainAuto

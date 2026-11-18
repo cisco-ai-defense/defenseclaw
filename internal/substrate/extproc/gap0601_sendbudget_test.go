@@ -71,7 +71,7 @@ func slowLeaderHarness(t *testing.T, m gitMode, delay, send time.Duration, v Cha
 	h := newHarness(t, func(c *Config, o *Options) {
 		o.ChainChecker = fakeChecker{delay: delay, v: v}
 		if send > 0 {
-			c.Chain.SendBudget, c.Ask.Hold = send, MessageBudget-send
+			c.Chain.SendBudget = send
 		}
 		if m.cfg != nil {
 			m.cfg(c)
@@ -236,7 +236,7 @@ func TestSendBudgetIsBoundedGAP0601(t *testing.T) {
 	// A longer check_budget wins over a shorter send_budget.
 	h = newHarness(t, func(c *Config, o *Options) {
 		o.ChainChecker = fakeChecker{delay: 300 * time.Millisecond}
-		c.Chain.CheckBudget, c.Chain.SendBudget, c.Ask.Hold = 450*time.Millisecond, 100*time.Millisecond, time.Second
+		c.Chain.CheckBudget, c.Chain.SendBudget = 450*time.Millisecond, 100*time.Millisecond
 	})
 	if v := h.eng.DecideHeaders(ctx, postBody("eng-web", "example.com")); !v.Allow {
 		t.Fatalf("check_budget 450ms over send_budget 100ms, 300ms leader: %+v", v)
@@ -273,7 +273,8 @@ func TestSendBudgetConfigGAP0601(t *testing.T) {
 	if _, err := ParseConfig([]byte(testConfig + "\nchain:\n  send_budget: 600ms\n")); err == nil {
 		t.Fatal("send_budget 600ms accepted, want at most 500ms")
 	}
-	if _, err := ParseConfig([]byte(testConfig + "\nchain:\n  send_budget: 400ms\n")); err == nil {
-		t.Fatal("send_budget 400ms with ask.hold 1500ms accepted, want at most the 1.8s message budget together")
+	// The defaults leave an ask, raised after the check, its whole hold.
+	if cfg.Chain.SendBudget+cfg.Ask.Hold > MessageBudget {
+		t.Fatalf("default send_budget %s plus ask.hold %s is over the %s message budget", cfg.Chain.SendBudget, cfg.Ask.Hold, MessageBudget)
 	}
 }

@@ -59,18 +59,12 @@ func TestMessageBudget(t *testing.T) {
 	if took > MessageBudget+300*time.Millisecond || int(j.calls.Load()) >= maxBatchCalls {
 		t.Fatalf("took %s for %d calls; budget %s", took, j.calls.Load(), MessageBudget)
 	}
-	// An ask is raised after the chain check: chain.send_budget (250ms by
-	// default) and ask.hold share the message budget (GAP-0601).
-	for _, doc := range []string{"ask:\n  hold: 2s\n", "judge:\n  timeout: 1h\n", "ask:\n  hold: 1800ms\n",
-		"chain:\n  send_budget: 500ms\n", "chain:\n  check_budget: 400ms\n  send_budget: 100ms\nask:\n  hold: 1500ms\n"} {
+	for _, doc := range []string{"ask:\n  hold: 2s\n", "judge:\n  timeout: 1h\n"} {
 		if _, err := ParseConfig([]byte(doc)); err == nil {
 			t.Errorf("accepted %q", doc)
 		}
 	}
-	if _, err := ParseConfig([]byte("ask:\n  hold: 1550ms\njudge:\n  timeout: 1800ms\n")); err != nil {
+	if _, err := ParseConfig([]byte("ask:\n  hold: 1800ms\njudge:\n  timeout: 1800ms\n")); err != nil {
 		t.Errorf("budget-sized timeouts refused: %v", err)
-	}
-	if _, err := ParseConfig([]byte("chain:\n  send_budget: 500ms\nask:\n  hold: 1300ms\n")); err != nil {
-		t.Errorf("send_budget 500ms with ask.hold 1300ms refused: %v", err)
 	}
 }
