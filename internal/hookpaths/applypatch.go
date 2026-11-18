@@ -808,18 +808,25 @@ func openQuote(text string) byte {
 	return quote
 }
 
+// applyPatchNames are the program names of apply_patch.
+var applyPatchNames = []string{"apply_patch", "applypatch", "apply-patch"}
+
 // invokesApplyPatch reports a shell text that may run apply_patch as a
 // command, also behind a wrapper (env, sudo, nice, nohup, time, exec,
 // command) or in a sh -c script. Its patch then comes from a file or a pipe
 // the hook cannot read. Each line is also read on its own, so a script fed
 // to a shell on stdin (a here-document body) counts too.
 func invokesApplyPatch(text string) bool {
-	names := []string{"apply_patch", "applypatch", "apply-patch"}
-	if tactics.RunsProgram(text, names...) {
+	// A line holds no name the whole text does not (MayNameProgram), so a
+	// text that names none skips the reading of every line.
+	if !tactics.MayNameProgram(text, applyPatchNames...) {
+		return false
+	}
+	if tactics.RunsProgram(text, applyPatchNames...) {
 		return true
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if tactics.RunsProgram(line, names...) {
+		if tactics.RunsProgram(line, applyPatchNames...) {
 			return true
 		}
 	}

@@ -333,6 +333,9 @@ type overLimitArgsReducer struct {
 	// commandTwin reduces only a string over maxCommandBytes, to its form
 	// without padding white space, and nothing else.
 	commandTwin bool
+	// dry reads the object without copying its strings: the reduction says
+	// what a copy would find, its args are not the copy.
+	dry bool
 	overLimitReduction
 }
 
@@ -461,6 +464,9 @@ func (r *overLimitArgsReducer) array(depth int) bool {
 }
 
 func (r *overLimitArgsReducer) writeString(text string) bool {
+	if r.dry {
+		return true // json.Marshal of a string does not fail
+	}
 	encoded, err := json.Marshal(text)
 	if err != nil {
 		return false

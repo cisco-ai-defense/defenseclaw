@@ -622,8 +622,15 @@ func commandArgv(command CommandFact, facts Facts) []string {
 }
 
 func (r *controlReader) read(facts Facts, text string, depth int) {
-	flowing := heredocFlowBodies(text)
-	text = withoutDataHeredocs(text)
+	var docs []heredoc
+	if strings.Contains(text, "<<") {
+		// One parse serves both readings of the here-documents: each parse
+		// of a 1 MiB here-document copies its body a few times
+		// (rel-1-0-10:GAP-0299).
+		docs = heredocs(text)
+	}
+	flowing := heredocFlowBodies(docs)
+	text = withoutDataHeredocs(text, docs)
 	if !containsFold(text, defenseClawNamespace) {
 		return
 	}
@@ -2193,16 +2200,14 @@ func runLocationPath(path string) bool {
 	return false
 }
 
-// heredocFlowBodies returns the bodies of the here-documents whose output may
-// be run by something the statement does not name (GAP-0788): a substitution a
-// shell reads, a variable that is run, a descriptor, a file a login, a
-// scheduler or a later command of the call runs.
-func heredocFlowBodies(text string) []string {
-	if !strings.Contains(text, "<<") {
-		return nil
-	}
+// heredocFlowBodies returns the bodies of the here-documents of docs (the
+// heredocs of a text) whose output may be run by something the statement
+// does not name (GAP-0788): a substitution a shell reads, a variable that is
+// run, a descriptor, a file a login, a scheduler or a later command of the
+// call runs.
+func heredocFlowBodies(docs []heredoc) []string {
 	var bodies []string
-	for _, doc := range heredocs(text) {
+	for _, doc := range docs {
 		if doc.flows {
 			bodies = append(bodies, doc.body)
 		}
@@ -2223,13 +2228,10 @@ func heredocBodies(text string) []string {
 }
 
 // withoutDataHeredocs returns text with the bodies of the here-documents and
-// here-strings that only feed data removed: what a note, a brief or a file
-// written through cat says about DefenseClaw is not a command of the call.
-func withoutDataHeredocs(text string) string {
-	if !strings.Contains(text, "<<") {
-		return text
-	}
-	docs := heredocs(text)
+// here-strings of docs (the heredocs of text) that only feed data removed:
+// what a note, a brief or a file written through cat says about DefenseClaw
+// is not a command of the call.
+func withoutDataHeredocs(text string, docs []heredoc) string {
 	cut := text
 	for index := len(docs) - 1; index >= 0; index-- {
 		doc := docs[index]

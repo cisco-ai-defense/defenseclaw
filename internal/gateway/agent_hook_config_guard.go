@@ -128,7 +128,11 @@ type agentHookConfigGuard struct {
 
 // shellMentionsRegistryPath is a cheap prefilter. Every component comes from
 // the active registration registry, including enclosing hook directories.
+// Many files share components (.claude, settings.json, the project folders),
+// so each distinct component is searched for once: a 1 MiB command was
+// read once per component of every file (rel-1-0-10:GAP-0299).
 func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
+	searched := make(map[string]bool, 4*len(g.files))
 	for _, file := range g.files {
 		path := file.Path
 		if relative, ok := strings.CutPrefix(path, g.home+string(filepath.Separator)); ok && g.home != "" {
@@ -137,7 +141,15 @@ func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
 			path = relative
 		}
 		for _, component := range strings.Split(filepath.ToSlash(path), "/") {
-			if len(component) > 2 && strings.Contains(text, strings.ToLower(component)) {
+			if len(component) <= 2 {
+				continue
+			}
+			component = strings.ToLower(component)
+			if searched[component] {
+				continue
+			}
+			searched[component] = true
+			if strings.Contains(text, component) {
 				return true
 			}
 		}
