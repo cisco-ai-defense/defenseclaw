@@ -145,6 +145,22 @@ func (c *Client) Create(ctx context.Context, r CreateRequest) (Actor, error) {
 
 // List returns the person's actors.
 func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
+	actors, _, err := c.ListWithWorkload(ctx, o)
+	return actors, err
+}
+
+// WorkloadMatch is the cluster's answer to a workload caller (GAP-0542):
+// the subject it verified, the match.substrate.workloads entry that
+// subject matched ("" for none) and that entry's profile.
+type WorkloadMatch struct {
+	Subject string `json:"subject"`
+	Entry   string `json:"entry"`
+	Profile string `json:"profile"`
+}
+
+// ListWithWorkload is List plus the workload answer, nil when the caller is
+// a person or the cluster is older and sends none.
+func (c *Client) ListWithWorkload(ctx context.Context, o ListOptions) ([]Actor, *WorkloadMatch, error) {
 	q := url.Values{}
 	if o.Batch != "" {
 		q.Set("batch", o.Batch)
@@ -153,15 +169,16 @@ func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
 		q.Set("all", "1")
 	}
 	var out struct {
-		Actors []Actor `json:"actors"`
+		Actors   []Actor        `json:"actors"`
+		Workload *WorkloadMatch `json:"workload"`
 	}
 	if err := c.do(ctx, http.MethodGet, "actors", q, nil, &out); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i := range out.Actors {
 		out.Actors[i] = out.Actors[i].shown()
 	}
-	return out.Actors, nil
+	return out.Actors, out.Workload, nil
 }
 
 // Get returns one actor.

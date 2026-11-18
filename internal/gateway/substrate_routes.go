@@ -518,7 +518,15 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 			}
 			out = append(out, v)
 		}
-		writeSubstrateJSON(w, http.StatusOK, map[string]any{"actors": out})
+		body := map[string]any{"actors": out}
+		// GAP-0542: a workload caller learns which workloads entry its
+		// verified subject matched ("" for none), so login --workload can
+		// warn about an entry that never matches.
+		if c.person.Kind == identity.PersonWorkload && st.cfg.WorkloadEntry != nil {
+			entry, profile := st.cfg.WorkloadEntry(c.person.Subject)
+			body["workload"] = map[string]any{"subject": c.person.Subject, "entry": entry, "profile": profile}
+		}
+		writeSubstrateJSON(w, http.StatusOK, body)
 	}
 }
 

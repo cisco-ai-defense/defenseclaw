@@ -75,6 +75,30 @@ func SubstrateLauncherProfiles(cfg *config.Config) SubstrateProfileResolver {
 	}
 }
 
+// SubstrateWorkloadEntry is the first match.substrate.workloads entry, in
+// profile_assignments order, that a workload subject matches, and that
+// assignment's profile; "" and "" when no entry matches, so the workload
+// gets an assignment without workloads or guardrail.default_profile. The
+// actor list answers a workload caller with it, so login --workload can
+// warn about an entry written in another form than the token's subject
+// (GAP-0542).
+func SubstrateWorkloadEntry(cfg *config.Config, subject string) (entry, profile string) {
+	if cfg == nil {
+		return "", ""
+	}
+	for _, a := range cfg.Guardrail.ProfileAssignments {
+		if a.Match.Substrate == nil {
+			continue
+		}
+		for _, e := range a.Match.Substrate.Workloads {
+			if substrateWorkloadMatches(e, subject) {
+				return strings.TrimSpace(e), strings.TrimSpace(a.Profile)
+			}
+		}
+	}
+	return "", ""
+}
+
 // substrateCallerProfile is the profile profile_assignments give the
 // caller, "" for none.
 func substrateCallerProfile(g config.GuardrailConfig, p identity.Person, connector string) string {
@@ -137,8 +161,6 @@ func substrateUserMatches(entry string, p identity.Person) bool {
 	return strings.EqualFold(entry, p.Principal) || entry == p.Subject
 }
 
-// substrateWorkloadMatches compares a workloads entry (exact, or a prefix
-// with a trailing "*") with a workload subject.
 // substrateWorkloadMatches matches a match.substrate.workloads entry: exact,
 // or a ":*" / "/*" prefix that stops on a segment boundary (GAP-0043, the
 // rule identity.WorkloadSubjectPattern holds); a raw prefix or a bare "*"

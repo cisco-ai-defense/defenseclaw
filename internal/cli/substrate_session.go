@@ -248,7 +248,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	}
 	// Check that the cluster takes this sign-in, so a wrong issuer shows now
 	// and not at the first run.
-	note := ""
+	note, warning := "", ""
 	probe := auth.SourceOptions{}
 	if kube {
 		ko := c.KubeOptions()
@@ -260,18 +260,25 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 		probe.Workload = &auth.WorkloadOptions{TokenFile: f.workloadFile}
 	}
 	if cl, err := api.New(api.Options{Base: c.AdminURL, CAFile: c.AdminCAFile, Token: auth.NewSource(name, c, store, probe).Token}); err == nil {
-		if _, err := cl.List(ctx, api.ListOptions{}); err != nil {
+		_, wm, err := cl.ListWithWorkload(ctx, api.ListOptions{})
+		if err != nil {
 			if e, ok := api.AsError(err); ok && !e.NotImplemented() {
 				note = "You are signed in, but the cluster did not accept it yet: " + substrateAPIMessage(e)
 			} else if !ok {
 				note = "You are signed in, but the cluster could not be reached: " + safetext.Line(err.Error())
 			}
+		} else if workload {
+			warning = substrateWorkloadWarning(wm, tok.Subject)
 		}
 	}
 	w := cmd.OutOrStdout()
 	who := substrateDash(tok.Principal)
 	if asJSON {
-		return writeSubstrateJSON(w, map[string]any{"context": name, "signed_in_as": tok.Principal, "subject": tok.Subject, "kind": tok.Kind, "note": note})
+		out := map[string]any{"context": name, "signed_in_as": tok.Principal, "subject": tok.Subject, "kind": tok.Kind, "note": note}
+		if warning != "" {
+			out["warning"] = warning
+		}
+		return writeSubstrateJSON(w, out)
 	}
 	if kube && c.KubeServiceAccount == "" && strings.HasPrefix(tok.Principal, "system:serviceaccount:") {
 		// GAP-0192: say once why the person is a ServiceAccount now.
@@ -282,8 +289,26 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	if note != "" {
 		fmt.Fprintln(w, note)
 	}
+	if warning != "" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Warning: "+warning)
+	}
 	fmt.Fprintln(w, "Next: start a coding agent in a project folder with: defenseclaw substrate run claude")
 	return nil
+}
+
+// substrateWorkloadWarning is what login --workload warns when the cluster
+// says no match.substrate.workloads entry matches the workload's subject
+// (GAP-0542), "" when one matches or the cluster sent no answer (an older
+// cluster). The subject is the cluster's, else the token's, made one safe
+// line.
+func substrateWorkloadWarning(m *api.WorkloadMatch, subject string) string {
+	if m == nil || strings.TrimSpace(m.Entry) != "" {
+		return ""
+	}
+	if s := strings.TrimSpace(m.Subject); s != "" {
+		subject = s
+	}
+	return fmt.Sprintf("no match.substrate.workloads entry matches %s; it gets the default profile", substrateDash(subject))
 }
 
 func newSubstrateLogoutCmd() *cobra.Command {
