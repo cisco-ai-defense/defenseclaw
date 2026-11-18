@@ -1423,12 +1423,6 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 	if target := sandboxAgentHookConfigWrite(whole, input.ActiveHome); target != "" {
 		return agentHookConfigWriteRuleID, "", target
 	}
-	// The writers the path facts do not list are read on the whole call
-	// before the placed statements below, whose early returns would skip
-	// them (substrate-1:GAP-0578).
-	if target := sandboxAgentHookConfigInlineWrite(input); target != "" {
-		return agentHookConfigWriteRuleID, "", target
-	}
 	// Each top-level statement read alone in the directory a static cd
 	// leaves it in, as the laptop guard places them (TopLevelStatements;
 	// a lexical parse, and actionfacts.Analyze reads no files): the reading
@@ -1441,9 +1435,16 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 	// write, as on the laptop (substrate-1 GAP-0359). A call the whole
 	// reading did not finish (a && list past its bound) is read even without
 	// a cd, through the guest placement below (substrate-1 GAP-0363).
+	// The writers the path facts do not list (inline code, substrate-1
+	// GAP-0578) are read where the laptop reads them: in each placed
+	// statement, in its folder (agentHookConfigReachedPaths), and on the
+	// whole call where this guard places no statement.
 	command := agentHookConfigRawShellCommand(input)
 	if command == "" || len(command) > agentHookConfigMaxPlacedBytes || !path.IsAbs(input.CWD) ||
 		whole.Authoritative() && !strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
+		if target := sandboxAgentHookConfigInlineWrite(command, input.CWD, input.ActiveHome); target != "" {
+			return agentHookConfigWriteRuleID, "", target
+		}
 		return "", "", ""
 	}
 	if !whole.Authoritative() {
@@ -1463,11 +1464,10 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 			// (substrate-1 GAP-0500). After a command the split cannot read
 			// ($CMD, eval, source), which may change the folder, the laptop
 			// keeps such a folder and alerts; so does this guard.
-			if placement.candidate && !dynamic || !sandboxStatementMayNameHookConfig(placement.text) {
+			if placement.candidate && !dynamic {
 				continue
 			}
-			placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: placement.text, CWD: placement.cwd, ActiveHome: input.ActiveHome})
-			if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
+			if target := sandboxAgentHookConfigPlacedWrite(placement.text, placement.cwd, input.ActiveHome); target != "" {
 				return agentHookConfigWriteRuleID, "", target
 			}
 		}
@@ -1475,22 +1475,38 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 	}
 	statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome)
 	if !ok {
+		if target := sandboxAgentHookConfigInlineWrite(command, input.CWD, input.ActiveHome); target != "" {
+			return agentHookConfigWriteRuleID, "", target
+		}
 		return "", "", ""
 	}
 	type placement struct{ command, dir string }
 	seen := map[placement]bool{}
 	for _, statement := range statements {
 		key := placement{statement.Command, statement.Dir}
-		if seen[key] || !path.IsAbs(statement.Dir) || !sandboxStatementMayNameHookConfig(statement.Command) {
+		if seen[key] || !path.IsAbs(statement.Dir) {
 			continue
 		}
 		seen[key] = true
-		placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: input.ActiveHome})
-		if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
+		if target := sandboxAgentHookConfigPlacedWrite(statement.Command, statement.Dir, input.ActiveHome); target != "" {
 			return agentHookConfigWriteRuleID, "", target
 		}
 	}
 	return "", "", ""
+}
+
+// sandboxAgentHookConfigPlacedWrite is the first hook file one placed
+// statement writes in folder cwd, or "": by its path facts, read only when
+// its text may name a hook file (sandboxStatementMayNameHookConfig), then by
+// the inline writer reading.
+func sandboxAgentHookConfigPlacedWrite(statement, cwd, home string) string {
+	if sandboxStatementMayNameHookConfig(statement) {
+		placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement, CWD: cwd, ActiveHome: home})
+		if target := sandboxAgentHookConfigWrite(placed, home); target != "" {
+			return target
+		}
+	}
+	return sandboxAgentHookConfigInlineWrite(statement, cwd, home)
 }
 
 // sandboxHookConfigNames are the file names of every hook file
@@ -1556,27 +1572,26 @@ func sandboxAgentHookConfigWrite(facts actionfacts.Facts, home string) string {
 	return ""
 }
 
-// sandboxAgentHookConfigInlineWrite is the first hook file a shell call
-// writes that its path facts do not list, or "". Inline code (python3 -c
-// "open(PATH, 'w')"), and the other writers the path facts do not list, are
-// read by the shared shell writer as the laptop reads them
+// sandboxAgentHookConfigInlineWrite is the first hook file a shell command run
+// in folder cwd writes that its path facts do not list, or "". Inline code
+// (python3 -c "open(PATH, 'w')"), and the other writers the path facts do not
+// list, are read by the shared shell writer as the laptop reads them
 // (agentHookConfigReachedPaths), against the hook files of the guest home
 // and of the working folder and its parents (substrate-1:GAP-0578).
 // The guest paths are not this host's; a stat of one that exists here
 // only adds this alert.
-func sandboxAgentHookConfigInlineWrite(input actionfacts.Input) string {
-	command := agentHookConfigRawShellCommand(input)
-	if command == "" || !path.IsAbs(input.CWD) || !path.IsAbs(input.ActiveHome) ||
+func sandboxAgentHookConfigInlineWrite(command, cwd, home string) string {
+	if command == "" || !path.IsAbs(cwd) || !path.IsAbs(home) ||
 		!sandboxAgentHookConfigMentioned(command) || !hookpaths.RegistrationWriteCandidate(command) {
 		return ""
 	}
-	names := sandboxAgentHookConfigNames(input.CWD, input.ActiveHome)
-	if reached := hookpaths.RegistrationWriteReached(command, input.CWD, input.ActiveHome, names); len(reached) > 0 {
+	names := sandboxAgentHookConfigNames(cwd, home)
+	if reached := hookpaths.RegistrationWriteReached(command, cwd, home, names); len(reached) > 0 {
 		return reached[0]
 	}
-	handed, _ := hookpaths.InlineHandedPaths(command, input.CWD, input.ActiveHome)
+	handed, _ := hookpaths.InlineHandedPaths(command, cwd, home)
 	for _, word := range handed {
-		if !word.Dynamic && sandboxAgentHookConfigFormat(word.Path, input.ActiveHome) != "" {
+		if !word.Dynamic && sandboxAgentHookConfigFormat(word.Path, home) != "" {
 			return word.Path
 		}
 	}
@@ -1605,7 +1620,15 @@ func sandboxAgentHookConfigNames(cwd, home string) []string {
 
 // sandboxAgentHookConfigMentioned is the cheap prefilter of that reading: the
 // command names a folder or file name of a hook file (sandboxAgentHookConfigNames).
+// The names are built once: the guard reads it for every placed statement of
+// a call (substrate-1 GAP-0364 bounds that work).
 func sandboxAgentHookConfigMentioned(command string) bool {
+	return slices.ContainsFunc(sandboxAgentHookConfigParts(), func(part string) bool { return strings.Contains(command, part) })
+}
+
+// sandboxAgentHookConfigParts are the folder and file names, longer than two
+// bytes, of every hook file sandboxAgentHookConfigMentioned looks for.
+var sandboxAgentHookConfigParts = sync.OnceValue(func() []string {
 	var parts []string
 	for _, file := range agentHookConfigHomeFiles {
 		parts = append(parts, file.parts...)
@@ -1613,8 +1636,10 @@ func sandboxAgentHookConfigMentioned(command string) bool {
 	for _, file := range agentHookConfigProjectFiles {
 		parts = append(parts, strings.Split(strings.TrimPrefix(file.suffix, "/"), "/")...)
 	}
-	return slices.ContainsFunc(parts, func(part string) bool { return len(part) > 2 && strings.Contains(command, part) })
-}
+	parts = slices.DeleteFunc(parts, func(part string) bool { return len(part) <= 2 })
+	slices.Sort(parts)
+	return slices.Compact(parts)
+})
 
 // A no-copy replacement cannot prove that any Claude settings file never
 // held DefenseClaw's entries. Use the same hook-preservation fallback on every
