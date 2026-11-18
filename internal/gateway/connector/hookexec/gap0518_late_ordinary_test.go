@@ -76,6 +76,11 @@ func lateOrdinaryPayload(t *testing.T, project string, command any) string {
 // stays closed. A call that names the keys file, a link or a hard link to it,
 // in a short or a 2000-operand list, stays closed in every tier (the
 // verified-gateway-without-status control of the psna-rb review).
+// A call is ordinary only when both late-call scans find it so
+// (LateOrdinaryBothScans): an argv command, which the shared protected-reach
+// reader does not model, stays closed (rel-1-0-10 GAP-1188); an ordinary
+// leading cd chain, which both read, follows the outage mode, and a cd the
+// readers cannot prove or one into a protected folder stays closed.
 func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 	project := lateOrdinaryProject(t)
 	// A folder whose link is not in the project (round 4: a cd must move the
@@ -130,7 +135,7 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"echo flag next to a one-letter link, open tier", "echo -l", "open", false},
 			{"ls flag next to a one-letter link, open tier", "ls -l", "open", false},
 			{"sed print, open tier", "sed -n 1,5p plain.txt", "open", false},
-			{"argv with a plain file, open tier", []string{"cat", "plain.txt"}, "open", false},
+			{"argv with a plain file, open tier", []string{"cat", "plain.txt"}, "open", true},
 			{"sed write command to the link, open tier", `sed -n -e "w keylink" plain.txt`, "open", true},
 			{"sed write flag to the link, open tier", `sed -n "s/a/b/w keylink" plain.txt`, "open", true},
 			{"argv with a link that has a space, open tier", []string{"cat", "key link"}, "open", true},
@@ -169,6 +174,18 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"sed regexp holding a semicolon, open tier", `sed -n '/a;b/p' plain.txt`, "open", false},
 			{"sed write after a trailing separator, open tier", `sed -n '1p;w keylink;' plain.txt`, "open", true},
 			{"echo of a link to a plain file, strict tier", "echo l", "closed", true},
+			// GAP-1188 review: an ordinary leading cd chain follows the
+			// outage mode; a cd into a protected folder, by a tilde or a
+			// variable, or to the home stays closed.
+			{"cd then ls, open tier", "cd sub && ls", "open", false},
+			{"cd to the project then go test, open tier", "cd " + project + " && go test ./...", "open", false},
+			{"cd then ls after a semicolon, open tier", "cd sub; ls", "open", false},
+			{"cd then ls, strict tier", "cd sub && ls", "closed", true},
+			{"cd into the SSH folder, open tier", "cd ../.ssh && cat authorized_keys", "open", true},
+			{"cd home by tilde, open tier", "cd ~/.ssh && cat authorized_keys", "open", true},
+			{"cd up to the home, open tier", "cd .. && cat .env", "open", true},
+			{"cd by a variable into the state folder, open tier", "cd $HOME/.defenseclaw && ls", "open", true},
+			{"cd twice, then tilde, open tier", "cd /x; cd ~/.aws && cat credentials", "open", true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
 				result, _ := runAgainstGateway(t, connector, addr, func(opts *Options) {

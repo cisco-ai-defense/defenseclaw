@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 )
 
-// LateOrdinaryCall reports a Claude Code or Codex shell or Read call that
+// LateOrdinaryCallAt reports a Claude Code or Codex shell or Read call that
 // plainly names nothing a protected file could be reached through. The hook
 // client asks it only when its verified gateway took the call and gave no
 // answer by the deadline (GAP-0518): such a call may then follow the outage
@@ -57,12 +57,8 @@ import (
 //
 // A protected target spelled in a way the scan cannot see is a detection
 // miss and belongs to the hook-path detection work (#1189).
-func LateOrdinaryCall(connector string, payload []byte) bool {
-	return LateOrdinaryCallAt("", connector, payload)
-}
-
-// LateOrdinaryCallAt is LateOrdinaryCall for an account whose home is given:
-// every home-relative answer (the protected folders and authorized-keys files,
+//
+// Every home-relative answer (the protected folders and authorized-keys files,
 // the hard-link identities, the home itself) is told against home, not against
 // the home of the process. A shell hook replaces HOME with a scratch folder
 // before it runs the helper, so the helper of such a hook must be given the

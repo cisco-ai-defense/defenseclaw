@@ -903,8 +903,9 @@ def proxy_requests_note(cfg: Any, connector: str, *, saved: str | None = None) -
 # The connectors whose hook runs a call that its verified gateway took and did
 # not answer in time, in the open outage mode, when the call plainly names
 # nothing a protected file could be reached through (GAP-0518: Go
-# hookpaths.LateOrdinaryCall and hookexec.OrdinaryNoAnswerPayload read only
-# Claude Code and Codex tool calls). Every other connector blocks such a call.
+# hookexec.LateOrdinaryBothScans, which asks hookpaths.LateOrdinaryCallAt and
+# the shared protected-reach reader, reads only Claude Code and Codex tool
+# calls). Every other connector blocks such a call.
 _LATE_ORDINARY_CONNECTORS = frozenset({"claudecode", "codex"})
 
 # The kinds of hook failure failure_outcomes tells apart, in the order status

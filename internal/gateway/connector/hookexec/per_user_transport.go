@@ -187,7 +187,7 @@ const PerUserPostRestartOutageExit = 11
 // PerUserPostLateOrdinaryExit is the exit status of `hook-post` for a call
 // that got no answer from its verified gateway before the deadline (like
 // PerUserPostNoAnswerExit) and that plainly names nothing a protected file
-// could be reached through (hookpaths.LateOrdinaryCall): a gateway that is up
+// could be reached through (LateOrdinaryBothScans): a gateway that is up
 // but slow under a burst or a long operand list (GAP-0518). The shell hooks
 // read it as the outage status 7, so the account's outage mode decides: open
 // with the visible warning in the default and permissive tiers, closed in
