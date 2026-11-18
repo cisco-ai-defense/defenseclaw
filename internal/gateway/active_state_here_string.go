@@ -44,6 +44,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	// they had, which no one text can say, so such a command is never judged
 	// here (mixed): the walk of its calls, each with its own state, judges it.
 	seen := map[string]bool{}
+	request.hereStringPipeReading = true
 	for _, split := range []bool{true, false} {
 		twin, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, split, request.Input.LoopBindsStraightLine)
 		if !ok || seen[twin] {
