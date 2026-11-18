@@ -66,7 +66,13 @@ func restoreGatewayProcessPosture(t *testing.T) {
 	// Secure Client test read no Secure Client user.
 	facts, attribution := identityFactsEnabled.Load(), secureClientUserAttribution.Load()
 	principal, blocking := userPrincipalCollectionEnabled.Load(), identityLookupBlocking.Load()
+	// A managed boot makes the process ignore the provider overlay path; the
+	// posture must not outlive the test (rel-1-0-10:GAP-1305).
+	providerRegistryMu.Lock()
+	providerManaged := providerRegistryManagedEnterprise
+	providerRegistryMu.Unlock()
 	t.Cleanup(func() {
+		setProviderRegistryManagedEnterprise(providerManaged)
 		setIdentityFactsEnabled(facts)
 		setSecureClientUserAttribution(attribution)
 		SetUserPrincipalCollectionEnabled(principal)

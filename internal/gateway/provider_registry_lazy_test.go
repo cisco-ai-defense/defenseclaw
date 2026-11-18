@@ -17,9 +17,37 @@ func init() {
 	ensureProviderRegistry()
 }
 
+// unmanagedProviderRegistry runs the test in the unmanaged provider posture
+// whatever an earlier test left: a managed sidecar boot (NewSidecar, a config
+// reload) makes the process ignore DEFENSECLAW_CUSTOM_PROVIDERS_PATH, so in a
+// shuffled order the overlay tests read a registry without their overlay
+// (rel-1-0-10:GAP-1305). The earlier posture is restored with the test.
+func unmanagedProviderRegistry(t *testing.T) {
+	t.Helper()
+	providerRegistryMu.Lock()
+	previous := providerRegistryManagedEnterprise
+	providerRegistryMu.Unlock()
+	setProviderRegistryManagedEnterprise(false)
+	t.Cleanup(func() { setProviderRegistryManagedEnterprise(previous) })
+}
+
+// The provider overlay tests pass after a managed boot left the process in
+// the managed posture, as they do in the declared order.
+func TestProviderOverlayTestsIgnoreAnEarlierManagedBoot(t *testing.T) {
+	providerRegistryMu.Lock()
+	previous := providerRegistryManagedEnterprise
+	providerRegistryMu.Unlock()
+	setProviderRegistryManagedEnterprise(true)
+	t.Cleanup(func() { setProviderRegistryManagedEnterprise(previous) })
+	t.Run("malformed overlay not applied", TestProviderResponsesReportMalformedOverlayNotApplied)
+	t.Run("env overlay path", TestCustomProvidersPath_EnvOverride)
+	t.Run("managed posture ignores the path override", TestSetProviderRegistryManagedEnterpriseIgnoresPathOverride)
+}
+
 // Entering managed posture rebuilds a loaded registry without the
 // environment-selected overlay, and leaving it restores the override.
 func TestSetProviderRegistryManagedEnterpriseIgnoresPathOverride(t *testing.T) {
+	unmanagedProviderRegistry(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
