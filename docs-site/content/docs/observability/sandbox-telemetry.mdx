@@ -224,7 +224,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 
 **Secrets.** `secret.injected` records the secret name and the host, never a value, a prefix or the placeholder.
 
-**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller and the callout have no telemetry runtime: they send their counts and records to the leader, and a gateway replica records each one once. The leader keeps what is waiting in memory (up to 50,000 records): records not yet handed on when the leader restarts are lost, and the gateway logs how many.
+**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller and the callout have no telemetry runtime: they send their counts and records to the leader, and a gateway replica records each one once. The leader keeps what is waiting in memory, egress decisions apart from lifecycle records and counts so a burst of egress never pushes those out. Each holds up to 50,000 records or 16 MiB, and each text field is cut to 512 bytes. Records past that bound, or not yet handed on when the leader restarts, are lost, and the gateway logs how many.
 
 | Metric | Type | Recorded |
 | --- | --- | --- |
