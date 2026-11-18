@@ -261,6 +261,19 @@ type workFolderTracker struct {
 	// trackers of the mover bodies it reads), so each is worked out once
 	// (rel-1-0-10:GAP-1292).
 	defined map[workFolderDefinedKey]bool
+	// firstRun holds, per outer definition, climb depth and body flag, the
+	// earliest call of the outer function after which a definition in its
+	// body may have run (shared like defined), so a call of the inner
+	// function compares one offset instead of asking each outer call again
+	// (rel-1-0-10:GAP-1293).
+	firstRun map[workFolderDefinedKey]workFolderFirstRun
+}
+
+// workFolderFirstRun is the earliest offset of a call of an outer function
+// whose definition may have run there (ok false when no call qualifies).
+type workFolderFirstRun struct {
+	from uint
+	ok   bool
 }
 
 // workFolderDefinedKey is everything a definedAt answer depends on beyond
@@ -304,20 +317,18 @@ const (
 // newWorkFolderTracker is a tracker of file with its movers and their
 // bodies.
 func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
-	tracker := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: map[string]bool{},
-		decls: map[string]*syntax.FuncDecl{}, defs: map[*syntax.FuncDecl]workFolderDef{},
-		callsOf: map[string][]*syntax.CallExpr{}, calls: new(int), defined: map[workFolderDefinedKey]bool{}}
+	tracker := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders)}
 	if file == nil {
 		return tracker
 	}
-	topLevel := make(map[*syntax.FuncDecl]bool)
-	for _, stmt := range file.Stmts {
-		if decl, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
-			topLevel[decl] = true
-		}
-	}
+	// The tracker is made for every text the reader parses, most of them
+	// one statement with no function: the scopes and calls are only kept
+	// here and worked out below for a text that defines a function, and
+	// the calls only by the name of a function another mover is defined in
+	// (rel-1-0-10:GAP-1293).
 	var all []*syntax.FuncDecl
-	var scopes []workFolderSpan
+	var scopeNodes []syntax.Node
+	var calls []*syntax.CallExpr
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
@@ -325,20 +336,35 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 				all = append(all, node)
 			}
 		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
-			scopes = append(scopes, workFolderSpanOf(node))
+			scopeNodes = append(scopeNodes, node)
 		case *syntax.BinaryCmd:
 			if node.Op == syntax.Pipe || node.Op == syntax.PipeAll {
-				scopes = append(scopes, workFolderSpanOf(node.X), workFolderSpanOf(node.Y))
+				scopeNodes = append(scopeNodes, node.X, node.Y)
 			}
 		case *syntax.CallExpr:
 			if len(node.Args) != 0 {
-				if name := projectPOSIXWord(node.Args[0]); !name.Expands {
-					tracker.callsOf[name.Value] = append(tracker.callsOf[name.Value], node)
-				}
+				calls = append(calls, node)
 			}
 		}
 		return true
 	})
+	if len(all) == 0 {
+		return tracker // no function, so no mover
+	}
+	tracker.movers, tracker.decls = map[string]bool{}, map[string]*syntax.FuncDecl{}
+	tracker.defs, tracker.callsOf = map[*syntax.FuncDecl]workFolderDef{}, map[string][]*syntax.CallExpr{}
+	tracker.calls, tracker.defined = new(int), map[workFolderDefinedKey]bool{}
+	tracker.firstRun = map[workFolderDefinedKey]workFolderFirstRun{}
+	topLevel := make(map[*syntax.FuncDecl]bool)
+	for _, stmt := range file.Stmts {
+		if decl, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
+			topLevel[decl] = true
+		}
+	}
+	scopes := make([]workFolderSpan, 0, len(scopeNodes))
+	for _, node := range scopeNodes {
+		scopes = append(scopes, workFolderSpanOf(node))
+	}
 	// A function whose body moves, or calls a function that does, is a
 	// mover.
 	for changed := true; changed; {
@@ -381,6 +407,20 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 		}
 		tracker.defs[decl] = def
 	}
+	// definedAt reads the calls of the function each mover is defined in.
+	outers := map[string]bool{}
+	for _, def := range tracker.defs {
+		if def.outer != nil {
+			outers[def.outer.Name.Value] = true
+		}
+	}
+	if len(outers) != 0 {
+		for _, call := range calls {
+			if name := projectPOSIXWord(call.Args[0]); !name.Expands && outers[name.Value] {
+				tracker.callsOf[name.Value] = append(tracker.callsOf[name.Value], call)
+			}
+		}
+	}
 	return tracker
 }
 
@@ -394,7 +434,10 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 // out once per scan: the climb asks the same (outer definition, outer call)
 // for every call of the inner one, which made nested definitions with many
 // calls of each outer function cost the product of those counts
-// (rel-1-0-10:GAP-1292).
+// (rel-1-0-10:GAP-1292). The calls of the outer function are asked once per
+// outer definition and depth (outerFirstRun), not once per inner call: a
+// top-level call of the inner function is defined when one of them before
+// it is, which is when the earliest of them is (rel-1-0-10:GAP-1293).
 func (t *workFolderTracker) definedAt(decl *syntax.FuncDecl, call *syntax.CallExpr, depth int) bool {
 	key := workFolderDefinedKey{decl: decl, call: call, depth: depth, inBody: t.inBody != 0}
 	if defined, seen := t.defined[key]; seen {
@@ -417,17 +460,36 @@ func (t *workFolderTracker) definedAtUncached(decl *syntax.FuncDecl, call *synta
 	if workFolderSpanOf(def.outer.Body).holds(at) {
 		return true // the body that defines it calls it
 	}
-	outer := def.outer.Name.Value
-	if t.decls[outer] != def.outer {
+	if t.decls[def.outer.Name.Value] != def.outer {
 		return false
 	}
-	for _, outerCall := range t.callsOf[outer] {
-		if from := outerCall.Pos().Offset(); !workFolderSpanOf(def.outer.Body).holds(from) &&
-			(t.inBody != 0 || from < at) && t.definedAt(def.outer, outerCall, depth+1) {
-			return true
+	first := t.outerFirstRun(def.outer, depth+1)
+	// In a function body the call runs when the body does, after any
+	// call of the outer function; at the top level only one before it.
+	return first.ok && (t.inBody != 0 || first.from < at)
+}
+
+// outerFirstRun returns the earliest call of the function outer, outside
+// its own body, at which outer may have been defined (definedAt at depth).
+// Every such call is asked once, whatever the order of callsOf.
+func (t *workFolderTracker) outerFirstRun(outer *syntax.FuncDecl, depth int) workFolderFirstRun {
+	key := workFolderDefinedKey{decl: outer, depth: depth, inBody: t.inBody != 0}
+	if first, seen := t.firstRun[key]; seen {
+		return first
+	}
+	var first workFolderFirstRun
+	body := workFolderSpanOf(outer.Body)
+	for _, outerCall := range t.callsOf[outer.Name.Value] {
+		from := outerCall.Pos().Offset()
+		if body.holds(from) || first.ok && from >= first.from {
+			continue
+		}
+		if t.definedAt(outer, outerCall, depth) {
+			first = workFolderFirstRun{from: from, ok: true}
 		}
 	}
-	return false
+	t.firstRun[key] = first
+	return first
 }
 
 // posixWorkFolders returns, for every statement of file, the folders its
@@ -483,7 +545,8 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// The body statements keep the folders recorded where they are; only
 	// the folders the call leaves are read here.
 	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, decls: t.decls,
-		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined}
+		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined,
+		firstRun: t.firstRun}
 	ok, after = inner.stmt(decl.Body, in)
 	if !t.defs[decl].topLevel {
 		// A definition in a list, a branch or a body may not have run: the
@@ -566,7 +629,7 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 			// it worked, where it was if not.
 			return moved, unionWorkFolders(moved, in)
 		}
-		if len(cmd.Args) != 0 {
+		if len(cmd.Args) != 0 && len(t.movers) != 0 {
 			if name := projectPOSIXWord(cmd.Args[0]); !name.Expands && t.movers[name.Value] {
 				// After `f() { cd X || cd Y; }; f` the shell is in X, Y or
 				// where it was (rel-1-0-10:GAP-1144).
