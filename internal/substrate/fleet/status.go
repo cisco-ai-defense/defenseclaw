@@ -164,6 +164,15 @@ func groupForm(g string) string {
 	return "name"
 }
 
+// hostGroupForm reports a blank value or a host-side group form (DOMAIN\name
+// or a SID such as S-1-5-21-...), which the sign-in token never carries.
+func hostGroupForm(g string) bool {
+	g = strings.TrimSpace(g)
+	return g == "" || strings.Contains(g, `\`) || sidRE.MatchString(g)
+}
+
+var sidRE = regexp.MustCompile(`(?i)^S-1-[0-9]+(-[0-9]+)+$`)
+
 // groupFormWords says a form in words.
 func groupFormWords(form string) string {
 	switch form {
@@ -183,8 +192,14 @@ func groupFormWords(form string) string {
 // assignment written in another form than the token's. The line names the
 // profile and the form the claim really carries.
 func GroupFormMismatches(assignments []ProfileGroups, tokenGroups []string) []string {
-	tokenForm := ""
+	tokenForm, example := "", ""
 	for _, g := range tokenGroups {
+		if strings.TrimSpace(g) == "" {
+			continue // a blank claim value says nothing of the form
+		}
+		if example == "" {
+			example = strings.TrimSpace(g)
+		}
 		f := groupForm(g)
 		if tokenForm == "" {
 			tokenForm = f
@@ -192,14 +207,15 @@ func GroupFormMismatches(assignments []ProfileGroups, tokenGroups []string) []st
 			tokenForm = "mixed"
 		}
 	}
-	example := ""
-	if len(tokenGroups) > 0 {
-		example = tokenGroups[0]
-	}
 	var out []string
 	for _, a := range assignments {
 		forms := map[string][]string{}
 		for _, g := range a.Groups {
+			if hostGroupForm(g) {
+				// DOMAIN\name and SID values match the host's groups (an
+				// AD-joined launcher), not the token's: no form to compare.
+				continue
+			}
 			forms[groupForm(g)] = append(forms[groupForm(g)], strings.TrimSpace(g))
 		}
 		switch {

@@ -167,13 +167,15 @@ func captureScript(rec *CopyRecord, bundle bool) string {
 		// a removed submodule: its files never came into the copy
 		// (GAP-0250).
 		`GIT_INDEX_FILE="$idx" g ls-files -s | while read -r m o s p; do if [ "$m" = 160000 ] && [ ! -e "$W/$p" ]; then mkdir -p -- "$W/$p"; fi; done || true`,
-		// A folder whose name is .git in another case (.GIT, .Git) or a
+		// A folder whose name is .git in another case (.GIT, .Git), an NTFS
+		// form of it (git~1, or .git followed by a dot or a space, which git's
+		// core.protectNTFS refuses on every platform, GAP-0575) or a
 		// .git folder below the top that is not a repository: git refuses
 		// such a path ("invalid path"), which failed the whole pull, and it
 		// is git metadata the folder must never take (GAP-0530). It is left
 		// out and named in the review; a nested repository stays a gitlink.
-		`gitdirs=$(cd "$W" && find . -mindepth 1 \( -path ./.git -prune \) -o \( -iname .git -prune -print \) 2>/dev/null | while read -r p; do if [ "$(basename "$p")" != .git ] || ! git --git-dir="$p" rev-parse -q --git-dir >/dev/null 2>&1; then printf '%s,' "${p#./}"; fi; done | head -c 4096)`,
-		`GIT_INDEX_FILE="$idx" g add ` + addArgs + ` -- . ` + strings.Join(excludes, " ") + ` ':(exclude,icase,glob)**/.git' ':(exclude,icase,glob)**/.git/**'`,
+		`gitdirs=$(cd "$W" && find . -mindepth 1 \( -path ./.git -prune \) -o \( \( -iname .git -o -iname '.git[. ]*' -o -iname 'git~1' \) -prune -print \) 2>/dev/null | while IFS= read -r p; do if [ "$(basename "$p")" != .git ] || ! git --git-dir="$p" rev-parse -q --git-dir >/dev/null 2>&1; then printf '%s,' "${p#./}"; fi; done | head -c 4096)`,
+		`GIT_INDEX_FILE="$idx" g add ` + addArgs + ` -- . ` + strings.Join(excludes, " ") + ` ':(exclude,icase,glob)**/.git' ':(exclude,icase,glob)**/.git/**' ':(exclude,icase,glob)**/.git[. ]*' ':(exclude,icase,glob)**/.git[. ]*/**' ':(exclude,icase,glob)**/git~1' ':(exclude,icase,glob)**/git~1/**'`,
 		`tree=$(GIT_INDEX_FILE="$idx" g write-tree)`,
 		`rm -f "$idx"`,
 		`if [ -n "$head" ] && [ "$tree" = "$(g rev-parse "$head^{tree}")" ]; then result=$head`,

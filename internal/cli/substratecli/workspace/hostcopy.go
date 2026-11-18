@@ -563,17 +563,24 @@ func windowsName(rel string) bool {
 	return true
 }
 
-// hasGitComponent reports a path with a folder named .git in any case: git
-// metadata (a nested repository's, or one the agent made), which the
-// folder never takes (GAP-0530).
+// hasGitComponent reports a path with a folder named .git in any case, or
+// in a form NTFS reads as .git (git~1, .git followed by dots or spaces;
+// git's is_ntfs_dotgit, GAP-0575): git metadata (a nested repository's,
+// or one the agent made), which the folder never takes (GAP-0530).
 func hasGitComponent(rel string) bool {
-	parts := strings.Split(rel, "/")
-	for _, p := range parts[:len(parts)-1] {
-		if strings.EqualFold(p, ".git") {
+	for _, p := range strings.Split(rel, "/") {
+		if isDotGitName(p) {
 			return true
 		}
 	}
-	return strings.EqualFold(parts[len(parts)-1], ".git")
+	return false
+}
+
+// isDotGitName is git's is_ntfs_dotgit with its case fold: .git, then
+// only dots or spaces, or the short name git~1.
+func isDotGitName(name string) bool {
+	n := strings.ToLower(name)
+	return n == "git~1" || (strings.HasPrefix(n, ".git") && strings.Trim(n[4:], ". ") == "")
 }
 
 // stageHostTree reads the actor's copy (a tar of <folder>) into dir:

@@ -221,9 +221,9 @@ func printSubstrateDoctor(w io.Writer, rep substrateDoctorReport) {
 		width = max(width, len(c.ID))
 	}
 	for _, c := range rep.Checks {
-		fmt.Fprintf(w, "  %-4s  %-*s  %s\n", c.Status, width, c.ID, c.Summary)
+		fmt.Fprintf(w, "  %-4s  %-*s  %s\n", c.Status, width, c.ID, safetext.Line(c.Summary))
 		if c.Status == doctorWarn && c.Fix != "" {
-			fmt.Fprintf(w, "        %-*s  to fix: %s\n", width, "", c.Fix)
+			fmt.Fprintf(w, "        %-*s  to fix: %s\n", width, "", safetext.Line(c.Fix))
 		}
 	}
 	if rep.OK {
