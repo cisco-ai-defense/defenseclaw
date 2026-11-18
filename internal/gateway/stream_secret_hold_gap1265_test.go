@@ -324,20 +324,16 @@ func TestGAP1265OpenRunIdleIsNotTruncated(t *testing.T) {
 // stream bytes than streamSecretMaxHeld: no piece end ever closes the run.
 func gap1265Table() []string {
 	var pieces []string
-	i := 0
-	for n := 0; n < streamSecretMaxHeld*5/4; {
-		// A piece is the steps of about 8 KiB, ending in a digit: the held
-		// bytes are the stream bytes of the frames behind the open run, so
-		// the bound is crossed after about 150 frames; with 16-byte pieces
-		// it took 10,000 frames, each checked over the whole reply text
-		// (208 s under -race).
-		var b strings.Builder
-		for b.Len() < 8<<10 {
-			fmt.Fprintf(&b, " step %d took %d", i%97, (i*37)%1000)
-			i++
-		}
-		pieces = append(pieces, b.String())
-		n += b.Len() + 120 // a piece is a frame of at least 120 bytes on these routes
+	for i, n := 0, 0; n < streamSecretMaxHeld*5/4; i++ {
+		// A short piece ending in a digit: the bound counts stream bytes
+		// (the frame, at least 120 bytes), and every frame is checked over
+		// the whole reply text, which costs more than linearly in its length,
+		// so the least text per frame is the cheapest table (a long piece of
+		// 8 KiB took 327 s under -race and cut the stream at the request
+		// deadline; 16-byte pieces took 155 s).
+		p := fmt.Sprintf(" k%d", i%97)
+		pieces = append(pieces, p)
+		n += len(p) + 120 // a piece is a frame of at least 120 bytes on these routes
 	}
 	return pieces
 }

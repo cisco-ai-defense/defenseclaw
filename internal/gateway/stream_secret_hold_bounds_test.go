@@ -47,9 +47,11 @@ func gap0429BoundCases(t *testing.T) []gap0429BoundCase {
 	cut := key
 	cut.text, cut.end = key.text[:half], half
 	// An open block with more body than secretshape reads: base64 lines past
-	// streamSecretMaxPEM, then the END line.
+	// streamSecretMaxPEM (by 32 KiB, so a frame of 4096 bytes ends inside
+	// the open block past the cap, whichever frames a read batches), then
+	// the END line.
 	line := strings.Repeat("QUJD", 16) + "\n"
-	big := key.text[:key.body] + strings.Repeat(line, streamSecretMaxPEM/len(line)+64)
+	big := key.text[:key.body] + strings.Repeat(line, streamSecretMaxPEM/len(line)+512)
 	over := gap0429Secret{name: "over-cap", class: "pem", text: big + "-----END " + key.text[len("-----BEGIN "):key.body],
 		body: key.body, end: len(big)}
 	filler := retestFiller(1100)[:1100]
