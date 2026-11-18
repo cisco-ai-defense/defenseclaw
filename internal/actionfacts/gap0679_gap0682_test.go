@@ -80,6 +80,7 @@ type g0679Row struct {
 const (
 	g0679All   = "count when unsure: a hidden read turns every hidden credentials file on"
 	g0679Words = "count when unsure: a word known only when it runs may be --hidden"
+	g0679Class = "count when unsure: a glob with a class always counts"
 	// rg reads a -f pattern file; rg -l lists only the files it searches.
 	g0679PatternFile = "rg reads the -f pattern file, rg -l does not list it"
 )
@@ -118,7 +119,7 @@ var g0680Rows = []g0679Row{
 	{"rg -g '.aws/' -g '.aws/credentials' KEY", []string{".aws/credentials"}, g0679All},
 	{"rg -g '.ssh/' -g id_rsa KEY", []string{".ssh/id_rsa"}, g0679All},
 	{"rg -g '.aws/' -g 'cred*' KEY", []string{".aws/credentials"}, g0679All},
-	{"rg -g '.aws/' KEY", []string{}, g0679All},
+	{"rg -g '.aws/' KEY", []string{}, ""},
 	{"rg -g '.aws/' -g credentials KEY .", []string{".aws/credentials"}, g0679All},
 	{"rg -g '*/' -g 'id_*' KEY .", []string{".ssh/id_rsa"}, g0679All},
 	{"rg -g '/.aws/' -g credentials KEY", []string{".aws/credentials"}, g0679All},
@@ -154,8 +155,8 @@ var g0681Rows = []g0679Row{
 	{"rg --type-add 'e:*.go,[!_]env' -tall KEY", []string{}, g0679All},
 	{"rg -g '?env' KEY", []string{".env", "sub/.env"}, g0679All},
 	{"rg -g 'cred[!x]ntials' KEY", []string{}, g0679All},
-	{"rg -g 'cred[e]ntials' KEY", []string{}, ""},
-	{"rg --type-add 'e:id_[r]sa' -te KEY", []string{}, ""},
+	{"rg -g 'cred[e]ntials' KEY", []string{}, g0679Class},
+	{"rg --type-add 'e:id_[r]sa' -te KEY", []string{}, g0679Class},
 }
 
 // g0682Rows is substrate-1:GAP-0682: a word known only when the call runs
@@ -182,7 +183,7 @@ var g0682Rows = []g0679Row{
 var g0673RV4Rows = []g0679Row{
 	{"rg -tall KEY", []string{}, ""},
 	{"rg -tsh -tconfig -tjson -tyaml KEY", []string{}, ""},
-	{"rg --type-add 'e:*.env' -te --type-clear e --type-add 'e:*.go' KEY", []string{}, g0679All},
+	{"rg --type-add 'e:*.env' -te --type-clear e --type-add 'e:*.go' KEY", []string{}, ""},
 	{"rg --type-add 'e:*.go' -te --type-add 'e:*.env' KEY", []string{".env", "sub/.env"}, g0679All},
 	{"rg -g '{.aws,credentials}' KEY", []string{".aws/credentials"}, g0679All},
 	{"rg -L KEY", []string{}, ""},
@@ -342,6 +343,16 @@ func g0681FuzzGlob(r *rand.Rand) string {
 	return glob
 }
 
+// g0681FuzzPlain is a random glob of literals, "*", "?", "." and "/".
+func g0681FuzzPlain(r *rand.Rand) string {
+	const alphabet = "*?./ecnvrdsawi_gotkp"
+	var b strings.Builder
+	for range 1 + r.IntN(9) {
+		b.WriteByte(alphabet[r.IntN(len(alphabet))])
+	}
+	return b.String()
+}
+
 // TestGAP0681GlobFuzzLive is substrate-1:GAP-0680 and GAP-0681 for every
 // glob shape, not only the listed ones: random --glob, --iglob, two-glob
 // and --type-add shapes (a fixed seed; DEFENSECLAW_RG_FUZZ_SEED picks
@@ -357,12 +368,12 @@ func TestGAP0681GlobFuzzLive(t *testing.T) {
 	files := []string{"credentials", "id_*", "*.env", ".env", "cred*", "npmrc", "id_rsa"}
 	dir := g0679Folder(t)
 	home := t.TempDir()
-	const rows = 600
+	const rows = 900
 	reads, over, weaker := 0, 0, 0
 	for range rows {
 		glob := g0681FuzzGlob(r)
 		var args []string
-		switch r.IntN(5) {
+		switch r.IntN(6) {
 		case 0:
 			args = []string{"-g", glob}
 		case 1:
@@ -371,6 +382,10 @@ func TestGAP0681GlobFuzzLive(t *testing.T) {
 			args = []string{"-g", glob, "-g", files[r.IntN(len(files))]}
 		case 3:
 			args = []string{"-g", glob, "-g", g0681FuzzGlob(r)}
+		case 4:
+			// Only literals, * and ?: the shapes the rule reads with
+			// path.Match.
+			args = []string{"-g", g0681FuzzPlain(r), "-g", g0681FuzzPlain(r)}
 		default:
 			args = []string{"--type-add", "e:" + glob, "-te"}
 		}

@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"path"
 	"slices"
 	"strings"
 )
@@ -198,9 +199,9 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 // read). They are read with:
 //   - --hidden (-.), until a later --no-hidden; and the second
 //     --unrestricted (-uu), which turns --hidden on where it stands;
-//   - a --glob or --iglob include that may match a dot-named file or
-//     folder (an override glob whitelists past every ignore rule), by
-//     rgGlobMayMatchHidden;
+//   - --glob and --iglob includes that may whitelist a hidden credentials
+//     file (an override glob whitelists past every ignore rule), by
+//     rgGlobsMayReadHidden;
 //   - a file type selected with -t or --type whose globs may match one
 //     (substrate-1:GAP-0671): --type-add NAME:GLOB,... adds globs, and
 //     NAME:include:TYPE,... copies the globs those types have then;
@@ -229,7 +230,8 @@ func rgSearchesHidden(command CommandFact, argv []string) bool {
 			return true
 		}
 	}
-	hidden, unrestricted, glob := false, 0, false
+	hidden, unrestricted, unsure := false, 0, false
+	var globs []string
 	ignoreFile, ignoreFiles := false, true
 	types := make(map[string][]string)
 	var selected []string
@@ -245,7 +247,7 @@ func rgSearchesHidden(command CommandFact, argv []string) bool {
 				hidden = true
 			}
 		case "glob", "iglob":
-			glob = glob || rgGlobMayMatchHidden(option.value)
+			globs = append(globs, option.value)
 		case "ignore-file":
 			ignoreFile = true
 		case "no-ignore-files":
@@ -267,7 +269,7 @@ func rgSearchesHidden(command CommandFact, argv []string) bool {
 			if !ok || strings.Contains(name, "*") {
 				// rg refuses a literal NAME with no ":"; a value known only
 				// when it runs may define any type.
-				glob = true
+				unsure = true
 				break
 			}
 			if included, ok := strings.CutPrefix(globs, "include:"); ok {
@@ -282,11 +284,9 @@ func rgSearchesHidden(command CommandFact, argv []string) bool {
 		}
 	}
 	for _, name := range selected {
-		for _, typeGlob := range types[name] {
-			glob = glob || typeGlob != "" && rgGlobMayMatchHidden(typeGlob)
-		}
+		globs = append(globs, types[name]...)
 	}
-	return hidden || glob || ignoreFile && ignoreFiles
+	return hidden || unsure || rgGlobsMayReadHidden(globs) || ignoreFile && ignoreFiles
 }
 
 // rgWordMayBeOption reports a word of an rg argv known only when it runs
@@ -317,51 +317,69 @@ func rgWordMayBeOption(argument ArgumentFact) bool {
 	return false
 }
 
-// rgGlobMayMatchHidden reports an rg include glob (--glob, --iglob, or a
-// --type-add glob) that may match a dot-named file or folder. It counts
-// when unsure (substrate-1:GAP-0680, GAP-0681): rg's glob engine is not
-// modelled, and a glob counts unless it provably cannot match a dot-named
-// path segment. That is: every segment, split at each "/", starts with a
-// literal character that is not a dot (rgGlobLiteralStart), and the glob
-// has no alternation ({...}), no "**", and no class that may match "/"
-// (a negated class, [!x] or [^x], or one with a range or an escape:
-// rg's classes match "/", so sub[!x].env matches sub/.env). A folder glob
-// (".aws/", "*/") is such a segment too: it lets rg enter the folder, where
-// any other include glob may then match. An exclude glob (!...) never adds
-// a read, and "" and "/" name no segment.
-func rgGlobMayMatchHidden(glob string) bool {
-	if strings.HasPrefix(glob, "!") {
-		return false
-	}
-	if strings.ContainsAny(glob, "{}") || strings.Contains(glob, "**") {
-		return true
-	}
-	for i := 0; i < len(glob); i++ {
-		if glob[i] != '[' {
+// rgGlobsMayReadHidden reports include globs (--glob, --iglob, and the
+// --type-add globs of the selected types) that may make rg read a hidden
+// credentials file (substrate-1:GAP-0680, GAP-0681). rg's glob engine is
+// not modelled; the rule counts when unsure. rg reads a hidden file only
+// when an include glob matches it, and enters a hidden folder only when an
+// include glob matches the folder. So the globs count when:
+//   - one has a part this rule does not read exactly: {...}, "**", a
+//     class [...] (rg's classes match "/": sub[!x].env matches sub/.env)
+//     or an escape "\\";
+//   - one may match a dot-named credentials file name (*.env, .npmrc); or
+//   - one may match a hidden folder name (a segment, split at each "/",
+//     that does not start with a literal non-dot character: .aws/, */, ?aws)
+//     and one may match any credentials file name (credentials, id_*).
+//
+// "May match" is path.Match on one segment of the lowercase glob, exact
+// for globs of literals, * and ? (neither matches "/" in rg's globs, nor
+// in path.Match). -g '*.go' and --type-add 'go:*.go' count nothing: no
+// credentials file name ends in .go. An exclude glob (!...) never adds a
+// read; "" and "/" name nothing.
+func rgGlobsMayReadHidden(globs []string) bool {
+	opensHidden, namesFile, namesDotFile := false, false, false
+	for _, glob := range globs {
+		if glob == "" || strings.HasPrefix(glob, "!") {
 			continue
 		}
-		body := glob[i+1:]
-		if body == "" || body[0] == '!' || body[0] == '^' {
+		if strings.ContainsAny(glob, "{}[]\\") || strings.Contains(glob, "**") {
 			return true
 		}
-		end := strings.IndexByte(body[1:], ']')
-		if end < 0 || strings.ContainsAny(body[:end+1], "-/\\") {
-			return true
+		glob = strings.ToLower(glob)
+		folderOnly := strings.HasSuffix(glob, "/")
+		var segments []string
+		for _, segment := range strings.Split(glob, "/") {
+			if segment != "" {
+				segments = append(segments, segment)
+			}
 		}
-		i += end + 1
+		if len(segments) == 0 {
+			continue
+		}
+		for _, segment := range segments {
+			opensHidden = opensHidden || !rgGlobLiteralStart(segment[0])
+		}
+		if folderOnly {
+			continue
+		}
+		last := segments[len(segments)-1]
+		for _, probe := range credentialProbes() {
+			name := probe.segments[len(probe.segments)-1]
+			ok, err := path.Match(last, name)
+			if err != nil {
+				return true
+			}
+			namesFile = namesFile || ok
+			namesDotFile = namesDotFile || ok && strings.HasPrefix(name, ".")
+		}
 	}
-	for _, segment := range strings.Split(glob, "/") {
-		if segment != "" && !rgGlobLiteralStart(segment[0]) {
-			return true
-		}
-	}
-	return false
+	return namesDotFile || opensHidden && namesFile
 }
 
 // rgGlobLiteralStart reports a first byte of a glob segment that matches
 // only itself, and is no dot: a letter, a digit, one of _-+@%~=,:# or a
-// byte of a non-ASCII character. Every other byte (".", "*", "?", "[",
-// "\\", "!" ...) may start a dot-named match, or is not modelled.
+// byte of a non-ASCII character. Every other byte (".", "*", "?", "!" ...)
+// may start a dot-named match, or is not modelled.
 func rgGlobLiteralStart(b byte) bool {
 	return b >= 0x80 || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9' ||
 		strings.IndexByte("_-+@%~=,:#", b) >= 0

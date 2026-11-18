@@ -148,7 +148,7 @@ var g0673Rows = []struct {
 	{"--type-add 'e:*.go' --type-add 'e:*.env' -te KEY", []string{".env", "sub/.env"}, "P3-1 (1.0.11): a glob or type turns every hidden read on"},
 	{"--type-add 'e:*' -te KEY", []string{".env", ".npmrc", "sub/.env"}, "P3-1 (1.0.11): a type glob never whitelists a hidden folder"},
 	{"--type-add 'e:*.env' -tgo -te KEY", []string{".env", "sub/.env"}, "P3-1 (1.0.11): a glob or type turns every hidden read on"},
-	{"--type-add 'g:*.go' -tg KEY", []string{}, "count when unsure (GAP-0681): a type glob that starts with * may match a dot name"},
+	{"--type-add 'g:*.go' -tg KEY", []string{}, ""},
 	{"-te --type-add 'e:*.env' KEY", []string{".env", "sub/.env"}, "P3-1 (1.0.11): a glob or type turns every hidden read on"},
 	{"-tgo KEY", []string{}, ""},
 	{"-L KEY", []string{}, ""},
