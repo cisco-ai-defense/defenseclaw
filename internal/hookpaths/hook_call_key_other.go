@@ -20,6 +20,13 @@ func lockHookCallKey() (unlock func()) { return func() {} }
 // (memoReads), so the traceback is paid only by the share-wait checks.
 func hookCallKey() uint64 { return goroutineID() }
 
+// releaseHookCallThread lets nothing go off Windows: the goroutine holds no
+// thread for its call, and its key does not change with the thread it runs on.
+func releaseHookCallThread() *hookCall { return nil }
+
+// retakeHookCallThread has nothing to take back off Windows.
+func retakeHookCallThread(*hookCall) {}
+
 // goroutineID is the runtime's number of the calling goroutine (0: not
 // read), from the first line of its stack: "goroutine N [...". Numbers are
 // not reused while the process runs.

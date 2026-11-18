@@ -180,6 +180,10 @@ type trustedActionRequest struct {
 	// call's findings with and without it (TestHostScriptTwinOnlyAddsFindings).
 	// Production requests never set it.
 	hostScriptTwinOff bool
+	// windowsTwinHosts, on a Windows reading twin (windowsReadingTwinRequests),
+	// holds the script readings its call judges itself, which the twin leaves
+	// out (judgedHostReadings, rel-1-0-10:GAP-1316).
+	windowsTwinHosts *windowsTwinHostReadings
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -954,7 +958,14 @@ func dispatchTrustedAction(
 		}()
 	}
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
+	var ownHostReadings *judgedHostReadings
+	if len(windowsTwins) != 0 && !windowsTwinsKeepHostReadings {
+		ownHostReadings = &judgedHostReadings{}
+	}
 	for _, twin := range windowsTwins {
+		if ownHostReadings != nil {
+			twin.windowsTwinHosts = &windowsTwinHostReadings{call: ownHostReadings, input: twin.Input}
+		}
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
@@ -1029,6 +1040,10 @@ func dispatchTrustedAction(
 	// launcher itself stays as the tokenizer saw it); the script reading only
 	// ever adds findings (host_script_twin.go).
 	if twins, caps := hostScriptTwinRequests(request, facts); len(twins) != 0 || caps.Any() {
+		// The Windows reading twins registered above are judged after this
+		// call's script readings are made: they leave out the ones it
+		// judges itself (judgedHostReadings).
+		ownHostReadings.note(twins)
 		defer func() {
 			for _, twin := range twins {
 				twinFindings := dispatchTrustedAction(parent, twin)

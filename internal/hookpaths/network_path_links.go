@@ -301,6 +301,11 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	// comparison is made in the goroutine too: nothing of the folder is
 	// read after the wait.
 	lstat := walkLstat
+	// The goroutine reads nothing of its hook call while it waits for the
+	// read, so on Windows it lets the call's thread go for the grace wait and
+	// the read runs on that thread (releaseHookCallThread). A read that is
+	// slow is waited for on the thread taken back, by the call found again.
+	released := releaseHookCallThread()
 	go func() {
 		info, err := lstat(path)
 		done <- err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 && os.SameFile(known, info)
@@ -309,9 +314,11 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	defer timer.Stop()
 	select {
 	case same := <-done:
+		retakeHookCallThread(released)
 		return same, true
 	case <-timer.C:
 	}
+	retakeHookCallThread(released)
 	call := currentHookCall()
 	wait := networkShareAnswerWait
 	if call != nil {
