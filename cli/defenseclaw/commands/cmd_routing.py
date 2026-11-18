@@ -348,6 +348,13 @@ def _own_read(path: str, params: Any = None) -> tuple[Any, str]:
     return None, str(message or proc.stderr.strip()[-300:] or "the managed gateway did not answer")
 
 
+def routing_classifier(routing: Any) -> str:
+    """routing.classifier with the default applied. Only vllm_sr has a router
+    container and endpoint; rules and systemone run inside the gateway
+    (GAP-0567, GAP-1252)."""
+    return str(getattr(routing, "classifier", "") or DEFAULT_CLASSIFIER).strip() or DEFAULT_CLASSIFIER
+
+
 def _health_routing(app: AppContext) -> dict[str, Any]:
     try:
         client = _client(app, timeout=3)

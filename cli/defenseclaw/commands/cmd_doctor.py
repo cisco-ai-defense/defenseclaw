@@ -13717,13 +13717,15 @@ def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None =
         _emit("skip", "Semantic routing", "disabled", r=r)
         return
 
-    classifier = str(getattr(routing, "classifier", "") or "vllm_sr").strip()
+    from defenseclaw.commands.cmd_routing import DEFAULT_CLASSIFIER, routing_classifier  # noqa: PLC0415
+
+    classifier = routing_classifier(routing)
     remote = getattr(routing, "remote", {}) or {}
     remote_endpoint = str(remote.get("endpoint") or "").strip() if isinstance(remote, dict) else ""
     port = int(getattr(routing, "port", 0) or 8080)
     endpoint = remote_endpoint or f"http://127.0.0.1:{port}"
     models = getattr(routing, "models", []) or []
-    if classifier != "vllm_sr":
+    if classifier != DEFAULT_CLASSIFIER:
         _check_inprocess_routing(routing, classifier, models, r, cfg)
         return
     mode = "remote" if remote_endpoint else "managed Docker"
