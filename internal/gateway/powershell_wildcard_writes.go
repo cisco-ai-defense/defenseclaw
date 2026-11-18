@@ -324,7 +324,7 @@ func psPathComponents(path string, steps bool) []string {
 		switch {
 		case component == ".":
 		case component == ".." && steps:
-			if len(out) > 0 && !(len(out) == 1 && psDriveComponent(out[0])) {
+			if len(out) > 1 || len(out) == 1 && !psDriveComponent(out[0]) {
 				out = out[:len(out)-1]
 			}
 		default:
