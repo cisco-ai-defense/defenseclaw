@@ -156,11 +156,11 @@ The **Substrate agents** board (`defenseclaw-substrate`) shows [Agent Substrate]
 | Row | Panels | What it shows |
 | --- | --- | --- |
 | Control plane health | Policy lag p99, Unattested templates, Policy conflicts, Idle suspends, Rate limited, Actors seen | Whether policy reaches new actors in time, whether any template or actor has no valid policy, and how often the controller, the idle rule and the rate limit act. Zero conflicts and zero unattested templates are healthy |
-| Latency | Hook round trip, First hook after resume, Policy lag, Leader observe latency | The 50th and 99th percentile of each histogram |
+| Latency | Hook round trip, Policy lag, Leader observe latency | The 50th and 99th percentile of each histogram |
 | Actor lifecycle | Lifecycle changes by trigger, Phase transitions, Recent lifecycle records | What caused each change (create, resume re-check, fork, drift, idle suspend) and which phase it entered |
 | Egress through the callout | Egress decisions, Bodies read and bodies over the cap, Secrets injected, Recent blocked requests | What the callout allowed and refused, how often it read a body, and which secrets it injected (names only) |
 
-The First hook after resume panel stays empty in this release (see [Agent Substrate metrics](/docs/observability/sandbox-telemetry)).
+The board has no panel for `defenseclaw.substrate.first_hook_after_resume`: no component records it in this release (see [Agent Substrate metrics](/docs/observability/sandbox-telemetry)).
 
 The metric panels have no actor, atespace or person label, because those are never metric labels. Actor names appear only in the log panels. Alert rules for the same signals are in the chart (`metrics.prometheusRule.enabled`).
 

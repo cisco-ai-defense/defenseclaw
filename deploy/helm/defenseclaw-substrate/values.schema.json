@@ -546,9 +546,6 @@
         "adminFrom": {
           "type": "array"
         },
-        "metricsFrom": {
-          "type": "array"
-        },
         "egress": {
           "type": "object",
           "additionalProperties": false,

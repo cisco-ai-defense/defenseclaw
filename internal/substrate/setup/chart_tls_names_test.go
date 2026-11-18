@@ -27,7 +27,7 @@ import (
 // certificate carries for the chart's pods: "<service>.<namespace>.svc" for
 // each Service, never the ".cluster.local" spelling (seen on the stk stack:
 // defenseclaw-actor.dc.svc, defenseclaw-admin.dc.svc,
-// defenseclaw-gateway-metrics.dc.svc).
+// defenseclaw-leader.dc.svc).
 func podCertificateNames(t *testing.T, out []byte, ns string) map[string]bool {
 	t.Helper()
 	names := map[string]bool{}

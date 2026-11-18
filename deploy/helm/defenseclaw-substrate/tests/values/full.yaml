@@ -18,11 +18,6 @@ metrics:
 observability:
   local:
     enabled: true
-networkPolicy:
-  metricsFrom:
-  - namespaceSelector:
-      matchLabels:
-        kubernetes.io/metadata.name: monitoring
 leader:
   store:
     storageClassName: gp3

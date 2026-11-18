@@ -414,7 +414,7 @@
       "gridPos": {
         "x": 0,
         "y": 6,
-        "w": 12,
+        "w": 8,
         "h": 8
       },
       "targets": [
@@ -464,67 +464,6 @@
       }
     },
     {
-      "id": 10,
-      "type": "timeseries",
-      "title": "First hook after resume (ms)",
-      "description": "Time the first hook call takes after an actor resumes (the relay pre-connects, so this should stay close to the normal round trip).",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "defenseclaw-prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 6,
-        "w": 12,
-        "h": 8
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(defenseclaw_substrate_first_hook_after_resume_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
-          "refId": "A",
-          "range": true,
-          "legendFormat": "p50"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "defenseclaw-prometheus"
-          },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_substrate_first_hook_after_resume_milliseconds_bucket{deployment_environment_name=~\"$environment\"}[$__rate_interval])))",
-          "refId": "B",
-          "range": true,
-          "legendFormat": "p99"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 10,
-            "showPoints": "never"
-          },
-          "unit": "ms"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
       "id": 11,
       "type": "timeseries",
       "title": "Policy lag (s)",
@@ -534,9 +473,9 @@
         "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 14,
-        "w": 12,
+        "x": 8,
+        "y": 6,
+        "w": 8,
         "h": 8
       },
       "targets": [
@@ -595,9 +534,9 @@
         "uid": "defenseclaw-prometheus"
       },
       "gridPos": {
-        "x": 12,
-        "y": 14,
-        "w": 12,
+        "x": 16,
+        "y": 6,
+        "w": 8,
         "h": 8
       },
       "targets": [
@@ -653,7 +592,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 14,
         "w": 24,
         "h": 1
       }
@@ -669,7 +608,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 15,
         "w": 12,
         "h": 8
       },
@@ -719,7 +658,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 23,
+        "y": 15,
         "w": 12,
         "h": 8
       },
@@ -769,7 +708,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 23,
         "w": 24,
         "h": 8
       },
@@ -799,7 +738,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 31,
         "w": 24,
         "h": 1
       }
@@ -815,7 +754,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -865,7 +804,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 40,
+        "y": 32,
         "w": 12,
         "h": 8
       },
@@ -925,7 +864,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 48,
+        "y": 40,
         "w": 12,
         "h": 8
       },
@@ -975,7 +914,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 48,
+        "y": 40,
         "w": 12,
         "h": 8
       },

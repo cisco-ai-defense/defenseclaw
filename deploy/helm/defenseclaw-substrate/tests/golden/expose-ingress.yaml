@@ -837,30 +837,6 @@ spec:
     port: 443
     targetPort: admin
 ---
-# Source: defenseclaw-substrate/templates/gateway.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: defenseclaw-gateway-metrics
-  labels:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/version: "1.0.10"
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/part-of: defenseclaw
-    helm.sh/chart: defenseclaw-substrate-1.0.10
-    app.kubernetes.io/component: gateway
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: defenseclaw-substrate
-    app.kubernetes.io/instance: dc
-    app.kubernetes.io/component: gateway
-  ports:
-  - name: metrics
-    port: 9464
-    targetPort: metrics
----
 # Source: defenseclaw-substrate/templates/leader.yaml
 # Internal: followers forward stateful RPCs here (mTLS between pods).
 apiVersion: v1
@@ -885,9 +861,6 @@ spec:
   - name: leader
     port: 7443
     targetPort: leader
-  - name: metrics
-    port: 9464
-    targetPort: metrics
 ---
 # Source: defenseclaw-substrate/templates/callout.yaml
 # The atenet-egress ext_proc callout. It serves TLS 1.3 with the servicedns

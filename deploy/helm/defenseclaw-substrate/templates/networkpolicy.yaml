@@ -117,13 +117,6 @@ spec:
     ports:
     - protocol: TCP
       port: {{ .Values.gateway.ports.admin }}
-  {{- with .Values.networkPolicy.metricsFrom }}
-  - from:
-    {{- toYaml . | nindent 4 }}
-    ports:
-    - protocol: TCP
-      port: {{ $.Values.gateway.ports.metrics }}
-  {{- end }}
 ---
 # Callout: only atenet-egress.
 apiVersion: networking.k8s.io/v1
@@ -143,13 +136,6 @@ spec:
     ports:
     - protocol: TCP
       port: {{ .Values.callout.port }}
-  {{- with .Values.networkPolicy.metricsFrom }}
-  - from:
-    {{- toYaml . | nindent 4 }}
-    ports:
-    - protocol: TCP
-      port: {{ $.Values.callout.ports.health }}
-  {{- end }}
 ---
 # Leader: only this release's pods (followers, controller, callout).
 apiVersion: networking.k8s.io/v1
@@ -169,11 +155,4 @@ spec:
     ports:
     - protocol: TCP
       port: {{ .Values.leader.port }}
-  {{- with .Values.networkPolicy.metricsFrom }}
-  - from:
-    {{- toYaml . | nindent 4 }}
-    ports:
-    - protocol: TCP
-      port: {{ $.Values.gateway.ports.metrics }}
-  {{- end }}
 {{- end }}
