@@ -4552,8 +4552,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		// Managed inventory publication refreshes parent identities on startup
 		// and on config changes; avoid re-reading every connector on each scan.
-		if scanErr != nil || result == nil || result.MCPAdvertisedTools == nil {
-			s.mcpTools.recordListingFailure(connectorName, serverName)
+		// A judge can reject a scan after the scanner returned a valid tools/list
+		// projection. Keep that content-free listing; the admission verdict does
+		// not make the scanner evidence incomplete.
+		if result == nil || result.MCPAdvertisedTools == nil {
+			s.mcpTools.recordListingFailureContext(ctx, connectorName, serverName)
 			if scanErr != nil || result == nil {
 				s.mcpTools.recordMetric(ctx, "list", "error", "scan_failed")
 			} else {
@@ -4561,7 +4564,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 			}
 			return
 		}
-		s.mcpTools.recordAdvertised(connectorName, serverName, result.MCPAdvertisedTools, result.Timestamp, result.MCPToolListPartial)
+		s.mcpTools.recordAdvertisedContext(ctx, connectorName, serverName, result.MCPAdvertisedTools, result.Timestamp, result.MCPToolListPartial)
 		outcome := "success"
 		if len(result.MCPAdvertisedTools) == 0 {
 			outcome = "empty"

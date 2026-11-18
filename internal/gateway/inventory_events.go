@@ -325,13 +325,21 @@ func emitEndpointInventory(
 	}
 	if len(toolStates) > 0 && toolStates[0] != nil {
 		toolStates[0].retryRestoreFromStore(ctx)
-		removed := toolStates[0].refreshCompleteParents(perConnectorMCP, perConnectorStatus.incompleteConnectors)
+		// A partial aggregate without connector attribution cannot prove which
+		// parent set is authoritative. Preserve every current parent and its
+		// durable children until a later scoped or complete read can reconcile it.
+		incompleteConnectors := perConnectorStatus.incompleteConnectors
+		var removed []string
+		unscopedPartial := perConnectorPartial && len(incompleteConnectors) == 0
+		if !unscopedPartial {
+			removed = toolStates[0].refreshCompleteParents(perConnectorMCP, incompleteConnectors)
+		}
 		if toolStates[0].store != nil && len(removed) > 0 {
 			if err := toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed); err == nil {
 				toolStates[0].acknowledgeRemovedParents(removed)
 			}
 		}
-		observedReadPartial := toolStates[0].observedIncomplete(perConnectorStatus.incompleteConnectors)
+		observedReadPartial := toolStates[0].observedIncomplete(incompleteConnectors)
 		if perConnectorPartial && len(perConnectorStatus.incompleteConnectors) == 0 {
 			// A partial result without connector attribution is not safe to scope.
 			observedReadPartial = true
@@ -1188,7 +1196,7 @@ func emitInventorySnapshot(
 			active++
 		}
 	}
-	limit := managedInventoryLimit(managedAction)
+	limit := managedInventoryComponentLimit(managedAction, components)
 	carrier, carrierOK := endpointInventoryCarrierFor(managedAction, components)
 	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
 		carrier, carrierOK = endpointInventoryCarrier{}, true
@@ -1264,6 +1272,14 @@ func managedInventoryLimit(action observability.ProducerKey) int {
 	default:
 		return 0
 	}
+}
+
+func managedInventoryComponentLimit(action observability.ProducerKey, components []endpointInventoryComponent) int {
+	if action == config.ObservabilityV8ManagedMCPInventoryAction &&
+		(len(components) == 0 || components[0].componentType == "mcp_tool") {
+		return maxMCPToolCollection
+	}
+	return managedInventoryLimit(action)
 }
 
 func endpointInventoryCarrierFor(

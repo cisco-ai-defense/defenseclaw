@@ -506,6 +506,8 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"runtime_asset_state":              retentionOwnedProtected,
 	"mcp_observed_tools":               retentionOwnedProtected,
 	"mcp_observed_tool_parents":        retentionOwnedProtected,
+	"mcp_advertised_tools":             retentionOwnedProtected,
+	"mcp_advertised_tool_parents":      retentionOwnedProtected,
 	// Field class sets are named by the rows retention keeps; bounded by
 	// maxFieldClassSets, never pruned (field_class_sets.go).
 	"audit_field_class_sets":             retentionOwnedProtected,

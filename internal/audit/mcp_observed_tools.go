@@ -229,6 +229,12 @@ func (s *Store) DeleteMCPObservedToolsForParents(ctx context.Context, parentIDs 
 	}
 	return s.callGroupWrite(ctx, func(runCtx context.Context, tx *sql.Tx) error {
 		for _, id := range clean {
+			if _, err := tx.ExecContext(runCtx, `DELETE FROM mcp_advertised_tools WHERE parent_component_id = ?`, id); err != nil {
+				return fmt.Errorf("audit: delete advertised MCP tools for parent: %w", err)
+			}
+			if _, err := tx.ExecContext(runCtx, `DELETE FROM mcp_advertised_tool_parents WHERE parent_component_id = ?`, id); err != nil {
+				return fmt.Errorf("audit: delete advertised MCP tool parent: %w", err)
+			}
 			if _, err := tx.ExecContext(runCtx, `DELETE FROM mcp_observed_tools WHERE parent_component_id = ?`, id); err != nil {
 				return fmt.Errorf("audit: delete observed MCP tools for parent: %w", err)
 			}
