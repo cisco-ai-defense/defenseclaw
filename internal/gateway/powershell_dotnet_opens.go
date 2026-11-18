@@ -59,6 +59,16 @@ type psFileInfo struct {
 // placed reports a receiver the reader places.
 func (f psFileInfo) placed() bool { return len(f.params) > 0 }
 
+// unsure is the reading of a receiver the reader places but may be wrong
+// about (a run-time name may bind it, or a use may re-bind it): not placed,
+// each of its readings a maybe (rel-1-0-10:GAP-1301).
+func (f psFileInfo) unsure() psFileInfo {
+	if !f.placed() {
+		return f
+	}
+	return psFileInfo{maybe: append([]psFileInfo{{params: f.params, kind: f.kind}}, f.maybe...)}
+}
+
 // psLiteralFileInfo is the FileInfo of the literal .NET path argument arg.
 func psLiteralFileInfo(arg string) psFileInfo {
 	return psFileInfo{params: []string{"-LiteralPath " + arg}}
@@ -213,11 +223,14 @@ func (s *psStateScan) dotNetCall(method, statement string, receiver *psReceiver,
 func (s *psStateScan) fileInfoMethod(name string, effect psFileInfoMethod, statement string, receiver *psReceiver, variable string, args []string, open int) {
 	file := s.fileInfoOf(statement, name, receiver, open)
 	if !file.placed() {
-		// A receiver the reader cannot place: an Open without a FileMode
-		// and Replace are calls of other types (a connection, a string),
-		// and an Open with a literal read mode reads whatever file it is
-		// (rel-1-0-10:GAP-1258).
-		if effect.placedOnly || effect.mode && (len(args) == 0 || psOpenVerdictOf(args, 0) == psOpenRead) {
+		// A receiver the reader knows nothing of: an Open without a
+		// FileMode and Replace are calls of other types (a connection, a
+		// string), and an Open with a literal read mode reads whatever file
+		// it is (rel-1-0-10:GAP-1258). A receiver the reader placed but is
+		// not sure of (file.maybe) is a FileInfo it may still be: its
+		// Replace is read as Delete's and CopyTo's are, never as nothing
+		// (rel-1-0-10:GAP-1301).
+		if effect.placedOnly && len(file.maybe) == 0 || effect.mode && (len(args) == 0 || psOpenVerdictOf(args, 0) == psOpenRead) {
 			return
 		}
 		for _, index := range effect.arguments {
@@ -227,6 +240,7 @@ func (s *psStateScan) fileInfoMethod(name string, effect psFileInfoMethod, state
 		}
 		if effect.receiver || effect.mode {
 			s.unplaced = true
+			s.maybeOpens(file, name)
 		}
 		return
 	}
@@ -246,14 +260,20 @@ func (s *psStateScan) fileInfoMethod(name string, effect psFileInfoMethod, state
 		for _, param := range file.params {
 			s.opens = append(s.opens, psOpenTarget{param, verdict == psOpenUnknown, file.writesFolder(name)})
 		}
-		for _, maybe := range file.maybe {
-			for _, param := range maybe.params {
-				s.opens = append(s.opens, psOpenTarget{param, true, maybe.writesFolder(name)})
-			}
-		}
+		s.maybeOpens(file, name)
 	}
 	if variable != "" && effect.stream && len(file.params) == 1 && len(file.maybe) == 0 {
 		s.bind(&s.streams, variable, file.params[0])
+	}
+}
+
+// maybeOpens adds the files of the readings the receiver file may be
+// (file.maybe) that the FileInfo method name writes, as the unknown tier.
+func (s *psStateScan) maybeOpens(file psFileInfo, name string) {
+	for _, maybe := range file.maybe {
+		for _, param := range maybe.params {
+			s.opens = append(s.opens, psOpenTarget{param, true, maybe.writesFolder(name)})
+		}
 	}
 }
 
@@ -430,8 +450,9 @@ func (s *psStateScan) bindFileInfo(variable string, file psFileInfo) {
 // at rune index at, is called on: the receiver, else the variable before
 // .name in statement (variableFileInfo; the pipeline item of the
 // ForEach-Object block being read, for $_ and $PSItem); unplaced when the
-// reader cannot place it, also when the command may bind a variable by a
-// name built at run time (rel-1-0-10:GAP-1257, GAP-1276).
+// reader cannot place it, and unsure (psFileInfo.unsure) when the command
+// may bind a variable by a name built at run time (rel-1-0-10:GAP-1257,
+// GAP-1276, GAP-1301).
 func (s *psStateScan) fileInfoOf(statement, name string, receiver *psReceiver, at int) psFileInfo {
 	switch {
 	case receiver != nil && receiver.call:
@@ -452,16 +473,19 @@ func (s *psStateScan) fileInfoOf(statement, name string, receiver *psReceiver, a
 		return psFileInfo{}
 	}
 	variable := before[k:]
-	if s.dynamicVariables() {
-		return psFileInfo{}
-	}
+	var file psFileInfo
 	if variable == "_" || variable == "psitem" {
 		if s.item.placed() {
 			s.itemUses++
 		}
-		return s.item
+		file = s.item
+	} else {
+		file = s.variableFileInfo(variable, at)
 	}
-	return s.variableFileInfo(variable, at)
+	if s.dynamicVariables() {
+		return file.unsure()
+	}
+	return file
 }
 
 // psVariableCount is what psVariableUses reads of one variable in the whole
@@ -496,11 +520,12 @@ func (s *psStateScan) dynamicVariables() bool {
 // variableFileInfo returns the FileInfo the variable (lower case) is when a
 // method whose argument list opens at rune index at is called on it: the
 // binding read last, and the earlier ones it may still be (maybe). It is
-// unplaced when an assignment of it before the call is one the reader does
-// not place, when one after the call may run before it (the call is in a
-// block, which may run again, or a trap block may run first), and when a use
-// may bind it otherwise (psVariableUses). A plain read of the variable binds
-// nothing (rel-1-0-10:GAP-1257, GAP-1278).
+// unsure (psFileInfo.unsure: every binding a maybe) when an assignment of it
+// before the call is one the reader does not place, when one after the call
+// may run before it (the call is in a block, which may run again, or a trap
+// block may run first), and when a use may bind it otherwise
+// (psVariableUses). A plain read of the variable binds nothing
+// (rel-1-0-10:GAP-1257, GAP-1278, GAP-1301).
 func (s *psStateScan) variableFileInfo(variable string, at int) psFileInfo {
 	bindings := s.fileInfos[variable]
 	lower, ok := s.lowerText()
@@ -515,12 +540,13 @@ func (s *psStateScan) variableFileInfo(variable string, at int) psFileInfo {
 		}
 		s.uses[variable] = count
 	}
+	unsure := psFileInfo{maybe: append([]psFileInfo(nil), bindings...)}
 	if count.rebinds || at > len(s.runes) || !s.account(at) {
-		return psFileInfo{}
+		return unsure
 	}
 	before, _ := psVariableUses(strings.ToLower(string(s.runes[:at])), variable)
 	if before != len(bindings) || count.assignments > before && (s.braces > 0 || psHasWord(lower, "trap")) {
-		return psFileInfo{}
+		return unsure
 	}
 	file := bindings[len(bindings)-1]
 	file.maybe = append([]psFileInfo(nil), bindings[:len(bindings)-1]...)
