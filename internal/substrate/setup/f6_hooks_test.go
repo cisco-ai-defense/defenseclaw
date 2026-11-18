@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -142,5 +143,82 @@ func TestDeploymentPodsCountsTerminatingPods(t *testing.T) {
 	}
 	if podQuery != "app.kubernetes.io/component=controller,app.kubernetes.io/name=defenseclaw" {
 		t.Fatalf("label selector %q", podQuery)
+	}
+}
+
+// GAP-0609: a failed hook keeps its Job and Error pod (hook-succeeded), so
+// the pre-delete hook deletes the chart's other hook Jobs, by name in the
+// release namespace, with background propagation so their pods go too.
+func TestPreDeleteDeletesLeftoverHookJobs(t *testing.T) {
+	var deletes []string
+	var bodies []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/apis/batch/v1/") {
+			deletes = append(deletes, r.URL.Path)
+			b, _ := io.ReadAll(r.Body)
+			bodies = append(bodies, string(b))
+			if strings.HasSuffix(r.URL.Path, "/defenseclaw-pre-upgrade") {
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Success"}`))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	tok := filepath.Join(dir, "token")
+	if err := os.WriteFile(tok, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	k, err := NewKube(srv.URL, tok, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := testPlan()
+	plan.CredentialProvider.Grant = false
+	r, err := PreDelete(context.Background(), plan, newFakeAPI(), k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{}
+	for _, n := range []string{"defenseclaw-chain-key", "defenseclaw-relay-session", "defenseclaw-pre-upgrade", "defenseclaw-pre-rollback", "defenseclaw-bootstrap"} {
+		want["/apis/batch/v1/namespaces/defenseclaw-system/jobs/"+n] = true
+	}
+	for _, p := range deletes {
+		if !want[p] {
+			t.Errorf("deleted %s, which is not a leftover hook Job of the release namespace", p)
+		}
+		delete(want, p)
+	}
+	if len(want) > 0 {
+		t.Errorf("hook Jobs not deleted: %v (deleted %v)", want, deletes)
+	}
+	for _, b := range bodies {
+		if !strings.Contains(b, `"propagationPolicy":"Background"`) {
+			t.Errorf("a Job delete without background propagation leaves its pods: %s", b)
+		}
+	}
+	notes := strings.Join(r.Notes, "\n")
+	if !strings.Contains(notes, "deleted the hook Job(s) defenseclaw-pre-upgrade and their pods") {
+		t.Errorf("notes do not name the deleted Job: %s", notes)
+	}
+}
+
+// GAP-0609 (2): the kept access-policy grants come with the exact commands a
+// global owner runs, for the global policy and each writable atespace.
+func TestPurgeStepsGiveTheExactGrantCommands(t *testing.T) {
+	steps := strings.Join(PurgeSteps(testPlan()), "\n")
+	for _, w := range []string{
+		"kubectl ate get access-policy --global -o yaml > global.yaml",
+		"kubectl ate update access-policy --global -f global.yaml",
+		"kubectl ate get access-policy -a eng-web -o yaml > eng-web.yaml",
+		"kubectl ate update access-policy -a eng-web -f eng-web.yaml",
+		"kubectl ate update access-policy -a data-team -f data-team.yaml",
+	} {
+		if !strings.Contains(steps, w) {
+			t.Errorf("purge steps lack %q:\n%s", w, steps)
+		}
 	}
 }
