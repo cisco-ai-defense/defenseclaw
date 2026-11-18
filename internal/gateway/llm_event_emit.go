@@ -2676,9 +2676,14 @@ func (a *APIServer) takeHookLLMSpanPrompt(meta llmEventMeta, response string) (h
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 
+	turnID := strings.TrimSpace(meta.TurnID)
 	var snapshot hookLLMSpanPrompt
 	for _, key := range hookLLMSpanPromptKeys(meta) {
 		candidate, exists := a.hookLLMSpanPrompts[key]
+		candidateTurnID := strings.TrimSpace(candidate.meta.TurnID)
+		if exists && turnID != "" && candidateTurnID != "" && candidateTurnID != turnID {
+			continue
+		}
 		if snapshot.content == "" && exists {
 			snapshot = candidate
 		}

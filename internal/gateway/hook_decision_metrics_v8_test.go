@@ -13,7 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	oteltrace "go.opentelemetry.io/otel/trace"
-	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 )
 
 func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvider(t *testing.T) {
@@ -174,26 +174,49 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 }
 
 func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
-	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
-	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "TaskCreated"}
-	rawContent := "Authorization: Basic abc123==; Authorization: Bearer def456"
-	resp := agentHookResponse{
-		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
-		InspectedContent: rawContent, InspectedContentPresent: true,
+	trueValue, falseValue := true, false
+	for _, test := range []struct {
+		name      string
+		directive *bool
+		want      string
+	}{
+		{
+			name: "managed true redacts embedded credentials", directive: &trueValue,
+			want: "notification Authorization: Bearer <redacted len=6 sha=8f61ad5c> continues",
+		},
+		{
+			name: "explicit false preserves raw content", directive: &falseValue,
+			want: "notification Authorization: Bearer def456 continues",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+			req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "Notification"}
+			resp := agentHookResponse{
+				Action: "allow", RawAction: "allow", Severity: "HIGH", Mode: "observe",
+				InspectedContent: "notification Authorization: Bearer def456 continues", InspectedContentPresent: true,
+				RedactionEnabled: test.directive,
+			}
+
+			api.emitHookDecisionObservabilityV8(t.Context(), req, resp, HookAuditEnvelope{Result: "ok"}, false)
+			if got := capturedHookDecisionInputContent(t, capture); got != test.want {
+				t.Fatalf("inspected content = %q, want %q", got, test.want)
+			}
+		})
 	}
+}
 
-	api.emitHookDecisionObservabilityV8(t.Context(), req, resp, HookAuditEnvelope{Result: "ok"}, false)
-
+func capturedHookDecisionInputContent(t *testing.T, capture *hookModelV8OTLPCapture) string {
+	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
-	var logs []*collectorlogspb.ExportLogsServiceRequest
+	var records []*logspb.LogRecord
 	for time.Now().Before(deadline) {
-		logs = capture.logSnapshot()
-		if len(hookModelV8CapturedLogs(logs)) == 1 {
+		records = hookModelV8CapturedLogs(capture.logSnapshot())
+		if len(records) == 1 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	records := hookModelV8CapturedLogs(logs)
 	if len(records) != 1 {
 		t.Fatalf("generated hook decision logs=%d want=1", len(records))
 	}
@@ -216,10 +239,14 @@ func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
 		t.Fatalf("parts=%v, want one part", message["parts"])
 	}
 	part, ok := parts[0].(map[string]interface{})
-	wantContent := "Authorization: Basic <redacted len=8 sha=a251c2d1>; Authorization: Bearer <redacted len=6 sha=8f61ad5c>"
-	if !ok || part["content"] != wantContent {
-		t.Fatalf("part=%v, want projection-safe inspected content %q", parts[0], wantContent)
+	if !ok {
+		t.Fatalf("part=%T, want object", parts[0])
 	}
+	content, ok := part["content"].(string)
+	if !ok {
+		t.Fatalf("part content=%T, want string", part["content"])
+	}
+	return content
 }
 
 func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {
