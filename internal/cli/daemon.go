@@ -355,6 +355,20 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return fmt.Errorf("gateway start listener: %w", err)
 	}
 
+	if !rotationTransaction {
+		// No gateway of this account runs: park the route a crash, a forced
+		// stop or a logoff left in place before anything else, so a start
+		// refused because another process holds the port leaves the agents
+		// sending nothing (GAP-1133). The gateway parks again before it
+		// binds and renders the real route once it holds the port.
+		if running, _ := d.IsRunning(); !running {
+			// A failed park is not a start failure: the gateway parks
+			// again before it binds.
+			if err := parkRouteOnlyWithoutGateway(cfg, false); err != nil {
+				Warn(err.Error())
+			}
+		}
+	}
 	alreadyRunning, pid, err := inspectConfiguredListener(d, cfg, client)
 	if err != nil {
 		return err
@@ -680,7 +694,8 @@ func runStop(cmd *cobra.Command, _ []string) error {
 	if !running {
 		removeRunningGatewayToken(config.DefaultDataPath())
 		fmt.Println(Dim("Gateway sidecar is not running"))
-		return nil
+		// A crash or a forced stop left the route in place (GAP-1133).
+		return parkRouteOnlyWithoutGateway(cfg, true)
 	}
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
@@ -715,6 +730,11 @@ func runStop(cmd *cobra.Command, _ []string) error {
 
 	fmt.Println(Style("OK", "fg=green", "bold"))
 	removeRunningGatewayToken(config.DefaultDataPath())
+	// A graceful stop parked the routes itself; a stop that had to kill the
+	// process (Windows TerminateProcess) did not (GAP-1133).
+	if err := parkRouteOnlyWithoutGateway(cfg, false); err != nil {
+		return fmt.Errorf("the gateway stopped, but %w", err)
+	}
 	printHint("Start again:  defenseclaw-gateway start")
 	return nil
 }

@@ -370,6 +370,11 @@ LIVE_ONLY_JOBS = {
 LONG_COMPILE_JOBS = {
     ("ci.yml", "go-lint"): 25,
     ("ci.yml", "darwin-gateway-test-binary"): 35,
+    # Not a compile: the Windows upgrade lane installs, upgrades, converges and
+    # removes the standalone services on a hosted runner. On rel/1.0.10
+    # da4177e225 (CI run 44074568058) every step passed and the job was
+    # cancelled at 20m07s inside the last step, Setup /uninstall.
+    ("ci.yml", "enterprise-upgrade-windows"): 30,
 }
 
 
