@@ -89,6 +89,13 @@ type Record struct {
 	Alert         bool   `json:"alert,omitempty"`
 	BodyInspected bool   `json:"body_inspected,omitempty"`
 	BodyOverCap   bool   `json:"body_over_cap,omitempty"`
+	// Unregistered is the leader's mark on an egress record it could not
+	// tie to a registration of its atespace (a deleted actor, one DefenseClaw
+	// never registered, a registration lookup outage at the callout, or a UID
+	// no registration of the atespace has): its atespace and actor name are
+	// the callout's, from the egress gateway's verified SPIFFE ID, and it has
+	// no UID and no profile (GAP-0581). What a poster sends here is ignored.
+	Unregistered bool `json:"unregistered,omitempty"`
 
 	// Metric and Value: a count (Value is the increment) or a gauge (the
 	// current value).
@@ -153,9 +160,9 @@ type Store struct {
 	MaxQueueBytes int64
 	// Registrations are the leader's actor registrations. An egress record
 	// names its actor from the registration of its atespace and UID, not
-	// from what the callout sent, and a record of an actor with no
-	// registration is dropped (GAP-0581). Nil keeps the posted fields
-	// (tests).
+	// from what the callout sent; one with no such registration is kept,
+	// marked Unregistered, without a UID or profile (GAP-0581). Nil keeps
+	// the posted fields (tests).
 	Registrations registry.Store
 
 	mu sync.Mutex
@@ -330,20 +337,39 @@ func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error
 	return struct{}{}, nil
 }
 
-// egressActor sets r's atespace, actor, UID and profile from the actor's
-// registration; false for an actor without one.
+// egressActor names r's actor from the registration of its atespace and
+// UID: the registration's name, and its profile where the callout named no
+// deciding policy (the callout's Profile is the name of the policy that
+// decided, which can differ from the registration's profile). A record no
+// registration matches (no UID: a deleted actor, an unregistered one, a
+// lookup outage at the callout; or a UID the atespace has no registration
+// for) keeps the atespace and actor name the callout read from the egress
+// gateway's verified SPIFFE ID, loses its UID and profile and is marked
+// Unregistered, so its refusal still reaches log.egress.blocked (GAP-0581).
+// Stripping, not dropping, a record with an unknown UID: without the UID
+// and profile it can't name another actor's registration, and a poster can
+// already omit the UID, so a drop would protect nothing and would lose real
+// refusals made on a stale cached UID. A record with no atespace or actor
+// is dropped.
 func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
+	r.Unregistered = false
 	if s.Registrations == nil {
 		return r, true
 	}
-	if r.Atespace == "" || r.UID == "" {
+	if r.Atespace == "" || r.Actor == "" {
 		return r, false
 	}
-	reg, ok, err := s.Registrations.Get(ctx, r.Atespace, r.UID)
-	if err != nil || !ok || reg.Atespace != r.Atespace || reg.UID != r.UID || reg.Name == "" {
-		return r, false
+	if r.UID != "" {
+		reg, ok, err := s.Registrations.Get(ctx, r.Atespace, r.UID)
+		if err == nil && ok && reg.Atespace == r.Atespace && reg.UID == r.UID && reg.Name != "" {
+			r.Actor = reg.Name
+			if r.Profile == "" {
+				r.Profile = reg.Profile
+			}
+			return r, true
+		}
 	}
-	r.Actor, r.Profile = reg.Name, reg.Profile
+	r.UID, r.Profile, r.Unregistered = "", "", true
 	return r, true
 }
 
