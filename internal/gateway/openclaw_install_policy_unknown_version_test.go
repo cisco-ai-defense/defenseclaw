@@ -60,7 +60,16 @@ func registeredOpenClawInstallPolicy(t *testing.T, version string) (s *Sidecar, 
 
 func openClawInstallPolicyStillRegistered(t *testing.T, configPath string) bool {
 	t.Helper()
-	data, err := os.ReadFile(configPath)
+	// openclaw.json is replaced atomically while the gateway under test
+	// refreshes it; on Windows a read in that instant fails with a sharing
+	// violation (1 of 30 native runs). Only an error that lasts is a failure.
+	var data []byte
+	var err error
+	for end := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if data, err = os.ReadFile(configPath); err == nil || time.Now().After(end) {
+			break
+		}
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
