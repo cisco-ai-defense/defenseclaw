@@ -461,7 +461,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 		if err != nil {
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
-			if derr := s.Client.Delete(cctx, a.Atespace, a.Name); derr == nil {
+			if _, derr := s.Client.Delete(cctx, a.Atespace, a.Name); derr == nil {
 				fmt.Fprintf(w, "Removed the half-made agent %s/%s.\n", a.Atespace, a.Name)
 			} else {
 				fmt.Fprintf(w, "Could not remove %s/%s (%v); delete it with: defenseclaw substrate delete %s\n", a.Atespace, a.Name, substrateFail(derr), a.Name)

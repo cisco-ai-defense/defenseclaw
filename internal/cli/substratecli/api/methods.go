@@ -51,6 +51,10 @@ type Actor struct {
 	Foreign     bool   `json:"foreign,omitempty"`
 	Deleted     bool   `json:"deleted,omitempty"`
 	State       string `json:"state,omitempty"`
+	// Snapshots is how many snapshots the cluster holds for the actor (one
+	// actor's status), or removed with it (delete); nil when the gateway
+	// did not count them (GAP-0474).
+	Snapshots *int `json:"snapshots,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
@@ -252,9 +256,12 @@ func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, err
 	return a.shown(), err
 }
 
-// Delete removes an actor and its snapshots.
-func (c *Client) Delete(ctx context.Context, atespace, name string) error {
-	return c.do(ctx, http.MethodDelete, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, nil)
+// Delete removes an actor and its snapshots. The answer is the deleted
+// actor; its Snapshots says how many went with it (GAP-0474).
+func (c *Client) Delete(ctx context.Context, atespace, name string) (Actor, error) {
+	var a Actor
+	err := c.do(ctx, http.MethodDelete, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, &a)
+	return a.shown(), err
 }
 
 // SessionCert mints a relay session token for an actor the person may
