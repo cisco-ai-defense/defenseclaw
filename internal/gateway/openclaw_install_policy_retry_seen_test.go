@@ -62,7 +62,7 @@ func TestOpenClawInstallPolicyRetryJudgesUnderTheLastVersionTheWatcherSaw(t *tes
 
 	writeOpenClawDiscoveryVersion(t, dataDir, "2026.8.34")
 	deadline := time.Now().Add(5 * time.Second)
-	for !(calls.Load() == 1 && openClawInstallPolicyRetrying.Load()) && time.Now().Before(deadline) {
+	for (calls.Load() != 1 || !openClawInstallPolicyRetrying.Load()) && time.Now().Before(deadline) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	if calls.Load() != 1 || !openClawInstallPolicyRetrying.Load() {

@@ -320,11 +320,6 @@ func (a *obsCountingAID) Inspect(_ context.Context, messages []ChatMessage) *Sca
 
 func (a *obsCountingAID) bindObservabilityV8(hookLifecycleMetricV8Runtime) {}
 
-// obsBothInspector is obsModeInspector with scanner_mode both.
-func obsBothInspector(aid *obsCountingAID) (*GuardrailInspector, *atomic.Int64) {
-	return obsModeInspector("both", aid)
-}
-
 // obsModeInspector is the gateway's inspector with scanner_mode mode over
 // aid; spans counts the completion checks that open an evaluation span.
 func obsModeInspector(mode string, aid *obsCountingAID) (*GuardrailInspector, *atomic.Int64) {
