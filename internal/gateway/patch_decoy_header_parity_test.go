@@ -55,12 +55,52 @@ func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManaged(t *testing.T) {
 }
 
 func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictEvenCases(t *testing.T) {
-	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", 0, 2)
+	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", patchDecoyManagedStrictParts[0], len(patchDecoyManagedStrictParts))
 }
 
 func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictOddCases(t *testing.T) {
-	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", 1, 2)
+	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", patchDecoyManagedStrictParts[1], len(patchDecoyManagedStrictParts))
 }
+
+// patchDecoyManagedStrictParts are the parts the two managed-strict tests
+// check, of len(patchDecoyManagedStrictParts) parts.
+var patchDecoyManagedStrictParts = []int{0, 1}
+
+// TestPatchDecoyHeaderManagedStrictHalvesCoverEveryCase: the even and the odd
+// managed-strict tests together check exactly the fixture cases the single
+// managed-strict test checked: every case in one half, none in both, none lost.
+func TestPatchDecoyHeaderManagedStrictHalvesCoverEveryCase(t *testing.T) {
+	var cases []string
+	for _, c := range shapeParityCases(t) {
+		if patchDecoyCase(c.id, c.tool) {
+			cases = append(cases, c.id+" "+c.tool)
+		}
+	}
+	if len(cases) == 0 {
+		t.Fatal("no wincred Write or Edit fixture cases")
+	}
+	parts := len(patchDecoyManagedStrictParts)
+	for n, c := range cases {
+		in := 0
+		for _, part := range patchDecoyManagedStrictParts {
+			if patchDecoyInPart(n, part, parts) {
+				in++
+			}
+		}
+		if in != 1 {
+			t.Errorf("case %d (%s) is in %d of the managed-strict halves, want 1", n, c, in)
+		}
+	}
+}
+
+// patchDecoyCase reports whether a shape-parity fixture case is one the
+// decoy-header test checks: a wincred Write or Edit.
+func patchDecoyCase(id, tool string) bool {
+	return strings.HasPrefix(id, "wincred/") && (tool == "Write" || tool == "Edit")
+}
+
+// patchDecoyInPart reports whether case index n is in part of parts.
+func patchDecoyInPart(n, part, parts int) bool { return n%parts == part }
 
 // patchDecoyUnplaced are header names no reader places on the host of the
 // gateway, on every patch route: home forms, which the patch tool expands on
@@ -207,7 +247,7 @@ func patchDecoyHeaderNeverWeakerPart(t *testing.T, tier string, part, parts int)
 	all := shapeParityCases(t)
 	cases := all[:0]
 	for _, c := range all {
-		if strings.HasPrefix(c.id, "wincred/") && (c.tool == "Write" || c.tool == "Edit") {
+		if patchDecoyCase(c.id, c.tool) {
 			cases = append(cases, c)
 		}
 	}
@@ -230,7 +270,7 @@ func patchDecoyHeaderNeverWeakerPart(t *testing.T, tier string, part, parts int)
 					return shapeParityHook(t, handlers[call.conn], call, p.managed)
 				}
 				for n, c := range cases {
-					if n%parts != part {
+					if !patchDecoyInPart(n, part, parts) {
 						continue
 					}
 					str := func(key string) string { value, _ := c.args[key].(string); return value }
