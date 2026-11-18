@@ -1145,6 +1145,8 @@
    "TestGAP0581EgressRecordsSayWhetherTheActorIsRegistered": 0.5,
    "TestGAP0487LLMRequestCanaryIsRefusedInActionMode": 7.68,
    "TestGAP0487LLMStreamedReplyCanaryIsInspected": 1.78,
+   "TestGAP0579ConfigMapProfileModeReachesLLMWithoutRestart": 3.2,
+   "TestGAP0579LLMReplyNamingCredentialsPathInActionMode": 3.1,
    "TestACPActionParityWithKiroHook": 153.3,
    "TestACPActionVerdictSemantics": 5.5,
    "TestACPActionWithNoKnownDirectoryIsAtTheUnknownTier": 6.9,

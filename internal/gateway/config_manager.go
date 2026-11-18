@@ -2208,7 +2208,26 @@ func cloneConfig(in *config.Config) *config.Config {
 }
 
 func (m *ConfigManager) matches(path string) bool {
-	return equalConfigPathForDiff(filepath.Clean(path), m.path, runtime.GOOS)
+	cleaned := filepath.Clean(path)
+	return equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) || m.isMountDataSwap(cleaned)
+}
+
+// kubeletDataLink is the link a Kubernetes ConfigMap or Secret volume
+// replaces on every update: the kubelet writes the new files to a fresh
+// ..<timestamp> directory and renames a new ..data link over the old one.
+// config.yaml in that volume is a link through ..data that never changes,
+// so the directory reports events for ..data and never for config.yaml.
+const kubeletDataLink = "..data"
+
+// isMountDataSwap reports an event for the ..data link next to config.yaml:
+// the config was replaced in a Kubernetes volume mount. Without it an edit
+// of the ConfigMap a Substrate gateway mounts reached nothing until a pod
+// restart: guardrail modes and profiles changed only after a rollout
+// (substrate-1:GAP-0579). No host install has a ..data entry beside its
+// config.yaml.
+func (m *ConfigManager) isMountDataSwap(cleaned string) bool {
+	return filepath.Base(cleaned) == kubeletDataLink &&
+		equalConfigPathForDiff(filepath.Dir(cleaned), filepath.Dir(m.path), runtime.GOOS)
 }
 
 // classify reports which watched file the fsnotify event refers to:
@@ -2219,7 +2238,7 @@ func (m *ConfigManager) matches(path string) bool {
 // events on the target's *parent*, not the target itself.
 func (m *ConfigManager) classify(path string) string {
 	cleaned := filepath.Clean(path)
-	if equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) {
+	if equalConfigPathForDiff(cleaned, m.path, runtime.GOOS) || m.isMountDataSwap(cleaned) {
 		return "config"
 	}
 	if envPath := m.getEnvConfigPath(); envPath != "" && equalConfigPathForDiff(cleaned, filepath.Clean(envPath), runtime.GOOS) {
