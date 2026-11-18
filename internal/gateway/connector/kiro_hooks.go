@@ -130,10 +130,13 @@ func kiroV3HookEntry(name, description, trigger, matcher, hookScript string) map
 // files, and in them only the entries that run exactly one of commands. A
 // nil scope, the teardown of a configured connector, covers every Kiro file
 // and every DefenseClaw entry (kiroOwnedV3Hook, kiroV2EntryOwned and the
-// edited forms).
+// edited forms). script, when set, is this install's POSIX hook script: an
+// entry that runs it in another command form (kiroCommandRunsScript) is the
+// scope's too.
 type kiroReclaimScope struct {
 	files    map[string]bool
 	commands []string
+	script   string
 }
 
 func (s *kiroReclaimScope) covers(path string) bool {
@@ -162,14 +165,73 @@ func (s *kiroReclaimScope) remaining() ([]string, error) {
 }
 
 // runsOwnCommand reports whether raw, a CLI 2.x hook handler or the action of
-// a v3 or universal entry, runs exactly one of the scope's commands.
+// a v3 or universal entry, runs exactly one of the scope's commands, or the
+// scope's script in another form (kiroCommandRunsScript).
 func (s *kiroReclaimScope) runsOwnCommand(raw interface{}) bool {
 	for _, command := range s.commands {
 		if managedHookCommandEntry(raw, command) {
 			return true
 		}
 	}
+	if s.script == "" {
+		return false
+	}
+	entry, _ := raw.(map[string]interface{})
+	for _, key := range []string{"command", "bash"} {
+		if command, _ := entry[key].(string); kiroCommandRunsScript(command, s.script) {
+			return true
+		}
+	}
 	return false
+}
+
+// holds reports whether the Kiro hook or agent file at path, in any of its
+// forms, has an entry that runs one of the scope's commands
+// (runsOwnCommand). A file that cannot be read as a JSON object is an error.
+func (s *kiroReclaimScope) holds(path string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	cfg, err := kiroDecodeJSONObject(data)
+	if err != nil {
+		return false, fmt.Errorf("parse kiro file %s: %w", path, err)
+	}
+	return s.holdsIn(cfg), nil
+}
+
+func (s *kiroReclaimScope) holdsIn(raw interface{}) bool {
+	switch v := raw.(type) {
+	case []interface{}:
+		return slices.ContainsFunc(v, s.holdsIn)
+	case map[string]interface{}:
+		if s.runsOwnCommand(v) {
+			return true
+		}
+		for _, value := range v {
+			if s.holdsIn(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// kiroCommandRunsScript reports whether a POSIX hook command runs script, a
+// data folder's own kiro-hook.sh, in a form other than the ones Setup writes
+// now: the script word, quoted or not and after one shell or env wrapper
+// (hookScriptWordAfterWrapper), is exactly script, alone or with
+// DefenseClaw's --event or --hook-surface binding. The path names that data
+// folder, so no other install's or user's entry matches.
+func kiroCommandRunsScript(command, script string) bool {
+	if script == "" {
+		return false
+	}
+	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+	return ok && word == script && (rest == "" || defenseClawHookBinding(rest))
 }
 
 // ownsActionEntry is the ownership of a v3 or universal-form entry: with no
