@@ -3,6 +3,8 @@
 
 package hookpaths
 
+import "strings"
+
 // sedScriptReplaceOnly reports a sed script that is read in full and holds
 // only commands that change the pattern space or the output: substitute
 // (without the w and e flags), transliterate, delete, print, hold-space
@@ -16,6 +18,110 @@ package hookpaths
 func sedScriptReplaceOnly(script string) bool {
 	p := sedScan{s: script}
 	return p.script()
+}
+
+// sedScriptEffects reads the output operands and literal commands of a sed
+// script. They are independent of the file that -i replaces: a safe entry
+// replacement cannot excuse a w/W output or an e command. The reader accepts
+// the same script positions with -e, -eSCRIPT and --expression=SCRIPT.
+func sedScriptEffects(words []string) (outputs, commands []string) {
+	var scripts []string
+	explicit := false
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "-e" || word == "--expression":
+			explicit = true
+			if i+1 < len(words) {
+				i++
+				scripts = append(scripts, words[i])
+			}
+		case strings.HasPrefix(word, "--expression="):
+			explicit = true
+			scripts = append(scripts, strings.TrimPrefix(word, "--expression="))
+		case strings.HasPrefix(word, "-e") && len(word) > 2:
+			explicit = true
+			scripts = append(scripts, word[2:])
+		case word == "--":
+			if !explicit && i+1 < len(words) {
+				scripts = append(scripts, words[i+1])
+			}
+			i = len(words)
+		case strings.HasPrefix(word, "-"):
+			// Other options do not make their following word a script.
+		case !explicit:
+			scripts = append(scripts, word)
+			explicit = true
+		}
+	}
+	for _, script := range scripts {
+		if len(script) > MaxPayloadBytes || strings.Contains(script, sedHole) {
+			continue
+		}
+		p := sedScan{s: script}
+		for p.more() {
+			p.skipSeparators()
+			if !p.more() || !p.addresses() {
+				break
+			}
+			p.skipBlank()
+			for p.more() && p.peek() == '!' {
+				p.i++
+				p.skipBlank()
+			}
+			if !p.more() {
+				break
+			}
+			command := p.peek()
+			p.i++
+			switch command {
+			case 'w', 'W', 'e':
+				p.skipBlank()
+				start := p.i
+				for p.more() && p.peek() != '\n' {
+					p.i++
+				}
+				value := strings.TrimSpace(script[start:p.i])
+				if value != "" {
+					if command == 'e' {
+						commands = append(commands, value)
+					} else {
+						outputs = append(outputs, value)
+					}
+				}
+			case 's':
+				if !p.more() {
+					break
+				}
+				delim := p.peek()
+				p.i++
+				if !p.part(delim) || !p.part(delim) {
+					break
+				}
+				for p.more() && p.peek() != ';' && p.peek() != '\n' {
+					if p.peek() == 'w' {
+						p.i++
+						p.skipBlank()
+						start := p.i
+						for p.more() && p.peek() != '\n' {
+							p.i++
+						}
+						name := strings.TrimSpace(script[start:p.i])
+						if name != "" {
+							outputs = append(outputs, name)
+						}
+						break
+					}
+					p.i++
+				}
+			default:
+				for p.more() && p.peek() != ';' && p.peek() != '\n' {
+					p.i++
+				}
+			}
+		}
+	}
+	return outputs, commands
 }
 
 type sedScan struct {

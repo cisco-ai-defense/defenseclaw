@@ -86,14 +86,25 @@ func globOptionsInCall(command string, start shellGlobOptions) shellGlobOptions 
 	return o
 }
 
-// SameGlobOptionsInCall reports that statement, read alone, changes the glob
-// options exactly as call does (globOptionsInCall): a word of the statement
-// then means the same pattern in both readings. A statement of a call whose
-// other statements change an option (shopt -s globstar on its own line) does
-// not: read alone, its ** is two stars, not the folder walk the call makes
-// (rel-1-0-10:GAP-0415).
-func SameGlobOptionsInCall(call, statement string) bool {
-	return globOptionsInCall(call, shellGlobOptions{}) == globOptionsInCall(statement, shellGlobOptions{})
+// CallGlobOptionsCoverStatement reports whether the client's whole-call
+// reading includes every glob-option state of a gateway's isolated statement.
+// A modeled option change is read both on and off. An unmodeled change
+// remains distinct and cannot justify a negative answer (GAP-0380, GAP-0415).
+func CallGlobOptionsCoverStatement(call, statement string) bool {
+	parent := globReadings(globOptionsInCall(call, shellGlobOptions{}))
+	for _, child := range globReadings(globOptionsInCall(statement, shellGlobOptions{})) {
+		covered := false
+		for _, reading := range parent {
+			if reading == child {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
 }
 
 // globOptionsCall applies one simple command to o.

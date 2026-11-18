@@ -334,7 +334,7 @@ func TestHLinkRealBashOracle(t *testing.T) {
 // A statement read alone means the same words as in its call only when it
 // changes the glob options as the call does (rel-1-0-10:GAP-0415: the
 // managed gateway's per-command pass).
-func TestSameGlobOptionsInCall(t *testing.T) {
+func TestCallGlobOptionsCoverStatement(t *testing.T) {
 	for _, tc := range []struct {
 		call, statement string
 		same            bool
@@ -342,15 +342,15 @@ func TestSameGlobOptionsInCall(t *testing.T) {
 		{"touch -h a*", "touch -h a*", true},
 		{"cd sub\ntouch -h a*", "touch -h a*", true},
 		{"set -e\ntouch -h a*", "touch -h a*", true},
-		{"shopt -s globstar\ntouch -h **/a", "touch -h **/a", false},
+		{"shopt -s globstar\ntouch -h **/a", "touch -h **/a", true},
 		{"shopt -s globstar\ntouch -h **/a", "shopt -s globstar", true},
-		{"shopt -s nocaseglob; touch -h A?", "touch -h A?", false},
-		{"set -f\ntouch -h a*", "touch -h a*", false},
+		{"shopt -s nocaseglob; touch -h A?", "touch -h A?", true},
+		{"set -f\ntouch -h a*", "touch -h a*", true},
 		{"GLOBIGNORE=x\ntouch -h a*", "touch -h a*", false},
 		{"eval x\ntouch -h a*", "touch -h a*", false},
 	} {
-		if got := SameGlobOptionsInCall(tc.call, tc.statement); got != tc.same {
-			t.Errorf("SameGlobOptionsInCall(%q, %q) = %t, want %t", tc.call, tc.statement, got, tc.same)
+		if got := CallGlobOptionsCoverStatement(tc.call, tc.statement); got != tc.same {
+			t.Errorf("CallGlobOptionsCoverStatement(%q, %q) = %t, want %t", tc.call, tc.statement, got, tc.same)
 		}
 	}
 }

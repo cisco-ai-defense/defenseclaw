@@ -1868,13 +1868,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// proof (rel-1-0-6:GAP-0675). A form or option the resolver does not model
 	// is uncertain before any walk, and stays uncertain there too.
 	//
-	// The client's evidence answers the words of the whole call, under the
-	// glob options the call itself sets. A statement the per-command pass
-	// reads alone, in a call whose other statements change those options
-	// (shopt -s globstar on its own line), is another reading of the same
-	// words: the client's answer does not decide it, and the blind walk keeps
-	// it unknown, where a per-user gateway reads that statement on the disk
-	// (rel-1-0-10:GAP-0415: managed is never weaker than per-user).
+	// The client's evidence answers the words of the whole call, under both
+	// readings of every modeled glob option the call changes. Its answer also
+	// covers an isolated statement when that statement's readings are a subset
+	// of the call's readings. An unmodeled change remains unknown (GAP-0415).
 	if input.Command != "" && trustedShellCommandInput(request.Input) {
 		if reason := hookpaths.UncertainGlobWriteReason(input.Command, input.CWD, facts.ActiveHome, request.ShellStartup, request.ProtectedHomeHook); reason != "" &&
 			(!request.ProtectedHomeHook || reason != hookpaths.UnprovenTargetUnresolved || !clientAnswersReading(request, input.Command)) {
@@ -1886,11 +1883,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 
 // clientAnswersReading reports that the hook client's evidence was read for
 // the words of command as this evaluation reads them: command is the call
-// itself, or a statement of it that changes the glob options as the call
-// does (hookpaths.SameGlobOptionsInCall).
+// itself, or a statement whose glob-option states were all read by the client
+// (hookpaths.CallGlobOptionsCoverStatement).
 func clientAnswersReading(request trustedActionRequest, command string) bool {
 	return !request.simpleCommandPass || request.parentPatch == nil ||
-		hookpaths.SameGlobOptionsInCall(request.parentPatch.Command, command)
+		hookpaths.CallGlobOptionsCoverStatement(request.parentPatch.Command, command)
 }
 
 // trustedPOSIXShellCall reports a call a POSIX shell runs (Bash tool,

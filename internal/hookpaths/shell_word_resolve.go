@@ -148,8 +148,16 @@ type resolvedWord struct {
 // cannot read and a result past the bound. The caller judges every
 // candidate by identity.
 func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
+	return resolveShellWordWithFallback(word, values, cwd, opts, false)
+}
+
+// An attached value is globbed with its option prefix. If that whole word
+// has no match, bash passes it literally even when the apparent directory
+// before the slash (for example "of=.") does not exist. The program then
+// removes the prefix and opens the value's real parent.
+func resolveShellWordWithFallback(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions, attached bool) resolvedWord {
 	if opts.may != 0 {
-		return resolveShellWordReadings(word, values, cwd, opts)
+		return resolveShellWordReadings(word, values, cwd, opts, attached)
 	}
 	if word == nil || !filepath.IsAbs(cwd) {
 		return resolvedWord{uncertain: wordUncertainDynamic, preGlob: true}
@@ -212,7 +220,7 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	// An unmatched pattern is the literal word. The command writes it only
 	// when its directory exists; a name under one that is not there names
 	// nothing.
-	return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, true)}
+	return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, !attached)}
 }
 
 // resolveWriteWord is resolveShellWord for an operand of a write verb. Bash
@@ -224,8 +232,8 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 // Any other match is uncertain. Without a glob character the value after the
 // equals sign is the operand too.
 func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
-	whole := resolveShellWord(word, values, cwd, opts)
 	tail, name, attached := resolverAttachedValue(word)
+	whole := resolveShellWordWithFallback(word, values, cwd, opts, attached)
 	if !attached {
 		return whole
 	}
@@ -529,12 +537,12 @@ func resolverWidePattern(pattern string) (string, bool) {
 // statements may expand under other options (opts.may): the word is read
 // under each, and every path any reading names is a candidate. A reading
 // that is uncertain keeps the word uncertain.
-func resolveShellWordReadings(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
+func resolveShellWordReadings(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions, attached bool) resolvedWord {
 	var out resolvedWord
 	seen := map[string]bool{}
 	supersetLost := false
 	for _, reading := range globReadings(opts) {
-		got := resolveShellWord(word, values, cwd, reading)
+		got := resolveShellWordWithFallback(word, values, cwd, reading, attached)
 		for _, candidate := range got.candidates {
 			if !seen[candidate] {
 				seen[candidate] = true

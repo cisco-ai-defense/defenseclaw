@@ -365,6 +365,20 @@ func (r *sedBackupReader) unwrap(words []string, scope sedBackupScope) ([]string
 }
 
 func (r *sedBackupReader) sed(words []string, scope sedBackupScope, implicit bool) {
+	// Script side effects write through their own operand, regardless of the
+	// in-place edit's entry-only proof (GAP-0377). Read all option spellings
+	// here so the client and both gateway modes make the same decision.
+	outputs, commands := sedScriptEffects(words)
+	for _, output := range outputs {
+		r.judge(output, scope.dirs)
+	}
+	for _, command := range commands {
+		for _, dir := range scope.dirs {
+			if ActionCommandDecision(command, dir, r.home) != "" {
+				r.blocked = true
+			}
+		}
+	}
 	if r.optionHole {
 		r.unresolved = true
 	}
