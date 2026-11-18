@@ -122,6 +122,12 @@ type claudeCodeHookResponse struct {
 	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// CompanionRedactionEnabled is the cloud directive for a distinct canonical
+	// companion event (currently a SubagentStart task prompt). Present keeps a
+	// nil directive distinct from no companion override, so managed projection
+	// can fail closed for that prompt without inheriting the event directive.
+	CompanionRedactionEnabled *bool `json:"-"`
+	CompanionRedactionPresent bool  `json:"-"`
 	// InspectedContent is the exact event content sent to AI Defense when the
 	// hook has no companion canonical prompt/tool event. It stays in-process so
 	// the hook_decision emitter can publish the generated, centrally-redacted
@@ -139,15 +145,15 @@ type claudeCodeHookResponse struct {
 	laneVerdict bool
 }
 
-var inspectedBearerCredential = regexp.MustCompile(`(?i)((?:\bauthorization["']?[ \t]*[:=][ \t]*["']?)?\bbearer[ \t]+)([A-Za-z0-9._~+/=-]+)`)
+var inspectedAuthorizationCredential = regexp.MustCompile(`(?i)((?:\bauthorization["']?[ \t]*[:=][ \t]*["']?)?\b(?:bearer|basic)[ \t]+)([A-Za-z0-9._~+/=-]+)`)
 
-// redactInspectedBearerCredentials removes bearer values from the telemetry
+// redactInspectedAuthorizationCredentials removes Basic and Bearer values from the telemetry
 // copy of submitted event content when AI Defense supplied no redaction
 // directive. The submitted payload itself is unchanged; an explicit cloud
 // directive remains authoritative at the downstream projection boundary.
-func redactInspectedBearerCredentials(content string) string {
-	return inspectedBearerCredential.ReplaceAllStringFunc(content, func(match string) string {
-		parts := inspectedBearerCredential.FindStringSubmatchIndex(match)
+func redactInspectedAuthorizationCredentials(content string) string {
+	return inspectedAuthorizationCredential.ReplaceAllStringFunc(content, func(match string) string {
+		parts := inspectedAuthorizationCredential.FindStringSubmatchIndex(match)
 		if len(parts) < 6 {
 			return match
 		}
@@ -184,6 +190,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	ctx = withCascadeTrace(ctx, cfg, "claudecode")
 	var assetDecisions []runtimeAssetDecision
 	var inspectedContent string
+	var companionRedactionEnabled *bool
+	var companionRedactionPresent bool
 	var inspectedContentPresent bool
 	switch req.HookEventName {
 	case "SessionStart":
@@ -333,8 +341,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "StopFailure":
 		// StopFailure's inspected error/error_details are distinct from the
 		// optional last_assistant_message emitted as a model.response companion.
-		// Retain the normalized submitted error content on hook_decision so a failure
-		// without an assistant message does not lose its inspection input.
+		// Retain the normalized submitted error content on hook_decision unless that
+		// companion already represents the same text.
 		inspectedContent = claudeCodeToolOutput(req)
 		if !a.managedAIDOnly() {
 			inspectedContent = withoutBlockMessageEcho(cfg, "claudecode", inspectedContent)
@@ -343,6 +351,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Tool: "message", Content: inspectedContent, Direction: "tool_result", Connector: "claudecode",
 			blockMessageEchoNormalized: !a.managedAIDOnly(),
 		})
+		if strings.TrimSpace(inspectedContent) == strings.TrimSpace(req.LastAssistantMessage) {
+			inspectedContent = ""
+		}
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -372,8 +383,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(eventContent, "prompt"))
 			if strings.TrimSpace(canonicalPrompt) != "" &&
 				strings.TrimSpace(canonicalPrompt) != strings.TrimSpace(eventContent) {
+				eventRedactionEnabled := verdict.RedactionEnabled
 				promptVerdict := a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(canonicalPrompt, "prompt"))
+				if promptVerdict != nil {
+					companionRedactionEnabled = promptVerdict.RedactionEnabled
+				}
+				companionRedactionPresent = true
 				verdict = mergeCodexToolResultVerdicts(verdict, promptVerdict)
+				// The merged action covers both inspections, but the hook_decision
+				// content is eventContent. Keep its directive scoped to that text.
+				verdict.RedactionEnabled = eventRedactionEnabled
 			}
 		}
 		if strings.TrimSpace(eventContent) != "" && strings.TrimSpace(eventContent) != strings.TrimSpace(canonicalPrompt) {
@@ -388,9 +407,6 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		))
 	}
 	if strings.TrimSpace(inspectedContent) != "" && verdict != nil && verdict.aiDefenseSubmitted {
-		if verdict.RedactionEnabled == nil {
-			inspectedContent = redactInspectedBearerCredentials(inspectedContent)
-		}
 		inspectedContentPresent = true
 	} else {
 		// Do not retain or emit content handled only by local rules or the
@@ -492,6 +508,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RuleNames = hookResponseRuleNames(resp.RuleIDs, evalCtx)
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.CompanionRedactionEnabled = companionRedactionEnabled
+	resp.CompanionRedactionPresent = companionRedactionPresent
 	resp.InspectedContent = inspectedContent
 	resp.InspectedContentPresent = inspectedContentPresent
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)

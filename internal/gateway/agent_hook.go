@@ -231,6 +231,11 @@ type agentHookResponse struct {
 	// ctx-injection is local to evaluate*). Never serialized on the
 	// hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// CompanionRedactionEnabled is the per-inspection directive for a distinct
+	// canonical prompt/response companion emitted for this hook. Present keeps
+	// an absent cloud directive distinct from hooks with no override.
+	CompanionRedactionEnabled *bool `json:"-"`
+	CompanionRedactionPresent bool  `json:"-"`
 	// InspectedContent carries exact AI Defense input only for hooks without a
 	// companion canonical content event. It is emitted through the generated
 	// telemetry contract and is never serialized to connector clients.
@@ -1205,8 +1210,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// from this event's evaluation is now on ctx, so emit the deferred
 		// LLM event here — before finalize so the prompt/tool/response event
 		// still precedes the hook_decision event, preserving the OSS event
-		// ordering. Fails closed to redact when the AID lane returned no
-		// directive (resp.RedactionEnabled == nil).
+		// ordering. A distinct companion uses its own inspection directive;
+		// an absent directive fails closed instead of inheriting this event's.
 		if deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
 			telemetryCtx := ctx
 			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
@@ -1214,6 +1219,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
 				telemetryPersistenceCtx = telemetryCtx
 			}
+			telemetryCtx = withRedactionDecision(telemetryCtx, hookLLMEventRedactionDirective(resp))
 			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
@@ -1428,6 +1434,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeHookAnswer(w, body)
 		}
 	}
+}
+
+func hookLLMEventRedactionDirective(resp agentHookResponse) *bool {
+	if resp.CompanionRedactionPresent {
+		return resp.CompanionRedactionEnabled
+	}
+	return resp.RedactionEnabled
 }
 
 // hookAnswerBody is the wire body of the hook answer resp, ready to write.
