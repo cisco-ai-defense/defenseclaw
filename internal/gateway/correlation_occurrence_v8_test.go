@@ -10,9 +10,11 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,15 +40,48 @@ func newHookCorrelationServer(t *testing.T, path string) (*APIServer, *audit.Sto
 	return &APIServer{store: store}, store
 }
 
-func installCorrelationHMACForTest(t testing.TB) {
-	t.Helper()
+// correlationHMACKeyForTest is the key SetTelemetryHMACSeed derives from 32
+// bytes of 0x4a, the seed the helper used to install for the whole process.
+var correlationHMACKeyForTest = sync.OnceValue(func() []byte {
 	key, err := hkdf.Key(sha256.New, bytes.Repeat([]byte{0x4a}, 32),
 		[]byte("defenseclaw-telemetry-salt-v1"), "defenseclaw-telemetry-v1", 32)
 	if err != nil {
-		t.Fatal(err)
+		panic(err)
 	}
-	previous := gatewaylog.SwapTelemetryHMACKeyForTest(key)
-	t.Cleanup(func() { gatewaylog.SwapTelemetryHMACKeyForTest(previous) })
+	return key
+})
+
+// correlationHMACHolders counts the running tests that hold the test key, so
+// tests that overlap (parallel ones) share one install and the last to end
+// puts back the key that was active before the first.
+var correlationHMACHolders struct {
+	sync.Mutex
+	count    int
+	previous []byte
+}
+
+// installCorrelationHMACForTest makes the test correlation HMAC key active
+// until t, and every other test that holds it, has ended. It used to seed the
+// process-wide key for good, so every later test in the package ran with the
+// per-session tool chain armed: an order-dependent red (rel-1-0-10 GAP-1253).
+func installCorrelationHMACForTest(t testing.TB) {
+	t.Helper()
+	key := correlationHMACKeyForTest()
+	correlationHMACHolders.Lock()
+	defer correlationHMACHolders.Unlock()
+	if correlationHMACHolders.count == 0 {
+		correlationHMACHolders.previous = gatewaylog.SwapTelemetryHMACKeyForTest(key)
+	}
+	correlationHMACHolders.count++
+	t.Cleanup(func() {
+		correlationHMACHolders.Lock()
+		defer correlationHMACHolders.Unlock()
+		correlationHMACHolders.count--
+		if correlationHMACHolders.count == 0 {
+			gatewaylog.SwapTelemetryHMACKeyForTest(correlationHMACHolders.previous)
+			correlationHMACHolders.previous = nil
+		}
+	})
 }
 
 func TestCorrelationHMACSeedRestoredAfterSubtest(t *testing.T) {
@@ -69,6 +104,47 @@ func TestCorrelationHMACSeedRestoredAfterSubtest(t *testing.T) {
 	if ids, source := correlationIdentifiersForValues("instance", []connector.CorrelationValue{value},
 		connector.CorrelationValue{}); len(ids) != 0 || source != "" {
 		t.Fatalf("fresh session has active correlation identifiers: %v, source %q", ids, source)
+	}
+}
+
+// Two tests that hold the key at once: the first to end leaves it to the
+// other, and the key is gone only when both have ended (GAP-1253). A plain
+// save-and-restore put back the stale test key when the ends interleaved.
+func TestCorrelationHMACStaysUntilTheLastOverlappingTestEnds(t *testing.T) {
+	if f := flag.Lookup("test.parallel"); f != nil && f.Value.String() == "1" {
+		t.Skip("needs two parallel subtests at once")
+	}
+	previous := gatewaylog.SwapTelemetryHMACKeyForTest(nil)
+	t.Cleanup(func() { gatewaylog.SwapTelemetryHMACKeyForTest(previous) })
+	payload := struct{ Session string }{"overlapping-session"}
+	wait := func(t *testing.T, ch <-chan struct{}) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(30 * time.Second):
+			t.Fatal("the other subtest never got there")
+		}
+	}
+	secondHolds, firstEnded := make(chan struct{}), make(chan struct{})
+	t.Run("overlap", func(t *testing.T) {
+		t.Run("first", func(t *testing.T) {
+			t.Parallel()
+			t.Cleanup(func() { close(firstEnded) }) // runs after the helper's cleanup
+			installCorrelationHMACForTest(t)
+			wait(t, secondHolds)
+		})
+		t.Run("second", func(t *testing.T) {
+			t.Parallel()
+			installCorrelationHMACForTest(t)
+			close(secondHolds)
+			wait(t, firstEnded)
+			if gatewaylog.ComputePayloadHMAC(payload) == "" {
+				t.Fatal("the first test to end took the key from the one still running")
+			}
+		})
+	})
+	if gatewaylog.ComputePayloadHMAC(payload) != "" {
+		t.Fatal("the key outlived both tests that held it")
 	}
 }
 
