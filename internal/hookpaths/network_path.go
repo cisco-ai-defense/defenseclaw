@@ -163,7 +163,15 @@ type statAnswer struct {
 // is the same file for the whole decision (rel-1-0-10:GAP-0766). A caller
 // that reads a path again to see whether it changed uses pathStat.
 func callStat(name string) (os.FileInfo, error) {
-	call := memoHookCall()
+	return memoHookCall().stat(name)
+}
+
+// stat is callStat for the hook call call (nil: none, pathStat). A loop that
+// stats many paths finds its call once and stats through it: finding the
+// call is a traceback of the goroutine's stack (goroutineID), which cost
+// more than the stats it saved, half of a Windows hook decision for the
+// registration names alone (rel-1-0-10:GAP-1293).
+func (call *hookCall) stat(name string) (os.FileInfo, error) {
 	if call == nil {
 		return pathStat(name)
 	}
