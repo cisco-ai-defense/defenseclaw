@@ -213,7 +213,7 @@ func registrationFlowDataRunner(file *syntax.File, home string, provenPython map
 				case index > 0 && (base == "tar" || base == "gtar"):
 					// A wrapped tar (sudo tar -x) is not read here.
 					runner = true
-				case registrationPythonProgram.MatchString(base) && !(index == 0 && provenCalls[node]):
+				case registrationPythonProgram.MatchString(base) && (index != 0 || !provenCalls[node]):
 					runner = true
 				case strings.HasPrefix(value, "--files-from") || strings.HasPrefix(value, "--include-from") ||
 					strings.HasPrefix(value, "--exclude-from") || strings.HasPrefix(value, "--to-command"):
