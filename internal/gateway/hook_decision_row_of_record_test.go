@@ -134,7 +134,7 @@ func TestRowOfRecordThatDidNotCommitIsNeverExported(t *testing.T) {
 // call keeps its connector-hook, tool_start and requested rows locally, as
 // in 1.0.9 (S8 R4 review P3-5).
 func TestHookCallKeepsItsRowsWhenHookDecisionsAreNotCollected(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixtureCollectingNo(t, nil, observability.BucketGuardrailEvaluation)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -177,7 +177,7 @@ func TestHookLifecycleRestoresAfterSessionStartAndPostToolUse(t *testing.T) {
 		}, "tool_end"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			installDefaultProfileConnector(t, "claudecode")
 			fixture := newSignedSidecarRuntimeFixture(t, true)
 			fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -235,7 +235,7 @@ func TestHookLifecycleRestoresAfterSessionStartAndPostToolUse(t *testing.T) {
 // newAuditFailureHookFixture with every log also sent to remote.
 func newPerUserHookFixtureExportingTo(t *testing.T, remote delivery.Adapter) auditFailureHookFixture {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixtureExportingTo(t, nil, remote)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -394,7 +394,7 @@ func TestBenignPerUserAllowKeepsOneLocalHookRowAndExportsTheRest(t *testing.T) {
 // hook_decision row, since tool_start is exported only inside a call
 // (#1384): the next call continues the same execution with the next sequence.
 func TestHookLifecycleRestoresFromTheHookDecisionRowAfterRestart(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSignedSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

@@ -24,7 +24,7 @@ import (
 // Benign twins a careful developer runs (a local copy, a download, an upload
 // of a report) do not alert in default and never block.
 func TestCredentialFileUploadProgramsFiveTiersGAP0595(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const (
 		file  = "/work/f5proj/.aws/credentials"

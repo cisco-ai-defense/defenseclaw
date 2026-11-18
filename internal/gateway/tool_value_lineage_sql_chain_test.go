@@ -330,7 +330,7 @@ func newSQLValuePersistenceLifecycleAPI(
 	connectorName string,
 ) (*APIServer, connector.HookProfile) {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, connectorName)
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}

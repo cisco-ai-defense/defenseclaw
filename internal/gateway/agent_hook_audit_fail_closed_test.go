@@ -68,7 +68,7 @@ func TestManagedReceiptedHookAuditFaultKeepsTheCommittedVerdict(t *testing.T) {
 
 func newAuditFailureHookFixture(t *testing.T, failMode string) auditFailureHookFixture {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

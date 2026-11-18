@@ -37,7 +37,7 @@ func TestGAP0347AttributedActorStep(t *testing.T) {
 		{"attested-template", "claudecode", version, contract, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			installDefaultProfileConnector(t, "claudecode")
 			_, chains := newTestChainLeaderServiceWith(t, "")
 			mine, err := registry.OpenFileStore(t.TempDir())

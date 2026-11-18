@@ -69,7 +69,7 @@ func TestHookRateProbe(t *testing.T) {
 	}
 	out := os.Getenv("DEFENSECLAW_HOOK_RATE_OUT")
 
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

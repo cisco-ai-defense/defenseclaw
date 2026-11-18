@@ -20,7 +20,7 @@ import (
 // SUBSTRATE-CHAIN-UNRECORDED report. It is reported like every other
 // reason a step cannot reach the actor window.
 func TestSubstrateChainStepIsReportedWhenTheRulesetFingerprintFails(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	_, chains := newTestChainLeaderService(t)
 	r := chartReplica{newSubstrateFixture(t, func(c *SubstrateConfig) { c.Chains = chains })}

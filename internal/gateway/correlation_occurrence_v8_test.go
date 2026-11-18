@@ -6,6 +6,8 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -36,12 +38,42 @@ func newHookCorrelationServer(t *testing.T, path string) (*APIServer, *audit.Sto
 	return &APIServer{store: store}, store
 }
 
-func installCorrelationHMACForTest() {
-	gatewaylog.SetTelemetryHMACSeed(bytes.Repeat([]byte{0x4a}, 32))
+func installCorrelationHMACForTest(t testing.TB) {
+	t.Helper()
+	key, err := hkdf.Key(sha256.New, bytes.Repeat([]byte{0x4a}, 32),
+		[]byte("defenseclaw-telemetry-salt-v1"), "defenseclaw-telemetry-v1", 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := gatewaylog.SwapTelemetryHMACKeyForTest(key)
+	t.Cleanup(func() { gatewaylog.SwapTelemetryHMACKeyForTest(previous) })
+}
+
+func TestCorrelationHMACSeedRestoredAfterSubtest(t *testing.T) {
+	previous := gatewaylog.SwapTelemetryHMACKeyForTest(nil)
+	t.Cleanup(func() { gatewaylog.SwapTelemetryHMACKeyForTest(previous) })
+
+	t.Run("seeded session", func(t *testing.T) {
+		installCorrelationHMACForTest(t)
+		if digest := correlationValueDigest("instance", connector.CorrelationValue{
+			Target: connector.CorrelationTargetSession, Value: "seeded-session",
+		}); digest == "" {
+			t.Fatal("the test session has no correlation HMAC")
+		}
+	})
+
+	value := connector.CorrelationValue{Target: connector.CorrelationTargetSession, Value: "fresh-session"}
+	if digest := correlationValueDigest("instance", value); digest != "" {
+		t.Fatal("the HMAC seed was not restored after the subtest")
+	}
+	if ids, source := correlationIdentifiersForValues("instance", []connector.CorrelationValue{value},
+		connector.CorrelationValue{}); len(ids) != 0 || source != "" {
+		t.Fatalf("fresh session has active correlation identifiers: %v, source %q", ids, source)
+	}
 }
 
 func TestHookCorrelationRetriesConcurrentSQLiteWriter(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	server.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
@@ -129,7 +161,7 @@ func persistCanonicalCorrelationObservation(
 }
 
 func TestHookOccurrenceMintsOnlyAtReviewedBoundariesAndRestoresCursor(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	profile := server.hookProfileForConnector("claudecode")
@@ -185,7 +217,7 @@ func TestHookOccurrenceMintsOnlyAtReviewedBoundariesAndRestoresCursor(t *testing
 // identity can still name the exact root cursor that SessionStart persisted.
 func TestCodexAgentlessHookRestoresIdentityScopedRootCursor(t *testing.T) {
 	agentIdentityTestSetup(t)
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	t.Cleanup(func() { _ = store.Close() })
 	profile := server.hookProfileForConnector("codex")
@@ -215,7 +247,7 @@ func TestCodexAgentlessHookRestoresIdentityScopedRootCursor(t *testing.T) {
 }
 
 func TestHookOccurrenceRootAgentKeepsUUIDv7UnderSecureClient(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	for _, profile := range []string{managed.ProfileStandalone, managed.ProfileSecureClient} {
 		server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 		server.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
@@ -241,7 +273,7 @@ func TestHookOccurrenceRootAgentKeepsUUIDv7UnderSecureClient(t *testing.T) {
 }
 
 func TestHookOccurrenceExactReceiptReplaySuppressesOnlyDuplicateEmission(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	profile := server.hookProfileForConnector("codex")
@@ -297,7 +329,7 @@ func TestHookOccurrenceExactReceiptReplaySuppressesOnlyDuplicateEmission(t *test
 }
 
 func TestHookOccurrenceReviewedToolRetryReceiptIsPartitioned(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 
@@ -411,7 +443,7 @@ func TestHookOccurrenceReviewedToolRetryReceiptIsPartitioned(t *testing.T) {
 }
 
 func TestHookOccurrenceSameReceiptWithDifferentFingerprintIsRetainedAsConflict(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	profile := server.hookProfileForConnector("codex")
@@ -468,7 +500,7 @@ func TestHookOccurrenceSameReceiptWithDifferentFingerprintIsRetainedAsConflict(t
 }
 
 func TestHookReceiptUsesProviderDeliveryIDBeforeSharedItemIdentity(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	defer store.Close() //nolint:errcheck
@@ -520,7 +552,7 @@ func TestHookReceiptUsesProviderDeliveryIDBeforeSharedItemIdentity(t *testing.T)
 }
 
 func TestHookOccurrenceToolStartAndEndRemainDistinctAcrossRestart(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	profile := server.hookProfileForConnector("claudecode")
@@ -579,7 +611,7 @@ func TestHookOccurrenceToolStartAndEndRemainDistinctAcrossRestart(t *testing.T) 
 }
 
 func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	profile := server.hookProfileForConnector("cursor")
@@ -670,7 +702,7 @@ func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t 
 }
 
 func TestModernCursorCrossPhaseHooksWithoutDeliveryIDNeverSuppressEachOther(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	defer store.Close() //nolint:errcheck
@@ -761,7 +793,7 @@ func TestCrossRailMirrorAuthorityIsScopedToLifecycle(t *testing.T) {
 }
 
 func TestExactIdentityClaimsUseOnlyReportedSamePhaseOccurrenceIDs(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	spec, ok := connector.CorrelationSpecForConnector("codex", "codex-hooks-v1")
 	if !ok {
 		t.Fatal("missing codex correlation profile")
@@ -798,7 +830,7 @@ func TestExactIdentityClaimsUseOnlyReportedSamePhaseOccurrenceIDs(t *testing.T) 
 }
 
 func TestCorrelationValueDigestSeparatesIDKindAndTargetDomains(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	instance := audit.ConnectorInstanceID("019b0000-0000-7000-8000-000000000001")
 	base := connector.CorrelationValue{
 		Target: connector.CorrelationTargetSourceEvent, Namespace: "codex",
@@ -818,7 +850,7 @@ func TestCorrelationValueDigestSeparatesIDKindAndTargetDomains(t *testing.T) {
 }
 
 func TestHookOccurrenceReportedToolStartResolvesMissingEndIDAcrossRestart(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	profile := server.hookProfileForConnector("claudecode")
@@ -881,7 +913,7 @@ func TestHookOccurrenceReportedToolStartResolvesMissingEndIDAcrossRestart(t *tes
 }
 
 func TestHookOccurrenceExactTerminalIDNeverFallsBackToCurrentPendingOperation(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	defer store.Close() //nolint:errcheck
@@ -942,7 +974,7 @@ func TestHookOccurrenceExactTerminalIDNeverFallsBackToCurrentPendingOperation(t 
 }
 
 func TestHookOccurrenceRejectsMalformedReportedSemanticID(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	profile := server.hookProfileForConnector("codex")
@@ -957,7 +989,7 @@ func TestHookOccurrenceRejectsMalformedReportedSemanticID(t *testing.T) {
 }
 
 func TestHookOccurrenceRejectsConflictingTypedAliasesBeforePersistence(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	defer store.Close() //nolint:errcheck
@@ -991,7 +1023,7 @@ func TestHookOccurrenceRejectsConflictingTypedAliasesBeforePersistence(t *testin
 }
 
 func TestHookOccurrencePersistsReportedAgentAndSessionLineage(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	defer store.Close() //nolint:errcheck
@@ -1051,7 +1083,7 @@ func TestHookOccurrencePersistsReportedAgentAndSessionLineage(t *testing.T) {
 }
 
 func TestHookTraceContextIsTopologyNotSameOccurrenceAuthority(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	profile := server.hookProfileForConnector("codex")
@@ -1132,7 +1164,7 @@ func TestHookTraceContextIsTopologyNotSameOccurrenceAuthority(t *testing.T) {
 }
 
 func TestHookCursorAfterRestartDoesNotCrossAgentIdentity(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	profile := server.hookProfileForConnector("claudecode")

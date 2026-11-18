@@ -26,7 +26,7 @@ import (
 // strict); alone, credential material handed to one is the unknown-tier
 // finding of the pack. Benign twins a careful developer runs never block.
 func TestSenderNetworkRoleFiveTiersGAP0719(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const (
 		file = "/work/f5proj/.aws/credentials"
