@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const maxInput = hookexec.MaxPerUserPluginRequest
@@ -380,42 +379,55 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 	return 1
 }
 
-// lateOrdinary reports a sent Claude Code or Codex tool call that the scan
-// finds ordinary (hookpaths.LateOrdinaryCall). The connector is named by the
-// request path; any other path is not scanned.
+// lateOrdinary reports a sent Claude Code or Codex tool call that the native
+// hook's late-ordinary rule finds ordinary (hookexec.LateOrdinaryBothScans):
+// both late-call scans, told against the account home, find nothing
+// protected, so a call that either scan reaches stays closed (rel-1-0-10
+// GAP-1188). The connector is named by the request path, the event by the
+// call; any other path is not scanned.
 func lateOrdinary(call postedCall) bool {
-	var connector string
-	switch {
-	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
-		connector = "claudecode"
-	case strings.Contains(call.path, "codex"):
-		connector = "codex"
-	default:
+	connector := postedConnector(call)
+	if connector == "" {
 		return false
 	}
-	return hookpaths.LateOrdinaryCallAt(accountHome(), connector, []byte(call.body))
+	event, _ := postedEvent(call)
+	return hookexec.LateOrdinaryBothScans(accountHome(), connector, event, []byte(call.body))
 }
 
 // nonToolGateEvent reports a Claude Code or Codex call that names an event
 // which is not a tool gate (a post-tool batch, a prompt, a session event).
 // Any other connector, or an event it cannot read, is not one.
 func nonToolGateEvent(call postedCall) bool {
-	var connector string
-	switch {
-	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
-		connector = "claudecode"
-	case strings.Contains(call.path, "codex"):
-		connector = "codex"
-	default:
+	connector := postedConnector(call)
+	if connector == "" {
 		return false
 	}
+	event, ok := postedEvent(call)
+	return ok && !hookexec.ToolGateEvent(connector, event)
+}
+
+// postedConnector is the connector the request path of call names: Claude
+// Code or Codex, else "".
+func postedConnector(call postedCall) string {
+	switch {
+	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
+		return "claudecode"
+	case strings.Contains(call.path, "codex"):
+		return "codex"
+	}
+	return ""
+}
+
+// postedEvent is the hook event the body of call names; false when it names
+// none or is no JSON.
+func postedEvent(call postedCall) (string, bool) {
 	var event struct {
 		Name string `json:"hook_event_name"`
 	}
 	if json.Unmarshal([]byte(call.body), &event) != nil || strings.TrimSpace(event.Name) == "" {
-		return false
+		return "", false
 	}
-	return !hookexec.ToolGateEvent(connector, event.Name)
+	return event.Name, true
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {

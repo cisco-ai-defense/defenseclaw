@@ -23,6 +23,10 @@ import (
 // outage mode) when it plainly names nothing protected, and keeps 9 (closed
 // in every mode) when it names the keys file or a link or hard link to it, in
 // a short or a 2000-operand list, or is not a Claude Code or Codex tool call.
+// A call is ordinary only when both late-call scans of the native hook find
+// it so (hookexec.LateOrdinaryBothScans): a call that the shared
+// protected-reach reader refuses keeps 9 too, though the link-hop scan alone
+// reads it as ordinary (rel-1-0-10 GAP-1188).
 func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -69,15 +73,22 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 	t.Setenv(hookPostDataDirEnv, t.TempDir())
 	addr := strings.TrimPrefix(server.URL, "http://")
 
+	postBody := func(path, body string) int {
+		frame := []byte("DCPOST1\x00" + path + "\x00" + body + "\x00Content-Type\x00application/json\x00")
+		return runMain([]string{"hook-post", "--api-addr", addr, "--max-time", "1", "--curl-output"},
+			bytes.NewReader(frame), new(bytes.Buffer), new(bytes.Buffer))
+	}
 	post := func(path, tool, command string) int {
 		body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": project, "tool_name": tool,
 			"tool_input": map[string]any{"command": command}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		frame := []byte("DCPOST1\x00" + path + "\x00" + string(body) + "\x00Content-Type\x00application/json\x00")
-		return runMain([]string{"hook-post", "--api-addr", addr, "--max-time", "1", "--curl-output"},
-			bytes.NewReader(frame), new(bytes.Buffer), new(bytes.Buffer))
+		return postBody(path, string(body))
+	}
+	cwd, err := json.Marshal(project)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, tc := range []struct {
 		name, path, tool, command string
@@ -100,6 +111,22 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := post(tc.path, tc.tool, tc.command); got != tc.want {
 				t.Fatalf("exit %d, want %d", got, tc.want)
+			}
+		})
+	}
+	// Calls the link-hop scan alone reads as ordinary and the shared
+	// protected-reach reader refuses: exit 12 at 479a1ebc12, 9 now (GAP-1188).
+	for _, tc := range []struct{ name, path, body string }{
+		{"claude permission request", "/api/v1/claude-code/hook",
+			`{"hook_event_name":"PermissionRequest","cwd":` + string(cwd) + `,"tool_name":"Bash","tool_input":{"command":"echo hi"}}`},
+		{"codex duplicate command key, the last one plain", "/api/v1/codex/hook",
+			`{"hook_event_name":"PreToolUse","cwd":` + string(cwd) + `,"tool_name":"Bash","tool_input":{"command":"cat keylink","command":"echo hi"}}`},
+		{"claude camel-case tool keys", "/api/v1/claude-code/hook",
+			`{"hook_event_name":"PreToolUse","cwd":` + string(cwd) + `,"toolName":"Bash","toolInput":{"command":"echo hi"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := postBody(tc.path, tc.body); got != hookexec.PerUserPostNoAnswerExit {
+				t.Fatalf("exit %d, want %d", got, hookexec.PerUserPostNoAnswerExit)
 			}
 		})
 	}

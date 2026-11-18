@@ -218,7 +218,7 @@ func TestGAP0518LateOrdinaryCall(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, call := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {
-				if got := LateOrdinaryCall(call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
+				if got := LateOrdinaryCallAt("", call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
 					t.Errorf("%s %s: %q ordinary=%v, want %v", call.connector, call.tool, tc.command, got, tc.want)
 				}
 			}
@@ -320,7 +320,7 @@ func TestGAP0518LateOrdinaryCallRound4(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, call := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {
-				if got := LateOrdinaryCall(call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
+				if got := LateOrdinaryCallAt("", call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
 					t.Errorf("%s %s: %q ordinary=%v, want %v", call.connector, call.tool, tc.command, got, tc.want)
 				}
 			}
@@ -442,7 +442,7 @@ func TestGAP0518LateOrdinaryCallRound5(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, call := range []struct{ connector, tool string }{{"claudecode", "Bash"}, {"codex", "exec_command"}} {
-				if got := LateOrdinaryCall(call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
+				if got := LateOrdinaryCallAt("", call.connector, lateBash(t, call.tool, f.project, tc.command)); got != tc.want {
 					t.Errorf("%s %s: %q ordinary=%v, want %v", call.connector, call.tool, tc.command, got, tc.want)
 				}
 			}
@@ -479,7 +479,7 @@ func TestGAP0518LateOrdinaryCallArgv(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if got := LateOrdinaryCall(call.connector, payload); got != tc.want {
+				if got := LateOrdinaryCallAt("", call.connector, payload); got != tc.want {
 					t.Errorf("%s: %q ordinary=%v, want %v", call.connector, tc.argv, got, tc.want)
 				}
 			}
@@ -496,12 +496,12 @@ func TestGAP0518LateOrdinaryCallEnvelope(t *testing.T) {
 			"tool_input": map[string]any{"file_path": path}})
 		return payload
 	}
-	if !LateOrdinaryCall("claudecode", read(filepath.Join(f.project, "plain.txt"))) {
+	if !LateOrdinaryCallAt("", "claudecode", read(filepath.Join(f.project, "plain.txt"))) {
 		t.Error("Read of a project file is ordinary")
 	}
 	for _, path := range []string{filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(f.project, "keylink"),
 		filepath.Join(f.project, "hardlink"), filepath.Join(f.project, "dirlink", "authorized_keys"), "plain.txt"} {
-		if LateOrdinaryCall("claudecode", read(path)) {
+		if LateOrdinaryCallAt("", "claudecode", read(path)) {
 			t.Errorf("Read of %s is not ordinary", path)
 		}
 	}
@@ -509,7 +509,7 @@ func TestGAP0518LateOrdinaryCallEnvelope(t *testing.T) {
 		payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": cwd, "tool_name": "Bash", "tool_input": input})
 		return payload
 	}
-	if !LateOrdinaryCall("claudecode", bash(f.project, map[string]any{"command": "ls", "description": "list"})) {
+	if !LateOrdinaryCallAt("", "claudecode", bash(f.project, map[string]any{"command": "ls", "description": "list"})) {
 		t.Error("a Bash call with a description is ordinary")
 	}
 	for name, payload := range map[string][]byte{
@@ -523,7 +523,7 @@ func TestGAP0518LateOrdinaryCallEnvelope(t *testing.T) {
 		"empty":            bash(f.project, map[string]any{"command": ""}),
 		"not json":         []byte("{"),
 	} {
-		if LateOrdinaryCall("claudecode", payload) {
+		if LateOrdinaryCallAt("", "claudecode", payload) {
 			t.Errorf("%s: ordinary, want not", name)
 		}
 	}
@@ -532,7 +532,7 @@ func TestGAP0518LateOrdinaryCallEnvelope(t *testing.T) {
 		if err := os.MkdirAll(cwd, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if !LateOrdinaryCall("claudecode", bash(cwd, map[string]any{"command": "ls"})) {
+		if !LateOrdinaryCallAt("", "claudecode", bash(cwd, map[string]any{"command": "ls"})) {
 			t.Errorf("a working directory named %s is ordinary", name)
 		}
 	}
@@ -541,16 +541,16 @@ func TestGAP0518LateOrdinaryCallEnvelope(t *testing.T) {
 		if err := os.MkdirAll(cwd, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if LateOrdinaryCall("claudecode", bash(cwd, map[string]any{"command": "ls"})) {
+		if LateOrdinaryCallAt("", "claudecode", bash(cwd, map[string]any{"command": "ls"})) {
 			t.Errorf("a working directory named %s is not ordinary", name)
 		}
 	}
 	write, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": f.project, "tool_name": "Write",
 		"tool_input": map[string]any{"file_path": filepath.Join(f.project, "new.txt"), "content": "x"}})
-	if LateOrdinaryCall("claudecode", write) {
+	if LateOrdinaryCallAt("", "claudecode", write) {
 		t.Error("a file write is not scanned: it stays closed")
 	}
-	if LateOrdinaryCall("cursor", bash(f.project, map[string]any{"command": "ls"})) {
+	if LateOrdinaryCallAt("", "cursor", bash(f.project, map[string]any{"command": "ls"})) {
 		t.Error("only Claude Code and Codex are scanned")
 	}
 }
@@ -567,7 +567,7 @@ func BenchmarkGAP0518LateOrdinaryCall2000(b *testing.B) {
 	payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": project, "tool_name": "Bash",
 		"tool_input": map[string]any{"command": lateOperands(2000, "", "")}})
 	for b.Loop() {
-		if !LateOrdinaryCall("claudecode", payload) {
+		if !LateOrdinaryCallAt("", "claudecode", payload) {
 			b.Fatal("not ordinary")
 		}
 	}

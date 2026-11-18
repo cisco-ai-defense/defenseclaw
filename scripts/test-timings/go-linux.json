@@ -298,6 +298,7 @@
    "TestB2ReviewGuardUsesTheTrustedGateway": 7.8,
    "TestGAP0518HookPostLateOrdinaryNoAnswerExit": 9.2,
    "TestGAP1162FrozenOwnGatewayIsDecidedWithinTheShellBudget": 11.5,
+   "TestGAP1188ShellAndNativeLateOrdinaryAgree": 4.8,
    "TestHookPostKeepsAnUnrecordedListenerOfThisAccountRefused": 6.0,
    "TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome": 103.9,
    "TestHookPostNoAnswerExitNamesOnlyAProvenRestart": 14.4,

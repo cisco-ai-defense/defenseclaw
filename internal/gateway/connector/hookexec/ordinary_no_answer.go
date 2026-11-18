@@ -19,13 +19,22 @@ import (
 //
 // The protected files of every home the call can mean are read: the home the
 // agent runs with ($HOME, as the other late-call scan reads it,
-// hookpaths.LateOrdinaryCall) and the account database home. They are one
+// hookpaths.LateOrdinaryCallAt) and the account database home. They are one
 // folder for an ordinary user, and differ when the hook runs with another
 // HOME; a call that names a protected file of either is not ordinary.
 func OrdinaryNoAnswerPayload(body []byte) bool {
+	return ordinaryNoAnswerPayloadAt("", body)
+}
+
+// ordinaryNoAnswerPayloadAt is OrdinaryNoAnswerPayload for the account whose
+// home is given (the home a shell hook saved before it replaced HOME, GAP-0850)
+// instead of $HOME; "" is $HOME. The account database home is read as well.
+func ordinaryNoAnswerPayloadAt(home string, body []byte) bool {
 	var homes []string
-	if home, err := os.UserHomeDir(); err == nil {
+	if home != "" {
 		homes = append(homes, home)
+	} else if processHome, err := os.UserHomeDir(); err == nil {
+		homes = append(homes, processHome)
 	}
 	if account, err := osuser.Current(); err == nil {
 		homes = append(homes, account.HomeDir)

@@ -74,6 +74,9 @@ func lateOrdinaryPayload(t *testing.T, project string, command any) string {
 // stays closed. A call that names the keys file, a link or a hard link to it,
 // in a short or a 2000-operand list, stays closed in every tier (the
 // verified-gateway-without-status control of the psna-rb review).
+// A call is ordinary only when both late-call scans find it so
+// (LateOrdinaryBothScans): an argv command and a cd chain, which the shared
+// protected-reach reader does not model, stay closed (rel-1-0-10 GAP-1188).
 func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 	project := lateOrdinaryProject(t)
 	// A folder whose link is not in the project (round 4: a cd must move the
@@ -128,14 +131,14 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"echo flag next to a one-letter link, open tier", "echo -l", "open", false},
 			{"ls flag next to a one-letter link, open tier", "ls -l", "open", false},
 			{"sed print, open tier", "sed -n 1,5p plain.txt", "open", false},
-			{"argv with a plain file, open tier", []string{"cat", "plain.txt"}, "open", false},
+			{"argv with a plain file, open tier", []string{"cat", "plain.txt"}, "open", true},
 			{"sed write command to the link, open tier", `sed -n -e "w keylink" plain.txt`, "open", true},
 			{"sed write flag to the link, open tier", `sed -n "s/a/b/w keylink" plain.txt`, "open", true},
 			{"argv with a link that has a space, open tier", []string{"cat", "key link"}, "open", true},
 			{"quoted link that has a space, open tier", `cat "key link"`, "open", true},
 			// Round 4: a cd moves the folder, a direct link stays closed as
 			// text, and ordinary scripts and patterns stay open.
-			{"cd then a plain file, open tier", "cd sub && cat plain.txt", "open", false},
+			{"cd then a plain file, open tier", "cd sub && cat plain.txt", "open", true},
 			{"cd then a link of that folder, open tier", "cd sub && cat childlink", "open", true},
 			{"cd then a redirect to a link of that folder, open tier", "cd sub && echo x > childlink", "open", true},
 			{"cd then a link after a semicolon, open tier", "cd sub; cat childlink", "open", true},
@@ -155,7 +158,7 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			// program reads them; the protected twins stay closed.
 			{"echo of a link to a plain file, open tier", "echo l", "open", false},
 			{"grep pattern that is a link to a plain file, open tier", "grep -e l plain.txt", "open", false},
-			{"cd and back, open tier", "cd sub && cd .. && cat plain.txt", "open", false},
+			{"cd and back, open tier", "cd sub && cd .. && cat plain.txt", "open", true},
 			{"cd and back, then the link, open tier", "cd sub && cd .. && cat keylink", "open", true},
 			{"grep after-context, open tier", "grep -A 3 openclaw plain.txt", "open", false},
 			{"grep max count, open tier", "grep -m 3 openclaw plain.txt", "open", false},
