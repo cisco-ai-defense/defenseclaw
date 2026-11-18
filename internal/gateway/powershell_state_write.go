@@ -600,16 +600,31 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 		} else {
 			reading.addUnknown(form, seen)
 		}
+		// A write of a folder's children (or a DirectoryInfo's) may write
+		// every file it holds (rel-1-0-10:GAP-1257).
+		if open.folder {
+			if folder := psFolderTwin(open.param, reading.merge.home); folder != "" {
+				reading.addUnknown(folder, seen)
+			}
+		}
 	}
-	dynamic := scan.dynamicPaths
-	if scan.unplaced {
-		// A FileInfo or System.IO write the reader cannot place may write
-		// any file the command spells (rel-1-0-10:GAP-1230).
-		dynamic = append(dynamic, command)
-	}
-	for _, text := range dynamic {
+	for _, text := range scan.dynamicPaths {
 		for _, form := range psDynamicPathReadings(text, reading.merge.home, budget) {
 			reading.addUnknown(form, seen)
+		}
+	}
+	if scan.unplaced {
+		// A FileInfo or System.IO write the reader cannot place may write
+		// any file the command spells (rel-1-0-10:GAP-1230), or any file a
+		// folder it spells holds (Get-ChildItem -Recurse f | ForEach-Object
+		// { $_.Delete() }, rel-1-0-10:GAP-1257).
+		for _, form := range psDynamicPathReadings(command, reading.merge.home, budget) {
+			reading.addUnknown(form, seen)
+			if param, ok := strings.CutPrefix(strings.TrimSuffix(form, " -Value x"), "Set-Content "); ok {
+				if folder := psFolderTwin(param, reading.merge.home); folder != "" {
+					reading.addUnknown(folder, seen)
+				}
+			}
 		}
 	}
 	if budget.over {
@@ -991,21 +1006,32 @@ type psStateScan struct {
 	// text of each path argument known only at run time.
 	opens        []psOpenTarget
 	dynamicPaths []string
-	// The variables bound to a FileInfo or a file stream, by lower-case
-	// name, with the twin parameter of the file.
-	fileInfos, streams map[string]string
+	// The variables bound to a FileInfo, and to a file stream (with the
+	// twin parameter of the file), by lower-case name.
+	fileInfos map[string]psFileInfo
+	streams   map[string]string
 	// groupClose is the index after the ) of the last (...) group read: a
 	// method called on it is called on what the group evaluates to.
 	// groupCall reports that group as the argument list of a call
 	// ([IO.FileInfo]::new(f).OpenWrite()), whose result is groupFile, the
-	// twin parameter of the FileInfo it returns ("" for none known).
+	// FileInfo it returns (unplaced for none known).
 	groupOpen, groupClose int
 	groupCall             bool
-	groupFile             string
+	groupFile             psFileInfo
 	// unplaced reports a FileInfo or System.IO write the reader cannot
 	// place (psFileInfoMethod): every file the command spells may be the
 	// one it writes, the unknown tier (rel-1-0-10:GAP-1230).
 	unplaced bool
+	// braces is the depth of the { blocks being read. item is where the
+	// pipeline item ($_) of the ForEach-Object block at depth itemDepth
+	// (0 for none), whose body starts at itemOpen, is placed; itemUses
+	// counts the methods called on it (psStateScan.openBlock).
+	braces, itemDepth, itemOpen, itemUses int
+	item                                  psFileInfo
+	// lower is the command in lower case, read once; sole caches
+	// soleBinding by variable.
+	lower string
+	sole  map[string]bool
 }
 
 func (s *psStateScan) overBound() bool { return s.budget.over }
@@ -1104,7 +1130,17 @@ func (s *psStateScan) code(i int, nested bool) int {
 			}
 			pipedFrom = last
 			i++
-		case c == '\n' || c == ';' || c == '&' || c == '{' || c == '}':
+		case c == '{':
+			// A ForEach-Object block places its pipeline item at what
+			// feeds it (rel-1-0-10:GAP-1257).
+			s.openBlock(string(cur), pipedFrom, i)
+			flush()
+			i++
+		case c == '}':
+			flush()
+			s.closeBlock(i)
+			i++
+		case c == '\n' || c == ';' || c == '&':
 			flush()
 			i++
 		case c == ')':

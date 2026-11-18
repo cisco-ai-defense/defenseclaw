@@ -20,8 +20,8 @@ func TestGAP1230FileInfoPlacement(t *testing.T) {
 		{`[IO.FileInfo]::new`, ``},
 		{`[IO.FileInfo]::new('f')`, `-LiteralPath 'f'`},
 	} {
-		if got := psFileInfoExpression(row.text, &psBudget{}); got != row.want {
-			t.Errorf("psFileInfoExpression(%s) = %q, want %q", row.text, got, row.want)
+		if got := psFileInfoExpression(row.text, &psBudget{}); got.param != row.want {
+			t.Errorf("psFileInfoExpression(%s) = %q, want %q", row.text, got.param, row.want)
 		}
 	}
 	for _, row := range []struct{ text, variable, typeName, rest string }{
