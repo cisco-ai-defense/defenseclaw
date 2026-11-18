@@ -2954,7 +2954,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			for index := range static {
 				static[index] = true
 			}
-			if childIndex = WrapperChildIndex(argv, static); childIndex > 0 {
+			if childIndex = simpleWrapperChildIndex(argv, static); childIndex > 0 {
 				break
 			}
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
@@ -3061,6 +3061,48 @@ func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program stri
 		argv[index] = value
 	}
 	return parsePOSIXShellInvocation(program, argv).noExec
+}
+
+// simpleWrapperChildIndex is the child WrapperChildIndex gives the nested
+// script walk for a nested wrapper without a branch of its own (sudo, exec,
+// command, chroot, nsenter), cut at the first nested wrapper of the chain
+// (simpleNestedWrapper). WrapperChildIndex reads a whole chain of prefix
+// wrappers at once, so for sudo nohup PROGRAM, sudo env NAME=value PROGRAM
+// and nohup sudo env NAME=value PROGRAM it named PROGRAM, past the nohup or
+// env whose own branch of simpleNestedScriptArgs turns PROGRAM into the
+// reading the rules judge (simpleWrappedProgram). That reading was lost and
+// the action was allowed (rel-1-0-10:GAP-1322). Stopping at that wrapper
+// lets its branch read the rest of the chain, one wrapper at a time, as the
+// walk did before; a chain of other prefix wrappers, and chroot, nsenter and
+// xargs by their own grammars, keep the WrapperChildIndex child
+// (rel-1-0-10:GAP-1182).
+func simpleWrapperChildIndex(argv []string, static []bool) int {
+	childIndex := WrapperChildIndex(argv, static)
+	if childIndex <= 0 {
+		return childIndex
+	}
+	value := func(at int) (string, bool) {
+		if at < 0 || at >= len(argv) {
+			return "", false
+		}
+		return argv[at], static[at]
+	}
+	var run PrefixWrapperRun
+	for index := 0; index < childIndex; {
+		name, ok := value(index)
+		if !ok || name == "" {
+			break
+		}
+		next, known := wrapperChildIndex(wrapperProgramName(name), value, len(argv), index, &run)
+		if !known || next <= index || next >= childIndex {
+			break
+		}
+		if wrapperChildProgram(argv, static, next) == next && simpleNestedWrapper(wrapperProgramName(argv[next])) {
+			return next
+		}
+		index = next
+	}
+	return childIndex
 }
 
 func simpleNestedWrapper(program string) bool {
