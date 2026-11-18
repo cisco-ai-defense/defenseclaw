@@ -1897,6 +1897,7 @@
    "TestGAP1182WrappedStateWriteOnClaudeHook": 5.6,
    "TestGAP1183OrdinaryHereDocDataOnClaudeHook": 5.9,
    "TestGAP1183TopLevelHereDocConsumerOnClaudeHook": 7.1,
+   "TestGAP1214PowerShellToolPOSIXHomeWritesFiveTiers": 65.6,
    "TestGAP1409DirectoryEntryOperandsDoNotFollowFinalLink": 3.4,
    "TestGAP1409ObserveSelfProtectionHooks": 4.2,
    "TestGAP2590BenignLinkReadersAndLinkRemoval": 3.0,

@@ -90,6 +90,7 @@
    "TestFileToolWriteOfOrdinaryTextByRelativeNameFromTheDropInDirectoryIsAllowed": 3.3,
    "TestFileToolWritesOfOrdinaryContentAreNotBlockedByTheContentRules": 5.4,
    "TestFileToolWritesOfProtectedContentAreBlockedLikeTheWholeFileWrite": 5.5,
+   "TestGAP1214PowerShellToolPOSIXHomeWritesFiveTiers": 65.6,
    "TestHealthCountsALookupTheDirectoryDoesNotAnswer": 2.0,
    "TestHermesV4ATargetBound": 2.2,
    "TestInvalidatedOrExpiredExemptNameNeedsTheRefresh": 8.2,

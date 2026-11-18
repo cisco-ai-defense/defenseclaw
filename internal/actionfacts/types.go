@@ -73,9 +73,15 @@ type Input struct {
 	// PowerShellLauncherBody is trusted caller context set on the reading of
 	// a script a PowerShell launcher runs (pwsh -Command BODY): under a Linux
 	// or macOS ActiveHome its $HOME and ~ are spelled out as that home, as
-	// pwsh expands them (rel-1-0-10:GAP-1134). A PowerShell tool call of such
-	// a home is read as before, with its bounds.
+	// pwsh expands them (rel-1-0-10:GAP-1134). The command of a PowerShell
+	// tool is read the same way without it (posixPowerShellScript,
+	// rel-1-0-10:GAP-1214).
 	PowerShellLauncherBody bool `json:"-"`
+	// WindowsHookHost is trusted hook-host context. A test can force Windows
+	// routing on a POSIX runner, whose process home does not describe the
+	// Windows shell's home. Such a call must not take the POSIX PowerShell
+	// tool home rewrite.
+	WindowsHookHost bool `json:"-"`
 	// LoopBindsStraightLine is trusted caller context set by a gateway that
 	// judges the call in a tier that blocks only what the shell certainly
 	// runs (the default and permissive tiers). A function that replaces read,

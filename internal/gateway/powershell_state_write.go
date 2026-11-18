@@ -46,44 +46,70 @@ func provenPowerShellStateWrite(request trustedActionRequest) (proven, unknown b
 
 // provenPowerShellStateWriteOf is provenPowerShellStateWrite for one
 // PowerShell reading command of the call.
-func provenPowerShellStateWriteOf(request trustedActionRequest, command string) (proven, unknown bool) {
+func provenPowerShellStateWriteOf(request trustedActionRequest, command powerShellReadingCommand) (proven, unknown bool) {
 	home := request.Input.ActiveHome
 	var mentions func(string) bool
-	if !strings.Contains(strings.ToLower(command), "defenseclaw") {
+	if !strings.Contains(strings.ToLower(command.text), "defenseclaw") {
 		cwd := request.Input.CWD
 		mentions = func(text string) bool { return request.targetMemo.ActionStateTargetMention(text, cwd, home) }
 		if request.ProtectedHomeHook {
 			spellings := clientStateSpellings(request.ResolvedWriteTargets, home)
 			mentions = func(text string) bool { return psSpellsAny(text, spellings) }
 		}
-		if !mentions(command) {
+		if !mentions(command.text) {
 			return false, false
 		}
 	}
 	return powerShellWriteReading(request, command, mentions, provenStateMutationPath)
 }
 
+// powerShellReadingCommand is one command text the PowerShell reading judges
+// (powerShellReadingCommands).
+type powerShellReadingCommand struct {
+	text string
+	// posixTool is the command of a PowerShell tool call of a Linux or macOS
+	// home. Its reading proves only what it reads within its bounds: past
+	// them the shared readers judge the call with their own bounds, as they
+	// did before the reading read it (statement-padded state readings,
+	// rel-1-0-6:GAP-0448).
+	posixTool bool
+}
+
 // powerShellReadingCommands are the command texts of a call the PowerShell
 // reading judges: a call of a Windows home (a drive path) that runs in
 // PowerShell, or in a shell the gateway cannot tell from it (no hint, or
-// POSIX: Codex names its PowerShell tool Bash); and, for a POSIX call of a
-// Linux or macOS home, the script of each PowerShell launcher it runs (pwsh
+// POSIX: Codex names its PowerShell tool Bash); for a POSIX call of a Linux
+// or macOS home, the script of each PowerShell launcher it runs (pwsh
 // -Command BODY, actionfacts.PowerShellLauncherScripts): its .NET file
 // writes, New-Item -Value and home spellings were read nowhere else
-// (rel-1-0-10:GAP-1134). A cmd call is not one, nor a PowerShell tool call
-// of a Linux or macOS home: the shared readers judge it, with their bounds.
-func powerShellReadingCommands(request trustedActionRequest) []string {
+// (rel-1-0-10:GAP-1134); and the command of a PowerShell tool call of such a
+// home (Claude Code's PowerShell tool on Linux or macOS), which pwsh runs as
+// that script: its .NET file writes and New-Item -Value of the DefenseClaw
+// state or a hook config were allowed (rel-1-0-10:GAP-1214). A cmd call is
+// not one.
+func powerShellReadingCommands(request trustedActionRequest) []powerShellReadingCommand {
 	home := request.Input.ActiveHome
 	hint := request.Input.DialectHint
 	switch {
 	case len(home) >= 2 && home[1] == ':' &&
 		(hint == "" || hint == actionfacts.DialectPOSIX || hint == actionfacts.DialectPowerShell):
 		if command, known := trustedBashCommandInput(request.Input); known {
-			return []string{command}
+			return []powerShellReadingCommand{{text: command}}
 		}
 		return nil
-	case strings.HasPrefix(home, "/"):
-		return actionfacts.PowerShellLauncherScripts(request.Input)
+	case strings.HasPrefix(home, "/") && !request.Input.WindowsHookHost:
+		var commands []powerShellReadingCommand
+		if hint == "" || hint == actionfacts.DialectPowerShell {
+			if trustedPowerShellExecutionTool(request.Input.Tool) {
+				if command, known := trustedBashCommandInput(request.Input); known {
+					commands = append(commands, powerShellReadingCommand{text: command, posixTool: true})
+				}
+			}
+		}
+		for _, script := range actionfacts.PowerShellLauncherScripts(request.Input) {
+			commands = append(commands, powerShellReadingCommand{text: script})
+		}
+		return commands
 	}
 	return nil
 }
@@ -99,13 +125,15 @@ func powerShellReadingCommands(request trustedActionRequest) []string {
 // reads each such twin, as the redirect and every write cmdlet
 // (Add-Content, Set-Content, Out-File, Tee-Object, New-Item, Copy-Item and
 // Move-Item destinations) are read, and proves judges the twin's facts. A
-// command past the reading bounds is the write (true without proves).
-// unknown reports no proven write but a .NET open that may write a file
-// proves accepts, by a mode or path known only at run time: the caller
-// gives it the unknown tier of the pack (rel-1-0-10:GAP-1138).
-func powerShellWriteReading(request trustedActionRequest, command string, follows func(string) bool,
+// command past the reading bounds is the write (true without proves), but
+// for the command of a PowerShell tool of a Linux or macOS home
+// (powerShellReadingCommand.posixTool), which the shared readers judge with
+// their bounds. unknown reports no proven write but a .NET open that may
+// write a file proves accepts, by a mode or path known only at run time: the
+// caller gives it the unknown tier of the pack (rel-1-0-10:GAP-1138).
+func powerShellWriteReading(request trustedActionRequest, command powerShellReadingCommand, follows func(string) bool,
 	proves func(actionfacts.Facts, trustedActionRequest) bool) (written, unknown bool) {
-	forms, unknownForms, bounded, ok := powerShellStateWriteForms(command, request.Input.ActiveHome, request.Input.CWD, request.ResolvedWriteTargets, follows)
+	forms, unknownForms, bounded, ok := powerShellStateWriteForms(command.text, request.Input.ActiveHome, request.Input.CWD, request.ResolvedWriteTargets, follows)
 	if !ok {
 		return false, false
 	}
@@ -113,15 +141,16 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 	// reading copies; past a bound the state-naming command counts as the
 	// write (over-block, RV10-3, RV14-2).
 	const maxForms = 128
+	pastBounds := !command.posixTool
 	if bounded || len(forms)+len(unknownForms) > maxForms {
-		return true, false
+		return pastBounds, false
 	}
 	proven := func(form string) bool {
 		input := request.Input
 		input.Command, input.Args, input.Argv = form, nil, nil
 		input.DialectHint = actionfacts.DialectPowerShell
-		// Under a Linux or macOS home the reading reads only launcher
-		// scripts (powerShellReadingCommands).
+		// Under a Linux or macOS home each command it reads is a script pwsh
+		// runs (powerShellReadingCommands).
 		input.PowerShellLauncherBody = strings.HasPrefix(request.Input.ActiveHome, "/")
 		// pwsh on Linux and macOS writes the POSIX path a twin names, which
 		// the PowerShell reading places as a Windows one (no drive, so no
@@ -149,7 +178,7 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 		forms, bounded := psParameterReadings(form)
 		variants += len(forms)
 		if bounded || variants > maxVariants {
-			return true, false
+			return pastBounds, false
 		}
 		for _, variant := range forms {
 			if proven(variant) {
@@ -164,7 +193,7 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 		opaque, bounded := psOpaqueValueReadings(form)
 		variants += len(opaque)
 		if bounded || variants > maxVariants {
-			return true, false
+			return pastBounds, false
 		}
 		for _, variant := range opaque {
 			if proven(variant) {

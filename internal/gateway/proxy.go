@@ -5616,10 +5616,11 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, toolName, args stri
 	cfg := proxyDecisionConfig(ctx)
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool:       actionTool,
-			Args:       trusted,
-			CWD:        proxyToolCallCWD(toolCWD),
-			ActiveHome: hookActiveHome(ctx),
+			Tool:            actionTool,
+			Args:            trusted,
+			CWD:             proxyToolCallCWD(toolCWD),
+			ActiveHome:      hookActiveHome(ctx),
+			WindowsHookHost: windowsHookHost() && !p.toolCallSecureClient(ctx),
 		},
 		LegacyText:         args,
 		Connector:          connectorName,

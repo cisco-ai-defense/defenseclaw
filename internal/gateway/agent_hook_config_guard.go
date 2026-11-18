@@ -1703,7 +1703,7 @@ func sandboxAgentHookConfigFormat(target, home string) string {
 // (rel-1-0-10:GAP-1138).
 func agentHookConfigPowerShellWrite(request trustedActionRequest, guard *agentHookConfigGuard) (written, unknown bool, place string, owned bool) {
 	for _, command := range powerShellReadingCommands(request) {
-		if !guard.shellMentionsFileName(command) {
+		if !guard.shellMentionsFileName(command.text) {
 			continue
 		}
 		var maybe bool
@@ -1717,7 +1717,7 @@ func agentHookConfigPowerShellWrite(request trustedActionRequest, guard *agentHo
 
 // agentHookConfigPowerShellWriteOf is agentHookConfigPowerShellWrite for one
 // PowerShell reading command of the call.
-func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agentHookConfigGuard, command string) (written, unknown bool, place string, owned bool) {
+func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agentHookConfigGuard, command powerShellReadingCommand) (written, unknown bool, place string, owned bool) {
 	written, unknown = powerShellWriteReading(request, command, guard.shellMentionsFileName,
 		func(facts actionfacts.Facts, _ trustedActionRequest) bool {
 			for _, candidate := range facts.Paths {
