@@ -34,7 +34,10 @@ func gap1228Pad(prefix, separator string, n int) string {
 // strict). The statements keep their budget; the call keeps the verdict it
 // has on rel: the protected writes block by their rule, the benign call is
 // allowed, on the Claude Code PowerShell tool, the Codex shell (and cmd /c)
-// and the Copilot CLI powershell tool, in the five tiers.
+// and the Copilot CLI powershell tool, in the five tiers. Past the reading
+// cap a relative write of the DefenseClaw config after the moves (2 moves
+// and 64 statements, 7 and 18) is read in the home again and blocks, as
+// below the cap (rel-1-0-10:GAP-1281: it was allowed in all five tiers).
 //
 // The gateway judges the Windows path on the host that holds it: the rows
 // run on native Windows (the S7 WINDOWS-READER run), as a standard user.
@@ -57,25 +60,36 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 	t.Setenv("USERPROFILE", home)
 	volume := filepath.VolumeName(root) + `\`
 	psMoves, cmdMoves := "Set-Location "+home+"; ", "cd /d "+home+" & "
+	psTwo, cmdTwo := psMoves, cmdMoves
 	for i := 1; i <= 7; i++ {
 		psMoves += fmt.Sprintf("cd %snonexistent-g1228-%d; ", volume, i)
 		cmdMoves += fmt.Sprintf("cd /d %snonexistent-g1228-%d & ", volume, i)
+		if i == 2 {
+			psTwo, cmdTwo = psMoves, cmdMoves
+		}
 	}
 	psPad := func(prefix string, n int) string { return gap1228Pad(prefix, "; ", n) }
 	cmdPad := func(prefix string, n int) string { return gap1228Pad(prefix, " & ", n) }
 	key := filepath.Join(home, ".ssh", "authorized_keys")
+	const stateWrite = `type nul >> .defenseclaw\config.yaml`
 	type row struct {
 		id, command string
-		// rule is the evidence of the block; "" for a call that is allowed.
-		rule string
+		// rule is the evidence of the block; "" for a call that is allowed
+		// unless block is set (a block whatever its rule).
+		rule  string
+		block bool
 	}
 	powerShell := []row{
-		{"key-mid", psMoves + psPad("a", 35) + "; Add-Content -Path " + key + " -Value k; " + psPad("b", 35), "ssh_authorized"},
-		{"benign", psMoves + psPad("a", 70), ""},
+		{"key-mid", psMoves + psPad("a", 35) + "; Add-Content -Path " + key + " -Value k; " + psPad("b", 35), "ssh_authorized", true},
+		{"benign", psMoves + psPad("a", 70), "", false},
+		{"state-k2-n64", psTwo + psPad("p", 64) + "; " + stateWrite, "", true},
+		{"state-k7-n18", psMoves + psPad("p", 18) + "; " + stateWrite, "", true},
 	}
 	cmd := []row{
-		{"cmd-key-mid", cmdMoves + cmdPad("a", 35) + " & echo k >> " + key + " & " + cmdPad("b", 35), "ssh_authorized"},
-		{"cmd-benign", cmdMoves + cmdPad("a", 70), ""},
+		{"cmd-key-mid", cmdMoves + cmdPad("a", 35) + " & echo k >> " + key + " & " + cmdPad("b", 35), "ssh_authorized", true},
+		{"cmd-benign", cmdMoves + cmdPad("a", 70), "", false},
+		{"cmd-state-k2-n64", cmdTwo + cmdPad("p", 64) + " & " + stateWrite, "", true},
+		{"cmd-state-k7-n18", cmdMoves + cmdPad("p", 18) + " & " + stateWrite, "", true},
 	}
 	for _, p := range gap0437Packs {
 		for _, route := range []string{"claudecode", "codex", "codex-cmd", "copilot"} {
@@ -84,7 +98,7 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 				rows = cmd
 			}
 			for _, r := range rows {
-				if p.managed && route == "copilot" && r.rule == "" {
+				if p.managed && route == "copilot" && !r.block {
 					// A Copilot managed-peer append after a cd that may
 					// fail is an unresolved write target:
 					// rel-1-0-10:GAP-1157 (same at rel).
@@ -97,10 +111,10 @@ func TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers(
 				out := gap1150Post(t, a, route, project, r.command, home, p.managed)
 				raw, _ := json.Marshal(out)
 				action, _ := out["action"].(string)
-				if r.rule != "" && (action != "block" || !strings.Contains(string(raw), r.rule)) {
-					t.Errorf("%s %s %s: action %q, want block by %s: %.400s", p.name, route, r.id, action, r.rule, raw)
+				if r.block && (action != "block" || !strings.Contains(string(raw), r.rule)) {
+					t.Errorf("%s %s %s: action %q, want block (evidence %q): %.400s", p.name, route, r.id, action, r.rule, raw)
 				}
-				if r.rule == "" && action != "allow" {
+				if !r.block && action != "allow" {
 					t.Errorf("%s %s %s: the benign padded call is %q, want allow: %.400s", p.name, route, r.id, action, raw)
 				}
 			}

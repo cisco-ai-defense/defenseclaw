@@ -74,6 +74,10 @@ type SimpleCommand struct {
 	// operand of Text depends on it: the gateway reads it in each folder
 	// that holds a protected file (rel-1-0-10:GAP-0871).
 	UnresolvedFolder bool
+	// cappedFolders are, for the UnresolvedFolder reading of a Windows
+	// statement past maxSimpleWindowsOtherReadings, the folders it was not
+	// read in (CappedFolders). A pointer keeps the type comparable.
+	cappedFolders *[]string
 	// AbsoluteOnly means the directory of the command is unknown (an eval,
 	// an unreadable cd) and no operand of Text depends on it: CWD is empty,
 	// and the directory the action starts in judges the command as well as
@@ -250,6 +254,17 @@ const (
 	// call of the same statements on rel.
 	maxSimpleWindowsOtherReadings = maxStatementsAlone
 )
+
+// CappedFolders are the folders a Windows statement after moves that may
+// fail was not read in because the call reached
+// maxSimpleWindowsOtherReadings (nil for every other reading). Only its
+// UnresolvedFolder reading carries them (rel-1-0-10:GAP-1281).
+func (s SimpleCommand) CappedFolders() []string {
+	if s.cappedFolders == nil {
+		return nil
+	}
+	return *s.cappedFolders
+}
 
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
@@ -1205,7 +1220,14 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			// maxSimpleWindowsFolders, beside every reading made before:
 			// never the whole-call limit (the one bound rule,
 			// rel-1-0-10:GAP-1228).
+			//
+			// The folders past the cap stay on that reading
+			// (CappedFolders): the gateway reads the statement in those
+			// of them where its operand may name a protected file, as
+			// below the cap, so the cap drops only benign readings
+			// (rel-1-0-10:GAP-1281).
 			unresolved := state.othersUnresolved
+			var capped []string
 			if placed+len(state.others) <= maxSimpleWindowsOtherReadings {
 				for _, other := range state.others {
 					result = append(result, SimpleCommand{Text: text, CWD: other.cwd, OtherFolder: true})
@@ -1214,9 +1236,16 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 				}
 			} else {
 				unresolved = true
+				for _, other := range state.others {
+					capped = append(capped, other.cwd)
+				}
 			}
 			if unresolved {
-				result = append(result, SimpleCommand{Text: text, OtherFolder: true, UnresolvedFolder: true})
+				reading := SimpleCommand{Text: text, OtherFolder: true, UnresolvedFolder: true}
+				if len(capped) != 0 {
+					reading.cappedFolders = &capped
+				}
+				result = append(result, reading)
 				readings++
 			}
 		}
