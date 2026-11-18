@@ -158,7 +158,7 @@ A signed gateway image and signed per-connector kit images, digest-pinned, from 
 network policies, the OpenFGA bootstrap Job, hooks for upgrade, rollback and delete, an optional PrometheusRule and a local
 observability stack. `defenseclaw substrate setup` writes the Substrate install overlay and refuses when another callout is registered.
 Upgrades roll under the PDB with the config and store migrated first; a rollback across a store schema change is refused and names the
-backup. Uninstall removes DefenseClaw's egress policies first, so nothing is left open.
+backup and how to clear the pending-rollback revision helm keeps for it. Uninstall removes DefenseClaw's egress policies first, so nothing is left open.
 
 ## Tests
 
