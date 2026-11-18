@@ -942,6 +942,7 @@
    "TestStandaloneCleanupSameHomeRemovesDespiteStrayReceipt": 7.1,
    "TestStandaloneForeignCleanupKeepsTheClaudeBlockerWhenThePolicyIsUnknown": 2.3,
    "TestStandaloneForeignCleanupUnblocksPersonalClaudeWhenThePolicyDropsIt": 2.3,
+   "TestStandaloneRouteOnlyTargetsCrossTheWorkerBoundary": 1.2,
    "TestSubstrateChainEgressActionDecidesTheCalloutGAP0250": 3.3,
    "TestSubstrateRecreatedActorEgressIsChainChecked": 5.9,
    "TestUpgradeAuditStoreBeforeStartAppliesPendingMigrations": 2.5,
