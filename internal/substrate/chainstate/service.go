@@ -145,6 +145,12 @@ type Options struct {
 	// action, is answered at once. Known limit: a gateway with a long note
 	// backlog, or a leader too busy to take a note, can deliver one after
 	// the grace.
+	//
+	// After Leading (the elector made this replica the leader) the grace
+	// also ends startGraceCap(StartGrace) after the term began: a gateway's
+	// waiting note is itself a call, retried every 5 s from when the leader
+	// can be reached (readiness every 5 s), so a term whose first call came
+	// that late had no note waiting (a quiet cluster's first actor).
 	StartGrace time.Duration
 }
 
@@ -163,9 +169,13 @@ type Service struct {
 	// clears both for a new term. graceMu guards them (monotonic with the
 	// default clock). Before GAP-0601 (IB5) the grace ran from the first
 	// clear check alone, however long after the leader started it came.
+	// leadingAt is when Leading started the term (leading says it did):
+	// the grace never runs past leadingAt + startGraceCap.
 	graceMu   sync.Mutex
 	served    atomic.Bool
 	servingAt time.Time
+	leading   bool
+	leadingAt time.Time
 
 	mu      sync.Mutex
 	actors  map[string]*actorEntry // atespace/uid
@@ -1657,7 +1667,8 @@ var errStarting = &leader.WireError{Code: leader.CodeUnavailable,
 	Message: "the gateway leader started moments ago; tool calls a gateway could not record while no leader answered may still be arriving"}
 
 // starting reports whether a clear egress check is within opts.StartGrace
-// of the start of this leader term. A check that comes first starts it.
+// of the start of this leader term, and, after Leading, within
+// startGraceCap of it. A check that comes first starts it.
 func (s *Service) starting() bool {
 	if s.opts.StartGrace <= 0 {
 		return false
@@ -1665,12 +1676,25 @@ func (s *Service) starting() bool {
 	s.graceMu.Lock()
 	defer s.graceMu.Unlock()
 	now := s.opts.Now()
+	if s.leading && now.Sub(s.leadingAt) >= startGraceCap(s.opts.StartGrace) {
+		return false
+	}
 	if !s.served.Load() {
 		s.servingAt = now
 		s.served.Store(true)
 	}
 	return now.Sub(s.servingAt) < s.opts.StartGrace
 }
+
+// startGraceCap is how long after Leading the start grace can last at
+// most: twice the grace (30 s on the leader). The first call reaches a new
+// leader within its readiness period (5 s) and the Service endpoint update;
+// a gateway's waiting note then arrives within one retry (5 s) and its
+// timeout (2 s). A first call later than that means no note was waiting,
+// and the grace it would start protects nothing: without the cap the first
+// clone of a quiet cluster's first actor was refused as in IB5 (GAP-0601
+// review round 1).
+func startGraceCap(grace time.Duration) time.Duration { return 2 * grace }
 
 // LeaderCall marks a call this replica served as the leader; Register
 // installs it as srv.OnLeaderCall. The first one of a leader term starts
@@ -1703,6 +1727,8 @@ func (s *Service) Leading() {
 	defer s.graceMu.Unlock()
 	s.served.Store(false)
 	s.servingAt = time.Time{}
+	s.leading = true
+	s.leadingAt = s.opts.Now()
 }
 
 // staleVerdict answers an egress check under a UID that is not the

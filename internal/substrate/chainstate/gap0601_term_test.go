@@ -59,7 +59,7 @@ func TestStartGraceRunsFromTheTermsFirstCallGAP0601(t *testing.T) {
 		t.Fatalf("15 s into a new term: %+v %v", v, err)
 	}
 	h.svc.Leading()
-	h.advance(time.Minute)
+	h.advance(10 * time.Second)
 	if _, err := h.svc.Egress(ctx, post); !errors.Is(err, errStarting) {
 		t.Fatalf("a term whose first call is the check: want errStarting, got %v", err)
 	}
