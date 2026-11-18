@@ -736,6 +736,13 @@ var runners = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": tru
 	"bwrap": true, "tini": true, "dumb-init": true, "awk": true, "gawk": true, "mawk": true, "tclsh": true, "expect": true, "git": true,
 	"pwsh": true, "powershell": true, "cmd": true, "luajit": true, "R": true, "elixir": true, "escript": true, "dart": true, "swift": true}
 
+// runnerName reports a runner, also with a version after its name
+// (python3.12, php8.2, ruby3.2, lua5.4, node22): a versioned interpreter
+// runs the folder's script as the plain one does (GAP-0633).
+func runnerName(base string) bool {
+	return runners[base] || runners[strings.TrimRight(base, "0123456789.")] || strings.HasPrefix(base, "python3.")
+}
+
 // runsNothingOfFolder reports a stdio server positively known to run no
 // code of the project folder: an installed program (an absolute path
 // outside it, or a bare name the kit found outside it on the actor's
@@ -790,7 +797,7 @@ func runsNothingOfFolder(s MCPServer, project string, files []AttachedFile) bool
 		// An image run with no mount, working folder, env file or entry
 		// point sees nothing of the folder (GAP-0575).
 		return containerRun(s.Args)
-	case runners[base] || strings.HasPrefix(base, "python3."):
+	case runnerName(base):
 		// A runner (installed, or found on PATH): safe only when what it
 		// runs is not the folder's: an installed program (an absolute path
 		// outside the folder, also after -jar, GAP-0556), or a module (-m)
