@@ -222,3 +222,60 @@ func TestPurgeStepsGiveTheExactGrantCommands(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0611: a Job that cannot be deleted (403 here, 500 for another) is a
+// note with the kubectl command; the other Jobs are still deleted and the
+// uninstall succeeds.
+func TestPreDeleteKeepsGoingWhenAHookJobCannotBeDeleted(t *testing.T) {
+	var deletes []string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/apis/batch/v1/") {
+			deletes = append(deletes, r.URL.Path)
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/defenseclaw-pre-rollback"):
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Failure","reason":"Forbidden","code":403}`))
+				return
+			case strings.HasSuffix(r.URL.Path, "/defenseclaw-chain-key"):
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Failure","code":500}`))
+				return
+			case strings.HasSuffix(r.URL.Path, "/defenseclaw-pre-upgrade"):
+				_, _ = w.Write([]byte(`{"kind":"Status","status":"Success"}`))
+				return
+			}
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	tok := filepath.Join(dir, "token")
+	if err := os.WriteFile(tok, []byte("t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	k, err := NewKube(srv.URL, tok, ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := testPlan()
+	plan.CredentialProvider.Grant = false
+	r, err := PreDelete(context.Background(), plan, newFakeAPI(), k)
+	if err != nil {
+		t.Fatalf("a hook Job that cannot be deleted stopped the uninstall: %v", err)
+	}
+	if len(deletes) != len(LeftoverHookJobs) {
+		t.Errorf("deletes %v: every leftover hook Job must still be tried", deletes)
+	}
+	notes := strings.Join(r.Notes, "\n")
+	for _, w := range []string{
+		"kubectl -n defenseclaw-system delete job defenseclaw-pre-rollback",
+		"kubectl -n defenseclaw-system delete job defenseclaw-chain-key",
+		"deleted the hook Job(s) defenseclaw-pre-upgrade and their pods",
+	} {
+		if !strings.Contains(notes, w) {
+			t.Errorf("notes lack %q:\n%s", w, notes)
+		}
+	}
+}
