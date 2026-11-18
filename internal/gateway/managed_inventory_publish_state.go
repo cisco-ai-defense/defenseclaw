@@ -272,6 +272,25 @@ func (cycle *managedInventoryPublishCycle) recordPublished(key, digest string, r
 	}
 }
 
+// covers reports whether AI Defense has accepted this exact collection, either
+// during the current cycle or in a previous successful cycle. It is used to
+// keep child inventory from referencing a parent whose managed publish failed.
+func (cycle *managedInventoryPublishCycle) covers(key, digest string) bool {
+	if cycle == nil || digest == "" {
+		return false
+	}
+	if current, ok := cycle.published[key]; ok && current.Digest == digest {
+		return true
+	}
+	if cycle.state == nil {
+		return false
+	}
+	cycle.state.mu.Lock()
+	defer cycle.state.mu.Unlock()
+	stored, ok := cycle.state.file.Collections[key]
+	return ok && stored.Digest == digest
+}
+
 // managedInventoryPublishRejected reports whether an emit that returned no error
 // nevertheless failed to hand its record to the managed AI Defense destination.
 //

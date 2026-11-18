@@ -8,9 +8,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 const (
@@ -115,6 +117,12 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 	for key, count := range counts {
 		if count != 1 {
 			m.blockedObserved[key] = true
+			// Retain the last complete identity and evidence while refusing new
+			// observations/listings. A later unique read either confirms it or
+			// retires it through the ordinary parent-change path.
+			if old := m.parents[key]; old != "" {
+				next[key] = old
+			}
 		}
 	}
 	if m.pendingRemoval == nil {
@@ -258,7 +266,7 @@ func (m *mcpToolInventory) recordMetric(ctx context.Context, stage, outcome, rea
 }
 
 func (a *APIServer) recordObservedMCPToolIfManaged(ctx context.Context, req agentHookRequest) {
-	if !ManagedEnterpriseActive() {
+	if !ManagedEnterpriseActive() || req.SuppressCorrelationEmit && !req.CorrelationUnavailable {
 		return
 	}
 	a.recordObservedMCPTool(ctx, req, time.Now())
@@ -274,6 +282,12 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 	}
 	server, tool, valid := exactMCPToolResource(req.ToolName, payloadString(req.Payload, "mcp_server_name"))
 	if valid {
+		configuredServer, resolved := a.mcpTools.resolveConfiguredServer(projection.connector, server)
+		if !resolved {
+			a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
+			return
+		}
+		server = configuredServer
 		parentID, recorded := a.mcpTools.recordObserved(projection.connector, server, tool, at)
 		if !recorded {
 			a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
@@ -285,33 +299,53 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 				a.mcpTools.recordMetric(ctx, "observe", "partial", "persistence_queue_full")
 				return
 			}
+			var attempted atomic.Bool
 			writeCtx, report := audit.WithCallWriteReport(ctx, a.store, func(err error) {
-				a.mcpTools.settleObservedWrite(pending, err)
+				a.mcpTools.settleObservedWrite(pending, err, attempted.Load())
 			})
 			err := a.mcpTools.store.UpsertMCPObservedToolIf(writeCtx, audit.MCPObservedTool{
-				ParentComponentID: parentID,
-				Connector:         projection.connector,
-				ServerName:        server,
-				ToolName:          tool,
-				LastObservedAt:    at,
+				ParentComponentID: pending.parentID,
+				Connector:         pending.connector,
+				ServerName:        pending.server,
+				ToolName:          pending.tool,
+				LastObservedAt:    pending.at,
 			}, func() bool {
-				return a.mcpTools.parentIsCurrent(projection.connector, server, parentID)
+				current := a.mcpTools.observedWriteIsCurrent(pending)
+				if current {
+					attempted.Store(true)
+				}
+				return current
 			})
 			if report == nil || !report.Deferred() {
-				a.mcpTools.settleObservedWrite(pending, err)
+				a.mcpTools.settleObservedWrite(pending, err, attempted.Load())
 			}
 		}
 	}
 }
 
-func (m *mcpToolInventory) parentIsCurrent(connector, server, parentID string) bool {
-	if m == nil || parentID == "" {
-		return false
+// resolveConfiguredServer maps an agent's tool-name spelling back to the one
+// configured server alias that owns it. Codex normalizes punctuation to
+// underscores in tool names, so the literal hook spelling is not necessarily
+// the durable inventory identity.
+func (m *mcpToolInventory) resolveConfiguredServer(connector, toolServer string) (string, bool) {
+	if m == nil {
+		return "", false
 	}
+	connector = canonicalConnectorRulePackKey(connector)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := mcpToolServerKey(connector, server)
-	return m.parents[key] == parentID && !m.blockedObserved[key]
+	matched := ""
+	for key, parentID := range m.parents {
+		owner, configured, ok := strings.Cut(key, "\x00")
+		if !ok || owner != connector || parentID == "" || !config.SameMCPToolServer(connector, configured, toolServer) {
+			continue
+		}
+		if m.blockedObserved[key] || matched != "" && matched != configured {
+			return "", false
+		}
+		matched = configured
+	}
+	return matched, matched != ""
 }
 
 func (m *mcpToolInventory) beginObservedWrite(connector, server, tool, parentID string, at time.Time) (pendingMCPObservedTool, bool) {
@@ -333,6 +367,9 @@ func (m *mcpToolInventory) beginObservedWrite(connector, server, tool, parentID 
 	if _, exists := m.pendingObserved[key][tool]; !exists && len(m.pendingObserved[key]) >= maxMCPToolObservations {
 		return pendingMCPObservedTool{}, false
 	}
+	if current, exists := m.pendingObserved[key][tool]; exists && current.parentID == parentID && current.at.After(at) {
+		at = current.at
+	}
 	m.observedVersion++
 	pending := pendingMCPObservedTool{
 		parentID: parentID, connector: connector, server: server, tool: tool,
@@ -353,7 +390,7 @@ func (m *mcpToolInventory) observedWriteIsCurrent(pending pendingMCPObservedTool
 	return ok && current.version == pending.version && m.parents[key] == pending.parentID && !m.blockedObserved[key]
 }
 
-func (m *mcpToolInventory) settleObservedWrite(pending pendingMCPObservedTool, err error) {
+func (m *mcpToolInventory) settleObservedWrite(pending pendingMCPObservedTool, err error, attempted bool) {
 	if m == nil || pending.version == 0 || err != nil {
 		return
 	}
@@ -362,6 +399,10 @@ func (m *mcpToolInventory) settleObservedWrite(pending pendingMCPObservedTool, e
 	defer m.mu.Unlock()
 	current, ok := m.pendingObserved[key][pending.tool]
 	if !ok || current.version != pending.version {
+		return
+	}
+	parentStillExists := m.parents[key] == pending.parentID
+	if !attempted && parentStillExists {
 		return
 	}
 	delete(m.pendingObserved[key], pending.tool)
@@ -390,14 +431,21 @@ func (m *mcpToolInventory) flushPendingObserved(ctx context.Context) error {
 	})
 	var firstErr error
 	for _, pending := range writes {
+		var attempted atomic.Bool
 		err := m.store.UpsertMCPObservedToolIf(ctx, audit.MCPObservedTool{
 			ParentComponentID: pending.parentID,
 			Connector:         pending.connector,
 			ServerName:        pending.server,
 			ToolName:          pending.tool,
 			LastObservedAt:    pending.at,
-		}, func() bool { return m.observedWriteIsCurrent(pending) })
-		m.settleObservedWrite(pending, err)
+		}, func() bool {
+			current := m.observedWriteIsCurrent(pending)
+			if current {
+				attempted.Store(true)
+			}
+			return current
+		})
+		m.settleObservedWrite(pending, err, attempted.Load())
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -436,6 +484,11 @@ func (m *mcpToolInventory) recordAdvertisedContext(ctx context.Context, connecto
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].name < items[j].name })
 	m.mu.Lock()
+	if m.blockedObserved[key] {
+		m.mu.Unlock()
+		m.recordMetric(ctx, "listing", "partial", "ambiguous_parent")
+		return
+	}
 	parentID := m.parents[key]
 	if m.advertised == nil {
 		m.advertised = make(map[string][]mcpToolObservation)
@@ -487,10 +540,15 @@ func (m *mcpToolInventory) advertisedWriteIsCurrent(key, parentID string, versio
 }
 
 func (m *mcpToolInventory) persistAdvertisedSnapshot(ctx context.Context, key string, version uint64, snapshot audit.MCPAdvertisedToolSnapshot) error {
+	var attempted atomic.Bool
 	err := m.store.ReplaceMCPAdvertisedToolsIf(ctx, snapshot, func() bool {
-		return m.advertisedWriteIsCurrent(key, snapshot.ParentComponentID, version)
+		current := m.advertisedWriteIsCurrent(key, snapshot.ParentComponentID, version)
+		if current {
+			attempted.Store(true)
+		}
+		return current
 	})
-	if err != nil {
+	if err != nil || !attempted.Load() {
 		return err
 	}
 	m.mu.Lock()
@@ -570,6 +628,10 @@ func (m *mcpToolInventory) recordListingFailureContext(ctx context.Context, conn
 	listedAt := m.advertisedListedAt[key]
 	if listedAt.IsZero() {
 		listedAt = time.Now().UTC()
+		if m.advertisedListedAt == nil {
+			m.advertisedListedAt = make(map[string]time.Time)
+		}
+		m.advertisedListedAt[key] = listedAt
 	}
 	for _, item := range items {
 		names = append(names, item.name)

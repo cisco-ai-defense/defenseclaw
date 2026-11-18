@@ -112,6 +112,11 @@ func upsertMCPObservedToolTx(ctx context.Context, tx *sql.Tx, tool MCPObservedTo
 		ON CONFLICT(parent_component_id, tool_name) DO UPDATE SET
 			connector = excluded.connector,
 			server_name = excluded.server_name,
+			first_observed_at = CASE
+				WHEN excluded.first_observed_at < mcp_observed_tools.first_observed_at
+				THEN excluded.first_observed_at
+				ELSE mcp_observed_tools.first_observed_at
+			END,
 			last_observed_at = CASE
 				WHEN excluded.last_observed_at > mcp_observed_tools.last_observed_at
 				THEN excluded.last_observed_at

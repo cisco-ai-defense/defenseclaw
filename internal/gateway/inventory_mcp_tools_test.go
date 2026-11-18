@@ -27,7 +27,13 @@ type testMCPObservedToolStore struct {
 	advertisedListErr error
 	deleteErr         error
 	deleteCalls       [][]string
+	deleteStarted     chan struct{}
+	releaseDelete     chan struct{}
+	deleteOnce        sync.Once
 	stillCurrent      func() bool
+	observedWrite     audit.MCPObservedTool
+	upsertCalls       int
+	deferUpsert       bool
 	upsertErr         error
 	advertisedCurrent func() bool
 	advertisedWrite   audit.MCPAdvertisedToolSnapshot
@@ -70,8 +76,16 @@ func (s *coordinatedAdvertisedStore) snapshots() []audit.MCPAdvertisedToolSnapsh
 	return append([]audit.MCPAdvertisedToolSnapshot(nil), s.writes...)
 }
 
-func (s *testMCPObservedToolStore) UpsertMCPObservedToolIf(_ context.Context, _ audit.MCPObservedTool, stillCurrent func() bool) error {
+func (s *testMCPObservedToolStore) UpsertMCPObservedToolIf(_ context.Context, tool audit.MCPObservedTool, stillCurrent func() bool) error {
 	s.stillCurrent = stillCurrent
+	if s.deferUpsert {
+		return s.upsertErr
+	}
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
+	}
+	s.observedWrite = tool
+	s.upsertCalls++
 	return s.upsertErr
 }
 
@@ -81,6 +95,9 @@ func (s *testMCPObservedToolStore) ListMCPObservedTools(context.Context) ([]audi
 
 func (s *testMCPObservedToolStore) ReplaceMCPAdvertisedToolsIf(_ context.Context, snapshot audit.MCPAdvertisedToolSnapshot, stillCurrent func() bool) error {
 	s.advertisedCurrent = stillCurrent
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
+	}
 	s.advertisedWrite = snapshot
 	return s.advertisedErr
 }
@@ -121,12 +138,101 @@ func TestMCPToolListingFailureRetriesVersionedPartialState(t *testing.T) {
 	}
 }
 
+func TestMCPToolFirstListingFailureRetriesWithNonzeroTimestamp(t *testing.T) {
+	store := &testMCPObservedToolStore{advertisedErr: fmt.Errorf("database busy")}
+	tools := &mcpToolInventory{store: store}
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	tools.recordListingFailure("codex", "notes")
+	key := mcpToolServerKey("codex", "notes")
+	if tools.advertisedListedAt[key].IsZero() || tools.pendingAdvertised[key] == 0 {
+		t.Fatalf("first failed listing timestamp=%v pending=%d", tools.advertisedListedAt[key], tools.pendingAdvertised[key])
+	}
+	store.advertisedErr = nil
+	if err := tools.flushPendingAdvertised(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if store.advertisedWrite.ListedAt.IsZero() || tools.pendingAdvertised[key] != 0 {
+		t.Fatalf("retried listing=%+v pending=%d", store.advertisedWrite, tools.pendingAdvertised[key])
+	}
+}
+
+func TestMCPToolAmbiguousAliasRetainsLastAdvertisedListing(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	tools.recordAdvertised("codex", "notes", []string{"search"}, time.Now())
+	tools.refreshParents([]endpointInventoryComponent{
+		parent, {id: "server-b", itemName: "notes", agentConnector: "codex"},
+	})
+	tools.recordAdvertised("codex", "notes", []string{"delete"}, time.Now())
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if partial || len(rows) != 1 || rows[0].itemName != "search" {
+		t.Fatalf("blocked alias did not retain last valid listing: rows=%+v partial=%v", rows, partial)
+	}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	rows, partial = tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if partial || len(rows) != 1 || rows[0].itemName != "search" {
+		t.Fatalf("last valid listing was replaced while blocked: rows=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestMCPToolPendingObservationKeepsMaximumTimestamp(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	newer := time.Date(2026, 11, 18, 2, 0, 0, 0, time.UTC)
+	older := newer.Add(-time.Hour)
+	if _, ok := tools.beginObservedWrite("codex", "notes", "search", parent.id, newer); !ok {
+		t.Fatal("newer pending write rejected")
+	}
+	pending, ok := tools.beginObservedWrite("codex", "notes", "search", parent.id, older)
+	if !ok || !pending.at.Equal(newer) {
+		t.Fatalf("pending timestamp=%v ok=%v, want %v", pending.at, ok, newer)
+	}
+	if err := tools.flushPendingObserved(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !store.observedWrite.LastObservedAt.Equal(newer) {
+		t.Fatalf("durable timestamp=%v, want %v", store.observedWrite.LastObservedAt, newer)
+	}
+}
+
+func TestMCPToolGuardedObservationRemainsPending(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	pending, ok := tools.beginObservedWrite("codex", "notes", "search", parent.id, time.Now())
+	if !ok {
+		t.Fatal("pending write rejected")
+	}
+	key := mcpToolServerKey("codex", "notes")
+	tools.mu.Lock()
+	tools.blockedObserved[key] = true
+	tools.mu.Unlock()
+	if err := tools.flushPendingObserved(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if tools.pendingObserved[key][pending.tool].version != pending.version || store.upsertCalls != 0 {
+		t.Fatalf("guarded write was cleared or committed: pending=%+v calls=%d", tools.pendingObserved[key], store.upsertCalls)
+	}
+}
+
 func (s *testMCPObservedToolStore) ListMCPAdvertisedToolSnapshots(context.Context) ([]audit.MCPAdvertisedToolSnapshot, error) {
 	return s.advertised, s.advertisedListErr
 }
 
 func (s *testMCPObservedToolStore) DeleteMCPObservedToolsForParents(_ context.Context, parentIDs []string) error {
 	s.deleteCalls = append(s.deleteCalls, append([]string(nil), parentIDs...))
+	if s.deleteStarted != nil {
+		s.deleteOnce.Do(func() { close(s.deleteStarted) })
+	}
+	if s.releaseDelete != nil {
+		<-s.releaseDelete
+	}
 	return s.deleteErr
 }
 
@@ -185,6 +291,79 @@ func TestObservedMCPToolCostsNothingWhenManagedInventoryIsOff(t *testing.T) {
 	}
 }
 
+func TestObservedMCPToolExactReplayDoesNotAdvanceTimestamp(t *testing.T) {
+	withManagedEnterprise(t, true)
+	var tools mcpToolInventory
+	api := &APIServer{mcpTools: &tools}
+	parent := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "claudecode"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	req := agentHookRequest{
+		ConnectorName: "claudecode", ConnectorInstanceID: syntheticToolResourceConnectorID,
+		ToolName: "mcp__notes__search", Payload: map[string]interface{}{"mcp_server_name": "notes"},
+	}
+	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "claudecode"), req,
+		[]byte(`{"tool_name":"mcp__notes__search","mcp_server_name":"notes"}`))
+	api.recordObservedMCPToolIfManaged(ctx, req)
+	rows, _ := tools.components([]endpointInventoryComponent{parent}, false, "observed")
+	if len(rows) != 1 {
+		t.Fatalf("first observation rows=%+v", rows)
+	}
+	first := rows[0].mcpToolObservedAt
+	req.SuppressCorrelationEmit = true
+	api.recordObservedMCPToolIfManaged(ctx, req)
+	rows, _ = tools.components([]endpointInventoryComponent{parent}, false, "observed")
+	if len(rows) != 1 || rows[0].mcpToolObservedAt != first {
+		t.Fatalf("exact replay advanced observation: first=%q rows=%+v", first, rows)
+	}
+	// A suppressed event with no correlation evidence is not a proven replay and
+	// remains eligible for observation.
+	req.CorrelationUnavailable = true
+	api.recordObservedMCPToolIfManaged(ctx, req)
+	rows, _ = tools.components([]endpointInventoryComponent{parent}, false, "observed")
+	if len(rows) != 1 || rows[0].mcpToolObservedAt < first {
+		t.Fatalf("correlation-unavailable event was lost: first=%q rows=%+v", first, rows)
+	}
+}
+
+func TestObservedMCPToolResolvesUniqueCodexConfiguredAlias(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
+	api := &APIServer{mcpTools: tools}
+	parent := endpointInventoryComponent{id: "parent", itemName: "acme-notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	req := agentHookRequest{
+		ConnectorName: "codex", ConnectorInstanceID: syntheticToolResourceConnectorID,
+		ToolName: "mcp__acme_notes__search", Payload: map[string]interface{}{"mcp_server_name": "acme_notes"},
+	}
+	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "codex"), req,
+		[]byte(`{"tool_name":"mcp__acme_notes__search"}`))
+	api.recordObservedMCPTool(ctx, req, time.Now())
+	if store.upsertCalls != 1 || store.observedWrite.ServerName != "acme-notes" || store.observedWrite.ParentComponentID != parent.id {
+		t.Fatalf("configured alias write=%+v calls=%d", store.observedWrite, store.upsertCalls)
+	}
+}
+
+func TestObservedMCPToolRejectsAmbiguousCodexConfiguredAlias(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
+	api := &APIServer{mcpTools: tools}
+	parents := []endpointInventoryComponent{
+		{id: "one", itemName: "acme-notes", agentConnector: "codex"},
+		{id: "two", itemName: "acme.notes", agentConnector: "codex"},
+	}
+	tools.refreshParents(parents)
+	req := agentHookRequest{
+		ConnectorName: "codex", ConnectorInstanceID: syntheticToolResourceConnectorID,
+		ToolName: "mcp__acme_notes__search", Payload: map[string]interface{}{"mcp_server_name": "acme_notes"},
+	}
+	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "codex"), req,
+		[]byte(`{"tool_name":"mcp__acme_notes__search"}`))
+	api.recordObservedMCPTool(ctx, req, time.Now())
+	if store.upsertCalls != 0 {
+		t.Fatalf("ambiguous alias persisted %+v", store.observedWrite)
+	}
+}
+
 func TestObservedMCPToolReportsUnavailableParent(t *testing.T) {
 	var gotStage, gotOutcome, gotReason string
 	tools := &mcpToolInventory{metric: func(_ context.Context, stage, outcome, reason string) {
@@ -204,7 +383,7 @@ func TestObservedMCPToolReportsUnavailableParent(t *testing.T) {
 }
 
 func TestObservedMCPToolDeferredWriteRejectsRetiredParent(t *testing.T) {
-	store := &testMCPObservedToolStore{}
+	store := &testMCPObservedToolStore{deferUpsert: true}
 	tools := &mcpToolInventory{store: store}
 	api := &APIServer{mcpTools: tools}
 	oldParent := endpointInventoryComponent{id: "old-parent", itemName: "notes", agentConnector: "claudecode"}
@@ -866,12 +1045,19 @@ func TestMCPToolInventoryRequiresManagedParentEligibility(t *testing.T) {
 		parents = append(parents, endpointInventoryComponent{id: fmt.Sprintf("parent-%03d", index)})
 	}
 	toolRows := []endpointInventoryComponent{{mcpToolParentID: parents[0].id}}
-	if mcpToolParentsManaged(toolRows, managedMCPParentIDs(parents, nil, false)) {
+	if mcpToolParentsManaged(toolRows, managedMCPParentIDs(parents, nil, true)) {
 		t.Fatal("tool was eligible while its parent collection was over the managed limit")
 	}
 	parents = parents[:maxManagedMCPInventory]
-	if !mcpToolParentsManaged(toolRows, managedMCPParentIDs(parents, nil, false)) {
+	if !mcpToolParentsManaged(toolRows, managedMCPParentIDs(parents, nil, true)) {
 		t.Fatal("tool was rejected with an eligible managed parent")
+	}
+	if mcpToolParentsManaged(toolRows, managedMCPParentIDs(parents, nil, false)) {
+		t.Fatal("tool was eligible without an accepted parent submission")
+	}
+	accepted := map[string]struct{}{parents[0].id: {}}
+	if !mcpToolParentsManaged(toolRows, managedMCPParentIDs(parents, accepted, false)) {
+		t.Fatal("tool was rejected after its parent submission was accepted")
 	}
 }
 
@@ -998,34 +1184,48 @@ func TestMCPToolInventoryUsesCurrentParentAndAvoidsAmbiguousAliases(t *testing.T
 }
 
 func TestMCPToolInventorySerializesReadReconcileAndDelete(t *testing.T) {
-	var tools mcpToolInventory
-	firstReadStarted := make(chan struct{})
-	releaseFirstRead := make(chan struct{})
+	store := &testMCPObservedToolStore{deleteStarted: make(chan struct{}), releaseDelete: make(chan struct{})}
+	tools := mcpToolInventory{store: store}
+	tools.refreshParents([]endpointInventoryComponent{{id: "old", itemName: "notes", agentConnector: "codex"}})
 	firstDone := make(chan struct{})
 	go func() {
 		defer close(firstDone)
 		tools.readAndReconcileParents(t.Context(), func() ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
-			close(firstReadStarted)
-			<-releaseFirstRead
-			return []endpointInventoryComponent{{id: "old", itemName: "notes", agentConnector: "codex"}}, perConnectorMCPReadStatus{}
+			return []endpointInventoryComponent{{id: "new", itemName: "notes", agentConnector: "codex"}}, perConnectorMCPReadStatus{}
 		})
 	}()
-	<-firstReadStarted
-	if tools.reconcileMu.TryLock() {
-		tools.reconcileMu.Unlock()
-		close(releaseFirstRead)
-		t.Fatal("connector read did not hold the reconciliation fence")
+	select {
+	case <-store.deleteStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("durable delete did not start")
 	}
-	close(releaseFirstRead)
+	secondReadStarted := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		tools.readAndReconcileParents(t.Context(), func() ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
+			close(secondReadStarted)
+			return []endpointInventoryComponent{{id: "newer", itemName: "notes", agentConnector: "codex"}}, perConnectorMCPReadStatus{}
+		})
+	}()
+	select {
+	case <-secondReadStarted:
+		close(store.releaseDelete)
+		t.Fatal("new reconciliation started before durable retirement completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(store.releaseDelete)
 	select {
 	case <-firstDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("first reconciliation did not finish")
 	}
-	tools.readAndReconcileParents(t.Context(), func() ([]endpointInventoryComponent, perConnectorMCPReadStatus) {
-		return []endpointInventoryComponent{{id: "new", itemName: "notes", agentConnector: "codex"}}, perConnectorMCPReadStatus{}
-	})
-	if parent, recorded := tools.recordObserved("codex", "notes", "search", time.Now()); !recorded || parent != "new" {
+	select {
+	case <-secondDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second reconciliation did not finish")
+	}
+	if parent, recorded := tools.recordObserved("codex", "notes", "search", time.Now()); !recorded || parent != "newer" {
 		t.Fatalf("final parent=%q recorded=%v, want serialized newer parent", parent, recorded)
 	}
 }

@@ -314,6 +314,7 @@ func emitEndpointInventory(
 	// would silently drop the collection from the daily complete bundle.
 	const perConnectorMCPSource = "endpoint_per_connector_mcp_inventory"
 	var completeRows []endpointInventoryComponent
+	acceptedParentIDs := make(map[string]struct{})
 	if perConnectorPartial {
 		// A partial aggregate is not an authoritative snapshot, but connectors
 		// whose native reads completed still carry independently validated server
@@ -324,20 +325,32 @@ func emitEndpointInventory(
 		// suppress a complete sibling nor cause its retained cloud rows to be
 		// removed.
 		completeRows = completeConnectorMCPEntriesFromPartial(perConnectorMCP, perConnectorStatus.incompleteConnectors)
-		if err := emitEndpointInventoryComponents(
+		var err error
+		acceptedParentIDs, err = emitEndpointInventoryComponents(
 			ctx, emitter, perConnectorMCPSource, completeRows,
 			config.ObservabilityV8ManagedMCPInventoryAction, publish,
-		); err != nil && firstErr == nil {
+		)
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	if err := emitEndpointInventorySnapshot(
+	parentSnapshotErr := emitEndpointInventorySnapshot(
 		ctx, emitter, perConnectorMCPSource, perConnectorMCP, perConnectorPartial,
 		config.ObservabilityV8ManagedMCPInventoryAction, publish,
-	); err != nil && firstErr == nil {
-		firstErr = err
+	)
+	if parentSnapshotErr != nil && firstErr == nil {
+		firstErr = parentSnapshotErr
 	}
-	managedParentIDs := managedMCPParentIDs(perConnectorMCP, completeRows, perConnectorPartial)
+	fullParentSnapshotCovered := false
+	if !perConnectorPartial && len(perConnectorMCP) <= maxManagedMCPInventory {
+		if publish.cycle == nil {
+			fullParentSnapshotCovered = parentSnapshotErr == nil
+		} else {
+			digest := managedInventoryComponentsDigest(perConnectorMCPSource, perConnectorMCP)
+			fullParentSnapshotCovered = publish.cycle.covers(perConnectorMCPSource, digest)
+		}
+	}
+	managedParentIDs := managedMCPParentIDs(perConnectorMCP, acceptedParentIDs, fullParentSnapshotCovered)
 	if toolState != nil {
 		incompleteConnectors := perConnectorStatus.incompleteConnectors
 		if err := toolState.flushPendingAdvertised(ctx); err != nil && firstErr == nil {
@@ -392,19 +405,22 @@ func emitEndpointInventory(
 }
 
 func managedMCPParentIDs(
-	all, complete []endpointInventoryComponent,
-	partial bool,
+	all []endpointInventoryComponent,
+	accepted map[string]struct{},
+	fullSnapshotCovered bool,
 ) map[string]struct{} {
-	parents := all
-	if partial {
-		parents = complete
-	}
-	eligible := make(map[string]struct{}, len(parents))
-	if len(parents) > maxManagedMCPInventory {
+	eligible := make(map[string]struct{}, len(all))
+	if len(all) > maxManagedMCPInventory {
 		return eligible
 	}
-	for _, parent := range parents {
-		eligible[parent.id] = struct{}{}
+	for _, parent := range all {
+		if fullSnapshotCovered {
+			eligible[parent.id] = struct{}{}
+			continue
+		}
+		if _, ok := accepted[parent.id]; ok {
+			eligible[parent.id] = struct{}{}
+		}
 	}
 	return eligible
 }
@@ -1189,9 +1205,10 @@ func emitEndpointInventoryComponents(
 	components []endpointInventoryComponent,
 	action observability.ProducerKey,
 	publish endpointInventoryCycle,
-) error {
+) (map[string]struct{}, error) {
+	accepted := make(map[string]struct{}, len(components))
 	if len(components) == 0 || len(components) > managedInventoryLimit(action) {
-		return nil
+		return accepted, nil
 	}
 	scanID := publish.scanID
 	if scanID == "" {
@@ -1213,11 +1230,14 @@ func emitEndpointInventoryComponents(
 		if managedInventoryPublishRejected(outcome) && publish.cycle != nil {
 			publish.cycle.markDegraded()
 		}
+		if err == nil && !managedInventoryPublishRejected(outcome) {
+			accepted[component.id] = struct{}{}
+		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
-	return firstErr
+	return accepted, firstErr
 }
 
 func emitInventorySnapshot(

@@ -309,6 +309,35 @@ func managedGateSourceCounts(t *testing.T, records []observability.Record) map[s
 	return counts
 }
 
+func TestManagedMCPComponentSubmissionsReturnOnlyAcceptedParents(t *testing.T) {
+	const source = "endpoint_per_connector_mcp_inventory"
+	components := []endpointInventoryComponent{
+		{id: "accepted-a", componentType: "mcp_server", itemName: "one"},
+		{id: "accepted-b", componentType: "mcp_server", itemName: "two"},
+	}
+	rejected := &managedGateEmitter{managedRejectSource: source}
+	accepted, err := emitEndpointInventoryComponents(
+		t.Context(), rejected, source, components,
+		config.ObservabilityV8ManagedMCPInventoryAction, endpointInventoryCycle{},
+	)
+	if err != nil || len(accepted) != 0 {
+		t.Fatalf("managed rejection accepted parents=%v err=%v", accepted, err)
+	}
+	clean := &endpointInventoryCapture{}
+	accepted, err = emitEndpointInventoryComponents(
+		t.Context(), clean, source, components,
+		config.ObservabilityV8ManagedMCPInventoryAction, endpointInventoryCycle{},
+	)
+	if err != nil || len(accepted) != len(components) {
+		t.Fatalf("clean submission accepted parents=%v err=%v", accepted, err)
+	}
+	for _, component := range components {
+		if _, ok := accepted[component.id]; !ok {
+			t.Fatalf("accepted parent %q missing from receipt %v", component.id, accepted)
+		}
+	}
+}
+
 // TestAIDiscoveryV8SignalsGateManagedProjectionFailureStoresNoDigest is the
 // per-signal half of the same rule.
 func TestAIDiscoveryV8SignalsGateManagedProjectionFailureStoresNoDigest(t *testing.T) {

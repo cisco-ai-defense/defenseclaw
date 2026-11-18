@@ -79,6 +79,30 @@ func TestMCPObservedToolsPreserveSiblingsAndSurviveRestart(t *testing.T) {
 	}
 }
 
+func TestMCPObservedToolReverseUpsertPreservesEarliestFirstSeen(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	newer := time.Date(2026, 11, 18, 2, 0, 0, 0, time.UTC)
+	older := newer.Add(-time.Hour)
+	tool := MCPObservedTool{
+		ParentComponentID: "endpoint-mcp-entry-parent", Connector: "claudecode",
+		ServerName: "notes", ToolName: "search", FirstObservedAt: newer, LastObservedAt: newer,
+	}
+	if err := store.UpsertMCPObservedTool(t.Context(), tool); err != nil {
+		t.Fatal(err)
+	}
+	tool.FirstObservedAt, tool.LastObservedAt = older, older
+	if err := store.UpsertMCPObservedTool(t.Context(), tool); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ListMCPObservedTools(t.Context())
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	if !rows[0].FirstObservedAt.Equal(older) || !rows[0].LastObservedAt.Equal(newer) {
+		t.Fatalf("reverse upsert timestamps=%+v, want first=%v last=%v", rows[0], older, newer)
+	}
+}
+
 func TestMCPObservedToolDeferredUpsertRevalidatesParent(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	ctx := WithCallWriteBatch(context.Background(), store)

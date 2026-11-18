@@ -1045,7 +1045,8 @@ or an incomplete discovery scan as a partial observation. Valid entries from
 other sources remain in the local diagnostic. The gateway emits a local,
 redacted inventory diagnostic and keeps the last complete managed snapshot;
 it does not report the missing entries as removals. A complete scan can publish
-a genuinely empty inventory when servers have been removed. The partial
+a genuinely empty inventory when servers have been removed, but only after
+every connector configuration read completes successfully. The partial
 summary contains a source and counts; any observed component rows stay on the
 local diagnostic route and are not exported as managed inventory.
 On Windows, a LocalSystem gateway cannot read configured user-profile MCP
@@ -1086,7 +1087,10 @@ incomplete listing produces a local partial diagnostic. An ambiguous server
 alias across user profiles is not attributed to either profile. Advertised tool
 evidence and observed tool names are persisted in bounded local SQLite state,
 restored after a gateway restart, and retained until an authoritative parent
-refresh retires the configured alias. A restored complete advertised listing
+refresh retires the configured alias. Each parent retains at most 256 distinct
+advertised names and 256 distinct observed names. Once an observed parent is at
+that limit, a new distinct name is rejected and the collection remains partial;
+existing names and their timestamps are never evicted to make room. A restored complete advertised listing
 remains complete once its configured parent is matched again; a restored
 partial listing remains partial until that server completes a later listing,
 including an empty one. Durable restore completeness is tracked separately for
