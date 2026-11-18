@@ -265,14 +265,19 @@ func hookSourceReasonForSink(ctx context.Context, resp agentHookResponse) string
 	if !resp.ReasonRedactionPresent {
 		return reason
 	}
-	return redaction.ReasonForSink(reason, sinkPolicyFor(ctx, resp.ReasonRedactionEnabled))
+	return redaction.ReasonForSink(reason, hookReasonSinkPolicy(ctx, resp))
 }
 
-func hookReasonRedactionDirective(resp agentHookResponse) *bool {
+func hookReasonSinkPolicy(ctx context.Context, resp agentHookResponse) redaction.SinkPolicy {
 	if resp.ReasonRedactionPresent {
-		return resp.ReasonRedactionEnabled
+		if !ManagedEnterpriseActive() {
+			return redaction.SinkPolicyDefault
+		}
+		// A present nil reason directive belongs to the reason inspection and
+		// fails closed. It must not inherit an event context stamped raw.
+		return managedSinkPolicy(resp.ReasonRedactionEnabled)
 	}
-	return resp.RedactionEnabled
+	return sinkPolicyFor(ctx, resp.RedactionEnabled)
 }
 
 // agentHookDisconnectGrace bounds how long an accepted hook keeps working
@@ -1959,7 +1964,7 @@ func (a *APIServer) dispatchFinalizedAgentHookNotification(
 		hookSourceReasonForSink(ctx, resp),
 		resp.WouldBlock,
 		hookEvaluationContext{EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs},
-		sinkPolicyFor(ctx, hookReasonRedactionDirective(resp)),
+		hookReasonSinkPolicy(ctx, resp),
 	)
 }
 
