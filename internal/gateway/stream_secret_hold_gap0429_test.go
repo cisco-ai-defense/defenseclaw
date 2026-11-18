@@ -570,8 +570,9 @@ func TestGAP0429StreamedSecretHeldRawForward(t *testing.T) {
 }
 
 // TestGAP0429BenignStreamsAreNotHeld: ordinary replies with BEGIN words,
-// public PEM blocks, a private-key header in prose and long prose go out
-// whole and unchanged on every path, with no block and no TRUNCATED alert.
+// public PEM blocks, a private-key header in prose, long prose and a reply
+// whose upstream pauses after a number go out whole and unchanged on every
+// path, with no block and no TRUNCATED alert.
 func TestGAP0429BenignStreamsAreNotHeld(t *testing.T) {
 	ek, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -628,5 +629,22 @@ func TestGAP0429BenignStreamsAreNotHeld(t *testing.T) {
 				}
 			}
 		}
+	}
+	// A reply that ends a piece in a number, then the upstream is idle past
+	// the hold's idle bound (GAP-1265): whole, no block, no TRUNCATED alert.
+	// One row per path; TestGAP1265OpenRunIdleIsNotTruncated runs the five
+	// tiers.
+	prose := gap0429Pieces(retestFiller(1500)[:1500], 24, nil)
+	paused := append(append(append([]string(nil), prose...), "I bumped the release to version 1.0.10\n"), "Then the tests passed.\n")
+	for _, path := range gap0429Paths() {
+		t.Run("number-then-pause/"+path.name, func(t *testing.T) {
+			row := gap1265Row{name: "number-then-pause", tier: "default", pack: "default", pieces: paused, at: len(prose) + 1, pause: gap1265Pause}
+			results, log := gap1265Serve(t, path, []gap1265Row{row})
+			gap1265Check(t, path.name, row, results[0])
+			gap1265NoTruncated(t, path.name, log)
+			if strings.Contains(log, "STREAM-BLOCK") {
+				t.Errorf("%s: a BLOCK line was logged: %s", path.name, gap1265LogLine(log, "STREAM-BLOCK"))
+			}
+		})
 	}
 }

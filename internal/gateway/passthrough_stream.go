@@ -237,8 +237,9 @@ func (s *passthroughStream) run() {
 	streamEnded := false
 	initialFlushed := mode != "action"
 	// secretOpen: the text ended inside an open secret when last read;
-	// textAt is when the text last grew (GAP-0429).
-	secretOpen := false
+	// secretKey: that secret is a private-key block; textAt is when the text
+	// last grew (GAP-0429).
+	secretOpen, secretKey := false, false
 	var textAt time.Time
 	textMark := 0
 
@@ -368,7 +369,7 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		accumulated.ReleaseOpenSecret()
-		secretOpen = false
+		secretOpen, secretKey = false, false
 		return boundHit(c, why)
 	}
 	// secretWait reports that nothing may be sent now: the text ends inside
@@ -379,14 +380,19 @@ func (s *passthroughStream) run() {
 			return false, true
 		}
 		o := accumulated.OpenSecret()
-		secretOpen = o.open
+		secretOpen, secretKey = o.open, o.pem
 		switch {
 		case !o.open:
 			return false, true
 		case o.overCap:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("a private-key block in a reply stream over %d bytes", streamSecretMaxPEM))
-		case queueBytes > streamSecretMaxHeld:
+		case queueBytes > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
+		case queueBytes > streamSecretMaxHeld:
+			// Only a token or a digit run is open (GAP-1265): what is held
+			// goes out once the check has read it, with no verdict, and
+			// what comes next is held behind it again.
+			return false, true
 		}
 		return true, true
 	}
@@ -652,16 +658,20 @@ read:
 		// event in progress, with nothing queued, is reported once
 		// streamHoldMaxPartialAge after the last byte.
 		var deadline time.Time
-		if tailHold && secretOpen {
-			// An open secret waits for more text at most
+		switch {
+		case !tailHold:
+		case secretKey:
+			// An open private-key block waits for more text at most
 			// streamHoldMaxPartialAge (GAP-0429).
 			deadline = textAt.Add(streamHoldMaxPartialAge)
-		} else if tailHold && initialFlushed {
-			if relN > 0 {
-				deadline = queueAt[0].Add(streamHoldMaxAge)
-			} else if len(queue) == 0 && unread() > 0 && !stallReported {
-				deadline = lastRead.Add(streamHoldMaxPartialAge)
-			}
+		case !initialFlushed:
+		case relN > 0 && !secretOpen:
+			deadline = queueAt[0].Add(streamHoldMaxAge)
+		case relN > 0:
+			// Held behind a token or a digit run, which has no clock: the
+			// next text or the end of the stream decides it (GAP-1265).
+		case len(queue) == 0 && unread() > 0 && !stallReported:
+			deadline = lastRead.Add(streamHoldMaxPartialAge)
 		}
 		var rd streamRead
 		select {
@@ -673,13 +683,14 @@ read:
 				// was busy (a long event, a slow check). The read goes
 				// first; a due hold is checked with it.
 			default:
-				if secretOpen {
-					if accumulated.OpenSecret().open && !secretBound(bounded.Time,
-						fmt.Sprintf("a secret in a reply stream unfinished, no new text for %s", streamHoldMaxPartialAge)) {
+				if secretKey {
+					o := accumulated.OpenSecret()
+					secretOpen, secretKey = o.open, o.pem
+					if o.pem && !secretBound(bounded.Time,
+						fmt.Sprintf("a private-key block in a reply stream unfinished, no new text for %s", streamHoldMaxPartialAge)) {
 						stopped = true
 						break read
 					}
-					secretOpen = false
 					if !initialFlushed {
 						stopped = !flushInitial(false)
 					} else if relN > 0 {

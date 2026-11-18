@@ -36,15 +36,26 @@ import (
 // passthrough stream and the raw forward stream) send nothing more in action
 // mode: the held bytes go out once the secret has ended and a check has read
 // it whole, which blocks or alerts as for any complete secret. The hold is
-// bounded (the bound rule, internal/guardrail/bounded): an open private-key
+// bounded (the bound rule, internal/guardrail/bounded). An open private-key
 // block over streamSecretMaxPEM bytes of text, more than streamSecretMaxHeld
-// bytes held behind an open secret, an open secret with no new text for
-// streamHoldMaxPartialAge (the paths that read on their own goroutine), and
-// a stream that ends inside an open private-key block are TRUNCATED: the text
-// is checked, then the unknown tier of the pack decides (default and
-// permissive alert and send, strict blocks). That secret is then no longer
-// held. A token run streamSecretMaxToken bytes long has been decided by every
-// token rule and is no longer open; the end of the stream ends a token.
+// bytes held behind an open private-key block, an open private-key block
+// with no new text for streamHoldMaxPartialAge (the paths that read on their
+// own goroutine), and a stream that ends inside an open private-key block are
+// TRUNCATED: the text is checked, then the unknown tier of the pack decides
+// (default and permissive alert and send, strict blocks). That secret is then
+// no longer held.
+//
+// A token or a digit run is bounded by its own length and by the end of the
+// stream, so it gets no TRUNCATED verdict (rel-1-0-10:GAP-1265): a reply
+// that ends a piece with a version, a port or a count is not a secret that
+// could not be read. A run streamSecretMaxToken bytes long (22 digits for a
+// digit run) has been decided by every rule and is no longer open, and the
+// end of the stream ends it. It has no idle clock: while the upstream is
+// quiet it stays held, and the next text or the end decides it, so a card
+// number or a token the upstream pauses inside never goes out in part. Past
+// streamSecretMaxHeld bytes held behind open runs (a long numeric table keeps
+// one open at almost every piece end) the held bytes go out once the check
+// has read them, with no verdict, and what follows is held again.
 const (
 	// streamSecretMaxPEM is the largest block secretshape reads as a key
 	// (maxPrivateKeyPEMBytes).

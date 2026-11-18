@@ -3698,8 +3698,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	}
 	// While the text ends inside an open secret nothing more is sent
 	// (rel-1-0-10:GAP-0429, stream_secret_hold.go). secretOpen is that state
-	// as last read; textAt is when the text last grew.
-	secretOpen := false
+	// as last read, secretKey that it is a private-key block; textAt is when
+	// the text last grew.
+	secretOpen, secretKey := false, false
 	var textAt time.Time
 	// secretBound decides an open secret at a hold bound: TRUNCATED, the
 	// unknown tier of the pack, once the text read so far passed its check.
@@ -3709,7 +3710,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return false
 		}
 		accumulated.ReleaseOpenSecret()
-		secretOpen = false
+		secretOpen, secretKey = false, false
 		tv := p.streamTailTruncatedVerdict(llmCtx, c, why)
 		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, tv, 0, mode, tv.Action == "block")
 		modelTrace.AddGuardrailOverlay(overlay)
@@ -3730,14 +3731,19 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return false
 		}
 		o := accumulated.OpenSecret()
-		secretOpen = o.open
+		secretOpen, secretKey = o.open, o.pem
 		switch {
 		case !o.open:
 			return false
 		case o.overCap:
 			return !secretBound(bounded.Bytes, fmt.Sprintf("a private-key block in a reply stream over %d bytes", streamSecretMaxPEM))
-		case held > streamSecretMaxHeld:
+		case held > streamSecretMaxHeld && o.pem:
 			return !secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
+		case held > streamSecretMaxHeld:
+			// Only a token or a digit run is open (GAP-1265): what is held
+			// goes out once the check has read it, with no verdict, and
+			// what comes next is held behind it again.
+			return false
 		}
 		return true
 	}
@@ -3863,10 +3869,13 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		var deadline time.Time
 		switch {
 		case !holding || streamBlocked:
-		case secretOpen:
-			// An open secret waits for more text at most
+		case secretKey:
+			// An open private-key block waits for more text at most
 			// streamHoldMaxPartialAge (GAP-0429).
 			deadline = textAt.Add(streamHoldMaxPartialAge)
+		case secretOpen:
+			// A token or a digit run has no clock: the next text or the end
+			// of the stream decides it (GAP-1265).
 		case len(hold.buf) > 0:
 			deadline = hold.since.Add(streamHoldMaxAge)
 		}
@@ -3882,13 +3891,14 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			if streamBlocked {
 				break
 			}
-			if secretOpen {
-				if accumulated.OpenSecret().open && !secretBound(bounded.Time,
-					fmt.Sprintf("a secret in a reply stream unfinished, no new text for %s", streamHoldMaxPartialAge)) {
+			if secretKey {
+				o := accumulated.OpenSecret()
+				secretOpen, secretKey = o.open, o.pem
+				if o.pem && !secretBound(bounded.Time,
+					fmt.Sprintf("a private-key block in a reply stream unfinished, no new text for %s", streamHoldMaxPartialAge)) {
 					break
 				}
-				secretOpen = false
-				if !initialBufFlushed && len(initialChunkBuf) > 0 {
+				if !secretOpen && !initialBufFlushed && len(initialChunkBuf) > 0 {
 					for _, buffered := range initialChunkBuf {
 						hold.add([]byte("data: "+string(buffered)+"\n\n"), time.Now())
 					}
@@ -6516,8 +6526,13 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			return false, true
 		case o.overCap:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("a private-key block in a reply stream over %d bytes", streamSecretMaxPEM))
-		case heldSize+next > streamSecretMaxHeld:
+		case heldSize+next > streamSecretMaxHeld && o.pem:
 			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
+		case heldSize+next > streamSecretMaxHeld:
+			// Only a token or a digit run is open (GAP-1265): the held
+			// frames, every one checked, go out with no verdict, and the
+			// next ones are held behind it again.
+			return false, true
 		}
 		return true, true
 	}
