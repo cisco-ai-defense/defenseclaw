@@ -53,9 +53,12 @@ type UIDCache struct {
 	ttl      time.Duration
 	staleMax time.Duration
 	now      func() time.Time
-	// refreshBudget bounds how long a request waits for a Refresh
-	// (GAP-0243).
+	// refreshBudget bounds how long a policy-stage refusal waits for a
+	// Refresh: it stands either way (GAP-0243). confirmBudget, when longer,
+	// bounds the wait of anything else, which is refused unless the lookup
+	// answers, so a slow but healthy leader still confirms it (GAP-0601).
 	refreshBudget time.Duration
+	confirmBudget time.Duration
 
 	mu      sync.Mutex
 	m       map[string]uidEntry
@@ -204,7 +207,8 @@ const defaultRefreshBudget = 20 * time.Millisecond
 // registration changed (GAP-0237). It bounds what a flood costs the leader
 // and the requests (GAP-0243): one lookup per name in flight (its own
 // singleflight, never forgotten while it runs), which concurrent refreshes
-// join, and a request waits refreshBudget for it.
+// join, and a request waits refreshBudget for it (a refusal) or
+// confirmBudget (anything else).
 //
 // Anything that would allow, and a cached delete, needs a lookup made
 // during this request (one started after since, the request's start): the
@@ -271,7 +275,11 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 		c.storeLocked(key, ne)
 		return ne, nil
 	})
-	t := time.NewTimer(c.refreshBudget)
+	budget := c.refreshBudget
+	if !refusal {
+		budget = max(budget, c.confirmBudget)
+	}
+	t := time.NewTimer(budget)
 	defer t.Stop()
 	unanswered := func() RefreshResult {
 		c.mu.Lock()

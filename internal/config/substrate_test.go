@@ -267,6 +267,9 @@ func TestSubstrateValidate(t *testing.T) {
 		"failure mode":              func(s *SubstrateConfig) { s.Extproc.FailureMode = "ignore" },
 		"body mode":                 func(s *SubstrateConfig) { s.Extproc.BodyInspection = "always" },
 		"chain failure mode":        func(s *SubstrateConfig) { s.Extproc.Chain.FailureMode = "sometimes" },
+		"chain send budget":         func(s *SubstrateConfig) { s.Extproc.Chain.SendBudget = "600ms" },
+		"send budget and hold":      func(s *SubstrateConfig) { s.Extproc.Chain.SendBudget = "500ms" },
+		"check budget and hold":     func(s *SubstrateConfig) { s.Extproc.Chain.CheckBudget, s.Extproc.Ask.Hold = "400ms", "1500ms" },
 		"body cap":                  func(s *SubstrateConfig) { s.Extproc.BodyMaxBytes = 2 << 20 },
 		"mcp host":                  func(s *SubstrateConfig) { s.Extproc.MCPHosts = []string{"*"} },
 		"provider uri":              func(s *SubstrateConfig) { s.LLM.Credential.ProviderURI = "sk-live-value" },
@@ -305,6 +308,11 @@ func TestSubstrateValidate(t *testing.T) {
 		if err := s.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	fits := validSubstrate()
+	fits.Extproc.Chain.SendBudget, fits.Extproc.Ask.Hold = "500ms", "1300ms"
+	if err := fits.Validate(); err != nil {
+		t.Errorf("send_budget 500ms with ask.hold 1300ms refused: %v", err)
 	}
 	per := validSubstrate()
 	per.Secrets[0].Scope = "per_person"

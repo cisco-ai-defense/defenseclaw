@@ -117,11 +117,15 @@ type UIDConfig struct {
 type ChainConfig struct {
 	// CheckBudget bounds the synchronous egress-chain check. Default 20 ms.
 	CheckBudget time.Duration `yaml:"check_budget"`
-	// SendBudget bounds the check of a request that can carry data out (a
-	// body, or any method but GET and HEAD), which is refused when its check
-	// can't answer: a slow but healthy leader (GAP-0564) gets that long
-	// before a git push or fetch is refused (GAP-0601). Default 250 ms, at
-	// most 500 ms, never shorter than CheckBudget.
+	// SendBudget bounds a check whose miss refuses the request (one that can
+	// carry data out: a body, or any method but GET and HEAD; any request
+	// whose policy refuses unchecked egress; one on a cached registration,
+	// which the check confirms), and the registration refresh that confirms
+	// such a pass instead (a cached refusal waits CheckBudget for its
+	// refresh, GAP-0243). A slow but healthy leader (GAP-0564) gets that long
+	// before a git fetch or push is refused (GAP-0601). Default 250 ms, at
+	// most 500 ms, never shorter than CheckBudget, and with Ask.Hold at most
+	// MessageBudget, since an ask is raised after the check.
 	SendBudget time.Duration `yaml:"send_budget"`
 	// QueueSize bounds the observed_egress queue; a full queue drops.
 	QueueSize int `yaml:"queue_size"`
@@ -136,8 +140,8 @@ type ChainConfig struct {
 
 // AskConfig configures ask-required hosts.
 type AskConfig struct {
-	// Hold is how long a request waits for an ask's outcome, at most
-	// MessageBudget.
+	// Hold is how long a request waits for an ask's outcome, with
+	// Chain.SendBudget at most MessageBudget.
 	Hold time.Duration `yaml:"hold"`
 }
 
@@ -345,6 +349,13 @@ func (c *Config) normalize() error {
 		if err := setDur(d.p, d.def, d.name, d.max); err != nil {
 			return err
 		}
+	}
+	// A check whose miss refuses waits at least as long as any other. An
+	// ask is raised after the check, and both fit in one message's budget.
+	c.Chain.SendBudget = max(c.Chain.SendBudget, c.Chain.CheckBudget)
+	if c.Chain.SendBudget+c.Ask.Hold > MessageBudget {
+		return bad("chain.send_budget %s plus ask.hold %s is over the callout's %s message budget, so an ask would not get its whole hold",
+			c.Chain.SendBudget, c.Ask.Hold, MessageBudget)
 	}
 	switch c.Chain.FailureMode = strings.ToLower(strings.TrimSpace(c.Chain.FailureMode)); c.Chain.FailureMode {
 	case "":
