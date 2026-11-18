@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // maxRuntimeSignalsPerRecord bounds the rendered evidence trail. The registry
@@ -309,7 +310,7 @@ func (adapter *aiRuntimeV8Adapter) emitFinding(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		fields := adapter.identityFields(runtimeFindingIdentity(finding, snapshot.Kernel))
+		fields := adapter.identityFields(runtimeRecordIdentity(runtimeFindingIdentity(finding, snapshot.Kernel), finding))
 		source, kernelOutcome, kernelControl := findingKernelFacts(finding)
 		input := observability.LogAIRuntimeFindingInput{
 			Envelope:                                aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime"),
@@ -386,7 +387,7 @@ func (adapter *aiRuntimeV8Adapter) emitActivity(
 		// root's (the install the activity belongs to).
 		findingIdentity := runtimeFindingIdentity(finding, snapshot.Kernel)
 		detail, _ := findingActivity(finding, tactic)
-		identity := runtimeActivityIdentity(finding, detail)
+		identity := runtimeRecordIdentity(runtimeActivityIdentity(finding, detail), finding)
 		identity.AgentIdentityID = findingIdentity.AgentIdentityID
 		fields := adapter.identityFields(identity)
 		envelope := aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime")
@@ -429,6 +430,17 @@ func (adapter *aiRuntimeV8Adapter) emitActivity(
 		return builder.BuildLogAIRuntimeActivity(input)
 	})
 	return err
+}
+
+// runtimeRecordIdentity fills user.id for a root that has no kernel uid: a
+// Windows root is identified by the SID of its owner (windows_sid), as the
+// inventory records of the same account are.
+func runtimeRecordIdentity(identity runtimeIdentity, finding sensor.Finding) runtimeIdentity {
+	if sid := strings.TrimSpace(finding.UserSID); identity.UserID == "" &&
+		useridentity.KindForID(sid) == useridentity.KindWindowsSID {
+		identity.UserID = sid
+	}
+	return identity
 }
 
 // runtimeSeverity maps a finding band onto the telemetry severity vocabulary.

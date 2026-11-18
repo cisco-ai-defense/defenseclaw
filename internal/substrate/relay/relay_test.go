@@ -34,10 +34,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
-// The test binary is the relay's run-agent wrapper in the tmux tests, as the
-// relay binary is in an actor.
 // The test binary doubles as a probe of hardenProcess: run with
-// "harden-probe" it hardens itself and prints its dumpable flag.
+// "harden-probe" it hardens itself and prints its dumpable flag; with
+// "hold-probe" it holds signals as the relay does.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "harden-probe" {
 		if err := hardenProcess(); err != nil {
@@ -48,7 +47,19 @@ func TestMain(m *testing.M) {
 		fmt.Println("dumpable", d, err)
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	// The relay's child commands (file copies as the agent's user).
+	if IsChildCommand(os.Args[1:]) {
+		os.Exit(runChild(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
+	// "hold-probe" holds signals as the relay does and waits (GAP-0116).
+	if len(os.Args) > 1 && os.Args[1] == "hold-probe" {
+		holdSignals()
+		fmt.Println("holding")
+		time.Sleep(time.Minute)
+		os.Exit(0)
+	}
+	markLeaks()
+	os.Exit(checkLeaks(m.Run()))
 }
 
 func TestFramesRoundTrip(t *testing.T) {
@@ -270,6 +281,7 @@ func testServer(t *testing.T, argv []string) (*Server, *recorder, signer) {
 	s := NewServer(Options{Config: cfg, Verifier: v,
 		Warm:   func(context.Context, string) error { rec.add("warm"); return nil },
 		Report: func(_ context.Context, e TaskEnd) error { rec.add(fmt.Sprintf("report %d", e.ExitCode)); return nil },
+		Tamper: func(_ context.Context, c, reason string) error { rec.add("tamper " + c + ": " + reason); return nil },
 	})
 	t.Cleanup(func() {
 		if s.agent != nil {

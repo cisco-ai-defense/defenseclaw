@@ -593,7 +593,13 @@ func verifyWindowsPerUserManagedRegistration(
 	if !exists {
 		return fmt.Errorf("enterprise hooks: %s enrollment is absent", name)
 	}
-	if !sameWindowsEnterprisePath(enrollment.HookExecutable, target.hookExecutable) {
+	// A verification that accepts an earlier release render also accepts an
+	// enrollment that still names the earlier image the target records: the
+	// hook admits it, and the first reconcile in an active session rewrites it
+	// (GAP-0751, GAP-1096).
+	if !sameWindowsEnterprisePath(enrollment.HookExecutable, target.hookExecutable) &&
+		(target.recordsHookExecutable() == target.hookExecutable ||
+			!sameWindowsEnterprisePath(enrollment.HookExecutable, target.recordsHookExecutable())) {
 		return fmt.Errorf("enterprise hooks: %s enrollment names a different hook executable", name)
 	}
 	entry, ok := windowsPerUserManagedEnrollmentTargetForSID(enrollment, target.sid.String())
@@ -608,7 +614,7 @@ func verifyWindowsPerUserManagedRegistration(
 		name,
 		target.sid,
 		target.dataDir,
-		target.hookExecutable,
+		target.recordsHookExecutable(),
 		target.setup.APIAddr,
 		target.setup.HookAPIToken,
 		contractID,

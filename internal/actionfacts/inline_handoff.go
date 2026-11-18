@@ -67,6 +67,10 @@ type InlineHandoff struct {
 	// Caps is the caps the prefix chain hit: set when a wrapper or runner was
 	// left unread (InlineChainRounds).
 	Caps bounded.CapSet
+	// Code is the inline code in the words ("" when it is read from stdin),
+	// and Language the interpreter that runs it (python, node, bun, ruby,
+	// php).
+	Code, Language string
 }
 
 // InlineCodeHandoff reads argv as a call that may run an inline-code
@@ -111,7 +115,7 @@ func InlineCodeHandoff(argv []string) InlineHandoff {
 				none.ProvenReads = true
 				return none
 			}
-			return InlineHandoff{From: offset + from, Fed: fed, Access: access, Caps: caps}
+			return InlineHandoff{From: offset + from, Fed: fed, Access: access, Caps: caps, Code: text, Language: key}
 		}
 		switch {
 		case word == "-" && key != "php" && (index+1 < len(argv) || fed):

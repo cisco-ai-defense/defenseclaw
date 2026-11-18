@@ -449,6 +449,11 @@ func routeCallerFromContext(ctx context.Context) (engine.Caller, []string) {
 	if s, ok := verifiedSubjectFromContext(ctx); ok {
 		caller = engine.Caller{Verified: true, Key: s.UserID, Source: s.Source}
 		caller.Matches = routingCallerMatcher(ctx)
+		// Name the fact an unconfirmed selector waits on (directory,
+		// groups) in identity_unconfirmed:<fact>, not the bare identity
+		// (rel-1-0-10:GAP-1155).
+		facts := profileSubjectFromVerified(s, identityLookupBlocking.Load())
+		caller.LookupFailed, caller.GroupsUnknown = facts.LookupFailed, facts.GroupsUnknown
 	}
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || !caller.Verified {

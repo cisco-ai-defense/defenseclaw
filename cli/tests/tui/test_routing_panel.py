@@ -115,6 +115,7 @@ def test_keys_build_the_cli_commands() -> None:
 def test_usage_view_and_periods() -> None:
     model = loaded()
     assert model.handle_key("u").kind == "view" and model.view == VIEW_USAGE
+    assert model.summary_line() == "Loading usage for the last week..." and model.data_table_rows(compact=True) == []
     assert model.handle_key("m").kind == "refresh" and model.usage_since() == "30d"
     assert model.handle_key("d").kind == "refresh" and model.period == "day"
     model.apply_usage_json(json.dumps({"rows": [{"key": "fast", "calls": 3, "cost_usd": 0.5}], "scope": "own"}))
@@ -261,3 +262,25 @@ def test_usage_disabled_shows_the_gateway_hint() -> None:
     assert "set observability.tokenomics.enabled" in model.empty_state()
     model.apply_usage_json(json.dumps({"rows": [], "error": "usage is not available"}))
     assert model.summary_line() == "usage is not available"
+
+
+async def test_usage_table_loads_on_u_without_pressing_r(tmp_path, monkeypatch) -> None:
+    """GAP-1169: u shows the Model/Calls/Cost table once the load ends, never the model table under the usage heading."""
+    usage = {"enabled": True, "scope": "own", "rows": [{"key": "fast", "calls": 3, "input_tokens": 120,
+                                                          "output_tokens": 40, "cost_usd": 0.5}]}
+    patch_commands(monkeypatch, (0, json.dumps(STATUS).encode(), b""), (0, json.dumps(usage).encode(), b""))
+    app = snapshot_app(tmp_path)
+    app.config.routing = SimpleNamespace(enabled=True, admin={})
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.action_switch_panel("routing")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        from textual.widgets import DataTable
+
+        table = app.query_one("#panel-table", DataTable)
+        assert [str(c.label) for c in table.columns.values()] == ["Kind", "Name", "Details"]
+        await pilot.press("u")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert [str(c.label) for c in table.columns.values()] == ["Model", "Calls", "Cost"], screen_text(app)
+        assert table.row_count == 1 and "0.5000" in screen_text(app), screen_text(app)

@@ -141,8 +141,16 @@ func TestLauncherCreateRaceIsNotForeign(t *testing.T) {
 	if ev := r.sink.Events(controller.EventForeignActor); len(ev) != 0 {
 		t.Fatalf("foreign events after the registration landed: %+v", ev)
 	}
-	if ev := r.sink.Events(controller.EventInventory); len(ev) != 1 || ev[0].Detail["person_bound"] != true {
-		t.Fatalf("inventory = %+v (want one, person bound)", ev)
+	// One "actor seen" record, person bound; the resume adds its own
+	// lifecycle record (GAP-0430).
+	var seen []controller.Event
+	for _, ev := range r.sink.Events(controller.EventInventory) {
+		if ev.Message == "actor seen" {
+			seen = append(seen, ev)
+		}
+	}
+	if len(seen) != 1 || seen[0].Detail["person_bound"] != true {
+		t.Fatalf("inventory = %+v (want one actor seen, person bound)", seen)
 	}
 }
 

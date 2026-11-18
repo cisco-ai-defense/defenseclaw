@@ -76,6 +76,8 @@ type AttachResult struct {
 	// the hello's Received (GAP-0170).
 	Input string
 	Sent  int64
+	// Warning is the relay's hello warning (GAP-0151), "" for none.
+	Warning string
 }
 
 // Attach connects in to the agent's terminal and copies in to the agent and
@@ -204,7 +206,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 				resMu.Lock()
 				switch c.Type {
 				case CtlHello:
-					res.Session, res.Input = c.Session, c.Input
+					res.Session, res.Input, res.Warning = c.Session, c.Input, c.Warning
 				case CtlExit:
 					res.ExitCode = c.Code
 				}
@@ -330,7 +332,7 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 					resMu.Lock()
 					switch cc.Type {
 					case CtlHello:
-						res.Session, res.Input = cc.Session, cc.Input
+						res.Session, res.Input, res.Warning = cc.Session, cc.Input, cc.Warning
 					case CtlExit:
 						res.ExitCode = cc.Code
 					}

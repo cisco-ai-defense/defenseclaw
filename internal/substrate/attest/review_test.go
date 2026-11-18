@@ -293,7 +293,7 @@ func TestEnvThatLoadsCode(t *testing.T) {
 		s.Predicate.Hooks.UnsafeEnv = []string{"LD_PRELOAD"}
 	})
 	_, err = g.verifier(nil).Verify(context.Background(), ref)
-	wantCode(t, err, CodeEnvUnsafe)
+	wantCode(t, err, CodeEnvNotPermitted)
 }
 
 func TestRevokedDigestAndValidUntil(t *testing.T) {

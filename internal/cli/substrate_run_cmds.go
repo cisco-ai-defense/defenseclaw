@@ -166,14 +166,16 @@ keeps following until the task ends (Ctrl-C stops following; the task keeps runn
 
 // substratePullFlags are the flags of pull.
 type substratePullFlags struct {
-	out     substrateOutput
-	com     substrateCommon
-	apply   bool
-	branch  string
-	patch   string
-	diff    bool
-	yes     bool
-	timeout time.Duration
+	out    substrateOutput
+	com    substrateCommon
+	apply  bool
+	branch string
+	patch  string
+	diff   bool
+	yes    bool
+	// allowFlagged writes flagged files with --apply (GAP-0472).
+	allowFlagged bool
+	timeout      time.Duration
 }
 
 func newSubstratePullCmd() *cobra.Command {
@@ -183,8 +185,13 @@ func newSubstratePullCmd() *cobra.Command {
 		Short: "Review what the agent changed and bring it home",
 		Long: `Reads the agent's work back to this machine and shows what changed, with the files that need a
 careful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,
-links that leave the folder). Nothing touches your folder until you choose: --apply writes the changes
-into the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch.`,
+links that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder
+until you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,
+--patch-out FILE writes a patch.
+
+When a change can run code on this machine, --apply asks first (the default answer is no). --yes takes
+that safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,
+--allow-flagged writes them too.`,
 		Example: "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
 		Args:    cobra.ExactArgs(1),
 		RunE:    func(cmd *cobra.Command, args []string) error { return runSubstratePull(cmd, &f, args[0]) },
@@ -197,6 +204,7 @@ into the folder, --branch NAME puts them on a new git branch, --patch-out FILE w
 	fl.StringVar(&f.patch, "patch-out", "", "write the changes as a patch to this file")
 	fl.BoolVar(&f.diff, "diff", false, "print the full diff")
 	fl.BoolVarP(&f.yes, "yes", "y", false, "take the safe default at each question")
+	fl.BoolVar(&f.allowFlagged, "allow-flagged", false, "with --apply: also write the files flagged as able to run code (review them first)")
 	fl.DurationVar(&f.timeout, "timeout", 0, "stop reading the agent's work after this long (default 10m)")
 	return cmd
 }

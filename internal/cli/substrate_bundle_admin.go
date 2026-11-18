@@ -49,8 +49,9 @@ func (a substrateBundleAdapter) Status(ctx context.Context) (any, error) {
 }
 
 // substrateBundleStore is the admin listener's bundle store, nil when
-// substrate.bundles is off.
-func substrateBundleStore(c *config.Config) (gateway.SubstrateBundles, error) {
+// substrate.bundles is off. live is config.yaml in force: it decides which
+// atespaces a stage may name, as the controller decides (GAP-0494).
+func substrateBundleStore(c *config.Config, live func() *config.Config) (gateway.SubstrateBundles, error) {
 	b := c.Substrate.Bundles
 	if !b.Enabled {
 		return nil, nil
@@ -60,6 +61,6 @@ func substrateBundleStore(c *config.Config) (gateway.SubstrateBundles, error) {
 		return nil, fmt.Errorf("substrate.bundles: %w", err)
 	}
 	path := b.EffectiveAnchorsFile()
-	return substrateBundleAdapter{&bundle.Store{CM: cms, Base: c, AnchorsFile: path,
+	return substrateBundleAdapter{&bundle.Store{CM: cms, Base: c, Live: live, AnchorsFile: path,
 		Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}}, nil
 }

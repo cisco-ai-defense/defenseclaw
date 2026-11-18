@@ -188,13 +188,14 @@ func runSubstrateController(cmd *cobra.Command, _ []string) error {
 	// Bundle mode: profiles come from the active signed bundle of each
 	// stage layered over config.yaml (PLAN §9); otherwise config.yaml.
 	sink := &controller.JSONSink{W: cmd.OutOrStdout()}
-	resolver, err := substrateProfileResolver(ctx, cfg, sink)
+	// One config.yaml source for every pass (GAP-0276): the ConfigMap
+	// through the API, else the mounted file. The bundle store reads it
+	// too, so a stage may name a launcher atespace added live (GAP-0494).
+	src, err := substrateConfigWatcher(path, cfg)
 	if err != nil {
 		return err
 	}
-	// One config.yaml source for every pass (GAP-0276): the ConfigMap
-	// through the API, else the mounted file.
-	src, err := substrateConfigWatcher(path, cfg)
+	resolver, err := substrateProfileResolver(ctx, cfg, func() *config.Config { cur, _ := src.Current(); return cur }, sink)
 	if err != nil {
 		return err
 	}

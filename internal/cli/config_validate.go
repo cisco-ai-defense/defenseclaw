@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -125,6 +126,7 @@ var configValidateCmd = &cobra.Command{
 		warnings = append(warnings, configV8InstalledAdvisories(loaded)...)
 		warnings = append(warnings, configValidateManagedStandaloneWarnings(loaded)...)
 		warnings = append(warnings, configValidateUserEntryWarnings(cmd.Context(), loaded.runtime.Guardrail.ProfileAssignments)...)
+		warnings = append(warnings, configValidateRoutingGroupWarnings(cmd.Context(), loaded.runtime)...)
 		if configValidateJSON {
 			valid := true
 			encoder := json.NewEncoder(out)
@@ -156,6 +158,18 @@ var configValidateUserEntryWarnings = func(ctx context.Context, assignments []co
 		warnings = append(warnings, warning+" (profile_assignment_unmatched)")
 	}
 	return warnings
+}
+
+// configValidateRoutingGroupWarnings names the routing.admin rules and
+// group budgets whose group this computer knows by no spelling the matcher
+// selects, so a deny there never acts (rel-1-0-10:GAP-1124). A seam for
+// tests.
+var configValidateRoutingGroupWarnings = func(ctx context.Context, loadedCfg *config.Config) []string {
+	spoolDir := ""
+	if loadedCfg != nil && loadedCfg.DataDir != "" {
+		spoolDir = enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(loadedCfg.DataDir))
+	}
+	return gateway.RoutingAdminGroupWarnings(ctx, loadedCfg, spoolDir)
 }
 
 // configValidateLayout is this computer's standalone layout. A seam for

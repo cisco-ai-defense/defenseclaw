@@ -220,10 +220,23 @@ type simpleShellState struct {
 	folderVars []string
 	// homeUnproven means HOME holds a value the walk could not read
 	// (HOME=$(pwd), HOME=$X, a declaration option that changes what the
-	// value means). HOME keeps its previous value, so a later ~ or $HOME
-	// write is still judged against a home the call can reach (GAP-2476),
-	// and a reading through it is marked UnprovenHome (rel-1-0-10:GAP-0996).
+	// value means). HOME is then the active home the action started in
+	// (startHome), so a later ~ or $HOME write is still judged against a
+	// home the call can reach (GAP-2476), and a reading through it is marked
+	// UnprovenHome (rel-1-0-10:GAP-0996).
 	homeUnproven bool
+	// startHome is the active home of the action, the HOME the walk starts
+	// with. An unreadable HOME value falls back to it, never only to a
+	// literal home an earlier statement moved HOME to: after export
+	// HOME=/tmp/x; export HOME=$(...) a later ~ write may reach the active
+	// home, and the earlier literal alone judged it a clean allow
+	// (rel-1-0-10:GAP-1087).
+	startHome string
+	// movedHome is that earlier literal home while the statement that made
+	// HOME unreadable is read: the walk then reads the statements after it
+	// in both homes (simpleHomeReadings), so a ~ write that blocks in
+	// either still blocks.
+	movedHome string
 }
 
 // simpleLocal is the caller value of name saved by a local declaration in
@@ -243,7 +256,7 @@ func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
 		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked), folderVars: slices.Clone(s.folderVars),
-		homeUnproven: s.homeUnproven}
+		homeUnproven: s.homeUnproven, startHome: s.startHome, movedHome: s.movedHome}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -252,11 +265,42 @@ func (s simpleShellState) clone() simpleShellState {
 
 // noteHome records what assignments did to HOME (updateSimpleVariables): a
 // value the walk read proves the home, a value it could not read leaves the
-// home unproven.
+// home unproven (unproveHome).
 func (s *simpleShellState) noteHome(set, known bool) {
-	if set {
-		s.homeUnproven = !known
+	switch {
+	case set && !known:
+		s.unproveHome()
+	case set:
+		s.homeUnproven = false
 	}
+}
+
+// unproveHome records that HOME got a value the walk cannot read: HOME is
+// the active home the action started in again; a literal home an earlier
+// statement moved it to stays a second reading (movedHome,
+// rel-1-0-10:GAP-1087).
+func (s *simpleShellState) unproveHome() {
+	s.homeUnproven = true
+	if home := s.vars["HOME"]; s.startHome != "" && home != s.startHome {
+		if s.movedHome == "" {
+			s.movedHome = home
+		}
+		s.vars["HOME"] = s.startHome
+	}
+}
+
+// simpleHomeReadings is the state after a statement: one state, or, when the
+// statement made HOME unreadable after HOME had been moved to another
+// literal home (unproveHome), the state in the active home and the state in
+// that literal home, since either may be the home the shell has
+// (rel-1-0-10:GAP-1087).
+func simpleHomeReadings(state simpleShellState) []simpleShellState {
+	if state.movedHome == "" {
+		return []simpleShellState{state}
+	}
+	moved := state.clone()
+	moved.vars["HOME"], moved.movedHome, state.movedHome = state.movedHome, "", ""
+	return []simpleShellState{state, moved}
 }
 
 // simpleReadsThroughUnprovenHome reports whether the reading text of a
@@ -520,7 +564,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		initialVars["PWD"] = simplePathClean(input.CWD)
 	}
 	states := map[string][]simpleShellState{
-		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars}},
+		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars, startHome: home}},
 	}
 	result := make([]SimpleCommand, 0, len(parts))
 	changed := reduced || len(parts) != 1 || input.folderUnknown
@@ -532,6 +576,21 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// read with that folder as its head (simpleUnknownFolderNestedCall); the
 	// reading of the body as unread stays too.
 	unknownFolderBody := ""
+	// unresolvedBody: a nested shell body made at run time was not read
+	// (EvaluationFailureUnresolvedBody); the rest of the call was.
+	unresolvedBody := false
+	// parseGap is the reading of a call the walk gives up on (a parse gap,
+	// judged as the whole action): the call is not split, but a nested shell
+	// body made at run time that an earlier statement already left unread
+	// stays recorded, as the walk gave it up at that statement on rel
+	// (rel-1-0-10:GAP-0535, GAP-1083: a later parse gap must not turn the
+	// unknown body into an allow).
+	parseGap := func() []SimpleCommand {
+		if unresolvedBody || unknownFolderBody == EvaluationFailureUnresolvedBody {
+			return []SimpleCommand{{EvaluationFailure: "parse"}, {EvaluationFailure: EvaluationFailureUnresolvedBody}}
+		}
+		return []SimpleCommand{{EvaluationFailure: "parse"}}
+	}
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
 	var plainWords simplePlainWords
@@ -541,7 +600,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		for previousScope != part.scope && !strings.HasPrefix(part.scope, previousScope+"/") {
 			index := strings.LastIndexByte(previousScope, '/')
 			if index < 0 {
-				return []SimpleCommand{{EvaluationFailure: "parse"}}
+				return parseGap()
 			}
 			parent := previousScope[:index]
 			body, ran := states[previousScope]
@@ -606,15 +665,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			reads = simpleParamNames(part.text)
 		}
 		if !simpleEnterForkedLoops(states, part, unreadLoops, &plainWords) {
-			return []SimpleCommand{{EvaluationFailure: "parse"}}
+			return parseGap()
 		}
 		variants := simpleScopeStates(states, part.scope)
 		if variants == nil {
-			return []SimpleCommand{{EvaluationFailure: "parse"}}
+			return parseGap()
 		}
 		file, parsed := shellparse.Parse(part.text)
 		if !parsed || len(file.Stmts) != 1 {
-			return []SimpleCommand{{EvaluationFailure: "parse"}}
+			return parseGap()
 		}
 		stmt := file.Stmts[0]
 		nextVariants := make([]simpleShellState, 0, len(variants))
@@ -637,7 +696,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				state.noteHome(updateSimpleVariables(state.vars, assigns))
 				state.setFolderVars(simpleAssignNames(assigns), folderNames)
 				changed = true
-				nextVariants = append(nextVariants, state)
+				nextVariants = append(nextVariants, simpleHomeReadings(state)...)
 				if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
 					// The assignment may not run: the word of the loop, and the
 					// HOME it would change (false && HOME=/x, true || HOME=/x),
@@ -665,7 +724,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				start := int(call.Args[0].Pos().Offset())
 				end := int(call.Pos().Offset())
 				if start <= end || start > len(text) {
-					return []SimpleCommand{{EvaluationFailure: "parse"}}
+					return parseGap()
 				}
 				if simplePrefixChangesResolution(call.Assigns) {
 					unprefixed = text[start:]
@@ -703,7 +762,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			}
 			text = resolve(text)
 			if strings.TrimSpace(text) == "" {
-				return []SimpleCommand{{EvaluationFailure: "parse"}}
+				return parseGap()
 			}
 			relative := state.cwdUnknown && simpleRelativePathOperand(text)
 			if relative {
@@ -777,22 +836,29 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					}
 				}
 				script, shared, nested, static := simpleNestedScript(nestedCall, nestedVars, &innerCWDUnknown, &innerInterpreter)
+				if nested && !static && simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
+					// A shell -c body, or a word that may be the -c option,
+					// whose text is made at run time: what runs is not known
+					// (rel-1-0-10:GAP-0535). The statements around it are
+					// still read, each in its folder (a body that runs in the
+					// caller may move it): the unknown body is one more
+					// finding, never the only reading of the call
+					// (rel-1-0-10:GAP-1083).
+					unresolvedBody, nested, changed = true, false, true
+					if shared {
+						state.cwd, state.cwdUnknown = "", true
+						delete(state.vars, "PWD")
+					}
+				}
 				if nested {
 					if !static {
-						if simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
-							// A shell -c body, or a word that may be the -c
-							// option, whose text is made at run time: what runs
-							// is not known (rel-1-0-10:GAP-0535). Static text the
-							// walk does not model (a quoted pattern, an option
-							// it does not read) stays a parse gap, as on rel.
-							return []SimpleCommand{{EvaluationFailure: EvaluationFailureUnresolvedBody}}
-						}
-						// A wrapper option the walk does not model, a trap
+						// Static text the walk does not model (a quoted
+						// pattern, an option it does not read), a trap
 						// handler: a parse gap, judged as the whole action.
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
+						return parseGap()
 					}
 					if len(script) > maxCommandBytes {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
+						return parseGap()
 					}
 					innerInput := input
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
@@ -828,7 +894,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
 						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
 					if !bodyParsed && !slices.ContainsFunc(inner, isSyntaxTailUnread) {
-						return []SimpleCommand{{EvaluationFailure: "parse"}}
+						return parseGap()
 					}
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
@@ -890,8 +956,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				simpleForgetUserVars(state.vars, CallBindsUserNames(call))
 				if simpleCallReadsHome(call) {
 					// read HOME: the value is known only when it runs, and
-					// HOME keeps the previous one (rel-1-0-10:GAP-0996).
-					state.homeUnproven = true
+					// HOME is the active home again (rel-1-0-10:GAP-0996,
+					// GAP-1087).
+					state.unproveHome()
 				}
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
@@ -930,7 +997,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if part.read != nil {
 				state.vars[part.read.name] = part.read.word
 			}
-			nextVariants = append(nextVariants, state)
+			nextVariants = append(nextVariants, simpleHomeReadings(state)...)
 			if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
 				// The statement may not run: the word of the loop, and the
 				// HOME it would change (false && export HOME=/x), stay as
@@ -939,13 +1006,20 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			}
 		}
 		for _, command := range own {
-			// A statement the walk placed nowhere after no cd the tracking
-			// read (an unmodeled builtin, eval) stays unplaced: it is judged
-			// as an unresolved folder (UnresolvedFolder). After a cd the
-			// tracking read (a CDPATH miss), its folders are read.
+			// A statement the walk placed nowhere (after a dynamic command
+			// word, an eval or an unmodeled builtin that may move the shell)
+			// is read in every folder the working-folder tracking gives it,
+			// the one the shell was in before that command included, and it
+			// keeps UnresolvedFolder, so the unknown tier applies as well:
+			// the folder it may still be in judges it, never the unplaced
+			// reading alone (rel-1-0-10:GAP-1083, substrate-1:GAP-0367).
+			// A reading of the guess walk (LoginGuess) stays where the walk
+			// read it: it only proves a state write by the login it spells,
+			// which the walk could not bind there (u=$USER; command echo
+			// IFS=x; read u <<< w), and placed in a folder it proved one the
+			// shell never makes.
 			dirs := mayRunIn[partIndex]
-			if len(dirs) == 0 || command.CWD == "" && len(dirs) == 1 && dirs[0] == input.CWD ||
-				!simpleRelativePathOperand(command.Text) {
+			if len(dirs) == 0 || guess || command.LoginGuess || !simpleRelativePathOperand(command.Text) {
 				continue
 			}
 			for _, dir := range mayRunIn[partIndex] {
@@ -979,6 +1053,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	}
 	if unknownFolderBody != "" {
 		result = append(result, SimpleCommand{EvaluationFailure: unknownFolderBody})
+	}
+	if unresolvedBody && unknownFolderBody != EvaluationFailureUnresolvedBody {
+		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
@@ -1485,7 +1562,7 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 			if assign.Name.Value != "HOME" {
 				delete(vars, assign.Name.Value)
 			} else {
-				state.homeUnproven = true
+				state.unproveHome()
 			}
 			continue
 		}
@@ -1610,9 +1687,10 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) (ho
 			}
 		}
 		// A HOME value the walk cannot read (HOME=$(echo $HOME), HOME=$X)
-		// keeps the previous HOME: an unknown HOME dropped every later ~
-		// write (GAP-2476). The home a run-time value moves to is not known,
-		// so the state records it as unproven (rel-1-0-10:GAP-0996).
+		// leaves vars as they are; the state then makes HOME the active home
+		// (noteHome): an unknown HOME dropped every later ~ write
+		// (GAP-2476). The home a run-time value moves to is not known, so the
+		// state records it as unproven (rel-1-0-10:GAP-0996, GAP-1087).
 		if name == "HOME" {
 			homeSet, homeKnown = true, known
 		}
@@ -3247,8 +3325,15 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 	if simplePathAbs(dir) {
 		return simplePathClean(dir), true
 	}
-	if program == "cd" && vars["CDPATH"] != "" &&
+	if program == "cd" && (vars["CDPATH"] != "" || len(cdPathCandidates(call, dir)) != 0) &&
 		!strings.HasPrefix(dir, "./") && !strings.HasPrefix(dir, "../") {
+		// A CDPATH may send the cd to another folder: the CDPATH the walk
+		// holds, or one a prefix assignment sets (CDPATH=/srv cd app), also
+		// one whose value is not known (CDPATH="$X" cd app), which the
+		// assignment drops from vars. The candidates are the ones the
+		// working-folder tracking reads (cdPathCandidates), so the walk and
+		// the path facts agree on the folder, PWD included
+		// (rel-1-0-10:GAP-1063).
 		return "", true
 	}
 	if state.cwd == "" {

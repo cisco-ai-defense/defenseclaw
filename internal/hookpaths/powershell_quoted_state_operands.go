@@ -117,15 +117,27 @@ func powerShellQuotedPathOperands(command, cwd, home string) (operands []stateOp
 // expands (lower case): the automatic variable and the profile variable.
 var psHomeVariables = []string{"$home", "${home}", "$env:userprofile", "${env:userprofile}"}
 
+// psPOSIXHomeVariables are the spellings of the user's home pwsh expands on
+// Linux and macOS (lower case).
+var psPOSIXHomeVariables = []string{"$home", "${home}"}
+
 // psHomeQuotedPath returns the path a double-quoted string or a bare word
 // names when it starts with the home (psHomeVariables) followed by a separator and
-// expands nothing else, false for any other string.
+// expands nothing else, false for any other string. Under a Linux or macOS
+// home only $HOME counts.
 func psHomeQuotedPath(text, home string) (string, bool) {
-	if !actionWindowsHome(home) {
+	variables := psHomeVariables
+	switch {
+	case actionWindowsHome(home):
+	case strings.HasPrefix(home, "/"):
+		// pwsh on Linux and macOS: $HOME is the home, USERPROFILE is not
+		// set (the script of a PowerShell launcher, rel-1-0-10:GAP-1138).
+		variables = psPOSIXHomeVariables
+	default:
 		return "", false
 	}
 	lower := strings.ToLower(text)
-	for _, variable := range psHomeVariables {
+	for _, variable := range variables {
 		rest, ok := strings.CutPrefix(lower, variable)
 		if !ok || rest == "" || rest[0] != '\\' && rest[0] != '/' {
 			continue

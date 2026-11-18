@@ -401,8 +401,9 @@ func substrateBundleActivation(cfg *config.Config) func(string, []byte) error {
 // alone, or in bundle mode the bundle resolver kept current by a manager
 // (started here; it ends with ctx). The first refresh must succeed, so the
 // controller never writes a config.yaml-only policy for an atespace a
-// bundle covers.
-func substrateProfileResolver(ctx context.Context, cfg *config.Config, sink controller.Sink) (controller.ProfileResolver, error) {
+// bundle covers. live is config.yaml in force: the inbox applies decide
+// which atespaces a stage may name from it (GAP-0494).
+func substrateProfileResolver(ctx context.Context, cfg *config.Config, live func() *config.Config, sink controller.Sink) (controller.ProfileResolver, error) {
 	b := cfg.Substrate.Bundles
 	if !b.Enabled {
 		return &controller.ConfigResolver{Config: cfg}, nil
@@ -413,7 +414,7 @@ func substrateProfileResolver(ctx context.Context, cfg *config.Config, sink cont
 		return nil, fmt.Errorf("substrate.bundles: %w", err)
 	}
 	path := b.EffectiveAnchorsFile()
-	store := &bundle.Store{CM: cms, Base: cfg, Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}
+	store := &bundle.Store{CM: cms, Base: cfg, Live: live, Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}
 	res := bundle.NewResolver(cfg)
 	res.Managed = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	m := &bundle.Manager{Store: store, Resolver: res, Inbox: b.EffectiveInbox(), Interval: b.EffectiveRefreshInterval(), Sink: sink}

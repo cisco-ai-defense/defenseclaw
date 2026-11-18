@@ -186,9 +186,26 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	if rev.Empty {
 		return nil
 	}
+	if f.allowFlagged && !f.apply {
+		return cliusage.WithExitCode(errors.New("--allow-flagged goes with --apply (a branch or a patch writes nothing that runs)"), 2)
+	}
 	mode, branch, patch := workspace.ModeApply, f.branch, f.patch
 	switch {
 	case f.apply:
+		// Flagged files land only on an explicit yes: --allow-flagged, or
+		// the question answered y. --yes takes the safe answer, no
+		// (GAP-0472); Apply then refuses and names the files.
+		accept, write, err := substratePullAccept(f, rev.Sensitive, substrateInteractive(), func() (bool, error) {
+			return substrateConfirm(cmd, "Some of these changes can run code on this computer. Write them into this folder anyway?")
+		})
+		if err != nil {
+			return err
+		}
+		if !write {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Nothing was written to this folder. Look at them first with --branch NAME or --patch-out FILE, or pass --allow-flagged.")
+			return nil
+		}
+		return substrateApply(cmd, dataDir, name, mode, branch, patch, accept)
 	case f.branch != "":
 		mode = workspace.ModeBranch
 	case f.patch != "":
@@ -196,7 +213,28 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	default:
 		return substratePullChoose(cmd, f, a, name, dataDir, rev)
 	}
-	return substrateApply(cmd, dataDir, name, mode, branch, patch, f.yes)
+	// A branch or a patch runs nothing; Apply still refuses a branch whose
+	// history would keep a secret.
+	return substrateApply(cmd, dataDir, name, mode, branch, patch, false)
+}
+
+// substratePullAccept decides whether pull --apply may write files flagged
+// as able to run code: --allow-flagged says yes; otherwise a terminal asks
+// (the default answer is no). --yes takes that safe answer and never says
+// yes for the user (GAP-0472): Apply then refuses and names the files.
+// write is false when the user answered no.
+func substratePullAccept(f *substratePullFlags, sensitive, interactive bool, ask func() (bool, error)) (accept, write bool, err error) {
+	if !sensitive || f.allowFlagged {
+		return f.allowFlagged, true, nil
+	}
+	if f.yes || !interactive {
+		return false, true, nil
+	}
+	ok, err := ask()
+	if err != nil {
+		return false, false, err
+	}
+	return ok, ok, nil
 }
 
 // substratePullChoose asks what to do with the changes on a terminal; with
@@ -204,7 +242,9 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor, name, dataDir string, rev *workspace.Review) error {
 	hint := fmt.Sprintf("Nothing was written to this folder. Bring the changes home with:\n  defenseclaw substrate pull %s --apply            write them into this folder\n  defenseclaw substrate pull %s --branch NAME      put them on a new git branch\n  defenseclaw substrate pull %s --patch-out FILE   write a patch", a.Name, a.Name, a.Name)
 	if f.yes {
-		return substrateApply(cmd, dataDir, name, workspace.ModeBranch, "", "", true)
+		// The safe default is a branch, which runs nothing; a secret still
+		// keeps it out of the branch's history (Apply decides).
+		return substrateApply(cmd, dataDir, name, workspace.ModeBranch, "", "", false)
 	}
 	if !substrateInteractive() {
 		fmt.Fprintln(cmd.ErrOrStderr(), hint)

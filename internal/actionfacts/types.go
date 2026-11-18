@@ -70,6 +70,12 @@ type Input struct {
 	// command then resolve under it (GAP-2473); the whole action keeps its
 	// own reading.
 	MovedWindowsShellCWD bool `json:"-"`
+	// PowerShellLauncherBody is trusted caller context set on the reading of
+	// a script a PowerShell launcher runs (pwsh -Command BODY): under a Linux
+	// or macOS ActiveHome its $HOME and ~ are spelled out as that home, as
+	// pwsh expands them (rel-1-0-10:GAP-1134). A PowerShell tool call of such
+	// a home is read as before, with its bounds.
+	PowerShellLauncherBody bool `json:"-"`
 	// LoopBindsStraightLine is trusted caller context set by a gateway that
 	// judges the call in a tier that blocks only what the shell certainly
 	// runs (the default and permissive tiers). A function that replaces read,

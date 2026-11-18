@@ -159,7 +159,7 @@ Gateway replicas hold no state, so a finding that spans several calls needs one 
 
 | What happens | What DefenseClaw does |
 |---|---|
-| The agent suspends, then resumes on another machine | Nothing changes. Its approvals, sessions and audit trail carry on. Before it resumes, the controller checks its profile hasn't changed, and the first hook after resume uses a connection the relay opened in advance |
+| The agent suspends, then resumes on another machine | Nothing changes. Its approvals, sessions and audit trail carry on. Before it resumes, the controller checks its profile hasn't changed, and the first hook after resume uses a connection the relay opened in advance. Budget: that first hook answers within 250 ms at p99 on gVisor and microVM (measured: about 60 ms and 86 ms), with no timeout, retry or fail-mode answer |
 | You undo to a checkpoint | Same agent, same approvals. The chain window gets a barrier, but egress after a secret read stays refused |
 | Someone starts a new agent from a saved snapshot | A new agent with a new UID and fresh approvals. An approval given to one agent can't be copied by cloning it. Actors made from one golden snapshot share the memory the snapshot captured, including the state of any random number generator in a program that started before it. Kernel randomness and IDs differ per actor. The kit starts nothing before the first resume, and partitions its state on the actor UID |
 | The agent is deleted | Its allow list and registration are removed and a tombstone stays in the audit. The snapshots are removed from the bucket |
