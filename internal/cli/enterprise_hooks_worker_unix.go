@@ -2177,15 +2177,43 @@ func sortedWorkerJobs(byUID map[int]*enterpriseHookWorkerJob) []enterpriseHookWo
 
 var errEnterpriseHookWorkerNoResult = errors.New("worker returned no result for this target")
 
-// enterpriseHookWorkerScanGrace is how long a discover worker waits, after
+// enterpriseHookWorkerScanGrace is the longest a discover worker waits, after
 // its scan deadline, for a scan that observes the deadline to return.
 var enterpriseHookWorkerScanGrace = 2 * time.Second
 
+// enterpriseHookWorkerAnswerMargin is the part of a discover worker's limit
+// kept free after the scan deadline and the grace, for the worker to start,
+// write its answer and the parent to read it.
+const enterpriseHookWorkerAnswerMargin = time.Second
+
+// enterpriseHookWorkerScanShare splits a discover worker's limit into its
+// scan deadline and the grace after it, so that the scan, the grace and a
+// margin always end before the parent kills the worker at limit. A long limit
+// gets three quarters for the scan, less if the grace and
+// enterpriseHookWorkerAnswerMargin do not fit after it. A short limit (a
+// discovery called near the end of a cycle's budget passes what is left, down
+// to 1 s) gets half for the scan, a quarter for the grace and a quarter for
+// the answer: before, 3/4 of a limit of 8 s or less plus the full 2 s grace
+// ran past the limit, and the parent discarded the partial answer of a
+// blocked scan (GAP-0332).
+func enterpriseHookWorkerScanShare(limit, grace time.Duration) (time.Duration, time.Duration) {
+	scan := limit * 3 / 4
+	if scan+grace+enterpriseHookWorkerAnswerMargin > limit {
+		scan = limit - grace - enterpriseHookWorkerAnswerMargin
+	}
+	if scan < limit/2 {
+		scan, grace = limit/2, min(grace, limit/4)
+	}
+	return scan, grace
+}
+
 // enterpriseHookWorkerScanTimeout is the scan deadline of a discover worker
-// whose limit is timeout: three quarters of it, so the worker can still answer
-// after a scan that did not return, within enterpriseHookWorkerScanGrace.
-// The test worker replaces it so that a blocked scan does not take seconds.
-var enterpriseHookWorkerScanTimeout = func(timeout time.Duration) time.Duration { return timeout * 3 / 4 }
+// whose limit is timeout (enterpriseHookWorkerScanShare). The test worker
+// replaces it so that a blocked scan does not take seconds.
+var enterpriseHookWorkerScanTimeout = func(timeout time.Duration) time.Duration {
+	scan, _ := enterpriseHookWorkerScanShare(timeout, enterpriseHookWorkerScanGrace)
+	return scan
+}
 
 // enterpriseHookWorkerDiscovery is what one discover worker has found so far.
 type enterpriseHookWorkerDiscovery struct {
@@ -2227,7 +2255,8 @@ func enterpriseHookWorkerDiscoverWithin(ctx context.Context, request enterpriseH
 	select {
 	case <-done:
 	case <-ctx.Done():
-		grace := time.NewTimer(enterpriseHookWorkerScanGrace)
+		_, wait := enterpriseHookWorkerScanShare(workerTimeout(request), enterpriseHookWorkerScanGrace)
+		grace := time.NewTimer(wait)
 		select {
 		case <-done:
 		case <-grace.C:
