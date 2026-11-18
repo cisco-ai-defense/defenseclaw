@@ -26,7 +26,9 @@ import (
 // A call is ordinary only when both late-call scans of the native hook find
 // it so (hookexec.LateOrdinaryBothScans): a call that the shared
 // protected-reach reader refuses keeps 9 too, though the link-hop scan alone
-// reads it as ordinary (rel-1-0-10 GAP-1188).
+// reads it as ordinary (rel-1-0-10 GAP-1188). An ordinary leading cd chain
+// and a PermissionRequest, which both scans read, keep 12; their protected
+// twins keep 9.
 func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -34,7 +36,7 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 	}
 	home := filepath.Join(root, "h")
 	project := filepath.Join(home, "proj")
-	for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(project, "sub")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -107,6 +109,11 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 		{"claude echo of a state folder word", "/api/v1/claude-code/hook", "Bash", "echo openclaw", hookexec.PerUserPostLateOrdinaryExit},
 		{"codex sed write command to the link", "/api/v1/codex/hook", "Bash", `sed -n -e "w keylink" plain.txt`, hookexec.PerUserPostNoAnswerExit},
 		{"other connector", "/api/v1/cursor/hook", "Bash", "echo hi", hookexec.PerUserPostNoAnswerExit},
+		{"claude cd then ls", "/api/v1/claude-code/hook", "Bash", "cd sub && ls", hookexec.PerUserPostLateOrdinaryExit},
+		{"codex cd to the project then go test", "/api/v1/codex/hook", "Bash", "cd " + project + " && go test ./...", hookexec.PerUserPostLateOrdinaryExit},
+		{"claude cd into the SSH folder", "/api/v1/claude-code/hook", "Bash", "cd ../.ssh && cat authorized_keys", hookexec.PerUserPostNoAnswerExit},
+		{"codex cd home by tilde", "/api/v1/codex/hook", "Bash", "cd ~/.ssh && cat authorized_keys", hookexec.PerUserPostNoAnswerExit},
+		{"claude cd by a variable into the state folder", "/api/v1/claude-code/hook", "Bash", "cd $HOME/.defenseclaw && ls", hookexec.PerUserPostNoAnswerExit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := post(tc.path, tc.tool, tc.command); got != tc.want {
@@ -117,8 +124,6 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 	// Calls the link-hop scan alone reads as ordinary and the shared
 	// protected-reach reader refuses: exit 12 at 479a1ebc12, 9 now (GAP-1188).
 	for _, tc := range []struct{ name, path, body string }{
-		{"claude permission request", "/api/v1/claude-code/hook",
-			`{"hook_event_name":"PermissionRequest","cwd":` + string(cwd) + `,"tool_name":"Bash","tool_input":{"command":"echo hi"}}`},
 		{"codex duplicate command key, the last one plain", "/api/v1/codex/hook",
 			`{"hook_event_name":"PreToolUse","cwd":` + string(cwd) + `,"tool_name":"Bash","tool_input":{"command":"cat keylink","command":"echo hi"}}`},
 		{"claude camel-case tool keys", "/api/v1/claude-code/hook",
@@ -127,6 +132,28 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := postBody(tc.path, tc.body); got != hookexec.PerUserPostNoAnswerExit {
 				t.Fatalf("exit %d, want %d", got, hookexec.PerUserPostNoAnswerExit)
+			}
+		})
+	}
+	// A PermissionRequest carries the tool and input of a PreToolUse: both
+	// scans read it, so the ordinary one keeps 12 and a protected one 9.
+	for _, tc := range []struct {
+		name, path, command string
+		want                int
+	}{
+		{"claude permission request", "/api/v1/claude-code/hook", "echo hi", hookexec.PerUserPostLateOrdinaryExit},
+		{"codex permission request cd chain", "/api/v1/codex/hook", "cd sub && ls", hookexec.PerUserPostLateOrdinaryExit},
+		{"claude permission request of a link", "/api/v1/claude-code/hook", "cat keylink", hookexec.PerUserPostNoAnswerExit},
+		{"codex permission request of the keys path", "/api/v1/codex/hook", "cat ../.ssh/authorized_keys", hookexec.PerUserPostNoAnswerExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{"hook_event_name": "PermissionRequest", "cwd": project, "tool_name": "Bash",
+				"tool_input": map[string]any{"command": tc.command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := postBody(tc.path, string(body)); got != tc.want {
+				t.Fatalf("exit %d, want %d", got, tc.want)
 			}
 		})
 	}

@@ -375,29 +375,38 @@ func lateOrdinaryLook(opts Options) bool {
 		bothLateScansOrdinary(opts)
 }
 
-// LateOrdinaryBothScans is the one late-ordinary rule: it reports a per-user
-// Claude Code or Codex tool-gate call (event) that both late-call scans find
-// ordinary, the shared protected-reach reader (OrdinaryNoAnswerPayload) and
-// the word-by-word link-hop scan (hookpaths.LateOrdinaryCallAt, GAP-0518),
-// which also reads a path out of a key=value word, a sed write and a
-// dash-named link target. Only such a call may follow the open outage tier
-// when its gateway took it and gave no answer; a call that either scan
-// reaches stays closed. Both scans tell the protected files against home, the
-// account the call runs for ("" is the home of the process). The native hook
-// asks it on every no-answer path (bothLateScansOrdinary, lateOrdinaryCheck)
-// and the shell hook helper (defenseclaw-hook-post) asks it too, so the two
-// answer the same payload alike (rel-1-0-10 GAP-1188). The link-hop scan is
-// written for POSIX paths and answers false on Windows, so this does too.
+// LateOrdinaryBothScans is the late-ordinary rule on Linux and macOS: it
+// reports a per-user Claude Code or Codex tool-gate call (event) that both
+// late-call scans find ordinary, the word-by-word link-hop scan
+// (hookpaths.LateOrdinaryCallAt, GAP-0518), which also reads a path out of a
+// key=value word, a sed write and a dash-named link target, and the shared
+// protected-reach reader (lateOrdinaryNoAnswerPayloadAt), which also reads the
+// PermissionRequest, leading cd chain and relative Codex workdir shapes the
+// link-hop scan reads. Only such a call may follow the open outage tier when
+// its gateway took it and gave no answer; a call that either scan reaches
+// stays closed. Both scans tell the protected files against home, the account
+// the call runs for ("" is the home of the process). The native hook asks it
+// on every no-answer path (bothLateScansOrdinary, lateOrdinaryCheck) and the
+// shell hook helper (defenseclaw-hook-post) asks it too, so the two answer the
+// same payload alike (rel-1-0-10 GAP-1188). The link-hop scan is written for
+// POSIX paths and answers false on Windows, so this does too; there the
+// native hook's bothLateScansOrdinary reads the shared reader alone, as
+// OrdinaryNoAnswerPayload reads it.
 func LateOrdinaryBothScans(home, connector, event string, payload []byte) bool {
 	return lateScansOrdinary(home, connector, event, payload, true)
 }
 
 // lateScansOrdinary is LateOrdinaryBothScans; linkHop false leaves out the
-// link-hop scan (the Windows no-answer path of bothLateScansOrdinary).
+// link-hop scan and reads the shared reader as OrdinaryNoAnswerPayload does
+// (the Windows no-answer path of bothLateScansOrdinary).
 func lateScansOrdinary(home, connector, event string, payload []byte, linkHop bool) bool {
+	sharedReader := ordinaryNoAnswerPayloadAt
+	if linkHop {
+		sharedReader = lateOrdinaryNoAnswerPayloadAt
+	}
 	return toolGateEvent(connector, event) && lateOrdinaryConnector(connector) &&
 		(!linkHop || hookpaths.LateOrdinaryCallAt(home, connector, payload)) &&
-		ordinaryNoAnswerPayloadAt(home, payload)
+		sharedReader(home, payload)
 }
 
 // bothLateScansOrdinary is LateOrdinaryBothScans for the call of opts, read

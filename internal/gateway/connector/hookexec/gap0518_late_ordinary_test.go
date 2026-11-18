@@ -75,8 +75,10 @@ func lateOrdinaryPayload(t *testing.T, project string, command any) string {
 // in a short or a 2000-operand list, stays closed in every tier (the
 // verified-gateway-without-status control of the psna-rb review).
 // A call is ordinary only when both late-call scans find it so
-// (LateOrdinaryBothScans): an argv command and a cd chain, which the shared
-// protected-reach reader does not model, stay closed (rel-1-0-10 GAP-1188).
+// (LateOrdinaryBothScans): an argv command, which the shared protected-reach
+// reader does not model, stays closed (rel-1-0-10 GAP-1188); an ordinary
+// leading cd chain, which both read, follows the outage mode, and a cd the
+// readers cannot prove or one into a protected folder stays closed.
 func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 	project := lateOrdinaryProject(t)
 	// A folder whose link is not in the project (round 4: a cd must move the
@@ -138,7 +140,7 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"quoted link that has a space, open tier", `cat "key link"`, "open", true},
 			// Round 4: a cd moves the folder, a direct link stays closed as
 			// text, and ordinary scripts and patterns stay open.
-			{"cd then a plain file, open tier", "cd sub && cat plain.txt", "open", true},
+			{"cd then a plain file, open tier", "cd sub && cat plain.txt", "open", false},
 			{"cd then a link of that folder, open tier", "cd sub && cat childlink", "open", true},
 			{"cd then a redirect to a link of that folder, open tier", "cd sub && echo x > childlink", "open", true},
 			{"cd then a link after a semicolon, open tier", "cd sub; cat childlink", "open", true},
@@ -158,7 +160,7 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			// program reads them; the protected twins stay closed.
 			{"echo of a link to a plain file, open tier", "echo l", "open", false},
 			{"grep pattern that is a link to a plain file, open tier", "grep -e l plain.txt", "open", false},
-			{"cd and back, open tier", "cd sub && cd .. && cat plain.txt", "open", true},
+			{"cd and back, open tier", "cd sub && cd .. && cat plain.txt", "open", false},
 			{"cd and back, then the link, open tier", "cd sub && cd .. && cat keylink", "open", true},
 			{"grep after-context, open tier", "grep -A 3 openclaw plain.txt", "open", false},
 			{"grep max count, open tier", "grep -m 3 openclaw plain.txt", "open", false},
@@ -170,6 +172,18 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"sed regexp holding a semicolon, open tier", `sed -n '/a;b/p' plain.txt`, "open", false},
 			{"sed write after a trailing separator, open tier", `sed -n '1p;w keylink;' plain.txt`, "open", true},
 			{"echo of a link to a plain file, strict tier", "echo l", "closed", true},
+			// GAP-1188 review: an ordinary leading cd chain follows the
+			// outage mode; a cd into a protected folder, by a tilde or a
+			// variable, or to the home stays closed.
+			{"cd then ls, open tier", "cd sub && ls", "open", false},
+			{"cd to the project then go test, open tier", "cd " + project + " && go test ./...", "open", false},
+			{"cd then ls after a semicolon, open tier", "cd sub; ls", "open", false},
+			{"cd then ls, strict tier", "cd sub && ls", "closed", true},
+			{"cd into the SSH folder, open tier", "cd ../.ssh && cat authorized_keys", "open", true},
+			{"cd home by tilde, open tier", "cd ~/.ssh && cat authorized_keys", "open", true},
+			{"cd up to the home, open tier", "cd .. && cat .env", "open", true},
+			{"cd by a variable into the state folder, open tier", "cd $HOME/.defenseclaw && ls", "open", true},
+			{"cd twice, then tilde, open tier", "cd /x; cd ~/.aws && cat credentials", "open", true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
 				result, _ := runAgainstGateway(t, connector, addr, func(opts *Options) {
