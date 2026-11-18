@@ -1888,6 +1888,8 @@
    "TestGAP1060DefaultStreamPowerShellWriteIsStateWrite": 4.8,
    "TestGAP1075Win32SpellingsOfThePlainFile": 102.7,
    "TestGAP1230UnplacedDotNetOpens": 64.2,
+   "TestGAP1257FileInfoChildAndRebound": 14.9,
+   "TestGAP1258BenignDotNetRows": 15.6,
    "TestGAP1409DirectoryEntryOperandsDoNotFollowFinalLink": 2.6,
    "TestGAP1409ObserveSelfProtectionHooks": 2.3,
    "TestGAP2590BenignLinkReadersAndLinkRemoval": 2.7,
