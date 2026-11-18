@@ -388,20 +388,22 @@ func registrationCopySources(call *syntax.CallExpr, home string, protected prote
 // out of a hook config (cp -p ~/.claude/settings.json /tmp/bak/) kept its
 // tamper.agent_hook_config_write alert, as /tmp/... is not absolute
 // (rel-1-0-10:GAP-0104, native Windows). Any other rooted name (/home/x, an
-// fstab mount, //host) may be mapped anywhere, so it is not placed.
+// fstab mount) may be mapped anywhere, so it is not placed; nor is a UNC
+// or device path (//host/share, \\localhost\C$, \\?\C:), which may name a
+// local drive again.
 func registrationCopyDestination(dest string) (string, bool) {
 	if runtime.GOOS != "windows" {
 		return dest, filepath.IsAbs(dest)
+	}
+	slashed := filepath.ToSlash(dest)
+	if strings.HasPrefix(slashed, "//") {
+		return "", false
 	}
 	if drive := actionfacts.MSYSDrivePath(dest); drive != dest {
 		dest = filepath.FromSlash(drive)
 	}
 	if filepath.IsAbs(dest) {
 		return dest, true
-	}
-	slashed := filepath.ToSlash(dest)
-	if strings.HasPrefix(slashed, "//") {
-		return "", false
 	}
 	clean := path.Clean(slashed)
 	for _, root := range []string{"/tmp", "/var/tmp"} {

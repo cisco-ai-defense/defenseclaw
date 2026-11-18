@@ -117,10 +117,11 @@ func p34fbTamperFindings(findings []string) []string {
 // are allowed.
 func TestGAP0104ShellReadsOfHookConfigsNameNoTamperRule(t *testing.T) {
 	home, cwd := p34fbHome(t)
-	driveReads, _ := p34fbDriveRows(t, home)
-	rows := append(p34fbReadRows(filepath.ToSlash(filepath.Join(home, ".claude", "settings.json"))), driveReads...)
+	reads := p34fbReadRows(filepath.ToSlash(filepath.Join(home, ".claude", "settings.json")))
 	for _, tier := range p34fbTiers {
 		for _, connector := range []string{"claudecode", "codex"} {
+			driveReads, _ := p34fbDriveRows(t, home, connector)
+			rows := append(slices.Clone(reads), driveReads...)
 			t.Run(tier.name+"/"+connector, func(t *testing.T) {
 				judge := p34fbJudge(t, connector, tier.posture, tier.managed)
 				for _, row := range rows {
@@ -144,7 +145,7 @@ func TestGAP0104ShellReadsOfHookConfigsNameNoTamperRule(t *testing.T) {
 // per-user paths are judged there as before (no tamper rule at rel either).
 func TestGAP0104WritesIntoHookConfigsStillFire(t *testing.T) {
 	home, cwd := p34fbHome(t)
-	_, driveWrites := p34fbDriveRows(t, home)
+	_, driveWrites := p34fbDriveRows(t, home, "claudecode")
 	rows := append(p34fbWriteRows(filepath.Join(home, ".claude", "settings.json")), driveWrites...)
 	rows = append(rows, p34fbWriteRows(filepath.ToSlash(filepath.Join(home, ".claude", "settings.json")))[7:9]...)
 	for _, tier := range p34fbTiers {
@@ -217,12 +218,18 @@ func TestGAP0376HereStringReadNamesNoStateRule(t *testing.T) {
 // Windows user writes them under Git Bash: a backup folder and the hook
 // config as C:/Users/x/... (elsewhere the plain absolute path), and on
 // Windows also as the MSYS mount /c/Users/x/.... The reads copy a hook
-// config out; the writes copy onto one.
-func p34fbDriveRows(t *testing.T, home string) (reads, writes []string) {
+// config out; the writes copy onto one. On Windows the Codex hook reads a
+// call that parses as PowerShell in that dialect (Codex runs PowerShell
+// there; selectWindowsShellDialectReading), where cp -p is Copy-Item with an
+// ambiguous -p that copies nothing: the drive-path read is a Git Bash read
+// (Claude Code) on Windows, and a read of both connectors elsewhere.
+func p34fbDriveRows(t *testing.T, home, connector string) (reads, writes []string) {
 	t.Helper()
 	bak := filepath.ToSlash(filepath.Join(t.TempDir(), "bak"))
 	settings := filepath.ToSlash(filepath.Join(home, ".claude", "settings.json"))
-	reads = []string{`mkdir -p ` + bak + `; cp -p ~/.claude/settings.json ` + bak + `/settings.json; cp -p ~/.codex/config.toml ` + bak + `/`}
+	if runtime.GOOS != "windows" || connector == "claudecode" {
+		reads = []string{`mkdir -p ` + bak + `; cp -p ~/.claude/settings.json ` + bak + `/settings.json; cp -p ~/.codex/config.toml ` + bak + `/`}
+	}
 	writes = []string{`cp -p /tmp/gap0104-x ` + settings, `cp -p ~/.codex/config.toml ` + settings}
 	if runtime.GOOS == "windows" {
 		reads = append(reads, `cp -p ~/.claude/settings.json `+p34fbMSYS(bak)+`/settings.json`)

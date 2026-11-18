@@ -86,6 +86,7 @@ func TestGAP0104FlowNetLeavesReadOnlyWordsOut(t *testing.T) {
 			{`cp -p ~/.codex/config.toml /cygdrive/` + msys(settings)[1:] + `; echo ok > /tmp/gap0104-x`, true},
 			{`cp -p ~/.claude/settings.json /home/u/.claude/settings.json; echo ok > /tmp/gap0104-x`, true},
 			{`cp -p ~/.claude/settings.json //host/share/.claude/settings.json; echo ok > /tmp/gap0104-x`, true},
+			{`cp -p ~/.codex/config.toml //localhost/` + settings[:1] + `$` + settings[2:] + `; echo ok > /tmp/gap0104-x`, true},
 			{`cp -p ~/.codex/config.toml /tmp/../` + msys(settings)[1:] + `; echo ok > /tmp/gap0104-x`, true},
 		}...)
 	}
