@@ -52,6 +52,9 @@ dependencies = [
     # Used by `defenseclaw setup galileo test` to emit a real, minimal OTLP
     # protobuf canary span without starting the gateway.
     "opentelemetry-proto>=1.28.0,<2",
+    # MCP permits opentelemetry-api>=1.28.0, but CVE-2026-126360 is fixed only
+    # in 1.45.2. Keep the floor in wheel metadata as well as uv.lock.
+    "opentelemetry-api>=1.45.2",
     # Skill scanner 2.3.2 ships only platform wheels (each bundles a CEL
     # helper; there is no py3-none-any wheel or Windows arm64/musl wheel) and
     # requires Python >=3.11, so Python 3.10 installs have no skill scanning.
@@ -145,9 +148,7 @@ dev = [
     "freezegun==1.5.5",
     "jsonschema>=4.23.0",
     "ruff==0.15.7",
-    # CVE-2026-114603 (tracestate) is fixed in 1.45.1; CVE-2026-126360
-    # (traceparent parsing) is fixed in 1.45.2. Keep the SDK aligned.
-    "opentelemetry-api>=1.45.2",
+    # Keep the development SDK on the fixed runtime API release.
     "opentelemetry-sdk>=1.45.2",
 ]
 
@@ -254,6 +255,8 @@ override-dependencies = [
     "openai==2.30.0",
     "importlib-metadata>=8.7.1,<8.8",
     "jsonschema>=4.26.0",
+    # MCP's transitive floor predates the CVE-2026-126360 fix.
+    "opentelemetry-api>=1.45.2",
     # CVE-2026-40347/42561 fixed by 0.0.27; CVE-2026-53537..53540 fixed by 0.0.31.
     "python-multipart>=0.0.31",
     # CVE-2026-44431/44432 fixed in 2.7.0; CVE-2026-97687..97689 fixed in 2.8.0.

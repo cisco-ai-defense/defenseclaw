@@ -6,9 +6,31 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
+
+func TestTopRuleIDsAndNamesBoundsEachDisplayName(t *testing.T) {
+	longName := strings.Repeat("a", 255) + "é" + strings.Repeat("b", 32)
+	ids, names := topRuleIDsAndNames([]scanner.InspectFinding{{
+		RuleID: "CISCO-CUSTOM-1",
+		Title:  longName,
+	}}, 8)
+
+	if len(ids) != 1 || ids[0] != "CISCO-CUSTOM-1" {
+		t.Fatalf("rule IDs = %v, want unchanged custom ID", ids)
+	}
+	if len(names) != 1 || len(names[0]) > 256 || !utf8.ValidString(names[0]) {
+		t.Fatalf("rule names = %q, want one valid UTF-8 value bounded to 256 bytes", names)
+	}
+	if names[0] != strings.Repeat("a", 255) {
+		t.Fatalf("bounded rule name = %q, want truncation before split rune", names[0])
+	}
+}
 
 // TestEmitInspectVerdictFindings_ZeroFindingsStillCountsAsScan pins
 // the fix for the PR-579 security review finding that

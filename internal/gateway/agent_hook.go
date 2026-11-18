@@ -198,6 +198,7 @@ type agentHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	RuleNames    []string `json:"-"`
 	// AgentIdentityID (agt-) and AgentInstanceID (ais-, the session or
 	// sub-agent instance) are the ids the gateway derived for this hook,
 	// the ones its audit rows and telemetry carry. hookAnswerBody stamps
@@ -1606,6 +1607,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		RawEventIDs:  rawEventIDs,
 		EvaluationID: resp.EvaluationID,
 		RuleIDs:      resp.RuleIDs,
+		RuleNames:    resp.RuleNames,
 		// The connected Cowork folders ride in their own path-class field.
 		WorkspaceHostPaths: coworkWorkspaceHostPaths(ctx),
 	}
@@ -2210,6 +2212,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		RawEventIDs:         rawEventIDs,
 		EvaluationID:        resp.EvaluationID,
 		RuleIDs:             resp.RuleIDs,
+		RuleNames:           resp.RuleNames,
 		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
 		Extra:               mergeHookEnvelopeExtra(extra, hookRequestAuditExtra(ctx, profile)),
 	}
@@ -3840,6 +3843,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// evaluation_id.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
+	resp.RuleNames = hookResponseRuleNames(resp.RuleIDs, evalCtx)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)

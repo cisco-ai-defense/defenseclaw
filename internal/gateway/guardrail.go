@@ -76,6 +76,9 @@ type ScanVerdict struct {
 	EvaluationID string   `json:"-"`
 	ScanID       string   `json:"-"`
 	RuleIDs      []string `json:"-"`
+	// findingNames is index-aligned with Findings and carries bounded display
+	// labels for stable rule identities such as hashed AI Defense custom rules.
+	findingNames []string
 	// RedactionEnabled is the cloud-controlled per-inspection
 	// redaction directive from the managed Cisco AI Defense inspect
 	// response (is_redaction_enabled). Tri-state: nil = no directive
