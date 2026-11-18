@@ -1201,13 +1201,15 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			signals = append(signals, promptInjectionReviewSignals(view)...)
 		}
 	}
-	high, review, _ := partitionSignals(signals)
-
 	// Keep trust, credential, and PII detection on untrusted content. Concrete
 	// actions are evaluated through the tool-call path where execution facts
 	// are available, rather than treating their literal appearance in prose as
-	// an action.
+	// an action. A credential finding in a prompt is also a HIGH_SIGNAL triage
+	// signal (secretRuleTriageSignals).
 	ruleFindings := scanProxyContentRules(ctx, content)
+	signals = append(signals, secretRuleTriageSignals(direction, ruleFindings)...)
+	high, review, _ := partitionSignals(signals)
+
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
@@ -1453,16 +1455,17 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Always merge the regex safety net — even when the judge succeeded,
 	// it may have missed categories that only regex covers. HIGH_SIGNAL
 	// regex findings and full rule engine results are both applied.
+	// Keep the same content/action boundary as regex_judge. The trusted action
+	// dispatcher remains responsible for command, path, cognitive-file, and C2
+	// enforcement because it can reason over parsed execution facts.
+	ruleFindings := scanProxyContentRules(ctx, content)
+	signals = append(signals, secretRuleTriageSignals(direction, ruleFindings)...)
 	high, _, _ := partitionSignals(signals)
 	if len(high) > 0 {
 		regexVerdict := signalsToVerdict(high, "local-triage")
 		merged = mergeWithJudge(merged, regexVerdict)
 	}
 
-	// Keep the same content/action boundary as regex_judge. The trusted action
-	// dispatcher remains responsible for command, path, cognitive-file, and C2
-	// enforcement because it can reason over parsed execution facts.
-	ruleFindings := scanProxyContentRules(ctx, content)
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		if severityRank[maxSev] >= severityRank["HIGH"] {
@@ -2357,6 +2360,46 @@ func triagePatterns(direction, content string) []TriageSignal {
 				Evidence: extractEvidence(content, lower, p), Confidence: 0.70,
 			})
 		}
+	}
+	return signals
+}
+
+// triageLiftedSecretRules are the pack rules that read the credential shapes
+// of rel's proxy-only secret regexes (removed with rel-1-0-10:GAP-0210): a
+// password, token or API key assignment, a bearer credential and an AWS
+// secret key.
+var triageLiftedSecretRules = map[string]bool{
+	passwordAssignRuleID:   true,
+	secretAssignmentRuleID: true,
+	"SEC-BEARER":           true,
+	bareBearerRuleID:       true,
+	"SEC-AWS-SECRET":       true,
+}
+
+// secretRuleTriageSignals is the TRIAGE-SECRET-REGEX signal of a prompt: one
+// HIGH_SIGNAL per pack credential finding of triageLiftedSecretRules. On rel
+// the proxy's own secret regexes raised it for regex_judge and judge_first,
+// so a password assignment in a prompt was HIGH and the permissive posture
+// (alert from HIGH) alerted on it; without it SEC-PASSWORD-ASSIGN (MEDIUM)
+// was allowed there (rel-1-0-10:GAP-1269). The pack decides what is a
+// credential, so a placeholder the rule leaves alone (GAP-0213) raises
+// nothing, and the signal names the rule, never the value. In a completion
+// the rule finding is the verdict, as for every other rule. Off under managed
+// enterprise, like triagePatterns.
+func secretRuleTriageSignals(direction string, findings []RuleFinding) []TriageSignal {
+	if direction != "prompt" || ManagedEnterpriseActive() {
+		return nil
+	}
+	var signals []TriageSignal
+	for _, f := range findings {
+		if !triageLiftedSecretRules[f.RuleID] {
+			continue
+		}
+		signals = append(signals, TriageSignal{
+			Level: "HIGH_SIGNAL", FindingID: "TRIAGE-SECRET-REGEX",
+			Category: "secret", Pattern: f.RuleID,
+			Evidence: f.RuleID + ": " + f.Title, Confidence: 0.75,
+		})
 	}
 	return signals
 }
