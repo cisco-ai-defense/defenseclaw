@@ -2985,7 +2985,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 	for index, arg := range args {
 		argv[index], fixedWords[index] = simpleStaticScriptWord(arg, vars)
 	}
-	if childIndex := simpleWrapperChildIndex(argv, fixedWords); childIndex > 0 {
+	if childIndex := WrapperChildIndex(argv, fixedWords); childIndex > 0 {
 		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
 	}
 	shellProgram := filepath.Base(program)
@@ -3064,16 +3064,18 @@ func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program stri
 }
 
 // simpleWrapperChildIndex is the child WrapperChildIndex gives the nested
-// script walk, cut at the first nested wrapper of the chain
+// script walk for a nested wrapper without a branch of its own (sudo, exec,
+// command, chroot, nsenter), cut at the first nested wrapper of the chain
 // (simpleNestedWrapper). WrapperChildIndex reads a whole chain of prefix
 // wrappers at once, so for sudo nohup PROGRAM, sudo env NAME=value PROGRAM
 // and nohup sudo env NAME=value PROGRAM it named PROGRAM, past the nohup or
 // env whose own branch of simpleNestedScriptArgs turns PROGRAM into the
 // reading the rules judge (simpleWrappedProgram). That reading was lost and
 // the action was allowed (rel-1-0-10:GAP-1322). Stopping at that wrapper
-// lets its branch read the rest of the chain, one wrapper at a time; a chain
-// of other prefix wrappers, and chroot, nsenter and xargs by their own
-// grammars, keep the WrapperChildIndex child (rel-1-0-10:GAP-1182).
+// lets its branch read the rest of the chain, one wrapper at a time, as the
+// walk did before; a chain of other prefix wrappers, and chroot, nsenter and
+// xargs by their own grammars, keep the WrapperChildIndex child
+// (rel-1-0-10:GAP-1182).
 func simpleWrapperChildIndex(argv []string, static []bool) int {
 	childIndex := WrapperChildIndex(argv, static)
 	if childIndex <= 0 {
