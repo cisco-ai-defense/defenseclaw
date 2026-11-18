@@ -9,7 +9,7 @@ import (
 )
 
 func TestStoreHandsEachRecordOnceAndKeepsTheNewestGauge(t *testing.T) {
-	s := &Store{MaxQueue: 3}
+	s := &Store{MaxQueue: 2}
 	s.Add(
 		Record{Kind: KindEgress, Host: "a"},
 		Record{Kind: KindCount, Metric: MetricIdleSuspends, Value: 1},
@@ -18,14 +18,15 @@ func TestStoreHandsEachRecordOnceAndKeepsTheNewestGauge(t *testing.T) {
 		Record{Kind: KindGauge, Metric: MetricUnattestedTemplates, Value: 4},
 		Record{Kind: "other"},
 		Record{Kind: KindLifecycle, Actor: "x"},
-		Record{Kind: KindEgress, Host: "b"}, // over the bound: the oldest goes
+		Record{Kind: KindEgress, Host: "b"},
+		Record{Kind: KindEgress, Host: "c"}, // over the egress bound: the oldest egress record goes
 	)
 	out, _ := s.Take(context.Background(), TakeRequest{Max: 2})
-	if len(out.Records) != 2 || out.Records[0].Kind != KindCount || out.Dropped != 1 || out.Gauges[MetricUnattestedTemplates] != 4 {
+	if len(out.Records) != 2 || out.Records[0].Kind != KindCount || out.Records[1].Kind != KindLifecycle || out.Dropped != 1 || out.Gauges[MetricUnattestedTemplates] != 4 {
 		t.Fatalf("first take %+v", out)
 	}
 	out, _ = s.Take(context.Background(), TakeRequest{})
-	if len(out.Records) != 1 || out.Records[0].Host != "b" || out.Dropped != 0 || out.Gauges[MetricUnattestedTemplates] != 4 {
+	if len(out.Records) != 2 || out.Records[0].Host != "b" || out.Records[1].Host != "c" || out.Dropped != 0 || out.Gauges[MetricUnattestedTemplates] != 4 {
 		t.Fatalf("second take %+v", out)
 	}
 	out, _ = s.Take(context.Background(), TakeRequest{})

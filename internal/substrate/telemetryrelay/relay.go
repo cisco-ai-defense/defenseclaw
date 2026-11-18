@@ -10,15 +10,17 @@
 // seconds and records it, so every record is exported once. Gauges are kept
 // as the newest value and handed to every replica.
 //
-// The queue is in the leader's memory: records not taken when the leader
-// restarts, or past its bound, are lost (counted in Dropped and reported to
-// the replica that takes next).
+// The queues are in the leader's memory: records not taken when the leader
+// restarts, or past their bounds, are lost (counted in Dropped and reported
+// to the replica that takes next).
 package telemetryrelay
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 )
@@ -114,23 +116,119 @@ type TakeResponse struct {
 
 // Bounds.
 const (
-	DefaultMaxQueue = 50000
-	maxPostRecords  = 2000
-	DefaultTakeMax  = 2000
+	// DefaultMaxQueue and DefaultMaxQueueBytes bound each of the leader's
+	// two queues (egress decisions; lifecycle records and counts) in records
+	// and in bytes.
+	DefaultMaxQueue      = 50000
+	DefaultMaxQueueBytes = 16 << 20
+	maxPostRecords       = 2000
+	DefaultTakeMax       = 2000
+	// maxTakeBytes bounds one take's records in bytes (at least one record
+	// is handed on).
+	maxTakeBytes = 1 << 20
+	// MaxFieldBytes is the longest text field a record keeps; a longer one
+	// is cut at a character boundary (the callout cuts paths to the same
+	// 512 bytes).
+	MaxFieldBytes = 512
+	// recordOverhead is what a queued record costs besides its text.
+	recordOverhead = 128
 	// DefaultInterval is how often posters and takers call the leader.
 	DefaultInterval = 3 * time.Second
 )
 
-// Store is the leader's queue.
+// Store is the leader's queue. Egress decisions, which a busy callout posts
+// by the thousand, have their own queue: past its bound the oldest egress
+// records go, never a lifecycle record or a controller count (GAP-0580).
 type Store struct {
-	// MaxQueue bounds the queue (DefaultMaxQueue when 0): past it the
-	// oldest records go.
-	MaxQueue int
+	// MaxQueue bounds each queue in records (DefaultMaxQueue when 0), and
+	// MaxQueueBytes in bytes (DefaultMaxQueueBytes when 0): past either the
+	// oldest records of that queue go.
+	MaxQueue      int
+	MaxQueueBytes int64
 
-	mu      sync.Mutex
-	q       []Record
-	gauges  map[string]int64
-	dropped int64
+	mu sync.Mutex
+	// life is lifecycle records and counts, egress the egress decisions.
+	life, egress queue
+	gauges       map[string]int64
+	dropped      int64
+}
+
+// queue is a bounded FIFO of records and their size.
+type queue struct {
+	recs  []Record
+	bytes int64
+}
+
+// push appends r, first dropping the oldest records past maxN or maxBytes;
+// it returns how many it dropped.
+func (q *queue) push(r Record, maxN int, maxBytes int64) int64 {
+	size := recordSize(r)
+	var dropped int64
+	for len(q.recs) > 0 && (len(q.recs) >= maxN || q.bytes+size > maxBytes) {
+		q.bytes -= recordSize(q.recs[0])
+		q.recs[0] = Record{}
+		q.recs = q.recs[1:]
+		dropped++
+	}
+	q.recs = append(q.recs, r)
+	q.bytes += size
+	return dropped
+}
+
+// take removes and returns up to n records and about maxBytes from the
+// front; it never returns more than n, and returns one record at least
+// when one is queued and n > 0.
+func (q *queue) take(n int, maxBytes int64) ([]Record, int64) {
+	k, used := 0, int64(0)
+	for k < n && k < len(q.recs) {
+		size := recordSize(q.recs[k])
+		if k > 0 && used+size > maxBytes {
+			break
+		}
+		used += size
+		k++
+	}
+	out := append([]Record(nil), q.recs[:k]...)
+	q.recs = append(q.recs[:0:0], q.recs[k:]...)
+	q.bytes -= used
+	return out, used
+}
+
+// recordSize is what r costs in the queue.
+func recordSize(r Record) int64 {
+	n := recordOverhead
+	for _, f := range textFields(&r) {
+		n += len(*f)
+	}
+	return int64(n)
+}
+
+// textFields are r's text fields.
+func textFields(r *Record) []*string {
+	return []*string{&r.Kind, &r.Atespace, &r.Actor, &r.UID, &r.ParentUID, &r.Profile, &r.Template, &r.Connector,
+		&r.Driver, &r.BatchID, &r.RunMode, &r.UserID, &r.UserName, &r.Lifecycle, &r.Host, &r.Path, &r.Decision,
+		&r.Category, &r.Reason, &r.Metric}
+}
+
+// cutRecord cuts each text field of r to MaxFieldBytes.
+func cutRecord(r Record) Record {
+	for _, f := range textFields(&r) {
+		*f = cutText(*f, MaxFieldBytes)
+	}
+	return r
+}
+
+// cutText is s cut to at most max bytes at a character boundary. A cut
+// value is a copy, so it does not keep a long original alive.
+func cutText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	n := max
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return strings.Clone(s[:n])
 }
 
 func validMetric(kind, m string) bool {
@@ -144,15 +242,19 @@ func validMetric(kind, m string) bool {
 }
 
 // Add queues records; a count or gauge naming an unknown metric, and a
-// negative value, are dropped.
+// negative value, are dropped. Text fields are cut to MaxFieldBytes.
 func (s *Store) Add(recs ...Record) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	max := s.MaxQueue
-	if max <= 0 {
-		max = DefaultMaxQueue
+	maxN, maxBytes := s.MaxQueue, s.MaxQueueBytes
+	if maxN <= 0 {
+		maxN = DefaultMaxQueue
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxQueueBytes
 	}
 	for _, r := range recs {
+		q := &s.life
 		switch r.Kind {
 		case KindGauge:
 			if validMetric(r.Kind, r.Metric) && r.Value >= 0 {
@@ -166,15 +268,13 @@ func (s *Store) Add(recs ...Record) {
 			if !validMetric(r.Kind, r.Metric) || r.Value <= 0 {
 				continue
 			}
-		case KindLifecycle, KindEgress:
+		case KindLifecycle:
+		case KindEgress:
+			q = &s.egress
 		default:
 			continue
 		}
-		if len(s.q) >= max {
-			s.q = s.q[1:]
-			s.dropped++
-		}
-		s.q = append(s.q, r)
+		s.dropped += q.push(cutRecord(r), maxN, maxBytes)
 	}
 }
 
@@ -205,7 +305,8 @@ func (s *Store) PostEgress(_ context.Context, in PostRequest) (struct{}, error) 
 	return struct{}{}, nil
 }
 
-// Take implements MethodTake.
+// Take implements MethodTake: lifecycle records and counts first, then
+// egress decisions, at most in.Max records and about 1 MiB.
 func (s *Store) Take(_ context.Context, in TakeRequest) (TakeResponse, error) {
 	n := in.Max
 	if n <= 0 || n > DefaultTakeMax {
@@ -213,11 +314,15 @@ func (s *Store) Take(_ context.Context, in TakeRequest) (TakeResponse, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if n > len(s.q) {
-		n = len(s.q)
+	recs, used := s.life.take(n, maxTakeBytes)
+	if rest := n - len(recs); rest > 0 && (len(recs) == 0 || used < maxTakeBytes) {
+		more, _ := s.egress.take(rest, maxTakeBytes-used)
+		recs = append(recs, more...)
 	}
-	out := TakeResponse{Records: append([]Record(nil), s.q[:n]...), Dropped: s.dropped}
-	s.q = append(s.q[:0:0], s.q[n:]...)
+	out := TakeResponse{Records: recs, Dropped: s.dropped}
+	if len(out.Records) == 0 {
+		out.Records = nil
+	}
 	s.dropped = 0
 	if len(s.gauges) > 0 {
 		out.Gauges = make(map[string]int64, len(s.gauges))
@@ -270,7 +375,7 @@ func (p *Poster) Add(recs ...Record) {
 		if len(p.pending) >= DefaultMaxQueue {
 			p.pending = p.pending[1:]
 		}
-		p.pending = append(p.pending, r)
+		p.pending = append(p.pending, cutRecord(r))
 	}
 }
 
