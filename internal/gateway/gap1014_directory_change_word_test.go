@@ -194,3 +194,73 @@ func TestGAP1014PlacedStatementReadingNeedsADirectoryChange(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP1014TopLevelWriteIsReadWhenTheStatementsAreNotPlaced is the rv1014
+// regression of the first GAP-1014 fix (3a4a3ef867): the hook-config guard
+// skipped the whole command whenever it held a directory change and the
+// reading had more than one entry, but that second entry can come from a
+// nested bash -c body alone. When TopLevelStatements does not place the
+// statements (popd;, cd; or popd on its own line, a cd inside { ...; }), the
+// whole command is the only reading of a top-level write, and skipping it let
+// popd; bash -c true; echo x > ~/.codex/hooks.json through (rel 22db7a8362:
+// alert or block HIGH tamper.agent_hook_config_write; 3a4a3ef867: allow).
+// The { cd /tmp; } form was the same hole on rel. Every form must keep the
+// finding of the same write with no directory change at all (stronger is
+// fine, weaker is the regression).
+func TestGAP1014TopLevelWriteIsReadWhenTheStatementsAreNotPlaced(t *testing.T) {
+	base := t.TempDir()
+	home := gap1014Home(t, base, "31e8ac4c00ed")
+	for _, dir := range []string{".codex", ".claude"} {
+		if err := os.MkdirAll(filepath.Join(home, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, ".codex", "hooks.json"), []byte("{\"hooks\":{}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// %[1]s is the home, %[2]s the written file under it (absolute or ~).
+	oracleForm := "bash -c true; echo x > %[2]s"
+	forms := []string{
+		"popd; bash -c true; echo x > %[2]s",
+		"cd; bash -c true; echo x > %[2]s",
+		"popd\nbash -c true\necho x > %[2]s",
+		"cd\nbash -c true\necho x > %[2]s",
+		"popd; sh -c 'true'; echo x > %[2]s",
+		"{ cd /tmp; }; bash -c true; echo x > %[2]s",
+		"{ popd; }; bash -c true; echo x > %[2]s",
+		// Placed forms: TopLevelStatements reads them, and only then is the
+		// whole command skipped.
+		"cd /tmp; bash -c true; echo x > %[2]s",
+		"pushd %[1]s; bash -c true; echo x > %[2]s",
+	}
+	targets := []string{"%[1]s/.codex/hooks.json", "~/.codex/hooks.json", "%[1]s/.claude/settings.json", "~/.claude/settings.json"}
+	const rule = "tamper.agent_hook_config_write"
+	calls := 0
+	for _, p := range gap0437Packs {
+		for _, connector := range []string{"claudecode", "codex"} {
+			a := gap0437Server(t, p, connector, "action")
+			t.Setenv("HOME", home)
+			verdict := func(form, target string) string {
+				t.Helper()
+				calls++
+				session := fmt.Sprintf("gap1014-top-%s-%s-%d", p.name, connector, calls)
+				command := fmt.Sprintf(form, home, strings.ReplaceAll(target, "%[1]s", home))
+				return gap1014Verdict(t, a, connector, session, filepath.Join(home, "proj"), command, false)
+			}
+			for _, target := range targets {
+				want := verdict(oracleForm, target)
+				if strings.HasPrefix(want, "allow") || !strings.Contains(want, rule) {
+					t.Fatalf("%s %s oracle %q on %s: %s, want a %s verdict", p.name, connector, oracleForm, target, want, rule)
+				}
+				for _, form := range forms {
+					if got := verdict(form, target); strings.HasPrefix(got, "allow") || !strings.Contains(got, rule) {
+						t.Errorf("%s %s %q on %s: %s, want %s or stronger (the same write with no directory change)", p.name, connector, form, target, got, want)
+					}
+				}
+			}
+		}
+	}
+}

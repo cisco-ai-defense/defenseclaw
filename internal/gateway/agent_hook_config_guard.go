@@ -1060,10 +1060,9 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		// Managed installations keep their own file policy. A literal
 		// configuration change on the launched agent is still a proved
 		// disablement of this call's hooks.
-		parts := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
-		placed := len(parts) > 1 && hookpaths.ChangesDirectory(managedRaw)
-		for _, part := range parts {
-			if placed && part.Command == managedRaw {
+		parts, placed := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
+		for index, part := range parts {
+			if placed && index == 0 {
 				continue
 			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
@@ -1156,10 +1155,9 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	// The registration set is read by hookpaths' shared shell writer. A
 	// placed statement carries its own directory, including after literal cd.
-	parts := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
-	placed := len(parts) > 1 && hookpaths.ChangesDirectory(rawCommand)
-	for _, part := range parts {
-		if placed && part.Command == rawCommand {
+	parts, placed := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
+	for index, part := range parts {
+		if placed && index == 0 {
 			continue
 		}
 		partGuard := guard
@@ -1635,21 +1633,31 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 
 // agentHookConfigPlacedCommands keeps each literal shell body and each
 // statement's directory. All shell decisions consume this same placement.
-func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookpaths.PlacedStatement {
+// The first entry is always the whole command read in cwd. The flag reports
+// that TopLevelStatements placed the statements of the command itself, so
+// that every statement is in the list with the folder a directory change
+// leads to and the caller may skip the unplaced whole command. Only then:
+// a nested sh -c body adds entries too, and when the statements were not
+// placed (popd; or a cd inside { ...; } that TopLevelStatements does not
+// read), the whole command is the only reading of the top-level writes
+// (rel-1-0-10:GAP-1014, rv1014).
+func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool) {
 	if depth > 4 || command == "" || len(command) > 8192 {
-		return nil
+		return nil, false
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}
 	out := []hookpaths.PlacedStatement{root}
 	placed := []hookpaths.PlacedStatement{root}
+	topPlaced := false
 	if hookpaths.ChangesDirectory(command) {
-		if statements, ok := hookpaths.TopLevelStatements(command, cwd, home); ok {
+		if statements, ok := hookpaths.TopLevelStatements(command, cwd, home); ok && len(statements) > 0 {
 			placed = statements
 			out = append(out, statements...)
+			topPlaced = true
 		}
 	}
 	if !strings.Contains(command, "sh") {
-		return out
+		return out, topPlaced
 	}
 	for _, statement := range placed {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: home})
@@ -1683,11 +1691,12 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookp
 						return true
 					})
 				}
-				out = append(out, agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)...)
+				nested, _ := agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)
+				out = append(out, nested...)
 			}
 		}
 	}
-	return out
+	return out, topPlaced
 }
 
 func agentHookConfigExactWords(command actionfacts.CommandFact) []string {
