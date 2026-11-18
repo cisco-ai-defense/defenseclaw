@@ -72,7 +72,7 @@ func TestOpenClawRefreshInstallPolicyFollowsConfig(t *testing.T) {
 	if _, has := readOpenClawJSON5(t, configPath)["security"]; has {
 		t.Fatalf("teardown after a refresh left the install policy:\n%s", mustReadFileString(t, configPath))
 	}
-	if _, ok := loadOpenClawInstallPolicyRecord(opts.DataDir); ok {
+	if _, ok, _ := loadOpenClawInstallPolicyRecord(opts.DataDir); ok {
 		t.Fatal("teardown after a refresh left the install policy record")
 	}
 }

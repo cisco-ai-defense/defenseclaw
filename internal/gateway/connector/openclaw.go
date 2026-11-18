@@ -177,6 +177,19 @@ func openClawObservedVersion(opts SetupOpts) string {
 	return LoadCachedAgentVersion(opts.DataDir, "openclaw")
 }
 
+// openClawObservedExecutable is the openclaw executable the version of
+// openClawObservedVersion was read from: the one Setup was given with its
+// version, else the one the last discovery recorded; "" when it is not known.
+func openClawObservedExecutable(opts SetupOpts) string {
+	if strings.TrimSpace(opts.AgentVersion) != "" {
+		return strings.TrimSpace(opts.AgentExecutable)
+	}
+	if opts.DataDir == "" {
+		return ""
+	}
+	return LoadCachedAgentExecutable(opts.DataDir, "openclaw")
+}
+
 // dropDefenseClawPluginApprovals removes the approvals.plugin block an
 // earlier setup --human-approval wrote ({"enabled": true, "mode": "session"},
 // nothing else) and reports whether it did. The caller does this only for an
@@ -451,14 +464,31 @@ func openClawSnapshotUsable(dataDir, connectorName, configPath string) (bool, er
 // openClawConfigRegistersDefenseClaw reports whether openclaw.json already
 // lists the DefenseClaw plugin, so a snapshot of it would not be pre-setup.
 func openClawConfigRegistersDefenseClaw(configPath string) bool {
+	registered, _ := openClawConfigRegistersDefenseClawErr(configPath)
+	return registered
+}
+
+// openClawConfigRegistersDefenseClawErr is openClawConfigRegistersDefenseClaw
+// that returns a read error other than a missing file (GAP-1234); a file
+// that does not parse lists nothing.
+func openClawConfigRegistersDefenseClawErr(configPath string) (bool, error) {
 	data, err := readConnectorStateFile(configPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		return false, fmt.Errorf("read %s: %w", configPath, err)
 	}
 	cfg, err := parseOpenClawConfig(configPath, data)
 	if err != nil {
-		return false
+		return false, nil
 	}
+	return openClawDocumentRegistersDefenseClaw(cfg), nil
+}
+
+// openClawDocumentRegistersDefenseClaw reports whether a parsed openclaw.json
+// lists the DefenseClaw plugin.
+func openClawDocumentRegistersDefenseClaw(cfg map[string]interface{}) bool {
 	plugins, _ := cfg["plugins"].(map[string]interface{})
 	if plugins == nil {
 		return false

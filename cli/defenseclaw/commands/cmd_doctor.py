@@ -13223,6 +13223,8 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
     from defenseclaw.openclaw_plugin_config import (
         openclaw_install_policy_recorded_state,
         openclaw_install_policy_remediation,
+        openclaw_install_policy_stale_remediation,
+        openclaw_install_policy_stale_version,
         openclaw_install_policy_state,
         openclaw_install_policy_wanted,
         openclaw_operator_admin_off,
@@ -13237,7 +13239,19 @@ def _check_openclaw_plugin_rows(cfg, r: _DoctorResult, *, live_health: dict | No
         )
 
     policy_state = openclaw_install_policy_state(cfg)
-    if policy_state == "ours":
+    stale, _certain = openclaw_install_policy_stale_version(cfg) if policy_state == "ours" else ("", False)
+    if stale:
+        # GAP-1198: registered under a newer OpenClaw than the one installed
+        # now; the gateway re-checks within 30 seconds, and this says so
+        # until it has.
+        _emit(
+            "warn",
+            "OpenClaw install admission",
+            stale,
+            remediation=openclaw_install_policy_stale_remediation(),
+            r=r,
+        )
+    elif policy_state == "ours":
         _emit(
             "pass", "OpenClaw install admission", "OpenClaw asks DefenseClaw before a skill or plugin install", r=r
         )
