@@ -141,6 +141,33 @@ func TestEndpointSecurityPowerShellCmdReader(t *testing.T) {
 	t.Fatal("the shared command reader lost the exact CMD service call")
 }
 
+// TestWinDefendSequenceUnproved pins which calls leave a WinDefend stop to
+// the closed sequence proof (rel-1-0-10:GAP-1194).
+func TestWinDefendSequenceUnproved(t *testing.T) {
+	cases := []struct {
+		name, command      string
+		dialect            Dialect
+		unproved, stopOnly bool
+	}{
+		{name: "missing query", command: "sc stop WinDefend\nsc config WinDefend start=disabled", dialect: DialectCMD, unproved: true},
+		{name: "extra command", command: "sc stop WinDefend\nsc config WinDefend start=disabled\nwhoami\nsc query WinDefend", dialect: DialectCMD, unproved: true},
+		{name: "full sequence", command: "sc stop WinDefend\nsc config WinDefend start=disabled\nsc query WinDefend", dialect: DialectCMD},
+		{name: "lone stop", command: `sc.exe stop WinDefend`, dialect: DialectPowerShell, stopOnly: true},
+		{name: "sysmon then stop", command: `sysmon.exe -u; sc.exe stop WinDefend`, dialect: DialectPowerShell},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "shell", Command: tc.command, CWD: `C:\repo`, DialectHint: tc.dialect})
+			if got := WinDefendSequenceUnproved(facts); got != tc.unproved {
+				t.Errorf("WinDefendSequenceUnproved=%t want %t", got, tc.unproved)
+			}
+			if got := ExactWinDefendStopOnly(facts); got != tc.stopOnly {
+				t.Errorf("ExactWinDefendStopOnly=%t want %t", got, tc.stopOnly)
+			}
+		})
+	}
+}
+
 func TestExactEndpointSecurityProductDisableHardNegatives(t *testing.T) {
 	tests := []struct {
 		name    string
