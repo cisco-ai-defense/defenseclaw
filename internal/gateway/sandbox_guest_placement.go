@@ -183,10 +183,23 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// takes the place of the last plain one kept, so the list stays at the
 	// bound (substrate-1 GAP-0624: a here-string call listed ~200k readings)
 	// and a protected tail is still read next to the limit (GAP-0501).
-	// plain holds the indexes of the plain readings kept.
-	collect := func(list []pending, listed map[key]bool, plain *[]int, dropped *bool, reading pending) []pending {
+	// plain holds the indexes of the plain readings kept; listed maps each
+	// reading kept to its index.
+	//
+	// A reading listed as a candidate that comes again in a directory the
+	// call runs in is no longer a candidate: every owner reads it, as place
+	// does for a reading placed twice. The split reads a body after a cd that
+	// may fail in each folder the chain may leave (rel-1-0-10:GAP-1144), so
+	// cd ~/.defenseclaw || cd /tmp && sh -c 'x=config.yaml; echo m > $x'
+	// gives echo m > 'config.yaml' in ~/.defenseclaw after the earlier cd
+	// listed that folder as a target. Kept as a candidate, judged only for a
+	// private-key read and a hook-config write, it let the actor allow the
+	// write the laptop blocks with tamper.detector_state_write
+	// (substrate-1 GAP-0645).
+	collect := func(list []pending, listed map[key]int, plain *[]int, dropped *bool, reading pending) []pending {
 		at := key{reading.text, reading.cwd}
-		if listed[at] {
+		if index, ok := listed[at]; ok {
+			list[index].candidate = list[index].candidate && reading.candidate
 			return list
 		}
 		first := guestReadingFirst(reading.text)
@@ -198,14 +211,14 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 			last := (*plain)[len(*plain)-1]
 			*plain = (*plain)[:len(*plain)-1]
 			delete(listed, key{list[last].text, list[last].cwd})
-			listed[at] = true
+			listed[at] = last
 			list[last] = reading
 			return list
 		}
 		if !first {
 			*plain = append(*plain, len(list))
 		}
-		listed[at] = true
+		listed[at] = len(list)
 		return append(list, reading)
 	}
 	placeAll := func(p *pass, list []pending) bool {
@@ -220,7 +233,7 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	}
 	simples := &pass{statements: map[string]bool{}}
 	var simpleReadings []pending
-	simplesDropped, simplesListed := false, map[key]bool{}
+	simplesDropped, simplesListed := false, map[key]int{}
 	var simplesPlain []int
 	for _, simple := range actionfacts.SimpleCommands(input, facts) {
 		if guestPlacementSkips(simple) {
@@ -277,7 +290,7 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	// directory the laptop's readers keep.
 	calls := &pass{statements: map[string]bool{}}
 	var callReadings []pending
-	callsDropped, callsListed := false, map[key]bool{}
+	callsDropped, callsListed := false, map[key]int{}
 	var callsPlain []int
 	for _, call := range guestScriptCalls(command) {
 		for _, dir := range dirs {
