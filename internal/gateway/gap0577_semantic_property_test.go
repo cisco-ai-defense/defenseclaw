@@ -24,10 +24,14 @@ import (
 
 // Use the real kit fact channel; never read an actor path on the gateway host.
 func gapNF6Facts(ctx context.Context, before string) context.Context {
+	return gapNF8Facts(ctx, sandboxauth.SandboxHome+"/.claude/settings.json", before)
+}
+
+func gapNF8Facts(ctx context.Context, target, before string) context.Context {
 	sum := sha256.Sum256([]byte(before))
 	return context.WithValue(ctx, substrateEnvelopeKey{}, substrateEnvelope{
 		Facts: &SubstrateFacts{Files: []SubstrateAttachedFile{{
-			Role: "agent_hook_config_before", Path: sandboxauth.SandboxHome + "/.claude/settings.json",
+			Role: "agent_hook_config_before", Path: target,
 			Content: []byte(before), Size: int64(len(before)), SHA256: hex.EncodeToString(sum[:]),
 		}}},
 	})
@@ -137,7 +141,8 @@ const gapNF6Seed int64 = 5770600
 func gapNF6PropertyRows(t *testing.T) []gapNF6ParityRow {
 	t.Helper()
 	// 128 renderings x 12 mutations x 3 edit shapes x 2 fact modes = 9216 cases.
-	// Half the mutations are benign. Shape 2 splits the mutation across steps.
+	// Half the mutations are benign. Shape 2 stages a whole changed span.
+	// TestGAP0612PartialMultiEditProperty splits one protected member itself.
 	// Sorted input plus seeded key shuffling makes the byte corpus reproducible.
 	var rows []gapNF6ParityRow
 	for rendering := 0; rendering < 128; rendering++ {

@@ -78,9 +78,10 @@ func gap0433Verdict(t *testing.T, api *APIServer, ctx context.Context, cwd, tool
 func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) { gapNF6Parity(t) }
 
 type gapNF6ParityRow struct {
-	name, tool        string
-	input             map[string]any
-	want, file, actor string
+	name, tool                  string
+	input                       map[string]any
+	want, file, actor           string
+	target, noCopy, mountNoCopy string
 }
 
 func gapNF6Parity(t *testing.T) { gapNF6ParityModes(t, true) }
@@ -144,8 +145,8 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 		{"settings.local home allowManagedHooksOnly", "Write", map[string]any{"file_path": "{H}/.claude/settings.local.json", "content": `{"allowManagedHooksOnly":true}`}, "block"},
 		// GAP-0536 (RKNF review of the GAP-0433 fix): changes the actor
 		// judged without the file's DefenseClaw entries. The actor applies
-		// them to synthetic copies of the registered file and compares as the
-		// laptop does.
+		// them to the exact kit snapshot and compares as the laptop does;
+		// absent snapshots use the shared ambiguity refusal.
 		{"rknf Edit keeps old as substring", "Edit", map[string]any{"file_path": "{H}/.claude/settings.json",
 			"old_string": "~/.defenseclaw/hooks/claude-code-hook.sh", "new_string": "true || ~/.defenseclaw/hooks/claude-code-hook.sh"}, "block"},
 		{"rknf Edit renames hooks key", "Edit", map[string]any{"file_path": "{H}/.claude/settings.json",
@@ -165,7 +166,8 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 		{"gap0536 MultiEdit narrows matcher", "MultiEdit", map[string]any{"file_path": "{H}/.claude/settings.json",
 			"edits": []any{map[string]any{"old_string": `"matcher":"*"`, "new_string": `"matcher":"Read"`}}}, "block"},
 		// Controls: a write that keeps the hooks, an Edit that does not touch
-		// them, and a settings.local.json that never held them.
+		// them, and a settings.local.json that never held them. A missing
+		// snapshot cannot prove that last fact, so replacements then refuse.
 		{"settings home Write keeps hooks", "Write", map[string]any{"file_path": "{H}/.claude/settings.json", "content": kept}, "allow"},
 		{"settings home Edit keeps hooks", "Edit", map[string]any{"file_path": "{H}/.claude/settings.json",
 			"old_string": `"timeout":30`, "new_string": `"timeout":30`}, "allow"},
@@ -175,8 +177,8 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 	}
 	type parityRow = gapNF6ParityRow
 	// GAP-0577 (RKNF2 review of the GAP-0536 fix): an Edit or MultiEdit that
-	// applies to no synthetic copy as a whole, because the laptop's file holds
-	// another key or the hooks in another layout, was allow/NONE in the actor
+	// could not be judged from the former guessed originals, because the
+	// laptop file holds another key or layout, was allow/NONE in the actor
 	// and block/CRITICAL on the laptop. Each row sets its own laptop file.
 	withModel := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"model":"zzz","hooks"`, 1)
 	spaced := strings.Replace(gap0433LaptopSettings, `"PreToolUse":[`, `"PreToolUse" :[`, 1)
@@ -336,7 +338,15 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 	}
 	rows := make([]parityRow, 0, len(probes)+len(gap0577))
 	for _, probe := range probes {
-		rows = append(rows, parityRow{name: probe.name, tool: probe.tool, input: probe.input, want: probe.want})
+		row := parityRow{name: probe.name, tool: probe.tool, input: probe.input, want: probe.want}
+		if probe.tool == "Write" && probe.want == "allow" && probe.input["content"] == "{}" {
+			row.noCopy = "block"
+			if strings.HasPrefix(probe.input["file_path"].(string), "{P}/") {
+				// The confined mount view proves this project file absent.
+				row.mountNoCopy = "allow"
+			}
+		}
+		rows = append(rows, row)
 	}
 
 	for _, n := range []int{64, 65, 4000} {
@@ -385,21 +395,45 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 		input: map[string]any{"file_path": settings, "old_string": `"/opt/lib"`, "new_string": `"/tmp/evil"`},
 	})
 	rows = append(rows, gap0577...)
+	rows = append(rows, gapNF8ReviewRows()...)
 	for _, probe := range rows {
 		t.Run(probe.name, func(t *testing.T) {
 			file := probe.file
-			if file == "" {
+			if file == "" && probe.target == "" {
 				file = gap0433LaptopSettings
+			}
+			for _, rel := range []string{".claude/settings.local.json", "proj/.claude/settings.json", "proj/.claude/settings.local.json"} {
+				if err := os.Remove(filepath.Join(home, rel)); err != nil && !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
 			}
 			if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(file), 0o600); err != nil {
 				t.Fatal(err)
+			}
+			if probe.target != "" {
+				target := filepath.Join(home, probe.target)
+				if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, []byte(file), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			laptopInput := gap0264Expand(probe.input, project, home).(map[string]any)
 			actorInput := gap0264Expand(probe.input, gap0264ActorWorkdir, sandboxauth.SandboxHome).(map[string]any)
 			lAction, lSeverity, lRules := gap0433Verdict(t, api, context.Background(), project, probe.tool, laptopInput)
 			copyCtx, mountCtx := actor(false), actor(true)
 			if withFacts {
-				copyCtx, mountCtx = gapNF6Facts(copyCtx, file), gapNF6Facts(mountCtx, file)
+				target, _ := actorInput["file_path"].(string)
+				if target == "" {
+					target = sandboxauth.SandboxHome + "/.claude/settings.json"
+				}
+				target = strings.Replace(target, "~", sandboxauth.SandboxHome, 1)
+				before := file
+				if probe.target == "" && (strings.HasSuffix(target, "/settings.local.json") || strings.HasPrefix(target, gap0264ActorWorkdir+"/")) {
+					before = ""
+				}
+				copyCtx, mountCtx = gapNF8Facts(copyCtx, target, before), gapNF8Facts(mountCtx, target, before)
 			}
 			cAction, cSeverity, cRules := gap0433Verdict(t, api, copyCtx, gap0264ActorWorkdir, probe.tool, actorInput)
 			mAction, mSeverity, mRules := gap0433Verdict(t, api, mountCtx, gap0264ActorWorkdir, probe.tool, actorInput)
@@ -409,15 +443,22 @@ func gapNF6ParityModes(t *testing.T, withFacts bool) {
 			if lAction != probe.want {
 				t.Fatalf("laptop oracle %s/%s %v, want %s", lAction, lSeverity, lRules, probe.want)
 			}
-			if !withFacts && (probe.tool == "Edit" || probe.tool == "MultiEdit") {
+			if !withFacts && (probe.tool == "Edit" || probe.tool == "MultiEdit" || probe.noCopy != "") {
 				expected := "block"
 				if probe.name == "settings home Edit keeps hooks" || probe.name == "rvnf5 count bound 64" || probe.name == "rvnf5 escape_benign_model" {
 					expected = "allow"
 				}
-				if cAction != expected || mAction != expected {
-					t.Errorf("no-copy: copy=%s mount=%s, want %s (T6 ambiguity ruling)", cAction, mAction, expected)
+				if probe.noCopy != "" {
+					expected = probe.noCopy
 				}
-				if expected == "block" && (cSeverity != "CRITICAL" || mSeverity != "CRITICAL") {
+				mountExpected := expected
+				if probe.mountNoCopy != "" {
+					mountExpected = probe.mountNoCopy
+				}
+				if cAction != expected || mAction != mountExpected {
+					t.Errorf("no-copy: copy=%s mount=%s, want %s/%s (T6 ambiguity ruling; exact mount facts win)", cAction, mAction, expected, mountExpected)
+				}
+				if expected == "block" && cSeverity != "CRITICAL" || mountExpected == "block" && mSeverity != "CRITICAL" {
 					t.Errorf("ambiguous edits must be CRITICAL, copy=%s mount=%s", cSeverity, mSeverity)
 				}
 				return

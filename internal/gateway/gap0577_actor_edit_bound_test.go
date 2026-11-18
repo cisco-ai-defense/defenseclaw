@@ -17,8 +17,8 @@ import (
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// substrate-1 GAP-0577 (RVNF2 F5): an actor's MultiEdit of its registered
-// ~/.claude/settings.json whose edits apply to no synthetic copy was judged
+// substrate-1 GAP-0577 (RVNF2 F5): an actor's Claude settings MultiEdit
+// without a snapshot was formerly judged against guessed originals
 // in time that grows with the square of the edits (4,000 edits took 31 s, so
 // one call near the 1 MiB body cap held a gateway core for minutes). Past 64
 // edits or 64 KB of edit text the call is refused at once, never allowed;

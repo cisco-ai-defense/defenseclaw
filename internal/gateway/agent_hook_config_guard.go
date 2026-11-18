@@ -1241,10 +1241,10 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 //     tamper.agent_hook_config_write as an alert only, never a block.
 //
 // The guard only adds findings. A file the laptop would read first is judged
-// without that file, except the per-user file where the connector's setup
-// registers DefenseClaw's hooks on the laptop: exact kit pre-edit facts are
-// preferred there. Missing context refuses ambiguous edits; complete documents
-// use the laptop semantic comparison (GAP-0433, GAP-0536, GAP-0577).
+// against exact kit pre-edit facts whenever available. All Claude settings
+// paths share the same no-copy rule: refuse ambiguous changes and require
+// complete replacements to preserve the registered hook entries
+// (GAP-0433, GAP-0536, GAP-0577, GAP-0612).
 func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	ruleID, note, target := sandboxAgentHookConfigChange(ctx, request)
 	if target == "" ||
@@ -1300,7 +1300,6 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 			if format == "" {
 				continue
 			}
-			registration, registered := sandboxAgentHookRegistration(request.Connector, target, input.ActiveHome)
 			// Prefer exact facts on every settings path, then the confined
 			// ingress FSView. Never open a guest path on the host directly.
 			if before, exact := sandboxAgentHookBefore(ctx, target); exact {
@@ -1313,10 +1312,10 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 				}
 				return agentHookConfigWriteRuleID, "cannot apply this settings edit to the available document", target
 			}
-			if registered {
-				if reason := sandboxAgentHookWithoutBefore(format, change, registration); reason != "" {
+			if request.Connector == "claudecode" && format == gatewayconnector.AgentHookConfigClaudeSettings {
+				if reason := sandboxAgentHookWithoutBefore(format, change, sandboxClaudeRegisteredHooks); reason != "" {
 					if reason != sandboxAgentHookNoBefore {
-						reason += "; " + sandboxManagedHooksNote
+						reason += "; " + sandboxManagedHooksBoundary + "; " + sandboxAgentHookNoBefore
 					}
 					return agentHookConfigDisableRuleID, reason, target
 				}
@@ -1406,38 +1405,10 @@ func sandboxAgentHookConfigMentioned(command string) bool {
 	return slices.ContainsFunc(parts, func(part string) bool { return len(part) > 2 && strings.Contains(command, part) })
 }
 
-// sandboxAgentHookRegistrations are, per connector, the per-user files under
-// the home where the connector's per-user setup registers DefenseClaw's hooks
-// on a laptop (Claude Code: claudeCodeSettingsPath), with the "hooks" member
-// that setup writes there. An actor keeps its hooks in managed settings.
-// The kit attaches the current actor file for edits and replacements. These
-// registrations define the entries a complete replacement must preserve when
-// facts are absent (GAP-0433, GAP-0577).
-var sandboxAgentHookRegistrations = map[string]struct {
-	files []string
-	hooks string
-}{
-	"claudecode": {
-		files: []string{".claude/settings.json"},
-		hooks: `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"~/.defenseclaw/hooks/claude-code-hook.sh","timeout":30}]}]}`,
-	},
-}
-
-// sandboxAgentHookRegistration identifies the setup-owned home settings path.
-// The registered hook definition is used only to judge complete replacements;
-// edits are never applied to an invented settings document.
-func sandboxAgentHookRegistration(connector, target, home string) (string, bool) {
-	registration, known := sandboxAgentHookRegistrations[connector]
-	if !known || !path.IsAbs(home) {
-		return "", false
-	}
-	for _, name := range registration.files {
-		if path.Clean(target) == path.Join(path.Clean(home), name) {
-			return registration.hooks, true
-		}
-	}
-	return "", false
-}
+// A no-copy replacement cannot prove that any Claude settings file never
+// held DefenseClaw's entries. Use the same hook-preservation fallback on every
+// recognized Claude settings path; edits never receive an invented document.
+const sandboxClaudeRegisteredHooks = `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"~/.defenseclaw/hooks/claude-code-hook.sh","timeout":30}]}]}`
 
 const sandboxAgentHookNoBefore = "DefenseClaw could not see the settings file to judge this edit; re-run with a current DefenseClaw kit that includes the settings snapshot"
 
@@ -1512,7 +1483,9 @@ func sandboxAgentHookSameJSONString(old, next string) bool {
 }
 
 // sandboxManagedHooksNote explains the registered-settings boundary.
-const sandboxManagedHooksNote = "in an actor DefenseClaw's hooks are managed by root-owned settings, so this file must keep DefenseClaw's hook entries as written: change other keys with Edit, or ask your administrator to change the managed settings"
+const sandboxManagedHooksBoundary = "in an actor DefenseClaw's hooks are managed by root-owned settings, so this file must keep DefenseClaw's hook entries as written"
+
+const sandboxManagedHooksNote = sandboxManagedHooksBoundary + ": change other keys with Edit, or ask your administrator to change the managed settings"
 
 const (
 	sandboxAgentHookEditBound     = 64
