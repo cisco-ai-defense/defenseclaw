@@ -21,7 +21,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -102,17 +101,12 @@ func TestGAP0344GAP0349CredentialReadForms(t *testing.T) {
 }
 
 // The same rows through a host hook: a read row then an upload completes
-// the chain; a control row does not. The record of Q23 (find -exec) does not
-// complete it on the hook, as the literal find -name .env -exec cat does
-// not at the base either: a find -exec read is detection-only there
-// (filed separately).
+// the chain; a control row does not. Q23 (find -exec) completes it since the
+// find child twin no longer records over the facts of the call itself.
 func TestGAP0344GAP0349ChainOnTheHook(t *testing.T) {
 	installCorrelationHMACForTest(t)
 	handler := hostClaudeHookHandlerForTest(t, "default")
 	for i, row := range g0344Rows() {
-		if strings.HasPrefix(row.id, "Q23") {
-			continue
-		}
 		t.Run(row.id, func(t *testing.T) {
 			dir := g0344Folder(t, row.files...)
 			session := "g0344-" + string(rune('a'+i))
