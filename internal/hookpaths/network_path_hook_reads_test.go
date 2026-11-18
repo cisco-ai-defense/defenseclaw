@@ -34,7 +34,8 @@ var hookPathRawReads = map[string][]string{
 
 // hookPathRawHandles open a path through the Windows API. A function may
 // call one only after it read the same path through the bounded readers or
-// asked networkPathUnanswered.
+// took it from gatedPath (or asked networkPathUnanswered, for a call that
+// opens no last link).
 var hookPathRawHandles = map[string][]string{
 	"windows": {"CreateFile", "GetLongPathName", "GetNamedSecurityInfo"},
 	"syscall": {"CreateFile"},
@@ -85,8 +86,8 @@ func TestHookPathReadsAreShareBounded(t *testing.T) {
 // (a Write or Edit target, a cp destination, a git pathspec or -C folder, a
 // script the command runs). Each read goes through the share-gated readers
 // (the guard through its seam, which must call them), so a share on another
-// machine is never contacted; a reader the gate does not wrap (a bounded
-// regular-file read) is asked ShareReadUnanswered first. On native Windows
+// machine is never contacted; a bounded regular-file read goes through
+// hookpaths.ReadRegularFileBounded. On native Windows
 // the guard's direct os.Lstat and filepath.EvalSymlinks of a Write target on
 // \\server\share opened an SMB session (210 DNS names in the native run).
 func TestGatewayHookPathOperandReadsAreShareBounded(t *testing.T) {
@@ -138,21 +139,16 @@ func TestGatewayHookPathOperandReadsAreShareBounded(t *testing.T) {
 	}
 	sort.Strings(found)
 	if len(found) != 0 {
-		t.Fatalf("gateway reads of a path a hook call names that bypass the share gate (use the seam or hookpaths.Stat, Lstat, LstatPinned, EvalSymlinks, Readlink, Open, ReadFile; ask hookpaths.ShareReadUnanswered before a safefile read):\n%s", strings.Join(found, "\n"))
+		t.Fatalf("gateway reads of a path a hook call names that bypass the share gate (use the seam or hookpaths.Stat, Lstat, LstatPinned, EvalSymlinks, Readlink, Open, ReadFile, ReadRegularFileBounded):\n%s", strings.Join(found, "\n"))
 	}
 }
 
 // gatewayUngatedOperandReads finds the readers hookPathRawReads does not
-// name that the gateway uses on an operand: a pinned lstat, and a bounded
-// safefile read in a function that does not ask ShareReadUnanswered.
+// name that the gateway uses on an operand: a pinned lstat and a bounded
+// safefile read (hookpaths.LstatPinned and ReadRegularFileBounded read them
+// through the share gate). A check before a safefile read is no gate: the
+// read would open the name again after it (rel-1-0-10:GAP-1074 review 1).
 func gatewayUngatedOperandReads(fset *token.FileSet, decl ast.Decl) []string {
-	gated := false
-	ast.Inspect(decl, func(node ast.Node) bool {
-		if selector, ok := node.(*ast.SelectorExpr); ok && selector.Sel.Name == "ShareReadUnanswered" {
-			gated = true
-		}
-		return true
-	})
 	var found []string
 	ast.Inspect(decl, func(node ast.Node) bool {
 		selector, ok := node.(*ast.SelectorExpr)
@@ -167,8 +163,8 @@ func gatewayUngatedOperandReads(fset *token.FileSet, decl ast.Decl) []string {
 		switch {
 		case pkg.Name == "pathidentity" && selector.Sel.Name == "LstatPinned":
 			found = append(found, where)
-		case pkg.Name == "safefile" && strings.HasPrefix(selector.Sel.Name, "Read") && !gated:
-			found = append(found, where+" (no ShareReadUnanswered first)")
+		case pkg.Name == "safefile" && strings.HasPrefix(selector.Sel.Name, "Read"):
+			found = append(found, where)
 		}
 		return true
 	})
@@ -374,7 +370,7 @@ func hookPathUnboundedReads(fset *token.FileSet, decl ast.Decl) []string {
 			}
 		case *ast.Ident:
 			switch node.Name {
-			case "networkPathUnanswered", "pathStat", "pathLstat":
+			case "networkPathUnanswered", "gatedPath", "pathStat", "pathLstat":
 				gated = true
 			}
 		}

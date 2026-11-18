@@ -25,7 +25,6 @@ import (
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"gopkg.in/yaml.v3"
 )
@@ -409,10 +408,10 @@ func (g *agentHookConfigGuard) read(raw string) ([]byte, bool) {
 		} else if !filepath.IsAbs(path) {
 			path = filepath.Join(g.cwd, path)
 		}
-		if path == "" || !filepath.IsAbs(path) || hookpaths.ShareReadUnanswered(filepath.Clean(path)) {
+		if path == "" || !filepath.IsAbs(path) {
 			return nil, false
 		}
-		body, err := safefile.ReadRegularFileBounded(filepath.Clean(path), agentHookConfigMaxBytes)
+		body, err := hookpaths.ReadRegularFileBounded(filepath.Clean(path), agentHookConfigMaxBytes)
 		return body, err == nil
 	}
 	places := g.places(raw)
