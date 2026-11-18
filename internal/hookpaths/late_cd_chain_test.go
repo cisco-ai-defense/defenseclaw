@@ -21,6 +21,10 @@ import (
 // home, a protected or state folder, CDPATH), and a later word that reaches a
 // protected file from either folder, keep the call not ordinary. LateCallGrade
 // itself is unchanged: it keeps every one of these calls Possible.
+// GAP-1303: a cd at a later step ("ls && cd sub && ls", "cd sub && make && cd
+// ..") is read the same way, each step against the folder current at it; the
+// same protected cds stay not ordinary at a later step, and so does a step
+// before the cd that changes the shell context.
 func TestGAP1188LateChainCallGradeReadsALeadingCD(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -30,7 +34,8 @@ func TestGAP1188LateChainCallGradeReadsALeadingCD(t *testing.T) {
 	project := filepath.Join(home, "proj")
 	sub := filepath.Join(project, "sub")
 	other := filepath.Join(root, "other")
-	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw"), sub, other} {
+	backend, frontend := filepath.Join(project, "backend"), filepath.Join(project, "frontend")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw"), sub, other, backend, frontend} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -94,12 +99,58 @@ func TestGAP1188LateChainCallGradeReadsALeadingCD(t *testing.T) {
 		{"negated cd", "! cd sub && ls", false},
 		{"five leading cds", "cd sub && cd .. && cd sub && cd .. && cd sub && ls", false},
 		{"cd then a link to the keys file", "cd sub && cat deep-keyslink", false},
+		// GAP-1303: a cd at a later step.
+		{"later cd: ls, cd, ls", "ls && cd sub && ls", true},
+		{"later cd: cd, make, cd back", "cd sub && make && cd ..", true},
+		{"later cd: two projects", "cd backend && go test ./... && cd ../frontend && npm test", true},
+		{"later cd: after a semicolon", "ls; cd sub; cat plain.txt", true},
+		{"later cd: cd and back, then a plain file", "ls && cd sub && cd .. && cat plain.txt", true},
+		{"later cd: after an or, then a plain file", "ls || cd sub && cat plain.txt", true},
+		{"later cd into the SSH folder", "ls && cd ../.ssh && cat authorized_keys", false},
+		{"later cd up to the home", "ls && cd .. && cat .env", false},
+		{"later cd, make, cd up to the home", "cd sub && make && cd ../.. && cat .env", false},
+		{"later cd up twice to the home", "ls && cd sub/../.. && ls", false},
+		{"later cd home by tilde", "ls && cd ~/.ssh && cat authorized_keys", false},
+		{"later cd by a variable", "ls && cd $HOME/.defenseclaw && ls", false},
+		{"later cd to the state folder", "ls && cd " + filepath.Join(home, ".defenseclaw") + " && ls", false},
+		{"later cd to the state folder by a parent step", "ls && cd ../.defenseclaw && ls", false},
+		{"later cd into a link to the SSH folder", "ls && cd sshlink && cat authorized_keys", false},
+		{"later cd into a link to an ordinary folder", "ls && cd linkdir && ls", false},
+		{"later cd dash", "ls && cd - && ls", false},
+		{"later cd plus", "ls && cd +1 && ls", false},
+		{"later cd glob", "ls && cd s* && ls", false},
+		{"later cd substitution", "ls && cd $(echo sub) && ls", false},
+		{"later cd option", "ls && cd -P sub && ls", false},
+		{"later cd with a redirect", "ls && cd sub 2>/dev/null && ls", false},
+		{"later cd with an assignment", "ls && X=1 cd sub && ls", false},
+		{"later cd to a missing folder", "ls && cd missing && ls", false},
+		{"later cd to the root", "ls && cd / && ls", false},
+		{"later cd then a link of that folder", "ls && cd sub && cat childlink", false},
+		{"later cd then an or", "ls && cd sub || cat plain.txt", false},
+		{"later cd after an or, then a word protected from the call folder", "ls || cd sub && cat sshlink/authorized_keys", false},
+		{"later cd after a semicolon, then a word protected from the call folder", "ls; cd sub; cat sshlink/authorized_keys", false},
+		{"later cd as the last step, into the SSH folder", "ls && cd ../.ssh", false},
+		{"later cd as the last step, up to the home", "cd sub && make && cd ../..", false},
+		{"later cd in the background", "ls && cd sub & cat childlink", false},
+		{"later cd in a pipeline", "ls && cd sub | cat childlink", false},
+		{"later cd in a subshell", "ls && (cd ../.ssh && cat authorized_keys)", false},
+		{"later cd in a group", "ls && { cd sub && cat childlink; }", false},
+		{"pushd before a later cd", "pushd sub && cd . && cat childlink", false},
+		{"source before a later cd", "source x.sh && cd sub && ls", false},
+		{"a subshell with a cd before a later cd", "(cd ../.ssh) && cd sub && ls", false},
+		{"CDPATH set before a later cd", "CDPATH=" + home + "; cd sub && ls", false},
+		{"CDPATH read before a later cd", "echo " + home + " | read CDPATH; cd sub && ls", false},
+		{"printf -v before a later cd", "printf -v CDPATH x; cd sub && ls", false},
+		{"shopt before a later cd", "shopt -s cdable_vars; cd sub && ls", false},
+		{"printf before a later cd", "printf x && cd sub && ls", true},
+		{"later cd, five cds", "ls && cd sub && cd .. && cd sub && cd .. && cd sub && ls", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := LateChainCallGrade(tc.command, project, home) == GradeNone; got != tc.ordinary {
 				t.Fatalf("LateChainCallGrade(%q) ordinary=%v, want %v", tc.command, got, tc.ordinary)
 			}
-			if strings.HasPrefix(tc.command, "cd ") || strings.HasPrefix(tc.command, "! cd") || strings.HasPrefix(tc.command, "X=1 cd") {
+			if strings.Contains(tc.command, "cd ") || strings.HasPrefix(tc.command, "pushd ") || strings.HasPrefix(tc.command, "source ") {
+				// LateCallGrade keeps every compound call with a cd Possible.
 				if grade := LateCallGrade(tc.command, project, home); grade == GradeNone {
 					t.Fatalf("LateCallGrade(%q) = None, want it unchanged (not ordinary)", tc.command)
 				}
@@ -122,6 +173,12 @@ func TestGAP1188LateChainCallGradeReadsALeadingCD(t *testing.T) {
 		}
 		if LateChainCallGrade("cd ./sub && ls", project, home) != GradeNone {
 			t.Fatal("cd ./sub with CDPATH set is not ordinary, want ordinary (CDPATH is not read)")
+		}
+		if LateChainCallGrade("ls && cd sub && ls", project, home) == GradeNone {
+			t.Fatal("a later cd sub with CDPATH set is ordinary, want refused")
+		}
+		if LateChainCallGrade("ls && cd ./sub && ls", project, home) != GradeNone {
+			t.Fatal("a later cd ./sub with CDPATH set is not ordinary, want ordinary (CDPATH is not read)")
 		}
 	})
 }

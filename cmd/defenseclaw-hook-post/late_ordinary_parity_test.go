@@ -30,8 +30,8 @@ import (
 // call that either late-call scan finds protected, including a call that only
 // the shared protected-reach reader refuses (rel-1-0-10 GAP-1188). An
 // ordinary leading cd chain, a PermissionRequest and a relative Codex workdir
-// follow the outage mode (the review of 098bcb4da9); their protected twins
-// stay closed.
+// follow the outage mode (the review of 098bcb4da9), and so does an ordinary
+// cd at a later step (GAP-1303); their protected twins stay closed.
 //
 // The native hook runs each row on two of its no-answer paths: the
 // restart-window path (lateOrdinaryCheck, with a DefenseClaw home) and
@@ -51,7 +51,8 @@ func TestGAP1188ShellAndNativeLateOrdinaryAgree(t *testing.T) {
 	project := filepath.Join(home, "proj")
 	sub := filepath.Join(project, "sub")
 	scratch := filepath.Join(root, "scratch")
-	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw"), sub, scratch} {
+	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw"), sub, scratch,
+		filepath.Join(project, "backend"), filepath.Join(project, "frontend")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -156,6 +157,18 @@ func TestGAP1188ShellAndNativeLateOrdinaryAgree(t *testing.T) {
 		{"cd then a link after a semicolon", "cd chain protected", "PreToolUse", bash("cd sub; cat childlink"), false},
 		{"Codex relative workdir into the SSH folder", "cd chain protected", "PreToolUse",
 			payload("PreToolUse", "exec_command", map[string]any{"cmd": "cat authorized_keys", "workdir": "../.ssh"}), false},
+		// GAP-1303: a cd at a later step.
+		{"ls, cd, ls", "later cd", "PreToolUse", bash("ls && cd sub && ls"), true},
+		{"cd, make, cd back", "later cd", "PreToolUse", bash("cd sub && make && cd .."), true},
+		{"two projects", "later cd", "PreToolUse", bash("cd backend && go test ./... && cd ../frontend && npm test"), true},
+		{"later cd into the SSH folder", "later cd protected", "PreToolUse", bash("ls && cd ../.ssh && cat authorized_keys"), false},
+		{"later cd up to the home", "later cd protected", "PreToolUse", bash("ls && cd .. && cat .env"), false},
+		{"later cd home by tilde", "later cd protected", "PreToolUse", bash("ls && cd ~/.ssh && cat authorized_keys"), false},
+		{"later cd by a variable into the state folder", "later cd protected", "PreToolUse", bash("ls && cd $HOME/.defenseclaw && ls"), false},
+		{"later cd then a link of that folder", "later cd protected", "PreToolUse", bash("ls && cd sub && cat childlink"), false},
+		{"cd, make, cd back, then the link", "later cd protected", "PreToolUse", bash("cd sub && make && cd .. && cat keylink"), false},
+		{"permission request later cd", "permission request", "PermissionRequest", permission("ls && cd sub && ls"), true},
+		{"permission request later cd into the SSH folder", "permission request protected", "PermissionRequest", permission("ls && cd ../.ssh && cat authorized_keys"), false},
 		{"permission request", "permission request", "PermissionRequest", permission("echo hi"), true},
 		{"permission request cd chain", "permission request", "PermissionRequest", permission("cd sub && ls"), true},
 		{"permission request read of a plain file", "permission request", "PermissionRequest",

@@ -78,7 +78,8 @@ func lateOrdinaryPayload(t *testing.T, project string, command any) string {
 // (LateOrdinaryBothScans): an argv command, which the shared protected-reach
 // reader does not model, stays closed (rel-1-0-10 GAP-1188); an ordinary
 // leading cd chain, which both read, follows the outage mode, and a cd the
-// readers cannot prove or one into a protected folder stays closed.
+// readers cannot prove or one into a protected folder stays closed. The same
+// holds for a cd at a later step (GAP-1303).
 func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 	project := lateOrdinaryProject(t)
 	// A folder whose link is not in the project (round 4: a cd must move the
@@ -92,6 +93,11 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(sub, "plain.txt"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	for _, dir := range []string{"backend", "frontend"} {
+		if err := os.Mkdir(filepath.Join(project, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	shortAnswerBudget(t, 400*time.Millisecond)
 	addr := hungGateway(t)
@@ -184,6 +190,18 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"cd up to the home, open tier", "cd .. && cat .env", "open", true},
 			{"cd by a variable into the state folder, open tier", "cd $HOME/.defenseclaw && ls", "open", true},
 			{"cd twice, then tilde, open tier", "cd /x; cd ~/.aws && cat credentials", "open", true},
+			// GAP-1303: a cd at a later step follows the outage mode when
+			// it is ordinary; the protected twins stay closed.
+			{"ls, cd, ls, open tier", "ls && cd sub && ls", "open", false},
+			{"cd, make, cd back, open tier", "cd sub && make && cd ..", "open", false},
+			{"two projects, open tier", "cd backend && go test ./... && cd ../frontend && npm test", "open", false},
+			{"ls, cd, ls, strict tier", "ls && cd sub && ls", "closed", true},
+			{"later cd into the SSH folder, open tier", "ls && cd ../.ssh && cat authorized_keys", "open", true},
+			{"later cd up to the home, open tier", "ls && cd .. && cat .env", "open", true},
+			{"later cd home by tilde, open tier", "ls && cd ~/.ssh && cat authorized_keys", "open", true},
+			{"later cd by a variable into the state folder, open tier", "ls && cd $HOME/.defenseclaw && ls", "open", true},
+			{"later cd then a link of that folder, open tier", "ls && cd sub && cat childlink", "open", true},
+			{"cd, make, cd back, then the link, open tier", "cd sub && make && cd .. && cat keylink", "open", true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
 				result, _ := runAgainstGateway(t, connector, addr, func(opts *Options) {

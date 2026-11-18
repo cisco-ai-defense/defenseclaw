@@ -381,7 +381,7 @@ func lateOrdinaryLook(opts Options) bool {
 // (hookpaths.LateOrdinaryCallAt, GAP-0518), which also reads a path out of a
 // key=value word, a sed write and a dash-named link target, and the shared
 // protected-reach reader (lateOrdinaryNoAnswerPayloadAt), which also reads the
-// PermissionRequest, leading cd chain and relative Codex workdir shapes the
+// PermissionRequest, cd chain (a cd at any step) and relative Codex workdir shapes the
 // link-hop scan reads. Only such a call may follow the open outage tier when
 // its gateway took it and gave no answer; a call that either scan reaches
 // stays closed. Both scans tell the protected files against home, the account
