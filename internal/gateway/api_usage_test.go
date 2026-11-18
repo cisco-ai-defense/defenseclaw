@@ -71,11 +71,27 @@ func TestUsageEndpointOffReportsDisabled(t *testing.T) {
 	}
 }
 
+// A per-user gateway's store holds only its owner's usage: the owner reads
+// the whole store, which is its own usage, so the scope is "own" ("yours" in
+// the CLI and the TUI), never "all" ("everyone", GAP-1205). Only an
+// administrator of a managed gateway reads everyone's.
 func TestUsageEndpointPerUserGatewaySeesItsRows(t *testing.T) {
 	api, _ := usageAPI(t, false)
 	code, body := getUsage(t, api, context.Background(), "by=model&since=7d")
-	if code != http.StatusOK || body["scope"] != "all" {
+	rows, _ := body["rows"].([]any)
+	if code != http.StatusOK || body["scope"] != "own" || len(rows) == 0 {
 		t.Fatalf("%d %v", code, body)
+	}
+	managedAPI, _ := usageAPI(t, true)
+	admin := httptest.NewRequest(http.MethodGet, "/usage?by=model", nil)
+	admin.Header.Set("Authorization", "Bearer usage-admin-token")
+	managedAPI.scannerCfg = &config.Config{Gateway: config.GatewayConfig{Token: "usage-admin-token"}}
+	rec := httptest.NewRecorder()
+	managedAPI.handleUsage(rec, admin)
+	var adminBody map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &adminBody)
+	if rec.Code != http.StatusOK || adminBody["scope"] != "all" {
+		t.Fatalf("a managed administrator reads everyone's usage: %d %v", rec.Code, adminBody)
 	}
 }
 
