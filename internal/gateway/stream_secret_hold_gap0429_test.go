@@ -70,6 +70,15 @@ func (w *gap0429Watch) InspectMidStream(ctx context.Context, direction, content 
 	return w.note(content, w.GuardrailInspector.InspectMidStream(ctx, direction, content, messages, model, mode))
 }
 
+// InspectMidStreamAgeDue is the check of a hold due by age only (GAP-0625):
+// it reads the held text before it is sent, as the other two do, so the
+// watch notes it too. Unwatched, the embedded inspector's method decided
+// without the watch seeing a block or the first read of the whole secret.
+func (w *gap0429Watch) InspectMidStreamAgeDue(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) (*ScanVerdict, bool) {
+	v, full := w.GuardrailInspector.InspectMidStreamAgeDue(ctx, direction, content, messages, model, mode)
+	return w.note(content, v), full
+}
+
 // gap0429Secret is one secret of the table: secret[body:end] are the bytes
 // that must not reach the client before the verdict.
 type gap0429Secret struct {

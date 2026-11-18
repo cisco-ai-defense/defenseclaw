@@ -413,7 +413,6 @@ func (s *passthroughStream) run() {
 		return true, true
 	}
 	// checkHeld sends the events the tool-call hold lets out, once a check
-	// checkHeld sends the events the tool-call hold lets out, once a check
 	// (full, or the one due by age) has read their text and it ends inside
 	// no open secret. False: the check blocked and nothing is sent.
 	checkHeld := func(full bool) bool {

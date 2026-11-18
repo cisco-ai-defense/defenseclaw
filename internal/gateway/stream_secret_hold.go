@@ -99,6 +99,7 @@ var streamTokenRules = []struct {
 	{[]string{"SEC-SENDGRID"}, `SG\.[A-Za-z0-9_.-]+`},
 	{[]string{"SEC-TWILIO"}, `SK[0-9a-fA-F]+`},
 	{[]string{"SEC-NPM-TOKEN"}, `npm_[A-Za-z0-9]+`},
+	{[]string{"SEC-HF-TOKEN"}, `hf_[A-Za-z0-9]+`},
 	{[]string{"SEC-PYPI-TOKEN"}, `pypi-[A-Za-z0-9_-]+`},
 }
 
