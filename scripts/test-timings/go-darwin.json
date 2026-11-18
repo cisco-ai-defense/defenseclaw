@@ -283,6 +283,7 @@
    "TestPluginStartupGuardPinsConfirmedDenialWhateverItsReason": 2.7,
    "TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown": 3.5,
    "TestRefreshedReleasedCopilotHookNamesTheInstallWhileTheLockIsHeld": 7.5,
+   "TestRouteOnlySetupFullyPopulatedEncodesForTheWorker": 0.0,
    "TestRunningSessionOutageWarnsOnceWhicheverEventComesFirst": 15.2,
    "TestSandboxAntigravityHookDenySaysWhy": 2.0,
    "TestSandboxClaudeAndCodexAcknowledgeTheirRelayedToolAnswer": 3.2,
