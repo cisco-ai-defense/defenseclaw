@@ -136,7 +136,7 @@ func TestGAP1316WindowsReadingTwinAnswersAreUnchanged(t *testing.T) {
 				if !reflect.DeepEqual(left, kept) {
 					t.Errorf("%s %s %s: answer %v, want %v as with the twin's own script readings", p.name, route, r.id, left, kept)
 				}
-				if runtime.GOOS == "windows" && r.block && left["action"] != "block" && !(p.managed && route == "copilot") {
+				if runtime.GOOS == "windows" && r.block && left["action"] != "block" && (!p.managed || route != "copilot") {
 					t.Errorf("%s %s %s: action %v, want block", p.name, route, r.id, left["action"])
 				}
 			}
