@@ -1480,6 +1480,18 @@ type protectedFile struct {
 	path    string
 	info    os.FileInfo
 	unknown bool
+	// call is the hook call whose memory newProtectedFiles read the set
+	// from (nil: none): target stats through it rather than finding the
+	// call again for every target (rel-1-0-10:GAP-1293).
+	call *hookCall
+}
+
+// stat is callStat through the hook call the set was read in.
+func (p protectedFile) stat(name string) (os.FileInfo, error) {
+	if p.call != nil {
+		return p.call.stat(name)
+	}
+	return callStat(name)
 }
 
 type protectedFiles []protectedFile
@@ -1512,7 +1524,11 @@ func newProtectedFiles(home string) protectedFiles {
 	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
 	// same files for the whole decision.
 	if call := memoHookCall(); call != nil {
-		return call.targets().protectedFiles(home)
+		files := call.targets().protectedFiles(home) // a copy
+		for index := range files {
+			files[index].call = call
+		}
+		return files
 	}
 	return newProtectedFilesWith(home, nil)
 }
@@ -1554,7 +1570,7 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 		}
 		if info == nil {
 			var err error
-			if info, err = callStat(resolved); err != nil || !info.Mode().IsRegular() {
+			if info, err = p.stat(resolved); err != nil || !info.Mode().IsRegular() {
 				return resolved, true
 			}
 		}

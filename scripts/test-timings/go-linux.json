@@ -1366,6 +1366,7 @@
    "TestCaseFoldingHostJudgesTypedCredentialFileWriteInAnyLetterCase": 11.9,
    "TestCaseFoldingHostLinkToAnOrdinaryNeighbourOfACredentialFileIsAllowed": 3.5,
    "TestCaseFoldingHostNestedCredentialFileIsJudgedInEveryLetterCase": 3.6,
+   "TestChainBodyWritesAreJudgedInEveryFolderTheChainMayLeave": 90.0,
    "TestChainStatementFindingsAfterABackgroundStatementDefault": 88.6,
    "TestChainStatementFindingsAfterABackgroundStatementManaged": 88.6,
    "TestChainStatementFindingsAfterABackgroundStatementManagedStrict": 88.6,

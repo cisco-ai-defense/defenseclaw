@@ -66,10 +66,19 @@ type SimpleCommand struct {
 	// run in, after a cd that may fail (rel-1-0-10:GAP-0869): a reading,
 	// not a further statement of the call.
 	OtherFolder bool
+	// bodyReading marks a reading of a nested body statement in another
+	// folder its call may run in (rel-1-0-10:GAP-1144): it does not count
+	// against the evaluation budget of the statements of the call, which
+	// it would otherwise push into the limit (GAP-1228).
+	bodyReading bool
 	// UnresolvedFolder means the directory of the command is unknown and an
 	// operand of Text depends on it: the gateway reads it in each folder
 	// that holds a protected file (rel-1-0-10:GAP-0871).
 	UnresolvedFolder bool
+	// cappedFolders are, for the UnresolvedFolder reading of a Windows
+	// statement past maxSimpleWindowsOtherReadings, the folders it was not
+	// read in (CappedFolders). A pointer keeps the type comparable.
+	cappedFolders *[]string
 	// AbsoluteOnly means the directory of the command is unknown (an eval,
 	// an unreadable cd) and no operand of Text depends on it: CWD is empty,
 	// and the directory the action starts in judges the command as well as
@@ -251,7 +260,25 @@ const (
 	maxSimpleStates      = 32
 	maxSimpleEvaluations = 512
 	maxCompactionCases   = 8
+	// maxSimpleWindowsOtherReadings bounds the readings of a PowerShell or
+	// CMD call in other folders that name the folder: each is a policy
+	// pass of its own, and a padded call past it took the native gateway
+	// past its hook persistence deadline (rel-1-0-10:GAP-1228). It is the
+	// statement budget, so such a call costs at most about three times a
+	// call of the same statements on rel.
+	maxSimpleWindowsOtherReadings = maxStatementsAlone
 )
+
+// CappedFolders are the folders a Windows statement after moves that may
+// fail was not read in because the call reached
+// maxSimpleWindowsOtherReadings (nil for every other reading). Only its
+// UnresolvedFolder reading carries them (rel-1-0-10:GAP-1281).
+func (s SimpleCommand) CappedFolders() []string {
+	if s.cappedFolders == nil {
+		return nil
+	}
+	return *s.cappedFolders
+}
 
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
@@ -743,6 +770,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars, startHome: home}},
 	}
 	result := make([]SimpleCommand, 0, len(parts))
+	// extra counts the readings of result that are body readings in another
+	// folder (bodyReading): the budget of the statements of the call is
+	// len(result)-extra, as on rel, where those readings did not exist.
+	extra := 0
 	changed := reduced || len(parts) != 1 || input.folderUnknown
 	unproven := false
 	// syntaxUnread: a nested body with a syntax error was read only in part
@@ -962,7 +993,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				result = append(result, command)
 				emitted[command] = true
 				own = append(own, command)
-				if len(result) > maxSimpleEvaluations {
+				if len(result)-extra > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
 			}
@@ -984,7 +1015,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						result = append(result, alone)
 						emitted[alone] = true
 						changed = true
-						if len(result) > maxSimpleEvaluations {
+						if len(result)-extra > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
 						}
 					}
@@ -1095,8 +1126,92 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
 						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
 						result = append(result, child)
-						if len(result) > maxSimpleEvaluations {
+						if child.bodyReading {
+							extra++
+						}
+						if len(result)-extra > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
+						}
+					}
+					// The body starts where its caller is. After a cd that
+					// may fail or not run, that is each folder the tracking
+					// gives the call (mayRunIn), not only the one the walk
+					// moved to: `cd X || cd Y && eval "$body"` runs the body
+					// in X or Y, so it is read in each of them as well
+					// (rel-1-0-10:GAP-1144, GAP-0183). A body that starts in
+					// a folder of its own (innerCWDUnknown) has none.
+					//
+					// These readings come on top of the statements of the
+					// call: they never make the call over its budget. Past
+					// maxSimpleEvaluations readings in all, the body is not
+					// read again folder by folder; each statement of it with a
+					// relative operand is kept as a reading in a folder the
+					// walk does not give (UnresolvedFolder), which the gateway
+					// judges by the protected files it may name there, beside
+					// every reading made before (the one bound rule,
+					// rel-1-0-10:GAP-1228).
+					if !innerCWDUnknown && innerInput.CWD != "" {
+						capped := false
+						for _, dir := range mayRunIn[partIndex] {
+							if dir == innerInput.CWD {
+								continue
+							}
+							if len(result) >= maxSimpleEvaluations {
+								capped = true
+								break
+							}
+							otherInput := innerInput
+							otherInput.CWD, otherInput.folderUnknown = dir, false
+							others := simpleCommands(otherInput, Analyze(otherInput), depth+1, innerInterpreter,
+								simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, nil)
+							if len(others) == 0 && strings.TrimSpace(otherInput.Command) != "" {
+								others = []SimpleCommand{{Text: otherInput.Command, CWD: dir}}
+							}
+							for _, child := range others {
+								if isSyntaxTailUnread(child) {
+									syntaxUnread = true
+									continue
+								}
+								if child.EvaluationFailure != "" {
+									unproven = true
+									continue
+								}
+								if !simpleRelativePathOperand(child.Text) {
+									continue // read in its own folder above
+								}
+								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
+									simpleUnresolvedBoundVariable(child.Text, effective, bound)
+								child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+								child.OtherFolder, child.bodyReading = true, true
+								if emitted[child] {
+									continue
+								}
+								if len(result) >= maxSimpleEvaluations {
+									capped = true
+									break
+								}
+								emitted[child] = true
+								result = append(result, child)
+								extra++
+							}
+						}
+						if capped {
+							for _, child := range inner {
+								if child.EvaluationFailure != "" || child.OtherFolder || !simpleRelativePathOperand(child.Text) {
+									continue
+								}
+								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
+									simpleUnresolvedBoundVariable(child.Text, effective, bound)
+								child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+								child.CWD, child.AbsoluteOnly = "", false
+								child.OtherFolder, child.UnresolvedFolder, child.bodyReading = true, true, true
+								if emitted[child] {
+									continue
+								}
+								emitted[child] = true
+								result = append(result, child)
+								extra++
+							}
 						}
 					}
 					if shared && !bodyParsed {
@@ -1207,7 +1322,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				emitted[again] = true
 				again.OtherFolder = true
 				result = append(result, again)
-				if len(result) > maxSimpleEvaluations {
+				if len(result)-extra > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
 			}
@@ -1284,8 +1399,12 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	begin := 0
 	result := make([]SimpleCommand, 0, 2)
 	variables := make(map[string]string)
-	state := simpleWindowsState{cwd: input.CWD}
+	state := simpleWindowsState{cwd: input.CWD, trackOthers: windowsSimpleCallFolder(input.CWD)}
 	failed := false
+	// readings counts the readings of a statement in another folder it may
+	// run in (OtherFolder): readings, not statements of the call; placed
+	// counts those that name the folder.
+	readings, placed := 0, 0
 	groupIndex := 0
 	var groups []simpleWindowsGroupSnapshot
 	processGroupEvents := func(before int) {
@@ -1301,7 +1420,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			groupIndex++
 		}
 	}
-	appendPart := func(part string, start, end int) {
+	appendPart := func(part string, start, end int, operator string) {
 		childStart := start
 		for childStart < end && unicode.IsSpace(runes[childStart]) {
 			childStart++
@@ -1312,6 +1431,8 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if dialect == windowsPowerShell {
 			if windowsSimpleLiteralOutput(part) {
 				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, LiteralOutputOnly: true})
+				// It moves nothing; the folders an && skipped come back.
+				state.advance(part, dialect, childInput, variables, operator)
 				processGroupEvents(end)
 				return
 			}
@@ -1322,6 +1443,8 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 					failed = true
 				}
 				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, OpaqueValueAssignment: true})
+				// It moves nothing; the folders an && skipped come back.
+				state.advance(part, dialect, childInput, variables, operator)
 				processGroupEvents(end)
 				return
 			}
@@ -1340,7 +1463,46 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			failed = true
 		}
 		result = append(result, SimpleCommand{Text: text, CWD: state.cwd})
-		state.next(part, dialect, childInput, variables)
+		if (len(state.others) != 0 || state.othersUnresolved) && windowsSimpleRelativePathOperand(text, facts.Parse.Dialect) {
+			// A relative operand names a file in each folder the
+			// statement may run in (rel-1-0-10:GAP-1150). Those readings
+			// come on top of the statements of the call, which keep the
+			// budget they have on rel. Past maxSimpleWindowsOtherReadings
+			// of them, the statement is read once more as in a folder the
+			// walk does not give (UnresolvedFolder), as past
+			// maxSimpleWindowsFolders, beside every reading made before:
+			// never the whole-call limit (the one bound rule,
+			// rel-1-0-10:GAP-1228).
+			//
+			// The folders past the cap stay on that reading
+			// (CappedFolders): the gateway reads the statement in those
+			// of them where its operand may name a protected file, as
+			// below the cap, so the cap drops only benign readings
+			// (rel-1-0-10:GAP-1281).
+			unresolved := state.othersUnresolved
+			var capped []string
+			if placed+len(state.others) <= maxSimpleWindowsOtherReadings {
+				for _, other := range state.others {
+					result = append(result, SimpleCommand{Text: text, CWD: other.cwd, OtherFolder: true})
+					readings++
+					placed++
+				}
+			} else {
+				unresolved = true
+				for _, other := range state.others {
+					capped = append(capped, other.cwd)
+				}
+			}
+			if unresolved {
+				reading := SimpleCommand{Text: text, OtherFolder: true, UnresolvedFolder: true}
+				if len(capped) != 0 {
+					reading.cappedFolders = &capped
+				}
+				result = append(result, reading)
+				readings++
+			}
+		}
+		state.advance(part, dialect, childInput, variables, operator)
 		processGroupEvents(end)
 	}
 	for _, lexeme := range lexemes {
@@ -1354,14 +1516,18 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if part == "" {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
-		appendPart(part, begin, lexeme.start)
+		operator := lexeme.operator
+		if lexeme.kind == windowsPipeLexeme {
+			operator = "|"
+		}
+		appendPart(part, begin, lexeme.start, operator)
 		begin = lexeme.end
 		if lexeme.kind == windowsPipeLexeme || lexeme.operator == "&&" || lexeme.operator == "||" {
 			// A pipeline stage has a separate scope; conditional assignments
 			// may not have run. Do not carry either into a later command.
 			clear(variables)
 		}
-		if len(result) >= maxStatementsAlone {
+		if len(result)-readings >= maxStatementsAlone {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}
@@ -1380,7 +1546,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		}
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
-	appendPart(last, begin, len(runes))
+	appendPart(last, begin, len(runes), "")
 	if failed {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
 	}

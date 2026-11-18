@@ -40,12 +40,13 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	}
 	protected := make(protectedFiles, 0, len(names))
 	origin := make([]string, 0, len(names))
+	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
 	for _, name := range names {
 		if !filepath.IsAbs(name) {
 			continue
 		}
-		entry := protectedFile{path: filepath.Clean(name)}
-		if info, err := callStat(entry.path); err == nil {
+		entry := protectedFile{path: filepath.Clean(name), call: call}
+		if info, err := call.stat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
 			entry.unknown = true

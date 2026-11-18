@@ -356,6 +356,8 @@
    "TestGAP1138DotNetFileOpensCodexAndClaudeCode": 125.1,
    "TestGAP1138DotNetFileOpensDevinAndAntigravity": 47.7,
    "TestGAP1138PowerShellWriteSpellings": 59.9,
+   "TestGAP1150FailedLocationChangeThenRelativeStateWriteFiveTiers": 190.0,
+   "TestGAP1228PaddedWindowsCallAfterMovesThatMayFailKeepsItsReadingsFiveTiers": 300.0,
    "TestGAP1265NumericTableIsNotCutAtHeldBound": 208.1,
    "TestGAP1265OpenRunIdleIsNotTruncated": 45.7,
    "TestHandlePassthrough_SSRFHardening": 2.8,
