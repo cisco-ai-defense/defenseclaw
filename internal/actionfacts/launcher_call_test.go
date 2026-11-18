@@ -92,15 +92,19 @@ func TestShellLauncherCallsReadsBothWays(t *testing.T) {
 	}
 	for _, tc := range tests {
 		var starts []int
-		for _, call := range ShellLauncherCalls(tc.argv) {
+		calls, cut := ShellLauncherCalls(tc.argv)
+		if cut {
+			t.Errorf("%s: cut, want every reading judged", tc.name)
+		}
+		for _, call := range calls {
 			starts = append(starts, call.Start)
 		}
 		if strings.Trim(strings.Join(strings.Fields(fmt.Sprint(starts)), ","), "[]") != strings.Trim(strings.Join(strings.Fields(fmt.Sprint(tc.starts)), ","), "[]") {
 			t.Errorf("%s: starts %v, want %v", tc.name, starts, tc.starts)
 		}
 	}
-	calls, _, _, ok := ShellLauncherCallsOfText(`start "My Title" sudo -u cmd pwsh -c 'dir'`)
-	if !ok || len(calls) != 1 || calls[0].Body != "dir" {
+	calls, _, _, cut, ok := ShellLauncherCallsOfText(`start "My Title" sudo -u cmd pwsh -c 'dir'`)
+	if !ok || cut || len(calls) != 1 || calls[0].Body != "dir" {
 		t.Errorf("text: %+v %t, want one call with body dir", calls, ok)
 	}
 }
@@ -144,6 +148,96 @@ func TestShellLauncherCallOfTextReadsStatements(t *testing.T) {
 		call, _, statement, ok := ShellLauncherCallOfText(tc.text)
 		if ok != tc.ok || (ok && (call.Body != tc.body || statement != tc.statement)) {
 			t.Errorf("%s: got body %.40q statement %d ok %t, want %.40q %d %t", tc.name, call.Body, statement, ok, tc.body, tc.statement, tc.ok)
+		}
+	}
+}
+
+// gap0971Decoys are wrapper words whose operand is spelled as a launcher
+// name, the GAP-0857 rows of TestShellLauncherCallFindsTheLauncher; a chain of
+// them is a crafted spelling (rel-1-0-10:GAP-0971).
+var gap0971Decoys = [][]string{
+	{"sudo", "-u", "cmd"}, {"env", "-u", "pwsh"}, {"timeout", "-s", "sh", "5"}, {"nice", "-n", "cmd.exe"},
+	{"xargs", "-I", "bash"}, {"wsl", "-u", "powershell.exe", "--"}, {"sudo", "-u", "powershell"}, {"env", "-u", "cmd"},
+}
+
+func gap0971Chain(n int) []string {
+	var chain []string
+	for i := 0; i < n; i++ {
+		chain = append(chain, gap0971Decoys[i%len(gap0971Decoys)]...)
+	}
+	return chain
+}
+
+// However many wrapper operands are spelled as launchers, the launcher the
+// chain runs is read, and a launcher reading past maxLauncherReadings is
+// reported as cut (the one bound rule), never dropped in silence. start's
+// switches that take an operand (/d, /node, /affinity, /machine, any case,
+// and /d<path> in one word) take it, so the title and the program after it
+// are read, by the reader and by the over-limit screen alike
+// (rel-1-0-10:GAP-0971).
+func TestGAP0971LauncherChainsReachTheLauncher(t *testing.T) {
+	const body = "Get-ChildItem ."
+	for n := 1; n <= 24; n++ {
+		argv := append(gap0971Chain(n), "pwsh", "-Command", body)
+		calls, cut := ShellLauncherCalls(argv)
+		if len(calls) == 0 || calls[len(calls)-1].Start != len(argv)-3 || calls[len(calls)-1].Body != body {
+			t.Errorf("chain n=%d: calls %+v, want the last one at %d with body %q", n, calls, len(argv)-3, body)
+		}
+		if len(calls) > maxLauncherReadings+1 {
+			t.Errorf("chain n=%d: %d calls, want at most %d", n, len(calls), maxLauncherReadings+1)
+		}
+		// Every decoy whose reading gives a script (a pwsh or powershell word
+		// followed by a word PowerShell runs) is one reading more.
+		readings := 1
+		for i := 0; i < n; i++ {
+			if d := gap0971Decoys[i%len(gap0971Decoys)]; d[2] == "pwsh" || d[2] == "powershell" {
+				readings++
+			}
+		}
+		if want := readings > maxLauncherReadings+1; cut != want {
+			t.Errorf("chain n=%d (%d readings): cut %t, want %t", n, readings, cut, want)
+		}
+		text := strings.Join(gap0971Chain(n), " ") + " pwsh -Command '" + body + "'"
+		tcalls, _, _, tcut, ok := ShellLauncherCallsOfText(text)
+		if !ok || tcalls[len(tcalls)-1].Body != body || tcut != cut {
+			t.Errorf("chain n=%d text: calls %+v cut %t ok %t, want the launcher read and cut %t", n, tcalls, tcut, ok, cut)
+		}
+		if !hostLauncherArgv(argv, 0) {
+			t.Errorf("chain n=%d: the over-limit screen names no launcher", n)
+		}
+	}
+	// A chain still open at MaxArgvItems words runs a command past the walk.
+	long := append(strings.Fields(strings.Repeat("sudo -u cmd ", MaxArgvItems/3+1)), "pwsh", "-Command", body)
+	if _, cut := ShellLauncherCalls(long); !cut {
+		t.Errorf("chain past MaxArgvItems words: not cut")
+	}
+	if _, _, _, cut, _ := ShellLauncherCallsOfText(strings.Join(long, " ")); !cut {
+		t.Errorf("chain past MaxArgvItems words as text: not cut")
+	}
+
+	starts := []struct {
+		name   string
+		prefix []string
+	}{
+		{"/d <dir> <title>", []string{"start", "/d", `C:\work`, "T"}},
+		{"/d <launcher name> <title>", []string{"start", "/d", "cmd", "T"}},
+		{"<empty title> /d <launcher name>", []string{"start", "", "/d", "pwsh"}},
+		{"/b <title> /d <launcher name>", []string{"start", "/b", "T", "/d", "cmd"}},
+		{"<title> /D <launcher name>", []string{"start", "T", "/D", "pwsh.exe"}},
+		{"/d<dir> in one word", []string{"start", `/dC:\work`, "T"}},
+		{"/node <n>", []string{"start", "/node", "1", "T"}},
+		{"/affinity <mask>", []string{"start", "/AFFINITY", "3", "T"}},
+		{"/machine <arch>", []string{"start", "/machine", "amd64", "T"}},
+		{"/wait /min <title>", []string{"start", "/wait", "/min", "T"}},
+	}
+	for _, s := range starts {
+		argv := append(append([]string{}, s.prefix...), "cmd", "/c", "dir")
+		calls, cut := ShellLauncherCalls(argv)
+		if cut || len(calls) == 0 || calls[len(calls)-1].Start != len(s.prefix) || calls[len(calls)-1].Body != "dir" {
+			t.Errorf("start %s: calls %+v cut %t, want the launcher at %d with body dir", s.name, calls, cut, len(s.prefix))
+		}
+		if !hostLauncherArgv(argv, 0) {
+			t.Errorf("start %s: the over-limit screen names no launcher", s.name)
 		}
 	}
 }

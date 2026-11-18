@@ -450,6 +450,11 @@ func dispatchTrustedAction(
 			findings = withPosixDataWordRecord(findings)
 		}
 	}()
+	// A DefenseClaw state write that only a partial reading proves is at
+	// least the unknown tier, never a clean allow: judged after every other
+	// reading and twin, so a proven block keeps its verdict
+	// (rel-1-0-10:GAP-0892).
+	defer func() { findings = withPartialStateWriteFloor(request, findings) }()
 	// One dispatch is one hook call whichever surface carries the action (the
 	// hook request, an ACP frame, a direct evaluation): the file system reads
 	// of its reach scans are remembered for the decision (hookpaths.HookCall;
@@ -714,6 +719,14 @@ func dispatchTrustedAction(
 			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
 			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
+		if launcher.readingCut {
+			// A wrapper chain with more launcher readings than the reader
+			// judges, or one still open past the words it reads, has a
+			// launcher reading no request judged: TRUNCATED (the one bound
+			// rule, rel-1-0-10:GAP-0971). The readings judged, the last
+			// launcher of the chain among them, still decide.
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
 		}
 		if cut := trustedUndecodedCommandCut(request.Input, facts); cut.Any() {
 			// A command array past the decode bound is read by nothing: the
@@ -7366,6 +7379,12 @@ func filterExactFallbackFindings(
 			finding.enforcement = findingEnforcementAlertOnly
 		} else if contract.detectionOnly || !enforcementCapable || !proven {
 			finding.enforcement = findingEnforcementDetectionOnly
+			// The contract proved its operation on what the analysis read, but
+			// the call was read only in part, so no enforcing reader ran
+			// (rel-1-0-10:GAP-0892). A detection-only contract never denies
+			// itself; the caller may still floor the call at the unknown tier
+			// (withPartialStateWriteFloor).
+			finding.partialReading = matched && !proofBoundary && enforcementCapable && operandGrammarOnlyReading(facts)
 		} else {
 			finding.enforcement = findingEnforcementAllowed
 		}

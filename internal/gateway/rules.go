@@ -110,6 +110,10 @@ type RuleFinding struct {
 	// counts it as a limit the call hit or raises it to an enforcing one
 	// (rel-1-0-10:GAP-0760). Private and value-free.
 	dataWordRecord bool
+	// partialReading marks a finding whose rule contract matched the call's
+	// facts while the analysis read the call only in part, so it could not
+	// enforce (exact fallback, rel-1-0-10:GAP-0892). Private and value-free.
+	partialReading bool
 	// evaluationFault marks the finding of a call the evaluation failed on:
 	// the shell parser failed on its text (shellparse.ErrParserFault) or a
 	// reader panicked (recoverTrustedActionFault). Nothing proves what the
