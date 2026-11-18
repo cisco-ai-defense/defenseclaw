@@ -179,17 +179,21 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	// of an install that set Kiro up afterwards (review round 5 P2 of
 	// GAP-1092). A file that cannot be read as JSON is left with its record.
 	recorded := c.recordedKiroFiles(opts, hooks, append(slices.Clone(agents), kiroBuiltInDefaultAgentPath()))
-	if scope == nil && !kiroManaged(opts) {
-		// `setup remove` fails on it, as it did before such a file was
-		// skipped, and VerifyClean reports it (kiroUnreadableRecordedFiles):
-		// skipped, the removal succeeded with this install's hooks possibly
-		// still in it (rel-1-0-10 GAP-1298). Its record stays for the retry.
+	if scope == nil && !kiroManaged(opts) && opts.ReportUnreadableResidue {
+		// `connector teardown` fails on it and `connector verify` reports it
+		// (kiroUnreadableRecordedFiles): skipped silently, the removal
+		// succeeded with this install's hooks possibly still in it
+		// (rel-1-0-10 GAP-1298). Its record stays for the retry.
 		if err := kiroUnreadableRecordedFiles(recorded); err != nil {
 			errs = append(errs, err)
 		}
 	} else {
-		// The boot reclaim and the managed teardown skip it: it failed the
-		// reclaim on every boot. It proves no ownership (kiroPendingRecords).
+		// The boot teardowns, the boot reclaim and the managed teardown
+		// skip it: failing there came back on every gateway start until the
+		// file was fixed (rel-1-0-10 GAP-1304). Its record stays and proves
+		// no ownership while the file cannot be read (kiroPendingRecords);
+		// once it can, the record is pending again and the boot reclaim
+		// finishes the cleanup (kiroUnfinishedTeardown).
 		for _, path := range recorded.unreadable {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector kiro: %s is not a JSON object, so its DefenseClaw hooks, if any, stay; "+
 				"its backup record is kept and the cleanup retried once the file can be read\n", path)
@@ -547,8 +551,10 @@ func recordKiroCreatedDirs(opts SetupOpts, missing []string) {
 // VerifyClean reports DefenseClaw Kiro hooks left in the files the settings
 // name (verifyHooksClean), this install's entries left in a file only its
 // backup records name, what an unfinished teardown left in the data folder
-// (kiroUnfinishedTeardown), and a file only its records name that cannot be
-// read as JSON (kiroUnreadableRecordedFiles), which `setup remove` fails on.
+// (kiroUnfinishedTeardown), and, for `connector verify`
+// (SetupOpts.ReportUnreadableResidue), a file only its records name that
+// cannot be read as JSON (kiroUnreadableRecordedFiles), which `connector
+// teardown` fails on. The boot teardowns log that file and go on (GAP-1304).
 func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 	if err := c.verifyHooksClean(opts); err != nil {
 		return err
@@ -556,7 +562,7 @@ func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 	if err := c.kiroUnfinishedTeardown(opts); err != nil {
 		return err
 	}
-	if kiroManaged(opts) {
+	if kiroManaged(opts) || !opts.ReportUnreadableResidue {
 		return nil
 	}
 	hooks := c.hookCleanupPaths(opts)
@@ -631,8 +637,9 @@ func (c *KiroConnector) orphanedHookFilesFor(goos string, opts SetupOpts) ([]str
 	hooks := c.hookCleanupPaths(opts)
 	agents := append(c.agentCleanupPaths(opts), kiroBuiltInDefaultAgentPath())
 	// A recorded file that cannot be read as JSON is skipped, not an error: it
-	// failed the whole reclaim and prune on every boot (`setup remove` fails
-	// on it and VerifyClean reports it, kiroUnreadableRecordedFiles).
+	// failed the whole reclaim and prune on every boot (`connector teardown`
+	// fails on it and `connector verify` reports it,
+	// kiroUnreadableRecordedFiles).
 	recorded := c.recordedKiroFiles(opts, hooks, agents)
 	for _, path := range slices.Concat(hooks, recorded.hooks) {
 		if present, err := kiroV3FileHoldsCommand(path, commands); err != nil {

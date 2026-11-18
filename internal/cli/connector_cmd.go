@@ -1056,6 +1056,9 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := resolveConnectorOpts(dataDir)
+	// This removal names a leftover it cannot clean (an agent file that is
+	// not JSON) and fails; the gateway's boot teardowns log it (GAP-1304).
+	opts.ReportUnreadableResidue = true
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
@@ -1596,6 +1599,7 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	}
 
 	opts := resolveConnectorOpts(dataDir)
+	opts.ReportUnreadableResidue = true
 	verifyErr := conn.VerifyClean(opts)
 
 	if connectorFlagJSON {

@@ -375,6 +375,18 @@ type SetupOpts struct {
 	// install's live hooks stay (review P2 of rel-1-0-10 GAP-1092). The
 	// teardown of a configured connector leaves it false.
 	ReclaimOwnHooksOnly bool
+
+	// ReportUnreadableResidue is set by `connector teardown` and `connector
+	// verify`, the native steps of uninstall and of an operator's removal. A
+	// leftover the connector cannot clean and that guards nothing fails them
+	// and names the file to fix (Kiro: a file only a backup record names that
+	// is not a JSON object, which Kiro cannot load either, rel-1-0-10
+	// GAP-1298). The gateway's boot teardowns (guardrail disabled, a removed
+	// connector, the lock-only orphan reconcile, the unguarded reclaim) leave
+	// it false: they log the file and go on, as their failure came back on
+	// every start until the file was fixed, and the boot reclaim finishes
+	// the cleanup once it can be read (rel-1-0-10 GAP-1304).
+	ReportUnreadableResidue bool
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for
