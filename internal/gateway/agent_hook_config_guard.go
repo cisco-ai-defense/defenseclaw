@@ -440,6 +440,8 @@ type agentHookConfigChange struct {
 	// text is the call's own text for the file, judged when the change
 	// cannot be applied to the file as it is.
 	text string
+	// edits are an Edit or MultiEdit call's replacements.
+	edits []agentHookConfigTextEdit
 	// after is the document the call leaves (exists false: it removes the
 	// file); ok false when the change does not apply to the file as read.
 	after func(read func(string) ([]byte, bool)) (body []byte, exists, ok bool)
@@ -556,7 +558,7 @@ func agentHookConfigEditChange(path string, edits []agentHookConfigTextEdit) age
 		text.WriteString(edit.new)
 		text.WriteString("\n")
 	}
-	return agentHookConfigChange{path: path, text: text.String(),
+	return agentHookConfigChange{path: path, text: text.String(), edits: edits,
 		after: func(read func(string) ([]byte, bool)) ([]byte, bool, bool) {
 			before, exists := read(path)
 			return agentHookConfigApplyEdits(before, exists, edits)
@@ -1247,9 +1249,12 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 //   - a shell write, whose content is not known, is
 //     tamper.agent_hook_config_write as an alert only, never a block.
 //
-// The guard only adds findings. A file the laptop would read first (a hook
-// entry removed from an existing document) is judged without that file, so
-// the sandbox verdict is never stricter than the laptop's.
+// The guard only adds findings. A file the laptop would read first is judged
+// without that file, except the per-user file where the connector's setup
+// registers DefenseClaw's hooks on the laptop
+// (sandboxAgentHookRegistrations): a change there is judged against
+// synthetic copies of that file, as the laptop judges its own (GAP-0433,
+// GAP-0536).
 func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	ruleID, note, target := sandboxAgentHookConfigChange(request)
 	if target == "" ||
@@ -1292,13 +1297,27 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 	if changes, native := agentHookConfigFileChanges(input.Tool, input.Args); native {
 		noRead := func(string) ([]byte, bool) { return nil, false }
 		for _, change := range changes {
-			target := change.path
+			target := strings.TrimSpace(change.path)
+			// "~" is the guest's HOME, as the laptop guard reads it
+			// against the account home (resolvePlaces).
+			if home := input.ActiveHome; path.IsAbs(home) && (target == "~" || strings.HasPrefix(target, "~/")) {
+				target = path.Join(home, target[1:])
+			}
 			if !path.IsAbs(target) && path.IsAbs(input.CWD) {
 				target = path.Join(input.CWD, target)
 			}
 			format := sandboxAgentHookConfigFormat(target, input.ActiveHome)
 			if format == "" {
 				continue
+			}
+			if copies := sandboxAgentHookRegisteredCopies(request.Connector, target, input.ActiveHome); len(copies) > 0 {
+				reason, judged := sandboxAgentHookRegisteredChange(format, change, copies)
+				if reason != "" {
+					return agentHookConfigDisableRuleID, reason + "; " + sandboxManagedHooksNote, target
+				}
+				if judged {
+					continue
+				}
 			}
 			after, afterExists, ok := change.after(noRead)
 			if !ok {
@@ -1329,6 +1348,93 @@ func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, t
 		}
 	}
 	return "", "", ""
+}
+
+// sandboxAgentHookRegistrations are, per connector, the per-user files under
+// the home where the connector's per-user setup registers DefenseClaw's hooks
+// on a laptop (Claude Code: claudeCodeSettingsPath), with the "hooks" member
+// that setup writes there. An actor keeps its hooks in managed settings, so
+// its own copy holds none, and the gateway does not read it; the laptop reads
+// its copy and blocks a change that drops or changes them (GAP-0433).
+var sandboxAgentHookRegistrations = map[string]struct {
+	files []string
+	hooks string
+}{
+	"claudecode": {
+		files: []string{".claude/settings.json"},
+		hooks: `{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"~/.defenseclaw/hooks/claude-code-hook.sh","timeout":30}]}]}`,
+	},
+}
+
+// sandboxAgentHookRegisteredCopies are, for a guest path that is under the
+// guest home a file where connector registers DefenseClaw's hooks on a
+// laptop, synthetic copies of that file as the laptop holds it: the
+// registered hooks in the key order the hook docs use, compact, and as
+// setup's encoder writes them (sorted keys, compact and indented). nil for
+// any other path.
+func sandboxAgentHookRegisteredCopies(connector, target, home string) [][]byte {
+	registration, known := sandboxAgentHookRegistrations[connector]
+	if !known || !path.IsAbs(home) {
+		return nil
+	}
+	if !slices.ContainsFunc(registration.files, func(name string) bool {
+		return path.Clean(target) == path.Join(path.Clean(home), name)
+	}) {
+		return nil
+	}
+	copies := [][]byte{[]byte(`{"hooks":` + registration.hooks + `}`)}
+	var hooks any
+	if json.Unmarshal([]byte(registration.hooks), &hooks) != nil {
+		return copies
+	}
+	document := map[string]any{"hooks": hooks}
+	if compact, err := json.Marshal(document); err == nil {
+		copies = append(copies, compact)
+	}
+	if indented, err := json.MarshalIndent(document, "", "  "); err == nil {
+		copies = append(copies, indented)
+	}
+	return copies
+}
+
+// sandboxManagedHooksNote tells the person why a change to the actor's
+// registered hook file is refused and what to do instead (GAP-0433, lead
+// ruling: the actor is stricter than the laptop here in 1.0.10).
+const sandboxManagedHooksNote = "in an actor DefenseClaw's hooks are managed by root-owned settings, so this file must keep DefenseClaw's hook entries as written: change other keys with Edit, or ask your administrator to change the managed settings"
+
+// sandboxAgentHookRegisteredChange judges a change to a file that holds
+// DefenseClaw's hooks on the laptop as the laptop judges it, against
+// synthetic copies of that file (sandboxAgentHookRegisteredCopies): the
+// change is applied to each copy it applies to and the laptop's before/after
+// comparison (agentHookConfigTurnsOff) names how it turns them off. A Write
+// that does not keep the registered entries (a decoy that only names
+// DefenseClaw), an Edit that rewrites the hook command (kept old text
+// included), renames the hooks or event key, or adds a later key that
+// overrides them, all change the fingerprint. judged is false when the change
+// applies to no copy: it then edits text the laptop's copy does not hold, so
+// only an Edit whose old text names DefenseClaw and is not kept as it was is
+// taken to change their entries.
+func sandboxAgentHookRegisteredChange(format string, change agentHookConfigChange, copies [][]byte) (reason string, judged bool) {
+	for _, before := range copies {
+		read := func(string) ([]byte, bool) { return before, true }
+		after, afterExists, ok := change.after(read)
+		if !ok {
+			continue
+		}
+		judged = true
+		if reason := agentHookConfigTurnsOff(format, before, true, after, afterExists); reason != "" {
+			return reason, true
+		}
+	}
+	if judged {
+		return "", true
+	}
+	for _, edit := range change.edits {
+		if edit.old != edit.new && strings.Contains(strings.ToLower(edit.old), "defenseclaw") {
+			return "removes or changes DefenseClaw's hook entries", false
+		}
+	}
+	return "", false
 }
 
 // sandboxAgentHookConfigFormat is the hook-file format of a sandbox path by

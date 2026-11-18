@@ -1129,7 +1129,15 @@ func (writer *EventHistoryWriter) enqueueHealthFailure(
 	err error,
 	classOverride EventHistorySQLiteClass,
 ) {
-	if writer == nil || writer.healthReporter == nil {
+	if writer == nil {
+		return
+	}
+	if code == EventHistoryHealthWriteFailed {
+		// The store's one full-volume alert (substrate-1:GAP-0554); a writer
+		// without a health reporter used to log nothing at all.
+		writer.store.NoteWriteError("event-history write", err)
+	}
+	if writer.healthReporter == nil {
 		return
 	}
 	var sqliteClass EventHistorySQLiteClass

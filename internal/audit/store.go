@@ -311,6 +311,9 @@ type Store struct {
 	// walPressure is true while the last WAL guard pass left the log over
 	// its limit; background writers wait for it (awaitWALHeadroom).
 	walPressure atomic.Bool
+	// fullAlert is the one "ALERT audit_store_full" signal of a store whose
+	// volume is full, whichever write hits it (NoteWriteError).
+	fullAlert storeFullAlert
 
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
@@ -740,6 +743,9 @@ func (s *Store) execDB(ctx context.Context, op string, query string, args ...any
 		s.noteWriteAttempt(started, execErr, true)
 		return execErr
 	})
+	if err == nil {
+		s.noteWriteOK()
+	}
 	return res, err
 }
 

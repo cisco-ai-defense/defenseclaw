@@ -1903,6 +1903,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0388", page: "stories/local-observability.mdx", has: ["21 DefenseClaw dashboards (22 with the Fleet assets)"], lacks: ["20 DefenseClaw dashboards"] },
   { gap: "GAP-0211", page: "substrate/how-it-works.mdx", has: ["refused by default in every mode", "`alert` is an opt-in the operator chooses"] },
   { gap: "GAP-0200", page: "substrate/reference.mdx", has: ["There is no `--api`", "### What `verify` needs"], lacks: ["`--api` reads it from the gateway", "or from the gateway with `--api`"] },
+  { gap: "GAP-0461", page: "substrate/how-it-works.mdx", section: "Suspend, resume, undo, fork", has: ["atelet uploads it to the bucket about 5 minutes later (atelet's `--snapshot-upload-delay`)", "a resume or a delete in those minutes skips the upload", "`kubectl ate suspend actor NAME -a ATESPACE --mode sync`"] },
   { gap: "GAP-0200", page: "substrate/troubleshooting.mdx", has: ["### `verify` cannot read the snapshot bucket", "### `verify` cannot read the access policies or the actor routes"], lacks: ["does not read the bucket yet"] },
   { gap: "GAP-1716", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },

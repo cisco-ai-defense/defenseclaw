@@ -113,6 +113,31 @@ func substrateSessionActor(reg registry.Registration) identity.SessionActor {
 	return identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID, TaskDigest: reg.TaskDigest}
 }
 
+// substrateAttachReportEvery is how often an open terminal attachment is
+// reported (controller.DefaultAttachMaxAge is three of them).
+var substrateAttachReportEvery = time.Minute
+
+// substrateReportAttach reports an attachment of uid now and every
+// substrateAttachReportEvery until the returned stop is called.
+func substrateReportAttach(sink SubstrateActivitySink, atespace, uid string) (stop func()) {
+	sink.ObserveActivity(SubstrateActivityAttach, atespace, uid, time.Now())
+	every := substrateAttachReportEvery
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-t.C:
+				sink.ObserveActivity(SubstrateActivityAttach, atespace, uid, now)
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if st.cfg.Relays == nil || st.cfg.Sessions == nil {
@@ -150,6 +175,12 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 		}
 		if st.cfg.Activity != nil {
 			st.cfg.Activity.ObserveActivity(SubstrateActivityRelay, reg.Atespace, reg.UID, time.Now())
+			// A terminal attachment (WebSocket, or a long-poll request
+			// other than its close) is reported while it is open, so a
+			// controller without a CPU feed keeps the actor (GAP-0534).
+			if head == relay.RouteWS || (head == relay.RoutePoll && r.Method != http.MethodDelete) {
+				defer substrateReportAttach(st.cfg.Activity, reg.Atespace, reg.UID)()
+			}
 		}
 		space, name := reg.Atespace, reg.Name
 		proxy := &httputil.ReverseProxy{

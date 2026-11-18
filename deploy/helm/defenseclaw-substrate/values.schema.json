@@ -223,7 +223,8 @@
           "minLength": 1
         },
         "dataSizeLimit": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9]+(Mi|Gi)$"
         }
       }
     },
@@ -720,6 +721,10 @@
     "homeSizeLimit": {
       "type": "string",
       "pattern": "^[0-9]+(Mi|Gi)$"
+    },
+    "homeMedium": {
+      "type": "string",
+      "enum": ["", "Memory"]
     },
     "bundles": {
       "type": "object",

@@ -287,6 +287,7 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 			item.err, item.ran = err, false
 		}
 	}
+	s.noteGroupedTx(hooks.op, batch, err)
 	return err
 }
 

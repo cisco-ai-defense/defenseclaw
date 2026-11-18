@@ -18,6 +18,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,25 +29,45 @@ import (
 
 // Actor is one Substrate actor as the admin listener shows it.
 type Actor struct {
-	Atespace        string    `json:"atespace"`
-	Name            string    `json:"name"`
-	UID             string    `json:"uid"`
-	RegistrationKey string    `json:"registration_key,omitempty"`
-	Profile         string    `json:"profile"`
-	Connector       string    `json:"connector"`
-	Template        string    `json:"template"`
-	BatchID         string    `json:"batch_id,omitempty"`
-	Unattended      bool      `json:"unattended,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	Owner           string    `json:"owner,omitempty"`
-	Deleted         bool      `json:"deleted,omitempty"`
-	State           string    `json:"state,omitempty"`
+	Atespace        string `json:"atespace"`
+	Name            string `json:"name"`
+	UID             string `json:"uid"`
+	RegistrationKey string `json:"registration_key,omitempty"`
+	Profile         string `json:"profile"`
+	Connector       string `json:"connector"`
+	Template        string `json:"template"`
+	BatchID         string `json:"batch_id,omitempty"`
+	Unattended      bool   `json:"unattended,omitempty"`
+	// UnattendedAsks is what an unattended actor's asks do, from its
+	// profile: deny or queue (D12); AskTimeoutSeconds how long a queued
+	// ask waits for a person.
+	UnattendedAsks    string    `json:"unattended_asks,omitempty"`
+	AskTimeoutSeconds int64     `json:"ask_timeout_seconds,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	Owner             string    `json:"owner,omitempty"`
+	Deleted           bool      `json:"deleted,omitempty"`
+	State             string    `json:"state,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
 	// Warnings come with a create: what the cluster allowed but wants the
 	// person to know (an open-source vendor sign-in, E9).
 	Warnings []string `json:"warnings,omitempty"`
+	// PolicyConflict is set while the actor is in policy_conflict: after
+	// repeated foreign changes to its egress policy the controller keeps only
+	// the DefenseClaw rule (deny-only) until an administrator resets it
+	// (GAP-0398).
+	PolicyConflict *PolicyConflict `json:"policy_conflict,omitempty"`
+}
+
+// PolicyConflict is an actor's policy_conflict as the cluster shows it.
+type PolicyConflict struct {
+	Since time.Time `json:"since"`
+	// Reverts is how many foreign changes the controller reverted before
+	// it marked the conflict.
+	Reverts int `json:"reverts"`
+	// Fix is the administrator's command that clears it.
+	Fix string `json:"fix,omitempty"`
 }
 
 // shown returns a with every field a person reads made safe to print
@@ -56,6 +77,11 @@ type Actor struct {
 func (a Actor) shown() Actor {
 	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.State} {
 		*f = safetext.Line(*f)
+	}
+	if a.PolicyConflict != nil {
+		pc := *a.PolicyConflict
+		pc.Fix = safetext.Line(pc.Fix)
+		a.PolicyConflict = &pc
 	}
 	if a.Warnings != nil {
 		warnings := make([]string, len(a.Warnings))
@@ -145,6 +171,30 @@ func (c *Client) Create(ctx context.Context, r CreateRequest) (Actor, error) {
 
 // List returns the person's actors.
 func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
+	actors, _, err := c.list(ctx, o)
+	return actors, err
+}
+
+// ErrNotAdministrator is ListEveryone's answer when the cluster listed only
+// the caller's own agents: it gives every person's only to an administrator.
+var ErrNotAdministrator = errors.New("the cluster lists only your own agents: you are not signed in as an administrator")
+
+// ListEveryone returns every person's actors, or ErrNotAdministrator. The
+// gateway narrows all=1 to the caller's own agents for a person and says
+// "all": true only when it did not, so a count over the answer is the
+// cluster's and not the caller's (GAP-0398).
+func (c *Client) ListEveryone(ctx context.Context) ([]Actor, error) {
+	actors, all, err := c.list(ctx, ListOptions{All: true})
+	if err != nil {
+		return nil, err
+	}
+	if !all {
+		return nil, ErrNotAdministrator
+	}
+	return actors, nil
+}
+
+func (c *Client) list(ctx context.Context, o ListOptions) ([]Actor, bool, error) {
 	q := url.Values{}
 	if o.Batch != "" {
 		q.Set("batch", o.Batch)
@@ -154,14 +204,15 @@ func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
 	}
 	var out struct {
 		Actors []Actor `json:"actors"`
+		All    bool    `json:"all"`
 	}
 	if err := c.do(ctx, http.MethodGet, "actors", q, nil, &out); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for i := range out.Actors {
 		out.Actors[i] = out.Actors[i].shown()
 	}
-	return out.Actors, nil
+	return out.Actors, out.All, nil
 }
 
 // Get returns one actor.

@@ -148,6 +148,16 @@ func (s *Remote) GetFresh(ctx context.Context, atespace, uid string) (Registrati
 	return s.Get(ctx, atespace, uid)
 }
 
+// GetLatest reads the leader past the cache, found or not. A caller that
+// writes a record back (the controller's policy_conflict mark) reads it this
+// way, so a cached copy does not undo a newer write such as an approval.
+func (s *Remote) GetLatest(ctx context.Context, atespace, uid string) (Registration, bool, error) {
+	s.mu.Lock()
+	delete(s.cache, atespace+"/"+uid)
+	s.mu.Unlock()
+	return s.Get(ctx, atespace, uid)
+}
+
 // Put implements Store.
 func (s *Remote) Put(ctx context.Context, r Registration) error {
 	if err := r.Validate(); err != nil {

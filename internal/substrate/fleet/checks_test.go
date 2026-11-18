@@ -28,8 +28,16 @@ func TestCheckIssuer(t *testing.T) {
 	o = healthyCluster()
 	o.Issuer = "https://idp.ate-system.svc"
 	expect(t, CheckIssuerUnique(o), Fail, "2 clusters")
+	expect(t, CheckIssuerUnique(o), Fail, "setup --issuer")
+	// GAP-0383: a shared default issuer is named, with the fix.
+	o.OtherIssuers = []string{"https://idp.ate-system.svc"}
+	expect(t, CheckIssuerUnique(o), Fail, "the default https://idp.ate-system.svc")
+	expect(t, CheckIssuerUnique(o), Fail, "setup --issuer")
 	o.Clusters, o.OtherIssuers = 1, nil
 	expect(t, CheckIssuerUnique(o), Warn, "fine for one cluster")
+	o.FleetUnread = 2
+	expect(t, CheckIssuerUnique(o), Warn, "2 other cluster(s) of the kubeconfig could not be read")
+	o.FleetUnread = 0
 	o.Issuer = ""
 	expect(t, CheckIssuerUnique(o), Fail, "not set")
 	if CheckIssuerUnique(o).EdgeCase != "E13" {
@@ -87,6 +95,9 @@ func TestCheckGrants(t *testing.T) {
 	expect(t, CheckOpenFGAGrants(o), Warn, "global owner")
 	o.PoliciesReadable = false
 	expect(t, CheckOpenFGAGrants(o), Warn, "could not read")
+	// GAP-0384: refused to the gateway's own ServiceAccount is a lost grant.
+	o.PoliciesDenied = true
+	expect(t, CheckOpenFGAGrants(o), Fail, "lacks a grant it needs")
 }
 
 func TestCheckCallout(t *testing.T) {
