@@ -144,6 +144,12 @@ func TestHermesBytecodeTheScanDidNotSeeIsScannedAtAScannerChange(t *testing.T) {
 		{name: "folder in a cache", change: func(t *testing.T, path string) {
 			writePluginFile(t, filepath.Join(path, "__pycache__", "nested", "__init__.cpython-312.pyc"), "\xcb\x0d\x0d\x0anested")
 		}},
+		{name: "cache folder in another case", change: func(t *testing.T, path string) {
+			writePluginFile(t, filepath.Join(path, "__PYCACHE__", "__init__.cpython-312.pyc"), "\xcb\x0d\x0d\x0acase")
+		}},
+		{name: "cache file extension in another case", change: func(t *testing.T, path string) {
+			writePluginFile(t, filepath.Join(path, "__pycache__", "__init__.cpython-312.PYC"), "\xcb\x0d\x0d\x0acase")
+		}},
 		{name: "source edited", refused: true, change: func(t *testing.T, path string) {
 			writePluginFile(t, filepath.Join(path, "__init__.py"), "import os\nos.system('id')\n")
 		}},
@@ -156,6 +162,11 @@ func TestHermesBytecodeTheScanDidNotSeeIsScannedAtAScannerChange(t *testing.T) {
 			ctx := context.Background()
 			f.w.runRescanCycle(ctx)
 			tc.change(t, path)
+			if !tc.refused {
+				// A cycle without a scanner change keeps the stored scan
+				// and records no bytecode for it.
+				f.w.runRescanCycle(ctx)
+			}
 			f.scannerChanged(path)
 			f.w.runRescanCycle(ctx)
 			if n := f.scan.scans(path); n != 2 {
@@ -195,6 +206,36 @@ func TestHermesLinkInBytecodeCacheIsScannedAtAScannerChange(t *testing.T) {
 		if n := f.scan.scans(path); n != 1+change {
 			t.Fatalf("scans after scanner change %d = %d, want %d", change, n, 1+change)
 		}
+	}
+}
+
+// rel-1-0-10:GAP-0765: Secure Client keeps its rescan of every shipped
+// plugin at a scanner change, and with content gating off every cycle scans.
+func TestHermesBytecodeScanOnceKeepsSecureClientAndUngatedRescans(t *testing.T) {
+	for _, secureClient := range []bool{true, false} {
+		t.Run(map[bool]string{true: "secure client", false: "gating off"}[secureClient], func(t *testing.T) {
+			f := newHermesPluginFixture(t)
+			if secureClient {
+				f.cfg.Enterprise.Profile = "secure_client"
+			} else {
+				f.cfg.Watch.RescanContentGated = false
+			}
+			path := f.hermesReleasePlugin("0.23.1")
+			hermesBytecode(t, path, "bytecode of the release __init__.py")
+			ctx := context.Background()
+			f.w.runRescanCycle(ctx)
+			first := f.scan.scans(path)
+			if first != 1 {
+				t.Fatalf("first sight scans = %d, want 1", first)
+			}
+			for change := 1; change <= 2; change++ {
+				f.scannerChanged(path)
+				f.w.runRescanCycle(ctx)
+				if n := f.scan.scans(path); n != 1+change {
+					t.Fatalf("scans after scanner change %d = %d, want %d", change, n, 1+change)
+				}
+			}
+		})
 	}
 }
 

@@ -62,9 +62,10 @@ import (
 // (rel-1-0-10:GAP-0808). Such a plugin is scanned once for the bytecode it
 // holds, and not again for a scanner change while its source still matches
 // its digest and its bytecode is the bytecode that scan saw
-// (hermesBytecodeScanned, rel-1-0-10:GAP-0765): a scan with the new scanner
-// would read the same vendor source, and the plugin scanner reads no cache
-// file. Any other bytecode is a new scan. Change detection for a shipped plugin covers the
+// (hermesBytecodeScanned, rel-1-0-10:GAP-0765): its source is vendor
+// content, which is not scanned at all without bytecode (GAP-0645), and the
+// plugin scanner reads no cache file, so its bytecode is bound, not vouched
+// for. Any other bytecode is a new scan. Change detection for a shipped plugin covers the
 // folders the snapshot leaves out (skippedTreeHash), so a later change
 // anywhere the scanner can read reaches a scan whatever was admitted before. A Hermes
 // release newer than every release in the table (doctor and status name it),
@@ -315,8 +316,16 @@ func hermesPluginDigests(path string) (source, bytecode string, err error) {
 // hermesBytecodeScanType is the target_snapshots type of the row that binds
 // the stored scan of a Hermes shipped plugin to the source and bytecode the
 // plugin held when that scan ran (hermesCachedVendorDigest). Its path is the
-// plugin's, its scan id the scan's, its content hash that digest.
+// plugin's, its scan id the scan's, its content hash that digest, and its
+// scanner fingerprint hermesBytecodeBlindScanner.
 const hermesBytecodeScanType = "hermes_plugin_bytecode"
+
+// hermesBytecodeBlindScanner names the plugin scanner contract the rows of
+// hermesBytecodeScanType rely on: the scanner reads no bytecode cache file
+// (snapshotSkippedDir, skippedTreeHash), so a scanner change cannot change
+// what it finds in one. Change it when the plugin scanner starts reading
+// bytecode: every row then stops matching and each plugin is scanned again.
+const hermesBytecodeBlindScanner = "plugin-scanner-reads-no-bytecode/1"
 
 // hermesCachedVendorDigest returns, for a Hermes shipped plugin whose files
 // outside its bytecode caches match the digest of that plugin in a supported
@@ -339,18 +348,22 @@ func (w *InstallWatcher) hermesCachedVendorDigest(evt InstallEvent) string {
 // hermesBytecodeScanned reports a Hermes shipped plugin whose stored scan was
 // made of the source and bytecode it holds now (snap was read in this cycle):
 // its source still matches its vendor digest and its bytecode is the bytecode
-// that scan saw. A scan with a new scanner reads the same vendor source again
-// and no cache file, so it would add nothing, and a scan that only follows a
-// scanner change decides no admission (rel-1-0-10:GAP-0765). Other bytecode,
-// a source edit, or a stored scan with no row for its bytecode (a scan made
-// before 1.0.10) is scanned.
+// that scan saw. Such a plugin is not scanned again for a scanner change
+// (rel-1-0-10:GAP-0765). Its source is vendor content, which is not scanned
+// at all, for any scanner, when it holds no bytecode (GAP-0645); the plugin
+// scanner reads no cache file (hermesBytecodeBlindScanner), so a new scanner
+// would find nothing new in the bytecode; and a scan that only follows a
+// scanner change decides no admission, so nothing it would block is let
+// through. Other bytecode, a source edit, or a stored scan with no row for
+// its bytecode (a scan made before 1.0.10) is scanned.
 func (w *InstallWatcher) hermesBytecodeScanned(evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot) bool {
 	if w.store == nil || baseline == nil || baseline.ScanID == "" || snap == nil ||
 		snap.hermesCachedVendor == "" || baseline.ContentHash != snap.ContentHash {
 		return false
 	}
 	row, err := w.store.GetTargetSnapshot(hermesBytecodeScanType, evt.Path)
-	return err == nil && row != nil && row.ScanID == baseline.ScanID && row.ContentHash == snap.hermesCachedVendor
+	return err == nil && row != nil && row.ScanID == baseline.ScanID && row.ContentHash == snap.hermesCachedVendor &&
+		row.ScannerFingerprint == hermesBytecodeBlindScanner
 }
 
 // hermesNewBytecodeScan reports a baseline write that records a new scan of a
