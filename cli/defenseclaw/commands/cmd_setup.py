@@ -22279,6 +22279,18 @@ def _print_routing_status(app: AppContext) -> None:
         click.echo("    Enable with: defenseclaw setup routing --enable")
         return
     click.echo("    Configured: enabled")
+    from defenseclaw.commands.cmd_routing import DEFAULT_CLASSIFIER, routing_classifier  # noqa: PLC0415
+
+    classifier = routing_classifier(app.cfg.routing)
+    if classifier != DEFAULT_CLASSIFIER:
+        # rules and systemone run inside the gateway: there is no router
+        # container or API to probe, so ask the gateway (GAP-1252).
+        click.echo(f"    Classifier: {classifier} (in process, no router container)")
+        click.echo(f"    Models:     {len(app.cfg.routing.models)}")
+        click.echo(f"    Runtime:    {_inprocess_routing_runtime(app)}")
+        click.echo("    Changes require a gateway restart.")
+        click.echo()
+        return
     version = app.cfg.routing.version or "0.3.0 (default)"
     port = app.cfg.routing.port or 8080
     remote_endpoint = str(app.cfg.routing.remote.get("endpoint") or "").strip()
@@ -22313,6 +22325,23 @@ def _validate_routing_setup_models(models: list[dict[str, Any]]) -> None:
         if alias in aliases:
             raise click.ClickException(f"routing model alias is duplicated: {alias}")
         aliases.add(alias)
+
+
+def _inprocess_routing_runtime(app: AppContext) -> str:
+    """Routing state from the running gateway's /health, the same source
+    `defenseclaw routing status` reads."""
+    from defenseclaw.commands.cmd_routing import _health_routing  # noqa: PLC0415
+
+    live = _health_routing(app)
+    state = str(live.get("state") or "").strip().lower()
+    if state == "unreachable":
+        return "gateway not reachable (start it with: defenseclaw-gateway start)"
+    if state == "error":
+        cause = " ".join(str(live.get("last_error") or "").split())[:200]
+        return f"error: {cause}" if cause else "error"
+    if not state:
+        return "not reported by the gateway (restart it with: defenseclaw-gateway restart)"
+    return state
 
 
 def _routing_health_status(endpoint: str) -> str:
