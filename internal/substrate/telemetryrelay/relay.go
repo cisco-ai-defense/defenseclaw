@@ -76,14 +76,12 @@ type Record struct {
 	// forked, reverted, deleted, crashed).
 	Lifecycle string `json:"lifecycle,omitempty"`
 
-	// Egress: the callout's decision (extproc.Event fields).
+	// Egress: the callout's decision (the extproc.Event fields the gateway
+	// exports on log.egress.allowed and log.egress.blocked).
 	Host          string `json:"host,omitempty"`
-	Method        string `json:"method,omitempty"`
 	Path          string `json:"path,omitempty"`
 	Decision      string `json:"decision,omitempty"`
 	Category      string `json:"category,omitempty"`
-	Source        string `json:"source,omitempty"`
-	Rule          string `json:"rule,omitempty"`
 	Reason        string `json:"reason,omitempty"`
 	Alert         bool   `json:"alert,omitempty"`
 	BodyInspected bool   `json:"body_inspected,omitempty"`

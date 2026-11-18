@@ -281,7 +281,6 @@ func (s substrateRelayEgress) EgressEvent(ev extproc.Event) {
 	}
 	s.relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindEgress, At: ev.Time,
 		Atespace: ev.Atespace, Actor: ev.Actor, UID: ev.ActorUID, Profile: ev.Profile,
-		Host: ev.Host, Method: ev.Method, Path: ev.Path, Decision: ev.Decision, Category: ev.Category,
-		Source: ev.Source, Rule: ev.Rule, Reason: ev.Reason, Alert: ev.Alert,
+		Host: ev.Host, Path: ev.Path, Decision: ev.Decision, Category: ev.Category, Reason: ev.Reason, Alert: ev.Alert,
 		BodyInspected: ev.BodyInspected, BodyOverCap: ev.BodyOverCap})
 }

@@ -120,9 +120,9 @@ func TestGAP0453SubstrateRecordsReachTheTelemetryRuntime(t *testing.T) {
 		telemetryrelay.Record{Kind: telemetryrelay.KindLifecycle, At: now, Lifecycle: chainstate.LifecycleSuspended,
 			Atespace: "eng-web", Actor: "alice-1", UID: subUID1, Profile: "eng", Connector: "claudecode"},
 		telemetryrelay.Record{Kind: telemetryrelay.KindEgress, At: now, Atespace: "eng-web", Actor: "alice-1", UID: subUID1, Profile: "eng",
-			Host: "pypi.org", Method: "GET", Path: "/simple/", Decision: "allow"},
+			Host: "pypi.org", Path: "/simple/", Decision: "allow"},
 		telemetryrelay.Record{Kind: telemetryrelay.KindEgress, At: now, Atespace: "eng-web", Actor: "alice-1", UID: subUID1, Profile: "eng",
-			Host: "evil.example.com", Method: "POST", Decision: "block", Category: "chain_egress", Reason: "a secret was read"},
+			Host: "evil.example.com", Decision: "block", Category: "chain_egress", Reason: "a secret was read"},
 	)
 	if err := (&telemetryrelay.Taker{Leader: client, Record: f.api.recordSubstrateRelay}).TakeOnce(context.Background()); err != nil {
 		t.Fatal(err)
