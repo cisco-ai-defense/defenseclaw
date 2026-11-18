@@ -34,42 +34,66 @@ import (
 // Before GAP-1077, the shell routes read an envelope with an unplaced header
 // as partial and added no unknown finding: allow in every tier, strict too,
 // where the single-header here-document blocks. One top-level test per tier,
-// so the -race shards can take them apart; managed-strict, the slowest (469 s
-// under -race on the hosted runners of #1457, over the 440 s one shard holds),
+// so the -race shards can take them apart. Each tier takes 430-470 s under
+// -race on the hosted runners of #1457, about what one shard holds, so each
 // runs as two tests, the even and the odd fixture cases (each case keeps its
 // index, so its shapes and unplaced names are the ones the whole run checks).
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefault(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "default")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefaultEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "default", 0)
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchStrict(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "strict")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefaultOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "default", 1)
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchPermissive(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "permissive")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchStrictEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "strict", 0)
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManaged(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "managed")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchStrictOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "strict", 1)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchPermissiveEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "permissive", 0)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchPermissiveOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "permissive", 1)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "managed", 0)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerHalf(t, "managed", 1)
 }
 
 func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictEvenCases(t *testing.T) {
-	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", patchDecoyManagedStrictParts[0], len(patchDecoyManagedStrictParts))
+	patchDecoyHeaderNeverWeakerHalf(t, "managed-strict", 0)
 }
 
 func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictOddCases(t *testing.T) {
-	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", patchDecoyManagedStrictParts[1], len(patchDecoyManagedStrictParts))
+	patchDecoyHeaderNeverWeakerHalf(t, "managed-strict", 1)
 }
 
-// patchDecoyManagedStrictParts are the parts the two managed-strict tests
-// check, of len(patchDecoyManagedStrictParts) parts.
-var patchDecoyManagedStrictParts = []int{0, 1}
+// patchDecoyTiers are the tiers the decoy-header tests check, each as two
+// tests: the even and the odd fixture cases (patchDecoyParts).
+var patchDecoyTiers = []string{"default", "strict", "permissive", "managed", "managed-strict"}
 
-// TestPatchDecoyHeaderManagedStrictHalvesCoverEveryCase: the even and the odd
-// managed-strict tests together check exactly the fixture cases the single
-// managed-strict test checked: every case in one half, none in both, none lost.
-func TestPatchDecoyHeaderManagedStrictHalvesCoverEveryCase(t *testing.T) {
+// patchDecoyParts are the parts the two tests of a tier check, of
+// len(patchDecoyParts) parts.
+var patchDecoyParts = []int{0, 1}
+
+func patchDecoyHeaderNeverWeakerHalf(t *testing.T, tier string, half int) {
+	patchDecoyHeaderNeverWeakerPart(t, tier, patchDecoyParts[half], len(patchDecoyParts))
+}
+
+// TestPatchDecoyHeaderHalvesCoverEveryCase: in every tier, the even and the
+// odd test together check exactly the fixture cases the single test of the
+// tier checked: every case in one half, none in both, none lost.
+func TestPatchDecoyHeaderHalvesCoverEveryCase(t *testing.T) {
 	var cases []string
 	for _, c := range shapeParityCases(t) {
 		if patchDecoyCase(c.id, c.tool) {
@@ -79,16 +103,21 @@ func TestPatchDecoyHeaderManagedStrictHalvesCoverEveryCase(t *testing.T) {
 	if len(cases) == 0 {
 		t.Fatal("no wincred Write or Edit fixture cases")
 	}
-	parts := len(patchDecoyManagedStrictParts)
-	for n, c := range cases {
-		in := 0
-		for _, part := range patchDecoyManagedStrictParts {
-			if patchDecoyInPart(n, part, parts) {
-				in++
-			}
+	parts := len(patchDecoyParts)
+	for _, tier := range patchDecoyTiers {
+		if !slices.ContainsFunc(gap0437Packs, func(p gap0437Pack) bool { return p.name == tier }) {
+			t.Errorf("no tier %q in gap0437Packs", tier)
 		}
-		if in != 1 {
-			t.Errorf("case %d (%s) is in %d of the managed-strict halves, want 1", n, c, in)
+		for n, c := range cases {
+			in := 0
+			for _, part := range patchDecoyParts {
+				if patchDecoyInPart(n, part, parts) {
+					in++
+				}
+			}
+			if in != 1 {
+				t.Errorf("%s: case %d (%s) is in %d of the halves, want 1", tier, n, c, in)
+			}
 		}
 	}
 }
@@ -230,10 +259,6 @@ func patchDecoyRoutes(cwd string) []patchDecoyRoute {
 			return codex("Bash", map[string]any{"command": "apply_patch <<PATCH\n" + e + "\nPATCH"})
 		}, shell},
 	}
-}
-
-func patchDecoyHeaderNeverWeaker(t *testing.T, tier string) {
-	patchDecoyHeaderNeverWeakerPart(t, tier, 0, 1)
 }
 
 // patchDecoyHeaderNeverWeakerPart checks the fixture cases whose index n has
