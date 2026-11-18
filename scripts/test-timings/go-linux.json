@@ -855,6 +855,7 @@
   },
   "internal/cli": {
    "*": 0.062,
+   "TestGAP0589FollowerRestartAdviceNamesTheController": 0.01,
    "TestGAP0590GatewayFollowerSaysWhenTheGuardrailApplies": 0.01,
    "TestAuditCompactDryRunReportsBesideARunningGatewayAndChangesNothing": 4.0,
    "TestAuditCompactRefusesADiskWithZeroFreeBytes": 3.4,
