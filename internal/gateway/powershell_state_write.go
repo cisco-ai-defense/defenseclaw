@@ -1077,6 +1077,8 @@ func (s *psStateScan) code(i int, nested bool) int {
 	// block or a call since it started; lastWhole and pipedWhole are that of
 	// last and pipedFrom, also fed by no pipeline (rel-1-0-10:GAP-1275).
 	whole, lastWhole, pipedWhole := true, false, false
+	// start is the rune index the statement in cur starts at.
+	start := i
 	var statementWordKnown, statementArgumentMode bool
 	firstScanned := 0
 	commentStarts := func(i int) bool {
@@ -1097,7 +1099,9 @@ func (s *psStateScan) code(i int, nested bool) int {
 		text := string(cur)
 		if strings.TrimSpace(text) != "" && s.account(len(cur)) {
 			s.pieces = append(s.pieces, text)
-			s.dotNetStatement(text)
+			// A statement read whole ends at a ; or a line, a block or group
+			// close or the end of the code (copyFileInfo).
+			s.dotNetStatement(text, start, i >= len(r) || strings.ContainsRune("\n;})", r[i]))
 			if pipedFrom != "" {
 				if body, ok := psPipedInvokeBody(pipedFrom, text, s.budget); ok {
 					s.bodies = append(s.bodies, body)
@@ -1119,6 +1123,9 @@ func (s *psStateScan) code(i int, nested bool) int {
 		firstScanned = 0
 	}
 	for i < len(r) && !s.parseError && s.budget.step() {
+		if len(cur) == 0 {
+			start = i
+		}
 		c := r[i]
 		comment := (c == '#' || c == '<' && i+1 < len(r) && r[i+1] == '#') && commentStarts(i)
 		switch {
