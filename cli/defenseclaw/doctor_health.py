@@ -777,6 +777,50 @@ def _kiro_installed_token(signal: Any) -> str:
     return _safe_semver_from_agent(selected.normalized) if selected is not None else ""
 
 
+#: Cursor's executables by role (ntpath stem, lower case): the Desktop hook
+#: host and the Agent CLI. Both read ~/.cursor/hooks.json; each has its own
+#: pins (Desktop semver ranges, Agent CLI date-hash builds).
+_CURSOR_DESKTOP_STEMS = frozenset({"cursor"})
+_CURSOR_AGENT_CLI_STEMS = frozenset({"agent", "cursor-agent"})
+
+
+def _executable_stem(path: str) -> str:
+    import ntpath
+
+    return ntpath.splitext(ntpath.basename(path))[0].lower()
+
+
+def cursor_agent_cli_discovery(discovery: Any | None, data_dir: str) -> tuple[Any, str] | None:
+    """The evidence with Cursor's Agent CLI in place of its Desktop (GAP-0196).
+
+    Discovery prefers the Desktop hook host, so on a host with both the
+    connector row judged the Desktop version and the Agent CLI that runs the
+    same hooks was never compared with its own pins (another account without
+    the Desktop got "untested newer" for the same CLI build). Returns
+    ``(discovery, executable)`` with the cursor signal re-read from the first
+    Agent CLI launch candidate that answers, or None when the recorded
+    executable is not the Desktop or no Agent CLI answers.
+    """
+
+    agents = getattr(discovery, "agents", None)
+    if not isinstance(agents, Mapping) or not dataclasses.is_dataclass(discovery):
+        return None
+    signal = agents.get("cursor")
+    if signal is None or not dataclasses.is_dataclass(signal) or not getattr(signal, "installed", False):
+        return None
+    recorded = getattr(signal, "binary_path", "")
+    if not isinstance(recorded, str) or _executable_stem(recorded) not in _CURSOR_DESKTOP_STEMS:
+        return None
+    for candidate in _launch_candidates("cursor", data_dir):
+        if _executable_stem(candidate) not in _CURSOR_AGENT_CLI_STEMS:
+            continue
+        found, error = _probe_agent_version("cursor", candidate, data_dir)
+        if found.strip() and not error:
+            fresh = dataclasses.replace(signal, binary_path=candidate, version=found, error="")
+            return dataclasses.replace(discovery, agents={**agents, "cursor": fresh}), candidate
+    return None
+
+
 def _kiro_selected_path(signal: Any) -> str:
     selected = assess_kiro_signal(signal).selected
     path = getattr(selected, "path", "") if selected is not None else ""
