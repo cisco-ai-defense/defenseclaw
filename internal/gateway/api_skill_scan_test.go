@@ -79,9 +79,10 @@ func main() { fmt.Print("{\"findings\":[{\"rule_id\":\"LLM_ANALYSIS_FAILED\",\"s
 // a seccomp profile or sandbox that refuses user namespaces): no scan runs
 // there by design (processutil.RunTracked, GAP-0521), so the scanner
 // fixture never answers (GAP-0174). Any other answer is judged by the test.
+// GitHub Actions runners allow user namespaces, so there it never skips.
 func skipWhereScanContainmentIsRefused(t *testing.T, body string) {
 	t.Helper()
-	if strings.Contains(body, processutil.ErrContainmentUnavailable.Error()) {
+	if strings.Contains(body, processutil.ErrContainmentUnavailable.Error()) && os.Getenv("GITHUB_ACTIONS") != "true" {
 		t.Skipf("this host cannot run a contained scan: %s", strings.TrimSpace(body))
 	}
 }
