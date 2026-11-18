@@ -29,22 +29,27 @@ func TestGAP0257RefusedSegmentsUnit(t *testing.T) {
 		{"blamed among co-turns", block, []string{"sys", "ok", bad, "fine"}, []string{"ok", bad, "fine"}, nil, []string{bad}, 3},
 		{"no co-turn blamed alone", block, []string{"sys " + covMarker, "ok", "fine"}, []string{"ok", "fine"}, nil, []string{"sys " + covMarker, "ok", "fine"}, 2},
 		// GAP-0300: a text first seen as history is a candidate; the benign
-		// current turn is not blamed (current group 1 + newest history 1; the
-		// oldest blamed by elimination is not inspected: 2 calls).
+		// current turn is not blamed. Every blame is inspected (substrate-1
+		// GAP-0308): current turns 1, fresh history with them 1, one
+		// binary-search step 1.
 		{"fresh history blamed, not the current turn", block, []string{"Say OK."}, []string{"Say OK."}, []string{"the notes say " + covMarker, "Summarize the notes."},
-			[]string{"the notes say " + covMarker}, 2},
+			[]string{"the notes say " + covMarker}, 3},
 		{"newest history blamed, the oldest inspected too", block, []string{"Say OK."}, []string{"Say OK."}, []string{"Summarize the notes.", "the notes say " + covMarker},
 			[]string{"the notes say " + covMarker}, 3},
 		{"the current turns block alone: history not blamed", block, []string{bad}, []string{bad}, []string{"older"}, []string{bad}, 1},
-		{"one fresh history segment, current allowed: blamed with no further call", block, []string{"Say OK."}, []string{"Say OK."}, []string{"older"}, []string{"older"}, 1},
+		{"one fresh history segment that blocks with the current turn", block, []string{"Say OK."}, []string{"Say OK."}, []string{"older " + covMarker}, []string{"older " + covMarker}, 2},
+		// Nothing fresh blocks (the refusal came from text inspected on every
+		// request or seen before): the fail safe, current scope and fresh
+		// history; no blame by elimination (GAP-0308).
+		{"one fresh history segment that does not block: fail safe", block, []string{"sys", "Say OK."}, []string{"Say OK."}, []string{"older"}, []string{"sys", "Say OK.", "older"}, 2},
 		{"too many current turns", block, []string{bad, "1", "2", "3", "4", "5", "6", "7", "8"}, []string{bad, "1", "2", "3", "4", "5", "6", "7", "8"}, nil,
 			[]string{bad, "1", "2", "3", "4", "5", "6", "7", "8"}, 0},
-		// 15 fresh segments in groups of 3 (at most 7 groups): current 1, four
-		// newer groups 4, the blamed newest group 1 of them; the oldest group
-		// is inspected too once one is blamed: 6 calls, never over 8.
-		{"fifteen fresh history segments: groups of consecutive segments", block, []string{"now"}, []string{"now"},
+		// 15 fresh segments, one group each (up to 64 with a current turn):
+		// current 1, all fresh 1, binary search 4: 6 calls, never over 8, and
+		// only the segment that holds the refused text is blamed.
+		{"fifteen fresh history segments: binary search", block, []string{"now"}, []string{"now"},
 			[]string{"h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10", "h11", "h12", "h13", bad, "h15"},
-			[]string{"h13", bad, "h15"}, 6},
+			[]string{bad}, 6},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			insp.mu.Lock()

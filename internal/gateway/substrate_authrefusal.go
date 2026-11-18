@@ -30,31 +30,33 @@ import (
 // listener (an actor token on a hook, model or relay call) and the admin
 // listener (a person token from the launcher) refuse a missing, forged,
 // tampered, foreign or expired token with 401 and a closed reason. Each
-// refusal is now visible to the operator three ways, none of which carries
+// refusal is visible to the operator two ways, neither of which carries
 // token bytes, a claim value or the verifier's message (a header alg or an
 // issuer is attacker text):
 //
-//   - the metric defenseclaw.substrate.auth_refused, every refusal, labelled
-//     by listener and reason (both closed sets);
 //   - one gateway log line per listener, reason and client address class
 //     per window, with the count since the last line;
 //   - one substrate audit row per listener, reason and client class per
 //     window, with the same fields.
+//
+// No metric counts them: 1.0.10 adds no OTel instrument for refused tokens
+// (the Substrate metrics reach OTLP since GAP-0401), so the rows' counts are
+// the total.
 //
 // Lines and rows go through the shared access recorder
 // (substrate_accessaudit.go, also GAP-0424, GAP-0434, GAP-0435): bounded
 // windows, written off the request path, so a flood of bad tokens cannot
 // fill the audit store (GAP-0402) or the pod log.
 
-// Listener names, the metric's listener label.
+// Listener names, the listener field of the line and the row.
 const (
 	substrateListenerActor = "actor"
 	substrateListenerAdmin = "admin"
 )
 
-// substrateAuthReasons is the closed reason set of the metric label and the
-// row. Anything else (a future verifier reason) counts as "other", so the
-// label and the window map stay bounded.
+// substrateAuthReasons is the closed reason set of the line and the row.
+// Anything else (a future verifier reason) counts as "other", so the window
+// map stays bounded.
 var substrateAuthReasons = map[identity.Reason]bool{
 	identity.ReasonMissing: true, identity.ReasonMalformed: true, identity.ReasonAlgorithm: true,
 	identity.ReasonType: true, identity.ReasonUnknownKey: true, identity.ReasonSignature: true,
@@ -118,18 +120,15 @@ func (st *substrateState) logLine(format string, args ...any) {
 	fmt.Fprintf(out, "[substrate] "+format+"\n", args...)
 }
 
-// authRefused records one refused token on listener: the metric always,
-// and through the shared access recorder (substrate_accessaudit.go) one log
-// line and one audit row per listener, reason and client class per window,
-// written off the request path.
+// authRefused records one refused token on listener through the shared
+// access recorder (substrate_accessaudit.go): one log line and one audit row
+// per listener, reason and client class per window, written off the request
+// path.
 func (st *substrateState) authRefused(r *http.Request, listener string, why identity.Reason) {
 	if st == nil {
 		return
 	}
 	reason := substrateAuthReason(why)
-	if st.cfg.OnAuthRefused != nil {
-		st.cfg.OnAuthRefused(listener, reason)
-	}
 	client := substrateClientClass(r.RemoteAddr)
 	severity := "INFO"
 	if substrateAuthForgery(reason) {

@@ -501,6 +501,7 @@ func hookRequestAuditExtra(ctx context.Context, profile connector.HookProfile) m
 	extra := mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), hookActorAuditExtra(ctx))
 	extra = mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
 	extra = mergeHookEnvelopeExtra(extra, coworkSurfaceAuditExtra(ctx))
+	extra = mergeHookEnvelopeExtra(extra, toolChainEvidenceAuditExtra(ctx))
 	if reason := resolvedWritesFromContext(ctx)[hookpaths.UnprovenReasonKey]; hookpaths.UnprovenWriteTitle(reason) != "" {
 		extra = mergeHookEnvelopeExtra(extra, map[string]string{"unresolved_command": reason})
 	}

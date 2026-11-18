@@ -3670,17 +3670,28 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 		previous.bindObservabilityV8TraceMode(nil, true)
 	}
 	if proxy != nil {
-		lifecycle := s.observabilityV8Lifecycle
-		if s.observabilityV8ConsumersDetached {
-			lifecycle = nil
-		}
-		proxy.bindObservabilityV8TraceMode(lifecycle, true)
-		proxy.generationSource = s.Generation
-		proxy.kernelPeer = s.proxyKernelPeer
+		s.bindGuardrailProxyLocked(proxy)
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
 	s.observabilityV8Mu.Unlock()
+}
+
+// bindGuardrailProxyLocked wires proxy to this sidecar: its observability
+// lifecycle, the configuration generation every request pins (rules, local
+// patterns, guardrail profiles, the policy stamp of its records) and the
+// kernel peer. The caller holds observabilityV8Mu. The sidecar's own proxy
+// and the one a Substrate gateway keeps for actors (substrateLLMProxy) are
+// wired alike: the actor proxy had none of it, so an actor's model calls were
+// inspected without the published generation and its records (GAP-0487).
+func (s *Sidecar) bindGuardrailProxyLocked(proxy *GuardrailProxy) {
+	lifecycle := s.observabilityV8Lifecycle
+	if s.observabilityV8ConsumersDetached {
+		lifecycle = nil
+	}
+	proxy.bindObservabilityV8TraceMode(lifecycle, true)
+	proxy.generationSource = s.Generation
+	proxy.kernelPeer = s.proxyKernelPeer
 }
 
 // setEventRouter is construction-time wiring. Keeping the lifecycle binding in

@@ -92,6 +92,8 @@ type SubstrateCreated struct {
 	HarnessVersion string
 	HookContract   string
 	KitVersion     string
+	// SandboxClass is the class the actor runs in (gvisor or microvm).
+	SandboxClass string
 }
 
 // SubstrateActorActions creates, resumes and deletes actors in launcher
@@ -428,6 +430,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateSigninRefusal(w, d)
 			return
 		}
+		createStart := time.Now()
 		created, err := st.cfg.Actions.Create(r.Context(), req)
 		var classErr *SubstrateClassUnavailable
 		switch {
@@ -461,7 +464,8 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			Profile: profile, Template: created.Template, TemplateDigest: created.TemplateDigest,
 			KitVersion: created.KitVersion, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
 			HookContract: created.HookContract, BatchID: req.BatchID, Unattended: req.Unattended,
-			Secrets: append([]string(nil), req.Secrets...),
+			SandboxClass: created.SandboxClass,
+			Secrets:      append([]string(nil), req.Secrets...),
 		}
 		if req.Task != "" {
 			sum := sha256.Sum256([]byte(req.Task))
@@ -509,6 +513,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
+		a.recordSubstratePolicyLag(time.Since(createStart))
 		out := st.actorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)

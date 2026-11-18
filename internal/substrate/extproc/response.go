@@ -19,6 +19,7 @@ package extproc
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -75,6 +76,13 @@ func refusalHint(v Verdict) string {
 		ref := ""
 		if v.AskID != "" {
 			ref = " (" + v.AskID + ")"
+		}
+		if v.AskUnattended {
+			// An unattended run has no user to tell, and ending the task
+			// here ends the run before anyone can answer (GAP-0387).
+			return "This run is unattended and a person has been asked to approve this host" + ref + ". Do not end the task: " +
+				"wait about 30 seconds (for example with sleep 30), then send the same request again, and keep doing so until it " +
+				"goes through or is denied, until " + v.AskExpires.Format(time.RFC3339) + "."
 		}
 		return "Tell the user this host needs their approval" + ref + ". Retry once they approve it."
 	case CategoryAskDenied:

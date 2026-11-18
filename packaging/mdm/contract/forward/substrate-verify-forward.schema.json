@@ -101,7 +101,8 @@
             "ingress_clients",
             "actor_service_routes",
             "api_access_label",
-            "policy_conflict"
+            "policy_conflict",
+            "worker_drain"
           ]
         },
         "status": {

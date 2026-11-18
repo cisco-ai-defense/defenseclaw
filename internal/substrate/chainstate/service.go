@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/copilotjoin"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/historystore"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
@@ -56,6 +57,8 @@ const (
 	DefaultMaxActors = guardrail.ToolChainMaxPartitions
 	// DefaultMaxOpenStores bounds the open SQLite handles; idle ones close.
 	DefaultMaxOpenStores = 128
+	// DefaultWALGuardEvery is how often Run checkpoints the open stores.
+	DefaultWALGuardEvery = 2 * time.Second
 )
 
 // egressChains are the chains whose terminal step is external egress, and
@@ -101,6 +104,10 @@ type Options struct {
 	MaxActors int
 	// MaxOpenStores bounds the open per-actor stores (default 128).
 	MaxOpenStores int
+	// WALGuardEvery is how often Run copies the open per-actor stores'
+	// write-ahead logs into their databases (default 2 s, as the gateway's
+	// WAL guard does for audit.db; GAP-0404).
+	WALGuardEvery time.Duration
 	// ParentOf returns the parent UID of a forked actor from its verified
 	// registration ("" for none). The leader copies the parent's windows the
 	// first time it sees the child, whatever comes first (GAP-0091).
@@ -195,6 +202,8 @@ type actorEntry struct {
 	intents  *intentstore.Process
 	// history is the proxy's inspect-once record of the actor (GAP-0266).
 	history *historystore.Process
+	// copilot is the actor's Copilot permission join (GAP-0269).
+	copilot *copilotjoin.Process
 	openMu  sync.Mutex
 	purged  bool
 	// purgeIdle is a delete that waits for the calls holding the entry.
@@ -220,14 +229,19 @@ const ActiveGap = 5 * time.Minute
 // actorState is what the leader keeps of an actor on the volume: its
 // running-time clock, the order of its lifecycle events, and its task.
 //
-// The clock is the actor's own requests through DefenseClaw, at the
-// leader's receive time (never a guest timestamp, E15): hook chain calls,
-// intent calls and egress checks. A gap between two counts at most
-// ActiveGap. An actor that is not running makes no requests, so whatever
-// stopped it (a suspend of any kind, a detach, a drain, an eviction, an
-// outage of the controller or of the leader) stops its clock, and nothing
-// has to report it (GAP-0292). What the leader does not see counts as not
-// running: a chain window lasts longer, never shorter.
+// The clock is wall time while the actor runs (the chain horizon: 30
+// minutes of running time, a suspend does not count). The leader sees it
+// running from the actor's own requests through DefenseClaw (hook chain
+// calls, intent calls and egress checks) and from the controller's report
+// of the actors it saw in state RUNNING (ChainRunning, about once a minute,
+// GAP-0539), each at the leader's receive time (never a guest or controller
+// timestamp, E15, GAP-0319). A gap between two of them counts at most
+// ActiveGap. An actor that is not running makes no requests and is not
+// reported running, so whatever stopped it (a suspend of any kind, a
+// detach, a drain, an eviction, an outage of the controller or of the
+// leader) stops its clock, and nothing has to report the stop (GAP-0292).
+// What the leader does not see counts as not running: a chain window lasts
+// longer, never shorter.
 type actorState struct {
 	// UncountedNanos is the wall time that is not running time: the part of
 	// each gap between two requests past ActiveGap.
@@ -326,6 +340,9 @@ func New(opts Options) (*Service, error) {
 	if opts.MaxOpenStores <= 0 {
 		opts.MaxOpenStores = DefaultMaxOpenStores
 	}
+	if opts.WALGuardEvery <= 0 {
+		opts.WALGuardEvery = DefaultWALGuardEvery
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -334,6 +351,12 @@ func New(opts Options) (*Service, error) {
 	}
 	for _, d := range []string{"chains", "actors"} {
 		if err := os.MkdirAll(filepath.Join(opts.Dir, d), 0o700); err != nil {
+			return nil, err
+		}
+		// A pod fsGroup makes the store volume 2770/0660 on every mount
+		// (EKS with EBS); the leader takes its own entries back to
+		// owner-only, or the audit store refuses every chain (GAP-0394).
+		if err := audit.ReclaimOwnTree(filepath.Join(opts.Dir, d)); err != nil {
 			return nil, err
 		}
 	}
@@ -376,8 +399,11 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(MethodChainLifecycle, s.logged(MethodChainLifecycle, leader.Typed(s.Lifecycle)))
 	srv.Handle(MethodChainEgress, s.logged(MethodChainEgress, leader.Typed(s.Egress)))
 	srv.Handle(MethodChainUnrecorded, s.logged(MethodChainUnrecorded, leader.Typed(s.Unrecorded)))
+	srv.Handle(MethodChainRunning, s.logged(MethodChainRunning, leader.Typed(s.Running)))
 	srv.Handle(MethodHistorySeen, s.logged(MethodHistorySeen, leader.Typed(s.HistorySeen)))
 	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
+	srv.Handle(MethodCopilotJoinRecord, s.logged(MethodCopilotJoinRecord, leader.Typed(s.CopilotJoinRecord)))
+	srv.Handle(MethodCopilotJoinTake, s.logged(MethodCopilotJoinTake, leader.Typed(s.CopilotJoinTake)))
 }
 
 // logged logs the errors a handler returns that the transport reports only
@@ -717,7 +743,10 @@ func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, aud
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, "", err
 	}
-	st, err = audit.NewStore(path)
+	// A per-actor store is one of up to MaxOpenStores: a small page cache
+	// and no read pool, or each holds up to 100 MB outside the Go heap as it
+	// grows (GAP-0404).
+	st, err = audit.NewStore(path, audit.WithSmallFootprint())
 	if err != nil {
 		return nil, "", err
 	}
@@ -1064,6 +1093,11 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		if err := decodeGob(in.Input, &x); err != nil {
 			return ObserveResponse{}, bad(err)
 		}
+		// The replicas mint their own semantic event IDs: a PreToolUse
+		// delivered again to another replica is the same call, not a reused
+		// invocation ID that voids the proposal (GAP-0562). Set here, so no
+		// caller sets it.
+		x.PreEventFromAnyReplica = true
 		x.ConnectorInstanceID = instance
 		if err := s.notePending(e, in.Scope, x.Projection); err != nil {
 			return ObserveResponse{}, err
@@ -1274,6 +1308,32 @@ func (s *Service) IntentPut(ctx context.Context, in IntentRequest) (IntentRespon
 		return IntentResponse{}, s.setState(e, st)
 	}
 	return IntentResponse{}, bad(fmt.Errorf("chainstate: unknown intent operation %q", in.Op))
+}
+
+// Running serves ChainRunning: the controller saw these actors running, so
+// each runs at the leader's receive time (actorState.active), as for one of
+// its own requests (GAP-0539). Only an actor the leader keeps chain state
+// for is touched; others have no window to age, and an unknown or purged
+// one gets no entry. It is saved with the actor's next state write: a
+// leader that stops before loses only running time.
+func (s *Service) Running(_ context.Context, in RunningRequest) (struct{}, error) {
+	if len(in.Actors) > MaxRunningActors {
+		return struct{}{}, bad(fmt.Errorf("chainstate: a running report names at most %d actors", MaxRunningActors))
+	}
+	for _, a := range in.Actors {
+		if err := a.Validate(); err != nil {
+			return struct{}{}, bad(err)
+		}
+	}
+	now := s.opts.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, a := range in.Actors {
+		if e := s.actors[a.key()]; e != nil && !e.purged && !e.purgeIdle {
+			e.state = e.state.active(now)
+		}
+	}
+	return struct{}{}, nil
 }
 
 // Lifecycle serves ChainLifecycle. Times are the controller's; zero is the
@@ -1663,18 +1723,62 @@ func (s *Service) purgeDeleted(ctx context.Context, held []Actor) int {
 	return n
 }
 
-// Run sweeps every 10 minutes until ctx ends.
+// Run sweeps every 10 minutes, and checkpoints the open stores every
+// WALGuardEvery, until ctx ends.
 func (s *Service) Run(ctx context.Context) error {
 	t := time.NewTicker(10 * time.Minute)
 	defer t.Stop()
+	wal := time.NewTicker(s.opts.WALGuardEvery)
+	defer wal.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-wal.C:
+			s.guardWALs(ctx)
 		case <-t.C:
 			if _, err := s.Sweep(ctx); err != nil {
 				s.warnf("sweep: %v", err)
 			}
+		}
+	}
+}
+
+// The WAL guard of the per-actor stores: the log is copied on every pass,
+// the writer is taken for at most storeWALWriterBudget when the log is over
+// storeWALLimitBytes, and an idle log is cut back (audit.Store.
+// CheckpointWALIfLarge, the gateway's pass for audit.db).
+const (
+	storeWALLimitBytes   = 4 << 20
+	storeWALWriterBudget = 50 * time.Millisecond
+	storeWALPassTimeout  = 10 * time.Second
+)
+
+// guardWALs checkpoints the write-ahead log of every open per-actor store.
+// An audit store runs with SQLite's own checkpoints off
+// (wal_autocheckpoint=0): its owner copies the log, as the gateway's WAL
+// guard does for audit.db. Nothing did for the chain stores, so each actor's
+// log grew with every call it made, about 300 KiB per hook call (81 MB after
+// 270 calls), on the leader's volume and in its memory (GAP-0404). A store
+// closed or purged meanwhile answers not ready and is skipped.
+func (s *Service) guardWALs(ctx context.Context) {
+	s.mu.Lock()
+	stores := make([]*audit.Store, 0, s.open)
+	for _, e := range s.actors {
+		if e.store != nil {
+			stores = append(stores, e.store)
+		}
+	}
+	s.mu.Unlock()
+	for _, st := range stores {
+		if ctx.Err() != nil {
+			return
+		}
+		pctx, cancel := context.WithTimeout(ctx, storeWALPassTimeout)
+		_, err := st.CheckpointWALIfLarge(pctx, storeWALLimitBytes, storeWALWriterBudget)
+		cancel()
+		if err != nil && ctx.Err() == nil && st.Ready() && !errors.Is(err, context.DeadlineExceeded) {
+			s.warnf("chain store WAL checkpoint: %v", err)
 		}
 	}
 }

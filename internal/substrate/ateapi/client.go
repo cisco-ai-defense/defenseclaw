@@ -71,6 +71,7 @@ type (
 	Worker               = pb.Worker
 	WorkerStatus         = pb.WorkerStatus
 	WorkerSandboxClass   = pb.WorkerSandboxClass
+	WorkerState          = pb.WorkerState
 	ResourceRequirements = pb.ResourceRequirements
 	Resources            = pb.Resources
 	ImageVolumeSource    = pb.ImageVolumeSource
@@ -108,6 +109,21 @@ const (
 	ActorStateDeleting    = pb.ActorState_ACTOR_STATE_DELETING
 	ActorStateReverting   = pb.ActorState_ACTOR_STATE_REVERTING
 )
+
+// Worker states (WorkerStatus.state). A DRAINING worker's pod is terminating:
+// Substrate places no new actor there and leaves the ones it hosts alone.
+const (
+	WorkerStateActive      = pb.WorkerState_WORKER_STATE_ACTIVE
+	WorkerStateDraining    = pb.WorkerState_WORKER_STATE_DRAINING
+	WorkerStateUnavailable = pb.WorkerState_WORKER_STATE_UNAVAILABLE
+)
+
+// WorkerLister lists the cluster's workers (global viewer): the one call
+// DrainingWorkers needs. Client has it too (GAP-0386), so a test can pass a
+// worker list alone.
+type WorkerLister interface {
+	ListWorkers(ctx context.Context, opts ListOptions) (Page[*Worker], error)
+}
 
 // Snapshot fidelity and actor metadata fields used when building a template.
 const (
@@ -441,6 +457,15 @@ func (c *GRPCClient) ListActors(ctx context.Context, atespace string, opts ListO
 	return Page[*Actor]{Items: resp.GetActors(), NextPageToken: resp.GetNextPageToken()}, nil
 }
 
+// ListWorkers lists the cluster's workers.
+func (c *GRPCClient) ListWorkers(ctx context.Context, opts ListOptions) (Page[*Worker], error) {
+	resp, err := c.ctl.ListWorkers(ctx, &pb.ListWorkersRequest{Options: listOptions(opts)})
+	if err != nil {
+		return Page[*Worker]{}, err
+	}
+	return Page[*Worker]{Items: resp.GetWorkers(), NextPageToken: resp.GetNextPageToken()}, nil
+}
+
 func (c *GRPCClient) SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor, error) {
 	resp, err := c.ctl.SuspendActor(ctx, &pb.SuspendActorRequest{
 		Actor:   actor,
@@ -574,14 +599,6 @@ func (c *GRPCClient) ListAtespaces(ctx context.Context, opts ListOptions) (Page[
 		return Page[*Atespace]{}, err
 	}
 	return Page[*Atespace]{Items: resp.GetAtespaces(), NextPageToken: resp.GetNextPageToken()}, nil
-}
-
-func (c *GRPCClient) ListWorkers(ctx context.Context, opts ListOptions) (Page[*Worker], error) {
-	resp, err := c.ctl.ListWorkers(ctx, &pb.ListWorkersRequest{Options: listOptions(opts)})
-	if err != nil {
-		return Page[*Worker]{}, err
-	}
-	return Page[*Worker]{Items: resp.GetWorkers(), NextPageToken: resp.GetNextPageToken()}, nil
 }
 
 func listOptions(o ListOptions) *pb.ListOptions {

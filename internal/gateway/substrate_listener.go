@@ -39,6 +39,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // The Agent Substrate gateway serves two listeners (PLAN §5.1, D15):
@@ -201,16 +203,19 @@ type SubstrateConfig struct {
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
 	SecretStore SubstrateSecretStore
-	// OnRateLimited counts defenseclaw.substrate.rate_limited.
+	// OnRateLimited is told of each refusal by the fair-share limits; the
+	// gateway itself records defenseclaw.substrate.rate_limited (GAP-0401).
 	OnRateLimited func(scope ratelimit.Scope, route string)
-	// OnAuthRefused counts defenseclaw.substrate.auth_refused: a refused
-	// token on the actor or admin listener, by closed reason (GAP-0408).
-	OnAuthRefused func(listener, reason string)
 	// Chains is the leader's chain and intent state (lane A13): a verified
 	// actor's tool-chain windows and the judge's session intent live there,
 	// so every replica sees the same. Nil turns the chain lane off for
 	// actors and keeps the judge's intent per process.
 	Chains *chainstate.Client
+	// Relay takes the records the leader collects from the controller, the
+	// callout and its own lifecycle feed; RunSubstrate records each batch
+	// through this replica's telemetry runtime (GAP-0450, GAP-0453). Nil:
+	// nothing is relayed.
+	Relay *telemetryrelay.Taker
 }
 
 // SubstrateActorVerifier verifies actor tokens (identity.ActorVerifier).
@@ -329,6 +334,9 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	a.substrateMu.Lock()
 	a.substrate = st
 	a.substrateMu.Unlock()
+	if cfg.Chains != nil && cfg.Chains.ObserveLatency == nil {
+		cfg.Chains.ObserveLatency = a.recordSubstrateLeaderObserve
+	}
 	useSubstrateChains(cfg.Chains)
 	return nil
 }
@@ -385,6 +393,10 @@ func (a *APIServer) RunSubstrate(ctx context.Context) error {
 		return errors.New("substrate: no listener address")
 	}
 	a.startPendingHookRecovery(ctx)
+	if st.cfg.Relay != nil {
+		st.cfg.Relay.Record = a.recordSubstrateRelay
+		go st.cfg.Relay.Run(ctx)
+	}
 	if st.cfg.SignInServer != nil {
 		go st.watchSignIn(ctx)
 	}
@@ -608,6 +620,7 @@ func writeSubstrateRefusal(w http.ResponseWriter, status int, reason string) {
 
 func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		route := substrateRouteFrom(r.Context())
 		tok := substrateActorToken(r)
 		// The token never reaches a handler, a log or an audit sink, and
@@ -642,6 +655,7 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		release, lerr := st.cfg.Limiter.Acquire(actor.Atespace, actor.UID)
 		if lerr != nil {
 			scope, _ := ratelimit.IsLimited(lerr)
+			a.recordSubstrateRateLimited()
 			if st.cfg.OnRateLimited != nil {
 				st.cfg.OnRateLimited(scope, substrateRouteName(route))
 			}
@@ -682,6 +696,10 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		w.Header().Set(substrateModeHeader, substrateMode(reg))
 		w.Header().Set(substrateFailModeHeader, substrateFailMode(st.cfg, reg))
 		next.ServeHTTP(w, r.WithContext(ctx))
+		if route.class == sandboxauth.RouteHook && r.Method == http.MethodPost {
+			// A hook call; the kit's GET warm-up pings are not counted.
+			a.recordSubstrateHookRTT(time.Since(start))
+		}
 	})
 }
 
@@ -781,8 +799,28 @@ func contextWithSubstratePerson(ctx context.Context, reg registry.Registration) 
 	if reg.Person.Subject != "" {
 		id.UserID = sanitizeLLMEventUser(reg.Person.Subject)
 		id.UserName = sanitizeLLMEventUser(reg.Person.Principal)
+		// The person's principal on the records' identity group
+		// (defenseclaw.user.principal, identity.source oidc, assurance
+		// verified): the registration holds what the OIDC token verified
+		// (GAP-0454). It feeds telemetry only, never profile selection.
+		ctx = context.WithValue(ctx, substratePersonIdentityKey{}, substratePersonIdentity{userID: id.UserID, principal: reg.Person.Principal})
 	}
 	return ContextWithAgentIdentity(ctx, id)
+}
+
+type substratePersonIdentityKey struct{}
+
+type substratePersonIdentity struct{ userID, principal string }
+
+// substrateRequestIdentity is the identity group of a record of userID on a
+// request a verified actor made for its person.
+func substrateRequestIdentity(ctx context.Context, userID string) (*llmEventIdentity, bool) {
+	p, ok := ctx.Value(substratePersonIdentityKey{}).(substratePersonIdentity)
+	if !ok || p.userID == "" || p.userID != userID || strings.TrimSpace(p.principal) == "" {
+		return nil, false
+	}
+	return &llmEventIdentity{Directory: useridentity.DirectoryFacts{Principal: p.principal,
+		Source: useridentity.SourceOIDC, Assurance: useridentity.AssuranceVerified}}, true
 }
 
 func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Request) {

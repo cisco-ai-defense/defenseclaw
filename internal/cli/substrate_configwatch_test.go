@@ -92,11 +92,16 @@ func TestGAP0276GatewayAndLeaderFollowChainEgressAction(t *testing.T) {
 	if got := chains.EgressAction(); got != chainstate.EgressBlock {
 		t.Fatalf("leader chain egress action = %q after the edit", got)
 	}
-	if !strings.Contains(gwOut.String(), "deploy/defenseclaw-gateway)") || !strings.Contains(ldOut.String(), "deploy/defenseclaw-gateway-leader)") {
-		t.Fatalf("the restart hint names a Deployment the chart does not have: %q / %q", gwOut.String(), ldOut.String())
+	// substrate.identity is also a key the controller keeps from its start,
+	// so the hint restarts the gateway, the leader and the controller
+	// (GAP-0589), the chart's Deployment names.
+	if !strings.Contains(gwOut.String(), substrateRestartAll+")") || !strings.Contains(ldOut.String(), substrateRestartAll+")") {
+		t.Fatalf("the restart hint does not name the chart's gateway, leader and controller Deployments: %q / %q", gwOut.String(), ldOut.String())
 	}
-	for _, out := range []string{gwOut.String(), ldOut.String()} {
-		if !strings.Contains(out, configwatch.Digest([]byte("v2"))+" in force") || !strings.Contains(out, "substrate.identity") ||
+	// The gateway's guardrail follows the mounted file, so its follower says
+	// seen, not in force (GAP-0590).
+	for out, word := range map[string]string{gwOut.String(): " seen", ldOut.String(): " in force"} {
+		if !strings.Contains(out, configwatch.Digest([]byte("v2"))+word) || !strings.Contains(out, "substrate.identity") ||
 			!strings.Contains(out, "rollout restart") {
 			t.Fatalf("follower log = %q", out)
 		}

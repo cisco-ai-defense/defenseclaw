@@ -356,26 +356,37 @@ const historyBlameMax = 8
 // only the current turn left that text unrecorded, so it was inspected and
 // refused again on every later request and the session was locked.
 //
+// Only what an inspection shows is blamed (substrate-1 GAP-0308). The
+// segments of a refused request that are not blamed are not recorded, so the
+// next request inspects them again: blaming one cause of a refusal never
+// lets another one through. In all, at most historyBlameMax attribution
+// inspections, every probe counted (GAP-0309).
+//
 //   - A refusal that is not a guardrail block (an audit that failed closed)
 //     is attributed to nothing: the guardrail allowed the text.
-//   - No fresh history: among the current turns, as before. One current
-//     turn (the walker's Turn: not a leading system or developer turn, the
+//   - No fresh history: among the current turns. One current turn (the
+//     walker's Turn: not a leading system or developer turn, the
 //     instructions or the tool definitions, GAP-0265) is blamed with no
 //     further inspection, so a refusal keeps managed AI Defense at one call;
 //     two to historyBlameMax are each inspected alone and the ones that block
 //     alone are blamed; none blamed, none, or more: the current scope is
 //     recorded refused (fail safe).
-//   - Fresh history: the current turns are inspected first, as one group.
-//     When they block alone, the refusal is attributed among them as above
-//     and the history is not blamed. When they do not, the refusal came from
-//     the fresh history (or from the text inspected on every request): a
-//     benign current turn is not blamed. The fresh history is split, in
-//     order, into at most historyBlameMax-1 groups of consecutive segments
-//     and inspected newest group first; the groups that block alone are
-//     blamed. When every group but the oldest is allowed, the oldest is
-//     blamed without its own inspection (by elimination: one call fewer, and
-//     the history text that went first is the one a client wrote before the
-//     model answered). In all, at most historyBlameMax attribution calls.
+//   - Fresh history: the current turns are inspected first, as one text.
+//     When they block, the refusal is attributed among them as above, with
+//     one call fewer (up to historyBlameMax-1 turns each alone), and the
+//     history is not blamed. When they do not, the fresh history is in the
+//     cause: the fresh history and the current turns are inspected together,
+//     and when that does not block either (the refusal came from the text
+//     inspected on every request, the system text, or from a history text
+//     the proxy had already seen), the current scope and the fresh history
+//     are recorded refused (fail safe). When it blocks, the fresh history is
+//     split, in order, into groups of consecutive segments (as many as the
+//     calls left can search: 2^left) and the smallest newest-first run of
+//     groups that blocks together with the current turns is found by binary
+//     search. Its oldest group is blamed: without it the rest of the run is
+//     allowed. A refusal of two parts together (one in the history, one in
+//     the current turn, or both in the history) blames the older part and
+//     removes no benign turn.
 func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, current, turn, fresh []string, label, mode string) []string {
 	if v == nil || v.Action != "block" {
 		return nil
@@ -383,33 +394,50 @@ func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, cu
 	cands := uniqueSegments(turn)
 	hist := uniqueSegments(fresh)
 	if len(hist) == 0 || p.inspector == nil {
-		return p.blameAmong(ctx, cands, current, label, mode)
+		return p.blameAmong(ctx, cands, current, historyBlameMax, label, mode)
 	}
-	if len(cands) > 0 && p.blocksAlone(ctx, cands, label, mode) {
-		return p.blameAmong(ctx, cands, current, label, mode)
-	}
-	if len(hist) == 1 {
-		return hist
-	}
-	groups := historyGroups(hist, historyBlameMax-1)
-	var blamed []string
-	for i := len(groups) - 1; i >= 1; i-- {
-		if p.blocksAlone(ctx, groups[i], label, mode) {
-			blamed = append(blamed, groups[i]...)
+	left := historyBlameMax
+	if len(cands) > 0 {
+		left--
+		if p.blocksAlone(ctx, cands, label, mode) {
+			return p.blameAmong(ctx, cands, current, left, label, mode)
 		}
 	}
-	if len(blamed) == 0 || p.blocksAlone(ctx, groups[0], label, mode) {
-		blamed = append(blamed, groups[0]...)
+	failSafe := append(append(make([]string, 0, len(current)+len(hist)), current...), hist...)
+	run := func(from [][]string) []string {
+		var out []string
+		for _, g := range from {
+			out = append(out, g...)
+		}
+		return append(out, cands...)
 	}
-	return blamed
+	left--
+	if !p.blocksAlone(ctx, run([][]string{hist}), label, mode) {
+		return failSafe
+	}
+	// The run of every group blocks; the current turns alone (the run of
+	// none) do not. Binary search keeps hi a run that blocks and lo one that
+	// does not: ceil(log2(len(groups))) <= left calls.
+	groups := historyGroups(hist, 1<<left)
+	hi, lo := 0, len(groups)
+	for lo-hi > 1 {
+		mid := (hi + lo) / 2
+		if p.blocksAlone(ctx, run(groups[mid:]), label, mode) {
+			hi = mid
+		} else {
+			lo = mid
+		}
+	}
+	return groups[hi]
 }
 
-// blameAmong attributes a refusal among the current turns cands (GAP-0257).
-func (p *GuardrailProxy) blameAmong(ctx context.Context, cands, current []string, label, mode string) []string {
+// blameAmong attributes a refusal among the current turns cands (GAP-0257),
+// inspecting each alone when there are at most limit of them.
+func (p *GuardrailProxy) blameAmong(ctx context.Context, cands, current []string, limit int, label, mode string) []string {
 	if len(cands) == 1 {
 		return cands
 	}
-	if len(cands) == 0 || len(cands) > historyBlameMax || p.inspector == nil {
+	if len(cands) == 0 || len(cands) > limit || p.inspector == nil {
 		return current
 	}
 	var blamed []string
