@@ -550,6 +550,24 @@ func (controller *RetentionController) capPassDue(ctx context.Context) bool {
 	return err != nil || over
 }
 
+// capPassStuck is whether a size-capped pass that completed under the cap
+// still left the store past the size at which a pass starts, having deleted
+// nothing (only open correlation state or protected rows were left): the
+// next checks would start the same empty pass every RetentionSizeCapCheckInterval,
+// so they wait RetentionSizeCapShortfallInterval as after a shortfall over
+// the cap.
+func (controller *RetentionController) capPassStuck(ctx context.Context, result audit.RetentionRunResult) bool {
+	if !result.SizeCapped || result.Backlog || sumRowsDeleted(result.RowsDeleted) > 0 {
+		return false
+	}
+	checker, ok := controller.reaper.(retentionStoreCapChecker)
+	if !ok {
+		return false
+	}
+	over, err := checker.StoreOverCapStart(ctx)
+	return err == nil && over
+}
+
 // maxStoreMB is the reaper's size cap in MiB, zero when it has none.
 func (controller *RetentionController) maxStoreMB() int64 {
 	if capper, ok := controller.reaper.(retentionStoreCapper); ok {
@@ -609,7 +627,7 @@ func (controller *RetentionController) runOnce(ctx context.Context) bool {
 		return false
 	}
 	controller.lastRunAt = attemptedAt
-	controller.capShortfall = err == nil && result.CapNotReached
+	controller.capShortfall = err == nil && (result.CapNotReached || controller.capPassStuck(ctx, result))
 	controller.backlog.Store(err == nil && result.Backlog)
 	controller.logRunOutcome(err)
 	status := controller.Status()

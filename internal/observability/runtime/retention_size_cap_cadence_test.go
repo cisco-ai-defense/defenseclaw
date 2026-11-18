@@ -188,3 +188,71 @@ func TestRetentionControllerSecureClientKeepsTheSixHourCadenceWithACap(t *testin
 		t.Fatalf("Secure Client ran %d size checks", checks)
 	}
 }
+
+// CLOSE-RET review (P3): a store that sits past nine tenths of its cap with
+// nothing a pass may delete (open correlation state) used to run a full,
+// empty pass on every 30-second check, since the pass ended under the cap and
+// so was no shortfall. Such a pass now waits RetentionSizeCapShortfallInterval
+// too.
+func TestRetentionControllerWaitsAfterAnEmptyCappedPassPastTheStart(t *testing.T) {
+	reaper := &checkingFakeRetentionReaper{cappedFakeRetentionReaper: &cappedFakeRetentionReaper{
+		fakeRetentionReaper: newFakeRetentionReaper(7),
+	}}
+	reaper.maxStoreMB.Store(1024)
+	scheduler := newScriptedRetentionScheduler()
+	var clockMu sync.Mutex
+	now := time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC)
+	advance := func(by time.Duration) {
+		clockMu.Lock()
+		now = now.Add(by)
+		clockMu.Unlock()
+	}
+	controller, err := newRetentionController(reaper, RetentionControllerOptions{
+		Scheduler: scheduler, Clock: func() time.Time {
+			clockMu.Lock()
+			defer clockMu.Unlock()
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer stopRetentionControllerTest(t, controller)
+	runs := func() int {
+		count, _, _, _ := reaper.snapshot()
+		return count
+	}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: successfulRetentionResult()}
+	receiveRetentionTest(t, scheduler.waits)
+
+	// Past the start: the check runs a capped pass that deletes nothing.
+	reaper.over.Store(true)
+	advance(RetentionSizeCapCheckInterval)
+	scheduler.commands <- retentionSchedulerCommand{wake: audit.RetentionScheduleTick}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: audit.RetentionRunResult{CompletedAt: now, SizeCapped: true}}
+	receiveRetentionTest(t, scheduler.waits)
+	if got := runs(); got != 2 {
+		t.Fatalf("past the start: %d passes, want 2", got)
+	}
+	for elapsed := RetentionSizeCapCheckInterval; elapsed < RetentionSizeCapShortfallInterval; elapsed += RetentionSizeCapCheckInterval {
+		advance(RetentionSizeCapCheckInterval)
+		scheduler.commands <- retentionSchedulerCommand{wake: audit.RetentionScheduleTick}
+		receiveRetentionTest(t, scheduler.waits)
+	}
+	if got := runs(); got != 2 {
+		t.Fatalf("after an empty capped pass past the start: %d passes within %s, want none", got-2, RetentionSizeCapShortfallInterval)
+	}
+	advance(RetentionSizeCapCheckInterval)
+	scheduler.commands <- retentionSchedulerCommand{wake: audit.RetentionScheduleTick}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: successfulRetentionResult()}
+	receiveRetentionTest(t, scheduler.waits)
+	if got := runs(); got != 3 {
+		t.Fatalf("after the wait: %d passes, want 3", got)
+	}
+}
