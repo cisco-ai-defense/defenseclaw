@@ -189,6 +189,9 @@ type IntentResponse struct {
 	Prior      []IntentCall `json:"prior,omitempty"`
 	// Task is true when UserIntent is the launcher-registered task text.
 	Task bool `json:"task,omitempty"`
+	// Found is true when IntentGet found a context for the key or the
+	// actor's task (intentstore.Reader's found).
+	Found bool `json:"found,omitempty"`
 }
 
 // Lifecycle events (the controller's view of an actor).

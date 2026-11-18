@@ -11,12 +11,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const (
@@ -25,14 +28,20 @@ const (
 	maxWalkDepth = 4
 )
 
-// pathKeys are tool_input keys whose string value is a file-system path in
-// the wave-1 connectors' tools (Claude Code Read/Write/Edit/NotebookEdit/
-// Glob/Grep, Codex and others' file tools).
-var pathKeys = map[string]bool{
-	"file_path": true, "filePath": true, "path": true, "notebook_path": true,
-	"target_file": true, "filename": true, "old_path": true, "new_path": true,
-	"source": true, "destination": true,
-}
+// pathKeys are tool argument keys whose string value is a file-system path
+// in the connectors' file tools: every key the reviewed file-tool schemas
+// read as the path (actionfacts.FileToolPathKeys, root included; substrate-1
+// GAP-0545) and the other file tools' names for a file.
+var pathKeys = func() map[string]bool {
+	keys := map[string]bool{
+		"target_file": true, "filename": true, "old_path": true, "new_path": true,
+		"source": true, "destination": true,
+	}
+	for _, key := range actionfacts.FileToolPathKeys() {
+		keys[key] = true
+	}
+	return keys
+}()
 
 // readTools are tools whose PreToolUse target the gateway may want to see:
 // the kit attaches the file it is about to read.
@@ -40,12 +49,12 @@ var readTools = map[string]map[string]bool{
 	"claudecode": {"Read": true, "NotebookRead": true},
 }
 
-// payloadView is the part of a hook payload the kit inspects.
+// payloadView is the part of a hook payload the kit inspects; the tool's
+// arguments are read by ToolArgsOf.
 type payloadView struct {
-	Event     string          `json:"hook_event_name"`
-	CWD       string          `json:"cwd"`
-	ToolName  string          `json:"tool_name"`
-	ToolInput json.RawMessage `json:"tool_input"`
+	Event    string `json:"hook_event_name"`
+	CWD      string `json:"cwd"`
+	ToolName string `json:"tool_name"`
 }
 
 // CollectFacts inspects the event and returns the facts to attach, or nil
@@ -69,8 +78,8 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	budget := attachCap
 
 	var input any
-	if len(view.ToolInput) > 0 {
-		_ = json.Unmarshal(view.ToolInput, &input)
+	if args := ToolArgsOf(connector, event, payload); len(args) > 0 {
+		_ = json.Unmarshal(args, &input)
 	}
 	seen := map[string]bool{}
 	add := func(field, p string) {
@@ -88,6 +97,9 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	walkPaths("tool_input", input, 0, add)
 
 	isPre := event == "PreToolUse" || event == "preToolUse"
+	if shellProofEvent(connector, event) {
+		addShellCommandFacts(f, connector, event, payload, cwd)
+	}
 	if isPre && readTools[connector][view.ToolName] {
 		for _, pf := range f.Paths {
 			// A read of a skill's files runs the skill folder pass in this
@@ -119,7 +131,7 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		}
 	}
 	_ = budget
-	if len(f.Paths) == 0 && len(f.Files) == 0 && !f.Truncated && !f.readsSkill {
+	if len(f.Paths) == 0 && len(f.Files) == 0 && len(f.Proofs) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
 	}
 	return f
@@ -193,6 +205,102 @@ func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) i
 	return budget
 }
 
+// addShellCommandFacts makes, in the actor's file system, the file-system
+// proofs the laptop's gateway makes for the call's shell command
+// (ShellCommandOf, for every connector's shell tool): the private-key read
+// proof and the protected-target write decision. It also lists each path word
+// of the command (hookpaths.CommandPathWords: arguments, redirect targets, the
+// words of an eval or -c body) whose physical place differs from its
+// spelling: a symlink, a symlinked folder, a `..` after one. The gateway has
+// no view of this file system: without these, cat key-link, cat
+// a/b/ssh/id_ed25519, cd -P a/b/ssh && cat id_ed25519, eval "cat key-link" and
+// echo x >> link-to-defenseclaw-state read or write the actor's protected
+// files where the laptop blocks (substrate-1 GAP-0471, GAP-0545, GAP-0546,
+// GAP-0547). Only POSIX shells run in an actor.
+func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte, cwd string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	command, workdir, ok := ShellCommandOf(connectorName, event, payload)
+	if !ok {
+		return
+	}
+	if workdir != "" {
+		if !filepath.IsAbs(workdir) {
+			workdir = filepath.Join(cwd, workdir)
+		}
+		cwd = filepath.Clean(workdir)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return
+	}
+	if hookpaths.ActionPrivateKeyReadWithDialect(command, cwd, home, actionfacts.DialectPOSIX) ||
+		hookpaths.ActionMakePrivateKeyRead(command, cwd, home) {
+		f.Proofs = append(f.Proofs, ProofPrivateKeyRead)
+	}
+	if hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil) ==
+		hookpaths.ProtectedTargetDecision {
+		f.Proofs = append(f.Proofs, ProofProtectedWrite)
+	}
+	// Which places are private matters only to a call the kit proved reads
+	// or writes the actor's keys: an own SSH folder copy alerts where the
+	// copy stays private (substrate-1 GAP-0549).
+	privacy := len(f.Proofs) > 0
+	seen := map[string]bool{}
+	for _, word := range hookpaths.CommandPathWords(command, home) {
+		if seen[word.Text] {
+			continue
+		}
+		seen[word.Text] = true
+		if fact, listed := commandWordFact(word, cwd, home, privacy); listed {
+			if len(f.Paths) >= maxPathFacts {
+				f.Truncated = true
+				return
+			}
+			f.Paths = append(f.Paths, fact)
+		}
+	}
+}
+
+// commandWordFact is the CommandWordField fact of one command word: its place
+// with every link followed and with its last name kept, each as the kernel
+// walks it from cwd (hookpaths.ResolveWriteTarget), and, when privacy is
+// asked, whether it is a private place of home. listed is false when both
+// places are the one the word spells and it is no private place.
+func commandWordFact(word hookpaths.CommandPathWord, cwd, home string, privacy bool) (PathFact, bool) {
+	full := word.Value
+	if !strings.HasPrefix(full, "/") {
+		full = strings.TrimRight(cwd, "/") + "/" + full
+	}
+	lexical := filepath.Clean(full)
+	fact := PathFact{Field: CommandWordField, Path: word.Text, Abs: lexical, UID: -1, GID: -1, Type: "missing"}
+	if followed, ok := hookpaths.ResolveWriteTarget(full); ok && followed != lexical {
+		fact.Resolved = followed
+	}
+	if dir, name := filepath.Split(strings.TrimRight(full, "/")); dir != "" && name != "" && name != "." && name != ".." {
+		if parent, ok := hookpaths.ResolveWriteTarget(dir); ok {
+			if entry := filepath.Join(parent, name); entry != lexical {
+				fact.Entry = entry
+			}
+		}
+	}
+	fact.PrivateHome = privacy && hookpaths.PrivateHomePlace(lexical, home)
+	if fact.Resolved == "" && fact.Entry == "" && !fact.PrivateHome {
+		return PathFact{}, false
+	}
+	if info, err := os.Stat(full); err == nil {
+		fact.Type = "other"
+		switch {
+		case info.Mode().IsRegular():
+			fact.Type = "file"
+		case info.IsDir():
+			fact.Type = "dir"
+		}
+	}
+	return fact, true
+}
+
 // walkPaths calls add for every path-valued key and for every file an
 // apply_patch body names, depth-first in key order.
 func walkPaths(field string, v any, depth int, add func(field, path string)) {
@@ -253,17 +361,22 @@ func patchPaths(s string) []string {
 
 func inspectPath(field, p, cwd string) PathFact {
 	pf := PathFact{Field: field, Path: p, UID: -1, GID: -1}
-	abs := p
-	if strings.HasPrefix(abs, "~/") {
+	// walk is the path as the kernel walks it: joined, not cleaned, so a
+	// `..` after a symlinked folder ascends from the link's target
+	// (a/b/ssh/../.ssh/id_ed25519 is the actor's key when a/b/ssh links to
+	// ~/.ssh; cleaned first it was the missing a/b/.ssh/id_ed25519,
+	// substrate-1 GAP-0546). Abs is the cleaned spelling.
+	walk := p
+	if strings.HasPrefix(walk, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
-			abs = filepath.Join(home, abs[2:])
+			walk = strings.TrimRight(home, "/") + "/" + walk[2:]
 		}
 	}
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(cwd, abs)
+	if !filepath.IsAbs(walk) {
+		walk = strings.TrimRight(cwd, "/") + "/" + walk
 	}
-	pf.Abs = filepath.Clean(abs)
-	cur := pf.Abs
+	pf.Abs = filepath.Clean(walk)
+	cur := walk
 	for i := 0; i < maxLinkHops; i++ {
 		info, err := os.Lstat(cur)
 		if err != nil || info.Mode()&os.ModeSymlink == 0 {
@@ -274,16 +387,20 @@ func inspectPath(field, p, cwd string) PathFact {
 			break
 		}
 		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(cur), target)
+			if dir, err := filepath.EvalSymlinks(filepath.Dir(cur)); err == nil {
+				target = filepath.Join(dir, target)
+			} else {
+				target = filepath.Join(filepath.Dir(cur), target)
+			}
 		}
 		target = filepath.Clean(target)
 		pf.LinkChain = append(pf.LinkChain, target)
 		cur = target
 	}
-	if resolved, err := filepath.EvalSymlinks(pf.Abs); err == nil {
+	if resolved, err := filepath.EvalSymlinks(walk); err == nil {
 		pf.Resolved = resolved
 	}
-	info, err := os.Stat(pf.Abs)
+	info, err := os.Stat(walk)
 	switch {
 	case err == nil:
 		pf.Type = "other"
@@ -297,7 +414,7 @@ func inspectPath(field, p, cwd string) PathFact {
 		pf.UID, pf.GID, pf.NLink = fileOwner(info)
 		pf.Size = info.Size()
 	case os.IsNotExist(err):
-		if l, lerr := os.Lstat(pf.Abs); lerr == nil && l.Mode()&os.ModeSymlink != 0 {
+		if l, lerr := os.Lstat(walk); lerr == nil && l.Mode()&os.ModeSymlink != 0 {
 			pf.Type = "symlink"
 		} else {
 			pf.Type = "missing"

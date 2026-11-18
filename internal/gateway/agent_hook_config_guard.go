@@ -20,6 +20,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	toml "github.com/pelletier/go-toml/v2"
 	"mvdan.cc/sh/v3/syntax"
@@ -1418,7 +1419,126 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 		}
 		return "", "", ""
 	}
-	facts := actionfacts.Analyze(input)
+	whole := actionfacts.Analyze(input)
+	if target := sandboxAgentHookConfigWrite(whole, input.ActiveHome); target != "" {
+		return agentHookConfigWriteRuleID, "", target
+	}
+	// The writers the path facts do not list are read on the whole call
+	// before the placed statements below, whose early returns would skip
+	// them (substrate-1:GAP-0578).
+	if target := sandboxAgentHookConfigInlineWrite(input); target != "" {
+		return agentHookConfigWriteRuleID, "", target
+	}
+	// Each top-level statement read alone in the directory a static cd
+	// leaves it in, as the laptop guard places them (TopLevelStatements;
+	// a lexical parse, and actionfacts.Analyze reads no files): the reading
+	// of the whole call stops placing operands at its own bound, and a chain
+	// padded with cd steps past it hid the write from the sandbox while the
+	// laptop still alerted (substrate-1 GAP-0304). A statement repeated in
+	// one directory is read once. Like the laptop guard, it reads a command
+	// up to agentHookConfigMaxPlacedBytes, past the statement budget too:
+	// such a call carries the evaluation-limit finding and still names the
+	// write, as on the laptop (substrate-1 GAP-0359). A call the whole
+	// reading did not finish (a && list past its bound) is read even without
+	// a cd, through the guest placement below (substrate-1 GAP-0363).
+	command := agentHookConfigRawShellCommand(input)
+	if command == "" || len(command) > agentHookConfigMaxPlacedBytes || !path.IsAbs(input.CWD) ||
+		whole.Authoritative() && !strings.Contains(command, "cd") && !strings.Contains(command, "pushd") {
+		return "", "", ""
+	}
+	if !whole.Authoritative() {
+		// A call the whole reading did not finish is read in the directories
+		// the guest placement gives its commands (sandboxGuestPlacements):
+		// after pushd, popd, cd -, { cd x; } or a function body that cds,
+		// and in an Args-only call the POSIX reader rejects, the statement
+		// split declines and the settings write went unnamed where the
+		// laptop alerts (substrate-1 GAP-0378, GAP-0379).
+		placements, _ := sandboxGuestPlacements(input, whole, false)
+		dynamic := guestCallRunsUnreadCommand(command, input.ActiveHome)
+		for _, placement := range placements {
+			// A folder the call reaches only as a cd target no command runs
+			// in ((cd ~/.claude || cd /tmp), an uncalled function that cds)
+			// is not where a later write runs: the laptop guard allows
+			// (cd ~/.claude || cd /tmp) then echo '{}' > settings.json
+			// (substrate-1 GAP-0500). After a command the split cannot read
+			// ($CMD, eval, source), which may change the folder, the laptop
+			// keeps such a folder and alerts; so does this guard.
+			if placement.candidate && !dynamic || !sandboxStatementMayNameHookConfig(placement.text) {
+				continue
+			}
+			placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: placement.text, CWD: placement.cwd, ActiveHome: input.ActiveHome})
+			if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
+				return agentHookConfigWriteRuleID, "", target
+			}
+		}
+		return "", "", ""
+	}
+	statements, ok := hookpaths.TopLevelStatements(command, input.CWD, input.ActiveHome)
+	if !ok {
+		return "", "", ""
+	}
+	type placement struct{ command, dir string }
+	seen := map[placement]bool{}
+	for _, statement := range statements {
+		key := placement{statement.Command, statement.Dir}
+		if seen[key] || !path.IsAbs(statement.Dir) || !sandboxStatementMayNameHookConfig(statement.Command) {
+			continue
+		}
+		seen[key] = true
+		placed := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: input.ActiveHome})
+		if target := sandboxAgentHookConfigWrite(placed, input.ActiveHome); target != "" {
+			return agentHookConfigWriteRuleID, "", target
+		}
+	}
+	return "", "", ""
+}
+
+// sandboxHookConfigNames are the file names of every hook file
+// sandboxAgentHookConfigFormat matches.
+var sandboxHookConfigNames = sync.OnceValue(func() []string {
+	var names []string
+	for _, file := range agentHookConfigProjectFiles {
+		names = append(names, path.Base(file.suffix))
+	}
+	for _, file := range agentHookConfigHomeFiles {
+		names = append(names, file.parts[len(file.parts)-1])
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
+})
+
+// sandboxStatementMayNameHookConfig reports a placed statement that may
+// write a hook file: its text, with quotes taken out, names a hook file's
+// name, or it has an expansion, a pattern, a backslash or a line break that
+// may make one.
+// sandboxAgentHookConfigWrite matches a write target by that name, and a
+// lexical reading (actionfacts.Analyze) takes every target from the text,
+// so a statement that names none of them writes none. The guard skips the
+// reading of such a statement: an 8 KB call of ~1,500 placed ':N'
+// statements allocated ~129 MB per call (substrate-1 GAP-0364).
+func sandboxStatementMayNameHookConfig(statement string) bool {
+	// A backslash (an escape or a line continuation inside a name) and a
+	// line break are read as the shell reads them only by the parser.
+	if strings.ContainsAny(statement, "$`*?[{\\\r\n") {
+		return true
+	}
+	plain := strings.NewReplacer("'", "", "\"", "").Replace(statement)
+	for _, name := range sandboxHookConfigNames() {
+		if strings.Contains(plain, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// agentHookConfigMaxPlacedBytes bounds the command the hook-config guards
+// split into placed statements (agentHookConfigPlacedCommands and the
+// sandbox guard): a longer one is read only as the whole call.
+const agentHookConfigMaxPlacedBytes = 8192
+
+// sandboxAgentHookConfigWrite is the first hook file a reading writes,
+// appends or deletes, by its lexical path in the guest's namespace, or "".
+func sandboxAgentHookConfigWrite(facts actionfacts.Facts, home string) string {
 	for _, candidate := range facts.Paths {
 		switch candidate.Access {
 		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
@@ -1429,31 +1549,38 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 		if target == "" {
 			target = strings.TrimSpace(candidate.Value)
 		}
-		if sandboxAgentHookConfigFormat(target, input.ActiveHome) != "" {
-			return agentHookConfigWriteRuleID, "", target
+		if sandboxAgentHookConfigFormat(target, home) != "" {
+			return target
 		}
 	}
-	// Inline code (python3 -c "open(PATH, 'w')"), and the other writers the
-	// path facts do not list, are read by the shared shell writer as the
-	// laptop reads them (agentHookConfigReachedPaths), against the hook files
-	// of the guest home and of the working folder and its parents
-	// (substrate-1:GAP-0578).
-	// The guest paths are not this host's; a stat of one that exists here
-	// only adds this alert.
-	if command := agentHookConfigRawShellCommand(input); command != "" && path.IsAbs(input.CWD) && path.IsAbs(input.ActiveHome) &&
-		sandboxAgentHookConfigMentioned(command) && hookpaths.RegistrationWriteCandidate(command) {
-		names := sandboxAgentHookConfigNames(input.CWD, input.ActiveHome)
-		if reached := hookpaths.RegistrationWriteReached(command, input.CWD, input.ActiveHome, names); len(reached) > 0 {
-			return agentHookConfigWriteRuleID, "", reached[0]
-		}
-		handed, _ := hookpaths.InlineHandedPaths(command, input.CWD, input.ActiveHome)
-		for _, word := range handed {
-			if !word.Dynamic && sandboxAgentHookConfigFormat(word.Path, input.ActiveHome) != "" {
-				return agentHookConfigWriteRuleID, "", word.Path
-			}
+	return ""
+}
+
+// sandboxAgentHookConfigInlineWrite is the first hook file a shell call
+// writes that its path facts do not list, or "". Inline code (python3 -c
+// "open(PATH, 'w')"), and the other writers the path facts do not list, are
+// read by the shared shell writer as the laptop reads them
+// (agentHookConfigReachedPaths), against the hook files of the guest home
+// and of the working folder and its parents (substrate-1:GAP-0578).
+// The guest paths are not this host's; a stat of one that exists here
+// only adds this alert.
+func sandboxAgentHookConfigInlineWrite(input actionfacts.Input) string {
+	command := agentHookConfigRawShellCommand(input)
+	if command == "" || !path.IsAbs(input.CWD) || !path.IsAbs(input.ActiveHome) ||
+		!sandboxAgentHookConfigMentioned(command) || !hookpaths.RegistrationWriteCandidate(command) {
+		return ""
+	}
+	names := sandboxAgentHookConfigNames(input.CWD, input.ActiveHome)
+	if reached := hookpaths.RegistrationWriteReached(command, input.CWD, input.ActiveHome, names); len(reached) > 0 {
+		return reached[0]
+	}
+	handed, _ := hookpaths.InlineHandedPaths(command, input.CWD, input.ActiveHome)
+	for _, word := range handed {
+		if !word.Dynamic && sandboxAgentHookConfigFormat(word.Path, input.ActiveHome) != "" {
+			return word.Path
 		}
 	}
-	return "", "", ""
+	return ""
 }
 
 // sandboxAgentHookConfigNames are the guest paths of the hook files a shell
@@ -1953,7 +2080,7 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 // read), the whole command is the only reading of the top-level writes
 // (rel-1-0-10:GAP-1014, rv1014).
 func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool) {
-	if depth > 4 || command == "" || len(command) > 8192 {
+	if depth > 4 || command == "" || len(command) > agentHookConfigMaxPlacedBytes {
 		return nil, false
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}

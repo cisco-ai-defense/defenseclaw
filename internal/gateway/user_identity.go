@@ -99,8 +99,7 @@ func resolveHookUserIdentity(ctx context.Context, connector string, payload map[
 // wasted work on a path that has nowhere to put the result.
 func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEventUser {
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
-		userID, _, userName := sandboxBindingUser(binding)
-		return newLLMEventUser(userID, userName, userID != "")
+		return sandboxRequestUser(ctx, binding)
 	}
 	fromHeaders := AgentIdentityFromContext(ctx)
 	// The two sources are ranked as pairs rather than field by field. The hook
@@ -122,8 +121,7 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 	var user llmEventUser
 	if binding, ok := sandboxauth.FromContext(r.Context()); ok {
-		userID, _, userName := sandboxBindingUser(binding)
-		user = newLLMEventUser(userID, userName, userID != "")
+		user = sandboxRequestUser(r.Context(), binding)
 	} else if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
 		// An authenticated caller's headers and body are claims; the
 		// verified subject is who it is.
@@ -133,6 +131,30 @@ func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 	}
 	user.Identity = requestIdentityFor(r.Context(), user.ID)
 	return user
+}
+
+// sandboxRequestUser is the user the records of a sandbox request name. A
+// verified Agent Substrate actor's records name its person, the subject the
+// actor listener attached from the registration (attachSubstrateSubject):
+// user.id the OIDC subject, id_kind oidc_subject, and, because the record
+// names the verified subject, its directory facts at assurance verified with
+// identity source oidc (requestIdentityFor). user.name is the bare name, as
+// on the host's verified path: the email-shaped principal is a directory
+// fact, never the name (substrate-1 GAP-0263). An actor with no bound person
+// names nobody. Neither is the binding's host user: a Substrate binding has
+// none, and the local fallback named the gateway pod's own account (uid
+// 65532, nonroot) on every actor row (substrate-1 GAP-0263). Any other
+// sandbox names the host user its binding recorded.
+func sandboxRequestUser(ctx context.Context, binding sandboxauth.Binding) llmEventUser {
+	if subject, ok := verifiedSubjectFromContext(ctx); ok && isSubstrateSubjectSource(subject.Source) {
+		return llmEventUser{ID: subject.UserID, IDKind: subject.IDKind,
+			Name: useridentity.BareAccountName(sanitizeLLMEventUser(subject.UserName))}
+	}
+	if _, ok := substrateActorFrom(ctx); ok {
+		return llmEventUser{}
+	}
+	userID, _, userName := sandboxBindingUser(binding)
+	return newLLMEventUser(userID, userName, userID != "")
 }
 
 func resolveHTTPUser(r *http.Request, rawBody []byte) llmEventUser {

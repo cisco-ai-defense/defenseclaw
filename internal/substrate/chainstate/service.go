@@ -1305,7 +1305,9 @@ func toResponse(snap intentstore.Snapshot, task string) IntentResponse {
 	return out
 }
 
-// IntentGet serves IntentGet: a session's context without recording.
+// IntentGet serves IntentGet: a session's context without recording. Found
+// reports a context for the key or a task of the actor. Only the actor's
+// own store is read: the leader keys every store by the verified actor.
 func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse, error) {
 	e, release, err := s.acquire(in.Actor)
 	if err != nil {
@@ -1313,8 +1315,11 @@ func (s *Service) IntentGet(_ context.Context, in IntentRequest) (IntentResponse
 	}
 	defer release()
 	s.touch(e)
-	snap, _ := s.intents(e).Peek(in.Key)
-	return toResponse(snap, s.stateOf(e).Task), nil
+	snap, found := s.intents(e).Peek(in.Key)
+	task := s.stateOf(e).Task
+	out := toResponse(snap, task)
+	out.Found = found || task != ""
+	return out, nil
 }
 
 // IntentPut serves IntentPut.
