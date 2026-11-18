@@ -7,6 +7,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -131,7 +133,7 @@ func TestAlertFatigueWeakButRealPasswordsRemainVisible(t *testing.T) {
 		"password=dummysecret",
 		"password=examplepass",
 	} {
-		if !acceptedLocalSecretMatch(1, assignment) {
+		if !bareWeakPasswordAssignment(assignment, assignment, 0) {
 			t.Fatalf("weak password value was mistaken for a documentation placeholder: %q", assignment)
 		}
 	}
@@ -169,12 +171,21 @@ func TestAlertFatigueActionModePreservesWeakExplicitCredentials(t *testing.T) {
 		}
 	}
 
+	// An explicit weak password on a bare password key alerts on the proxy
+	// content check, as on rel (rel-1-0-10:GAP-0210 review r1: the proxy's own
+	// password regex went with GAP-0210, and SEC-PASSWORD-ASSIGN reads these as
+	// weak passwords, weakPasswordAssignmentFindings). The hook path stays quiet
+	// on them, as on rel (GAP-0522).
+	hookAPI := &APIServer{scannerCfg: &config.Config{}}
 	for _, assignment := range []string{
 		"password=changeme123", "password=dummysecret", "password=examplepass",
 	} {
 		verdict := scanLocalPatterns("prompt", assignment)
-		if verdict.Action != "alert" || verdict.Severity != "MEDIUM" || len(verdict.Findings) == 0 {
+		if verdict.Action != "alert" || verdict.Severity != "MEDIUM" || !containsString(verdict.Findings, "SEC-PASSWORD-ASSIGN:Password assigned to a password-named key") {
 			t.Errorf("Action fallback suppressed explicit weak password %q: %+v", assignment, verdict)
+		}
+		if hook := hookAPI.inspectMessageContent(context.Background(), claudeCodeContentInspectRequest(assignment, "prompt")); hook.Severity != "NONE" {
+			t.Errorf("%q: the hook prompt check reports %s %v, rel is quiet (GAP-0522)", assignment, hook.Severity, hook.Findings)
 		}
 	}
 }

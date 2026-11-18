@@ -99,6 +99,11 @@ func toolResultChecks(generation *compiledRulePackCategories, content, toolName 
 				findings = append(findings, f)
 			}
 		}
+		// The secret rules also read the output with its invisible characters
+		// removed, as for a prompt and a model response (rel-1-0-10:GAP-0210).
+		if !secureClientGeneration() {
+			findings = withZeroWidthSecretFindings(generation, findings, content, "message", scope)
+		}
 		injection = scanContentRulesWithOptions(generation, content, "message", scope,
 			ruleScanOptions{onlyCategory: "trust-exploit"})
 		switch {

@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -1240,13 +1241,15 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			signals = append(signals, promptInjectionReviewSignals(view)...)
 		}
 	}
-	high, review, _ := partitionSignals(signals)
-
 	// Keep trust, credential, and PII detection on untrusted content. Concrete
 	// actions are evaluated through the tool-call path where execution facts
 	// are available, rather than treating their literal appearance in prose as
-	// an action.
+	// an action. A credential finding in a prompt is also a HIGH_SIGNAL triage
+	// signal (secretRuleTriageSignals).
 	ruleFindings := scanProxyContentRules(ctx, content)
+	signals = append(signals, secretRuleTriageSignals(direction, ruleFindings)...)
+	high, review, _ := partitionSignals(signals)
+
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
@@ -1492,16 +1495,17 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Always merge the regex safety net — even when the judge succeeded,
 	// it may have missed categories that only regex covers. HIGH_SIGNAL
 	// regex findings and full rule engine results are both applied.
+	// Keep the same content/action boundary as regex_judge. The trusted action
+	// dispatcher remains responsible for command, path, cognitive-file, and C2
+	// enforcement because it can reason over parsed execution facts.
+	ruleFindings := scanProxyContentRules(ctx, content)
+	signals = append(signals, secretRuleTriageSignals(direction, ruleFindings)...)
 	high, _, _ := partitionSignals(signals)
 	if len(high) > 0 {
 		regexVerdict := signalsToVerdict(high, "local-triage")
 		merged = mergeWithJudge(merged, regexVerdict)
 	}
 
-	// Keep the same content/action boundary as regex_judge. The trusted action
-	// dispatcher remains responsible for command, path, cognitive-file, and C2
-	// enforcement because it can reason over parsed execution facts.
-	ruleFindings := scanProxyContentRules(ctx, content)
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		if severityRank[maxSev] >= severityRank["HIGH"] {
@@ -1811,35 +1815,6 @@ func compileLocalPatternSources(field string, sources []string) ([]*regexp.Regex
 	return compiled, nil
 }
 
-type localSecretDetectorKind uint8
-
-const (
-	localSecretDetectorToken localSecretDetectorKind = iota + 1
-	localSecretDetectorPassword
-	localSecretDetectorAPIKey
-	localSecretDetectorBearer
-	localSecretDetectorAWS
-)
-
-type localSecretDetector struct {
-	kind        localSecretDetectorKind
-	canonicalID string
-	pattern     *regexp.Regexp
-}
-
-// secretPatternDetectors tighten patterns that cause false positives as bare
-// substrings. Every detector carries stable behavioral and canonical identities
-// so slice reordering cannot silently change acceptance or finding IDs.
-var secretPatternDetectors = []localSecretDetector{
-	{localSecretDetectorToken, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`)},
-	// Require an actual secret-shaped VALUE after the key name, so prose
-	// that merely mentions "password" / "api_key" / "bearer" is not flagged.
-	{localSecretDetectorPassword, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`)},
-	{localSecretDetectorAPIKey, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`)},
-	{localSecretDetectorBearer, "LP-SECRET-BEARER", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`)},
-	{localSecretDetectorAWS, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`)},
-}
-
 // Target names and transfer verbs are common in source review and operational
 // documentation. Strong built-in exfil detection therefore requires the
 // conjunction of a read/dump verb, a sensitive target, and an egress verb.
@@ -1958,19 +1933,139 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 // spliced into a word, or a Latin letter swapped for a Cyrillic one, reads the
 // same to a model and must not read differently to the rules. The hook path
 // does the same (messageRuleFindings); the Secure Client generation keeps its
-// single pass.
+// single pass. One reading is the proxy's own: a weak password assigned to a
+// bare password key (weakPasswordAssignmentFindings).
 func scanUntrustedContentRules(generation *compiledRulePackCategories, content string) []RuleFinding {
 	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
+	findings = unionRuleFindings(findings, weakPasswordAssignmentFindings(generation, content))
 	if secureClientGeneration() {
 		return findings
 	}
-	folded := trustPatternText(content)
-	if folded == content {
+	if folded := trustPatternText(content); folded != content {
+		findings = unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
+			contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+		}))
+	}
+	return withZeroWidthSecretFindings(generation, findings, content, "", ruleContentScopeUntrusted)
+}
+
+// withZeroWidthSecretFindings adds to findings the secret rules found on
+// content with only its invisible characters removed (credentialVisibleText;
+// no letter folding: a credential is matched byte for byte). A key with a
+// zero-width space, a Hangul filler or another invisible character spliced
+// between its name and its value, or into the value, reads the same to a
+// model and to a shell. The proxy's own secret regexes had a zero-width
+// fallback for five shapes and the pack had none, on any surface; the hook
+// prompt check (messageRuleFindings), the tool-result check
+// (toolResultChecks) and the proxy (scanUntrustedContentRules) now share it
+// (rel-1-0-10:GAP-0210, GAP-1076). Only the copy the secret rules read is
+// folded: the text the client receives and the other rules read is the text
+// as written. A rule found on the text as written keeps the stronger of its
+// two findings (unionRuleFindings). Off under Secure Client, like the folded
+// trust pass: callers skip it there.
+func withZeroWidthSecretFindings(generation *compiledRulePackCategories, findings []RuleFinding, content, toolName string, scope ruleContentScope) []RuleFinding {
+	invisible := credentialVisibleText(content)
+	if invisible == content {
 		return findings
 	}
-	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
-		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+	return unionRuleFindings(findings, scanRuleGeneration(generation, invisible, toolName, ruleScanOptions{
+		contentScope: scope, onlyCategory: "secret",
 	}))
+}
+
+// weakPasswordAssignmentFindings is the proxy content check's reading of a
+// weak password assigned to a bare password key (bareWeakPasswordAssignment:
+// a stand-in or a bare word such as changeme123 or examplepass after
+// password=), reported as the pack's SEC-PASSWORD-ASSIGN with its title and
+// severity. rel found these in a prompt or a completion on the proxy with its
+// own password regex, removed with the other proxy-only secret regexes
+// (rel-1-0-10:GAP-0210); without this reading such a model response was
+// allowed where rel alerted (GAP-0210 review r1). The hook path does not
+// report them (GAP-0522: in a prompt or a tool result they are sample
+// configs), and a documentation placeholder, a mask or a template is not a
+// weak password (passwordReadAsNone, GAP-0213). The key names are the rule's
+// pattern, so a pack that disables or replaces SEC-PASSWORD-ASSIGN turns this
+// off or changes them. The text without its invisible characters
+// (credentialVisibleText) is read too, as rel read its normalized text.
+func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string) []RuleFinding {
+	if generation == nil {
+		return nil
+	}
+	if len(generation.members) > 0 {
+		var out []RuleFinding
+		for i, member := range generation.members {
+			findings := weakPasswordAssignmentFindings(member, content)
+			if i < len(generation.memberNames) {
+				for j := range findings {
+					findings[j].profile = generation.memberNames[i]
+				}
+			}
+			out = append(out, findings...)
+		}
+		return out
+	}
+	options := ruleScanOptions{contentScope: ruleContentScopeUntrusted, onlyCategory: "secret"}
+	texts := []string{content}
+	if visible := credentialVisibleText(content); visible != content {
+		texts = append(texts, visible)
+	}
+	for categoryIndex := range generation.categories {
+		cat := &generation.categories[categoryIndex]
+		for ruleIndex := range cat.Rules {
+			rule := &cat.Rules[ruleIndex]
+			if rule.ID != passwordAssignRuleID || rule.Pattern == nil || !ruleScanEligible(options, cat, rule) {
+				continue
+			}
+			for _, text := range texts {
+				if !(&ruleScanText{text: text}).mayMatch(rule.Pattern) {
+					continue
+				}
+				for _, loc := range rule.Pattern.FindAllStringIndex(text, -1) {
+					if !bareWeakPasswordAssignment(text, text[loc[0]:loc[1]], loc[0]) {
+						continue
+					}
+					finding := RuleFinding{
+						RuleID:     rule.ID,
+						Title:      rule.Title,
+						Severity:   rule.Severity,
+						Confidence: rule.Confidence,
+						Evidence:   sanitizeEvidence(text[loc[0]:minInt(loc[1], loc[0]+80)]),
+						Tags:       rule.Tags,
+					}
+					if text == content {
+						finding.LineNumber = lineNumberAtOffset(text, loc[0])
+					}
+					return []RuleFinding{finding}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// credentialVisibleText is content without the characters that render as
+// nothing (rel-1-0-10:GAP-1076): every Unicode format character (Cf: the
+// zero-width space, joiners, word joiner, BOM, soft hyphen, bidi controls,
+// invisible operators, tag characters, shorthand format controls), the
+// fillers and joiners stripZeroWidth lists that are not Cf (Hangul fillers
+// U+115F, U+1160, U+3164, U+FFA0, Khmer U+17B4/U+17B5, the combining grapheme
+// joiner, interlinear annotation marks), variation selectors (U+FE00-FE0F,
+// U+E0100-E01EF) and the Mongolian free variation selectors (U+180B-180D,
+// U+180F). ASCII text is returned as it is, without a copy.
+func credentialVisibleText(content string) string {
+	if strings.IndexFunc(content, func(r rune) bool { return r >= utf8.RuneSelf }) < 0 {
+		return content
+	}
+	return stripZeroWidth(strings.Map(func(r rune) rune {
+		switch {
+		case unicode.Is(unicode.Cf, r),
+			r >= '\uFE00' && r <= '\uFE0F',
+			r >= '\U000E0100' && r <= '\U000E01EF',
+			r >= '\u180B' && r <= '\u180D', r == '\u180F':
+			return -1
+		}
+		return r
+	}, content))
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
@@ -2084,15 +2179,14 @@ func scanLocalPatternsWithActivation(
 			flags = append(flags, p)
 		}
 	}
-	for _, detector := range secretPatternDetectors {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
-			flag := match
-			if norm {
-				flag = "[normalized] " + match
-			}
-			flags = append(flags, flag)
-		}
-	}
+	// Every built-in secret detection comes from the rule pack, read as the
+	// hook path reads a prompt or a tool result (scanUntrustedContentRules).
+	// The proxy used to add its own secret regexes here, so a completion and a
+	// tool result holding the same text were decided by different detectors: a
+	// documentation placeholder alerted only in a response
+	// (rel-1-0-10:GAP-0210, GAP-0213). The one reading the proxy keeps of its
+	// own is a weak password on a bare password key, as rel had it
+	// (weakPasswordAssignmentFindings, in scanUntrustedContentRules).
 
 	// Content scanning retains trust, credential, and PII rules. Literal
 	// commands, paths, cognitive files, and C2 indicators are action categories
@@ -2307,34 +2401,46 @@ func triagePatterns(direction, content string) []TriageSignal {
 			})
 		}
 	}
-	// Secret regex: tries `content` first (case/whitespace preserved
-	// for audit context) and falls back to `lower` so evasions like
-	// "token\u200B=\u200B<60-char key>" still fire. Without the
-	// fallback the docstring on scanLocalPatterns above — which
-	// promises normalization defeats whitespace/slash-run evasions —
-	// would not hold for secrets.
-	for _, detector := range secretPatternDetectors {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
-			src := content
-			if norm {
-				src = lower
-			}
-			loc := strings.Index(src, match)
-			if loc < 0 {
-				continue
-			}
-			ev := extractEvidenceAt(src, loc, loc+len(match))
-			if norm {
-				ev = "[normalized] " + ev
-			}
-			signals = append(signals, TriageSignal{
-				Level: secretLevel, FindingID: "TRIAGE-SECRET-REGEX",
-				Category: "secret", Pattern: detector.pattern.String(),
-				Evidence: ev, Confidence: 0.75,
-			})
-		}
-	}
+	return signals
+}
 
+// triageLiftedSecretRules are the pack rules that read the credential shapes
+// of rel's proxy-only secret regexes (removed with rel-1-0-10:GAP-0210): a
+// password, token or API key assignment, a bearer credential and an AWS
+// secret key.
+var triageLiftedSecretRules = map[string]bool{
+	passwordAssignRuleID:   true,
+	secretAssignmentRuleID: true,
+	"SEC-BEARER":           true,
+	bareBearerRuleID:       true,
+	"SEC-AWS-SECRET":       true,
+}
+
+// secretRuleTriageSignals is the TRIAGE-SECRET-REGEX signal of a prompt: one
+// HIGH_SIGNAL per pack credential finding of triageLiftedSecretRules. On rel
+// the proxy's own secret regexes raised it for regex_judge and judge_first,
+// so a password assignment in a prompt was HIGH and the permissive posture
+// (alert from HIGH) alerted on it; without it SEC-PASSWORD-ASSIGN (MEDIUM)
+// was allowed there (rel-1-0-10:GAP-1269). The pack decides what is a
+// credential, so a placeholder the rule leaves alone (GAP-0213) raises
+// nothing, and the signal names the rule, never the value. In a completion
+// the rule finding is the verdict, as for every other rule. Off under managed
+// enterprise, like triagePatterns.
+func secretRuleTriageSignals(direction string, findings []RuleFinding) []TriageSignal {
+	if direction != "prompt" || ManagedEnterpriseActive() {
+		return nil
+	}
+	var signals []TriageSignal
+	for _, f := range findings {
+		if !triageLiftedSecretRules[f.RuleID] {
+			continue
+		}
+		signals = append(signals, TriageSignal{
+			Level: "HIGH_SIGNAL", FindingID: "TRIAGE-SECRET-REGEX",
+			Category: "secret", Pattern: f.RuleID,
+			Evidence: f.RuleID + ": " + f.Title, Confidence: 0.75,
+		})
+	}
 	return signals
 }
 
