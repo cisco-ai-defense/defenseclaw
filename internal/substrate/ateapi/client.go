@@ -136,6 +136,7 @@ const (
 // Snapshot owner and durable storage states (ActorStatus.snapshots).
 const (
 	SnapshotOwnerActor       = pb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR
+	SnapshotOwnerTag         = pb.SnapshotOwner_SNAPSHOT_OWNER_TAG
 	SnapshotStoragePending   = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING
 	SnapshotStorageCompleted = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 )

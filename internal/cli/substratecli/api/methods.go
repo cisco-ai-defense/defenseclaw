@@ -68,6 +68,9 @@ type Actor struct {
 	RecoveredFrom string `json:"recovered_from,omitempty"`
 	// SnapshotGeneration comes with a snapshot: the generation stored.
 	SnapshotGeneration int32 `json:"snapshot_generation,omitempty"`
+	// ResumeError comes with a snapshot whose agent could not be started
+	// again (state suspended): no_worker when the pool had no room.
+	ResumeError string `json:"resume_error,omitempty"`
 }
 
 // PolicyConflict is an actor's policy_conflict as the cluster shows it.
@@ -85,7 +88,7 @@ type PolicyConflict struct {
 // tables, status lines, prompts and errors. The identifiers the launcher
 // sends back (UID, registration key, session token) are left as they are.
 func (a Actor) shown() Actor {
-	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State, &a.RecoveredFrom} {
+	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State, &a.RecoveredFrom, &a.ResumeError} {
 		*f = safetext.Line(*f)
 	}
 	if a.PolicyConflict != nil {
@@ -258,13 +261,18 @@ func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, err
 	return a.shown(), err
 }
 
+// SnapshotTimeout bounds a Snapshot call: the upload of a large agent's
+// memory takes longer than an ordinary request. The gateway finishes the
+// snapshot and starts the agent again even when the launcher stops waiting.
+const SnapshotTimeout = 6 * time.Minute
+
 // Snapshot has the cluster store the running actor's state durably (it
 // pauses for the seconds that takes), so a crash recovery returns to it
 // rather than to the template's start (GAP-0410). The gateway answers 409
 // not_running for an actor that is not running and 501 when it cannot.
 func (c *Client) Snapshot(ctx context.Context, atespace, name string) (Actor, error) {
 	var a Actor
-	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/snapshot", nil, map[string]any{}, &a)
+	err := c.do(withLongCall(ctx, SnapshotTimeout), http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/snapshot", nil, map[string]any{}, &a)
 	return a.shown(), err
 }
 

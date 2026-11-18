@@ -378,7 +378,9 @@ func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *subst
 		case <-ctx.Done():
 			return nil
 		case <-tick.C:
-			if err := take(); err != nil {
+			if err := take(); errors.Is(err, errSubstrateNotKept) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %v\n", err)
+			} else if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Could not save a restore point: %v\n", err)
 			}
 		}
@@ -508,6 +510,9 @@ func substrateKeepSnapshot(ctx context.Context, s *substrateSession, a api.Actor
 	res, err := s.Client.Snapshot(ctx, a.Atespace, a.Name)
 	if err == nil {
 		if res.State == "suspended" {
+			if res.ResumeError == "no_worker" {
+				return true, fmt.Sprintf("The cluster stored it, but it has no free worker to start %s again now; it is suspended at that snapshot, and \"defenseclaw substrate connect %s\" starts it when a worker is free.", a.Name, a.Name), nil
+			}
 			return true, fmt.Sprintf("The cluster stored it; %s is suspended at that snapshot and \"defenseclaw substrate connect %s\" starts it again.", a.Name, a.Name), nil
 		}
 		return true, "", nil
@@ -520,8 +525,12 @@ func substrateKeepSnapshot(ctx context.Context, s *substrateSession, a api.Actor
 			return false, "Note: the agent stopped running before the cluster could store a snapshot, so this restore point is lost if it crashes before its next one. Run checkpoint again after connect.", nil
 		}
 	}
-	return false, "", fmt.Errorf("restore point %s is saved in the agent, but the cluster could not store a snapshot of it (%w), so it is lost if the agent crashes. Run checkpoint again", id, err)
+	return false, "", fmt.Errorf("%w: restore point %s is saved in the agent, but the cluster could not store a snapshot of it (%w), so it is lost if the agent crashes. Run checkpoint again", errSubstrateNotKept, id, err)
 }
+
+// errSubstrateNotKept marks a checkpoint whose restore point was saved but
+// not stored by the cluster.
+var errSubstrateNotKept = errors.New("not stored by the cluster")
 
 // substrateUndoStartTries bounds the retries of an undo while a recovered
 // agent starts (2 s apart).

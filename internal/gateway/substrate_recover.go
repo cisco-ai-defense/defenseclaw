@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 )
@@ -37,8 +38,9 @@ type SubstrateActorRecoverer interface {
 type SubstrateRecovery struct {
 	// FromTemplate: the actor had no snapshot of its own in durable
 	// storage, so the revert took it back to its template's (golden)
-	// snapshot. The folder copied into it and its restore points are gone
-	// (GAP-0410).
+	// snapshot, owned by a tag. The folder copied into it and its restore
+	// points are gone (GAP-0410). False when no snapshot is listed at all:
+	// that is not evidence of a loss.
 	FromTemplate bool
 	// Generation is the snapshot generation it came back from.
 	Generation int32
@@ -58,7 +60,14 @@ type SubstrateKept struct {
 	// Running: the actor was resumed after the snapshot. When false it
 	// stays SUSPENDED at that snapshot, and the next connect starts it.
 	Running bool
+	// NoWorker: the resume found no room in the pool.
+	NoWorker bool
 }
+
+// substrateSnapshotTimeout bounds a snapshot (the durable suspend and the
+// resume after it). It runs detached from the request, so a launcher that
+// stops waiting never leaves the agent suspended.
+const substrateSnapshotTimeout = 5 * time.Minute
 
 var (
 	// ErrSubstrateNotCrashed is a recover of an actor that is not CRASHED.
@@ -104,7 +113,7 @@ func (s *SubstrateATEActions) Recover(ctx context.Context, atespace, name string
 	// A revert drops a newest snapshot that was never uploaded, so the
 	// newest one left is the one the actor resumes from.
 	h := newestSnapshot(ra.GetStatus())
-	rec := SubstrateRecovery{FromTemplate: h.GetOwner() != ateapi.SnapshotOwnerActor, Generation: h.GetGeneration()}
+	rec := SubstrateRecovery{FromTemplate: h != nil && h.GetOwner() == ateapi.SnapshotOwnerTag, Generation: h.GetGeneration()}
 	return rec, s.Resume(ctx, atespace, name)
 }
 
@@ -125,19 +134,21 @@ func (s *SubstrateATEActions) Snapshot(ctx context.Context, atespace, name strin
 	if st := a.GetStatus().GetState(); st != ateapi.ActorStateRunning {
 		return SubstrateKept{}, fmt.Errorf("%w (it is %s)", ErrSubstrateNotRunning, st)
 	}
+	before := newestSnapshot(a.GetStatus()).GetGeneration()
 	sa, err := ds.SuspendActorDurable(ctx, ref)
 	if err != nil {
 		return SubstrateKept{}, fmt.Errorf("suspend: %w", err)
 	}
 	h := newestSnapshot(sa.GetStatus())
-	if h.GetOwner() != ateapi.SnapshotOwnerActor || h.GetDurableSnapshot().GetState() != ateapi.SnapshotStorageCompleted {
-		// Not stored durably: a crash would still lose it. Start the
-		// actor again and say so.
-		rerr := s.Resume(ctx, atespace, name)
-		return SubstrateKept{Running: rerr == nil}, fmt.Errorf("the suspend returned generation %d before it was stored durably", h.GetGeneration())
+	if h.GetGeneration() <= before || h.GetOwner() != ateapi.SnapshotOwnerActor || h.GetDurableSnapshot().GetState() != ateapi.SnapshotStorageCompleted {
+		// Someone else suspended it first (the idle controller, an
+		// asynchronous snapshot): it is SUSPENDED by their decision and
+		// the call returned it as it was. Leave it so.
+		return SubstrateKept{}, fmt.Errorf("%w (suspended meanwhile, at generation %d)", ErrSubstrateNotRunning, h.GetGeneration())
 	}
 	kept := SubstrateKept{Generation: h.GetGeneration()}
 	if err := s.Resume(ctx, atespace, name); err != nil {
+		kept.NoWorker = errors.Is(err, ErrSubstrateNoWorker)
 		return kept, fmt.Errorf("%w: %w", errSubstrateKeptNotResumed, err)
 	}
 	kept.Running = true
@@ -158,7 +169,7 @@ func newestSnapshot(s *ateapi.ActorStatus) *ateapi.Snapshot {
 // substrateRecoverActor is POST .../actors/{atespace}/{name}/recover: the
 // owner (or an administrator) brings a crashed actor back. The answer's
 // recovered_from is "snapshot" (its own last snapshot) or "template" (it
-// had none, so its folder is gone).
+// had none, so its folder is gone); absent when no snapshot is listed.
 func (a *APIServer) substrateRecoverActor(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rec, ok := st.cfg.Actions.(SubstrateActorRecoverer)
@@ -172,7 +183,11 @@ func (a *APIServer) substrateRecoverActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		a.substrateAuditAdminTarget(st, r, reg, "recover", "HIGH")
-		res, err := rec.Recover(r.Context(), reg.Atespace, reg.Name)
+		// Detached like a snapshot: a launcher that stops waiting must
+		// not leave the actor reverted but not started.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), substrateSnapshotTimeout)
+		defer cancel()
+		res, err := rec.Recover(ctx, reg.Atespace, reg.Name)
 		switch {
 		case errors.Is(err, ErrSubstrateNotCrashed):
 			writeSubstrateJSONError(w, http.StatusConflict, "not_crashed")
@@ -199,7 +214,11 @@ func (a *APIServer) substrateRecoverActor(st *substrateState) http.HandlerFunc {
 		fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s recovered from a crash to snapshot generation %d (%s)\n", reg.Atespace, reg.Name, res.Generation, from)
 		v := st.actorView(reg)
 		v["state"] = "running"
-		v["recovered_from"] = from
+		if res.Generation > 0 {
+			// No snapshot listed: say nothing; the launcher's undo
+			// finds out from the folder.
+			v["recovered_from"] = from
+		}
 		writeSubstrateJSON(w, http.StatusOK, v)
 	}
 }
@@ -219,8 +238,10 @@ func (a *APIServer) substrateSnapshotActor(st *substrateState) http.HandlerFunc 
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
-		a.substrateAuditAdminTarget(st, r, reg, "snapshot", "INFO")
-		kept, err := sn.Snapshot(r.Context(), reg.Atespace, reg.Name)
+		a.substrateAuditAdminTarget(st, r, reg, "snapshot", "MEDIUM")
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), substrateSnapshotTimeout)
+		defer cancel()
+		kept, err := sn.Snapshot(ctx, reg.Atespace, reg.Name)
 		switch {
 		case errors.Is(err, ErrSubstrateNotRunning):
 			writeSubstrateJSONError(w, http.StatusConflict, "not_running")
@@ -243,6 +264,10 @@ func (a *APIServer) substrateSnapshotActor(st *substrateState) http.HandlerFunc 
 		v["state"] = "running"
 		if !kept.Running {
 			v["state"] = "suspended"
+			v["resume_error"] = "resume_failed"
+			if kept.NoWorker {
+				v["resume_error"] = "no_worker"
+			}
 		}
 		v["snapshot_generation"] = kept.Generation
 		writeSubstrateJSON(w, http.StatusOK, v)

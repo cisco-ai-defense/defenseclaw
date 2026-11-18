@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
@@ -13,6 +15,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi/ateapifake"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // gap0410Fixture is a gateway with alice's actor alice-1 in state, holding
@@ -147,4 +151,67 @@ func gap0410Newest(s *ateapi.ActorStatus) *ateapi.Snapshot {
 		}
 	}
 	return h
+}
+
+// GAP-0410 (review of FIX-0410): an administrator may snapshot another
+// person's agent; when no worker has room to start it again, the snapshot
+// is still stored and the answer says the agent is suspended; when someone
+// else (the idle controller) suspended it first, it stays suspended by
+// their decision and the answer is 409; a recover with no snapshot listed
+// does not claim the folder is lost.
+func TestGAP0410SnapshotEdges(t *testing.T) {
+	ref := ateapi.Ref("eng-web", "alice-1")
+	t.Run("admin, no worker after the snapshot", func(t *testing.T) {
+		f, fake, _ := gap0410Fixture(t, ateapi.ActorStateRunning)
+		fake.Err = func(method, _ string) error {
+			if method == "ResumeActor" {
+				return status.Error(codes.ResourceExhausted, "no worker")
+			}
+			return nil
+		}
+		rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors/eng-web/alice-1/snapshot", "p-admin", "{}")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("admin snapshot %d %s", rec.Code, rec.Body)
+		}
+		v := gap0410Body(t, rec.Body.Bytes())
+		if v["state"] != "suspended" || v["resume_error"] != "no_worker" || v["snapshot_generation"] != float64(2) {
+			t.Fatalf("answer %v", v)
+		}
+		a, _ := fake.GetActor(context.Background(), ref)
+		h := gap0410Newest(a.GetStatus())
+		if a.GetStatus().GetState() != ateapi.ActorStateSuspended || h.GetDurableSnapshot().GetState() != ateapi.SnapshotStorageCompleted {
+			t.Fatalf("after: %v, newest %v", a.GetStatus().GetState(), h)
+		}
+	})
+	t.Run("suspended meanwhile by the idle controller", func(t *testing.T) {
+		f, fake, _ := gap0410Fixture(t, ateapi.ActorStateRunning)
+		fake.Err = func(method, _ string) error {
+			if method == "SuspendActorDurable" {
+				return fake.SetState(ref, ateapi.ActorStateSuspended)
+			}
+			return nil
+		}
+		rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors/eng-web/alice-1/snapshot", "p-alice", "{}")
+		var e struct{ Reason string }
+		_ = json.Unmarshal(rec.Body.Bytes(), &e)
+		if rec.Code != http.StatusConflict || e.Reason != "not_running" || fake.Calls("ResumeActor") != 0 {
+			t.Fatalf("snapshot racing an idle suspend %d %s, resumes %d", rec.Code, rec.Body, fake.Calls("ResumeActor"))
+		}
+		if a, _ := fake.GetActor(context.Background(), ref); a.GetStatus().GetState() != ateapi.ActorStateSuspended {
+			t.Fatalf("the idle suspend was overridden: %v", a.GetStatus().GetState())
+		}
+	})
+	t.Run("recover with no snapshot listed", func(t *testing.T) {
+		f, fake, _ := gap0410Fixture(t, ateapi.ActorStateCrashed)
+		a, _ := fake.GetActor(context.Background(), ref)
+		a.Status.Snapshots = nil
+		fake.PutActor(a)
+		rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors/eng-web/alice-1/recover", "p-alice", "{}")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("recover %d %s", rec.Code, rec.Body)
+		}
+		if v := gap0410Body(t, rec.Body.Bytes()); v["recovered_from"] != nil {
+			t.Fatalf("recover with no snapshot listed claims %v", v["recovered_from"])
+		}
+	})
 }

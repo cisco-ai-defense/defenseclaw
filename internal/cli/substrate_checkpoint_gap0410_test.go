@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ func TestGAP0410CheckpointHasTheClusterStoreASnapshot(t *testing.T) {
 	}{
 		"stored":                 {h: jsonReply(map[string]any{"atespace": "eng-web", "name": "fix-tests-1", "state": "running", "snapshot_generation": 2}), kept: true},
 		"stored, start pending":  {h: jsonReply(map[string]any{"atespace": "eng-web", "name": "fix-tests-1", "state": "suspended"}), kept: true, note: "defenseclaw substrate connect fix-tests-1"},
+		"stored, no worker":      {h: jsonReply(map[string]any{"atespace": "eng-web", "name": "fix-tests-1", "state": "suspended", "resume_error": "no_worker"}), kept: true, note: "no free worker"},
 		"gateway without route":  {kept: false, note: "lost if the agent's worker crashes"},
 		"agent stopped meantime": {h: jsonStatus(http.StatusConflict, "not_running"), note: "lost if it crashes"},
 		"snapshot failed":        {h: jsonStatus(http.StatusBadGateway, "snapshot_failed"), wantErr: true},
@@ -43,7 +45,7 @@ func TestGAP0410CheckpointHasTheClusterStoreASnapshot(t *testing.T) {
 			if kept != tc.kept || (err != nil) != tc.wantErr || !strings.Contains(note, tc.note) {
 				t.Fatalf("kept %v note %q err %v", kept, note, err)
 			}
-			if tc.wantErr && !strings.Contains(err.Error(), "restore point 3 is saved in the agent") {
+			if tc.wantErr && (!strings.Contains(err.Error(), "restore point 3 is saved in the agent") || !errors.Is(err, errSubstrateNotKept)) {
 				t.Fatalf("error %v does not say the restore point itself is saved", err)
 			}
 			f.mu.Lock()
