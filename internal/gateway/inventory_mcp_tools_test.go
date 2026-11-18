@@ -186,17 +186,88 @@ func TestObservedMCPToolRestoreReconcilesParentAndRetriesCleanup(t *testing.T) {
 func TestObservedMCPToolRestoreFailureRetriesToAuthoritativeEmpty(t *testing.T) {
 	store := &testMCPObservedToolStore{listErr: fmt.Errorf("database busy")}
 	tools := &mcpToolInventory{store: store}
+	server := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{server})
 	if err := tools.restoreFromStore(t.Context()); err == nil {
 		t.Fatal("restore unexpectedly succeeded")
 	}
 	if !tools.observedIncomplete(nil) {
 		t.Fatal("failed restore did not keep observed inventory partial")
 	}
+	if rows, partial := tools.components([]endpointInventoryComponent{server}, false, "advertised"); len(rows) != 0 || !partial {
+		t.Fatalf("failed restore advertised rows=%+v partial=%v", rows, partial)
+	}
 	store.listErr = nil
 	tools.retryRestoreFromStore(t.Context())
-	tools.refreshParents(nil)
+	tools.refreshParents([]endpointInventoryComponent{server})
 	if tools.observedIncomplete(nil) {
 		t.Fatal("successful empty restore was not authoritative")
+	}
+	if rows, partial := tools.components([]endpointInventoryComponent{server}, false, "advertised"); len(rows) != 0 || partial {
+		t.Fatalf("successful empty restore advertised rows=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestMCPToolInventoryFencesReappearingParentUntilCleanupCompletes(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
+	parent := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	if _, recorded := tools.recordObserved("codex", "notes", "old", time.Now()); !recorded {
+		t.Fatal("initial observation was not recorded")
+	}
+	removed := tools.refreshParents(nil)
+	if fmt.Sprint(removed) != "[parent]" {
+		t.Fatalf("retired parents=%v", removed)
+	}
+	if retry := tools.refreshParents([]endpointInventoryComponent{parent}); fmt.Sprint(retry) != "[parent]" {
+		t.Fatalf("pending cleanup was not retained: %v", retry)
+	}
+	if _, recorded := tools.recordObserved("codex", "notes", "new", time.Now()); recorded {
+		t.Fatal("reappearing parent accepted evidence before cleanup completed")
+	}
+	tools.acknowledgeRemovedParents(removed)
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	if _, recorded := tools.recordObserved("codex", "notes", "new", time.Now()); !recorded {
+		t.Fatal("parent was not reactivated after cleanup completed")
+	}
+}
+
+func TestMCPToolInventoryRetainsListingUntilParentRefresh(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := mcpToolInventory{store: store}
+	listed := time.Date(2026, 11, 18, 1, 2, 3, 0, time.UTC)
+	parent := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "codex"}
+	tools.recordAdvertised("codex", "notes", []string{"search"}, listed)
+	if rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised"); len(rows) != 0 || !partial {
+		t.Fatalf("pre-parent rows=%+v partial=%v", rows, partial)
+	}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	if err := tools.flushPendingAdvertised(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if partial || len(rows) != 1 || rows[0].itemName != "search" || rows[0].mcpToolParentID != parent.id {
+		t.Fatalf("retained listing rows=%+v partial=%v", rows, partial)
+	}
+	if store.advertisedWrite.ParentComponentID != parent.id ||
+		len(store.advertisedWrite.ToolNames) != 1 || store.advertisedWrite.ToolNames[0] != "search" {
+		t.Fatalf("flushed listing=%+v", store.advertisedWrite)
+	}
+}
+
+func TestMCPToolInventoryRestoresAdvertisedPartialState(t *testing.T) {
+	var tools mcpToolInventory
+	listed := time.Date(2026, 11, 18, 1, 2, 3, 0, time.UTC)
+	parent := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "codex"}
+	tools.restoreAdvertised([]audit.MCPAdvertisedToolSnapshot{{
+		ParentComponentID: parent.id, Connector: "codex", ServerName: "notes",
+		ToolNames: []string{"search"}, ListedAt: listed, Partial: true,
+	}})
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if !partial || len(rows) != 1 || rows[0].itemName != "search" {
+		t.Fatalf("restored partial listing rows=%+v partial=%v", rows, partial)
 	}
 }
 
@@ -525,6 +596,7 @@ func TestObservedMCPToolInventoryDoesNotWaitForToolsListAndPreservesSiblings(t *
 	tools.recordObserved("claudecode", "notes", "search", first)
 	tools.recordObserved("claudecode", "notes", "read", first.Add(time.Minute))
 	tools.recordObserved("claudecode", "notes", "search", first.Add(2*time.Minute))
+	tools.recordObserved("claudecode", "notes", "search", first.Add(time.Minute))
 
 	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "observed")
 	if partial || len(rows) != 2 {
@@ -545,6 +617,39 @@ func TestObservedMCPToolInventoryDoesNotWaitForToolsListAndPreservesSiblings(t *
 	advertised, advertisedPartial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
 	if len(advertised) != 0 || advertisedPartial {
 		t.Fatalf("advertised rows=%+v partial=%v", advertised, advertisedPartial)
+	}
+}
+
+func TestMCPToolInventoryDoesNotProjectEvidenceUnderDifferentParent(t *testing.T) {
+	var tools mcpToolInventory
+	current := endpointInventoryComponent{id: "parent-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{current})
+	tools.recordAdvertised("codex", "notes", []string{"search"}, time.Now())
+	tools.recordObserved("codex", "notes", "read", time.Now())
+
+	replacement := current
+	replacement.id = "parent-b"
+	replacement.userID = "different-user"
+	rows, partial := tools.components([]endpointInventoryComponent{replacement}, false)
+	if len(rows) != 0 || !partial {
+		t.Fatalf("stale parent evidence was reattributed: rows=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestMCPToolInventoryRestoreDoesNotMoveObservationTimeBackward(t *testing.T) {
+	var tools mcpToolInventory
+	parent := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	newer := time.Date(2026, 11, 18, 2, 0, 0, 0, time.UTC)
+	tools.recordObserved("codex", "notes", "search", newer)
+	tools.restoreObserved([]audit.MCPObservedTool{{
+		ParentComponentID: parent.id, Connector: "codex", ServerName: "notes",
+		ToolName: "search", LastObservedAt: newer.Add(-time.Hour),
+	}})
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "observed")
+	if partial || len(rows) != 1 || rows[0].mcpToolObservedAt != newer.Format(time.RFC3339Nano) {
+		t.Fatalf("restored observation rows=%+v partial=%v", rows, partial)
 	}
 }
 

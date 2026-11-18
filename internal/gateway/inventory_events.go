@@ -339,6 +339,9 @@ func emitEndpointInventory(
 				toolStates[0].acknowledgeRemovedParents(removed)
 			}
 		}
+		if err := toolStates[0].flushPendingAdvertised(ctx); err != nil && firstErr == nil {
+			firstErr = err
+		}
 		observedReadPartial := toolStates[0].observedIncomplete(incompleteConnectors)
 		if perConnectorPartial && len(perConnectorStatus.incompleteConnectors) == 0 {
 			// A partial result without connector attribution is not safe to scope.

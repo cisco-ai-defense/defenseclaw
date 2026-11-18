@@ -42,8 +42,11 @@ type mcpToolInventory struct {
 	metric             func(context.Context, string, string, string)
 	store              mcpObservedToolStore
 	advertised         map[string][]mcpToolObservation
+	advertisedListedAt map[string]time.Time
 	observed           map[string]map[string]time.Time
 	partial            map[string]bool
+	advertisedVersion  map[string]uint64
+	pendingAdvertised  map[string]uint64
 	observedPartial    map[string]bool
 	parents            map[string]string
 	restored           map[string]map[string][]audit.MCPObservedTool
@@ -85,6 +88,14 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 	if m.pendingRemoval == nil {
 		m.pendingRemoval = make(map[string]struct{})
 	}
+	// A parent whose durable cleanup has not completed cannot become current
+	// again yet. Otherwise a later cleanup retry could delete observations that
+	// were accepted after the parent reappeared.
+	for key, parentID := range next {
+		if _, pending := m.pendingRemoval[parentID]; pending {
+			delete(next, key)
+		}
+	}
 	for key, old := range m.parents {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete {
@@ -95,6 +106,9 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 				m.pendingRemoval[old] = struct{}{}
 			}
 			delete(m.advertised, key)
+			delete(m.advertisedListedAt, key)
+			delete(m.advertisedVersion, key)
+			delete(m.pendingAdvertised, key)
 			delete(m.observed, key)
 			delete(m.partial, key)
 			delete(m.observedPartial, key)
@@ -155,6 +169,10 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 				m.partial = make(map[string]bool)
 			}
 			m.advertised[key] = items
+			if m.advertisedListedAt == nil {
+				m.advertisedListedAt = make(map[string]time.Time)
+			}
+			m.advertisedListedAt[key] = snapshot.ListedAt.UTC()
 			m.partial[key] = snapshot.Partial
 		}
 		delete(m.restoredAdvertised, key)
@@ -253,10 +271,6 @@ func (m *mcpToolInventory) recordAdvertisedContext(ctx context.Context, connecto
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].name < items[j].name })
 	m.mu.Lock()
-	if m.parents[key] == "" {
-		m.mu.Unlock()
-		return
-	}
 	parentID := m.parents[key]
 	if m.advertised == nil {
 		m.advertised = make(map[string][]mcpToolObservation)
@@ -264,12 +278,27 @@ func (m *mcpToolInventory) recordAdvertisedContext(ctx context.Context, connecto
 	if m.partial == nil {
 		m.partial = make(map[string]bool)
 	}
+	if m.advertisedListedAt == nil {
+		m.advertisedListedAt = make(map[string]time.Time)
+	}
+	if m.advertisedVersion == nil {
+		m.advertisedVersion = make(map[string]uint64)
+	}
+	m.advertisedVersion[key]++
 	// An authoritative empty tools/list clears the previous advertised set.
 	m.advertised[key] = items
+	m.advertisedListedAt[key] = at.UTC()
 	m.partial[key] = len(names) > len(items) || len(upstreamPartial) > 0 && upstreamPartial[0]
 	partial := m.partial[key]
+	version := m.advertisedVersion[key]
+	if parentID == "" {
+		if m.pendingAdvertised == nil {
+			m.pendingAdvertised = make(map[string]uint64)
+		}
+		m.pendingAdvertised[key] = version
+	}
 	m.mu.Unlock()
-	if m.store != nil {
+	if m.store != nil && parentID != "" {
 		toolNames := make([]string, 0, len(items))
 		for _, item := range items {
 			toolNames = append(toolNames, item.name)
@@ -279,6 +308,54 @@ func (m *mcpToolInventory) recordAdvertisedContext(ctx context.Context, connecto
 			ToolNames: toolNames, ListedAt: at.UTC(), Partial: partial,
 		}, func() bool { return m.parentIsCurrent(connector, server, parentID) })
 	}
+}
+
+// flushPendingAdvertised durably writes listings that completed before their
+// configured parent was established. A version check prevents an older flush
+// from clearing a newer listing that arrived while the store write ran.
+func (m *mcpToolInventory) flushPendingAdvertised(ctx context.Context) error {
+	if m == nil || m.store == nil {
+		return nil
+	}
+	type pendingWrite struct {
+		key      string
+		version  uint64
+		snapshot audit.MCPAdvertisedToolSnapshot
+	}
+	m.mu.Lock()
+	writes := make([]pendingWrite, 0, len(m.pendingAdvertised))
+	for key, version := range m.pendingAdvertised {
+		parentID := m.parents[key]
+		if parentID == "" {
+			continue
+		}
+		connector, server, _ := strings.Cut(key, "\x00")
+		items := m.advertised[key]
+		names := make([]string, 0, len(items))
+		for _, item := range items {
+			names = append(names, item.name)
+		}
+		writes = append(writes, pendingWrite{key: key, version: version, snapshot: audit.MCPAdvertisedToolSnapshot{
+			ParentComponentID: parentID, Connector: connector, ServerName: server,
+			ToolNames: names, ListedAt: m.advertisedListedAt[key], Partial: m.partial[key],
+		}})
+	}
+	m.mu.Unlock()
+	for _, write := range writes {
+		err := m.store.ReplaceMCPAdvertisedToolsIf(ctx, write.snapshot, func() bool {
+			return m.parentIsCurrent(write.snapshot.Connector, write.snapshot.ServerName, write.snapshot.ParentComponentID)
+		})
+		if err != nil {
+			return err
+		}
+		m.mu.Lock()
+		if m.pendingAdvertised[write.key] == write.version &&
+			m.parents[write.key] == write.snapshot.ParentComponentID {
+			delete(m.pendingAdvertised, write.key)
+		}
+		m.mu.Unlock()
+	}
+	return nil
 }
 
 func (m *mcpToolInventory) recordListingFailure(connector, server string) {
@@ -343,7 +420,10 @@ func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at 
 		m.observedPartial[key] = true
 		return parentID, true
 	}
-	m.observed[key][name] = at.UTC()
+	observedAt := at.UTC()
+	if current := m.observed[key][name]; current.IsZero() || observedAt.After(current) {
+		m.observed[key][name] = observedAt
+	}
 	return parentID, true
 }
 
@@ -394,7 +474,10 @@ func (m *mcpToolInventory) restoreToolLocked(key string, tool audit.MCPObservedT
 	if _, exists := m.observed[key][tool.ToolName]; !exists && len(m.observed[key]) >= maxMCPToolObservations {
 		return
 	}
-	m.observed[key][tool.ToolName] = tool.LastObservedAt.UTC()
+	restoredAt := tool.LastObservedAt.UTC()
+	if current := m.observed[key][tool.ToolName]; current.IsZero() || restoredAt.After(current) {
+		m.observed[key][tool.ToolName] = restoredAt
+	}
 	if tool.Overflowed {
 		if m.observedPartial == nil {
 			m.observedPartial = make(map[string]bool)
@@ -482,6 +565,9 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 		includeAdvertised = onlySource[0] == "advertised"
 		includeObserved = onlySource[0] == "observed"
 	}
+	if includeAdvertised && m.restoreIncomplete {
+		partial = true
+	}
 	for _, server := range servers {
 		if server.mcpIsRemote != remote {
 			continue
@@ -494,6 +580,15 @@ func (m *mcpToolInventory) components(servers []endpointInventoryComponent, remo
 		if counts[key] != 1 {
 			partial = true
 			continue
+		}
+		if m.parents[key] != server.id {
+			if len(m.advertised[key]) > 0 || len(m.observed[key]) > 0 || m.partial[key] || m.observedPartial[key] {
+				partial = true
+			}
+			continue
+		}
+		if includeAdvertised && m.store != nil && m.pendingAdvertised[key] != 0 {
+			partial = true
 		}
 		// A parent that has never been scanned contributes no advertised rows.
 		// A recorded listing failure is partial, while an authoritative empty

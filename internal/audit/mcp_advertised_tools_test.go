@@ -11,7 +11,8 @@ import (
 )
 
 func TestMCPAdvertisedToolsReplaceAndSurviveRestart(t *testing.T) {
-	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	path := filepath.Join(t.TempDir(), "audit.db")
+	store := openTestStore(t, path)
 	now := time.Date(2026, 11, 18, 1, 2, 3, 0, time.UTC)
 	snapshot := MCPAdvertisedToolSnapshot{
 		ParentComponentID: "endpoint-mcp-entry-parent", Connector: "claudecode",
@@ -23,6 +24,15 @@ func TestMCPAdvertisedToolsReplaceAndSurviveRestart(t *testing.T) {
 	rows, err := store.ListMCPAdvertisedToolSnapshots(context.Background())
 	if err != nil || len(rows) != 1 || len(rows[0].ToolNames) != 2 {
 		t.Fatalf("listed snapshots=%+v err=%v", rows, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openTestStore(t, path)
+	rows, err = store.ListMCPAdvertisedToolSnapshots(context.Background())
+	if err != nil || len(rows) != 1 || len(rows[0].ToolNames) != 2 ||
+		!rows[0].ListedAt.Equal(now) {
+		t.Fatalf("restarted snapshots=%+v err=%v", rows, err)
 	}
 	snapshot.ToolNames = nil
 	snapshot.ListedAt = now.Add(time.Minute)

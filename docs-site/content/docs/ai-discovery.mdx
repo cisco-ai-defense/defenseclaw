@@ -1086,16 +1086,21 @@ incomplete listing produces a local partial diagnostic. An ambiguous server
 alias across user profiles is not attributed to either profile. Advertised tool
 evidence and observed tool names are persisted in bounded local SQLite state,
 restored after a gateway restart, and retained until an authoritative parent
-refresh retires the configured alias. This flow does not reconcile a central
+refresh retires the configured alias. A restored complete advertised listing
+remains complete once its configured parent is matched again; a restored
+partial listing remains partial until that server completes a later listing,
+including an empty one. If durable restore is incomplete, advertised and
+observed tool collections remain diagnostic-only until the read succeeds. A
+listing that completes before its newly configured parent has been refreshed
+is retained in memory, persisted, and published after that parent is
+established. This flow does not reconcile a central
 principal catalog. Remote tool lineage follows the alias-based server ID.
 DefenseClaw reuses the scanner's existing remote
 `tools/list` request and does not start an additional endpoint probe. If an
 older scanner omits the tool-list field, the gateway marks the listing unknown
 and keeps the last complete managed snapshot. Only managed enterprise mode
 records this tool inventory; parent identities refresh with inventory
-publication. After a gateway restart, tool collections stay partial until
-each configured server has completed a listing, including an empty listing.
-An observed call alone does not mark a listing complete.
+publication. An observed call alone does not mark a listing complete.
 The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing,
 authenticated-call observation, and export submission using fixed outcome and
 reason labels. An observation whose verified server parent is unavailable uses
