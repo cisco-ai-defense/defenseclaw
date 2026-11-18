@@ -15,6 +15,15 @@ import (
 
 type resolvedWritesContextKey struct{}
 
+type shellStartupContextKey struct{}
+
+// shellStartupFromContext is the agent's shell startup the hook client sent
+// (nil: no header).
+func shellStartupFromContext(ctx context.Context) *hookpaths.ShellStartup {
+	startup, _ := ctx.Value(shellStartupContextKey{}).(*hookpaths.ShellStartup)
+	return startup
+}
+
 func resolvedWritesFromContext(ctx context.Context) map[string]string {
 	targets, _ := ctx.Value(resolvedWritesContextKey{}).(map[string]string)
 	return targets

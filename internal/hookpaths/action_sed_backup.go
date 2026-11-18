@@ -82,8 +82,31 @@ const (
 // actionSedInPlaceWrite reports an in-place editor call of the command that
 // writes a protected file, as the edited file or as its backup.
 func actionSedInPlaceWrite(command, cwd, home string, memo *TargetMemo) bool {
-	blocked, _ := actionSedInPlaceReading(command, cwd, home, memo)
+	blocked, _ := actionSedInPlaceReading(command, cwd, home, memo, false)
 	return blocked
+}
+
+// actionSedInPlaceBackupWrite reports an in-place editor call of the command
+// whose backup (or --follow-symlinks name) is a protected file. The edited
+// operand itself is left out: the replace-verb proof (replaceVerbSafeIn)
+// decides whether the edit replaces that entry or writes through it, and a
+// backup is a second path that proof never covers (rel-1-0-10:GAP-0414).
+func actionSedInPlaceBackupWrite(command, cwd, home string, memo *TargetMemo) bool {
+	blocked, _ := actionSedInPlaceReading(command, cwd, home, memo, true)
+	return blocked
+}
+
+// actionSedInPlaceDecision is the client decision of an in-place editor call:
+// a backup that is a protected file, or an edited operand that reaches one
+// when the replace-verb proof does not hold. sed -i of a hard link of a
+// protected file replaces the link and leaves the file as it was
+// (rel-1-0-10:GAP-0377, the hlink matrix benign rows).
+func actionSedInPlaceDecision(command, cwd, home string, memo *TargetMemo) bool {
+	if actionSedInPlaceBackupWrite(command, cwd, home, memo) {
+		return true
+	}
+	return actionSedInPlaceWrite(command, cwd, home, memo) &&
+		!replaceVerbSafeIn(command, cwd, home, memo.shellStartup())
 }
 
 // SedInPlaceBackupUnresolved reports a command with an in-place editor
@@ -97,11 +120,11 @@ func SedInPlaceBackupUnresolved(command, cwd, home string) bool {
 // SedInPlaceBackupUnresolved is the package function of that name, with the
 // file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) SedInPlaceBackupUnresolved(command, cwd, home string) bool {
-	blocked, unresolved := actionSedInPlaceReading(command, cwd, home, m)
+	blocked, unresolved := actionSedInPlaceReading(command, cwd, home, m, false)
 	return unresolved && !blocked
 }
 
-func actionSedInPlaceReading(command, cwd, home string, memo *TargetMemo) (blocked, unresolved bool) {
+func actionSedInPlaceReading(command, cwd, home string, memo *TargetMemo, backupOnly bool) (blocked, unresolved bool) {
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
 		return false, false // an in-place editor is a POSIX path; a Windows home has its own readers
 	}
@@ -109,7 +132,7 @@ func actionSedInPlaceReading(command, cwd, home string, memo *TargetMemo) (block
 	// name is what the parser makes of the word (quotes and escapes removed,
 	// braces expanded, wrappers peeled), never a substring of the raw text
 	// (rel-1-0-10:GAP-0667: s''ed, "s"ed and s\ed name sed too).
-	reader := &sedBackupReader{cwd: cwd, home: home, ssh: filepath.Join(home, ".ssh"), memo: memo}
+	reader := &sedBackupReader{cwd: cwd, home: home, ssh: filepath.Join(home, ".ssh"), memo: memo, backupOnly: backupOnly}
 	reader.read(command, sedBackupScope{dirs: []string{cwd}}, 0)
 	return reader.blocked, reader.unresolved
 }
@@ -125,6 +148,9 @@ type sedBackupReader struct {
 	// to expand where an option can start: any in-place editor in it may
 	// have an option the words do not show.
 	optionHole bool
+	// backupOnly leaves the edited operand as typed out of the judged paths
+	// (actionSedInPlaceBackupWrite).
+	backupOnly bool
 }
 
 // protectedSet is the protected files of the home, read on the first path
@@ -382,7 +408,7 @@ func (r *sedBackupReader) inPlace(kind sedKind, files []string, suffix string, f
 		}
 		fileHole := strings.Contains(file, sedHole)
 		var names []string
-		if !fileHole {
+		if !fileHole && !r.backupOnly {
 			names = append(names, file)
 		}
 		switch {

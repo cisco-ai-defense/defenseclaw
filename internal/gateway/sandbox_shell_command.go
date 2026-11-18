@@ -146,6 +146,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
+		ShellStartup:                  action.ShellStartup,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
 		windowsDialectReadings:        action.windowsDialectReadings,
 	})

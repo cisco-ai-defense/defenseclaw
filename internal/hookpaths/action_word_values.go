@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -633,6 +634,16 @@ func actionWordValueWithGlob(word *syntax.Word, values actionValues, cwd, home s
 			case *syntax.SglQuoted:
 				if strings.Contains(part.Value, actionGeneratedMarker) {
 					return false
+				}
+				if part.Dollar {
+					// ANSI-C quoting: the escapes are decoded once, by the
+					// shell word resolver's own quote removal.
+					text, err := expand.Literal(&expand.Config{}, &syntax.Word{Parts: []syntax.WordPart{part}})
+					if err != nil || strings.ContainsAny(text, "\x00\x1f") {
+						return false
+					}
+					out.WriteString(text)
+					break
 				}
 				out.WriteString(part.Value)
 			case *syntax.DblQuoted:
