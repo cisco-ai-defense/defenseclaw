@@ -30,6 +30,7 @@ func TestGAP0410CheckpointHasTheClusterStoreASnapshot(t *testing.T) {
 		"gateway without route":  {kept: false, note: "lost if the agent's worker crashes"},
 		"agent stopped meantime": {h: jsonStatus(http.StatusConflict, "not_running"), note: "lost if it crashes"},
 		"snapshot failed":        {h: jsonStatus(http.StatusBadGateway, "snapshot_failed"), wantErr: true},
+		"may be suspended":       {h: jsonStatus(http.StatusBadGateway, "snapshot_failed_may_be_suspended"), wantErr: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){}}
@@ -45,7 +46,7 @@ func TestGAP0410CheckpointHasTheClusterStoreASnapshot(t *testing.T) {
 			if kept != tc.kept || (err != nil) != tc.wantErr || !strings.Contains(note, tc.note) {
 				t.Fatalf("kept %v note %q err %v", kept, note, err)
 			}
-			if tc.wantErr && (!strings.Contains(err.Error(), "restore point 3 is saved in the agent") || !errors.Is(err, errSubstrateNotKept)) {
+			if tc.wantErr && (!strings.Contains(err.Error(), "restore point 3 is saved in the agent") || !errors.Is(err, errSubstrateNotKept) || !strings.Contains(err.Error(), "fix-tests-1 may be suspended now")) {
 				t.Fatalf("error %v does not say the restore point itself is saved", err)
 			}
 			f.mu.Lock()

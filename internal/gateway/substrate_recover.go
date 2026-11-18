@@ -137,7 +137,7 @@ func (s *SubstrateATEActions) Snapshot(ctx context.Context, atespace, name strin
 	before := newestSnapshot(a.GetStatus()).GetGeneration()
 	sa, err := ds.SuspendActorDurable(ctx, ref)
 	if err != nil {
-		return SubstrateKept{}, fmt.Errorf("suspend: %w", err)
+		return s.snapshotFailed(ctx, atespace, name, before, err)
 	}
 	h := newestSnapshot(sa.GetStatus())
 	if h.GetGeneration() <= before || h.GetOwner() != ateapi.SnapshotOwnerActor || h.GetDurableSnapshot().GetState() != ateapi.SnapshotStorageCompleted {
@@ -154,6 +154,39 @@ func (s *SubstrateATEActions) Snapshot(ctx context.Context, atespace, name strin
 	kept.Running = true
 	return kept, nil
 }
+
+// snapshotFailed handles a durable suspend that returned err: the suspend
+// may have taken effect before the upload failed, the bound ran out or the
+// gateway lost the call. It re-reads the actor and, when it is SUSPENDED at
+// a generation newer than before (this call's own snapshot), starts it
+// again, so an unattended task does not stall until someone connects
+// (GAP-0649). The answer is always an error: nothing durable is known.
+func (s *SubstrateATEActions) snapshotFailed(ctx context.Context, atespace, name string, before int32, err error) (SubstrateKept, error) {
+	// ctx may be the one that ran out: give the re-read and the resume a
+	// bound of their own.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), substrateSnapshotRecheckTimeout)
+	defer cancel()
+	a, gerr := s.Client.GetActor(rctx, ateapi.Ref(atespace, name))
+	if gerr != nil {
+		return SubstrateKept{}, fmt.Errorf("suspend: %w (and the actor could not be read again: %v; it may be suspended)", err, gerr)
+	}
+	h := newestSnapshot(a.GetStatus())
+	if a.GetStatus().GetState() != ateapi.ActorStateSuspended || h.GetGeneration() <= before {
+		return SubstrateKept{Running: a.GetStatus().GetState() == ateapi.ActorStateRunning}, fmt.Errorf("suspend: %w", err)
+	}
+	kept := SubstrateKept{Generation: h.GetGeneration()}
+	if rerr := s.Resume(rctx, atespace, name); rerr != nil {
+		kept.NoWorker = errors.Is(rerr, ErrSubstrateNoWorker)
+		return kept, fmt.Errorf("suspend: %w (it is suspended at generation %d and did not start again: %v)", err, kept.Generation, rerr)
+	}
+	kept.Running = true
+	fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s: durable suspend failed (%v); it was suspended at generation %d and is running again\n", atespace, name, err, kept.Generation)
+	return kept, fmt.Errorf("suspend: %w", err)
+}
+
+// substrateSnapshotRecheckTimeout bounds the re-read and resume after a
+// failed durable suspend.
+const substrateSnapshotRecheckTimeout = time.Minute
 
 // newestSnapshot is the highest generation in s, nil for none.
 func newestSnapshot(s *ateapi.ActorStatus) *ateapi.Snapshot {
@@ -254,7 +287,16 @@ func (a *APIServer) substrateSnapshotActor(st *substrateState) http.HandlerFunc 
 			fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s: snapshot generation %d stored, resume failed: %v\n", reg.Atespace, reg.Name, kept.Generation, err)
 		case err != nil:
 			fmt.Fprintf(os.Stderr, "[substrate] snapshot of %s/%s failed: %v\n", reg.Atespace, reg.Name, err)
-			writeSubstrateJSONError(w, http.StatusBadGateway, "snapshot_failed")
+			if inv, ok := st.cfg.Actors.(interface{ Invalidate(string, string) }); ok {
+				inv.Invalidate(reg.Atespace, reg.Name)
+			}
+			// A suspend that took effect and could not be undone leaves
+			// the actor suspended: say so (GAP-0649).
+			reason := "snapshot_failed"
+			if !kept.Running {
+				reason = "snapshot_failed_may_be_suspended"
+			}
+			writeSubstrateJSONError(w, http.StatusBadGateway, reason)
 			return
 		}
 		if inv, ok := st.cfg.Actors.(interface{ Invalidate(string, string) }); ok {

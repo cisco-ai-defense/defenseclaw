@@ -525,7 +525,10 @@ func substrateKeepSnapshot(ctx context.Context, s *substrateSession, a api.Actor
 			return false, "Note: the agent stopped running before the cluster could store a snapshot, so this restore point is lost if it crashes before its next one. Run checkpoint again after connect.", nil
 		}
 	}
-	return false, "", fmt.Errorf("%w: restore point %s is saved in the agent, but the cluster could not store a snapshot of it (%w), so it is lost if the agent crashes. Run checkpoint again", errSubstrateNotKept, id, err)
+	// The suspend may have taken effect before it failed; the gateway
+	// starts the agent again when it can (GAP-0649), but it may be left
+	// suspended.
+	return false, "", fmt.Errorf("%w: restore point %s is saved in the agent, but the cluster could not store a snapshot of it (%w), so it is lost if the agent crashes. Run checkpoint again. %s may be suspended now; \"defenseclaw substrate connect %s\" starts it again", errSubstrateNotKept, id, err, a.Name, a.Name)
 }
 
 // errSubstrateNotKept marks a checkpoint whose restore point was saved but
