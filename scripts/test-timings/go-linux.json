@@ -855,6 +855,7 @@
   },
   "internal/cli": {
    "*": 0.062,
+   "TestGAP0590GatewayFollowerSaysWhenTheGuardrailApplies": 0.01,
    "TestAuditCompactDryRunReportsBesideARunningGatewayAndChangesNothing": 4.0,
    "TestAuditCompactRefusesADiskWithZeroFreeBytes": 3.4,
    "TestAuditCompactRefusesAShortDiskWithTheNumbers": 3.5,
@@ -1145,7 +1146,9 @@
    "TestGAP0487LLMRequestCanaryIsRefusedInActionMode": 7.68,
    "TestGAP0487LLMStreamedReplyCanaryIsInspected": 1.78,
    "TestGAP0579ConfigMapProfileModeReachesLLMWithoutRestart": 3.2,
+   "TestGAP0579DataLinkElsewhereIsNoConfigEvent": 0.01,
    "TestGAP0579LLMReplyNamingCredentialsPathInActionMode": 3.1,
+   "TestGAP0589SubstrateGatewayHoldsLLMProvidersUntilRestart": 0.01,
    "TestACPActionParityWithKiroHook": 153.3,
    "TestACPActionVerdictSemantics": 5.5,
    "TestACPActionWithNoKnownDirectoryIsAtTheUnknownTier": 6.9,
