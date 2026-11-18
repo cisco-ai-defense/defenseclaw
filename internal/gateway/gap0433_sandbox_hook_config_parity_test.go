@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -74,7 +75,15 @@ func gap0433Verdict(t *testing.T, api *APIServer, ctx context.Context, cwd, tool
 // no file at all. Each call runs on a laptop whose ~/.claude/settings.json
 // holds DefenseClaw's hooks and in a copy-mode and a mount-mode actor, and
 // every actor verdict (action, severity, rules) must be the laptop's.
-func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
+func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) { gapNF6Parity(t) }
+
+type gapNF6ParityRow struct {
+	name, tool        string
+	input             map[string]any
+	want, file, actor string
+}
+
+func gapNF6Parity(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway")
 	}
@@ -162,17 +171,7 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 		{"settings.local home Write {}", "Write", map[string]any{"file_path": "{H}/.claude/settings.local.json", "content": "{}"}, "allow"},
 		{"project settings Write {}", "Write", map[string]any{"file_path": "{P}/.claude/settings.json", "content": "{}"}, "allow"},
 	}
-	type parityRow struct {
-		name, tool string
-		input      map[string]any
-		want       string // the laptop's action, pinned so the oracle stays a real one
-		// file is the laptop's ~/.claude/settings.json before the call, the
-		// state earlier allowed calls left; "" for gap0433LaptopSettings.
-		file string
-		// actor is the actor's action where it is stricter than the laptop
-		// (lead ruling on GAP-0577); "" for the laptop's verdict.
-		actor string
-	}
+	type parityRow = gapNF6ParityRow
 	// GAP-0577 (RKNF2 review of the GAP-0536 fix): an Edit or MultiEdit that
 	// applies to no synthetic copy as a whole, because the laptop's file holds
 	// another key or the hooks in another layout, was allow/NONE in the actor
@@ -246,7 +245,7 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 		// Stricter by the lead's ruling: a statusLine command names the keys
 		// the hook entries are written with, so the actor cannot tell it
 		// from theirs.
-		{name: "gap0577 Edit statusLine command (stricter)", file: withStatus, tool: "Edit", want: "allow", actor: "block", input: map[string]any{"file_path": settings,
+		{name: "gap0577 Edit statusLine command (stricter)", file: withStatus, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
 			"old_string": `"command":"a.sh"`, "new_string": `"command":"b.sh"`}},
 		// Round 2, F1: a \u escape spells a hook key, the hook path, a
 		// reserved env name or a hooks switch.
@@ -296,10 +295,89 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 		{name: "gap0578 Bash python -c writes settings", tool: "Bash", want: "alert", input: map[string]any{
 			"command": `python3 -c "open('{H}/.claude/settings.json','w').write('{}')"`}},
 	}
+	// RVNF5 cases are retained verbatim, including controls and invalid JSON.
+	base, model := gap0433LaptopSettings, withModel
+	with := func(member string) string { return "{" + member + "," + base[1:] }
+	rvnf5 := []struct{ name, file, old, new string }{
+		{"switch_leading_space", with(`"disableAllHooks": false,"model":"zzz"`), ` false,"model"`, ` true,"model"`},
+		{"switch_space_only", with(`"disableAllHooks": false`), " false", " true"},
+		{"switch_pretty_newline", with("\"disableAllHooks\":\n    false"), "\n    false", "\n    true"},
+		{"escape_hex_key", strings.Replace(model, "PreToolUse", `Pre\u0054oolUse`, 1), "0054", "0058"},
+		{"escape_hex_path", strings.Replace(model, "hook.sh", `hook\u002esh`, 1), "002e", "002f"},
+		{"escape_hex_model_benign", with(`"model":"z\u007az"`), "007a", "0079"},
+		{"escape_benign_model", model, `"zzz"`, `"zz\u007a"`},
+		{"C20_LD_value", with(`"env":{"LD_LIBRARY_PATH":"/opt/lib"}`), `"/opt/lib"`, `"/tmp/evil"`},
+		{"C20_NODE_path", with(`"env":{"NODE_OPTIONS":"--require=/opt/good.js"}`), "/opt/good.js", "/tmp/evil.js"},
+		{"C20_BASH_ENV", with(`"env":{"BASH_ENV":"/opt/good.sh"}`), "/opt/good.sh", "/tmp/evil.sh"},
+		{"NODE_full_quoted_value", with(`"env":{"NODE_OPTIONS":"--max-old-space-size=4096"}`), `"--max-old-space-size=4096"`, `"--require=/tmp/x.js"`},
+		{"NODE_split_flag", with(`"env":{"NODE_OPTIONS":"--max-old-space-size=4096"}`), "max-old-space-size=4096", "require=/tmp/x.js"},
+		{"NODE_split_argument", with(`"env":{"NODE_OPTIONS":"--require= --max-old-space-size=4096"}`), " --max-old-space-size=4096", "/tmp/x.js"},
+		{"benign_model_boolean_string", with(`"model":"false"`), "false", "true"},
+		{"benign_model_name_null", with(`"model":"null-model"`), "null-model", "new-model"},
+		{"benign_model_number", with(`"model":"v30"`), "30", "60"},
+		{"benign_allow_option", with(`"alwaysThinkingEnabled":false`), "false", "true"},
+		{"benign_boolean_member", with(`"alwaysThinkingEnabled":false`), `"alwaysThinkingEnabled":false`, `"alwaysThinkingEnabled":true`},
+		{"benign_model_reserved_word", model, `"zzz"`, `"LD_LIBRARY_PATH"`},
+		{"benign_model_loader", model, "zzz", "--require=/tmp/x.js"},
+		{"unreadable_boolean_string", with(`"model":"false"`), "false", "true,"},
+		{"unreadable_escape", with(`"model":"a\\b"`), `a\\b`, `a\b`},
+		{"unreadable_array", with(`"x":["zzz"]`), `"zzz"`, `"zzz","x":1`},
+		{"unreadable_array_value", with(`"x":["zzz"]`), `zzz`, `zzz","x":1,"j":"y`},
+	}
+	for _, row := range rvnf5 {
+		want := "block"
+		if strings.Contains(row.name, "benign") || row.name == "unreadable_boolean_string" || row.name == "unreadable_escape" {
+			want = "allow"
+		}
+		gap0577 = append(gap0577, parityRow{name: "rvnf5 " + row.name, file: row.file, tool: "Edit", want: want,
+			input: map[string]any{"file_path": settings, "old_string": row.old, "new_string": row.new}})
+	}
 	rows := make([]parityRow, 0, len(probes)+len(gap0577))
 	for _, probe := range probes {
 		rows = append(rows, parityRow{name: probe.name, tool: probe.tool, input: probe.input, want: probe.want})
 	}
+
+	for _, n := range []int{64, 65, 4000} {
+		edits := make([]any, n)
+		for i := range edits {
+			edits[i] = map[string]any{"old_string": `"timeout":30`, "new_string": `"timeout":30`}
+		}
+		stricter := ""
+		if n > 64 {
+			stricter = "block"
+		}
+		want := "allow"
+		if n == 4000 {
+			want = "block"
+		}
+		gap0577 = append(gap0577, parityRow{name: fmt.Sprintf("rvnf5 count bound %d", n), tool: "MultiEdit", want: want, actor: stricter, input: map[string]any{"file_path": settings, "edits": edits}})
+	}
+	for _, n := range []int{65536, 65537, 131072} {
+		gap0577 = append(gap0577, parityRow{name: fmt.Sprintf("rvnf5 text bound %d", n), tool: "Edit", want: "allow", actor: "block", input: map[string]any{
+			"file_path": settings, "old_string": `{"hooks"`, "new_string": `{"model":"` + strings.Repeat("p", n) + `","hooks"`}})
+	}
+	for _, n := range []int{8, 12, 16} {
+		edits := []any{map[string]any{"old_string": `{"hooks"`, "new_string": `{"model":"ZZ","hooks"`}}
+		for i := 0; i < n; i++ {
+			edits = append(edits, map[string]any{"old_string": "ZZ", "new_string": "ZZZZ", "replace_all": true})
+		}
+		stricter := ""
+		if n == 16 {
+			stricter = "block"
+		}
+		gap0577 = append(gap0577, parityRow{name: fmt.Sprintf("rvnf5 expansion bound %d", n), tool: "MultiEdit", want: "allow", actor: stricter, input: map[string]any{"file_path": settings, "edits": edits}})
+	}
+
+	gap0577 = append(gap0577,
+		parityRow{name: "nf6 prefix switch then restore", file: withSwitch, tool: "MultiEdit", want: "allow", actor: "block", input: map[string]any{"file_path": settings, "edits": []any{
+			map[string]any{"old_string": `"disableAllHooks":false`, "new_string": `"disableAllHooks":true`},
+			map[string]any{"old_string": `"disableAllHooks":true`, "new_string": `"disableAllHooks":false`},
+		}}},
+		parityRow{name: "nf6 unapplicable suffix", tool: "MultiEdit", want: "alert", input: map[string]any{"file_path": settings, "edits": []any{
+			map[string]any{"old_string": `"timeout":30`, "new_string": `"timeout":30`},
+			map[string]any{"old_string": `"hooksDisabled":false`, "new_string": `"hooksDisabled":true`},
+		}}},
+	)
 	rows = append(rows, gap0577...)
 	for _, probe := range rows {
 		t.Run(probe.name, func(t *testing.T) {
@@ -313,10 +391,11 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 			laptopInput := gap0264Expand(probe.input, project, home).(map[string]any)
 			actorInput := gap0264Expand(probe.input, gap0264ActorWorkdir, sandboxauth.SandboxHome).(map[string]any)
 			lAction, lSeverity, lRules := gap0433Verdict(t, api, context.Background(), project, probe.tool, laptopInput)
-			cAction, cSeverity, cRules := gap0433Verdict(t, api, actor(false), gap0264ActorWorkdir, probe.tool, actorInput)
-			mAction, mSeverity, mRules := gap0433Verdict(t, api, actor(true), gap0264ActorWorkdir, probe.tool, actorInput)
+			cAction, cSeverity, cRules := gap0433Verdict(t, api, gapNF6Facts(actor(false), file), gap0264ActorWorkdir, probe.tool, actorInput)
+			mAction, mSeverity, mRules := gap0433Verdict(t, api, gapNF6Facts(actor(true), file), gap0264ActorWorkdir, probe.tool, actorInput)
 			t.Logf("PARITY %-42s laptop=%s/%s %v copy=%s/%s %v mount=%s/%s %v", probe.name,
 				lAction, lSeverity, lRules, cAction, cSeverity, cRules, mAction, mSeverity, mRules)
+			gapNF6Probe(t, probe.name, file, probe.input, lAction+"/"+lSeverity+"/"+strings.Join(lRules, ","), cAction+"/"+cSeverity+"/"+strings.Join(cRules, ",")+";"+mAction+"/"+mSeverity+"/"+strings.Join(mRules, ","))
 			if lAction != probe.want {
 				t.Fatalf("laptop oracle %s/%s %v, want %s", lAction, lSeverity, lRules, probe.want)
 			}

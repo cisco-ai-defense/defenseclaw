@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestGAP0433ActorHookFileBlockSaysWhatToDo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ruleID, note, target := sandboxAgentHookConfigChange(trustedActionRequest{
+	ruleID, note, target := sandboxAgentHookConfigChange(context.Background(), trustedActionRequest{
 		Connector: "claudecode",
 		Input:     actionfacts.Input{Tool: "Write", Args: args, ActiveHome: "/sandbox", CWD: "/sandbox/work"},
 	})

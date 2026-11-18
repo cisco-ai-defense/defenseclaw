@@ -107,6 +107,7 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	if event == "SessionStart" || event == "sessionStart" || (isPre && strings.HasPrefix(view.ToolName, "mcp__")) {
 		budget = attachMCP(f, connector, cwd, budget)
 	} else if isPre {
+		budget = attachAgentHookBefore(f, connector, view.ToolName, budget)
 		// A Write or Edit of one of those configs: its next content.
 		budget = attachMCPWrite(f, connector, cwd, input, budget)
 	}
@@ -115,6 +116,55 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 		return nil
 	}
 	return f
+}
+
+// attachAgentHookBefore supplies exact current settings bytes for semantic
+// Edit/MultiEdit judgement. One bounded read, only for Claude settings edits;
+// unrelated calls attach nothing. No digest pass over an oversized file.
+func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) int64 {
+	if connectorName != "claudecode" || (tool != "Edit" && tool != "MultiEdit") {
+		return budget
+	}
+	for _, pf := range f.Paths {
+		if pf.Field != "tool_input.file_path" {
+			continue
+		}
+		p := filepath.ToSlash(pf.Abs)
+		if !strings.HasSuffix(p, "/.claude/settings.json") && !strings.HasSuffix(p, "/.claude/settings.local.json") {
+			continue
+		}
+		a := AttachedFile{Role: "agent_hook_config_before", Path: pf.Abs, Resolved: pf.Resolved, Size: -1, Truncated: true}
+		limit := budget
+		if limit > 64<<10 {
+			limit = 64 << 10
+		}
+		if limit < 0 {
+			limit = 0
+		}
+		file, err := os.Open(pf.Abs)
+		if err == nil {
+			info, statErr := file.Stat()
+			if statErr == nil && info.Mode().IsRegular() {
+				a.Size = info.Size()
+				if info.Size() <= limit {
+					content, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+					if readErr == nil && int64(len(content)) == info.Size() {
+						a.Content = content
+						a.Truncated = false
+						sum := sha256.Sum256(content)
+						a.SHA256 = hex.EncodeToString(sum[:])
+					}
+				}
+			}
+			file.Close()
+		}
+		if a.Truncated {
+			f.Truncated = true
+		}
+		f.Files = append(f.Files, a)
+		return budget - int64(len(a.Content))
+	}
+	return budget
 }
 
 // walkPaths calls add for every path-valued key and for every file an

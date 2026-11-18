@@ -96,3 +96,57 @@ func TestFactsMCPAdmission(t *testing.T) {
 		t.Fatalf("codex mcp facts %+v", f)
 	}
 }
+
+// GAP-0577: the gateway needs exact pre-edit bytes, not invented JSON
+// contexts. Attach only settings edits, and stop at the local read budget.
+func TestFactsAgentHookBefore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "settings.json")
+	before := []byte(`{"model":"z\u007az","hooks":{}}`)
+	if err := os.WriteFile(target, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"Edit", "MultiEdit", "Read", "Write"} {
+		payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": home, "tool_name": tool,
+			"tool_input": map[string]any{"file_path": "~/.claude/settings.json", "old_string": "007a", "new_string": "0079"}})
+		for _, cap := range []int64{0, int64(len(before) - 1), int64(len(before)), 1 << 20} {
+			facts := CollectFacts("claudecode", "", payload, cap)
+			var files []AttachedFile
+			for _, f := range facts.Files {
+				if f.Role == "agent_hook_config_before" {
+					files = append(files, f)
+				}
+			}
+			if tool == "Read" || tool == "Write" {
+				if len(files) != 0 {
+					t.Fatalf("%s attached pre-edit content", tool)
+				}
+				continue
+			}
+			if len(files) != 1 || files[0].Path != target {
+				t.Fatalf("%s facts %+v", tool, files)
+			}
+			f := files[0]
+			if cap < int64(len(before)) {
+				if !f.Truncated || len(f.Content) != 0 {
+					t.Fatal("over-budget file was attached")
+				}
+			} else if f.Truncated || string(f.Content) != string(before) || f.SHA256 == "" {
+				t.Fatalf("lost exact pre-edit bytes: %+v", f)
+			}
+		}
+	}
+	if err := os.WriteFile(target, []byte(strings.Repeat("x", 65537)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": home, "tool_name": "Edit", "tool_input": map[string]any{"file_path": target}})
+	facts := CollectFacts("claudecode", "", payload, 1<<20)
+	if len(facts.Files) != 1 || !facts.Files[0].Truncated || len(facts.Files[0].Content) != 0 {
+		t.Fatal("settings read exceeded the fixed local cap")
+	}
+}
