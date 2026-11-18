@@ -28,6 +28,13 @@ func TestGAP1219RoundCReviewHookTiers(t *testing.T) {
 		{"Z06", "rm -rf ${HOME:+/etc/*; :}"},
 		{"Z07", "rm -rf $D/*"},
 		{"Z08", "[[ D=1 ]]; rm -rf $D/*"},
+		// Review round 3: an indexed printf destination and a mapfile
+		// callback bind D in the receiving shell (V06, V07).
+		{"V06", "printf -v D[0] %s /tmp/x; rm -rf $D/*"},
+		{"V06b", "printf -vD[0] %s /tmp/x; rm -rf $D/*"},
+		{"V07", "mapfile -C 'D=/tmp/x; :' -c 1 L < /etc/hostname; rm -rf $D/*"},
+		{"V07b", "readarray -tC 'D=/tmp/x; :' -c 1 L < /etc/hostname; rm -rf $D/*"},
+		{"A02", "[[ 1 -eq D=1 ]]; rm -rf $D/*"},
 	}
 	shellTextTiers(t, func(tier string, decide func(string) (string, []string), oracle func(string, bool) (string, []string)) {
 		if !strings.HasSuffix(tier, "/permissive") {
@@ -56,6 +63,19 @@ func TestGAP1219RoundCReviewHookTiers(t *testing.T) {
 				}
 				if gap1137Rank[got] < gap1137Rank[least] || !strings.Contains(strings.Join(findings, "|"), gap1147UnreadReason) {
 					t.Errorf("%s: %s (%q), want at least %s and unread reason", row.name, got, findings, least)
+				}
+			})
+		}
+		// Review round 3 C02: a string, file or numeric test binds nothing,
+		// so the body is read as written and a benign call stays allowed.
+		for _, body := range []string{
+			"[[ -n $HOME ]] && echo $HOME",
+			"[[ -f $HOME/.bashrc ]] && echo $HOME",
+		} {
+			command := "cat <<EOF | bash\n" + body + "\nEOF"
+			t.Run(tier+"/C02/"+body, func(t *testing.T) {
+				if got, findings := decide(command); got != "allow" || strings.Contains(strings.Join(findings, "|"), gap1147UnreadReason) {
+					t.Errorf("%q: %s (%q), want allow without the unread reason", body, got, findings)
 				}
 			})
 		}

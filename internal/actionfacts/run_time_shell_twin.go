@@ -1056,7 +1056,9 @@ func heredocParamsExpandAsWritten(text string, at map[int]int, names map[string]
 	var comments [][2]int
 	bound := false
 	bind := func(name string) {
-		if names[name] {
+		// An indexed destination (printf -v NAME[i], read NAME[i]) binds
+		// NAME, and its subscript is arithmetic that can bind any name.
+		if names[name] || strings.Contains(name, "[") {
 			bound = true
 		}
 	}
@@ -1081,8 +1083,12 @@ func heredocParamsExpandAsWritten(text string, at map[int]int, names map[string]
 		case *syntax.LetClause:
 			bindAll()
 		case *syntax.TestClause:
-			// Arithmetic in [[ ]] can bind a name while testing it.
-			bindAll()
+			// Arithmetic in [[ ]] can bind a name while testing it. A string,
+			// file or pattern test binds nothing (=~ sets BASH_REMATCH, a
+			// name each shell keeps for itself: heredocShellOwnedName).
+			if heredocTestMayAssign(typed.X) {
+				bindAll()
+			}
 		case *syntax.CoprocClause:
 			// Bash creates both an array of descriptors and a PID variable.
 			// An unnamed coprocess uses COPROC and COPROC_PID. The holding
@@ -1151,6 +1157,55 @@ func heredocParamsExpandAsWritten(text string, at map[int]int, names map[string]
 	return true
 }
 
+// heredocTestMayAssign reports a [[ ]] expression with an arithmetic
+// comparison (-eq, -ne, -lt, -le, -gt, -ge) whose operand may assign a name
+// when the shell evaluates it: anything but a decimal number, a length
+// expansion or a special parameter ($#, $?, $$, $!) that always expands to
+// one. A word that spells an assignment ([[ D=1 ]]) keeps the reading of
+// review round c (row A01): the test is not read as proof that it binds
+// nothing.
+func heredocTestMayAssign(expr syntax.TestExpr) bool {
+	assigns := false
+	syntax.Walk(expr, func(node syntax.Node) bool {
+		if word, isWord := node.(*syntax.Word); isWord && strings.Contains(word.Lit(), "=") {
+			assigns = true
+		}
+		test, isBinary := node.(*syntax.BinaryTest)
+		if !isBinary || assigns {
+			return !assigns
+		}
+		switch test.Op {
+		case syntax.TsEql, syntax.TsNeq, syntax.TsLeq, syntax.TsGeq, syntax.TsLss, syntax.TsGtr:
+			assigns = !heredocNumericOperand(test.X) || !heredocNumericOperand(test.Y)
+		}
+		return !assigns
+	})
+	return assigns
+}
+
+func heredocNumericOperand(expr syntax.TestExpr) bool {
+	word, isWord := expr.(*syntax.Word)
+	if !isWord || len(word.Parts) != 1 {
+		return false
+	}
+	if text, static := simpleStaticWord(word, nil); static {
+		digits := strings.TrimPrefix(text, "-")
+		return digits != "" && strings.Trim(digits, "0123456789") == ""
+	}
+	param, isParam := word.Parts[0].(*syntax.ParamExp)
+	if !isParam || param.Param == nil || param.Exp != nil || param.Repl != nil || param.Slice != nil {
+		return false
+	}
+	if param.Length {
+		return true
+	}
+	switch param.Param.Value {
+	case "#", "?", "$", "!":
+		return param.Index == nil && !param.Excl
+	}
+	return false
+}
+
 // heredocArithmAssigns reports an arithmetic operator that assigns its left
 // operand.
 func heredocArithmAssigns(op syntax.BinAritOperator) bool {
@@ -1199,6 +1254,15 @@ func heredocCallBinds(call *syntax.CallExpr, bind func(string), bindAll func()) 
 	case "cd", "pushd", "popd":
 		bind("PWD")
 	case "read", "getopts", "mapfile", "readarray", "unset", "wait":
+		if program == "mapfile" || program == "readarray" {
+			for _, arg := range call.Args[1:] {
+				if word, known := simpleStaticWord(arg, nil); !known || strings.HasPrefix(word, "-") && strings.ContainsRune(word, 'C') {
+					// A callback (-C) runs code that can bind any name.
+					bindAll()
+					return
+				}
+			}
+		}
 		for _, arg := range call.Args[1:] {
 			name, known := simpleStaticWord(arg, nil)
 			if !known {
