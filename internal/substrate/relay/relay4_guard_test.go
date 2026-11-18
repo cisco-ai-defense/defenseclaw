@@ -42,12 +42,12 @@ func TestGuardFailsClosedWhenAWatchCannotBeSet(t *testing.T) {
 				return unix.InotifyAddWatch(fd, p, mask)
 			}
 			ctx, cancel := context.WithCancel(context.Background())
-			err := watchGuarded(ctx, []string{gem}, func(string) {})
+			err := watchGuardedAs(ctx, []string{gem}, func(string) {}, nil)
 			cancel()
 			inotifyAddWatch = unix.InotifyAddWatch
 			var degraded *guardDegraded
 			if !errors.As(err, &degraded) || !errors.Is(err, errno) {
-				t.Errorf("%v on watch %d: watchGuarded = %v, want a guardDegraded error", errno, failOn, err)
+				t.Errorf("%v on watch %d: watchGuardedAs = %v, want a guardDegraded error", errno, failOn, err)
 			}
 		}
 	}
@@ -69,10 +69,10 @@ func TestGuardFailsClosedOnAnUnreadableFolder(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(gem, 0o755) })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	err := watchGuarded(ctx, []string{gem}, func(string) {})
+	err := watchGuardedAs(ctx, []string{gem}, func(string) {}, nil)
 	var degraded *guardDegraded
 	if !errors.As(err, &degraded) {
-		t.Fatalf("watchGuarded on a folder it cannot watch = %v, want a guardDegraded error", err)
+		t.Fatalf("watchGuardedAs on a folder it cannot watch = %v, want a guardDegraded error", err)
 	}
 }
 
@@ -122,7 +122,7 @@ func TestGuardReaderEndsWithItsContext(t *testing.T) {
 	_ = os.Mkdir(gem, 0o755)
 	var tripped atomic.Bool
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := watchGuarded(ctx, []string{gem}, func(string) { tripped.Store(true) }); err != nil {
+	if err := watchGuardedAs(ctx, []string{gem}, func(string) { tripped.Store(true) }, nil); err != nil {
 		t.Fatal(err)
 	}
 	cancel()

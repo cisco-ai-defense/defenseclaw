@@ -30,7 +30,7 @@ func TestGuardTripsOnASwapAndRestore(t *testing.T) {
 			_ = os.Mkdir(evil, 0o755)
 			var tripped atomic.Bool
 			ctx, cancel := context.WithCancel(context.Background())
-			if err := watchGuarded(ctx, []string{gem}, func(string) { tripped.Store(true) }); err != nil {
+			if err := watchGuardedAs(ctx, []string{gem}, func(string) { tripped.Store(true) }, nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := unix.Renameat2(unix.AT_FDCWD, gem, unix.AT_FDCWD, evil, unix.RENAME_EXCHANGE); err != nil {
@@ -66,7 +66,7 @@ func TestGuardIgnoresBenignFlows(t *testing.T) {
 	var tripped atomic.Bool
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := watchGuarded(ctx, []string{gem}, func(string) { tripped.Store(true) }); err != nil {
+	if err := watchGuardedAs(ctx, []string{gem}, func(string) { tripped.Store(true) }, nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 50; i++ {

@@ -97,9 +97,10 @@ func capName(c string) string {
 // gives an actor container its default capabilities minus drop plus add
 // (kit.ActorCapabilities).
 //   - An image whose root relay starts the agent as its own user must end
-//     with SETUID, SETGID and KILL (the relay refuses to start without them)
-//     and may add only those (template publish adds SETUID and SETGID and
-//     drops the other defaults: kit.RelayCapabilitiesAdd and Drop).
+//     with exactly SETUID, SETGID and KILL (the relay refuses to start
+//     without them, and needs no other; GAP-0509) and may add only those
+//     (template publish adds SETUID and SETGID and drops the other defaults:
+//     kit.RelayCapabilitiesAdd and Drop).
 //   - Any other image may add nothing: its agent runs as the relay's user,
 //     so a capability added to the container would be the agent's.
 //
@@ -128,6 +129,13 @@ func securityContextRefusal(c *ateapi.Container, v *attest.Verified) string {
 	for _, need := range kit.RelayCapabilities {
 		if !slices.Contains(got, need) {
 			return "security_context.capabilities does not give the container " + need + ", which DefenseClaw's relay needs to start the agent as its own user and to stop it; publish the template with defenseclaw substrate template publish (it adds SETUID and SETGID)"
+		}
+	}
+	for _, c := range got {
+		if !slices.Contains(kit.RelayCapabilities, c) {
+			// A Substrate default the relay does not need, kept by a template
+			// that adds SETUID and SETGID without the drop (GAP-0509).
+			return "security_context.capabilities leaves the container " + c + ", which DefenseClaw's relay does not need; drop it (template publish drops " + strings.Join(kit.RelayCapabilitiesDrop, " and ") + ")"
 		}
 	}
 	return ""

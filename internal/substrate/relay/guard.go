@@ -7,7 +7,7 @@ package relay
 // while the agent ran (GAP-0369).
 const guardWatchEnded = "the guard's watch on the hook folder ended"
 
-// guardDegraded is watchGuarded's error for a watch that cannot be set: the
+// guardDegraded is watchGuardedAs's error for a watch that cannot be set: the
 // relay refuses the agent, logs relay.guard_degraded and reports it on the
 // tamper route (GAP-0369).
 type guardDegraded struct{ err error }
