@@ -952,3 +952,49 @@ def test_cursor_agent_cli_alone_keeps_one_row() -> None:
     # Benign twin: the recorded executable is the Agent CLI, judged by the main row.
     rows = _cursor_rows(_CURSOR_CLI, (_CURSOR_CLI,), {_CURSOR_CLI: ("2026.11.11-b912975", "")})
     assert list(rows) == ["Connector compatibility: cursor"]
+
+
+# ---- GAP-0199: agy updates itself; Doctor reads the agy that runs now --------
+
+_AGY = "/Users/u/.local/bin/agy"
+
+
+def test_self_updated_agy_is_reported_at_the_version_that_runs_now() -> None:
+    agents = {
+        n: AgentSignal(name=n, installed=False, config_path="", binary_path="", version="", error="")
+        for n in agent_discovery.DISCOVERABLE_CONNECTORS
+    }
+    agents["antigravity"] = AgentSignal(
+        name="antigravity", installed=True, config_path="", binary_path=_AGY, version="1.5.7", error=""
+    )
+    discovery = AgentDiscovery(scanned_at="2026-11-06T00:00:00Z", agents=agents, cache_hit=True)
+
+    def probe(_name, _path, *_a, require_trusted_binary_paths=True, **_k):
+        # The passive probe refuses ~/.local/bin; setup admits it (GAP-0164).
+        return ("", agent_discovery.UNTRUSTED_PREFIX_ERROR) if require_trusted_binary_paths else ("1.5.8", "")
+
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=discovery),
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", mock.Mock(side_effect=probe)),
+        mock.patch.object(doctor_health, "_setup_admits_for_probe", return_value=True),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cmd_doctor._check_component_connector_compatibility(SimpleNamespace(data_dir=""), ["antigravity"], r)
+    row = next(c for c in r.checks if c["label"] == "Connector compatibility: antigravity")
+    assert "installed=1.5.8" in row["detail"]
+    assert "recorded as 1.5.7 before the agent updated" in row["detail"]
+
+
+def test_antigravity_docs_name_the_agy_self_update() -> None:
+    from pathlib import Path
+
+    page = (
+        Path(__file__).resolve().parents[2] / "docs-site" / "content" / "docs" / "connectors" / "antigravity.mdx"
+    ).read_text(encoding="utf-8")
+    limits = page.split("## Limits", 1)[1].split("\n## ", 1)[0]
+    assert "`agy` updates itself" in limits
+    assert "no setting that turns this off" in limits
+    assert "defenseclaw setup antigravity" in limits
