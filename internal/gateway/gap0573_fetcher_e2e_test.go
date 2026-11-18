@@ -72,6 +72,7 @@ func TestGAP0573FetcherFolderShapesFollowTheFailMode(t *testing.T) {
 		"F11 npx in a project with a plain package.json": {srv(`{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}`), map[string]string{"package.json": `{"name":"app","version":"1.0.0","scripts":{"test":"x"}}`}, true},
 		"F12 uvx in a Python project":                    {srv(`{"command":"uvx","args":["mcp-server-git"]}`), map[string]string{"pyproject.toml": "[project]\nname='app'\n"}, true},
 		"F13 npx in a JS project after npm install":      {srv(`{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}`), map[string]string{"package.json": `{"name":"app","version":"1.0.0","devDependencies":{"typescript":"5.6.3"}}`, "node_modules/typescript/package.json": `{"name":"typescript","bin":{"tsc":"bin/tsc"}}`, "node_modules/.bin/tsc": js}, true},
+		"F14 npx vendor MCP beside the vendor's CLI":     {srv(`{"command":"npx","args":["-y","@playwright/mcp@latest"]}`), map[string]string{"package.json": `{"name":"web","devDependencies":{"@playwright/test":"1.48.0"}}`, "node_modules/@playwright/test/package.json": `{"name":"@playwright/test","bin":{"playwright":"cli.js"}}`, "node_modules/.bin/playwright": js}, true},
 	}
 	// An installed program outside the folder, and the folder's own bin on
 	// the actor's PATH (E17: the kit resolves it into the folder).

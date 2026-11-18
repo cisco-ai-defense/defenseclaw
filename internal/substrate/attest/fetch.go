@@ -250,10 +250,10 @@ var fetchRuntimes = map[string]bool{"node": true, "nodejs": true, "bun": true, "
 
 // binShadows reports a node_modules/.bin program that npx could run in
 // place of the fetched package's program or of the runtime it starts: a
-// name of the server, a runtime, or a name that carries the package's own
-// name or scope (the program of @modelcontextprotocol/server-filesystem is
-// mcp-server-filesystem). Compared without case and without the Windows
-// shim suffixes.
+// name of the server, a runtime, or a program name the package commonly
+// declares (binNamesOf). Whole names only, compared without case and
+// without the Windows shim suffixes: a vendor's own CLI beside its MCP
+// server (.bin/playwright beside @playwright/mcp) is not one of them.
 func binShadows(bin string, names map[string]bool, pkgs []string, family string) bool {
 	b := strings.ToLower(bin)
 	for _, ext := range []string{".cmd", ".ps1", ".exe", ".bat"} {
@@ -271,17 +271,32 @@ func binShadows(bin string, names map[string]bool, pkgs []string, family string)
 		}
 	}
 	for _, p := range pkgs {
-		scope, base := "", strings.ToLower(specName(family, p))
-		if s, r, ok := strings.Cut(strings.TrimPrefix(base, "@"), "/"); ok && strings.HasPrefix(base, "@") {
-			scope, base = s, r
-		}
-		for _, part := range []string{base, scope} {
-			if len(part) >= 3 && strings.Contains(b, part) {
-				return true
-			}
+		if binNamesOf(strings.ToLower(specName(family, p)))[b] {
+			return true
 		}
 	}
 	return false
+}
+
+// binNamesOf lists the program names a registry package commonly declares:
+// its name, its base name, mcp-<base> for a server-<x> base, and for a
+// scoped package <scope>-<base> and mcp-server-<scope>
+// (@modelcontextprotocol/server-filesystem declares mcp-server-filesystem).
+func binNamesOf(name string) map[string]bool {
+	out := map[string]bool{name: true}
+	scope, base := "", name
+	if s, r, ok := strings.Cut(strings.TrimPrefix(name, "@"), "/"); ok && strings.HasPrefix(name, "@") {
+		scope, base = s, r
+	}
+	out[base] = true
+	if strings.HasPrefix(base, "server-") {
+		out["mcp-"+base] = true
+	}
+	if scope != "" {
+		out[scope+"-"+base] = true
+		out["mcp-server-"+scope] = true
+	}
+	return out
 }
 
 // packageJSONClean reports a package.json that gives npx nothing of the
