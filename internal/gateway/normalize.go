@@ -225,13 +225,10 @@ func activeLocalPatternRuleIdentity(ruleID, title string) bool {
 func localValueFreeFinding(id, title, raw, source, severity string) (NormalizedFinding, bool) {
 	switch title {
 	case localCredentialFindingTitle:
+		// The proxy's own secret regexes are gone (GAP-0210): the operator
+		// literal indicator is the one legacy secret finding left.
 		if id == "LP-SECRET-MATCH" {
 			return normalizedSensitiveLocalFinding(id, CatCredentialLeak, title, raw, source, severity), true
-		}
-		for _, detector := range secretPatternDetectors {
-			if detector.canonicalID == id {
-				return normalizedSensitiveLocalFinding(id, CatCredentialLeak, title, raw, source, severity), true
-			}
 		}
 	case localPIIFindingTitle:
 		if id == "LP-PII-DATA" {

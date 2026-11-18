@@ -8,7 +8,11 @@ package gateway
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,9 +23,8 @@ import (
 )
 
 // The s7/response round 2 and 3 review repros (rel-1-0-10:GAP-0368, GAP-0428,
-// GAP-0430, GAP-0431; GAP-0429 is still open on rel and has its own port lane)
-// were written against that branch's stream guard (newCompletionStreamGuard,
-// trackPEM), which rel never took: rel holds
+// GAP-0429, GAP-0430, GAP-0431) were written against that branch's stream
+// guard (newCompletionStreamGuard, trackPEM), which rel never took: rel holds
 // a streamed completion with the s7/stream-tail design (proxy_stream_tail.go,
 // GAP-0212). The same inputs go here through rel's two stream entry points end
 // to end, the /llm proxy (handleChatCompletion) and the passthrough stream
@@ -206,6 +209,48 @@ func TestRetestGAP0428PEMOtherFooterTerminates(t *testing.T) {
 			}
 		case <-time.After(15 * time.Second):
 			t.Errorf("%s: a stream with another label's END line inside an open key block did not finish within 15 s", name)
+		}
+	}
+}
+
+// GAP-0429: a non-key BEGIN line still open at a piece boundary, then a real
+// key header in the next piece: no key body line reaches the client, on /llm
+// and on the passthrough stream. The key is generated at run time.
+func TestRetestGAP0429DecoyHeaderThenKey(t *testing.T) {
+	rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := string(pem.EncodeToMemory(&pem.Block{Type: "RSA " + "PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rk)}))
+	body := key[strings.IndexByte(key, '\n')+1 : strings.LastIndex(key, "-----END ")]
+	leaked := func(out string) int {
+		got := streamedContent(out)
+		n := 0
+		for _, line := range strings.Split(body, "\n") {
+			if len(line) > 8 && (strings.Contains(got, line) || strings.Contains(out, line)) {
+				n += len(line)
+			}
+		}
+		return n
+	}
+	for _, decoy := range []bool{false, true} {
+		pre := retestFiller(600) + "\n"
+		var pieces []string
+		if decoy {
+			pieces = append(pieces, pre+"-----BEGIN ", "X-----\n"+key[:60])
+		} else {
+			pieces = append(pieces, pre+"-----BEGIN X-----\n", key[:60])
+		}
+		pieces = append(pieces, retestPieces(key[60:]+retestFiller(400), 24)...)
+		if n := leaked(retestLLM(t, pieces)); n > 0 {
+			t.Errorf("llm decoy=%v: %d of %d key body bytes reached the client", decoy, n, len(body))
+		}
+		var writes []string
+		for _, p := range pieces {
+			writes = append(writes, retestOAIFrame(p))
+		}
+		if n := leaked(retestPassthrough(t, append(writes, "data: [DONE]\n\n"))); n > 0 {
+			t.Errorf("passthrough decoy=%v: %d of %d key body bytes reached the client", decoy, n, len(body))
 		}
 	}
 }
