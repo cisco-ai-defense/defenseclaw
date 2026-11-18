@@ -132,6 +132,10 @@ var hookCalls struct {
 }
 
 type hookCall struct {
+	// key is the call's entry in hookCalls: hookCallKey of its goroutine
+	// when the call began, or when it last took a thread back after a wait
+	// (retakeHookCallThread).
+	key uint64
 	// waitLeft is how long the call may still wait for share answers
 	// (networkShareCallShares answer waits and tail at its start); tail is
 	// the part of it that the shares after the full waits share.
@@ -220,10 +224,11 @@ func HookCall() (end func()) {
 		hookCalls.calls = make(map[uint64]*hookCall)
 	}
 	tail := networkShareAnswerWait / 2
-	hookCalls.calls[id] = &hookCall{waitLeft: networkShareCallShares*networkShareAnswerWait + tail, tail: tail}
+	call := &hookCall{key: id, waitLeft: networkShareCallShares*networkShareAnswerWait + tail, tail: tail}
+	hookCalls.calls[id] = call
 	return func() {
 		hookCalls.mu.Lock()
-		delete(hookCalls.calls, id)
+		delete(hookCalls.calls, call.key)
 		hookCalls.mu.Unlock()
 		unlock()
 	}

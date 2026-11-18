@@ -1046,6 +1046,34 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		_, ok := protected[canonicalSemanticPath(path)]
 		return ok
 	}
+	// The lane reads each operand's entry and each protected file once in its
+	// pass over the call's write targets: one operand reaches writeTarget from
+	// the path facts, the shell reading and the client's targets, and the
+	// hard-link check stats every protected file for each, and on Windows
+	// each read asks the share check of every folder on its way first
+	// (rel-1-0-10:GAP-1316). Nothing runs in the pass, so a second read of
+	// a path is the first one's answer.
+	type laneRead struct {
+		info os.FileInfo
+		err  error
+	}
+	lstats, stats := map[string]laneRead{}, map[string]laneRead{}
+	laneLstat := func(path string) (os.FileInfo, error) {
+		read, ok := lstats[path]
+		if !ok {
+			read.info, read.err = hookpaths.Lstat(path)
+			lstats[path] = read
+		}
+		return read.info, read.err
+	}
+	laneStat := func(path string) (os.FileInfo, error) {
+		read, ok := stats[path]
+		if !ok {
+			read.info, read.err = hookpaths.Stat(path)
+			stats[path] = read
+		}
+		return read.info, read.err
+	}
 	confirmed := func() bool {
 		if request.resolvedTarget != nil {
 			*request.resolvedTarget = true
@@ -1203,7 +1231,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if cannotResolveLocally || runtime.GOOS != "windows" {
 			return false
 		}
-		if info, err := hookpaths.Lstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+		if info, err := laneLstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			return false
 		}
 		if !windowsMovedRead {
@@ -1305,7 +1333,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
-			if info, err := hookpaths.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			if info, err := laneLstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return unproven(hookpaths.UnprovenLinkUnread, target)
 			}
 		}
@@ -1411,7 +1439,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 			return unproven(hookpaths.UnprovenLinkUnread, target)
 		}
-		info, err := hookpaths.Lstat(walked)
+		info, err := laneLstat(walked)
 		if err != nil && !hookpaths.NotExist(err) {
 			return false
 		}
@@ -1421,7 +1449,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return false
 			}
 			for _, path := range protectedPaths {
-				if file, err := hookpaths.Stat(path); err == nil && os.SameFile(info, file) {
+				if file, err := laneStat(path); err == nil && os.SameFile(info, file) {
 					return confirmed()
 				}
 			}
