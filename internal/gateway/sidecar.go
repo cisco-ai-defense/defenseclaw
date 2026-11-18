@@ -5122,9 +5122,16 @@ func (s *Sidecar) remediateAtOpenClaw(
 	case errors.Is(err, ErrOpenClawRemediationUnavailable):
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: %s %s blocked by DefenseClaw; OpenClaw not told (no operator.admin)\n",
 			kind, r.Event.Name)
+		note := openClawRemediationUnavailableAction + " (scope operator.admin)"
 		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
 			fmt.Sprintf("type=%s verdict=%s %s: blocked and enforced by DefenseClaw; OpenClaw was not told to disable it",
-				kind, r.Verdict, openClawRemediationUnavailableAction+" (scope operator.admin)"))
+				kind, r.Verdict, note))
+		// The INFO row above is not an alert: `defenseclaw alerts` lists
+		// platform-health rows above INFO. The operator must still see here that
+		// OpenClaw has the asset enabled (GAP-0187).
+		_ = s.logger.LogAlert("openclaw-remediation", "HIGH",
+			fmt.Sprintf("%s %s is blocked by DefenseClaw, but OpenClaw was not told to disable it: %s", kind, r.Event.Name, note),
+			map[string]any{"type": kind, "asset": r.Event.Name, "action": openClawRemediationUnavailableAction, "scope": "operator.admin"})
 		return openClawRemediationUnavailableAction
 	default:
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway OpenClaw disable %s %s failed: %v\n", kind, r.Event.Name, err)

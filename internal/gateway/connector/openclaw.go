@@ -850,6 +850,7 @@ func uninstallOpenClawExtension(paths openClawPaths, dropRejectedApprovals bool,
 		approvals:         dropRejectedApprovals,
 		conversationGrant: grant.added,
 		keepEmptyHooks:    grant.hooksBefore,
+		loneGrant:         grant.unrecorded,
 	})
 	if err != nil {
 		errs = append(errs, err.Error())
@@ -921,11 +922,22 @@ func removeDefenseClawEntryKeys(entries map[string]interface{}, scope openClawRe
 	if scope.conversationGrant {
 		removeDefenseClawConversationGrant(entry, scope.keepEmptyHooks)
 	}
+	if scope.loneGrant && isLoneConversationGrant(entry) {
+		delete(entries, "defenseclaw")
+		return
+	}
 	if len(entry) == 0 {
 		delete(entries, "defenseclaw")
 		return
 	}
 	entries["defenseclaw"] = entry
+}
+
+// isLoneConversationGrant reports whether entry holds nothing but
+// hooks.allowConversationAccess: true, the grant setup writes.
+func isLoneConversationGrant(entry map[string]interface{}) bool {
+	hooks, ok := entry["hooks"].(map[string]interface{})
+	return len(entry) == 1 && ok && len(hooks) == 1 && hooks["allowConversationAccess"] == true
 }
 
 // openClawHookModeKey is the plugin config key setup writes with the
@@ -1007,18 +1019,32 @@ func removeDefenseClawConversationGrant(entry map[string]interface{}, keepEmptyH
 // openClawSetupGrant says whether the conversation-hook grant in the
 // defenseclaw entry is DefenseClaw's to take out, as the copy of openclaw.json
 // from before setup shows it. Setup keeps a grant the operator already had, so
-// only a copy without one (or no file at all) makes it setup's. With no copy,
-// or one that cannot be read, nothing is claimed.
+// only a copy without one (or no file at all) makes it setup's. A copy that
+// is there but cannot be read claims nothing. With no copy at all nothing says
+// who wrote the grant, so the grant stays beside other keys of the entry and
+// goes with an entry that holds nothing else (unrecorded, GAP-0267).
 type openClawSetupGrant struct {
 	// added: the file before setup had no hooks.allowConversationAccess in the entry.
 	added bool
 	// hooksBefore: it had a hooks object there, which stays even when empty.
 	hooksBefore bool
+	// unrecorded: no copy of the file from before setup exists, so nothing
+	// says the operator wrote the grant. An entry left holding nothing but
+	// that grant is then dropped with the plugin: a plugin installed later
+	// under the id defenseclaw would otherwise inherit it (GAP-0267).
+	unrecorded bool
 }
 
 func openClawSetupGrantFor(dataDir, connectorName string) openClawSetupGrant {
-	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, "openclaw.json"))
+	path := managedFileBackupPath(dataDir, connectorName, "openclaw.json")
+	b, err := loadManagedFileBackupPath(path)
 	if err != nil {
+		// A record that is absent is "no copy"; one that is there and cannot be
+		// read says nothing about who wrote the grant, so the grant is kept
+		// (nothing is claimed, and no lone entry is dropped).
+		if _, statErr := os.Lstat(path); statErr != nil && os.IsNotExist(statErr) {
+			return openClawSetupGrant{unrecorded: true}
+		}
 		return openClawSetupGrant{}
 	}
 	if !b.Existed {

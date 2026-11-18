@@ -1713,8 +1713,7 @@ func TestInvokeAtomicTransformV2ReplacementNativePreservesMetadata(t *testing.T)
 		t.Fatal(err)
 	}
 	stageName := ".tmp-cas-v2-ready-native-replace-test"
-	stageState, err := atomicTransformBoundCreate(dir, stageName, []byte("new-main"), 0o600)
-	if err != nil {
+	if _, err := atomicTransformBoundCreate(dir, stageName, []byte("new-main"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stagePath := filepath.Join(directory, stageName)
@@ -1729,7 +1728,7 @@ func TestInvokeAtomicTransformV2ReplacementNativePreservesMetadata(t *testing.T)
 	if err := windows.SetFileAttributes(stagePointer, stageAttributes|windows.FILE_ATTRIBUTE_SYSTEM); err != nil {
 		t.Fatal(err)
 	}
-	stageState, err = atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
+	stageState, err := atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
 	if err != nil {
 		t.Fatal(err)
 	}
