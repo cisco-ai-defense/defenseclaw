@@ -61,12 +61,6 @@ func noAnswerPayloadAt(home string, body []byte, late bool) bool {
 	return noAnswerPayloadInHomes(body, homes, late)
 }
 
-// ordinaryNoAnswerPayloadInHomes is ordinary only when the call names no
-// protected file of any of the absolute homes; a list with none is not.
-func ordinaryNoAnswerPayloadInHomes(body []byte, homes []string) bool {
-	return noAnswerPayloadInHomes(body, homes, false)
-}
-
 func noAnswerPayloadInHomes(body []byte, homes []string, late bool) bool {
 	var seen []string
 	for _, home := range homes {
@@ -79,10 +73,6 @@ func noAnswerPayloadInHomes(body []byte, homes []string, late bool) bool {
 		}
 	}
 	return len(seen) != 0
-}
-
-func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
-	return noAnswerPayloadInHome(body, home, false)
 }
 
 func noAnswerPayloadInHome(body []byte, home string, late bool) bool {
