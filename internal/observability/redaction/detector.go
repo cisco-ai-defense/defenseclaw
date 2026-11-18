@@ -114,6 +114,22 @@ func DetectAndRedact(
 	key []byte,
 	recordBudget *RecordMatchBudget,
 ) (DetectionResult, error) {
+	return detectAndRedact(input, fieldClass, groups, key, recordBudget, nil)
+}
+
+// detectAndRedact is DetectAndRedact plus the spans an engine's secret
+// classifier flags (GAP-0426). When the secrets group is selected, every
+// classifier span is an accepted secrets.assignment match, so the text the
+// guardrail flags as a secret is replaced by the same path as a detector
+// match, under the same field and record limits.
+func detectAndRedact(
+	input string,
+	fieldClass observability.FieldClass,
+	groups []DetectorGroup,
+	key []byte,
+	recordBudget *RecordMatchBudget,
+	classify SecretSpanClassifier,
+) (DetectionResult, error) {
 	if !utf8.ValidString(input) {
 		return failedDetection(FailureInvalidUTF8)
 	}
@@ -169,6 +185,33 @@ func DetectAndRedact(
 				spanCharged = true
 				acceptedSpans++
 			}
+			if acceptedSpans > MaxFieldMatches {
+				return failedDetectionWithCandidates(FailureFieldMatchLimit, candidateCount)
+			}
+		}
+	}
+
+	if _, ok := enabled[classifierDetectorID]; ok && classify != nil {
+		definition, _ := catalogDefinitionFor(classifierDetectorID)
+		for _, span := range classify(input) {
+			item := candidate{start: span[0], end: span[1], accepted: true}
+			candidateCount++
+			if candidateCount > MaxFieldCandidates {
+				return failedDetectionWithCandidates(FailureCandidateLimit, candidateCount)
+			}
+			if !validCandidate(item, len(input), len(input)) ||
+				!utf8.RuneStart(input[item.start]) || (item.end < len(input) && !utf8.RuneStart(input[item.end])) {
+				continue
+			}
+			if item.end-item.start > definition.candidateBound {
+				// A flagged span this long is never kept in clear: fail closed.
+				return failedDetectionWithCandidates(FailureCandidateLimit, candidateCount)
+			}
+			accepted = append(accepted, acceptedMatch{
+				start: item.start, end: item.end, id: definition.id,
+				group: definition.group, order: definition.order,
+			})
+			acceptedSpans++
 			if acceptedSpans > MaxFieldMatches {
 				return failedDetectionWithCandidates(FailureFieldMatchLimit, candidateCount)
 			}
