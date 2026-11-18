@@ -86,3 +86,77 @@ func TestNewItemBindingThisReadingCannotFollowMayMakeALink(t *testing.T) {
 		}
 	}
 }
+
+// TestNewItemSpellingsReadAsThePlainLink: the link reading of a command
+// (commandLinks) is the same in every spelling of -ItemType, also when the
+// shell parser cannot read the command (rel-1-0-10:GAP-0849, cert L73: a
+// first statement that assigns a parenthesized expression left only the
+// literal -ItemType text to find the link, so -Ty, an en dash and -ItemType:
+// read as no link).
+func TestNewItemSpellingsReadAsThePlainLink(t *testing.T) {
+	home := t.TempDir()
+	const computed = `$t = Join-Path $env:TEMP ("gap0849-" + [guid]::NewGuid()); `
+	rows := []string{
+		`New-Item -ItemType SymbolicLink -Path ./l -Target $t; Add-Content ./l marker`,
+		`New-Item -ItemType SymbolicLink -Path ./l -Target ./a; Add-Content ./l marker`,
+		`New-Item -ItemType Junction -Path ./l -Target $t`,
+		`New-Item -ItemType Directory -Path ./d; Add-Content ./d/f.txt marker`,
+		`New-Item -ItemType File -Path ./f.txt; Add-Content ./f.txt marker`,
+	}
+	type reading struct{ known, unread, opaque bool }
+	read := func(command string) reading {
+		links := commandLinks(command, home, home, nil, false, false)
+		return reading{links.known, links.unread, links.opaque}
+	}
+	for _, row := range rows {
+		for _, prefix := range []string{"", computed} {
+			plain := prefix + row
+			want := read(plain)
+			if prefix != "" && strings.Contains(row, "SymbolicLink -Path ./l -Target $t") && want.known {
+				t.Errorf("%q: the plain link reads as known, want unread", plain)
+			}
+			for _, spelling := range newItemSpellings {
+				command := strings.Replace(plain, "-ItemType ", spelling.spelling, 1)
+				if got := read(command); got != want {
+					t.Errorf("%s: commandLinks(%q) = %+v, want the plain reading %+v", spelling.id, command, got, want)
+				}
+			}
+		}
+	}
+}
+
+// TestNewItemInAnotherProgramsTextReadsByItsWords: a New-Item spelling the
+// PowerShell reading does not read as a call (a PowerShell script in a
+// bash string another program runs) is read from its words for the link
+// reading. A folder or a file stays no link, as before; a link stays a
+// possible link in every spelling (rel-1-0-10:GAP-0849: the first fix took
+// every such New-Item for a possible link, and the owner A/B showed benign
+// folder scripts sent to a Windows host blocked; a parenthesized path is one
+// word, and a bracket left open keeps the possible link).
+func TestNewItemInAnotherProgramsTextReadsByItsWords(t *testing.T) {
+	rows := []struct {
+		command string
+		want    bool
+	}{
+		{`ssh h "powershell -c 'New-Item -ItemType Directory -Force $o | Out-Null; Get-ChildItem $o'"`, false},
+		{`ssh h "pwsh -c \"New-Item -ItemType Directory -Force -Path C:\x\y 2>&1\""`, false},
+		{`run h 'New-Item "$root\a.stop" -ItemType File -Force; exit 0'`, false},
+		{`run h '$w = (New-Item -ItemType Directory -Path $out -Force); Set-Content $w\f.txt x'`, false},
+		{`ssh h "powershell -c 'New-Item -ItemType SymbolicLink -Path .\l -Target $t'"`, true},
+		{`ssh h "powershell -c 'New-Item -ItemType Junction -Path .\l -Target .\a'"`, true},
+		{`run h 'New-Item -Path .\l -ItemType $kind -Target .\a'`, true},
+		{"cat > s.ps1 <<'EOF'\nNew-Item -ItemType Directory -Force (Split-Path $out) | Out-Null\nEOF", false},
+		{`run h 'New-Item -ItemType File -Path (Join-Path $d "a b.txt"; $x) -Force'`, false},
+		{`run h 'New-Item -ItemType SymbolicLink -Path (Join-Path $d l) -Target $t'`, true},
+		{`run h 'New-Item (Join-Path $d l) .\x -ItemType Directory'`, true},
+		{`run h 'New-Item -ItemType Directory -Path (Join-Path $d l'`, true},
+	}
+	for _, spelling := range newItemSpellings {
+		for _, row := range rows {
+			command := strings.Replace(row.command, "-ItemType ", spelling.spelling, 1)
+			if got := commandNewItemLinkSpelled(command); got != row.want {
+				t.Errorf("%s: commandNewItemLinkSpelled(%q) = %v, want %v", spelling.id, command, got, row.want)
+			}
+		}
+	}
+}
