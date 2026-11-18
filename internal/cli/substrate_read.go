@@ -90,6 +90,21 @@ func substrateIsSuffix(s string) bool {
 	return true
 }
 
+// substrateUnattendedMode is the Mode line of an unattended agent: what its
+// asks do, as its profile's unattended_asks says (D12, GAP-0388).
+func substrateUnattendedMode(a api.Actor) string {
+	profile := substrateDash(a.Profile)
+	if a.UnattendedAsks != "queue" {
+		return "unattended (asks are denied: profile " + profile + " has unattended_asks: deny)"
+	}
+	wait := ""
+	if a.AskTimeoutSeconds > 0 {
+		wait = ", denied after " + substrateAge(time.Unix(0, 0), time.Unix(a.AskTimeoutSeconds, 0)) + " without an answer"
+	}
+	return "unattended (asks are queued for approval: profile " + profile + " has unattended_asks: queue" + wait +
+		"; answer them with defenseclaw substrate approvals)"
+}
+
 func substrateAge(t time.Time, now time.Time) string {
 	if t.IsZero() {
 		return "-"
@@ -119,6 +134,38 @@ func substrateAskRun(a api.Ask, now time.Time) string {
 		return "unattended"
 	}
 	return "unattended, " + substrateAge(now, a.Expires) + " left"
+}
+
+// substrateActorState is the STATE column: the actor's state, and
+// policy_conflict while the controller keeps it on the DefenseClaw rule only
+// (GAP-0398).
+func substrateActorState(a api.Actor) string {
+	if a.PolicyConflict == nil {
+		return substrateDash(a.State)
+	}
+	if st := safetext.Line(a.State); st != "" {
+		return st + ", policy_conflict"
+	}
+	return "policy_conflict"
+}
+
+// substratePolicyConflictLine says what policy_conflict means for the agent
+// and how it is cleared, "" when it is not in conflict (GAP-0398).
+func substratePolicyConflictLine(a api.Actor) string {
+	pc := a.PolicyConflict
+	if pc == nil {
+		return ""
+	}
+	fix := pc.Fix
+	if fix == "" {
+		fix = "defenseclaw substrate policy reset " + a.Atespace + "/" + a.Name
+	}
+	since := ""
+	if !pc.Since.IsZero() {
+		since = " since " + pc.Since.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("policy_conflict%s: %d foreign change(s) to its network policy were reverted, so it may reach only DefenseClaw until an administrator clears it with: %s",
+		since, pc.Reverts, fix)
 }
 
 // substrateDash shows a value the cluster sent, as one safe line, or "-".
@@ -175,9 +222,17 @@ them and how long ago they started. Administrators see only their own agents unl
 			now := time.Now()
 			rows := make([][]string, 0, len(live))
 			for _, a := range live {
-				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateDash(a.State), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
+				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
+				if all {
+					row = append(row, substrateListOwner(a))
+				}
+				rows = append(rows, row)
 			}
-			substrateTable(cmd.OutOrStdout(), []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}, rows)
+			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}
+			if all {
+				header = append(header, "OWNER")
+			}
+			substrateTable(cmd.OutOrStdout(), header, rows)
 			return nil
 		},
 	}
@@ -186,6 +241,16 @@ them and how long ago they started. Administrators see only their own agents unl
 	cmd.Flags().StringVar(&batch, "batch", "", "only the agents of this batch")
 	cmd.Flags().BoolVar(&all, "all", false, "every person's agents (administrators only)")
 	return cmd
+}
+
+// substrateListOwner is list --all's OWNER column: the person, or that the
+// agent was made outside DefenseClaw and belongs to its atespace only
+// (GAP-0419).
+func substrateListOwner(a api.Actor) string {
+	if a.Foreign || a.Attribution == "atespace" {
+		return "not launcher (atespace only)"
+	}
+	return substrateDash(a.Owner)
 }
 
 // --- status -----------------------------------------------------------------
@@ -206,8 +271,10 @@ With a name, shows that agent: where it runs, which profile guards it and its ba
 With --batch, shows every agent of a batch run.
 
 For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and callout,
-the agents and templates in the cluster (agents by state, also per launcher and managed atespace) and the setup
-checks. It reads the cluster with kubectl (give --install-file).
+the agents and templates in the cluster (agents by state, also per launcher and managed atespace), the agents
+in policy_conflict per atespace and the setup checks. It reads the cluster with kubectl (give --install-file),
+and the agents in policy_conflict with your DefenseClaw sign-in (sign in as an administrator, or the count is
+unknown).
 Exit 75 means the cluster could not be reached; there is no document.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -215,7 +282,7 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if len(args) > 0 || batch != "" {
 					return cliusage.WithExitCode(errors.New("--cluster shows the whole cluster; leave the name and --batch out"), 2)
 				}
-				return runSubstrateFleet(cmd, "status", &out, &cf)
+				return runSubstrateFleet(cmd, "status", &out, &cf, com)
 			}
 			asJSON, err := out.wantJSON()
 			if err != nil {
@@ -252,11 +319,22 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				fmt.Fprintf(w, "Profile:   %s\n", substrateDash(a.Profile))
 				fmt.Fprintf(w, "Template:  %s\n", substrateDash(a.Template))
 				fmt.Fprintf(w, "Started:   %s ago\n", substrateAge(a.CreatedAt, time.Now()))
+				if a.State != "" {
+					fmt.Fprintf(w, "State:     %s\n", a.State)
+				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
 				}
 				if a.Unattended {
-					fmt.Fprintln(w, "Mode:      unattended (asks are denied)")
+					fmt.Fprintf(w, "Mode:      %s\n", substrateUnattendedMode(a))
+				}
+				if line := substratePolicyConflictLine(a); line != "" {
+					fmt.Fprintln(w, "Policy:    "+line)
+				}
+				if a.State == substrateStateCrashed {
+					// GAP-0410: say it crashed and the way back.
+					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
+					return nil
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
 				return nil
@@ -938,9 +1016,11 @@ func newSubstratePolicyResetCmd() *cobra.Command {
 		Use:   "reset <actor>",
 		Short: "Clear a policy conflict on an agent (administrators only)",
 		Long: `For administrators. When something outside DefenseClaw keeps rewriting an agent's network policy,
-the controller stops after three reverts in ten minutes and marks the agent policy_conflict. Once the
-other writer is stopped, "reset" clears that state so the controller writes the policy again. Name the
-agent as ATESPACE/NAME. The reset is recorded in the audit log under your own name.`,
+three reverts in ten minutes mark the agent policy_conflict and put it on deny-only: it keeps only the
+DefenseClaw rule, and each later change by the other writer is replaced with deny-only again, so a foreign
+policy never stays in force. Once the other writer is stopped, "reset" clears that state so the controller
+writes the full policy again. Name the agent as ATESPACE/NAME. The reset is recorded in the audit log under
+your own name.`,
 		Example: "defenseclaw substrate policy reset eng-web/fix-tests-7f3a --reason \"removed the GitOps rule\"",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

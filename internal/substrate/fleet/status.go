@@ -73,12 +73,15 @@ type Health struct {
 	Callout    Callout    `json:"callout"`
 }
 
-// Atespace is one launcher or managed atespace and its actors.
+// Atespace is one launcher or managed atespace and its actors. Conflicts
+// counts its agents in policy_conflict; nil (left out) when they were not
+// counted (policy_conflicts.reason says why), never a 0 then (GAP-0398).
 type Atespace struct {
-	Name     string         `json:"atespace"`
-	Launcher bool           `json:"launcher"`
-	Actors   int            `json:"actors"`
-	States   map[string]int `json:"states"`
+	Name      string         `json:"atespace"`
+	Launcher  bool           `json:"launcher"`
+	Actors    int            `json:"actors"`
+	States    map[string]int `json:"states"`
+	Conflicts *int           `json:"conflicts,omitempty"`
 }
 
 // Inventory counts every actor and template in the cluster.
@@ -99,7 +102,10 @@ type StatusDocument struct {
 	Health             Health     `json:"health"`
 	Atespaces          []Atespace `json:"atespaces"`
 	Inventory          *Inventory `json:"inventory,omitempty"`
-	Checks             []Check    `json:"checks"`
+	// PolicyConflicts counts the agents in policy_conflict per atespace
+	// (GAP-0398). Always set; optional in the contract.
+	PolicyConflicts *PolicyConflicts `json:"policy_conflicts,omitempty"`
+	Checks          []Check          `json:"checks"`
 }
 
 // VerifyDocument is `defenseclaw substrate verify --json`: the checks and
@@ -112,7 +118,9 @@ type VerifyDocument struct {
 	GeneratedAt        string  `json:"generated_at"`
 	Cluster            Cluster `json:"cluster"`
 	OK                 bool    `json:"ok"`
-	Checks             []Check `json:"checks"`
+	// PolicyConflicts: as in the status document (GAP-0398).
+	PolicyConflicts *PolicyConflicts `json:"policy_conflicts,omitempty"`
+	Checks          []Check          `json:"checks"`
 }
 
 // Report is what the CLI collected for a status document beyond Observed.
@@ -171,9 +179,18 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 	h.State = HealthState(h, checks)
 	atespaces := append([]Atespace{}, r.Atespaces...)
 	sort.Slice(atespaces, func(i, j int) bool { return atespaces[i].Name < atespaces[j].Name })
+	var counts map[string]int
+	if conflictsRead(o) {
+		counts = conflictCounts(o)
+	}
 	for i := range atespaces {
 		if atespaces[i].States == nil {
 			atespaces[i].States = map[string]int{}
+		}
+		atespaces[i].Conflicts = nil
+		if counts != nil {
+			n := counts[atespaces[i].Name]
+			atespaces[i].Conflicts = &n
 		}
 	}
 	var inv *Inventory
@@ -194,6 +211,7 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 		Health:             h,
 		Atespaces:          atespaces,
 		Inventory:          inv,
+		PolicyConflicts:    policyConflicts(o),
 		Checks:             checks,
 	}
 }
@@ -215,6 +233,7 @@ func BuildVerify(o Observed, productVersion string, now time.Time) VerifyDocumen
 		GeneratedAt:        now.UTC().Format(time.RFC3339),
 		Cluster:            ClusterOf(o),
 		OK:                 ok,
+		PolicyConflicts:    policyConflicts(o),
 		Checks:             checks,
 	}
 }

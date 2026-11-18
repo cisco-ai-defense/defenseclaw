@@ -101,6 +101,44 @@ func TestSandboxClassMicroVMRefusesAGVisorActor(t *testing.T) {
 	}
 }
 
+// GAP-0386: under sandbox_class microvm, an actor on a template pinned to
+// a microVM pool with --worker-label (no class label) gets its policy: the
+// workers the selector matches say the class. One pinned to a gVisor pool
+// is refused.
+func TestSandboxClassMicroVMReadsTheTemplatesPool(t *testing.T) {
+	r := newRig(t, withSandbox(&config.SandboxAdminConfig{SandboxClass: config.SubstrateSandboxMicroVM}))
+	for _, w := range []struct{ pool, class string }{{"gv", "gvisor"}, {"mv", "microvm"}, {"mv", ""}} {
+		wk := &ateapi.Worker{WorkerNamespace: "dc-workers", WorkerPool: w.pool, Labels: map[string]string{"workload": "dc-" + w.pool}}
+		if w.class != "" {
+			wk.Status = &ateapi.WorkerStatus{SandboxClasses: []*ateapi.WorkerSandboxClass{{SandboxClass: w.class}}}
+		}
+		r.api.PutWorker(wk)
+	}
+	actors := map[string]*ateapi.Actor{}
+	for _, pool := range []string{"gv", "mv"} {
+		name := "claude-" + pool
+		r.api.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: name},
+			WorkerSelector: &ateapi.Selector{MatchLabels: map[string]string{"workload": "dc-" + pool}}})
+		a := r.api.PutActor(&ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "a-" + pool}, ActorTemplate: ateapi.Ref("eng-web", name),
+			Status: &ateapi.ActorStatus{State: ateapi.ActorStateSuspended}})
+		if err := r.reg.Put(context.Background(), controller.Registration{Atespace: "eng-web", Name: "a-" + pool,
+			UID: a.GetMetadata().GetUid(), Person: "sub-a", Profile: "eng", Source: controller.SourceLauncher}); err != nil {
+			t.Fatal(err)
+		}
+		actors[pool] = a
+	}
+	r.pass()
+	if r.api.Policy(ateapi.RefOf(actors["mv"].GetMetadata())) == nil {
+		t.Fatalf("an actor pinned to the microVM pool got no policy: %+v", r.sink.Events(controller.EventProfileRefused))
+	}
+	if r.api.Policy(ateapi.RefOf(actors["gv"].GetMetadata())) != nil {
+		t.Fatal("an actor pinned to the gVisor pool got a policy under sandbox_class microvm")
+	}
+	if !refusedWith(r, "requires sandbox_class microvm; the actor's template runs on gvisor") {
+		t.Fatalf("refusal events: %+v", r.sink.Events(controller.EventProfileRefused))
+	}
+}
+
 // idle_suspend_after: the profile's delay replaces the controller's, and
 // turns idle suspend on where the cluster has it off.
 func TestProfileIdleSuspendAfter(t *testing.T) {

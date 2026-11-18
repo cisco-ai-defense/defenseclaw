@@ -234,7 +234,7 @@ func (ks *KeySet) ServedIssuer(ctx context.Context) (string, error) {
 		origin = u.Scheme + "://" + u.Host
 	}
 	var doc discovery
-	if err := ks.getJSON(ctx, origin+"/.well-known/openid-configuration", &doc); err != nil {
+	if err := ks.getJSON(ctx, origin+"/.well-known/openid-configuration", acceptJSON, &doc); err != nil {
 		return "", fmt.Errorf("discovery: %w", err)
 	}
 	return doc.Issuer, nil
@@ -322,7 +322,7 @@ func (ks *KeySet) fetch(ctx context.Context) (map[string]publicKey, error) {
 	jwksURL := ks.keysURL
 	if jwksURL == "" {
 		var doc discovery
-		if err := ks.getJSON(ctx, ks.issuer+"/.well-known/openid-configuration", &doc); err != nil {
+		if err := ks.getJSON(ctx, ks.issuer+"/.well-known/openid-configuration", acceptJSON, &doc); err != nil {
 			return nil, fmt.Errorf("discovery: %w", err)
 		}
 		if doc.Issuer != ks.issuer {
@@ -337,7 +337,7 @@ func (ks *KeySet) fetch(ctx context.Context) (map[string]publicKey, error) {
 	var set struct {
 		Keys []jwk `json:"keys"`
 	}
-	if err := ks.getJSON(ctx, jwksURL, &set); err != nil {
+	if err := ks.getJSON(ctx, jwksURL, acceptKeySet, &set); err != nil {
 		return nil, fmt.Errorf("key set: %w", err)
 	}
 	if len(set.Keys) == 0 || len(set.Keys) > maxKeys {
@@ -360,12 +360,21 @@ func (ks *KeySet) fetch(ctx context.Context) (map[string]publicKey, error) {
 	return keys, nil
 }
 
-func (ks *KeySet) getJSON(ctx context.Context, rawURL string, v any) error {
+// acceptJSON is the Accept header of a discovery document.
+const acceptJSON = "application/json"
+
+// acceptKeySet is the Accept header of a key set. RFC 7517 names its media
+// type application/jwk-set+json, and the Kubernetes API server's
+// service-account issuer serves /openid/v1/jwks only as that type: it
+// answers Accept: application/json alone with 406 (substrate-1 GAP-0457).
+const acceptKeySet = "application/jwk-set+json, application/json"
+
+func (ks *KeySet) getJSON(ctx context.Context, rawURL, accept string, v any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	resp, err := ks.client.Do(req)
 	if err != nil {
 		return err

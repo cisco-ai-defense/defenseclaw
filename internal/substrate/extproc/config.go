@@ -173,6 +173,9 @@ type SecretBinding struct {
 	Hosts       []string `yaml:"hosts"`
 	Header      string   `yaml:"header"`
 	Placeholder string   `yaml:"placeholder"`
+	// Profiles are the profile names or globs the secret is rendered for
+	// (substrate.secrets[].profiles); none means every profile.
+	Profiles []string `yaml:"profiles,omitempty"`
 }
 
 // ProfileConfig is the egress part of a profile.

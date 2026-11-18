@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -18,9 +19,10 @@ import (
 )
 
 // PLAN 7.3 / F3 open item: create picks the class from the profile's
-// sandbox_class. A template that already meets it keeps its selector; a
-// weaker one gets the class label on the actor (the template's other labels
-// kept), so the actor lands on a pool of that class.
+// sandbox_class. A template that already meets it keeps its selector; one
+// that may land on a weaker pool gets the class label on the actor when
+// the pools of that class carry it; one pinned to a weaker pool is refused
+// before any actor exists (GAP-0386: such an actor no worker can take).
 func TestSubstrateCreatePicksTheProfileSandboxClass(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Substrate.DefaultSandboxClass = "gvisor"
@@ -40,6 +42,11 @@ func TestSubstrateCreatePicksTheProfileSandboxClass(t *testing.T) {
 	pool := map[string]string{"pool": "gv"}
 	fake.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "cc"},
 		WorkerSelector: &ateapi.Selector{MatchLabels: pool}})
+	fake.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "any"}})
+	fake.PutWorker(&ateapi.Worker{WorkerNamespace: "w", WorkerPool: "gv", Labels: map[string]string{"pool": "gv", controller.SandboxClassLabel: "gvisor"},
+		Status: &ateapi.WorkerStatus{SandboxClasses: []*ateapi.WorkerSandboxClass{{SandboxClass: "gvisor"}}}})
+	fake.PutWorker(&ateapi.Worker{WorkerNamespace: "w", WorkerPool: "mv", Labels: map[string]string{"pool": "mv", controller.SandboxClassLabel: "microvm"},
+		Status: &ateapi.WorkerStatus{SandboxClasses: []*ateapi.WorkerSandboxClass{{SandboxClass: "microvm"}}}})
 	fake.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "cc-mv"},
 		WorkerSelector: &ateapi.Selector{MatchLabels: map[string]string{controller.SandboxClassLabel: "microvm"}}})
 	profile := "eng"
@@ -66,18 +73,26 @@ func TestSubstrateCreatePicksTheProfileSandboxClass(t *testing.T) {
 		t.Errorf("gvisor profile set a selector: %v", a.GetWorkerSelector())
 	}
 	profile = "secure"
-	// microvm profile, gvisor template: the class label goes on the actor.
-	a := create("cc", "alice-c2")
-	got := a.GetWorkerSelector().GetMatchLabels()
-	if got[controller.SandboxClassLabel] != "microvm" || got["pool"] != "gv" {
-		t.Errorf("selector %v, want the class label and the template's labels", got)
+	// microvm profile, a template that may land on either pool: the class
+	// label goes on the actor.
+	a := create("any", "alice-c2")
+	if got := a.GetWorkerSelector().GetMatchLabels(); len(got) != 1 || got[controller.SandboxClassLabel] != "microvm" {
+		t.Errorf("selector %v, want the class label", got)
+	}
+	// microvm profile, a template pinned to the gVisor pool: refused, no actor.
+	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"template":"cc","connector":"claudecode","name":"alice-c5"}`)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "sandbox_class_unavailable") {
+		t.Errorf("gVisor-pinned template under microvm: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := fake.GetActor(context.Background(), ateapi.Ref("eng-web", "alice-c5")); !ateapi.IsNotFound(err) {
+		t.Errorf("a refused create left an actor: %v", err)
 	}
 	// microvm profile, microvm template: the template already meets it.
 	if a := create("cc-mv", "alice-c3"); a.GetWorkerSelector() != nil {
 		t.Errorf("a template that meets the class got a selector: %v", a.GetWorkerSelector())
 	}
 	// The request cannot pick the class.
-	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"template":"cc","connector":"claudecode","name":"alice-c4","SandboxClass":"gvisor","sandbox_class":"gvisor"}`)
+	rec = f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"template":"any","connector":"claudecode","name":"alice-c4","SandboxClass":"gvisor","sandbox_class":"gvisor"}`)
 	if rec.Code == http.StatusCreated {
 		a, _ := fake.GetActor(context.Background(), ateapi.Ref("eng-web", "alice-c4"))
 		if a.GetWorkerSelector().GetMatchLabels()[controller.SandboxClassLabel] != "microvm" {

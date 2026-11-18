@@ -337,6 +337,10 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	if len(cfg.Relay.Env) == 0 {
 		cfg.Relay.Env = wave2RelayEnv[art.Connector]
 	}
+	if art.Connector == "claudecode" && cfg.Relay.ClaudeStateFile == "" {
+		// The harness preseed's ~/.claude.json (GAP-0446).
+		cfg.Relay.ClaudeStateFile = path.Join(o.Home, ".claude.json")
+	}
 	if cfg.LogDir == "" {
 		cfg.LogDir = path.Join(o.Home, ".defenseclaw")
 	}

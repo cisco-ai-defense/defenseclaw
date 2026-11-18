@@ -401,13 +401,13 @@ func TestSubstrateActorRateLimit(t *testing.T) {
 
 func TestSubstrateRelayVerify(t *testing.T) {
 	f := newSubstrateFixture(t)
-	tok, _, err := f.sessions.Issue("alice", identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
+	tok, _, err := f.sessions.Issue(alice.ID(), identity.SessionActor{Atespace: "eng-web", Name: "alice-1", UID: subUID1}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(map[string]string{"token": tok})
 	rec := f.do(t, f.actor, http.MethodPost, substrateRelayVerify, "tok-alice", string(body))
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"person":"alice"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"person":"`+alice.ID()+`"`) {
 		t.Fatalf("own actor: %d %s", rec.Code, rec.Body)
 	}
 	// The same token presented by another actor (proxy takeover, E2).
@@ -471,8 +471,10 @@ func TestSubstrateAdminListener(t *testing.T) {
 	if rec := cert("p-alice", "bob-1"); rec.Code != http.StatusNotFound {
 		t.Fatalf("session for other's actor %d", rec.Code)
 	}
-	if rec := cert("p-admin", "bob-1"); rec.Code != 200 {
-		t.Fatalf("admin session %d", rec.Code)
+	// An administrator sees the inventory, never a person's session
+	// (GAP-0435).
+	if rec := cert("p-admin", "bob-1"); rec.Code != http.StatusForbidden || reasonOf(t, rec) != "not_your_agent" {
+		t.Fatalf("admin session %d %s", rec.Code, rec.Body)
 	}
 	// Batches are own-only.
 	rec = f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/batches/b1", "p-alice", "")
@@ -751,7 +753,11 @@ func TestSubstrateRelayVerifyCarriesTheTaskDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	verify := func(actorTok string, uid string, name string) map[string]any {
-		tok, _, err := f.sessions.Issue(bob.ID(), identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
+		owner := bob.ID()
+		if name == "alice-1" {
+			owner = alice.ID()
+		}
+		tok, _, err := f.sessions.Issue(owner, identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -763,7 +769,7 @@ func TestSubstrateRelayVerifyCarriesTheTaskDigest(t *testing.T) {
 	if got := verify("tok-bob", subUID2, "bob-1"); got["task_digest"] != reg.TaskDigest {
 		t.Fatalf("task actor: %v", got)
 	}
-	if got := verify("tok-alice", subUID1, "alice-1"); got["task_digest"] != nil {
+	if got := verify("tok-alice", subUID1, "alice-1"); got["task_digest"] != nil || got["person"] != alice.ID() {
 		t.Fatalf("interactive actor carries a digest: %v", got)
 	}
 }

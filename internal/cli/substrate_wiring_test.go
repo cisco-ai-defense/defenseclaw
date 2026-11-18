@@ -24,7 +24,8 @@ import (
 const wireUID1 = "4f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4a"
 
 // The controller sees the launcher's registration (so a launcher actor is
-// not foreign), and its fork records keep the parent's person.
+// not foreign), and its fork records are attributed, without the parent's
+// person (GAP-0425).
 func TestControllerRegistryOverTheGatewayStore(t *testing.T) {
 	fs, err := registry.OpenFileStore(t.TempDir())
 	if err != nil {
@@ -42,11 +43,11 @@ func TestControllerRegistryOverTheGatewayStore(t *testing.T) {
 	}
 	child := "5f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4b"
 	if err := cr.Put(ctx, controller.Registration{Atespace: "eng-web", Name: "a1-fork", UID: child, ParentUID: wireUID1,
-		Source: controller.SourceFork, ForkedBy: controller.ForkedByDefenseClaw, Profile: "eng"}); err != nil {
+		Source: controller.SourceFork, ForkedBy: controller.ForkedByUnknown, Profile: "eng"}); err != nil {
 		t.Fatal(err)
 	}
 	r, ok, _ := fs.Get(ctx, "eng-web", child)
-	if !ok || r.Person.ID() != person.ID() || r.Connector != "claudecode" || r.Attributed {
+	if !ok || r.Person.Subject != "" || r.ParentUID != wireUID1 || !r.Attributed {
 		t.Fatalf("fork record %+v", r)
 	}
 	other := "6f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4c"

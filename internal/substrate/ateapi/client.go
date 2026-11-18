@@ -68,6 +68,9 @@ type (
 	Snapshot             = pb.Snapshot
 	SnapshotStorage      = pb.SnapshotStorage
 	WorkerAssignment     = pb.WorkerAssignment
+	Worker               = pb.Worker
+	WorkerStatus         = pb.WorkerStatus
+	WorkerSandboxClass   = pb.WorkerSandboxClass
 	ResourceRequirements = pb.ResourceRequirements
 	Resources            = pb.Resources
 	ImageVolumeSource    = pb.ImageVolumeSource
@@ -228,6 +231,9 @@ type Client interface {
 
 	GetAtespace(ctx context.Context, name string) (*Atespace, error)
 	ListAtespaces(ctx context.Context, opts ListOptions) (Page[*Atespace], error)
+	// ListWorkers lists the workers (a global viewer may): their pool
+	// labels, which selectors match, and the sandbox class each runs.
+	ListWorkers(ctx context.Context, opts ListOptions) (Page[*Worker], error)
 	// CreateAtespace needs a global owner (the chart bootstrap).
 	CreateAtespace(ctx context.Context, name string) (*Atespace, error)
 
@@ -446,6 +452,23 @@ func (c *GRPCClient) SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor
 	return resp.GetActor(), nil
 }
 
+// Reverter is a Client that can also revert an actor: a CRASHED (or
+// RUNNING) actor goes back to SUSPENDED at its last durable snapshot, as
+// kubectl ate revert actor does. The launcher's undo brings a crashed actor
+// back with it (GAP-0410).
+type Reverter interface {
+	RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error)
+}
+
+// RevertActor implements Reverter.
+func (c *GRPCClient) RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error) {
+	resp, err := c.ctl.RevertActor(ctx, &pb.RevertActorRequest{Actor: actor})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetActor(), nil
+}
+
 func (c *GRPCClient) CreateActor(ctx context.Context, actor *Actor) (*Actor, error) {
 	if actor.GetMetadata().GetAtespace() == "" || actor.GetMetadata().GetName() == "" || actor.GetActorTemplate().GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "ateapi: CreateActor needs the atespace, name and template")
@@ -553,6 +576,14 @@ func (c *GRPCClient) ListAtespaces(ctx context.Context, opts ListOptions) (Page[
 	return Page[*Atespace]{Items: resp.GetAtespaces(), NextPageToken: resp.GetNextPageToken()}, nil
 }
 
+func (c *GRPCClient) ListWorkers(ctx context.Context, opts ListOptions) (Page[*Worker], error) {
+	resp, err := c.ctl.ListWorkers(ctx, &pb.ListWorkersRequest{Options: listOptions(opts)})
+	if err != nil {
+		return Page[*Worker]{}, err
+	}
+	return Page[*Worker]{Items: resp.GetWorkers(), NextPageToken: resp.GetNextPageToken()}, nil
+}
+
 func listOptions(o ListOptions) *pb.ListOptions {
 	if o.PageSize == 0 && o.PageToken == "" {
 		return nil
@@ -633,6 +664,13 @@ func AllActorTemplates(ctx context.Context, c Client, atespace string, pageSize 
 	err := ListAll(ctx, pageSize, func(ctx context.Context, o ListOptions) (Page[*ActorTemplate], error) {
 		return c.ListActorTemplates(ctx, atespace, o)
 	}, func(t *ActorTemplate) error { out = append(out, t); return nil })
+	return out, err
+}
+
+// AllWorkers lists every worker.
+func AllWorkers(ctx context.Context, c Client, pageSize int32) ([]*Worker, error) {
+	var out []*Worker
+	err := ListAll(ctx, pageSize, c.ListWorkers, func(w *Worker) error { out = append(out, w); return nil })
 	return out, err
 }
 

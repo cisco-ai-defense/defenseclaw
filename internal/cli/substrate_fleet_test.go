@@ -29,6 +29,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
@@ -215,9 +218,12 @@ func TestSubstrateStatusClusterCountsTheActors(t *testing.T) {
 		if inv == nil || inv.Actors != 5 || inv.Templates != 2 || inv.States["running"] != 3 || inv.States["suspended"] != 1 || inv.States["crashed"] != 1 {
 			t.Fatalf("inventory = %+v", inv)
 		}
+		// The fake administrator's list has no agent in policy_conflict
+		// (GAP-0398).
+		none := 0
 		want := []fleet.Atespace{
-			{Name: "data-team", Actors: 1, States: map[string]int{"running": 1}},
-			{Name: "eng-web", Launcher: true, Actors: 3, States: map[string]int{"running": 2, "suspended": 1}},
+			{Name: "data-team", Actors: 1, States: map[string]int{"running": 1}, Conflicts: &none},
+			{Name: "eng-web", Launcher: true, Actors: 3, States: map[string]int{"running": 2, "suspended": 1}, Conflicts: &none},
 		}
 		if !reflect.DeepEqual(doc.Atespaces, want) {
 			t.Fatalf("atespaces = %+v, want %+v", doc.Atespaces, want)
@@ -310,8 +316,20 @@ func TestSubstrateDoctorReadsClusterChecksWithKubectl(t *testing.T) {
 // CLI (an encrypted, private, expiring bucket in the cluster's region).
 func fakeFleetReaders(t *testing.T, fail error) {
 	t.Helper()
-	oldPF, oldAP, oldCLI := substratePortForward, substrateClusterAPI, substrateCloudCLI
-	t.Cleanup(func() { substratePortForward, substrateClusterAPI, substrateCloudCLI = oldPF, oldAP, oldCLI })
+	oldPF, oldAP, oldCLI, oldEveryone := substratePortForward, substrateClusterAPI, substrateCloudCLI, substrateFleetEveryone
+	t.Cleanup(func() {
+		substratePortForward, substrateClusterAPI, substrateCloudCLI, substrateFleetEveryone = oldPF, oldAP, oldCLI, oldEveryone
+	})
+	// The administrator's DefenseClaw sign-in lists every agent: none is in
+	// policy_conflict (GAP-0398).
+	substrateFleetEveryone = func(*cobra.Command, *substrateCommon) func(context.Context) ([]api.Actor, error) {
+		return func(context.Context) ([]api.Actor, error) {
+			if fail != nil {
+				return nil, fail
+			}
+			return []api.Actor{{Atespace: "eng-web", Name: "calm-1", State: "running"}}, nil
+		}
+	}
 	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fleet.ActorRouteAllowed(r.RequestURI) {
 			w.WriteHeader(http.StatusUnauthorized)

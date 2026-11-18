@@ -41,7 +41,7 @@ const (
 
 // CheckIDs lists every check in the order doctor prints them.
 var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckCallout,
-	CheckIngressClients, CheckActorRoutes, CheckAPIAccess}
+	CheckIngressClients, CheckActorRoutes, CheckAPIAccess, CheckPolicyConflicts}
 
 // Check is one result. Message is for the admin (kept on the cluster);
 // EdgeCase names the plan edge case it guards, when there is one.
@@ -88,11 +88,14 @@ type Observed struct {
 	// Issuer is substrate.identity.issuer; SubstrateNamespace the
 	// namespace Substrate runs in (its default issuer is
 	// https://idp.<namespace>.svc). OtherIssuers are the issuers of the
-	// other clusters in the fleet config; Clusters counts them all.
+	// other clusters DefenseClaw runs in that the administrator's
+	// kubeconfig reaches; Clusters counts them all, this one included.
+	// FleetUnread counts the other clusters that could not be read.
 	Issuer             string
 	SubstrateNamespace string
 	OtherIssuers       []string
 	Clusters           int
+	FleetUnread        int
 
 	// The actor token key set (GAP-0194). KeysURL is the effective
 	// substrate.identity.keys_url. Keys is the result of reading it: nil
@@ -124,9 +127,12 @@ type Observed struct {
 	Editors           []string
 	GlobalViewers     []string
 	// PoliciesReadable is false when the access policies could not be
-	// read; PoliciesNote says why.
+	// read; PoliciesNote says why. PoliciesDenied is true when Substrate
+	// refused the read to the gateway's own ServiceAccount (permission
+	// denied): that is a reading, the gateway lacks a grant (GAP-0384).
 	PoliciesReadable bool
 	PoliciesNote     string
+	PoliciesDenied   bool
 
 	// The SubstrateInstall settings in effect: the callout service, the
 	// router clients, and whether the body opt-in is on (nil when the
@@ -156,6 +162,11 @@ type Observed struct {
 	SignInSince  string
 
 	NamespaceLabels map[string]string
+
+	// Conflicts are the agents in policy_conflict, read with the
+	// administrator's DefenseClaw sign-in (GAP-0398); nil or a Reason when
+	// they were not counted.
+	Conflicts *Conflicts
 }
 
 // DefaultIssuer is Substrate's actor JWT issuer when actorJWT.issuer is unset.
@@ -185,10 +196,16 @@ func RunChecks(o Observed) []Check {
 	return []Check{
 		CheckVersion(o), CheckIssuerUnique(o), CheckActorKeysVerify(o), CheckSignInServerReach(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
 		CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
+		CheckPolicyConflict(o),
 	}
 }
 
 // CheckVersion: the Substrate release is inside substrate.supported_versions.
+// A release outside the range is a warning, not a failure, on purpose
+// (GAP-0384): the range is what this DefenseClaw was tested with, and an
+// untested Substrate release (a newer patch or minor) may well work, so
+// verify says so and names the fix but does not fail the cluster. A range
+// that does not parse fails: the check cannot be made.
 func CheckVersion(o Observed) Check {
 	if o.SubstrateVersion == "" {
 		return result(CheckSubstrateVersion, Warn, "", "could not read the Substrate version (ate-api-server image tag)")
@@ -205,23 +222,35 @@ func CheckVersion(o Observed) Check {
 }
 
 // CheckIssuerUnique: with more than one cluster each needs its own actor JWT
-// issuer, or an actor token of one cluster verifies in another (E13).
+// issuer, or an actor token of one cluster verifies in another (E13). A
+// message names the issuer only when it is a default one: that carries no
+// setting of this cluster (the status document leaves the cluster).
 func CheckIssuerUnique(o Observed) Check {
 	if o.Issuer == "" {
 		return result(CheckIssuer, Fail, "E13", "substrate.identity.issuer is not set")
 	}
+	isDefault := IsDefaultIssuer(o.Issuer) || o.Issuer == DefaultIssuer(o.SubstrateNamespace)
+	named := "the same actor JWT issuer"
+	if isDefault {
+		named = "the same actor JWT issuer, the default " + o.Issuer + ","
+	}
+	fix := "Give each cluster its own issuer (defenseclaw substrate setup --issuer URL, then ate-setup deploy) and the same " +
+		"value in substrate.identity.issuer"
 	digest := IssuerDigest(o.Issuer)
 	for _, other := range o.OtherIssuers {
 		if IssuerDigest(other) == digest {
-			return result(CheckIssuer, Fail, "E13", "another cluster uses the same actor JWT issuer: an actor token from one "+
-				"cluster would verify in the other. Give each cluster its own issuer (setup --issuer) and the same value in "+
-				"substrate.identity.issuer")
+			return result(CheckIssuer, Fail, "E13", "another cluster uses %s so an actor token from one cluster would verify "+
+				"in the other. %s", named, fix)
 		}
 	}
-	if IsDefaultIssuer(o.Issuer) || o.Issuer == DefaultIssuer(o.SubstrateNamespace) {
+	if isDefault {
 		if o.Clusters > 1 {
-			return result(CheckIssuer, Fail, "E13", "%d clusters are configured and this one uses the default issuer %s, "+
-				"which every cluster has; set a unique issuer per cluster", o.Clusters, o.Issuer)
+			return result(CheckIssuer, Fail, "E13", "%d clusters run DefenseClaw and this one uses the default issuer %s, "+
+				"which every cluster has. %s", o.Clusters, o.Issuer, fix)
+		}
+		if o.FleetUnread > 0 {
+			return result(CheckIssuer, Warn, "E13", "the default issuer %s is fine for one cluster, but %d other cluster(s) "+
+				"of the kubeconfig could not be read to compare; set a unique one before adding another", o.Issuer, o.FleetUnread)
 		}
 		return result(CheckIssuer, Warn, "E13", "the default issuer %s is fine for one cluster; set a unique one before adding another", o.Issuer)
 	}
@@ -312,6 +341,14 @@ func CheckSnapshotBucket(o Observed) Check {
 // (E2, E3, E17).
 func CheckOpenFGAGrants(o Observed) Check {
 	if !o.PoliciesReadable {
+		if o.PoliciesDenied {
+			// The read ran as the gateway's ServiceAccount: a refusal means
+			// it lost a grant (GAP-0384).
+			return result(CheckGrants, Fail, "E2", "Substrate refused the gateway's ServiceAccount the access policies (%s): "+
+				"DefenseClaw lacks a grant it needs, so inventory and live actor checks fail. Run the chart bootstrap "+
+				"(bootstrap.ownerTokenSecret) or apply `defenseclaw substrate setup --print-access-policies` as a global owner",
+				o.PoliciesNote)
+		}
 		return result(CheckGrants, Warn, "E2", "could not read the access policies as the gateway's ServiceAccount (%s)",
 			o.PoliciesNote)
 	}

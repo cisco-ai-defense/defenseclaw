@@ -1399,13 +1399,6 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if s.substrateBuild != nil {
-			// serve --substrate runs no host connector guardrail in any
-			// mode: actors use the /llm proxy (substrateLLMProxy), so a
-			// managed pod no longer boots the default openclaw connector
-			// and logs that it is not bundled (GAP-0155).
-			return
-		}
 		if retryGuardrail {
 			// A managed gateway has no operator to re-run setup, so it
 			// retries the guardrail with backoff: a transient sharing or
@@ -1701,6 +1694,14 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 }
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
+	if s.substrateBuild != nil {
+		// serve --substrate runs no host connector guardrail in any mode:
+		// actors use the /llm proxy (substrateLLMProxy), so a managed pod
+		// does not boot the default openclaw connector and log that it is
+		// not bundled (GAP-0155). A reload that restarts the guardrail
+		// lands here too.
+		return nil
+	}
 	if err := s.waitForAPIProfilePublication(ctx); err != nil {
 		return err
 	}

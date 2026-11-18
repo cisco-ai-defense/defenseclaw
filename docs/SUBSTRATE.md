@@ -143,7 +143,7 @@ Registry version 4 of the v8 telemetry registry (no v9). All additions are liste
 - the `defenseclaw.sandbox.substrate.*` group and `ate.actor.uid` in `correlation.sandbox`;
 - resource attributes `k8s.cluster.name` and `k8s.namespace.name` (the pinned OpenTelemetry snapshot was refreshed for exactly these);
 - `defenseclaw.network.body_inspected` and `defenseclaw.network.body_over_cap` on egress records;
-- `log.secret.injected`, and eight `defenseclaw.substrate.*` metrics with no identity labels;
+- `log.secret.injected`, and nine `defenseclaw.substrate.*` metrics with no identity labels (`auth_refused` counts refused actor and person tokens by listener and reason);
 - the Grafana board `defenseclaw-substrate` and the chart's alert rules.
 
 Not yet in the registry (owned elsewhere): `log.model.usage` and `defenseclaw.model.cost` from the tokenomics stream, and the tool-chain

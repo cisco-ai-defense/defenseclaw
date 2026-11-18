@@ -21,23 +21,57 @@ package ateactors
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
-// ATEAPILookup reads live actors through the control API client.
+// ATEAPILookup reads live actors through the control API client. It is
+// also an identity.ActorLister.
 func ATEAPILookup(c ateapi.Client) identity.ActorLookup {
-	return identity.ActorLookupFunc(func(ctx context.Context, atespace, name string) (identity.LiveActor, error) {
-		a, err := c.GetActor(ctx, ateapi.Ref(atespace, name))
-		if err != nil {
-			if ateapi.IsNotFound(err) {
-				return identity.LiveActor{}, identity.ErrActorNotFound
-			}
-			return identity.LiveActor{}, err
+	return lookup{c}
+}
+
+type lookup struct{ c ateapi.Client }
+
+func live(a *ateapi.Actor) identity.LiveActor {
+	state := strings.TrimPrefix(a.GetStatus().GetState().String(), "ACTOR_STATE_")
+	return identity.LiveActor{UID: a.GetMetadata().GetUid(), State: identity.ActorState(state)}
+}
+
+func (l lookup) LookupActor(ctx context.Context, atespace, name string) (identity.LiveActor, error) {
+	a, err := l.c.GetActor(ctx, ateapi.Ref(atespace, name))
+	if err != nil {
+		if ateapi.IsNotFound(err) {
+			return identity.LiveActor{}, identity.ErrActorNotFound
 		}
-		state := strings.TrimPrefix(a.GetStatus().GetState().String(), "ACTOR_STATE_")
-		return identity.LiveActor{UID: a.GetMetadata().GetUid(), State: identity.ActorState(state)}, nil
-	})
+		return identity.LiveActor{}, err
+	}
+	return live(a), nil
+}
+
+// listMaxPages bounds one atespace's list (at the server's largest page
+// that is far more actors than an atespace holds).
+const listMaxPages = 1000
+
+// ListLiveActors pages through ListActors (GAP-0427).
+func (l lookup) ListLiveActors(ctx context.Context, atespace string) (map[string]identity.LiveActor, error) {
+	out := map[string]identity.LiveActor{}
+	opts := ateapi.ListOptions{PageSize: 500}
+	for range listMaxPages {
+		page, err := l.c.ListActors(ctx, atespace, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range page.Items {
+			out[a.GetMetadata().GetName()] = live(a)
+		}
+		if page.NextPageToken == "" {
+			return out, nil
+		}
+		opts.PageToken = page.NextPageToken
+	}
+	return nil, errors.New("ateactors: the actor list did not end")
 }

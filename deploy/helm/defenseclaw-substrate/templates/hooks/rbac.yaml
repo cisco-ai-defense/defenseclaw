@@ -1,6 +1,9 @@
-# The chart hook Jobs: read the store state, and in the Substrate namespace
-# merge and remove DefenseClaw's entries of the credential provider namespace
-# policy and restart the provider (it reads the policy at start only).
+# The ServiceAccount of the hooks that run after the release's resources
+# exist (bootstrap: post-install, post-upgrade; pre-delete). The hooks that
+# run before them (chain-key, relay-session, pre-upgrade, pre-rollback) have
+# ServiceAccounts of their own that exist only while they run: Argo CD runs
+# every pre-install and pre-upgrade hook in PreSync, before any object of the
+# Sync phase, on a first sync too (GAP-0459).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -8,7 +11,9 @@ metadata:
   labels:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
 automountServiceAccountToken: false
+{{- if and .Values.bootstrap.ownerTokenSecret .Values.bootstrap.deleteTokenAfterUse }}
 ---
+# The bootstrap deletes the owner token Secret after use.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -17,15 +22,9 @@ metadata:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
 rules:
 - apiGroups: [""]
-  resources: [configmaps]
-  resourceNames: [defenseclaw-store-state]
-  verbs: [get]
-{{- if and .Values.bootstrap.ownerTokenSecret .Values.bootstrap.deleteTokenAfterUse }}
-- apiGroups: [""]
   resources: [secrets]
   resourceNames: [{{ .Values.bootstrap.ownerTokenSecret | quote }}]
   verbs: [delete]
-{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -41,10 +40,53 @@ subjects:
 - kind: ServiceAccount
   name: defenseclaw-hooks
   namespace: {{ .Release.Namespace }}
+{{- end }}
 ---
-# The chain-key hook runs before install creates the release's resources
-# (defenseclaw-hooks among them), so it has its own ServiceAccount, which
-# exists only while the hook runs.
+# The pre-upgrade and pre-rollback hooks read the store state only, with
+# their own ServiceAccount, which exists only while they run (GAP-0459).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-store-check
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-upgrade,pre-rollback") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-store-check
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-upgrade,pre-rollback") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-store-state]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-store-check
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-upgrade,pre-rollback") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-store-check
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-store-check
+  namespace: {{ .Release.Namespace }}
+---
+# The chain-key hook runs before install creates the release's resources,
+# so it has its own ServiceAccount, which exists only while the hook runs.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

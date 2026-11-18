@@ -35,6 +35,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
@@ -56,7 +57,15 @@ type substrateClusterFlags struct {
 	configFile  string
 	// managedAtespaces is the chart's managedAtespaces (openfga_grants).
 	managedAtespaces []string
-	timeout          time.Duration
+	// fleetContexts are the kubectl contexts of the other clusters whose
+	// issuers issuer_unique compares (empty: every other context of the
+	// kubeconfig; "none": this cluster only).
+	fleetContexts []string
+	timeout       time.Duration
+	// everyone lists every person's agents with the administrator's
+	// DefenseClaw sign-in, for the policy_conflict count (GAP-0398); nil
+	// where it is not read (doctor has its own policy_conflict row).
+	everyone func(context.Context) ([]api.Actor, error)
 }
 
 // addKube adds the flags that say how to read the cluster with kubectl.
@@ -69,6 +78,7 @@ func (f *substrateClusterFlags) addKube(cmd *cobra.Command) {
 	fl.StringVar(&f.installFile, "install-file", "", "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)")
 	fl.StringVar(&f.configFile, "config", "", "DefenseClaw config.yaml (default: read from the cluster)")
 	fl.StringSliceVar(&f.managedAtespaces, "managed-atespaces", nil, "the chart's managedAtespaces, where DefenseClaw must be an editor (comma-separated)")
+	fl.StringSliceVar(&f.fleetContexts, "fleet-contexts", nil, "kubectl contexts of the other clusters whose actor token issuer must differ from this one's (default: every other context in the kubeconfig; none: this cluster only)")
 	fl.DurationVar(&f.timeout, "timeout", 30*time.Second, "give up on the cluster after this long")
 }
 
@@ -302,7 +312,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	if o.InstallIssuer != "" && o.Issuer == "" {
 		o.Issuer = o.InstallIssuer
 	}
-	o.Clusters = 1
+	readOtherClusters(cctx, f, &o, name)
 	readActorKeys(cctx, f, &o, keysCfg.EffectiveKeysURL())
 
 	// The Substrate release: the tag of the API server image.
@@ -329,6 +339,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	}
 	readAccessPolicies(cctx, f, &o, launcherAtespaceList(keysCfg.LauncherAtespaces), cluster, apiErr)
 	readInventory(cctx, &r, o.LauncherAtespaces, o.WritableAtespaces, cluster, apiErr)
+	readPolicyConflicts(cctx, f, &o)
 	readActorRoutes(cctx, f, &o, keysCfg.Services.Actor)
 	if o.SignInIssuer != "" {
 		readSignInServer(cctx, f, &o, adminService)
@@ -460,6 +471,7 @@ func newSubstrateVerifyCmd() *cobra.Command {
 	var (
 		out substrateOutput
 		cf  substrateClusterFlags
+		com = &substrateCommon{}
 	)
 	cmd := &cobra.Command{
 		Use:   "verify",
@@ -467,24 +479,26 @@ func newSubstrateVerifyCmd() *cobra.Command {
 		Long: `For administrators. Checks that the cluster is set up as DefenseClaw needs it: Substrate's version is
 one DefenseClaw is tested on, the cluster has its own sign-in issuer, the snapshot bucket is private and
 encrypted, DefenseClaw holds the right access grants, the egress callout is registered and nobody else
-can reach agents through the router. It reads the cluster with kubectl and the snapshot bucket with your
-own aws or gcloud CLI.
+can reach agents through the router, and no agent is in policy_conflict. It reads the cluster with kubectl,
+the snapshot bucket with your own aws or gcloud CLI, and the agents in policy_conflict with your DefenseClaw
+sign-in (--context; sign in as an administrator, or the count is unknown and the check warns).
 
 Exit 0: every check passed or warned. Exit 1: a check failed. Exit 2: wrong arguments. Exit 75: the cluster
 could not be reached; there is no document, retry later. With --json it prints the verify document.`,
 		Example: "defenseclaw substrate verify --install-file install.yaml\ndefenseclaw substrate verify --install-file install.yaml --json",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runSubstrateFleet(cmd, "verify", &out, &cf)
+			return runSubstrateFleet(cmd, "verify", &out, &cf, com)
 		},
 	}
 	out.add(cmd)
+	com.add(cmd)
 	cf.addKube(cmd)
 	return cmd
 }
 
 // runSubstrateFleet prints the verify or status document of the cluster.
-func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf *substrateClusterFlags) error {
+func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf *substrateClusterFlags, com *substrateCommon) error {
 	asJSON, err := out.wantJSON()
 	if err != nil {
 		return cliusage.WithExitCode(err, 2)
@@ -495,6 +509,7 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 	var checks []fleet.Check
 	var ok = true
 	var header string
+	cf.everyone = substrateFleetEveryone(cmd, com)
 	o, r, err := collectFleet(ctx, cf)
 	if err != nil {
 		var un *errClusterUnreachable
@@ -546,7 +561,11 @@ func printSubstrateFleet(w io.Writer, kind, cluster string, doc any, checks []fl
 				if a.Launcher {
 					role = "launcher"
 				}
-				fmt.Fprintf(w, "  %-24s %-8s %d%s\n", a.Name, role, a.Actors, actorStateCounts(a.States))
+				conflicts := ""
+				if a.Conflicts != nil && *a.Conflicts > 0 {
+					conflicts = fmt.Sprintf(", %d in policy_conflict", *a.Conflicts)
+				}
+				fmt.Fprintf(w, "  %-24s %-8s %d%s%s\n", a.Name, role, a.Actors, actorStateCounts(a.States), conflicts)
 			}
 		}
 		fmt.Fprintln(w)

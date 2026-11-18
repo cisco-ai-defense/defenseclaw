@@ -57,6 +57,11 @@ type SubstrateConfig struct {
 	// IdleSuspendAfter is a Go duration (default 30m; "0s" turns idle
 	// suspend off).
 	IdleSuspendAfter string `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty"`
+	// IdleSuspendWithoutCPU, an opt-in, makes silence alone idle when the
+	// controller has no CPU feed (no --usage-listen), an attached actor's
+	// too. Off, such a controller never suspends an actor with a terminal
+	// attached (GAP-0534).
+	IdleSuspendWithoutCPU bool `mapstructure:"idle_suspend_without_cpu" yaml:"idle_suspend_without_cpu,omitempty"`
 	// ChainEgressAction is what a request that leaves the cluster after a
 	// secret read gets at the egress callout: block (the default, in every
 	// mode, because actors are unattended) refuses it; alert, an opt-in,

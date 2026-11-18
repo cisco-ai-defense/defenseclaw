@@ -301,6 +301,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag(
+                "fleet-contexts",
+                "stringSlice",
+                (
+                    "kubectl contexts of the other clusters whose actor token issuer must differ from this one's "
+                    "(default: every other context in the kubeconfig; none: this cluster only)"
+                ),
+            ),
+            _Flag(
                 "install-file",
                 "string",
                 "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)",
@@ -477,11 +485,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         "Clear a policy conflict on an agent (administrators only)",
         long=(
             "For administrators. When something outside DefenseClaw keeps rewriting an agent's network policy,\n"
-            "the controller stops after three reverts in ten minutes and marks the agent policy_conflict. Once "
+            "three reverts in ten minutes mark the agent policy_conflict and put it on deny-only: it keeps only "
             "the\n"
-            'other writer is stopped, "reset" clears that state so the controller writes the policy again. Name '
-            "the\n"
-            "agent as ATESPACE/NAME. The reset is recorded in the audit log under your own name."
+            "DefenseClaw rule, and each later change by the other writer is replaced with deny-only again, so a "
+            "foreign\n"
+            'policy never stays in force. Once the other writer is stopped, "reset" clears that state so the '
+            "controller\n"
+            "writes the full policy again. Name the agent as ATESPACE/NAME. The reset is recorded in the audit "
+            "log under\n"
+            "your own name."
         ),
         example='defenseclaw substrate policy reset eng-web/fix-tests-7f3a --reason "removed the GitOps rule"',
         args=(_Arg("actor"),),
@@ -595,10 +607,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             '"defenseclaw substrate connect NAME". Bring the changes home with "defenseclaw substrate pull '
             'NAME".\n'
             "\n"
-            "With --task the agent runs headless without you: asks are denied and the run is checked as strictly "
-            "as\n"
-            'an unattended job. Add --detach to leave it running and follow it with "defenseclaw substrate logs '
-            '-f NAME".\n'
+            "With --task the agent runs headless without you: asks are denied, or queued for approval when the "
+            "profile's\n"
+            "unattended_asks is queue, and the run is checked as strictly as an unattended job. Add --detach to "
+            "leave it\n"
+            'running and follow it with "defenseclaw substrate logs -f NAME".\n'
             "With --batch FILE every task gets its own agent on the same folder; --parallel limits how many run "
             "at once.\n"
             "With --clone URL the agent starts from a repository instead of a copy of the folder. Arguments "
@@ -812,9 +825,13 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "\n"
             "For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and "
             "callout,\n"
-            "the agents and templates in the cluster (agents by state, also per launcher and managed atespace) "
-            "and the setup\n"
-            "checks. It reads the cluster with kubectl (give --install-file).\n"
+            "the agents and templates in the cluster (agents by state, also per launcher and managed atespace), "
+            "the agents\n"
+            "in policy_conflict per atespace and the setup checks. It reads the cluster with kubectl (give "
+            "--install-file),\n"
+            "and the agents in policy_conflict with your DefenseClaw sign-in (sign in as an administrator, or "
+            "the count is\n"
+            "unknown).\n"
             "Exit 75 means the cluster could not be reached; there is no document."
         ),
         args=(_Arg("name", required=False),),
@@ -823,6 +840,14 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("cluster", "bool", "administrators: show the health and setup checks of the whole cluster"),
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "fleet-contexts",
+                "stringSlice",
+                (
+                    "kubectl contexts of the other clusters whose actor token issuer must differ from this one's "
+                    "(default: every other context in the kubeconfig; none: this cluster only)"
+                ),
+            ),
             _Flag(
                 "install-file",
                 "string",
@@ -1119,9 +1144,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "private and\n"
             "encrypted, DefenseClaw holds the right access grants, the egress callout is registered and nobody "
             "else\n"
-            "can reach agents through the router. It reads the cluster with kubectl and the snapshot bucket with "
-            "your\n"
-            "own aws or gcloud CLI.\n"
+            "can reach agents through the router, and no agent is in policy_conflict. It reads the cluster with "
+            "kubectl,\n"
+            "the snapshot bucket with your own aws or gcloud CLI, and the agents in policy_conflict with your "
+            "DefenseClaw\n"
+            "sign-in (--context; sign in as an administrator, or the count is unknown and the check warns).\n"
             "\n"
             "Exit 0: every check passed or warned. Exit 1: a check failed. Exit 2: wrong arguments. Exit 75: the "
             "cluster\n"
@@ -1133,6 +1160,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
         flags=(
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
+            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag(
+                "fleet-contexts",
+                "stringSlice",
+                (
+                    "kubectl contexts of the other clusters whose actor token issuer must differ from this one's "
+                    "(default: every other context in the kubeconfig; none: this cluster only)"
+                ),
+            ),
             _Flag(
                 "install-file",
                 "string",
