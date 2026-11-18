@@ -55,6 +55,10 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 	if err != nil {
 		return substrateFail(err)
 	}
+	if a.State == substrateStateCrashed {
+		// GAP-0420: no wait for an agent that cannot answer.
+		return substrateFail(substrateCrashedErr(a))
+	}
 	o, err := substrateAttachOptions(cmd, s, a, "auto", true)
 	if err != nil {
 		return err
@@ -67,6 +71,12 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 			return substrateFail(err)
 		}
 		if id = latestSubstrateTask(st); id == "" {
+			if a.Unattended {
+				// GAP-0420: a headless run whose actor crashed and came back
+				// lost its run and its log with the worker.
+				return fmt.Errorf("%s/%s has no headless task now: its run and log were lost when it crashed and was brought back to an earlier snapshot. "+
+					"Bring its folder home with: defenseclaw substrate pull %s, or start the task again in a new agent", a.Atespace, a.Name, a.Name)
+			}
 			return fmt.Errorf("%s/%s has no headless task; start one with: defenseclaw substrate run AGENT --task \"...\"", a.Atespace, a.Name)
 		}
 	}
@@ -74,25 +84,24 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 	if asJSON {
 		emit = func(e relay.TaskEvent) { _ = writeSubstrateJSONCompact(cmd.OutOrStdout(), e) }
 	}
-	fctx := ctx
-	if !follow {
-		// A snapshot: read what is there, then stop once nothing new comes.
-		var cancel context.CancelFunc
-		fctx, cancel = context.WithCancel(ctx)
-		defer cancel()
-		idle := time.AfterFunc(3*time.Second, cancel)
-		defer idle.Stop()
-		inner := emit
-		emit = func(e relay.TaskEvent) {
-			idle.Reset(2 * time.Second)
-			inner(e)
-		}
-	}
+	var code int
 	if follow {
 		defer substratePresence(cmd, a)()
+		code, err = attach.FollowTask(ctx, o, id, emit)
+	} else {
+		// A snapshot: read what is there, then stop once nothing new comes.
+		// Only the open log is timed, never the wait for the agent to wake
+		// and answer: that wait cut a finished task's log off unread, and
+		// logs printed nothing with exit 0 (GAP-0406).
+		code, err = attach.SnapshotTask(ctx, o, id, attach.Quiet{First: 3 * time.Second, Then: 2 * time.Second}, emit)
+		if errors.Is(err, attach.ErrTaskStillRunning) {
+			if !asJSON {
+				fmt.Fprintf(cmd.ErrOrStderr(), "The task is still running. Follow it with: defenseclaw substrate logs -f %s\n", a.Name)
+			}
+			return nil
+		}
 	}
-	code, err := attach.FollowTask(fctx, o, id, emit)
-	if err != nil && (!errors.Is(err, context.Canceled) || follow) {
+	if err != nil {
 		return substrateFail(err)
 	}
 	if err == nil && code != 0 && !asJSON {
@@ -146,6 +155,9 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	a, err := resolveSubstrateActor(ctx, s.Client, ref)
 	if err != nil {
 		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed {
+		return substrateFail(substrateCrashedErr(a))
 	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
@@ -366,6 +378,28 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 	if err != nil {
 		return substrateFail(err)
 	}
+	if a.State == substrateStateCrashed {
+		// GAP-0410: a crashed agent has no worker to run the restore in.
+		// The gateway first brings it back to its last snapshot.
+		if !yes {
+			ok, err := substrateConfirm(cmd, fmt.Sprintf("%s/%s crashed. Bring it back to its last snapshot? What it did after that snapshot is lost.", a.Atespace, a.Name))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				fmt.Fprintln(cmd.OutOrStdout(), "Nothing changed.")
+				return nil
+			}
+		}
+		if _, err := s.Client.Recover(ctx, a.Atespace, a.Name); err != nil {
+			var ae *api.Error
+			if errors.As(err, &ae) && ae.NotImplemented() {
+				return substrateFail(fmt.Errorf("this cluster cannot bring a crashed agent back yet; ask your administrator to upgrade DefenseClaw (or to run: kubectl ate revert actor %s -a %s)", a.Name, a.Atespace))
+			}
+			return substrateFail(fmt.Errorf("bringing %s/%s back from its crash: %w", a.Atespace, a.Name, err))
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s/%s crashed; it is back at its last snapshot and starting.\n", a.Atespace, a.Name)
+	}
 	dir, err := substrateRemoteDir(a)
 	if err != nil {
 		return err
@@ -389,10 +423,72 @@ func runSubstrateUndo(cmd *cobra.Command, com *substrateCommon, ref, to string, 
 		return err
 	}
 	defer rel.Close()
-	info, err := workspace.Undo(ctx, workspace.UndoOptions{Exec: rel.Client, Dir: dir, ID: to, DataDir: auth.StateDir(), Name: substrateCopyName(a)})
+	opts := workspace.UndoOptions{Exec: rel.Client, Dir: dir, ID: to, DataDir: auth.StateDir(), Name: substrateCopyName(a)}
+	info, err := workspace.Undo(ctx, opts)
+	for try := 1; err != nil && a.State == substrateStateCrashed && try <= substrateUndoStartTries && substrateRelayStarting(err); try++ {
+		// The recovered agent's relay may need a moment to answer.
+		if serr := substrateSleep(ctx, 2*time.Second); serr != nil {
+			return serr
+		}
+		info, err = workspace.Undo(ctx, opts)
+	}
 	if err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Put %s/%s back to restore point %s.\n", a.Atespace, a.Name, info.ID)
+	// GAP-0415: what the agent was asking about is gone with the folder it
+	// changed; its pending asks close now instead of waiting out their time.
+	if n := substrateCloseAsks(ctx, s.Client, a, "the agent was put back to a restore point with undo"); n > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Closed %d pending question(s) of %s.\n", n, a.Name)
+	}
 	return nil
+}
+
+// substrateUndoStartTries bounds the retries of an undo while a recovered
+// agent starts (2 s apart).
+const substrateUndoStartTries = 30
+
+// substrateRelayStarting reports an error of an agent that is still
+// starting (HTTP 502, 503 or 504 from the route or the relay).
+func substrateRelayStarting(err error) bool {
+	if errors.Is(err, attach.ErrStarting) || errors.Is(err, attach.ErrClusterFull) {
+		return true
+	}
+	msg := err.Error()
+	for _, code := range []string{"HTTP 502", "HTTP 503", "HTTP 504"} {
+		if strings.Contains(msg, code) {
+			return true
+		}
+	}
+	return false
+}
+
+func substrateSleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// substrateCloseAsks denies a's pending asks with why and returns how many
+// it closed. Best effort: an ask it cannot close expires as before.
+func substrateCloseAsks(ctx context.Context, cl *api.Client, a api.Actor, why string) int {
+	asks, err := cl.Asks(ctx)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, k := range asks {
+		if k.Actor != a.Name || (k.Atespace != "" && k.Atespace != a.Atespace) {
+			continue
+		}
+		if cl.Decide(ctx, k.ID, "deny", false, why) == nil {
+			n++
+		}
+	}
+	return n
 }

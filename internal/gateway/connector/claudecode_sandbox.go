@@ -471,8 +471,11 @@ func verifyClaudeCodeSandboxManagedSource(source *claudeCodeSettingsSource, rt r
 }
 
 // renderClaudeCodeSandboxPreseed pre-accepts onboarding and the workspace
-// trust dialog. Trust on /work is inherited by every project mounted below
-// it, which keeps the image independent of the repository name.
+// trust dialog. Trust on /work is inherited by a plain folder below it,
+// which keeps the image independent of the repository name. Claude Code
+// stops at the root of a git repository, so an Agent Substrate relay also
+// records the folder it starts Claude Code in (kit relay.claude_state_file,
+// substrate-1 GAP-0446).
 func renderClaudeCodeSandboxPreseed() ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

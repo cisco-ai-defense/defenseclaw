@@ -222,9 +222,17 @@ them and how long ago they started. Administrators see only their own agents unl
 			now := time.Now()
 			rows := make([][]string, 0, len(live))
 			for _, a := range live {
-				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
+				row := []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateActorState(a), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)}
+				if all {
+					row = append(row, substrateListOwner(a))
+				}
+				rows = append(rows, row)
 			}
-			substrateTable(cmd.OutOrStdout(), []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}, rows)
+			header := []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}
+			if all {
+				header = append(header, "OWNER")
+			}
+			substrateTable(cmd.OutOrStdout(), header, rows)
 			return nil
 		},
 	}
@@ -233,6 +241,16 @@ them and how long ago they started. Administrators see only their own agents unl
 	cmd.Flags().StringVar(&batch, "batch", "", "only the agents of this batch")
 	cmd.Flags().BoolVar(&all, "all", false, "every person's agents (administrators only)")
 	return cmd
+}
+
+// substrateListOwner is list --all's OWNER column: the person, or that the
+// agent was made outside DefenseClaw and belongs to its atespace only
+// (GAP-0419).
+func substrateListOwner(a api.Actor) string {
+	if a.Foreign || a.Attribution == "atespace" {
+		return "not launcher (atespace only)"
+	}
+	return substrateDash(a.Owner)
 }
 
 // --- status -----------------------------------------------------------------
@@ -301,6 +319,9 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				fmt.Fprintf(w, "Profile:   %s\n", substrateDash(a.Profile))
 				fmt.Fprintf(w, "Template:  %s\n", substrateDash(a.Template))
 				fmt.Fprintf(w, "Started:   %s ago\n", substrateAge(a.CreatedAt, time.Now()))
+				if a.State != "" {
+					fmt.Fprintf(w, "State:     %s\n", a.State)
+				}
 				if a.BatchID != "" {
 					fmt.Fprintf(w, "Batch:     %s\n", a.BatchID)
 				}
@@ -309,6 +330,11 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				}
 				if line := substratePolicyConflictLine(a); line != "" {
 					fmt.Fprintln(w, "Policy:    "+line)
+				}
+				if a.State == substrateStateCrashed {
+					// GAP-0410: say it crashed and the way back.
+					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
+					return nil
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
 				return nil

@@ -191,3 +191,28 @@ func TestClaudeCodeModelFollowsTheHarnessVersion(t *testing.T) {
 		t.Fatal("an explicit --model must win")
 	}
 }
+
+// GAP-0446: a Claude Code actor's relay records the folder it starts the
+// agent in as trusted in the image's ~/.claude.json; other connectors' do not.
+func TestClaudeCodeRelayTrustsItsStartFolderGAP0446(t *testing.T) {
+	stateFile := func(ov Overlay) string {
+		var cfg struct {
+			Relay map[string]any `json:"relay"`
+		}
+		if err := json.Unmarshal(file(ov, ConfigPath), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		s, _ := cfg.Relay["claude_state_file"].(string)
+		return s
+	}
+	cc := overlayFor(t, harness.ClaudeCode, "bedrock")
+	if got := stateFile(cc); got != "/sandbox/.claude.json" {
+		t.Fatalf("claudecode relay.claude_state_file = %q, want /sandbox/.claude.json (the preseed the harness renders)", got)
+	}
+	if file(cc, "/sandbox/.claude.json") == nil {
+		t.Fatal("the claudecode overlay has no /sandbox/.claude.json preseed")
+	}
+	if got := stateFile(overlayFor(t, harness.Codex, "bedrock")); got != "" {
+		t.Fatalf("codex relay.claude_state_file = %q, want none", got)
+	}
+}

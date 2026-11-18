@@ -45,8 +45,12 @@ type Actor struct {
 	AskTimeoutSeconds int64     `json:"ask_timeout_seconds,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	Owner             string    `json:"owner,omitempty"`
-	Deleted           bool      `json:"deleted,omitempty"`
-	State             string    `json:"state,omitempty"`
+	// Attribution is person, workload or atespace (an actor made outside
+	// DefenseClaw, which Foreign marks too; GAP-0419).
+	Attribution string `json:"attribution,omitempty"`
+	Foreign     bool   `json:"foreign,omitempty"`
+	Deleted     bool   `json:"deleted,omitempty"`
+	State       string `json:"state,omitempty"`
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
@@ -75,7 +79,7 @@ type PolicyConflict struct {
 // tables, status lines, prompts and errors. The identifiers the launcher
 // sends back (UID, registration key, session token) are left as they are.
 func (a Actor) shown() Actor {
-	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.State} {
+	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.Attribution, &a.State} {
 		*f = safetext.Line(*f)
 	}
 	if a.PolicyConflict != nil {
@@ -219,6 +223,15 @@ func (c *Client) list(ctx context.Context, o ListOptions) ([]Actor, bool, error)
 func (c *Client) Get(ctx context.Context, atespace, name string) (Actor, error) {
 	var a Actor
 	err := c.do(ctx, http.MethodGet, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, &a)
+	return a.shown(), err
+}
+
+// Recover brings a crashed actor back to its last snapshot and starts it
+// again (GAP-0410). The gateway answers 409 not_crashed for an actor that
+// has not crashed.
+func (c *Client) Recover(ctx context.Context, atespace, name string) (Actor, error) {
+	var a Actor
+	err := c.do(ctx, http.MethodPost, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name)+"/recover", nil, map[string]any{}, &a)
 	return a.shown(), err
 }
 

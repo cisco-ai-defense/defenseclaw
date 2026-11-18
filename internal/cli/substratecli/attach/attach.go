@@ -117,6 +117,10 @@ type Options struct {
 	// MaxWait bounds the wait while the cluster is full or the agent is
 	// starting (default 10m).
 	MaxWait time.Duration
+	// Health, when set, is asked before each such wait: an error (the agent
+	// crashed) ends the wait with it, since waiting cannot bring the agent
+	// back (GAP-0410).
+	Health func(ctx context.Context) error
 	// ReconnectFor bounds how long a lost connection is retried, as when
 	// the agent is suspended and resumes (default 3m, GAP-0003).
 	ReconnectFor time.Duration
@@ -151,13 +155,20 @@ const (
 	stableAfter = 30 * time.Second
 	fullMsg     = "The cluster is full. Waiting for room (Ctrl-C to stop)..."
 	startingMsg = "The agent is starting. Waiting for it (Ctrl-C to stop)..."
-	lostMsg     = "Connection lost; reconnecting (Ctrl-] detaches; keys typed now are not sent)..."
+	lostMsg     = "Connection lost; reconnecting"
 	backMsg     = "Reconnected."
 	stopMsg     = "Stopped reconnecting. The agent keeps running. Come back with: "
 	fallbackMsg = "WebSocket is blocked here; using the slower fallback"
 )
 
 func connectHint(name string) string { return "defenseclaw substrate connect " + name }
+
+// lostStatus is the reconnect line: the attempt, the backoff before the
+// next one and how long the link has been down (GAP-0423).
+func lostStatus(attempt int, next, down time.Duration) string {
+	return fmt.Sprintf("%s: attempt %d, next in %s, down %s (Ctrl-] detaches; keys typed now are not sent)...",
+		lostMsg, attempt, fmtDur(next), fmtDur(down.Truncate(time.Second)))
+}
 
 func (o *Options) normalize() error {
 	if err := o.Target.validate(); err != nil {
@@ -498,15 +509,16 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 			a.endLine()
 			return res, a.notSentErr(giveUp(o.Target, connections > 0, failures, lastErr))
 		}
-		if !lostShown {
+		wait := rec.next()
+		switch {
+		case connections > 0:
+			// Every attempt updates the line (GAP-0423).
+			a.say(lostStatus(failures, wait, o.Now().Sub(outageStart)), false)
+		case !lostShown && kerr != nil:
 			lostShown = true
-			if connections > 0 {
-				a.say(lostMsg, false)
-			} else if kerr != nil {
-				a.say("Could not connect yet ("+kerr.Error()+"); retrying...", false)
-			}
+			a.say("Could not connect yet ("+kerr.Error()+"); retrying...", false)
 		}
-		if serr := o.Sleep(wctx, rec.next()); serr != nil {
+		if serr := o.Sleep(wctx, wait); serr != nil {
 			if a.outageStopped(wctx, &res) {
 				return res, nil
 			}

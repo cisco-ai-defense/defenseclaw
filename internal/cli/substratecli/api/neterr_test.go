@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -52,6 +53,23 @@ func TestTransportErrorsSayWhatToDo(t *testing.T) {
 	}
 	if got := friendlyTransport("h", context.Canceled); !errors.Is(got, context.Canceled) || strings.Contains(got.Error(), "doctor") {
 		t.Errorf("a cancelled call must stay a cancel: %v", got)
+	}
+}
+
+// GAP-0431: "no route to host" says so, and on macOS names the Local
+// Network privacy setting that gives the same error to a program it has
+// not allowed.
+func TestNoRouteNamesMacLocalNetworkPrivacyGAP0431(t *testing.T) {
+	unreachable := &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}
+	got := friendlyTransport("10.0.0.5:8445", unreachable)
+	if !strings.Contains(got.Error(), "no network route to the cluster address") {
+		t.Errorf("%q", got)
+	}
+	if strings.Contains(got.Error(), "Local Network") != (runtime.GOOS == "darwin") {
+		t.Errorf("Local Network hint on %s: %q", runtime.GOOS, got)
+	}
+	if !errors.Is(got, syscall.EHOSTUNREACH) {
+		t.Errorf("the cause is lost: %v", got)
 	}
 }
 

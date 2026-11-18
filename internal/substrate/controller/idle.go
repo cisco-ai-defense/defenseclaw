@@ -42,7 +42,10 @@ import (
 // (taskEnded), so a batch larger than the pool drains through it
 // (GAP-0274). Once it reached the gateway after the end (pull, logs,
 // connect), or was woken again later, it is idle like any other actor
-// (GAP-0288).
+// (GAP-0288). The end counts when it came after the actor was last seen
+// stopped, not after the controller first saw it running: a short task
+// ends before a slow pass sees it run, and a restarted controller sees
+// every finished task already running (GAP-0411).
 // The task-end suspend does not depend on idle suspend: with no idle timeout
 // (idle_suspend_after: 0) a finished task still gives its worker back
 // (GAP-0518).
@@ -67,7 +70,7 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 		if !ok {
 			return nil // the task runs
 		}
-		if ended.After(st.runningAt) {
+		if ended.After(st.stoppedAt) {
 			if t, ok := c.o.Activity.LastActivity(uid); !ok || !t.After(ended.Add(taskEndSlack)) {
 				return c.taskEnded(ctx, a, st, reg, base, ended, now)
 			}
@@ -111,7 +114,7 @@ func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, 
 	if _, err := c.o.Client.SuspendActor(ctx, ateapi.RefOf(a.GetMetadata())); err != nil {
 		return fmt.Errorf("%s: idle suspend: %w", st.key, err)
 	}
-	st.lastState = ateapi.ActorStateSuspended
+	st.lastState, st.stoppedAt = ateapi.ActorStateSuspended, now
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventIdleSuspend, SeverityInfo, "suspended after "+after.String()+" without activity"
 	detail["idle_for"] = now.Sub(last).Round(1e9).String()
@@ -133,7 +136,7 @@ func (c *Controller) taskEnded(ctx context.Context, a *ateapi.Actor, st *actorSt
 	if _, err := c.o.Client.SuspendActor(ctx, ateapi.RefOf(a.GetMetadata())); err != nil {
 		return fmt.Errorf("%s: task-end suspend: %w", st.key, err)
 	}
-	st.lastState = ateapi.ActorStateSuspended
+	st.lastState, st.stoppedAt = ateapi.ActorStateSuspended, now
 	ev := base
 	ev.Type, ev.Severity = EventTaskEndSuspend, SeverityInfo
 	ev.Message = "suspended: its task ended " + now.Sub(ended).Round(time.Second).String() + " ago, so its worker is free; pull, logs and connect wake it"
