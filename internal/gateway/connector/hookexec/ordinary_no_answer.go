@@ -36,7 +36,7 @@ func ordinaryNoAnswerPayloadAt(home string, body []byte) bool {
 // late-ordinary rule asks it (LateOrdinaryBothScans, Linux and macOS), beside
 // the link-hop scan, which reads these shapes too: it also reads a
 // PermissionRequest that carries the tool and input of a PreToolUse, a shell
-// call that starts with a cd chain (hookpaths.LateChainCallGrade) and a Codex
+// call with a cd at any step (hookpaths.LateChainCallGrade, GAP-1303) and a Codex
 // workdir relative to the call folder (hookpaths.LateEnteredDirectory), so an
 // ordinary call of those shapes is not closed only because this reader did
 // not model it (rel-1-0-10 GAP-1188). A protected reach in any of them stays

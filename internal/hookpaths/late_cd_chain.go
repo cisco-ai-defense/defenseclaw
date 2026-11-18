@@ -12,22 +12,26 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// lateMaxLeadingCDs bounds the leading cd steps LateChainCallGrade reads.
-const lateMaxLeadingCDs = 4
+// lateMaxChainCDs bounds the cd steps LateChainCallGrade reads.
+const lateMaxChainCDs = 4
 
 // LateChainCallGrade is LateCallGrade as the late-ordinary rule of a per-user
 // outage asks it (hookexec.LateOrdinaryBothScans, Linux and macOS,
-// rel-1-0-10 GAP-1188). It also reads a call that starts with a cd chain,
-// "cd DIR && rest" or "cd DIR; rest", up to lateMaxLeadingCDs steps, as the
-// link-hop scan (LateOrdinaryCallAt) does: DIR is one literal word, entered as
-// LateEnteredDirectory proves it, and rest is graded against the folder it
-// enters. When rest may also run where the cd failed (after ";", or with a
-// "||" in the chain) it is graded against the folder the call started in as
-// well, and the grade is the higher one. Any other cd (a variable, -, +, ~, a
-// glob, a substitution, an option, a redirect, a link, a folder that does not
-// exist, a protected or state folder, a folder CDPATH may replace) keeps the
-// call Possible, as LateCallGrade keeps every compound call with a cd. On
-// Windows it is LateCallGrade.
+// rel-1-0-10 GAP-1188, GAP-1303). It also reads a call with a cd at any step
+// of its top-level lists, "cd DIR && rest", "cd DIR; rest", "before && cd DIR
+// && rest", "before; cd DIR" and the like, up to lateMaxChainCDs cd steps, as
+// the link-hop scan (LateOrdinaryCallAt) does: DIR is one literal word,
+// entered as LateEnteredDirectory proves it; the steps before the first cd
+// are graded against the folder the call is in, as part of a compound call
+// (lateChainedCallGrade: none of them may change the shell context), and rest
+// against the folder the cd enters. When rest may also run where the cd
+// failed or did not run (after ";", or with a "||" in the call) it is graded
+// against the folder the call started in as well, and the grade is the
+// higher one. Any other cd (a variable, -, +, ~, a glob, a substitution, an
+// option, a redirect, a link, a folder that does not exist, a protected or
+// state folder, a folder CDPATH may replace, a cd followed by "||" or inside
+// a group, subshell or pipeline) keeps the call Possible, as LateCallGrade
+// keeps every compound call with a cd. On Windows it is LateCallGrade.
 func LateChainCallGrade(command, cwd, home string) Grade {
 	return lateChainGrade(command, cwd, home, 0)
 }
@@ -36,75 +40,188 @@ func lateChainGrade(command, cwd, home string, depth int) Grade {
 	if runtime.GOOS == "windows" || !filepath.IsAbs(cwd) || !filepath.IsAbs(home) || len(command) > MaxPayloadBytes {
 		return LateCallGrade(command, cwd, home)
 	}
-	dir, rest, enteredOnly, leading := lateLeadingCD(command)
-	if !leading {
+	step, modelled := lateChainCD(command)
+	if !modelled {
 		return LateCallGrade(command, cwd, home)
 	}
-	if depth >= lateMaxLeadingCDs || !lateCDWithoutSearchPath(dir) {
+	if depth >= lateMaxChainCDs || !lateCDWithoutSearchPath(step.dir) {
 		return GradePossible
 	}
-	entered, ok := LateEnteredDirectory(cwd, dir, home)
+	entered, ok := LateEnteredDirectory(cwd, step.dir, home)
 	if !ok {
 		return GradePossible
 	}
-	grade := lateChainGrade(rest, entered, home, depth+1)
-	if !enteredOnly && grade != GradeNamed {
-		grade = grade.Max(lateChainGrade(rest, cwd, home, depth+1))
+	grade := GradeNone
+	if step.before != "" {
+		grade = lateChainedCallGrade(step.before, cwd, home)
+	}
+	if step.rest == "" || grade == GradeNamed {
+		return grade
+	}
+	grade = grade.Max(lateChainGrade(step.rest, entered, home, depth+1))
+	if !step.enteredOnly && grade != GradeNamed {
+		grade = grade.Max(lateChainGrade(step.rest, cwd, home, depth+1))
 	}
 	return grade
 }
 
-// lateLeadingCD splits a command that starts with "cd DIR" followed by "&&"
-// or ";" (or a new line) into the literal DIR and the command text after it.
+// lateCDStep is the first cd of a call as lateChainCD splits it: the text of
+// the steps before it, the literal folder, and the text after it.
 // enteredOnly reports a rest that runs only when the cd worked: the call is
-// one statement whose and-or list has no "||". leading is false for every
-// other shape: no cd first, a cd with assignments, options, redirects or a
-// word that is not literal, a negated or background statement, or a "||" or
-// pipe right after the cd.
-func lateLeadingCD(command string) (dir, rest string, enteredOnly, leading bool) {
+// one statement whose and-or list has no "||".
+type lateCDStep struct {
+	before, dir, rest string
+	enteredOnly       bool
+}
+
+// lateListStep is one command of a top-level and-or list, in order, with the
+// operator that joins it to the next one (andNext: "&&"; endsStatement: the
+// last of its statement, so ";", a new line or the end follows).
+type lateListStep struct {
+	stmt                   *syntax.Stmt
+	andNext, endsStatement bool
+}
+
+// lateChainCD finds the first cd among the commands of the top-level and-or
+// lists of a call and splits the call at it. modelled is false when there is
+// no such cd and for every cd shape it does not model: a cd with
+// assignments, options, redirects or a word that is not literal; a negated,
+// background or coprocess cd; a "||" right after the cd; and a call that is
+// only "cd DIR", which LateCallGrade reads. A cd inside a group, subshell,
+// pipeline, negated or background list is not found here; the call then
+// keeps a compound with a cd, which LateCallGrade keeps Possible.
+func lateChainCD(command string) (lateCDStep, bool) {
 	file, parsed := parseShell(command)
 	if !parsed || len(file.Stmts) == 0 {
-		return "", "", false, false
+		return lateCDStep{}, false
 	}
-	first := file.Stmts[0]
-	stmt, next := first, (*syntax.Stmt)(nil)
-	for {
-		if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || len(stmt.Redirs) != 0 {
-			return "", "", false, false
-		}
-		binary, isBinary := stmt.Cmd.(*syntax.BinaryCmd)
-		if !isBinary {
+	var steps []lateListStep
+	for _, stmt := range file.Stmts {
+		steps = lateAndOrSteps(stmt, steps)
+		steps[len(steps)-1].endsStatement = true
+	}
+	at := -1
+	for i, step := range steps {
+		if lateCDCall(step.stmt) {
+			at = i
 			break
 		}
-		if binary.Op != syntax.AndStmt {
-			return "", "", false, false
-		}
-		// The command right after the cd is the second operand of the
-		// innermost "&&" on the way to it, whichever way the list nests.
-		next, stmt = binary.Y, binary.X
 	}
-	if next == nil {
-		if len(file.Stmts) < 2 {
-			return "", "", false, false
-		}
-		next = file.Stmts[1]
+	if at < 0 {
+		return lateCDStep{}, false
 	}
-	call, isCall := stmt.Cmd.(*syntax.CallExpr)
-	if !isCall || len(call.Assigns) != 0 || len(call.Args) != 2 {
-		return "", "", false, false
+	cd := steps[at]
+	if cd.stmt.Negated || cd.stmt.Background || cd.stmt.Coprocess || len(cd.stmt.Redirs) != 0 {
+		return lateCDStep{}, false
 	}
-	if program, ok := plainLiteralWord(call.Args[0]); !ok || program != "cd" {
-		return "", "", false, false
+	call := cd.stmt.Cmd.(*syntax.CallExpr)
+	if len(call.Assigns) != 0 || len(call.Args) != 2 {
+		return lateCDStep{}, false
 	}
 	dir, ok := lateLiteralDirectory(call.Args[1])
-	if !ok || next == nil {
-		return "", "", false, false
+	if !ok || !cd.andNext && !cd.endsStatement {
+		return lateCDStep{}, false
 	}
-	start := int(next.Pos().Offset())
+	step := lateCDStep{dir: dir, enteredOnly: len(file.Stmts) == 1 && !lateAndOrHasOr(file.Stmts[0])}
+	if at > 0 {
+		if !lateStepsKeepCD(steps[:at]) {
+			return lateCDStep{}, false
+		}
+		end := int(steps[at-1].stmt.End().Offset())
+		if end <= 0 || end > int(cd.stmt.Pos().Offset()) {
+			return lateCDStep{}, false
+		}
+		step.before = command[:end]
+	}
+	if at+1 == len(steps) {
+		// Nothing runs after a last cd. A call that is only "cd DIR" stays
+		// with LateCallGrade, as before GAP-1303.
+		return step, at > 0
+	}
+	start := int(steps[at+1].stmt.Pos().Offset())
 	if start <= int(call.End().Offset()) || start >= len(command) {
-		return "", "", false, false
+		return lateCDStep{}, false
 	}
-	return dir, command[start:], len(file.Stmts) == 1 && !lateAndOrHasOr(first), true
+	step.rest = command[start:]
+	return step, true
+}
+
+// lateAndOrSteps appends the commands of an and-or list in the order they
+// are written. A negated, background or coprocess list, or one with
+// redirects, is one command: a cd inside it is not a step of the call.
+func lateAndOrSteps(stmt *syntax.Stmt, steps []lateListStep) []lateListStep {
+	binary, isBinary := stmt.Cmd.(*syntax.BinaryCmd)
+	if !isBinary || binary.Op != syntax.AndStmt && binary.Op != syntax.OrStmt ||
+		stmt.Negated || stmt.Background || stmt.Coprocess || len(stmt.Redirs) != 0 {
+		return append(steps, lateListStep{stmt: stmt})
+	}
+	steps = lateAndOrSteps(binary.X, steps)
+	steps[len(steps)-1].andNext = binary.Op == syntax.AndStmt
+	return lateAndOrSteps(binary.Y, steps)
+}
+
+// lateStepsKeepCD reports steps before a cd that cannot change how the shell
+// resolves it, at any depth (a zsh pipeline runs its last command in the
+// shell itself): no assignment to CDPATH or cdpath, and no program that is not
+// one plain word or that sets a shell variable or option, an alias or a trap
+// (read, printf -v, shopt, setopt, ...). The steps that change the folder or
+// the shell context (cd, pushd, source, export, exec, ...) are refused by
+// lateChainedCallGrade.
+func lateStepsKeepCD(steps []lateListStep) bool {
+	keeps := true
+	for _, step := range steps {
+		syntax.Walk(step.stmt, func(node syntax.Node) bool {
+			call, isCall := node.(*syntax.CallExpr)
+			if !keeps || !isCall {
+				return keeps
+			}
+			for _, assign := range call.Assigns {
+				if assign == nil || assign.Name == nil || assign.Name.Value == "CDPATH" || assign.Name.Value == "cdpath" {
+					keeps = false
+				}
+			}
+			if len(call.Args) == 0 {
+				return keeps
+			}
+			program, plain := plainLiteralWord(call.Args[0])
+			if !plain || lateSetsShellState(filepath.Base(program), call.Args[1:]) {
+				keeps = false
+			}
+			return keeps
+		})
+		if !keeps {
+			return false
+		}
+	}
+	return true
+}
+
+// lateSetsShellState reports a bash or zsh builtin that may set a shell
+// variable or option, an alias, a hash entry or a trap; printf and print only
+// with an option (printf -v).
+func lateSetsShellState(program string, args []*syntax.Word) bool {
+	switch program {
+	case "read", "mapfile", "readarray", "getopts", "let", "local", "alias", "unalias", "shopt", "setopt",
+		"unsetopt", "emulate", "enable", "disable", "hash", "trap", "vared", "zparseopts", "zmodload", "autoload":
+		return true
+	case "printf", "print":
+		for _, arg := range args {
+			if word, plain := plainLiteralWord(arg); !plain || strings.HasPrefix(word, "-") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// lateCDCall reports a simple command whose program is the literal word cd.
+func lateCDCall(stmt *syntax.Stmt) bool {
+	call, isCall := stmt.Cmd.(*syntax.CallExpr)
+	if !isCall || len(call.Args) == 0 {
+		return false
+	}
+	program, ok := plainLiteralWord(call.Args[0])
+	return ok && program == "cd"
 }
 
 // lateAndOrHasOr reports an and-or list with a "||" in it.
