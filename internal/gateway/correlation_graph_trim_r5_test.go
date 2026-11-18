@@ -53,7 +53,7 @@ func countCorrelationRowsForTest(t *testing.T, path, query string, args ...any) 
 // putCorrelationMatchRelationship does not store. Such rows (a 1.0.9 store
 // keeps them) never gave a reader anything.
 func TestMembershipIdentifierMatchesAreDroppedSoTheyAreNotStored(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	_, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	repo, err := store.CorrelationRepository()
@@ -126,7 +126,7 @@ func TestMembershipIdentifierMatchesAreDroppedSoTheyAreNotStored(t *testing.T) {
 // identifier (the tool chain's partition key), and its graph still has the
 // turn and agent nodes, from the occurrence's own edges (S8 R5).
 func TestHookOccurrenceKeepsTurnAndAgentNodesWithoutTheirIdentifiers(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	defer store.Close() //nolint:errcheck
@@ -175,7 +175,7 @@ func TestHookOccurrenceKeepsTurnAndAgentNodesWithoutTheirIdentifiers(t *testing.
 func TestNativeCustodyClaudeHooksKeepClaimsAndToolIdentifier(t *testing.T) {
 	for _, mode := range []string{"per-user", "sandboxed", "managed"} {
 		t.Run(mode, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			fixture := newCodexNativeOTLPFixture(t)
 			api := &APIServer{store: fixture.store}
 			api.bindOTLPObservabilityRuntime(fixture.runtime)
@@ -245,7 +245,7 @@ func TestNativeCustodyClaudeHooksKeepClaimsAndToolIdentifier(t *testing.T) {
 // delivered again finds nothing to resolve and is recorded without error
 // (S8 R5).
 func TestSettledToolCallLeavesNoPendingOperation(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	defer store.Close() //nolint:errcheck

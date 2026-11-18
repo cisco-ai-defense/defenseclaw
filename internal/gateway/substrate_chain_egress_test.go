@@ -47,7 +47,7 @@ func newTestChainLeaderServiceWith(t *testing.T, egressAction string) (*chainsta
 // counts from PreToolUse (the command can send the file while it runs),
 // and still after PostToolUse; a benign actor's egress passes.
 func TestSubstrateHookSecretReadRefusesTheFirstEgressGAP0179(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	svc, chains := newTestChainLeaderService(t)
 	f := newSubstrateFixture(t, func(sc *SubstrateConfig) { sc.Chains = chains })

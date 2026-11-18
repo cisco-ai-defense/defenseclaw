@@ -2561,7 +2561,7 @@ func TestHookManagedAIDOnly_SecureClientPreToolUseWire(t *testing.T) {
 		},
 	} {
 		t.Run(test.connector, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			var gotBody []byte
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
@@ -2680,7 +2680,7 @@ func TestHookManagedAIDOnly_SecureClientPermissionRequestWithoutArgsStaysText(t 
 		{"codex blank name", "codex", codexHeaders, func(p map[string]interface{}) { p["tool_name"] = "" }, "Tool call: Bash\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			var gotBody []byte
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
@@ -2762,7 +2762,7 @@ func TestHookManagedAIDOnly_ToolCallFollowsResolvedContract(t *testing.T) {
 				name = test.connector + "/declared"
 			}
 			t.Run(name, func(t *testing.T) {
-				installCorrelationHMACForTest()
+				installCorrelationHMACForTest(t)
 				var gotBody []byte
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					gotBody, _ = io.ReadAll(r.Body)

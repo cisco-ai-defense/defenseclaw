@@ -201,7 +201,7 @@ var chainStartPacks = []struct {
 // contract.
 func chainStartReplica(t *testing.T, conn, pack string, managed bool) (chartReplica, *chainstate.Client, string) {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installToolCallCorpusProfileConnector(t, conn, pack)
 	if err := SetSubstrateChainEgressAction(""); err != nil {
 		t.Fatal(err)

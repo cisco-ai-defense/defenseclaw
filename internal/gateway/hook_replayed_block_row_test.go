@@ -16,7 +16,7 @@ import (
 // own row: a denied call never vanishes from the audit (GAP-1060). A replayed
 // allow collapses only into an earlier allow: after a block it has its own row.
 func TestReplayedToolUseIDBlockStillWritesItsAuditRow(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store, logger := testStoreAndLogger(t)
 	api := &APIServer{store: store, logger: logger}
 	profile := api.hookProfileForConnector("claudecode")

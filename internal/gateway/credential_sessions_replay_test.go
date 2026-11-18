@@ -106,7 +106,7 @@ func TestCredentialSessionsReplayGAP0724(t *testing.T) {
 		sessions = keep
 	}
 	fmt.Printf("SESSIONS credential-touching=%d\n", len(sessions))
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	for _, pack := range []string{"default", "strict"} {
 		installDefaultProfileConnector(t, "claudecode")
