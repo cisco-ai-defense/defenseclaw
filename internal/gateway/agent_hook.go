@@ -4185,6 +4185,7 @@ func (a *APIServer) inspectAgentHookToolCall(
 		Args:                     trustedArgs,
 		CWD:                      agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD),
 		ActiveHome:               hookActiveHome(ctx),
+		WindowsHookHost:          windowsHookHost() && !isSandboxHookRequest(ctx),
 		CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
 		ToolResourceIdentity:     resourceIdentity,
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,

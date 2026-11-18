@@ -77,6 +77,11 @@ type Input struct {
 	// tool is read the same way without it (posixPowerShellScript,
 	// rel-1-0-10:GAP-1214).
 	PowerShellLauncherBody bool `json:"-"`
+	// WindowsHookHost is trusted hook-host context. A test can force Windows
+	// routing on a POSIX runner, whose process home does not describe the
+	// Windows shell's home. Such a call must not take the POSIX PowerShell
+	// tool home rewrite.
+	WindowsHookHost bool `json:"-"`
 	// LoopBindsStraightLine is trusted caller context set by a gateway that
 	// judges the call in a tier that blocks only what the shell certainly
 	// runs (the default and permissive tiers). A function that replaces read,

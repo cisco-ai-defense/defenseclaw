@@ -47,6 +47,9 @@ func posixPowerShellScript(input Input) bool {
 	if input.PowerShellLauncherBody {
 		return true
 	}
+	if input.WindowsHookHost {
+		return false
+	}
 	switch input.DialectHint {
 	case "", DialectNone, DialectPowerShell:
 	default:

@@ -318,6 +318,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Args:                     toolArgs,
 			CWD:                      toolCWD,
 			ActiveHome:               hookActiveHome(ctx),
+			WindowsHookHost:          windowsHookHost() && !isSandboxHookRequest(ctx),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}

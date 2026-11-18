@@ -93,7 +93,7 @@ func powerShellReadingCommands(request trustedActionRequest) []powerShellReading
 			return []powerShellReadingCommand{{text: command}}
 		}
 		return nil
-	case strings.HasPrefix(home, "/"):
+	case strings.HasPrefix(home, "/") && !request.Input.WindowsHookHost:
 		var commands []powerShellReadingCommand
 		if hint == "" || hint == actionfacts.DialectPowerShell {
 			if trustedPowerShellExecutionTool(request.Input.Tool) {
