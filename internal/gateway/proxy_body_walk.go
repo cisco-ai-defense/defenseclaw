@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -336,6 +338,73 @@ func (w *textWalker) mediaValue(key, s string) bool {
 	return pos && encodedBytes(s)
 }
 
+// replyTextMedia is the text of a reply's inline data part whose media type
+// is text (Gemini inlineData of mimeType text/plain, base64): model text the
+// client renders, so the completion checks read it, decoded
+// (rel-1-0-10:GAP-0687). Data that is not base64 is read as it is. Other
+// media types, and a request's inline data, are not read here.
+func (w *textWalker) replyTextMedia(key, s string) (string, bool) {
+	if !w.reply || w.payload > 0 || w.cur == nil || normKey(key) != "data" || normKey(w.curKey) != "inlinedata" {
+		return "", false
+	}
+	mt := firstNonEmpty(w.cur.str("mimeType"), w.cur.str("mime_type"))
+	if base, _, _ := strings.Cut(mt, ";"); !strings.Contains(base, "/") || !textMediaType(base) {
+		return "", false
+	}
+	clean := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, s)
+	var b []byte
+	err := errors.New("not base64")
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err = enc.DecodeString(clean); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return s, true
+	}
+	return decodedText(b, mt), true
+}
+
+// decodedText is decoded inline text data as the characters it carries:
+// UTF-16 when its charset or byte order mark says so (big-endian without a
+// mark, RFC 2781), UTF-8 when it is valid UTF-8, else one character per byte
+// (Latin-1), so the checks read the text whatever its encoding (GAP-0687).
+func decodedText(b []byte, mediaType string) string {
+	_, params, _ := mime.ParseMediaType(mediaType)
+	cs := strings.ToLower(strings.TrimSpace(params["charset"]))
+	le := len(b) >= 2 && b[0] == 0xFF && b[1] == 0xFE
+	be := len(b) >= 2 && b[0] == 0xFE && b[1] == 0xFF
+	if strings.HasPrefix(cs, "utf-16") || le || be {
+		if le || be {
+			b = b[2:]
+		} else {
+			le = cs == "utf-16le"
+		}
+		u := make([]uint16, 0, len(b)/2)
+		for i := 0; i+1 < len(b); i += 2 {
+			if le {
+				u = append(u, uint16(b[i+1])<<8|uint16(b[i]))
+			} else {
+				u = append(u, uint16(b[i])<<8|uint16(b[i+1]))
+			}
+		}
+		return string(utf16.Decode(u))
+	}
+	if utf8.Valid(b) {
+		return string(b)
+	}
+	r := make([]rune, len(b))
+	for i, c := range b {
+		r[i] = rune(c)
+	}
+	return string(r)
+}
+
 // foldCanon is the smallest rune of every rune's simple-folding orbit, so
 // keys that encoding/json treats as one are one.
 func foldCanon(s string) string {
@@ -496,7 +565,14 @@ func (w *textWalker) checkKeys(n *jnode) {
 func (w *textWalker) walk(n *jnode, key string, depth int) {
 	switch n.kind {
 	case 's':
-		if w.payload == 0 && (walkSkipScalar[normKey(key)] || w.mediaValue(key, n.s)) {
+		if w.payload == 0 && walkSkipScalar[normKey(key)] {
+			return
+		}
+		if text, ok := w.replyTextMedia(key, n.s); ok {
+			w.add(text)
+			return
+		}
+		if w.mediaValue(key, n.s) {
 			return
 		}
 		if seg := w.add(n.s); seg != "" && w.redact != nil && w.turn >= 0 {

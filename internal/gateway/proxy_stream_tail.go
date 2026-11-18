@@ -20,6 +20,29 @@ import (
 // check that blocks withholds the tail and ends the stream as a mid-stream
 // block does. Observe mode holds nothing and only records the would-block.
 //
+// The initial buffer (guardrail.stream_buffer_bytes of text, checked before
+// anything of the reply is sent) is bounded in time too
+// (rel-1-0-10:GAP-0628): when the upstream has sent nothing for
+// streamHoldMaxAge while it holds reply text and no tool call is open, it
+// is checked and sent, so a short reply from an upstream that then goes
+// quiet is not held until the upstream ends. A stream that keeps coming,
+// or a call the rules have not decided, still waits for the buffer size,
+// so a block there still replaces the whole reply. The reply headers are
+// sent at once: they carry no model text, and the status and headers were
+// already fixed (a block after them is written as it was).
+//
+// The check of a held byte that is due by its age only is the cheap one
+// (rel-1-0-10:GAP-0625, inspectStreamText): the local rules and the policy,
+// no AI Defense call and no span, since a slow stream would run it every
+// streamHoldMaxAge. The full mid-stream check (AI Defense with scanner_mode
+// remote or both, one span) runs every scanInterval bytes of text counted
+// from the last full one, as before the hold, and on the initial buffer, at
+// a hold bound and at the end of the stream; the final check reads the
+// whole reply. So a held byte waits at most streamHoldMaxAge (plus one
+// check) after it arrived, p50 about half of it on a stream that sends
+// often, and the bytes a check due by age lets out were read by the local
+// rules first; AI Defense reads them at the next full check.
+//
 // The hold is bounded (the bound rule, internal/guardrail/bounded). In
 // time: a held byte whose text was read is checked by the mid-stream check
 // and sent at most streamHoldMaxAge after it arrived (plus that one scan),
@@ -92,6 +115,42 @@ func (h *streamHold) take(n int, now time.Time) []byte {
 // due reports that the oldest held byte has waited streamHoldMaxAge.
 func (h *streamHold) due(now time.Time) bool {
 	return len(h.buf) > 0 && !now.Before(h.since.Add(streamHoldMaxAge))
+}
+
+// streamAgeInspector is an inspector with a cheap check for a stream hold
+// that is due by age only (GuardrailInspector.InspectMidStreamLocal).
+type streamAgeInspector interface {
+	InspectMidStreamLocal(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
+}
+
+// inspectStreamText is the mid-stream check of a streamed reply's text.
+// full: the check is due by text, a bound or the end (InspectMidStream);
+// otherwise only a held byte's age made it due, and it is the local one
+// when the inspector has it (GAP-0625).
+func (p *GuardrailProxy) inspectStreamText(ctx context.Context, content, model, mode string, full bool) *ScanVerdict {
+	msgs := []ChatMessage{{Role: "assistant", Content: content}}
+	if !full {
+		if li, ok := p.inspector.(streamAgeInspector); ok {
+			return li.InspectMidStreamLocal(ctx, "completion", content, msgs, model, mode)
+		}
+	}
+	return p.inspector.InspectMidStream(ctx, "completion", content, msgs, model, mode)
+}
+
+// midStreamFinalInspector is an inspector that says whether its mid-stream
+// check decides as its final check (GuardrailInspector.MidStreamDecidesAsFinal).
+type midStreamFinalInspector interface {
+	MidStreamDecidesAsFinal() bool
+}
+
+// initialEarlyRelease reports that the initial buffer of a stream may go out
+// before the stream ends, once the upstream went quiet (GAP-0628): only when
+// the mid-stream check that reads it decides as the final check, so a reply
+// the final check would refuse whole is not sent first. An inspector that
+// does not say keeps the initial buffer to the end, as before.
+func (p *GuardrailProxy) initialEarlyRelease() bool {
+	fi, ok := p.inspector.(midStreamFinalInspector)
+	return ok && fi.MidStreamDecidesAsFinal()
 }
 
 // streamHoldTimer is the one timer of a stream's hold.

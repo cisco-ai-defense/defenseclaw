@@ -226,10 +226,18 @@ func TestCascadeInspectContentCutIsUninspected(t *testing.T) {
 
 // The content inspect routes keep the 200 ms production scan deadline
 // unless a test widens it, and past the deadline they answer 504 with no
-// verdict, which the callers handle by their fail mode (GAP-0958).
+// verdict, which the callers handle by their fail mode (GAP-0958). The
+// budget is pinned on the server the gateway serves (NewAPIServer), and the
+// tool-response route reads the same seam (rel-1-0-10:GAP-1036).
 func TestInspectContentRoutesAnswer504PastTheScanBudget(t *testing.T) {
 	if got := (&APIServer{}).inspectScanBudget(); got != 200*time.Millisecond {
 		t.Fatalf("production inspect scan budget = %s, want 200ms", got)
+	}
+	store, logger := testStoreAndLogger(t)
+	served := &config.Config{}
+	served.Guardrail.Mode = "action"
+	if got := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, served).inspectScanBudget(); got != 200*time.Millisecond {
+		t.Fatalf("NewAPIServer inspect scan budget = %s, want 200ms", got)
 	}
 	api := cascadeModuleConfig(t, "default", cascadeAllowAllModule, "")
 	api.inspectToolScanTimeout = time.Nanosecond
@@ -241,12 +249,16 @@ func TestInspectContentRoutesAnswer504PastTheScanBudget(t *testing.T) {
 	}{
 		{"/api/v1/inspect/request", api.handleInspectRequest, RequestInspectRequest{Content: big}},
 		{"/api/v1/inspect/response", api.handleInspectResponse, ResponseInspectRequest{Content: big}},
+		{"/api/v1/inspect/tool-response", api.handleInspectToolResponse, ToolResponseInspectRequest{Tool: "Bash", Output: mustJSON(t, big)}},
 	} {
 		raw, _ := json.Marshal(tc.body)
 		rec := httptest.NewRecorder()
 		tc.h(rec, httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(raw)))
 		if rec.Code != http.StatusGatewayTimeout || !strings.Contains(rec.Body.String(), "scan timeout") {
 			t.Errorf("%s past the scan budget: status %d %s, want 504 scan timeout", tc.path, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), `"action"`) {
+			t.Errorf("%s past the scan budget answered a verdict: %s", tc.path, rec.Body.String())
 		}
 	}
 }

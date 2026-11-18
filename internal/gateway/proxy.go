@@ -3588,6 +3588,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+	// The headers carry no model text: the client has them at once, also
+	// while the initial buffer waits (GAP-0628).
+	flusher.Flush()
 
 	aliasModel := req.Model
 	fmt.Fprintf(os.Stderr, "[guardrail] → upstream (streaming) model=%q messages=%d\n", req.Model, len(req.Messages))
@@ -3668,19 +3671,27 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		streamBufSize = p.cfg.StreamBufferBytes
 	}
 	var initialChunkBuf [][]byte
+	var lastChunkAt time.Time // when the provider last sent a chunk
 	initialBufFlushed := mode != "action"
 	// In action mode the chunks after the initial buffer wait in hold until
 	// a check has read their text (rel-1-0-10:GAP-0212, proxy_stream_tail.go).
 	holding := mode == "action"
+	// earlyInitial: the initial buffer may go out once the provider went
+	// quiet (GAP-0628, initialEarlyRelease).
+	earlyInitial := holding && p.initialEarlyRelease()
 	var hold streamHold
 	var holdTimer streamHoldTimer
 	defer holdTimer.stop()
 	const midStreamScanInterval = 500
-	// scanMid runs the mid-stream check over the text so far. False: it
-	// blocked; the stream is cut.
-	scanMid := func() bool {
-		midVerdict := p.inspector.InspectMidStream(llmCtx, "completion", accumulated.String(),
-			[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, aliasModel, mode)
+	// lastFullScanLen is the text the last full mid-stream check read: the
+	// midStreamScanInterval cadence counts from it, so a check due by age
+	// only (the local one) does not put off AI Defense (GAP-0625).
+	lastFullScanLen := 0
+	// scanMid runs the mid-stream check over the text so far: the full
+	// check, or (full false) the check of a hold due by age only
+	// (inspectStreamText). False: it blocked; the stream is cut.
+	scanMid := func(full bool) bool {
+		midVerdict := p.inspectStreamText(llmCtx, accumulated.String(), aliasModel, mode, full)
 		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",
@@ -3693,11 +3704,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return false
 		}
 		lastScanLen = accumulated.Len()
+		if full {
+			lastFullScanLen = lastScanLen
+		}
 		return true
 	}
-	// releaseHeld sends the held chunks after a check has read their text.
-	releaseHeld := func() bool {
-		if accumulated.Len() > lastScanLen && !scanMid() {
+	// releaseHeld sends the held chunks after a check (full, or the one due
+	// by age) has read their text.
+	releaseHeld := func(full bool) bool {
+		if accumulated.Len() > lastScanLen && !scanMid(full) {
 			return false
 		}
 		if b := hold.take(len(hold.buf), time.Now()); len(b) > 0 {
@@ -3705,6 +3720,21 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			flusher.Flush()
 		}
 		return true
+	}
+	// sendInitial sends the initial buffer after a full check has read it:
+	// at stream_buffer_bytes of text, or once the provider has sent nothing
+	// for streamHoldMaxAge (GAP-0628); a stream that keeps coming waits for
+	// stream_buffer_bytes, as before.
+	sendInitial := func() {
+		if accumulated.Len() > lastScanLen && !scanMid(true) {
+			return
+		}
+		for _, buffered := range initialChunkBuf {
+			fmt.Fprintf(w, "data: %s\n\n", buffered)
+		}
+		flusher.Flush()
+		initialChunkBuf = nil
+		initialBufFlushed = true
 	}
 
 	handleChunk := func(chunk StreamChunk) {
@@ -3737,8 +3767,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 		}
 
-		if accumulated.Len()-lastScanLen >= midStreamScanInterval && mode == "action" {
-			if !scanMid() {
+		if accumulated.Len()-lastFullScanLen >= midStreamScanInterval && accumulated.Len() > lastScanLen && mode == "action" {
+			if !scanMid(true) {
 				return
 			}
 		}
@@ -3760,16 +3790,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		if !initialBufFlushed {
 			initialChunkBuf = append(initialChunkBuf, data)
 			if accumulated.Len() >= streamBufSize {
-				// The initial buffer is sent after a check has read it.
-				if accumulated.Len() > lastScanLen && !scanMid() {
-					return
-				}
-				for _, buffered := range initialChunkBuf {
-					fmt.Fprintf(w, "data: %s\n\n", buffered)
-				}
-				flusher.Flush()
-				initialChunkBuf = nil
-				initialBufFlushed = true
+				sendInitial()
 			}
 			return
 		}
@@ -3781,8 +3802,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 		now := time.Now()
 		hold.add([]byte("data: "+string(data)+"\n\n"), now)
-		if accumulated.Len() == lastScanLen || len(hold.buf) >= streamHoldMaxBytes || hold.due(now) {
-			releaseHeld()
+		if full := len(hold.buf) >= streamHoldMaxBytes; accumulated.Len() == lastScanLen || full || hold.due(now) {
+			releaseHeld(full)
 		}
 	}
 
@@ -3806,6 +3827,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		var deadline time.Time
 		if holding && !streamBlocked && len(hold.buf) > 0 {
 			deadline = hold.since.Add(streamHoldMaxAge)
+		} else if earlyInitial && !streamBlocked && !initialBufFlushed && len(initialChunkBuf) > 0 && len(bufferedTCChunks) == 0 && accumulated.Len() > 0 {
+			deadline = lastChunkAt.Add(streamHoldMaxAge)
 		}
 		due := holdTimer.wait(deadline, time.Now())
 		select {
@@ -3814,10 +3837,15 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 				open = false
 				break
 			}
+			lastChunkAt = time.Now()
 			handleChunk(chunk)
 		case <-due:
-			if !streamBlocked {
-				releaseHeld()
+			switch {
+			case streamBlocked:
+			case !initialBufFlushed:
+				sendInitial()
+			default:
+				releaseHeld(false)
 			}
 		}
 	}
@@ -3845,6 +3873,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 		}
 		if !streamBlocked {
+			// That check read the whole text: the tail needs no other
+			// mid-stream check (GAP-0625).
+			lastScanLen, lastFullScanLen = accumulated.Len(), accumulated.Len()
 			for _, buffered := range initialChunkBuf {
 				hold.add([]byte("data: "+string(buffered)+"\n\n"), time.Now())
 			}
@@ -3855,7 +3886,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// The tail gets the mid-stream check every chunk before it got, then the
 	// final check.
 	if holding && !streamBlocked && accumulated.Len() > lastScanLen {
-		scanMid()
+		scanMid(true)
 	}
 
 	// Final post-stream inspection (apply_guardrail output), enforced in
