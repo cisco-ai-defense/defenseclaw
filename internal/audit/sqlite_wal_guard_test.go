@@ -401,6 +401,10 @@ func (c *fakeWALClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+// useFakeWALClock starts walClock in 2027. A pass reads its context's
+// deadline against walClock (walRoundOutrunsPass), so a test that uses it
+// must not give the pass a real context.WithTimeout: the deadline would read
+// as already past and the pass would skip its settle rounds.
 func useFakeWALClock(t *testing.T) *fakeWALClock {
 	t.Helper()
 	clock := &fakeWALClock{now: time.Unix(1_800_000_000, 0)}
@@ -1190,11 +1194,13 @@ func TestCheckpointWALIfLargeOverTheLimitSettlesBrieflyThenHoldsTheWriter(t *tes
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
 	overrideWALDuration(t, &walSettledSpan, 5*time.Millisecond)
-	// What this test pins is the order of the pass (one copy, no sync, then
-	// the writer), not how fast a disk copies and syncs the ~15 MiB log under
-	// the writer. With the 100 ms production cap that copy and sync missed the
-	// cap on a Windows CI runner (100.7 ms held, WriterDeferred, no restart:
-	// rel-1-0-6:GAP-0410), so the bounded hold here gets room to finish.
+	// What this test pins is the order of the pass (each copy off the writer
+	// followed by a sync of the database file, walBoundedSettleRounds+1 of
+	// them, then the writer), not how fast a disk copies and syncs the ~15 MiB
+	// log under the writer. With the 100 ms production cap that copy and sync
+	// missed the cap on a Windows CI runner (100.7 ms held, WriterDeferred, no
+	// restart: rel-1-0-6:GAP-0410), so the bounded hold here gets room to
+	// finish.
 	overrideWALDuration(t, &walCatchUpCap, overLimitTestHoldCap)
 	// A reader on an older snapshot keeps every copy off the writer more than
 	// walCopyTargetFrames short of the end of the log, and each sync is
@@ -1214,11 +1220,16 @@ func TestCheckpointWALIfLargeOverTheLimitSettlesBrieflyThenHoldsTheWriter(t *tes
 	if err := snapshot.QueryRow(`SELECT count(*) FROM audit_events`).Scan(&events); err != nil {
 		t.Fatal(err)
 	}
-	var copies, syncs atomic.Int64
-	originalCopy, originalSync, originalWriter := walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook
+	var copies, syncs, fileSyncs atomic.Int64
+	originalCopy, originalSync, originalWriter, originalFileSync := walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook, walSyncDatabaseFile
 	t.Cleanup(func() {
 		walCopyPhaseHook, walSyncPhaseHook, walWriterPhaseHook = originalCopy, originalSync, originalWriter
+		walSyncDatabaseFile = originalFileSync
 	})
+	walSyncDatabaseFile = func(f *os.File) error {
+		fileSyncs.Add(1)
+		return originalFileSync(f)
+	}
 	walCopyPhaseHook = func(context.Context) {
 		copies.Add(1)
 		logWALGuardEvents(t, store, 100)
@@ -1245,6 +1256,10 @@ func TestCheckpointWALIfLargeOverTheLimitSettlesBrieflyThenHoldsTheWriter(t *tes
 		t.Fatalf("pass over the limit ran %d copies and %d syncs off the writer before it; want %d of each, every copy followed by a sync",
 			copiesAtWriter.Load(), syncsAtWriter.Load(), rounds)
 	}
+	// Each settle round synced audit.db itself, not only its test hook.
+	if fileSyncs.Load() != rounds {
+		t.Fatalf("pass over the limit synced the database file %d times; want %d, one per settle round", fileSyncs.Load(), rounds)
+	}
 }
 
 // A missed bounded pass remains over the limit. Its next pass must still
@@ -1267,6 +1282,11 @@ func TestCheckpointWALIfLargeRepeatedOverLimitPassesSettleBrieflyBeforeTheWriter
 		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
 		if err != nil || !pass.Bounded || !pass.WriterDeferred || pass.Syncs == 0 || pass.Syncs > walBoundedSettleRounds+1 {
 			t.Fatalf("over-limit pass %d: %+v, %v; sync hooks %d, want a bounded catch-up after 1 to %d syncs", passNumber, pass, err, syncs.Load(), walBoundedSettleRounds+1)
+		}
+		// Every repeated pass takes the writer again: a bounded hold with
+		// a cap that it used.
+		if pass.HoldCap <= 0 || pass.WriterHeld <= 0 {
+			t.Fatalf("over-limit pass %d did not try the writer: %+v; want a bounded hold (HoldCap and WriterHeld > 0)", passNumber, pass)
 		}
 		if !store.WALOverLimit() || pass.WriterHeld > testWALWriterBudget {
 			t.Fatalf("over-limit pass %d lost pressure or exceeded writer budget: %+v", passNumber, pass)
