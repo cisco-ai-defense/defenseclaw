@@ -106,7 +106,7 @@ Leader failover moves the lease and reattaches the volume (about 30 seconds). St
 | Failure | Behaviour |
 |---|---|
 | One gateway replica down | Nothing visible |
-| Leader down | Stateless checks continue; stateful steps follow the fail mode until the new leader is up |
+| Leader down | Stateless checks continue; stateful steps follow the fail mode until the new leader is up; egress that can carry data out (a body, or POST, PUT, PATCH, DELETE) is refused in every mode while the chain can't be checked (GAP-0601) |
 | All replicas down | Hooks follow D8; model calls fail with a clear message; policies stay |
 | Controller down | Existing actors keep their policy; new actors have no network; idle suspend pauses |
 | Callout down | Closed in managed mode, configurable in open source; `doctor` red |

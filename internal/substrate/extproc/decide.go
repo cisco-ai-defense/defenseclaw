@@ -360,7 +360,8 @@ func policyRefusal(v Verdict) bool {
 // the actor was deleted, so chain.failure_mode decides, from the first
 // request of the outage, as it does once the entry ages out (an alert on an
 // attended OSS install; refused on a managed install or for an unattended
-// actor). While the leader is reachable, an unchecked step or a cached
+// actor), except that a request that can carry data out is refused in every
+// mode (GAP-0601). While the leader is reachable, an unchecked step or a cached
 // delete needs its answer: one that misses this request's budget is
 // refused, retryable (registration_unconfirmed), and a stale or not-live
 // answer refuses.
@@ -398,7 +399,8 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 	// attendance (GAP-0090). A lookup outage (the leader, past the stale
 	// window) does not stop the actor's traffic: the actor is matched by
 	// atespace, and only its chain check is missing, which
-	// chain.failure_mode decides (refused on a managed install). The
+	// chain.failure_mode decides (refused on a managed install; a request
+	// that can carry data out is refused in every mode, GAP-0601). The
 	// actor's last known registration still names its profile and
 	// attendance; with none, nobody can say a person watches the actor, so
 	// it counts as unattended, and under auto its unchecked egress is
@@ -537,6 +539,16 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 			v.Retryable = true
 			return v
 		}
+		// The actor is never weaker than a laptop, whose chain check needs
+		// no cluster: a request that can carry data out is refused in every
+		// mode while its check is missing (a leader outage, a slow leader,
+		// the actor's own flood), and only GET and HEAD keep the alert
+		// (GAP-0601). An actor with no registration has no window to check.
+		if chainWhy != uncheckedUnregistered && carriesData(req, methods) {
+			v = deny(v, CategoryChainUnchecked, sourceChain, chainWhy, uncheckedSendReason(chainWhy))
+			v.Retryable = true
+			return v
+		}
 		v.Alert = true
 		v.Findings = append(v.Findings, "chain_unchecked:"+chainWhy)
 	}
@@ -557,6 +569,37 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		v.WantBody = true
 	}
 	return e.uninspected(v, why)
+}
+
+// carriesData reports whether a request can carry data out: it has a body
+// (its headers do not end the stream), or it is, or stands for through an
+// override header or parameter, a method other than GET and HEAD
+// (GAP-0601). methods is requestMethods(req).
+func carriesData(req *Request, methods []string) bool {
+	if !req.EndOfStream {
+		return true
+	}
+	for _, m := range methods {
+		if m != "GET" && m != "HEAD" {
+			return true
+		}
+	}
+	return false
+}
+
+// uncheckedSendReason is the refusal text of a request that can carry data
+// out while its chain check is missing, naming why (GAP-0601).
+func uncheckedSendReason(why string) string {
+	cause := "DefenseClaw could not check this request against the actor's earlier tool calls"
+	switch why {
+	case uncheckedLookup, uncheckedError:
+		cause = "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached"
+	case uncheckedTimeout:
+		cause = "DefenseClaw's gateway leader did not answer in time"
+	case uncheckedBusy:
+		cause = "This actor has too many requests waiting for their check"
+	}
+	return cause + ", so DefenseClaw can't tell whether it read a secret earlier. Requests that can carry data out (a body, or POST, PUT, PATCH, DELETE) are refused until the check works; GET and HEAD go through with an alert."
 }
 
 // askStage raises the asks a request standing for methods needs: every

@@ -425,16 +425,28 @@ func TestChainCheckBudget(t *testing.T) {
 	slow := newHarness(t, func(_ *Config, o *Options) {
 		o.ChainChecker = fakeChecker{v: ChainVerdict{Deny: true}, delay: 200 * time.Millisecond}
 	})
+	// A check that misses the budget is unchecked: a GET goes through with
+	// an alert, a POST is refused, retryable, in every mode (GAP-0601).
 	start := time.Now()
-	if v := slow.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); !v.Allow {
-		t.Fatalf("slow chain check refused: %+v", v)
+	if v := slow.eng.DecideHeaders(ctx, req("x", "GET", "example.com", "/")); !v.Allow || !v.Alert {
+		t.Fatalf("slow chain check, GET: %+v", v)
+	}
+	if d := time.Since(start); d > 150*time.Millisecond {
+		t.Fatalf("chain check took %s, budget 20ms", d)
+	}
+	start = time.Now()
+	if v := slow.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); v.Allow || v.Rule != uncheckedTimeout || !v.Retryable {
+		t.Fatalf("slow chain check, POST: %+v", v)
 	}
 	if d := time.Since(start); d > 150*time.Millisecond {
 		t.Fatalf("chain check took %s, budget 20ms", d)
 	}
 	errc := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = fakeChecker{err: errors.New("leader down")} })
-	if v := errc.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); !v.Allow {
-		t.Fatalf("chain error refused: %+v", v)
+	if v := errc.eng.DecideHeaders(ctx, req("x", "GET", "example.com", "/")); !v.Allow {
+		t.Fatalf("chain error, GET refused: %+v", v)
+	}
+	if v := errc.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); v.Allow || v.Rule != uncheckedError {
+		t.Fatalf("chain error, POST allowed: %+v", v)
 	}
 }
 

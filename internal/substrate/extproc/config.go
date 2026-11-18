@@ -122,7 +122,9 @@ type ChainConfig struct {
 	// FailureMode decides a request whose chain check could not answer (an
 	// error, the budget, the actor's in-flight cap): auto (default) refuses
 	// for unattended actors and alerts for the rest, closed always refuses
-	// (managed installs), open always alerts.
+	// (managed installs), open always alerts. An alert covers GET and HEAD
+	// only: a request that can carry data out is refused whatever the mode
+	// (GAP-0601).
 	FailureMode string `yaml:"failure_mode"`
 }
 
