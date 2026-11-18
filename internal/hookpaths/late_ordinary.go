@@ -497,7 +497,7 @@ var (
 	lateFilters = []string{"tail", "head", "grep", "egrep", "wc", "sort", "uniq", "cut", "tr", "cat", "less", "jq"}
 	// lateWrappers run another program or a shell text the scan cannot read.
 	lateWrappers = []string{"sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "fish", "eval", "exec", "source", ".",
-		"pushd", "popd", "env", "sudo", "su", "doas", "xargs", "nohup", "command", "builtin", "time", "watch", "timeout", "setsid",
+		"pushd", "popd", "chdir", "env", "sudo", "su", "doas", "xargs", "nohup", "command", "builtin", "time", "watch", "timeout", "setsid",
 		"ssh", "scp", "sftp", "nc", "ncat", "socat", "script", "screen", "tmux", "at", "crontab",
 		"vi", "vim", "view", "nvim", "ex", "ed", "emacs", "nano"}
 	// lateInterpreters run program text given on the command line.

@@ -586,7 +586,7 @@ func lateEnvName(name string) bool {
 
 func lateChangesShellContext(program string) bool {
 	switch program {
-	case "cd", "pushd", "popd", "export", "unset", "set", "declare", "typeset", "readonly", "eval", "source", ".", "builtin", "command", "exec":
+	case "cd", "chdir", "pushd", "popd", "export", "unset", "set", "declare", "typeset", "readonly", "eval", "source", ".", "builtin", "command", "exec":
 		return true
 	default:
 		return false

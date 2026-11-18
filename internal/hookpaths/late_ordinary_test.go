@@ -271,6 +271,7 @@ func TestGAP0518LateOrdinaryCallRound4(t *testing.T) {
 		{"cd to a missing folder", "cd gone && ls", false},
 		{"cd to the home", "cd .. && ls", false},
 		{"pushd", "pushd sub && cat childlink", false},
+		{"zsh chdir", "chdir sub && cat childlink", false},
 		// Text words.
 		{"echo flag next to a link", "echo -l", true},
 		{"echo of a state folder word", "echo openclaw", true},

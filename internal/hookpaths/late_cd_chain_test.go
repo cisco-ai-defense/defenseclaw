@@ -136,6 +136,7 @@ func TestGAP1188LateChainCallGradeReadsALeadingCD(t *testing.T) {
 		{"later cd in a subshell", "ls && (cd ../.ssh && cat authorized_keys)", false},
 		{"later cd in a group", "ls && { cd sub && cat childlink; }", false},
 		{"pushd before a later cd", "pushd sub && cd . && cat childlink", false},
+		{"zsh chdir before a later cd", "chdir sub && cd . && cat childlink", false},
 		{"source before a later cd", "source x.sh && cd sub && ls", false},
 		{"a subshell with a cd before a later cd", "(cd ../.ssh) && cd sub && ls", false},
 		{"CDPATH set before a later cd", "CDPATH=" + home + "; cd sub && ls", false},
@@ -149,7 +150,7 @@ func TestGAP1188LateChainCallGradeReadsALeadingCD(t *testing.T) {
 			if got := LateChainCallGrade(tc.command, project, home) == GradeNone; got != tc.ordinary {
 				t.Fatalf("LateChainCallGrade(%q) ordinary=%v, want %v", tc.command, got, tc.ordinary)
 			}
-			if strings.Contains(tc.command, "cd ") || strings.HasPrefix(tc.command, "pushd ") || strings.HasPrefix(tc.command, "source ") {
+			if strings.Contains(tc.command, "cd ") || strings.HasPrefix(tc.command, "pushd ") || strings.HasPrefix(tc.command, "chdir ") || strings.HasPrefix(tc.command, "source ") {
 				// LateCallGrade keeps every compound call with a cd Possible.
 				if grade := LateCallGrade(tc.command, project, home); grade == GradeNone {
 					t.Fatalf("LateCallGrade(%q) = None, want it unchanged (not ordinary)", tc.command)
