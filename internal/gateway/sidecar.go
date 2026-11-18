@@ -610,9 +610,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	}
 	if store != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		sidecar.mcpTools.store = store
-		if observed, loadErr := store.ListMCPObservedTools(context.Background()); loadErr == nil {
-			sidecar.mcpTools.restoreObserved(observed)
-		} else {
+		if loadErr := sidecar.mcpTools.restoreFromStore(context.Background()); loadErr != nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] observed MCP tool state unavailable: %v\n", loadErr)
 		}
 	}
@@ -1096,8 +1094,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	go lazyregexp.CompileAll()
 	// The endpoint inventory cannot be emitted from NewSidecar: schema v8
 	// deliberately binds its generation-owned runtime afterward. Publish the
-	// first complete connector/MCP snapshot immediately after that binding, then
-	// retain the same callback for each managed discovery scan.
+	// first complete connector/MCP snapshot after the installation-keyed identity
+	// is ready below, then retain the same callback for each managed discovery scan.
+	var initialInventoryEmit func(context.Context)
 	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
 		var snapshotFn func() inventory.AIDiscoveryReport
 		discovery := s.aiDiscoverySnapshot()
@@ -1110,7 +1109,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		if discovery != nil {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
-		inventoryEmit(runCtx)
+		initialInventoryEmit = inventoryEmit
 	}
 
 	runID := gatewaylog.ProcessRunID()
@@ -1220,6 +1219,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("sidecar: gateway token synthesis: %w", tokErr)
 	}
 	inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
+	if initialInventoryEmit != nil {
+		initialInventoryEmit(runCtx)
+	}
 
 	s.attachApplicationProtectionObserver(runCtx, apiToken)
 

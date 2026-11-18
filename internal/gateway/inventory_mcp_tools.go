@@ -20,19 +20,28 @@ type mcpToolObservation struct {
 	at   time.Time
 }
 
+type mcpObservedToolStore interface {
+	UpsertMCPObservedToolIf(context.Context, audit.MCPObservedTool, func() bool) error
+	ListMCPObservedTools(context.Context) ([]audit.MCPObservedTool, error)
+	DeleteMCPObservedToolsForParents(context.Context, []string) error
+}
+
 // mcpToolInventory retains only tool names from completed scanner listings and
 // authenticated hook calls. Observed calls are projected into the audit store
 // so they survive a restart. It never retains arguments, descriptions, schemas,
 // results, or the scanner's target URL.
 type mcpToolInventory struct {
-	mu              sync.Mutex
-	metric          func(context.Context, string, string, string)
-	store           *audit.Store
-	advertised      map[string][]mcpToolObservation
-	observed        map[string]map[string]time.Time
-	partial         map[string]bool
-	observedPartial map[string]bool
-	parents         map[string]string
+	mu                sync.Mutex
+	metric            func(context.Context, string, string, string)
+	store             mcpObservedToolStore
+	advertised        map[string][]mcpToolObservation
+	observed          map[string]map[string]time.Time
+	partial           map[string]bool
+	observedPartial   map[string]bool
+	parents           map[string]string
+	restored          map[string]map[string][]audit.MCPObservedTool
+	pendingRemoval    map[string]struct{}
+	restoreIncomplete bool
 }
 
 // refreshParents invalidates evidence when an alias starts naming a different
@@ -65,15 +74,17 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var removed []string
+	if m.pendingRemoval == nil {
+		m.pendingRemoval = make(map[string]struct{})
+	}
 	for key, old := range m.parents {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete {
 			continue
 		}
 		if next[key] != old {
-			if old != "" {
-				removed = append(removed, old)
+			if old != "" && m.store != nil {
+				m.pendingRemoval[old] = struct{}{}
 			}
 			delete(m.advertised, key)
 			delete(m.observed, key)
@@ -94,7 +105,43 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 		}
 	}
 	m.parents = next
+	// Reconcile every durable candidate only after an authoritative connector
+	// read identifies the current parent. This removes stale pre-restart parent
+	// generations without allowing map iteration order to choose a winner.
+	for key, parents := range m.restored {
+		connector, _, _ := strings.Cut(key, "\x00")
+		if _, incomplete := incompleteConnectors[connector]; incomplete {
+			continue
+		}
+		current := m.parents[key]
+		for parentID, tools := range parents {
+			if current == "" || parentID != current {
+				m.pendingRemoval[parentID] = struct{}{}
+				continue
+			}
+			for _, tool := range tools {
+				m.restoreToolLocked(key, tool)
+			}
+		}
+		delete(m.restored, key)
+	}
+	removed := make([]string, 0, len(m.pendingRemoval))
+	for parentID := range m.pendingRemoval {
+		removed = append(removed, parentID)
+	}
+	sort.Strings(removed)
 	return removed
+}
+
+func (m *mcpToolInventory) acknowledgeRemovedParents(parentIDs []string) {
+	if m == nil || len(parentIDs) == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, parentID := range parentIDs {
+		delete(m.pendingRemoval, parentID)
+	}
 }
 
 func (m *mcpToolInventory) recordMetric(ctx context.Context, stage, outcome, reason string) {
@@ -119,15 +166,26 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 			return
 		}
 		if a.mcpTools.store != nil {
-			_ = a.mcpTools.store.UpsertMCPObservedTool(ctx, audit.MCPObservedTool{
+			_ = a.mcpTools.store.UpsertMCPObservedToolIf(ctx, audit.MCPObservedTool{
 				ParentComponentID: parentID,
 				Connector:         projection.connector,
 				ServerName:        server,
 				ToolName:          tool,
 				LastObservedAt:    at,
+			}, func() bool {
+				return a.mcpTools.parentIsCurrent(projection.connector, server, parentID)
 			})
 		}
 	}
+}
+
+func (m *mcpToolInventory) parentIsCurrent(connector, server, parentID string) bool {
+	if m == nil || parentID == "" {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.parents[mcpToolServerKey(connector, server)] == parentID
 }
 
 func mcpToolServerKey(connector, server string) string {
@@ -222,35 +280,64 @@ func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.observed == nil {
-		m.observed = make(map[string]map[string]time.Time)
-	}
-	if m.parents == nil {
-		m.parents = make(map[string]string)
-	}
+	m.restoreIncomplete = false
+	m.restored = make(map[string]map[string][]audit.MCPObservedTool)
 	for _, tool := range tools {
 		name := inventorySafeItemName(tool.ToolName, 256)
 		if name == "" || name != tool.ToolName || tool.ParentComponentID == "" {
 			continue
 		}
 		key := mcpToolServerKey(tool.Connector, tool.ServerName)
-		if current := m.parents[key]; current != "" && current != tool.ParentComponentID {
-			continue
+		if m.restored[key] == nil {
+			m.restored[key] = make(map[string][]audit.MCPObservedTool)
 		}
-		if m.observed[key] == nil {
-			m.observed[key] = make(map[string]time.Time)
+		m.restored[key][tool.ParentComponentID] = append(m.restored[key][tool.ParentComponentID], tool)
+	}
+}
+
+func (m *mcpToolInventory) restoreToolLocked(key string, tool audit.MCPObservedTool) {
+	if m.observed == nil {
+		m.observed = make(map[string]map[string]time.Time)
+	}
+	if m.observed[key] == nil {
+		m.observed[key] = make(map[string]time.Time)
+	}
+	if _, exists := m.observed[key][tool.ToolName]; !exists && len(m.observed[key]) >= maxMCPToolObservations {
+		return
+	}
+	m.observed[key][tool.ToolName] = tool.LastObservedAt.UTC()
+	if tool.Overflowed {
+		if m.observedPartial == nil {
+			m.observedPartial = make(map[string]bool)
 		}
-		if _, exists := m.observed[key][name]; !exists && len(m.observed[key]) >= maxMCPToolObservations {
-			continue
-		}
-		m.parents[key] = tool.ParentComponentID
-		m.observed[key][name] = tool.LastObservedAt.UTC()
-		if tool.Overflowed {
-			if m.observedPartial == nil {
-				m.observedPartial = make(map[string]bool)
-			}
-			m.observedPartial[key] = true
-		}
+		m.observedPartial[key] = true
+	}
+}
+
+func (m *mcpToolInventory) restoreFromStore(ctx context.Context) error {
+	if m == nil || m.store == nil {
+		return nil
+	}
+	tools, err := m.store.ListMCPObservedTools(ctx)
+	if err != nil {
+		m.mu.Lock()
+		m.restoreIncomplete = true
+		m.mu.Unlock()
+		return err
+	}
+	m.restoreObserved(tools)
+	return nil
+}
+
+func (m *mcpToolInventory) retryRestoreFromStore(ctx context.Context) {
+	if m == nil || m.store == nil {
+		return
+	}
+	m.mu.Lock()
+	retry := m.restoreIncomplete
+	m.mu.Unlock()
+	if retry {
+		_ = m.restoreFromStore(ctx)
 	}
 }
 
@@ -261,11 +348,14 @@ func (m *mcpToolInventory) restoreObserved(tools []audit.MCPObservedTool) {
 // connector with no observed evidence cannot make a complete connector's
 // authenticated observations diagnostic-only.
 func (m *mcpToolInventory) observedIncomplete(incompleteConnectors map[string]struct{}) bool {
-	if m == nil || len(incompleteConnectors) == 0 {
+	if m == nil {
 		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.restoreIncomplete || len(m.restored) > 0 || len(m.pendingRemoval) > 0 {
+		return true
+	}
 	for key, tools := range m.observed {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete &&

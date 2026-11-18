@@ -13,10 +13,33 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
+
+type testMCPObservedToolStore struct {
+	tools        []audit.MCPObservedTool
+	listErr      error
+	deleteErr    error
+	deleteCalls  [][]string
+	stillCurrent func() bool
+}
+
+func (s *testMCPObservedToolStore) UpsertMCPObservedToolIf(_ context.Context, _ audit.MCPObservedTool, stillCurrent func() bool) error {
+	s.stillCurrent = stillCurrent
+	return nil
+}
+
+func (s *testMCPObservedToolStore) ListMCPObservedTools(context.Context) ([]audit.MCPObservedTool, error) {
+	return s.tools, s.listErr
+}
+
+func (s *testMCPObservedToolStore) DeleteMCPObservedToolsForParents(_ context.Context, parentIDs []string) error {
+	s.deleteCalls = append(s.deleteCalls, append([]string(nil), parentIDs...))
+	return s.deleteErr
+}
 
 func TestObservedMCPToolRequiresAuthenticatedExactHookEvidence(t *testing.T) {
 	var tools mcpToolInventory
@@ -63,6 +86,84 @@ func TestObservedMCPToolReportsUnavailableParent(t *testing.T) {
 	api.recordObservedMCPTool(ctx, req, time.Now())
 	if gotStage != "observe" || gotOutcome != "partial" || gotReason != "parent_unavailable" {
 		t.Fatalf("unavailable parent metric=%q/%q/%q", gotStage, gotOutcome, gotReason)
+	}
+}
+
+func TestObservedMCPToolDeferredWriteRejectsRetiredParent(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
+	api := &APIServer{mcpTools: tools}
+	oldParent := endpointInventoryComponent{id: "old-parent", itemName: "notes", agentConnector: "claudecode"}
+	tools.refreshParents([]endpointInventoryComponent{oldParent})
+	req := agentHookRequest{
+		ConnectorName: "claudecode", ConnectorInstanceID: syntheticToolResourceConnectorID,
+		ToolName: "mcp__notes__search", Payload: map[string]interface{}{"mcp_server_name": "notes"},
+	}
+	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "claudecode"), req,
+		[]byte(`{"tool_name":"mcp__notes__search","mcp_server_name":"notes"}`))
+	api.recordObservedMCPTool(ctx, req, time.Now())
+	if store.stillCurrent == nil || !store.stillCurrent() {
+		t.Fatal("current parent was rejected before retirement")
+	}
+	tools.refreshParents([]endpointInventoryComponent{{id: "new-parent", itemName: "notes", agentConnector: "claudecode"}})
+	if store.stillCurrent() {
+		t.Fatal("deferred durable write accepted a retired parent")
+	}
+}
+
+func TestObservedMCPToolRestoreReconcilesParentAndRetriesCleanup(t *testing.T) {
+	now := time.Now().UTC()
+	store := &testMCPObservedToolStore{tools: []audit.MCPObservedTool{
+		{ParentComponentID: "old-parent", Connector: "claudecode", ServerName: "notes", ToolName: "old", LastObservedAt: now},
+		{ParentComponentID: "new-parent", Connector: "claudecode", ServerName: "notes", ToolName: "current", LastObservedAt: now},
+	}}
+	tools := &mcpToolInventory{store: store}
+	if err := tools.restoreFromStore(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	server := endpointInventoryComponent{id: "new-parent", itemName: "notes", agentConnector: "claudecode"}
+	removed := tools.refreshParents([]endpointInventoryComponent{server})
+	if fmt.Sprint(removed) != "[old-parent]" {
+		t.Fatalf("stale parents=%v", removed)
+	}
+	rows, _ := tools.components([]endpointInventoryComponent{server}, false, "observed")
+	if len(rows) != 1 || rows[0].itemName != "current" {
+		t.Fatalf("restored rows=%+v", rows)
+	}
+	store.deleteErr = fmt.Errorf("temporary cleanup failure")
+	if err := store.DeleteMCPObservedToolsForParents(t.Context(), removed); err == nil {
+		t.Fatal("cleanup unexpectedly succeeded")
+	}
+	if !tools.observedIncomplete(nil) {
+		t.Fatal("failed cleanup did not keep observed inventory partial")
+	}
+	if retry := tools.refreshParents([]endpointInventoryComponent{server}); fmt.Sprint(retry) != "[old-parent]" {
+		t.Fatalf("cleanup was not retried: %v", retry)
+	}
+	store.deleteErr = nil
+	if err := store.DeleteMCPObservedToolsForParents(t.Context(), removed); err != nil {
+		t.Fatal(err)
+	}
+	tools.acknowledgeRemovedParents(removed)
+	if tools.observedIncomplete(nil) {
+		t.Fatal("successful cleanup left observed inventory partial")
+	}
+}
+
+func TestObservedMCPToolRestoreFailureRetriesToAuthoritativeEmpty(t *testing.T) {
+	store := &testMCPObservedToolStore{listErr: fmt.Errorf("database busy")}
+	tools := &mcpToolInventory{store: store}
+	if err := tools.restoreFromStore(t.Context()); err == nil {
+		t.Fatal("restore unexpectedly succeeded")
+	}
+	if !tools.observedIncomplete(nil) {
+		t.Fatal("failed restore did not keep observed inventory partial")
+	}
+	store.listErr = nil
+	tools.retryRestoreFromStore(t.Context())
+	tools.refreshParents(nil)
+	if tools.observedIncomplete(nil) {
+		t.Fatal("successful empty restore was not authoritative")
 	}
 }
 

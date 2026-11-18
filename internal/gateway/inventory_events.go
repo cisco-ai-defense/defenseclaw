@@ -324,9 +324,12 @@ func emitEndpointInventory(
 		firstErr = err
 	}
 	if len(toolStates) > 0 && toolStates[0] != nil {
+		toolStates[0].retryRestoreFromStore(ctx)
 		removed := toolStates[0].refreshCompleteParents(perConnectorMCP, perConnectorStatus.incompleteConnectors)
-		if toolStates[0].store != nil {
-			_ = toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed)
+		if toolStates[0].store != nil && len(removed) > 0 {
+			if err := toolStates[0].store.DeleteMCPObservedToolsForParents(ctx, removed); err == nil {
+				toolStates[0].acknowledgeRemovedParents(removed)
+			}
 		}
 		observedReadPartial := toolStates[0].observedIncomplete(perConnectorStatus.incompleteConnectors)
 		if perConnectorPartial && len(perConnectorStatus.incompleteConnectors) == 0 {

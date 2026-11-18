@@ -142,6 +142,14 @@ func upsertMCPObservedToolTx(ctx context.Context, tx *sql.Tx, tool MCPObservedTo
 // sibling. Inside a hook CallWriteBatch it joins that call's existing SQLite
 // transaction; otherwise it uses the ordinary grouped durable write path.
 func (s *Store) UpsertMCPObservedTool(ctx context.Context, input MCPObservedTool) error {
+	return s.UpsertMCPObservedToolIf(ctx, input, nil)
+}
+
+// UpsertMCPObservedToolIf records one authenticated tool only if stillCurrent
+// remains true when the durable transaction actually executes. The predicate
+// closes the gap between hook-time attribution and a concurrent authoritative
+// parent refresh, including when a CallWriteBatch defers this write.
+func (s *Store) UpsertMCPObservedToolIf(ctx context.Context, input MCPObservedTool, stillCurrent func() bool) error {
 	if s == nil || s.db == nil || ctx == nil {
 		return fmt.Errorf("audit: observed MCP tool store is not initialized")
 	}
@@ -150,6 +158,9 @@ func (s *Store) UpsertMCPObservedTool(ctx context.Context, input MCPObservedTool
 		return err
 	}
 	run := func(runCtx context.Context, tx *sql.Tx) error {
+		if stillCurrent != nil && !stillCurrent() {
+			return nil
+		}
 		return upsertMCPObservedToolTx(runCtx, tx, tool)
 	}
 	if batch := deferringBatch(ctx, s); batch != nil {

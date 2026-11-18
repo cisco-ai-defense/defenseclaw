@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -78,6 +79,27 @@ func TestMCPObservedToolsPreserveSiblingsAndSurviveRestart(t *testing.T) {
 	}
 }
 
+func TestMCPObservedToolDeferredUpsertRevalidatesParent(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
+	ctx := WithCallWriteBatch(context.Background(), store)
+	current := true
+	if err := store.UpsertMCPObservedToolIf(ctx, MCPObservedTool{
+		ParentComponentID: "retired-parent", Connector: "claudecode", ServerName: "notes",
+		ToolName: "search", LastObservedAt: time.Now(),
+	}, func() bool { return current }); err != nil {
+		t.Fatal(err)
+	}
+	current = false
+	FlushCallWrites(ctx)
+	rows, err := store.ListMCPObservedTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("retired parent was recreated: %+v", rows)
+	}
+}
+
 func TestMCPObservedToolOverflowIsDurableAndDoesNotReplaceSiblings(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	at := time.Date(2026, 11, 17, 1, 2, 3, 0, time.UTC)
@@ -107,7 +129,7 @@ func TestMCPObservedToolRejectsContentLikeOversizedNames(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	err := store.UpsertMCPObservedTool(context.Background(), MCPObservedTool{
 		ParentComponentID: "parent", Connector: "claudecode", ServerName: "notes",
-		ToolName: string(make([]byte, maxMCPObservedToolName+1)), LastObservedAt: time.Now(),
+		ToolName: strings.Repeat("a", maxMCPObservedToolName+1), LastObservedAt: time.Now(),
 	})
 	if err == nil {
 		t.Fatal("oversized tool name was accepted")

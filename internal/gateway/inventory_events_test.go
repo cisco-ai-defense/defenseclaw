@@ -776,6 +776,8 @@ func TestPerConnectorMCPInventoryScopesPartialStateByConnector(t *testing.T) {
 	withManagedEnterprise(t, true)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", filepath.Join(t.TempDir(), ".codex"))
+	originalClaudeConfigDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	t.Setenv("CLAUDE_CONFIG_DIR", originalClaudeConfigDir)
 	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
 		t.Fatal(err)
 	}
