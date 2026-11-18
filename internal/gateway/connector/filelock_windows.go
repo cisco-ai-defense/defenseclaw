@@ -61,6 +61,12 @@ func RemoveIdleFileLockSentinels() {
 	}
 }
 
+// removeIdleLockFile removes lockPath when it is an empty lock file no one
+// holds open (removeIdleWindowsLockSentinel).
+func removeIdleLockFile(lockPath string) {
+	removeIdleWindowsLockSentinel(lockPath)
+}
+
 // removeIdleWindowsLockSentinel deletes path when it is an empty regular
 // file with one link that it can open without sharing: no other handle, so no
 // lock holder, is open on it.

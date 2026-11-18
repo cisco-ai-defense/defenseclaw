@@ -7,7 +7,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 )
@@ -61,11 +60,10 @@ func TestOrphanedKiroHooksAreFoundAsDecodedEntries(t *testing.T) {
 // the account. A file whose entries carry the name defenseclaw-* but run
 // another install's command is that install's: this install's `setup remove
 // kiro` must not find it, and so must not tear it down. Ownership is the
-// decoded action.command, not the name prefix.
+// decoded action.command, not the name prefix, and on Windows, where the
+// command names the account's launcher, also this data folder's own hook
+// script or Kiro backup record (install A has neither).
 func TestOrphanedKiroHooksOfAnotherInstallAreNotFound(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows commands name the account's launcher, not a data folder")
-	}
 	dataA := filepath.Join(t.TempDir(), "install-a")
 	dataB := filepath.Join(t.TempDir(), "install-b")
 	for _, dir := range []string{dataA, dataB} {

@@ -300,7 +300,13 @@ func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
 // an unconfigured connector "already absent" with its hook file still there
 // (rel-1-0-10 GAP-1092, GAP-1174).
 func (c *KiroConnector) orphanedHookFiles(opts SetupOpts) ([]string, error) {
-	commands := c.installHookCommands(opts)
+	return c.orphanedHookFilesFor(runtime.GOOS, opts)
+}
+
+// orphanedHookFilesFor is orphanedHookFiles for the commands Setup writes on
+// goos (installHookCommandsFor), so the Windows rule is tested on every host.
+func (c *KiroConnector) orphanedHookFilesFor(goos string, opts SetupOpts) ([]string, error) {
+	commands := c.installHookCommandsFor(goos, opts)
 	if len(commands) == 0 {
 		return nil, nil
 	}
@@ -330,21 +336,76 @@ func (c *KiroConnector) orphanedHookFiles(opts SetupOpts) ([]string, error) {
 // these. A managed install's footprint belongs to the hook guardian, so no
 // command is owned there.
 func (c *KiroConnector) installHookCommands(opts SetupOpts) []string {
+	return c.installHookCommandsFor(runtime.GOOS, opts)
+}
+
+// installHookCommandsFor is installHookCommands on goos. A POSIX command runs
+// the hook script under opts.DataDir, so it names this data folder by itself
+// and is owned with no other proof (a rollback's data swap drops the script,
+// GAP-1092). A Windows command runs the account's launcher and is the same
+// for every data folder of the account: alone it took the live hooks of the
+// install that guards Kiro for those of another data folder that never set
+// Kiro up (a second DEFENSECLAW_HOME, `connector prune-orphans --data-dir`),
+// whose boot reclaim or prune then removed them and left Kiro unguarded
+// (review P2 of GAP-1092). The Windows commands are this install's only when
+// this data folder shows that its own Setup set Kiro up
+// (kiroDataDirSetUpKiro).
+func (c *KiroConnector) installHookCommandsFor(goos string, opts SetupOpts) []string {
 	if kiroManaged(opts) {
 		return nil
 	}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
+		if !kiroDataDirSetUpKiro(opts.DataDir) {
+			return nil
+		}
 		return kiroWindowsOwnedHookCommandsFor(false)
 	}
-	script := c.hookCommand(opts)
-	v3 := c.hookCommandForV3Surface(opts)
-	return uniqueNonEmptyStrings([]string{script, posixHookCommandUnquoted(script), v3, posixHookCommandUnquoted(v3)})
+	script := filepath.Join(opts.DataDir, "hooks", kiroHookScriptName)
+	agent := kiroHookInvocationCommandFor(goos, script, "", false)
+	v3 := kiroHookInvocationCommandFor(goos, script, KiroHookSurfaceV3, false)
+	return uniqueNonEmptyStrings([]string{agent, posixHookCommandUnquoted(agent), v3, posixHookCommandUnquoted(v3)})
+}
+
+// kiroDataDirSetUpKiro reports whether dataDir shows that its own Setup set
+// Kiro up and its teardown did not finish: the hook script Setup writes is in
+// its hooks folder (not the disabled tombstone a teardown leaves there), or
+// one of its connector backup records, which teardown discards file by file
+// as it reclaims each, is Kiro's.
+func kiroDataDirSetUpKiro(dataDir string) bool {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return false
+	}
+	if kiroLiveHookScript(filepath.Join(dataDir, "hooks", kiroHookScriptName)) {
+		return true
+	}
+	recorded := false
+	_ = forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		if strings.EqualFold(b.Connector, "kiro") {
+			recorded = true
+		}
+		return nil
+	})
+	return recorded
+}
+
+// kiroLiveHookScript reports whether path is a regular file other than the
+// disabled tombstone (hookBodyIsDisabledTombstone).
+func kiroLiveHookScript(path string) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if info.Size() > 1<<16 {
+		return true
+	}
+	body, err := os.ReadFile(path)
+	return err == nil && !hookBodyIsDisabledTombstone(string(body))
 }
 
 // InstallOwnsHookEntries reports whether a Kiro file still holds a hook entry
-// whose command is one this install wrote. The boot reclaim of an unguarded
-// connector uses it as the proof of ownership when the install's hook script
-// is gone (a rollback's data swap drops it).
+// whose command is one this install wrote (installHookCommands). The boot
+// reclaim of an unguarded connector uses it as the proof of ownership.
 func (c *KiroConnector) InstallOwnsHookEntries(opts SetupOpts) (bool, error) {
 	files, err := c.orphanedHookFiles(opts)
 	return len(files) > 0, err

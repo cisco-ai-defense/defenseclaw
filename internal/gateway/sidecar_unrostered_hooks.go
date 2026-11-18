@@ -39,12 +39,13 @@ import (
 //
 // A rollback's data swap drops the hook script and leaves the entries
 // running a script that is not there (rel-1-0-10 GAP-1092). A connector that
-// can prove, without the script, that an entry is this install's own
-// (connector.InstallHookEntryOwner: the decoded command of an entry is
-// exactly one this install's Setup writes, never a managed install's)
-// qualifies without it. When the script is gone and ownership cannot be
-// proven, the entries stay and the boot says so. Windows commands name the per-account
-// launcher, not a data directory. Its own Teardown removes only what
+// can prove from its decoded entries that one is this install's own
+// (connector.InstallHookEntryOwner: the command is exactly one this install's
+// Setup writes, never a managed install's, and on Windows, where the command
+// names the account's launcher, this data folder also holds the live hook
+// script or a backup record of the connector) qualifies with or without the
+// script, by that proof alone. When ownership cannot be proven, the entries
+// stay and the boot says so. Its own Teardown removes only what
 // DefenseClaw wrote, then the hook script goes and its hook token is
 // revoked as for a removed connector, so the next boot finds nothing to do.
 // A managed install leaves it to the hook guardian. A failure is logged and
@@ -92,23 +93,19 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 		if _, hooked := conn.(connector.HookEndpoint); !hooked {
 			continue
 		}
-		scripted := installWroteHookScript(conn, opts)
-		var owner connector.InstallHookEntryOwner
-		if !scripted {
-			var ok bool
-			if owner, ok = conn.(connector.InstallHookEntryOwner); !ok {
-				continue
-			}
+		owner, decoded := conn.(connector.InstallHookEntryOwner)
+		if !decoded && !installWroteHookScript(conn, opts) {
+			continue
 		}
 		if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "teardown incomplete") {
 			continue
 		}
-		if scripted {
-			if !connector.PatchedFilesNameOwnHook(opts, conn) {
+		if decoded {
+			if owns, err := owner.InstallOwnsHookEntries(opts); err != nil || !owns {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s is not guarded and DefenseClaw hook entries remain, but this install cannot prove they are its own; left in place\n", name)
 				continue
 			}
-		} else if owns, err := owner.InstallOwnsHookEntries(opts); err != nil || !owns {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector %s is not guarded and DefenseClaw hook entries remain, but this install cannot prove they are its own (its hook script is gone); left in place\n", name)
+		} else if !connector.PatchedFilesNameOwnHook(opts, conn) {
 			continue
 		}
 		result := "removed"

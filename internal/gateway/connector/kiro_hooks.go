@@ -568,14 +568,16 @@ func kiroEmptyJSONValue(value interface{}) bool {
 }
 
 // removeKiroFileResidue removes what sits beside a Kiro file DefenseClaw has
-// just removed: its empty lock file, and, for a CLI 2.x agent, the
+// just removed: its empty lock file when no one holds it (removeIdleLockFile:
+// a lock file still there may belong to a live holder, and unlinking a held
+// one lets a second writer lock a new file), and, for a CLI 2.x agent, the
 // <agent>.json.bak copies Kiro's /upgrade-agent keeps, when each is itself
-// only DefenseClaw's overlay (its hooks all DefenseClaw's and no operator
-// key). A copy with anything else in it is the operator's and stays.
+// only DefenseClaw's overlay: every hook's command exactly one of this
+// install's (kiroV2EntryOwned; a copy with another data folder's kiro-hook.sh
+// is that install's) and no operator key. A copy with anything else in it
+// stays.
 func removeKiroFileResidue(path, hookScript string, agent bool) {
-	if info, err := os.Lstat(path + ".lock"); err == nil && info.Mode().IsRegular() && info.Size() == 0 {
-		_ = os.Remove(path + ".lock")
-	}
+	removeIdleLockFile(path + ".lock")
 	if !agent {
 		return
 	}
@@ -597,14 +599,21 @@ func removeKiroFileResidue(path, hookScript string, agent bool) {
 			continue
 		}
 		if list, ok := cfg["hooks"].([]interface{}); ok {
-			if kept := removeKiroOwnedUniversalHooks(list, hookScript); len(kept) == 0 {
+			kept := slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+				return kiroUniversalEntryOwned(item, hookScript)
+			})
+			if len(kept) == 0 {
 				delete(cfg, "hooks")
 			} else {
 				cfg["hooks"] = kept
 			}
 		} else if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
 			for event, raw := range hooks {
-				if remaining := removeKiroOwnedV2Hooks(raw, hookScript); len(remaining) == 0 {
+				list, _ := raw.([]interface{})
+				remaining := slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+					return kiroV2EntryOwned(item, hookScript)
+				})
+				if len(remaining) == 0 {
 					delete(hooks, event)
 				} else {
 					hooks[event] = remaining

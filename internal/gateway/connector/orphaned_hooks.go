@@ -55,6 +55,13 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 			return nil, err
 		}
 		found = append(found, paths...)
+		// Its own answer asks for proof in this data folder where the
+		// commands do not name it. The raw `hook --connector` match below
+		// would match another data folder's Windows entries (an earlier
+		// release's `& '<launcher>'` form holds it in plain text).
+		if runtime.GOOS == "windows" {
+			return found, nil
+		}
 	}
 	exact := ownedHookCommandNeedles(opts, conn)
 	scripts := ownedHookScriptPaths(conn, opts)
@@ -93,10 +100,12 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 }
 
 // InstallHookEntryOwner is a connector that can say, from the decoded entries
-// of the agent files alone, whether one of them is a hook this install's
-// Setup wrote (never a managed install's, and never another data folder's of
-// the same account). The boot reclaim of an unguarded connector uses it as the
-// proof of ownership when the install's hook script is gone.
+// of the agent files, whether one of them is a hook this install's Setup
+// wrote (never a managed install's, and never another data folder's of the
+// same account: where a command does not name the data folder, as on
+// Windows, that takes proof in the data folder too). The boot reclaim of an
+// unguarded connector uses it as the proof of ownership, with or without the
+// install's hook script.
 type InstallHookEntryOwner interface {
 	InstallOwnsHookEntries(SetupOpts) (bool, error)
 }
