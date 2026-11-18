@@ -2996,6 +2996,13 @@ func hookStageForTest(ctx context.Context, stage string) {
 }
 
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {
+	return withHookSessionRootAgent(enrichAgentHookContextOnly(ctx, req), req)
+}
+
+// enrichAgentHookContextOnly is enrichAgentHookContext without the session
+// root agent: for a caller that names the session's agent itself, as the
+// foreign-hook denial does from the live hook snapshot first (GAP-1903).
+func enrichAgentHookContextOnly(ctx context.Context, req agentHookRequest) context.Context {
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
@@ -3030,7 +3037,6 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	if auditSessionID != "" {
 		ctx = refreshAuditEnvelopeFromIdentity(ctx, auditSessionID, identity)
 	}
-	ctx = withHookSessionRootAgent(ctx, req.ConnectorName)
 	// Stamp the connector identity onto the audit envelope so every
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is
@@ -3068,19 +3074,26 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 // replica, wrote its connector-hook rows with agent_id empty while the
 // hook_decision rows of the same events named the agent (substrate-1:GAP-0422).
 // A cursor's or the payload's agent still wins (contextWithHookCorrelation).
-// Traffic with no agent identity, and Secure Client (UUIDv7 agents, issue
-// #1092), keep the envelope as it was.
-func withHookSessionRootAgent(ctx context.Context, connectorName string) context.Context {
+// The key is the hook's own session, as hookLLMEventMeta's. An agentless
+// sub-agent start or stop is left alone: hookLLMEventMeta names a sub-agent
+// node for it, not the root. Traffic with no agent identity, and Secure Client
+// (UUIDv7 agents, issue #1092), keep the envelope as it was.
+func withHookSessionRootAgent(ctx context.Context, req agentHookRequest) context.Context {
 	env := audit.EnvelopeFromContext(ctx)
-	connectorName = strings.TrimSpace(connectorName)
-	if env.AgentID != "" || env.SessionID == "" || connectorName == "" || ManagedEnterpriseActive() {
+	connectorName, sessionID := strings.TrimSpace(req.ConnectorName), strings.TrimSpace(req.SessionID)
+	if env.AgentID != "" || sessionID == "" || connectorName == "" || ManagedEnterpriseActive() {
+		return ctx
+	}
+	switch canonicalHookLifecycleEvent(firstString(req.Payload,
+		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName")) {
+	case "subagent_start", "subagent_stop":
 		return ctx
 	}
 	scope := agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx))
 	if scope == "" {
 		return ctx
 	}
-	env.AgentID = agentNodeID(scope, connectorName, env.SessionID, "root")
+	env.AgentID = agentNodeID(scope, connectorName, sessionID, "root")
 	return audit.ContextWithEnvelope(ctx, env)
 }
 

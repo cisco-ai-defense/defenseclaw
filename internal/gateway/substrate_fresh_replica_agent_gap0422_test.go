@@ -6,10 +6,11 @@
 package gateway
 
 import (
-	"strings"
+	"context"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 )
 
 // TestSubstrateFreshReplicaHookRowsNameTheAgentGAP0422 (substrate-1:GAP-0422,
@@ -20,7 +21,8 @@ import (
 // fix its connector-hook rows had agent_id empty while its hook_decision rows
 // of the same events (hookLLMEventMeta), and every row of replica 1, named
 // agent-<hash>. Every connector-hook row of the verified actor now names the
-// agent replica 1 minted, on both replicas.
+// agent hook_decision derives (the session's root under the actor's agt-),
+// on both replicas.
 func TestSubstrateFreshReplicaHookRowsNameTheAgentGAP0422(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
@@ -59,19 +61,27 @@ func TestSubstrateFreshReplicaHookRowsNameTheAgentGAP0422(t *testing.T) {
 		}
 		return out
 	}
-	want := ""
+	// The agent hookLLMEventMeta derives for the session's hook_decision rows.
+	key, err := sandboxreg.SubstrateKey("eng-web", subUID1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actorCtx := withSubstrateActor(context.Background(), verifiedSubstrateActor("eng-web", "alice-1", subUID1, "actor/eng-web/alice-1", key))
+	if reg, ok, err := r1.f.regs.Get(context.Background(), "eng-web", subUID1); err != nil || !ok {
+		t.Fatalf("registration alice-1: ok=%v err=%v", ok, err)
+	} else {
+		actorCtx = context.WithValue(actorCtx, substrateRegistrationKey{}, reg)
+	}
+	facts := resolveHookAgentIdentity(actorCtx, agentHookRequest{ConnectorName: "claudecode", SessionID: session})
+	if facts.ID == "" || !facts.Verified {
+		t.Fatalf("alice-1 agent identity %+v, want a verified agt- id", facts)
+	}
+	want := agentNodeID(facts.ID, "claudecode", session, "root")
 	for name, r := range map[string]chartReplica{"replica 1": r1, "replica 2 (fresh)": r2} {
 		for action, byAgent := range agents(name, r) {
 			for agent, n := range byAgent {
-				if !strings.HasPrefix(agent, "agent-") {
-					t.Errorf("%s: %d %s rows have agent_id %q, want the session's agent-<hash>", name, n, action, agent)
-					continue
-				}
-				if want == "" {
-					want = agent
-				}
 				if agent != want {
-					t.Errorf("%s: %d %s rows have agent_id %q, other rows %q", name, n, action, agent, want)
+					t.Errorf("%s: %d %s rows have agent_id %q, want the session's root agent %q", name, n, action, agent, want)
 				}
 			}
 		}
