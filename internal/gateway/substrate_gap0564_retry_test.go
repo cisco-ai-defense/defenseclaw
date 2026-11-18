@@ -30,7 +30,7 @@ import (
 // actor stays checked, and a secret read that is resent still refuses the
 // upload after it. A different call under a reused id is still refused.
 func TestSubstrateGAP0564KitRetryOnTheOtherReplicaKeepsTheActorChecked(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	svc, chains := newTestChainLeaderServiceWith(t, "")
 	fake := ateapifake.New()

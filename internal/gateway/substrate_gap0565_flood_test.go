@@ -111,7 +111,7 @@ func TestSubstrateGAP0565FloodingActorKeepsTheOthersFast(t *testing.T) {
 		}
 		phase = time.Duration(n) * time.Second
 	}
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	issuer := newJ43Issuer(t)
 	ks, err := identity.NewKeySet(identity.KeySetOptions{Issuer: j43IssuerURL, KeysURL: issuer.srv.URL + "/jwks", HTTPClient: issuer.srv.Client()})
@@ -243,7 +243,7 @@ func TestSubstrateGAP0565FloodingActorKeepsTheOthersFast(t *testing.T) {
 // allocation count of one refused request through the actor listener
 // (with a real ES256 actor token) is deterministic; its time is logged.
 func TestSubstrateGAP0565RefusedFloodRequestIsCheap(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	issuer := newJ43Issuer(t)
 	ks, err := identity.NewKeySet(identity.KeySetOptions{Issuer: j43IssuerURL, KeysURL: issuer.srv.URL + "/jwks", HTTPClient: issuer.srv.Client()})
 	if err != nil {

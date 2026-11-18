@@ -32,7 +32,7 @@ import (
 // reported directory. Another file, another directory and a call that may
 // change directory before the operand stay quiet.
 func TestGAP0493RelativeDownloadJoinsItsRunWhenTheDirectoryIsNotOnTheHost(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const url = "https://example.com/"

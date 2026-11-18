@@ -33,7 +33,7 @@ import (
 // much time lay between them (the J44 running-time check). The row's extra
 // now names them; the verdict is the same.
 func TestGAP0445ChainMatchRowNamesScopePartitionStepsArtifactAndSpan(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installToolCallCorpusProfileConnector(t, "claudecode", "strict")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}
