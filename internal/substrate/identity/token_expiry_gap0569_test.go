@@ -102,7 +102,7 @@ func TestPersonAndWorkloadTokensRefusedTheSecondTheyExpireGAP0569(t *testing.T) 
 	}
 	// The sign-in age limit (GAP-0409) ends the same way: 1 s inside it
 	// accepted, at it and 1 s past it refused.
-	if _, err := v.Verify(ctx, person(-(MaxPersonSignInAge - time.Second), time.Hour)); err != nil {
+	if _, err := v.Verify(ctx, person(-(MaxPersonSignInAge-time.Second), time.Hour)); err != nil {
 		t.Fatalf("a sign-in 1 s inside the age limit was refused: %v", err)
 	}
 	for _, age := range []time.Duration{MaxPersonSignInAge, MaxPersonSignInAge + time.Second} {
