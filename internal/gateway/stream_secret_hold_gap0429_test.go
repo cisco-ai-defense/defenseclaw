@@ -427,8 +427,8 @@ type gap0429Result struct {
 	text          string // reply text the client got
 }
 
-func gap0429Serve(t *testing.T, row gap0429Row) gap0429Result {
-	t.Helper()
+// gap0429Text is the reply text of row and the extra cut offsets of its shape.
+func gap0429Text(row gap0429Row) (string, []int) {
 	filler := retestFiller(row.filler)[:row.filler]
 	pre := row.shape.pre(filler)
 	text := pre + row.secret.text + row.trailer
@@ -436,6 +436,26 @@ func gap0429Serve(t *testing.T, row gap0429Row) gap0429Result {
 	if row.shape.cut != nil {
 		cut = row.shape.cut(filler)
 	}
+	return text, cut
+}
+
+// gap0429IsWholeAgain reports a row of 4096-byte pieces whose whole reply
+// text is no longer than 4096 bytes: gap0429Pieces cuts at 4096, 8192, ...
+// only below len(text), so such a row serves exactly the pieces (one piece
+// plus the shape's own cuts) of the whole (size 0) row of the same
+// secret, shape, filler and pack. It is a duplicate of that row, so the
+// tables skip it and say how many they skipped.
+func gap0429IsWholeAgain(row gap0429Row) bool {
+	if row.size != 4096 {
+		return false
+	}
+	text, _ := gap0429Text(row)
+	return len(text) <= 4096
+}
+
+func gap0429Serve(t *testing.T, row gap0429Row) gap0429Result {
+	t.Helper()
+	text, cut := gap0429Text(row)
 	rec := httptest.NewRecorder()
 	w := &gap0429Watch{GuardrailInspector: retestInspector(), secret: row.secret.text, rec: rec}
 	row.path.run(t, rec, w, row.pack, gap0429Pieces(text, row.size, cut))
@@ -460,6 +480,7 @@ func gap0429Run(t *testing.T, paths []gap0429Path) {
 	keys, tokens := gap0429Keys(t), gap0429Tokens(t)
 	tallies := map[string]*gap0429Tally{}
 	sizes := gap0429Sizes()
+	dropped := 0
 	for _, path := range paths {
 		for _, pack := range gap0429Packs() {
 			var rows []gap0429Row
@@ -488,6 +509,10 @@ func gap0429Run(t *testing.T, paths []gap0429Path) {
 				}
 			}
 			for _, row := range rows {
+				if gap0429IsWholeAgain(row) {
+					dropped++
+					continue
+				}
 				name := fmt.Sprintf("%s/%s/%s/%s/size=%d", path.name, pack, row.secret.name, row.shape.name, row.size)
 				res := gap0429Serve(t, row)
 				body := row.secret.end - row.secret.body
@@ -517,6 +542,7 @@ func gap0429Run(t *testing.T, paths []gap0429Path) {
 			}
 		}
 	}
+	t.Logf("GAP0429-TALLY skipped %d rows of 4096-byte pieces whose reply text is at most 4096 bytes (the same pieces as their whole rows)", dropped)
 	keysOut := make([]string, 0, len(tallies))
 	for k := range tallies {
 		keysOut = append(keysOut, k)
