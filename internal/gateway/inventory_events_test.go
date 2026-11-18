@@ -1189,7 +1189,7 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 	}
 }
 
-func TestEndpointLocalMCPIdentityUsesCommandAndOrderedArguments(t *testing.T) {
+func TestEndpointLocalMCPIdentityRemainsStableAcrossConfigurationChanges(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	component := func(name, command string, args ...string) endpointInventoryComponent {
 		t.Helper()
@@ -1202,14 +1202,23 @@ func TestEndpointLocalMCPIdentityUsesCommandAndOrderedArguments(t *testing.T) {
 		return components[0]
 	}
 	base := component("alias-a", "/private/bin/mcp", "--mode", "safe")
+	if want := endpointInventoryComponentID("mcp", "alias-a"); base.id != want {
+		t.Fatalf("local component ID = %q, want historical alias identity %q", base.id, want)
+	}
 	if renamed := component("alias-b", "/private/bin/mcp", "--mode", "safe"); renamed.id == base.id {
 		t.Fatalf("distinct server aliases shared identity: %q", base.id)
 	}
-	if changed := component("alias-a", "/other/bin/mcp", "--mode", "safe"); changed.id == base.id {
-		t.Fatal("changing the full command did not change identity")
+	if changed := component("alias-a", "/other/bin/mcp", "--mode", "safe"); changed.id != base.id {
+		t.Fatal("changing the full command replaced the alias-based identity")
 	}
-	if reordered := component("alias-a", "/private/bin/mcp", "safe", "--mode"); reordered.id == base.id {
-		t.Fatal("changing argument order did not change identity")
+	if reordered := component("alias-a", "/private/bin/mcp", "safe", "--mode"); reordered.id != base.id {
+		t.Fatal("changing argument order replaced the alias-based identity")
+	}
+	rotated := endpointMCPComponentsFromServers([]config.MCPServerEntry{{
+		Name: "alias-a", Command: "/private/bin/mcp", Args: []string{"--mode", "safe"},
+	}}, []byte("abcdef0123456789abcdef0123456789"))
+	if len(rotated) != 1 || rotated[0].id != base.id {
+		t.Fatalf("rotating the fingerprint key replaced identity: %+v", rotated)
 	}
 	if strings.Contains(base.id, "/private") || strings.Contains(base.id, "--mode") {
 		t.Fatalf("local component ID disclosed raw identity material: %q", base.id)
@@ -1241,7 +1250,7 @@ func TestMCPInventoryServerURLDropsCredentialsQueryAndFragment(t *testing.T) {
 	}
 }
 
-func TestEndpointRemoteMCPIdentityUsesSanitizedURL(t *testing.T) {
+func TestEndpointRemoteMCPIdentityRemainsStableAcrossEndpointChanges(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	component := func(name, url string) endpointInventoryComponent {
 		t.Helper()
@@ -1258,8 +1267,8 @@ func TestEndpointRemoteMCPIdentityUsesSanitizedURL(t *testing.T) {
 	if renamed := component("second", "https://mcp.example.com/v1?token=other"); renamed.id == base.id {
 		t.Fatalf("distinct remote aliases shared identity: %q", base.id)
 	}
-	if changed := component("first", "https://mcp.example.com/v2"); changed.id == base.id {
-		t.Fatal("different endpoint path kept the same remote identity")
+	if changed := component("first", "https://other.example.com/v2"); changed.id != base.id {
+		t.Fatal("different endpoint replaced the alias-based remote identity")
 	}
 	if strings.Contains(base.id, "password") || strings.Contains(base.id, "secret") || strings.Contains(base.mcpServerURL, "/v1") {
 		t.Fatalf("component ID disclosed URL credential: %q", base.id)
@@ -1299,6 +1308,13 @@ func TestPerConnectorMCPInventoryDistinguishesIdenticalCommandsWithDifferentAlia
 	initial := ids()
 	if initial["alpha"] == "" || initial["beta"] == "" || initial["alpha"] == initial["beta"] {
 		t.Fatalf("colliding commands lost alias identity: %v", initial)
+	}
+	if want := endpointInventoryComponentID("mcp-entry", "codex/"+endpointInventoryScopeKey(home)+"/alpha"); initial["alpha"] != want {
+		t.Fatalf("per-connector component ID = %q, want historical alias identity %q", initial["alpha"], want)
+	}
+	cfg.Gateway.Token = "rotated-test-identity-key"
+	if rotated := ids(); !reflect.DeepEqual(initial, rotated) {
+		t.Fatalf("fingerprint-key rotation changed component IDs: %v / %v", initial, rotated)
 	}
 	write("beta", "alpha")
 	reordered := ids()

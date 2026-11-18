@@ -2130,7 +2130,7 @@ attributes:
 - id: defenseclaw.inventory.mcp.server_url
   type: string
   brief: Sanitized configured remote MCP endpoint URL
-  examples: [https://mcp.example.com/v1]
+  examples: [https://mcp.example.com]
   stability: stable
   owner: defenseclaw
   field_class: identifier
@@ -2140,8 +2140,8 @@ attributes:
     id: bounded-v1
     overrides:
       max_utf8_bytes: 1024
-      pattern: '^https?://[^/?#@ ]+(/[^?# ]*)?$'
-    notes: Scheme, host, port, and escaped path only; userinfo, query, and fragment are forbidden
+      pattern: '^https?://[^/?#@ ]+$'
+    notes: Origin only (scheme, host, and optional port); path, query, userinfo, and fragment are never exported
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.tool_parent_id
   type: string

@@ -573,21 +573,13 @@ func perConnectorMCPEntriesForOSWithHomeGuardStatus(cfg *config.Config, reg *con
 			if product == "" {
 				product = host
 			}
-			// Local IDs use the keyed command and ordered arguments; remote
-			// IDs use the sanitized configured URL. Scope distinguishes users.
-			serverIdentity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
-			if remoteIdentity := mcpInventoryRemoteIdentity(fingerprintKey, server.URL); remoteIdentity != "" {
-				serverIdentity = remoteIdentity
-			}
-			if serverIdentity == "" {
-				serverIdentity = server.Name
-			} else {
-				// The alias is part of configured-server identity. Hook evidence is
-				// attributed by alias, and including it unconditionally prevents a
-				// later same-command sibling from changing an existing server ID.
-				serverIdentity += "\x00alias\x00" + server.Name
-			}
-			identity := connectorName + "/" + homeScope + "/" + serverIdentity
+			// Keep the pre-fingerprint component identity stable across upgrades
+			// and configuration changes. Fingerprints are change-detection
+			// attributes, not identity: rotating the gateway token or updating a
+			// command, arguments, or URL must not replace the server and its tool
+			// history. Connector and home scope separate same-named entries owned
+			// by different agents or users.
+			identity := connectorName + "/" + homeScope + "/" + server.Name
 			if _, seen := seenComponent[identity]; seen {
 				continue
 			}
@@ -1074,15 +1066,10 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 		if product == "" {
 			product = host
 		}
-		identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
-		if remoteIdentity := mcpInventoryRemoteIdentity(fingerprintKey, server.URL); remoteIdentity != "" {
-			identity = remoteIdentity
-		}
-		if identity == "" {
-			identity = server.Name
-		} else {
-			identity += "\x00alias\x00" + server.Name
-		}
+		// Preserve the historical alias-based component ID. Fingerprints and
+		// sanitized endpoint fields describe configuration changes without
+		// replacing the component or its child-tool history.
+		identity := server.Name
 		if strings.TrimSpace(identity) == "" {
 			identity = strings.Join([]string{command, host}, "\x00")
 		}

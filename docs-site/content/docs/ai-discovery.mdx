@@ -1059,20 +1059,20 @@ it also exports separate keyed HMAC fingerprints of the full command and ordered
 never leaves the gateway through these fields; raw command paths, arguments,
 environment variables, headers, and OAuth material are not exported. A gateway
 token rotation changes these fingerprints. A local MCP component ID derives
-from the connector, user scope, server alias, command fingerprint, and
-ordered-argument fingerprint. Rotating the token or renaming the alias changes
-that ID. The connector and user scope distinguish separate installations on one
-endpoint, while the alias keeps two entries with identical commands and ordered
-arguments visible as distinct configured rows.
+from the connector, user scope, and server alias, preserving the identity used
+by earlier inventory releases. Command, argument, or token changes update the
+record's fingerprints without replacing the component or its tool history. The
+connector and user scope distinguish separate installations on one endpoint,
+while the alias keeps two entries with identical commands and ordered arguments
+visible as distinct configured rows. Renaming the alias creates a new component.
 
 Remote MCP component records also include the configured server endpoint URL.
 The exported value keeps only the HTTP(S) scheme, host, and explicit port; it
-omits userinfo, path, query parameters, and fragments. The escaped path is used
-only in the keyed HMAC server identity, so changing it changes the component ID
-without exposing it. DefenseClaw does not probe
+omits userinfo, path, query parameters, and fragments. A remote MCP component ID
+also derives from connector, user scope, and server alias. Endpoint changes
+update that component in place. DefenseClaw does not probe
 the endpoint to collect this value; it comes from native connector
-configuration. Renaming a remote server alias or changing its sanitized
-endpoint identity changes its component ID.
+configuration. Renaming a remote server alias creates a new component.
 
 When a local or remote MCP admission scan completes, DefenseClaw preserves the bounded tool
 names returned by its existing `tools/list` request even if the scanner reports
@@ -1081,15 +1081,14 @@ called at runtime. Managed local and remote inventory emit these as `mcp_tool` c
 the current parent server component ID, `advertised` or `observed` source, and
 the UTC observation time. It exports names only: tool descriptions, input
 schemas, call arguments, and results are excluded. A completed empty listing
-clears previously advertised names in the gateway's process memory; an
+clears previously advertised names from the bounded durable snapshot; an
 incomplete listing produces a local partial diagnostic. An ambiguous server
 alias across user profiles is not attributed to either profile. Advertised tool
-evidence is process-local until the next gateway inventory publication.
-Observed tool names are persisted in bounded local SQLite state, restored after
-a gateway restart, and retained until an authoritative parent refresh retires
-or replaces the configured server. This flow does not reconcile a central
-principal catalog. Remote tool lineage follows the
-sanitized URL-based server ID. DefenseClaw reuses the scanner's existing remote
+evidence and observed tool names are persisted in bounded local SQLite state,
+restored after a gateway restart, and retained until an authoritative parent
+refresh retires the configured alias. This flow does not reconcile a central
+principal catalog. Remote tool lineage follows the alias-based server ID.
+DefenseClaw reuses the scanner's existing remote
 `tools/list` request and does not start an additional endpoint probe. If an
 older scanner omits the tool-list field, the gateway marks the listing unknown
 and keeps the last complete managed snapshot. Only managed enterprise mode

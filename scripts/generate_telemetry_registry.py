@@ -434,7 +434,7 @@ _GO_RESERVED_IDENTIFIERS: Final = frozenset(
         "uintptr",
     }
 )
-EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "b94cec828f969f73b69fe2882c6b65c272fedccec840a640abdd733c1be1361c"
+EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "610b046847cfc4366ff592188b64df4eea86ababffe04f68d866c0f5aed00dc5"
 EXPECTED_MESSAGE_PART_VARIANTS: Final = (
     ("text", "gen_ai.text_part"),
     ("tool_call", "gen_ai.tool_call_request_part"),

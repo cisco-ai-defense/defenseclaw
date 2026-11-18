@@ -40,7 +40,7 @@ func mcpInventoryFingerprint(key []byte, domain string, values []string) string 
 	if len(key) != sha256.Size || len(values) > maxMCPFingerprintParts {
 		return ""
 	}
-	if domain != "command" && domain != "arguments" && domain != "remote_url" {
+	if domain != "command" && domain != "arguments" {
 		return ""
 	}
 	mac := hmac.New(sha256.New, key)
@@ -61,37 +61,10 @@ func mcpInventoryFingerprint(key []byte, domain string, values []string) string 
 	return fmt.Sprintf("hmac-sha256:%x", mac.Sum(nil))
 }
 
-// mcpInventoryRemoteIdentity identifies a configured remote endpoint without
-// exporting its path. Paths can contain bearer material even when query and
-// fragment are absent, so the canonical endpoint is used only as keyed HMAC
-// input. The exported server_url is limited separately to scheme and host.
-func mcpInventoryRemoteIdentity(key []byte, raw string) string {
-	canonical := mcpInventoryCanonicalRemoteEndpoint(raw)
-	if canonical == "" {
-		return ""
-	}
-	fingerprint := mcpInventoryFingerprint(key, "remote_url", []string{canonical})
-	if fingerprint == "" {
-		return ""
-	}
-	return "remote\x00" + fingerprint
-}
-
 func mcpInventoryLocalFingerprints(key []byte, server config.MCPServerEntry) (string, string) {
 	if server.Command == "" {
 		return "", ""
 	}
 	return mcpInventoryFingerprint(key, "command", []string{server.Command}),
 		mcpInventoryFingerprint(key, "arguments", server.Args)
-}
-
-// mcpInventoryLocalIdentity identifies a configured local server by its full
-// command and ordered arguments. The HMAC values keep command paths and
-// argument values out of the component ID, including low-entropy secrets.
-// The caller adds connector and user scope for endpoint component identity.
-func mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint string) string {
-	if commandFingerprint == "" || argumentsFingerprint == "" {
-		return ""
-	}
-	return "local\x00" + commandFingerprint + "\x00" + argumentsFingerprint
 }
