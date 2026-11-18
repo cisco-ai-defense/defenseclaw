@@ -653,3 +653,28 @@ func TestChartMemoryHomeFloorsAreTheDefaultRequests(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0609: the pre-delete hook's Role may delete the chart's other hook
+// Jobs by name (a failed hook keeps its Job and pod), and nothing else.
+func TestChartUninstallRoleDeletesLeftoverHookJobs(t *testing.T) {
+	helm := helmBinary(t)
+	out := string(renderChart(t, helm, "default"))
+	var role string
+	for _, doc := range strings.Split(out, "\n---") {
+		// "\nkind: Role\n" at column 0: the RoleBinding's roleRef has an
+		// indented "kind: Role" and the same name.
+		if strings.Contains(doc, "\nkind: Role\n") && strings.Contains(doc, "\n  name: defenseclaw-hooks-uninstall\n") {
+			role = doc
+		}
+	}
+	if role == "" {
+		t.Fatal("no Role defenseclaw-hooks-uninstall in the default chart")
+	}
+	rule := "- apiGroups: [batch]\n  resources: [jobs]\n  resourceNames: [" + "defenseclaw-chain-key, defenseclaw-relay-session, defenseclaw-pre-upgrade, defenseclaw-pre-rollback, defenseclaw-bootstrap" + "]\n  verbs: [delete]"
+	if !strings.Contains(role, rule) {
+		t.Errorf("the uninstall Role lacks the leftover hook Job delete rule %q:\n%s", rule, role)
+	}
+	if strings.Contains(role, "defenseclaw-pre-delete") {
+		t.Errorf("the uninstall Role must not delete its own Job:\n%s", role)
+	}
+}

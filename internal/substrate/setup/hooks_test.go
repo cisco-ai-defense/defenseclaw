@@ -108,6 +108,7 @@ type fakeKube struct {
 	cms       map[string]*ConfigMap
 	restarts  []string
 	deleted   []string
+	jobs      []string // DeleteJob calls
 	updateErr error
 	// replicas of Deployments by ns/name; scales records every scale call.
 	replicas map[string]int32
@@ -178,6 +179,10 @@ func (k *fakeKube) DeploymentPods(_ context.Context, ns, name string) (int32, er
 		return k.pods(name), nil
 	}
 	return k.replicas[ns+"/"+name], nil
+}
+func (k *fakeKube) DeleteJob(_ context.Context, ns, name string) (bool, error) {
+	k.jobs = append(k.jobs, ns+"/"+name)
+	return false, nil
 }
 func (k *fakeKube) DeleteSecret(_ context.Context, ns, name string) error {
 	k.deleted = append(k.deleted, ns+"/"+name)

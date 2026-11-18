@@ -2187,6 +2187,12 @@ rules:
 - apiGroups: [""]
   resources: [pods]
   verbs: [list]
+# Delete the Jobs (and, by propagation, the pods) of earlier failed hooks,
+# by name: setup.LeftoverHookJobs (GAP-0609).
+- apiGroups: [batch]
+  resources: [jobs]
+  resourceNames: [defenseclaw-chain-key, defenseclaw-relay-session, defenseclaw-pre-upgrade, defenseclaw-pre-rollback, defenseclaw-bootstrap]
+  verbs: [delete]
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
