@@ -502,17 +502,26 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 // route answered 504 (rel-1-0-10:GAP-1066). It runs in the hook call of the
 // calling goroutine, or in one of its own.
 func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
+	truncated = globCutOf(func() { read = ActionPrivateKeyReadWithDialect(command, cwd, home, dialect) })
+	return read, truncated
+}
+
+// globCutOf runs read in the hook call of the calling goroutine (or one of
+// its own) and returns the caps the pattern expansions of read hit
+// (noteGlobCut), which the call also keeps.
+func globCutOf(read func()) bounded.CapSet {
 	defer HookCall()()
 	call := currentHookCall()
 	if call == nil {
-		return ActionPrivateKeyReadWithDialect(command, cwd, home, dialect), truncated
+		read()
+		return bounded.CapSet{}
 	}
 	outer := call.globCut
 	call.globCut = bounded.CapSet{}
-	read = ActionPrivateKeyReadWithDialect(command, cwd, home, dialect)
-	truncated = call.globCut
+	read()
+	truncated := call.globCut
 	call.globCut = outer.Union(truncated)
-	return read, truncated
+	return truncated
 }
 
 // actionPosixPrivateKeyRead is the POSIX shell's private-key reader.
@@ -1288,12 +1297,16 @@ func actionKeyPatternMatch(pattern, name string, dotglob bool) bool {
 const actionGlobEntryCap = 4096
 
 // actionBoundedGlob expands an absolute pattern on this host, following
-// directory links, with the shell's leading-dot rule. It reads at most
-// actionGlobEntryCap directory entries in all, and a directory only up to
-// that cap: past it the expansion is what it matched so far, and truncated
-// names the cap (the one bound rule). The cap was a count of its own that
-// ended the walk silently, after os.ReadDir had read and sorted the whole of
-// each directory: /tmp of a build host held 27,000 names (rel-1-0-10:GAP-1066).
+// directory links, with the shell's leading-dot rule. It examines at most
+// actionGlobEntryCap directory entries in all: one count for every directory
+// of the expansion, as rel's budget was (22db7a8362). Each directory is
+// walked in name order, so past the cap the expansion is what the first
+// entries by name matched, as on rel, and truncated names the cap (the one
+// bound rule). The cap was a count of its own that ended the walk silently
+// (rel-1-0-10:GAP-1066); pathReadDirLimit holds at most twice the cap of a
+// directory past it, where os.ReadDir held and sorted the whole of it, and
+// still reads it to its end so the first names are the same
+// (rel-1-0-10:GAP-1468).
 func actionBoundedGlob(pattern string, dotglob bool) ([]string, bounded.CapSet) {
 	var trunc bounded.Truncated
 	if !filepath.IsAbs(pattern) {

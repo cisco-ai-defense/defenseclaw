@@ -148,8 +148,8 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
-	// globCut holds the caps a private-key reader's pattern expansion hit
-	// (ActionPrivateKeyReadBounded).
+	// globCut holds the caps the pattern expansions of the private-key and
+	// registration readers hit (globCutOf).
 	globCut bounded.CapSet
 	// memo holds what the call has read of the file system: the paths it
 	// resolved and the protected set of each home (targets).
@@ -549,7 +549,7 @@ func noteBodyCut(cut shareReadCut) {
 }
 
 // noteGlobCut records on the hook call the caps a pattern expansion of the
-// private-key reader hit (ActionPrivateKeyReadBounded).
+// private-key or a registration reader hit (globCutOf).
 func noteGlobCut(truncated bounded.CapSet) {
 	if !truncated.Any() {
 		return
@@ -600,9 +600,19 @@ func pathReadDir(name string) ([]os.DirEntry, error) {
 	return os.ReadDir(fixturefs.Map(name))
 }
 
-// pathReadDirLimit is pathReadDir that reads at most n entries, sorted by
-// name, for a walk that stops at a bound of n-1: a directory of fewer names
-// reads as pathReadDir reads it.
+// pathReadDirChunk is how many entries pathReadDirLimit reads at a time past
+// its first n.
+const pathReadDirChunk = 1024
+
+// pathReadDirLimit is pathReadDir for a walk that examines at most n-1
+// entries of a directory in name order: it returns the n entries of the
+// whole directory that sort first by name, which is how the sorted read of
+// pathReadDir begins (a directory of fewer names reads as pathReadDir reads
+// it). A directory of more names is still read to its end, as pathReadDir
+// read it, keeping at most 2n entries at a time, so the walk examines the
+// entries rel examined whatever order the file system lists them in: the
+// first n in directory order made a key link that sorts early drop out of a
+// directory past the cap (rel-1-0-10:GAP-1468).
 func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("readdir", name)
@@ -616,8 +626,33 @@ func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
 	if errors.Is(err, io.EOF) {
 		err = nil
 	}
-	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
-	return entries, err
+	byName := func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) }
+	slices.SortFunc(entries, byName)
+	if err != nil || n <= 0 || len(entries) < n {
+		return entries, err
+	}
+	for {
+		more, err := dir.ReadDir(pathReadDirChunk)
+		done := errors.Is(err, io.EOF) || len(more) == 0
+		if err != nil && !done {
+			return nil, err
+		}
+		// entries[:n] is sorted: a name past entries[n-1] is not among the
+		// first n (the names of a directory are distinct).
+		bound := entries[n-1].Name()
+		for _, entry := range more {
+			if entry.Name() < bound {
+				entries = append(entries, entry)
+			}
+		}
+		if done || len(entries) >= 2*n {
+			slices.SortFunc(entries, byName)
+			entries = entries[:n]
+		}
+		if done {
+			return entries, nil
+		}
+	}
 }
 
 func pathReadlink(name string) (string, error) {
