@@ -27,7 +27,8 @@ import (
 )
 
 // WrapperUnwrapTwin returns the POSIX reading of command in which every cp,
-// mv, install, ln, dd, tee, rsync or shell call run through static prefix
+// mv, install, ln, dd, tee, rsync, delete (rm, unlink, rmdir, shred) or
+// shell call run through static prefix
 // wrappers (nohup, nice, time, timeout, env, command, builtin, sudo, doas,
 // exec, setsid, stdbuf, ionice, taskset, chrt, flock, caffeinate with
 // their known options), or after a leading word that may expand to nothing
@@ -35,7 +36,10 @@ import (
 // GAP-2477). A wrapper runs the call with the argv the caller shell
 // expanded, so the call writes what the plain call writes, while the
 // wrapped argv tied no write to it (nohup cp a.txt
-// ~/.defenseclaw/config.yaml was allowed). A wrapper that runs the call in
+// ~/.defenseclaw/config.yaml was allowed; setsid, stdbuf, ionice, doas,
+// chrt, taskset and flock rm -rf ~/.defenseclaw were allowed in all five
+// tiers while nohup rm -rf ~/.defenseclaw blocked, rel-1-0-10:GAP-1186).
+// A wrapper that runs the call in
 // another directory (env -C dir) is written as ( cd dir && call ), so a
 // relative operand is read where the call runs. ok is false when no call
 // was rewritten. A caller counts only a block proven on the reading.
@@ -522,7 +526,8 @@ func wrapperProgramName(word string) string {
 }
 
 // wrappedWriterRun returns where the program word of a file writer
-// (dynamicOperandPrograms or rsync) or of a POSIX shell is that args run
+// (dynamicOperandPrograms or rsync), of a delete (wrappedDeletePrograms) or
+// of a POSIX shell is that args run
 // after leading words that may expand to nothing and static prefix
 // wrappers. A shell is the stop too: setsid sh -c STRING runs what
 // sh -c STRING runs (GAP-2519).
@@ -548,7 +553,7 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 			return PrefixWrapperRun{}, false
 		}
 		name := wrapperProgramName(word)
-		if dynamicOperandPrograms[name] || name == "rsync" || wrappedShellPrograms[name] {
+		if dynamicOperandPrograms[name] || name == "rsync" || wrappedDeletePrograms[name] || wrappedShellPrograms[name] {
 			run.Index = index
 			return run, true
 		}
@@ -560,6 +565,14 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	}
 	return PrefixWrapperRun{}, false
 }
+
+// wrappedDeletePrograms are the deletes whose wrapped call is read as the
+// plain call: a wrapper runs rm with the argv the caller shell expanded, so
+// it removes what the plain rm removes. Only nohup, timeout and env used to
+// reach the plain reading, so the same delete of the DefenseClaw state behind
+// any other wrapper the prefix reader knows was a clean allow
+// (rel-1-0-10:GAP-1186).
+var wrappedDeletePrograms = map[string]bool{"rm": true, "unlink": true, "rmdir": true, "shred": true}
 
 // wrappedShellPrograms are the shells whose wrapped call is read as the
 // plain call, so the plain reading of a -c STRING applies.

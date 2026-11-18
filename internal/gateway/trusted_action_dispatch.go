@@ -822,10 +822,11 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
-	// A file writer run through nohup, nice, time, timeout, env NAME=value,
-	// command, sudo or exec (or after a word that may expand to nothing)
-	// writes what the plain call writes (GAP-2512); the plain reading is
-	// judged, and only its block counts.
+	// A file writer or a delete run through any static prefix wrapper
+	// (nohup, nice, setsid, stdbuf, ionice, sudo, ...; or after a word that
+	// may expand to nothing) writes or removes what the plain call does
+	// (GAP-2512, rel-1-0-10:GAP-1186); the plain reading is judged, and only
+	// its block counts.
 	if twin, ok := wrapperUnwrapTwinRequest(request); ok {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))

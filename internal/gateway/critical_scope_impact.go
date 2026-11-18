@@ -250,7 +250,7 @@ func criticalWrappedChild(command actionfacts.CommandFact) bool {
 // judged only on a command with no unreadable word beside the glob, and only
 // the glob targets count: a root or a folder named next to an unrelated
 // dynamic word stays at the unknown tier of the pack, as before.
-func criticalScopeCommands(facts actionfacts.Facts, visit func(program string, words []string, partial bool) bool) bool {
+func criticalScopeCommands(facts actionfacts.Facts, visit func(command actionfacts.CommandFact, program string, words []string, partial bool) bool) bool {
 	for _, command := range facts.Commands {
 		if command.ParentCommandID != 0 && !criticalWrappedChild(command) ||
 			command.Effect == actionfacts.EffectPreview ||
@@ -266,11 +266,106 @@ func criticalScopeCommands(facts actionfacts.Facts, visit func(program string, w
 			continue
 		}
 		inner, innerWords := unwrapStateWrapper(command, words)
-		if visit(strings.ToLower(path.Base(inner.Program)), innerWords, partial) {
+		if strings.ToLower(path.Base(inner.Program)) == "xargs" {
+			// xargs runs its program with the words it reads from stdin
+			// (echo ~ | xargs rm -rf removes the home, rel-1-0-10:GAP-0762).
+			if program, run, ok := xargsStdinRun(facts, command, innerWords); ok {
+				inner.Program, innerWords = program, run
+			}
+		}
+		if visit(command, strings.ToLower(path.Base(inner.Program)), innerWords, partial) {
 			return true
 		}
 	}
 	return false
+}
+
+// xargsOperandOptions are the xargs options that leave the words it reads as
+// operands of its program, each with whether it takes the next word. An
+// option that changes how the input is split or where it is placed (-I, -i,
+// -d, -0, -a, -E, -e, -s) is not read.
+var xargsOperandOptions = map[string]bool{
+	"-r": false, "--no-run-if-empty": false, "-t": false, "--verbose": false, "-x": false, "--exit": false,
+	"-n": true, "--max-args": true, "-L": true, "--max-lines": true, "-P": true, "--max-procs": true,
+}
+
+// xargsStdinPrograms are the programs whose output xargs reads as words
+// when their own words are static, from those words: echo prints its words,
+// and printf with a format of only %s and spacing prints its arguments.
+var xargsStdinPrograms = map[string]func(words []string) ([]string, bool){
+	"echo": func(words []string) ([]string, bool) {
+		for len(words) > 0 && (words[0] == "-n" || words[0] == "-e" || words[0] == "-E") {
+			words = words[1:]
+		}
+		return strings.Fields(strings.Join(words, " ")), true
+	},
+	"printf": func(words []string) ([]string, bool) {
+		if len(words) == 0 {
+			return nil, false
+		}
+		format := strings.NewReplacer("%s", "", `\n`, "", `\t`, "", " ", "").Replace(words[0])
+		if format != "" || !strings.Contains(words[0], "%s") {
+			return nil, false
+		}
+		return strings.Fields(strings.Join(words[1:], " ")), true
+	},
+}
+
+// xargsStdinRun returns the program an xargs call runs and its words, with
+// the words the stage before it in the pipeline prints (xargsStdinPrograms)
+// appended as xargs appends them. ok is false when the xargs options or the
+// stage before it are not read.
+func xargsStdinRun(facts actionfacts.Facts, command actionfacts.CommandFact, words []string) (string, []string, bool) {
+	index := 0
+	for index < len(words) && strings.HasPrefix(words[index], "-") {
+		word := words[index]
+		if word == "--" {
+			index++
+			break
+		}
+		name, _, attached := strings.Cut(word, "=")
+		value, known := xargsOperandOptions[name]
+		if !known && len(word) > 2 && !strings.HasPrefix(word, "--") {
+			// -n1, -P4: the value attached to a short option that takes one.
+			if takes := xargsOperandOptions[word[:2]]; takes {
+				value, known, attached = true, true, true
+			}
+		}
+		if !known {
+			return "", nil, false
+		}
+		index++
+		if value && !attached {
+			index++
+		}
+	}
+	if index >= len(words) || words[index] == "" || command.PipelineID == 0 {
+		return "", nil, false
+	}
+	var before *actionfacts.CommandFact
+	for i := range facts.Commands {
+		other := &facts.Commands[i]
+		if other.PipelineID == command.PipelineID && other.ParentCommandID == 0 && other.ID < command.ID &&
+			(before == nil || other.ID > before.ID) {
+			before = other
+		}
+	}
+	if before == nil || !before.ArgvComplete {
+		return "", nil, false
+	}
+	read, known := xargsStdinPrograms[strings.ToLower(path.Base(before.Program))]
+	if !known {
+		return "", nil, false
+	}
+	printed, ok := stateOperandWords(*before)
+	if !ok || slices.Contains(printed, "") {
+		return "", nil, false
+	}
+	input, ok := read(printed)
+	if !ok || len(input) == 0 {
+		return "", nil, false
+	}
+	return path.Base(words[index]), append(slices.Clone(words[index+1:]), input...), true
 }
 
 // criticalTarget reports a word that removes or locks a critical scope; in a
@@ -295,8 +390,13 @@ func rmRecursiveOptions(words []string) (recursive, force, interactive bool) {
 			recursive = true
 		case word == "--force":
 			force = true
-		case word == "--interactive" || strings.HasPrefix(word, "--interactive="):
+		case word == "--interactive":
 			interactive = true
+		case strings.HasPrefix(word, "--interactive="):
+			// --interactive=never (no, none) never asks, so it is the
+			// removal itself; the last prompting option wins, as in rm
+			// (rel-1-0-10:GAP-0743).
+			interactive = !rmNeverPrompts[strings.TrimPrefix(word, "--interactive=")]
 		case strings.HasPrefix(word, "--"):
 		default:
 			for _, flag := range word[1:] {
@@ -309,17 +409,50 @@ func rmRecursiveOptions(words []string) (recursive, force, interactive bool) {
 	return recursive, force, interactive
 }
 
+// rmNeverPrompts are the WHEN values of rm --interactive=WHEN that never
+// ask before a removal.
+var rmNeverPrompts = map[string]bool{"never": true, "no": true, "none": true}
+
+// stdinAnswersYesPrograms are the programs whose output answers every prompt
+// of an interactive rm with yes: yes with no word, or with a word that
+// starts with y or Y.
+var stdinAnswersYesPrograms = map[string]func(args []string) bool{
+	"yes": func(args []string) bool {
+		return len(args) == 0 || strings.HasPrefix(strings.ToLower(args[0]), "y")
+	},
+}
+
+// stdinAnswersYes reports a command whose pipeline starts with a program of
+// stdinAnswersYesPrograms before it (yes | rm -ri ~): every question an
+// interactive rm asks is answered yes, so it removes what rm -r removes
+// (rel-1-0-10:GAP-0743).
+func stdinAnswersYes(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	if command.PipelineID == 0 {
+		return false
+	}
+	for _, other := range facts.Commands {
+		if other.PipelineID != command.PipelineID || other.ID >= command.ID || len(other.Argv) == 0 {
+			continue
+		}
+		if answers, ok := stdinAnswersYesPrograms[strings.ToLower(path.Base(other.Program))]; ok && answers(other.Argv[1:]) {
+			return true
+		}
+	}
+	return false
+}
+
 // criticalDeleteProof proves a recursive `rm` of a critical scope from the
 // words of the call: the shell expands a glob after the hook reads it, so the
 // parse is partial, but the directory part and the match-everything last
 // component are static. A recursive delete that does not force (`rm -r ~`)
-// is the same removal unless it asks first (-i, -I, with no -f after it).
-// A complete parse with -f is judged by the CMD-RM-RF owner itself.
+// is the same removal unless it asks first (-i, -I, with no -f after it)
+// and nothing answers yes for it (stdinAnswersYes). A complete parse with -f is judged by the CMD-RM-RF owner itself.
 func criticalDeleteProof(_ actionfacts.Input, facts actionfacts.Facts) bool {
 	home := criticalScopeHome(facts)
-	return criticalScopeCommands(facts, func(program string, words []string, partial bool) bool {
+	return criticalScopeCommands(facts, func(command actionfacts.CommandFact, program string, words []string, partial bool) bool {
 		recursive, force, interactive := rmRecursiveOptions(words)
-		if program != "rm" || !recursive || interactive && !force || force && facts.Authoritative() {
+		if program != "rm" || !recursive || interactive && !force && !stdinAnswersYes(facts, command) ||
+			force && facts.Authoritative() {
 			return false
 		}
 		options := true
@@ -407,7 +540,7 @@ func chmodLocksOut(mode string) bool {
 // to a mode that locks it out or opens it for writing.
 func criticalRecursiveLockoutProof(_ actionfacts.Input, facts actionfacts.Facts) bool {
 	home := criticalScopeHome(facts)
-	return criticalScopeCommands(facts, func(program string, words []string, partial bool) bool {
+	return criticalScopeCommands(facts, func(_ actionfacts.CommandFact, program string, words []string, partial bool) bool {
 		if program != "chmod" {
 			return false
 		}
