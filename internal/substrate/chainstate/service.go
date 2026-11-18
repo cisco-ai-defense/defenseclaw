@@ -132,16 +132,19 @@ type Options struct {
 	Now func() time.Time
 	// Warn receives operational warnings (default stderr).
 	Warn io.Writer
-	// StartGrace is how long after its first clear egress check the leader
-	// answers a clear one unavailable (0: never). A gateway that could not
-	// record a tool step while no leader answered (a secret read during an
-	// outage) tells the leader when it is back, retrying every 5 s; until
-	// that note can have arrived, a clear answer may miss the read. The
-	// callout takes unavailable as unchecked: a send is refused in every
-	// mode, GET and HEAD follow chain.failure_mode (GAP-0601). A hit, or a
-	// detection under the alert action, is answered at once. Known limit: a
-	// gateway with a long note backlog, or a leader too busy to take a note,
-	// can deliver one after the grace.
+	// StartGrace is how long after the start of its leader term the leader
+	// answers a clear egress check unavailable (0: never). The term starts
+	// with the first call this replica serves as the leader (LeaderCall), or
+	// with its first clear check when no call came through a leader.Server.
+	// A gateway that could not record a tool step while no leader answered
+	// (a secret read during an outage) tells the leader when it can reach it
+	// again, retrying every 5 s; until that note can have arrived, a clear
+	// answer may miss the read. The callout takes unavailable as unchecked:
+	// a send is refused in every mode, GET and HEAD follow
+	// chain.failure_mode (GAP-0601). A hit, or a detection under the alert
+	// action, is answered at once. Known limit: a gateway with a long note
+	// backlog, or a leader too busy to take a note, can deliver one after
+	// the grace.
 	StartGrace time.Duration
 }
 
@@ -154,10 +157,15 @@ type Service struct {
 	// action is the chain egress action in force: opts.EgressAction at
 	// start, then SetEgressAction (a config.yaml change, GAP-0276).
 	action atomic.Pointer[string]
-	// servingAt is when the first clear egress check came, for
-	// opts.StartGrace (monotonic with the default clock).
-	servingOnce sync.Once
-	servingAt   time.Time
+	// servingAt is when this leader term began, for opts.StartGrace: the
+	// first call served as the leader (LeaderCall), or the first clear
+	// egress check when none came first; served says it is set, and Leading
+	// clears both for a new term. graceMu guards them (monotonic with the
+	// default clock). Before GAP-0601 (IB5) the grace ran from the first
+	// clear check alone, however long after the leader started it came.
+	graceMu   sync.Mutex
+	served    atomic.Bool
+	servingAt time.Time
 
 	mu      sync.Mutex
 	actors  map[string]*actorEntry // atespace/uid
@@ -413,8 +421,11 @@ func New(opts Options) (*Service, error) {
 	return s, nil
 }
 
-// Register serves the chain, intent, lifecycle and egress methods on srv.
+// Register serves the chain, intent, lifecycle and egress methods on srv,
+// and makes every call srv serves as the leader, whatever its method, mark
+// the leader term's start for StartGrace (LeaderCall).
 func (s *Service) Register(srv *leader.Server) {
+	srv.OnLeaderCall = s.LeaderCall
 	srv.Handle(leader.MethodChainObserve, s.logged(leader.MethodChainObserve, leader.Typed(s.Observe)))
 	srv.Handle(leader.MethodIntentGet, s.logged(leader.MethodIntentGet, leader.Typed(s.IntentGet)))
 	srv.Handle(leader.MethodIntentPut, s.logged(leader.MethodIntentPut, leader.Typed(s.IntentPut)))
@@ -1640,20 +1651,58 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 }
 
 // errStarting answers a clear egress check within opts.StartGrace of the
-// leader's first one (GAP-0601). The leader client retries unavailable, so
-// the callout usually reports the check as timed out.
+// start of the leader term (GAP-0601). The leader client retries
+// unavailable, so the callout usually reports the check as timed out.
 var errStarting = &leader.WireError{Code: leader.CodeUnavailable,
 	Message: "the gateway leader started moments ago; tool calls a gateway could not record while no leader answered may still be arriving"}
 
 // starting reports whether a clear egress check is within opts.StartGrace
-// of the first one this leader answered.
+// of the start of this leader term. A check that comes first starts it.
 func (s *Service) starting() bool {
 	if s.opts.StartGrace <= 0 {
 		return false
 	}
+	s.graceMu.Lock()
+	defer s.graceMu.Unlock()
 	now := s.opts.Now()
-	s.servingOnce.Do(func() { s.servingAt = now })
+	if !s.served.Load() {
+		s.servingAt = now
+		s.served.Store(true)
+	}
 	return now.Sub(s.servingAt) < s.opts.StartGrace
+}
+
+// LeaderCall marks a call this replica served as the leader; Register
+// installs it as srv.OnLeaderCall. The first one of a leader term starts
+// opts.StartGrace: a gateway's note of a step it could not record during
+// the outage can reach the leader only once calls do, and arrives within
+// one retry (5 s) and its timeout (2 s) after that. Before GAP-0601 (IB5
+// TST-2593) the grace ran from the first clear egress check, so the first
+// git clone after any leader restart was refused even when it came minutes
+// after the restart, with every gateway's notes long delivered.
+func (s *Service) LeaderCall() {
+	if s == nil || s.served.Load() {
+		return
+	}
+	s.graceMu.Lock()
+	defer s.graceMu.Unlock()
+	if !s.served.Load() {
+		s.servingAt = s.opts.Now()
+		s.served.Store(true)
+	}
+}
+
+// Leading starts a new leader term (leader.Elector OnStarted): while this
+// replica was not the leader no gateway could record a step on it, so the
+// next call it serves starts opts.StartGrace again.
+func (s *Service) Leading() {
+	if s == nil {
+		return
+	}
+	s.graceMu.Lock()
+	defer s.graceMu.Unlock()
+	s.served.Store(false)
+	s.servingAt = time.Time{}
 }
 
 // staleVerdict answers an egress check under a UID that is not the

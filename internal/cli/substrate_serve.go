@@ -24,6 +24,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -670,14 +671,14 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	if err := substrateRecordStoreState(ctx, ns); err != nil {
 		return err
 	}
+	// chains is the leader's chain state, opened below before the elector
+	// runs; a new leader term restarts its start grace (GAP-0601).
+	var chains *chainstate.Service
 	el := &leader.Elector{
 		API: &leader.KubeLeaseAPI{Server: "https://" + net.JoinHostPort(host, port), Namespace: ns, Name: serveFlags.lease,
 			TokenFile: serveFlags.kubeTokenFile, HTTP: kube},
 		Name: serveFlags.lease, Ns: ns, Identity: pod,
-		OnStarted: func(context.Context) {
-			fmt.Fprintf(os.Stderr, "[substrate] %s is the leader\n", pod)
-			ready.Store(true)
-		},
+		OnStarted: func(context.Context) { substrateLeaderStarted(os.Stderr, pod, chains, ready) },
 		OnStopped: func() { ready.Store(false) },
 	}
 	srv := &leader.Server{IsLeader: el.IsLeader}
@@ -717,7 +718,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	chainOpts, source := leaderChainOptions(cfg, store, serveFlags.storeDir, serveFlags.chainRetention)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		chainOpts.EgressAction, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[chainOpts.EgressAction])
-	chains, err := chainstate.New(chainOpts)
+	chains, err = chainstate.New(chainOpts)
 	if err != nil {
 		return err
 	}
@@ -771,6 +772,16 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		return nil
 	}
 	return err
+}
+
+// substrateLeaderStarted runs when this replica becomes the leader: a new
+// leader term for the chain start grace, then ready (GAP-0601). The grace
+// then runs from the first call the new leader serves, not from its first
+// clear egress check, which can come minutes later.
+func substrateLeaderStarted(w io.Writer, pod string, chains *chainstate.Service, ready *atomic.Bool) {
+	fmt.Fprintf(w, "[substrate] %s is the leader\n", pod)
+	chains.Leading()
+	ready.Store(true)
 }
 
 func kubeHTTPClient() (*http.Client, error) {
