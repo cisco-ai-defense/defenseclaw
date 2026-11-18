@@ -16,8 +16,9 @@ import (
 // shell call in its own file system, so a link operand in any position is
 // spelled as the file it reaches (rel-1-0-10:GAP-1243). A word that names no
 // link, a program word (also the program a wrapper runs), a top-level folder
-// alias and an in-place sed edit of a link (which replaces the link) keep
-// their spelling.
+// alias, an in-place sed edit of a link (which replaces the link), and a word
+// whose place an earlier statement of the command changes (a cd, a mv or ln
+// onto it) keep their spelling.
 func TestGAP1243LocalCommandWordPlaces(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	app := filepath.Join(home, "app")
@@ -73,6 +74,35 @@ func TestGAP1243LocalCommandWordPlaces(t *testing.T) {
 		{"./key-link", ""},
 		{"nice -n 5 ./key-link", ""},
 		{"sudo -u bob ./cfg-link x", ""},
+		// The program behind a wrapper decides whether its operand's link
+		// is followed: rm removes the link itself.
+		{"command rm key-link", ""},
+		{"nice -n 5 ls -l key-link", ""},
+		// A word that an earlier statement moves (a folder change, a move,
+		// link or removal of its path, a step this reading cannot see) is
+		// placed where the shell reaches it, not before the command: it
+		// keeps its spelling. So is a word its own call reads elsewhere.
+		{"mv a.txt key-link && cat key-link", ""},
+		{"ln -sfn README.md key-link; cat key-link", ""},
+		{"rm key-link && echo x > key-link", ""},
+		{"mv /tmp/d . && cat d/key-link", ""},
+		{"cat key-link; mv a.txt key-link; cat key-link", "cat " + keySpelling + "; mv a.txt key-link; cat key-link"},
+		{"for i in 1 2; do cat key-link; mv a.txt key-link; done", ""},
+		{"cd /tmp && cat key-link", ""},
+		{"cd .. && cd app && cat key-link", ""},
+		{`cd /tmp && bash -c "cat key-link"`, ""},
+		{"source env.sh; cat key-link", ""},
+		{"$TOOL x; cat key-link", ""},
+		{"tar -xf a.tar && cat key-link", ""},
+		{"git checkout main && cat key-link", ""},
+		{"env -C /tmp cat key-link", ""},
+		{"tar -C /tmp -chf o.tar key-link", ""},
+		{"ssh x.invalid cat key-link", ""},
+		// A statement that moves none of the word's path leaves it placed.
+		{"cd . && cat key-link", "cd . && cat " + keySpelling},
+		{"rm -f other.txt && cat key-link", "rm -f other.txt && cat " + keySpelling},
+		{"git status && cat key-link", "git status && cat " + keySpelling},
+		{`bash -c "rm -f other.txt" && cat key-link`, `bash -c "rm -f other.txt" && cat ` + keySpelling},
 	} {
 		places := LocalCommandWordPlaces(tc.command, app, home, ResolveWriteTarget)
 		got, changed := LinkResolvedCommand(tc.command, home, places)

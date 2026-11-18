@@ -22,8 +22,10 @@ import (
 // blocks or alerts). The same places are what a Substrate actor's kit
 // reports for its own file system.
 //
-// The words are placed in the hook's folder: a cd before the word may fail,
-// so that folder stays a place the word may name. A relative word is placed
+// The words are placed in the hook's folder and in the file system as it is
+// before the command runs, so a word that an earlier statement moves away
+// from that place (a cd, a mv or ln onto its path: CommandPathWord.Unplaced)
+// is left out and keeps the reading it has as written. A relative word is placed
 // in the physical folder, and an alias of a top-level folder (/tmp to
 // /private/tmp on macOS) is no move of the word. /proc/self/cwd names the
 // folder of the shell that opens it, not the gateway's
@@ -55,7 +57,7 @@ func LocalCommandWordPlaces(command, cwd, home string, resolve func(string) (str
 	var places map[string]CommandWordPlace
 	seen := map[string]bool{}
 	for _, word := range CommandPathWords(command, home) {
-		if seen[word.Text] {
+		if word.Unplaced || seen[word.Text] {
 			continue
 		}
 		seen[word.Text] = true
