@@ -114,6 +114,23 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 			delete(m.observedPartial, key)
 		}
 	}
+	// A listing can complete before the first parent refresh. If an
+	// authoritative connector read then says that alias is absent, discard the
+	// unbound listing so it cannot attach to a different server that later reuses
+	// the same connector and alias.
+	for key := range m.pendingAdvertised {
+		connector, _, _ := strings.Cut(key, "\x00")
+		if _, incomplete := incompleteConnectors[connector]; incomplete {
+			continue
+		}
+		if m.parents[key] == "" && next[key] == "" {
+			delete(m.advertised, key)
+			delete(m.advertisedListedAt, key)
+			delete(m.advertisedVersion, key)
+			delete(m.pendingAdvertised, key)
+			delete(m.partial, key)
+		}
+	}
 	for key := range next {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete {
@@ -156,6 +173,11 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 		for parentID, snapshot := range parents {
 			if current == "" || parentID != current {
 				m.pendingRemoval[parentID] = struct{}{}
+				continue
+			}
+			// A scanner listing received after restore began is newer live
+			// evidence. Do not replace it with the durable startup snapshot.
+			if m.advertisedVersion[key] != 0 {
 				continue
 			}
 			items := make([]mcpToolObservation, 0, len(snapshot.ToolNames))
@@ -291,23 +313,50 @@ func (m *mcpToolInventory) recordAdvertisedContext(ctx context.Context, connecto
 	m.partial[key] = len(names) > len(items) || len(upstreamPartial) > 0 && upstreamPartial[0]
 	partial := m.partial[key]
 	version := m.advertisedVersion[key]
-	if parentID == "" {
-		if m.pendingAdvertised == nil {
-			m.pendingAdvertised = make(map[string]uint64)
-		}
-		m.pendingAdvertised[key] = version
+	if m.pendingAdvertised == nil {
+		m.pendingAdvertised = make(map[string]uint64)
+	}
+	// Track every listing until this exact version is durable. This covers both
+	// the pre-parent path and a failed write for an already-known parent.
+	m.pendingAdvertised[key] = version
+	toolNames := make([]string, 0, len(items))
+	for _, item := range items {
+		toolNames = append(toolNames, item.name)
+	}
+	snapshot := audit.MCPAdvertisedToolSnapshot{
+		ParentComponentID: parentID, Connector: connector, ServerName: server,
+		ToolNames: toolNames, ListedAt: at.UTC(), Partial: partial,
 	}
 	m.mu.Unlock()
 	if m.store != nil && parentID != "" {
-		toolNames := make([]string, 0, len(items))
-		for _, item := range items {
-			toolNames = append(toolNames, item.name)
-		}
-		_ = m.store.ReplaceMCPAdvertisedToolsIf(ctx, audit.MCPAdvertisedToolSnapshot{
-			ParentComponentID: parentID, Connector: connector, ServerName: server,
-			ToolNames: toolNames, ListedAt: at.UTC(), Partial: partial,
-		}, func() bool { return m.parentIsCurrent(connector, server, parentID) })
+		_ = m.persistAdvertisedSnapshot(ctx, key, version, snapshot)
 	}
+}
+
+func (m *mcpToolInventory) advertisedWriteIsCurrent(key, parentID string, version uint64) bool {
+	if m == nil || parentID == "" || version == 0 {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.parents[key] == parentID && m.advertisedVersion[key] == version &&
+		m.pendingAdvertised[key] == version
+}
+
+func (m *mcpToolInventory) persistAdvertisedSnapshot(ctx context.Context, key string, version uint64, snapshot audit.MCPAdvertisedToolSnapshot) error {
+	err := m.store.ReplaceMCPAdvertisedToolsIf(ctx, snapshot, func() bool {
+		return m.advertisedWriteIsCurrent(key, snapshot.ParentComponentID, version)
+	})
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.pendingAdvertised[key] == version && m.advertisedVersion[key] == version &&
+		m.parents[key] == snapshot.ParentComponentID {
+		delete(m.pendingAdvertised, key)
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 // flushPendingAdvertised durably writes listings that completed before their
@@ -342,18 +391,9 @@ func (m *mcpToolInventory) flushPendingAdvertised(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 	for _, write := range writes {
-		err := m.store.ReplaceMCPAdvertisedToolsIf(ctx, write.snapshot, func() bool {
-			return m.parentIsCurrent(write.snapshot.Connector, write.snapshot.ServerName, write.snapshot.ParentComponentID)
-		})
-		if err != nil {
+		if err := m.persistAdvertisedSnapshot(ctx, write.key, write.version, write.snapshot); err != nil {
 			return err
 		}
-		m.mu.Lock()
-		if m.pendingAdvertised[write.key] == write.version &&
-			m.parents[write.key] == write.snapshot.ParentComponentID {
-			delete(m.pendingAdvertised, write.key)
-		}
-		m.mu.Unlock()
 	}
 	return nil
 }

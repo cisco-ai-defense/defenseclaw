@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,6 +29,42 @@ type testMCPObservedToolStore struct {
 	stillCurrent      func() bool
 	advertisedCurrent func() bool
 	advertisedWrite   audit.MCPAdvertisedToolSnapshot
+}
+
+type coordinatedAdvertisedStore struct {
+	testMCPObservedToolStore
+	mu           sync.Mutex
+	calls        int
+	firstStarted chan struct{}
+	releaseFirst chan struct{}
+	writes       []audit.MCPAdvertisedToolSnapshot
+}
+
+func (s *coordinatedAdvertisedStore) ReplaceMCPAdvertisedToolsIf(_ context.Context, snapshot audit.MCPAdvertisedToolSnapshot, stillCurrent func() bool) error {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		close(s.firstStarted)
+		<-s.releaseFirst
+	}
+	if call == 2 {
+		return fmt.Errorf("temporary write failure")
+	}
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
+	}
+	s.mu.Lock()
+	s.writes = append(s.writes, snapshot)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *coordinatedAdvertisedStore) snapshots() []audit.MCPAdvertisedToolSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]audit.MCPAdvertisedToolSnapshot(nil), s.writes...)
 }
 
 func (s *testMCPObservedToolStore) UpsertMCPObservedToolIf(_ context.Context, _ audit.MCPObservedTool, stillCurrent func() bool) error {
@@ -253,6 +290,79 @@ func TestMCPToolInventoryRetainsListingUntilParentRefresh(t *testing.T) {
 	if store.advertisedWrite.ParentComponentID != parent.id ||
 		len(store.advertisedWrite.ToolNames) != 1 || store.advertisedWrite.ToolNames[0] != "search" {
 		t.Fatalf("flushed listing=%+v", store.advertisedWrite)
+	}
+}
+
+func TestMCPToolInventoryFreshListingWinsOverRestoredSnapshot(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := mcpToolInventory{store: store}
+	parent := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "codex"}
+	oldListed := time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC)
+	newListed := oldListed.Add(time.Minute)
+	tools.restoreAdvertised([]audit.MCPAdvertisedToolSnapshot{{
+		ParentComponentID: parent.id, Connector: "codex", ServerName: "notes",
+		ToolNames: []string{"old"}, ListedAt: oldListed,
+	}})
+	tools.recordAdvertised("codex", "notes", []string{"fresh"}, newListed)
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	if err := tools.flushPendingAdvertised(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if partial || len(rows) != 1 || rows[0].itemName != "fresh" || rows[0].mcpToolObservedAt != newListed.Format(time.RFC3339Nano) {
+		t.Fatalf("fresh listing rows=%+v partial=%v", rows, partial)
+	}
+	if fmt.Sprint(store.advertisedWrite.ToolNames) != "[fresh]" {
+		t.Fatalf("persisted listing=%+v", store.advertisedWrite)
+	}
+}
+
+func TestMCPToolInventoryNewerFailedWriteRemainsPending(t *testing.T) {
+	store := &coordinatedAdvertisedStore{
+		firstStarted: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	tools := mcpToolInventory{store: store}
+	parent := endpointInventoryComponent{id: "parent", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		tools.recordAdvertised("codex", "notes", []string{"old"}, time.Date(2026, 11, 18, 1, 0, 0, 0, time.UTC))
+	}()
+	<-store.firstStarted
+	tools.recordAdvertised("codex", "notes", []string{"fresh"}, time.Date(2026, 11, 18, 1, 1, 0, 0, time.UTC))
+	close(store.releaseFirst)
+	<-firstDone
+	if err := tools.flushPendingAdvertised(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	writes := store.snapshots()
+	if len(writes) != 1 || fmt.Sprint(writes[0].ToolNames) != "[fresh]" {
+		t.Fatalf("durable writes=%+v", writes)
+	}
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if partial || len(rows) != 1 || rows[0].itemName != "fresh" {
+		t.Fatalf("fresh listing rows=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestMCPToolInventoryDropsUnboundListingWhenParentIsAbsent(t *testing.T) {
+	store := &testMCPObservedToolStore{}
+	tools := mcpToolInventory{store: store}
+	tools.recordAdvertised("codex", "notes", []string{"stale"}, time.Now())
+	tools.refreshParents(nil)
+	parent := endpointInventoryComponent{id: "different-parent", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	if err := tools.flushPendingAdvertised(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
+	if partial || len(rows) != 0 {
+		t.Fatalf("stale listing attached to new parent: rows=%+v partial=%v", rows, partial)
+	}
+	if store.advertisedWrite.ParentComponentID != "" {
+		t.Fatalf("stale listing was persisted: %+v", store.advertisedWrite)
 	}
 }
 
