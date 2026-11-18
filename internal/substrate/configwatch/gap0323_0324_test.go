@@ -14,6 +14,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
+// The Substrate config watcher runs only in Linux pods: these tests lay out
+// a kubelet ConfigMap mount (symlinks a standard Windows user may not create)
+// and read the chart's managed config, which a Windows build treats as a
+// Secure Client document. Native Windows has nothing to check here.
+
 package configwatch
 
 import (

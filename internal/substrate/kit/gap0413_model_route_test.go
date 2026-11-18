@@ -14,6 +14,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build linux
+
+// The kit renders actor templates only on Linux, like the GAP-0326 kit test.
+
 package kit
 
 import (
