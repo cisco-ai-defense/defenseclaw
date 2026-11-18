@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -44,16 +45,27 @@ func (a *APIServer) usageQuerier() modelusage.Querier {
 // all rows; any other caller reads only the rows of the identity the gateway
 // verified for the request, and nothing when it verified none. The filter is
 // applied in the SQL WHERE clause by the store.
-func (a *APIServer) usageScope(r *http.Request) (owner string, admin bool) {
+//
+// scope names whose rows the answer holds, which the CLI and the TUI head
+// the usage with ("everyone" or "yours"): "all" only for an administrator
+// of a managed gateway, whose store is the machine's. A per-user gateway's
+// store holds only its owner's usage, so its owner reads "own" although it
+// reads the whole store; scope was taken from admin alone, so every
+// standard user of a per-user install was told it read everyone's usage
+// (GAP-1205).
+func (a *APIServer) usageScope(r *http.Request) (owner string, admin bool, scope string) {
 	cfg := a.runtimeConfigSnapshot()
 	if a.healthAdministratorCaller(r, cfg) {
-		return "", true
+		if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+			return "", true, "all"
+		}
+		return "", true, "own"
 	}
 	caller, ok := verifiedAuditCaller(r.Context())
 	if !ok {
-		return "", false
+		return "", false, "own"
 	}
-	return modelusage.OwnerID(modelusage.CallFacts{Subject: caller.ID, SubjectKind: caller.IDKind, IdentityVerified: true}), false
+	return modelusage.OwnerID(modelusage.CallFacts{Subject: caller.ID, SubjectKind: caller.IDKind, IdentityVerified: true}), false, "own"
 }
 
 func parseUsageWindow(since string, now time.Time) (time.Time, error) {
@@ -101,7 +113,7 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 		by = "model"
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	owner, admin := a.usageScope(r)
+	owner, admin, scope := a.usageScope(r)
 	rows, err := store.Run(r.Context(), modelusage.Query{By: by, From: from, To: now, Owner: owner, AllOwners: admin, Limit: limit})
 	switch {
 	case errors.Is(err, modelusage.ErrAdminOnly):
@@ -113,10 +125,6 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		http.Error(w, "the usage store could not be read", http.StatusInternalServerError)
 		return
-	}
-	scope := "own"
-	if admin {
-		scope = "all"
 	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": true, "by": by, "scope": scope,

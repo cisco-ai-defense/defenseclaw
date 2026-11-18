@@ -488,9 +488,8 @@ func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []strin
 	if set != nil && runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 		return perUserWindowsGroupWarnings(set.assignments)
 	}
-	pairs := verifiedGroupDomains(currentIdentitySpoolDir())
-	return set.unknownGroupWarningsWith(foldedGroupExists(profileGroupExists, pairs),
-		foldedGroupQualify(profileGroupQualifiedName, pairs), bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth, wait)
+	exists, qualify := matcherFoldedGroupChecks(currentIdentitySpoolDir())
+	return set.unknownGroupWarningsWith(exists, qualify, bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth, wait)
 }
 
 // Per-user Windows has no trusted group facts; these assignments cannot match.
@@ -598,9 +597,8 @@ func (set *guardrailProfileSet) logProfileWarnings() {
 	for _, warning := range set.unknownConnectorWarnings() {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
 	}
-	pairs := verifiedGroupDomains(currentIdentitySpoolDir())
-	exists, qualify, silent, unmatchedUser, health := foldedGroupExists(profileGroupExists, pairs),
-		foldedGroupQualify(profileGroupQualifiedName, pairs), bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth
+	exists, qualify := matcherFoldedGroupChecks(currentIdentitySpoolDir())
+	silent, unmatchedUser, health := bareGroupsDirectorySilent, profileUserEntryUnmatched(), directoryCacheHealth
 	go func() {
 		if runtime.GOOS == "windows" && set.base != nil && !set.base.StandaloneEnterprise() {
 			for _, warning := range perUserWindowsGroupWarnings(set.assignments) {
