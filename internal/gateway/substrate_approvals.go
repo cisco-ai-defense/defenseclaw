@@ -100,26 +100,45 @@ func (a *APIServer) substrateListApprovals(st *substrateState) http.HandlerFunc 
 
 // substrateStandingApprovals joins the live registrations' approved hosts
 // with the always-approved asks of the same agents: one row per agent,
-// host and scope, with the newest answer's person and time.
+// host and scope, with the newest answer's person and time. An always
+// approval the person gave on an earlier agent of the same profile is
+// listed on each of their live agents of that profile, since the callout
+// answers those with it too (GAP-0387), and a revoke there takes it back.
 func substrateStandingApprovals(regs []registry.Registration, answered []asks.Ask, me string, all bool) []substrateApproval {
 	type key struct{ uid, host, scope string }
+	type ownerProfile struct{ owner, profile string }
 	live := map[string]registry.Registration{}
+	byProfile := map[ownerProfile][]registry.Registration{}
 	for _, reg := range regs {
 		if !reg.Deleted {
 			live[reg.UID] = reg
+			if id := reg.Person.ID(); id != "" && !reg.Attributed && reg.Profile != "" {
+				k := ownerProfile{id, reg.Profile}
+				byProfile[k] = append(byProfile[k], reg)
+			}
 		}
 	}
 	newest := map[key]asks.Ask{}
+	note := func(uid string, x asks.Ask) {
+		k := key{uid, x.Host, substrateApprovalScope(x.Rule)}
+		if cur, ok := newest[k]; !ok || x.DecidedAt.After(cur.DecidedAt) {
+			newest[k] = x
+		}
+	}
 	for _, x := range answered {
 		if x.State != asks.StateApproved || !x.Always || x.Host == "" {
 			continue
 		}
-		if reg, ok := live[x.UID]; !ok || reg.Atespace != x.Atespace {
+		if reg, ok := live[x.UID]; ok && reg.Atespace == x.Atespace {
+			note(x.UID, x)
+		}
+		if x.Kind == "tool" || x.Profile == "" {
 			continue
 		}
-		k := key{x.UID, x.Host, substrateApprovalScope(x.Rule)}
-		if cur, ok := newest[k]; !ok || x.DecidedAt.After(cur.DecidedAt) {
-			newest[k] = x
+		for _, reg := range byProfile[ownerProfile{x.OwnerID, x.Profile}] {
+			if reg.UID != x.UID {
+				note(reg.UID, x)
+			}
 		}
 	}
 	row := func(reg registry.Registration, host, scope string) substrateApproval {
@@ -191,7 +210,7 @@ func (a *APIServer) substrateRevokeApproval(st *substrateState) http.HandlerFunc
 		c, _ := substrateCallerFrom(r.Context())
 		a.substrateAuditAdminTarget(st, r, reg, "revoke", "MEDIUM")
 		got, err := st.cfg.Asks.Revoke(r.Context(), asks.RevokeRequest{
-			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Host: host,
+			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(), Host: host, Profile: reg.Profile,
 			CallerID: ownerOf(c.person).ID(), Admin: c.admin,
 		})
 		switch {

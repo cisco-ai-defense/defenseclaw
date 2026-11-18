@@ -258,7 +258,7 @@ DefenseClaw ask 4c1f from dc-eng/claude-b66c97d1: POST api.example.test /v1/char
 
 Press `Ctrl-\`. The line becomes `... -- [o]nce [a]lways [d]eny [Esc] cancel`. One key answers. `o` lets one request through, and the agent's next request asks again. `a` asks you to press `y` to confirm, because it covers every later identical request from this agent. Typing and pasting never answer by accident: only a single key pressed after the prompt appears does. The line appears within about a second of the ask. The request itself waits only about a second and a half, the time Substrate's egress gateway gives DefenseClaw to answer a request. If you answer after that, the agent is told the site needs your approval and to retry once you approve; its next try after your answer goes through.
 
-An `always` answer stays in force for the agent until you take it back. `defenseclaw substrate approvals --standing` lists them: the agent, the host, what the approval covers, who approved it and when. `defenseclaw substrate revoke NAME HOST` takes one back: the agent's next request to that host asks you again, and the cluster drops the host from the agent's network rules within about a minute.
+An `always` answer stays in force for the agent until you take it back. `defenseclaw substrate approvals --standing` lists them: the agent, the host, what the approval covers, who approved it and when. `defenseclaw substrate revoke NAME HOST` takes one back: the agent's next request to that host asks you again, and the cluster drops the host from the agent's network rules within about a minute. An `always` answer also covers your later agents of the same profile, so they list it too, and a revoke on any of them takes it back.
 
 </Step>
 

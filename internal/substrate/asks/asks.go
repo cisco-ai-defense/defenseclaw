@@ -201,6 +201,11 @@ type RevokeRequest struct {
 	// OwnerID is the actor's person, for the decision record.
 	OwnerID string `json:"owner_id,omitempty"`
 	Host    string `json:"host"`
+	// Profile is the actor's profile. An always approval that the same
+	// person gave on an earlier actor of this profile answers this actor
+	// too (the callout ask route, GAP-0387), so the revoke takes it back
+	// as well. "" takes back the actor's own approvals only.
+	Profile string `json:"profile,omitempty"`
 	// CallerID is the person taking the approval back; Admin lets them take
 	// back anyone's.
 	CallerID string `json:"caller_id"`
@@ -489,8 +494,16 @@ func (s *Store) Revoke(ctx context.Context, in RevokeRequest) (RevokeResult, err
 	defer s.mu.Unlock()
 	now := s.now()
 	for _, a := range s.asks {
-		if a.UID != in.UID || a.Atespace != in.Atespace || a.Host != in.Host || a.State != StateApproved || !a.Always ||
-			(!in.Admin && a.OwnerID != in.CallerID) {
+		if a.Host != in.Host || a.State != StateApproved || !a.Always || (!in.Admin && a.OwnerID != in.CallerID) {
+			continue
+		}
+		// The actor's own approvals, and an approval the same person gave
+		// on an earlier actor of the same profile: the callout answers this
+		// actor (and every later run) with it too (GAP-0387), so leaving it
+		// in force would leave the host open after the revoke.
+		own := a.UID == in.UID && a.Atespace == in.Atespace
+		earlier := in.Profile != "" && in.OwnerID != "" && a.Kind != "tool" && a.OwnerID == in.OwnerID && a.Profile == in.Profile
+		if !own && !earlier {
 			continue
 		}
 		a.State, a.RevokedBy, a.RevokedAt = StateRevoked, in.CallerID, now
