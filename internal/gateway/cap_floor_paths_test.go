@@ -32,7 +32,7 @@ func capFloorGrepChain(n int) string {
 func TestCapFloorProjectPathPiecesAreNotTwins(t *testing.T) {
 	env := boundedLaneEnv(t)
 	command := capFloorGrepChain(200)
-	head, tail := capFloorPieces(command, env.home)
+	head, tail, _ := capFloorPieces(command, env.home)
 	if picked, _ := capFloorPick(head, tail, command, env.cwd, env.home, true, true, capFloorMaxTwins); len(picked) != 0 {
 		t.Fatalf("per-user: %d piece twins of plain project paths, want 0: %v", len(picked), picked[0].text(command))
 	}
@@ -50,7 +50,7 @@ func TestCapFloorProjectPathPiecesAreNotTwins(t *testing.T) {
 		"cat 'src/a b'", "cat src/*.go", "scp src/a host:b", "tar -C/tmp -xf src/a",
 	} {
 		chained := capFloorGrepChain(100) + " && " + statement + " && " + capFloorGrepChain(100)
-		head, tail := capFloorPieces(chained, env.home)
+		head, tail, _ := capFloorPieces(chained, env.home)
 		picked, _ := capFloorPick(head, tail, chained, env.cwd, env.home, true, true, capFloorMaxTwins)
 		if len(picked) != 1 || picked[0].text(chained) != statement {
 			var texts []string

@@ -59,7 +59,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	ShellWriteOperands(command, cwd, home)
 	shellWriteOperands(command, cwd, home, KnownUser{})
 	knownStateOperands(command, cwd, home)
-	powerShellQuotedPathOperands(command, cwd)
+	powerShellQuotedPathOperands(command, cwd, home)
 	LiteralWriteOperands(command, cwd, home)
 	AdjacentAssignedWriteOperands(command, cwd, home)
 	DeclaredRedirectWriteOperands(command, cwd, home)
@@ -83,6 +83,33 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		ShellWriteOperands(wrapped, cwd, home)
 		LiteralWriteOperands(wrapped, cwd, home)
 		ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
+	}
+	// A shell named at run time is also read as the literal shell it names
+	// (rel-1-0-10:GAP-0980).
+	if shellTwin, ok, _ := actionfacts.RunTimeShellTwin(command); ok && shellTwin != command {
+		readings = append(readings, shellTwin)
+		twin := fallback
+		twin.Command = shellTwin
+		shellTwinFacts := actionfacts.Analyze(twin)
+		clientProtectedDecision(shellTwin, cwd, home)
+		ShellWriteOperands(shellTwin, cwd, home)
+		LiteralWriteOperands(shellTwin, cwd, home)
+		ShellDirectoryWriteOperands(shellTwin, cwd, home, sourceFacts, true, false)
+		AdjacentAssignedWriteOperands(shellTwin, cwd, home)
+		DeclaredRedirectWriteOperands(shellTwin, cwd, home)
+		BoundedShellWriteOperands(shellTwin, cwd, home)
+		QuotedDynamicCopyDestinations(shellTwin, cwd, home)
+		quotedGlobNameWriteOperands(shellTwin, cwd, home, shellTwinFacts.Paths)
+		BoundedLoopCopyDestinations(shellTwin, cwd, home)
+		CopySourceGlobDestinations(shellTwin, cwd, home, nil)
+		BoundedGlobLoopCopyDestinations(shellTwin, cwd, home, nil)
+		commandLinksWithFacts(shellTwin, cwd, home, sourceFacts, true)
+		if wrapped, ok := actionfacts.WrapperUnwrapTwin(shellTwin); ok && wrapped != shellTwin {
+			readings = append(readings, wrapped)
+			ShellWriteOperands(wrapped, cwd, home)
+			LiteralWriteOperands(wrapped, cwd, home)
+			ShellDirectoryWriteOperands(wrapped, cwd, home, sourceFacts, true, false)
+		}
 	}
 	if awked := actionfacts.AwkCommandTwinFiles(command, func(name string) (string, bool) { return readActionScript(name, cwd) }); awked.Text != "" && awked.Text != command {
 		readings = append(readings, awked.Text)
@@ -151,7 +178,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionSedInPlaceWrite", "SedInPlaceBackupUnresolved", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
-	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwinFiles", "addReading",
+	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin", "actionfacts.AwkCommandTwinFiles", "actionfacts.RunTimeShellTwin", "addReading",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "quotedGlobNameWriteOperands", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }

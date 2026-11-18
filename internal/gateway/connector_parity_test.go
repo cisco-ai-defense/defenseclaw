@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -27,18 +29,100 @@ import (
 //
 // Native shapes with no vendor fixture in the repo (from the vendor schemas,
 // to confirm on a live agent): antigravity write_to_file, replace_file_content,
-// view_file; Amp edit_file; Copilot view; Cursor beforeReadFile.
+// view_file; Amp edit_file; Copilot view; Cursor beforeReadFile; OpenCode V2
+// read; OpenClaw write, edit and read.
 
 var shapeParityRank = map[string]int{"allow": 0, "": 0, "alert": 2, "warn": 2, "confirm": 2, "ask": 2, "block": 3}
 
+// shapeParityConnectors are the connectors shapeParityNative renders calls
+// for, and claudecode, the baseline. Every shipped connector with a hook or
+// inspect route is here: OpenCode (tool.execute.before), Devin (PreToolUse),
+// Hermes (pre_tool_call), Kiro (preToolUse, and PreToolUse for --v3) and
+// OpenClaw (its plugin's /api/v1/inspect/tool call; OpenClaw has no command
+// hook).
+var shapeParityConnectors = []string{"claudecode", "antigravity", "codex", "amp", "copilot", "cursor",
+	"opencode", "devin", "hermes", "kiro", "openclaw"}
+
+// shapeParityInspectRoute is the route OpenClaw's plugin asks before a tool
+// runs (extensions/defenseclaw before_tool_call).
+const shapeParityInspectRoute = "/api/v1/inspect/tool"
+
 // shapeParityCall is one tool call of a connector: its hook event, body and
-// headers.
+// headers, and the route when it is not the connector's hook.
 type shapeParityCall struct {
 	name    string
 	conn    string
 	event   string
 	body    map[string]any
 	headers map[string]string
+	route   string
+}
+
+// shapeParityHandlers answers each of shapeParityConnectors in tier p: its
+// hook, or for OpenClaw the inspect route.
+func shapeParityHandlers(t *testing.T, p gap0437Pack) map[string]http.HandlerFunc {
+	t.Helper()
+	handlers := map[string]http.HandlerFunc{}
+	for _, conn := range shapeParityConnectors {
+		srv := gap0437Server(t, p, conn, "action")
+		installToolCallCorpusProfileConnector(t, conn, p.pack)
+		if conn == "openclaw" {
+			// The route caps its scan at 200 ms; a loaded box answers
+			// past it, which is not the reading under test (as in
+			// TestWindowsHostShellDialectEveryRoute).
+			srv.inspectToolScanTimeout = time.Minute
+			handlers[conn] = srv.handleInspectTool
+			continue
+		}
+		handlers[conn] = srv.handleAgentHook(conn)
+	}
+	return handlers
+}
+
+// shapeParityCheckedEveryConnector fails a tier in which a connector of
+// shapeParityConnectors other than the baseline had no call checked.
+func shapeParityCheckedEveryConnector(t *testing.T, checked map[string]int) {
+	t.Helper()
+	for _, conn := range shapeParityConnectors[1:] {
+		if checked[conn] == 0 {
+			t.Errorf("no %s native shape was checked", conn)
+		}
+	}
+}
+
+// shapeParityOpenCode is an OpenCode V2 tool.execute.before body as its
+// plugin posts it (internal/gateway/connector/hooks/opencode-plugin.js),
+// after the plugin's config hook proved the plugin order.
+func shapeParityOpenCode(cwd, tool string, input map[string]any) map[string]any {
+	n := shapeParitySeq.Add(1)
+	return map[string]any{"hook_event_name": "tool.execute.before", "tool_name": tool, "tool_input": input,
+		"session_id": fmt.Sprintf("sp-%d", n), "turn_id": fmt.Sprintf("m-sp-%d", n), "tool_call_id": fmt.Sprintf("tu-sp-%d", n),
+		"agent_name": "build", "cwd": cwd, "load_heartbeat": true, "arguments_authoritative": true, "mcp_identity_status": "not_mcp"}
+}
+
+// shapeParityHermes is a Hermes pre_tool_call body.
+func shapeParityHermes(cwd, tool string, input map[string]any) map[string]any {
+	return map[string]any{"hook_event_name": "pre_tool_call", "tool_name": tool, "tool_input": input,
+		"session_id": fmt.Sprintf("sp-%d", shapeParitySeq.Add(1)), "cwd": cwd}
+}
+
+// shapeParityOpenClaw is the inspect body OpenClaw's plugin posts before a
+// tool runs: the tool, its params, the session, and no working directory.
+func shapeParityOpenClaw(tool string, args map[string]any) map[string]any {
+	n := shapeParitySeq.Add(1)
+	return map[string]any{"tool": tool, "args": args, "tool_call_id": fmt.Sprintf("tu-sp-%d", n),
+		"session_id": fmt.Sprintf("sp-%d", n), "approval_surface": "native"}
+}
+
+// shapeParityPatch is an apply_patch envelope: one Add File of content, or
+// an Update File replacing oldText by newText.
+func shapeParityPatch(path, content string) string {
+	return "*** Begin Patch\n*** Add File: " + path + "\n+" + strings.ReplaceAll(content, "\n", "\n+") + "\n*** End Patch"
+}
+
+func shapeParityUpdatePatch(path, oldText, newText string) string {
+	return "*** Begin Patch\n*** Update File: " + path + "\n@@\n-" + strings.ReplaceAll(oldText, "\n", "\n-") +
+		"\n+" + strings.ReplaceAll(newText, "\n", "\n+") + "\n*** End Patch"
 }
 
 // shapeParitySeq numbers the calls: every call is its own session and
@@ -86,6 +170,11 @@ func shapeParityNative(tool string, args map[string]any, cwd string) []shapePari
 			shapeParityCall{name: "amp/edit_file", conn: "amp", event: "tool.call",
 				body: shapeParityEnvelope("tool.call", cwd, "edit_file", map[string]any{"path": str("file_path"),
 					"old_str": str("old_string"), "new_str": str("new_string")})},
+			// The Update File of the same edit (rel-1-0-10:GAP-0947).
+			shapeParityCall{name: "codex/apply_patch-update", conn: "codex", event: "PreToolUse",
+				headers: map[string]string{"X-DefenseClaw-Hook-Event": "PreToolUse", "X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract},
+				body: shapeParityEnvelope("PreToolUse", cwd, "apply_patch", map[string]any{"command": shapeParityUpdatePatch(
+					str("file_path"), str("old_string"), str("new_string"))})},
 		)
 	case "Read":
 		copilotArgs, _ := json.Marshal(map[string]any{"path": str("file_path")})
@@ -104,16 +193,108 @@ func shapeParityNative(tool string, args map[string]any, cwd string) []shapePari
 	return out
 }
 
+// shapeParityNativeMore renders a Claude Code call (tool Bash, Write, Edit or
+// Read) as the shell and file tools of OpenCode, Devin, Hermes, Kiro and
+// OpenClaw (shapeParityNative keeps the train's shapes, which other tests
+// read alone). A connector with no native
+// tool for an action has no call for it: Devin's file tools (only exec is
+// confirmed, by its audit rows and trusted shell schema) and OpenCode V2's
+// edit (its patch tool, captured on a managed host, carries the edit).
+func shapeParityNativeMore(tool string, args map[string]any, cwd string) []shapeParityCall {
+	str := func(key string) string { value, _ := args[key].(string); return value }
+	kiroV3 := map[string]string{connector.HookDialectHeader: connector.KiroHookSurfaceV3}
+	var out []shapeParityCall
+	switch tool {
+	case "Bash":
+		command := str("command")
+		out = append(out,
+			shapeParityCall{name: "opencode/shell", conn: "opencode", event: "tool.execute.before",
+				body: shapeParityOpenCode(cwd, "shell", map[string]any{"command": command})},
+			shapeParityCall{name: "devin/exec", conn: "devin", event: "PreToolUse",
+				body: shapeParityEnvelope("PreToolUse", cwd, "exec", map[string]any{"command": command})},
+			shapeParityCall{name: "hermes/terminal", conn: "hermes", event: "pre_tool_call",
+				body: shapeParityHermes(cwd, "terminal", map[string]any{"command": command})},
+			shapeParityCall{name: "openclaw/exec", conn: "openclaw", route: shapeParityInspectRoute,
+				body: shapeParityOpenClaw("exec", map[string]any{"command": command, "workdir": cwd})},
+		)
+		if runtime.GOOS == "windows" {
+			// The kiro-cli --v3 engine is the Windows one; it names its
+			// shell tool execute_pwsh.
+			out = append(out, shapeParityCall{name: "kiro/v3-execute_pwsh", conn: "kiro", event: "PreToolUse", headers: kiroV3,
+				body: shapeParityEnvelope("PreToolUse", cwd, "execute_pwsh", map[string]any{"command": command})})
+		} else {
+			out = append(out,
+				shapeParityCall{name: "kiro/execute_bash", conn: "kiro", event: "preToolUse",
+					body: shapeParityEnvelope("preToolUse", cwd, "execute_bash", map[string]any{"command": command})},
+				shapeParityCall{name: "kiro/v3-execute_bash", conn: "kiro", event: "PreToolUse", headers: kiroV3,
+					body: shapeParityEnvelope("PreToolUse", cwd, "execute_bash", map[string]any{"command": command})},
+			)
+		}
+	case "Write":
+		path, content := str("file_path"), str("content")
+		out = append(out,
+			shapeParityCall{name: "opencode/write", conn: "opencode", event: "tool.execute.before",
+				body: shapeParityOpenCode(cwd, "write", map[string]any{"path": path, "content": content})},
+			shapeParityCall{name: "opencode/patch-add", conn: "opencode", event: "tool.execute.before",
+				body: shapeParityOpenCode(cwd, "patch", map[string]any{"patchText": shapeParityPatch(path, content)})},
+			shapeParityCall{name: "hermes/write_file", conn: "hermes", event: "pre_tool_call",
+				body: shapeParityHermes(cwd, "write_file", map[string]any{"path": path, "content": content})},
+			shapeParityCall{name: "hermes/patch-v4a-add", conn: "hermes", event: "pre_tool_call",
+				body: shapeParityHermes(cwd, "patch", map[string]any{"mode": "patch", "patch": shapeParityPatch(path, content)})},
+			shapeParityCall{name: "kiro/fs_write", conn: "kiro", event: "preToolUse",
+				body: shapeParityEnvelope("preToolUse", cwd, "fs_write", map[string]any{"path": path, "content": content})},
+			shapeParityCall{name: "kiro/fs_write-create", conn: "kiro", event: "preToolUse",
+				body: shapeParityEnvelope("preToolUse", cwd, "fs_write", map[string]any{"command": "create", "path": path, "file_text": content})},
+			shapeParityCall{name: "openclaw/write", conn: "openclaw", route: shapeParityInspectRoute,
+				body: shapeParityOpenClaw("write", map[string]any{"path": path, "content": content})},
+		)
+	case "Edit":
+		path, oldText, newText := str("file_path"), str("old_string"), str("new_string")
+		out = append(out,
+			shapeParityCall{name: "opencode/patch-update", conn: "opencode", event: "tool.execute.before",
+				body: shapeParityOpenCode(cwd, "patch", map[string]any{"patchText": shapeParityUpdatePatch(path, oldText, newText)})},
+			shapeParityCall{name: "hermes/patch-replace", conn: "hermes", event: "pre_tool_call",
+				body: shapeParityHermes(cwd, "patch", map[string]any{"mode": "replace", "path": path, "old_string": oldText, "new_string": newText})},
+			shapeParityCall{name: "kiro/str_replace", conn: "kiro", event: "preToolUse",
+				body: shapeParityEnvelope("preToolUse", cwd, "str_replace", map[string]any{"path": path, "oldStr": oldText, "newStr": newText})},
+			shapeParityCall{name: "kiro/fs_write-str_replace", conn: "kiro", event: "preToolUse",
+				body: shapeParityEnvelope("preToolUse", cwd, "fs_write", map[string]any{"command": "str_replace", "path": path,
+					"old_str": oldText, "new_str": newText})},
+			shapeParityCall{name: "openclaw/edit", conn: "openclaw", route: shapeParityInspectRoute,
+				body: shapeParityOpenClaw("edit", map[string]any{"path": path, "oldText": oldText, "newText": newText})},
+		)
+	case "Read":
+		path := str("file_path")
+		out = append(out,
+			shapeParityCall{name: "opencode/read", conn: "opencode", event: "tool.execute.before",
+				body: shapeParityOpenCode(cwd, "read", map[string]any{"path": path})},
+			shapeParityCall{name: "hermes/read_file", conn: "hermes", event: "pre_tool_call",
+				body: shapeParityHermes(cwd, "read_file", map[string]any{"path": path})},
+			shapeParityCall{name: "kiro/fs_read", conn: "kiro", event: "preToolUse",
+				body: shapeParityEnvelope("preToolUse", cwd, "fs_read", map[string]any{"path": path})},
+			shapeParityCall{name: "openclaw/read", conn: "openclaw", route: shapeParityInspectRoute,
+				body: shapeParityOpenClaw("read", map[string]any{"path": path})},
+		)
+	}
+	return out
+}
+
 // shapeParityHook answers one hook call through the connector's handler.
 func shapeParityHook(t *testing.T, h http.HandlerFunc, call shapeParityCall, managedTier bool) string {
 	t.Helper()
 	raw, _ := json.Marshal(call.body)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+call.conn+"/hook", bytes.NewReader(raw))
+	route := call.route
+	if route == "" {
+		route = "/api/v1/" + call.conn + "/hook"
+	}
+	req := httptest.NewRequest(http.MethodPost, route, bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	for key, value := range call.headers {
 		req.Header.Set(key, value)
 	}
-	if managedTier {
+	// The inspect route's caller (OpenClaw's plugin) sends no hook
+	// evidence header.
+	if managedTier && call.route == "" {
 		if ev := hookpaths.ResolveConnector(call.conn, "", call.event, raw); ev != "" {
 			req.Header.Set(hookpaths.Header, ev)
 		}

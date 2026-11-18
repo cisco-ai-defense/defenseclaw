@@ -23,6 +23,20 @@ const (
 	routeCredentialMissing = "missing"         // custody host without a gateway credential: every call is 503
 )
 
+// Closed causes of a route-only connector that is not ready, published next
+// to the free-text problem (a code, never text from the config)
+// (doctor and the TUI read them from /health; the status routing block has
+// no cause member: its schema in packaging/mdm/contract is a published contract).
+const (
+	routeCauseEpoch             = "route_epoch"
+	routeCauseAliasNoCredential = "allowed_alias_no_credential"
+	routeCauseUpstreamNotSet    = "upstream_not_set"
+	routeCauseSigning           = "signing_not_ready"
+	routeCauseCredentialStored  = "credential_not_stored"
+	routeCauseNoCredential      = "credential_not_configured"
+	routeCauseNoEnrolled        = "no_enrolled_account"
+)
+
 // routeOnlyReadiness is the route-only state of one connector, published in
 // /health routing.details.route_only so doctor, status and the TUI read it
 // without a new endpoint.
@@ -40,8 +54,15 @@ type routeOnlyReadiness struct {
 	// reports a missing render); nil off managed hosts.
 	EnrolledUsers *int   `json:"enrolled_users,omitempty"`
 	Ready         bool   `json:"ready"`
-	Problem       string `json:"problem,omitempty"`
-	Fix           string `json:"fix,omitempty"`
+	Cause         string `json:"cause,omitempty"` // route* cause constants; "" for any other problem
+	// Warning is a closed code for a state that leaves the connector ready
+	// but refuses some callers (a scoped routing.admin rule).
+	Warning string `json:"warning,omitempty"`
+	// Detail names the rule and models behind Warning. Administrator only:
+	// publicRouteOnly drops it (policy privacy, GAP-0666).
+	Detail  string `json:"detail,omitempty"`
+	Problem string `json:"problem,omitempty"`
+	Fix     string `json:"fix,omitempty"`
 }
 
 // routeOnlySigningReadiness is the gateway Bedrock signing check.
@@ -84,6 +105,7 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 		up, ok := cfg.Routing.RouteOnly.Upstreams[name]
 		if !ok || strings.TrimSpace(up.BaseURL) == "" {
 			r.Problem = "routing.route_only.upstreams." + name + " is not set"
+			r.Cause = routeCauseUpstreamNotSet
 			r.Fix = "set routing.route_only.upstreams." + name + " (base_url and api) in " + routeOnlyConfigSource(managedHost)
 			out = append(out, r)
 			continue
@@ -95,6 +117,7 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 			r.Signing = checkBedrockSigning(cfg, up.Bedrock, up.BaseURL, signers)
 			r.Ready = r.Signing.RegionOK && r.Signing.Signer && r.Signing.Credential
 			if !r.Ready {
+				r.Cause = routeCauseSigning
 				r.Problem = "gateway Bedrock signing is not ready"
 				r.Fix = bedrockSigningFix(r.Signing, "routing.route_only.upstreams."+name+".bedrock", managedHost)
 			}
@@ -106,14 +129,33 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 			r.Credential = routeCredentialMissing
 			if named := routeOnlyCoveringCredentials(cfg, up.BaseURL, r.Provider); len(named) > 0 {
 				// The bundle names the key, but this host does not store it.
+				r.Cause = routeCauseCredentialStored
 				r.Problem = "credential " + named[0] + " is named in the policy bundle but not stored on this host: every model call answers 503"
 				r.Fix = "store it: defenseclaw-gateway enterprise secret set --name " + named[0] + " --from-stdin"
 				break
 			}
+			r.Cause = routeCauseNoCredential
 			r.Problem = "this managed host forwards no agent credential and no gateway credential covers " + r.Provider + " at " + r.Upstream + ": every model call answers 503"
 			r.Fix = "set routing.models[].credential for " + r.Provider + " (base_url " + r.Upstream + ") in the policy bundle"
 		default:
 			r.Credential, r.Ready = routeCredentialAgent, true
+		}
+		if managedHost && r.Problem == "" {
+			// An allowed alias without a gateway key refuses the calls of its
+			// rule as "not allowed" (rel-1-0-10 GAP-0921). Only a rule for every
+			// caller of the connector makes it not ready; a scoped rule is a
+			// warning. The text names the rule and models; publicRouteOnly
+			// removes it for an ordinary account (no credential on /health).
+			blocking, scoped := routeOnlyAllowedWithoutKey(cfg, name, r.Provider)
+			switch {
+			case len(blocking) > 0:
+				r.Ready, r.Cause = false, routeCauseAliasNoCredential
+				r.Problem = "routing.admin rule " + blocking[0].ID + " applies to every " + name + " caller and allows only " + strings.Join(blocking[0].Aliases, ", ") + ", which has no gateway credential on this host: every call is refused"
+				r.Fix = "name a protected credential in routing.models[].credential for " + strings.Join(blocking[0].Aliases, ", ") + " in the policy bundle and store its key: defenseclaw-gateway enterprise secret set --name <name> --from-stdin"
+			case len(scoped) > 0:
+				r.Warning = routeCauseAliasNoCredential
+				r.Detail = "routing.admin rule " + scoped[0].ID + " (scoped to some callers) allows only " + strings.Join(scoped[0].Aliases, ", ") + ", which has no gateway credential on this host: those callers are refused"
+			}
 		}
 		if managedHost && enrolled != nil {
 			if n, ok := enrolled(name); ok {
@@ -121,7 +163,7 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 				if n == 0 && r.Problem == "" {
 					// Nothing is routed until the guardian renders an
 					// enrolled account (rel-1-0-10 GAP-0568: this was silent).
-					r.Ready = false
+					r.Ready, r.Cause = false, routeCauseNoEnrolled
 					r.Problem = "no enrolled account has " + name + " protected yet, so no " + name + " call is routed"
 					r.Fix = "enroll users with " + name + " installed (enterprise.enrollment), wait for the hook guardian pass (about 2 minutes) and restart the agent; enterprise verify lists route_config_drift for an account whose route settings are missing"
 				}
@@ -234,10 +276,71 @@ func withRouteEpochReadiness(out []routeOnlyReadiness, problem string) []routeOn
 	}
 	for i := range out {
 		if out[i].Problem == "" {
+			out[i].Cause = routeCauseEpoch
 			out[i].Problem = problem + ", so the hook guardian cannot render route-only for any account"
 			out[i].Fix = "check gateway.log for 'route epoch not published' (the machine data dir hooks folder must be writable by the gateway service), then restart DefenseClawGateway"
 		}
 		out[i].Ready = false
 	}
 	return out
+}
+
+// publicRouteOnlyProblems is what an ordinary account reads for each closed
+// cause. It names no credential, model, alias, rule, group, path or user.
+var publicRouteOnlyProblems = map[string]string{
+	routeCauseEpoch:             "the gateway route epoch is not ready, so no account can be rendered",
+	routeCauseAliasNoCredential: "a routing.admin rule that applies to every caller allows only models with no gateway credential on this host: every call is refused",
+	routeCauseUpstreamNotSet:    "the route-only upstream is not set",
+	routeCauseSigning:           "gateway Bedrock signing is not ready",
+	routeCauseCredentialStored:  "a gateway credential the policy names is not stored on this host: every model call is refused",
+	routeCauseNoCredential:      "no gateway credential covers the route-only upstream: every model call is refused",
+	routeCauseNoEnrolled:        "no enrolled account has the connector protected yet",
+}
+
+const publicRouteOnlyFix = "run defenseclaw doctor as an administrator for the cause and the fix"
+
+// publicRouteOnly is a route-only readiness row as an ordinary account may
+// read it on a standalone host: the closed cause and warning codes and
+// generic text, never a credential, model, rule or path name, a signing
+// profile or an upstream (policy privacy, rel-1-0-10 GAP-0666, GAP-1268).
+func publicRouteOnly(in routeOnlyReadiness) routeOnlyReadiness {
+	out := routeOnlyReadiness{
+		Connector: in.Connector, API: in.API, Provider: in.Provider, Custody: in.Custody, Credential: in.Credential,
+		EnrolledUsers: in.EnrolledUsers, Ready: in.Ready, Cause: in.Cause, Warning: in.Warning,
+	}
+	if !in.Ready {
+		out.Problem = publicRouteOnlyProblems[in.Cause]
+		if out.Problem == "" {
+			out.Problem = "route-only is not ready"
+		}
+		out.Fix = publicRouteOnlyFix
+	}
+	return out
+}
+
+// healthRoutingForOrdinaryAccount replaces the route-only rows of the
+// routing subsystem with their public form (a copy; the stored details are
+// never written).
+func healthRoutingForOrdinaryAccount(routing SubsystemHealth) SubsystemHealth {
+	if routing.LastError != "" {
+		// The start error can quote a path, a credential or a model of the
+		// policy; an ordinary account reads a closed text, like config. The text
+		// points to status, not doctor: doctor reads this very row.
+		routing.LastError = "routing did not start; an administrator can read the cause in defenseclaw status"
+	}
+	rows, ok := routing.Details["route_only"].([]routeOnlyReadiness)
+	if !ok {
+		return routing
+	}
+	public := make([]routeOnlyReadiness, len(rows))
+	for i, row := range rows {
+		public[i] = publicRouteOnly(row)
+	}
+	details := make(map[string]interface{}, len(routing.Details))
+	for k, v := range routing.Details {
+		details[k] = v
+	}
+	details["route_only"] = public
+	routing.Details = details
+	return routing
 }

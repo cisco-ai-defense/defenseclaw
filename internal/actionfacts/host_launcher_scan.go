@@ -71,6 +71,13 @@ func launcherStatement(source string, words []layoutWord, depth int) bool {
 	first := 0
 	for first < len(words) && (words[first].assign || words[first].plain && layoutReserved[words[first].literal]) {
 		first++
+		if words[first-1].plain && words[first-1].literal == "time" {
+			// The time keyword's own options (time -p, time --) are no
+			// command (rel-1-0-10:GAP-0970).
+			for first < len(words) && words[first].plain && (words[first].literal == "-p" || words[first].literal == "--") {
+				first++
+			}
+		}
 	}
 	return launcherCommand(source, words, first, depth)
 }
@@ -81,8 +88,12 @@ func launcherStatement(source string, words []layoutWord, depth int) bool {
 // empty words, a start title and the operand a flag takes; a word that follows
 // a flag is read as that operand and as the command both, since the flag's
 // arity is the wrapper's.
+//
+// cmd's start takes its first quoted word as the window title: in an argv,
+// which carries no quotes, the first word after start's switches may be the
+// title too (launcherStarts reads it both ways, rel-1-0-10:GAP-0857).
 func launcherCommand(source string, words []layoutWord, first, depth int) bool {
-	wrapped, afterFlag, wrapper := false, false, ""
+	wrapped, afterFlag, wrapper, titled := false, false, "", false
 	for index := first; index < len(words); index++ {
 		word := words[index]
 		if launcherWord(source, word) {
@@ -100,10 +111,13 @@ func launcherCommand(source string, words []layoutWord, first, depth int) bool {
 			if (name == "command" || name == "builtin") && queryOnlyCommand(words[index+1:]) {
 				return false
 			}
-			wrapped, afterFlag, wrapper = true, false, name
+			wrapped, afterFlag, wrapper, titled = true, false, name, false
 		case !wrapped:
 			return false
 		case launcherPrefix(word, wrapper):
+			if wrapper == "start" && (word.literal == "" || word.quoted) {
+				titled = true
+			}
 			afterFlag = launcherFlag(word)
 		case afterFlag:
 			// env -S takes a command text as its operand.
@@ -111,6 +125,8 @@ func launcherCommand(source string, words []layoutWord, first, depth int) bool {
 				return true
 			}
 			afterFlag = false
+		case wrapper == "start" && !titled:
+			titled = true
 		default:
 			return false
 		}
@@ -145,11 +161,19 @@ func commandBase(word string) string {
 
 // launcherWrapper reports a command that runs the command it is given on
 // this machine. ssh runs it on another one: its argument is no local launcher.
+// Every pass-through wrapper the analysis unwraps (staticPOSIXWrapperPrograms:
+// time and nsenter as well as env, sudo, nice, timeout, nohup ...) is one, so
+// the launcher reader and the screen read through every wrapper the analysis
+// reads through; a wrapper missing here hid the launcher behind it while the
+// analysis read the chain whole (rel-1-0-10:GAP-0970).
 func launcherWrapper(name string) bool {
 	switch name {
 	case "ssh":
 		return false
-	case "start", "wsl", "command", "builtin":
+	case "start", "wsl":
+		return true
+	}
+	if _, ok := staticPOSIXWrapperPrograms[name]; ok {
 		return true
 	}
 	return layoutWrappers[name]

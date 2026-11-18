@@ -67,7 +67,7 @@ func commandNewItemMayMakeLink(command string) bool {
 	if spellings == 0 {
 		return false
 	}
-	facts := actionfacts.Analyze(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell})
+	facts := analyzeAtHookFolder(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell})
 	// A partial parse (a dynamic value) still names each call it read; a
 	// New-Item spelling outside a read call (a string, a script block)
 	// leaves the counts unequal.

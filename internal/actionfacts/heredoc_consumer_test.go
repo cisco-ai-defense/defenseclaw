@@ -3,6 +3,10 @@ package actionfacts
 import (
 	"strings"
 	"testing"
+
+	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // rel-1-0-10:GAP-0889. The command of a quoted here-document is resolved
@@ -142,32 +146,87 @@ func TestHereDocConsumerDataIsAnAllowlist(t *testing.T) {
 	}
 }
 
-// rel-1-0-10:GAP-0902. The consumer text stops at the list operator before the
-// opener, so a function, alias or hash entry of the data name, or a PATH
-// assignment, made earlier in the same call is read from the call text: the
-// unknown tier. A text that only mentions the name keeps the data reading.
-func TestHereDocConsumerRedefinedInTheCallIsUnknown(t *testing.T) {
+// gap0913Rebinds are the reviewer's rebind prefixes (s7-d4tailrev,
+// TestD4trConsumerProbe idx 1-17) and more: each binds PATH (or another
+// name that changes what a word runs) or renames cat in a way the parsed
+// binding reader follows, or may bind anything (a sourced file, eval of a
+// run-time string, enable -f, a run-time command word).
+var gap0913Rebinds = []string{
+	"export PATH=/tmp/x", "export PA\"\"TH=/tmp/x", "export PA\\TH=/tmp/x", "read PATH < /tmp/p",
+	"for PATH in /tmp/x; do :; done", "printf -v PATH /tmp/x", "declare PA''TH=/tmp/x", "mapfile -t PATH < /tmp/p",
+	"typeset -x PA\"\"TH=/tmp/x", "eval 'PA''TH=/tmp/x'", "eval \"c\"\"at() { bash; }\"", "eval \"$DEFS\"",
+	"source /tmp/defs.sh", ". ./defs.sh", "enable -f /tmp/x.so cat", "cat() { bash; }", "alias cat=bash",
+	"function cat { sh; }", "hash -p /bin/sh cat", "PATH+=:/tmp/x", "path=(/tmp/x $path)", "export LD_PRELOAD=/tmp/x.so",
+	"builtin alias cat=sh", "command eval 'cat(){ sh; }'", "$CMD cat=sh", "trap 'cat(){ sh; }' DEBUG",
+	"declare \"$N=/tmp/x\"", "readarray PATH < /tmp/p", "if true; then PATH=/tmp/x; fi",
+}
+
+// gap0913Keeps are statements that bind or define nothing that renames cat:
+// the cat writer stays data after them.
+var gap0913Keeps = []string{
+	"echo concat", "alias ll='ls -l'", "MANPATH=/x", "export FOO=/x", "read -r line < f", "hash cat",
+	"eval 'echo hi'", "export PATH", "printf -v x %s y", "for f in a b; do echo $f; done", "cd /tmp && ls",
+}
+
+// rel-1-0-10:GAP-0913. A data consumer is the unknown tier when a readable
+// statement of the call, or the script before it in its own argument, binds
+// PATH or renames the program; the bindings are read with the parser and the
+// shared binding reader (callBindsNames), never with a pattern on the text.
+// A statement or script that does not parse may bind anything.
+func TestHereDocConsumerRenamedByTheCallIsUnknown(t *testing.T) {
+	doc := func(script string) shellparse.SyntaxTailHereDoc {
+		return shellparse.SyntaxTailHereDoc{Consumer: "cat > notes.txt", Script: script, ScriptKnown: true}
+	}
+	for _, statement := range gap0913Rebinds {
+		if got := syntaxTailHereDocConsumerIn(doc(""), []string{statement}); got == hereDocData {
+			t.Errorf("statement %q: hereDocData, want the unknown tier", statement)
+		}
+		if got := syntaxTailHereDocConsumerIn(doc(statement+"; "), nil); got == hereDocData {
+			t.Errorf("script %q: hereDocData, want the unknown tier", statement)
+		}
+	}
+	for _, statement := range gap0913Keeps {
+		if got := syntaxTailHereDocConsumerIn(doc(""), []string{statement}); got != hereDocData {
+			t.Errorf("statement %q: %d, want hereDocData", statement, got)
+		}
+		if got := syntaxTailHereDocConsumerIn(doc(statement+" && "), nil); got != hereDocData {
+			t.Errorf("script %q: %d, want hereDocData", statement, got)
+		}
+	}
 	for _, row := range []struct {
-		command, consumer string
-		want              hereDocConsumer
+		name string
+		doc  shellparse.SyntaxTailHereDoc
+		stmt []string
+		want hereDocConsumer
 	}{
-		{"cat(){ sh; }; cat > f", "cat > f", hereDocUnknown},
-		{"cat () { sh; }; cat > f", "cat > f", hereDocUnknown},
-		{"function cat { sh; }; cat > f", "cat > f", hereDocUnknown},
-		{"alias cat=sh; cat > f", "cat > f", hereDocUnknown},
-		{"alias -- 'cat=sh'; cat > f", "cat > f", hereDocUnknown},
-		{"hash -p /bin/sh cat; cat > f", "cat > f", hereDocUnknown},
-		{"export PATH=/tmp/x:$PATH; cat > f", "cat > f", hereDocUnknown},
-		{"PATH=/tmp/x; cat > f", "cat > f", hereDocUnknown},
-		{"nice(){ sh; }; nice cat > f", "nice cat > f", hereDocUnknown},
-		{"echo concat; cat > f", "cat > f", hereDocData},
-		{"alias ll='ls -l'; cat > f", "cat > f", hereDocData},
-		{"MANPATH=/x; cat > f", "cat > f", hereDocData},
-		// A path is not looked up as a function.
-		{"cat(){ sh; }; /bin/cat > f", "/bin/cat > f", hereDocData},
+		{"no bindings", doc(""), nil, hereDocData},
+		{"a path is no function", shellparse.SyntaxTailHereDoc{Consumer: "/bin/cat > f", ScriptKnown: true}, []string{"cat() { sh; }"}, hereDocData},
+		{"a script that is not known", shellparse.SyntaxTailHereDoc{Consumer: "cat > f"}, nil, hereDocUnknown},
+		{"a script that does not parse", doc("if true; then "), nil, hereDocUnknown},
+		{"a statement that does not parse", doc(""), []string{"if true"}, hereDocUnknown},
+		{"a wrapper renamed", shellparse.SyntaxTailHereDoc{Consumer: "nice cat > f", ScriptKnown: true}, []string{"nice() { sh; }"}, hereDocUnknown},
+		{"a shell stays a shell", shellparse.SyntaxTailHereDoc{Consumer: "bash", ScriptKnown: true}, []string{"export PATH=/tmp/x"}, hereDocRunsCode},
 	} {
-		if got := syntaxTailHereDocConsumerIn(row.consumer, row.command); got != row.want {
-			t.Errorf("%q in %q: %d, want %d", row.consumer, row.command, got, row.want)
+		if got := syntaxTailHereDocConsumerIn(row.doc, row.stmt); got != row.want {
+			t.Errorf("%s: %d, want %d", row.name, got, row.want)
+		}
+	}
+}
+
+// The shared binding reader keeps its USER and LOGNAME results: the names
+// parameter of callBindsNames does not change CallBindsUserNames.
+func TestCallBindsUserNamesKeepsItsNames(t *testing.T) {
+	for text, want := range map[string]int{
+		"read USER": 1, "printf -v LOGNAME x": 1, "source f": 2, "eval \"$X\"": 2, "eval 'USER=x'": 1,
+		"read PATH": 0, "printf -v PATH x": 0, "echo USER": 0,
+	} {
+		file, ok := shellparse.Parse(text)
+		if !ok {
+			t.Fatalf("%q: no parse", text)
+		}
+		call, _ := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		if got := len(CallBindsUserNames(call)); got != want {
+			t.Errorf("%q: %d names, want %d", text, got, want)
 		}
 	}
 }

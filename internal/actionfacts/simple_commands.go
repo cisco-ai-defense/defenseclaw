@@ -61,11 +61,26 @@ type SimpleCommand struct {
 	// through a link on disk is not a file the command names
 	// (rel-1-0-6:GAP-0601 review 5).
 	UnboundUser bool
+	// OtherFolder marks the reading of a statement in another folder it may
+	// run in, after a cd that may fail (rel-1-0-10:GAP-0869): a reading,
+	// not a further statement of the call.
+	OtherFolder bool
+	// UnresolvedFolder means the directory of the command is unknown and an
+	// operand of Text depends on it: the gateway reads it in each folder
+	// that holds a protected file (rel-1-0-10:GAP-0871).
+	UnresolvedFolder bool
 	// AbsoluteOnly means the directory of the command is unknown (an eval,
 	// an unreadable cd) and no operand of Text depends on it: CWD is empty,
 	// and the directory the action starts in judges the command as well as
 	// any other (rel-1-0-6:GAP-0630 review 5).
 	AbsoluteOnly bool
+	// UnprovenHome means Text reads a file through ~ or $HOME after HOME got
+	// a value the walk could not read (HOME=$(pwd); cp ~/../f d): Text spells
+	// the previous home, and the file the shell reads is known only when it
+	// runs. A reader judges Text and adds the unknown tier
+	// (rel-1-0-10:GAP-0996). A write there is judged against the previous
+	// home only (GAP-2476): a scratch HOME=$(mktemp -d) keeps its writes.
+	UnprovenHome bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced, EvaluationFailureInternal when the reader
 	// itself failed, and EvaluationFailureSyntax when a text with a syntax
@@ -100,10 +115,10 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // here-document body are statements only when its command runs its standard
 // input as shell code; another command's body is its data and stays unread
 // text, and a command that is not known is the unknown tier
-// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). source is the text
-// the tail was read from: the consumer reading looks in it for a function,
-// alias, hash entry or PATH assignment that renames a data program (GAP-0902).
-func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, source string, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+// (EvaluationFailureUnresolvedBody, rel-1-0-10:GAP-0876). The consumer
+// reading takes the readable statements for the bindings that may rename a
+// data program (hereDocCallBindings, GAP-0902, GAP-0913).
+func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
 	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
 	capped := tail.Truncated.Any()
@@ -145,7 +160,7 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, source string, 
 	statements := slices.Clone(tail.Statements)
 	unknownBody := false
 	for _, doc := range tail.HereDocs {
-		switch syntaxTailHereDocConsumerIn(doc.Consumer, source) {
+		switch syntaxTailHereDocConsumerIn(doc, tail.Statements) {
 		case hereDocRunsCode:
 			statements = append(statements, doc.Statements...)
 		case hereDocUnknown:
@@ -198,6 +213,17 @@ type simpleShellState struct {
 	// forked holds the forked loop variables that hold the value of one list
 	// word (simpleForkLoopBind) in this state, until their loop ends.
 	forked []string
+	// folderVars are the variables assigned from a current-folder head while
+	// the folder was unknown (X=$PWD/f after cd "$D"): their value is the
+	// relative spelling in that folder, which the next cd moves away from, so
+	// the next cd forgets them (rel-1-0-10:GAP-1042).
+	folderVars []string
+	// homeUnproven means HOME holds a value the walk could not read
+	// (HOME=$(pwd), HOME=$X, a declaration option that changes what the
+	// value means). HOME keeps its previous value, so a later ~ or $HOME
+	// write is still judged against a home the call can reach (GAP-2476),
+	// and a reading through it is marked UnprovenHome (rel-1-0-10:GAP-0996).
+	homeUnproven bool
 }
 
 // simpleLocal is the caller value of name saved by a local declaration in
@@ -216,11 +242,57 @@ const (
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
-		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked)}
+		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked), folderVars: slices.Clone(s.folderVars),
+		homeUnproven: s.homeUnproven}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
 	return copy
+}
+
+// noteHome records what assignments did to HOME (updateSimpleVariables): a
+// value the walk read proves the home, a value it could not read leaves the
+// home unproven.
+func (s *simpleShellState) noteHome(set, known bool) {
+	if set {
+		s.homeUnproven = !known
+	}
+}
+
+// simpleReadsThroughUnprovenHome reports whether the reading text of a
+// statement spelled with ~ or HOME (source) reads, under the home of state
+// while that home is unproven (SimpleCommand.UnprovenHome), a path that
+// another home makes an account's file: one that climbs out of the home
+// (~/../f) or one of the credentials-file table (~/.git-credentials).
+// A test script that sets HOME to its own folder and reads its own files
+// there (export HOME=$T; tail "$HOME/init.log") reads no such path.
+func simpleReadsThroughUnprovenHome(input Input, state simpleShellState, source, text string, resolved bool) bool {
+	home := state.vars["HOME"]
+	if !state.homeUnproven || !resolved || home == "" ||
+		!strings.Contains(source, "~") && !strings.Contains(source, "HOME") {
+		return false
+	}
+	reading := input
+	reading.Command, reading.Args, reading.Argv, reading.CWD = text, nil, nil, state.cwd
+	prefix := strings.TrimSuffix(home, "/") + "/"
+	for _, fact := range Analyze(reading).Paths {
+		if fact.Access != PathAccessRead || !strings.HasPrefix(fact.Value, prefix) {
+			continue
+		}
+		relative := strings.TrimPrefix(fact.Value, prefix)
+		if slices.Contains(strings.Split(relative, "/"), "..") {
+			return true
+		}
+		if _, credential := MatchCredentialFileShape(relative); credential {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleHomeChanged reports whether state holds another HOME than prior.
+func simpleHomeChanged(prior, state simpleShellState) bool {
+	return prior.vars["HOME"] != state.vars["HOME"] || prior.homeUnproven != state.homeUnproven
 }
 
 // simplePieces holds the commands a walk reads from the text of the call as it
@@ -351,10 +423,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	// for its tail, so a call that parses pays no second parse.
 	if facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
 		if tail, ok := shellparse.ReadSyntaxTail(source); ok {
-			return syntaxTailCommands(input, tail, source, depth, interpreter, inherited, guess)
+			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
 		}
 	}
-	if !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
+	if !input.folderUnknown && !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
 		!strings.Contains(source, "eval") && !strings.Contains(source, "trap") &&
 		!strings.Contains(source, " -") {
 		return nil
@@ -374,6 +446,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	if len(parts) > maxStatementsAlone {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
 	}
+	// The folders each statement may run in, by the working-folder tracking
+	// of the analysis (working_folder.go): the walk below moves its folder
+	// at every cd as if the cd ran and worked, so a statement after a cd that
+	// may fail or not run is also read where the shell was before it
+	// (rel-1-0-10:GAP-0869).
+	mayRunIn := simplePartWorkFolders(source, parts, input.CWD, input.ActiveHome)
 	var futureSafe []bool
 	var checkedCases, tooManyCases bool
 	compact := func(states []simpleShellState, index int) []simpleShellState {
@@ -396,7 +474,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		}
 		return compactSimpleStatesForFuture(states, parts[index:], futureSafe[index])
 	}
-	if !reduced && len(parts) == 1 {
+	// A body that starts in an unknown folder (Input.folderUnknown) is read
+	// whole: a single statement of it is a reading in that folder.
+	if !reduced && len(parts) == 1 && !input.folderUnknown {
 		file, parsed := shellparse.Parse(parts[0].text)
 		if !parsed || len(file.Stmts) != 1 {
 			return nil
@@ -440,14 +520,18 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		initialVars["PWD"] = simplePathClean(input.CWD)
 	}
 	states := map[string][]simpleShellState{
-		"0": {{cwd: input.CWD, vars: initialVars}},
+		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars}},
 	}
 	result := make([]SimpleCommand, 0, len(parts))
-	changed := reduced || len(parts) != 1
+	changed := reduced || len(parts) != 1 || input.folderUnknown
 	unproven := false
 	// syntaxUnread: a nested body with a syntax error was read only in part
 	// (syntaxTailCommands).
 	syntaxUnread := false
+	// unknownFolderBody: a body the caller expands in an unknown folder was
+	// read with that folder as its head (simpleUnknownFolderNestedCall); the
+	// reading of the body as unread stays too.
+	unknownFolderBody := ""
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
 	var plainWords simplePlainWords
@@ -535,6 +619,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		stmt := file.Stmts[0]
 		nextVariants := make([]simpleShellState, 0, len(variants))
 		emitted := make(map[SimpleCommand]bool)
+		var own []SimpleCommand
 		for _, prior := range variants {
 			if simpleReboundReading(prior, part) {
 				continue
@@ -542,11 +627,21 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			state := prior.clone()
 			simpleApplyLoopBinds(state.vars, part.binds, login)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
-				updateSimpleVariables(state.vars, call.Assigns)
+				assigns, folderNames := call.Assigns, []string(nil)
+				if folder, names, ok := simpleUnknownFolderAssignment(part.text, &state); ok {
+					if folderCall, ok := folder.Cmd.(*syntax.CallExpr); ok && len(folderCall.Args) == 0 &&
+						len(folderCall.Assigns) == len(assigns) {
+						assigns, folderNames = folderCall.Assigns, names
+					}
+				}
+				state.noteHome(updateSimpleVariables(state.vars, assigns))
+				state.setFolderVars(simpleAssignNames(assigns), folderNames)
 				changed = true
 				nextVariants = append(nextVariants, state)
-				if part.maySkip && len(prior.forked) != 0 {
-					// The assignment may not run: the word of the loop stays.
+				if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
+					// The assignment may not run: the word of the loop, and the
+					// HOME it would change (false && HOME=/x, true || HOME=/x),
+					// stay as they were (rel-1-0-10:GAP-0996).
 					nextVariants = append(nextVariants, prior)
 				}
 				continue
@@ -592,9 +687,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					text = resolved
 					changed, resolvedVariable = true, true
 				}
-				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
+				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state, home); ok {
 					text = resolved
 					changed = true
+				}
+				if resolved, ok, held := simpleResolvedCurrentFolderHeads(text, &state); ok {
+					text = resolved
+					changed, resolvedVariable = true, resolvedVariable || held
 				}
 				if stripped, ok := withoutDescriptorDuplications(text); ok {
 					text = stripped
@@ -618,13 +717,16 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				ResolvedVariable:        resolvedVariable,
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
-				AbsoluteOnly:            state.cwdUnknown && !relative}
+				AbsoluteOnly:            state.cwdUnknown && !relative,
+				UnresolvedFolder:        relative,
+				UnprovenHome:            simpleReadsThroughUnprovenHome(input, state, part.text, text, resolvedVariable)}
 			if text == part.text {
 				pieces.add(command)
 			}
 			if !emitted[command] {
 				result = append(result, command)
 				emitted[command] = true
+				own = append(own, command)
 				if len(result) > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
@@ -638,7 +740,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						ResolvedVariable:        resolvedVariable,
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
-						AbsoluteOnly:            command.AbsoluteOnly}
+						AbsoluteOnly:            command.AbsoluteOnly,
+						UnprovenHome:            command.UnprovenHome}
 					if reading == unprefixed {
 						pieces.add(alone)
 					}
@@ -655,7 +758,25 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if call != nil {
 				var innerCWDUnknown bool
 				var innerInterpreter string
-				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown, &innerInterpreter)
+				nestedCall, nestedVars := call, effective
+				if state.cwdUnknown || state.cwd == "" && input.CWD == "" {
+					// Only a body the caller's expansion left unread is read
+					// so; the call keeps the unread body's reading as well
+					// (EvaluationFailureUnresolvedBody below), so its verdict
+					// is never below the one it had.
+					if _, _, nested, static := simpleNestedScript(call, effective, nil, nil); nested && !static {
+						folderCall, folderVars := simpleUnknownFolderNestedCall(part.text, call, effective)
+						if _, _, nested, static := simpleNestedScript(folderCall, folderVars, nil, nil); nested && static {
+							nestedCall, nestedVars = folderCall, folderVars
+							// The failure the unread body gives (below).
+							unknownFolderBody = EvaluationFailureUnresolvedBody
+							if !simplePotentialShellScript(call.Args, effective) || !simpleRuntimeWords(call.Args) {
+								unknownFolderBody = "parse"
+							}
+						}
+					}
+				}
+				script, shared, nested, static := simpleNestedScript(nestedCall, nestedVars, &innerCWDUnknown, &innerInterpreter)
 				if nested {
 					if !static {
 						if simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
@@ -679,6 +800,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					if innerCWDUnknown {
 						innerInput.CWD = ""
 					}
+					// A body that starts after a cd the walk could not follow,
+					// or in a call with no folder at all, starts in a folder
+					// the walk does not know: its walk knows that, so a
+					// current-folder head or a relative operand of the body is
+					// read as on the top level (rel-1-0-10:GAP-1042).
+					innerInput.folderUnknown = innerInput.CWD == "" && (state.cwdUnknown || input.CWD == "")
 					if shared {
 						if resolved, ok := simpleResolvedVariables(script, effective); ok {
 							innerInput.Command = resolved
@@ -750,10 +877,22 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if decl, ok := stmt.Cmd.(*syntax.DeclClause); ok {
 				// export HOME=v sets HOME for the commands after it, as
 				// HOME=v; export HOME does (GAP-2476).
+				var folderNames []string
+				if folder, names, ok := simpleUnknownFolderAssignment(part.text, &state); ok {
+					if folderDecl, ok := folder.Cmd.(*syntax.DeclClause); ok && len(folderDecl.Args) == len(decl.Args) {
+						decl, folderNames = folderDecl, names
+					}
+				}
 				updateSimpleDeclVariables(&state, decl, part.scope)
+				state.setFolderVars(simpleAssignNames(decl.Args), folderNames)
 			}
 			if call != nil {
 				simpleForgetUserVars(state.vars, CallBindsUserNames(call))
+				if simpleCallReadsHome(call) {
+					// read HOME: the value is known only when it runs, and
+					// HOME keeps the previous one (rel-1-0-10:GAP-0996).
+					state.homeUnproven = true
+				}
 			}
 			nextCWD, changedDirectory := simpleCommandNextCWD(text, &state, effective)
 			if !changedDirectory {
@@ -769,6 +908,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				}
 			}
 			if changedDirectory {
+				// A value spelled relative to the folder the walk did not know
+				// names another file in the next one.
+				simpleForgetUserVars(state.vars, state.folderVars)
+				state.folderVars = nil
 				if state.cwd != "" {
 					state.vars["OLDPWD"] = state.cwd
 				} else {
@@ -788,9 +931,35 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				state.vars[part.read.name] = part.read.word
 			}
 			nextVariants = append(nextVariants, state)
-			if part.maySkip && len(prior.forked) != 0 {
-				// The statement may not run: the word of the loop stays.
+			if part.maySkip && (len(prior.forked) != 0 || simpleHomeChanged(prior, state)) {
+				// The statement may not run: the word of the loop, and the
+				// HOME it would change (false && export HOME=/x), stay as
+				// they were (rel-1-0-10:GAP-0996).
 				nextVariants = append(nextVariants, prior)
+			}
+		}
+		for _, command := range own {
+			// A statement the walk placed nowhere after no cd the tracking
+			// read (an unmodeled builtin, eval) stays unplaced: it is judged
+			// as an unresolved folder (UnresolvedFolder). After a cd the
+			// tracking read (a CDPATH miss), its folders are read.
+			dirs := mayRunIn[partIndex]
+			if len(dirs) == 0 || command.CWD == "" && len(dirs) == 1 && dirs[0] == input.CWD ||
+				!simpleRelativePathOperand(command.Text) {
+				continue
+			}
+			for _, dir := range mayRunIn[partIndex] {
+				again := command
+				again.CWD, again.AbsoluteOnly = dir, false
+				if emitted[again] {
+					continue // the walk itself read it there
+				}
+				emitted[again] = true
+				again.OtherFolder = true
+				result = append(result, again)
+				if len(result) > maxSimpleEvaluations {
+					return []SimpleCommand{{EvaluationFailure: "limit"}}
+				}
 			}
 		}
 		states[part.scope] = compact(uniqueSimpleStates(nextVariants), partIndex+1)
@@ -807,6 +976,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	}
 	if syntaxUnread {
 		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
+	}
+	if unknownFolderBody != "" {
+		result = append(result, SimpleCommand{EvaluationFailure: unknownFolderBody})
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
@@ -1141,7 +1313,8 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 		if !slices.ContainsFunc(result, func(previous simpleShellState) bool {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
 				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
-				slices.Equal(previous.locals, state.locals)
+				slices.Equal(previous.locals, state.locals) && previous.homeUnproven == state.homeUnproven &&
+				slices.Equal(previous.folderVars, state.folderVars)
 		}) {
 			result = append(result, state)
 		}
@@ -1311,10 +1484,12 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 		if !known || assign.Index != nil || assign.Array != nil {
 			if assign.Name.Value != "HOME" {
 				delete(vars, assign.Name.Value)
+			} else {
+				state.homeUnproven = true
 			}
 			continue
 		}
-		updateSimpleVariables(vars, []*syntax.Assign{assign})
+		state.noteHome(updateSimpleVariables(vars, []*syntax.Assign{assign}))
 	}
 }
 
@@ -1415,24 +1590,34 @@ func simpleEndFunctionBody(states []simpleShellState, scope string) []simpleShel
 	return ended
 }
 
-func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
+// updateSimpleVariables applies assigns to vars. It reports whether one of
+// them set HOME and whether the walk read the value HOME has after them.
+func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) (homeSet, homeKnown bool) {
 	for _, assign := range assigns {
 		if assign == nil || assign.Name == nil || assign.Index != nil || assign.Array != nil {
 			continue
 		}
 		name := assign.Name.Value
+		known := true
 		if assign.Value == nil {
 			vars[name] = ""
-		} else if value, known := simpleStaticWord(assign.Value, vars); known {
+		} else if value, static := simpleStaticWord(assign.Value, vars); static {
 			vars[name] = value
-		} else if name != "HOME" {
-			delete(vars, name)
+		} else {
+			known = false
+			if name != "HOME" {
+				delete(vars, name)
+			}
 		}
 		// A HOME value the walk cannot read (HOME=$(echo $HOME), HOME=$X)
 		// keeps the previous HOME: an unknown HOME dropped every later ~
-		// write (GAP-2476). A home that a run-time value really moves to is
-		// outside what the static check can follow.
+		// write (GAP-2476). The home a run-time value moves to is not known,
+		// so the state records it as unproven (rel-1-0-10:GAP-0996).
+		if name == "HOME" {
+			homeSet, homeKnown = true, known
+		}
 	}
+	return homeSet, homeKnown
 }
 
 // The full action may bind a value that the simple-command walk cannot
@@ -1499,6 +1684,16 @@ func simpleBoundVariables(file *syntax.File) (bound map[string]bool) {
 // it spells (any when it is not static). The statements after the call read
 // no value for them; the statements before it do.
 func CallBindsUserNames(call *syntax.CallExpr) []string {
+	return callBindsNames(call, func(name string) bool { return slices.Contains(simpleUserNames, name) }, simpleUserNames)
+}
+
+// callBindsNames is CallBindsUserNames for the names match accepts: read,
+// mapfile and printf -v name one; eval and trap code binds the names it binds
+// itself (evalCodeBindsNames); a sourced file, or code that is not static,
+// may bind any, which is every. The here-document consumer reading uses it
+// for PATH and the other names that change what a word runs
+// (hereDocCallBindings, rel-1-0-10:GAP-0913).
+func callBindsNames(call *syntax.CallExpr, match func(string) bool, every []string) []string {
 	if call == nil || len(call.Args) == 0 {
 		return nil
 	}
@@ -1508,7 +1703,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 	}
 	var names []string
 	add := func(name string) {
-		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+		if match(name) && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -1532,7 +1727,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 			name, known := simpleStaticWord(call.Args[index], nil)
 			switch {
 			case !known:
-				for _, user := range simpleUserNames {
+				for _, user := range every {
 					add(user)
 				}
 			case options && name == "--":
@@ -1559,7 +1754,7 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 		}
 	case ".", "source":
 		// The sourced file is code the walk does not read.
-		for _, name := range simpleUserNames {
+		for _, name := range every {
 			add(name)
 		}
 	case "eval", "trap":
@@ -1576,18 +1771,31 @@ func CallBindsUserNames(call *syntax.CallExpr) []string {
 		for _, arg := range code {
 			text, known := simpleStaticWord(arg, nil)
 			if !known {
-				for _, name := range simpleUserNames {
+				for _, name := range every {
 					add(name)
 				}
 				return names
 			}
 			words = append(words, text)
 		}
-		for _, name := range evalCodeBindsUser(strings.Join(words, " "), 0) {
+		for _, name := range evalCodeBindsNames(strings.Join(words, " "), 0, match, every) {
 			add(name)
 		}
 	}
 	return names
+}
+
+// simpleCallReadsHome reports a read, mapfile, readarray or printf -v call
+// that binds HOME to a value it reads when it runs (rel-1-0-10:GAP-0996).
+func simpleCallReadsHome(call *syntax.CallExpr) bool {
+	if call == nil || len(call.Args) == 0 {
+		return false
+	}
+	switch program, _ := simpleStaticWord(call.Args[0], nil); program {
+	case "read", "mapfile", "readarray", "printf":
+		return slices.Contains(callBindsNames(call, func(name string) bool { return name == "HOME" }, []string{"HOME"}), "HOME")
+	}
+	return false
 }
 
 // simpleStaticWordOrEmpty reports a static word that starts with prefix.
@@ -1600,13 +1808,19 @@ func simpleStaticWordOrEmpty(word *syntax.Word, prefix byte) bool {
 // code text binds: an assignment, a loop name, or a call that binds one
 // (CallBindsUserNames). Code that does not parse may bind any.
 func evalCodeBindsUser(text string, depth int) []string {
+	return evalCodeBindsNames(text, depth, func(name string) bool { return slices.Contains(simpleUserNames, name) }, simpleUserNames)
+}
+
+// evalCodeBindsNames is evalCodeBindsUser for the names match accepts
+// (every, when the code does not parse).
+func evalCodeBindsNames(text string, depth int, match func(string) bool, every []string) []string {
 	file, ok := shellparse.Parse(text)
 	if !ok || depth >= 4 {
-		return simpleUserNames
+		return every
 	}
 	var names []string
 	add := func(name string) {
-		if slices.Contains(simpleUserNames, name) && !slices.Contains(names, name) {
+		if match(name) && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -1621,7 +1835,7 @@ func evalCodeBindsUser(text string, depth int) []string {
 				add(node.Name.Value)
 			}
 		case *syntax.CallExpr:
-			for _, name := range CallBindsUserNames(node) {
+			for _, name := range callBindsNames(node, match, every) {
 				add(name)
 			}
 		}
@@ -1955,8 +2169,11 @@ func simpleResolvedVariables(source string, vars map[string]string) (string, boo
 // pushd /tmp the word ~1 is ~/.ssh, and grep -r . ~1 read the keys while
 // the reading saw a literal ~1 (GAP-2480). A tilde whose directory is not
 // known, or whose index is outside the list (bash keeps it literal), is
-// left as written.
-func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) (string, bool) {
+// left as written. The tilde-prefix of another account (~bob, ~root) is
+// written as that account's home when the home of the active account tells
+// where homes sit (simpleOtherAccountHome); one it cannot place stays as
+// written, an operand the call does not resolve (rel-1-0-10:GAP-0837).
+func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState, activeHome string) (string, bool) {
 	if !strings.Contains(source, "~") {
 		return "", false
 	}
@@ -1972,6 +2189,9 @@ func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) 
 		case "~-":
 			dir, known := state.vars["OLDPWD"]
 			return dir, known && dir != ""
+		}
+		if other, ok := simpleOtherAccountHome(prefix[1:], activeHome); ok {
+			return other, true
 		}
 		digits := strings.TrimLeft(prefix[1:], "+-")
 		if digits == "" || len(digits) > 3 || strings.Trim(digits, "0123456789") != "" ||
@@ -2037,6 +2257,360 @@ func simpleResolvedDirectoryStackTildes(source string, state *simpleShellState) 
 		source = source[:r.start] + r.text + source[r.end:]
 	}
 	return source, true
+}
+
+// simpleResolvedCurrentFolderHeads writes the current-folder head of a word
+// ($PWD, ${PWD}, "$PWD", $(pwd), `pwd` and ~+ before a slash, alone or in
+// double quotes) as the folder the walk is in. After a cd the walk cannot
+// follow (cd "$X", cd "$(mktemp -d)": cwdUnknown, PWD dropped) the head is
+// the current folder itself, so the word is the relative operand it spells
+// there and takes the path of its plain spelling: $PWD/.ssh/id_rsa is
+// .ssh/id_rsa, where the head kept its $ or ~ and the operand named nothing
+// (rel-1-0-10:GAP-1023). The head and its slash go; it stays as "." where
+// the rest alone would be another word: the program word (a bare name is
+// looked up in PATH), or a rest that starts with -, ~, / or a quote. In a folder the walk knows, $(pwd) and
+// `pwd` are that folder, as $PWD and ~+ already are there
+// (simpleResolvedVariables, simpleResolvedDirectoryStackTildes,
+// rel-1-0-10:GAP-1024); held reports such a written folder. The value of an
+// assignment is left as written: the variable keeps the folder the shell
+// gave it, which a later cd does not move. Only an assignment made while the
+// folder is unknown is read with its heads written
+// (simpleUnknownFolderAssignment), and the next cd forgets it.
+func simpleResolvedCurrentFolderHeads(source string, state *simpleShellState) (resolved string, ok, held bool) {
+	return simpleResolvedCurrentFolderHeadsIn(source, state, false)
+}
+
+// simpleResolvedCurrentFolderHeadsIn is simpleResolvedCurrentFolderHeads;
+// assignments also writes the heads in the value of an assignment.
+func simpleResolvedCurrentFolderHeadsIn(source string, state *simpleShellState, assignments bool) (resolved string, ok, held bool) {
+	if !strings.Contains(source, "PWD") && !strings.Contains(source, "pwd") && !strings.Contains(source, "~+") {
+		return "", false, false
+	}
+	unresolved := state.cwdUnknown
+	folder := ""
+	if !unresolved && strings.HasPrefix(state.cwd, "/") {
+		folder = simplePathClean(state.cwd)
+	}
+	if !unresolved && folder == "" {
+		return "", false, false
+	}
+	// A PWD the walk holds was written by simpleResolvedVariables already.
+	_, pwdHeld := state.vars["PWD"]
+	file, parsed := shellparse.Parse(source)
+	if !parsed {
+		return "", false, false
+	}
+	type replacement struct {
+		start, end int
+		text       string
+	}
+	var replacements []replacement
+	// programs are the program words: a head there stays "./".
+	programs := map[*syntax.Word]bool{}
+	add := func(word *syntax.Word, start, end int, text string) {
+		if start < 0 || end <= start || end > len(source) {
+			return
+		}
+		if text == "." && !programs[word] && end+1 < len(source) && source[end] == '/' &&
+			simpleBareOperandStart(source[end+1]) {
+			// The plain spelling: the head and its slash go.
+			text, end = "", end+1
+		}
+		replacements = append(replacements, replacement{start, end, text})
+	}
+	addNode := func(word *syntax.Word, node syntax.Node, text string) {
+		add(word, int(node.Pos().Offset()), int(node.End().Offset()), text)
+	}
+	// head is the text of a current-folder part: "." where the folder is
+	// not known, else the folder, quoted for where the part sits.
+	head := func(part syntax.WordPart, quoted bool) (string, bool) {
+		switch node := part.(type) {
+		case *syntax.ParamExp:
+			if !unresolved || pwdHeld || !simplePlainParameter(node, "PWD") {
+				return "", false
+			}
+		case *syntax.CmdSubst:
+			if !simplePwdSubstitution(node) {
+				return "", false
+			}
+		default:
+			return "", false
+		}
+		switch {
+		case unresolved:
+			return ".", true
+		case quoted:
+			return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`, "`", "\\`").Replace(folder), true
+		default:
+			return "'" + strings.ReplaceAll(folder, "'", "'\\''") + "'", true
+		}
+	}
+	slashAt := func(parts []syntax.WordPart, index int) bool {
+		if index >= len(parts) {
+			return false
+		}
+		lit, ok := parts[index].(*syntax.Lit)
+		return ok && strings.HasPrefix(lit.Value, "/")
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Redirect:
+			return node.Op != syntax.Hdoc && node.Op != syntax.DashHdoc
+		case *syntax.Assign:
+			return assignments
+		case *syntax.CallExpr:
+			if len(node.Args) != 0 {
+				programs[node.Args[0]] = true
+			}
+		case *syntax.Word:
+			if len(node.Parts) == 0 {
+				return true
+			}
+			switch first := node.Parts[0].(type) {
+			case *syntax.Lit:
+				if unresolved && !pwdHeld && strings.HasPrefix(first.Value, "~+/") {
+					start := int(first.Pos().Offset())
+					if start >= 0 && start+2 <= len(source) && source[start:start+2] == "~+" {
+						add(node, start, start+2, ".")
+					}
+					return false
+				}
+			case *syntax.DblQuoted:
+				if first.Dollar || len(first.Parts) == 0 {
+					break
+				}
+				if len(first.Parts) == 1 && slashAt(node.Parts, 1) {
+					// "$PWD"/x: the quoted head is the whole quote.
+					if text, ok := head(first.Parts[0], false); ok {
+						addNode(node, first, text)
+						return false
+					}
+				} else if slashAt(first.Parts, 1) {
+					// "$PWD/x": the head sits inside the quotes.
+					if text, ok := head(first.Parts[0], true); ok {
+						addNode(node, first.Parts[0], text)
+						return false
+					}
+				}
+			default:
+				if slashAt(node.Parts, 1) {
+					if text, ok := head(first, false); ok {
+						addNode(node, first, text)
+						return false
+					}
+				}
+			}
+		}
+		return true
+	})
+	if len(replacements) == 0 {
+		return "", false, false
+	}
+	slices.SortFunc(replacements, func(a, b replacement) int { return a.start - b.start })
+	for i := len(replacements) - 1; i >= 0; i-- {
+		r := replacements[i]
+		source = source[:r.start] + r.text + source[r.end:]
+	}
+	return source, true, !unresolved
+}
+
+// CurrentFolderHeadsAsRelative is command with each current-folder head
+// ($PWD/, ${PWD}/, "$PWD"/, $(pwd)/, `pwd`/, ~+/) written as the current
+// folder itself, as the walk writes it after a cd it cannot follow
+// (simpleResolvedCurrentFolderHeads): the operand alone. A gateway reads it
+// for a call with no folder from the agent at all, whose current folder is
+// as unknown (rel-1-0-10:GAP-1023). ok is false when command has no head.
+func CurrentFolderHeadsAsRelative(command string) (string, bool) {
+	state := simpleShellState{cwdUnknown: true, vars: map[string]string{}}
+	resolved, ok, _ := simpleResolvedCurrentFolderHeads(command, &state)
+	return resolved, ok
+}
+
+// simpleUnknownFolderAssignment re-reads an assignment statement (X=v,
+// export X=v, declare X=v) made while the folder is unknown, with each
+// current-folder head of an assigned value written as that folder itself:
+// X=$PWD/.ssh/id_rsa after cd "$D" gives X the value .ssh/id_rsa in the
+// unknown folder, as X=.ssh/id_rsa does, where the head left X unread and
+// cat "$X" named nothing (rel-1-0-10:GAP-1042). names are the variables
+// whose value had such a head. ok is false when no value has one.
+func simpleUnknownFolderAssignment(text string, state *simpleShellState) (stmt *syntax.Stmt, names []string, ok bool) {
+	if !state.cwdUnknown {
+		return nil, nil, false
+	}
+	resolved, changed, _ := simpleResolvedCurrentFolderHeadsIn(text, state, true)
+	if !changed || resolved == text {
+		return nil, nil, false
+	}
+	before, parsedBefore := shellparse.Parse(text)
+	after, parsedAfter := shellparse.Parse(resolved)
+	if !parsedBefore || !parsedAfter || len(before.Stmts) != 1 || len(after.Stmts) != 1 {
+		return nil, nil, false
+	}
+	var assigns []*syntax.Assign
+	switch command := before.Stmts[0].Cmd.(type) {
+	case *syntax.CallExpr:
+		assigns = command.Assigns
+	case *syntax.DeclClause:
+		assigns = command.Args
+	}
+	for _, assign := range assigns {
+		if assign == nil || assign.Name == nil || assign.Value == nil {
+			continue
+		}
+		start, end := int(assign.Value.Pos().Offset()), int(assign.Value.End().Offset())
+		if start < 0 || end > len(text) || start >= end {
+			continue
+		}
+		if value := text[start:end]; strings.Contains(value, "PWD") || strings.Contains(value, "pwd") || strings.Contains(value, "~+") {
+			names = append(names, assign.Name.Value)
+		}
+	}
+	return after.Stmts[0], names, len(names) != 0
+}
+
+// simpleUnknownFolderNestedCall is the call that starts a nested shell
+// (source) as the walk reads its body while the folder is unknown: the
+// caller expands a current-folder head in a double-quoted body (bash -c
+// "cat $PWD/f") to that unknown folder, so the head is the folder itself (.)
+// and the body is static: cat ./f, a relative operand the body's walk reads
+// in the unknown folder (Input.folderUnknown), where the head left the body
+// unread (rel-1-0-10:GAP-1042). $(pwd) and `pwd` print PWD. A body with a cd
+// of its own is left as it was: there the expanded folder is no longer the
+// current one. The walk reads a body so only where it would be unread, and
+// keeps that unread reading beside it: a rule that judges the whole call
+// (a fetched file run as ./p) reads $PWD/p as no file it fetched.
+func simpleUnknownFolderNestedCall(source string, call *syntax.CallExpr, vars map[string]string) (*syntax.CallExpr, map[string]string) {
+	if _, held := vars["PWD"]; held || !strings.Contains(source, "PWD") && !strings.Contains(source, "pwd") ||
+		strings.Contains(source, "cd ") || strings.Contains(source, "pushd") || strings.Contains(source, "popd") {
+		return call, vars
+	}
+	if strings.Contains(source, "$(pwd)") || strings.Contains(source, "`pwd`") {
+		file, parsed := shellparse.Parse(strings.NewReplacer("$(pwd)", "$PWD", "`pwd`", "$PWD").Replace(source))
+		if !parsed || len(file.Stmts) != 1 {
+			return call, vars
+		}
+		rewritten, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+		if !ok {
+			return call, vars
+		}
+		call = rewritten
+	}
+	folder := make(map[string]string, len(vars)+1)
+	for name, value := range vars {
+		folder[name] = value
+	}
+	folder["PWD"] = "."
+	return call, folder
+}
+
+// simpleAssignNames are the names assigns give a value.
+func simpleAssignNames(assigns []*syntax.Assign) []string {
+	var names []string
+	for _, assign := range assigns {
+		if assign != nil && assign.Name != nil {
+			names = append(names, assign.Name.Value)
+		}
+	}
+	return names
+}
+
+// setFolderVars records an assignment of assigned: a name it gave a value
+// relative to the unknown folder (folder) is a folder variable, any other
+// name it assigned is no longer one.
+func (s *simpleShellState) setFolderVars(assigned, folder []string) {
+	s.folderVars = slices.DeleteFunc(s.folderVars, func(name string) bool { return slices.Contains(assigned, name) })
+	for _, name := range folder {
+		if !slices.Contains(s.folderVars, name) {
+			s.folderVars = append(s.folderVars, name)
+		}
+	}
+	if len(s.folderVars) == 0 {
+		s.folderVars = nil
+	}
+}
+
+// simpleBareOperandStart reports a first character after which a word reads
+// the same with or without a leading ./: a letter, a digit, . _ or a
+// pattern character. A -, ~, / or quote there would make another word.
+func simpleBareOperandStart(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' ||
+		strings.IndexByte("._*?[", char) >= 0
+}
+
+// simplePlainParameter reports $name or ${name} with no operator, index or
+// flag: the value of name as it is.
+func simplePlainParameter(param *syntax.ParamExp, name string) bool {
+	return param.Param != nil && param.Param.Value == name && !param.Excl && !param.Length && !param.Width &&
+		!param.IsSet && param.Index == nil && param.Slice == nil && param.Repl == nil && param.Names == 0 &&
+		param.Exp == nil && param.Flags == nil && param.NestedParam == nil && len(param.Modifiers) == 0
+}
+
+// simplePwdSubstitution reports $(pwd) or `pwd`: a substitution of the pwd
+// program alone, which prints the current folder.
+func simplePwdSubstitution(subst *syntax.CmdSubst) bool {
+	if subst.TempFile || subst.ReplyVar || len(subst.Stmts) != 1 {
+		return false
+	}
+	stmt := subst.Stmts[0]
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	return ok && !stmt.Negated && !stmt.Background && !stmt.Coprocess && !stmt.Disown && len(stmt.Redirs) == 0 &&
+		len(call.Assigns) == 0 && len(call.Args) == 1 && call.Args[0].Lit() == "pwd"
+}
+
+// simpleOtherAccountHome is the home that the tilde-prefix ~name names, for an
+// account other than the active one, found by the position of the active home:
+// homes sit side by side below /home, /Users or <drive>:/Users, so another
+// account's home is the folder of that name beside the active home. ~root is
+// /root where homes sit below /home (and the other accounts of a root agent are
+// the folders of /home). The name of the active account is
+// left to ActiveUserTildeTwin, which also reads the logins of the OS identity.
+// A home that does not sit in such a folder tells nothing, and the prefix stays
+// unresolved. The directory-stack forms (~N, ~+N, ~-N, ~+, ~-) are never an
+// account name: bash takes them from the dirs list, PWD and OLDPWD
+// (directoryStackTildeName, rel-1-0-10:GAP-0887). macOS keeps root's home in
+// /var/root, not beside the others in /Users.
+func simpleOtherAccountHome(name, activeHome string) (string, bool) {
+	home := strings.TrimRight(activeHome, "/")
+	if home == "" || directoryStackTildeName(name) || !activeUserTildeName.MatchString(name) ||
+		strings.EqualFold(name, path.Base(home)) {
+		return "", false
+	}
+	parent := path.Dir(home)
+	if strings.EqualFold(home, "/root") {
+		// root's home sits outside the folder that holds the others.
+		parent = "/home"
+	}
+	switch lower := strings.ToLower(parent); {
+	case lower == "/home":
+		if name == "root" {
+			return "/root", true
+		}
+	case lower == "/users":
+		if name == "root" {
+			return "/var/root", true
+		}
+	case len(parent) >= 3 && parent[1] == ':' && lower[2:] == "/users":
+	default:
+		return "", false
+	}
+	return parent + "/" + name, true
+}
+
+// directoryStackTildeName reports whether name, the text after the ~ of a
+// tilde-prefix, is a bash directory-stack form: empty, + or - (HOME, PWD,
+// OLDPWD), or N, +N or -N with N all digits (an entry of the dirs list).
+// bash expands these before it consults the password database, so after
+// pushd ~/.ssh the word ~1 is a folder of the active home, never the home of
+// an account named 1 (rel-1-0-10:GAP-0887).
+func directoryStackTildeName(name string) bool {
+	switch name {
+	case "", "+", "-":
+		return true
+	}
+	if name[0] == '+' || name[0] == '-' {
+		name = name[1:]
+	}
+	return name != "" && strings.Trim(name, "0123456789") == ""
 }
 
 // simpleNestedScript returns a static shell -c or eval body. eval shares the

@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // A word that names a protected file as an argument of a program the scan has
@@ -107,7 +109,12 @@ func actionCallRoleUnknown(call *syntax.CallExpr, home string) bool {
 	}
 	program, known := staticProgramWord(words[0], home)
 	if !known {
-		return !actionRunTimeProgramRunsText(words, home)
+		// Only a shell named at run time runs a -c TEXT as code. Any other
+		// program named at run time ("$GREP" -c PATTERN FILE) takes -c as
+		// an option of its own and keeps the unknown role
+		// (rel-1-0-10:GAP-0981).
+		_, shell := actionfacts.RunTimeShellWord(words[0], true)
+		return !shell || !actionRunTimeProgramRunsText(words, home)
 	}
 	if actionInterpreterScriptArguments(words, home) {
 		return true

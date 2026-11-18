@@ -5859,12 +5859,6 @@ func TestWindowsQuotedPathWhitespaceFailsClosedWithoutRetargeting(t *testing.T) 
 			source: `del " C:\Windows\System32\drivers\etc\hosts"`,
 			value:  ` C:\Windows\System32\drivers\etc\hosts`,
 		},
-		{
-			name:   "CMD trailing space",
-			parse:  parseCMD,
-			source: `del "C:\Windows\System32\drivers\etc\hosts "`,
-			value:  `C:\Windows\System32\drivers\etc\hosts `,
-		},
 	}
 	for _, test := range tests {
 		test := test
@@ -5882,6 +5876,22 @@ func TestWindowsQuotedPathWhitespaceFailsClosedWithoutRetargeting(t *testing.T) 
 				t.Fatalf("quoted whitespace became an exact path: %#v", out)
 			}
 		})
+	}
+}
+
+// TestWindowsCMDQuotedTrailingSpaceReadsTheFile: Win32 strips a trailing
+// space of the last name, so cmd del of the quoted spelling deletes the file
+// itself and reads as it (rel-1-0-10:GAP-1075). A leading space and the
+// extended-length form, which Win32 keeps, stay unknown above.
+func TestWindowsCMDQuotedTrailingSpaceReadsTheFile(t *testing.T) {
+	t.Parallel()
+
+	const hosts = `C:\Windows\System32\drivers\etc\hosts`
+	out := parseCMD(`del "`+hosts+` "`, 1, 0)
+	classifyOutput(&out)
+	if len(out.commands) != 1 ||
+		!hasWindowsPathFact(out.paths, hosts) {
+		t.Fatalf("quoted trailing space did not read as the file: %#v", out)
 	}
 }
 

@@ -495,6 +495,22 @@ func analyzeStructuredArgv(
 	wrapperDepth int,
 	dialect Dialect,
 ) parseOutput {
+	return analyzeStructuredArgvWords(argv, nil, startID, wrapperDepth, dialect)
+}
+
+// analyzeStructuredArgvWords is analyzeStructuredArgv for the words of a
+// command a static wrapper runs (expandStaticPOSIXWrappers): words are the
+// shell's word objects of argv, so the wrapped program sees which words
+// expand at run time exactly as the bare call does, and an interpreter case
+// (the awk program reading among them) answers as it answers the bare call
+// (rel-1-0-10:GAP-0859). nil words are the exact words of a structured argv.
+func analyzeStructuredArgvWords(
+	argv []string,
+	words []ArgumentFact,
+	startID int64,
+	wrapperDepth int,
+	dialect Dialect,
+) parseOutput {
 	if !validDialect(dialect) {
 		out := newParseOutput(DialectNone, startID)
 		out.markAmbiguous(IssueConflictingSources)
@@ -527,7 +543,13 @@ func analyzeStructuredArgv(
 	}
 
 	command := commandFromArgvAs(out.nextCommandID(), argv, dialect)
+	withShellWords(&command, words)
 	if !out.appendCommand(command) {
+		return out
+	}
+	if !command.ArgvComplete && !IsAwkCall(command) && !staticPOSIXWrappedAwkCall(command) {
+		// A word that expands at run time: the program is not read on, as the
+		// shell parser does not read it on for the bare call.
 		return out
 	}
 	program := command.Program
@@ -545,16 +567,27 @@ func analyzeStructuredArgv(
 		if !ok {
 			return out
 		}
-		if wrapperDepth >= maxWrapperDepth {
+		cost := staticPOSIXWrapperDepthCost(argv)
+		if wrapperDepth+cost > maxWrapperDepth {
 			out.markLimit(IssueWrapperLimit)
 			return out
 		}
-		child = analyzeStructuredArgv(
+		var run []WrapperFact
+		if cost == 0 {
+			nestedArgv, run = staticPOSIXNeutralRun(nestedArgv)
+		}
+		child = analyzeStructuredArgvWords(
 			nestedArgv,
+			staticPOSIXWrappedWords(command.Arguments, argv, nestedArgv),
 			out.nextID,
-			wrapperDepth+1,
+			wrapperDepth+cost,
 			DialectPOSIX,
 		)
+		if len(run) > 0 {
+			for i := range child.commands {
+				child.commands[i].Wrappers = append(cloneWrapperFacts(run), child.commands[i].Wrappers...)
+			}
+		}
 	case "su":
 		nested, ok := exactRootSuCommand(command)
 		if !ok {
@@ -571,6 +604,22 @@ func analyzeStructuredArgv(
 		}
 		nestedDialect = DialectPOSIX
 		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
+	case "awk", "gawk", "mawk", "nawk":
+		// An awk program behind an exact wrapper (env, sudo, ...) reaches here as
+		// argv: the shell commands it starts through system(), print | and
+		// | getline are judged as the hook running them directly, as in the
+		// shell parser (posix.go, GAP-0499). A command built at run time is
+		// answered by the gateway at the unknown tier (awkprog.DynamicReason).
+		body := AwkCall(command).Read().Body
+		if body == "" {
+			return out
+		}
+		if wrapperDepth >= maxWrapperDepth {
+			out.markLimit(IssueWrapperLimit)
+			return out
+		}
+		nestedDialect = DialectPOSIX
+		child = parsePOSIX(body, out.nextID, wrapperDepth+1)
 	case "eval":
 		if len(argv) < 2 {
 			return out
@@ -643,6 +692,36 @@ func analyzeStructuredArgv(
 	}
 	attachStructuredChild(&out, command, child)
 	return out
+}
+
+// staticPOSIXNeutralRun reads the rest of a run of context-neutral wrappers
+// (nice, time, timeout, nohup) in one walk: nested is the command at the end
+// of the run, and run the wrappers in between, outermost first, as the
+// wrapper facts each command of the end command's reading carries. Each
+// wrapper of the run was a command of its own read one level deeper, and
+// each level prepended and cloned the wrapper facts of every command below
+// it: a 64-deep run, which spends no wrapper depth (substrate-1:GAP-0334),
+// cost O(n^3) allocations per call, and the hook got slower with every call
+// in one process (rel-1-0-10:GAP-0977). A wrapper the reading cannot unwrap
+// exactly (an uncertain option, no command) ends the run, and the usual
+// reading of that wrapper decides. The words of every wrapper of the run are
+// static when the outer call's are (a suffix of its words), so the outer
+// call's checks hold for them.
+func staticPOSIXNeutralRun(nested []string) ([]string, []WrapperFact) {
+	var run []WrapperFact
+	for len(nested) >= 2 {
+		program := commandProgram(nested[0])
+		if _, neutral := posixContextNeutralWrappers[program]; !neutral {
+			break
+		}
+		deeper, ok, uncertain := staticPOSIXWrapperArgv(nested, program)
+		if !ok || uncertain || len(deeper) == 0 {
+			break
+		}
+		run = append(run, WrapperFact{Executable: nested[0], Argv: nested})
+		nested = deeper
+	}
+	return nested, run
 }
 
 func attachStructuredChild(

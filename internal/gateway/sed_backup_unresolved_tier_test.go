@@ -47,7 +47,8 @@ func TestBoundRuleSedBackupUnresolved(t *testing.T) {
 		{"SFXREV-follow-rel-link-star", "sed --follow-symlinks -i../.ssh/* s/x/y/ lnk", block},
 		{"SFXREV-follow-rel-link-star-abbrev", "sed --follow -i../.ssh/* s/x/y/ lnk", block},
 		{"SFXREV-follow-abs-link-plain", "sed --follow-symlinks -ikeys s/x/y/ alnk", block},
-		{"SFXREV-nofollow-rel-link-star-ctl", "sed -i../.ssh/* s/x/y/ lnk", allow},
+		// The keys folder rule blocks this one too (GAP-0669).
+		{"SFXREV-nofollow-rel-link-star-ctl", "sed -i../.ssh/* s/x/y/ lnk", block},
 		{"SFXREV-nofollow-abs-link-plain-ctl", "sed -ikeys s/x/y/ alnk", allow},
 		{"SFXREV-follow-missing", "sed --follow-symlinks -i.bak s/x/y/ nosuchfile", unresolved},
 		// GAP-0542

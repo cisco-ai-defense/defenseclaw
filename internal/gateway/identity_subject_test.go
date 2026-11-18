@@ -126,7 +126,11 @@ func TestIdentityKeepsCompressedIPv6ClientAddress(t *testing.T) {
 
 func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 	applyIdentityPosture(&config.Config{DeploymentMode: "managed_enterprise"})
-	t.Cleanup(func() { setIdentityFactsEnabled(false); SetUserPrincipalCollectionEnabled(false) })
+	t.Cleanup(func() {
+		setIdentityFactsEnabled(false)
+		SetUserPrincipalCollectionEnabled(false)
+		setSecureClientUserAttribution(false)
+	})
 	if identityFactsEnabled.Load() {
 		t.Fatal("identity facts enabled under the Secure Client integration")
 	}
@@ -134,10 +138,24 @@ func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 	if got["subject_ok"].(bool) || got["verified"].(*llmEventIdentity) != nil || got["forged"].(*llmEventIdentity) != nil {
 		t.Fatalf("Secure Client attached identity: %+v", got)
 	}
+	// The only identity a Secure Client record carries is the verified
+	// principal of its end user (secure_client_user.go); the domain,
+	// directory, source and session facts stay off.
 	input := observability.LogCompatHookDecisionInput{}
-	(&llmEventIdentity{Directory: useridentity.DirectoryFacts{Principal: "a@B", Assurance: useridentity.AssuranceVerified}}).applyTo(&input)
-	if !reflect.DeepEqual(input, observability.LogCompatHookDecisionInput{}) {
-		t.Fatal("Secure Client record gained identity attributes")
+	(&llmEventIdentity{Directory: useridentity.DirectoryFacts{
+		Principal: "a@B", Domain: "b", Directory: useridentity.DirectoryActiveDirectory,
+		Source: "windows_lsa", Assurance: useridentity.AssuranceVerified,
+	}}).applyTo(&input)
+	want := observability.LogCompatHookDecisionInput{}
+	want.DefenseClawUserPrincipal = observability.Present("a@B")
+	want.DefenseClawUserPrincipalAssurance = observability.Present("verified")
+	if got := (observability.LogCompatHookDecisionInput{
+		DefenseClawUserPrincipal: input.DefenseClawUserPrincipal, DefenseClawUserPrincipalAssurance: input.DefenseClawUserPrincipalAssurance,
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Secure Client principal = %+v", got)
+	}
+	if input.DefenseClawUserDomain.IsPresent() || input.DefenseClawUserDirectory.IsPresent() {
+		t.Fatal("Secure Client record gained directory facts")
 	}
 }
 

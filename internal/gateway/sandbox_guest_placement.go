@@ -57,9 +57,9 @@ type guestPlacement struct {
 // (substrate-1 GAP-0304).
 //
 // A call the analysis read in full lists each simple command a static cd
-// moved out of the guest's directory, in that directory, up to
-// maxSandboxGuestPlacedChildren readings: its whole-call view judges the
-// rest.
+// moved out of the guest's directory, in each directory the walk places it,
+// up to maxSandboxGuestPlacedChildren statements (and
+// maxSandboxGuestPlacements readings): its whole-call view judges the rest.
 //
 // A call the analysis did not read in full has no whole-call view that
 // judges it (substrate-1 GAP-0363):
@@ -94,6 +94,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 	type key struct{ text, cwd string }
 	seen := map[key]int{}
 	if facts.Authoritative() {
+		// Counted by statements, as the laptop counts them: the walk reads a
+		// command after a cd that may not run in every directory it may run
+		// in, so after three such cds each later command has seven readings
+		// outside the guest's directory, and a cap on readings cut a 24-line
+		// script the laptop allows (a here-string call, judged by its
+		// authoritative twin, substrate-1 GAP-0377).
+		statements := map[string]bool{}
 		for _, simple := range actionfacts.SimpleCommands(input, facts) {
 			cwd := simple.CWD
 			if guestPlacementSkips(simple) || !path.IsAbs(cwd) || cwd == input.CWD {
@@ -102,7 +109,13 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 			if _, ok := seen[key{simple.Text, cwd}]; ok {
 				continue
 			}
-			if len(placements) == maxSandboxGuestPlacedChildren {
+			if !statements[simple.Text] {
+				if len(statements) == maxSandboxGuestPlacedChildren {
+					return placements, true
+				}
+				statements[simple.Text] = true
+			}
+			if len(placements) == maxSandboxGuestPlacements {
 				return placements, true
 			}
 			seen[key{simple.Text, cwd}] = len(placements)
@@ -267,6 +280,36 @@ func sandboxGuestPlacements(input actionfacts.Input, facts actionfacts.Facts, st
 // of plain words (touch f1, ls, cd sub) is read after them.
 func guestReadingFirst(text string) bool {
 	return strings.ContainsAny(text, "./~$`*?[{\\")
+}
+
+// withSandboxGuestFolderTier gives a sandbox call the unknown tier the
+// laptop gives the same call in its own folder (withUnresolvedFolderTier,
+// rel-1-0-10:GAP-0871): an operand that may name a protected file in a
+// folder the call does not give, after a function that cds or a $CMD. A
+// copy-mode call names no folder, so the tier is read on the call placed in
+// the guest's working directory (sandboxGuestPlacedInput), as the laptop
+// reads it in its own. It is decided on that whole-call reading alone: the
+// commands the guest placement reads one by one (sandboxGuestPlacements) are
+// the laptop's piece readings, whose proof comes after the laptop's tier, so
+// their proof does not take the tier away here either. f() { cd .cache; };
+// f; $CMD; rm .defenseclaw/audit.db blocked in both, and only the laptop
+// named ACTION-COMPOUND-LIMIT (substrate-1 GAP-0377 at FU8). The reading is
+// lexical and only adds a finding.
+func withSandboxGuestFolderTier(findings []RuleFinding, request trustedActionRequest, facts actionfacts.Facts) []RuleFinding {
+	if request.simpleCommandPass || request.hostTwinDepth != 0 || request.stateProofOnly {
+		return findings
+	}
+	guest, ok := sandboxGuestPlacedInput(request, facts)
+	if !ok {
+		return findings
+	}
+	guestFacts := actionfacts.Analyze(guest)
+	if !guestFacts.MayRunInUnresolvedFolder() {
+		return findings
+	}
+	placed := request
+	placed.Input, placed.SandboxGuestCWD = guest, ""
+	return withSimpleCommandFindings(findings, withUnresolvedFolderTier(nil, placed, guestFacts, false))
 }
 
 // guestPlacementSkips reports a simple command the guest placement does not

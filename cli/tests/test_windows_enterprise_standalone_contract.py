@@ -943,6 +943,24 @@ def test_every_standalone_smoke_runs_from_exactly_one_smoke_file() -> None:
     assert (tests / "enterprise-standalone-codex-writer-stuck-smoke.ps1").is_file()
 
 
+def test_standalone_smokes_that_dot_source_the_module_bind_the_engine_modules() -> None:
+    # A smoke that dot-sources module functions from the AST instead of importing the
+    # module skips the module's load-time binding of the engine modules. Windows PowerShell
+    # 5.1 under a PowerShell 7 parent (Windows CI runs Python under pwsh) then autoloads the
+    # PowerShell 7 Utility manifest, which has no Get-FileHash, so such a smoke runs that
+    # block itself.
+    assert "foreach ($engineModuleName in @(" in _text(MODULE)
+    tests = MODULE.parent / "tests"
+    checked = 0
+    for name in STANDALONE_SMOKES:
+        body = _text(tests / name)
+        if "#Requires -Version 7" in body or "[scriptblock]::Create" not in body or "Import-Module" in body:
+            continue
+        checked += 1
+        assert "-eq 'engineModuleName'" in body, name
+    assert checked >= 1
+
+
 # The standalone Claude client floor the module records equals the lowest
 # Claude hook contract (the Go guardian enforces the same floor).
 

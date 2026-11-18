@@ -1229,10 +1229,10 @@ func privateSecurityMaterial(
 	}
 	return matchesAuthorizedKeys(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
-		matchesActiveAWSCredentials(facts, candidate) ||
-		matchesActiveKubeConfig(facts, candidate) ||
-		matchesActivePackageCredentialFile(facts, candidate) ||
-		matchesActiveGitCredentialFile(facts, candidate) ||
+		matchesAnyHomeAWSCredentials(facts, candidate) ||
+		matchesAnyHomeKubeConfig(facts, candidate) ||
+		matchesAnyHomePackageCredentialFile(facts, candidate) ||
+		matchesAnyHomeGitCredentialFile(facts, candidate) ||
 		matchesActiveCloudCredentialFile(facts, candidate) ||
 		matchesActiveBrowserSessionStore(facts, candidate)
 }

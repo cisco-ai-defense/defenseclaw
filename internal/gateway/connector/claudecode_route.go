@@ -29,7 +29,11 @@ func claudeCodeRouteEnv(route *RouteOnlySetup) map[string]string {
 	if route == nil {
 		return nil
 	}
-	env := map[string]string{claudeCodeRouteHeaders: route.Token}
+	env := map[string]string{}
+	if route.Token != "" {
+		// A parked render carries no route credential (route_only_park.go).
+		env[claudeCodeRouteHeaders] = route.Token
+	}
 	if route.Bedrock {
 		env[claudeCodeRouteBedrockBaseURL] = route.BaseURL
 		// Custody: the agent sends no AWS signature or Bedrock bearer; the
@@ -49,10 +53,15 @@ func claudeCodeRouteEnv(route *RouteOnlySetup) map[string]string {
 
 // ApplyRouteOnly implements RouteOnlyConnector.
 func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySetup) error {
+	route, release, write := lockedRoute(route)
+	defer release()
+	if !write {
+		return nil
+	}
 	settingsPath := claudeCodeSettingsPath()
-	// Nothing rendered and nothing to render: touch no file (the lock would
-	// create the agent config directory).
-	if route == nil {
+	// Nothing rendered and nothing to render (or only a park to write):
+	// touch no file (the lock would create the agent config directory).
+	if route == nil || route.ParkOnly {
 		if b, err := loadRouteBackup(opts.DataDir, c.Name()); err == nil && len(b.Applied) == 0 {
 			raw, rerr := os.ReadFile(settingsPath)
 			if rerr != nil || (!bytes.Contains(raw, []byte("/r/claudecode")) && !bytes.Contains(raw, []byte(RouteOnlyHeader))) {
@@ -65,22 +74,24 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 		if err != nil {
 			return err
 		}
-		if route == nil && len(backup.Applied) == 0 {
-			// No record: restore only if our own render is still there (a
-			// lost record after a crash or a data-dir reset).
+		if (route == nil || route.ParkOnly) && len(backup.Applied) == 0 {
+			// No record: restore (or park) only if our own render is still
+			// there (a lost record after a crash or a data-dir reset).
 			raw, rerr := os.ReadFile(settingsPath)
 			if rerr != nil || (!bytes.Contains(raw, []byte("/r/claudecode")) && !bytes.Contains(raw, []byte(RouteOnlyHeader))) {
 				return nil
 			}
-			backup = lostClaudeRouteRecord()
+			if route == nil {
+				backup = lostClaudeRouteRecord()
+			}
 		}
-		err = atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
+		err = atomicTransformFileWithStateDir(settingsPath, userAgentConfigTransactionDir(settingsPath, opts), 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			settings := map[string]interface{}{}
 			if exists && len(bytes.TrimSpace(data)) > 0 {
 				if err := json.Unmarshal(data, &settings); err != nil {
 					return atomicTransformResult{}, fmt.Errorf("parse claude settings: %w", err)
 				}
-			} else if route == nil {
+			} else if route == nil || route.ParkOnly {
 				return atomicTransformResult{Keep: true}, nil
 			}
 			env, _ := settings["env"].(map[string]interface{})
@@ -109,7 +120,7 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 			}
 			// The record goes first: a crash after it and before the agent
 			// file is harmless (restore finds nothing of ours to change).
-			if err := saveRouteBackup(opts.DataDir, c.Name(), backup); err != nil {
+			if err := saveRouteBackup(opts, c.Name(), backup); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("route backup: %w", err)
 			}
 			if exists && bytes.Equal(bytes.TrimSpace(out), bytes.TrimSpace(data)) {

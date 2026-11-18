@@ -260,6 +260,11 @@ type trustedActionRequest struct {
 	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
 	// that proof (loginGuessProvedFinding), so no other rule needs to run.
 	stateProofOnly bool
+	// unplacedStatement marks a simple command of a sandbox call that the
+	// walk placed in no folder (SimpleCommand.UnresolvedFolder): it is judged
+	// unplaced, as on the laptop, so the guest placement of the call alone
+	// reads it in the guest's directories (sandboxGuestPlacedInput).
+	unplacedStatement bool
 	// sendDestination marks the routing values of a message call, where its
 	// text is sent (ToolInspectRequest.sendDestination): the call is a send
 	// whatever the tool is named (trustedActionSendsMessage).
@@ -685,6 +690,13 @@ func dispatchTrustedAction(
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
 		analyzedCaps = capFloorAnalysisCaps(facts)
+		// A write operand with a .. component whose walk cannot be resolved
+		// has an unknown target: at least the unknown tier of the pack, what
+		// the readers proved still deciding (the one bound rule, cap paths;
+		// rel-1-0-10:GAP-1007).
+		if trustedDotDotWalkUnresolved(request, facts) {
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Paths), request) }()
+		}
 		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
@@ -726,19 +738,25 @@ func dispatchTrustedAction(
 			defer func() { findings = withPowerShellCapPieces(parent, request, findings) }()
 		}
 		launcher := launcherBodyTwinRequest(request, facts)
-		if launcher.read {
+		for _, twin := range launcher.twins {
 			// The script of an argv shell launcher (powershell.exe -Command,
 			// cmd /c) is judged as the string command the same script is
 			// (rel-1-0-10:GAP-0711, GAP-0712): its findings count, the
-			// TRUNCATED floor of its own cap among them.
+			// TRUNCATED floor of its own cap among them. Each launcher the
+			// call may run is judged (rel-1-0-10:GAP-0857).
 			defer func() {
-				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, launcher.twin))
+				findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 			}()
 		}
 		if launcher.depthCut {
 			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
 			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
+		if cut := trustedUndecodedCommandCut(request.Input, facts); cut.Any() {
+			// A command array past the decode bound is read by nothing: the
+			// call is TRUNCATED (the one bound rule, rel-1-0-10:GAP-0858).
+			defer func() { findings = withUndecodedCommandTruncation(findings, cut, request) }()
 		}
 		// A script past the input bound is not read in full, so the bound of the argv
 		// call still cuts it (rel-1-0-10:GAP-0712), and so do the words a POSIX -c
@@ -748,7 +766,7 @@ func dispatchTrustedAction(
 		// word judged as its twin) keeps that reading, which is the finer floor: a
 		// plain operand past 4 KiB of echo or dcx stays data, as in the text form
 		// (rel-1-0-10:GAP-0689). The argv cut covers every other argv call.
-		argvRead := launcher.read && launcher.fully && len(launcher.twin.Input.Command) <= actionfacts.MaxCommandBytes ||
+		argvRead := launcher.read && launcher.fully ||
 			posixByteBoundCommand(request, facts) != ""
 		if cut := trustedReadingCut(request.Input, facts, argvRead); cut.Any() {
 			// The reading of the call stopped at a cap of its own under the
@@ -830,6 +848,24 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// A shell named at run time ("$SHELL" -c TEXT, $BASH -ec TEXT, env
+	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
+	// call does: that reading is judged too, and the stricter of the two
+	// readings counts (rel-1-0-10:GAP-0980).
+	shellTwin, shellTwinOK, shellCaps := runTimeShellTwinRequest(request)
+	if shellTwinOK {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
+		}()
+	}
+	if shellCaps.Any() {
+		// A program word past the bounds of that reading (command
+		// substitutions nested past its depth, more words than its budget)
+		// is not read: the call is truncated (bound rule, rel-1-0-10:GAP-1041).
+		defer func() {
+			findings = withBoundedTruncation(findings, shellCaps, request)
+		}()
+	}
 	// The commands an awk program starts through system(), print | and
 	// | getline, written as string literals, are run by the shell as the
 	// hook would run them directly (GAP-0499): that reading is judged too,
@@ -861,6 +897,22 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	// An apply_patch call whose envelope names a file by a spelling no reader
+	// places (a home form the tool does not expand, a drive-relative path, a
+	// device path) writes a file no path rule can name: it is judged at the
+	// unknown tier of the pack at least, never a clean allow
+	// (rel-1-0-10:GAP-1052, GAP-0947). Whatever the parse status: the placed
+	// headers of the same envelope are facts the rules judge, and a block they
+	// prove stays a block (rel-1-0-10:GAP-1055). The same envelope fed to
+	// apply_patch by a shell here-document is judged as the tool's is
+	// (rel-1-0-10:GAP-1077).
+	if actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) ||
+		actionfacts.CommandPatchNamesUnplacedTarget(facts) {
+		defer func() {
+			findings = withUnknownFinding(findings, unknownReasonFinding(unplacedPatchTargetTitle,
+				actionfacts.UnplacedPatchTargetReason, request.EnforcementCapable))
+		}()
+	}
 	// A Windows call the tokenizer stopped reading at its input bound (one word
 	// over the word limit) is truncated: judged as unknown at the pack's
 	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345). So is
@@ -927,6 +979,9 @@ func dispatchTrustedAction(
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
 		}()
 	}
+	defer func() {
+		findings = withUnreadPowerShellFloor(findings, request, facts)
+	}()
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
 	for _, twin := range windowsTwins {
 		defer func() {
@@ -986,6 +1041,12 @@ func dispatchTrustedAction(
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
 		}()
 	}
+	// An operand in a folder the call does not give: the unknown tier when
+	// it may be a protected file there (rel-1-0-10:GAP-0871).
+	defer func() {
+		findings = withUnresolvedFolderTier(findings, request, facts, false)
+		findings = withSandboxGuestFolderTier(findings, request, facts)
+	}()
 	if twin, ok := overLimitCommandBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
@@ -1118,6 +1179,14 @@ func dispatchTrustedActionWith(
 			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
 			for index, simple := range simples {
+				if simple.UnprovenHome {
+					// The command reads ~ or $HOME after HOME got a value
+					// known only at run time (HOME=$(pwd)): its reading
+					// names the previous home, the file it reaches is not
+					// known, so the call is at least the unknown tier
+					// (rel-1-0-10:GAP-0996).
+					findings = withUnknownFinding(findings, unknownReasonFinding(runtimeHomeTitle, runtimeHomeReason, request.EnforcementCapable))
+				}
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
 						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
@@ -1204,6 +1273,15 @@ func dispatchTrustedActionWith(
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
 				child.stateProofOnly = simple.LoginGuess
+				// A statement the walk placed nowhere is judged as the laptop
+				// judges it, in no folder: the guest placement of the call
+				// already reads it in each directory the guest may be in
+				// (sandboxGuestPlacements). Placed in the guest's directory
+				// here, its proof there hid the unknown tier of the folder it
+				// may really run in, which the laptop names
+				// (withUnresolvedFolderTier, rel-1-0-10:GAP-0871; substrate-1
+				// GAP-0377 at FU8: $CMD; cat .ssh/id_ed25519).
+				child.unplacedStatement = simple.UnresolvedFolder && child.SandboxGuestCWD != ""
 				parent := request.Input
 				if wholeCommandKnown {
 					parent.Command = wholeCommand
@@ -1213,6 +1291,13 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.UnresolvedFolder {
+					// The walk does not know the folder this statement runs
+					// in (cd "$X", cd "$(...)"): the unknown tier when an
+					// operand may be a named protected file there
+					// (rel-1-0-10:GAP-0871).
+					childFindings = withUnresolvedFolderTier(childFindings, child, actionfacts.Analyze(child.Input), true)
+				}
 				if simple.LoginGuess {
 					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 						return !loginGuessProvedFinding(f)
@@ -1274,6 +1359,52 @@ func dispatchTrustedActionWith(
 					}
 				}
 				findings = withSimpleCommandFindings(findings, childFindings)
+			}
+			// A find hands its starting points to the program it runs: that
+			// program on each starting point is judged as the statement
+			// alone, for the call and for each of its statements, and the
+			// strictest finding is kept (rel-1-0-10:GAP-1048).
+			inputs := []actionfacts.Input{request.Input}
+			for _, simple := range simples {
+				if simple.EvaluationFailure == "" && !simple.OpaqueValueAssignment && !simple.LiteralOutputOnly &&
+					!simple.LoginGuess {
+					input := request.Input
+					input.Command, input.Args, input.Argv, input.CWD = simple.Text, nil, nil, simple.CWD
+					if simple.AbsoluteOnly {
+						input.CWD = request.Input.CWD
+					}
+					inputs = append(inputs, input)
+				}
+			}
+			for index, input := range inputs {
+				text, _ := trustedBashCommandInput(input)
+				if !strings.Contains(text, "-exec") && !strings.Contains(text, "-ok") {
+					continue
+				}
+				inputFacts := facts
+				if index != 0 {
+					inputFacts = actionfacts.Analyze(input)
+				}
+				readings, truncated := actionfacts.FindHandedReadings(inputFacts)
+				if truncated {
+					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
+				}
+				for _, reading := range readings {
+					child := request
+					child.Input = input
+					child.Input.Command, child.Input.Args, child.Input.Argv = reading, nil, nil
+					child.LegacyText = reading
+					child.conflictSource = nil
+					child.record, child.recordTelemetry = nil, nil
+					child.simpleCommandPass = true
+					parent := request.Input
+					if wholeCommandKnown {
+						parent.Command = wholeCommand
+					}
+					child.parentPatch = &parent
+					child.generation, child.budget = generation, budget
+					findings = withSimpleCommandFindings(findings, dispatchTrustedAction(ctx, child))
+				}
 			}
 		}()
 	}
@@ -3893,10 +4024,20 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 			continue
 		}
 		// The spelling the kernel walks first (GAP-2047 L5), then the
-		// lexical one the path fact keeps.
-		if walked, ok := stateWalkSpelling(candidate, request.Input.CWD, projected.ActiveHome); ok {
+		// walk spelling the hook client keys on every system, a Windows
+		// junction or drive path included (GAP-1007), then the lexical one
+		// the path fact keeps.
+		walked, isWalked := stateWalkSpelling(candidate, request.Input.CWD, projected.ActiveHome)
+		if isWalked {
 			physicalCandidate := candidate
 			physicalCandidate.Resolved = walked
+			if provenStateCandidateMatches(projected, command, physicalCandidate, request, lineStaysOff) {
+				return true
+			}
+		}
+		if raw, ok := dotDotWalkSpelling(candidate, request); ok && (!isWalked || raw != walked) {
+			physicalCandidate := candidate
+			physicalCandidate.Resolved = raw
 			if provenStateCandidateMatches(projected, command, physicalCandidate, request, lineStaysOff) {
 				return true
 			}
@@ -3966,7 +4107,7 @@ func provenStateCandidateMatches(
 	lineStaysOff func() bool,
 ) bool {
 	if entry, ok := stateDirectoryEntryTarget(command, candidate, request); ok {
-		spellings := []string{candidate.Resolved, candidate.Value, candidate.Normalized}
+		spellings, written := []string{candidate.Resolved, candidate.Value, candidate.Normalized}, candidate.Value
 		candidate.Resolved = entry
 		if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 			return true
@@ -3975,8 +4116,8 @@ func provenStateCandidateMatches(
 			// The gateway cannot follow the directory through a link
 			// the user can make; the hook placed the entry as the user
 			// and lists it only when it is in the state tree (GAP-2549).
-			for _, spelling := range spellings {
-				if placed := request.ResolvedWriteTargets[spelling]; filepath.IsAbs(placed) {
+			for _, placed := range clientWriteTargets(request.ResolvedWriteTargets, written, spellings...) {
+				if filepath.IsAbs(placed) {
 					candidate.Resolved = placed
 					if matchesActiveDefenseClawStateInLine(projected, candidate, lineStaysOff, request.ResolvedWriteTargets) {
 						return true
@@ -3987,11 +4128,9 @@ func provenStateCandidateMatches(
 		return false
 	}
 	physical := ""
-	for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
-		if value, found := request.ResolvedWriteTargets[spelling]; found {
-			physical = value
-			break
-		}
+	if found := clientWriteTargets(request.ResolvedWriteTargets, candidate.Value,
+		candidate.Resolved, candidate.Value, candidate.Normalized); len(found) > 0 {
+		physical = found[0]
 	}
 	if physical == "" && !request.SkipLocalFilesystemResolution {
 		if request.ProtectedHomeHook {
@@ -4081,7 +4220,9 @@ func managedLinkWalkView(request trustedActionRequest) (actionfacts.Facts, trust
 	}
 	placed := request
 	placed.Input.CWD = cwd
-	return actionfacts.Analyze(placed.Input), placed, true
+	// The link-walk facts are keyed by the client walk (the hook folder
+	// reading of each path, Facts.AtHookFolder).
+	return actionfacts.Analyze(placed.Input).AtHookFolder(), placed, true
 }
 
 // protectedHomeClientDirectory is the directory a managed hook call runs in
@@ -4324,10 +4465,15 @@ func sandboxGuestPlacedChildren(input actionfacts.Input, facts actionfacts.Facts
 // owners place by the working directory itself, or a call the analysis did
 // not read in full, whose commands are then read one by one in the guest's
 // directories (a here-string parses invalid and names no path,
-// substrate-1 GAP-0363).
+// substrate-1 GAP-0363). A statement of the call the walk placed nowhere
+// (unplacedStatement) has no reading of its own here: the call's reading
+// places it.
+//
+// The exact-target lane reads this placement too (provedHighWriteFindings):
+// its rules match a resolved target, which a copy-mode call names only here.
 func sandboxGuestPlacedInput(request trustedActionRequest, facts actionfacts.Facts) (actionfacts.Input, bool) {
 	guestCWD := request.SandboxGuestCWD
-	if guestCWD == "" || guestCWD == request.Input.CWD {
+	if guestCWD == "" || guestCWD == request.Input.CWD || request.unplacedStatement {
 		return actionfacts.Input{}, false
 	}
 	if facts.Authoritative() && !hasRelativePathOperand(facts) && !hasGitHookMutationCandidate(facts) && !hasGitReadOutputWrite(facts) {
@@ -4972,7 +5118,10 @@ func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRe
 		return facts, request
 	}
 	request.Input.CWD = client
-	return actionfacts.Analyze(request.Input), request
+	// The client keyed its link facts by its own walk of the call, which
+	// places a command by the hook folder: read the paths there too, or a
+	// write the gateway places after a cd misses its keys (GAP-0426).
+	return actionfacts.Analyze(request.Input).AtHookFolder(), request
 }
 
 // placedLinkedStateWrite reads each top-level statement in the directory
@@ -7325,6 +7474,10 @@ func trustedNestedExactFallbackProofFromActions(
 	}
 	return false
 }
+
+// unplacedPatchTargetTitle is the ship-authored title of a patch whose header
+// names its file by a spelling no reader places; the reason follows it.
+const unplacedPatchTargetTitle = "Patch names a file no rule can place, judged as unknown"
 
 func noRecoverableCommandFacts(facts actionfacts.Facts) bool {
 	if facts.Parse.Status != actionfacts.StatusInvalid &&
@@ -10125,6 +10278,28 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 	return bashReadingRequest(request, command, rewritten), true
 }
 
+// runTimeShellTwinRequest returns the request for
+// actionfacts.RunTimeShellTwin of a POSIX Bash call: the call read with each
+// program word that names its shell at run time written as that shell.
+// Behind ProtectHome (managed hook peer) the hook client map lists the
+// targets of the same reading (hookpaths), so it is judged there too
+// (rel-1-0-10:GAP-0980). caps is the caps that reading hit
+// (rel-1-0-10:GAP-1041), with or without a twin.
+func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, caps bounded.CapSet) {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return trustedActionRequest{}, false, caps
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return trustedActionRequest{}, false, caps
+	}
+	rewritten, ok, caps := actionfacts.RunTimeShellTwin(command)
+	if !ok || rewritten == command {
+		return trustedActionRequest{}, false, caps
+	}
+	return bashReadingRequest(request, command, rewritten), true, caps
+}
+
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
 // a POSIX Bash call. The gateway expands the pattern on its own host, so a
 // gateway that may not read the user home (ProtectHome, or a request that
@@ -10788,6 +10963,14 @@ const unresolvedBodyTitle = "This command runs a shell body that could not be re
 func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding {
 	return unreadPartAlert(unreadPartFindings(unresolvedBodyTitle, enforcementCapable), enforcementCapable)
 }
+
+// runtimeHomeTitle and runtimeHomeReason are the unknown-tier finding of a
+// command that reads the home through a HOME set at run time
+// (actionfacts.SimpleCommand.UnprovenHome, rel-1-0-10:GAP-0996).
+const (
+	runtimeHomeTitle  = "Shell command reads the home folder through a HOME set at run time, judged as unknown"
+	runtimeHomeReason = "home_set_at_run_time"
+)
 
 // shellReadingBound is the reading bound a command is past
 // (trustedActionCommandBound).
@@ -12527,7 +12710,9 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 	// an unknown directory); match the commands in order and skip those.
 	var placedCommands []actionfacts.SimpleCommand
 	for _, simple := range actionfacts.SimpleCommands(placed, actionfacts.Analyze(placed)) {
-		if simple.EvaluationFailure == "" {
+		// The readings of a statement in the other folders it may run in
+		// pair with no statement of the unplaced split.
+		if simple.EvaluationFailure == "" && !simple.OtherFolder {
 			placedCommands = append(placedCommands, simple)
 		}
 	}

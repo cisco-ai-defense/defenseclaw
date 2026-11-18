@@ -26,9 +26,18 @@ const BackupUnresolvedKey = "\x00backup-unresolved"
 // sed -i and perl -i replace the edited file by a rename and a new file,
 // and write a second path when a suffix is given: the backup. The reader
 // judges every path the call can write, with the working directory of the
-// command: the edited file and the backup its suffix names (sedInPlaceWrites
-// and perlInPlace hold the name rules of GNU sed, BSD sed and perl). A path
-// the words name in full that reaches a protected file is a block.
+// command: the edited file and the backup its suffix names (sedGNUInPlace,
+// sedBSDInPlace, perlInPlace and sedBackupName hold the name rules of GNU
+// sed, BSD sed and perl). A path the words name in full that reaches a
+// protected file is a block.
+//
+// A "*" suffix whose folder part is the keys folder (sed -i'~/.ssh/*.bak',
+// perl -pi'~/.ssh/*') lets the operand name the entry the backup writes in
+// that folder; the call is judged as a write to the keys folder itself, as a
+// copy into it is (cp f ~/.ssh/), whatever the operand and in every spelling
+// of the word: quoted, unquoted, escaped or from a brace list
+// (rel-1-0-10:GAP-0669). A star later in the entry name (~/.ssh/x*) names
+// only entries that start with that text and is judged by the backup name.
 //
 // A backup the reader cannot name in full is never a silent allow: it is
 // reported as unresolved, and the hook judges the call at least in the
@@ -364,6 +373,9 @@ func (r *sedBackupReader) inPlace(kind sedKind, files []string, suffix string, f
 	}
 	suffixHole := strings.Contains(suffix, sedHole)
 	star := kind != sedBSDKind && !suffixHole && strings.Contains(suffix, "*")
+	if folder := sedStarFolder(suffix); star && folder != "" && slices.ContainsFunc(files, func(file string) bool { return file != "" }) {
+		r.judge(folder, scope.dirs)
+	}
 	for _, file := range files {
 		if file == "" || r.blocked {
 			continue
@@ -433,6 +445,18 @@ func (r *sedBackupReader) judge(name string, dirs []string) {
 			return
 		}
 	}
+}
+
+// sedStarFolder is the folder a "*" suffix puts its backups in when the
+// first star starts an entry name (dir/*.bak, dir/*): the text before the
+// star, which ends in a slash. It is "" for a star inside an entry name
+// (dir/x*) and for a suffix with no folder part (*.bak, beside the file).
+func sedStarFolder(suffix string) string {
+	star := strings.IndexByte(suffix, '*')
+	if star <= 0 || suffix[star-1] != '/' {
+		return ""
+	}
+	return suffix[:star]
 }
 
 // sedBackupName is the backup the editor writes for file with a suffix

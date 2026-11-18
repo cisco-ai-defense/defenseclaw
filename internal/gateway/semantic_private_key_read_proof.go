@@ -101,6 +101,14 @@ func appendTrustedPrivateKeyReaderFindingOf(
 			return appendTrustedPrivateKeyHomeCopyAlert(findings, generation, request)
 		}
 	}
+	if !proved && request.StrictPolicy && request.EnforcementCapable &&
+		facts.Authoritative() && facts.EnforcementEligible() &&
+		trustedActionOtherHomeSSHPrivateKeyContentRead(facts.EnforcementProjection()) {
+		// A proven content read of another account's key: the strict pack
+		// blocks it as it blocks the active user's; the other packs keep the
+		// alert of the path rule (rel-1-0-10:GAP-0810).
+		proved = true
+	}
 	if !proved {
 		return findings
 	}

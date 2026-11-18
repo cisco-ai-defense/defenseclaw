@@ -83,9 +83,7 @@ func awaitAnswerWatchdogBackground(t *testing.T, w *answerWatchdog) {
 // row); the strict tier and strict availability block it with the restarting
 // text (fail_closed row). The deadline is driven by hand; nothing sleeps.
 func TestPerUserRestartOutlastingTheBudgetFollowsTheOutageMode(t *testing.T) {
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = time.Minute // a bound only
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, time.Minute) // a bound only
 	sp, _ := specFor("claudecode")
 	for _, tc := range []struct {
 		name       string
@@ -128,9 +126,7 @@ func TestPerUserRestartOutlastingTheBudgetFollowsTheOutageMode(t *testing.T) {
 // gateway, closed in every fail mode (GAP-2279); and a managed call's answer
 // does not change when the per-user outage is reported.
 func TestPerUserNoAnswerStaysClosed(t *testing.T) {
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = time.Minute
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, time.Minute)
 	sp, _ := specFor("claudecode")
 	t.Run("per-user hung gateway", func(t *testing.T) {
 		home := t.TempDir()
@@ -231,9 +227,7 @@ func TestPerUserPostNoAnswerExitIsOnlyANoStatusDeadline(t *testing.T) {
 
 // A no-answer without a verified contact or a prior refusal stays closed.
 func TestPerUserOutageSeenNeedsARefusedFirstTry(t *testing.T) {
-	previousLogWait := answerWatchdogLogWait
-	answerWatchdogLogWait = time.Minute
-	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	setAnswerWatchdogLogWait(t, time.Minute)
 	sp, _ := specFor("claudecode")
 	for _, err := range []error{
 		fmt.Errorf("post: %w", context.DeadlineExceeded),

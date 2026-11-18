@@ -30,9 +30,11 @@ spans overlap: internal/actionfacts summed 653 s of test time in a package
 run of 165 s, run 43229287498). The shares of a package add up to the time
 its tests ran, which is what a shard of them takes. A top-level test still
 running when the stream ends (the package -timeout killed it) is written as
-a fail with the share it had until the last event: a refresh then weighs
-the slowest test of a timed-out shard by at least that time, not as an
-unlisted test. An event without a Time keeps go test's Elapsed.
+a fail with the share it had until the last event, after the end event
+of its package: a refresh (scripts/update_test_timings.py) reads that
+place as a cut-off and weighs the test by at least that time and at least
+its recorded time, never as an unlisted test. An event without a Time keeps
+go test's Elapsed.
 
 --annotate TITLE prints a GitHub error annotation per failed top-level test
 (at most 20). The exit status is always 0; the caller keeps go test's.
@@ -119,11 +121,35 @@ class TopLevelShares:
         return None if share is None else round(share, 3)
 
 
+def expected_names(pattern: str) -> set[str] | None:
+    """The test names of a -run pattern ^(A|B)$ (scripts/go-unix-test-pattern.sh)
+    or ^(?:A|B)$ (scripts/go_test_shards.py), or None when it is anything else."""
+    match = re.fullmatch(r"\^\((?:\?:)?(.*)\)\$", pattern.strip(), re.S)
+    if match is None:
+        return None
+    names = {re.sub(r"\\(.)", r"\1", name) for name in match.group(1).split("|")}
+    if not names or not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+        return None
+    return names
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timings", help="write the pass/fail events (no output) to this file")
     parser.add_argument("--annotate", metavar="TITLE", help="GitHub ::error title for failed tests")
+    parser.add_argument(
+        "--expect-run",
+        metavar="PATTERN",
+        help="the go test -run pattern of this run, ^(A|B|...)$ or ^(?:A|B|...)$: exit 1 unless every test it names "
+        "reported a pass, fail or skip (a name the binary does not have runs nothing, and go test passes)",
+    )
     args = parser.parse_args()
+    expected = None
+    if args.expect_run is not None:
+        expected = expected_names(args.expect_run)
+        if expected is None:
+            parser.error(f"--expect-run is not ^(A|B|...)$ of test names: {args.expect_run[:80]!r}")
+    reported: set[str] = set()
 
     out = sys.stdout
     timings = open(args.timings, "w", encoding="utf-8") if args.timings else None
@@ -175,6 +201,8 @@ def main() -> int:
                     )
                 continue
             key = (package, test)
+            if action in ("pass", "fail", "skip") and "/" not in test:
+                reported.add(test)
             if action in ("run", "cont") and "/" not in test and at is not None:
                 started.add(key)
             elif action in ("pause", "skip"):
@@ -218,8 +246,19 @@ def main() -> int:
                 out.write(f"::error title={args.annotate}::{test} was still running\n")
         elif not names and package_failed:
             out.write(f"::error title={args.annotate}::No named failing test was reported\n")
+    status = 0
+    if expected is not None:
+        ran = expected & reported
+        missing = sorted(expected - reported)
+        out.write(f"{len(ran)} of {len(expected)} selected tests reported a result\n")
+        if missing:
+            title = args.annotate or "go test"
+            out.write(f"::error title={title}::{len(missing)} selected tests reported no result\n")
+            for name in missing[:20]:
+                out.write(f"::error title={title}::{name} reported no result\n")
+            status = 1
     out.flush()
-    return 0
+    return status
 
 
 if __name__ == "__main__":

@@ -165,7 +165,7 @@ func stripUsageProvenance(rec modelusage.Record) modelusage.Record {
 	rec.Facts.Route = modelusage.RouteFacts{Decision: rec.Facts.Route.Decision}
 	rec.Facts.ProfileName, rec.Facts.ProfileDigest = "", ""
 	rec.Facts.RequestedProvider = ""
-	rec.Facts.Subject, rec.Facts.SubjectKind = "", ""
+	rec.Facts.Subject, rec.Facts.SubjectKind, rec.Facts.SubjectName = "", "", ""
 	rec.Cost.PriceEntry, rec.Cost.TableDigest = "", ""
 	return rec
 }
@@ -180,6 +180,7 @@ func buildModelUsageLogInput(envelope observability.FamilyEnvelopeInput, rec mod
 	if f.IdentityVerified {
 		in.UserID = hookModelV8OptionalID(f.Subject)
 		in.DefenseClawUserIDKind = v8UserIDKind(f.SubjectKind)
+		in.DefenseClawUserName = v8UserName(f.SubjectName, hookModelV8OptionalID)
 	}
 	in.GenAIOperationName = observability.Present("chat")
 	in.GenAIProviderName = hookModelV8OptionalText(f.SelectedProvider)

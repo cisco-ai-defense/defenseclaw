@@ -609,7 +609,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) {
 			// PowerShell's stop-parsing token makes the native arguments
 			// opaque up to an unquoted pipe, &&, or the physical line end.
-			out.markPartial(IssueUnsupportedConstruct)
+			// That remainder is skipped, never lexed: it is unread.
+			out.markUnread(IssueUnsupportedConstruct)
 			wordExpands = true
 			for _, literal := range "--%" {
 				if !writeRune(literal) {
@@ -637,6 +638,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			}
 			end, ok := windowsPowerShellOpaqueEnd(runes, i)
 			if !ok {
+				// No balanced end: the rest of the source is never lexed.
+				out.markUnread(IssueUnsupportedConstruct)
 				break
 			}
 			i = end
@@ -1601,14 +1604,20 @@ func (b *windowsFactBuilder) addCanonicalPath(
 }
 
 func windowsCanonicalPathFactValue(value string) (string, bool) {
-	if value == "" || strings.TrimSpace(value) != value ||
+	// Win32 strips the trailing spaces of a file name, so a file operand
+	// with them names the file without them (windowsOpenedNames,
+	// rel-1-0-10:GAP-1075). Leading or other white space, and trailing
+	// spaces on a registry key, leave the operand unknown.
+	body := strings.TrimRight(value, " ")
+	if body == "" || strings.TrimSpace(body) != body ||
 		windowsEnvironmentProviderPath(value) {
 		return "", false
 	}
-	if _, ok := canonicalRegistryPath(value); ok {
+	_, registry := canonicalRegistryPath(value)
+	switch {
+	case registry && body == value:
 		return value, true
-	}
-	if looksLikeRegistryPath(value) {
+	case registry, looksLikeRegistryPath(value):
 		return "", false
 	}
 	return canonicalWindowsFilesystemPath(value)
@@ -1868,9 +1877,12 @@ func windowsClassifyPowerShell(
 			windowsAddOperation(command, OperationWrite)
 		}
 		windowsAddPowerShellPrimaryPath(name, command.ID, access, args, true, builder)
-	case "add-content":
+	case "add-content", "ac":
+		// ac is Add-Content's alias in Windows PowerShell and PowerShell 7 on
+		// Windows; the structured reading already reads it so
+		// (rel-1-0-10:GAP-1115).
 		windowsAddOperation(command, OperationAppend)
-		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessAppend, args, true, builder)
+		windowsAddPowerShellPrimaryPath("add-content", command.ID, PathAccessAppend, args, true, builder)
 	case "remove-item", "ri", "rm", "del", "erase", "rmdir", "rd":
 		windowsAddOperation(command, OperationDelete)
 		windowsAddPowerShellPaths(

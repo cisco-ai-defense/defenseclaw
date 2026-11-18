@@ -212,11 +212,12 @@ type APIServer struct {
 	// executes scanner.ScanCode.
 	codeScanner func(context.Context, string, string) (*scanner.ScanResult, error)
 
-	// inspectToolScanTimeout optionally overrides the synchronous
-	// /api/v1/inspect/tool scan budget for this server. Runtime constructors
-	// leave it at zero and therefore retain inspectScanTimeout; tests that
-	// exercise policy semantics can use a larger budget so race-detector
-	// scheduler latency is not mistaken for a scanner verdict.
+	// inspectToolScanTimeout optionally overrides the synchronous rule-scan
+	// budget of the /api/v1/inspect/* routes (tool, request, response,
+	// tool-response) for this server; see inspectScanBudget. Runtime
+	// constructors leave it at zero and therefore retain inspectScanTimeout;
+	// tests that exercise policy semantics can use a larger budget so
+	// race-detector scheduler latency is not mistaken for a scanner verdict.
 	inspectToolScanTimeout time.Duration
 	// inspectToolWorkerDone is a test-only completion barrier for the detached
 	// scan worker. Production constructors leave it nil. It lets timeout tests
@@ -1736,6 +1737,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		// OSS: a route key another account could have received is replaced
 		// before the first request (S1 DESIGN 17.1).
 		a.rotateRouteKeyAfterHeldPort()
+		// OSS: route-only agents get the real route only now that the port
+		// is ours; until then their render is parked (GAP-1133).
+		a.routeOnlyPortOwned(true)
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1748,6 +1752,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	var tcpBound chan net.Listener
 	retryCtx, stopRetry := context.WithCancel(ctx)
 	defer stopRetry()
+	// OSS: a render a crash, a forced stop or a logoff left in place points
+	// the agents at a port this gateway does not hold yet; park it before
+	// the bind, the real route follows once the port is ours (GAP-1133).
+	a.parkRouteOnly("this gateway is starting and does not hold its API port yet")
 	ln, lnErr := a.acquireAPIListener(ctx)
 	switch {
 	case lnErr == nil:
@@ -1806,11 +1814,15 @@ func (a *APIServer) Run(ctx context.Context) error {
 			a.health.SetAPI(StateRunning, "", apiDetails)
 		case err := <-errCh:
 			a.health.SetAPI(StateError, err.Error(), nil)
+			// Park route-only agents before the port is released (GAP-1133).
+			a.routeOnlyPortOwned(false)
 			_ = shutdown()
 			return fmt.Errorf("api: listen %s: %w", a.addr, err)
 		case <-ctx.Done():
 			a.health.SetAPI(StateStopped, "", nil)
 			_, _ = systemd.Notify(systemd.StateStopping)
+			// Park route-only agents before the port is released (GAP-1133).
+			a.routeOnlyPortOwned(false)
 			return shutdown()
 		}
 	}
@@ -1950,6 +1962,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	administrator := a.healthAdministratorCaller(r, cfg)
 	if !administrator {
 		snap.Config = healthConfigLiveness(snap.Config)
+		snap.Routing = healthRoutingForOrdinaryAccount(snap.Routing)
 	}
 	raw, err := json.Marshal(snap)
 	if err != nil {
@@ -4713,7 +4726,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedHookConnector(
-					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+					attachSecureClientUser(a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -4739,7 +4752,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if registered && !userScoped && a.hookAPITokenMatches(hookScope, token) {
 				r = r.WithContext(withAuthenticatedInspectConnector(
-					a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+					attachSecureClientUser(a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))),
 					hookScope,
 				))
 				next.ServeHTTP(w, r)
@@ -4775,6 +4788,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// to a fully minted entry so authenticated traffic still
 		// gets a stable agent_instance_id on its emissions.
 		ctx = a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context()))
+		if _, hook := a.hookTokenScopeForPath(r.URL.Path); hook || strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") {
+			// A hook that presents the gateway token: label its end user
+			// as the scoped-token branches above do. CLI and status calls
+			// are not attributed.
+			ctx = attachSecureClientUser(ctx)
+		}
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})

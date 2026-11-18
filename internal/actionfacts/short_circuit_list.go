@@ -162,7 +162,11 @@ func sequenceReduction(input Input, facts Facts, compound bool) (view Facts, ok 
 			return Facts{}, false
 		}
 	}
-	return twin, true
+	// The twin runs every command one after the other, so a cd in it may
+	// fail before every later one; the action said where each runs (`cd X
+	// && b` runs b in X only). Its paths are read in the folders of the
+	// action (rel-1-0-10:GAP-0869).
+	return twin.withWorkFoldersOf(original, input.MovedWindowsShellCWD), true
 }
 
 // shortCircuitListSequence returns source with each top-level && or || list
@@ -649,13 +653,25 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 				return false
 			}
 			reduced = true
-			if replaced, ok := flattenRedirected(stmt); replaced {
-				return ok
+			walk := func() bool {
+				if replaced, ok := flattenRedirected(stmt); replaced {
+					return ok
+				}
+				if allSimple && !flattenSubstitutions(stmt) {
+					return false
+				}
+				return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
 			}
-			if allSimple && !flattenSubstitutions(stmt) {
-				return false
+			if !stmt.Background {
+				return walk()
 			}
-			return stmt.Cmd != nil && keep(stmt.Cmd, stmt.Redirs...)
+			// The shell runs a background statement in a child shell: its
+			// HOME, other variables and directory stay there, and the
+			// statements after it read the values from before it
+			// (rel-1-0-10:GAP-1021).
+			subshells++
+			defer func() { subshells-- }()
+			return childScope('s', walk)
 		}
 		if replaced, ok := flattenRedirected(stmt); replaced {
 			reduced = true

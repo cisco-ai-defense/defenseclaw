@@ -13505,6 +13505,22 @@ def _check_routing_sensitive(cfg, r: _DoctorResult) -> None:
         _emit(status, "Routing sensitive data", detail, remediation=remediation, r=r)
 
 
+def _check_routing_tokenomics(cfg, r: _DoctorResult) -> None:
+    """Routing or a budget is on while tokenomics is off (GAP-0932): the dashboard
+    panels and budgets stay empty. It stays off by default; say how to turn it on."""
+    from defenseclaw.routing_tokenomics import ENABLE_COMMAND, note_from_cfg
+
+    note = note_from_cfg(cfg)
+    if note:
+        _emit(
+            "warn" if note.budgets else "info",
+            "Routing tokenomics",
+            note.detail,
+            remediation=ENABLE_COMMAND,
+            r=r,
+        )
+
+
 def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     """Warn about routed models a managed host keys by api_key_env.
 
@@ -13712,6 +13728,68 @@ def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None =
             remediation="run 'defenseclaw setup routing --status' and restart the gateway",
             r=r,
         )
+
+
+def _administrator_health(cfg, r: _DoctorResult, live_health: dict | None) -> dict | None:
+    """live_health as an administrator reads it: the AUTHENTICATED /health.
+
+    Only the verified gateway of this account is asked: a foreground gateway, a
+    port another process holds and an unverified listener keep the public body
+    (their own state rows say why)."""
+    if r.gateway_down in {"foreground", "foreign"}:
+        return live_health
+    if r.sidecar_unverified and r.gateway_down != "stopped":
+        return live_health
+    return _administrator_route_only_health(cfg, live_health)
+
+
+def _administrator_route_only_health(cfg, live_health: dict | None) -> dict | None:
+    """live_health with the routing subsystem of the AUTHENTICATED /health.
+
+    On a managed (standalone) host the unauthenticated /health gives an ordinary
+    account closed codes and a closed start error, so a doctor run by an
+    administrator would read "run doctor as an administrator" back to itself
+    (GAP-0989, GAP-1008). With the gateway token, which only an administrator can
+    read, the gateway answers the full rows (the rule, the model and the
+    credential to store) and the real routing state and start error. The token
+    is never printed. When it cannot be read, or the call fails, the public body
+    stays, so the answer is the one an ordinary account gets (its text points to
+    the administrator's own commands), never a better one.
+    """
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    routing = live_health.get("routing") if isinstance(live_health, dict) else None
+    if not isinstance(routing, dict):
+        return live_health
+    details = routing.get("details")
+    has_rows = isinstance(details, dict) and isinstance(details.get("route_only"), list)
+    if not has_rows and str(routing.get("state") or "").strip().lower() != "error":
+        return live_health
+    if _enterprise_profile(cfg) != "standalone":
+        return live_health
+    try:
+        token = cfg.gateway.resolved_token()
+        if not token:
+            return live_health
+        from defenseclaw.gateway import OrchestratorClient
+
+        full = OrchestratorClient(
+            host=_gateway_api_host(cfg), port=int(cfg.gateway.api_port), timeout=3, token=token
+        ).health()
+    except Exception:  # noqa: BLE001 - no token, no gateway, a refusal: keep the public body
+        return live_health
+    full_routing = full.get("routing") if isinstance(full, dict) else None
+    if not isinstance(full_routing, dict):
+        return live_health
+    merged = dict(live_health)
+    merged["routing"] = dict(routing)
+    for key in ("state", "last_error"):
+        if isinstance(full_routing.get(key), str):
+            merged["routing"][key] = full_routing[key]
+    rows = (full_routing.get("details") or {}).get("route_only")
+    if isinstance(rows, list):
+        merged["routing"]["details"] = {**(details if isinstance(details, dict) else {}), "route_only": rows}
+    return merged
 
 
 def _check_route_only(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -16920,10 +16998,12 @@ def doctor(
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
-    _check_semantic_routing(cfg, r, live_health=sidecar_health)
+    routing_health = _administrator_health(cfg, r, sidecar_health)
+    _check_semantic_routing(cfg, r, live_health=routing_health)
     _check_routing_policy(r)
     _check_routing_sensitive(cfg, r)
-    _check_route_only(cfg, r, live_health=sidecar_health)
+    _check_routing_tokenomics(cfg, r)
+    _check_route_only(cfg, r, live_health=routing_health)
     _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):

@@ -56,6 +56,11 @@ type LauncherCall struct {
 	// run as code (the positional arguments of bash -c '"$@"' _ ...): they
 	// are not part of Body (rel-1-0-10:GAP-0803).
 	Trailing bool
+	// Redirects are the redirections of the statement a launcher string
+	// runs in (`cmd /c <script> >> <file>`), in their source text: the script
+	// runs with them, so they are part of Body for a CMD or PowerShell
+	// launcher (rel-1-0-10:GAP-0806). Empty for an argv.
+	Redirects string
 }
 
 // ShellLauncherCall reads the launcher an argv runs: argv[0], or the command
@@ -65,17 +70,39 @@ type LauncherCall struct {
 // screen uses (launcherWrapper, launcherPrefix, launcherFlag in
 // host_launcher_scan.go), so the screen and this reader name the same
 // launcher (rel-1-0-10:GAP-0805). Then ShellLauncherBody's grammar reads the
-// script.
+// script. It is the first of ShellLauncherCalls.
 func ShellLauncherCall(argv []string) (LauncherCall, bool) {
-	start, ok := launcherAt(argv)
-	if !ok {
+	calls := ShellLauncherCalls(argv)
+	if len(calls) == 0 {
 		return LauncherCall{}, false
 	}
+	return calls[0], true
+}
+
+// ShellLauncherCalls is every launcher an argv may run, in word order: a
+// word that may be a wrapper flag's operand or a start title as well as the
+// launcher (sudo -u cmd, env -u pwsh, timeout -s sh, xargs -I bash, wsl -d
+// cmd, start "<title>") is read both ways, as the screen reads it, so a
+// launcher after it is read too (rel-1-0-10:GAP-0857). Each reading whose
+// launcher grammar gives a script is one call; the caller judges each and
+// keeps the strongest proven verdict.
+func ShellLauncherCalls(argv []string) []LauncherCall {
+	var calls []LauncherCall
+	for _, start := range launcherStarts(argv) {
+		if call, ok := shellLauncherCallAt(argv, start); ok {
+			calls = append(calls, call)
+		}
+	}
+	return calls
+}
+
+func shellLauncherCallAt(argv []string, start int) (LauncherCall, bool) {
 	call := LauncherCall{Start: start}
 	launcher := argv[start:]
 	if len(launcher) < 2 || strings.TrimSpace(launcher[0]) != launcher[0] || launcher[0] == "" {
 		return LauncherCall{}, false
 	}
+	ok := false
 	switch launcherProgram(launcher[0]) {
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		call.Dialect = DialectPowerShell
@@ -92,16 +119,41 @@ func ShellLauncherCall(argv []string) (LauncherCall, bool) {
 	return call, ok
 }
 
-// launcherAt is the index of the launcher word an argv runs (see
-// ShellLauncherCall). Leading assignments are skipped; a word that follows a
-// wrapper flag is read as the flag's operand unless it is a launcher (the
-// screen reads it as both). command -v and -V only print.
-func launcherAt(argv []string) (int, bool) {
-	wrapper, afterFlag := "", false
-	for index := 0; index < len(argv) && index < maxLauncherTextWords; index++ {
+// maxLauncherReadings bounds the launcher words one argv is read at. Each
+// one past the first follows a word read both ways (an operand or a title),
+// so a wrapper chain longer than this is a crafted one; the screen still
+// names it.
+const maxLauncherReadings = 4
+
+// launcherStarts are the indexes of the launcher words an argv may run (see
+// ShellLauncherCalls). Leading assignments are skipped. A word in an operand
+// slot (after a wrapper flag) or in the start title slot is read as the
+// launcher when it names one, and as the operand or title all the same, so
+// the walk goes on past it. cmd's start takes its first quoted word as the
+// window title and any other first word as the program: an argv carries no
+// quotes, so the first word after start's switches is read both ways, and
+// start has one title. command -v and -V only print. The walk reads up to
+// MaxArgvItems words, the bound of the argv analysis itself: a wrapper chain
+// the analysis reads whole (context-neutral wrappers spend no wrapper depth up
+// to InlineChainWrappers, substrate-1:GAP-0334) is read whole here too, so the
+// launcher at its end is found (rel-1-0-10:GAP-0970).
+func launcherStarts(argv []string) []int {
+	var starts []int
+	wrapper, afterFlag, titled := "", false, false
+	for index := 0; index < len(argv) && index < MaxArgvItems; index++ {
 		literal := argv[index]
+		titleSlot := wrapper == "start" && !titled
 		if literal != "" && launcherProgramWord(literal) {
-			return index, true
+			starts = append(starts, index)
+			if !afterFlag && !titleSlot || len(starts) >= maxLauncherReadings {
+				return starts
+			}
+			if afterFlag {
+				afterFlag = false
+			} else {
+				titled = true
+			}
+			continue
 		}
 		word := layoutWord{literal: literal, plain: true, assign: assignmentNameAt(literal, 0) != ""}
 		name := ""
@@ -112,21 +164,26 @@ func launcherAt(argv []string) (int, bool) {
 		case name != "" && launcherWrapper(name):
 			if (name == "command" || name == "builtin") && index+1 < len(argv) &&
 				layoutOptions(argv[index+1]) && strings.ContainsAny(argv[index+1], "vV") {
-				return 0, false
+				return starts
 			}
-			wrapper, afterFlag = name, false
+			wrapper, afterFlag, titled = name, false, false
 		case wrapper == "" && word.assign:
 		case wrapper == "":
-			return 0, false
+			return starts
 		case launcherPrefix(word, wrapper):
+			if wrapper == "start" && literal == "" {
+				titled = true
+			}
 			afterFlag = launcherFlag(word)
 		case afterFlag:
 			afterFlag = false
+		case titleSlot:
+			titled = true
 		default:
-			return 0, false
+			return starts
 		}
 	}
-	return 0, false
+	return starts
 }
 
 // launcherProgramWord reports a shell launcher program at any path.
@@ -260,41 +317,62 @@ func ShellLauncherBodyOfText(text string) (body string, dialect Dialect, ok bool
 	return call.Body, call.Dialect, ok
 }
 
-// ShellLauncherCallOfText reads the first launcher a command string runs, in
-// any of its first statements, behind any wrapper ShellLauncherCall reads
-// (`echo x | xargs pwsh -c '...'`, `start "" powershell -Command '...'`):
-// each statement is split into words as PowerShell splits it (single
-// quotes, in which a doubled quote is one quote, and double quotes, in which
-// a backtick quote or a doubled quote is one quote) up to its statement or
-// redirect operator outside quotes (newline, ; | & < >). A leading call
-// operator & is skipped. words are the words of that statement and
-// statement its index.
+// ShellLauncherCallOfText is the first of ShellLauncherCallsOfText.
 func ShellLauncherCallOfText(text string) (call LauncherCall, words []string, statement int, ok bool) {
-	if text == "" || len(text) > maxLauncherTextBytes {
+	calls, words, statement, ok := ShellLauncherCallsOfText(text)
+	if !ok {
 		return LauncherCall{}, nil, 0, false
+	}
+	return calls[0], words, statement, true
+}
+
+// ShellLauncherCallsOfText reads the launchers a command string runs, in the
+// first of its first statements that runs one, behind any wrapper
+// ShellLauncherCalls reads (`echo x | xargs pwsh -c '...'`,
+// `start "" powershell -Command '...'`): each statement is split into words as
+// PowerShell splits it (single quotes, in which a doubled quote is one quote,
+// and double quotes, in which a backtick quote or a doubled quote is one
+// quote) up to its statement operator outside quotes (newline, ; | &). A
+// redirection (< > >> 2> 2>&1 and its target) is no word: it is kept in
+// LauncherCall.Redirects, since the launcher's script runs with it. A
+// leading call operator & is skipped. words are the words of that statement
+// and statement its index.
+func ShellLauncherCallsOfText(text string) (calls []LauncherCall, words []string, statement int, ok bool) {
+	if text == "" || len(text) > maxLauncherTextBytes {
+		return nil, nil, 0, false
 	}
 	from := 0
 	for statement = 0; statement < maxLauncherTextStatements && from < len(text); statement++ {
 		var next int
-		words, next, ok = launcherTextWords(text, from)
+		var redirects []string
+		words, redirects, next, ok = launcherTextWords(text, from)
 		if next < 0 {
-			return LauncherCall{}, nil, 0, false // unterminated quote
+			return nil, nil, 0, false // unterminated quote
 		}
 		if ok {
-			if call, ok = ShellLauncherCall(words); ok {
-				return call, words, statement, true
+			if calls = ShellLauncherCalls(words); len(calls) > 0 {
+				if len(redirects) > 0 {
+					for i := range calls {
+						if calls[i].Dialect == DialectCMD || calls[i].Dialect == DialectPowerShell {
+							calls[i].Redirects = strings.Join(redirects, " ")
+							calls[i].Body += " " + calls[i].Redirects
+						}
+					}
+				}
+				return calls, words, statement, true
 			}
 		}
 		from = next
 	}
-	return LauncherCall{}, nil, 0, false
+	return nil, nil, 0, false
 }
 
-func launcherTextWords(text string, from int) ([]string, int, bool) {
+func launcherTextWords(text string, from int) ([]string, []string, int, bool) {
 	var (
-		words []string
-		word  strings.Builder
-		in    bool
+		words     []string
+		redirects []string
+		word      strings.Builder
+		in        bool
 	)
 	flush := func() {
 		if in {
@@ -310,59 +388,45 @@ func launcherTextWords(text string, from int) ([]string, int, bool) {
 		case ' ', '\t':
 			flush()
 			i++
-		case '\n', '\r', ';', '|', '<', '>':
+		case '\n', '\r', ';', '|':
 			flush()
-			return words, launcherStatementEnd(text, i), len(words) > 0
+			return words, redirects, launcherStatementEnd(text, i), len(words) > 0
+		case '<', '>':
+			start := i
+			if in && i > from && text[i-1] >= '0' && text[i-1] <= '9' && strings.Trim(word.String(), "0123456789") == "" {
+				// The descriptor of 2> or 1>> belongs to the redirection.
+				start -= word.Len()
+				word.Reset()
+				in = false
+			} else {
+				flush()
+			}
+			end, ok := launcherRedirectEnd(text, i)
+			if !ok {
+				// A redirection the reader cannot finish (its target opens a
+				// quote that never closes) ends the statement, as every
+				// redirection did before the reader kept them: the words
+				// and redirections before it are still read for a launcher,
+				// so a launcher the statement runs is never lost to an
+				// unreadable target (rel-1-0-10:GAP-0969).
+				return words, redirects, launcherRedirectStatementEnd(text, i), len(words) > 0
+			}
+			redirects = append(redirects, text[start:end])
+			i = end
 		case '&':
 			if len(words) == 0 && !in {
 				i++ // the call operator before the program
 				continue
 			}
 			flush()
-			return words, launcherStatementEnd(text, i), len(words) > 0
-		case '\'':
+			return words, redirects, launcherStatementEnd(text, i), len(words) > 0
+		case '\'', '"':
 			in = true
-			i++
-			for i < len(text) {
-				if text[i] == '\'' {
-					if i+1 < len(text) && text[i+1] == '\'' {
-						word.WriteByte('\'')
-						i += 2
-						continue
-					}
-					break
-				}
-				word.WriteByte(text[i])
-				i++
+			end, ok := launcherQuoteEnd(text, i, &word)
+			if !ok {
+				return nil, nil, -1, false // unterminated quote
 			}
-			if i >= len(text) {
-				return nil, -1, false // unterminated quote
-			}
-			i++
-		case '"':
-			in = true
-			i++
-			for i < len(text) {
-				if text[i] == '`' && i+1 < len(text) {
-					word.WriteByte(text[i+1])
-					i += 2
-					continue
-				}
-				if text[i] == '"' {
-					if i+1 < len(text) && text[i+1] == '"' {
-						word.WriteByte('"')
-						i += 2
-						continue
-					}
-					break
-				}
-				word.WriteByte(text[i])
-				i++
-			}
-			if i >= len(text) {
-				return nil, -1, false
-			}
-			i++
+			i = end
 		default:
 			in = true
 			word.WriteByte(c)
@@ -373,20 +437,111 @@ func launcherTextWords(text string, from int) ([]string, int, bool) {
 	if len(words) >= maxLauncherTextWords {
 		// The statement goes on past the words read: the next one is not
 		// looked for (the call's own reading has it).
-		return words, len(text), len(words) > 0
+		return words, redirects, len(text), len(words) > 0
 	}
-	return words, i, len(words) > 0
+	return words, redirects, i, len(words) > 0
 }
 
-// launcherStatementEnd is the index after the operator at text[i] (a run of
-// ; | & < > and line breaks): the start of the next statement. A redirect
-// target is a word of no launcher, so it is read as a statement that names
-// none.
-func launcherStatementEnd(text string, i int) int {
-	for i < len(text) && strings.IndexByte("\n\r;|&<> \t", text[i]) >= 0 {
+// launcherRedirectEnd is the end of the redirection whose operator starts at
+// text[i]: the run of < and >, then a descriptor (&1, &-) or the target
+// word, quoted as launcherTextWords quotes. ok is false for an unterminated
+// quote.
+func launcherRedirectEnd(text string, i int) (int, bool) {
+	for i < len(text) && (text[i] == '<' || text[i] == '>') {
+		i++
+	}
+	if i < len(text) && text[i] == '&' {
+		j := i + 1
+		for j < len(text) && (text[j] >= '0' && text[j] <= '9' || text[j] == '-') {
+			j++
+		}
+		if j > i+1 {
+			return j, true
+		}
+	}
+	for i < len(text) && (text[i] == ' ' || text[i] == '\t') {
+		i++
+	}
+	for i < len(text) {
+		switch c := text[i]; c {
+		case ' ', '\t', '\n', '\r', ';', '|', '&', '<', '>':
+			return i, true
+		case '\'', '"':
+			end, ok := launcherQuoteEnd(text, i, nil)
+			if !ok {
+				return 0, false
+			}
+			i = end
+		default:
+			i++
+		}
+	}
+	return i, true
+}
+
+// launcherQuoteEnd is the index after the quoted span that opens at text[i]
+// (a single or a double quote), split as PowerShell splits it: in single
+// quotes a doubled quote is one quote; in double quotes a backtick escapes the
+// next byte and a doubled quote is one quote. The span's text goes to word
+// when word is not nil. ok is false for a quote that never closes. Words and
+// redirection targets are read by this one scanner, so a target never ends
+// where its word would not (rel-1-0-10:GAP-0969).
+func launcherQuoteEnd(text string, i int, word *strings.Builder) (int, bool) {
+	quote := text[i]
+	write := func(c byte) {
+		if word != nil {
+			word.WriteByte(c)
+		}
+	}
+	for i++; i < len(text); i++ {
+		c := text[i]
+		if quote == '"' && c == '`' && i+1 < len(text) {
+			i++
+			write(text[i])
+			continue
+		}
+		if c == quote {
+			if i+1 < len(text) && text[i+1] == quote {
+				i++
+				write(quote)
+				continue
+			}
+			return i + 1, true
+		}
+		write(c)
+	}
+	return 0, false
+}
+
+// launcherRedirectStatementEnd is the start of the next statement after a
+// redirection the reader cannot finish at text[i]: the operator run, its
+// blanks and any statement operators after them, as the reader ended a
+// statement at a redirection before it kept them (the target is then read as
+// a statement of its own).
+func launcherRedirectStatementEnd(text string, i int) int {
+	for i < len(text) && (text[i] == '<' || text[i] == '>' || launcherStatementByte(text[i])) {
 		i++
 	}
 	return i
+}
+
+// launcherStatementEnd is the index after the operator at text[i] (a run of
+// ; | & and line breaks): the start of the next statement.
+func launcherStatementEnd(text string, i int) int {
+	for i < len(text) && launcherStatementByte(text[i]) {
+		i++
+	}
+	return i
+}
+
+// launcherStatementByte reports a byte of a statement operator run: a line
+// break, ; | & or a blank.
+func launcherStatementByte(c byte) bool {
+	switch c {
+	case '\n', '\r', ';', '|', '&', ' ', '\t':
+		return true
+	}
+	return false
 }
 
 // posixLauncherBody is the script word of a POSIX shell invoked with -c in

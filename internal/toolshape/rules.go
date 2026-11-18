@@ -6,20 +6,37 @@ package toolshape
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 // PathRule is a rule on a file the call reads or changes. The id names a rule
-// of the pack; the pack holds its title, severity and tags.
+// of the pack; the pack holds its title, severity and tags. A rule has one of
+// re (the whole path, PathRules) and home_re (the path below the active home
+// of the call, HomePathRules).
 type PathRule struct {
 	ID     string   `yaml:"id"`
 	Access []string `yaml:"access"` // read, write, append, delete
 	Regex  string   `yaml:"re"`
+	// HomeRe matches the path relative to the active home of the call
+	// (.config/systemd/user/x.service), whatever that home is: /home/alice
+	// on a laptop, /sandbox in a Substrate actor. A home found by the shape
+	// of the path misses a home of another shape (rel-1-0-10:GAP-1002).
+	HomeRe string `yaml:"home_re"`
 	// TextRe, when set, must also match the text of the call (the shell
 	// command, or the content a write carries): the path alone is not enough.
 	TextRe string `yaml:"text_re"`
-	re     *regexp.Regexp
-	textRe *regexp.Regexp
+	// PackTyped marks a rule whose finding the gateway judges as the pack's
+	// own typed path finding of the rule (the trusted-action context
+	// disposition: a local read of the file is an advisory MEDIUM, a mutation
+	// keeps the rule's tier), not as a lane alert at the rule's severity, so
+	// the lane gives the verdict the one-step spelling of the call gets in
+	// every pack (rel-1-0-10:GAP-1058). It only matters outside the strict
+	// tier and managed installs, where lane findings alert.
+	PackTyped bool `yaml:"pack_typed"`
+	re        *regexp.Regexp
+	homeRe    *regexp.Regexp
+	textRe    *regexp.Regexp
 }
 
 // CommandRule is a rule on one parsed command (program and argv).
@@ -45,11 +62,18 @@ type TextRule struct {
 func (t *table) compileRules() error {
 	for i := range t.PathRules {
 		r := &t.PathRules[i]
-		re, err := regexp.Compile(r.Regex)
+		if (r.Regex == "") == (r.HomeRe == "") {
+			return fmt.Errorf("toolshape: path rule %s: want one of re and home_re", r.ID)
+		}
+		source, field := r.Regex, &r.re
+		if r.HomeRe != "" {
+			source, field = r.HomeRe, &r.homeRe
+		}
+		re, err := regexp.Compile(source)
 		if err != nil {
 			return fmt.Errorf("toolshape: path rule %s: %w", r.ID, err)
 		}
-		r.re = re
+		*field = re
 		if r.TextRe != "" {
 			if r.textRe, err = regexp.Compile(r.TextRe); err != nil {
 				return fmt.Errorf("toolshape: path rule %s text: %w", r.ID, err)
@@ -95,25 +119,45 @@ func accessName(k Kind) []string {
 // delete, list. text is the call's command or written content, for the rules
 // that need more than the path.
 func PathRules(access, path, text string) []string {
+	return pathRules(access, path, text, func(r *PathRule) *regexp.Regexp { return r.re })
+}
+
+// HomePathRules is PathRules for the rules on a file of the active home:
+// relative is the path below that home (.config/autostart/x.desktop), which
+// the caller finds from the home the call runs as, never from the shape of
+// the path.
+func HomePathRules(access, relative, text string) []string {
+	return pathRules(access, relative, text, func(r *PathRule) *regexp.Regexp { return r.homeRe })
+}
+
+func pathRules(access, path, text string, pattern func(*PathRule) *regexp.Regexp) []string {
 	t, err := load()
 	if err != nil || path == "" {
 		return nil
 	}
 	path = strings.ReplaceAll(path, `\`, "/")
 	var out []string
-	for _, r := range t.PathRules {
-		ok := false
-		for _, a := range r.Access {
-			if a == access {
-				ok = true
-				break
-			}
+	for i := range t.PathRules {
+		r := &t.PathRules[i]
+		re := pattern(r)
+		if re == nil || !slices.Contains(r.Access, access) {
+			continue
 		}
-		if ok && r.re.MatchString(path) && (r.textRe == nil || r.textRe.MatchString(text)) {
+		if re.MatchString(path) && (r.textRe == nil || r.textRe.MatchString(text)) {
 			out = append(out, r.ID)
 		}
 	}
 	return out
+}
+
+// PackTypedPathRule reports whether a path rule of the table with this id is
+// pack_typed (PathRule.PackTyped).
+func PackTypedPathRule(id string) bool {
+	t, err := load()
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(t.PathRules, func(r PathRule) bool { return r.ID == id && r.PackTyped })
 }
 
 // PathAccessOf maps an effect kind to the access name PathRules takes.

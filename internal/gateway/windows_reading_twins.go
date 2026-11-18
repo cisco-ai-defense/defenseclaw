@@ -10,6 +10,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
 // windowsReadingTwinRequests are the other readings a Windows hook's shell
@@ -33,8 +34,9 @@ import (
 // parses complete on its own there is no readable-statements reading, and the
 // PowerShell reading of the whole call is the extra reading instead: it may
 // prove what the ambiguous reading does not (an NTDS export next to an
-// unreadable statement, rel-1-0-10:GAP-0425). Either way a call gets one
-// extra reading at most, and that reading makes none of its own.
+// unreadable statement, rel-1-0-10:GAP-0425). An argument-command reading also
+// judges inner argument calls before their parent (GAP-0988). No extra
+// reading makes readings of its own.
 //
 // The statements of the readable-statements reading are bounded through the
 // call's bounded.Truncated: the returned CapSet is the cap the reading hit,
@@ -46,25 +48,49 @@ import (
 // blocked its benign copy cases with that twin. The NetExec identity of
 // GAP-0366 is one program name in every dialect instead (netExecProgramFamily).
 func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.Facts) ([]trustedActionRequest, bounded.CapSet) {
-	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass ||
-		facts.Authoritative() || facts.Parse.Status == actionfacts.StatusLimitExceeded {
+	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass {
 		return nil, bounded.CapSet{}
 	}
 	input := request.Input
+	if input.DialectHint == "" && request.windowsPowerShellReading != nil {
+		input.DialectHint = actionfacts.DialectPowerShell
+		facts = request.windowsPowerShellReading.factsFor(input)
+	}
+	if facts.Authoritative() || facts.Parse.Status == actionfacts.StatusLimitExceeded {
+		return nil, bounded.CapSet{}
+	}
 	unplaced := facts.Parse.Dialect == actionfacts.DialectPowerShell && facts.Parse.Status == actionfacts.StatusAmbiguous &&
-		input.DialectHint == ""
+		(input.DialectHint == "" || request.windowsPowerShellReading != nil)
 	if unplaced {
 		input.DialectHint = actionfacts.DialectPowerShell
 		facts = request.windowsPowerShellReading.factsFor(input)
 	}
+	var argumentTwins []trustedActionRequest
+	if facts.Parse.Dialect == actionfacts.DialectPowerShell && facts.Parse.Status == actionfacts.StatusPartial {
+		command, known := trustedBashCommandInput(input)
+		if known {
+			text, changed, cut := psparse.ArgumentCommandReading(command)
+			if changed {
+				twin := windowsReadingTwin(request)
+				twin.Input = input
+				twin.Input.Args, twin.Input.Argv = nil, nil
+				twin.Input.Command, twin.LegacyText = text, text
+				twin.Input.DialectHint = actionfacts.DialectPowerShell
+				argumentTwins = append(argumentTwins, twin)
+			}
+			if cut.Any() {
+				return argumentTwins, cut
+			}
+		}
+	}
 	var trunc bounded.Truncated
 	readable, ok := actionfacts.PowerShellReadableStatementsTwin(input, facts, &trunc)
 	if cut := trunc.Set(); cut.Any() {
-		return nil, cut
+		return argumentTwins, cut
 	}
 	if !ok {
 		if !unplaced || facts.Parse.Status != actionfacts.StatusPartial || facts.Parse.Dialect != actionfacts.DialectPowerShell {
-			return nil, bounded.CapSet{}
+			return argumentTwins, bounded.CapSet{}
 		}
 		readable = input
 	}
@@ -73,7 +99,7 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 	if readable.Command != "" {
 		twin.LegacyText = readable.Command
 	}
-	return []trustedActionRequest{twin}, bounded.CapSet{}
+	return append([]trustedActionRequest{twin}, argumentTwins...), bounded.CapSet{}
 }
 
 // windowsHintedReading is the PowerShell reading selectWindowsShellDialectReading
@@ -103,4 +129,31 @@ func windowsReadingTwin(request trustedActionRequest) trustedActionRequest {
 	twin.record = nil
 	twin.recordTelemetry = nil
 	return twin
+}
+
+// withUnreadPowerShellFloor gives the unknown tier to a PowerShell call whose
+// reading skipped part of its text without reading it
+// (actionfacts.ParseResult.Unread, GAP-0988): no reader saw what that text
+// runs. A partial reading alone is not enough: almost every ordinary
+// PowerShell call reads as partial because a command's operand grammar is
+// not modeled, and those calls were read (GAP-1015). The finding is the
+// shared unknown-tier one, which the profile maps by pack: an alert in
+// default, permissive and the managed default pack, a block in strict and
+// managed-strict (GAP-1016). Proven findings keep their own verdict.
+func withUnreadPowerShellFloor(findings []RuleFinding, request trustedActionRequest, facts actionfacts.Facts) []RuleFinding {
+	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass {
+		return findings
+	}
+	input := request.Input
+	if input.DialectHint == "" && (request.windowsPowerShellReading != nil ||
+		facts.Parse.Dialect == actionfacts.DialectPowerShell && facts.Parse.Status == actionfacts.StatusAmbiguous) {
+		input.DialectHint = actionfacts.DialectPowerShell
+		facts = request.windowsPowerShellReading.factsFor(input)
+	}
+	if facts.Parse.Dialect != actionfacts.DialectPowerShell || facts.Parse.Status != actionfacts.StatusPartial ||
+		!facts.Parse.Unread {
+		return findings
+	}
+	return withUnknownFinding(findings, unknownReasonFinding("PowerShell call is only partly read",
+		"powershell_unread", request.EnforcementCapable))
 }

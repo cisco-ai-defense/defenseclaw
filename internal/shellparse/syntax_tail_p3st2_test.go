@@ -62,3 +62,32 @@ func TestReadSyntaxTailOpenerInACommentOrAnsiStringIsText(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0913. A here-document opened inside a script passed as one
+// quoted argument reports the script before its command, unquoted, so the
+// consumer reading can parse what it binds; an expansion in it makes it not
+// known. An opener outside quotes has no script of its own.
+func TestReadSyntaxTailHereDocScript(t *testing.T) {
+	for _, row := range []struct {
+		consumer, script string
+		known            bool
+	}{
+		{"cat > notes.txt", "", true},
+		{"export PATH=/tmp/x; cat > notes.txt", "export PATH=/tmp/x;", true},
+		{"export PA\"\"TH=/tmp/x; cat > notes.txt", "export PA\"\"TH=/tmp/x;", true},
+		{"alias cat=sh; cat > notes.txt", "alias cat=sh;", true},
+		{"cd /tmp && cat > notes.txt", "cd /tmp &&", true},
+	} {
+		tail, ok := ReadSyntaxTail(gap0876Script("tool -", row.consumer, "echo data"))
+		if !ok || len(tail.HereDocs) != 1 {
+			t.Fatalf("%q: %+v, want one here-document", row.consumer, tail)
+		}
+		if doc := tail.HereDocs[0]; doc.Script != row.script || doc.ScriptKnown != row.known {
+			t.Errorf("%q: script %q known %v, want %q %v", row.consumer, doc.Script, doc.ScriptKnown, row.script, row.known)
+		}
+	}
+	tail, ok := ReadSyntaxTail("tool - \"export PATH=$X; cat > notes.txt <<'EOF'\nit's (x\necho data\nEOF\necho after\"")
+	if ok && len(tail.HereDocs) == 1 && tail.HereDocs[0].ScriptKnown {
+		t.Errorf("a script with an expansion: %+v, want it not known", tail.HereDocs[0])
+	}
+}

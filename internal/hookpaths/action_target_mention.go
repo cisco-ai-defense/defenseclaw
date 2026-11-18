@@ -468,6 +468,36 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					}
 				}
 				roleUnknown := memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
+				// Opaque program text still names a protected file. Preserve
+				// its drive prefix only here: a quoted assignment or a known
+				// program operand must retain its shell field/option reading.
+				opaqueUnknown := !stateOnly && (windowsHost || spelledWindows) &&
+					!memo.nonWritesExcused() && !callHasGlob && actionCallRoleUnknown(call, home)
+				opaqueMentions := func(word *syntax.Word) bool {
+					if !opaqueUnknown {
+						return false
+					}
+					value, known := actionWordValue(word, values, effectiveCWD, home)
+					if !known {
+						return false
+					}
+					for _, span := range actionWindowsMentionToken.FindAllStringIndex(value, -1) {
+						token := value[span[0]:span[1]]
+						// The //host/... part of a URL in the text (pip
+						// install git+https://host/x) names no file of
+						// this machine; checking it would ask \\host\x
+						// and open an SMB session to the host the URL
+						// names, as the text scan below never does
+						// (rel-1-0-10:GAP-0920, GAP-1072).
+						if actionURLAuthorityToken(value, span[0], token) {
+							continue
+						}
+						if check(token, false, effectiveCWD) {
+							return true
+						}
+					}
+					return false
+				}
 				// A statement that only reads, outside a pipeline and not a cd, names
 				// the file to read it: its words leave the text scan too (a quoted
 				// remote command, a shell body), as a read-only statement's hit words
@@ -508,13 +538,25 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					if slices.Contains(inert, word) {
 						continue
 					}
-					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
+					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) || opaqueMentions(word) {
 						read := readOnly && plainReads[stmt] && !actionWordHasUnquotedGlob(word, command)
 						if readOnly && (direct[stmt] || read) {
 							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), enters: actionCallChangesDirectory(call, home) || callHasGlob, read: read})
 							judgedWords = append(judgedWords, word)
 							continue
 						}
+						found = true
+						return false
+					}
+				}
+				// The folder a target-directory option holds in its own word
+				// (cp -tDIR, -ftDIR, install -tDIR, ln -tDIR) is the call's
+				// destination, as the next word of -t DIR is. Each word above is
+				// judged whole, so the folder is read out of it with the shared
+				// writer reader (rel-1-0-10:GAP-0186, GAP-1149).
+				for _, destination := range actionAttachedCopyDestinations(call, home) {
+					if actionExpandedWordGlob(destination, values, effectiveCWD, home, check) ||
+						checkBraceFields(destination, false) || checkWord(destination) {
 						found = true
 						return false
 					}
@@ -1411,6 +1453,7 @@ func patchCommandResolutionChange(line string) bool {
 const actionLiteralTilde = "\x1e"
 
 var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+var actionWindowsMentionToken = lazyregexp.New(`(?:[A-Za-z]:)?[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
 // actionURLAuthorityToken reports a mention token that is the //host/... part
 // of a URL (scheme://host/...): a token stops at the colon, so the scan reads
@@ -1938,7 +1981,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			// No client evidence at all (an older hook client): the
 			// name fallback of round m.
 			base := filepath.Base(pattern)
-			if !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
+			if !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionfacts.GlobHasLiteral(base) {
 				// Only the last component is a pattern, in a directory
 				// this process cannot read, and it names nothing (git
 				// add *): no directory alias can be selected.
@@ -2308,27 +2351,6 @@ func actionGlobNotDirectory(dir string, err error) bool {
 	}
 	info, statErr := pathStat(dir)
 	return statErr == nil && !info.IsDir()
-}
-
-// actionGlobHasLiteral reports whether a pattern component keeps a literal
-// character outside *, ? and bracket expressions.
-func actionGlobHasLiteral(component string) bool {
-	for i := 0; i < len(component); i++ {
-		switch component[i] {
-		case '*', '?':
-		case '\\':
-			return true
-		case '[':
-			if end := strings.IndexByte(component[i+1:], ']'); end >= 0 {
-				i += end + 1
-				continue
-			}
-			return true
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 // actionGlobViewHidden reports whether this process cannot see the cwd or
