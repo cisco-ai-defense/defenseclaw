@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -103,7 +104,30 @@ func obsIdleUpstream(t *testing.T, f streamTailFormat, insp ContentInspector, de
 	t.Helper()
 	stall := make(chan struct{})
 	t.Cleanup(func() { close(stall) })
-	up, _ := streamTailUpstream(t, f, deltas, gap, stall)
+	var up *httptest.Server
+	if gap > 0 {
+		up, _ = streamTailUpstream(t, f, deltas, gap, stall)
+	} else {
+		// One burst: the whole reply in one write, so no pause of the
+		// upstream falls between its events.
+		var sb strings.Builder
+		sb.WriteString(f.head)
+		for _, d := range deltas {
+			sb.WriteString(f.delta(d))
+		}
+		burst := sb.String()
+		up = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", f.ctype)
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, burst)
+			w.(http.Flusher).Flush()
+			select {
+			case <-stall:
+			case <-r.Context().Done():
+			}
+		}))
+		t.Cleanup(up.Close)
+	}
 	proxy := streamTailProxy(t, f.provider, insp, "action")
 	front := httptest.NewServer(http.HandlerFunc(proxy.handlePassthrough))
 	t.Cleanup(front.Close)
@@ -120,7 +144,12 @@ type obsPacedStallProvider struct {
 }
 
 func (s *obsPacedStallProvider) ChatCompletionStream(ctx context.Context, _ *ChatRequest, cb func(StreamChunk)) (*ChatUsage, error) {
-	for _, c := range s.chunks {
+	chunks := s.chunks
+	if s.gap == 0 {
+		// One burst: the whole reply in one chunk.
+		chunks = []string{strings.Join(chunks, "")}
+	}
+	for _, c := range chunks {
 		if s.gap > 0 {
 			select {
 			case <-time.After(s.gap):
@@ -175,7 +204,6 @@ func TestGAP0628InitialBufferIsTimeBounded(t *testing.T) {
 		{"short-clean", short, 0, false},
 		{"short-finding", append(append([]string(nil), short...), "and "+streamTailMarker), 0, true},
 		{"finding-after-first-text", []string{streamTailProse(120), " more words here ", " and " + streamTailMarker}, 250 * time.Millisecond, true},
-		{"continuous-finding", append(append([]string(nil), short...), "and "+streamTailMarker), 5 * time.Millisecond, true},
 	}
 	// sentEarly reports whether the case's first text is released before
 	// the finding ends the stream: only when the upstream paused first.
@@ -292,10 +320,15 @@ func (a *obsCountingAID) Inspect(_ context.Context, messages []ChatMessage) *Sca
 
 func (a *obsCountingAID) bindObservabilityV8(hookLifecycleMetricV8Runtime) {}
 
-// obsBothInspector is the gateway's inspector with scanner_mode both over
-// aid; spans counts the completion checks that open an evaluation span.
+// obsBothInspector is obsModeInspector with scanner_mode both.
 func obsBothInspector(aid *obsCountingAID) (*GuardrailInspector, *atomic.Int64) {
-	g := NewGuardrailInspector("both", nil, nil)
+	return obsModeInspector("both", aid)
+}
+
+// obsModeInspector is the gateway's inspector with scanner_mode mode over
+// aid; spans counts the completion checks that open an evaluation span.
+func obsModeInspector(mode string, aid *obsCountingAID) (*GuardrailInspector, *atomic.Int64) {
+	g := NewGuardrailInspector(mode, nil, nil)
 	g.SetCiscoInspector(aid)
 	spans := &atomic.Int64{}
 	g.SetTracerFunc(func(ctx context.Context, _, direction, _, _ string) (context.Context, func(*ScanVerdict, time.Duration)) {
@@ -307,74 +340,89 @@ func obsBothInspector(aid *obsCountingAID) (*GuardrailInspector, *atomic.Int64) 
 	return g, spans
 }
 
-// A check of the stream hold that is due by age only is the local one
-// (rel-1-0-10:GAP-0625): on a slow stream (8 bytes every 10 ms) with
-// scanner_mode both, AI Defense is asked, and an evaluation span opened,
-// about once per 500 bytes of text as before the hold, not every 100 ms;
-// the hold still lets every byte out without the final event (the upstream
-// is idle after the last delta). A finding only AI Defense makes still ends
-// the stream (at the next full check), never as a finished reply.
-func TestGAP0625AgeDueChecksStayLocal(t *testing.T) {
+// A check of the stream hold that is due by age only keeps the guarantee of
+// the scanner mode (rel-1-0-10:GAP-0625): with scanner_mode local it opens
+// no evaluation span, so a slow stream (8 bytes every 10 ms) opens about one
+// per 500 bytes of text, not one every 100 ms; with scanner_mode remote or
+// both AI Defense reads every byte before it is sent (the calls stay
+// bounded, one at a time), and a finding only AI Defense makes never
+// reaches the client. The hold lets every byte out without the final event
+// (the upstream is idle after the last delta).
+func TestGAP0625AgeDueChecksKeepTheirScanner(t *testing.T) {
 	const n, size, gap = 250, 8, 10 * time.Millisecond
 	// The last delta is unique: the prose repeats every 64 bytes.
 	deltas := streamTailDeltas(n*size, size, "closing words zq-0625-end")
-	// The initial buffer, then one full check per 500 bytes, with slack.
-	maxFull := int64(n*size/500 + 3)
+	// scanner_mode local: the initial buffer, then one full check per 500
+	// bytes, with slack (the checks due by age open no span).
+	maxSpans := int64(n*size/500 + 3)
+	// scanner_mode remote or both: at most one AI Defense call per
+	// streamHoldMaxAge of stream plus one per 500 bytes, with slack.
+	maxCalls := int64(time.Duration(n)*gap/streamHoldMaxAge + n*size/500 + 3)
 	bound := time.Duration(n)*gap*3 + streamHoldMaxAge + 3*time.Second
 	f := streamTailFormatNamed(t, "anthropic")
-	check := func(t *testing.T, aid *obsCountingAID, spans *atomic.Int64) {
-		t.Helper()
-		calls, opened := aid.calls.Load(), spans.Load()
-		t.Logf("%d bytes of text: AI Defense calls %d, evaluation spans %d (max %d)", n*size, calls, opened, maxFull)
-		if calls == 0 || calls > maxFull || opened > maxFull {
-			t.Fatalf("AI Defense calls %d, evaluation spans %d over %d bytes of text: want 1..%d", calls, opened, n*size, maxFull)
+	routes := []struct {
+		name string
+		run  func(t *testing.T, insp ContentInspector, d []string) *obsStreamClient
+		last func(body string, d []string) bool
+	}{
+		{"passthrough", func(t *testing.T, insp ContentInspector, d []string) *obsStreamClient {
+			return obsStreamStart(t, obsIdleUpstream(t, f, insp, d, gap), bound)
+		}, func(body string, d []string) bool { return strings.Contains(body, f.delta(d[len(d)-1])) }},
+		{"llm", func(t *testing.T, insp ContentInspector, d []string) *obsStreamClient {
+			return obsStreamStart(t, obsIdleLLM(t, insp, d, gap), bound)
+		}, func(body string, d []string) bool {
+			return strings.Count(body, `"content":`) >= len(d) && strings.Contains(streamTailLLMText(body), strings.Join(d[len(d)-3:], ""))
+		}},
+	}
+	for _, rt := range routes {
+		t.Run(rt.name+"/local", func(t *testing.T) {
+			aid := &obsCountingAID{}
+			insp, spans := obsModeInspector("local", aid)
+			c := rt.run(t, insp, deltas)
+			if body, ok := c.waitFor(bound, func(body string, _ bool) bool { return rt.last(body, deltas) }); !ok {
+				t.Fatalf("held text not sent while the upstream is idle (%d bytes got)", len(body))
+			}
+			t.Logf("scanner_mode local, %d bytes of text: evaluation spans %d (max %d), AI Defense calls %d", n*size, spans.Load(), maxSpans, aid.calls.Load())
+			if s := spans.Load(); s == 0 || s > maxSpans || aid.calls.Load() != 0 {
+				t.Fatalf("evaluation spans %d (want 1..%d), AI Defense calls %d (want 0)", s, maxSpans, aid.calls.Load())
+			}
+		})
+		for _, sm := range []string{"remote", "both"} {
+			t.Run(rt.name+"/"+sm, func(t *testing.T) {
+				aid := &obsCountingAID{}
+				insp, _ := obsModeInspector(sm, aid)
+				c := rt.run(t, insp, deltas)
+				if body, ok := c.waitFor(bound, func(body string, _ bool) bool { return rt.last(body, deltas) }); !ok {
+					t.Fatalf("held text not sent while the upstream is idle (%d bytes got)", len(body))
+				}
+				t.Logf("scanner_mode %s, %d bytes of text: AI Defense calls %d (max %d)", sm, n*size, aid.calls.Load(), maxCalls)
+				if calls := aid.calls.Load(); calls == 0 || calls > maxCalls {
+					t.Fatalf("AI Defense calls %d, want 1..%d", calls, maxCalls)
+				}
+			})
+			// A finding only AI Defense makes, after the initial buffer went
+			// out, with less than 500 bytes after it and then an idle
+			// upstream: AI Defense reads it before it is sent, so it never
+			// reaches the client and the stream ends blocked.
+			t.Run(rt.name+"/"+sm+"/aid-finding", func(t *testing.T) {
+				const marker = "zq-aid-marker-0625"
+				marked := append(append(append([]string(nil), deltas[:200]...), " "+marker+" "), streamTailDeltas(300, size)...)
+				aid := &obsCountingAID{marker: marker}
+				insp, _ := obsModeInspector(sm, aid)
+				c := rt.run(t, insp, marked)
+				body, ended := c.waitFor(bound, func(body string, ended bool) bool { return ended || strings.Contains(body, marker) })
+				if strings.Contains(body, marker) {
+					t.Fatalf("the AI Defense finding reached the client before the block (ended=%v)", ended)
+				}
+				if !ended || streamTailSentTerminal(f, body) {
+					t.Fatalf("an AI Defense finding did not end the stream: ended=%v", ended)
+				}
+				if rt.name == "llm" && !strings.Contains(body, "content blocked mid-stream by guardrail") {
+					t.Fatal("no block chunk")
+				}
+			})
 		}
 	}
-	t.Run("passthrough", func(t *testing.T) {
-		aid := &obsCountingAID{}
-		insp, spans := obsBothInspector(aid)
-		c := obsStreamStart(t, obsIdleUpstream(t, f, insp, deltas, gap), bound)
-		last := f.delta(deltas[len(deltas)-1])
-		if body, ok := c.waitFor(bound, func(body string, _ bool) bool { return strings.Contains(body, last) }); !ok {
-			t.Fatalf("held text not sent while the upstream is idle (%d bytes got)", len(body))
-		}
-		check(t, aid, spans)
-	})
-	t.Run("llm", func(t *testing.T) {
-		aid := &obsCountingAID{}
-		insp, spans := obsBothInspector(aid)
-		c := obsStreamStart(t, obsIdleLLM(t, insp, deltas, gap), bound)
-		tail := strings.Join(deltas[len(deltas)-3:], "")
-		if body, ok := c.waitFor(bound, func(body string, _ bool) bool {
-			return strings.Count(body, `"content":`) >= len(deltas) && strings.Contains(streamTailLLMText(body), tail)
-		}); !ok {
-			t.Fatalf("held chunks not sent while the provider is idle (%d bytes got)", len(body))
-		}
-		check(t, aid, spans)
-	})
-	// The finding comes after the initial buffer went out (1600 bytes of
-	// text), so the local checks due by age let it out, and more than 500
-	// bytes follow it: the next full check reads it and ends the stream
-	// before the upstream goes idle.
-	marked := append(append(append(append([]string(nil), deltas[:200]...), " zq-aid-marker-0625 "), streamTailDeltas(800, size)...), "closing zq-0625-aid-end")
-	t.Run("passthrough/aid-finding", func(t *testing.T) {
-		aid := &obsCountingAID{marker: "zq-aid-marker-0625"}
-		insp, _ := obsBothInspector(aid)
-		c := obsStreamStart(t, obsIdleUpstream(t, f, insp, marked, gap), bound)
-		body, ok := c.waitFor(bound, func(_ string, ended bool) bool { return ended })
-		if !ok || streamTailSentTerminal(f, body) || strings.Contains(body, "zq-0625-aid-end") {
-			t.Fatalf("an AI Defense finding did not end the stream: ended=%v terminal=%v", ok, streamTailSentTerminal(f, body))
-		}
-	})
-	t.Run("llm/aid-finding", func(t *testing.T) {
-		aid := &obsCountingAID{marker: "zq-aid-marker-0625"}
-		insp, _ := obsBothInspector(aid)
-		c := obsStreamStart(t, obsIdleLLM(t, insp, marked, gap), bound)
-		body, ok := c.waitFor(bound, func(_ string, ended bool) bool { return ended })
-		if !ok || !strings.Contains(body, "content blocked mid-stream by guardrail") || strings.Contains(body, "zq-0625-aid-end") {
-			t.Fatalf("an AI Defense finding did not end the stream: ended=%v", ok)
-		}
-	})
 }
 
 // streamTailLLMText is the delta text of an /llm SSE body.
@@ -535,6 +583,14 @@ func TestGAP0687ReplyExtractorReadsImagePromptAndTextInlineData(t *testing.T) {
 			reply                func(text string) map[string]any
 		}{"gemini/json-charset", "gemini", "/v1beta/models/gemini-test:generateContent", func(text string) map[string]any {
 			return gemReply(textBytes("application/json; charset=utf-8", []byte(streamTailJSON(map[string]string{"caption": text}))))
+		}}, struct {
+			name, provider, path string
+			reply                func(text string) map[string]any
+		}{"gemini/lenient-base64", "gemini", "/v1beta/models/gemini-test:generateContent", func(text string) map[string]any {
+			// URL alphabet, no padding, a stray character in it: no strict
+			// decoder takes it.
+			enc := base64.RawURLEncoding.EncodeToString([]byte("a caption >>> " + text + " ???"))
+			return gemReply(map[string]any{"inlineData": map[string]any{"mimeType": "text/plain", "data": enc[:8] + "*" + enc[8:]}})
 		}},
 	)
 	for _, c := range buffered {

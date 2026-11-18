@@ -343,13 +343,13 @@ func (w *textWalker) mediaValue(key, s string) bool {
 // client renders, so the completion checks read it, decoded
 // (rel-1-0-10:GAP-0687). Data that is not base64 is read as it is. Other
 // media types, and a request's inline data, are not read here.
-func (w *textWalker) replyTextMedia(key, s string) (string, bool) {
+func (w *textWalker) replyTextMedia(key, s string) ([]string, bool) {
 	if !w.reply || w.payload > 0 || w.cur == nil || normKey(key) != "data" || normKey(w.curKey) != "inlinedata" {
-		return "", false
+		return nil, false
 	}
 	mt := firstNonEmpty(w.cur.str("mimeType"), w.cur.str("mime_type"))
 	if base, _, _ := strings.Cut(mt, ";"); !strings.Contains(base, "/") || !textMediaType(base) {
-		return "", false
+		return nil, false
 	}
 	clean := strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
@@ -364,10 +364,30 @@ func (w *textWalker) replyTextMedia(key, s string) (string, bool) {
 			break
 		}
 	}
-	if err != nil {
-		return s, true
+	if err == nil {
+		return []string{decodedText(b, mt)}, true
 	}
-	return decodedText(b, mt), true
+	// Not strict base64: decoded leniently (characters outside the alphabet
+	// dropped, both alphabets, no padding), and the raw text read as well,
+	// so neither reading hides the text from the checks.
+	lenient := strings.Map(func(r rune) rune {
+		switch {
+		case r == '-':
+			return '+'
+		case r == '_':
+			return '/'
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '+', r == '/':
+			return r
+		}
+		return -1
+	}, s)
+	if len(lenient)%4 == 1 {
+		lenient = lenient[:len(lenient)-1]
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(lenient); err == nil && len(b) > 0 {
+		return []string{decodedText(b, mt), s}, true
+	}
+	return []string{s}, true
 }
 
 // decodedText is decoded inline text data as the characters it carries:
@@ -568,8 +588,10 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 		if w.payload == 0 && walkSkipScalar[normKey(key)] {
 			return
 		}
-		if text, ok := w.replyTextMedia(key, n.s); ok {
-			w.add(text)
+		if texts, ok := w.replyTextMedia(key, n.s); ok {
+			for _, text := range texts {
+				w.add(text)
+			}
 			return
 		}
 		if w.mediaValue(key, n.s) {

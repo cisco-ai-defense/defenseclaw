@@ -352,7 +352,7 @@ func (s *passthroughStream) run() {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict := p.inspectStreamText(ctx, accumulated.String(), label, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.String(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -362,7 +362,7 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		lastScanLen = accumulated.Len()
-		if full {
+		if ranFull {
 			lastFullScanLen = lastScanLen
 		}
 		return true
@@ -651,7 +651,11 @@ read:
 				// first; a due hold is checked with it.
 			default:
 				if relN > 0 && !initialFlushed {
-					stopped = !flushInitial(false)
+					// Asked again: a reload may have made the final check
+					// decide more (a judge strategy); then the buffer waits.
+					if earlyInitial = p.initialEarlyRelease(); earlyInitial {
+						stopped = !flushInitial(false)
+					}
 				} else if relN > 0 {
 					stopped = !checkHeld(false)
 				} else if len(queue) == 0 && unread() > 0 && !stallReported {

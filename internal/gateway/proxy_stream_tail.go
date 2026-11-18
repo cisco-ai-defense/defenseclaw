@@ -31,17 +31,21 @@ import (
 // sent at once: they carry no model text, and the status and headers were
 // already fixed (a block after them is written as it was).
 //
-// The check of a held byte that is due by its age only is the cheap one
-// (rel-1-0-10:GAP-0625, inspectStreamText): the local rules and the policy,
-// no AI Defense call and no span, since a slow stream would run it every
-// streamHoldMaxAge. The full mid-stream check (AI Defense with scanner_mode
-// remote or both, one span) runs every scanInterval bytes of text counted
-// from the last full one, as before the hold, and on the initial buffer, at
-// a hold bound and at the end of the stream; the final check reads the
+// The check of a held byte that is due by its age only (rel-1-0-10:GAP-0625,
+// inspectStreamText) keeps the guarantee of the full check: with
+// scanner_mode remote or both AI Defense reads every byte before it is
+// sent. Checks run one at a time on the stream's goroutine, so at most one
+// AI Defense call is in flight per stream, the bytes stay held while it
+// runs, and only the text it read goes out; it counts as the full check
+// for the scanInterval cadence, so the two never both ask for one text.
+// With scanner_mode local the check due by age is the local rules and the
+// policy with no span (a slow stream would open one every
+// streamHoldMaxAge). The full mid-stream check runs every scanInterval
+// bytes of text counted from the last full one, and on the initial buffer,
+// at a hold bound and at the end of the stream; the final check reads the
 // whole reply. So a held byte waits at most streamHoldMaxAge (plus one
 // check) after it arrived, p50 about half of it on a stream that sends
-// often, and the bytes a check due by age lets out were read by the local
-// rules first; AI Defense reads them at the next full check.
+// often.
 //
 // The hold is bounded (the bound rule, internal/guardrail/bounded). In
 // time: a held byte whose text was read is checked by the mid-stream check
@@ -117,24 +121,25 @@ func (h *streamHold) due(now time.Time) bool {
 	return len(h.buf) > 0 && !now.Before(h.since.Add(streamHoldMaxAge))
 }
 
-// streamAgeInspector is an inspector with a cheap check for a stream hold
-// that is due by age only (GuardrailInspector.InspectMidStreamLocal).
+// streamAgeInspector is an inspector with its own check for a stream hold
+// that is due by age only (GuardrailInspector.InspectMidStreamAgeDue); full
+// reports that it was the full check.
 type streamAgeInspector interface {
-	InspectMidStreamLocal(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict
+	InspectMidStreamAgeDue(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) (*ScanVerdict, bool)
 }
 
 // inspectStreamText is the mid-stream check of a streamed reply's text.
 // full: the check is due by text, a bound or the end (InspectMidStream);
-// otherwise only a held byte's age made it due, and it is the local one
-// when the inspector has it (GAP-0625).
-func (p *GuardrailProxy) inspectStreamText(ctx context.Context, content, model, mode string, full bool) *ScanVerdict {
+// otherwise only a held byte's age made it due (InspectMidStreamAgeDue when
+// the inspector has it, GAP-0625). ranFull reports that the full check ran.
+func (p *GuardrailProxy) inspectStreamText(ctx context.Context, content, model, mode string, full bool) (v *ScanVerdict, ranFull bool) {
 	msgs := []ChatMessage{{Role: "assistant", Content: content}}
 	if !full {
 		if li, ok := p.inspector.(streamAgeInspector); ok {
-			return li.InspectMidStreamLocal(ctx, "completion", content, msgs, model, mode)
+			return li.InspectMidStreamAgeDue(ctx, "completion", content, msgs, model, mode)
 		}
 	}
-	return p.inspector.InspectMidStream(ctx, "completion", content, msgs, model, mode)
+	return p.inspector.InspectMidStream(ctx, "completion", content, msgs, model, mode), true
 }
 
 // midStreamFinalInspector is an inspector that says whether its mid-stream
