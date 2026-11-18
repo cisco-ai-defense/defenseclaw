@@ -54,7 +54,9 @@ func HookCapacityWarning(body []byte) (string, bool) {
 			"could not check them within their answer budget", w.DeadlineDenies, w.LateAllows))
 	}
 	if w.Shed > 0 {
-		clauses = append(clauses, fmt.Sprintf("%d call(s) refused by the admission limits; their hooks block them when the budget ends", w.Shed))
+		// A call a resend got in ran with a policy answer: the count is of
+		// calls refused at least once (GAP-0742 N1).
+		clauses = append(clauses, fmt.Sprintf("%d call(s) refused by the admission limits at least once; a call no resend got in is blocked when its budget ends", w.Shed))
 	}
 	verdict := "this host is over its hook capacity"
 	if w.DeadlineDenies+w.LateAllows == 0 {

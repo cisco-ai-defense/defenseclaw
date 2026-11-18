@@ -654,6 +654,24 @@ func forgetPendingHookUnrecordedTries(id string) {
 	delete(pendingHookUnrecordedTries, id)
 }
 
+// sandboxReceiptsOfferedHere holds the journal row IDs of the sandbox
+// proposals this process offered whose receipt window has not been closed
+// yet. Recovery counts an expired receipt as load only for such a row: a row
+// recovered after a gateway restart, or one whose receipt the store refused
+// (a full disk: the receipt route answered 503 "hook audit is unavailable"
+// and the row never took its fallback), expired for a crash or a store
+// problem, not for load (GAP-0742 N3). An entry leaves when the row's
+// receipt window timer has run, so the set holds at most the proposals of
+// the last sandboxHookReceiptWindow.
+var sandboxReceiptsOfferedHere sync.Map
+
+// sandboxReceiptExpiryIsLoad reports, once, whether the expired sandbox
+// receipt of row id counts as load (sandboxReceiptsOfferedHere).
+func sandboxReceiptExpiryIsLoad(id string) bool {
+	_, offered := sandboxReceiptsOfferedHere.LoadAndDelete(id)
+	return offered
+}
+
 // pendingHookDrainAt is when a full journal last started a recovery pass,
 // and pendingHookDraining whether that pass still runs.
 var (
@@ -933,7 +951,7 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 		notePendingHookUnrecordedTry(p.ID)
 	case !found:
 		return nil // another pass took it
-	case expiredSandboxReceipt && p.Decided != nil:
+	case expiredSandboxReceipt && p.Decided != nil && sandboxReceiptExpiryIsLoad(p.ID):
 		a.noteSandboxReceiptExpiredCapacity(p.Request.ConnectorName)
 	}
 	if p.Decided == nil {

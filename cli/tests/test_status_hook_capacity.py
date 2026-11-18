@@ -62,7 +62,10 @@ class HookCapacityStatusTests(unittest.TestCase):
             cmd_status._print_hook_capacity(health)
         row.assert_called_once()
         value = row.call_args.args[1]
-        self.assertIn("5 call(s) refused by the admission limits; their hooks block them when the budget ends", value)
+        # GAP-0742 N1: a call a resend got in ran with a policy answer, so
+        # the clause counts calls refused at least once.
+        self.assertIn("5 call(s) refused by the admission limits at least once; a call no resend got in is blocked when its budget ends", value)
+        self.assertNotIn("their hooks block them", value)
         self.assertNotIn("unchecked", value)
 
     def test_status_reads_the_window_from_the_authenticated_status(self):

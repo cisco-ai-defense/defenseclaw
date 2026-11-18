@@ -334,6 +334,9 @@ type Options struct {
 	// answeredErrorStatus records an HTTP refusal seen before a retry. A
 	// failed retry cannot turn that answered error into an outage allow.
 	answeredErrorStatus int
+	// answeredErrorOverBudget is callerOverBudget as the watchdog answer
+	// for answeredErrorStatus was last rendered with.
+	answeredErrorOverBudget bool
 	// callerOverBudget: the last 429 named this account own budget
 	// (callerBusyReason), not a full gateway. A call that ends in its 429
 	// resends then says the account is over its limit (S8 review P3-8).
@@ -1163,8 +1166,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return
 		}
 		if resp != nil && resp.StatusCode == http.StatusTooManyRequests && !opts.SecureClient {
-			// Read before the refusal is marked, so the watchdog copy of
-			// opts names it too.
+			// Read before the refusal is marked: the watchdog answer is
+			// rendered from this copy of opts, and again when a resend's
+			// 429 changes it (markManagedAnsweredError).
 			opts.callerOverBudget = callerBudgetRefusal(resp)
 		}
 		markManagedAnsweredError(&opts, sp, resp.StatusCode)
@@ -2282,12 +2286,18 @@ func managedNativeDecision(opts Options) bool {
 
 // markManagedAnsweredError makes the first HTTP error decisive for the
 // watchdog and every later failure path. A later valid verdict can still
-// decide the call; a failed retry cannot become a gateway outage.
+// decide the call; a failed retry cannot become a gateway outage. The
+// watchdog answer is rendered again when a resend's 429 changes whether it
+// names the account's own budget: a call that met a full gateway first and
+// then its account's limit (or the reverse) and was answered by the watchdog
+// named the first refusal (GAP-0742 N2). Only the text changes; the answer
+// stays closed.
 func markManagedAnsweredError(opts *Options, sp spec, status int) {
-	if !managedNativeDecision(*opts) || status >= 200 && status < 300 || opts.answeredErrorStatus == status {
+	if !managedNativeDecision(*opts) || status >= 200 && status < 300 ||
+		opts.answeredErrorStatus == status && opts.answeredErrorOverBudget == opts.callerOverBudget {
 		return
 	}
-	opts.answeredErrorStatus = status
+	opts.answeredErrorStatus, opts.answeredErrorOverBudget = status, opts.callerOverBudget
 	opts.answerWatch.closeForAnsweredError(*opts, sp)
 }
 
