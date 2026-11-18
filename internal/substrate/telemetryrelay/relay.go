@@ -296,15 +296,21 @@ func cutRecord(r Record) Record {
 	return r
 }
 
-// cutText is s cut to at most max bytes at a character boundary. A cut
-// value is a copy, so it does not keep a long original alive.
+// cutText is s cut to at most max bytes at a character boundary. A
+// character is at most utf8.UTFMax bytes, so the cut moves back at most
+// that far; bytes that start no character there (invalid UTF-8) are cut at
+// max, not walked back to an empty value. A cut value is a copy, so it
+// does not keep a long original alive.
 func cutText(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
 	n := max
-	for n > 0 && !utf8.RuneStart(s[n]) {
+	for n > 0 && max-n < utf8.UTFMax-1 && !utf8.RuneStart(s[n]) {
 		n--
+	}
+	if !utf8.RuneStart(s[n]) {
+		n = max
 	}
 	return strings.Clone(s[:n])
 }

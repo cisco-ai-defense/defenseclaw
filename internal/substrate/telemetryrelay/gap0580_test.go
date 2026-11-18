@@ -108,3 +108,20 @@ func TestGAP0580QueueIsBoundedInBytes(t *testing.T) {
 		t.Fatal("nothing was dropped past the byte bound")
 	}
 }
+
+// GAP-0580 (review 2): cutText walked back over every continuation byte,
+// so a field of continuation bytes (invalid UTF-8) was cut to nothing. It
+// moves back at most one character now, and a cut inside a character
+// still keeps the text before it.
+func TestGAP0580CutTextWalksBackAtMostOneCharacter(t *testing.T) {
+	if got := cutText(strings.Repeat("\x80", 600), MaxFieldBytes); len(got) != MaxFieldBytes {
+		t.Errorf("continuation bytes cut to %d bytes, want %d", len(got), MaxFieldBytes)
+	}
+	s := strings.Repeat("a", MaxFieldBytes-2) + "\U0001F600" + "tail" // a 4-byte character across the cut
+	if got := cutText(s, MaxFieldBytes); got != strings.Repeat("a", MaxFieldBytes-2) {
+		t.Errorf("cut inside a character: %d bytes %q", len(got), got[len(got)-4:])
+	}
+	if got := cutText("ab\u00e9", 3); got != "ab" {
+		t.Errorf("short cut %q", got)
+	}
+}
