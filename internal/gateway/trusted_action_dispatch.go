@@ -1889,7 +1889,12 @@ func withActiveStateTargetMention(
 				if !proven && (spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) {
 					proven, unknown = provenPowerShellStateWrite(request)
 				}
-				if unknown {
+				// A proven GNU target-directory write (rel-1-0-10:GAP-1250) keeps its
+				// own verdict over the unknown tier of a .NET open.
+				if !proven && spelled {
+					proven = provenTargetDirectoryStateWrite(request)
+				}
+				if !proven && unknown {
 					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
 				}
 				if !proven {
@@ -1898,7 +1903,8 @@ func withActiveStateTargetMention(
 			}
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
-			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
+			!provenTargetDirectoryStateWrite(request) {
 			if proven, unknown := provenPowerShellStateWrite(request); unknown {
 				return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
 			} else if !proven {
