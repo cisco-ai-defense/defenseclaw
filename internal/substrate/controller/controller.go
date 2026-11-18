@@ -850,6 +850,19 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 	st.resumed = false
 	if !first {
 		evs := []string{lifecycleOf(prev, state)}
+		if prev == state && rid.lastGen > st.rid.lastGen {
+			// A suspend ran since the last pass (it assigned a generation)
+			// and the actor is back in the state it was: a suspend and a
+			// resume inside one poll (a checkpoint, kubectl ate suspend then
+			// a connect) still leave their records and the resume re-check
+			// (GAP-0486).
+			switch state {
+			case ateapi.ActorStateRunning:
+				evs = []string{chainstate.LifecycleSuspended, chainstate.LifecycleResumed}
+			case ateapi.ActorStateSuspended:
+				evs = []string{chainstate.LifecycleResumed, chainstate.LifecycleSuspended}
+			}
+		}
 		if revertSeen(prev, state, st.rid, rid) {
 			// Told from the snapshot identity, so a revert whose REVERTING
 			// fell between two passes, a revert of a SUSPENDED actor and a
