@@ -469,3 +469,27 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 		t.Errorf("%s: plan editors %v / viewers %v differ from ChartEditors / ChartGlobalViewers", name, p.Editors, p.GlobalViewers)
 	}
 }
+
+// substrate-1:GAP-0584 (review 2). The policy alerts selected
+// k8s_namespace_name by default, a label a stock Prometheus OTLP receiver
+// or a collector without resource_to_telemetry_conversion never writes, so
+// they never fired. By default they read every release's series again;
+// metrics.prometheusRule.namespaceLabel scopes them.
+func TestGAP0584PolicyAlertsReadEverySeriesUnlessScoped(t *testing.T) {
+	helm := helmBinary(t)
+	out := string(renderChart(t, helm, "default", "--set", "metrics.prometheusRule.enabled=true"))
+	for _, expr := range []string{"defenseclaw_substrate_policy_lag_seconds_bucket[5m]",
+		"defenseclaw_substrate_policy_conflicts_total[10m]", "max(defenseclaw_substrate_unattested_templates) > 0"} {
+		if !strings.Contains(out, expr) {
+			t.Errorf("default rules: no %s", expr)
+		}
+	}
+	if strings.Contains(out, "k8s_namespace_name") {
+		t.Error("default rules select a namespace label no stock OTLP receiver writes")
+	}
+	scoped := string(renderChart(t, helm, "default", "--set", "metrics.prometheusRule.enabled=true",
+		"--set", "metrics.prometheusRule.namespaceLabel=k8s_namespace_name"))
+	if !strings.Contains(scoped, `defenseclaw_substrate_policy_conflicts_total{k8s_namespace_name="defenseclaw-system"}[10m]`) {
+		t.Error("namespaceLabel set: the rules do not select the release's namespace")
+	}
+}

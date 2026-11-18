@@ -238,7 +238,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | `defenseclaw.substrate.idle_suspends` | counter | By the gateway, from the controller: actors suspended for being idle |
 | `defenseclaw.substrate.policy_conflicts` | counter | By the gateway, from the controller: actors entering `policy_conflict` |
 
-The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates. The rules on these metrics select the release's namespace by the label Prometheus gives the `k8s.namespace.name` resource attribute (`k8s_namespace_name` once your OTLP receiver or collector promotes it; the chart value `metrics.prometheusRule.namespaceLabel`), so releases that share a Prometheus alert only on their own series.
+The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates. By default the rules on these metrics read every release's series, so they cover every DefenseClaw cluster that reports to that Prometheus. To scope them to one release, promote the `k8s.namespace.name` resource attribute where your metrics enter Prometheus (`otlp.promote_resource_attributes`, or the collector's `resource_to_telemetry_conversion`) and set the chart value `metrics.prometheusRule.namespaceLabel` to the label it becomes (`k8s_namespace_name`). Without the promotion that label is absent and the scoped rules never fire.
 
 ## What to trust
 

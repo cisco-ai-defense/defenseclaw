@@ -361,13 +361,15 @@ metrics:
     enabled: false
     labels: {}
     # The Prometheus label of the k8s.namespace.name resource attribute on
-    # the defenseclaw.substrate.* series: the policy rules select this
-    # release's namespace by it, so releases that share a Prometheus do not
-    # alert on each other's series. Promote the attribute in your OTLP
-    # receiver (Prometheus otlp.promote_resource_attributes) or collector
-    # (resource_to_telemetry_conversion). Empty selects every release's
-    # series.
-    namespaceLabel: k8s_namespace_name
+    # the defenseclaw.substrate.* series. Empty (the default): the policy
+    # rules read every release's series in that Prometheus, which works on
+    # any OTLP receiver. Set it (k8s_namespace_name) to select this
+    # release's namespace, so releases that share a Prometheus do not alert
+    # on each other's series, once your OTLP receiver (Prometheus
+    # otlp.promote_resource_attributes) or collector
+    # (resource_to_telemetry_conversion) promotes the attribute: without
+    # that the label is absent and the policy rules never fire.
+    namespaceLabel: ""
 
 # A local OpenTelemetry collector for trying the chart out (the debug
 # exporter: records show in the collector's log). It also adds an otlp
