@@ -60,7 +60,7 @@ func provenPowerShellStateWriteOf(request trustedActionRequest, command string) 
 			return false, false
 		}
 	}
-	return powerShellWriteReading(request, command, mentions, provenStateMutationPath)
+	return powerShellWriteReading(request, command, mentions, provenStateMutationPath, psStateProtectedPaths(home))
 }
 
 // powerShellReadingCommands are the command texts of a call the PowerShell
@@ -102,12 +102,29 @@ func powerShellReadingCommands(request trustedActionRequest) []string {
 // command past the reading bounds is the write (true without proves).
 // unknown reports no proven write but a .NET open that may write a file
 // proves accepts, by a mode or path known only at run time: the caller
-// gives it the unknown tier of the pack (rel-1-0-10:GAP-1138).
+// gives it the unknown tier of the pack (rel-1-0-10:GAP-1138). protected
+// are the files of the class a wildcard path of a write cmdlet may match:
+// each one it can match is such an unknown twin (psWildcardWriteTwins,
+// rel-1-0-10:GAP-1272).
 func powerShellWriteReading(request trustedActionRequest, command string, follows func(string) bool,
-	proves func(actionfacts.Facts, trustedActionRequest) bool) (written, unknown bool) {
-	forms, unknownForms, bounded, ok := powerShellStateWriteForms(command, request.Input.ActiveHome, request.Input.CWD, request.ResolvedWriteTargets, follows)
+	proves func(actionfacts.Facts, trustedActionRequest) bool, protected psProtectedPaths) (written, unknown bool) {
+	forms, unknownForms, placed, bounded, ok := powerShellStateWriteForms(command, request.Input.ActiveHome, request.Input.CWD, request.ResolvedWriteTargets, follows, protected)
 	if !ok {
 		return false, false
+	}
+	// The files a wildcard pattern the hook client placed may match, at the
+	// folder the client walked to (psWildcardElementTwins).
+	resolved := request.ResolvedWriteTargets
+	if len(placed) > 0 {
+		resolved = make(map[string]string, len(request.ResolvedWriteTargets)+len(placed))
+		for spelling, target := range request.ResolvedWriteTargets {
+			resolved[spelling] = target
+		}
+		for spelling, target := range placed {
+			if _, known := resolved[spelling]; !known {
+				resolved[spelling] = target
+			}
+		}
 	}
 	// Bound the twins a crafted command can ask for and the text the
 	// reading copies; past a bound the state-naming command counts as the
@@ -132,6 +149,7 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 		}
 		twin := request
 		twin.Input = input
+		twin.ResolvedWriteTargets = resolved
 		return proves(actionfacts.Analyze(input), twin)
 	}
 	const maxVariants = 256
@@ -393,18 +411,7 @@ func psParameterReadings(form string) ([]string, bool) {
 			continue
 		}
 		name, value, hasValue := strings.Cut(word.text[1:], ":")
-		full := ""
-		matches := 0
-		for _, known := range psKnownParameters {
-			if strings.EqualFold(known, name) {
-				full, matches = known, 1
-				break
-			}
-			if len(name) <= len(known) && strings.EqualFold(known[:len(name)], name) {
-				full = known
-				matches++
-			}
-		}
+		full, matches := psResolveParameter(name)
 		switch {
 		case matches == 1 && hasValue:
 			// -Name:value binds as -Name value, and a switch bound to
@@ -497,23 +504,31 @@ func newPSScan(runes []rune, budget *psBudget) *psStateScan {
 // reading. mentions, when not nil, also places text in the state (psMerger).
 // unknown are the twins of the files a .NET open may write, by a mode or a
 // path known only at run time: such a twin that proves the write is the
-// unknown tier, not the write (rel-1-0-10:GAP-1138).
-func powerShellStateWriteForms(command, home, cwd string, targets map[string]string, mentions func(string) bool) (forms, unknown []string, bounded, ok bool) {
+// unknown tier, not the write (rel-1-0-10:GAP-1138); so are the twins of the
+// protected files a wildcard path of a write cmdlet may match
+// (rel-1-0-10:GAP-1272). placed are the files of those twins the hook client
+// placed, with the paths it placed them at (psWildcardElementTwins).
+func powerShellStateWriteForms(command, home, cwd string, targets map[string]string, mentions func(string) bool, protected psProtectedPaths) (forms, unknown []string, placed map[string]string, bounded, ok bool) {
 	seen := map[string]bool{}
 	budget := &psBudget{}
 	merge := newPSMerger(home, cwd, targets)
 	merge.mentions = mentions
-	reading := psReading{merge: merge, unknown: &unknown}
+	placed = map[string]string{}
+	reading := psReading{merge: merge, unknown: &unknown, protected: protected, targets: targets, placed: placed}
 	bounded, ok = reading.collect(command, 0, true, seen, &forms, budget)
-	return forms, unknown, bounded, ok
+	return forms, unknown, placed, bounded, ok
 }
 
 // psReading is the user home, working directory and known links a command
-// is read in, and where it adds the twins of the files a .NET open may
-// write.
+// is read in, where it adds the twins of the files a .NET open may write, and
+// the protected files a wildcard path may match, with the hook client's
+// resolved targets and the twin files placed from them.
 type psReading struct {
-	merge   psMerger
-	unknown *[]string
+	merge     psMerger
+	unknown   *[]string
+	protected psProtectedPaths
+	targets   map[string]string
+	placed    map[string]string
 }
 
 // addUnknown adds the twin of a file a .NET open may write, once.
@@ -559,6 +574,13 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 	}
 	for _, piece := range scan.pieces {
 		add(piece)
+		// A write cmdlet writes every item its path pattern matches
+		// (rel-1-0-10:GAP-1272).
+		if reading.merge.namesState(piece) {
+			for _, form := range psWildcardWriteTwins(piece, reading, budget) {
+				reading.addUnknown(form, seen)
+			}
+		}
 		for _, target := range psPatchRunTargets(piece, reading.merge, budget) {
 			add("Set-Content -LiteralPath " + target + " -Value x")
 		}

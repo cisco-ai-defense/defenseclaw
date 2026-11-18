@@ -1410,7 +1410,7 @@ func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agent
 				}
 			}
 			return false
-		})
+		}, guard.psProtectedPaths())
 	return written, unknown, place, owned
 }
 
