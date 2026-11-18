@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -183,6 +184,16 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 	withEnv := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"env":{"A":"1"},"model":"zzz","permissions":{"allow":["Read"]},"hooks"`, 1)
 	withStatus := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"statusLine":{"type":"command","command":"a.sh"},"hooks"`, 1)
 	settings := "{H}/.claude/settings.json"
+	// Round 2 (RVNF2 review of the round-1 fix): laptop files the earlier
+	// rows do not set up.
+	escKey := strings.Replace(withModel, `"PreToolUse"`, `"Pre\u0054oolUse"`, 1)
+	escPath := strings.Replace(withModel, `claude-code-hook.sh`, `claude-code-hook\u002esh`, 1)
+	withNode := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"env":{"NODE_OPTIONS":"--max-old-space-size=4096"},"model":"zzz","hooks"`, 1)
+	withSwitch := strings.Replace(gap0433LaptopSettings, `{"hooks"`, `{"disableAllHooks":false,"model":"zzz","hooks"`, 1)
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, []byte(withModel), "", "  "); err != nil {
+		t.Fatal(err)
+	}
 	gap0577 := []parityRow{
 		// The RKNF2 probes: one call with an extra "model" edit, and the
 		// two-call chains (a layout or key the copies lack, then the change).
@@ -237,6 +248,50 @@ func TestGAP0433SandboxAgentHookConfigParityWithLaptop(t *testing.T) {
 		// from theirs.
 		{name: "gap0577 Edit statusLine command (stricter)", file: withStatus, tool: "Edit", want: "allow", actor: "block", input: map[string]any{"file_path": settings,
 			"old_string": `"command":"a.sh"`, "new_string": `"command":"b.sh"`}},
+		// Round 2, F1: a \u escape spells a hook key, the hook path, a
+		// reserved env name or a hooks switch.
+		{name: "gap0577 Edit renames escaped PreToolUse", file: escKey, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"Pre\u0054oolUse"`, "new_string": `"Pre\u0054oolUseOff"`}},
+		{name: "gap0577 Edit changes escaped hook path", file: escPath, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `hook\u002esh"`, "new_string": `hook\u002eshx"`}},
+		{name: "gap0577 Edit adds escaped BASH_ENV", file: withEnv, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"A":"1"`, "new_string": `"A":"1","BASH\u005fENV":"/tmp/x"`}},
+		{name: "gap0577 Edit adds escaped allowManagedHooksOnly", file: withModel, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"zzz"`, "new_string": `"zzz","allow\u004danagedHooksOnly":true,"x":"y"`}},
+		// F2: a reserved hook process variable set without a whole pair.
+		{name: "gap0577 Edit NODE_OPTIONS value preloads", file: withNode, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `--max-old-space-size=4096`, "new_string": `--require=/tmp/x.js`}},
+		{name: "gap0577 Edit renames env key to BASH_ENV", file: withEnv, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"A"`, "new_string": `"BASH_ENV"`}},
+		// F3: an edit of a value or fragment that leaves the file unreadable.
+		{name: "gap0577 Edit value to open array", file: withModel, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"zzz"`, "new_string": `["zzz"`}},
+		{name: "gap0577 Edit value double comma", file: withModel, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"zzz",`, "new_string": `"zzz",,`}},
+		{name: "gap0577 Edit string tail stray quote", file: withModel, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `zzz`, "new_string": `zzz"`}},
+		{name: "gap0577 Edit value stray bracket", file: withModel, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `"zzz"`, "new_string": `"zzz"]`}},
+		// F4: a hooks switch flipped by an edit that starts at its value.
+		{name: "gap0577 Edit flips disableAllHooks before model", file: withSwitch, tool: "Edit", want: "block", input: map[string]any{"file_path": settings,
+			"old_string": `false,"model"`, "new_string": `true,"model"`}},
+		// F6: benign edits that name no hook key keep the laptop's verdict.
+		{name: "gap0577 Edit adds includeCoAuthoredBy", file: withModel, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"model":"zzz"`, "new_string": `"model":"zzz","includeCoAuthoredBy":false`}},
+		{name: "gap0577 Edit pretty adds alwaysThinkingEnabled", file: pretty.String(), tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"model": "zzz"`, "new_string": "\"model\": \"zzz\",\n  \"alwaysThinkingEnabled\": true"}},
+		{name: "gap0577 Edit adds env number", file: withEnv, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"A":"1"`, "new_string": `"A":"1","B":2`}},
+		{name: "gap0577 Edit number only", file: withNode, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `4096`, "new_string": `8192`}},
+		{name: "gap0577 Edit nested env is not env", file: withModel, tool: "Edit", want: "allow", input: map[string]any{"file_path": settings,
+			"old_string": `"model":"zzz"`, "new_string": `"model":"zzz","x":{"env":{"LD_LIBRARY_PATH":"/opt"}}`}},
+		// F7: an edit the laptop's file does not hold is refused there and
+		// alerted on its text.
+		{name: "gap0577 Edit enabledPlugins not in file", tool: "Edit", want: "alert", input: map[string]any{"file_path": settings,
+			"old_string": `"enabledPlugins":{"a@b":true}`, "new_string": `"enabledPlugins":{}`}},
+		{name: "gap0577 Edit hooksDisabled not in file", tool: "Edit", want: "alert", input: map[string]any{"file_path": settings,
+			"old_string": `"hooksDisabled":false`, "new_string": `"hooksDisabled":true`}},
 		// GAP-0578 (a): inline code that writes the registered file.
 		{name: "gap0578 Bash python -c writes settings", tool: "Bash", want: "alert", input: map[string]any{
 			"command": `python3 -c "open('{H}/.claude/settings.json','w').write('{}')"`}},

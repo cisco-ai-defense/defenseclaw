@@ -1521,18 +1521,23 @@ const sandboxManagedHooksNote = "in an actor DefenseClaw's hooks are managed by 
 // An Edit or MultiEdit that applies to no copy as a whole edits text the
 // copies do not hold (another key, or the hooks in another layout), which
 // the laptop applies to its own file (substrate-1:GAP-0577):
+//   - more than sandboxAgentHookEditBound edits, or more than
+//     sandboxAgentHookEditTextBound bytes of edit text, are refused
+//     unjudged: the passes below grow with the square of the edits;
 //   - each edit alone, and the edits in order that apply (each prefix), are
 //     judged against each copy; so are the edits with the whitespace outside
-//     strings dropped, and the change against each copy that also holds an
-//     edit's old text as another member;
-//   - an edit that applies to no copy alone and names what the registered
-//     entries are written with, cuts into a word that may be one of them, or
-//     names no key or string at all, or that sets a reserved hook process
-//     variable, is taken to change them (sandboxAgentHookEditMayChangeHooks):
-//     the actor is stricter than the laptop here (lead ruling).
+//     strings dropped, and each edit alone and then the edits in order
+//     against each copy that also holds that edit's old text as a member, at
+//     the top or in env;
+//   - an edit that applies to no copy alone is then read as text
+//     (sandboxAgentHookEditReason): the actor is stricter than the laptop
+//     there (lead ruling).
 //
-// judged is false only for a change that applies to no copy and that the
-// agent refuses on the laptop's file (an empty old text).
+// judged is false for a change that applies to no copy and that the agent
+// refuses on the laptop's file (an empty old text), and for one whose edits
+// apply to no copy and that reads as no change of the hooks: the laptop
+// refuses such an edit when its file lacks the old text and alerts on its
+// text, and the caller does the same.
 func sandboxAgentHookRegisteredChange(format string, change agentHookConfigChange, copies [][]byte, text sandboxAgentHookText) (reason string, judged bool) {
 	for _, before := range copies {
 		read := func(string) ([]byte, bool) { return before, true }
@@ -1549,43 +1554,58 @@ func sandboxAgentHookRegisteredChange(format string, change agentHookConfigChang
 		slices.ContainsFunc(change.edits, func(edit agentHookConfigTextEdit) bool { return edit.old == "" }) {
 		return "", judged
 	}
+	size := 0
+	for _, edit := range change.edits {
+		size += len(edit.old) + len(edit.new)
+	}
+	if len(change.edits) > sandboxAgentHookEditBound || size > sandboxAgentHookEditTextBound {
+		return "makes more edits in one call than an actor checks (64 edits or 64 KB of edit text): split them", true
+	}
+	every := make([]int, len(change.edits))
 	placed := make([]bool, len(change.edits))
-	// judge applies each edit alone (marking those that apply when mark is
-	// set) and then the edits in order, skipping those that do not apply,
-	// judging every document that leaves.
-	judge := func(before []byte, edits []agentHookConfigTextEdit, mark, steps bool) string {
-		for index := range edits {
+	for index := range change.edits {
+		every[index] = index
+		placed[index] = slices.ContainsFunc(copies, func(before []byte) bool {
+			_, _, ok := agentHookConfigApplyEdits(before, true, change.edits[index:index+1])
+			return ok
+		})
+	}
+	touched := slices.Contains(placed, true)
+	// judge applies the edits at alone one at a time, and then all of them
+	// in order, skipping those that do not apply; it judges every document
+	// that leaves when steps is set, and only the last otherwise. applied is
+	// whether any edit applied.
+	judge := func(before []byte, edits []agentHookConfigTextEdit, alone []int, steps bool) (reason string, applied bool) {
+		for _, index := range alone {
 			after, exists, ok := agentHookConfigApplyEdits(before, true, edits[index:index+1])
 			if !ok {
 				continue
 			}
-			if mark {
-				placed[index] = true
-			}
+			applied = true
 			if reason := agentHookConfigTurnsOff(format, before, true, after, exists); reason != "" {
-				return reason
+				return reason, true
 			}
 		}
-		document, moved := before, false
+		document := before
 		for index := range edits {
 			after, _, ok := agentHookConfigApplyEdits(document, true, edits[index:index+1])
 			if !ok {
 				continue
 			}
-			document, moved = after, true
+			document, applied = after, true
 			if steps {
 				if reason := agentHookConfigTurnsOff(format, before, true, document, true); reason != "" {
-					return reason
+					return reason, true
 				}
 			}
 		}
-		if moved && !steps {
-			return agentHookConfigTurnsOff(format, before, true, document, true)
+		if applied && !steps {
+			return agentHookConfigTurnsOff(format, before, true, document, true), true
 		}
-		return ""
+		return "", applied
 	}
 	for _, before := range copies {
-		if reason := judge(before, change.edits, true, true); reason != "" {
+		if reason, _ := judge(before, change.edits, every, true); reason != "" {
 			return reason, true
 		}
 	}
@@ -1598,15 +1618,19 @@ func sandboxAgentHookRegisteredChange(format string, change agentHookConfigChang
 			continue
 		}
 		for _, before := range copies {
-			if reason := judge(before, compact, false, true); reason != "" {
+			reason, applied := judge(before, compact, every, true)
+			if reason != "" {
 				return reason, true
 			}
+			touched = touched || applied
 		}
 	}
-	for _, edit := range change.edits {
+	member := make([]bool, len(change.edits))
+	for index, edit := range change.edits {
 		for _, before := range copies {
 			for _, held := range sandboxAgentHookCopiesHolding(before, edit.old) {
-				if reason := judge(held, change.edits, false, false); reason != "" {
+				member[index] = true
+				if reason, _ := judge(held, change.edits, []int{index}, false); reason != "" {
 					return reason, true
 				}
 			}
@@ -1616,14 +1640,44 @@ func sandboxAgentHookRegisteredChange(format string, change agentHookConfigChang
 		if placed[index] {
 			continue
 		}
-		if sandboxAgentHookSetsReservedEnv(edit) {
-			return "changes a reserved hook process environment variable", true
-		}
-		if sandboxAgentHookEditMayChangeHooks(edit, text) {
-			return "removes or changes DefenseClaw's hook entries", true
+		if reason := sandboxAgentHookEditReason(edit, text, copies, member[index]); reason != "" {
+			return reason, true
 		}
 	}
-	return "", true
+	return "", touched
+}
+
+// sandboxAgentHookEditBound and sandboxAgentHookEditTextBound bound the
+// edits of one call to the registered file that the actor judges against
+// the synthetic copies (sandboxAgentHookRegisteredChange); past them the
+// call is refused (substrate-1:GAP-0577).
+const (
+	sandboxAgentHookEditBound     = 64
+	sandboxAgentHookEditTextBound = 64 << 10
+)
+
+// sandboxAgentHookEditReason reads an edit that applies to no synthetic copy
+// as the change it may make in the laptop's own file, where the old text
+// sits somewhere the copies do not show:
+//   - the edit leaves the file unreadable wherever its old text can sit
+//     (sandboxAgentHookEditBreaksDocument);
+//   - its old text is not whole members (member is false: the held copies
+//     already judged those) and it sets a reserved hook process variable
+//     (sandboxAgentHookSetsReservedEnv);
+//   - it may change the registered entries or a hooks switch
+//     (sandboxAgentHookEditMayChangeHooks).
+func sandboxAgentHookEditReason(edit agentHookConfigTextEdit, text sandboxAgentHookText, copies [][]byte, member bool) string {
+	switch {
+	case edit.old == edit.new:
+		return ""
+	case sandboxAgentHookEditBreaksDocument(edit):
+		return "leaves the file unreadable, so the agent drops DefenseClaw's hooks"
+	case !member && sandboxAgentHookSetsReservedEnv(edit):
+		return "changes a reserved hook process environment variable"
+	case sandboxAgentHookEditMayChangeHooks(edit, text, copies):
+		return "removes or changes DefenseClaw's hook entries"
+	}
+	return ""
 }
 
 // agentHookConfigWords are the words of text: its runs of letters, digits
@@ -1660,8 +1714,9 @@ func agentHookConfigDropLayout(text string, inside bool) string {
 }
 
 // sandboxAgentHookCopiesHolding are the copy with member, an edit's old
-// text, added as another member before or after its hooks: the laptop's
-// file holds that text too. Only the forms that stay a JSON document.
+// text, added as another member before or after its hooks, or as a member
+// of an env object beside them: the laptop's file holds that text too. Only
+// the forms that stay a JSON document.
 func sandboxAgentHookCopiesHolding(copy []byte, member string) [][]byte {
 	body := bytes.TrimSpace(copy)
 	member = strings.TrimSpace(member)
@@ -1670,25 +1725,63 @@ func sandboxAgentHookCopiesHolding(copy []byte, member string) [][]byte {
 	}
 	inner := string(body[1 : len(body)-1])
 	var held [][]byte
-	for _, candidate := range []string{
-		"{" + member + "," + inner + "}",
-		"{" + strings.TrimSuffix(member, ",") + "," + inner + "}",
-		"{" + inner + "," + member + "}",
-		"{" + inner + "," + strings.TrimPrefix(member, ",") + "}",
-	} {
-		if json.Valid([]byte(candidate)) && !slices.ContainsFunc(held, func(seen []byte) bool { return string(seen) == candidate }) {
-			held = append(held, []byte(candidate))
+	for _, form := range []string{member, strings.TrimSuffix(member, ","), strings.TrimPrefix(member, ",")} {
+		for _, candidate := range []string{
+			"{" + form + "," + inner + "}",
+			"{" + inner + "," + form + "}",
+			`{"env":{` + form + "}," + inner + "}",
+		} {
+			if json.Valid([]byte(candidate)) && !slices.ContainsFunc(held, func(seen []byte) bool { return string(seen) == candidate }) {
+				held = append(held, []byte(candidate))
+			}
 		}
 	}
 	return held
 }
 
+// sandboxAgentHookEditContexts are the places, a prefix and a suffix, an
+// edit's old text can sit in a JSON document: members, members after or
+// before another, a value, a value before another member, array items, the
+// inside of a string value, of a string item and of a key, and the end of a
+// string value before another member.
+var sandboxAgentHookEditContexts = [][2]string{
+	{`{`, `}`}, {`{`, `"j":1}`}, {`{"j":1`, `}`},
+	{`{"k":`, `}`}, {`{"k":`, `"j":1}`}, {`{"k":[`, `]}`},
+	{`{"k":"`, `"}`}, {`{"k":["`, `"]}`}, {`{"`, `":1}`}, {`{"k":"`, `"j":1}`},
+}
+
+// sandboxAgentHookEditBreaksDocument reports an edit whose old text can sit
+// in a JSON document (sandboxAgentHookEditContexts) and whose new text,
+// wherever the old one can sit, leaves no JSON document: the laptop's file,
+// which holds the old text, is left unreadable.
+func sandboxAgentHookEditBreaksDocument(edit agentHookConfigTextEdit) bool {
+	fits := false
+	for _, context := range sandboxAgentHookEditContexts {
+		if !json.Valid([]byte(context[0] + edit.old + context[1])) {
+			continue
+		}
+		if json.Valid([]byte(context[0] + edit.new + context[1])) {
+			return false
+		}
+		fits = true
+	}
+	return fits
+}
+
 // sandboxAgentHookEnvPair is one "KEY": "value" pair of an edit's text.
 var sandboxAgentHookEnvPair = lazyregexp.New(`"([^"\\]+)"\s*:\s*("(?:[^"\\]|\\.)*")`)
 
-// sandboxAgentHookSetsReservedEnv reports whether an edit's new text sets a
-// reserved hook process variable (agentHookConfigReservedEnvValue) its old
-// text did not set to that value, as the laptop reads the env member.
+// sandboxAgentHookSetsReservedEnv reports whether an edit's new text may set
+// a reserved hook process variable (agentHookConfigReservedEnvValue) its old
+// text did not, as the laptop reads the env member:
+//   - a "KEY": "value" pair that sets one;
+//   - a reserved name its old text does not name (a key renamed to it);
+//   - a NODE_OPTIONS value that preloads code in a string the edit extends
+//     at either end, or sets after a key whose end it holds.
+//
+// A value that changes and names no flag (an LD_LIBRARY_PATH folder) reads
+// as any other value: a known limit of the actor, which does not see the
+// key around it.
 func sandboxAgentHookSetsReservedEnv(edit agentHookConfigTextEdit) bool {
 	for _, match := range sandboxAgentHookEnvPair.FindAllStringSubmatch(edit.new, -1) {
 		var value string
@@ -1699,30 +1792,74 @@ func sandboxAgentHookSetsReservedEnv(edit agentHookConfigTextEdit) bool {
 			return true
 		}
 	}
+	named := agentHookConfigWords(edit.old)
+	if slices.ContainsFunc(agentHookConfigWords(edit.new), func(word string) bool {
+		return agentHookConfigReservedEnv(word) && !slices.Contains(named, word)
+	}) {
+		return true
+	}
+	pieces := strings.Split(edit.new, `"`)
+	for index, piece := range pieces {
+		if index != 0 && index != len(pieces)-1 && (index != 2 || strings.TrimSpace(pieces[1]) != ":") {
+			continue
+		}
+		if agentHookConfigReservedEnvValue("NODE_OPTIONS", piece) && !strings.Contains(edit.old, piece) {
+			return true
+		}
+	}
 	return false
 }
 
 // sandboxAgentHookEditMayChangeHooks reports whether an edit that applies to
-// no synthetic copy may still change the registered entries in the laptop's
-// own file, where they may be laid out otherwise:
+// no synthetic copy may still change the registered entries, or a switch
+// that turns them off, in the laptop's own file, where they may be laid out
+// otherwise:
 //   - its old or new text names DefenseClaw, a word or a value of the
-//     registered entries (sandboxAgentHookRegisteredText);
+//     registered entries (sandboxAgentHookRegisteredText), or holds a \u
+//     escape, which can spell any of them;
 //   - an end of the edit changes a word the edit's text only partly holds
-//     (old "ToolUse" for PreToolUse), or appends to the word before or after
-//     it (old `" :[` new `Off" :[`), and that word may be one of them;
+//     (old "ToolUse" for PreToolUse, "0054oolUse" after an escape), or a
+//     word of the hook command's file name, or appends to the word before
+//     or after it (old `" :[` new `Off" :[`); an end at an opening or closing
+//     quote of a string cuts into no word;
+//   - its first word is true, false or null and changes (a switch whose key
+//     lies before the edit), or is a number the copies hold and changes;
 //   - its old text names no key, string or word beyond true, false, null and
-//     numbers (`" :[{`, `30`), so where it lands is not known.
-func sandboxAgentHookEditMayChangeHooks(edit agentHookConfigTextEdit, text sandboxAgentHookText) bool {
+//     numbers, and the edit changes its punctuation, or a word of it is in
+//     a copy (the hook timeout).
+func sandboxAgentHookEditMayChangeHooks(edit agentHookConfigTextEdit, text sandboxAgentHookText, copies [][]byte) bool {
 	if edit.old == edit.new {
 		return false
 	}
 	for _, side := range []string{edit.old, edit.new} {
-		if strings.Contains(strings.ToLower(side), "defenseclaw") ||
+		if strings.Contains(side, `\u`) || strings.Contains(strings.ToLower(side), "defenseclaw") ||
 			slices.ContainsFunc(text.values, func(value string) bool { return strings.Contains(side, value) }) ||
 			slices.ContainsFunc(agentHookConfigWords(side), func(word string) bool { return slices.Contains(text.words, word) }) {
 			return true
 		}
 	}
+	parts := slices.Clone(text.words)
+	for _, value := range text.values {
+		parts = append(parts, agentHookConfigWords(value)...)
+	}
+	// partOf reports a fragment of a word, read from its start and also
+	// past up to five leading characters of a \uXXXX escape before it.
+	partOf := func(fragment string, match func(word, fragment string) bool) bool {
+		for strip := 0; strip <= 5 && strip < len(fragment); strip++ {
+			if strip > 0 && !strings.ContainsRune("uU0123456789abcdefABCDEF", rune(fragment[strip-1])) {
+				return false
+			}
+			if slices.ContainsFunc(parts, func(word string) bool { return match(word, fragment[strip:]) }) {
+				return true
+			}
+		}
+		return false
+	}
+	inCopy := func(word string) bool {
+		return slices.ContainsFunc(copies, func(copy []byte) bool { return bytes.Contains(copy, []byte(word)) })
+	}
+	literal := func(word string) bool { return word == "true" || word == "false" || word == "null" }
+	number := func(word string) bool { return word != "" && strings.Trim(word, "0123456789") == "" }
 	lead := func(side string) string {
 		end := 0
 		for end < len(side) && agentHookConfigWordByte(rune(side[end])) {
@@ -1737,25 +1874,42 @@ func sandboxAgentHookEditMayChangeHooks(edit agentHookConfigTextEdit, text sandb
 		}
 		return side[start:]
 	}
+	// A quote with a word byte inside it opens or closes a string: a valid
+	// file has no word byte on its other side.
+	opens := len(edit.old) > 1 && edit.old[0] == '"' && agentHookConfigWordByte(rune(edit.old[1]))
+	closes := len(edit.old) > 1 && edit.old[len(edit.old)-1] == '"' && agentHookConfigWordByte(rune(edit.old[len(edit.old)-2]))
 	if oldLead, newLead := lead(edit.old), lead(edit.new); oldLead != newLead {
-		if oldLead == "" || slices.ContainsFunc(text.words, func(word string) bool {
-			return strings.HasSuffix(word, oldLead) || oldLead == edit.old && strings.Contains(word, oldLead)
-		}) {
+		switch {
+		case oldLead == "":
+			if !opens {
+				return true
+			}
+		case literal(oldLead) || literal(newLead), number(oldLead) && inCopy(oldLead):
+			return true
+		case partOf(oldLead, func(word, fragment string) bool {
+			return strings.HasSuffix(word, fragment) || oldLead == edit.old && strings.Contains(word, fragment)
+		}):
 			return true
 		}
 	}
 	if oldTrail, newTrail := trail(edit.old), trail(edit.new); oldTrail != newTrail {
-		if oldTrail == "" || slices.ContainsFunc(text.words, func(word string) bool { return strings.HasPrefix(word, oldTrail) }) {
+		if oldTrail == "" && !closes || oldTrail != "" && slices.ContainsFunc(parts, func(word string) bool { return strings.HasPrefix(word, oldTrail) }) {
 			return true
 		}
 	}
-	return !slices.ContainsFunc(agentHookConfigWords(edit.old), func(word string) bool {
-		switch word {
-		case "true", "false", "null":
-			return false
-		}
-		return strings.Trim(word, "0123456789") != ""
-	})
+	oldWords := agentHookConfigWords(edit.old)
+	if slices.ContainsFunc(oldWords, func(word string) bool { return !literal(word) && !number(word) }) {
+		return false
+	}
+	skeleton := func(side string) string {
+		return strings.Map(func(r rune) rune {
+			if agentHookConfigWordByte(r) {
+				return -1
+			}
+			return r
+		}, agentHookConfigDropLayout(side, false))
+	}
+	return skeleton(edit.old) != skeleton(edit.new) || slices.ContainsFunc(oldWords, inCopy)
 }
 
 // sandboxAgentHookConfigFormat is the hook-file format of a sandbox path by
