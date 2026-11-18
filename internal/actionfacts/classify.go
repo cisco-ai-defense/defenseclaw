@@ -3798,37 +3798,7 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
 		return
 	}
-	parsed := parseOwnedPOSIXOptions(
-		command.Argv,
-		exactOptionSet(
-			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
-			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
-			"--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
-			"--suffix", "--chmod", "--chown", "--log-file", "--password-file",
-			"--partial-dir", "--max-size", "--min-size", "--bwlimit", "--timeout",
-			"--port", "--out-format", "--info", "--debug", "--max-delete",
-			"--modify-window", "--compress-level", "--skip-compress", "--usermap",
-			"--groupmap", "--iconv", "--contimeout", "--address",
-		),
-		exactOptionSet(
-			"-a", "-v", "-z", "-r", "-l", "-p", "-t", "-g", "-o", "-D", "-h", "-P",
-			"-u", "-c", "-x", "-H", "-A", "-X", "-S", "-W", "-q", "-i", "-R", "-L",
-			"-k", "-K", "-E", "-m", "-C", "-b", "-I", "-O", "-J", "-U", "-N", "-d",
-			"--archive", "--verbose", "--compress", "--recursive", "--progress",
-			"--partial", "--delete", "--delete-after", "--delete-before",
-			"--delete-during", "--delete-delay", "--delete-excluded", "--human-readable",
-			"--update", "--checksum", "--links", "--perms", "--times", "--group",
-			"--owner", "--devices", "--specials", "--hard-links", "--acls", "--xattrs",
-			"--sparse", "--whole-file", "--quiet", "--itemize-changes", "--relative",
-			"--copy-links", "--stats", "--mkpath", "--inplace", "--append",
-			"--append-verify", "--existing", "--ignore-existing",
-			"--remove-source-files", "--force", "--prune-empty-dirs", "--no-motd",
-			"--safe-links", "--numeric-ids", "--omit-dir-times", "--size-only",
-			"--ignore-times", "--one-file-system", "--backup", "--dirs",
-			"--keep-dirlinks", "--copy-dirlinks", "--executability", "--cvs-exclude",
-		),
-		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
-	)
+	parsed := parseRsyncOptions(command.Argv)
 	if parsed.preview {
 		command.Effect = EffectPreview
 		return
@@ -3884,6 +3854,53 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 	})
 	out.appendDataFlow(DataFlowFact{ToCommandID: command.ID, From: DataFile, To: DataProcess})
 	out.appendDataFlow(DataFlowFact{FromCommandID: command.ID, From: DataProcess, To: DataNetwork})
+}
+
+// parseRsyncOptions reads an rsync argv (the program word first) with the
+// option grammar classifyRsync owns.
+func parseRsyncOptions(argv []string) ownedPOSIXOptionParse {
+	return parseOwnedPOSIXOptions(
+		argv,
+		exactOptionSet(
+			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
+			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
+			"--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
+			"--suffix", "--chmod", "--chown", "--log-file", "--password-file",
+			"--partial-dir", "--max-size", "--min-size", "--bwlimit", "--timeout",
+			"--port", "--out-format", "--info", "--debug", "--max-delete",
+			"--modify-window", "--compress-level", "--skip-compress", "--usermap",
+			"--groupmap", "--iconv", "--contimeout", "--address",
+		),
+		exactOptionSet(
+			"-a", "-v", "-z", "-r", "-l", "-p", "-t", "-g", "-o", "-D", "-h", "-P",
+			"-u", "-c", "-x", "-H", "-A", "-X", "-S", "-W", "-q", "-i", "-R", "-L",
+			"-k", "-K", "-E", "-m", "-C", "-b", "-I", "-O", "-J", "-U", "-N", "-d",
+			"--archive", "--verbose", "--compress", "--recursive", "--progress",
+			"--partial", "--delete", "--delete-after", "--delete-before",
+			"--delete-during", "--delete-delay", "--delete-excluded", "--human-readable",
+			"--update", "--checksum", "--links", "--perms", "--times", "--group",
+			"--owner", "--devices", "--specials", "--hard-links", "--acls", "--xattrs",
+			"--sparse", "--whole-file", "--quiet", "--itemize-changes", "--relative",
+			"--copy-links", "--stats", "--mkpath", "--inplace", "--append",
+			"--append-verify", "--existing", "--ignore-existing",
+			"--remove-source-files", "--force", "--prune-empty-dirs", "--no-motd",
+			"--safe-links", "--numeric-ids", "--omit-dir-times", "--size-only",
+			"--ignore-times", "--one-file-system", "--backup", "--dirs",
+			"--keep-dirlinks", "--copy-dirlinks", "--executability", "--cvs-exclude",
+		),
+		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
+	)
+}
+
+// RsyncPreview reports an rsync argv (the program word first) that is a dry
+// run or a listing (-n, --dry-run, --list-only) with every option one the
+// rsync grammar knows: it writes nothing. A call wrapped in sudo keeps the
+// wrapper as its command fact, so the gateway reads the wrapped rsync with
+// this (rel-1-0-10:GAP-0104: sudo rsync -anrc --delete x/ ~/.defenseclaw/hooks/).
+// An unknown option (--no-dry-run turns the preview off again) is no preview.
+func RsyncPreview(argv []string) bool {
+	parsed := parseRsyncOptions(argv)
+	return parsed.preview && parsed.complete
 }
 
 // rsyncRemoteHost is the host of a remote rsync operand: [user@]host:path,

@@ -57,7 +57,9 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 	if !registrationWriteCapable(file, home) || !registrationHasFlow(file, home) {
 		return named
 	}
-	text := registrationHomeText(command, home)
+	// The words that only name a file to read it are left out of the
+	// text (registrationFlowText, rel-1-0-10:GAP-0104).
+	text := registrationHomeText(registrationFlowText(file, command, home, protected), home)
 	words := registrationStaticWords(file, home)
 	// resolved holds each distinct word of the command as the hook resolves it,
 	// read once for the whole registration set: the answer for a word does not
