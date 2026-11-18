@@ -76,14 +76,27 @@ func provenTargetDirectoryStateWrite(request trustedActionRequest) (written, unk
 	}
 	// A source of unknown name may land on each state name its base name
 	// may be: the copy onto it goes through the same proof (links and
-	// spellings of the folder).
-	for _, landing := range reading.unknownLandings {
-		if proven("Copy-Item -LiteralPath " + managed.PowerShellLiteral(targetDirectoryUnknownSource) +
-			" -Destination " + managed.PowerShellLiteral(landing)) {
-			return false, true
+	// spellings of the folder). A folder the proof does not place in the
+	// state tree (a copy onto <folder>\config.yaml is no state write) takes
+	// no state entry, whatever the name: its landings are not read
+	// (rel-1-0-10:GAP-1283).
+	copyOnto := func(landing string) bool {
+		return proven("Copy-Item -LiteralPath " + managed.PowerShellLiteral(targetDirectoryUnknownSource) +
+			" -Destination " + managed.PowerShellLiteral(landing))
+	}
+	for _, folder := range reading.unknownLandings {
+		if !copyOnto(folder.dir + `\` + targetDirectoryStateProbeName) {
+			continue
+		}
+		for _, name := range folder.names {
+			if name == targetDirectoryStateProbeName || copyOnto(folder.dir+`\`+name) {
+				return false, true
+			}
 		}
 	}
-	return false, false
+	// Past the bound of folders, or of names in one folder, that take a
+	// source of unknown name: the unknown tier, never a proven write.
+	return false, reading.unknownBounded
 }
 
 // targetDirectoryUnknownSource stands for a source whose name the call does
@@ -91,19 +104,35 @@ func provenTargetDirectoryStateWrite(request trustedActionRequest) (written, unk
 // that names no state.
 const targetDirectoryUnknownSource = "defenseclaw-unknown-source"
 
+// targetDirectoryStateProbeName is the name a folder is probed with before
+// the landings of a source of unknown name in it are read: the detector
+// config is a state entry of the state root and, as every entry, of a state
+// folder (rel-1-0-10:GAP-1283).
+const targetDirectoryStateProbeName = "config.yaml"
+
 // targetDirectoryReading is what targetDirectoryForms reads of a command:
 // the PowerShell move or copy of each source with a fixed base name, and
-// each place DIR\<name> a source of unknown name may land on.
+// for each folder a source of unknown name goes into, the names it may take
+// there. unknownBounded is true past maxTargetDirectoryForms such folders,
+// or names in one folder.
 type targetDirectoryReading struct {
 	forms           []string
-	unknownLandings []string
+	unknownLandings []targetDirectoryLanding
+	unknownBounded  bool
+}
+
+// targetDirectoryLanding is a folder DIR a source of unknown name goes into,
+// and the names DIR\<name> it may land on.
+type targetDirectoryLanding struct {
+	dir   string
+	names []string
 }
 
 // targetDirectoryForms spells each source of every mv, cp, install or ln
 // call of command that gives a target directory as the PowerShell move or
 // copy of that source onto DIR\<base>, and the places a source of unknown
 // name may land on (targetDirectoryUnknownNames). bounded is true past
-// maxTargetDirectoryForms.
+// maxTargetDirectoryForms forms.
 func targetDirectoryForms(command, home string) (reading targetDirectoryReading, bounded bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
@@ -146,16 +175,43 @@ func targetDirectoryForms(command, home string) (reading targetDirectoryReading,
 			return true
 		}
 		dir = strings.TrimRight(drivePath(dir), `\/`)
-		add := func(list *[]string, item string) bool {
-			if slices.Contains(*list, item) {
+		addForm := func(form string) bool {
+			if slices.Contains(reading.forms, form) {
 				return true
 			}
-			if len(reading.forms)+len(reading.unknownLandings) >= maxTargetDirectoryForms {
+			if len(reading.forms) >= maxTargetDirectoryForms {
 				bounded = true
 				return false
 			}
-			*list = append(*list, item)
+			reading.forms = append(reading.forms, form)
 			return true
+		}
+		// The landings of a source of unknown name do not count toward
+		// the bound of forms: they never prove a write, so past their own
+		// bound the reading is the unknown tier (rel-1-0-10:GAP-1283).
+		addLandings := func(names []string) {
+			at := slices.IndexFunc(reading.unknownLandings, func(landing targetDirectoryLanding) bool {
+				return landing.dir == dir
+			})
+			if at < 0 {
+				if len(reading.unknownLandings) >= maxTargetDirectoryForms {
+					reading.unknownBounded = true
+					return
+				}
+				reading.unknownLandings = append(reading.unknownLandings, targetDirectoryLanding{dir: dir})
+				at = len(reading.unknownLandings) - 1
+			}
+			landing := &reading.unknownLandings[at]
+			for _, name := range names {
+				if slices.Contains(landing.names, name) {
+					continue
+				}
+				if len(landing.names) >= maxTargetDirectoryForms {
+					reading.unknownBounded = true
+					return
+				}
+				landing.names = append(landing.names, name)
+			}
 		}
 		for _, source := range sources {
 			source = drivePath(source)
@@ -163,8 +219,8 @@ func targetDirectoryForms(command, home string) (reading targetDirectoryReading,
 			if base == "." || base == ".." || base == "/" {
 				continue
 			}
-			if !add(&reading.forms, cmdlet+" -LiteralPath "+managed.PowerShellLiteral(source)+
-				" -Destination "+managed.PowerShellLiteral(dir+`\`+base)) {
+			if !addForm(cmdlet + " -LiteralPath " + managed.PowerShellLiteral(source) +
+				" -Destination " + managed.PowerShellLiteral(dir+`\`+base)) {
 				return false
 			}
 		}
@@ -172,16 +228,14 @@ func targetDirectoryForms(command, home string) (reading targetDirectoryReading,
 			fixed, names := targetDirectoryUnknownNames(call.Args[index+1], view)
 			if fixed != "" {
 				// "$D/config.yaml": whatever the folder, the base is fixed.
-				if !add(&reading.forms, cmdlet+" -LiteralPath "+managed.PowerShellLiteral(fixed)+
-					" -Destination "+managed.PowerShellLiteral(dir+`\`+fixed)) {
+				if !addForm(cmdlet + " -LiteralPath " + managed.PowerShellLiteral(fixed) +
+					" -Destination " + managed.PowerShellLiteral(dir+`\`+fixed)) {
 					return false
 				}
 				continue
 			}
-			for _, name := range names {
-				if !add(&reading.unknownLandings, dir+`\`+name) {
-					return false
-				}
+			if len(names) > 0 {
+				addLandings(names)
 			}
 		}
 		return true
@@ -250,12 +304,7 @@ func targetDirectoryUnknownNames(word *syntax.Word, view string) (fixed string, 
 		}
 		return instance, nil
 	}
-	lowered := strings.ToLower(base)
-	for _, name := range activeDefenseClawStateNames {
-		if matched, err := path.Match(lowered, strings.ToLower(name)); err == nil && matched {
-			names = append(names, name)
-		}
-	}
+	names = targetDirectoryStateNamesMatching(strings.ToLower(base))
 	if instance != "" && !strings.Contains(instance, "\x00") && instance != "." && instance != ".." &&
 		!slices.Contains(names, instance) {
 		names = append(names, instance)
@@ -263,35 +312,79 @@ func targetDirectoryUnknownNames(word *syntax.Word, view string) (fixed string, 
 	return "", names
 }
 
+// targetDirectoryStateNamesMatching lists the state names directly under
+// ~/.defenseclaw that pattern (lower case) may match: every one when
+// path.Match refuses the pattern, which then rules no name out
+// (rel-1-0-10:GAP-1282).
+func targetDirectoryStateNamesMatching(pattern string) []string {
+	var names []string
+	for _, name := range activeDefenseClawStateNames {
+		matched, err := path.Match(pattern, strings.ToLower(name))
+		if err != nil {
+			return slices.Clone(activeDefenseClawStateNames)
+		}
+		if matched {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
 // targetDirectoryBasePattern is the base name of a source word as a
 // path.Match pattern: literal and quoted text escaped (a backslash of
 // quoted text is a Windows separator), an unquoted glob kept, and any
 // expansion with no fixed value (or a brace list) as *. An expansion may
 // hold a separator, so the base after an expansion is * and the text after
-// it. "" when the word has no base (a trailing separator only).
+// it. A bracket expression is kept only when it reads exactly as a
+// path.Match class; one the reader cannot prove disjoint from a state name
+// may be any character: a POSIX class, an equivalence class or collating
+// symbol, a nested [, a leading ], a backslash or separator inside it reads
+// as *, and a bracket or brace list that does not close in its literal
+// text (a quote or an expansion inside it) as * up to the next separator.
+// A ] after an unquoted expansion may close a bracket the value opened:
+// the text from the expansion to it reads as * too (rel-1-0-10:GAP-1282).
+// "" when the word has no base (a trailing separator only).
 func targetDirectoryBasePattern(word *syntax.Word, view string) string {
-	var pattern strings.Builder
+	const unknown = "\x00"
+	var pattern []byte
+	// skipping: inside a bracket or brace list that did not close in its
+	// literal text, up to the next separator. expanded: the end of the last
+	// unquoted expansion since the last separator, -1 when none.
+	skipping, expanded := false, -1
+	separator := func() {
+		skipping, expanded = false, -1
+		pattern = append(pattern, '/')
+	}
+	mark := func(unquoted bool) {
+		if skipping {
+			return
+		}
+		pattern = append(pattern, unknown...)
+		if unquoted {
+			expanded = len(pattern)
+		}
+	}
 	literal := func(text string) {
 		for _, char := range text {
 			switch {
-			case char == '\\':
-				pattern.WriteByte('/')
+			case char == '\\' || char == '/':
+				separator()
+			case skipping:
 			case strings.ContainsRune(`*?[]`, char):
-				pattern.WriteByte('\\')
-				pattern.WriteRune(char)
+				pattern = append(pattern, '\\', byte(char))
 			default:
-				pattern.WriteRune(char)
+				pattern = append(pattern, string(char)...)
 			}
 		}
 	}
-	const unknown = "\x00"
 	for index, part := range word.Parts {
+		last := index == len(word.Parts)-1
 		switch typed := part.(type) {
 		case *syntax.Lit:
 			value := typed.Value
 			if index == 0 && strings.HasPrefix(value, "~") {
 				if value != "~" && !strings.HasPrefix(value, "~/") {
-					pattern.WriteString(unknown)
+					mark(false)
 					value = strings.TrimLeft(value, "~")
 					if at := strings.IndexByte(value, '/'); at >= 0 {
 						value = value[at:]
@@ -304,33 +397,59 @@ func targetDirectoryBasePattern(word *syntax.Word, view string) string {
 				}
 			}
 			for at := 0; at < len(value); at++ {
-				switch char := value[at]; {
+				char := value[at]
+				if skipping {
+					if char == '/' {
+						separator()
+					}
+					continue
+				}
+				switch {
 				case char == '\\':
 					if at+1 < len(value) {
 						at++
 						literal(value[at : at+1])
 					}
 				case char == '*' || char == '?':
-					pattern.WriteByte(char)
-				case char == '[' && strings.IndexByte(value[at+1:], ']') >= 0:
-					end := at + 1 + strings.IndexByte(value[at+1:], ']')
-					class := value[at : end+1]
-					if strings.HasPrefix(class, "[!") {
-						class = "[^" + class[2:]
+					pattern = append(pattern, char)
+				case char == ']' && expanded >= 0:
+					pattern = pattern[:expanded]
+				case char == '[':
+					end, class := targetDirectoryClass(value, at)
+					switch {
+					case end >= 0 && expanded >= 0:
+						pattern, at = pattern[:expanded], end
+					case end >= 0 && class != "":
+						pattern, at = append(pattern, class...), end
+					case end >= 0:
+						mark(false)
+						at = end
+					case !last:
+						mark(false)
+						skipping = true
+					default:
+						literal("[")
 					}
-					pattern.WriteString(class)
-					at = end
-				case char == '{' && strings.IndexByte(value[at+1:], '}') >= 0:
-					// A brace list may be any of its words.
-					pattern.WriteString(unknown)
-					at += 1 + strings.IndexByte(value[at+1:], '}')
+				case char == '{':
+					end := strings.IndexByte(value[at+1:], '}')
+					switch {
+					case end >= 0:
+						// A brace list may be any of its words.
+						mark(false)
+						at += 1 + end
+					case !last:
+						mark(false)
+						skipping = true
+					default:
+						literal("{")
+					}
 				default:
 					literal(value[at : at+1])
 				}
 			}
 		case *syntax.SglQuoted:
 			if typed.Dollar {
-				pattern.WriteString(unknown)
+				mark(false)
 				continue
 			}
 			literal(typed.Value)
@@ -343,41 +462,85 @@ func targetDirectoryBasePattern(word *syntax.Word, view string) string {
 					if xargsPlainHome(quoted) {
 						literal(view)
 					} else {
-						pattern.WriteString(unknown)
+						mark(false)
 					}
 				default:
-					pattern.WriteString(unknown)
+					mark(false)
 				}
 			}
 		case *syntax.ParamExp:
 			if xargsPlainHome(typed) {
 				literal(view)
 			} else {
-				pattern.WriteString(unknown)
+				mark(true)
 			}
 		default:
-			pattern.WriteString(unknown)
+			mark(true)
 		}
 	}
-	text := strings.TrimRight(pattern.String(), "/")
+	text := strings.TrimRight(string(pattern), "/")
 	// The last separator outside an escape, and the last expansion.
-	separator, expansion := -1, strings.LastIndex(text, unknown)
+	separatorAt, expansion := -1, strings.LastIndex(text, unknown)
 	for at := 0; at < len(text); at++ {
 		if text[at] == '\\' {
 			at++
 			continue
 		}
 		if text[at] == '/' {
-			separator = at
+			separatorAt = at
 		}
 	}
-	if separator > expansion {
-		return text[separator+1:]
+	if separatorAt > expansion {
+		return text[separatorAt+1:]
 	}
 	if expansion >= 0 {
 		return "*" + strings.ReplaceAll(text[expansion+len(unknown):], unknown, "*")
 	}
 	return text
+}
+
+// targetDirectoryClass reads the bracket expression that starts at
+// value[at] ('[') of unquoted literal text: end is the index of its closing
+// ] (-1 when it does not close in value), and class its path.Match spelling
+// when it reads exactly as one ([!x] as [^x]), "" when it holds a POSIX
+// class ([:alpha:]), an equivalence class or collating symbol, a nested [,
+// a leading ], a backslash or a separator (rel-1-0-10:GAP-1282).
+func targetDirectoryClass(value string, at int) (end int, class string) {
+	exact, position := true, at+1
+	if position < len(value) && (value[position] == '!' || value[position] == '^') {
+		position++
+	}
+	if position < len(value) && value[position] == ']' {
+		// A leading ] is a member.
+		exact = false
+		position++
+	}
+	for ; position < len(value); position++ {
+		switch value[position] {
+		case ']':
+			if !exact {
+				return position, ""
+			}
+			class = value[at : position+1]
+			if class[1] == '!' {
+				class = "[^" + class[2:]
+			}
+			return position, class
+		case '[':
+			exact = false
+			if position+1 < len(value) && strings.IndexByte(":=.", value[position+1]) >= 0 {
+				if closing := strings.Index(value[position+2:], value[position+1:position+2]+"]"); closing >= 0 {
+					position += 2 + closing + 1
+				}
+			}
+		case '\\':
+			exact = false
+			position++
+		case '/':
+			exact = false
+		}
+	}
+	return -1, ""
 }
 
 // targetDirectoryCmdlet is the PowerShell cmdlet a GNU writer of the

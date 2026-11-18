@@ -74,6 +74,13 @@ func gap1260Rule(want string) string {
 // word with no static value: the folder //?/C:/... (a glob character) and
 // the sources "$F" and $(ls x) were dropped, so these calls were allowed.
 func TestGAP1260TargetDirectoryUnknownSources(t *testing.T) {
+	checkGAP1260Rows(t, "gap1260", gap1260Rows())
+}
+
+// checkGAP1260Rows judges each row as a Bash and a shell_command call of the
+// home C:\Users\Alice in the default and the strict pack.
+func checkGAP1260Rows(t *testing.T, label string, rows []struct{ id, want, command string }) {
+	t.Helper()
 	const home = `C:\Users\Alice`
 	resolved := map[string]string{"C:/Users/Alice/.defenseclaw": "C:/Users/Alice/.defenseclaw"}
 	for _, name := range []string{"config.yaml", "notes.txt"} {
@@ -81,9 +88,9 @@ func TestGAP1260TargetDirectoryUnknownSources(t *testing.T) {
 		resolved[value] = value
 	}
 	for _, profile := range []string{"default", "strict"} {
-		connector := "gap1260-" + profile
+		connector := label + "-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
-		for _, row := range gap1260Rows() {
+		for _, row := range rows {
 			for _, tool := range []string{"Bash", "shell_command"} {
 				args, _ := json.Marshal(map[string]string{"command": row.command})
 				request := trustedActionRequest{
@@ -107,8 +114,9 @@ func TestGAP1260TargetDirectoryUnknownSources(t *testing.T) {
 	}
 }
 
-// TestGAP1260TargetDirectoryHookRoute pins rel-1-0-10:GAP-1260 on the
-// Claude Code hook route of a Windows host (a real drive home).
+// TestGAP1260TargetDirectoryHookRoute pins rel-1-0-10:GAP-1260, GAP-1282
+// and GAP-1283 on the Claude Code hook route of a Windows host (a real
+// drive home).
 func TestGAP1260TargetDirectoryHookRoute(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("the drive-home reading needs a Windows home; TestGAP1260TargetDirectoryUnknownSources reads it on every OS")
@@ -117,7 +125,7 @@ func TestGAP1260TargetDirectoryHookRoute(t *testing.T) {
 	spell := strings.NewReplacer("C:/Users/Alice", filepath.ToSlash(strings.TrimRight(h.home, `\`)))
 	for _, profile := range []string{"default", "strict"} {
 		judge := newHookConfigJudgeWith(t, "claudecode", profile, false)
-		for _, row := range gap1260Rows() {
+		for _, row := range slices.Concat(gap1260Rows(), gap1282Rows(), gap1283Rows()) {
 			got := judge(h.project, false, "Bash", map[string]any{"command": spell.Replace(row.command)})
 			action := hookConfigAction(got)
 			if action == "deny" {
