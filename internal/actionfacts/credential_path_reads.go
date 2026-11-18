@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -73,6 +74,7 @@ const (
 	maxCredentialPathWalkEntries = 1 << 16
 	maxCredentialPathWalkLookups = 1024
 	credentialPathWalkBatch      = 512
+	credentialPathWalkWorkers    = 4
 	// The analyses of one hook evaluation (the call, its twins and its
 	// result event) reuse a walk of the same folder made within
 	// credentialPathWalkReuse: one walk per call. A later call walks again.
@@ -1285,7 +1287,7 @@ func credentialPathWalkOf(dir string, hidden bool) credentialPathWalkResult {
 // is set.
 func credentialPathWalk(dir string, hidden bool) (walk credentialPathWalkResult) {
 	groups := credentialProbeFirstSegments()
-	folders, entries, lookups := 0, 0, 0
+	var budget credentialPathWalkBudget
 	// The folder searched may itself be the first segment of a probe
 	// (rg KEY .aws, grep -r KEY ~/.aws): its own files are looked up
 	// under it. It is read whatever its name, as the command names it.
@@ -1297,68 +1299,124 @@ func credentialPathWalk(dir string, hidden bool) (walk credentialPathWalkResult)
 		if !hidden && (strings.HasPrefix(rest, ".") || strings.Contains(rest, "/.")) {
 			continue
 		}
-		if lookups == maxCredentialPathWalkLookups {
+		if !budget.take(&budget.lookups, maxCredentialPathWalkLookups) {
 			walk.cut = true
 			return walk
 		}
-		lookups++
 		file := filepath.Join(dir, filepath.FromSlash(rest))
 		if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
 			walk.found = append(walk.found, file)
 		}
 	}
-	queue := []string{dir}
-	for len(queue) > 0 {
-		if folders == maxCredentialPathWalkFolders {
+	// Level by level: the folders of one level are read by up to
+	// credentialPathWalkWorkers goroutines (the walk's cost is its system
+	// calls), and merged in order, so an uncut walk finds the same files in
+	// the same order every time.
+	folders := 0
+	level := []string{dir}
+	for len(level) > 0 && !walk.cut && !budget.stop.Load() {
+		if room := maxCredentialPathWalkFolders - folders; len(level) > room {
+			level = level[:room]
 			walk.cut = true
-			return walk
 		}
-		folders++
-		current := queue[0]
-		queue = queue[1:]
-		f, err := os.Open(current)
-		if err != nil {
-			continue
+		folders += len(level)
+		scans := make([]credentialPathFolderScan, len(level))
+		workers := min(credentialPathWalkWorkers, len(level))
+		if workers <= 1 {
+			for i, folder := range level {
+				scans[i] = budget.scan(folder, hidden, groups)
+			}
+		} else {
+			var next atomic.Int64
+			var wg sync.WaitGroup
+			for range workers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					defer func() {
+						if recover() != nil {
+							budget.stop.Store(true) // a cut walk, never a crash
+						}
+					}()
+					for {
+						i := int(next.Add(1)) - 1
+						if i >= len(level) || budget.stop.Load() {
+							return
+						}
+						scans[i] = budget.scan(level[i], hidden, groups)
+					}
+				}()
+			}
+			wg.Wait()
 		}
-		for {
-			batch, err := f.ReadDir(credentialPathWalkBatch)
-			for _, entry := range batch {
-				if entries == maxCredentialPathWalkEntries {
-					_ = f.Close()
-					walk.cut = true
-					return walk
-				}
-				entries++
-				name := entry.Name()
-				if !hidden && strings.HasPrefix(name, ".") {
+		level = nil
+		for _, s := range scans {
+			walk.found = append(walk.found, s.found...)
+			level = append(level, s.folders...)
+		}
+	}
+	walk.cut = walk.cut || budget.stop.Load()
+	return walk
+}
+
+// credentialPathWalkBudget is the entries and lookups of one walk, shared
+// by its workers; stop is set when one runs out.
+type credentialPathWalkBudget struct {
+	entries, lookups atomic.Int64
+	stop             atomic.Bool
+}
+
+func (b *credentialPathWalkBudget) take(counter *atomic.Int64, limit int64) bool {
+	if counter.Add(1) > limit {
+		b.stop.Store(true)
+		return false
+	}
+	return true
+}
+
+// credentialPathFolderScan is one folder of a walk: the credentials files
+// found in it and the folders below it to read next.
+type credentialPathFolderScan struct {
+	found, folders []string
+}
+
+// scan reads one folder in batches of credentialPathWalkBatch entries.
+func (b *credentialPathWalkBudget) scan(folder string, hidden bool, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
+	f, err := os.Open(folder)
+	if err != nil {
+		return s
+	}
+	defer func() { _ = f.Close() }()
+	for {
+		batch, err := f.ReadDir(credentialPathWalkBatch)
+		for _, entry := range batch {
+			if !b.take(&b.entries, maxCredentialPathWalkEntries) {
+				return s
+			}
+			name := entry.Name()
+			if !hidden && strings.HasPrefix(name, ".") {
+				continue
+			}
+			for _, probe := range groups[name] {
+				if !hidden && strings.Contains(probe.value, "/.") {
 					continue
 				}
-				for _, probe := range groups[name] {
-					if !hidden && strings.Contains(probe.value, "/.") {
-						continue
-					}
-					if lookups == maxCredentialPathWalkLookups {
-						_ = f.Close()
-						walk.cut = true
-						return walk
-					}
-					lookups++
-					file := filepath.Join(current, filepath.FromSlash(probe.value))
-					if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
-						walk.found = append(walk.found, file)
-					}
+				if !b.take(&b.lookups, maxCredentialPathWalkLookups) {
+					return s
 				}
-				if entry.IsDir() && !credentialWalkSkips[name] {
-					queue = append(queue, filepath.Join(current, name))
+				file := filepath.Join(folder, filepath.FromSlash(probe.value))
+				if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+					s.found = append(s.found, file)
 				}
 			}
-			if err != nil {
-				break // io.EOF, or a folder that cannot be read on
+			if entry.IsDir() && !credentialWalkSkips[name] {
+				s.folders = append(s.folders, filepath.Join(folder, name))
 			}
 		}
-		_ = f.Close()
+		if err != nil || len(batch) < credentialPathWalkBatch {
+			return s // the end of the folder, or a folder that cannot be read on
+		}
 	}
-	return walk
 }
 
 // rgSearchesHidden reports an rg that reads hidden (dot-named) files and
