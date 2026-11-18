@@ -126,16 +126,15 @@ func TestEvaluateClaudeCodeHook_StopFailureRetainsNormalizedSubmittedContent(t *
 	}
 }
 
-func TestEvaluateClaudeCodeHook_SubmittedContentRedactsBearerWithoutDirective(t *testing.T) {
+func TestEvaluateClaudeCodeHook_SubmittedContentStaysRawUntilProjection(t *testing.T) {
 	const token = "abc123"
 	for _, test := range []struct {
-		name             string
-		response         string
-		wantTokenPresent bool
+		name     string
+		response string
 	}{
-		{name: "missing directive redacts", response: `{"is_safe":true,"action":"Allow"}`},
-		{name: "explicit raw directive preserved", response: `{"is_safe":true,"action":"Allow","is_redaction_enabled":false}`, wantTokenPresent: true},
-		{name: "explicit redact directive preserved", response: `{"is_safe":true,"action":"Allow","is_redaction_enabled":true}`, wantTokenPresent: true},
+		{name: "missing directive", response: `{"is_safe":true,"action":"Allow"}`},
+		{name: "explicit raw directive", response: `{"is_safe":true,"action":"Allow","is_redaction_enabled":false}`},
+		{name: "explicit redact directive", response: `{"is_safe":true,"action":"Allow","is_redaction_enabled":true}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -160,8 +159,8 @@ func TestEvaluateClaudeCodeHook_SubmittedContentRedactsBearerWithoutDirective(t 
 			if !resp.InspectedContentPresent {
 				t.Fatal("submitted content was not retained")
 			}
-			if got := strings.Contains(resp.InspectedContent, token); got != test.wantTokenPresent {
-				t.Fatalf("token present = %t, want %t; content = %q", got, test.wantTokenPresent, resp.InspectedContent)
+			if !strings.Contains(resp.InspectedContent, token) {
+				t.Fatalf("inspection content changed before telemetry admission: %q", resp.InspectedContent)
 			}
 			if !strings.Contains(resp.InspectedContent, "request failed: Authorization: Bearer ") ||
 				!strings.Contains(resp.InspectedContent, " after retry") {
@@ -171,7 +170,7 @@ func TestEvaluateClaudeCodeHook_SubmittedContentRedactsBearerWithoutDirective(t 
 	}
 }
 
-func TestRedactInspectedBearerCredentials(t *testing.T) {
+func TestRedactInspectedAuthorizationCredentials(t *testing.T) {
 	const token = "abc123._~+/=-"
 	redacted := redaction.ForSinkEntity(token)
 	tests := []struct {
@@ -200,6 +199,21 @@ func TestRedactInspectedBearerCredentials(t *testing.T) {
 			want:    "request failed with Bearer " + redacted + " after retry",
 		},
 		{
+			name:    "basic authorization header",
+			content: "Authorization: Basic " + token,
+			want:    "Authorization: Basic " + redacted,
+		},
+		{
+			name:    "quoted basic JSON header",
+			content: `"authorization": "Basic ` + token + `"`,
+			want:    `"authorization": "Basic ` + redacted + `"`,
+		},
+		{
+			name:    "embedded word is not basic scheme",
+			content: "NotBasic " + token,
+			want:    "NotBasic " + token,
+		},
+		{
 			name:    "embedded word is not bearer scheme",
 			content: "NotBearer " + token,
 			want:    "NotBearer " + token,
@@ -208,7 +222,7 @@ func TestRedactInspectedBearerCredentials(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := redactInspectedBearerCredentials(test.content); got != test.want {
+			if got := redactInspectedAuthorizationCredentials(test.content); got != test.want {
 				t.Fatalf("redacted content = %q, want %q", got, test.want)
 			}
 		})
@@ -357,6 +371,55 @@ func TestEvaluateClaudeCodeHook_SubagentStartInspectsTaskAlongsideMetadata(t *te
 	}
 }
 
+func TestEvaluateClaudeCodeHook_SubagentPromptKeepsOwnRedactionDirective(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read AI Defense request: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), "event detail") {
+			_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","is_redaction_enabled":false}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","is_redaction_enabled":true}`)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey: "test-key", endpoint: server.URL, client: server.Client(),
+		},
+	}
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "SubagentStart",
+		Payload: map[string]interface{}{
+			"task":             "canonical task",
+			"task_description": "event detail",
+		},
+	})
+
+	if resp.RedactionEnabled == nil || *resp.RedactionEnabled {
+		t.Fatalf("event directive = %v, want explicit false", resp.RedactionEnabled)
+	}
+	if !resp.CompanionRedactionPresent || resp.CompanionRedactionEnabled == nil || !*resp.CompanionRedactionEnabled {
+		t.Fatalf("companion directive = (%v, present=%t), want explicit true override", resp.CompanionRedactionEnabled, resp.CompanionRedactionPresent)
+	}
+	agentResp := claudeCodeResponseToAgentHookResponse(resp)
+	if got := hookLLMEventRedactionDirective(agentResp); got == nil || !*got {
+		t.Fatalf("prompt directive = %v, want explicit true", got)
+	}
+	agentResp.CompanionRedactionEnabled = nil
+	if got := hookLLMEventRedactionDirective(agentResp); got != nil {
+		t.Fatalf("absent prompt directive inherited event directive %v, want nil fail-closed directive", *got)
+	}
+}
+
 func TestClaudeCodeSubagentPromptSelection(t *testing.T) {
 	for _, test := range []struct {
 		payload map[string]interface{}
@@ -386,6 +449,7 @@ func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *tes
 		{name: "tool call", req: claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: map[string]interface{}{"file_path": "README.md"}}, wantAIDCalls: 1},
 		{name: "tool result", req: claudeCodeHookRequest{HookEventName: "PostToolUse", ToolName: "Read", ToolResponse: "tool result"}, wantAIDCalls: 1},
 		{name: "companion-only stop failure", req: claudeCodeHookRequest{HookEventName: "StopFailure", LastAssistantMessage: "failed response"}},
+		{name: "matching stop failure companion", req: claudeCodeHookRequest{HookEventName: "StopFailure", Error: "failed response", LastAssistantMessage: " failed response "}, wantAIDCalls: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var calls int
@@ -417,10 +481,23 @@ func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *tes
 }
 
 func TestEvaluateClaudeCodeHook_LocalFileScanDoesNotReportUninspectedEventContent(t *testing.T) {
+	var aidCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		aidCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(server.Close)
+
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
-	api := &APIServer{scannerCfg: cfg}
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey: "test-key", endpoint: server.URL, client: server.Client(),
+		},
+	}
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{"enabled":true}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -434,6 +511,9 @@ func TestEvaluateClaudeCodeHook_LocalFileScanDoesNotReportUninspectedEventConten
 
 	if resp.InspectedContentPresent || resp.InspectedContent != "" {
 		t.Fatalf("local-only scan reported uninspected event content: %+v", resp)
+	}
+	if aidCalls != 0 {
+		t.Fatalf("local file scan made %d AI Defense requests, want 0", aidCalls)
 	}
 }
 

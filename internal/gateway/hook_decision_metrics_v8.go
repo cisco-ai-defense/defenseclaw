@@ -129,9 +129,13 @@ func (a *APIServer) emitHookDecisionLogV8(
 		}
 		inputMessages := observability.Absent[observability.TelemetryStructuredGenAIInputMessages]()
 		if resp.InspectedContentPresent {
+			inspectedContent := resp.InspectedContent
+			if resp.RedactionEnabled == nil {
+				inspectedContent = redactInspectedAuthorizationCredentials(inspectedContent)
+			}
 			messages, _, reported, _, contentOK := hookModelV8InputMessages(
-				resp.InspectedContent,
-				int64(len(resp.InspectedContent)),
+				inspectedContent,
+				int64(len(inspectedContent)),
 				false,
 			)
 			if reported && contentOK {

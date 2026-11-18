@@ -176,9 +176,10 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "TaskCreated"}
+	rawContent := "Authorization: Basic abc123==; Authorization: Bearer def456"
 	resp := agentHookResponse{
 		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
-		InspectedContent: "create task containing alice@example.com", InspectedContentPresent: true,
+		InspectedContent: rawContent, InspectedContentPresent: true,
 	}
 
 	api.emitHookDecisionObservabilityV8(t.Context(), req, resp, HookAuditEnvelope{Result: "ok"}, false)
@@ -215,8 +216,9 @@ func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
 		t.Fatalf("parts=%v, want one part", message["parts"])
 	}
 	part, ok := parts[0].(map[string]interface{})
-	if !ok || part["content"] != resp.InspectedContent {
-		t.Fatalf("part=%v, want exact inspected content", parts[0])
+	wantContent := redactInspectedAuthorizationCredentials(rawContent)
+	if !ok || part["content"] != wantContent {
+		t.Fatalf("part=%v, want projection-safe inspected content %q", parts[0], wantContent)
 	}
 }
 
