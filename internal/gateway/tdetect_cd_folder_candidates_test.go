@@ -8,6 +8,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -122,11 +123,30 @@ func TestCDFolderJudgesTheStatementsAfterADynamicStepInspectManagedStrict(t *tes
 	cdFoldDynamicStepRows(t, cdFoldRoutes[2], gap0437Packs[4])
 }
 
+// cdFoldSessions gives each call of a row its own session. The rows pin how
+// one call reads its folders. With the correlation key set (the sidecar sets
+// it at boot; in a test binary any earlier test that installs it leaves it
+// set), the tool-chain rules join the calls of one session: the target rows'
+// secret reads that ran (an alert) seed chain.secret_read_then_egress, so in a
+// shared session a dynamic step alone was the end of a chain (a block in
+// strict) while its control, past the 8-event window, was not, and the test
+// went red only after such a test in its shard. One call per session leaves
+// the chain no earlier step, with or without the key.
+func cdFoldSessions(prefix string) func() string {
+	n := 0
+	return func() string {
+		n++
+		return prefix + "-" + strconv.Itoa(n)
+	}
+}
+
 // cdFoldDynamicStepRows are the rows of the dynamic-step tests on one route
 // in the packs given: one test per route and pack keeps each well within a
 // CI shard under -race (a route in all five packs took 290-350 s there).
 func cdFoldDynamicStepRows(t *testing.T, r cdFoldRoute, packs ...gap0437Pack) {
 	t.Helper()
+	// The key the running gateway has, whatever ran before in this binary.
+	installCorrelationHMACForTest()
 	home, project := cdFirstFixture(t)
 	for _, dir := range []string{filepath.Join(home, ".cache", "d"), filepath.Join(project, "src")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -138,8 +158,8 @@ func cdFoldDynamicStepRows(t *testing.T, r cdFoldRoute, packs ...gap0437Pack) {
 		// Policy semantics, not latency: under -race the inspect route must
 		// not turn a verdict into a 504 scan timeout.
 		a.inspectToolScanTimeout = 30 * time.Second
-		session := "td-cdfold-" + r.name + "-" + p.name
-		verdict := func(command string) string { return r.verdict(t, a, session, project, command) }
+		session := cdFoldSessions("td-cdfold-" + r.name + "-" + p.name)
+		verdict := func(command string) string { return r.verdict(t, a, session(), project, command) }
 		for _, tg := range cdFirstTargets {
 			oracle := verdict(tg.one)
 			forms := map[string]string{"chain-33": "cd " + tg.dir + " && " + cdFoldChain(33) + tg.inner}
@@ -197,6 +217,7 @@ func TestCDPATHFolderCurrentFolderHeadIsThePlainOneInspect(t *testing.T) {
 // cdPathHeadRows are the rows of the CDPATH tests on one route.
 func cdPathHeadRows(t *testing.T, r cdFoldRoute) {
 	t.Helper()
+	installCorrelationHMACForTest()
 	_, project := cdFirstFixture(t)
 	dot := "."
 	operands := []string{dot + "ssh/id_rsa", dot + "aws/credentials"}
@@ -207,7 +228,7 @@ func cdPathHeadRows(t *testing.T, r cdFoldRoute) {
 		// Policy semantics, not latency: under -race the inspect route must
 		// not turn a verdict into a 504 scan timeout.
 		a.inspectToolScanTimeout = 30 * time.Second
-		session := "td-cdpath-" + r.name + "-" + p.name
+		session := cdFoldSessions("td-cdpath-" + r.name + "-" + p.name)
 		tier := "L"
 		if strings.Contains(p.name, "strict") {
 			tier = "B"
@@ -216,13 +237,13 @@ func cdPathHeadRows(t *testing.T, r cdFoldRoute) {
 			for _, form := range forms {
 				for _, operand := range operands {
 					plainCommand := cd + strings.Replace(form, "%s", operand, 1)
-					plain := r.verdict(t, a, session, project, plainCommand)
+					plain := r.verdict(t, a, session(), project, plainCommand)
 					if cdFirstRank[plain] < cdFirstRank[tier] {
 						t.Errorf("%s %s: the plain %q is %s, want at least %s", r.name, p.name, plainCommand, plain, tier)
 					}
 					for _, head := range tdCurrentFolderHeads() {
 						spelled := cd + strings.Replace(form, "%s", head+"/"+operand, 1)
-						if got := r.verdict(t, a, session, project, spelled); cdFirstRank[got] < cdFirstRank[plain] {
+						if got := r.verdict(t, a, session(), project, spelled); cdFirstRank[got] < cdFirstRank[plain] {
 							t.Errorf("%s %s: %q is %s, the plain spelling is %s", r.name, p.name, spelled, got, plain)
 						}
 					}
