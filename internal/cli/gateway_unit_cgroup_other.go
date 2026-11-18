@@ -5,8 +5,13 @@
 
 package cli
 
-// systemdServiceCgroup: only Linux runs the gateway from a systemd unit.
-func systemdServiceCgroup() (string, bool) { return "", false }
+// Only Linux runs the gateway from a systemd unit (GAP-0205): no unit binds
+// the gateway, so start and stop act as a shell's.
 
-// processOutsideCgroup: no cgroups, so never outside one.
+func boundSystemdUnitCgroup(string) (string, bool) { return "", false }
+
+func recordGatewayLaunchUnit(string) {}
+
+func adoptGatewayUnitOf(string, int) {}
+
 func processOutsideCgroup(int, string) bool { return false }

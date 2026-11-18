@@ -8,6 +8,8 @@ package cli
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -123,5 +125,153 @@ func TestGAP0205SystemdUnitNameAndCommand(t *testing.T) {
 	}
 	if got := systemctlFor("/user.slice/user-1000.slice/user@1000.service/app.slice/dc.service"); got != "systemctl --user" {
 		t.Fatalf("user unit command = %q", got)
+	}
+}
+
+// gap0205UnitProbeAt is systemd running this process as an ExecStart or
+// ExecStop in cgroup; procs serves other /proc files.
+func gap0205UnitProbeAt(cgroup string, procs map[string]string) systemdUnitProbe {
+	return systemdUnitProbe{
+		getenv: func(name string) string {
+			if name == "INVOCATION_ID" {
+				return "abc"
+			}
+			return ""
+		},
+		getppid: func() int { return 1 },
+		readFile: func(name string) ([]byte, error) {
+			switch name {
+			case "/proc/1/comm":
+				return []byte("systemd\n"), nil
+			case "/proc/self/cgroup":
+				return []byte("0::" + cgroup + "\n"), nil
+			}
+			if body, ok := procs[name]; ok {
+				return []byte(body), nil
+			}
+			return nil, os.ErrNotExist
+		},
+	}
+}
+
+func withGatewayUnitProbe(t *testing.T, probe systemdUnitProbe) {
+	t.Helper()
+	old := gatewayUnitProbe
+	t.Cleanup(func() { gatewayUnitProbe = old })
+	gatewayUnitProbe = probe
+}
+
+const (
+	gap0205SystemUnit = "/system.slice/defenseclaw-gateway.service"
+	gap0205UserApps   = "/user.slice/user-1000.slice/user@1000.service/app.slice/"
+)
+
+// Review round 4, P2-1: only the unit whose ExecStart launched the data
+// directory's gateway is bound to it. A transient systemd-run unit never
+// is, and never replaces the binding.
+func TestGAP0205OnlyTheUnitThatLaunchedTheGatewayIsBound(t *testing.T) {
+	if gap0205UnitRecordFile != gatewayUnitRecordName {
+		t.Fatalf("the process tests write %q, the gateway reads %q", gap0205UnitRecordFile, gatewayUnitRecordName)
+	}
+	dataDir := t.TempDir()
+	withGatewayUnitProbe(t, gap0205UnitProbeAt(gap0205SystemUnit, nil))
+	if cgroup, bound := boundSystemdUnitCgroup(dataDir); bound {
+		t.Fatalf("unit %q is bound with nothing recorded", cgroup)
+	}
+	recordGatewayLaunchUnit(dataDir)
+	if cgroup, bound := boundSystemdUnitCgroup(dataDir); !bound || cgroup != gap0205SystemUnit {
+		t.Fatalf("the unit that launched the gateway is not bound: %q, %v", cgroup, bound)
+	}
+	info, err := os.Stat(filepath.Join(dataDir, gatewayUnitRecordName))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("unit record: %v %v", info, err)
+	}
+
+	for _, name := range []string{"run-u42.service", "run-p812-i813.service", "run-r1f2e3d4c.service"} {
+		withGatewayUnitProbe(t, gap0205UnitProbeAt(gap0205UserApps+name, nil))
+		if _, bound := boundSystemdUnitCgroup(dataDir); bound {
+			t.Fatalf("transient %s is bound", name)
+		}
+		recordGatewayLaunchUnit(dataDir)
+		if got := recordedGatewayUnitCgroup(dataDir); got != gap0205SystemUnit {
+			t.Fatalf("transient %s replaced the binding: %q", name, got)
+		}
+	}
+
+	// A shell, or an agent inside the unit, records nothing.
+	shell := gap0205UnitProbeAt(gap0205UserApps+"other.service", nil)
+	shell.getppid = func() int { return 4242 }
+	withGatewayUnitProbe(t, shell)
+	recordGatewayLaunchUnit(dataDir)
+	if got := recordedGatewayUnitCgroup(dataDir); got != gap0205SystemUnit {
+		t.Fatalf("a shell replaced the binding: %q", got)
+	}
+
+	// Another named unit is bound once its ExecStart launches the gateway.
+	other := gap0205UserApps + "defenseclaw-gateway.service"
+	withGatewayUnitProbe(t, gap0205UnitProbeAt(other, nil))
+	if _, bound := boundSystemdUnitCgroup(dataDir); bound {
+		t.Fatal("a unit that never launched the gateway is bound")
+	}
+	recordGatewayLaunchUnit(dataDir)
+	if cgroup, bound := boundSystemdUnitCgroup(dataDir); !bound || cgroup != other {
+		t.Fatalf("the unit that launched the gateway last is not bound: %q, %v", cgroup, bound)
+	}
+}
+
+func TestGAP0205UnitRecordThatIsNotABindableUnitBindsNothing(t *testing.T) {
+	for _, record := range []string{
+		"", "\n", "garbage\n", "system.slice/defenseclaw-gateway.service\n",
+		"/user.slice/user-1000.slice/session-3.scope\n",
+		"/user.slice/user-1000.slice/user@1000.service\n",
+		gap0205UserApps + "run-u7.service\n",
+		gap0205SystemUnit + "\n" + gap0205SystemUnit + "\n",
+		gap0205SystemUnit + "\r\n",
+		"/" + strings.Repeat("x", maxGatewayUnitRecord) + ".service\n",
+	} {
+		dataDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dataDir, gatewayUnitRecordName), []byte(record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got := recordedGatewayUnitCgroup(dataDir); got != "" {
+			t.Fatalf("record %q was read as unit %q", record, got)
+		}
+	}
+}
+
+// A gateway a release before the record launched from its unit binds that
+// unit when it is stopped or restarted; a binding on record stays.
+func TestGAP0205AdoptsTheUnitAnOlderReleaseLaunchedTheGatewayFrom(t *testing.T) {
+	for _, tc := range []struct {
+		name, gateway string
+		unreadable    bool
+		want          string
+	}{
+		{name: "in a unit", gateway: "0::" + gap0205SystemUnit + "\n", want: gap0205SystemUnit},
+		{name: "in a login session", gateway: "0::/user.slice/user-1000.slice/session-3.scope\n"},
+		{name: "in the user manager", gateway: "0::/user.slice/user-1000.slice/user@1000.service\n"},
+		{name: "in a transient unit", gateway: "0::" + gap0205UserApps + "run-u9.service\n"},
+		{name: "unreadable", unreadable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			procs := map[string]string{}
+			if !tc.unreadable {
+				procs["/proc/77/cgroup"] = tc.gateway
+			}
+			withGatewayUnitProbe(t, gap0205UnitProbeAt("/user.slice/user-1000.slice/session-3.scope", procs))
+			dataDir := t.TempDir()
+			adoptGatewayUnitOf(dataDir, 77)
+			if got := recordedGatewayUnitCgroup(dataDir); got != tc.want {
+				t.Fatalf("adopted %q, want %q", got, tc.want)
+			}
+		})
+	}
+	dataDir := t.TempDir()
+	recorded := gap0205UserApps + "defenseclaw-gateway.service"
+	writeGatewayUnitRecord(dataDir, recorded)
+	withGatewayUnitProbe(t, gap0205UnitProbeAt(gap0205SystemUnit, map[string]string{"/proc/77/cgroup": "0::" + gap0205SystemUnit + "\n"}))
+	adoptGatewayUnitOf(dataDir, 77)
+	if got := recordedGatewayUnitCgroup(dataDir); got != recorded {
+		t.Fatalf("adopt replaced the recorded unit %q with %q", recorded, got)
 	}
 }
