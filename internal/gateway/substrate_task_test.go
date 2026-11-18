@@ -183,9 +183,9 @@ func TestGAP0303TaskEndKindsAreBounded(t *testing.T) {
 			}
 		}
 	}
-	// 16 kinds x 3 plain rows, then the shared kind: 3 plain rows and 8, 16, 32, 64, 128.
-	if rows > 16*3+3+5 || rows < 16*3 {
-		t.Fatalf("%d of %d distinct-cause reports audited, want 48 to 56", rows, reports)
+	// 16 kinds of one report each, then the shared kind: 3 plain rows and 8, 16, 32, 64, 128.
+	if rows != 16+3+5 {
+		t.Fatalf("%d of %d distinct-cause reports audited, want 24", rows, reports)
 	}
 	if last != 0 {
 		t.Fatalf("report 200 of a shared kind (count 185) was audited")
