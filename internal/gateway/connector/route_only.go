@@ -20,6 +20,12 @@ import (
 // from config.yaml routing.route_only (DESIGN 7.2, 17.5, 17.7). nil in
 // SetupOpts means the connector is not routed: Setup removes what an
 // earlier route-only render wrote and restores the agent values.
+//
+// The standalone guardian JSON-encodes it into the request of each account's
+// worker (enterpriseHookWorkerOptions.RouteOnly). Gate, ParkOnly and
+// HeldElsewhere are tagged json:"-": the OSS gateway sets them inside its own
+// process (routeonly_park.go), a managed render never carries them, and a
+// func field makes the whole request fail to encode (rel-1-0-10:GAP-1311).
 type RouteOnlySetup struct {
 	// BaseURL is the route-only endpoint, http://127.0.0.1:<api>/r/<c>.
 	BaseURL string
@@ -45,7 +51,7 @@ type RouteOnlySetup struct {
 	// Gate, on an OSS gateway, makes the write park the render while the
 	// gateway does not hold its API port (route_only_park.go,
 	// rel-1-0-10:GAP-1133). nil: the render is written as is.
-	Gate *RouteOnlyGate
+	Gate *RouteOnlyGate `json:"-"`
 	// ParkOnly: write this render only parked (GAP-1133 round 2). The park
 	// before a bind or a release is built from config alone, with no route
 	// credential and no signing check, so it parks a connector whose real
@@ -53,14 +59,14 @@ type RouteOnlySetup struct {
 	// stop time). It is skipped where nothing is rendered (the agent talks
 	// to its provider directly) and when the gate already holds the port
 	// (the owner renders the real route itself).
-	ParkOnly bool
+	ParkOnly bool `json:"-"`
 	// HeldElsewhere, when set, reports at write time that this home's own
 	// gateway (another process) holds the API port. A gated write that
 	// would park then leaves the agent config alone: a second gateway
 	// process of the same home (a bare defenseclaw-gateway beside the
 	// background one) must not park the agents of the working gateway
 	// (GAP-1133 round 3).
-	HeldElsewhere func() bool
+	HeldElsewhere func() bool `json:"-"`
 }
 
 // RouteOnlyPlaceholderCredential is the fixed, non-secret value a custody
