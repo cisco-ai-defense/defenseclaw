@@ -75,6 +75,14 @@ func sedScriptEffects(words []string) (outputs, commands []string) {
 			command := p.peek()
 			p.i++
 			switch command {
+			case '#':
+				for p.more() && p.peek() != '\n' {
+					p.i++
+				}
+			case 'a', 'i', 'c':
+				p.text()
+			case 'b', 't', 'T':
+				p.label()
 			case 'w', 'W', 'e':
 				p.skipBlank()
 				start := p.i
@@ -113,6 +121,10 @@ func sedScriptEffects(words []string) (outputs, commands []string) {
 						break
 					}
 					p.i++
+				}
+			case 'y':
+				if !p.transliterate() {
+					break
 				}
 			default:
 				for p.more() && p.peek() != ';' && p.peek() != '\n' {

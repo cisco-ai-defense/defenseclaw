@@ -52,6 +52,7 @@ func TestGAP0377GAP0379Review2FiveTierHookRoute(t *testing.T) {
 				{"0377-sed-substitute-w-link", "sed -i -e 's/x/y/w key[9]' ordinary/x", "block"},
 				{"0377-sed-execute-link", "sed -i -e 'e touch key[9]' ordinary/x", "block"},
 				{"0377-control", "sed -i -e 's/a/b/' ordinary/x", "allow"},
+				{"0377-text-control", "sed -i -e 'a text; w key[9]' ordinary/x", "allow"},
 				{"0379-alt-attached-dd", "dd if=/dev/null of=./key[9]", "block"},
 				{"0379-control", "dd if=/dev/null of=./plain[9]", "allow"},
 				{"0380-alt-nocase-bracket", "shopt -s nocaseglob; touch KEY[ab]", "block"},
