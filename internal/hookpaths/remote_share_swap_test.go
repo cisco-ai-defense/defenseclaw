@@ -142,17 +142,19 @@ func TestCXRV1074SwapBetweenGateAndRead(t *testing.T) {
 			return listing(names)
 		}
 	}
+	// Row ids name a folder each, so they differ in more than case (the
+	// Windows and macOS file systems ignore case).
 	readers := []reader{
 		{"stat", false, statSize(pathStat)},
 		{"stat-pinned", false, statSize(pathStatPinned)},
-		{"Stat", false, statSize(Stat)},
+		{"export-stat", false, statSize(Stat)},
 		{"open", false, openBody(pathOpen)},
-		{"Open", false, openBody(Open)},
-		{"ReadFile", false, func(path string) string { return body(ReadFile(path)) }},
+		{"export-open", false, openBody(Open)},
+		{"export-readfile", false, func(path string) string { return body(ReadFile(path)) }},
 		{"evalsymlinks", false, finalName(pathEvalSymlinks)},
-		{"EvalSymlinks", false, finalName(EvalSymlinks)},
+		{"export-evalsymlinks", false, finalName(EvalSymlinks)},
 		{"readdir", true, readDir(pathReadDir)},
-		{"ReadDir", true, readDir(ReadDir)},
+		{"export-readdir", true, readDir(ReadDir)},
 		{"openroot", true, func(path string) string {
 			root, err := pathOpenRoot(path)
 			if err != nil {
