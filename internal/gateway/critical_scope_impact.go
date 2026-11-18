@@ -250,7 +250,11 @@ func criticalWrappedChild(command actionfacts.CommandFact) bool {
 // judged only on a command with no unreadable word beside the glob, and only
 // the glob targets count: a root or a folder named next to an unrelated
 // dynamic word stays at the unknown tier of the pack, as before.
-func criticalScopeCommands(facts actionfacts.Facts, visit func(command actionfacts.CommandFact, program string, words []string, partial bool) bool) bool {
+//
+// stdin is set when the words hold what xargs read from the stage before it
+// (xargsStdinRun): no rule reads them from the argv, so a proof judges them
+// itself.
+func criticalScopeCommands(facts actionfacts.Facts, visit func(command actionfacts.CommandFact, program string, words []string, partial, stdin bool) bool) bool {
 	for _, command := range facts.Commands {
 		if command.ParentCommandID != 0 && !criticalWrappedChild(command) ||
 			command.Effect == actionfacts.EffectPreview ||
@@ -266,14 +270,18 @@ func criticalScopeCommands(facts actionfacts.Facts, visit func(command actionfac
 			continue
 		}
 		inner, innerWords := unwrapStateWrapper(command, words)
+		stdin := false
 		if strings.ToLower(path.Base(inner.Program)) == "xargs" {
 			// xargs runs its program with the words it reads from stdin
 			// (echo ~ | xargs rm -rf removes the home, rel-1-0-10:GAP-0762).
+			// A wrapper xargs runs (xargs sudo rm -rf) runs its program with
+			// those words too (rel-1-0-10:GAP-1247).
 			if program, run, ok := xargsStdinRun(facts, command, innerWords); ok {
-				inner.Program, innerWords = program, run
+				inner.Program, stdin = program, true
+				inner, innerWords = unwrapStateWrapper(inner, run)
 			}
 		}
-		if visit(command, strings.ToLower(path.Base(inner.Program)), innerWords, partial) {
+		if visit(command, strings.ToLower(path.Base(inner.Program)), innerWords, partial, stdin) {
 			return true
 		}
 	}
@@ -282,46 +290,127 @@ func criticalScopeCommands(facts actionfacts.Facts, visit func(command actionfac
 
 // xargsOperandOptions are the xargs options that leave the words it reads as
 // operands of its program, each with whether it takes the next word. An
-// option that changes how the input is split or where it is placed (-I, -i,
-// -d, -0, -a, -E, -e, -s) is not read.
+// option that changes how the input is split (-d, -a, -E, -e, -s) is not
+// read; -0 and -I are read by xargsStdinRun.
 var xargsOperandOptions = map[string]bool{
 	"-r": false, "--no-run-if-empty": false, "-t": false, "--verbose": false, "-x": false, "--exit": false,
 	"-n": true, "--max-args": true, "-L": true, "--max-lines": true, "-P": true, "--max-procs": true,
 }
 
-// xargsStdinPrograms are the programs whose output xargs reads as words
-// when their own words are static, from those words: echo prints its words,
-// and printf with a format of only %s and spacing prints its arguments.
-var xargsStdinPrograms = map[string]func(words []string) ([]string, bool){
-	"echo": func(words []string) ([]string, bool) {
+// xargsHome marks, in the text xargsStdinRun reads from the stage before
+// xargs, a "~" the caller shell expanded to the home. A "~" the source
+// quoted or escaped stays a "~": that stage prints a literal ~, which names
+// ./~ for xargs's program (rel-1-0-10:GAP-1247). A shell word holds no
+// such control byte, so the marker names nothing else.
+const xargsHome = "\x1f"
+
+// xargsStdinPrograms are the programs whose output xargs reads when their
+// own words are static, from those words (each a "~" of the home written as
+// xargsHome): echo prints its words, and printf prints a format of plain
+// text, %s and the \n and \t escapes with its arguments.
+var xargsStdinPrograms = map[string]func(words []string) (string, bool){
+	"echo": func(words []string) (string, bool) {
+		newline := "\n"
 		for len(words) > 0 && (words[0] == "-n" || words[0] == "-e" || words[0] == "-E") {
+			if words[0] == "-n" {
+				newline = ""
+			}
 			words = words[1:]
 		}
-		return strings.Fields(strings.Join(words, " ")), true
+		return strings.Join(words, " ") + newline, true
 	},
-	"printf": func(words []string) ([]string, bool) {
+	"printf": func(words []string) (string, bool) {
 		if len(words) == 0 {
-			return nil, false
+			return "", false
 		}
-		format := strings.NewReplacer("%s", "", `\n`, "", `\t`, "", " ", "").Replace(words[0])
-		if format != "" || !strings.Contains(words[0], "%s") {
-			return nil, false
+		format := strings.NewReplacer(`\n`, "\n", `\t`, "\t").Replace(words[0])
+		parts := strings.Split(format, "%s")
+		if strings.Contains(format, `\`) || strings.Count(format, "%") != len(parts)-1 {
+			return "", false
 		}
-		return strings.Fields(strings.Join(words[1:], " ")), true
+		args := words[1:]
+		var out strings.Builder
+		for {
+			out.WriteString(parts[0])
+			for _, part := range parts[1:] {
+				if len(args) > 0 {
+					out.WriteString(args[0])
+					args = args[1:]
+				}
+				out.WriteString(part)
+			}
+			// printf reuses the format while arguments are left.
+			if len(parts) == 1 || len(args) == 0 {
+				return out.String(), true
+			}
+		}
 	},
+}
+
+// xargsPrintedWords are the static words of command (stateOperandWords) with
+// each "~" the shell expands to the home written as xargsHome: a word the
+// source quoted or escaped keeps its "~" as text.
+func xargsPrintedWords(command actionfacts.CommandFact) ([]string, bool) {
+	words, ok := stateOperandWords(command)
+	if !ok || slices.Contains(words, "") || strings.Contains(strings.Join(words, ""), xargsHome) {
+		return nil, false
+	}
+	for i, word := range words {
+		if argument := command.Arguments[i+1]; argument.Value == "" && strings.HasPrefix(word, "~") {
+			words[i] = xargsHome + word[1:]
+		}
+	}
+	return words, true
+}
+
+// xargsInputWord is one item xargs read: a "~" the shell expanded to the
+// home names the home again, and a literal "~" at its start names ./~.
+func xargsInputWord(item string) string {
+	if strings.HasPrefix(item, "~") {
+		item = "./" + item
+	}
+	return strings.ReplaceAll(item, xargsHome, "~")
 }
 
 // xargsStdinRun returns the program an xargs call runs and its words, with
 // the words the stage before it in the pipeline prints (xargsStdinPrograms)
-// appended as xargs appends them. ok is false when the xargs options or the
-// stage before it are not read.
+// placed as xargs places them: appended after blanks split them, as one word
+// with -0 (the input holds no NUL), or one call per line in place of the
+// replace string with -I. ok is false when the xargs options or the stage
+// before it are not read.
 func xargsStdinRun(facts actionfacts.Facts, command actionfacts.CommandFact, words []string) (string, []string, bool) {
 	index := 0
+	null, replace := false, ""
 	for index < len(words) && strings.HasPrefix(words[index], "-") {
 		word := words[index]
 		if word == "--" {
 			index++
 			break
+		}
+		switch {
+		case word == "-0" || word == "--null":
+			null = true
+			index++
+			continue
+		case word == "-I":
+			if index+1 >= len(words) || words[index+1] == "" {
+				return "", nil, false
+			}
+			replace = words[index+1]
+			index += 2
+			continue
+		case strings.HasPrefix(word, "-I"):
+			replace = word[2:]
+			index++
+			continue
+		case word == "-i" || word == "--replace":
+			replace = "{}"
+			index++
+			continue
+		case strings.HasPrefix(word, "-i") || strings.HasPrefix(word, "--replace="):
+			replace = strings.TrimPrefix(strings.TrimPrefix(word, "--replace="), "-i")
+			index++
+			continue
 		}
 		name, _, attached := strings.Cut(word, "=")
 		value, known := xargsOperandOptions[name]
@@ -357,15 +446,46 @@ func xargsStdinRun(facts actionfacts.Facts, command actionfacts.CommandFact, wor
 	if !known {
 		return "", nil, false
 	}
-	printed, ok := stateOperandWords(*before)
-	if !ok || slices.Contains(printed, "") {
+	printed, ok := xargsPrintedWords(*before)
+	if !ok {
 		return "", nil, false
 	}
-	input, ok := read(printed)
-	if !ok || len(input) == 0 {
+	text, ok := read(printed)
+	if !ok {
 		return "", nil, false
 	}
-	return path.Base(words[index]), append(slices.Clone(words[index+1:]), input...), true
+	program, initial := path.Base(words[index]), words[index+1:]
+	var run []string
+	items := 0
+	switch {
+	case replace != "":
+		// -I reads one item per line, leading blanks dropped, and runs the
+		// program once per item with the item in place of the replace
+		// string; the words of every call are read together.
+		for _, line := range strings.Split(text, "\n") {
+			if item := strings.TrimLeft(line, " \t"); item != "" {
+				items++
+				for _, word := range initial {
+					run = append(run, strings.ReplaceAll(word, replace, xargsInputWord(item)))
+				}
+			}
+		}
+	case null:
+		run = append(slices.Clone(initial), xargsInputWord(text))
+		if text != "" {
+			items = 1
+		}
+	default:
+		run = slices.Clone(initial)
+		for _, item := range strings.Fields(text) {
+			run = append(run, xargsInputWord(item))
+			items++
+		}
+	}
+	if items == 0 {
+		return "", nil, false
+	}
+	return program, run, true
 }
 
 // criticalTarget reports a word that removes or locks a critical scope; in a
@@ -449,10 +569,10 @@ func stdinAnswersYes(facts actionfacts.Facts, command actionfacts.CommandFact) b
 // and nothing answers yes for it (stdinAnswersYes). A complete parse with -f is judged by the CMD-RM-RF owner itself.
 func criticalDeleteProof(_ actionfacts.Input, facts actionfacts.Facts) bool {
 	home := criticalScopeHome(facts)
-	return criticalScopeCommands(facts, func(command actionfacts.CommandFact, program string, words []string, partial bool) bool {
+	return criticalScopeCommands(facts, func(command actionfacts.CommandFact, program string, words []string, partial, stdin bool) bool {
 		recursive, force, interactive := rmRecursiveOptions(words)
 		if program != "rm" || !recursive || interactive && !force && !stdinAnswersYes(facts, command) ||
-			force && facts.Authoritative() {
+			force && facts.Authoritative() && !stdin {
 			return false
 		}
 		options := true
@@ -540,7 +660,7 @@ func chmodLocksOut(mode string) bool {
 // to a mode that locks it out or opens it for writing.
 func criticalRecursiveLockoutProof(_ actionfacts.Input, facts actionfacts.Facts) bool {
 	home := criticalScopeHome(facts)
-	return criticalScopeCommands(facts, func(_ actionfacts.CommandFact, program string, words []string, partial bool) bool {
+	return criticalScopeCommands(facts, func(_ actionfacts.CommandFact, program string, words []string, partial, _ bool) bool {
 		if program != "chmod" {
 			return false
 		}

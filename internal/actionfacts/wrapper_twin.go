@@ -26,9 +26,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
-// WrapperUnwrapTwin returns the POSIX reading of command in which every cp,
-// mv, install, ln, dd, tee, rsync, delete (rm, unlink, rmdir, shred) or
-// shell call run through static prefix
+// WrapperUnwrapTwin returns the POSIX reading of command in which every
+// call run through static prefix
 // wrappers (nohup, nice, time, timeout, env, command, builtin, sudo, doas,
 // exec, setsid, stdbuf, ionice, taskset, chrt, flock, caffeinate with
 // their known options), or after a leading word that may expand to nothing
@@ -38,7 +37,8 @@ import (
 // wrapped argv tied no write to it (nohup cp a.txt
 // ~/.defenseclaw/config.yaml was allowed; setsid, stdbuf, ionice, doas,
 // chrt, taskset and flock rm -rf ~/.defenseclaw were allowed in all five
-// tiers while nohup rm -rf ~/.defenseclaw blocked, rel-1-0-10:GAP-1186).
+// tiers while nohup rm -rf ~/.defenseclaw blocked, rel-1-0-10:GAP-1186;
+// so were find -delete and truncate of it, rel-1-0-10:GAP-1246).
 // A wrapper that runs the call in
 // another directory (env -C dir) is written as ( cd dir && call ), so a
 // relative operand is read where the call runs. ok is false when no call
@@ -525,12 +525,21 @@ func wrapperProgramName(word string) string {
 	return word
 }
 
-// wrappedWriterRun returns where the program word of a file writer
-// (dynamicOperandPrograms or rsync), of a delete (wrappedDeletePrograms) or
-// of a POSIX shell is that args run
-// after leading words that may expand to nothing and static prefix
-// wrappers. A shell is the stop too: setsid sh -c STRING runs what
-// sh -c STRING runs (GAP-2519).
+// wrappedWriterRun returns where the program word is that args run after
+// leading words that may expand to nothing and static prefix wrappers. The
+// program is the first static word that is no prefix wrapper
+// (prefixWrapperPrograms): a wrapper runs it with the argv the caller shell
+// expanded, so it writes or removes what the plain call does whatever the
+// program is. Stopping only at a list of writers, deletes and shells left
+// find -delete, truncate or git clean of the DefenseClaw state behind
+// setsid, stdbuf, ionice, doas, taskset, chrt or flock a clean allow while
+// the plain call blocked (rel-1-0-10:GAP-1246); the twin counts only a block
+// proven on the plain reading, so no program blocks there that does not
+// block plain. A shell is a stop too: setsid sh -c STRING runs what sh -c
+// STRING runs (GAP-2519). A program word with no static spelling
+// ("$(echo nice)", "$W") may name a wrapper: when a static program word
+// follows it, the call is read as that program's call too, as a word that
+// may expand to nothing is (rel-1-0-10:GAP-1246).
 func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	index := 0
 	for index < len(args) && vanishingWord(args[index]) {
@@ -549,11 +558,19 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	var run PrefixWrapperRun
 	for index < len(args) && run.ReadsMore() {
 		word, static := value(index)
-		if !static || word == "" {
+		if !static {
+			if next, ok := value(index + 1); ok && next != "" && !strings.HasPrefix(next, "-") {
+				run.Count("")
+				index++
+				continue
+			}
+			return PrefixWrapperRun{}, false
+		}
+		if word == "" || strings.HasPrefix(word, "-") {
 			return PrefixWrapperRun{}, false
 		}
 		name := wrapperProgramName(word)
-		if dynamicOperandPrograms[name] || name == "rsync" || wrappedDeletePrograms[name] || wrappedShellPrograms[name] {
+		if !prefixWrapperPrograms[name] || wrappedShellPrograms[name] {
 			run.Index = index
 			return run, true
 		}
@@ -566,13 +583,14 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 	return PrefixWrapperRun{}, false
 }
 
-// wrappedDeletePrograms are the deletes whose wrapped call is read as the
-// plain call: a wrapper runs rm with the argv the caller shell expanded, so
-// it removes what the plain rm removes. Only nohup, timeout and env used to
-// reach the plain reading, so the same delete of the DefenseClaw state behind
-// any other wrapper the prefix reader knows was a clean allow
-// (rel-1-0-10:GAP-1186).
-var wrappedDeletePrograms = map[string]bool{"rm": true, "unlink": true, "rmdir": true, "shred": true}
+// prefixWrapperPrograms are the prefix wrappers wrapperChildIndexOf reads
+// (one case each there): a word naming one of them is read as a wrapper,
+// every other static program word as the program the chain runs.
+var prefixWrapperPrograms = map[string]bool{
+	"nohup": true, "nice": true, "time": true, "timeout": true, "env": true, "command": true,
+	"builtin": true, "sudo": true, "doas": true, "exec": true, "setsid": true, "stdbuf": true,
+	"ionice": true, "taskset": true, "chrt": true, "flock": true, "caffeinate": true,
+}
 
 // wrappedShellPrograms are the shells whose wrapped call is read as the
 // plain call, so the plain reading of a -c STRING applies.
