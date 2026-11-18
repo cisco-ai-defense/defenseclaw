@@ -50,7 +50,7 @@
 //     answer, or that saw an unrecorded step, follows chain.failure_mode
 //     for GET and HEAD and refuses, in every mode, a request with a body or
 //     any other method (GAP-0601; an actor with no registration has no
-//     window and is alerted);
+//     window, so chain.failure_mode decides for it);
 //  8. ask-required hosts (AskSink);
 //  9. body mode (D9): MCP and admin-listed hosts only, when the egress
 //     filter allows a mode_override (upstream #3817), 1 MiB cap, never SSE

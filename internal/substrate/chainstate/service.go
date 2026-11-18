@@ -124,6 +124,15 @@ type Options struct {
 	Now func() time.Time
 	// Warn receives operational warnings (default stderr).
 	Warn io.Writer
+	// StartGrace is how long after its first egress check the leader
+	// answers a clear one unavailable (0: never). A gateway that could not
+	// record a tool step while no leader answered (a secret read during an
+	// outage) tells the leader when it is back, retrying every 5 s; until
+	// that note can have arrived, a clear answer may miss the read. The
+	// callout takes unavailable as unchecked: a send is refused in every
+	// mode, GET and HEAD follow chain.failure_mode (GAP-0601). A hit is
+	// answered at once.
+	StartGrace time.Duration
 }
 
 // Service is the leader's chain and intent state. Every actor has its own
@@ -135,6 +144,9 @@ type Service struct {
 	// action is the chain egress action in force: opts.EgressAction at
 	// start, then SetEgressAction (a config.yaml change, GAP-0276).
 	action atomic.Pointer[string]
+	// serving is when the first egress check came (Unix ns), for
+	// opts.StartGrace.
+	serving atomic.Int64
 
 	mu      sync.Mutex
 	actors  map[string]*actorEntry // atespace/uid
@@ -1525,9 +1537,30 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		s.egress.push(egressRecord{actor: e.actor, sync: true})
 		return EgressVerdict{}, errWarming
 	case !v.Deny:
+		if s.starting() {
+			// Not recorded: as during the outage, the callout refuses a
+			// send and the step is not the actor's yet.
+			return EgressVerdict{}, errStarting
+		}
 		s.egress.push(egressRecord{actor: e.actor, in: in})
 	}
 	return v, nil
+}
+
+// errStarting answers a clear egress check within opts.StartGrace of the
+// leader's first one (GAP-0601).
+var errStarting = &leader.WireError{Code: leader.CodeUnavailable,
+	Message: "the gateway leader started moments ago; tool calls a gateway could not record while no leader answered may still be arriving"}
+
+// starting reports whether a clear egress check is within opts.StartGrace
+// of the first one this leader answered.
+func (s *Service) starting() bool {
+	if s.opts.StartGrace <= 0 {
+		return false
+	}
+	now := s.opts.Now().UnixNano()
+	s.serving.CompareAndSwap(0, now)
+	return now-s.serving.Load() < int64(s.opts.StartGrace)
 }
 
 // staleVerdict answers an egress check under a UID that is not the

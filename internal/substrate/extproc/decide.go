@@ -608,6 +608,8 @@ func uncheckedSendReason(why string) string {
 		cause = "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached or failed the check"
 	case uncheckedTimeout:
 		cause = "DefenseClaw's gateway leader did not answer in time"
+	case uncheckedInternal:
+		cause = "DefenseClaw's chain check hit an internal error"
 	case uncheckedBusy:
 		cause = "This actor has too many requests waiting for their check"
 	case uncheckedUnrecorded:
