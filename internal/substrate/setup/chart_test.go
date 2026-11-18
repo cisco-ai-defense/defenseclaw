@@ -131,6 +131,10 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"memory home, limit below size":    "homeMedium=Memory,homeSizeLimit=512Mi,config.observability.local.max_store_mb=128", // controller and callout 512Mi < 512Mi + 128Mi
 		"memory home, decimal limit short": memoryHomeExample + ",callout.resources.limits.memory=600M",                         // 572 MiB < 640 MiB
 		"memory home, unreadable limit":    memoryHomeExample + ",leader.resources.limits.memory=lots",
+		// substrate-1:GAP-0578 (f): the headroom is never under the chart default
+		// request (controller 128Mi), so a 1Mi request does not make a 520Mi
+		// limit fit a 512Mi tmpfs.
+		"memory home, tiny request": memoryHomeExample + ",controller.resources.requests.memory=1Mi,controller.resources.limits.memory=520Mi",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {
