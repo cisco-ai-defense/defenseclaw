@@ -24,9 +24,7 @@ func TestR104Refix3WriteEvidence(t *testing.T) {
 	if err := os.WriteFile(protected, []byte("marker"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(protected, filepath.Join(cwd, "alias")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, protected, filepath.Join(cwd, "alias"))
 	for _, tc := range []struct {
 		name, command, reason string
 	}{

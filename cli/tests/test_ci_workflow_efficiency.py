@@ -159,7 +159,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
     assert "GO_PACKAGE_SHARDS: 19" in workflow
-    assert "GO_TEST_SHARDS: 88" in workflow
+    assert "GO_TEST_SHARDS: 96" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
     # The three Linux jobs, and the six darwin gateway parts, which weigh the
@@ -181,7 +181,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
-    assert profiles == 111
+    assert profiles == 120
     # The frozen-gateway job adds one more profile (it runs the three tests
     # that no longer run in the shards).
     profiles += 1
@@ -191,12 +191,13 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     # go_test_report.py names the test still running.
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
-    assert workflow.count(race) == 1
-    # A gateway shard's -timeout follows its planned seconds
-    # (go_test_shards.py --timeout, test_linux_gateway_shard_timeouts_fit_the_job).
-    gateway = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$test_timeout" '
-    assert workflow.count(gateway) == 1
-    assert 'test_timeout="$("${plan[@]}" --timeout)"' in workflow
+    assert workflow.count(race) == 0
+    # A gateway and an audit shard's -timeout follow their planned seconds
+    # (go_test_shards.py --timeout, test_linux_gateway_shard_timeouts_fit_the_job;
+    # the audit shards had a flat 11m until rel-1-0-10:GAP-1216).
+    planned = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$test_timeout" '
+    assert workflow.count(planned) == 2
+    assert workflow.count('test_timeout="$("${plan[@]}" --timeout)"') == 2
     # The remaining-package shards run several go test runs in one step: they
     # share one deadline inside the step budget, and each run is stopped at
     # most 11 minutes in or when the deadline is up, whichever comes first.
@@ -493,4 +494,12 @@ def test_connector_matrix_runs_the_gateway_matrix_tests_in_guarded_parts() -> No
     assert "./internal/gateway" not in packages
     assert "--package-dir internal/gateway --built-files" in makefile
     assert '--expect-run "$$run"' in makefile
+    # The connector parts carry the same run-count guard: a selected test
+    # that never ran (a name this GOOS does not build) failed nothing before
+    # (GAP-1054, the GAP-1051 class).
+    recipe = makefile.split("go-connector-matrix-test: sync-openclaw-extension", 1)[1].split("\nendif", 1)[0]
+    connector = recipe.split("\nelse\n")[-1]
+    assert "--package-dir internal/gateway/connector --built-files" in connector
+    assert "go test -json" in connector
+    assert '--expect-run "$$run"' in connector
     assert "go-connector-matrix-test: .SHELLFLAGS := -o pipefail -c" in makefile

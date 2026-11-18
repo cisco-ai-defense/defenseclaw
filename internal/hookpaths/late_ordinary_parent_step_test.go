@@ -46,9 +46,7 @@ func TestLateOrdinaryCallStepsThroughParentFolders(t *testing.T) {
 	if err := os.Symlink(linkedChild, jump); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if err := os.Symlink(keys, filepath.Join(plain, "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(plain, "keylink"))
 	if err := os.Link(keys, filepath.Join(plain, "hardlink")); err != nil {
 		t.Skipf("hard link unavailable: %v", err)
 	}

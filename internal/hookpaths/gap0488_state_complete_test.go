@@ -173,12 +173,8 @@ func TestG622b9LinkedStateDirectoryIsWalked(t *testing.T) {
 	if err := os.WriteFile(moved, []byte("# base\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(s.policies, "extra")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(s.policies, filepath.Join(outside, "loop")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, outside, filepath.Join(s.policies, "extra"))
+	testSymlink(t, s.policies, filepath.Join(outside, "loop"))
 	link := filepath.Join(s.project, "moved-alias.txt")
 	if err := os.Link(moved, link); err != nil {
 		t.Fatal(err)

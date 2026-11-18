@@ -442,9 +442,7 @@ func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T)
 	if err := os.Mkdir(filepath.Join(cwd, "build"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(ssh, filepath.Join(cwd, "dirlink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, ssh, filepath.Join(cwd, "dirlink"))
 	for _, command := range []string{
 		"cd dirlink && echo marker >> authorized_keys",
 		"env -C dirlink python3 <<'PY'\nopen(\"authorized_keys\",\"a\").write(\"marker\")\nPY",

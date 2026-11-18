@@ -34,9 +34,7 @@ func TestReachedEvidenceKeepsTheStartDirectoryPastTheHeaderBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(deep, "lnk")
-	if err := os.Symlink(project, link); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, project, link)
 	if len(link) > MaxWriteTargetPathBytes {
 		t.Skip("the temporary directory is too long for the deep spelling")
 	}

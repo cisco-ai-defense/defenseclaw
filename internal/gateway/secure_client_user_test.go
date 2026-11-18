@@ -50,6 +50,11 @@ func withSecureClientUserAttribution(t *testing.T, account func(context.Context)
 			return true
 		})
 	})
+	// The Secure Client posture, as applyIdentityPosture sets it: identity
+	// facts off and user attribution on. The flags are process-wide, so a
+	// test earlier in the same shard that left identity facts on sent
+	// requestIdentityFor down the facts path, and the Secure Client UPN was
+	// never asked for (rel-1-0-10:GAP-1210, Windows CI gw2).
 	setIdentityFactsEnabled(false)
 	setSecureClientUserAttribution(true)
 	SetManagedEnterpriseActive(true)
@@ -133,6 +138,16 @@ func TestSecureClientUserVerifiedMatchGetsUPN(t *testing.T) {
 	if !v8RecordNamesCaller(ctx, testSCSID) || v8RecordNamesCaller(context.Background(), testSCSID) {
 		t.Fatal("v8RecordNamesCaller must name only a labelled caller under Secure Client")
 	}
+}
+
+// TestSecureClientUserVerifiedMatchGetsUPNAfterIdentityFacts runs the
+// verified-match check after a test that left identity facts on, as the
+// Windows gw2 shard of #1457 did (rel-1-0-10:GAP-1210).
+func TestSecureClientUserVerifiedMatchGetsUPNAfterIdentityFacts(t *testing.T) {
+	prev := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(prev) })
+	TestSecureClientUserVerifiedMatchGetsUPN(t)
 }
 
 func TestSecureClientUserMismatchReportsKernelAccount(t *testing.T) {

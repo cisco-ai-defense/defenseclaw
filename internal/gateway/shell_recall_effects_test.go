@@ -69,11 +69,10 @@ func shellRecallFixtureCommand(t *testing.T, fixture, caseSuffix string) string 
 
 func shellRecallEffectsFixtureCommand(t *testing.T, id string) string {
 	t.Helper()
-	_, selfPath, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot resolve caller path")
-	}
-	file, err := os.Open(filepath.Join(filepath.Dir(selfPath), "..", "actionfacts", "testdata", "shell-recall-effects-v1.jsonl"))
+	// go test runs a package's tests in its folder; the build host's source
+	// path (runtime.Caller) does not exist where a test binary is copied
+	// (the native Windows gate read this as a red).
+	file, err := os.Open(filepath.Join("..", "actionfacts", "testdata", "shell-recall-effects-v1.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}

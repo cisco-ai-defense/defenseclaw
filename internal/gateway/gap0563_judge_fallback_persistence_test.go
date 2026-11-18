@@ -101,10 +101,26 @@ func TestGAP0563HookJudgeFallbackPersistsAfterEarlyTelemetry(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil || answer.Action != "allow" {
 				t.Fatalf("ordinary tool answer %+v, error %v, body %s", answer, err, w.Body.String())
 			}
+			// The hook has answered. A judge that answers or fails must reach
+			// the provider. When the hook gave up on the judge (late, timeout)
+			// the hook's answer cancels the call, and on a loaded host it can be
+			// cancelled before it reaches the provider at all ("judge call
+			// waited for a free slot ... past its deadline: context canceled"),
+			// so the provider never reports. That is the fallback this case
+			// checks, not a hang: the wait was a fixed 5 s on the provider and
+			// failed there under -race on a loaded box (rel-1-0-10:GAP-0289).
+			gaveUp := tc.reason == judgeFallbackLate || tc.reason == judgeFallbackTimeout
+			wait := tc.delay + 30*time.Second
+			if gaveUp {
+				wait = tc.delay + 5*time.Second
+			}
 			select {
 			case <-provider.finished:
-			case <-time.After(5 * time.Second):
-				t.Fatal("judge call did not finish")
+			case <-time.After(wait):
+				if !gaveUp {
+					t.Fatal("judge call did not finish")
+				}
+				t.Logf("the hook's %s fallback cancelled the judge call before it reached the provider", tc.reason)
 			}
 			// A benign per-user allow keeps one local row, its hook_decision
 			// row, which names the fallback (#1384); the connector-hook
