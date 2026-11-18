@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -124,22 +125,95 @@ func kiroV3HookEntry(name, description, trigger, matcher, hookScript string) map
 	return entry
 }
 
-func removeKiroV3Hooks(path, hookScript string) error {
-	return removeKiroV3HooksKeeping(path, hookScript, false)
+// kiroReclaimScope limits the teardown of an unconfigured connector to what
+// this install provably wrote (KiroConnector.reclaimScope): the files in
+// files, and in them only the entries that run exactly one of commands. A
+// nil scope, the teardown of a configured connector, covers every Kiro file
+// and every DefenseClaw entry (kiroOwnedV3Hook, kiroV2EntryOwned and the
+// edited forms).
+type kiroReclaimScope struct {
+	files    map[string]bool
+	commands []string
 }
 
-// removeKiroV3HooksKeeping is removeKiroV3Hooks that, with operatorFile,
-// keeps a file left with no hooks: the operator had it before Setup
-// (kiroPristineIsOperators).
-func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool) error {
-	cfg, err := readJSONObject(path)
+func (s *kiroReclaimScope) covers(path string) bool {
+	return s == nil || s.files[filepath.Clean(path)]
+}
+
+// remaining lists, sorted, the scope's files that still hold an entry running
+// one of its commands, read as the scope found them (kiroV3FileHoldsCommand,
+// kiroAgentFileHoldsCommand): what the reclaim had to remove and did not.
+func (s *kiroReclaimScope) remaining() ([]string, error) {
+	var left []string
+	for path := range s.files {
+		present, err := kiroV3FileHoldsCommand(path, s.commands)
+		if err == nil && !present {
+			present, err = kiroAgentFileHoldsCommand(path, s.commands)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if present {
+			left = append(left, path)
+		}
+	}
+	slices.Sort(left)
+	return left, nil
+}
+
+// runsOwnCommand reports whether raw, a CLI 2.x hook handler or the action of
+// a v3 or universal entry, runs exactly one of the scope's commands.
+func (s *kiroReclaimScope) runsOwnCommand(raw interface{}) bool {
+	for _, command := range s.commands {
+		if managedHookCommandEntry(raw, command) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownsActionEntry is the ownership of a v3 or universal-form entry: with no
+// scope kiroOwnedV3Hook, with one an action that runs one of its commands.
+func (s *kiroReclaimScope) ownsActionEntry(item interface{}, hookScript string) bool {
+	if s == nil {
+		return kiroOwnedV3Hook(item, hookScript)
+	}
+	obj, _ := item.(map[string]interface{})
+	return obj != nil && s.runsOwnCommand(obj["action"])
+}
+
+// keepUniversal drops the scope's universal-form entries from list.
+func (s *kiroReclaimScope) keepUniversal(list []interface{}, hookScript string) []interface{} {
+	if s == nil {
+		return removeKiroOwnedUniversalHooks(list, hookScript)
+	}
+	return slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+		return s.ownsActionEntry(item, hookScript)
+	})
+}
+
+// keepV2 drops the scope's entries from one CLI 2.x event's hook list.
+func (s *kiroReclaimScope) keepV2(raw interface{}, hookScript string) []interface{} {
+	if s == nil {
+		return removeKiroOwnedV2Hooks(raw, hookScript)
+	}
+	list, _ := raw.([]interface{})
+	return slices.DeleteFunc(slices.Clone(list), s.runsOwnCommand)
+}
+
+// removeKiroV3HooksKeeping removes DefenseClaw's entries from a v3 hook file,
+// and the file when nothing else is left in it unless operatorFile: the
+// operator had it before Setup (kiroPristineIsOperators). With a scope only
+// its entries go.
+func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
+	cfg, err := kiroReadJSONObject(path)
 	if err != nil {
 		return err
 	}
 	hooks, _ := cfg["hooks"].([]interface{})
 	kept := make([]interface{}, 0, len(hooks))
 	for _, item := range hooks {
-		if kiroOwnedV3Hook(item, hookScript) {
+		if scope.ownsActionEntry(item, hookScript) {
 			continue
 		}
 		kept = append(kept, item)
@@ -283,15 +357,12 @@ func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
 	return true
 }
 
-func removeKiroV2AgentHooks(path, hookScript string) error {
-	return removeKiroV2AgentHooksKeeping(path, hookScript, false)
-}
-
-// removeKiroV2AgentHooksKeeping is removeKiroV2AgentHooks that, with
-// operatorFile, keeps an agent file left looking like DefenseClaw's overlay:
-// the operator had it before Setup (kiroPristineIsOperators).
-func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) error {
-	cfg, err := readJSONObject(path)
+// removeKiroV2AgentHooksKeeping removes DefenseClaw's entries from a CLI 2.x
+// agent file, in either form, and the file when it is left looking like
+// DefenseClaw's overlay unless operatorFile: the operator had it before Setup
+// (kiroPristineIsOperators). With a scope only its entries go.
+func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
+	cfg, err := kiroReadJSONObject(path)
 	if err != nil {
 		return err
 	}
@@ -299,7 +370,7 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 		return nil
 	}
 	if list, ok := cfg["hooks"].([]interface{}); ok {
-		if kept := removeKiroOwnedUniversalHooks(list, hookScript); len(kept) == 0 {
+		if kept := scope.keepUniversal(list, hookScript); len(kept) == 0 {
 			delete(cfg, "hooks")
 		} else {
 			cfg["hooks"] = kept
@@ -317,7 +388,7 @@ func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool) e
 		return nil
 	}
 	for event, raw := range hooks {
-		remaining := removeKiroOwnedV2Hooks(raw, hookScript)
+		remaining := scope.keepV2(raw, hookScript)
 		if len(remaining) == 0 {
 			delete(hooks, event)
 		} else {
@@ -487,7 +558,7 @@ func kiroV2AgentIsDefenseClawOverlay(cfg map[string]interface{}) bool {
 	if len(cfg) == 0 {
 		return true
 	}
-	if !kiroV2AgentAllowsSeed(cfg) {
+	if !kiroV2AgentAllowsSeed(cfg) && !kiroV2AgentIsKnownDefenseClawShape(cfg) {
 		return false
 	}
 	name, _ := cfg["name"].(string)
@@ -512,13 +583,128 @@ func seedKiroDefaultAgentOverlay(cfg map[string]interface{}) {
 		return
 	}
 	if description, ok := cfg["description"].(string); !ok || strings.TrimSpace(description) == "" {
-		cfg["description"] = "DefenseClaw-guarded Kiro agent"
+		cfg["description"] = kiroManagedAgentDescription
 	}
 	if _, ok := cfg["tools"]; !ok {
 		cfg["tools"] = []interface{}{"*"}
 	}
 	if _, ok := cfg["includeMcpJson"]; !ok {
 		cfg["includeMcpJson"] = true
+	}
+}
+
+// kiroManagedAgentDescription is the description Setup gives the defenseclaw
+// agent; it marks the file as DefenseClaw's own.
+const kiroManagedAgentDescription = "DefenseClaw-guarded Kiro agent"
+
+// kiroAgentEmptyKeys are keys of a Kiro agent file that Kiro writes with an
+// empty value when it converts or normalizes an agent. Empty, they change
+// nothing; with a value they are the operator's.
+var kiroAgentEmptyKeys = []string{"prompt", "resources", "mcpServers", "allowedTools", "toolAliases", "toolsSettings"}
+
+// kiroV2AgentIsKnownDefenseClawShape reports whether cfg is a defenseclaw
+// agent file holding only keys that Setup writes (name, description, tools,
+// includeMcpJson, hooks), the $schema pointer, and the keys of
+// kiroAgentEmptyKeys with an empty value, and carrying Setup's description.
+// Any other key, or a non-empty value of those, is the operator's content, so
+// the file stays when its last DefenseClaw hook goes (rel-1-0-10 GAP-1174).
+func kiroV2AgentIsKnownDefenseClawShape(cfg map[string]interface{}) bool {
+	if description, _ := cfg["description"].(string); strings.TrimSpace(description) != kiroManagedAgentDescription {
+		return false
+	}
+	for key, value := range cfg {
+		switch {
+		case key == "name" || key == "hooks" || key == "description" || key == "tools" || key == "includeMcpJson" || key == "$schema":
+		case slices.Contains(kiroAgentEmptyKeys, key) && kiroEmptyJSONValue(value):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func kiroEmptyJSONValue(value interface{}) bool {
+	switch v := value.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(v) == ""
+	case []interface{}:
+		return len(v) == 0
+	case map[string]interface{}:
+		return len(v) == 0
+	}
+	return false
+}
+
+// removeKiroFileResidue removes what sits beside a Kiro file DefenseClaw has
+// just removed: its empty lock file when no one holds it (removeIdleLockFile:
+// a lock file still there may belong to a live holder, and unlinking a held
+// one lets a second writer lock a new file), and, for a CLI 2.x agent, the
+// <agent>.json.bak copies Kiro's /upgrade-agent keeps, when each is itself
+// only DefenseClaw's overlay and no operator key. Its hooks must each run
+// exactly a command this teardown owns: in a reclaim the install's own
+// (the scope's), otherwise kiroOwnedHookCommands, the install's script
+// command on POSIX (a copy with another data folder's kiro-hook.sh is that
+// install's) and on Windows every launcher form of the account, managed ones
+// included, which do not name a data folder. A copy with anything else in it
+// stays.
+func removeKiroFileResidue(path, hookScript string, agent bool, scope *kiroReclaimScope) {
+	removeIdleLockFile(path + ".lock")
+	if !agent {
+		return
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return
+	}
+	prefix := filepath.Base(path) + ".bak"
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) || !entry.Type().IsRegular() {
+			continue
+		}
+		backup := filepath.Join(filepath.Dir(path), entry.Name())
+		if info, err := os.Stat(backup); err != nil || info.Size() > 1<<20 {
+			continue
+		}
+		cfg, err := readJSONObject(backup)
+		if err != nil || len(cfg) == 0 {
+			continue
+		}
+		if list, ok := cfg["hooks"].([]interface{}); ok {
+			kept := slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+				if scope != nil {
+					return scope.ownsActionEntry(item, hookScript)
+				}
+				return kiroUniversalEntryOwned(item, hookScript)
+			})
+			if len(kept) == 0 {
+				delete(cfg, "hooks")
+			} else {
+				cfg["hooks"] = kept
+			}
+		} else if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+			for event, raw := range hooks {
+				list, _ := raw.([]interface{})
+				remaining := slices.DeleteFunc(slices.Clone(list), func(item interface{}) bool {
+					if scope != nil {
+						return scope.runsOwnCommand(item)
+					}
+					return kiroV2EntryOwned(item, hookScript)
+				})
+				if len(remaining) == 0 {
+					delete(hooks, event)
+				} else {
+					hooks[event] = remaining
+				}
+			}
+			if len(hooks) == 0 {
+				delete(cfg, "hooks")
+			}
+		}
+		if kiroV2AgentIsDefenseClawOverlay(cfg) {
+			_ = os.Remove(backup)
+		}
 	}
 }
 
@@ -571,6 +757,15 @@ func removeKiroOwnedV2Hooks(raw interface{}, hookScript string) []interface{} {
 // DefenseClaw Kiro entry, including a form an earlier build wrote; teardown
 // verification uses it.
 func kiroV2AgentReferencesAnyHook(path, hookScript string) (bool, error) {
+	return kiroAgentFileHoldsCommand(path, kiroOwnedHookCommands(hookScript))
+}
+
+// kiroV3FileHoldsCommand reports whether the v3 hook file at path has an
+// entry whose decoded action.command is exactly one of commands. Unlike
+// kiroV3FileReferencesHook it does not take the name prefix defenseclaw-* or
+// the script's base name as proof: a file shared with another install's
+// entries is not this install's.
+func kiroV3FileHoldsCommand(path string, commands []string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -578,11 +773,88 @@ func kiroV2AgentReferencesAnyHook(path, hookScript string) (bool, error) {
 		}
 		return false, err
 	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	cfg, err := kiroDecodeJSONObject(data)
+	if err != nil {
+		return false, fmt.Errorf("parse kiro hooks %s: %w", path, err)
+	}
+	hooks, _ := cfg["hooks"].([]interface{})
+	for _, item := range hooks {
+		obj, _ := item.(map[string]interface{})
+		action, _ := obj["action"].(map[string]interface{})
+		command, _ := action["command"].(string)
+		if command = strings.TrimSpace(command); command != "" && slices.Contains(commands, command) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// kiroAgentFileHoldsCommand reports whether the CLI 2.x agent file at path has
+// a hook entry that runs exactly one of commands, in any form of the file.
+func kiroAgentFileHoldsCommand(path string, commands []string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	cfg, err := kiroDecodeJSONObject(data)
+	if err != nil {
 		return false, fmt.Errorf("parse kiro agent %s: %w", path, err)
 	}
-	return containsHookScript(cfg, kiroOwnedHookCommands(hookScript)...), nil
+	return containsHookScript(cfg, commands...), nil
+}
+
+// kiroUTF8BOM is the byte order mark a Windows editor (Windows PowerShell
+// 5.1's Set-Content -Encoding UTF8, Notepad) puts before a UTF-8 file.
+var kiroUTF8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// kiroDecodeJSONObject decodes a Kiro hook or agent file as the ownership
+// checks read it: a leading UTF-8 BOM is skipped and an empty file holds no
+// entry. A BOM failed the parse, and one such file a backup record named
+// failed the whole reclaim and prune on every boot.
+func kiroDecodeJSONObject(data []byte) (map[string]interface{}, error) {
+	data = bytes.TrimPrefix(data, kiroUTF8BOM)
+	cfg := map[string]interface{}{}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return cfg, nil
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		cfg = map[string]interface{}{}
+	}
+	return cfg, nil
+}
+
+// kiroReadJSONObject is readJSONObject for a Kiro hook or agent file whose
+// DefenseClaw entries come out: it skips a leading UTF-8 BOM, as the
+// ownership checks do (kiroDecodeJSONObject), so a file they find holding
+// this install's entries can also be cleaned. The file is written back
+// without the BOM.
+func kiroReadJSONObject(path string) (map[string]interface{}, error) {
+	data, err := readHookConfigFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]interface{}{}, nil
+		}
+		return nil, err
+	}
+	return decodeJSONObject(path, bytes.TrimPrefix(data, kiroUTF8BOM))
+}
+
+// kiroFileUnparsable reports whether path is a file the ownership checks
+// cannot read as a JSON object (kiroDecodeJSONObject). An absent file, or one
+// that cannot be opened, is not: those keep their own handling.
+func kiroFileUnparsable(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	_, err = kiroDecodeJSONObject(data)
+	return err != nil
 }
 
 func kiroBuiltInAgentName(name string) bool {
@@ -685,8 +957,8 @@ func kiroSettingsSelectsManagedAgent(path string) (bool, error) {
 	return strings.TrimSpace(current) == kiroManagedAgentName, nil
 }
 
-func removeStaleKiroDefaultOverlay(hookScript string) error {
-	return removeKiroV2AgentHooks(kiroBuiltInDefaultAgentPath(), hookScript)
+func removeStaleKiroDefaultOverlay(hookScript string, scope *kiroReclaimScope) error {
+	return removeKiroV2AgentHooksKeeping(kiroBuiltInDefaultAgentPath(), hookScript, false, scope)
 }
 
 func kiroCommandOwned(command, hookScript string) bool {
