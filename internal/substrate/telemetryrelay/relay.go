@@ -17,11 +17,13 @@ package telemetryrelay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -403,6 +405,10 @@ func (s *Store) PostEgress(ctx context.Context, in PostRequest) (struct{}, error
 // for) keeps the atespace and actor name the callout read from the egress
 // gateway's verified SPIFFE ID, loses its UID and profile and is marked
 // Unregistered, so its refusal still reaches log.egress.blocked (GAP-0581).
+// Those two names are the callout's report, so the leader keeps them only
+// when they are well-formed SPIFFE name segments (registry.ValidName, the
+// check the callout applies): a record with any other name is dropped
+// (GAP-0605).
 // Stripping, not dropping, a record with an unknown UID: without the UID
 // and profile it can't name another actor's registration, and a poster can
 // already omit the UID, so a drop would protect nothing and would lose real
@@ -425,6 +431,9 @@ func (s *Store) egressActor(ctx context.Context, r Record) (Record, bool) {
 			}
 			return r, true
 		}
+	}
+	if !registry.ValidName(r.Atespace) || !registry.ValidName(r.Actor) {
+		return r, false
 	}
 	r.UID, r.Profile, r.Unregistered = "", "", true
 	return r, true
@@ -487,14 +496,34 @@ func (s *Store) takeLocked(n int) TakeResponse {
 	return out
 }
 
+// postHandler decodes a post without leader.Typed's unknown-field check:
+// a Record field a newer poster adds (a callout or controller that rolled
+// before the leader in an upgrade) is ignored, not a bad_request that drops
+// the whole batch (GAP-0606). An unknown kind is dropped by the method's
+// filter, and the fields this leader knows are bounded by post.
+func postHandler(fn func(context.Context, PostRequest) (struct{}, error)) leader.Handler {
+	return func(ctx context.Context, body json.RawMessage) (json.RawMessage, error) {
+		var in PostRequest
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &in); err != nil {
+				return nil, &leader.WireError{Code: leader.CodeBadRequest, Message: "body does not decode"}
+			}
+		}
+		if _, err := fn(ctx, in); err != nil {
+			return nil, err
+		}
+		return json.RawMessage(`{}`), nil
+	}
+}
+
 // Serve registers the methods on the leader server. A take's answer (up
 // to 2,000 records) is not kept in the leader's replay cache, where every
 // take, under a new request id, would push hook-call answers out before
 // their replay window (GAP-0582); the store replays its newest takes
 // itself.
 func Serve(srv *leader.Server, s *Store) {
-	srv.Handle(MethodPostCounts, leader.Typed(s.PostCounts))
-	srv.Handle(MethodPostEgress, leader.Typed(s.PostEgress))
+	srv.Handle(MethodPostCounts, postHandler(s.PostCounts))
+	srv.Handle(MethodPostEgress, postHandler(s.PostEgress))
 	srv.HandleRead(MethodTake, leader.Typed(s.Take))
 }
 
@@ -516,7 +545,13 @@ type Poster struct {
 
 	mu      sync.Mutex
 	pending queue
+	// dropped counts the records of batches the leader refused (GAP-0606).
+	dropped atomic.Int64
 }
+
+// Dropped returns how many records the leader refused since start: the
+// batches Flush dropped with ErrRefused.
+func (p *Poster) Dropped() int64 { return p.dropped.Load() }
 
 // Add queues records for the next flush.
 func (p *Poster) Add(recs ...Record) {
@@ -559,6 +594,7 @@ func (p *Poster) Flush(ctx context.Context) error {
 	}
 	var we *leader.WireError
 	if errors.As(err, &we) && we.Code == leader.CodeBadRequest {
+		p.dropped.Add(int64(len(batch)))
 		return fmt.Errorf("%w: %d records dropped: %w", ErrRefused, len(batch), err)
 	}
 	p.mu.Lock()
@@ -568,11 +604,12 @@ func (p *Poster) Flush(ctx context.Context) error {
 }
 
 // Run flushes every Interval until ctx ends, and once more then. A batch
-// the leader refused is logged; other failures are retried quietly.
+// the leader refused is logged with the records dropped since start;
+// other failures are retried quietly.
 func (p *Poster) Run(ctx context.Context) {
 	runEvery(ctx, p.Interval, true, func(ctx context.Context) {
 		if err := p.Flush(ctx); errors.Is(err, ErrRefused) {
-			fmt.Fprintf(os.Stderr, "[substrate] telemetry relay: %v\n", err)
+			fmt.Fprintf(os.Stderr, "[substrate] telemetry relay: %v (%d records dropped since start)\n", err, p.Dropped())
 		}
 	})
 }
