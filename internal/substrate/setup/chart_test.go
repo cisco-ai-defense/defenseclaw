@@ -751,27 +751,50 @@ func TestChartMemoryHomeFloorsAreTheDefaultRequests(t *testing.T) {
 	}
 }
 
-// GAP-0609: the pre-delete hook's Role may delete the chart's other hook
-// Jobs by name (a failed hook keeps its Job and pod), and nothing else.
+// GAP-0609, GAP-0610: setup.LeftoverHookJobs is the one list of the chart's
+// hook Jobs other than pre-delete. The rendered hook Jobs (launcher renders
+// bootstrap too) and the uninstall Role's resourceNames must be exactly that
+// list, so a new or renamed hook Job cannot drift out of the uninstall.
 func TestChartUninstallRoleDeletesLeftoverHookJobs(t *testing.T) {
 	helm := helmBinary(t)
-	out := string(renderChart(t, helm, "default"))
-	var role string
-	for _, doc := range strings.Split(out, "\n---") {
-		// "\nkind: Role\n" at column 0: the RoleBinding's roleRef has an
-		// indented "kind: Role" and the same name.
-		if strings.Contains(doc, "\nkind: Role\n") && strings.Contains(doc, "\n  name: defenseclaw-hooks-uninstall\n") {
-			role = doc
+	want := strings.Join(LeftoverHookJobs, ", ")
+	jobs := map[string]bool{}
+	for _, values := range []string{"default", "launcher"} {
+		out := string(renderChart(t, helm, values))
+		var role string
+		for _, doc := range strings.Split(out, "\n---") {
+			name := ""
+			if i := strings.Index(doc, "\nmetadata:\n  name: "); i >= 0 {
+				name = strings.TrimSpace(strings.SplitN(doc[i+len("\nmetadata:\n  name: "):], "\n", 2)[0])
+			}
+			switch {
+			// "\nkind: Role\n" at column 0: the RoleBinding's roleRef has
+			// an indented "kind: Role" and the same name.
+			case strings.Contains(doc, "\nkind: Role\n") && name == "defenseclaw-hooks-uninstall":
+				role = doc
+			case strings.Contains(doc, "\nkind: Job\n") && strings.Contains(doc, "helm.sh/hook: ") && name != "defenseclaw-pre-delete":
+				jobs[name] = true
+			}
+		}
+		if role == "" {
+			t.Fatalf("%s: no Role defenseclaw-hooks-uninstall", values)
+		}
+		rule := "- apiGroups: [batch]\n  resources: [jobs]\n  resourceNames: [" + want + "]\n  verbs: [delete]"
+		if !strings.Contains(role, rule) {
+			t.Errorf("%s: the uninstall Role's Job rule is not %q (setup.LeftoverHookJobs):\n%s", values, rule, role)
+		}
+		if strings.Contains(role, "defenseclaw-pre-delete") {
+			t.Errorf("%s: the uninstall Role must not delete its own Job:\n%s", values, role)
 		}
 	}
-	if role == "" {
-		t.Fatal("no Role defenseclaw-hooks-uninstall in the default chart")
+	var got []string
+	for n := range jobs {
+		got = append(got, n)
 	}
-	rule := "- apiGroups: [batch]\n  resources: [jobs]\n  resourceNames: [" + "defenseclaw-chain-key, defenseclaw-relay-session, defenseclaw-pre-upgrade, defenseclaw-pre-rollback, defenseclaw-bootstrap" + "]\n  verbs: [delete]"
-	if !strings.Contains(role, rule) {
-		t.Errorf("the uninstall Role lacks the leftover hook Job delete rule %q:\n%s", rule, role)
-	}
-	if strings.Contains(role, "defenseclaw-pre-delete") {
-		t.Errorf("the uninstall Role must not delete its own Job:\n%s", role)
+	slices.Sort(got)
+	listed := append([]string{}, LeftoverHookJobs...)
+	slices.Sort(listed)
+	if strings.Join(got, ",") != strings.Join(listed, ",") {
+		t.Errorf("the chart's hook Jobs %v are not setup.LeftoverHookJobs %v", got, listed)
 	}
 }
