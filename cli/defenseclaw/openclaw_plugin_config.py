@@ -226,7 +226,8 @@ def openclaw_install_policy_remediation(policy_state: str, platform: str | None 
     if "is too old for strict install policy" in recorded:
         return (
             "upgrade OpenClaw to 2026.11.3 or later (npm install -g openclaw@latest), then run "
-            "`defenseclaw setup openclaw`; until then installed skills and plugins are checked when DefenseClaw finds them"
+            "`defenseclaw setup openclaw`; until then installed skills and plugins are checked "
+            "when DefenseClaw finds them"
         )
     text = (
         "run `defenseclaw setup openclaw` (needs OpenClaw 2026.8.35 or later); "
