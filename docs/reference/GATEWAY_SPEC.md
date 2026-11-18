@@ -36,10 +36,18 @@ not a claim that all behavior is contained in one file.
   prompt/tool companion event, project the normalized telemetry copy onto the
   canonical hook decision only when the Cisco AI Defense hook lane submitted
   it. For Claude Code `StopFailure`, normalize echoed block messages before
-  both submission and projection. Remove embedded bearer credentials from the
-  telemetry copy when the cloud returns no redaction directive. Preserve an
-  explicit absence when the event was handled only by local rules, the optional
-  judge, or local file/component scanning.
+  both submission and projection, and retain that evidence on the hook decision
+  even when an equal model-response companion exists because destinations may
+  collect either bucket independently. When the cloud returns no redaction
+  directive, remove embedded bearer credentials, explicit Basic authorization
+  values, and valid bare Basic credentials while preserving ordinary text that
+  begins with `Basic`. Preserve an explicit absence when the event was handled
+  only by local rules, the optional judge, or local file/component scanning.
+- Scope each cloud redaction directive to the content inspected by that call.
+  If merged inspections choose a reason from a companion, project that reason
+  under the companion's directive. A combined prompt/response chat span must
+  use the stricter of the two directives so neither field inherits the other's
+  less protective decision.
 - Update the published API or connector page when externally observable
   behavior changes.
 - Run the relevant Go package tests plus the schema/telemetry parity gates

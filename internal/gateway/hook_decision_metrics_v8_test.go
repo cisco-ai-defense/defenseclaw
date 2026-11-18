@@ -216,7 +216,7 @@ func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
 		t.Fatalf("parts=%v, want one part", message["parts"])
 	}
 	part, ok := parts[0].(map[string]interface{})
-	wantContent := redactInspectedAuthorizationCredentials(rawContent)
+	wantContent := "Authorization: Basic <redacted len=8 sha=a251c2d1>; Authorization: Bearer <redacted len=6 sha=8f61ad5c>"
 	if !ok || part["content"] != wantContent {
 		t.Fatalf("part=%v, want projection-safe inspected content %q", parts[0], wantContent)
 	}

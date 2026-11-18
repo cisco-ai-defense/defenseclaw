@@ -833,7 +833,7 @@ func TestNormalizeHookReportedCostAccumulatesIncrementalPerCallCost(t *testing.T
 func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing.T) {
 	api := &APIServer{}
 	for i := 0; i < hookPromptCacheMaxEntries+10; i++ {
-		api.rememberHookLLMSpanPrompt(llmEventMeta{
+		api.rememberHookLLMSpanPrompt(t.Context(), llmEventMeta{
 			Source: "codex", SessionID: "session-" + strconv.Itoa(i), TurnID: "turn",
 			PromptID: "prompt-" + strconv.Itoa(i),
 		}, "prompt")
@@ -848,8 +848,8 @@ func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing
 	overlap := &APIServer{}
 	turn1 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "1", PromptID: "p1"}
 	turn2 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "2", PromptID: "p2"}
-	overlap.rememberHookLLMSpanPrompt(turn1, "first")
-	overlap.rememberHookLLMSpanPrompt(turn2, "second")
+	overlap.rememberHookLLMSpanPrompt(t.Context(), turn1, "first")
+	overlap.rememberHookLLMSpanPrompt(t.Context(), turn2, "second")
 	first, ok := overlap.takeHookLLMSpanPrompt(turn1, "response one")
 	if !ok || first.content != "first" {
 		t.Fatalf("first turn snapshot=%+v emit=%v", first, ok)
@@ -869,8 +869,8 @@ func TestHookLLMSpanPromptCacheIsExecutionScoped(t *testing.T) {
 	executionB := executionA
 	executionB.ExecutionID = "execution-b"
 
-	api.rememberHookLLMSpanPrompt(executionA, "prompt from execution A")
-	api.rememberHookLLMSpanPrompt(executionB, "prompt from execution B")
+	api.rememberHookLLMSpanPrompt(t.Context(), executionA, "prompt from execution A")
+	api.rememberHookLLMSpanPrompt(t.Context(), executionB, "prompt from execution B")
 
 	first, ok := api.takeHookLLMSpanPrompt(executionA, "response from execution A")
 	if !ok || first.content != "prompt from execution A" {
@@ -879,6 +879,33 @@ func TestHookLLMSpanPromptCacheIsExecutionScoped(t *testing.T) {
 	second, ok := api.takeHookLLMSpanPrompt(executionB, "response from execution B")
 	if !ok || second.content != "prompt from execution B" {
 		t.Fatalf("execution B snapshot=%+v emit=%v", second, ok)
+	}
+}
+
+func TestStricterHookRedactionDirective(t *testing.T) {
+	trueValue, falseValue := true, false
+	for _, test := range []struct {
+		name          string
+		first, second *bool
+		want          *bool
+	}{
+		{name: "both raw", first: &falseValue, second: &falseValue, want: &falseValue},
+		{name: "prompt redact", first: &trueValue, second: &falseValue, want: &trueValue},
+		{name: "completion redact", first: &falseValue, second: &trueValue, want: &trueValue},
+		{name: "missing fails closed", first: nil, second: &falseValue, want: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := stricterHookRedactionDirective(test.first, test.second)
+			if got == nil || test.want == nil {
+				if got != nil || test.want != nil {
+					t.Fatalf("directive = %v, want %v", got, test.want)
+				}
+				return
+			}
+			if *got != *test.want {
+				t.Fatalf("directive = %t, want %t", *got, *test.want)
+			}
+		})
 	}
 }
 

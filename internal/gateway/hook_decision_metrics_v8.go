@@ -233,7 +233,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailEnforced:        env.Enforced,
 			DefenseClawConnectorStepIdx:         hookV8OptionalPositiveInt64(int64(env.StepIdx)),
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
-			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
+			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReasonForSink(ctx, resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawGuardrailRuleNames:       hookDecisionV8RuleNames(resp.RuleNames),
 			GenAIInputMessages:                  inputMessages,

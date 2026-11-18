@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -173,6 +174,7 @@ func TestEvaluateClaudeCodeHook_SubmittedContentStaysRawUntilProjection(t *testi
 func TestRedactInspectedAuthorizationCredentials(t *testing.T) {
 	const token = "abc123._~+/=-"
 	redacted := redaction.ForSinkEntity(token)
+	basicCredential := base64.StdEncoding.EncodeToString([]byte("fixture-user:fixture-value"))
 	tests := []struct {
 		name    string
 		content string
@@ -207,6 +209,16 @@ func TestRedactInspectedAuthorizationCredentials(t *testing.T) {
 			name:    "quoted basic JSON header",
 			content: `"authorization": "Basic ` + token + `"`,
 			want:    `"authorization": "Basic ` + redacted + `"`,
+		},
+		{
+			name:    "bare valid basic credential",
+			content: "request failed with Basic " + basicCredential,
+			want:    "request failed with Basic " + redaction.ForSinkEntity(basicCredential),
+		},
+		{
+			name:    "ordinary bare basic text",
+			content: "Basic setup complete",
+			want:    "Basic setup complete",
 		},
 		{
 			name:    "embedded word is not basic scheme",
@@ -420,6 +432,54 @@ func TestEvaluateClaudeCodeHook_SubagentPromptKeepsOwnRedactionDirective(t *test
 	}
 }
 
+func TestEvaluateClaudeCodeHook_SubagentReasonKeepsPromptRedactionDirective(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read AI Defense request: %v", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), "event detail") {
+			_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","severity":"LOW","reason":"event reason","is_redaction_enabled":false}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[{"classification":"VIOLATION","rule_name":"task for alice@example.com"}],"is_redaction_enabled":true}`)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey: "test-key", endpoint: server.URL, client: server.Client(),
+		},
+	}
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "SubagentStart",
+		Payload: map[string]interface{}{
+			"task":             "canonical task",
+			"task_description": "event detail",
+		},
+	})
+
+	if resp.SourceReason != "Cisco AI Defense: task for alice@example.com" {
+		t.Fatalf("source reason = %q, want task-derived reason", resp.SourceReason)
+	}
+	if !resp.ReasonRedactionPresent || resp.ReasonRedactionEnabled == nil || !*resp.ReasonRedactionEnabled {
+		t.Fatalf("reason directive = (%v, present=%t), want task's explicit true", resp.ReasonRedactionEnabled, resp.ReasonRedactionPresent)
+	}
+	previousManaged := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(previousManaged) })
+	projected := hookSourceReasonForSink(t.Context(), claudeCodeResponseToAgentHookResponse(resp))
+	if strings.Contains(projected, "alice@example.com") || !strings.Contains(projected, "<redacted") {
+		t.Fatalf("projected task reason = %q, want independently redacted reason", projected)
+	}
+}
+
 func TestClaudeCodeSubagentPromptSelection(t *testing.T) {
 	for _, test := range []struct {
 		payload map[string]interface{}
@@ -438,9 +498,10 @@ func TestClaudeCodeSubagentPromptSelection(t *testing.T) {
 
 func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		req          claudeCodeHookRequest
-		wantAIDCalls int
+		name          string
+		req           claudeCodeHookRequest
+		wantAIDCalls  int
+		wantInspected bool
 	}{
 		{name: "user prompt", req: claudeCodeHookRequest{HookEventName: "UserPromptSubmit", Prompt: "prompt content"}, wantAIDCalls: 1},
 		{name: "expanded prompt", req: claudeCodeHookRequest{HookEventName: "UserPromptExpansion", Prompt: "expanded prompt content"}, wantAIDCalls: 1},
@@ -449,7 +510,7 @@ func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *tes
 		{name: "tool call", req: claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: map[string]interface{}{"file_path": "README.md"}}, wantAIDCalls: 1},
 		{name: "tool result", req: claudeCodeHookRequest{HookEventName: "PostToolUse", ToolName: "Read", ToolResponse: "tool result"}, wantAIDCalls: 1},
 		{name: "companion-only stop failure", req: claudeCodeHookRequest{HookEventName: "StopFailure", LastAssistantMessage: "failed response"}},
-		{name: "matching stop failure companion", req: claudeCodeHookRequest{HookEventName: "StopFailure", Error: "failed response", LastAssistantMessage: " failed response "}, wantAIDCalls: 1},
+		{name: "matching stop failure companion", req: claudeCodeHookRequest{HookEventName: "StopFailure", Error: "failed response", LastAssistantMessage: " failed response "}, wantAIDCalls: 1, wantInspected: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var calls int
@@ -473,7 +534,13 @@ func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *tes
 			if calls != test.wantAIDCalls {
 				t.Fatalf("AI Defense calls = %d, want %d", calls, test.wantAIDCalls)
 			}
-			if resp.InspectedContentPresent || resp.InspectedContent != "" {
+			if resp.InspectedContentPresent != test.wantInspected {
+				t.Fatalf("InspectedContentPresent = %t, want %t: %+v", resp.InspectedContentPresent, test.wantInspected, resp)
+			}
+			if test.wantInspected && strings.TrimSpace(resp.InspectedContent) != "failed response" {
+				t.Fatalf("retained StopFailure content = %q, want failed response", resp.InspectedContent)
+			}
+			if !test.wantInspected && resp.InspectedContent != "" {
 				t.Fatalf("captured duplicate inspected content: %+v", resp)
 			}
 		})

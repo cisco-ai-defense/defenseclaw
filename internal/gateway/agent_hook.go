@@ -236,6 +236,10 @@ type agentHookResponse struct {
 	// an absent cloud directive distinct from hooks with no override.
 	CompanionRedactionEnabled *bool `json:"-"`
 	CompanionRedactionPresent bool  `json:"-"`
+	// ReasonRedactionEnabled scopes SourceReason when it came from a distinct
+	// companion inspection rather than the hook event content.
+	ReasonRedactionEnabled *bool `json:"-"`
+	ReasonRedactionPresent bool  `json:"-"`
 	// InspectedContent carries exact AI Defense input only for hooks without a
 	// companion canonical content event. It is emitted through the generated
 	// telemetry contract and is never serialized to connector clients.
@@ -273,6 +277,21 @@ func hookSourceReason(resp agentHookResponse) string {
 		return resp.SourceReason
 	}
 	return resp.Reason
+}
+
+func hookSourceReasonForSink(ctx context.Context, resp agentHookResponse) string {
+	reason := hookSourceReason(resp)
+	if !resp.ReasonRedactionPresent {
+		return reason
+	}
+	return redaction.ReasonForSink(reason, sinkPolicyFor(ctx, resp.ReasonRedactionEnabled))
+}
+
+func hookReasonRedactionDirective(resp agentHookResponse) *bool {
+	if resp.ReasonRedactionPresent {
+		return resp.ReasonRedactionEnabled
+	}
+	return resp.RedactionEnabled
 }
 
 // agentHookDisconnectGrace bounds how long an accepted hook keeps working
@@ -1680,7 +1699,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
-		Reason:       hookSourceReason(resp),
+		Reason:       hookSourceReasonForSink(ctx, resp),
 		WouldBlock:   resp.WouldBlock,
 		ElapsedMs:    elapsed.Milliseconds(),
 		BodyBytes:    int64(len(rawBody)),
@@ -2061,10 +2080,10 @@ func (a *APIServer) dispatchFinalizedAgentHookNotification(
 		resp.Action,
 		resp.RawAction,
 		resp.Severity,
-		hookSourceReason(resp),
+		hookSourceReasonForSink(ctx, resp),
 		resp.WouldBlock,
 		hookEvaluationContext{EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs},
-		sinkPolicyFor(ctx, resp.RedactionEnabled),
+		sinkPolicyFor(ctx, hookReasonRedactionDirective(resp)),
 	)
 }
 
@@ -2346,7 +2365,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		RawAction:           resp.RawAction,
 		Severity:            resp.Severity,
 		Mode:                resp.Mode,
-		Reason:              hookSourceReason(resp),
+		Reason:              hookSourceReasonForSink(ctx, resp),
 		WouldBlock:          resp.WouldBlock,
 		ElapsedMs:           elapsed.Milliseconds(),
 		BodyBytes:           int64(len(rawBody)),
