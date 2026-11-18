@@ -827,10 +827,20 @@ func dispatchTrustedAction(
 	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
 	// call does: that reading is judged too, and the stricter of the two
 	// readings counts (rel-1-0-10:GAP-0980).
-	shellTwin, shellTwinOK, shellCaps := runTimeShellTwinRequest(request)
+	shellTwin, shellTwinOK, shellCaps, shellUnread := runTimeShellTwinRequest(request)
 	if shellTwinOK {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
+		}()
+	}
+	if shellUnread {
+		// A shell runs here-document or here-string text the reading cannot
+		// know (a body with a command substitution, a document handed on
+		// through a command or a descriptor the reading does not follow):
+		// what it runs is unknown, so the call is at least the unknown tier
+		// (rel-1-0-10:GAP-1147).
+		defer func() {
+			findings = withUnknownFinding(findings, unknownReasonFinding(unreadShellTextTitle, unreadShellTextReason, request.EnforcementCapable))
 		}()
 	}
 	if shellCaps.Any() {
@@ -10272,20 +10282,22 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 // Behind ProtectHome (managed hook peer) the hook client map lists the
 // targets of the same reading (hookpaths), so it is judged there too
 // (rel-1-0-10:GAP-0980). caps is the caps that reading hit
-// (rel-1-0-10:GAP-1041), with or without a twin.
-func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, caps bounded.CapSet) {
+// (rel-1-0-10:GAP-1041), with or without a twin; so is unread, a shell of
+// the call that runs here-document text the reading cannot know
+// (rel-1-0-10:GAP-1147).
+func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, caps bounded.CapSet, unread bool) {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
-		return trustedActionRequest{}, false, caps
+		return trustedActionRequest{}, false, caps, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
 	if !known {
-		return trustedActionRequest{}, false, caps
+		return trustedActionRequest{}, false, caps, false
 	}
-	rewritten, ok, caps := actionfacts.RunTimeShellTwin(command)
+	rewritten, ok, caps, unread := actionfacts.RunTimeShellTwin(command)
 	if !ok || rewritten == command {
-		return trustedActionRequest{}, false, caps
+		return trustedActionRequest{}, false, caps, unread
 	}
-	return bashReadingRequest(request, command, rewritten), true, caps
+	return bashReadingRequest(request, command, rewritten), true, caps, unread
 }
 
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
@@ -10968,6 +10980,14 @@ const (
 const (
 	unknownStdinConsumerTitle  = "Here-document that may change DefenseClaw state goes to a program whose use of its input is not known, judged as unknown"
 	unknownStdinConsumerReason = "heredoc_consumer_unknown"
+)
+
+// unreadShellTextTitle and unreadShellTextReason are the unknown-tier finding
+// of a shell that runs here-document or here-string text the reading cannot
+// know (actionfacts.RunTimeShellTwin, rel-1-0-10:GAP-1147).
+const (
+	unreadShellTextTitle  = "Shell runs here-document text that could not be read before it runs, judged as unknown"
+	unreadShellTextReason = "shell_input_not_read"
 )
 
 // shellReadingBound is the reading bound a command is past

@@ -508,7 +508,7 @@ func hereDocStatementBodies(file *syntax.File, stmt *syntax.Stmt, input Input) [
 			// (heredocScriptText, the reading of the shell twin). A body the
 			// twin cannot read (a command substitution) shows no state write
 			// here.
-			body, known := heredocScriptText(redirection.Hdoc)
+			body, known := heredocScriptText(redirection)
 			if hereDocOwnerUnknownStateConsumer(file, owner) && hereDocBodyMayWriteState(body, input) {
 				// A valid here-document fed to an ordinary program is data
 				// even when the closed syntax-tail reader cannot prove the

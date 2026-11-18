@@ -28,7 +28,7 @@ func TestRunTimeShellTwinReadsAHeredocAShellRuns(t *testing.T) {
 		{"cat <<EOF | cat | sh\nmake clean\nEOF", "cat <<EOF | cat | bash -c {q}\nmake clean\nEOF"},
 		{"cat <<EOF | tee log.txt | sh\nmake clean\nEOF", "cat <<EOF | tee log.txt | bash -c {q}\nmake clean\nEOF"},
 		{"cat <<< 'make clean' | sh", "cat <<< 'make clean' | bash -c {q}"},
-		{"echo 'make clean' | cat | sh", "echo 'make clean' | cat | bash -c {t}"},
+		{"echo 'make clean' | cat | sh", "echo 'make clean' | cat | bash -c {q}"},
 		{"bash -c \"$(cat <<EOF\nmake clean\nEOF\n)\"", "bash -c {t}"},
 		{"eval \"$(cat <<'EOF'\nmake clean\nEOF\n)\"", "bash -c {t}"},
 		{"sh <(cat <<EOF\nmake clean\nEOF\n)", "bash -c {q}"},
@@ -38,10 +38,7 @@ func TestRunTimeShellTwinReadsAHeredocAShellRuns(t *testing.T) {
 	}
 	for _, row := range rows {
 		want := strings.NewReplacer("{q}", q, "{t}", qTrim).Replace(row.want)
-		if row.command == "echo 'make clean' | cat | sh" {
-			want = strings.ReplaceAll(row.want, "{t}", posixSingleQuoted("make clean"))
-		}
-		got, ok, _ := RunTimeShellTwin(row.command)
+		got, ok, _, _ := RunTimeShellTwin(row.command)
 		if !ok || got != want {
 			t.Errorf("RunTimeShellTwin(%q) = %q, %v; want %q", row.command, got, ok, want)
 		}
@@ -61,7 +58,7 @@ func TestRunTimeShellTwinReadsAHeredocAShellRuns(t *testing.T) {
 		"bash -c \"$(cat notes.md)\"",
 		"sh <(cat <<EOF\nmake clean\nEOF\n) extra",
 	} {
-		if got, ok, _ := RunTimeShellTwin(command); ok {
+		if got, ok, _, _ := RunTimeShellTwin(command); ok {
 			t.Errorf("RunTimeShellTwin(%q) = %q; want no reading", command, got)
 		}
 	}
