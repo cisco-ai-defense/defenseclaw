@@ -84,9 +84,10 @@ func TestSubstrateListManyAgentsGAP0427(t *testing.T) {
 				Connector: "claudecode", Profile: "eng", Person: ownerOf(alice), Unattended: true}); err != nil {
 				t.Fatal(err)
 			}
-			if i%3 == 0 {
+			switch i % 3 {
+			case 0:
 				base.live["eng-scale/"+name] = identity.LiveActor{UID: scaleUID(i), State: identity.ActorRunning}
-			} else if i%3 == 1 {
+			case 1:
 				base.live["eng-scale/"+name] = identity.LiveActor{UID: "recreated", State: identity.ActorRunning}
 			}
 		}
