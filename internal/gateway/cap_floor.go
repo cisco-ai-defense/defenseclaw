@@ -999,7 +999,8 @@ func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 
 // prefixWrapperChainPastBound reports a command of the facts whose chain of
 // plain prefix wrappers (sudo, env, command, nohup, ...) is longer than the
-// action analysis unwraps (actionfacts.MaxWrapperDepth). A dynamic word
+// action analysis unwraps (PrefixWrapperRun.PastWrapperBound: context-neutral
+// wrappers spend no depth, substrate-1:GAP-0478). A dynamic word
 // after such a chain (a ~ or $HOME operand) stops the analysis at the first
 // wrapper as a partial parse, with no wrapper limit, so the program the
 // chain runs was never read; the readers that unwrap further still prove a
@@ -1023,7 +1024,7 @@ func prefixWrapperChainPastBound(facts actionfacts.Facts) bool {
 		for i := range static {
 			static[i] = len(command.Arguments) != len(command.Argv) || !command.Arguments[i].Expands
 		}
-		if run, wrapped := actionfacts.StaticPrefixWrapperChild(command.Argv, static); wrapped && run.Length > actionfacts.MaxWrapperDepth {
+		if run, wrapped := actionfacts.StaticPrefixWrapperChild(command.Argv, static); wrapped && run.PastWrapperBound() {
 			return true
 		}
 	}
