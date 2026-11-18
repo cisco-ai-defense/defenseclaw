@@ -491,7 +491,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		requirements,
 	)
 	if errors.Is(err, errGatewayStillStarting) {
-		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+		return reportGatewayStillStarting(pid, d.LogFile(), cfg, cfgErr, startedAsUnitExecStart())
 	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -921,7 +921,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		requirements,
 	)
 	if errors.Is(err, errGatewayStillStarting) {
-		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+		return reportGatewayStillStarting(pid, d.LogFile(), cfg, cfgErr, false)
 	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -1147,9 +1147,9 @@ type daemonReadinessRequirements struct {
 	// step extend the readiness timeout up to startReadinessProgressCap.
 	reportProgress func(elapsed time.Duration, step string)
 
-	// keepSlowStart leaves the launched gateway running when an interactive
-	// start or restart reaches the readiness deadline while that process is
-	// still alive (GAP-2022). Stopping it left no gateway and no watchdog on
+	// keepSlowStart leaves the launched gateway running when a start or
+	// restart reaches the readiness deadline while that process is still
+	// alive (GAP-2022). Stopping it left no gateway and no watchdog on
 	// a loaded host where it would have answered moments later.
 	keepSlowStart bool
 }

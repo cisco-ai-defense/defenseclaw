@@ -116,6 +116,31 @@ def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_user_home(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Start every test in an empty user home (GAP-0457).
+
+    Setup and uninstall commands read the connector roster from the account's
+    config.yaml and connector folders. A shared build box (or a developer
+    machine) has a real ~/.defenseclaw with another connector set up, so the
+    setup-guardrail and uninstall tests refused with "Claude Code is not set
+    up here (set up: openclaw)", while CI, whose home is empty, passed.
+    Tests that need a home (or a DefenseClaw/connector home) still set it
+    after this fixture runs, and win.
+    """
+    if os.name == "nt":
+        return  # _isolated_windows_identity covers the Windows profile variables
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("empty-home")))
+    for name in (
+        "DEFENSECLAW_HOME",
+        "DEFENSECLAW_CONFIG",
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "HERMES_HOME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 # The modules that test the Windows launcher preflight, or fake the launcher it probes.
 _LAUNCHER_PREFLIGHT_MODULES = frozenset({
     "test_cmd_setup_multi_connector",

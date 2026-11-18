@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -347,10 +348,42 @@ func missingScriptInterpreter(lo LiveOptions) string {
 					return ""
 				}
 			}
-			return fmt.Sprintf("%s is a launcher script that runs %s, which is not on the probe's PATH (%s); pass --agent-binary the native Codex executable (for an npm install, node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex inside the package) or link %s next to %s", binary, interpreter, value, interpreter, binary)
+			fix := "pass --agent-binary the native Codex executable (for an npm install, node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex inside the package)"
+			if native := npmNativeCodex(binary); native != "" {
+				fix = "pass --agent-binary " + native
+			}
+			return fmt.Sprintf("%s is a launcher script that runs %s, which is not on the probe's PATH (%s); %s or link %s next to %s", binary, interpreter, value, fix, interpreter, binary)
 		}
 	}
 	return ""
+}
+
+// npmNativeCodex returns the native Codex executable inside the npm package
+// whose launcher (bin/codex.js, usually reached through a bin/codex symlink)
+// is binary, for this machine's architecture, or "" when the package holds
+// none or more than one: the probe then names the layout instead of a path.
+func npmNativeCodex(binary string) string {
+	real, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		return ""
+	}
+	pkg := filepath.Dir(filepath.Dir(real))
+	arch := map[string]string{"amd64": "x86_64-", "arm64": "aarch64-"}[runtime.GOARCH]
+	if arch == "" {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(pkg, "node_modules", "@openai", "codex-*", "vendor", arch+"*", "bin", "codex"))
+	found := ""
+	for _, match := range matches {
+		if info, err := os.Stat(match); err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = match
+	}
+	return found
 }
 
 func waitFor(ctx context.Context, responses <-chan map[string]json.RawMessage, id int) (map[string]json.RawMessage, error) {
