@@ -5,6 +5,7 @@ package redaction
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -15,21 +16,64 @@ import (
 // the observability detector's key allowlist so signed-URL handling cannot
 // drift. Recognition failures fail closed by redacting the whole content.
 func RedactURLQueryCredentialsForCompatibility(input string) string {
-	candidates, err := recognize("secrets.url_query", input, observability.FieldClassContent, nil)
+	recognized, boundaries := normalizeJSONEscapedQuerySeparators(input)
+	candidates, err := recognize("secrets.url_query", recognized, observability.FieldClassContent, nil)
 	if err != nil {
 		return legacyredaction.ForSinkMessageContent(input)
 	}
 	accepted := make([]candidate, 0, len(candidates))
 	for _, item := range candidates {
-		if item.accepted && item.start >= 0 && item.end > item.start && item.end <= len(input) {
-			accepted = append(accepted, item)
+		if item.accepted && item.start >= 0 && item.end > item.start && item.end < len(boundaries) {
+			start, end := boundaries[item.start], boundaries[item.end]
+			if start >= 0 && end > start && end <= len(input) {
+				accepted = append(accepted, candidate{start: start, end: end, accepted: true})
+			}
 		}
 	}
 	sort.Slice(accepted, func(i, j int) bool { return accepted[i].start < accepted[j].start })
-	output := input
-	for index := len(accepted) - 1; index >= 0; index-- {
-		item := accepted[index]
-		output = output[:item.start] + legacyredaction.ForSinkEntity(input[item.start:item.end]) + output[item.end:]
+	if len(accepted) == 0 {
+		return input
 	}
-	return output
+	var output strings.Builder
+	output.Grow(len(input))
+	previousEnd := 0
+	for _, item := range accepted {
+		if item.start < previousEnd {
+			continue
+		}
+		output.WriteString(input[previousEnd:item.start])
+		output.WriteString(legacyredaction.ForSinkEntity(input[item.start:item.end]))
+		previousEnd = item.end
+	}
+	output.WriteString(input[previousEnd:])
+	return output.String()
+}
+
+// normalizeJSONEscapedQuerySeparators exposes ampersand and semicolon query
+// separators encoded inside JSON string values to the canonical recognizer.
+// boundaries maps every normalized byte boundary back to its original input
+// boundary so only credential values are replaced in the source text.
+func normalizeJSONEscapedQuerySeparators(input string) (string, []int) {
+	var normalized strings.Builder
+	normalized.Grow(len(input))
+	boundaries := make([]int, 1, len(input)+1)
+	for index := 0; index < len(input); {
+		if index+6 <= len(input) && input[index] == '\\' && input[index+1] == 'u' {
+			escape := strings.ToLower(input[index+2 : index+6])
+			if escape == "0026" || escape == "003b" {
+				separator := byte('&')
+				if escape == "003b" {
+					separator = ';'
+				}
+				normalized.WriteByte(separator)
+				index += 6
+				boundaries = append(boundaries, index)
+				continue
+			}
+		}
+		normalized.WriteByte(input[index])
+		index++
+		boundaries = append(boundaries, index)
+	}
+	return normalized.String(), boundaries
 }

@@ -13,10 +13,25 @@ func TestRedactURLQueryCredentialsForCompatibility(t *testing.T) {
 	input := "first https://example.test/a?sig=" + signature + "&safe=visible " +
 		"second https://example.test/b?X-Amz-Signature=" + signature + "#fragment"
 	got := RedactURLQueryCredentialsForCompatibility(input)
+	want := strings.ReplaceAll(input, signature, `<redacted len=23 prefix="f" sha=b27f9371>`)
+	if got != want {
+		t.Fatalf("compatibility projection = %q, want %q", got, want)
+	}
 	if strings.Contains(got, signature) {
 		t.Fatalf("signed URL credential remained in compatibility projection: %q", got)
 	}
-	if !strings.Contains(got, "safe=visible") || !strings.Contains(got, "#fragment") {
-		t.Fatalf("non-credential URL content changed: %q", got)
+}
+
+func TestRedactURLQueryCredentialsForCompatibilityJSONEscapedSeparators(t *testing.T) {
+	const signature = "fixture-signature-value"
+	input := `{"detail":"https://example.test/a?safe=visible\u0026sig=` + signature +
+		`\u003Bkeep=yes#fragment"}`
+	got := RedactURLQueryCredentialsForCompatibility(input)
+	want := strings.Replace(input, signature, `<redacted len=23 prefix="f" sha=b27f9371>`, 1)
+	if got != want {
+		t.Fatalf("JSON compatibility projection = %q, want %q", got, want)
+	}
+	if strings.Contains(got, signature) {
+		t.Fatalf("JSON-escaped signed URL credential remained in compatibility projection: %q", got)
 	}
 }

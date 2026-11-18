@@ -14,8 +14,30 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+type hookLLMSpanDirectiveRuntime struct {
+	sidecarRuntimeEmitter
+	lifecycleV8Runtime
+	directives []*bool
+}
+
+func (runtime *hookLLMSpanDirectiveRuntime) StartModelTrace(
+	ctx context.Context,
+	input observability.SpanModelChatInput,
+) (context.Context, *observabilityruntime.ModelTrace, error) {
+	directive := redactionDecisionFromContext(ctx)
+	if directive != nil {
+		value := *directive
+		directive = &value
+	}
+	runtime.directives = append(runtime.directives, directive)
+	return runtime.lifecycleV8Runtime.StartModelTrace(ctx, input)
+}
 
 func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	gatewaylog.SetProcessRunID("gateway-run-a")
@@ -860,6 +882,20 @@ func TestHookLLMSpanPromptCacheIsBoundedAndCorrelatesOverlappingTurns(t *testing
 	}
 }
 
+func TestHookLLMSpanPromptFallbackDoesNotConsumeDifferentKnownTurn(t *testing.T) {
+	api := &APIServer{}
+	turn2 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "2", PromptID: "p2"}
+	api.rememberHookLLMSpanPrompt(t.Context(), turn2, "second")
+
+	turn1 := llmEventMeta{Source: "codex", SessionID: "shared", TurnID: "1", PromptID: "p1"}
+	if snapshot, ok := api.takeHookLLMSpanPrompt(turn1, "response one"); !ok || snapshot.content != "" {
+		t.Fatalf("different-turn fallback snapshot=%+v emit=%v, want empty snapshot", snapshot, ok)
+	}
+	if snapshot, ok := api.takeHookLLMSpanPrompt(turn2, "response two"); !ok || snapshot.content != "second" {
+		t.Fatalf("matching turn snapshot=%+v emit=%v, want retained prompt", snapshot, ok)
+	}
+}
+
 func TestHookLLMSpanPromptCacheIsExecutionScoped(t *testing.T) {
 	api := &APIServer{}
 	executionA := llmEventMeta{
@@ -911,25 +947,50 @@ func TestStricterHookRedactionDirective(t *testing.T) {
 
 func TestEmitHookLLMSpanReturnsCompletionScopedDirective(t *testing.T) {
 	trueValue, falseValue := true, false
-	meta := llmEventMeta{Source: "claudecode", SessionID: "session", PromptID: "prompt"}
+	meta := llmEventMeta{
+		Source: "claudecode", Provider: "anthropic", Model: "claude-sonnet-4-5",
+		SessionID: "session", TurnID: "turn", PromptID: "prompt",
+	}
 
 	t.Run("cache miss preserves explicit completion directive", func(t *testing.T) {
-		api := &APIServer{}
+		api, _ := bindHookModelV8Runtime(t, []string{"traces"})
+		runtime := &hookLLMSpanDirectiveRuntime{
+			sidecarRuntimeEmitter: api.observabilityV8RuntimeEmitter(),
+			lifecycleV8Runtime:    api.observabilityV8LifecycleRuntime(),
+		}
+		api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 		completionCtx := withRedactionDecision(t.Context(), &falseValue)
 		returned := api.emitHookLLMSpan(completionCtx, meta, "response")
+		if len(runtime.directives) != 1 || runtime.directives[0] == nil || *runtime.directives[0] {
+			t.Fatalf("runtime directives = %v, want one explicit false", runtime.directives)
+		}
 		if got := redactionDecisionFromContext(returned); got == nil || *got {
 			t.Fatalf("returned directive = %v, want explicit false", got)
+		}
+		if span := oteltrace.SpanContextFromContext(returned); !span.IsValid() {
+			t.Fatalf("returned span correlation = %v, want valid", span)
 		}
 	})
 
 	t.Run("cached prompt does not replace standalone response directive", func(t *testing.T) {
-		api := &APIServer{}
+		api, _ := bindHookModelV8Runtime(t, []string{"traces"})
+		runtime := &hookLLMSpanDirectiveRuntime{
+			sidecarRuntimeEmitter: api.observabilityV8RuntimeEmitter(),
+			lifecycleV8Runtime:    api.observabilityV8LifecycleRuntime(),
+		}
+		api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 		promptCtx := withRedactionDecision(t.Context(), &trueValue)
 		api.rememberHookLLMSpanPrompt(promptCtx, meta, "prompt")
 		completionCtx := withRedactionDecision(t.Context(), &falseValue)
 		returned := api.emitHookLLMSpan(completionCtx, meta, "response")
+		if len(runtime.directives) != 1 || runtime.directives[0] == nil || !*runtime.directives[0] {
+			t.Fatalf("runtime directives = %v, want one explicit true", runtime.directives)
+		}
 		if got := redactionDecisionFromContext(returned); got == nil || *got {
 			t.Fatalf("returned directive = %v, want completion's explicit false", got)
+		}
+		if span := oteltrace.SpanContextFromContext(returned); !span.IsValid() {
+			t.Fatalf("returned span correlation = %v, want valid", span)
 		}
 	})
 }
