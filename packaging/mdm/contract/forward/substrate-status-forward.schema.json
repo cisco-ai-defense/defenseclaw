@@ -50,8 +50,8 @@
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 11,
-      "maxItems": 11
+      "minItems": 12,
+      "maxItems": 12
     }
   },
   "$defs": {
