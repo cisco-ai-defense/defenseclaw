@@ -17,8 +17,10 @@
 package workspace
 
 import (
+	"io/fs"
 	"path"
 	"strings"
+	"unicode"
 )
 
 // matchGlob matches a slash-separated relative path against a pattern.
@@ -271,23 +273,53 @@ var riskRules = []riskRule{
 // stands for a folder of a rule at any segment (.claude, .kiro/settings,
 // a/.gemini/config), makes that file appear in the folder whatever it
 // points to inside the project (GAP-0552). The folder case returns the
-// first rule a path below the link would match.
+// first rule a path below the link would match. Names compare under a
+// full Unicode case fold (.kiro/U+017Fettings is .kiro/settings to a
+// folding filesystem), not only strings.ToLower (GAP-0575).
 func classifyLinkName(rel string) (riskRule, bool) {
-	if r, ok := classifyPath(rel); ok {
+	if r, ok := classifyPath(foldName(rel)); ok {
 		return r, true
 	}
-	segs := strings.Split(strings.ToLower(strings.Trim(rel, "/")), "/")
+	segs := strings.Split(foldName(strings.Trim(rel, "/")), "/")
 	for _, r := range append(append([]riskRule{}, riskRules...), registryRules()...) {
 		for _, p := range r.patterns {
 			if !strings.Contains(p, "/") {
 				continue // a bare file name: classifyPath decided
 			}
-			if patternReachesBelow(strings.Split(strings.ToLower(strings.Trim(p, "/")), "/"), segs) {
+			if patternReachesBelow(strings.Split(foldName(strings.Trim(p, "/")), "/"), segs) {
 				return r, true
 			}
 		}
 	}
 	return riskRule{}, false
+}
+
+// foldName maps every rune to the lower case of the smallest rune of its
+// case-fold orbit, so names that strings.EqualFold equates (s, S and
+// U+017F; k and the Kelvin sign) compare equal.
+func foldName(s string) string {
+	return strings.Map(func(r rune) rune {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < m {
+				m = f
+			}
+		}
+		return unicode.ToLower(m)
+	}, s)
+}
+
+// sentinelLink reports a symbolic link named like a run-code file or a
+// folder a rule reaches below (.kiro/settings, .kiro, out/.kiro/settings):
+// git mode's diff cannot see one at a path git ignores, so the sentinel
+// walk records it with its target and the review classifies it as it does
+// a tracked link (GAP-0574).
+func sentinelLink(rel string, d fs.DirEntry) bool {
+	if d.Type()&fs.ModeSymlink == 0 {
+		return false
+	}
+	_, ok := classifyLinkName(rel)
+	return ok
 }
 
 // patternReachesBelow reports whether the link folder segs stands for a
