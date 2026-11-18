@@ -44,8 +44,13 @@ import (
 // Setup writes, never a managed install's, and on Windows, where the command
 // names the account's launcher, this data folder also holds the live hook
 // script or a backup record of the connector) qualifies with or without the
-// script, by that proof alone. When ownership cannot be proven, the entries
-// stay and the boot says so. Its own Teardown, in reclaim mode
+// script, by that proof alone. That proof also reads the files only this
+// install's backup records name (a workspace file from before
+// claw.workspace_dir changed, a custom default agent the user switched away
+// from), and VerifyClean reports their entries too, so residue only a record
+// names starts the reclaim; so does an unfinished teardown (a record or the
+// hook token it left), whose reclaim finishes it. When ownership cannot be
+// proven, the entries stay and the boot says so. Its own Teardown, in reclaim mode
 // (SetupOpts.ReclaimOwnHooksOnly), removes only what this install wrote and
 // leaves another install's entries in the shared files, then the hook script goes and its hook token is
 // revoked as for a removed connector, so the next boot finds nothing to do.
@@ -112,12 +117,20 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 		result := "removed"
 		reclaim := opts
 		reclaim.ReclaimOwnHooksOnly = true
-		if err := conn.Teardown(ctx, reclaim); err != nil {
+		teardownErr := conn.Teardown(ctx, reclaim)
+		var verifyErr error
+		if teardownErr == nil && !decoded {
+			// A connector that proves ownership from its decoded entries
+			// checks its own reclaim in Teardown: another install's entries in
+			// the shared files stay, which VerifyClean would report.
+			verifyErr = conn.VerifyClean(opts)
+		}
+		if teardownErr != nil {
 			result = "failed"
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded but its DefenseClaw hooks could not be removed: %v\n", name, err)
-		} else if err := verifyOwnHooksGone(conn, owner, decoded, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded but its DefenseClaw hooks could not be removed: %v\n", name, teardownErr)
+		} else if verifyErr != nil {
 			result = "incomplete"
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded and its DefenseClaw hooks are not all gone: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded and its DefenseClaw hooks are not all gone: %v\n", name, verifyErr)
 		} else {
 			if err := removeTeardownHookFiles(registry, conn, cfg.ActiveConnectors(), opts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s hook script and token were not removed: %v\n", name, err)
@@ -132,24 +145,6 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 			)
 		}
 	}
-}
-
-// verifyOwnHooksGone checks a reclaim: for a connector that proves ownership
-// from its decoded entries, that none of this install's is left (another
-// install's entries in the shared files stay, so VerifyClean, which reads
-// every DefenseClaw entry, would report them); for any other, VerifyClean.
-func verifyOwnHooksGone(conn connector.Connector, owner connector.InstallHookEntryOwner, decoded bool, opts connector.SetupOpts) error {
-	if !decoded {
-		return conn.VerifyClean(opts)
-	}
-	owns, err := owner.InstallOwnsHookEntries(opts)
-	if err != nil {
-		return err
-	}
-	if owns {
-		return fmt.Errorf("%s teardown incomplete: hook entries of this install remain", conn.Name())
-	}
-	return nil
 }
 
 // installWroteHookScript reports whether the hooks folder holds one of the

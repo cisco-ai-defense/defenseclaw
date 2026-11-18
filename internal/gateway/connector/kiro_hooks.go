@@ -206,7 +206,7 @@ func (s *kiroReclaimScope) keepV2(raw interface{}, hookScript string) []interfac
 // operator had it before Setup (kiroPristineIsOperators). With a scope only
 // its entries go.
 func removeKiroV3HooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
-	cfg, err := readJSONObject(path)
+	cfg, err := kiroReadJSONObject(path)
 	if err != nil {
 		return err
 	}
@@ -362,7 +362,7 @@ func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
 // DefenseClaw's overlay unless operatorFile: the operator had it before Setup
 // (kiroPristineIsOperators). With a scope only its entries go.
 func removeKiroV2AgentHooksKeeping(path, hookScript string, operatorFile bool, scope *kiroReclaimScope) error {
-	cfg, err := readJSONObject(path)
+	cfg, err := kiroReadJSONObject(path)
 	if err != nil {
 		return err
 	}
@@ -773,8 +773,8 @@ func kiroV3FileHoldsCommand(path string, commands []string) (bool, error) {
 		}
 		return false, err
 	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	cfg, err := kiroDecodeJSONObject(data)
+	if err != nil {
 		return false, fmt.Errorf("parse kiro hooks %s: %w", path, err)
 	}
 	hooks, _ := cfg["hooks"].([]interface{})
@@ -799,11 +799,62 @@ func kiroAgentFileHoldsCommand(path string, commands []string) (bool, error) {
 		}
 		return false, err
 	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	cfg, err := kiroDecodeJSONObject(data)
+	if err != nil {
 		return false, fmt.Errorf("parse kiro agent %s: %w", path, err)
 	}
 	return containsHookScript(cfg, commands...), nil
+}
+
+// kiroUTF8BOM is the byte order mark a Windows editor (Windows PowerShell
+// 5.1's Set-Content -Encoding UTF8, Notepad) puts before a UTF-8 file.
+var kiroUTF8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// kiroDecodeJSONObject decodes a Kiro hook or agent file as the ownership
+// checks read it: a leading UTF-8 BOM is skipped and an empty file holds no
+// entry. A BOM failed the parse, and one such file a backup record named
+// failed the whole reclaim and prune on every boot.
+func kiroDecodeJSONObject(data []byte) (map[string]interface{}, error) {
+	data = bytes.TrimPrefix(data, kiroUTF8BOM)
+	cfg := map[string]interface{}{}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return cfg, nil
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		cfg = map[string]interface{}{}
+	}
+	return cfg, nil
+}
+
+// kiroReadJSONObject is readJSONObject for a Kiro hook or agent file whose
+// DefenseClaw entries come out: it skips a leading UTF-8 BOM, as the
+// ownership checks do (kiroDecodeJSONObject), so a file they find holding
+// this install's entries can also be cleaned. The file is written back
+// without the BOM.
+func kiroReadJSONObject(path string) (map[string]interface{}, error) {
+	data, err := readHookConfigFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]interface{}{}, nil
+		}
+		return nil, err
+	}
+	return decodeJSONObject(path, bytes.TrimPrefix(data, kiroUTF8BOM))
+}
+
+// kiroFileUnparsable reports whether path is a file the ownership checks
+// cannot read as a JSON object (kiroDecodeJSONObject). An absent file, or one
+// that cannot be opened, is not: those keep their own handling.
+func kiroFileUnparsable(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	_, err = kiroDecodeJSONObject(data)
+	return err != nil
 }
 
 func kiroBuiltInAgentName(name string) bool {

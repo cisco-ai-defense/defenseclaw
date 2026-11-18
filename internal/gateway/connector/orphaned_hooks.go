@@ -110,9 +110,10 @@ func orphanedHookConfigPathsFor(goos string, conn Connector, opts SetupOpts) ([]
 // of the agent files, whether one of them is a hook this install's Setup
 // wrote (never a managed install's, and never another data folder's of the
 // same account: where a command does not name the data folder, as on
-// Windows, that takes proof in the data folder too). The boot reclaim of an
-// unguarded connector uses it as the proof of ownership, with or without the
-// install's hook script.
+// Windows, that takes proof in the data folder too), or that this install's
+// own teardown of it did not finish (Kiro: a backup record or the hook token
+// it left). The boot reclaim of an unguarded connector uses it as the proof
+// of ownership, with or without the install's hook script.
 type InstallHookEntryOwner interface {
 	InstallOwnsHookEntries(SetupOpts) (bool, error)
 }
