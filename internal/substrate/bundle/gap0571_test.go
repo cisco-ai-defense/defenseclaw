@@ -55,3 +55,47 @@ func TestGAP0571ModeRefusalSaysActorsAlwaysEnforce(t *testing.T) {
 		t.Errorf("block_at: %v", err)
 	}
 }
+
+// GAP-0571 (T6 ruling, balanced defaults): only a mode that would weaken
+// enforcement is refused. mode: action is what actors already enforce
+// (the LIVEGATE eng profile sets it), so it applies, as a no-op; observe
+// is refused.
+func TestGAP0571ActionModeAppliesObserveIsRefused(t *testing.T) {
+	sb := "      sandbox:\n        egress_block: [x.example.com]\n"
+	for name, tc := range map[string]struct {
+		yaml    string
+		refused string // the refused path; "" applies
+	}{
+		"global action":     {"config_version: 9\nguardrail:\n  mode: action\n  profiles:\n    eng:\n" + sb, ""},
+		"global ACTION":     {"config_version: 9\nguardrail:\n  mode: ACTION\n  profiles:\n    eng:\n" + sb, ""},
+		"profile action":    {"config_version: 9\nguardrail:\n  profiles:\n    eng:\n      mode: action\n" + sb, ""},
+		"connector action":  {"config_version: 9\nguardrail:\n  profiles:\n    eng:\n      connectors:\n        claudecode: {mode: action}\n" + sb, ""},
+		"global observe":    {"config_version: 9\nguardrail:\n  mode: observe\n  profiles:\n    eng:\n" + sb, "guardrail.mode"},
+		"profile observe":   {"config_version: 9\nguardrail:\n  profiles:\n    eng:\n      mode: observe\n" + sb, "guardrail.profiles.eng.mode"},
+		"connector observe": {"config_version: 9\nguardrail:\n  profiles:\n    eng:\n      mode: action\n      connectors:\n        codex: {mode: observe}\n" + sb, "guardrail.profiles.eng.connectors.codex.mode"},
+		"profile other":     {"config_version: 9\nguardrail:\n  profiles:\n    eng:\n      mode: audit\n" + sb, "guardrail.profiles.eng.mode"},
+	} {
+		pol, err := ParsePolicy([]byte(tc.yaml), baseConfig())
+		if tc.refused == "" {
+			if err != nil {
+				t.Errorf("%s: refused (%v), want applied", name, err)
+				continue
+			}
+			if p := pol.Profiles["eng"]; p.Mode != "" || len(p.Connectors) != 0 {
+				t.Errorf("%s: the stored profile keeps the no-op mode: %+v", name, p)
+			}
+			continue
+		}
+		var e *eb.Error
+		if !errors.As(err, &e) || e.Code != CodeNotSubstrate || e.Path != tc.refused || !strings.Contains(e.Detail, "always enforce") {
+			t.Errorf("%s: err = %v, want %s at %s", name, err, CodeNotSubstrate, tc.refused)
+		}
+	}
+	// A connector entry with another field than mode keeps the general
+	// refusal (only description and sandbox apply to actors).
+	_, err := ParsePolicy([]byte("guardrail:\n  profiles:\n    eng:\n      connectors:\n        claudecode: {mode: action, block_at: HIGH}\n"+sb), baseConfig())
+	var e *eb.Error
+	if !errors.As(err, &e) || e.Code != CodeNotSubstrate || strings.Contains(e.Detail, "mode is not") {
+		t.Errorf("connector block_at: %v", err)
+	}
+}
