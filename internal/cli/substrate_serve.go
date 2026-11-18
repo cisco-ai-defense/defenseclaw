@@ -1100,7 +1100,8 @@ func leaderChainOptions(cfg *config.Config, store registry.Store, dir string, re
 
 // leaderChainStartGrace covers a gateway's note of a tool step it could not
 // record during a leader outage: retried every 5 s with a 2 s timeout
-// (internal/gateway substrateNotes), so 15 s holds two tries (GAP-0601).
+// (internal/gateway substrateNotes), so 15 s holds two tries of a small
+// backlog (GAP-0601).
 const leaderChainStartGrace = 15 * time.Second
 
 // gatewayRoleChainEgressAction is the chain egress action the gateway role

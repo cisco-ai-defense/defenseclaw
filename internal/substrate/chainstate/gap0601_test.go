@@ -36,8 +36,8 @@ func TestEgressStartGraceGAP0601(t *testing.T) {
 	in := EgressRequest{Actor: actorA, Host: "example.com", Method: "POST"}
 	_, err := h.svc.Egress(ctx, in)
 	var we *leader.WireError
-	if !errors.As(err, &we) || we.Code != leader.CodeUnavailable {
-		t.Fatalf("first check, clear: want unavailable, got %v", err)
+	if !errors.Is(err, errStarting) || !errors.As(err, &we) || we.Code != leader.CodeUnavailable {
+		t.Fatalf("first check, clear: want errStarting (unavailable), got %v", err)
 	}
 	h.advance(10 * time.Second)
 	if _, err := h.svc.Egress(ctx, in); !errors.Is(err, errStarting) {
@@ -55,6 +55,13 @@ func TestEgressStartGraceGAP0601(t *testing.T) {
 	h2.advance(16 * time.Second)
 	if v, err := h2.svc.Egress(ctx, in); err != nil || v.Deny {
 		t.Fatalf("past the grace: %+v %v", v, err)
+	}
+	// A detection under the alert action is answered within the grace.
+	h4 := newHarness(t, t.TempDir(), Options{StartGrace: 15 * time.Second, EgressAction: EgressAlert})
+	h4.hook(actorA, "s1", projection(t, guardrail.ToolChainSecretReadThenEgress, 1))
+	h4.advance(time.Second)
+	if v, err := h4.svc.Egress(ctx, in); err != nil || v.Deny || len(v.Detected) == 0 {
+		t.Fatalf("alert action, detection within the grace: %+v %v", v, err)
 	}
 	// No grace (the zero value): answered at once.
 	h3 := newHarness(t, t.TempDir(), Options{})
