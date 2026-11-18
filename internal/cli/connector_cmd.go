@@ -1304,6 +1304,9 @@ func pruneOrphanedConnector(ctx context.Context, dataDir, name string, conn conn
 	}
 	defer restoreConfigHome()
 	opts := resolveConnectorOptsFor(dataDir, name)
+	// After a rollback's data swap, the saved newer install proves which
+	// account-wide hooks it set up (Kiro on Windows, GAP-1221).
+	opts.RollbackSavedDataDir = connectorRollbackBackupsDir
 	paths, err := connector.OrphanedHookConfigPaths(conn, opts)
 	if err != nil || len(paths) == 0 {
 		return nil, err

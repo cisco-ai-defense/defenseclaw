@@ -387,6 +387,17 @@ type SetupOpts struct {
 	// every start until the file was fixed, and the boot reclaim finishes
 	// the cleanup once it can be read (rel-1-0-10 GAP-1304).
 	ReportUnreadableResidue bool
+
+	// RollbackSavedDataDir is the saved data folder of the newer install a
+	// rollback just left (`connector prune-orphans --rollback-backups-dir`,
+	// which the installers run with that release's gateway after the data
+	// swap). A connector that proves ownership of an account-wide command by
+	// what a data folder holds (Kiro on Windows, kiroDataDirSetUpKiro) also
+	// takes the proof from this folder: the install that set the connector
+	// up is the one the rollback left, and the restored folder never held
+	// it, so the hooks it left stayed after the rollback and Kiro failed
+	// closed without its token (rel-1-0-10 GAP-1221). Empty everywhere else.
+	RollbackSavedDataDir string
 }
 
 // ManagedHookPolicyProvider renders and verifies connector-owned settings for

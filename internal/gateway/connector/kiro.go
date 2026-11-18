@@ -680,13 +680,17 @@ func (c *KiroConnector) installHookCommands(opts SetupOpts) []string {
 // whose boot reclaim or prune then removed them and left Kiro unguarded
 // (review P2 of GAP-1092). The Windows commands are this install's only when
 // this data folder shows that its own Setup set Kiro up
-// (kiroDataDirSetUpKiro).
+// (kiroDataDirSetUpKiro), or, in the prune after a rollback's data swap, the
+// saved folder of the newer install the rollback left does
+// (SetupOpts.RollbackSavedDataDir): its hooks, which the rollback converted
+// into a form these commands include, stayed in an install that never set
+// Kiro up (rel-1-0-10 GAP-1221).
 func (c *KiroConnector) installHookCommandsFor(goos string, opts SetupOpts) []string {
 	if kiroManaged(opts) {
 		return nil
 	}
 	if goos == "windows" {
-		if !kiroDataDirSetUpKiro(opts.DataDir) {
+		if !kiroDataDirSetUpKiro(opts.DataDir) && !kiroDataDirSetUpKiro(opts.RollbackSavedDataDir) {
 			return nil
 		}
 		return kiroWindowsOwnedHookCommandsFor(false)
