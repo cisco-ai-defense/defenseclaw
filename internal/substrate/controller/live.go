@@ -150,7 +150,7 @@ func (c *Controller) UnattestedTemplates() int {
 	defer c.mu.Unlock()
 	n := 0
 	for k, ct := range c.templates {
-		if c.inUse[k] && !ct.att.Attested {
+		if len(c.inUse[k]) > 0 && !ct.att.Attested {
 			n++
 		}
 	}
