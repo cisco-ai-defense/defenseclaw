@@ -259,9 +259,11 @@ func (e *Engine) Begin(ctx context.Context, f CallFacts) Call {
 		f.StartedAt = now
 	}
 	c := &call{e: e, s: s, f: s.withoutProvenance(f), start: now}
-	if f.Listener == listenerRouteOnly && f.CallRole == RoleAgent {
-		c.connector = reconcileConnector(f.Connector)
-		c.track = e.rc.begin(c.connector)
+	if routeOnlyListener(f) {
+		// Tracked only when a native record of the call can arrive.
+		if connector := reconcileConnector(f.Connector); s.tok.NativeImportEnabled(connector) {
+			c.connector, c.track = connector, e.rc.begin(connector)
+		}
 	}
 	if f.Streaming {
 		c.parser = NewStreamParser(f.APIFamily)

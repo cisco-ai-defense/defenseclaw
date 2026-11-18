@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 // The black-box cases (recorded once, unrecorded counted, both orders,
 // reload) are in internal/gateway/otel_ingest_native_usage_percall_v8_test.go.
-// These cover the grace, the disable drain and the listener kinds.
+// These cover the grace, the disable drain, the listener kinds and the bounds.
 
 func reconcileEngine(t *testing.T) (*Engine, *captureSink, *nativeChargeSink) {
 	t.Helper()
@@ -28,7 +29,7 @@ func reconcileEngine(t *testing.T) (*Engine, *captureSink, *nativeChargeSink) {
 
 func routeOnlyCall(e *Engine) Call {
 	f := facts()
-	f.Listener, f.ChargeKeys = listenerRouteOnly, []string{"user:u1"}
+	f.Listener, f.ChargeKeys = engine.ListenerRouteOnly, []string{"user:u1"}
 	return e.Begin(context.Background(), f)
 }
 
@@ -129,6 +130,63 @@ func TestReconcileMatchKinds(t *testing.T) {
 		}
 		if e.rc.ledgers["claudecode"] != nil {
 			t.Fatal("the ledger of an idle connector is dropped")
+		}
+	})
+}
+
+// A connector whose native usage is not imported is not tracked, a listener
+// call in flight past reconcileTTL holds no native record back, and the
+// queues keep their cap with O(1) trimming.
+func TestReconcileBounds(t *testing.T) {
+	t.Run("native import off", func(t *testing.T) {
+		off := false
+		sink := newCapture()
+		e := NewEngine(sink)
+		e.Apply(config.TokenomicsConfig{Enabled: true, NativeOTelImport: config.TokenomicsNativeImportConfig{ClaudeCode: &off}}, testPricing())
+		defer e.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
+		endWithUsage(routeOnlyCall(e), "req_1")
+		sink.wait(t, 1)
+		if len(e.rc.ledgers) != 0 {
+			t.Fatalf("no native record can arrive, nothing is tracked: %v", e.rc.ledgers)
+		}
+	})
+	t.Run("stale call in flight", func(t *testing.T) {
+		e, sink, _ := reconcileEngine(t)
+		c := routeOnlyCall(e)
+		e.rc.mu.Lock()
+		for seq := range e.rc.ledgers["claudecode"].inflight {
+			e.rc.ledgers["claudecode"].inflight[seq] = time.Now().Add(-reconcileTTL - time.Second)
+		}
+		e.rc.mu.Unlock()
+		if _, ok := e.RecordNative(nativeRecord(nil)); !ok {
+			t.Fatal("not recorded")
+		}
+		if recs := sink.wait(t, 1); recs[0].Facts.Listener != "native_otel" {
+			t.Fatalf("counted at once: %+v", recs[0])
+		}
+		c.End(nil)
+	})
+	t.Run("queue cap", func(t *testing.T) {
+		var q entryQueue
+		u := Usage{Input: 1, Output: 1, Has: HasInput | HasOutput}
+		for i := 0; i < 3*reconcileMaxEntries; i++ {
+			u.Input = int64(i)
+			q.push(reconcileEntry{usage: u, at: time.Now()})
+		}
+		if q.size() != reconcileMaxEntries || cap(q.items) > 4*reconcileMaxEntries {
+			t.Fatalf("size %d cap %d", q.size(), cap(q.items))
+		}
+		u.Input = 3*reconcileMaxEntries - 1
+		if !q.take(reconcileEntry{usage: u}) {
+			t.Fatal("the newest entry pairs")
+		}
+		u.Input = 0
+		if q.take(reconcileEntry{usage: u}) {
+			t.Fatal("the oldest entries were evicted")
+		}
+		q.trim(time.Now().Add(time.Hour))
+		if q.size() != 0 {
+			t.Fatalf("trim left %d", q.size())
 		}
 	})
 }

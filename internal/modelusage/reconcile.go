@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 // Per-call reconciliation of native usage with the route-only listener
@@ -27,13 +29,15 @@ import (
 // reload or a routing enable or disable between a call and its export
 // changes nothing.
 //
-// Match: the provider request id when both sides carry it (the request-id
-// response header the listener forwarded and the request_id Claude Code
-// exports), else the token counts, which both sides read from the same
-// provider usage block: input and output present and equal on both sides,
-// and every cache and reasoning count both report equal. A listener record
-// without input and output counts never matches, so the native numbers of
-// that call are counted. Each record pairs at most once.
+// Match: the provider request id when both sides carry one (the Anthropic
+// request-id response header the listener forwarded, which Claude Code
+// exports as request_id). Two different ids are two calls and never pair.
+// When one side has no id, the token counts decide: both sides read them
+// from the same provider usage block, so input and output must be present
+// and equal on both sides, and every cache and reasoning count both report
+// must be equal. A listener record without input and output counts never
+// matches, so the native numbers of that call are counted. Each record pairs
+// at most once. Only connectors whose native usage is imported are tracked.
 //
 // Order: an agent exports a call after it has the whole answer, and the
 // listener begins its record before it sends the request upstream. When a
@@ -43,27 +47,83 @@ import (
 // until those calls end (a match drops it) or for reconcileGrace, and then
 // counted. A listener record that ends after that and matches the counted
 // native record is not enqueued again; its budget charge stays, because a
-// native record carries no budget keys.
+// native record carries no budget keys. That call's stored row is then the
+// native one, without the routing facts.
+//
+// Residual double counts (a call counted twice is preferred over a call
+// lost): the export arrives more than reconcileTTL after the call, the
+// gateway restarted in between (the ledger is in memory), an entry was
+// evicted at the caps, or the two sides report different counts and only
+// one carries an id. When no side carries an id (Codex, Bedrock), two calls
+// of one connector with equal counts within reconcileTTL may pair the wrong
+// way round: the totals stay right while both exports arrive.
 const (
-	// reconcileTTL is how long an unmatched record waits for its pair.
+	// reconcileTTL is how long an unmatched record, or a listener call in
+	// flight, waits for its pair.
 	reconcileTTL = 15 * time.Minute
 	// reconcileGrace bounds how long a native record is parked.
 	reconcileGrace = 30 * time.Second
 	// reconcileMaxEntries bounds each list of one connector; the oldest
-	// unmatched entry is evicted first.
+	// entry is evicted first.
 	reconcileMaxEntries = 4096
 	// reconcileMaxConnectors bounds the connectors tracked at once.
 	reconcileMaxConnectors = 64
 	reconcileMaxIDBytes    = 128
-	// listenerRouteOnly is CallFacts.Listener of the route-only listener
-	// (routing/engine.ListenerRouteOnly; this package imports nothing from it).
-	listenerRouteOnly = "route_only"
 )
 
 type reconcileEntry struct {
-	ids   [2]string
+	id    string // provider request id, "" when unknown
 	usage Usage
 	at    time.Time
+	used  bool
+}
+
+// entryQueue is a FIFO of entries, oldest first. A paired entry is marked
+// used and dropped once it reaches the head, so push, pair and trim cost O(1)
+// amortised; a search is linear.
+type entryQueue struct {
+	items []reconcileEntry
+	head  int
+}
+
+func (q *entryQueue) size() int { return len(q.items) - q.head }
+
+func (q *entryQueue) push(e reconcileEntry) {
+	if q.size() >= reconcileMaxEntries {
+		q.items[q.head] = reconcileEntry{}
+		q.head++
+	}
+	q.items = append(q.items, e)
+	q.compact()
+}
+
+// trim drops paired entries and entries older than cut from the head.
+func (q *entryQueue) trim(cut time.Time) {
+	for q.head < len(q.items) && (q.items[q.head].used || q.items[q.head].at.Before(cut)) {
+		q.items[q.head] = reconcileEntry{}
+		q.head++
+	}
+	q.compact()
+}
+
+func (q *entryQueue) compact() {
+	if q.head == 0 || q.head < len(q.items)/2 {
+		return
+	}
+	n := copy(q.items, q.items[q.head:])
+	clear(q.items[n:])
+	q.items, q.head = q.items[:n], 0
+}
+
+// take pairs the entry matching e and reports whether there was one.
+func (q *entryQueue) take(e reconcileEntry) bool {
+	live := q.items[q.head:]
+	i := pickPair(len(live), func(i int) (reconcileEntry, bool) { return live[i], !live[i].used }, e)
+	if i < 0 {
+		return false
+	}
+	live[i].used = true
+	return true
 }
 
 type parkedNative struct {
@@ -74,9 +134,9 @@ type parkedNative struct {
 }
 
 type reconcileLedger struct {
-	inflight map[uint64]struct{}
-	recorded []reconcileEntry // listener records not matched yet, oldest first
-	late     []reconcileEntry // native records counted while a listener call was in flight
+	inflight map[uint64]time.Time // listener calls in flight, by begin time
+	recorded entryQueue           // listener records not matched yet
+	late     entryQueue           // native records counted while a listener call was in flight
 	parked   []*parkedNative
 }
 
@@ -96,6 +156,11 @@ const (
 	nativeParked
 )
 
+// routeOnlyListener reports whether f is a call of the route-only listener.
+func routeOnlyListener(f CallFacts) bool {
+	return f.Listener == engine.ListenerRouteOnly && f.CallRole == RoleAgent
+}
+
 func reconcileConnector(connector string) string {
 	return strings.ToLower(strings.TrimSpace(connector))
 }
@@ -108,15 +173,11 @@ func boundReconcileID(id string) string {
 	return id
 }
 
-// providerRequestID is the provider request id of an upstream answer:
-// request-id (Anthropic), x-request-id (OpenAI), x-amzn-requestid (Bedrock).
+// providerRequestID is the Anthropic request-id of an upstream answer, the
+// id Claude Code exports as request_id. Other providers' ids are not read:
+// no agent exports them, and an id one side lacks never blocks a match.
 func providerRequestID(h http.Header) string {
-	for _, key := range []string{"Request-Id", "X-Request-Id", "X-Amzn-Requestid"} {
-		if id := boundReconcileID(h.Get(key)); id != "" {
-			return id
-		}
-	}
-	return ""
+	return boundReconcileID(h.Get("Request-Id"))
 }
 
 func (r *reconciler) ledger(connector string, create bool) *reconcileLedger {
@@ -129,13 +190,13 @@ func (r *reconciler) ledger(connector string, create bool) *reconcileLedger {
 	if len(r.ledgers) >= reconcileMaxConnectors {
 		return nil
 	}
-	l := &reconcileLedger{inflight: map[uint64]struct{}{}}
+	l := &reconcileLedger{inflight: map[uint64]time.Time{}}
 	r.ledgers[connector] = l
 	return l
 }
 
 func (r *reconciler) forget(connector string, l *reconcileLedger) {
-	if len(l.inflight) == 0 && len(l.recorded) == 0 && len(l.late) == 0 && len(l.parked) == 0 {
+	if len(l.inflight) == 0 && l.recorded.size() == 0 && l.late.size() == 0 && len(l.parked) == 0 {
 		delete(r.ledgers, connector)
 	}
 }
@@ -148,11 +209,16 @@ func (r *reconciler) begin(connector string) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	l := r.ledger(connector, true)
-	if l == nil || len(l.inflight) >= reconcileMaxEntries {
+	if l == nil {
+		return 0
+	}
+	now := time.Now()
+	l.trim(now)
+	if len(l.inflight) >= reconcileMaxEntries {
 		return 0
 	}
 	r.seq++
-	l.inflight[r.seq] = struct{}{}
+	l.inflight[r.seq] = now
 	return r.seq
 }
 
@@ -171,15 +237,14 @@ func (r *reconciler) listenerEnd(connector string, seq uint64, requestID string,
 	l.trim(now)
 	emit = true
 	if usageKeyed(rec.Usage) {
-		q := reconcileEntry{ids: [2]string{requestID}, usage: rec.Usage, at: now}
-		if i := pickParked(l.parked, q); i >= 0 {
+		q := reconcileEntry{id: requestID, usage: rec.Usage, at: now}
+		if i := pickPair(len(l.parked), func(i int) (reconcileEntry, bool) { return l.parked[i].entry, true }, q); i >= 0 {
 			l.parked[i].timer.Stop()
 			l.parked = slices.Delete(l.parked, i, i+1)
-		} else if i := pickEntry(l.late, q); i >= 0 {
-			l.late = slices.Delete(l.late, i, i+1)
+		} else if l.late.take(q) {
 			emit = false
 		} else {
-			l.recorded = appendReconcileEntry(l.recorded, q)
+			l.recorded.push(q)
 		}
 	}
 	release = l.releasable()
@@ -203,16 +268,14 @@ func (r *reconciler) native(e *Engine, rec Record) nativeOutcome {
 	}
 	now := time.Now()
 	l.trim(now)
-	q := reconcileEntry{
-		ids:   [2]string{boundReconcileID(rec.Facts.ModelResponseID), boundReconcileID(rec.Facts.ModelRequestID)},
-		usage: rec.Usage, at: now,
-	}
-	if i := pickEntry(l.recorded, q); i >= 0 {
-		l.recorded = slices.Delete(l.recorded, i, i+1)
+	q := reconcileEntry{id: boundReconcileID(rec.Facts.ModelResponseID), usage: rec.Usage, at: now}
+	if l.recorded.take(q) {
+		l.recorded.trim(now.Add(-reconcileTTL))
 		r.forget(connector, l)
 		return nativeMatched
 	}
 	if len(l.inflight) == 0 || len(l.parked) >= reconcileMaxEntries {
+		r.forget(connector, l)
 		return nativeCount
 	}
 	grace := r.grace
@@ -239,7 +302,7 @@ func (r *reconciler) expire(e *Engine, connector string, p *parkedNative) {
 	}
 	l.parked = slices.Delete(l.parked, i, i+1)
 	p.entry.at = time.Now()
-	l.late = appendReconcileEntry(l.late, p.entry)
+	l.late.push(p.entry)
 	r.mu.Unlock()
 	e.countNative(p.rec)
 }
@@ -254,13 +317,26 @@ func (r *reconciler) drain() []Record {
 		for _, p := range l.parked {
 			p.timer.Stop()
 			p.entry.at = now
-			l.late = appendReconcileEntry(l.late, p.entry)
+			l.late.push(p.entry)
 			out = append(out, p.rec)
 		}
 		l.parked = nil
 		r.forget(connector, l)
 	}
 	return out
+}
+
+// trim drops entries and listener calls in flight older than reconcileTTL,
+// so a call that never ended cannot hold native records back for ever.
+func (l *reconcileLedger) trim(now time.Time) {
+	cut := now.Add(-reconcileTTL)
+	l.recorded.trim(cut)
+	l.late.trim(cut)
+	for seq, began := range l.inflight {
+		if began.Before(cut) {
+			delete(l.inflight, seq)
+		}
+	}
 }
 
 // releasable removes and returns the parked records that waited for no
@@ -288,63 +364,25 @@ func (l *reconcileLedger) releasable() []Record {
 	return out
 }
 
-// trim drops entries older than reconcileTTL.
-func (l *reconcileLedger) trim(now time.Time) {
-	cut := now.Add(-reconcileTTL)
-	trim := func(list []reconcileEntry) []reconcileEntry {
-		n := 0
-		for n < len(list) && list[n].at.Before(cut) {
-			n++
-		}
-		return slices.Delete(list, 0, n)
-	}
-	l.recorded, l.late = trim(l.recorded), trim(l.late)
-}
-
-func appendReconcileEntry(list []reconcileEntry, entry reconcileEntry) []reconcileEntry {
-	if len(list) >= reconcileMaxEntries {
-		list = slices.Delete(list, 0, len(list)-reconcileMaxEntries+1)
-	}
-	return append(list, entry)
-}
-
-// pickEntry finds the pair of q: a shared provider request id first, then
-// the oldest entry with the same token counts. -1: none.
-func pickEntry(list []reconcileEntry, q reconcileEntry) int {
-	for i := range list {
-		if sharesReconcileID(list[i].ids, q.ids) {
-			return i
+// pickPair finds the pair of q among n candidates (at returns candidate i
+// and whether it may pair): the same provider request id first, then the
+// oldest candidate with equal counts that does not carry a different id.
+// -1: none.
+func pickPair(n int, at func(int) (reconcileEntry, bool), q reconcileEntry) int {
+	if q.id != "" {
+		for i := 0; i < n; i++ {
+			if c, ok := at(i); ok && c.id == q.id {
+				return i
+			}
 		}
 	}
-	for i := range list {
-		if usageMatches(list[i].usage, q.usage) {
+	for i := 0; i < n; i++ {
+		c, ok := at(i)
+		if ok && (c.id == "" || q.id == "") && usageMatches(c.usage, q.usage) {
 			return i
 		}
 	}
 	return -1
-}
-
-func pickParked(list []*parkedNative, q reconcileEntry) int {
-	for i := range list {
-		if sharesReconcileID(list[i].entry.ids, q.ids) {
-			return i
-		}
-	}
-	for i := range list {
-		if usageMatches(list[i].entry.usage, q.usage) {
-			return i
-		}
-	}
-	return -1
-}
-
-func sharesReconcileID(a, b [2]string) bool {
-	for _, x := range a {
-		if x != "" && (x == b[0] || x == b[1]) {
-			return true
-		}
-	}
-	return false
 }
 
 // usageKeyed reports whether u carries the input and output counts a match

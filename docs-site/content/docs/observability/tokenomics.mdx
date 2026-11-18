@@ -178,7 +178,13 @@ The gateway answers `GET /usage?by=model|connector|route|profile|role|provider|u
 
 ## Agents that report their own usage
 
-Claude Code and Codex send their own usage over OTLP. `observability.tokenomics.native_otel_import` lets DefenseClaw read it. When the route-only listener recorded a call, its record is counted and the agent figures for that call are only a cross-check, so a call is never counted twice. A call the listener did not record, for example from an agent session started before `defenseclaw routing enable`, is counted from the agent figures.
+Claude Code and Codex send their own usage over OTLP. `observability.tokenomics.native_otel_import` lets DefenseClaw read it. DefenseClaw pairs the agent figures with the route-only listener record of the same call, by the provider request id or else by the token counts. When both records arrive within 15 minutes, the call is counted once, from the listener record. A call the listener did not record, for example from an agent session started before `defenseclaw routing enable`, is counted from the agent figures.
+
+A call can still be counted twice when:
+
+- the agent exports it more than 15 minutes after the call,
+- the gateway restarts between the call and the export,
+- the two records report different token counts and only one of them has a request id.
 
 | Agent | Event read | What the usage record gets |
 |---|---|---|

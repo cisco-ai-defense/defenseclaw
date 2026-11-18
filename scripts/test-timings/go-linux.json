@@ -2305,6 +2305,7 @@
    "TestNativeUsageNeverTakesCumulativeCostAsPerCall": 2.6,
    "TestNativeUsagePerCallEmptyListenerUsageDoesNotSuppress": 4.4,
    "TestNativeUsagePerCallRecordedCallIsCountedOnce": 24.4,
+   "TestNativeUsagePerCallRequestIDs": 7.3,
    "TestNativeUsagePerCallSurvivesReload": 14.0,
    "TestNativeUsagePerCallUnrecordedCallIsCounted": 9.7,
    "TestNestedHomeCredentialBelowTheWorkingDirectoryIsJudgedLikeAnyOther": 3.3,

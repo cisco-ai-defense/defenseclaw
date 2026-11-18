@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 )
 
@@ -40,6 +41,7 @@ type perCallUsage struct {
 func routeOnlyClaudeConfig(routing bool, connectors ...string) *config.Config {
 	cfg := &config.Config{}
 	cfg.Observability.Tokenomics.Enabled = true
+	cfg.Observability.Pricing = nativeUsagePricing()
 	cfg.Routing.Enabled = routing
 	cfg.Routing.RouteOnly.Connectors = connectors
 	cfg.Routing.RouteOnly.Upstreams = map[string]config.RoutingUpstreamConfig{
@@ -48,9 +50,10 @@ func routeOnlyClaudeConfig(routing bool, connectors ...string) *config.Config {
 	return cfg
 }
 
-// newPerCallUsage installs a test usage engine. A non-nil cfg is applied
-// first as the gateway applies config.yaml on start (and later reloads go
-// through p.reload).
+// newPerCallUsage installs the usage engine under test. With a cfg it is the
+// gateway's own engine, configured as the gateway applies config.yaml on
+// start, and p.reload applies a reload to that same engine; without one it
+// is a bare engine with tokenomics on.
 func newPerCallUsage(t *testing.T, cfg *config.Config) *perCallUsage {
 	t.Helper()
 	p := &perCallUsage{t: t}
@@ -62,9 +65,12 @@ func newPerCallUsage(t *testing.T, cfg *config.Config) *perCallUsage {
 			p.sidecar.stopModelUsage()
 			processModelUsage.Store(previous)
 		})
+		p.sink = &nativeUsageSink{ch: make(chan struct{}, 64)}
+		processModelUsage.Load().AddSink(p.sink)
+	} else {
+		p.sink = installNativeUsageEngine(t, config.TokenomicsConfig{Enabled: true})
 	}
 	fixture := newCodexNativeOTLPFixture(t)
-	p.sink = installNativeUsageEngine(t, config.TokenomicsConfig{Enabled: true})
 	p.spend = &countingSpendSink{}
 	processModelUsage.Load().SetSpendSink(p.spend)
 	p.api = &APIServer{}
@@ -79,7 +85,7 @@ func (p *perCallUsage) reload(cfg *config.Config) {
 // begin starts the record the route-only listener makes for one call.
 func (p *perCallUsage) begin(connector string, family modelusage.APIFamily, provider, model string) modelusage.Call {
 	return processModelUsage.Load().Begin(context.Background(), modelusage.CallFacts{
-		Connector: connector, Listener: "route_only", APIFamily: family, CallRole: modelusage.RoleAgent,
+		Connector: connector, Listener: engine.ListenerRouteOnly, APIFamily: family, CallRole: modelusage.RoleAgent,
 		SelectedProvider: provider, SelectedModel: model, ChargeKeys: []string{"user:1001"},
 	})
 }
@@ -175,7 +181,7 @@ func TestNativeUsagePerCallRecordedCallIsCountedOnce(t *testing.T) {
 				p.exportClaude(claudeCall(perCallRequestA, 431))
 			}
 			recs := p.records(1)
-			if recs[0].Facts.Listener != "route_only" || recs[0].Usage.Output != 431 {
+			if recs[0].Facts.Listener != engine.ListenerRouteOnly || recs[0].Usage.Output != 431 {
 				t.Fatalf("the listener record is the one counted: %+v", recs[0])
 			}
 			if got := p.charges(); got != 1 {
@@ -196,8 +202,32 @@ func TestNativeUsagePerCallRecordedCallIsCountedOnce(t *testing.T) {
 		), otelSignalLogs, "codex", now); err != nil {
 			t.Fatal(err)
 		}
-		if recs := p.records(1); recs[0].Facts.Listener != "route_only" {
+		if recs := p.records(1); recs[0].Facts.Listener != engine.ListenerRouteOnly {
 			t.Fatalf("the listener record is the one counted: %+v", recs[0])
+		}
+	})
+}
+
+// TestNativeUsagePerCallRequestIDs: one provider request id is one call even
+// when the counts differ; two ids are two calls even with equal counts (a
+// direct call of a session started before routing enable next to a routed
+// one).
+func TestNativeUsagePerCallRequestIDs(t *testing.T) {
+	t.Run("same id, different counts", func(t *testing.T) {
+		p := newPerCallUsage(t, nil)
+		finishListenerCall(p.beginClaude(), perCallRequestA, claudeAnswer(431))
+		p.exportClaude(claudeCall(perCallRequestA, 432))
+		if recs := p.records(1); recs[0].Facts.Listener != engine.ListenerRouteOnly {
+			t.Fatalf("one record, the listener's: %+v", recs[0])
+		}
+	})
+	t.Run("different ids, same counts", func(t *testing.T) {
+		p := newPerCallUsage(t, routeOnlyClaudeConfig(true, "claudecode"))
+		finishListenerCall(p.beginClaude(), perCallRequestB, claudeAnswer(431))
+		p.exportClaude(claudeCall(perCallRequestA, 431))
+		recs := p.records(2)
+		if got := listenerOf(recs); got[engine.ListenerRouteOnly] != 1 || got["native_otel"] != 1 {
+			t.Fatalf("two calls, two records: %v", got)
 		}
 	})
 }
@@ -221,7 +251,7 @@ func TestNativeUsagePerCallUnrecordedCallIsCounted(t *testing.T) {
 		p.exportClaude(claudeCall(perCallRequestB, 77))
 		finishListenerCall(call, perCallRequestA, claudeAnswer(431))
 		recs := p.records(2)
-		if got := listenerOf(recs); got["route_only"] != 1 || got["native_otel"] != 1 {
+		if got := listenerOf(recs); got[engine.ListenerRouteOnly] != 1 || got["native_otel"] != 1 {
 			t.Fatalf("one listener and one native record, got %v", got)
 		}
 		for _, rec := range recs {
@@ -251,14 +281,15 @@ func TestNativeUsagePerCallEmptyListenerUsageDoesNotSuppress(t *testing.T) {
 }
 
 // TestNativeUsagePerCallSurvivesReload: a reload or a routing enable or
-// disable between a call and its export changes neither answer.
+// disable between a call and its export, applied to the engine that holds
+// the call, changes neither answer.
 func TestNativeUsagePerCallSurvivesReload(t *testing.T) {
 	t.Run("recorded, routing disabled before the export", func(t *testing.T) {
 		p := newPerCallUsage(t, routeOnlyClaudeConfig(true, "claudecode"))
 		finishListenerCall(p.beginClaude(), perCallRequestA, claudeAnswer(431))
 		p.reload(routeOnlyClaudeConfig(false, "claudecode"))
 		p.exportClaude(claudeCall(perCallRequestA, 431))
-		if recs := p.records(1); recs[0].Facts.Listener != "route_only" {
+		if recs := p.records(1); recs[0].Facts.Listener != engine.ListenerRouteOnly {
 			t.Fatalf("one record, the listener's: %+v", recs[0])
 		}
 	})
@@ -267,7 +298,7 @@ func TestNativeUsagePerCallSurvivesReload(t *testing.T) {
 		finishListenerCall(p.beginClaude(), perCallRequestA, claudeAnswer(431))
 		p.reload(routeOnlyClaudeConfig(true))
 		p.exportClaude(claudeCall(perCallRequestA, 431))
-		if recs := p.records(1); recs[0].Facts.Listener != "route_only" {
+		if recs := p.records(1); recs[0].Facts.Listener != engine.ListenerRouteOnly {
 			t.Fatalf("one record, the listener's: %+v", recs[0])
 		}
 	})
