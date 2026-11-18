@@ -100,3 +100,54 @@ func TestGAP0575RefusalNamesOnlyGatingFlags(t *testing.T) {
 		t.Errorf("flaggedPaths = %q", got)
 	}
 }
+
+// GAP-0634: only git's is_ntfs_dotgit forms are left out. A name that
+// merely starts with .git (.git.bak, .git.orig, .git.old) is an ordinary
+// file or folder: 2b6a5e022e left it out (pattern .git[. ]*), the parent
+// pulled it. Controls: .git. , .git.. and git~1 are still left out.
+func TestGAP0634GitLikeNamesArePulled(t *testing.T) {
+	o, sb, _ := copyInActor(t)
+	ctx := context.Background()
+	agent := sb.local(remoteProject)
+	pulled := map[string]string{".git.bak/config": "[core]\n", ".git.orig": "orig\n", "sub/.git.old/notes.txt": "notes\n"}
+	left := []string{".git./hooks/pre-commit", ".git../hooks/pre-commit", "sub/GIT~1/config"}
+	for p, c := range pulled {
+		write(t, agent, p, c, 0o644)
+	}
+	for _, p := range left {
+		write(t, agent, p, "#!/bin/sh\nid\n", 0o755)
+	}
+	rv, err := Pull(ctx, PullOptions{Exec: sb, DataDir: o.data, Name: "c1"})
+	if err != nil {
+		t.Fatalf("the pull failed: %v", err)
+	}
+	leftOut := ""
+	for _, w := range rv.Warnings {
+		if strings.Contains(w, "left out, never brought back") {
+			leftOut += w + "\n"
+		}
+	}
+	for _, n := range []string{".git.bak", ".git.orig", ".git.old"} {
+		if strings.Contains(leftOut, n) {
+			t.Errorf("%s is named as left out: %q", n, leftOut)
+		}
+	}
+	for _, p := range []string{".git.", ".git..", "sub/GIT~1"} {
+		if !strings.Contains(leftOut, p) {
+			t.Errorf("the review does not name %q as left out: %q", p, rv.Warnings)
+		}
+	}
+	if _, err := Apply(ctx, ApplyOptions{DataDir: o.data, Name: "c1", Mode: ModeApply, AcceptSensitive: true}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	for p, c := range pulled {
+		if got := read(t, o.project, p); got != c {
+			t.Errorf("%s was not brought back: %q", p, got)
+		}
+	}
+	for _, p := range left {
+		if _, err := os.Lstat(filepath.Join(o.project, filepath.FromSlash(p))); err == nil {
+			t.Errorf("%s was carried into the folder", p)
+		}
+	}
+}
