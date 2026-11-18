@@ -112,3 +112,60 @@ func TestRoutingBlockIsAdditiveAndNotForwarded(t *testing.T) {
 		t.Fatalf("a result without routing grew one: %v", doc["routing"])
 	}
 }
+
+// rel-1-0-10 GAP-1319 (GAP-0965): a not-ready route-only connector names the
+// closed cause the gateway reports, in the JSON row and the text lines of
+// status and verify, and never the gateway free text; an unknown code, or a
+// cause next to a ready row, is dropped. The block still validates.
+func TestBuildRoutingNamesTheCauseOfANotReadyConnector(t *testing.T) {
+	health := []byte(`{"routing":{"details":{"route_only":[` +
+		`{"connector":"claudecode","ready":false,"cause":"route_epoch","problem":"fixture-problem the route epoch file is missing","fix":"fixture-fix"},` +
+		`{"connector":"codex","ready":false,"cause":"credential_not_stored","problem":"credential fixture-secret is named in the policy bundle"}]}}}`)
+	state := BuildRouting(RoutingInputs{Config: routingConfig(), Health: health})
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		RouteOnly []map[string]any `json:"route_only"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.RouteOnly) != 2 {
+		t.Fatalf("route_only = %s (%v)", raw, err)
+	}
+	if doc.RouteOnly[0]["connector"] != "claudecode" || doc.RouteOnly[0]["cause"] != "route_epoch" || doc.RouteOnly[0]["reason_code"] != "not_ready" ||
+		doc.RouteOnly[1]["connector"] != "codex" || doc.RouteOnly[1]["cause"] != "credential_not_stored" {
+		t.Fatalf("the rows do not name the cause: %s", raw)
+	}
+	if strings.Contains(string(raw), "fixture-") {
+		t.Fatalf("the block carries gateway free text: %s", raw)
+	}
+	lines := strings.Join(RoutingLines(state), "\n")
+	for _, want := range []string{
+		"route-only: claudecode not ready (route_epoch), codex not ready (credential_not_stored)",
+		"route-only claudecode: route_epoch: the gateway route epoch is not published",
+		"route-only codex: credential_not_stored: a gateway credential the policy names is not stored on this host",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("lines do not say %q:\n%s", want, lines)
+		}
+	}
+	if strings.Contains(lines, "fixture-") {
+		t.Fatalf("lines carry gateway free text:\n%s", lines)
+	}
+	schemas := contracttest.Compile(t)
+	r := New("status", "standalone", "windows", "1.0.10")
+	r.Installed, r.InstalledVersion = true, "1.0.10"
+	r.Routing = state
+	r.Finish("windows", 0)
+	if got := schemas.ValidateValue(t, lifecycleSchema, r); got["routing"] == nil {
+		t.Fatalf("the result carries no routing block: %v", got)
+	}
+
+	other := []byte(`{"routing":{"details":{"route_only":[` +
+		`{"connector":"claudecode","ready":true,"cause":"route_epoch"},` +
+		`{"connector":"codex","ready":false,"cause":"free text naming fixture-account"}]}}}`)
+	raw, _ = json.Marshal(BuildRouting(RoutingInputs{Config: routingConfig(), Health: other}))
+	if strings.Contains(string(raw), `"cause"`) || strings.Contains(string(raw), "fixture-") {
+		t.Fatalf("a ready row or an unknown code kept a cause: %s", raw)
+	}
+}

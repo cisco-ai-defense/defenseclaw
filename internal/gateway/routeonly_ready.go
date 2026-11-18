@@ -7,12 +7,15 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Upstream credential of a route-only connector, as /health reports it.
@@ -24,17 +27,17 @@ const (
 )
 
 // Closed causes of a route-only connector that is not ready, published next
-// to the free-text problem (a code, never text from the config)
-// (doctor and the TUI read them from /health; the status routing block has
-// no cause member: its schema in packaging/mdm/contract is a published contract).
+// to the free-text problem (a code, never text from the config). doctor and
+// the TUI read them from /health, and enterprise status and verify name them
+// in the routing block (rel-1-0-10 GAP-1319), whose closed set they are.
 const (
-	routeCauseEpoch             = "route_epoch"
-	routeCauseAliasNoCredential = "allowed_alias_no_credential"
-	routeCauseUpstreamNotSet    = "upstream_not_set"
-	routeCauseSigning           = "signing_not_ready"
-	routeCauseCredentialStored  = "credential_not_stored"
-	routeCauseNoCredential      = "credential_not_configured"
-	routeCauseNoEnrolled        = "no_enrolled_account"
+	routeCauseEpoch             = enterprisestatus.RoutingCauseRouteEpoch
+	routeCauseAliasNoCredential = enterprisestatus.RoutingCauseAliasNoCredential
+	routeCauseUpstreamNotSet    = enterprisestatus.RoutingCauseUpstreamNotSet
+	routeCauseSigning           = enterprisestatus.RoutingCauseSigningNotReady
+	routeCauseCredentialStored  = enterprisestatus.RoutingCauseCredentialNotStored
+	routeCauseNoCredential      = enterprisestatus.RoutingCauseNoCredential
+	routeCauseNoEnrolled        = enterprisestatus.RoutingCauseNoEnrolledAccount
 )
 
 // routeOnlyReadiness is the route-only state of one connector, published in
@@ -297,7 +300,16 @@ var publicRouteOnlyProblems = map[string]string{
 	routeCauseNoEnrolled:        "no enrolled account has the connector protected yet",
 }
 
-const publicRouteOnlyFix = "run defenseclaw doctor as an administrator for the cause and the fix"
+// publicRouteOnlyFix is the next step an ordinary account of a managed host
+// reads. doctor is refused on a managed Windows host, so there it names the
+// administrator status command, which prints the cause (rel-1-0-10 GAP-1319).
+func publicRouteOnlyFix(goos string) string {
+	if goos == "windows" {
+		return "an administrator reads the cause in an elevated PowerShell prompt with " +
+			managed.WindowsGatewayCommand("enterprise", "windows", "status") + " (verify names it too)"
+	}
+	return "run defenseclaw doctor as an administrator for the cause and the fix"
+}
 
 // publicRouteOnly is a route-only readiness row as an ordinary account may
 // read it on a standalone host: the closed cause and warning codes and
@@ -313,7 +325,7 @@ func publicRouteOnly(in routeOnlyReadiness) routeOnlyReadiness {
 		if out.Problem == "" {
 			out.Problem = "route-only is not ready"
 		}
-		out.Fix = publicRouteOnlyFix
+		out.Fix = publicRouteOnlyFix(runtime.GOOS)
 	}
 	return out
 }
