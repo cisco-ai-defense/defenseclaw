@@ -132,6 +132,11 @@ const (
 	MaxFieldBytes = 512
 	// recordOverhead is what a queued record costs besides its text.
 	recordOverhead = 128
+	// maxTakeReplay answers of the newest takes are kept, each for
+	// takeReplayTTL (longer than a leader client retries), so a retried take
+	// gets the same records (GAP-0582).
+	maxTakeReplay = 8
+	takeReplayTTL = 2 * time.Minute
 	// DefaultInterval is how often posters and takers call the leader.
 	DefaultInterval = 3 * time.Second
 )
@@ -151,6 +156,14 @@ type Store struct {
 	life, egress queue
 	gauges       map[string]int64
 	dropped      int64
+	// taken is the newest takes' answers by request id, oldest first.
+	taken []takenAnswer
+}
+
+type takenAnswer struct {
+	id  string
+	at  time.Time
+	out TakeResponse
 }
 
 // queue is a bounded FIFO of records and their size.
@@ -306,14 +319,43 @@ func (s *Store) PostEgress(_ context.Context, in PostRequest) (struct{}, error) 
 }
 
 // Take implements MethodTake: lifecycle records and counts first, then
-// egress decisions, at most in.Max records and about 1 MiB.
-func (s *Store) Take(_ context.Context, in TakeRequest) (TakeResponse, error) {
+// egress decisions, at most in.Max records and about 1 MiB. A retry of a
+// recent take (the same request id) gets the same answer.
+func (s *Store) Take(ctx context.Context, in TakeRequest) (TakeResponse, error) {
 	n := in.Max
 	if n <= 0 || n > DefaultTakeMax {
 		n = DefaultTakeMax
 	}
+	id, now := leader.RequestIDFrom(ctx), time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	kept := s.taken[:0]
+	for _, t := range s.taken {
+		if now.Sub(t.at) < takeReplayTTL {
+			kept = append(kept, t)
+		}
+	}
+	clear(s.taken[len(kept):])
+	s.taken = kept
+	if id != "" {
+		for _, t := range s.taken {
+			if t.id == id {
+				return t.out, nil
+			}
+		}
+	}
+	out := s.takeLocked(n)
+	if id != "" {
+		if len(s.taken) >= maxTakeReplay {
+			s.taken[0] = takenAnswer{}
+			s.taken = s.taken[1:]
+		}
+		s.taken = append(s.taken, takenAnswer{id: id, at: now, out: out})
+	}
+	return out, nil
+}
+
+func (s *Store) takeLocked(n int) TakeResponse {
 	recs, used := s.life.take(n, maxTakeBytes)
 	if rest := n - len(recs); rest > 0 && (len(recs) == 0 || used < maxTakeBytes) {
 		more, _ := s.egress.take(rest, maxTakeBytes-used)
@@ -330,14 +372,18 @@ func (s *Store) Take(_ context.Context, in TakeRequest) (TakeResponse, error) {
 			out.Gauges[k] = v
 		}
 	}
-	return out, nil
+	return out
 }
 
-// Serve registers the methods on the leader server.
+// Serve registers the methods on the leader server. A take's answer (up
+// to 2,000 records) is not kept in the leader's replay cache, where every
+// take, under a new request id, would push hook-call answers out before
+// their replay window (GAP-0582); the store replays its newest takes
+// itself.
 func Serve(srv *leader.Server, s *Store) {
 	srv.Handle(MethodPostCounts, leader.Typed(s.PostCounts))
 	srv.Handle(MethodPostEgress, leader.Typed(s.PostEgress))
-	srv.Handle(MethodTake, leader.Typed(s.Take))
+	srv.HandleRead(MethodTake, leader.Typed(s.Take))
 }
 
 // Poster batches records for the leader (the controller and the callout).
