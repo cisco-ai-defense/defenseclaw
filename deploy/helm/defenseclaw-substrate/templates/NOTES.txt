@@ -39,6 +39,17 @@ resource attribute and set metrics.prometheusRule.namespaceLabel
 {{- end }}
 {{- end }}
 
+{{- $g := .Values.config.guardrail | default dict }}
+{{- $modes := list (toString ($g.mode | default "")) }}
+{{- range $name, $p := ($g.profiles | default dict) }}
+{{- $modes = append $modes (toString ((($p | default dict).mode) | default "")) }}
+{{- end }}
+{{- if has "observe" $modes }}
+
+guardrail.mode or a profile's mode is observe: actors always enforce, so it
+changes no actor verdict (docs/SUBSTRATE.md, Hook).
+{{- end }}
+
 Uninstall removes DefenseClaw-written egress policies first (actors fall back
 to deny-all), then run `defenseclaw substrate setup --remove` to take the
 callout out of Substrate. Snapshots stay in the Substrate bucket: the

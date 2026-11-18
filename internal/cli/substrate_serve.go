@@ -592,6 +592,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			out.Profiles = func(p identity.Person, requested, connector string, admin bool) (string, string, error) {
 				return gateway.SubstrateLauncherProfiles(live())(p, requested, connector, admin)
 			}
+			out.WorkloadEntry = func(subject string) (string, string) {
+				return gateway.SubstrateWorkloadEntry(live(), subject)
+			}
 			if out.Bundles, err = substrateBundleStore(c, live); err != nil {
 				return out, err
 			}

@@ -18,6 +18,7 @@ package render
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
@@ -63,6 +64,26 @@ var providerHosts = []hostClass{
 	{suffix: "deepseek.com"},
 	{suffix: "fireworks.ai"},
 	{suffix: "replicate.com"},
+}
+
+// providerClasses is providerHosts plus extra, the configured providers'
+// hosts (Settings.ProviderHosts), read as block entries.
+func providerClasses(extra []string) []hostClass {
+	return append(slices.Clone(providerHosts), blockClasses(extra)...)
+}
+
+// ProviderHost reports whether the egress pattern raw reaches a model
+// provider host (D2: the built-in list plus extra, the configured
+// providers' hosts) and names the entry it matches. It is the check
+// EgressPolicy drops a destination with (ReasonProvider), so a policy
+// bundle can refuse at apply what the render would drop (GAP-0572). "*" and
+// an invalid pattern are left to the pattern checks and report false.
+func ProviderHost(extra []string, raw string) (string, bool) {
+	p, ok := parsePattern(raw)
+	if !ok || p.Any {
+		return "", false
+	}
+	return anyOverlap(providerClasses(extra), p)
 }
 
 // pattern is egressspec.Pattern; parsePattern its parser.

@@ -85,6 +85,7 @@ func TestFactsMCPAdmission(t *testing.T) {
 	os.WriteFile(filepath.Join(repo, ".mcp.json"), []byte(`{"mcpServers":{"local":{"command":"python3","args":["tools/srv.py"]},"sys":{"command":"/usr/bin/env","args":["node"]},"web":{"type":"http","url":"https://x"}}}`), 0o644)
 	payload, _ := json.Marshal(map[string]any{"hook_event_name": "SessionStart", "cwd": repo})
 	f := CollectFacts("claudecode", "", payload, 1<<20)
+	f = withoutFolderFacts(f)
 	if f == nil || len(f.Files) != 2 || f.Files[0].Role != "mcp_config" || f.Files[1].Role != "mcp_server" ||
 		string(f.Files[1].Content) != "print('mcp')" {
 		t.Fatalf("mcp facts %+v", f)
@@ -92,7 +93,27 @@ func TestFactsMCPAdmission(t *testing.T) {
 	os.MkdirAll(filepath.Join(repo, ".codex"), 0o755)
 	os.WriteFile(filepath.Join(repo, ".codex", "config.toml"), []byte("[mcp_servers.local]\ncommand = \"./tools/srv.py\"\n"), 0o644)
 	f = CollectFacts("codex", "SessionStart", payload, 1<<20)
+	f = withoutFolderFacts(f)
 	if f == nil || len(f.Files) != 2 || f.Files[1].Path != filepath.Join(repo, "tools", "srv.py") {
 		t.Fatalf("codex mcp facts %+v", f)
 	}
+}
+
+// withoutFolderFacts drops the folder facts the kit reports for registry
+// fetchers and bare commands (GAP-0573, GAP-0575), which these rows do not
+// look at.
+func withoutFolderFacts(f *Facts) *Facts {
+	if f == nil {
+		return nil
+	}
+	var keep []AttachedFile
+	for _, a := range f.Files {
+		switch a.Role {
+		case roleFetchChecked, roleFetchLocal, roleFetchConfig, roleFetchNames, roleCommandPath:
+		default:
+			keep = append(keep, a)
+		}
+	}
+	f.Files = keep
+	return f
 }

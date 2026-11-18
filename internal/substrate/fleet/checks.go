@@ -145,6 +145,10 @@ type Observed struct {
 	IngressClients []string
 	BodyOptIn      *bool
 	OpenAPPA       bool
+	// ExtprocOff is set when config.yaml turns the DefenseClaw callout off
+	// (substrate.extproc.enabled: false), the option setup and doctor name
+	// for keeping another callout (GAP-0496).
+	ExtprocOff bool
 
 	// ActorRoutes are the probed paths (ActorListenerProbes) the actor
 	// listener answered with anything but 404, read through a port-forward
@@ -429,6 +433,20 @@ func containsAll(have, want []string) bool {
 // DefenseClaw callout, and no other callout holds the slot (D10).
 func CheckCalloutRegistered(o Observed) Check {
 	want := setup.CalloutService(o.Namespace, o.CalloutPort)
+	if o.ExtprocOff && o.ExtprocService != want {
+		// Turned off on purpose (GAP-0496): a warning that says what is off,
+		// not a failure the operator can only clear by removing the other
+		// callout.
+		holder := "no callout holds Substrate's egress slot"
+		switch {
+		case o.OpenAPPA:
+			holder = "OpenAPPA holds Substrate's egress slot"
+		case o.ExtprocService != "":
+			holder = "egress goes to another callout (" + o.ExtprocService + ")"
+		}
+		return result(CheckCallout, Warn, "", "the DefenseClaw egress callout is off (substrate.extproc.enabled: false) and %s, so these "+
+			"protections are off at egress: %s. Hooks, the egress policy and the actor listener still apply", holder, CalloutOffProtections)
+	}
 	switch {
 	case o.OpenAPPA:
 		return result(CheckCallout, Fail, "", "OpenAPPA holds Substrate's one additional callout, so DefenseClaw's egress "+
@@ -446,6 +464,32 @@ func CheckCalloutRegistered(o Observed) Check {
 		mode = "bodies on request: MCP and listed hosts, 1 MiB"
 	}
 	return result(CheckCallout, Pass, "", "the DefenseClaw callout is registered (%s)", mode)
+}
+
+// CalloutOffProtections are the protections only the DefenseClaw egress
+// callout gives (the same list the launcher's egress_callout row names).
+const CalloutOffProtections = "ask hosts, URL rules, egress feeds, secret and DLP scans, body and MCP inspection, tool chains at egress"
+
+// CalloutFix is the fix line for the callout check: setup registers the
+// callout only when the slot is free; with another callout (or OpenAPPA) in
+// place setup refuses, so the fix is to remove it or keep it with the
+// callout off (GAP-0496).
+func CalloutFix(o Observed) string {
+	want := setup.CalloutService(o.Namespace, o.CalloutPort)
+	switch {
+	case o.ExtprocOff && o.ExtprocService != want:
+		return "nothing to fix if the callout is off on purpose; to turn it back on, free Substrate's egress slot (remove the other " +
+			"callout from the SubstrateInstall file), set substrate.extproc.enabled: true, run defenseclaw substrate setup --install-file FILE, " +
+			"then ate-setup deploy and helm upgrade"
+	case o.OpenAPPA:
+		return "turn OpenAPPA off in the SubstrateInstall file, then run defenseclaw substrate setup --install-file FILE, ate-setup deploy " +
+			"and helm upgrade; or keep it and set substrate.extproc.enabled: false"
+	case o.ExtprocService != "" && o.ExtprocService != want:
+		return "remove the other callout (atenet.egress.additionalExtprocService) from the SubstrateInstall file, then run defenseclaw " +
+			"substrate setup --install-file FILE, ate-setup deploy and helm upgrade; or keep it and set substrate.extproc.enabled: false " +
+			"(setup refuses while another callout is in the file)"
+	}
+	return "defenseclaw substrate setup --install-file FILE, then ate-setup deploy and helm upgrade"
 }
 
 // BodyMode is the callout body mode the status reports.

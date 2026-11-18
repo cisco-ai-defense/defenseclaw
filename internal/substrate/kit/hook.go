@@ -43,8 +43,10 @@ func signinRefusal(status int, body []byte) (string, bool) {
 }
 
 // MCPRefusedCode is the gateway's 403 reason for a call of, or a call that
-// adds, an MCP server the runtime MCP scan refused (E20, GAP-0185): the kit
-// answers the agent's own closed deny, in every fail mode.
+// adds, an MCP server the runtime MCP scan refused (E20, GAP-0185), and for
+// a skill write the runtime skill pass refused (GAP-0519; the same code, so
+// an N-1 kit denies it too): the kit answers the agent's own closed deny, in
+// every fail mode.
 const MCPRefusedCode = "substrate_mcp_refused"
 
 // maxPayloadBytes is the agent event cap, the host hooks' 1 MiB

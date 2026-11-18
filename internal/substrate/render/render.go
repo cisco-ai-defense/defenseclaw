@@ -216,7 +216,7 @@ func EgressPolicy(in Input) (Result, error) {
 			internal = append(internal, hostClass{suffix: name})
 		}
 	}
-	providers := append(slices.Clone(providerHosts), blockClasses(s.ProviderHosts)...)
+	providers := providerClasses(s.ProviderHosts)
 	blocks := blockClasses(in.Profile.Block)
 
 	var res Result

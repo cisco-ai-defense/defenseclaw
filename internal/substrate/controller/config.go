@@ -160,6 +160,7 @@ func (r *ConfigResolver) Resolve(reg Registration, launcher bool) (Resolution, e
 		d := eff.EffectiveIdleSuspendAfter(0)
 		res.IdleSuspendAfter = &d
 	}
+	res.IdleSuspendTasks = eff.IdleSuspendTasks != nil && *eff.IdleSuspendTasks
 	return res, nil
 }
 

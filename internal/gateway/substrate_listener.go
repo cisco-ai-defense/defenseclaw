@@ -147,6 +147,10 @@ type SubstrateConfig struct {
 	// Profiles picks a create's profile and launcher atespace (nil: every
 	// create is refused).
 	Profiles SubstrateProfileResolver
+	// WorkloadEntry names the match.substrate.workloads entry a workload
+	// subject matches and its profile (SubstrateWorkloadEntry over the live
+	// config); nil leaves the workload answer out of the actor list.
+	WorkloadEntry func(subject string) (entry, profile string)
 	// Usage answers own-only usage (stream 10 seam; nil: 501).
 	Usage SubstrateUsage
 	// Bundles applies and shows signed policy bundles (nil: 501).

@@ -186,7 +186,7 @@ func cloneFloor(f config.OpenShellAdminConfig) config.OpenShellAdminConfig {
 	}
 	for _, flag := range []**bool{
 		&f.AllowYolo, &f.AllowMount, &f.AllowHostPorts, &f.AllowUnblock, &f.AllowLearnMode,
-		&f.Allowed, &f.ProcessTree, &f.AllowUpstreamTelemetry,
+		&f.Allowed, &f.ProcessTree, &f.AllowUpstreamTelemetry, &f.IdleSuspendTasks,
 	} {
 		if *flag != nil {
 			v := **flag

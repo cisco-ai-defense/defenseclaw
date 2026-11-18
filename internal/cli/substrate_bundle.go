@@ -413,8 +413,7 @@ func substrateProfileResolver(ctx context.Context, cfg *config.Config, live func
 	if err != nil {
 		return nil, fmt.Errorf("substrate.bundles: %w", err)
 	}
-	path := b.EffectiveAnchorsFile()
-	store := &bundle.Store{CM: cms, Base: cfg, Live: live, Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}
+	store := newSubstrateBundleStore(cms, cfg, live)
 	res := bundle.NewResolver(cfg)
 	res.Managed = managed.IsManagedEnterprise(cfg.DeploymentMode)
 	m := &bundle.Manager{Store: store, Resolver: res, Inbox: b.EffectiveInbox(), Interval: b.EffectiveRefreshInterval(), Sink: sink}
