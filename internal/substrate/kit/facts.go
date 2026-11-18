@@ -26,6 +26,11 @@ const (
 	maxPathFacts = 32
 	maxLinkHops  = 40
 	maxWalkDepth = 4
+	// maxCommandWordWalks bounds the distinct command words one shell call
+	// walks in the actor's file system (addShellCommandFacts): the 64 words
+	// hookpaths.CommandPathWords returned when the kit's link proofs came in
+	// (substrate-1 GAP-0546); it now returns every word.
+	maxCommandWordWalks = 64
 )
 
 // pathKeys are tool argument keys whose string value is a file-system path
@@ -251,6 +256,10 @@ func addShellCommandFacts(f *Facts, connectorName, event string, payload []byte,
 	for _, word := range hookpaths.CommandPathWords(command, home) {
 		if seen[word.Text] {
 			continue
+		}
+		if len(seen) == maxCommandWordWalks {
+			f.Truncated = true
+			return
 		}
 		seen[word.Text] = true
 		if fact, listed := commandWordFact(word, cwd, home, privacy); listed {

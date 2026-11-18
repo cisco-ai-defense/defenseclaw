@@ -64,7 +64,9 @@ func TestGAP0364SandboxHookConfigGuardAllocationIsBounded(t *testing.T) {
 		// One reading of the whole call, which the dispatch makes anyway.
 		reading := measure(func() { actionfacts.Analyze(input) })
 		var target string
-		allocated := measure(func() { _, _, target = sandboxAgentHookConfigChange(context.Background(), trustedActionRequest{Input: input}) })
+		allocated := measure(func() {
+			_, _, target = sandboxAgentHookConfigChange(context.Background(), trustedActionRequest{Input: input})
+		})
 		if row.want != "" && target != row.want {
 			t.Errorf("%s: guard target %q, want %q", row.name, target, row.want)
 		}
