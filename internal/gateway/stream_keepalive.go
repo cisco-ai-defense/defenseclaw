@@ -87,7 +87,8 @@ func (s *passthroughStream) keepAlive(started bool) []byte {
 		}
 		return append(b, '\n')
 	case s.bedrock != nil:
-		if !started || s.bedrock.converse || !(bedrockAnthropicModel(s.model) || bedrockAnthropicModel(s.path) || bedrockAnthropicModel(s.bedrock.model)) {
+		anthropic := bedrockAnthropicModel(s.model) || bedrockAnthropicModel(s.path) || bedrockAnthropicModel(s.bedrock.model)
+		if !started || s.bedrock.converse || !anthropic {
 			return nil
 		}
 		var buf bytes.Buffer
