@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A Windows UNC path (\\server\share\..., //server/share/...) names a file
@@ -30,8 +31,20 @@ import (
 // and passed its 3.5 s answer budget, so its hook denied an ordinary
 // command as a gateway that did not answer (rel-1-0-6 GAP-0127).
 //
-// The scans therefore read below a network share only after the share has
-// answered. The first read of a share asks it once, for every call that
+// A share on another machine is never read at all (rel-1-0-10:GAP-1074): even
+// a probe that the hook call does not wait for opens an SMB session to the
+// server the operand text names, with the user's credentials, before any
+// verdict and for a call the gateway then blocks. Such a share reads as
+// unknown at once, as a share that did not answer: a write below it cannot be
+// placed, a path below it is no proven protected file, and the protected
+// target rules judge its text. A script body below it is a body the call could
+// not read (ShareBodyUnread), judged by the policy tier as the unknown tier
+// is, never as a body that writes nothing. Only a share of this machine
+// (localhost, a loopback address, a name of this host:
+// actionfacts.WindowsServerIsThisMachine) is asked, as below.
+//
+// The scans therefore read below a share of this machine only after the share
+// has answered. The first read of a share asks it once, for every call that
 // names it, and waits at most networkShareAnswerWait. A share that has not
 // answered by then reads as unknown, as an unreadable path does: a write
 // below it cannot be placed and a path below it is no proven protected
@@ -102,6 +115,9 @@ var (
 	// local path); probeNetworkShare asks the share once. Tests replace both.
 	networkShareRootOf = networkShareRoot
 	probeNetworkShare  = func(root string) { _, _ = os.Stat(root) }
+	// networkShareOfThisMachine reports a share root whose server is this
+	// machine, the only shares the gate asks (rel-1-0-10:GAP-1074).
+	networkShareOfThisMachine = shareOfThisMachine
 )
 
 // networkShareCallShares is how many full answer waits one hook call may
@@ -287,6 +303,9 @@ const (
 	// shareReadLinkBound: the link bound stopped the walk before it could
 	// tell whether a further link leads into a share.
 	shareReadLinkBound
+	// shareReadRemote: the share is on another machine, which the hook path
+	// never reads (rel-1-0-10:GAP-1074); what is below it is unknown.
+	shareReadRemote
 )
 
 // linkUnanswered is networkPathUnanswered for a read that opens no link at
@@ -306,7 +325,30 @@ func networkPathRead(path string) (unanswered bool, cut shareReadCut) {
 
 // networkPathReadAs is networkPathRead for a path that is on a share, or
 // that a link on its way (and, with followLast, the last component) leads
-// into one. Every share the read opens is asked, in the order the system
+// into one (networkPathGate).
+func networkPathReadAs(path string, followLast bool) (unanswered bool, cut shareReadCut) {
+	gate := networkPathGate(path, followLast)
+	return gate.unanswered, gate.cut
+}
+
+// shareGate is the share decision for one read of a path and what the walk
+// behind it read.
+type shareGate struct {
+	unanswered bool
+	cut        shareReadCut
+	// read is the path the read opens: the path the walk read when it
+	// followed a link (shareWalk.resolved), else the name as given.
+	read string
+	// proved reports a walk that read every component of read as no link,
+	// the last one too when the read follows it; last and lastErr are its
+	// read of that last component (shareWalk).
+	proved  bool
+	last    os.FileInfo
+	lastErr error
+}
+
+// networkPathGate decides whether a read of path may be made, and what it
+// reads. Every share the read opens is asked, in the order the system
 // opens them: a link inside an answered share may lead on to another share,
 // and a name with a trailing separator opens its last link as well
 // (os.Lstat follows it), so the walk goes on from each answered share until
@@ -315,36 +357,53 @@ func networkPathRead(path string) (unanswered bool, cut shareReadCut) {
 // reported as unanswered, never as a completed check; a chain of links that
 // comes back to a path it has asked is a loop, which the system fails, and
 // every share on it has been asked.
-func networkPathReadAs(path string, followLast bool) (unanswered bool, cut shareReadCut) {
+//
+// The decision and the read are about the same file (rel-1-0-10:GAP-1074
+// review 1): the read opens the path the walk resolved, not the name again,
+// so a link on the way that is pointed at a share after the walk is never
+// opened, and a read that follows the last component holds it as the walk
+// read it (readGated). A stat is the walk's own read of it (pathStat).
+func networkPathGate(path string, followLast bool) (gate shareGate) {
+	name := path
+	gate.read = name
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
 	var seen map[string]bool
 	for range networkLinkHopLimit + 1 {
 		if root := networkShareRootOf(path); root != "" {
+			if !networkShareOfThisMachine(root) {
+				return shareGate{unanswered: true, cut: shareReadRemote, read: name}
+			}
 			if silent, budgetCut := askNetworkShare(root); silent {
 				if budgetCut {
-					return true, shareReadBudgetCut
+					return shareGate{unanswered: true, cut: shareReadBudgetCut, read: name}
 				}
-				return true, shareReadFinal
+				return shareGate{unanswered: true, cut: shareReadFinal, read: name}
 			}
 		}
-		next, exhausted := linkIntoShare(path, followLast)
+		walk := linkIntoShare(path, followLast)
 		switch {
-		case exhausted:
-			return true, shareReadLinkBound
-		case next == "":
-			return false, shareReadFinal
-		case seen[next]:
-			return false, shareReadFinal
+		case walk.exhausted:
+			return shareGate{unanswered: true, cut: shareReadLinkBound, read: name}
+		case walk.share == "":
+			if walk.resolved != "" {
+				gate.proved, gate.last, gate.lastErr = true, walk.last, walk.lastErr
+				if walk.linked || path != name {
+					gate.read = walk.resolved
+				}
+			}
+			return gate
+		case seen[walk.share]:
+			return gate
 		}
 		if seen == nil {
 			seen = make(map[string]bool)
 		}
-		seen[next] = true
-		path = next
+		seen[walk.share] = true
+		path = walk.share
 	}
-	return true, shareReadLinkBound
+	return shareGate{unanswered: true, cut: shareReadLinkBound, read: name}
 }
 
 // askNetworkShare asks the share root once for every call that names it and
@@ -426,16 +485,39 @@ func askNetworkShare(root string) (unanswered, budgetCut bool) {
 // OverrideNetworkSharesForTest replaces which paths are network shares
 // (rootOf names the share of a path, "" for none) and how a share is asked,
 // and forgets the shares asked so far, for tests of the gateway on a host
-// with no share. The restore puts all back.
+// with no share. The shares rootOf names are taken as shares of this machine,
+// the ones the gate asks, so that a test sees every share a reader would ask
+// (OverrideRemoteSharesForTest keeps the real split). The restore puts all
+// back.
 func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root string)) (restore func()) {
-	oldRoot, oldProbe, oldWalk := networkShareRootOf, probeNetworkShare, networkShareLinkWalk
+	return overrideNetworkShares(rootOf, ask, func(string) bool { return true })
+}
+
+// OverrideRemoteSharesForTest reads paths as Windows names network shares
+// (every spelling of windowsShareRoot, on any host, with the link walk on),
+// keeps which shares are this machine's as the product does, and calls ask
+// for every share the gate asks: a test of the gateway counts the shares a
+// call contacts (rel-1-0-10:GAP-1074). thisMachine, when not nil, replaces
+// which shares are this machine's. The restore puts all back.
+func OverrideRemoteSharesForTest(ask func(root string), thisMachine func(root string) bool) (restore func()) {
+	if thisMachine == nil {
+		thisMachine = shareOfThisMachine
+	}
+	return overrideNetworkShares(func(path string) string {
+		root, _ := windowsShareRoot(path)
+		return root
+	}, ask, thisMachine)
+}
+
+func overrideNetworkShares(rootOf func(path string) string, ask func(root string), thisMachine func(root string) bool) (restore func()) {
+	oldRoot, oldProbe, oldWalk, oldLocal := networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine
 	networkShares.mu.Lock()
 	oldProbes := networkShares.probes
 	networkShares.probes = nil
 	networkShares.mu.Unlock()
-	networkShareRootOf, probeNetworkShare, networkShareLinkWalk = rootOf, ask, true
+	networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine = rootOf, ask, true, thisMachine
 	return func() {
-		networkShareRootOf, probeNetworkShare, networkShareLinkWalk = oldRoot, oldProbe, oldWalk
+		networkShareRootOf, probeNetworkShare, networkShareLinkWalk, networkShareOfThisMachine = oldRoot, oldProbe, oldWalk, oldLocal
 		networkShares.mu.Lock()
 		networkShares.probes = oldProbes
 		networkShares.mu.Unlock()
@@ -444,7 +526,7 @@ func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root
 
 // ShareBodyUnread reports that the hook call on the calling goroutine
 // could not read the body of a script on a network share because its share
-// budget was spent. The body might have written a protected file; the
+// budget was spent or the share is on another machine (never read). The body might have written a protected file; the
 // caller judges the call by the policy tier: the strict tier as it judges
 // one it cannot evaluate, the others with an alert.
 func ShareBodyUnread() bool {
@@ -453,7 +535,7 @@ func ShareBodyUnread() bool {
 }
 
 // ShareBodyUnreadCauses tells why ShareBodyUnread is set: the call budget
-// kept the share from being asked, or the path to the script passes more
+// kept the share from being asked or the share is on another machine (budget), or the path to the script passes more
 // links than the walk follows, so a share on it may not have been asked
 // (rel-1-0-9:GAP-0621). Both can hold in one call.
 func ShareBodyUnreadCauses() (budget, linkBound bool) {
@@ -483,46 +565,101 @@ func networkShareError(op, name string) error {
 
 // The file system reads of the target scans and of the write-target walk.
 // Each reads a local path as the os function does, and a path below a
-// network share only once the share has answered (networkPathUnanswered).
+// network share only once the share has answered (networkPathGate). Each
+// reads the path the share decision was made for: the path the walk
+// resolved, its last component held as the walk read it (readGated).
 
+// readGated makes a read that follows the last component of name, once the
+// share gate allows it, on the path the gate read (shareGate.read). When the
+// walk read every component as no link, the last component is held as no
+// link for the read (pathidentity.HoldUnlinked): one that has become a link
+// since the walk, which may lead to a share on another machine, is refused
+// before it is opened, and a read that it changed under is discarded. A
+// refused read is unknown, as a share that did not answer
+// (rel-1-0-10:GAP-1074 review 1).
+func readGated[T any](op, name string, read func(path string) (T, error), discard func(T)) (T, shareReadCut, error) {
+	var none T
+	gate := networkPathGate(name, true)
+	if gate.unanswered {
+		return none, gate.cut, networkShareError(op, name)
+	}
+	path := fixturefs.Map(gate.read)
+	if !gate.proved {
+		value, err := read(path)
+		return value, shareReadFinal, err
+	}
+	still, err := pathidentity.HoldUnlinked(path)
+	switch {
+	case errors.Is(err, pathidentity.ErrLinked):
+		return none, shareReadRemote, networkShareError(op, name)
+	case err != nil:
+		return none, shareReadFinal, err
+	}
+	value, err := read(path)
+	if !still() {
+		if err == nil && discard != nil {
+			discard(value)
+		}
+		return none, shareReadRemote, networkShareError(op, name)
+	}
+	return value, shareReadFinal, err
+}
+
+// pathStat is os.Stat of name. When the share walk read the whole path, the
+// stat is the walk's own read of its last component: nothing reads the
+// name again after the share decision.
 func pathStat(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
+	gate := networkPathGate(name, true)
+	if gate.unanswered {
 		return nil, networkShareError("stat", name)
 	}
-	return os.Stat(fixturefs.Map(name))
+	if gate.proved && (gate.last != nil || gate.lastErr != nil) {
+		return gate.last, gate.lastErr
+	}
+	info, _, err := readGated("stat", name, os.Stat, nil)
+	return info, err
 }
 
 // pathStatPinned is pathStat with the file identity read at once, for a
-// FileInfo that a later os.SameFile compares with the opened file.
+// FileInfo that a later os.SameFile compares with the opened file. The
+// walk's read of the last component is such a read.
 func pathStatPinned(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
+	gate := networkPathGate(name, true)
+	if gate.unanswered {
 		return nil, networkShareError("stat", name)
 	}
-	return pathidentity.StatPinned(fixturefs.Map(name))
+	if gate.proved && (gate.last != nil || gate.lastErr != nil) {
+		return gate.last, gate.lastErr
+	}
+	info, _, err := readGated("stat", name, pathidentity.StatPinned, nil)
+	return info, err
 }
 
+// pathLstat is os.Lstat of name: the last component is not followed, and the
+// folders above it are read as the walk resolved them.
 func pathLstat(name string) (os.FileInfo, error) {
-	if linkUnanswered(name) {
+	gate := networkPathGate(name, false)
+	if gate.unanswered {
 		return nil, networkShareError("lstat", name)
 	}
-	return os.Lstat(fixturefs.Map(name))
+	return os.Lstat(fixturefs.Map(gate.read))
 }
 
+func closeFile(file *os.File) { _ = file.Close() }
+
 func pathOpen(name string) (*os.File, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("open", name)
-	}
-	return os.Open(fixturefs.Map(name))
+	file, _, err := readGated("open", name, os.Open, closeFile)
+	return file, err
 }
 
 // pathOpenRoot is os.OpenRoot with the root read as pathOpen reads it.
 // A read through the root stays below the root, so on the same share.
 func pathOpenRoot(name string) (*os.Root, error) {
-	if unanswered, cut := networkPathRead(name); unanswered {
+	root, cut, err := readGated("openroot", name, os.OpenRoot, func(root *os.Root) { _ = root.Close() })
+	if errors.Is(err, errNetworkShareUnanswered) {
 		noteBodyCut(cut)
-		return nil, networkShareError("openroot", name)
+		return nil, err
 	}
-	root, err := os.OpenRoot(fixturefs.Map(name))
 	noteBodyLinkLimit(err)
 	return root, err
 }
@@ -535,7 +672,7 @@ func noteBodyCut(cut shareReadCut) {
 		return
 	}
 	switch cut {
-	case shareReadBudgetCut:
+	case shareReadBudgetCut, shareReadRemote:
 		call.bodyUnread = true
 	case shareReadLinkBound:
 		call.bodyLinks = true
@@ -577,41 +714,46 @@ func noteBodyLinkLimit(err error) {
 }
 
 func pathReadDir(name string) ([]os.DirEntry, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("readdir", name)
-	}
-	return os.ReadDir(fixturefs.Map(name))
+	entries, _, err := readGated("readdir", name, os.ReadDir, nil)
+	return entries, err
 }
 
 func pathReadlink(name string) (string, error) {
-	if linkUnanswered(name) {
+	gate := networkPathGate(name, false)
+	if gate.unanswered {
 		return "", networkShareError("readlink", name)
 	}
-	target, err := os.Readlink(fixturefs.Map(name))
+	target, err := os.Readlink(fixturefs.Map(gate.read))
 	return fixturefs.Unmap(target), err
 }
 
 func pathEvalSymlinks(name string) (string, error) {
-	if networkPathUnanswered(name) {
-		return "", networkShareError("evalsymlinks", name)
-	}
-	resolved, err := filepath.EvalSymlinks(fixturefs.Map(name))
+	resolved, _, err := readGated("evalsymlinks", name, filepath.EvalSymlinks, nil)
 	return fixturefs.Unmap(resolved), err
 }
 
 // pathWalkDir is filepath.WalkDir with its root read as pathLstat reads
 // it: a root below a share that has not answered is passed to fn with the
-// share's error, as WalkDir passes a root it cannot read.
+// share's error, as WalkDir passes a root it cannot read. The walk reads
+// the root the share walk resolved and hands fn the paths below the root as
+// the caller named it.
 func pathWalkDir(root string, fn fs.WalkDirFunc) error {
-	if linkUnanswered(root) {
+	gate := networkPathGate(root, false)
+	if gate.unanswered {
 		err := fn(root, nil, networkShareError("lstat", root))
 		if err == filepath.SkipDir || err == filepath.SkipAll {
 			return nil
 		}
 		return err
 	}
-	return filepath.WalkDir(fixturefs.Map(root), func(path string, d fs.DirEntry, err error) error {
-		return fn(fixturefs.Unmap(path), d, err)
+	return filepath.WalkDir(fixturefs.Map(gate.read), func(path string, d fs.DirEntry, err error) error {
+		path = fixturefs.Unmap(path)
+		if gate.read != root {
+			if below, ok := strings.CutPrefix(path, gate.read); ok && (below == "" || os.IsPathSeparator(below[0])) {
+				path = root + below
+			}
+		}
+		return fn(path, d, err)
 	})
 }
 
@@ -633,6 +775,54 @@ func EvalSymlinks(name string) (string, error) { return pathEvalSymlinks(name) }
 
 // ReadDir is os.ReadDir for a directory a hook call names, read as pathReadDir reads it.
 func ReadDir(name string) ([]os.DirEntry, error) { return pathReadDir(name) }
+
+// Readlink is os.Readlink for a path a hook call names, read as pathReadlink reads it.
+func Readlink(name string) (string, error) { return pathReadlink(name) }
+
+// Open is os.Open for a path a hook call names, read as pathOpen reads it.
+func Open(name string) (*os.File, error) { return pathOpen(name) }
+
+// ReadFile is os.ReadFile for a path a hook call names, read as pathOpen reads it.
+func ReadFile(name string) ([]byte, error) {
+	body, _, err := readGated("open", name, os.ReadFile, nil)
+	return body, err
+}
+
+// ReadRegularFileBounded is safefile.ReadRegularFileBounded for a path a
+// hook call names, read as pathOpen reads it: a share on another machine is
+// never contacted, and the file read is the file the share decision was
+// made for (rel-1-0-10:GAP-1074). safefile refuses a name that passes any
+// link, so it reads the name itself: a name the walk read through a link is
+// refused as before, and one it read without is the path the walk read.
+func ReadRegularFileBounded(name string, maxBytes int64) ([]byte, error) {
+	body, _, err := readGated("open", name, func(string) ([]byte, error) {
+		return safefile.ReadRegularFileBounded(name, maxBytes)
+	}, nil)
+	return body, err
+}
+
+// LstatPinned is pathidentity.LstatPinned for a path a hook call names,
+// read as pathLstat reads it.
+func LstatPinned(name string) (os.FileInfo, error) {
+	gate := networkPathGate(name, false)
+	if gate.unanswered {
+		return nil, networkShareError("lstat", name)
+	}
+	return pathidentity.LstatPinned(fixturefs.Map(gate.read))
+}
+
+// ObserveRemoteShareReadsForTest calls note with every name a hook-path read
+// hands the file system (fixturefs.Map) that is below a share on another
+// machine, in any spelling Windows opens one by (windowsShareRoot), on any
+// host: a test counts every contact a call makes with such a share, the
+// reads past the gate as well as the share asks (rel-1-0-10:GAP-1074).
+func ObserveRemoteShareReadsForTest(note func(name string)) (restore func()) {
+	return fixturefs.ObserveForTest(func(name string) {
+		if root, _ := windowsShareRoot(name); root != "" && !shareOfThisMachine(root) {
+			note(name)
+		}
+	})
+}
 
 // NotExist reports a read error that a proof which tells a missing path
 // from an unreadable one takes as missing: an os not-exist error, or a

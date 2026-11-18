@@ -1904,6 +1904,7 @@
    "TestGatewayEgressV8EmitsGeneratedLogAndMetricWithoutLegacyPath": 3.7,
    "TestGatewayEgressV8LogsInterceptedPluginEgressAndSkipsSelfTest": 3.1,
    "TestGatewayPanicV8EmitsCorrelatedMetricAndDurableHealthRecord": 2.4,
+   "TestGatewayRemoteShareOperandIsNeverAsked": 120.4,
    "TestGeneratedInspectorPanicMetricDoesNotRequireLegacyProvider": 2.3,
    "TestGeneratedInspectorTraceEndStampsManagedProjectionPolicyOnRootAndPhases": 7.6,
    "TestGenericBashInlineInvocationIsQuietAcrossProfilesAndModes": 5.1,
