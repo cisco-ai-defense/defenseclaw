@@ -69,6 +69,10 @@ func g0344Rows() []g0344Row {
 		{"P05d rg naming the hidden file", "rg KEY .env", []string{".env"}, true},
 		{"P05e rg with a glob matching .env", "rg -g '*.env' KEY", []string{"src/.env"}, true},
 		{"P05f rg naming a hidden folder", "rg KEY .aws", []string{".aws/credentials"}, true},
+		// GAP-0671: a --type-add type selected with -t whitelists its globs
+		// past the hidden rule, as -g does.
+		{"P05g rg --type-add type selecting .env", "rg --type-add 'e:*.env' -te KEY", []string{".env", "main.go"}, true},
+		{"P05h rg --type-add type with a folder", "rg --type-add 'e:*.env' -te KEY .", []string{"src/.env"}, true},
 		{"P04b grep -r with no folder, the file one level down", "grep -r KEY", []string{"config/.env"}, true},
 		{"C01 grep -r in a folder without one", "grep -rn TODO .", []string{"src/main.go", "docs/a.md"}, false},
 		{"C02 grep -r with no folder, none there", "grep -r KEY", []string{"main.go", "pkg/a.go"}, false},
@@ -83,6 +87,8 @@ func g0344Rows() []g0344Row {
 		{"C09 rg -u alone still skips hidden files", "rg -u TODO", []string{"src/.env"}, false},
 		{"C15 rg with a glob that cannot match .env", "rg -g '*.go' TODO", []string{"src/.env", "src/a.go"}, false},
 		{"C16 rg --no-hidden after --hidden", "rg --hidden --no-hidden TODO", []string{"src/.env"}, false},
+		{"C17 rg --type-add of an ordinary type", "rg --type-add 'g:*.go' -tg KEY", []string{".env", "a.go"}, false},
+		{"C18 rg -T excludes a type, reads nothing hidden", "rg --type-add 'e:*.env' -Te KEY", []string{".env", "a.go"}, false},
 		// GAP-0349: read forms the record missed.
 		{"Q20 a for-loop variable", `for f in .env; do cat "$f"; done`, []string{".env"}, true},
 		{"Q21 perl -e reading its argument with <>", `perl -e 'print while <>' .env`, []string{".env"}, true},

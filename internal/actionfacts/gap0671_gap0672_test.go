@@ -1,0 +1,184 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package actionfacts
+
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// g0671Folder is a work folder with the given files.
+func g0671Folder(t *testing.T, files ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, f := range files {
+		p := filepath.Join(dir, filepath.FromSlash(f))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// g0671Named is the credentials files the private record names.
+func g0671Named(facts Facts) []string {
+	var named []string
+	for _, read := range facts.CredentialPathReads() {
+		if read.Value != "" {
+			named = append(named, read.Value)
+		}
+	}
+	return named
+}
+
+func g0671Unknown(facts Facts) bool {
+	return slices.ContainsFunc(facts.CredentialPathReads(), func(p PathFact) bool { return p.Value == "" })
+}
+
+// TestGAP0671RgTypeAddReadsHidden is substrate-1:GAP-0671: an rg file type
+// selected with -t or --type whitelists its --type-add globs past ripgrep's
+// hidden-file rule, as a -g include does (real rg 14.1 prints .env for
+// rg -l --type-add 'e:*.env' -te KEY). The value of --type-add is not the
+// pattern, so the form with no folder searches the working folder. -T
+// (--type-not) and a type that is defined but not selected read nothing
+// hidden. Rel and the parent count every row marked read.
+func TestGAP0671RgTypeAddReadsHidden(t *testing.T) {
+	files := []string{".env", ".npmrc", ".aws/credentials", "src/a.go"}
+	for _, row := range []struct {
+		cmd  string
+		read bool
+	}{
+		{"rg --type-add 'e:*.env' -te KEY .", true},
+		{"rg --type-add 'e:*.env' -te KEY", true},
+		{"rg --type-add=e:.env --type e KEY .", true},
+		{"rg --type-add 'e:.npmrc' -t e KEY", true},
+		{"rg --type-add 'e:*.go,*.env' --type=e KEY", true},
+		{"rg --type-add 'f:*.env' --type-add 'e:include:f' -te KEY", true},
+		{"rg -l --type-add 'e:*.env' -tgo -te KEY src .", true},
+		{"rg --type-add 'g:*.go' -tg KEY", false},
+		{"rg --type-add 'e:*.env' -Te KEY", false},
+		{"rg --type-add 'e:*.env' --type-not e KEY .", false},
+		{"rg --type-add 'e:*.env' KEY", false},
+		{"rg --type-add 'e:*.env' --type-clear e -te KEY", false},
+	} {
+		t.Run(row.cmd, func(t *testing.T) {
+			dir := g0671Folder(t, files...)
+			facts := Analyze(Input{Tool: "exec", Command: row.cmd, CWD: dir, ActiveHome: t.TempDir()})
+			named := g0671Named(facts)
+			if got := len(named) != 0; got != row.read {
+				t.Fatalf("%q: credentials read = %v, want %v (status %s, named %v)", row.cmd, got, row.read, facts.Parse.Status, named)
+			}
+			if row.read && !slices.ContainsFunc(named, func(v string) bool { return filepath.Base(v) == ".env" || filepath.Base(v) == ".npmrc" }) {
+				t.Fatalf("%q: the hidden file is not named (named %v)", row.cmd, named)
+			}
+			if caps := facts.CredentialPathReadCaps(); caps.Any() {
+				t.Fatalf("%q: TRUNCATED %v in a small folder", row.cmd, caps)
+			}
+		})
+	}
+	// The value of --type-add is no folder operand: --type-add's value is
+	// skipped, so KEY is the pattern and . the folder.
+	argv := []string{"rg", "--type-add", "e:*.env", "-te", "KEY", "."}
+	if got := searchOperandIndexes(argv, "rg"); !slices.Equal(got, []int{4, 5}) {
+		t.Fatalf("operands of %v: %v, want [4 5]", argv, got)
+	}
+}
+
+// g0672Tree is a work folder holding one tree, t, and n symbolic links to
+// it (h1 ... hn): every name is a distinct folder to the walk, as in the
+// RV2 repro. The tree has .env at its top, and either subs folders of 9
+// files or one flat folder of files.
+func g0672Tree(t *testing.T, n, subs, flat int) (string, []string) {
+	t.Helper()
+	files := []string{"t/.env"}
+	for i := range subs {
+		for j := range 9 {
+			files = append(files, "t/d"+strconv.Itoa(i)+"/f"+strconv.Itoa(j)+".go")
+		}
+	}
+	for i := range flat {
+		files = append(files, "t/f"+strconv.Itoa(i)+".go")
+	}
+	dir := g0671Folder(t, files...)
+	names := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		name := "h" + strconv.Itoa(i)
+		if err := os.Symlink(filepath.Join(dir, "t"), filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	return dir, names
+}
+
+// TestGAP0672OneWalkBudgetPerCall is substrate-1:GAP-0672: the walks of
+// one call share one walk budget (4,096 folders, 65,536 entries), however
+// many folders the call names. 200 names of one tree read at most one
+// budget's worth of the tree: the walks past it are cut, and a cut marks
+// only the chain's unknown tier (no TRUNCATED, so no verdict change, the
+// round-1 P2-1 ruling). The analyses of one call (the hook makes about six)
+// reuse every walk of the first: a second analysis after the tree's .env
+// is removed still names what the first found, so it walked nothing again.
+// At a6f8f54ead each name had its own budget (200 walks, 200 files named)
+// and a 64-folder memo the second analysis re-walked.
+func TestGAP0672OneWalkBudgetPerCall(t *testing.T) {
+	for _, shape := range []struct {
+		name        string
+		subs, flat  int
+		perWalk     int // folders or entries of one walk of the tree
+		budget      int // the budget that runs out first
+		description string
+	}{
+		{"folders", 40, 0, 41, maxCredentialPathWalkFolders, "41 folders of 401 entries"},
+		{"entries", 0, 1000, 1001, maxCredentialPathWalkEntries, "1 folder of 1,001 entries"},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			const n = 200
+			dir, names := g0672Tree(t, n, shape.subs, shape.flat)
+			in := Input{Tool: "exec", Command: "grep -r KEY " + strings.Join(names, " "), CWD: dir, ActiveHome: t.TempDir()}
+			first := Analyze(in)
+			if caps := first.CredentialPathReadCaps(); caps.Any() {
+				t.Fatalf("a spent walk budget is a cap of the resolve: %v", caps)
+			}
+			named := g0671Named(first)
+			// Whole walks in the budget, plus the one it cut.
+			if most := shape.budget/shape.perWalk + 1; len(named) == 0 || len(named) > most {
+				t.Fatalf("%d names of a tree of %s: %d files named, want 1..%d (one shared budget)",
+					n, shape.description, len(named), most)
+			}
+			if !g0671Unknown(first) {
+				t.Fatalf("%d names past the shared budget: no file-unknown read (the chain's unknown tier)", n)
+			}
+			if err := os.Remove(filepath.Join(dir, "t", ".env")); err != nil {
+				t.Fatal(err)
+			}
+			for i := range 5 {
+				again := Analyze(in)
+				if got := again.CredentialPathReads(); !slices.Equal(got, first.CredentialPathReads()) {
+					t.Fatalf("analysis %d of the same call walked again: %d reads, first %d", i+2, len(got), len(first.CredentialPathReads()))
+				}
+			}
+		})
+	}
+}

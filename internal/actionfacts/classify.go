@@ -3097,13 +3097,14 @@ func searchOptionConsumesValue(program, arg string) bool {
 		lower := strings.ToLower(arg)
 		switch lower {
 		case "--after-context", "--before-context", "--binary-files", "--color",
-			"--context", "--dfa-size-limit", "--devices", "--directories",
-			"--encoding", "--engine", "--exclude", "--exclude-dir",
-			"--field-context-separator", "--field-match-separator", "--file",
-			"--glob", "--iglob", "--include", "--label", "--max-columns",
-			"--max-count", "--max-depth", "--max-filesize", "--path-separator",
-			"--pre", "--pre-glob", "--regexp", "--replace", "--sort", "--sortr",
-			"--type", "--type-not":
+			"--colors", "--context", "--context-separator", "--dfa-size-limit",
+			"--devices", "--directories", "--encoding", "--engine", "--exclude",
+			"--exclude-dir", "--field-context-separator", "--field-match-separator",
+			"--file", "--glob", "--iglob", "--ignore-file", "--include", "--label",
+			"--max-columns", "--max-count", "--max-depth", "--max-filesize",
+			"--path-separator", "--pre", "--pre-glob", "--regexp", "--replace",
+			"--sort", "--sortr", "--threads", "--type", "--type-add",
+			"--type-clear", "--type-not":
 			return true
 		default:
 			return false
