@@ -150,6 +150,35 @@ func TestGAP0449EndedTaskIsSuspendedNotResumed(t *testing.T) {
 	}
 }
 
+// A task that ended before this controller first saw its actor run (a
+// controller restart, or a short run) has ended too: the drain compares the
+// end with the actor's last stop, as the task-end suspend does (GAP-0411).
+// Compared with when the controller first saw it run, the drain resumed the
+// finished task on a new worker, which then held that worker until an idle
+// suspend.
+func TestGAP0449TaskEndedBeforeTheControllerSawItIsNotResumed(t *testing.T) {
+	r, wc := drainRig(t)
+	a := running(t, r, "ci2-g449", "")
+	ref := ateapi.RefOf(a.GetMetadata())
+	if err := r.reg.Put(context.Background(), controller.Registration{Atespace: "eng-web", Name: "ci2-g449", UID: a.GetMetadata().GetUid(),
+		Person: "sub-ci", Profile: "eng", Source: controller.SourceLauncher, Task: true}); err != nil {
+		t.Fatal(err)
+	}
+	r.act.EndTask(a.GetMetadata().GetUid(), r.clk.Now())
+	r.clk.Add(time.Second)
+	wc.drain(t, a)
+	r.pass()
+	r.pass()
+	got, _ := r.api.GetActor(context.Background(), ref)
+	if got.GetStatus().GetState() != ateapi.ActorStateSuspended || r.api.Calls("ResumeActor") != 0 {
+		t.Fatalf("task that ended before the first pass, on a draining worker: %s with %d resumes, want SUSPENDED and none",
+			got.GetStatus().GetState(), r.api.Calls("ResumeActor"))
+	}
+	if evs := r.sink.Events("sandbox.worker_drain.suspend"); len(evs) != 1 || evs[0].Detail["resume"] != false {
+		t.Fatalf("drain suspend events = %+v, want one with resume false", evs)
+	}
+}
+
 // A principal that may not list workers is told once what that costs.
 func TestGAP0449WorkerListRefusedWarnsOnce(t *testing.T) {
 	r, wc := drainRig(t)

@@ -246,7 +246,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 // serveSubstrateProbes serves the liveness and readiness probes on the
 // metrics port. The Substrate metrics go through the gateway's telemetry
 // runtime to the OTLP destinations (GAP-0401); the Prometheus /metrics page
-// held only defenseclaw_substrate_rate_limited_total, which nothing read.
+// this port served before held counters nothing read.
 func serveSubstrateProbes(ready *atomic.Bool) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })

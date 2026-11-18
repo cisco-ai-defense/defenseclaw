@@ -108,8 +108,12 @@ func (c *Controller) drain(ctx context.Context, a *ateapi.Actor, st *actorState,
 	return false, nil
 }
 
-// taskDone says whether a --task actor's task has already ended: such an
-// actor is only suspended, as its task-end suspend would.
+// taskDone says whether a --task actor's task has already ended in its
+// current run: such an actor is only suspended, as its task-end suspend
+// would. The end is compared with the actor's last stop (stoppedAt), as the
+// task-end suspend does (GAP-0411), not with when this controller first saw
+// it run: a task that ended before that (a controller restart, a short run)
+// has ended too.
 func (c *Controller) taskDone(a *ateapi.Actor, st *actorState, reg Registration) bool {
 	if !reg.Task {
 		return false
@@ -119,7 +123,7 @@ func (c *Controller) taskDone(a *ateapi.Actor, st *actorState, reg Registration)
 		return false
 	}
 	ended, ok := src.TaskEnded(a.GetMetadata().GetUid())
-	return ok && ended.After(st.runningAt)
+	return ok && ended.After(st.stoppedAt)
 }
 
 // currentDrain is the draining workers of the pass in progress.
