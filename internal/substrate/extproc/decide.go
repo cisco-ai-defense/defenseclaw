@@ -521,6 +521,15 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 				return deny(v, CategoryChainUnchecked, sourceChain, uncheckedUnrecorded,
 					clip("DefenseClaw could not record one of this actor's earlier tool calls, so it can't check this request against them, and this actor's policy refuses unchecked egress. Why: "+cv.Unrecorded, 320))
 			}
+			// A send is refused in every mode, as for an unchecked step: a
+			// secret read during a leader outage is such a step once the
+			// leader is back (GAP-0601).
+			if carriesData(req, methods) {
+				v = deny(v, CategoryChainUnchecked, sourceChain, uncheckedUnrecorded,
+					clip(uncheckedSendReason(uncheckedUnrecorded)+" Why: "+cv.Unrecorded, 420))
+				v.Retryable = true
+				return v
+			}
 			v.Alert = true
 			v.Findings = append(v.Findings, "chain_unrecorded:"+clip(cv.Unrecorded, 160))
 		}
@@ -539,11 +548,14 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 			v.Retryable = true
 			return v
 		}
-		// The actor is never weaker than a laptop, whose chain check needs
-		// no cluster: a request that can carry data out is refused in every
-		// mode while its check is missing (a leader outage, a slow leader,
-		// the actor's own flood), and only GET and HEAD keep the alert
-		// (GAP-0601). An actor with no registration has no window to check.
+		// A laptop's chain check needs no cluster, so it never lets a send
+		// through unchecked: here a request that can carry data out (a body,
+		// or any method but GET and HEAD) is refused in every mode while its
+		// check is missing (a leader outage, a slow leader, the actor's own
+		// flood), and only GET and HEAD keep the alert (GAP-0601). Data put
+		// in a GET's URL or headers is alerted, not refused: the known limit
+		// of the GET/HEAD rule. An actor with no registration has no window
+		// to check.
 		if chainWhy != uncheckedUnregistered && carriesData(req, methods) {
 			v = deny(v, CategoryChainUnchecked, sourceChain, chainWhy, uncheckedSendReason(chainWhy))
 			v.Retryable = true
@@ -593,13 +605,15 @@ func uncheckedSendReason(why string) string {
 	cause := "DefenseClaw could not check this request against the actor's earlier tool calls"
 	switch why {
 	case uncheckedLookup, uncheckedError:
-		cause = "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached"
+		cause = "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached or failed the check"
 	case uncheckedTimeout:
 		cause = "DefenseClaw's gateway leader did not answer in time"
 	case uncheckedBusy:
 		cause = "This actor has too many requests waiting for their check"
+	case uncheckedUnrecorded:
+		cause = "DefenseClaw could not record one of this actor's earlier tool calls"
 	}
-	return cause + ", so DefenseClaw can't tell whether it read a secret earlier. Requests that can carry data out (a body, or POST, PUT, PATCH, DELETE) are refused until the check works; GET and HEAD go through with an alert."
+	return cause + ", so DefenseClaw can't tell whether it read a secret earlier. Requests that can carry data out (a body, or any method but GET and HEAD) are refused until the check works; GET and HEAD go through with an alert."
 }
 
 // askStage raises the asks a request standing for methods needs: every

@@ -122,7 +122,7 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.extproc.body_max_bytes` | `1048576` | Largest body the callout reads |
 | `substrate.extproc.mcp_hosts`, `.body_hosts` | `[]` | Hosts whose bodies are read as MCP calls (`host` or `host=name`), and other hosts whose bodies get the secret scans |
 | `substrate.extproc.request_access` | none | The contact a refusal names |
-| `substrate.extproc.chain.check_budget`, `.failure_mode` | `20ms` (at most `500ms`), `auto` | How long the tool-chain check may take per request, and what a request does when it can't be checked: `auto` refuses for unattended actors and alerts for the rest, `closed` always refuses, `open` always alerts |
+| `substrate.extproc.chain.check_budget`, `.failure_mode` | `20ms` (at most `500ms`), `auto` | How long the tool-chain check may take per request, and what a request does when it can't be checked: `auto` refuses for unattended actors and alerts for the rest, `closed` always refuses, `open` always alerts. The alert covers GET and HEAD only: a request with a body or any other method is refused in every mode while its check is missing |
 | `substrate.extproc.ask.hold` | `1.5s` | How long a request waits for an ask. Keep it under the egress filter's 2 s message timeout |
 | `substrate.extproc.dlp.credential_headers` | `alert` | `alert` or `deny` for a secret-shaped credential header on a host no secret is bound to |
 | `substrate.extproc.actor_secrets_dir` | set by the chart from `callout.actorSecrets.secretName` | Where the callout reads the values of profiles' `actor_secrets` |
