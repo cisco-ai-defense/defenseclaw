@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
 
 // Asks, decisions and policy explain on the admin listener. The stores
@@ -457,6 +458,39 @@ func (a *APIServer) dispatchQueuedAskWebhook(got asks.Ask) {
 			got.Expires.UTC().Format(time.RFC3339)),
 		Severity: orDefaultString(got.Severity, "MEDIUM"),
 	})
+}
+
+// substrateAskClosedAction is the webhook action of an ask the leader
+// closed because its actor crashed, was reverted or was deleted.
+const substrateAskClosedAction = "approval-closed"
+
+// recordSubstrateAskClosed writes a pending ask the leader closed because
+// its actor crashed, was reverted or was deleted to the audit log, and
+// tells the webhooks of an unattended run's ask (they were told it was
+// queued), with the reason code: such a closure left no audit, OTLP or log
+// record before (GAP-0526).
+func (a *APIServer) recordSubstrateAskClosed(ctx context.Context, r telemetryrelay.Record) {
+	if a == nil || r.AskID == "" {
+		return
+	}
+	reason := orDefaultString(r.Reason, "closed")
+	summary := fmt.Sprintf("ask %s of agent %s/%s for %s closed: %s", r.AskID, r.Atespace, r.Actor, r.Host, reason)
+	if a.logger != nil {
+		_ = a.logger.LogAlertCtx(context.WithoutCancel(ctx), "substrate", "MEDIUM", summary, map[string]any{
+			"event": "ask_closed", "ask": r.AskID, "actor": r.Atespace + "/" + r.Actor, "actor_uid": r.UID,
+			"target": r.Host, "reason": reason, "unattended": r.Unattended,
+		})
+	}
+	if !r.Unattended || a.webhookSource == nil {
+		return
+	}
+	if webhooks := a.webhookSource(); webhooks != nil {
+		webhooks.Dispatch(audit.Event{
+			Timestamp: time.Now().UTC(), Action: substrateAskClosedAction, Target: r.Host, Actor: "defenseclaw-substrate",
+			Details:  fmt.Sprintf("ask=%s actor=%s/%s unattended=true reason=%s", r.AskID, r.Atespace, r.Actor, reason),
+			Severity: orDefaultString(r.Severity, "MEDIUM"),
+		})
+	}
 }
 
 func orDefaultString(v, def string) string {

@@ -736,7 +736,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	chains.Register(srv)
 	// A crashed or deleted actor asks nothing any more (E16): its open asks
 	// close when the controller reports the lifecycle event.
-	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore), store, relay)))
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleRelays(substrateLifecycleClosesAsks(chains.Lifecycle, askStore, relay), store, relay)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -1091,8 +1091,14 @@ func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) boo
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
 // crashed, reverted or deleted event the actor's pending asks are closed
 // (a revert drops the held request with the run it belonged to, GAP-0415).
+// Each closure is a leader log line and a relay record, which a gateway
+// replica writes to its audit log and the webhooks with the reason code
+// (actor_crashed, actor_reverted, actor_deleted): the closure left no
+// record anywhere before (GAP-0526). relay may be nil.
 func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
-	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	asksStore interface {
+		CloseActor(uid, reason string) []asks.Ask
+	}, relay *telemetryrelay.Store) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 		res, err := next(ctx, ev)
 		if err != nil || res.Ignored {
@@ -1101,13 +1107,25 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			// (GAP-0142 residual).
 			return res, err
 		}
+		var code, why string
 		switch ev.Event {
 		case chainstate.LifecycleCrashed:
-			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
+			code, why = telemetryrelay.AskClosedActorCrashed, "the actor crashed"
 		case chainstate.LifecycleReverted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was reverted to a snapshot")
+			code, why = telemetryrelay.AskClosedActorReverted, "the actor was reverted to a snapshot"
 		case chainstate.LifecycleDeleted:
-			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
+			code, why = telemetryrelay.AskClosedActorDeleted, "the actor was deleted"
+		default:
+			return res, nil
+		}
+		now := time.Now().UTC()
+		for _, a := range asksStore.CloseActor(ev.Actor.UID, why+" ("+code+")") {
+			fmt.Fprintf(os.Stderr, "[substrate] actor %q/%q: %s, its pending ask %q for %q is closed (%s)\n",
+				a.Atespace, a.Actor, why, a.ID, firstNonEmptyString(a.Host, a.Tool), code)
+			if relay != nil {
+				relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindAskClosed, At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID,
+					AskID: a.ID, Host: firstNonEmptyString(a.Host, a.Tool), Reason: code, Unattended: a.Unattended, Severity: a.Severity})
+			}
 		}
 		return res, nil
 	}

@@ -97,7 +97,7 @@ func TestCloseActorEndsItsAsks(t *testing.T) {
 	a1, _ := s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a1", UID: "u1", OwnerID: "o", Host: "x.example.org"})
 	_, _ = s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a1", UID: "u1", OwnerID: "o", Tool: "mcp__t__x"})
 	other, _ := s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a2", UID: "u2", OwnerID: "o", Host: "y.example.org"})
-	if n := s.CloseActor("u1", "the actor crashed"); n != 2 {
+	if n := len(s.CloseActor("u1", "the actor crashed")); n != 2 {
 		t.Fatalf("closed %d, want 2", n)
 	}
 	if p := s.Pending(); len(p) != 1 || p[0] != "u2" {
