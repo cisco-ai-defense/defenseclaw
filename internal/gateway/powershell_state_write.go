@@ -1028,9 +1028,10 @@ type psStateScan struct {
 	// text of each path argument known only at run time.
 	opens        []psOpenTarget
 	dynamicPaths []string
-	// The variables bound to a FileInfo, and to a file stream (with the
+	// The placed bindings of the variables bound to a FileInfo, in
+	// reading order, and the variables bound to a file stream (with the
 	// twin parameter of the file), by lower-case name.
-	fileInfos map[string]psFileInfo
+	fileInfos map[string][]psFileInfo
 	streams   map[string]string
 	// groupClose is the index after the ) of the last (...) group read: a
 	// method called on it is called on what the group evaluates to.
@@ -1050,10 +1051,12 @@ type psStateScan struct {
 	// counts the methods called on it (psStateScan.openBlock).
 	braces, itemDepth, itemOpen, itemUses int
 	item                                  psFileInfo
-	// lower is the command in lower case, read once; sole caches
-	// soleBinding by variable.
-	lower string
-	sole  map[string]bool
+	// lower is the command in lower case, read once; uses caches
+	// psVariableUses of it by variable; dynamic caches dynamicVariables
+	// (0 not read, 1 no, 2 yes).
+	lower   string
+	uses    map[string]psVariableCount
+	dynamic int
 }
 
 func (s *psStateScan) overBound() bool { return s.budget.over }
@@ -1092,6 +1095,10 @@ func (s *psStateScan) code(i int, nested bool) int {
 	r := s.runes
 	var cur []rune
 	var last, pipedFrom string
+	// whole reports the pipeline element being read not cut by a group, a
+	// block or a call since it started; lastWhole and pipedWhole are that of
+	// last and pipedFrom, also fed by no pipeline (rel-1-0-10:GAP-1275).
+	whole, lastWhole, pipedWhole := true, false, false
 	var statementWordKnown, statementArgumentMode bool
 	firstScanned := 0
 	commentStarts := func(i int) bool {
@@ -1127,7 +1134,8 @@ func (s *psStateScan) code(i int, nested bool) int {
 				}
 			}
 		}
-		last, pipedFrom = text, ""
+		last, lastWhole = text, whole && pipedFrom == ""
+		pipedFrom, pipedWhole = "", false
 		cur = cur[:0]
 		statementWordKnown, statementArgumentMode = false, false
 		firstScanned = 0
@@ -1146,30 +1154,36 @@ func (s *psStateScan) code(i int, nested bool) int {
 			// A string piped into Invoke-Expression runs as its body
 			// (checker it16 RV16-2).
 			flush()
+			whole = true
 			if i+1 < len(r) && r[i+1] == '|' {
 				i += 2
 				continue
 			}
-			pipedFrom = last
+			pipedFrom, pipedWhole = last, lastWhole
 			i++
 		case c == '{':
 			// A ForEach-Object block places its pipeline item at what
 			// feeds it (rel-1-0-10:GAP-1257).
-			s.openBlock(string(cur), pipedFrom, i)
+			s.openBlock(string(cur), pipedFrom, pipedWhole, i)
 			flush()
+			whole = true
 			i++
 		case c == '}':
 			flush()
 			s.closeBlock(i)
+			// What follows the block is still the element it is in.
+			whole = false
 			i++
 		case c == '\n' || c == ';' || c == '&':
 			flush()
+			whole = true
 			i++
 		case c == ')':
 			flush()
 			if nested {
 				return i + 1
 			}
+			whole = false
 			i++
 		case c == '(':
 			tail := cur
@@ -1192,6 +1206,7 @@ func (s *psStateScan) code(i int, nested bool) int {
 			if !keep {
 				flush()
 			}
+			whole = false
 			end := s.code(i+1, true)
 			if s.overBound() {
 				return len(r)
