@@ -132,6 +132,10 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"memory home, decimal limit short": memoryHomeExample + ",callout.resources.limits.memory=600M",                         // 572 MiB < 640 MiB
 		"memory home, unreadable limit":    memoryHomeExample + ",leader.resources.limits.memory=lots",
 		"bad namespace label":              "metrics.prometheusRule.enabled=true,metrics.prometheusRule.namespaceLabel=k8s.namespace.name",
+		// substrate-1:GAP-0578 (f): the headroom is never under the chart default
+		// request (controller 128Mi), so a 1Mi request does not make a 520Mi
+		// limit fit a 512Mi tmpfs.
+		"memory home, tiny request": memoryHomeExample + ",controller.resources.requests.memory=1Mi,controller.resources.limits.memory=520Mi",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {

@@ -158,3 +158,72 @@ func TestRealFullStoreLogsOneAlertForEveryWritePath(t *testing.T) {
 		t.Fatalf("no cleared line once the volume had room again:\n%s", cleared)
 	}
 }
+
+// substrate-1:GAP-0578 (c): the rate limit used to run on from the last ALERT
+// line across a "cleared" line, so an outage that started less than a minute
+// after the previous one's ALERT got no line at all when it ended inside that
+// minute. A new outage after a cleared line now alerts at once; a third one
+// inside the same minute (a flapping volume) is folded and named by one ALERT
+// line a minute after the last, never lost.
+func TestStoreFullAlertRestartsAfterACleared(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	storeFullAlertClock = func() time.Time { return now }
+	t.Cleanup(func() { storeFullAlertClock = time.Now })
+	store := &Store{dbPath: "/data/audit.db"}
+	full := errors.New("database or disk is full (13)")
+	step := func(d time.Duration) { now = now.Add(d) }
+	out := captureAuditStderr(t, func() {
+		store.NoteWriteError("hook_call_transaction", full) // T: outage 1
+		step(20 * time.Second)
+		store.noteWriteOK() // T+20: cleared
+		step(20 * time.Second)
+		store.NoteWriteError("hook_call_transaction", full) // T+40: outage 2, at once
+		step(5 * time.Second)
+		store.noteWriteOK() // T+45: cleared
+		step(5 * time.Second)
+		store.NoteWriteError("WAL checkpoint", full) // T+50: outage 3, folded
+		store.NoteWriteError("WAL checkpoint", full)
+		step(2 * time.Second)
+		store.noteWriteOK() // T+52: no line yet
+		step(48 * time.Second)
+		store.noteWriteOK() // T+100: the folded outage's line
+		store.noteWriteOK()
+	})
+	if n := strings.Count(out, "ALERT audit_store_full"); n != 3 {
+		t.Fatalf("%d ALERT lines, want 3 (outage 1, outage 2 at once after its cleared line, the folded outage 3):\n%s", n, out)
+	}
+	if n := strings.Count(out, "audit_store_full cleared"); n != 2 {
+		t.Fatalf("%d cleared lines, want 2 (one per alerted outage):\n%s", n, out)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 5 || !strings.Contains(lines[2], "ALERT audit_store_full") ||
+		!strings.Contains(lines[4], "2 more writes were refused") || !strings.Contains(lines[4], "has room again") {
+		t.Fatalf("lines out of order or the folded outage is not named:\n%s", out)
+	}
+}
+
+// A volume that flaps every second for a minute logs a bounded number of
+// lines: two ALERT lines and their cleared lines, then one folded ALERT line.
+func TestStoreFullAlertFlappingVolumeIsBounded(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	storeFullAlertClock = func() time.Time { return now }
+	t.Cleanup(func() { storeFullAlertClock = time.Now })
+	store := &Store{dbPath: "/data/audit.db"}
+	full := errors.New("no space left on device")
+	out := captureAuditStderr(t, func() {
+		for range 59 {
+			store.NoteWriteError("hook_call_transaction", full)
+			now = now.Add(500 * time.Millisecond)
+			store.noteWriteOK()
+			now = now.Add(500 * time.Millisecond)
+		}
+		now = now.Add(2 * time.Second)
+		store.noteWriteOK()
+	})
+	if n := strings.Count(out, "\n"); n != 5 {
+		t.Fatalf("%d lines for a minute of flapping, want 5:\n%s", n, out)
+	}
+	if !strings.Contains(out, "57 more writes were refused") {
+		t.Fatalf("the folded outages are not counted:\n%s", out)
+	}
+}
