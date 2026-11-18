@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -198,6 +199,11 @@ type SubstrateConfig struct {
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
 	Info   map[string]any
+	// EgressCallout is who holds Substrate's egress callout slot, as the
+	// controller last reported it through the leader (nil: not reported).
+	// /info carries its class and the checks that are off, /doctor the
+	// holder (GAP-0497).
+	EgressCallout func(ctx context.Context) (controller.CalloutStatus, bool)
 	// SignInServer is the OIDC issuer people sign in with (nil: none
 	// configured). The gateway checks it from its own network every
 	// signInCheckEvery; /info names a failing cause, /doctor the detail,
@@ -887,6 +893,20 @@ func (a *APIServer) serveSubstrateActorRoute(w http.ResponseWriter, r *http.Requ
 	default:
 		writeSandboxIngressError(w, http.StatusNotFound, "not found")
 	}
+}
+
+// substrateWorkloadSubject is the OIDC subject of the CI workload a verified
+// actor was started by (its registration's person), "" for a person or no
+// registration (GAP-0540).
+func substrateWorkloadSubject(ctx context.Context) string {
+	if _, ok := substrateActorFrom(ctx); !ok {
+		return ""
+	}
+	reg, ok := substrateRegistrationFrom(ctx)
+	if !ok || reg.Attributed || reg.Person.Kind != identity.PersonWorkload {
+		return ""
+	}
+	return reg.Person.Subject
 }
 
 // substrateProfileSubject is the profile subject of an actor request: the

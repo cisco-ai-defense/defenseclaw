@@ -262,6 +262,25 @@ type Info struct {
 	// (the key set cannot be read, a wrong issuer): no hook or model call
 	// of any agent runs (GAP-0194).
 	ActorTokens *ActorTokens `json:"actor_tokens,omitempty"`
+	// EgressCallout is who holds Substrate's egress callout slot (nil from
+	// a gateway that does not report it, GAP-0497).
+	EgressCallout *EgressCallout `json:"egress_callout,omitempty"`
+}
+
+// EgressCallout is the /info egress_callout member.
+type EgressCallout struct {
+	// State is defenseclaw, other, none or unknown.
+	State string `json:"state"`
+	// FailMode is closed, open or off.
+	FailMode  string   `json:"fail_mode"`
+	ChecksOff []string `json:"checks_off,omitempty"`
+	Since     string   `json:"since,omitempty"`
+}
+
+// Replaced reports that the DefenseClaw callout does not hold the slot:
+// another callout does, or none is registered.
+func (e *EgressCallout) Replaced() bool {
+	return e != nil && (e.State == "other" || e.State == "none")
 }
 
 // ActorTokens is the /info actor_tokens member.

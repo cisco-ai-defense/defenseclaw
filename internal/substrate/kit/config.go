@@ -119,9 +119,13 @@ type RelayConfig struct {
 	// SessionIssuer is the iss a session token must carry; required with
 	// SessionKeys (GAP-0073).
 	SessionIssuer string `json:"session_issuer"`
-	// VerifyURL, when set, makes the relay ask the gateway (through egress,
-	// with the actor JWT) whether a presented token is bound to this actor
-	// and its person, instead of checking the signature itself.
+	// VerifyURL makes the relay ask the gateway (through egress, with the
+	// actor JWT) whether a presented token is bound to this actor and its
+	// own person (RelayVerifyURL of GatewayURL). Required with SessionKeys
+	// (GAP-0435): the keys check the signature and the actor only, so a
+	// relay with keys and no VerifyURL could not tell that the token's
+	// person owns the agent. With both, a token must pass the keys and
+	// the gateway.
 	VerifyURL string `json:"verify_url"`
 	// OutputBufferBytes sizes the long-poll output ring.
 	OutputBufferBytes int `json:"output_buffer_bytes"`
@@ -294,21 +298,40 @@ func (c Config) Validate() error {
 	if c.MaxAttachBytes < 0 || c.MaxAttachBytes > MaxAttachBytes {
 		return fmt.Errorf("actor kit config: max_attach_bytes must be 0..%d", MaxAttachBytes)
 	}
+	if err := c.Relay.CheckSessions(); err != nil {
+		return fmt.Errorf("actor kit config: %w", err)
+	}
 	return nil
 }
 
+// RelayVerifyPath is the actor listener route the relay checks a session
+// token with (the gateway's /relay/verify).
+const RelayVerifyPath = "/api/v1/substrate/relay/verify"
+
+// RelayVerifyURL is the relay's verify_url for an actor listener base URL.
+func RelayVerifyURL(gatewayURL string) string {
+	return strings.TrimRight(strings.TrimSpace(gatewayURL), "/") + RelayVerifyPath
+}
+
 // CheckSessions is the relay's start-up rule for session verification
-// (GAP-0073). The template build applies the same rule (substrate-1
-// GAP-0147), so an image whose relay would refuse to start is never built.
+// (GAP-0073), part of Validate, so the template build applies it too
+// (substrate-1 GAP-0147) and an image whose relay would refuse to start is
+// never built. Session keys need verify_url (GAP-0435) and their issuer.
 func (r RelayConfig) CheckSessions() error {
 	if r.VerifyURL != "" {
 		u, err := url.Parse(r.VerifyURL)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("relay verify_url %q is not an http or https URL", r.VerifyURL)
 		}
+	}
+	if len(r.SessionKeys) == 0 {
 		return nil
 	}
-	if len(r.SessionKeys) > 0 && strings.TrimSpace(r.SessionIssuer) == "" {
+	if r.VerifyURL == "" {
+		return errors.New("relay.session_keys need relay.verify_url (the gateway's session check, <gateway_url>" + RelayVerifyPath +
+			"): with the keys alone the relay cannot check that the token's person owns this agent")
+	}
+	if strings.TrimSpace(r.SessionIssuer) == "" {
 		return errors.New("relay session keys need relay.session_issuer (the issuer whose tokens they verify)")
 	}
 	return nil

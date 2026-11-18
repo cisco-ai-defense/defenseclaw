@@ -125,6 +125,10 @@ type Options struct {
 	// KitVersion is this release's kit version (N); N and N-1 are
 	// accepted. Empty or unparseable accepts every kit.
 	KitVersion string
+	// CalloutMode is what another callout in Substrate's egress callout
+	// slot does to actor policies (Live.CalloutMode; GAP-0505). The slot
+	// is read only with SetCallout.
+	CalloutMode string
 	// IdleSuspendAfter 0 turns idle suspend off.
 	IdleSuspendAfter time.Duration
 	// IdleSuspendWithoutCPU (substrate.idle_suspend_without_cpu): without
@@ -205,6 +209,8 @@ type Controller struct {
 	// workersWarned says the listing failed once (GAP-0449).
 	draining      ateapi.Draining
 	workersWarned bool
+	// callout is the egress callout slot as last read (GAP-0505).
+	callout calloutWatch
 }
 
 // runningReportInterval is how often the controller tells the leader which
@@ -401,7 +407,7 @@ func New(o Options) (*Controller, error) {
 		startedAt: o.Now(), allowlisted: map[string]string{}, unseparated: map[string]bool{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
 		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter,
-		IdleSuspendWithoutCPU: o.IdleSuspendWithoutCPU, LoadedAt: o.Now()}
+		IdleSuspendWithoutCPU: o.IdleSuspendWithoutCPU, LoadedAt: o.Now(), CalloutMode: o.CalloutMode}
 	if o.Config != nil {
 		_, lv.Digest = o.Config.Current()
 	}
@@ -412,6 +418,11 @@ func New(o Options) (*Controller, error) {
 // Run polls until ctx ends: every IdleInterval, or every FastInterval for
 // FastWindow after new or resuming actors were seen (batch starts).
 func (c *Controller) Run(ctx context.Context) error {
+	if c.calloutPublishes() {
+		// The gateway reads the egress callout slot from these reports
+		// (GAP-0505): they keep coming while a pass runs long.
+		go c.watchCallout(ctx)
+	}
 	for {
 		if err := c.Reconcile(ctx); err != nil && ctx.Err() == nil {
 			c.emit(Event{Type: EventWarning, Severity: SeverityWarn, Message: "reconcile pass failed: " + err.Error()})
@@ -434,6 +445,7 @@ func (c *Controller) Run(ctx context.Context) error {
 // so their policy lands before they reach the network.
 func (c *Controller) Reconcile(ctx context.Context) error {
 	c.reloadConfig(ctx)
+	c.checkCallout(ctx)
 	c.applyResets(ctx)
 	c.retryLifecycle(ctx)
 	// The list shows each actor's state as of listedAt or later.
@@ -705,6 +717,7 @@ func createdAt(md *ateapi.ResourceMetadata, st *actorState) time.Time {
 // registration the leader does not show yet is waited for briefly.
 func (c *Controller) EnsurePolicy(ctx context.Context, ref *ateapi.ObjectRef) error {
 	c.reloadConfig(ctx)
+	c.checkCallout(ctx)
 	for try := 1; ; try++ {
 		readAt := c.o.Now()
 		a, err := c.o.Client.GetActor(ctx, ref)
@@ -863,6 +876,16 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 			}
 			st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: life, AtUnixNano: now.UnixNano()})
 			st.resumed = st.resumed || life == chainstate.LifecycleResumed
+			if life == chainstate.LifecycleCrashed {
+				// The crash is a record of its own (GAP-0526): the leader
+				// closes the actor's open asks with reason actor_crashed
+				// when it gets the lifecycle event, and the audit trail
+				// says why the actor and its asks stopped.
+				ce := base
+				ce.Type, ce.Severity, ce.Message = EventCrashed, SeverityWarn, "actor crashed: its open asks are closed (actor_crashed)"
+				ce.Detail = map[string]any{"lifecycle": chainstate.LifecycleCrashed, "reason": "actor_crashed"}
+				c.emit(ce)
+			}
 			if !st.inventoried {
 				continue // the first record of an actor is "actor seen"
 			}
@@ -950,6 +973,12 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 			}
 			if !booted {
 				return c.removePolicy(ctx, a, st, base)
+			}
+			if res.DenyOnly == "" {
+				// Another callout holds Substrate's egress slot: what only
+				// the DefenseClaw callout enforced follows the fail mode
+				// (GAP-0505).
+				res.DenyOnly = c.calloutDenyOnly(lv, reg)
 			}
 			if res.DenyOnly != st.forcedDeny {
 				st.forcedDeny = res.DenyOnly

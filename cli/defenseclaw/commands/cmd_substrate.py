@@ -114,24 +114,30 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             '"defenseclaw substrate approve ID" or "defenseclaw substrate reject ID". An agent attached to your\n'
             "terminal shows the same question on its last line. An unattended run (--task, --batch)\n"
             "denies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n"
-            '"unattended" in the RUN column and is denied when its time runs out.'
+            '"unattended" in the RUN column and is denied when its time runs out.\n'
+            "\n"
+            'With --standing it lists the approvals given with "approve --always" that are still in force:\n'
+            "the agent, the host, what the approval covers, who approved it and when. Take one back with\n"
+            '"defenseclaw substrate revoke NAME HOST".'
         ),
         flags=(
+            _Flag("all", "bool", "every person's, not only yours (administrators only)"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
+            _Flag("standing", "bool", "list the approvals given with --always that are still in force"),
         ),
     ),
     _Cmd(
         ("approve",),
         "Approve a waiting question",
         long=(
-            'Approves one question from "defenseclaw substrate approvals" once, or with --always for every later '
-            "run that asks the same thing."
+            'Approves one question from "defenseclaw substrate approvals" for one request: the next request asks '
+            "again. With --always it covers every later request of the agent that asks the same thing."
         ),
         args=(_Arg("id"),),
         flags=(
-            _Flag("always", "bool", "keep this approval for later runs"),
+            _Flag("always", "bool", "keep this approval for every later request of the agent"),
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("reason", "string", "note recorded with the decision", metavar="TEXT"),
         ),
@@ -587,6 +593,22 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         ),
     ),
     _Cmd(
+        ("revoke",),
+        "Take back an approval given with --always",
+        long=(
+            'Takes back what "defenseclaw substrate approve --always" allowed for one agent and host: the '
+            "agent's\n"
+            "next request to the host asks you again. The cluster drops the host from the agent's network rules\n"
+            'within about a minute. List the approvals in force with "defenseclaw substrate approvals '
+            '--standing".\n'
+            "An administrator names another person's agent as ATESPACE/NAME; the revoke is recorded under their\n"
+            "own name."
+        ),
+        example="defenseclaw substrate revoke fix-tests-7f3a registry.example.test",
+        args=(_Arg("name"), _Arg("host")),
+        flags=(_Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),),
+    ),
+    _Cmd(
         ("run",),
         "Run a coding agent in the cluster on a copy of this folder",
         long=(
@@ -595,10 +617,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "claude,\n"
             "codex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that "
             "sign in to a\n"
-            "vendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, "
-            "because the\n"
-            "sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows "
-            "the guard profile, model, allowed hosts and how to leave. When the\n"
+            "vendor account (kiro, antigravity, cursor-agent, amp, devin) start in open source only after you "
+            "say yes to a\n"
+            "warning (or pass --yes), because the sign-in token stays in the agent and its snapshots; a managed "
+            "cluster refuses them. A banner shows the guard profile, model, allowed hosts and how to leave. When "
+            "the\n"
             "guard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, "
             "always or deny.\n"
             "\n"
@@ -685,7 +708,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "unmask", "stringArray", "send a held-back secret file or pattern anyway (repeatable)", metavar="GLOB"
             ),
             _Flag("workload-token-file", "string", "CI: file holding the workload identity token", metavar="FILE"),
-            _Flag("yes", "bool", "answer questions with their defaults", short="y"),
+            _Flag("yes", "bool", "say yes to the vendor sign-in warning without asking", short="y"),
         ),
     ),
     _Cmd(
@@ -938,10 +961,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "https://<substrate.services.admin>\n"
             "                                  of --config, the issuer the gateway signs with)\n"
             "  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n"
-            "  --verify-url URL                ask the gateway to check each session token, instead of "
-            "--session-key\n"
-            "                                  An image that starts the relay needs --session-key or "
-            "--verify-url.\n"
+            "  --verify-url URL                gateway URL the relay checks each session token with (default\n"
+            "                                  <gateway-url>/api/v1/substrate/relay/verify; --session-key keys "
+            "are checked first)\n"
             "\n"
             "Flags build, verify, scan and publish all take:\n"
             "  --json                          print JSON\n"

@@ -69,3 +69,16 @@ func TestGAP0410UndoRecoversACrashedAgent(t *testing.T) {
 		t.Fatalf("undo did not bring the crashed agent back (calls %v, stderr %q)", f.calls, errOut)
 	}
 }
+
+// GAP-0420 (owner ruling: known limit in 1.0.10): a crashed headless task
+// does not resume; status says so and how to run the task again.
+func TestGAP0420StatusOfACrashedTaskSaysReRunIt(t *testing.T) {
+	useFakeAdmin(t, &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){"GET actors": jsonReply(crashedActors())}})
+	out, _, err := runSubstrate(t, newSubstrateStatusCmd(), "fix-tests-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "does not resume") || !strings.Contains(out, "defenseclaw substrate run claude --task") {
+		t.Fatalf("status of a crashed task:\n%s", out)
+	}
+}

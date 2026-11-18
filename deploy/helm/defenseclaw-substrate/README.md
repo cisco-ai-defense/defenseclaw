@@ -32,6 +32,7 @@ for an admin to apply.
 | Deployment `defenseclaw-callout` (HPA min 2, PDB), Service, ConfigMap `defenseclaw-callout` | the atenet-egress ext_proc callout and its config |
 | ConfigMap `defenseclaw-config` | config.yaml, rendered from `config:` (the single source) |
 | Role and RoleBinding `defenseclaw-gateway-secrets`, in each namespace a Kubernetes source of `config.substrate.secrets` names | the secrets admin API writes those Secrets: create, plus get and patch by name (every Secret of the namespace for a `{person}` name); a source in the release or Substrate namespace fails the render |
+| Role and RoleBinding `defenseclaw-<release namespace>-egress-read`, in the Substrate namespace (the chart's only standing grant there) | the controller's ServiceAccount alone: `get` on the `atenet-egress` ConfigMap alone (no list or watch, nothing else there), to detect a replaced egress callout (GAP-0505). The gateway gets the controller's result through the leader. Without the grant the controller warns and doctor says it cannot verify the egress callout |
 | NetworkPolicies | default deny; actor listener and callout from atenet-egress only; admin from this namespace (not worker pods) and `networkPolicy.adminFrom`; leader from the release |
 | Hook Jobs | bootstrap (post-install/upgrade), pre-upgrade, pre-rollback, pre-delete |
 

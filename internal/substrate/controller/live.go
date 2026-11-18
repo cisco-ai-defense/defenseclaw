@@ -50,6 +50,10 @@ type Live struct {
 	// LoadedAt is when the controller put this config in force: a policy
 	// write it causes measures its lag from here (GAP-0392).
 	LoadedAt time.Time
+	// CalloutMode is what a callout replacement does (CalloutFailClosed,
+	// CalloutFailOpen or CalloutOff; "" is closed), from
+	// CalloutFailModeFromConfig (GAP-0505).
+	CalloutMode string
 }
 
 // ConfigSource is config.yaml as it is now (configwatch.Watcher).

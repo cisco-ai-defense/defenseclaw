@@ -41,8 +41,9 @@ type SourceOptions struct {
 }
 
 // Source hands out the bearer for the admin listener, refreshing the
-// person sign-in when it is about to expire. It is safe for concurrent
-// use; refreshes are serialized.
+// person sign-in when it is about to expire or was issued more than
+// signInRefreshAge ago (GAP-0409). It is safe for concurrent use;
+// refreshes are serialized.
 type Source struct {
 	name  string
 	ctx   Context
@@ -191,6 +192,12 @@ func (s *Source) personLocked(ctx context.Context) (*Token, error) {
 		return nil, errNotSignedIn("the sign-in expired")
 	}
 	if err := s.refreshLocked(ctx); err != nil {
+		// A refresh due to the sign-in's age (GAP-0409) that the issuer
+		// could not answer keeps the token while the admin listener still
+		// accepts it; an ended sign-in (ErrNotSignedIn) does not.
+		if _, ok := s.tok.pick(now); ok && !errors.Is(err, ErrNotSignedIn) {
+			return s.tok, nil
+		}
 		return nil, err
 	}
 	if _, ok := s.tok.pick(s.now()); !ok {

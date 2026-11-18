@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/launcherpresence"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
 // substrateAsks adapts the admin client to attach.AskSource for one person.
@@ -55,14 +57,27 @@ func (a substrateAsks) Pending(ctx context.Context, t attach.Target) ([]attach.A
 	}
 	// Only an ask that names this exact agent is shown here: a bare name or
 	// an empty actor could be another of the person's agents (GAP-0112).
+	// The gateway lists an ask's atespace and actor name apart, so the
+	// agent is atespace/name (GAP-0483: matching the bare name against
+	// atespace/name showed no ask on the pane, ever).
 	var out []attach.Ask
 	for _, k := range asks {
-		if k.Actor != t.Atespace+"/"+t.Name {
+		ref := substrateAskActor(k)
+		if ref == "" || ref != t.Atespace+"/"+t.Name {
 			continue
 		}
-		out = append(out, attach.Ask{ID: k.ID, Actor: k.Actor, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
+		out = append(out, attach.Ask{ID: k.ID, Actor: ref, Tool: k.Tool, Summary: k.Summary, Reason: k.Reason, Severity: k.Severity, Created: k.Created})
 	}
 	return out, nil
+}
+
+// substrateAskActor is the atespace/name of the agent that raised an ask,
+// or "" when the gateway named no atespace (never matched by name alone).
+func substrateAskActor(k api.Ask) string {
+	if k.Atespace == "" || k.Actor == "" || strings.Contains(k.Actor, "/") {
+		return ""
+	}
+	return k.Atespace + "/" + k.Actor
 }
 
 func (a substrateAsks) Decide(ctx context.Context, id string, d attach.Decision) error {
@@ -298,10 +313,13 @@ func newSubstrateID(n int) string {
 //     Bedrock model (lane A10, TST-0125, TST-0184).
 //   - cursor, devin, amp: vendor sign-in connectors (PLAN E9, lane A11, J41
 //     TST-0286 to TST-0299). The gateway decides at create with
-//     signin.Evaluate: open source runs the agent and the create answer
-//     carries the warning that the sign-in token sits in the actor and its
-//     snapshots, which run prints; a managed deployment refuses it with
-//     subscription_signin_refused before any actor exists. Kiro and
+//     signin.Evaluate: open source answers a create 428
+//     signin_ack_required with the warning that the sign-in token sits in
+//     the actor and its snapshots, before any actor exists; run shows it,
+//     asks for a yes (or takes --yes) and creates again with the
+//     acknowledgement, which the gateway audits (GAP-0482). A managed
+//     deployment refuses it with subscription_signin_refused before any
+//     actor exists. Kiro and
 //     Antigravity are verified harnesses with no entry here; the same rule
 //     applies to them.
 var substrateProven = map[string]string{
@@ -317,6 +335,15 @@ type substrateRunTarget struct {
 	connName string
 	profile  string
 	template string
+	// loginTemplate marks a template taken from the login's default
+	// (GAP-0469); agentTemplate is the named agent's own template, used when
+	// the cluster says the login default is another agent's.
+	loginTemplate bool
+	agentTemplate string
+	// loginProfile marks a profile taken from the login's default
+	// (GAP-0527): when the cluster says it is not the person's, the run
+	// lets the cluster pick the person's own instead.
+	loginProfile bool
 	// note is the substrateProven note, printed when the agent starts.
 	note string
 }
@@ -334,7 +361,10 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	// No profile named: the cluster gives the person the profile their
 	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
-	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, sandboxcli.HarnessArg(spec))
+	t.loginProfile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE")) == "" && strings.TrimSpace(s.Ctx.Profile) != ""
+	t.agentTemplate = sandboxcli.HarnessArg(spec)
+	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, t.agentTemplate)
+	t.loginTemplate = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE")) == "" && strings.TrimSpace(s.Ctx.Template) != ""
 	return t, nil
 }
 
@@ -443,16 +473,60 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
 	a, err = s.Client.Create(ctx, req)
+	// GAP-0527: the profile login saved (--default-profile) is a preference,
+	// not the person's assignment. Refused (a contractor whose login saved
+	// eng), the run asks again with no profile, so the cluster gives the
+	// person the profile their groups map to, as policy show reports it. A
+	// profile the person named (--profile or the environment) is not
+	// replaced.
+	if e, ok := api.AsError(err); ok && e.Status == http.StatusForbidden && e.Reason == "profile_not_allowed" && t.loginProfile && req.Profile != "" {
+		fmt.Fprintf(w, "The default profile %s from login is not one you may use; using the profile the cluster gives you.\n", req.Profile)
+		req.Profile = ""
+		a, err = s.Client.Create(ctx, req)
+	}
+	// GAP-0469: the template login saved is the default for its own agent.
+	// Named another agent (run codex after a claude login), the cluster
+	// answers connector_mismatch: run that agent's own template instead.
+	if e, ok := api.AsError(err); ok && e.Status == 400 && e.Reason == "connector_mismatch" {
+		if t.loginTemplate && t.agentTemplate != "" && t.agentTemplate != req.Template {
+			fmt.Fprintf(w, "The default template %s from login is not a %s template; using %s.\n", req.Template, t.spec.DisplayName, t.agentTemplate)
+			req.Template = t.agentTemplate
+			a, err = s.Client.Create(ctx, req)
+		}
+		if e, ok := api.AsError(err); ok && e.Status == 400 && e.Reason == "connector_mismatch" {
+			return a, cliusage.WithExitCode(fmt.Errorf("template %s is not a %s template; name one with --template TEMPLATE, for example --template %s", req.Template, t.spec.DisplayName, t.agentTemplate), 2)
+		}
+	}
+	// GAP-0482: an open-source cluster warns about a vendor sign-in before
+	// it creates anything; the person's yes (or --yes) sends the create
+	// again, and the cluster audits it.
+	acked := ""
+	if e, ok := api.AsError(err); ok && e.Status == http.StatusPreconditionRequired && e.Reason == signin.AckRequiredCode {
+		acked = substrateFirst(e.Message, "the cluster warns about this agent's vendor sign-in.")
+		if err = substrateAckSignin(cmd, t, f, req, acked); err != nil {
+			return a, err
+		}
+		req.AcknowledgeSignin = true
+		a, err = s.Client.Create(ctx, req)
+	}
 	if err != nil {
 		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
 			return a, cliusage.WithExitCode(substrateNoWorkerError{substrateNoWorkerMessage(ctx, s)}, substrateAPIExit(e))
 		}
+		if e, ok := api.AsError(err); ok && e.Status == http.StatusForbidden && e.Reason == "profile_not_allowed" && req.Profile == "" {
+			// No profile was sent, so "leave --profile out" is no fix: the
+			// cluster has no profile that runs agents for this person.
+			return a, cliusage.WithExitCode(errors.New("no profile that runs agents is assigned to you on this cluster; nothing was started. See yours with: defenseclaw substrate policy show, and ask your administrator to assign you one"), substrateAPIExit(e))
+		}
 		return a, substrateFail(err)
 	}
-	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
-	// E9: in open source the cluster says what a vendor sign-in costs.
+	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, req.Profile)))
+	// E9: in open source the cluster says what a vendor sign-in costs; the
+	// warning the person just acknowledged is not printed twice.
 	for _, warn := range a.Warnings {
-		fmt.Fprintf(w, "Warning: %s\n", warn)
+		if warn != acked {
+			fmt.Fprintf(w, "Warning: %s\n", warn)
+		}
 	}
 	if t.note != "" {
 		fmt.Fprintf(w, "Note: %s\n", t.note)
@@ -479,6 +553,32 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 		}
 	}
 	return a, nil
+}
+
+// substrateAckSignin shows the cluster's sign-in warning and takes the
+// person's yes before anything is created or uploaded (GAP-0482). --yes
+// answers it; a batch, or a run with no terminal, needs --yes. No is a run
+// that started nothing.
+func substrateAckSignin(cmd *cobra.Command, t substrateRunTarget, f *substrateRunFlags, req api.CreateRequest, warning string) error {
+	w := cmd.ErrOrStderr()
+	switch {
+	case f.yes:
+		fmt.Fprintf(w, "Warning: %s\nAcknowledged with --yes.\n", warning)
+		return nil
+	case req.BatchID != "":
+		return cliusage.WithExitCode(fmt.Errorf("%s signs in to a vendor account, and the cluster asks for a yes first; nothing was started. Run the batch again with --yes to acknowledge it", t.spec.DisplayName), 2)
+	case !substrateInteractive():
+		return cliusage.WithExitCode(fmt.Errorf("%s Nothing was started: run it again with --yes to acknowledge this warning", warning), 2)
+	}
+	fmt.Fprintf(w, "Warning: %s\n", warning)
+	ok, err := substrateConfirm(cmd, "Start "+t.spec.DisplayName+" anyway?")
+	if err != nil {
+		return cliusage.WithExitCode(err, 2)
+	}
+	if !ok {
+		return cliusage.WithExitCode(errors.New("not started: the warning was not acknowledged, so nothing was created or uploaded"), 1)
+	}
+	return nil
 }
 
 // substrateCloneInActor clones --clone into the actor through the relay

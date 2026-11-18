@@ -167,8 +167,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
 	if !workspace.HasCopy(dataDir, name) {
-		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so it cannot tell what the agent changed. "+
-			"Pull from the computer you ran it on, or push from inside the agent (defenseclaw substrate connect %s, then git push)", a.Atespace, a.Name, a.Name)
+		return substratePullElsewhere(a)
 	}
 	rel, err := substrateOpenRelay(ctx, s, a)
 	if err != nil {
@@ -251,6 +250,22 @@ func substratePullAccept(f *substratePullFlags, sensitive, interactive bool, ask
 	return ok, ok, nil
 }
 
+// substratePullElsewhere is pull's refusal on a computer that keeps no
+// record of the copy (GAP-0489): the agent is reachable from any computer,
+// but its work is compared with the folder that was sent, and only the
+// computer that ran run (or run --clone) keeps that baseline. The copy of it
+// in the agent's sandbox is the agent's to rewrite, a Windows copy keeps
+// none there, and only that computer knows which files were held back as
+// secrets, so another computer cannot rebuild it safely. The refusal names
+// what works from here instead. Exit 3: running it again on this computer
+// cannot help.
+func substratePullElsewhere(a api.Actor) error {
+	return cliusage.WithExitCode(fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so pull cannot tell what the agent changed: "+
+		"only the computer you ran \"defenseclaw substrate run\" on keeps it. Run pull there (--apply, --branch NAME or --patch-out FILE). "+
+		"From this computer, connect to the agent (defenseclaw substrate connect %s), commit its work and git push it from inside the agent, then git pull it here",
+		a.Atespace, a.Name, a.Name), substrateExitRefused)
+}
+
 // substratePullChoose asks what to do with the changes on a terminal; with
 // no terminal it says how to choose.
 func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor, name, dataDir string, rev *workspace.Review) error {
@@ -281,8 +296,8 @@ func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor,
 
 // substrateInteractive is true when stdin is a terminal. A char device is
 // not enough: /dev/null is one, and a script that gives pull no input must
-// get the hint, not a question.
-func substrateInteractive() bool {
+// get the hint, not a question. Tests replace it.
+var substrateInteractive = func() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 

@@ -69,8 +69,10 @@ type KubeTokenVerifier struct {
 }
 
 type kubeReview struct {
-	p  Person
-	at time.Time
+	p Person
+	// until is when the answer stops serving: the review time plus
+	// kubeReviewTTL, or the token's exp when that comes first (GAP-0569).
+	until time.Time
 }
 
 func (k *KubeTokenVerifier) now() time.Time {
@@ -89,8 +91,15 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	sum := sha256.Sum256([]byte(token))
 	key := hex.EncodeToString(sum[:])
 	now := k.now()
+	// A JWT (a ServiceAccount token, or an OIDC token in a kubeconfig) is
+	// refused from the second it expires, without a review: the API server
+	// allows its own leeway past exp (GAP-0569).
+	exp, hasExp := kubeTokenExpiry(token)
+	if hasExp && !now.Before(exp) {
+		return Person{}, reasonf(ReasonExpired, "the Kubernetes token expired")
+	}
 	k.mu.Lock()
-	if c, ok := k.cache[key]; ok && now.Sub(c.at) < kubeReviewTTL {
+	if c, ok := k.cache[key]; ok && now.Before(c.until) {
 		k.mu.Unlock()
 		return c.p, nil
 	}
@@ -121,8 +130,11 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	if strings.HasPrefix(u.Username, "system:node:") {
 		return Person{}, reasonf(ReasonSubject, "a node token is not a person")
 	}
-	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username,
-		Expires: now.Add(kubeReviewTTL)}
+	until := now.Add(kubeReviewTTL)
+	if hasExp && exp.Before(until) {
+		until = exp
+	}
+	p := Person{Kind: PersonKube, Issuer: KubeIssuer, Subject: u.Username, Principal: u.Username, Expires: until}
 	for _, g := range u.Groups {
 		if g = strings.TrimSpace(g); g != "" && len(p.Groups) < 512 {
 			p.Groups = append(p.Groups, g)
@@ -132,9 +144,36 @@ func (k *KubeTokenVerifier) Verify(ctx context.Context, token string) (Person, e
 	if k.cache == nil || len(k.cache) >= kubeReviewMaxKeys {
 		k.cache = map[string]kubeReview{}
 	}
-	k.cache[key] = kubeReview{p: p, at: now}
+	k.cache[key] = kubeReview{p: p, until: until}
 	k.mu.Unlock()
 	return p, nil
+}
+
+// kubeTokenExpiry reads the exp claim of a bearer token that is a JWT,
+// without verifying it: the TokenReview authenticates the token, and exp
+// only shortens how long the answer is used, never lengthens it
+// (GAP-0569). ok is false for a token that is not a JWT or has no integer
+// exp.
+func kubeTokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	cb, err := b64url(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var c struct {
+		Expiry json.Number `json:"exp"`
+	}
+	if json.Unmarshal(cb, &c) != nil {
+		return time.Time{}, false
+	}
+	n, err := c.Expiry.Int64()
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.Unix(n, 0), true
 }
 
 // kubeUser is the user of an authenticated TokenReview.

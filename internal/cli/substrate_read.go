@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
 // actorRef is how a person names an actor: "name" or "atespace/name".
@@ -331,9 +332,23 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 				if line := substratePolicyConflictLine(a); line != "" {
 					fmt.Fprintln(w, "Policy:    "+line)
 				}
+				if e := substrateEgressInfo(ctx, s); e.Replaced() {
+					// GAP-0497: say which protections are off.
+					fmt.Fprintf(w, "Egress:    %s\n", substrateEgressSummary(e))
+				}
 				if a.State == substrateStateCrashed {
 					// GAP-0410: say it crashed and the way back.
 					fmt.Fprintf(w, "Crashed:   its worker went away. Bring it back with: defenseclaw substrate undo %s\n", a.Name)
+					if a.Unattended {
+						// GAP-0420 (known limit in 1.0.10): a headless task does
+						// not resume after a crash; its record and log were in
+						// the crashed actor.
+						agent := a.Connector
+						if spec, err := sandboxcli.ResolveHarness(a.Connector); err == nil {
+							agent = spec.Command
+						}
+						fmt.Fprintf(w, "Task:      crashed and does not resume; undo brings the agent back without it. Re-run the task with: defenseclaw substrate run %s --task ...\n", substrateDash(agent))
+					}
 					return nil
 				}
 				fmt.Fprintf(w, "Come back: defenseclaw substrate connect %s\n", a.Name)
@@ -354,12 +369,22 @@ Exit 75 means the cluster could not be reached; there is no document.`,
 			if tok != nil {
 				who = substrateDash(tok.Principal)
 			}
+			egress := substrateEgressInfo(ctx, s)
 			if asJSON {
-				return writeSubstrateJSON(w, map[string]any{"context": s.Name, "admin_url": s.Ctx.AdminURL, "signed_in_as": who, "agents": n})
+				doc := map[string]any{"context": s.Name, "admin_url": s.Ctx.AdminURL, "signed_in_as": who, "agents": n}
+				if egress != nil {
+					doc["egress_callout"] = egress
+				}
+				return writeSubstrateJSON(w, doc)
 			}
 			fmt.Fprintf(w, "Cluster:    %s (%s)\n", s.Name, s.Ctx.AdminURL)
 			fmt.Fprintf(w, "Signed in:  %s\n", who)
 			fmt.Fprintf(w, "Agents:     %d\n", n)
+			if egress.Replaced() {
+				// GAP-0497: not "all is well" while another callout holds
+				// Substrate's egress slot.
+				fmt.Fprintf(w, "Egress:     %s\n", substrateEgressSummary(egress))
+			}
 			return nil
 		},
 	}
@@ -487,7 +512,7 @@ is gone.`,
 // substrateConfirm asks a yes/no question on a terminal; without one it
 // refuses and names --yes.
 func substrateConfirm(cmd *cobra.Command, q string) (bool, error) {
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
+	if !substrateInteractive() {
 		return false, errors.New("this needs a yes: pass --yes to answer it from a script")
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "%s [y/N] ", q)
@@ -538,8 +563,10 @@ that onto the current kit without losing its work.`,
 
 func newSubstrateApprovalsCmd() *cobra.Command {
 	var (
-		out substrateOutput
-		com substrateCommon
+		out      substrateOutput
+		com      substrateCommon
+		all      bool
+		standing bool
 	)
 	cmd := &cobra.Command{
 		Use:   "approvals",
@@ -548,7 +575,11 @@ func newSubstrateApprovalsCmd() *cobra.Command {
 "defenseclaw substrate approve ID" or "defenseclaw substrate reject ID". An agent attached to your
 terminal shows the same question on its last line. An unattended run (--task, --batch)
 denies its asks unless its profile sets unattended_asks: queue; a queued ask is marked
-"unattended" in the RUN column and is denied when its time runs out.`,
+"unattended" in the RUN column and is denied when its time runs out.
+
+With --standing it lists the approvals given with "approve --always" that are still in force:
+the agent, the host, what the approval covers, who approved it and when. Take one back with
+"defenseclaw substrate revoke NAME HOST".`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, err := out.wantJSON()
@@ -561,7 +592,10 @@ denies its asks unless its profile sets unattended_asks: queue; a queued ask is 
 			}
 			ctx, stop := substrateContext(cmd)
 			defer stop()
-			asks, err := s.Client.Asks(ctx)
+			if standing {
+				return printSubstrateStanding(ctx, cmd, s.Client, all, asJSON)
+			}
+			asks, err := s.Client.AsksOf(ctx, all)
 			if err != nil {
 				return substrateFail(err)
 			}
@@ -586,7 +620,46 @@ denies its asks unless its profile sets unattended_asks: queue; a queued ask is 
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().BoolVar(&all, "all", false, "every person's, not only yours (administrators only)")
+	cmd.Flags().BoolVar(&standing, "standing", false, "list the approvals given with --always that are still in force")
 	return cmd
+}
+
+// printSubstrateStanding lists the standing (always) approvals (GAP-0492).
+func printSubstrateStanding(ctx context.Context, cmd *cobra.Command, cl *api.Client, all, asJSON bool) error {
+	list, err := cl.StandingApprovals(ctx, all)
+	if err != nil {
+		return substrateFail(err)
+	}
+	w := cmd.OutOrStdout()
+	if asJSON {
+		return writeSubstrateJSON(w, map[string]any{"approvals": list})
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(w, "No approval given with --always is in force.")
+		return nil
+	}
+	now := time.Now()
+	header := []string{"AGENT", "HOST", "COVERS", "APPROVED BY", "AGE"}
+	if all {
+		header = append(header, "OWNER")
+	}
+	rows := make([][]string, 0, len(list))
+	for _, a := range list {
+		covers := a.Scope
+		if covers == "" || covers == "host" {
+			covers = "every request to the host"
+		}
+		row := []string{substrateDash(a.Atespace + "/" + a.Actor), substrateDash(a.Host), substrateDash(covers),
+			substrateDash(a.ApprovedBy), substrateAge(a.ApprovedAt, now)}
+		if all {
+			row = append(row, substrateDash(a.Owner))
+		}
+		rows = append(rows, row)
+	}
+	substrateTable(w, header, rows)
+	fmt.Fprintln(w, "\nTake one back with: defenseclaw substrate revoke NAME HOST")
+	return nil
 }
 
 func newSubstrateApproveCmd() *cobra.Command {
@@ -598,15 +671,58 @@ func newSubstrateApproveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "approve <id>",
 		Short: "Approve a waiting question",
-		Long:  `Approves one question from "defenseclaw substrate approvals" once, or with --always for every later run that asks the same thing.`,
+		Long:  `Approves one question from "defenseclaw substrate approvals" for one request: the next request asks again. With --always it covers every later request of the agent that asks the same thing.`,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return substrateDecide(cmd, &com, args[0], "approve", always, reason)
 		},
 	}
 	com.add(cmd)
-	cmd.Flags().BoolVar(&always, "always", false, "keep this approval for later runs")
+	cmd.Flags().BoolVar(&always, "always", false, "keep this approval for every later request of the agent")
 	cmd.Flags().StringVar(&reason, "reason", "", "note recorded with the decision")
+	return cmd
+}
+
+func newSubstrateRevokeCmd() *cobra.Command {
+	var com substrateCommon
+	cmd := &cobra.Command{
+		Use:   "revoke <name> <host>",
+		Short: "Take back an approval given with --always",
+		Long: `Takes back what "defenseclaw substrate approve --always" allowed for one agent and host: the agent's
+next request to the host asks you again. The cluster drops the host from the agent's network rules
+within about a minute. List the approvals in force with "defenseclaw substrate approvals --standing".
+An administrator names another person's agent as ATESPACE/NAME; the revoke is recorded under their
+own name.`,
+		Example: "defenseclaw substrate revoke fix-tests-7f3a registry.example.test",
+		Args:    cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			s, err := substrateOpen(cmd, &com)
+			if err != nil {
+				return err
+			}
+			ctx, stop := substrateContext(cmd)
+			defer stop()
+			atespace, name, ok := strings.Cut(strings.TrimSpace(args[0]), "/")
+			if !ok || atespace == "" || name == "" || strings.Contains(name, "/") {
+				a, err := resolveSubstrateActor(ctx, s.Client, args[0])
+				if err != nil {
+					return substrateFail(err)
+				}
+				atespace, name = a.Atespace, a.Name
+			}
+			host := strings.ToLower(strings.TrimSpace(args[1]))
+			if _, err := s.Client.Revoke(ctx, atespace, name, host); err != nil {
+				if e, ok := api.AsError(err); ok && e.Status == 404 && e.Reason == "approval_not_found" {
+					return cliusage.WithExitCode(fmt.Errorf("%s/%s has no approval of %s in force; list them with: defenseclaw substrate approvals --standing",
+						atespace, name, safetext.Line(host)), substrateExitRefused)
+				}
+				return substrateFail(err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Took back the approval of %s for %s/%s. Its next request there asks you again.\n", safetext.Line(host), atespace, name)
+			return nil
+		},
+	}
+	com.add(cmd)
 	return cmd
 }
 
