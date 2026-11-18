@@ -34,7 +34,10 @@ import (
 // Before GAP-1077, the shell routes read an envelope with an unplaced header
 // as partial and added no unknown finding: allow in every tier, strict too,
 // where the single-header here-document blocks. One top-level test per tier,
-// so the -race shards can take them apart.
+// so the -race shards can take them apart; managed-strict, the slowest (469 s
+// under -race on the hosted runners of #1457, over the 440 s one shard holds),
+// runs as two tests, the even and the odd fixture cases (each case keeps its
+// index, so its shapes and unplaced names are the ones the whole run checks).
 func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchDefault(t *testing.T) {
 	patchDecoyHeaderNeverWeaker(t, "default")
 }
@@ -51,8 +54,12 @@ func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManaged(t *testing.T) {
 	patchDecoyHeaderNeverWeaker(t, "managed")
 }
 
-func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrict(t *testing.T) {
-	patchDecoyHeaderNeverWeaker(t, "managed-strict")
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictEvenCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", 0, 2)
+}
+
+func TestPatchDecoyHeaderNeverWeakerThanTheSinglePatchManagedStrictOddCases(t *testing.T) {
+	patchDecoyHeaderNeverWeakerPart(t, "managed-strict", 1, 2)
 }
 
 // patchDecoyUnplaced are header names no reader places on the host of the
@@ -186,6 +193,12 @@ func patchDecoyRoutes(cwd string) []patchDecoyRoute {
 }
 
 func patchDecoyHeaderNeverWeaker(t *testing.T, tier string) {
+	patchDecoyHeaderNeverWeakerPart(t, tier, 0, 1)
+}
+
+// patchDecoyHeaderNeverWeakerPart checks the fixture cases whose index n has
+// n%parts == part; parts 1 checks them all.
+func patchDecoyHeaderNeverWeakerPart(t *testing.T, tier string, part, parts int) {
 	index := slices.IndexFunc(gap0437Packs, func(p gap0437Pack) bool { return p.name == tier })
 	if index < 0 {
 		t.Fatalf("no tier %q in gap0437Packs", tier)
@@ -217,6 +230,9 @@ func patchDecoyHeaderNeverWeaker(t *testing.T, tier string) {
 					return shapeParityHook(t, handlers[call.conn], call, p.managed)
 				}
 				for n, c := range cases {
+					if n%parts != part {
+						continue
+					}
 					str := func(key string) string { value, _ := c.args[key].(string); return value }
 					// The fixture name on Windows; elsewhere the same name
 					// with forward slashes, the spelling whose single-header
