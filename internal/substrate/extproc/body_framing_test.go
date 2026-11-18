@@ -91,6 +91,9 @@ func TestBodyFramingCannotSkipInspection(t *testing.T) {
 		})
 	}
 	open_ := newHarness(t, func(c *Config, _ *Options) { c.FailureMode = FailureOpen })
+	// As h above, after the inspected cases: a filter shown to send bodies
+	// (GAP-0516: before that, a stated length over the cap asks for the body).
+	open_.eng.body.arrived()
 	for _, tc := range refuse {
 		t.Run("open "+tc.name, func(t *testing.T) {
 			r := open_.eng.requestFrom(tc.msg, tc.msg.GetRequestHeaders())
