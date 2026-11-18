@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"slices"
@@ -552,7 +553,8 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks),
-					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor())}
+					substrateTemplateAllowlistCheck(ctx, ate, ctl.LiveAttestor()), substrateRelaySeparationCheck(ctx, ate, ctl.LiveAttestor()),
+					substrateSkillScannerCheck(substrateSkillScannerBinary(c), exec.LookPath, substrateContainmentProbe)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.LiveAttestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.

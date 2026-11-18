@@ -21,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -136,6 +137,30 @@ func (r *RuntimeScanner) now() time.Time {
 	return time.Now()
 }
 
+// ContainmentFix is the next step for a gateway whose skill-scanner cannot
+// run contained (GAP-0576 item 5).
+const ContainmentFix = "allow unprivileged user namespaces for the gateway pod (a seccomp profile that permits them, and user.max_user_namespaces above 0 on the node), or put the skill in the template image and rebuild it with template build"
+
+// ContainmentCause is the host's reason in a processutil
+// ErrContainmentUnavailable error (the namespace refusal and the setting
+// to look at).
+func ContainmentCause(err error) string {
+	const marker = "this host refuses the namespaces containment needs: "
+	s := err.Error()
+	if i := strings.LastIndex(s, marker); i >= 0 {
+		return s[i+len(marker):]
+	}
+	return s
+}
+
+// ContainmentUnavailableReason is the refusal of a skill whose scan cannot
+// run contained in the gateway: skill-scanner is there, the host refuses
+// the namespaces its containment needs.
+func ContainmentUnavailableReason(err error) string {
+	return "skill-scanner is installed in the gateway but cannot run contained (containment unavailable: " + ContainmentCause(err) +
+		"), so the skill is not admitted unscanned; " + ContainmentFix
+}
+
 // Scan decides one asset. An error means the scan could not run: the caller
 // applies its fail mode (unattended is closed, D8).
 func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDecision, error) {
@@ -208,6 +233,16 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			}
 		}
 		res, err = r.Skill.Scan(ctx, dir)
+		if err != nil && errors.Is(err, processutil.ErrContainmentUnavailable) {
+			// The GAP-0164 ruling (T6, GAP-0576 item 5): a skill-scanner
+			// that is installed but cannot run contained here (the pod
+			// refuses user namespaces) is "scanner unavailable" and fails
+			// closed in every tier: the skill is not admitted unscanned,
+			// and the refusal names the cause and the next step. Not a
+			// verdict about the skill, so it is not cached.
+			return &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Action: "block", Incomplete: incomplete,
+				Reason: ContainmentUnavailableReason(err), Result: failedScan(r.Skill.Name(), a.Name, err)}, nil
+		}
 		unavailable = err != nil && scanner.Unavailable(err)
 		if err != nil || res == nil {
 			res = failedScan(r.Skill.Name(), a.Name, err)

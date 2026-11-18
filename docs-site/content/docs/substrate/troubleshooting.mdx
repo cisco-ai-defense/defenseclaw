@@ -217,7 +217,7 @@ The Kubernetes Secret named by the secret's source already exists, and DefenseCl
 
 ### A skill I added in the session was refused
 
-A gateway whose image has skill-scanner but runs where user namespaces are refused (a pod under the default seccomp profile) cannot contain the scan, so it counts as having no scanner and the fail mode below decides.
+A gateway whose image has skill-scanner but cannot run it contained (user namespaces refused, as under a pod's default seccomp profile) refuses every skill added mid-session, in every tier, rather than admit it unscanned. The refusal and `defenseclaw substrate doctor --cluster` (`substrate.skill_scanner`) say "containment unavailable" with the cause. Allow unprivileged user namespaces for the gateway pod (a seccomp profile that permits them, and `user.max_user_namespaces` above 0 on the node), or put the skill in the template image and rebuild it with `template build`.
 
 skill-scanner does not run in the cluster. A skill in the attested template is trusted by its digest. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it and raise an alert; open source allows it and raises an alert. To use the skill everywhere, put it in the image and rebuild the template with `template build`.
 
