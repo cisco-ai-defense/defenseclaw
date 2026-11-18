@@ -351,7 +351,7 @@ func TestToolChainRootRowsDoNotBlockOlderRetention(t *testing.T) {
 		{RetentionCorrelationReceipts, []any{unixNano(future), batch}},
 		{RetentionCorrelationCursors, []any{unixNano(future), unixNano(future), batch}},
 		{RetentionCorrelationPending, []any{unixNano(future), batch, unixNano(future), batch, batch}},
-		{RetentionCorrelationRelationships, []any{unixNano(future), unixNano(future), unixNano(future), batch}},
+		{RetentionCorrelationRelationships, []any{unixNano(future), unixNano(future), unixNano(future), unixNano(future), batch}},
 		{RetentionCorrelationEvents, []any{unixNano(future), unixNano(future), batch}},
 	} {
 		statement, err := correlationRetentionDeleteStatement(stage.class)

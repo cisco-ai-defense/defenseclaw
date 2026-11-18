@@ -23,7 +23,7 @@ func TestRetentionRelationshipBatchLooksUpProtectedNodesByKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UnixNano()
-	rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+statement, now, now, now, RetentionBatchSize)
+	rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+statement, now, now, now, now, RetentionBatchSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,21 +37,23 @@ func TestRetentionRelationshipBatchLooksUpProtectedNodesByKey(t *testing.T) {
 			t.Fatal(err)
 		}
 		plan = append(plan, detail)
-		if !strings.Contains(detail, " node") {
+		if !strings.Contains(detail, " node") && !strings.Contains(detail, " live_node") {
 			continue
 		}
-		if strings.HasPrefix(detail, "SCAN node") || strings.HasSuffix(detail, "(kind=?)") {
+		if strings.HasPrefix(detail, "SCAN node") || strings.HasPrefix(detail, "SCAN live_node") ||
+			strings.HasSuffix(detail, "(kind=?)") {
 			t.Errorf("protected nodes are scanned per candidate: %q", detail)
 		}
-		if strings.HasPrefix(detail, "SEARCH node") && strings.Contains(detail, "id=?") {
+		if (strings.HasPrefix(detail, "SEARCH node") || strings.HasPrefix(detail, "SEARCH live_node")) &&
+			strings.Contains(detail, "id=?") {
 			lookups++
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if lookups < 3 {
-		t.Errorf("want 3 keyed protected-node lookups (from, to, evidence), got %d:\n%s",
+	if lookups < 5 {
+		t.Errorf("want 5 keyed protected-node lookups (from, to, evidence, live from, live to), got %d:\n%s",
 			lookups, strings.Join(plan, "\n"))
 	}
 }

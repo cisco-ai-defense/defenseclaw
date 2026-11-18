@@ -173,7 +173,10 @@ func TestRetentionSizeCapNamesActiveCorrelationState(t *testing.T) {
 	store, repo := newCorrelationTestStore(t)
 	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyDefenseClaw)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	old := now.Add(-8 * 24 * time.Hour)
+	// The edges of the live session are inside the 7-day window: an edge
+	// past it goes even on a live session (rel-1-0-10:GAP-0034), one inside
+	// it stays under the size cap, so the cap is not reached.
+	old := now.Add(-2 * 24 * time.Hour)
 	link := func(tx *CorrelationTx, event CorrelationEvent) {
 		if _, err := tx.PutRelationship(t.Context(), CorrelationRelationshipInput{
 			FromKind: CorrelationNodeSemanticEvent, FromID: string(event.SemanticEventID),
