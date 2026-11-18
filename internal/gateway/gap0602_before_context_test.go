@@ -113,13 +113,26 @@ func TestGAP0602NoCopyJSONStringEquivalence(t *testing.T) {
 		{`"zzz"`, ` "zzz"`, false},
 		{"false", " true", false},
 		{"30", "3e1", false},
+		{`":"`, `"\u003a"`, false},
+		{`"\u003a"`, `":"`, false},
+		{`","`, `"\u002c"`, false},
+		{`"},"`, `"\u007d\u002c"`, false},
 	}
 	for _, row := range rows {
-		args, _ := json.Marshal(map[string]any{"file_path": "~/.claude/settings.json", "old_string": row.old, "new_string": row.next})
+		args, _ := json.Marshal(map[string]any{"file_path": "~/.claude/settings.json", "old_string": row.old, "new_string": row.next, "replace_all": true})
 		rule, note, _ := sandboxAgentHookConfigChange(context.Background(), trustedActionRequest{
 			Connector: "claudecode", Input: actionfacts.Input{Tool: "Edit", Args: args, ActiveHome: sandboxauth.SandboxHome}})
 		if (rule == "") != row.allow {
 			t.Errorf("%q -> %q rule=%q note=%q allow=%t", row.old, row.next, rule, note, row.allow)
 		}
+	}
+}
+
+func TestGAP0602JSONStringSeparatorHasLaptopBlock(t *testing.T) {
+	before := []byte(gap0433LaptopSettings)
+	after := []byte(strings.ReplaceAll(gap0433LaptopSettings, `":"`, `"\u003a"`))
+	format := sandboxAgentHookConfigFormat(sandboxauth.SandboxHome+"/.claude/settings.json", sandboxauth.SandboxHome)
+	if reason := agentHookConfigTurnsOff(format, before, true, after, true); reason == "" {
+		t.Fatal("separator replacement must retain the laptop unreadable-file block")
 	}
 }

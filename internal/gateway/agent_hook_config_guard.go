@@ -1497,6 +1497,16 @@ func sandboxAgentHookSameJSONString(old, next string) bool {
 		next[0] != '"' || next[len(next)-1] != '"' {
 		return false
 	}
+	// A span can begin at a closing quote and cross syntax: ":" is
+	// valid JSON string text, but replacing that separator with "\u003a"
+	// makes a settings document unreadable. Check both spellings, since
+	// a malformed original could otherwise be repaired into a disabled file.
+	for _, text := range []string{old, next} {
+		outside := strings.TrimSpace(text[1 : len(text)-1])
+		if len(outside) > 0 && strings.ContainsRune(":,]}", rune(outside[0])) {
+			return false
+		}
+	}
 	var left, right string
 	return json.Unmarshal([]byte(old), &left) == nil && json.Unmarshal([]byte(next), &right) == nil && left == right
 }
