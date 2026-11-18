@@ -3030,6 +3030,7 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	if auditSessionID != "" {
 		ctx = refreshAuditEnvelopeFromIdentity(ctx, auditSessionID, identity)
 	}
+	ctx = withHookSessionRootAgent(ctx, req.ConnectorName)
 	// Stamp the connector identity onto the audit envelope so every
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is
@@ -3055,6 +3056,32 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	return ctx
+}
+
+// withHookSessionRootAgent names the session's root agent on the audit
+// envelope of a hook that reported no agent. The id is the one the hook's
+// hook_decision, lifecycle and model records derive (hookLLMEventMeta) and the
+// one correlation mints at the session's start, so it is the same on every
+// gateway replica and needs no cross-replica lookup. Before, the envelope got
+// an agent only from this replica's correlation cursor: a replica that saw an
+// actor's session first on a tool hook, with the session's start on another
+// replica, wrote its connector-hook rows with agent_id empty while the
+// hook_decision rows of the same events named the agent (substrate-1:GAP-0422).
+// A cursor's or the payload's agent still wins (contextWithHookCorrelation).
+// Traffic with no agent identity, and Secure Client (UUIDv7 agents, issue
+// #1092), keep the envelope as it was.
+func withHookSessionRootAgent(ctx context.Context, connectorName string) context.Context {
+	env := audit.EnvelopeFromContext(ctx)
+	connectorName = strings.TrimSpace(connectorName)
+	if env.AgentID != "" || env.SessionID == "" || connectorName == "" || ManagedEnterpriseActive() {
+		return ctx
+	}
+	scope := agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx))
+	if scope == "" {
+		return ctx
+	}
+	env.AgentID = agentNodeID(scope, connectorName, env.SessionID, "root")
+	return audit.ContextWithEnvelope(ctx, env)
 }
 
 // refreshAuditEnvelopeFromHook copies payload-derived correlation
