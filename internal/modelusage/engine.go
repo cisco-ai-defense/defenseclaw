@@ -55,6 +55,8 @@ type Engine struct {
 	dropSeen map[string]int64
 	// budgetSink receives agent call costs for routing.admin budgets.
 	budgetSink atomic.Pointer[spendSinkBox]
+	// rc pairs native records with route-only listener records (reconcile.go).
+	rc reconciler
 
 	mu      sync.RWMutex
 	sinks   []Sink
@@ -101,6 +103,8 @@ func (e *Engine) Apply(tok config.TokenomicsConfig, pricing config.PricingConfig
 	if s.enabled {
 		e.start()
 	} else {
+		// Parked native records are counted before the queue closes.
+		e.countNative(e.rc.drain()...)
 		e.stop()
 	}
 }
@@ -255,6 +259,10 @@ func (e *Engine) Begin(ctx context.Context, f CallFacts) Call {
 		f.StartedAt = now
 	}
 	c := &call{e: e, s: s, f: s.withoutProvenance(f), start: now}
+	if f.Listener == listenerRouteOnly && f.CallRole == RoleAgent {
+		c.connector = reconcileConnector(f.Connector)
+		c.track = e.rc.begin(c.connector)
+	}
 	if f.Streaming {
 		c.parser = NewStreamParser(f.APIFamily)
 	}
@@ -294,8 +302,10 @@ func (e *Engine) NativeImportEnabled(connector string) bool {
 // with the current price table, exactly as for a proxied call. A running
 // total (a session or cumulative cost counter) must never be passed as
 // ReportedUSD. The record is dropped when tokenomics, the call role or the
-// native import of rec.Facts.Connector is off. It returns the record as
-// recorded and whether it was recorded.
+// native import of rec.Facts.Connector is off, and not counted when the
+// route-only listener recorded the same call (reconcile.go); it may be parked
+// until a listener call in flight ends. It returns the record and whether it
+// was (or, parked, may still be) counted.
 func (e *Engine) RecordNative(rec Record) (out Record, ok bool) {
 	if e == nil {
 		return Record{}, false
@@ -329,9 +339,22 @@ func (e *Engine) RecordNative(rec Record) (out Record, ok bool) {
 	reported := rec.Cost.ReportedUSD
 	rec.Cost = s.price(rec.Facts, rec.Status, rec.Usage, reported)
 	s.bound(&rec)
-	e.chargeBudgets(rec.Facts, rec)
-	e.enqueue(rec)
+	switch e.rc.native(e, rec) {
+	case nativeMatched:
+		return rec, false
+	case nativeParked:
+		return rec, true
+	}
+	e.countNative(rec)
 	return rec, true
+}
+
+// countNative charges and enqueues native records.
+func (e *Engine) countNative(recs ...Record) {
+	for _, rec := range recs {
+		e.chargeBudgets(rec.Facts, rec)
+		e.enqueue(rec)
+	}
 }
 
 type call struct {
@@ -350,6 +373,11 @@ type call struct {
 	given     *Usage
 	done      bool
 	rec       Record
+	// A route-only listener call: its seq in the reconcile ledger (0: not
+	// tracked), connector and provider request id.
+	track     uint64
+	connector string
+	requestID string
 }
 
 func (c *call) UpstreamHeader(status int, h http.Header) {
@@ -357,6 +385,9 @@ func (c *call) UpstreamHeader(status int, h http.Header) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status = status
+	if c.track != 0 && c.requestID == "" {
+		c.requestID = providerRequestID(h)
+	}
 	if c.ttfb == 0 {
 		c.ttfb = time.Since(c.start)
 	}
@@ -403,10 +434,28 @@ func (c *call) End(err error) Record {
 			c.rec = Record{Facts: c.f, Outcome: "failed", ErrorType: "usage_record_panic"}
 		}
 	}()
+	// The reconcile ledger is settled even when the record cannot be built.
+	defer c.settle(Record{})
 	c.rec = c.build(err)
+	emit := c.settle(c.rec)
 	c.e.chargeBudgets(c.f, c.rec)
-	c.e.enqueue(c.rec)
+	if emit {
+		c.e.enqueue(c.rec)
+	}
 	return c.rec
+}
+
+// settle ends a tracked route-only call in the reconcile ledger once and
+// counts the native records it released. It reports whether rec is enqueued:
+// not when a native record of the same call was counted already.
+func (c *call) settle(rec Record) bool {
+	if c.track == 0 {
+		return true
+	}
+	emit, release := c.e.rc.listenerEnd(c.connector, c.track, c.requestID, rec)
+	c.track = 0
+	c.e.countNative(release...)
+	return emit
 }
 
 func (c *call) build(err error) Record {

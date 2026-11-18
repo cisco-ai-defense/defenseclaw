@@ -779,7 +779,7 @@ Both blocks reload with the rest of `config.yaml`: a change applies without a re
 | `observability.tokenomics.enabled` | `false` | Master switch. Off: no usage record, no metric, no local store, no extra goroutine. |
 | `observability.tokenomics.record_routing_provenance` | `true` | Put the requested and selected model, the route decision and the profile on each usage record. |
 | `observability.tokenomics.roles` | empty (all roles) | Call roles to record: `agent`, `judge`, `decision_model`, `ai_defense`, `router_classifier`. Unknown or repeated roles are refused. |
-| `observability.tokenomics.native_otel_import.claudecode`, `.codex` | `true`, `true` | Import per-call usage from the OTLP stream the agent sends. Applies only while `enabled` is true. While the proxy carries the connector, the import is a cross-check and is not counted twice. |
+| `observability.tokenomics.native_otel_import.claudecode`, `.codex` | `true`, `true` | Import per-call usage from the OTLP stream the agent sends. Applies only while `enabled` is true. A call the route-only listener recorded is counted once, from the listener record; the import counts the calls it did not record. |
 | `observability.tokenomics.cost.compute` | `true` | Compute cost from `observability.pricing`. |
 | `observability.tokenomics.cost.currency` | `USD` | USD is the only value. There is no currency conversion. |
 | `observability.tokenomics.cost.keep_reported` | `true` | Keep a per-call cost that the provider or the agent reported, and mark its basis `reported`. A reported cost wins over the computed one. Running session totals are never used. |
