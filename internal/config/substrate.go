@@ -300,12 +300,16 @@ type SubstrateExtprocUIDConfig struct {
 }
 
 // SubstrateExtprocChainConfig bounds the egress chain check (default 20ms,
-// at most 500ms) and the observed_egress queue (default 4096). FailureMode
-// decides a request whose check could not answer: auto (default) refuses
-// for unattended actors and alerts for the rest, closed always refuses
-// (managed installs), open always alerts.
+// at most 500ms; a send's, 250ms) and the observed_egress queue (default
+// 4096). FailureMode decides a request whose check could not answer: auto
+// (default) refuses for unattended actors and alerts for the rest, closed
+// always refuses (managed installs), open always alerts; a request that can
+// carry data out is refused in every mode (GAP-0601).
 type SubstrateExtprocChainConfig struct {
 	CheckBudget string `mapstructure:"check_budget" yaml:"check_budget,omitempty"`
+	// SendBudget bounds the check of a request that can carry data out
+	// (default 250ms, at most 500ms, never shorter than CheckBudget).
+	SendBudget  string `mapstructure:"send_budget"  yaml:"send_budget,omitempty"`
 	QueueSize   int    `mapstructure:"queue_size"   yaml:"queue_size,omitempty"`
 	FailureMode string `mapstructure:"failure_mode" yaml:"failure_mode,omitempty"`
 }
@@ -970,6 +974,7 @@ func (s *SubstrateConfig) validateExtproc(bad func(key, format string, a ...any)
 		{"extproc.uid.cache_ttl", e.UID.CacheTTL, 10 * time.Minute},
 		{"extproc.uid.stale_max", e.UID.StaleMax, 10 * time.Minute},
 		{"extproc.chain.check_budget", e.Chain.CheckBudget, 500 * time.Millisecond},
+		{"extproc.chain.send_budget", e.Chain.SendBudget, 500 * time.Millisecond},
 		{"extproc.ask.hold", e.Ask.Hold, 1800 * time.Millisecond},
 		{"extproc.judge.timeout", e.Judge.Timeout, 1800 * time.Millisecond},
 	} {

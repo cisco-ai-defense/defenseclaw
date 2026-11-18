@@ -434,12 +434,14 @@ func TestChainCheckBudget(t *testing.T) {
 	if d := time.Since(start); d > 150*time.Millisecond {
 		t.Fatalf("chain check took %s, budget 20ms", d)
 	}
+	// A send waits chain.send_budget (250 ms): the slow leader's hit is
+	// answered and refuses as chain_egress.
 	start = time.Now()
-	if v := slow.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); v.Allow || v.Rule != uncheckedTimeout || !v.Retryable {
+	if v := slow.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); v.Allow || v.Category != CategoryChainEgress {
 		t.Fatalf("slow chain check, POST: %+v", v)
 	}
-	if d := time.Since(start); d > 150*time.Millisecond {
-		t.Fatalf("chain check took %s, budget 20ms", d)
+	if d := time.Since(start); d > 600*time.Millisecond {
+		t.Fatalf("send chain check took %s, budget 250ms", d)
 	}
 	errc := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = fakeChecker{err: errors.New("leader down")} })
 	if v := errc.eng.DecideHeaders(ctx, req("x", "GET", "example.com", "/")); !v.Allow {

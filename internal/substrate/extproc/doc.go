@@ -46,7 +46,7 @@
 //     exact-value DLP for the profile's actor_secrets, and placeholders sent
 //     to hosts their secret is not bound to;
 //  7. an egress-type tool chain whose predecessor is in the actor's window
-//     (ChainChecker, 20 ms budget): a hit refuses; a check that can't
+//     (ChainChecker, 20 ms budget, 250 ms for a send): a hit refuses; a check that can't
 //     answer, or that saw an unrecorded step, follows chain.failure_mode
 //     for GET and HEAD and refuses, in every mode, a request with a body or
 //     any other method (GAP-0601; an actor with no registration has no

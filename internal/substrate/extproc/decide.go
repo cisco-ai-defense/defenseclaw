@@ -479,8 +479,15 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 		v.Findings = append(v.Findings, f.String())
 	}
 
+	// A send waits longer for its check (chain.send_budget), since it is
+	// refused when the check can't answer: a slow but healthy leader still
+	// answers it. One check, so the leader records the step once (GAP-0601).
+	budget := e.cfg.Chain.CheckBudget
+	if carriesData(req, methods) && !lookupDown {
+		budget = max(budget, e.cfg.Chain.SendBudget)
+	}
 	cv, outcome, chainWhy := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
-		Method: req.Method, Allowed: true, Time: e.now()})
+		Method: req.Method, Allowed: true, Time: e.now()}, budget)
 	if lookupDown && e.checker != nil {
 		outcome, chainWhy = chainUnchecked, uncheckedLookup
 	}
@@ -607,7 +614,7 @@ func uncheckedSendReason(why string) string {
 	case uncheckedLookup, uncheckedError:
 		cause = "DefenseClaw's gateway leader, which keeps this actor's earlier tool calls, can't be reached or failed the check"
 	case uncheckedTimeout:
-		cause = "DefenseClaw's gateway leader did not answer in time"
+		cause = "DefenseClaw's gateway leader did not answer within chain.send_budget"
 	case uncheckedInternal:
 		cause = "DefenseClaw's chain check hit an internal error"
 	case uncheckedBusy:

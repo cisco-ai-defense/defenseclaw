@@ -117,6 +117,12 @@ type UIDConfig struct {
 type ChainConfig struct {
 	// CheckBudget bounds the synchronous egress-chain check. Default 20 ms.
 	CheckBudget time.Duration `yaml:"check_budget"`
+	// SendBudget bounds the check of a request that can carry data out (a
+	// body, or any method but GET and HEAD), which is refused when its check
+	// can't answer: a slow but healthy leader (GAP-0564) gets that long
+	// before a git push or fetch is refused (GAP-0601). Default 250 ms, at
+	// most 500 ms, never shorter than CheckBudget.
+	SendBudget time.Duration `yaml:"send_budget"`
 	// QueueSize bounds the observed_egress queue; a full queue drops.
 	QueueSize int `yaml:"queue_size"`
 	// FailureMode decides a request whose chain check could not answer (an
@@ -204,6 +210,7 @@ const (
 	defaultCacheTTL     = 60 * time.Second
 	defaultStaleMax     = 60 * time.Second
 	defaultCheckBudget  = 20 * time.Millisecond
+	defaultSendBudget   = 250 * time.Millisecond
 	defaultQueueSize    = 4096
 	defaultAskHold      = 1500 * time.Millisecond
 	defaultJudgeTimeout = 1500 * time.Millisecond
@@ -331,6 +338,7 @@ func (c *Config) normalize() error {
 		{&c.UID.CacheTTL, defaultCacheTTL, 10 * time.Minute, "uid.cache_ttl"},
 		{&c.UID.StaleMax, defaultStaleMax, 10 * time.Minute, "uid.stale_max"},
 		{&c.Chain.CheckBudget, defaultCheckBudget, 500 * time.Millisecond, "chain.check_budget"},
+		{&c.Chain.SendBudget, defaultSendBudget, 500 * time.Millisecond, "chain.send_budget"},
 		{&c.Ask.Hold, defaultAskHold, MessageBudget, "ask.hold"},
 		{&c.Judge.Timeout, defaultJudgeTimeout, MessageBudget, "judge.timeout"},
 	} {
