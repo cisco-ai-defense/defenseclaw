@@ -222,7 +222,7 @@
   "github.com/defenseclaw/defenseclaw/internal/substrate/attest/kitspec": 3.6,
   "github.com/defenseclaw/defenseclaw/internal/substrate/attest/templatecli": 1.4,
   "github.com/defenseclaw/defenseclaw/internal/substrate/bundle": 1.9,
-  "github.com/defenseclaw/defenseclaw/internal/substrate/chainstate": 206.0,
+  "github.com/defenseclaw/defenseclaw/internal/substrate/chainstate": 226.8,
   "github.com/defenseclaw/defenseclaw/internal/substrate/configwatch": 1.1,
   "github.com/defenseclaw/defenseclaw/internal/substrate/controller": 3.0,
   "github.com/defenseclaw/defenseclaw/internal/substrate/controller/controllerfake": 3.8,
@@ -822,6 +822,7 @@
    "TestStore_PragmasAppliedAcrossPool": 2.2,
    "TestStore_QueryNetworkEgressEvents": 2.3,
    "TestStore_QueryNetworkEgressEvents_OrdersFractionalTimestampsChronologically": 2.3,
+   "TestSubstrateGAP0564ResentProposalIsAReplay": 2.0,
    "TestTargetSnapshotScannerFingerprintColumn": 2.3,
    "TestToolChainDiscardPendingForEventSessionIsExactAndBounded": 2.0,
    "TestToolChainObserveNoJoinBoundsExpiryAndClose": 2.0,
@@ -3161,7 +3162,10 @@
    "TestWriteThroughCommandLinkToActiveStateBlocks": 9.3,
    "TestXxdOutputOperandOfActiveState": 3.0,
    "TestGAP0559JudgeNoVerdictFailsClosedForUnattendedRunsAndStrict": 2.8,
-   "TestGAP0559JudgeFallbackWritesAnAlertLine": 0.4
+   "TestGAP0559JudgeFallbackWritesAnAlertLine": 0.4,
+   "TestSubstrateGAP0564KitRetryOnTheOtherReplicaKeepsTheActorChecked": 2.0,
+   "TestSubstrateGAP0565RefusedFloodRequestIsCheap": 3.0,
+   "TestSubstrateGAP0566PerActorBudgetIsTheClustersAcrossReplicas": 4.5
   },
   "internal/gateway/connector": {
    "*": 0.112,
@@ -3644,6 +3648,9 @@
    "TestRevertBarrierStopsSameArtifactChains": 5.2,
    "TestSecretReadSurvivesFailoverGAP0179": 10.4,
    "TestSessionRotationStillMatchesInTheActorWindow": 5.1,
+   "TestSubstrateGAP0564J43ShapeOnARealLeader": 15.8,
+   "TestSubstrateGAP0564NewActorStoreIsASeedCopy": 2.8,
+   "TestSubstrateGAP0564SeedFailureMigratesInPlace": 2.2,
    "TestSuspendPausesTheChainClock": 5.1
   },
   "internal/substrate/relay": {
