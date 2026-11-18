@@ -32,15 +32,19 @@ func TestGAP1240GAP1241ReviewRowsOnClaudeHook(t *testing.T) {
 	// The unknown tier: alert in default, permissive and managed, block in
 	// strict and managed-strict (unknownTierAction).
 	const unknown = "unknown"
+	// strictOnly: allow in default, permissive and managed, the unknown tier
+	// (a block) in strict and managed-strict: a data program after a PATH
+	// change (rel-1-0-10:GAP-1481).
+	const strictOnly = "strict-only"
 	rows := []row{
 		{"H01", "tmp", hd("newgrp", stateWrite), unknown, evaluationLimitRuleID},
 		{"H02", "tmp", hd("true && newgrp", stateWrite), unknown, evaluationLimitRuleID},
 		{"H03", "tmp", hd("cd /tmp && /tmp/x/wrap sh", stateWrite), unknown, evaluationLimitRuleID},
-		{"H04", "tmp", hd("true && PATH=/tmp/x:$PATH cat", stateWrite), unknown, evaluationLimitRuleID},
+		{"H04", "tmp", hd("true && PATH=/tmp/x:$PATH cat", stateWrite), strictOnly, evaluationLimitRuleID},
 		{"H05b", "tmp", "newgrp <<'EOF' | cat\n" + stateWrite + "\nEOF", unknown, evaluationLimitRuleID},
 		{"H06", "tmp", "{ " + hd("newgrp", stateWrite) + "\n}", unknown, evaluationLimitRuleID},
 		{"H07", "tmp", "if true; then " + hd("newgrp", stateWrite) + "\nfi", unknown, evaluationLimitRuleID},
-		{"H08", "tmp", hd("export PATH=/tmp/x:$PATH; cat", stateWrite), unknown, evaluationLimitRuleID},
+		{"H08", "tmp", hd("export PATH=/tmp/x:$PATH; cat", stateWrite), strictOnly, evaluationLimitRuleID},
 		{"H09", "tmp", hd("sudo newgrp", stateWrite), unknown, evaluationLimitRuleID},
 		{"H10", "tmp", hd("exec newgrp", stateWrite), unknown, evaluationLimitRuleID},
 		{"H11", "tmp", hd("nohup /tmp/x/wrap sh", stateWrite), unknown, evaluationLimitRuleID},
@@ -85,15 +89,21 @@ func TestGAP1240GAP1241ReviewRowsOnClaudeHook(t *testing.T) {
 		{"D05", hd("PATH=$HOME/go/bin:$PATH cat", "ordinary text"), "allow", ""},
 		{"D06", hd("sh", "echo hi"), "allow", ""},
 		{"D07", hd("bash", "sudo apt-get install -y jq"), "allow", ""},
-		{"D08", hd("PATH=/usr/local/go/bin:$PATH go run ./cmd", stateWrite), unknown, evaluationLimitRuleID},
+		{"D08", hd("PATH=/usr/local/go/bin:$PATH go run ./cmd", stateWrite), strictOnly, evaluationLimitRuleID},
 		{"D09", hd("tee README.md", "To reset, run: rm -rf ~/.defenseclaw"), "allow", ""},
 		{"D10", hd("cat > ~/.defenseclaw/notes.txt", "x"), "allow", ""},
-		{"D11", hd("PATH=$HOME/.local/bin:$PATH cat > notes.md", "echo x >> ~/.defenseclaw/config.yaml"), unknown, evaluationLimitRuleID},
+		{"D11", hd("PATH=$HOME/.local/bin:$PATH cat > notes.md", "echo x >> ~/.defenseclaw/config.yaml"), strictOnly, evaluationLimitRuleID},
 		{"D12", hd("kubectl apply -f -", "kind: ConfigMap"), "allow", ""},
 		{"D13", hd("/usr/bin/env bash", "echo hi"), "allow", ""},
 		{"D14", hd("cat", stateWrite) + "\nexport PATH=/tmp/x:$PATH", "allow", ""},
 		{"D16", "if false; then export PATH=/tmp/x:$PATH; fi; " + hd("cat", stateWrite), "allow", ""},
-		{"D16b", "if false; then :; else export PATH=/tmp/x:$PATH; fi; " + hd("cat", stateWrite), unknown, evaluationLimitRuleID},
+		{"D16b", "if false; then :; else export PATH=/tmp/x:$PATH; fi; " + hd("cat", stateWrite), strictOnly, evaluationLimitRuleID},
+		// GAP-1481: the A/B row at/claude-code/fe1e2e4c686659ba/326, a
+		// script written for another host after PATH adds tool folders.
+		{"G1481", "cd /tmp && export PATH=~/dc-eh/bin:~/bin:$PATH; cat > t7-99b.sh <<'E'\nset -e\nrm -f /var/lib/defenseclaw-hook-guardian/state.json\nrm -rf ~/.defenseclaw/foreign-hooks-backup\nE\nscp t7-99b.sh dc-rhel:/tmp/ && ssh dc-rhel sudo bash /tmp/t7-99b.sh", strictOnly, evaluationLimitRuleID},
+		{"G1481w", "export PATH=/tmp/x:$PATH; env sh <<'E'\n" + stateWrite + "\nE", "not-allow", ""},
+		{"G1481s", "export PATH=/tmp/x:$PATH; sh <<'E'\n" + stateWrite + "\nE", "not-allow", ""},
+		{"G1481n", "export PATH=/tmp/x:$PATH; newgrp <<'E'\n" + stateWrite + "\nE", unknown, evaluationLimitRuleID},
 	} {
 		rows = append(rows, row{control.id, "tmp", control.command, control.action, control.rule})
 	}
@@ -106,15 +116,22 @@ func TestGAP1240GAP1241ReviewRowsOnClaudeHook(t *testing.T) {
 			}
 			out := gap0437Hook(t, hook, cwd, fmt.Sprintf("%s-%d", pack.name, i), r.command)
 			want := r.action
-			if want == unknown {
+			rule := r.rule
+			switch want {
+			case unknown:
 				want = "alert"
 				if pack.pack == "strict" {
 					want = "block"
 				}
+			case strictOnly:
+				want = "block"
+				if pack.pack != "strict" {
+					want, rule = "allow", ""
+				}
 			}
 			if want == "not-allow" && out["action"] == "allow" ||
 				want != "not-allow" && out["action"] != want ||
-				r.rule != "" && !gap0526Names(out, r.rule) {
+				rule != "" && !gap0526Names(out, rule) {
 				t.Errorf("%s %s: want %s %s, got %v", pack.name, r.id, want, r.rule, out)
 			}
 		}

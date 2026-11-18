@@ -113,6 +113,14 @@ const EvaluationFailureUnresolvedBody = "unresolved-body"
 // GAP-1240).
 const EvaluationFailureUnknownStdinConsumer = "unknown-stdin-consumer"
 
+// EvaluationFailureUnknownStdinConsumerStrict is the EvaluationFailure of
+// the same here-document fed to a program that is no shell and no newgrp,
+// only after PATH changed (PATH=dir:$PATH cat <<E, export PATH=...; cat >
+// script <<E): the program is most likely the data program it names, so the
+// gateway judges it in the strict tiers only (the unknown tier there, a
+// block) and allows it in the others, as release did (rel-1-0-10:GAP-1481).
+const EvaluationFailureUnknownStdinConsumerStrict = "unknown-stdin-consumer-strict"
+
 func isSyntaxTailUnread(simple SimpleCommand) bool {
 	return simple.EvaluationFailure == EvaluationFailureSyntax
 }
@@ -509,12 +517,18 @@ func hereDocStatementBodies(file *syntax.File, stmt *syntax.Stmt, input Input) [
 			// twin cannot read (a command substitution) shows no state write
 			// here.
 			body, known := heredocScriptText(redirection)
-			if hereDocOwnerUnknownStateConsumer(file, owner) && hereDocBodyMayWriteState(body, input) {
+			if tier := hereDocOwnerUnknownStateConsumer(file, owner); tier != hereDocConsumerKnown && hereDocBodyMayWriteState(body, input) {
 				// A valid here-document fed to an ordinary program is data
 				// even when the closed syntax-tail reader cannot prove the
 				// stdin semantics of that program. Only the GAP-1183 launcher
-				// forms with a possible state write are the unknown tier.
-				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnknownStdinConsumer})
+				// forms with a possible state write are the unknown tier; a
+				// data program after a PATH change is the strict tiers only
+				// (GAP-1481).
+				failure := EvaluationFailureUnknownStdinConsumer
+				if tier == hereDocConsumerStrictOnly {
+					failure = EvaluationFailureUnknownStdinConsumerStrict
+				}
+				result = append(result, SimpleCommand{EvaluationFailure: failure})
 			}
 			if !runsCode {
 				continue
@@ -534,18 +548,20 @@ func hereDocStatementBodies(file *syntax.File, stmt *syntax.Stmt, input Input) [
 // whose program, as the statements before it may bind it, has unknown stdin
 // semantics and is one of the GAP-1183 opener forms
 // (topLevelHereDocUnknownStateConsumer).
-func hereDocOwnerUnknownStateConsumer(file *syntax.File, owner *syntax.Stmt) bool {
+func hereDocOwnerUnknownStateConsumer(file *syntax.File, owner *syntax.Stmt) hereDocConsumerTier {
 	call, isCall := owner.Cmd.(*syntax.CallExpr)
 	if !isCall {
-		return false
+		return hereDocConsumerKnown
 	}
 	var consumer strings.Builder
 	if syntax.NewPrinter().Print(&consumer, call) != nil {
-		return false
+		return hereDocConsumerKnown
 	}
 	bindings := hereDocBindingsBefore(file, owner)
-	return hereDocTextConsumer(consumer.String(), bindings, 0) == hereDocUnknown &&
-		topLevelHereDocUnknownStateConsumer(call, bindings)
+	if hereDocTextConsumer(consumer.String(), bindings, 0) != hereDocUnknown {
+		return hereDocConsumerKnown
+	}
+	return topLevelHereDocUnknownStateConsumer(call, bindings)
 }
 
 // topLevelHereDocReadElsewhere reports an opener whose every command that
@@ -641,20 +657,45 @@ func hereDocDeadThen(stmt *syntax.Stmt, clause *syntax.IfClause, bindings *hereD
 	return static && word == "false" && !bindings.renames(word)
 }
 
+// hereDocConsumerTier is how the gateway judges a here-document that may
+// write DefenseClaw state, by the program it is fed to
+// (topLevelHereDocUnknownStateConsumer).
+type hereDocConsumerTier uint8
+
+const (
+	// hereDocConsumerKnown: the document is data, or the ordinary readers
+	// judge it.
+	hereDocConsumerKnown hereDocConsumerTier = iota
+	// hereDocConsumerUnknown: newgrp, or a shell behind a wrapper the
+	// reading does not know: the unknown tier of every pack.
+	hereDocConsumerUnknown
+	// hereDocConsumerStrictOnly: a program that is no shell and no newgrp,
+	// after a PATH change before it or on it: the strict tiers only
+	// (rel-1-0-10:GAP-1481).
+	hereDocConsumerStrictOnly
+)
+
 // topLevelHereDocUnknownStateConsumer is the small set of valid opener
 // shapes in GAP-1183. Other unknown stdin consumers retain their release
 // behavior; the syntax-error tail has its separate conservative contract.
-func topLevelHereDocUnknownStateConsumer(call *syntax.CallExpr, bindings *hereDocBindings) bool {
+// newgrp and a shell behind a wrapper are the unknown tier; a changed PATH
+// alone, before a program that names no shell (export PATH=~/bin:$PATH;
+// cat > script <<E), is the strict tiers only: the PATH most often adds a
+// tool folder and the program stays the data program it names
+// (rel-1-0-10:GAP-1481).
+func topLevelHereDocUnknownStateConsumer(call *syntax.CallExpr, bindings *hereDocBindings) hereDocConsumerTier {
 	if len(call.Args) == 0 {
-		return false
+		return hereDocConsumerKnown
 	}
-	if bindings != nil && bindings.resolution {
-		return true
-	}
+	pathChanged := bindings != nil && bindings.resolution
 	for _, assign := range call.Assigns {
 		if assign.Name != nil && assign.Name.Value == "PATH" {
-			return true
+			pathChanged = true
 		}
+	}
+	changed := hereDocConsumerKnown
+	if pathChanged {
+		changed = hereDocConsumerStrictOnly
 	}
 	words := make([]string, len(call.Args))
 	static := make([]bool, len(words))
@@ -663,25 +704,31 @@ func topLevelHereDocUnknownStateConsumer(call *syntax.CallExpr, bindings *hereDo
 	}
 	if run, ok := StaticPrefixWrapperChild(words, static); ok {
 		if run.ChangesResolution {
-			return true
+			changed = hereDocConsumerStrictOnly
 		}
 		words, static = words[run.Index:], static[run.Index:]
 	}
 	if len(words) == 0 || !static[0] {
-		return false
+		return changed
 	}
-	if commandProgram(words[0]) == "newgrp" {
-		return true
+	program := commandProgram(words[0])
+	if program == "newgrp" {
+		return hereDocConsumerUnknown
 	}
-	if commandProgram(words[0]) != "" || len(words) < 2 {
-		return false
+	if changed != hereDocConsumerKnown && (posixShellProgram(program) || hereDocExtraShells[program]) {
+		// A shell the changed PATH may rename: what runs the text is not
+		// known.
+		return hereDocConsumerUnknown
+	}
+	if program != "" || len(words) < 2 {
+		return changed
 	}
 	for i, word := range words[1:] {
 		if static[i+1] && (posixShellProgram(commandProgram(word)) || hereDocExtraShells[commandProgram(word)]) {
-			return true
+			return hereDocConsumerUnknown
 		}
 	}
-	return false
+	return changed
 }
 
 func hereDocBodyMayWriteState(body string, input Input) bool {

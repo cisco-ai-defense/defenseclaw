@@ -1194,12 +1194,18 @@ func dispatchTrustedActionWith(
 						findings = withSimpleCommandFindings(findings, trustedActionUnresolvedBodyFindings(request.EnforcementCapable))
 						continue
 					}
-					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer {
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer ||
+						simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumerStrict && request.StrictPolicy {
 						// A here-document that may write DefenseClaw state goes
 						// to a program whose use of its input is not known: the
 						// unknown tier of the pack, a block in strict
-						// (rel-1-0-10:GAP-1183, GAP-1240).
+						// (rel-1-0-10:GAP-1183, GAP-1240). A data program after
+						// a PATH change is judged so in the strict tiers only;
+						// the others allow it, as release did (GAP-1481).
 						findings = withUnknownFinding(findings, unknownReasonFinding(unknownStdinConsumerTitle, unknownStdinConsumerReason, request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumerStrict {
 						continue
 					}
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntaxCap {
@@ -10672,7 +10678,8 @@ func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfac
 		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
 			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax ||
 				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody ||
-				simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer ||
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumerStrict
 		}) {
 		// A complete POSIX split already enforced the limit. The extra
 		// count is needed only when the analyzer reached its own bound or
