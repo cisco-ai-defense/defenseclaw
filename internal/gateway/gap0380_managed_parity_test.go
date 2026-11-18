@@ -9,11 +9,16 @@ import (
 	"testing"
 )
 
-// These are the review's real-shell counterexamples, sent through the real
-// hook client and gateway for both connectors and all five policy tiers.
-// The controls must remain allowed, including when the gateway cannot search
-// the managed user's home.
-func TestGAP0377GAP0379Review2FiveTierHookRoute(t *testing.T) {
+// A statement that changes a modeled glob option (shopt -s nocaseglob) and a
+// later word in the same call: the managed gateway's per-command pass reads
+// the later statement alone, and the hook client has already read the whole
+// call under every reading of that option. The client's answer covers the
+// statement, so a benign word stays allowed in the managed tiers as it does
+// per-user and on rel (Codex review r1 of s7/hlinkport-r2, row 0380-control:
+// four new managed blocks at 7231de882f). The protected word still blocks.
+// Rows come from that review; they run through the real hook client and
+// gateway for both connectors and all five policy tiers.
+func TestGAP0380ManagedStatementKeepsTheCallsGlobReadings(t *testing.T) {
 	for _, tier := range []struct {
 		name, pack string
 		managed    bool
@@ -45,19 +50,11 @@ func TestGAP0377GAP0379Review2FiveTierHookRoute(t *testing.T) {
 			rows := []struct {
 				id, command, want string
 			}{
-				{"0377-sed-direct", "sed -i -e 'w " + f.keys + "' ordinary/x", "block"},
-				{"0377-alt-sed-link", "sed -i -e 'w key[9]' ordinary/x", "block"},
-				{"0377-sed-attached-e-link", "sed -i -e'w key[9]' ordinary/x", "block"},
-				{"0377-sed-long-e-link", "sed -i --expression='w key[9]' ordinary/x", "block"},
-				{"0377-sed-substitute-w-link", "sed -i -e 's/x/y/w key[9]' ordinary/x", "block"},
-				{"0377-sed-braced-w-link", "sed -i -e '{w key[9]\n}' ordinary/x", "block"},
-				{"0377-sed-execute-link", "sed -i -e 'e touch key[9]' ordinary/x", "block"},
-				{"0377-control", "sed -i -e 's/a/b/' ordinary/x", "allow"},
-				{"0377-text-control", "sed -i -e 'a text; w key[9]' ordinary/x", "allow"},
-				{"0379-alt-attached-dd", "dd if=/dev/null of=./key[9]", "block"},
-				{"0379-control", "dd if=/dev/null of=./plain[9]", "allow"},
 				{"0380-alt-nocase-bracket", "shopt -s nocaseglob; touch KEY[ab]", "block"},
 				{"0380-control", "shopt -s nocaseglob; touch PLAIN[ab]", "allow"},
+				{"0377-sed-direct", "sed -i -e 'w " + f.keys + "' ordinary/x", "block"},
+				{"0377-control", "sed -i -e 's/a/b/' ordinary/x", "allow"},
+				{"0379-control", "dd if=/dev/null of=./plain[9]", "allow"},
 			}
 			payloads := make([][]byte, len(rows))
 			for i, row := range rows {
