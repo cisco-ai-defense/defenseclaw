@@ -29,8 +29,13 @@ import (
 //	cmd-run     [cmd-option]*  (/c|/k|/r) word+   (each word one plain argv word)
 //	cmd-run-q   [cmd-option]*  (/c|/k|/r) "payload with spaces"  (see cmdQuotedPayload)
 //
-// where every word is a whole static word (never padded, empty, colon-glued or
-// part of a --% tail) and the option spellings come from the fixed lists below.
+// where every word is a whole static word (never empty, colon-glued or part of
+// a --% tail) and the option spellings come from the fixed lists below. A
+// switch word may carry leading or trailing blanks: pwsh 7 and Windows
+// PowerShell 5.1 trim every host argument before they match it as a switch
+// (GetSwitchKey: args[i].Trim()), so " -ec" is -ec and the script after it
+// runs (rel-1-0-10:GAP-0155). Option values and the base64 word are never
+// padded: the host does not trim those.
 // A positional command is deliberately not a shape: pwsh 7 reads a positional
 // word as a script file, Windows PowerShell 5.1 as a command.
 const (
@@ -103,8 +108,10 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 		}
 	}
 	for i := 0; i < len(words); {
-		w := words[i].text
-		if w == "" || w != strings.TrimSpace(w) {
+		// The host trims a switch word (see the table above); an empty or blank
+		// word is no switch: pwsh 7 rejects it and 5.1 drops it from argv.
+		w := strings.TrimSpace(words[i].text)
+		if w == "" {
 			return "", 0, ReasonHostOption
 		}
 		lw := strings.ToLower(w)

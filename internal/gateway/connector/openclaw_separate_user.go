@@ -202,13 +202,18 @@ func (c *OpenClawConnector) registerSeparateUser(opts SetupOpts, paths openClawP
 	return nil
 }
 
+// openClawMergeBlockPath is the separate-user block to merge in dataDir.
+func openClawMergeBlockPath(dataDir string) string {
+	return filepath.Join(dataDir, "openclaw-merge.json")
+}
+
 // saveOpenClawMergeBlock writes the block to <data_dir>/openclaw-merge.json
 // and returns the note for the message, or "" when it could not.
 func saveOpenClawMergeBlock(dataDir, block string) string {
 	if dataDir == "" {
 		return ""
 	}
-	file := filepath.Join(dataDir, "openclaw-merge.json")
+	file := openClawMergeBlockPath(dataDir)
 	if err := os.WriteFile(file, []byte(block+"\n"), 0o644); err != nil {
 		return ""
 	}
@@ -235,9 +240,15 @@ func (c *OpenClawConnector) teardownSeparateUser(opts SetupOpts, paths openClawP
 			return fmt.Errorf("remove the plugin credential %s: %w", tokenFile, err)
 		}
 	}
-	// openclaw-merge.json stays: a failed setup rolls back through this
-	// teardown, and the file is what the administrator merges next
-	// (rel-1-0-10 GAP-0081). The next setup rewrites it.
+	// openclaw-merge.json stays when a failed setup rolls back through this
+	// teardown: the file is what the administrator merges next (rel-1-0-10
+	// GAP-0081), and the next setup rewrites it. A teardown that removes the
+	// connector takes it too (GAP-1130).
+	if !opts.SetupRollback && opts.DataDir != "" {
+		if err := os.Remove(openClawMergeBlockPath(opts.DataDir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove the block to merge %s: %w", openClawMergeBlockPath(opts.DataDir), err)
+		}
+	}
 	fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: removed the plugin credential; DefenseClaw does not write %s in the separate-user layout, "+
 		"so remove plugins.entries.defenseclaw, defenseclaw from plugins.allow, %s from plugins.load.paths and a security.installPolicy that runs defenseclaw-gateway there yourself\n", paths.config, paths.external)
 	return nil

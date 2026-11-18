@@ -1114,7 +1114,6 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	// the write rule. The hook client's resolved targets carry links the
 	// command text does not name.
 	for operand, resolved := range request.ResolvedWriteTargets {
-		_ = operand
 		if strings.HasPrefix(operand, "\x00") || !filepath.IsAbs(resolved) ||
 			guard.format(resolved) == "" && !guard.ownedFile(resolved) {
 			continue
@@ -1130,10 +1129,14 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	// PowerShell write reader hands each of them to the same hook-file check
 	// (rel-1-0-10:GAP-1115), also in the script of each PowerShell launcher
 	// a Linux or macOS call runs (rel-1-0-10:GAP-1134).
-	if written, place, owned := agentHookConfigPowerShellWrite(request, guard); owned {
+	// A .NET open that may write a hook file by a mode or path known only
+	// at run time is the unknown tier of the pack (rel-1-0-10:GAP-1138).
+	if written, unknown, place, owned := agentHookConfigPowerShellWrite(request, guard); owned {
 		add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", place)
 	} else if written {
 		add(agentHookConfigWriteRuleID, "", place)
+	} else if unknown {
+		out = withTrustedActionLimitFinding(out, request.EnforcementCapable)
 	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
 	rawCommand := agentHookConfigRawShellCommand(request.Input)
@@ -1358,23 +1361,27 @@ func sandboxAgentHookConfigFormat(target, home string) string {
 // place is that file, owned that it is an installed DefenseClaw artifact.
 // Only a call that spells the name of a hook file is read; reads and writes
 // of other files add nothing. A call past the reading bounds is a write
-// with no place (rel-1-0-10:GAP-1115).
-func agentHookConfigPowerShellWrite(request trustedActionRequest, guard *agentHookConfigGuard) (written bool, place string, owned bool) {
+// with no place (rel-1-0-10:GAP-1115). unknown reports no write but a .NET
+// open that may write a hook file by a mode or path known only at run time
+// (rel-1-0-10:GAP-1138).
+func agentHookConfigPowerShellWrite(request trustedActionRequest, guard *agentHookConfigGuard) (written, unknown bool, place string, owned bool) {
 	for _, command := range powerShellReadingCommands(request) {
 		if !guard.shellMentionsFileName(command.text) {
 			continue
 		}
-		if written, place, owned = agentHookConfigPowerShellWriteOf(request, guard, command); written {
-			return written, place, owned
+		var maybe bool
+		if written, maybe, place, owned = agentHookConfigPowerShellWriteOf(request, guard, command); written {
+			return true, false, place, owned
 		}
+		unknown = unknown || maybe
 	}
-	return false, "", false
+	return false, unknown, "", false
 }
 
 // agentHookConfigPowerShellWriteOf is agentHookConfigPowerShellWrite for one
 // PowerShell reading command of the call.
-func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agentHookConfigGuard, command powerShellReadingCommand) (written bool, place string, owned bool) {
-	written = powerShellWriteReading(request, command, guard.shellMentionsFileName,
+func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agentHookConfigGuard, command powerShellReadingCommand) (written, unknown bool, place string, owned bool) {
+	written, unknown = powerShellWriteReading(request, command, guard.shellMentionsFileName,
 		func(facts actionfacts.Facts, _ trustedActionRequest) bool {
 			for _, candidate := range facts.Paths {
 				switch candidate.Access {
@@ -1404,7 +1411,7 @@ func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agent
 			}
 			return false
 		})
-	return written, place, owned
+	return written, unknown, place, owned
 }
 
 // shellMentionsFileName reports text that spells, in any case, the file name

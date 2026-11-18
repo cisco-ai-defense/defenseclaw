@@ -30693,7 +30693,12 @@ function Invoke-DefenseClawEnumeratorRefresh {
             -Arguments @(
                 'enterprise', 'windows', 'enumerate',
                 '--manifest', [string]$Layout.ManifestPath,
-                '--once'
+                '--once',
+                # The enumerator service's first cycle after activation takes
+                # the gateway's read access off excluded profiles; here the
+                # revoke of many orphan profiles outlasted the timeout
+                # (GAP-1109).
+                '--defer-excluded-revoke'
             ) `
             -Capture `
             -AllowFailure `

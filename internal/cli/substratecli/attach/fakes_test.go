@@ -274,6 +274,8 @@ type fakeRelay struct {
 	// without one, as a relay from before it does.
 	received    map[string]int64
 	legacyHello bool
+	// warning goes in every hello (GAP-0151).
+	warning string
 }
 
 func newFakeRelay(tokens ...string) *fakeRelay {
@@ -371,7 +373,7 @@ func (f *fakeRelay) serveWS(w http.ResponseWriter, r *http.Request) {
 	if rs, err := relay.DecodeResize([]byte(`{"cols":` + r.URL.Query().Get("cols") + `,"rows":` + r.URL.Query().Get("rows") + `}`)); err == nil {
 		f.resizes = append(f.resizes, rs)
 	}
-	hello := relay.Control{Type: relay.CtlHello, Version: relay.Version, Session: "sess-1", Mode: "interact"}
+	hello := relay.Control{Type: relay.CtlHello, Version: relay.Version, Session: "sess-1", Mode: "interact", Warning: f.warning}
 	inID := ""
 	if !f.legacyHello {
 		inID = "in-" + strconv.Itoa(n)

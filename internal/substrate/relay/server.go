@@ -50,7 +50,20 @@ type Options struct {
 	Report func(ctx context.Context, end TaskEnd) error
 	// Headless tunes the task watchdog (tests); its Warm is Warm.
 	Headless HeadlessOptions
-	Now      func() time.Time
+	// Guard are the folders the relay watches (GAP-0120); nil is
+	// kit.GuardedDirs of the connector in the relay's HOME, empty is none.
+	Guard []string
+	// Tamper reports a guard trip to the gateway, which audits it
+	// (TamperReportPath, GAP-0120); default GatewayTamper over the kit
+	// transport.
+	Tamper func(ctx context.Context, connector, reason string) error
+	Now    func() time.Time
+	// sep runs everything the relay starts as the agent's user (GAP-0116;
+	// Main sets it from separate). nil: the relay's own user.
+	sep *separation
+	// mountinfo reads the actor's mount table (GAP-0368); nil is
+	// readMountinfo (tests set it).
+	mountinfo func() ([]byte, error)
 }
 
 // Server is the relay. NewServer has no side effect: the golden snapshot of
@@ -63,8 +76,11 @@ type Server struct {
 
 	initOnce sync.Once
 	initErr  error
-	agent    *Agent
-	session  string
+	// servingSince is when the relay first served this actor (init): the
+	// first authenticated request after the actor's first resume.
+	servingSince time.Time
+	agent        *Agent
+	session      string
 
 	mu    sync.Mutex
 	polls map[string]*pollAttachment
@@ -78,6 +94,14 @@ type Server struct {
 	// first in inputOrder (GAP-0170).
 	inputs     map[string]*inputCount
 	inputOrder []string
+
+	// guardErr is set when a guarded folder moved (GAP-0120): the agent
+	// was stopped and nothing starts again. taskCtx ends the running task
+	// then.
+	guardMu  sync.Mutex
+	guardErr error
+	taskCtx  context.Context
+	taskStop context.CancelFunc
 }
 
 // maxInputCounts bounds the attachments whose input counts a reconnect can
@@ -145,7 +169,7 @@ func (s *Server) init() error {
 		for k, v := range rc.Env {
 			env = append(env, k+"="+v)
 		}
-		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env}
+		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env, sep: s.opts.sep}
 		// E9: no agent that signs in to a vendor account in a managed
 		// image; an open-source image says what the sign-in costs.
 		d := s.signinDecision()
@@ -170,15 +194,125 @@ func (s *Server) init() error {
 			if s.opts.Report == nil {
 				s.opts.Report = GatewayReport(t)
 			}
+			if s.opts.Tamper == nil {
+				s.opts.Tamper = GatewayTamper(t)
+			}
+		}
+		// The hook folders the agent could rename away are watched from
+		// here on, before the agent first runs (GAP-0120).
+		s.taskCtx, s.taskStop = context.WithCancel(context.Background())
+		guard := s.opts.Guard
+		if guard == nil {
+			home := os.Getenv("HOME")
+			if home == "" {
+				home = kit.ActorHome // the kit's image HOME, as its start wrapper assumes
+			}
+			guard = kit.GuardedDirs(rc.Connector, home)
+		}
+		// No mount may hide the kit's files, also through a symlink in the
+		// image that admission cannot see (GAP-0368).
+		read := s.opts.mountinfo
+		if read == nil {
+			read = readMountinfo
+		}
+		info, err := read()
+		if err != nil {
+			s.refuseAtStart("relay.mount_refused", "DefenseClaw cannot read the actor's mounts ("+err.Error()+"), so it cannot tell that its hooks are in place; refusing to start the agent")
+			return
+		}
+		hidden, err := kitMountRefusal(info, rc.Protected, guard)
+		if err != nil {
+			s.refuseAtStart("relay.mount_refused", "DefenseClaw cannot read the actor's mounts ("+err.Error()+"), so it cannot tell that its hooks are in place; refusing to start the agent")
+			return
+		}
+		if hidden != "" {
+			s.refuseAtStart("relay.mount_refused", "a volume is mounted at, above or below "+hidden+", which holds DefenseClaw's hooks, so the agent could run without them; refusing to start the agent (mount data folders below the working directory)")
+			return
+		}
+		if err := watchGuardedAs(s.taskCtx, guard, s.guardBroken, s.opts.sep.agentCred()); err != nil {
+			var degraded *guardDegraded
+			if errors.As(err, &degraded) {
+				// Fail closed (GAP-0369): without the watch a fast swap and
+				// restore of the folder would go unseen.
+				s.refuseAtStart("relay.guard_degraded", err.Error()+", so a move of it could go unseen; refusing to start the agent")
+				return
+			}
+			s.log.Warn("relay.guard_refused", "connector", rc.Connector, "error", err.Error())
+			s.initErr = &signinRefusal{msg: "DefenseClaw's hook folder is not in place (" + err.Error() + "); refusing to start the agent without its hooks"}
+			return
 		}
 		s.session = newID()
+		// When this relay began serving this actor (GAP-0412): every actor
+		// of a template is restored from one golden snapshot, so the relay
+		// process (PID 1, it answers the wake-up probe) has the snapshot's
+		// start time in all of them; this is the actor's own.
+		s.servingSince = s.opts.Now().UTC()
 		go s.watchResume()
 	})
 	return s.initErr
 }
 
+// guardBroken stops the agent and its task for good when a guarded folder
+// moved (GAP-0120): every process of the actor but the relay ends (a tool
+// in a process group or session of its own too, GAP-0358), every attached
+// terminal is told why and closed, and the gateway audits the trip. Every
+// later attach is refused with the reason (410, GAP-0357).
+func (s *Server) guardBroken(reason string) {
+	msg := "DefenseClaw's hook-folder integrity guard stopped this agent: " + reason + ", so the agent could have run without DefenseClaw's hooks. The agent cannot be started again; delete it and start a new one"
+	s.guardMu.Lock()
+	s.guardErr = &guardStopped{msg: msg}
+	s.guardMu.Unlock()
+	connector := s.opts.Config.Relay.Connector
+	if strings.HasPrefix(reason, guardWatchEnded) {
+		s.log.Error("relay.guard_degraded", "connector", connector, "reason", reason)
+	}
+	s.log.Warn("relay.guard_tamper", "connector", connector, "reason", reason)
+	s.taskStop()
+	if n := stopActorProcesses(s.agent.pid(), func() { s.agent.Stop(msg) }); n > 0 {
+		s.log.Warn("relay.guard_stopped_processes", "connector", connector, "processes", n)
+	}
+	if s.opts.Tamper != nil {
+		go func() {
+			if err := reportTamper(context.Background(), s.opts.Tamper, connector, reason); err != nil {
+				s.log.Warn("relay.guard_report", "connector", connector, "error", err.Error())
+			}
+		}()
+	}
+}
+
+// refuseAtStart refuses the agent for good before it first runs, because
+// DefenseClaw cannot keep its hooks in place (a mount over them, a guard
+// watch that cannot be set): the reason is logged as event, answered to
+// every attach (403) and audited as HIGH on the tamper route.
+func (s *Server) refuseAtStart(event, reason string) {
+	connector := s.opts.Config.Relay.Connector
+	s.log.Error(event, "connector", connector, "reason", reason)
+	s.initErr = &signinRefusal{msg: reason}
+	if s.opts.Tamper != nil {
+		go func() {
+			if err := reportTamper(context.Background(), s.opts.Tamper, connector, reason); err != nil {
+				s.log.Warn("relay.guard_report", "connector", connector, "error", err.Error())
+			}
+		}()
+	}
+}
+
+// guardStopped is the refusal of every attachment after a guard trip.
+type guardStopped struct{ msg string }
+
+func (e *guardStopped) Error() string { return e.msg }
+
+// StoppedHeader marks a relay answer for an agent the guard stopped (410).
+const StoppedHeader = "X-Dcrelay-Stopped"
+
+func (s *Server) guardError() error {
+	s.guardMu.Lock()
+	defer s.guardMu.Unlock()
+	return s.guardErr
+}
+
 // signinRefusal is the E9 refusal of an agent that signs in to a vendor
-// account, in a managed image.
+// account, in a managed image, and the guard's refusal (GAP-0120).
 type signinRefusal struct{ msg string }
 
 func (e *signinRefusal) Error() string { return e.msg }
@@ -291,6 +425,16 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open 
 		http.Error(w, "relay: "+err.Error(), status)
 		return Session{}, false
 	}
+	if err := s.guardError(); err != nil && (open || what == "status") {
+		// 410, not 403: the launcher tells "stopped for good" from "not
+		// yours" by the status and says why (GAP-0357). The status route
+		// answers the same, so the launcher's probe after a refused
+		// WebSocket does not take it for a proxy that blocks the upgrade.
+		s.log.Warn("relay.refused", "what", what, "reason", "hook folder moved", "person", sess.Person)
+		w.Header().Set(StoppedHeader, "guard")
+		http.Error(w, "relay: "+err.Error(), http.StatusGone)
+		return Session{}, false
+	}
 	s.log.Info("relay.accepted", "what", what, "person", sess.Person, "actor", sess.Actor, "actor_uid", sess.ActorUID, "jti", sess.TokenID)
 	return sess, true
 }
@@ -394,7 +538,16 @@ func input(a *Attachment, in *inputCount, frame []byte, send func(Control)) bool
 // hello is the first message of an attachment: its input count id, and
 // what the relay got from the attachment the client resumes (GAP-0170).
 func (s *Server) hello(input string, received *int64) Control {
-	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: kit.ModeInteract, Input: input, Received: received}
+	return Control{Type: CtlHello, Version: Version, Session: s.session, Mode: kit.ModeInteract, Input: input, Received: received,
+		Warning: s.warning()}
+}
+
+// warning is the E9 warning of this agent, "" when there is none.
+func (s *Server) warning() string {
+	if s.agent == nil {
+		return ""
+	}
+	return s.agent.Banner
 }
 
 var upgrader = websocket.Upgrader{
@@ -695,7 +848,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"version": Version, "session": s.session, "agent_running": s.agent.Running(),
 		"last_preconnect_ms": float64(warm.Microseconds()) / 1000, "tasks": tasks, "workdir": relayWorkdir(s.opts.Config.Relay.Workdir),
-		"state_root": s.stateRoot(),
+		"state_root": s.stateRoot(), "signin_warning": s.warning(), "serving_since": s.servingSince.Format(time.RFC3339Nano),
 	})
 }
 

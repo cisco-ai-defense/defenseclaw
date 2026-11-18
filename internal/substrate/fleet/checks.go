@@ -440,7 +440,7 @@ var actorRoutePrefixes = []string{
 	"/api/v1/substrate/hook/", "/api/v1/substrate/notify/", "/api/v1/substrate/inspect/", "/llm/",
 }
 
-var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task"}
+var actorRouteExact = []string{"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/substrate/relay/verify", "/api/v1/substrate/relay/task", "/api/v1/substrate/relay/tamper"}
 
 // ActorListenerProbes are the paths verify asks the actor listener for,
 // without an actor token: one per actor route (they answer 401), and one

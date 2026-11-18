@@ -549,6 +549,18 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						return false
 					}
 				}
+				// The folder a target-directory option holds in its own word
+				// (cp -tDIR, -ftDIR, install -tDIR, ln -tDIR) is the call's
+				// destination, as the next word of -t DIR is. Each word above is
+				// judged whole, so the folder is read out of it with the shared
+				// writer reader (rel-1-0-10:GAP-0186, GAP-1149).
+				for _, destination := range actionAttachedCopyDestinations(call, home) {
+					if actionExpandedWordGlob(destination, values, effectiveCWD, home, check) ||
+						checkBraceFields(destination, false) || checkWord(destination) {
+						found = true
+						return false
+					}
+				}
 				if moved != nil {
 					replacedEntries = append(replacedEntries, movedEntry)
 				}

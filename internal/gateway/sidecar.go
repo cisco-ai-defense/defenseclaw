@@ -639,7 +639,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	setManagedEnterpriseRedactionPosture(cfg.ManagedAIDOnly())
 	setStandaloneEnterpriseActive(cfg.StandaloneEnterprise())
 	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
-	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
+	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail || cfg.SecureClientIntegration())
 	setAgentIdentityConfig(cfg)
 	applyIdentityPosture(cfg)
 	setProviderRegistryManagedEnterprise(managed.IsManagedEnterprise(cfg.DeploymentMode))
@@ -2472,7 +2472,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setManagedEnterpriseRedactionPosture(nextManagedAIDOnly)
 	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
 	setManagedServiceHosted(nextManagedEnterprise)
-	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
+	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail || next.SecureClientIntegration())
 	setAgentIdentityConfig(&next)
 	applyIdentityPosture(&next)
 	setProviderRegistryManagedEnterprise(nextManagedEnterprise)
@@ -2544,6 +2544,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// Route-only is hot (DESIGN 16.11): re-render the agent config of every
 	// connector whose route-only rendering changed.
 	s.applyRouteOnlyRenders(oldCfg, appliedCfg)
+	// A rule pack switched to or from strict turns the OpenClaw install
+	// admission on or off (install_policy auto). It runs off the reload
+	// path: it takes the openclaw.json lock that setup holds.
+	if openClawInstallPolicyReloadWanted(oldHookCfg, appliedCfg) {
+		go s.refreshOpenClawInstallPolicy()
+	}
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills, plugins and MCP servers affected by a list
 		// change are readmitted now, without waiting for content drift
@@ -3349,12 +3355,14 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		return nil
 	}
 	m.bindObservabilityV8(metricRuntime)
-	// Wire per-request availability into /health so a dropped CMID
-	// auth after inspector construction is visible without a reload.
-	// The client fires this on every Inspect() call — failure paths
-	// publish the error to setInspectionAvailability, success paths
-	// publish nil so a self-healing lane clears the fail flag.
-	m.bindAvailabilityObserver(s.setInspectionAvailability)
+	// Wire per-request availability into /health and the endpoint health
+	// report so a dropped CMID auth after construction is visible without
+	// a reload, and a working lane reads as observed rather than unknown.
+	// The client fires this on every Inspect() call: failures publish the
+	// error, successes publish nil so a self-healing lane clears the flag.
+	// The observer is epoch-bound, so a replaced client cannot overwrite
+	// its successor's state.
+	m.bindAvailabilityObserver(s.inspectionAvailabilityObserver())
 	return m
 }
 
@@ -7290,7 +7298,9 @@ func rollbackMultiConnectorPublication(ctx context.Context, transaction multiCon
 				}
 			}
 		} else if applied.conn != nil {
-			if err := applied.conn.Teardown(ctx, applied.opts); err != nil {
+			opts := applied.opts
+			opts.SetupRollback = true
+			if err := applied.conn.Teardown(ctx, opts); err != nil {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("connector %s teardown: %w", name, err))
 			}
 		}
@@ -7595,7 +7605,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:                     agentVersion,
 		AgentExecutable:                  agentExecutable,
 		HookContractID:                   contractResolution.Contract.ContractID,
-		RouteOnly:                        routeOnlySetupFor(cfg, conn.Name(), apiAddr),
+		RouteOnly:                        gatedRouteOnly(cfg, routeOnlySetupFor(cfg, conn.Name(), apiAddr)), // parked until the API port is ours (GAP-1133)
 		OpenClawInstallPolicy:            cfg.OpenClawInstallPolicyOn(),
 		OpenClawInstallPolicyTimeoutMs:   cfg.OpenClawInstallPolicyTimeoutMs(),
 		OpenClawInstallPolicyFailsClosed: cfg.OpenClawInstallPolicyFailsClosed(),
@@ -9159,6 +9169,7 @@ func rollbackFailedConnectorSetup(conn connector.Connector, opts connector.Setup
 	// Per-user installs only: managed and Secure Client rollbacks keep the
 	// tombstone they have always written.
 	opts.FailedSetupFailClosed = !opts.ManagedEnterprise && connector.HookFailClosed(opts, conn)
+	opts.SetupRollback = true
 	var rollbackErrors []error
 	if err := conn.Teardown(ctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s: %v\n", conn.Name(), err)

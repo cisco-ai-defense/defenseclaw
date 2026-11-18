@@ -471,9 +471,22 @@ func reviewSentinels(rec *SnapshotRecord, man *ignoredManifest, now *sentinelSca
 			}
 			return st.Content, st.Content != nil
 		}
-		for _, f := range classifyChanges(extra, content, opts.SensitiveGlobs) {
+		for _, f := range classifyChanges(extra, content, nil) {
 			f.Detail += " (git ignores this file, so it is not in the diff)"
 			rep.Flags = append(rep.Flags, f)
+		}
+		// The sensitive patterns take the rule of the other ignored files
+		// (ignoredSensitive): a bare file name counts only at the top of the
+		// folder, so build output such as dist/opencode.json, which is a
+		// sentinel since GAP-0522, does not match one.
+		for _, c := range extra {
+			if c.Status == "D" {
+				continue
+			}
+			if p, ok := ignoredSensitive(opts.SensitiveGlobs, c.Path); ok {
+				rep.Flags = append(rep.Flags, Flag{Path: c.Path, Label: c.Path, Kind: RiskPolicy, Severity: SeverityHigh,
+					Detail: "matches the sensitive-change pattern " + p + " (git ignores this file, so it is not in the diff)"})
+			}
 		}
 	}
 	before := toSet(rec.NestedRepos)

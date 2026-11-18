@@ -299,7 +299,7 @@
     "path": "substrate doctor",
     "use": "doctor",
     "short": "Check that this computer can run agents in the cluster",
-    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
+    "long": "Checks, from this computer, everything a run needs: the cluster is set up here, its admin address answers\nover TLS, you are signed in and the cluster accepts it, the sign-in server matches, attach through the gateway works and\nyou have what it asks for, your sign-in can be kept safely, and (for administrators, when the cluster uses signed policy\nbundles) every stage's bundle still verifies. Nothing needs to be installed here, and nothing in the\ncluster changes.\n\nAdministrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router\nclients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with\nkubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.\n\nThe last line is \"ready for agents\" when no check failed. Otherwise it is \"not ready\" and each failed check says how to fix\nit, and the exit code is 1.",
     "example": "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
     "flags": [
       {
@@ -778,7 +778,7 @@
     "path": "substrate pull",
     "use": "pull \u003cname\u003e",
     "short": "Review what the agent changed and bring it home",
-    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder). Nothing touches your folder until you choose: --apply writes the changes\ninto the folder, --branch NAME puts them on a new git branch, --patch-out FILE writes a patch.",
+    "long": "Reads the agent's work back to this machine and shows what changed, with the files that need a\ncareful look first (scripts, CI and hook files, dotfiles, secrets in the text, large or binary files,\nlinks that leave the folder, agent settings, MCP servers, shell startup files). Nothing touches your folder\nuntil you choose: --apply writes the changes into the folder, --branch NAME puts them on a new git branch,\n--patch-out FILE writes a patch.\n\nWhen a change can run code on this machine, --apply asks first (the default answer is no). --yes takes\nthat safe answer, so --apply --yes writes nothing and says why; after you reviewed the flagged files,\n--allow-flagged writes them too.",
     "example": "defenseclaw substrate pull fix-tests-7f3a\ndefenseclaw substrate pull fix-tests-7f3a --branch agent/fix-tests",
     "args": [
       {
@@ -787,6 +787,12 @@
       }
     ],
     "flags": [
+      {
+        "name": "allow-flagged",
+        "type": "bool",
+        "default": "false",
+        "usage": "with --apply: also write the files flagged as able to run code (review them first)"
+      },
       {
         "name": "apply",
         "type": "bool",

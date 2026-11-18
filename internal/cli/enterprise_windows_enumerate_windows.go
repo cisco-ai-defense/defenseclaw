@@ -92,6 +92,9 @@ type enterpriseWindowsEnumerateOptions struct {
 	interval     time.Duration
 	once         bool
 	initialDelay time.Duration
+
+	// deferExcludedRevoke is Setup's --defer-excluded-revoke.
+	deferExcludedRevoke bool
 }
 
 // newEnterpriseWindowsEnumerateCommand wires the `enterprise windows
@@ -164,6 +167,9 @@ nothing about this subcommand is invoked on non-Windows OSes.
 	flags.StringVar(&opts.manifestPath, "manifest", "", "absolute path to the hook-guardian targets.yaml this enumerator maintains (required)")
 	flags.DurationVar(&opts.interval, "interval", enterpriseWindowsEnumerateDefaultInterval, "sleep between enumeration cycles when running as a service")
 	flags.BoolVar(&opts.once, "once", false, "run a single cycle synchronously and exit; --interval is then unused")
+	flags.BoolVar(&opts.deferExcludedRevoke, "defer-excluded-revoke", false,
+		"with --once: leave taking the gateway's read access off excluded profiles to the enumerator service (Setup, whose services are stopped)")
+	_ = flags.MarkHidden("defer-excluded-revoke")
 	flags.DurationVar(&opts.initialDelay, "initial-cycle-delay", enterpriseWindowsEnumerateInitialCycleDelay, "wait this long before the first interval-loop cycle so the gateway + guardian can publish their startup health lines first")
 	return cmd
 }
@@ -194,12 +200,16 @@ func runEnterpriseWindowsEnumerate(
 	fmt.Fprintf(stderr, "[hook-enumerator] windows: manifest=%s interval=%s once=%t initial_delay=%s\n",
 		manifestPath, opts.interval, opts.once, opts.initialDelay)
 
+	if opts.deferExcludedRevoke && !opts.once {
+		return errors.New("enterprise windows enumerate: --defer-excluded-revoke needs --once")
+	}
 	if opts.once {
-		if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
-			return err
+		if opts.deferExcludedRevoke {
+			ctx = context.WithValue(ctx, enterpriseWindowsExcludedRevokeModeKey{}, enterpriseWindowsExcludedRevokeDeferred)
+		} else {
+			ctx = context.WithValue(ctx, enterpriseWindowsExcludedRevokeModeKey{}, enterpriseWindowsExcludedRevokeInline)
 		}
-		runEnterpriseWindowsEnumerateOnceLateWalk(ctx, stderr, manifestPath)
-		return nil
+		return runEnterpriseWindowsEnumerateOnce(ctx, cmd.OutOrStdout(), stderr, manifestPath)
 	}
 
 	return runEnterpriseWindowsEnumerateInterval(ctx, stderr, opts, manifestPath)
@@ -213,6 +223,7 @@ func runEnterpriseWindowsEnumerate(
 // the first publication, which names the account incomplete. The extra
 // cycle's own failure keeps that publication too.
 func runEnterpriseWindowsEnumerateOnceLateWalk(ctx context.Context, stderr io.Writer, manifestPath string) {
+	setEnterpriseWindowsEnumerateStep("waiting for a profile walk the cycle could not wait for")
 	waitCtx, cancel := context.WithTimeout(ctx, enterpriseWindowsEnumerateOnceWalkWait)
 	finished := enterpriseWindowsEnumerateOnceWalkWaiter(waitCtx)
 	cancel()
@@ -223,6 +234,93 @@ func runEnterpriseWindowsEnumerateOnceLateWalk(ctx context.Context, stderr io.Wr
 	if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] extra cycle failed; the first publication stands: %v\n", err)
 	}
+}
+
+// enterpriseWindowsEnumerateOnceLimit bounds enumerate --once. Setup stops
+// the process at 900 seconds (300 outside the standalone profile) and then
+// says only that it timed out, which named neither the step nor the profile
+// a first install on a computer with many orphan profiles waited on
+// (GAP-1109). Stopping first, --once names them and exits non-zero, which
+// Setup reports with this output. Tests replace it.
+var enterpriseWindowsEnumerateOnceLimit = 840 * time.Second
+
+// enterpriseWindowsExcludedRevokeMode is how a cycle takes the gateway's
+// read access off excluded profiles.
+type enterpriseWindowsExcludedRevokeMode int
+
+const (
+	// enterpriseWindowsExcludedRevokeBackground: the enumerator service's
+	// cycle, which waits a bounded time and lets the rest go on.
+	enterpriseWindowsExcludedRevokeBackground enterpriseWindowsExcludedRevokeMode = iota
+	// enterpriseWindowsExcludedRevokeInline: an --once run (the hot config
+	// apply), which revokes before it exits, as before: a process exit
+	// would stop a background revoke halfway through a folder tree.
+	enterpriseWindowsExcludedRevokeInline
+	// enterpriseWindowsExcludedRevokeDeferred: Setup's --once
+	// --defer-excluded-revoke. Its services are stopped; the enumerator
+	// service's first cycle after activation revokes (GAP-1109).
+	enterpriseWindowsExcludedRevokeDeferred
+)
+
+// enterpriseWindowsExcludedRevokeModeKey carries the mode in a cycle's
+// context; none is the service's background mode.
+type enterpriseWindowsExcludedRevokeModeKey struct{}
+
+func enterpriseWindowsExcludedRevokeModeOf(ctx context.Context) enterpriseWindowsExcludedRevokeMode {
+	mode, _ := ctx.Value(enterpriseWindowsExcludedRevokeModeKey{}).(enterpriseWindowsExcludedRevokeMode)
+	return mode
+}
+
+// enterpriseWindowsEnumerateStep is the step the running cycle is in, and
+// since when, for the --once limit's message.
+var enterpriseWindowsEnumerateStep struct {
+	sync.Mutex
+	what  string
+	since time.Time
+}
+
+func setEnterpriseWindowsEnumerateStep(what string) {
+	step := &enterpriseWindowsEnumerateStep
+	step.Lock()
+	step.what, step.since = what, time.Now()
+	step.Unlock()
+}
+
+func currentEnterpriseWindowsEnumerateStep() (string, time.Duration) {
+	step := &enterpriseWindowsEnumerateStep
+	step.Lock()
+	defer step.Unlock()
+	if step.what == "" {
+		return "starting", 0
+	}
+	return step.what, time.Since(step.since)
+}
+
+// runEnterpriseWindowsEnumerateOnce runs the --once cycle, and the extra one
+// for a late profile walk, within enterpriseWindowsEnumerateOnceLimit. Past
+// it, it prints which step it was in, and for how long, first on stdout
+// (Setup's diagnostic keeps the start of the output) and fails.
+func runEnterpriseWindowsEnumerateOnce(ctx context.Context, stdout, stderr io.Writer, manifestPath string) error {
+	setEnterpriseWindowsEnumerateStep("")
+	done := make(chan error, 1)
+	go func() {
+		err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath)
+		if err == nil {
+			runEnterpriseWindowsEnumerateOnceLateWalk(ctx, stderr, manifestPath)
+		}
+		done <- err
+	}()
+	limit := time.NewTimer(enterpriseWindowsEnumerateOnceLimit)
+	defer limit.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-limit.C:
+	}
+	what, waited := currentEnterpriseWindowsEnumerateStep()
+	message := fmt.Sprintf("enterprise windows enumerate --once did not finish within %s: it was %s, for %s", enterpriseWindowsEnumerateOnceLimit, what, waited.Round(time.Second))
+	fmt.Fprintf(stdout, "[hook-enumerator] ERROR %s\n", message)
+	return errors.New(message)
 }
 
 // runEnterpriseWindowsEnumerateSingleCycle runs one bounded cycle,
@@ -243,6 +341,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	cycleCtx, cancel := context.WithTimeout(ctx, enterpriseWindowsEnumerateCycleTimeout)
 	defer cancel()
 
+	setEnterpriseWindowsEnumerateStep("loading the configuration")
 	cfg, cfgErr := enterpriseWindowsEnumerateConfigLoader()
 	if cfgErr != nil {
 		// A missing config in managed_enterprise mode is a "waiting
@@ -280,12 +379,14 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// Manifest mode gives target authorship to the administrator, not
 		// install inspection. Keep checking every eligible profile so a
 		// private runnable copy can still lower managed health.
+		setEnterpriseWindowsEnumerateStep("scanning the administrator's enrolled accounts for agent installs")
 		return publishEnterpriseWindowsManifestInstallScan(cycleCtx, stderr, cfg, manifestPath)
 	}
 	logf := enumerationLoggerForStderr(stderr)
 	enumerateOpts := standaloneWindowsEnumerateOptions(cfg, enterprisehooks.EnumerateOptions{
 		ExistingManifestPath: manifestPath,
 		Logger:               logf,
+		Progress:             setEnterpriseWindowsEnumerateStep,
 	})
 	standalone := cfg.StandaloneEnterprise()
 	var unprotected []enterprisehooks.UnprotectedAgent
@@ -313,6 +414,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}
 		// A running agent no row enrolls is recorded too (GAP-0226), and so is
 		// one whose account resolves to no SID.
+		setEnterpriseWindowsEnumerateStep("reading the running agent sessions")
 		enumerateOpts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg), manifestPath)
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
@@ -320,6 +422,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
 	}
 
+	setEnterpriseWindowsEnumerateStep("writing the targets manifest")
 	changed, err := enterpriseWindowsEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
@@ -341,6 +444,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		for _, target := range excluded {
 			excludedSIDs = append(excludedSIDs, target.SID)
 		}
+		setEnterpriseWindowsEnumerateStep("publishing the enrolled accounts' identity facts")
 		if spoolErr := enterpriseWindowsIdentitySpoolWriter(cycleCtx, identityDir, enumerateOpts.GroupCache, excludedSIDs, enterpriseWindowsConnectorEmails(stderr, cfg, manifest), enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
 			fmt.Fprintf(stderr, format+"\n", args...)
 		}); spoolErr != nil {
@@ -349,6 +453,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; the next cycle publishes again
 		publishEnterpriseWindowsIDEAppData(cfg, manifest, stderr)
 		unprotected = append(unprotected, ownerUnknown...)
+		setEnterpriseWindowsEnumerateStep("publishing the unprotected agents record")
 		if recordErr := replaceEnterpriseHookUnprotectedAgentsRecord(cfg.DataDir, func() error {
 			_, writeErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected)
 			return writeErr
@@ -363,6 +468,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	if standalone {
 		// A deleted local account's ACP enrollments go with it, as its hook
 		// rows do (GAP-0367).
+		setEnterpriseWindowsEnumerateStep("revoking the ACP enrollments of deleted accounts")
 		revokeEnterpriseACPEnrollmentsOfDeletedSIDs(cfg.DataDir, windowsEnterpriseAccountDeleted, stderr)
 		// The copies a revoke could not remove while their user was signed
 		// out go at the next cycle the user is signed in for; a sign-in
@@ -378,6 +484,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	// failures log-only so one bad DACL doesn't block the enumerator cycle.
 	// The IDE plugin inventory's folders are added outside the Secure Client
 	// profile, whose gateway has no IDE inventory.
+	setEnterpriseWindowsEnumerateStep("granting the gateway read access on the enrolled profiles' agent folders")
 	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", !cfg.SecureClientIntegration(), logf); grantErr != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 	}
@@ -392,10 +499,12 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		if previousErr == nil {
 			last = &previous
 		}
+		setEnterpriseWindowsEnumerateStep("taking the gateway's read access off profiles no longer enrolled")
 		reconcileEnterpriseWindowsInventoryGrants(stderr, manifestPath, last, manifest)
 	}
 	if standalone {
-		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
+		setEnterpriseWindowsEnumerateStep("taking the gateway's read access off excluded profiles")
+		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded, enterpriseWindowsExcludedRevokeModeOf(ctx))
 	}
 	elapsed := time.Since(start)
 
@@ -578,50 +687,129 @@ func enumeratorErrorText(err error) string {
 }
 
 // enterpriseWindowsExcludedRevoked holds the excluded profiles whose
-// inventory read access this enumerator process already took away.
+// inventory read access this enumerator process already took away (sids),
+// those a background revoke still has to do (queued), the profiles the last
+// cycle excluded (wanted), and the one a revoke works on now (current).
 var enterpriseWindowsExcludedRevoked = struct {
 	sync.Mutex
-	sids map[string]bool
-}{sids: map[string]bool{}}
+	sids    map[string]bool
+	queued  map[string]bool
+	wanted  map[string]bool
+	current string
+}{sids: map[string]bool{}, queued: map[string]bool{}, wanted: map[string]bool{}}
+
+// enterpriseWindowsExcludedRevokeWait bounds how long a service cycle waits
+// for the excluded profiles' revoke. Taking the inherited grant off an agent
+// folder rewrites the security of every file below it, so on a computer with
+// many orphan profiles left by deleted accounts (all excluded), or a disk
+// still restoring from its snapshot, it took more than Setup's 900 seconds
+// and the first install rolled back (GAP-1109). Tests replace it.
+var enterpriseWindowsExcludedRevokeWait = 10 * time.Second
+
+// enterpriseWindowsExcludedProfileLabel names an excluded profile in a log
+// line: its folder name and SID, never the absolute path.
+func enterpriseWindowsExcludedProfileLabel(target enterprisehooks.ManifestTarget) string {
+	return fmt.Sprintf("%s (%s)", filepath.Base(filepath.Clean(target.UserHome)), strings.ToUpper(strings.TrimSpace(target.SID)))
+}
 
 // revokeEnterpriseWindowsExcludedInventoryRead takes the gateway's inventory
 // read access off every profile the enrollment excludes, once per profile
 // while it stays excluded. A profile excluded before this install was
 // granted by an earlier one (a cloned image) and was never in a manifest, so
 // the dropped-profile revoke never reached it (GAP-1024).
-func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []enterprisehooks.ManifestTarget) {
+//
+// The revoke runs one profile at a time. The enumerator service's cycle
+// waits for it at most enterpriseWindowsExcludedRevokeWait and then names the
+// profile it is at; a later cycle starts no second revoke of a queued
+// profile, skips a queued one that is no longer excluded (enrolled again, so
+// its new grant stays), and retries a failed one. An --once run (the hot
+// config apply) waits for it, as before. Setup's --once
+// --defer-excluded-revoke starts none: the enumerator service's first cycle
+// after activation takes the access off.
+func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []enterprisehooks.ManifestTarget, mode enterpriseWindowsExcludedRevokeMode) {
 	state := &enterpriseWindowsExcludedRevoked
 	state.Lock()
-	defer state.Unlock()
+	if state.queued == nil {
+		state.queued = map[string]bool{}
+	}
 	current := map[string]bool{}
-	var pending enterprisehooks.Manifest
+	var pending []enterprisehooks.ManifestTarget
 	for _, target := range excluded {
 		sid := strings.ToUpper(strings.TrimSpace(target.SID))
 		if sid == "" || current[sid] {
 			continue
 		}
 		current[sid] = true
-		if !state.sids[sid] {
-			pending.Targets = append(pending.Targets, target)
+		if !state.sids[sid] && !state.queued[sid] {
+			pending = append(pending, target)
 		}
 	}
+	state.wanted = current
 	for sid := range state.sids {
 		if !current[sid] {
 			delete(state.sids, sid)
 		}
 	}
-	if len(pending.Targets) == 0 {
+	if len(pending) == 0 || mode == enterpriseWindowsExcludedRevokeDeferred {
+		state.Unlock()
+		if len(pending) != 0 {
+			fmt.Fprintf(stderr, "[hook-enumerator] the gateway's inventory read access on %d excluded profile(s) is taken off by the enumerator service's first cycle after Setup\n", len(pending))
+		}
 		return
 	}
-	if err := enterpriseWindowsInventoryReadRevoker(pending); err != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway may keep read access on %d excluded profile(s); the revoke failed: %s\n",
-			len(pending.Targets), enumeratorErrorText(err))
+	for _, target := range pending {
+		state.queued[strings.ToUpper(strings.TrimSpace(target.SID))] = true
+	}
+	state.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		revoked := 0
+		for _, target := range pending {
+			sid := strings.ToUpper(strings.TrimSpace(target.SID))
+			label := enterpriseWindowsExcludedProfileLabel(target)
+			state.Lock()
+			if !state.wanted[sid] {
+				// Enrolled again since it was queued: its grant stays.
+				delete(state.queued, sid)
+				state.Unlock()
+				continue
+			}
+			state.current = label
+			state.Unlock()
+			err := enterpriseWindowsInventoryReadRevoker(enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{target}})
+			state.Lock()
+			delete(state.queued, sid)
+			state.current = ""
+			if err == nil {
+				state.sids[sid] = true
+			}
+			state.Unlock()
+			if err != nil {
+				fmt.Fprintf(stderr, "[hook-enumerator] WARN the gateway may keep read access on the excluded profile %s; the revoke failed and is retried at the next cycle: %s\n",
+					label, enumeratorErrorText(err))
+				continue
+			}
+			revoked++
+		}
+		if revoked > 0 {
+			fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d excluded profile(s)\n", revoked)
+		}
+	}()
+	if mode == enterpriseWindowsExcludedRevokeInline {
+		<-done
 		return
 	}
-	for _, target := range pending.Targets {
-		state.sids[strings.ToUpper(strings.TrimSpace(target.SID))] = true
+	wait := time.NewTimer(enterpriseWindowsExcludedRevokeWait)
+	defer wait.Stop()
+	select {
+	case <-done:
+	case <-wait.C:
+		state.Lock()
+		at, left := state.current, len(state.queued)
+		state.Unlock()
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN taking the gateway's read access off %d excluded profile(s) goes on after this cycle; it is at %s, whose agent folders hold many files\n", left, at)
 	}
-	fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d excluded profile(s)\n", len(pending.Targets))
 }
 
 // publishEnterpriseWindowsManifestIdentity refreshes signed-in token groups

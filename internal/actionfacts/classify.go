@@ -472,14 +472,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		}
 	case "set-mppreference":
 		if !classifyExactWindowsSecurityControlMutation(command) {
-			_, disabled, ok := exactWindowsDefenderDisableSetting(
+			disabled, _, ok := exactWindowsDefenderDisableSettings(
 				windowsWordsFromArguments(command.Arguments[1:]),
 			)
 			if !ok {
 				out.markPartial(IssueUnknownOperandGrammar)
 			} else {
 				addOperation(command, OperationConfigChange)
-				if disabled {
+				if len(disabled) != 0 {
 					addOperation(command, OperationPolicyBypass)
 				}
 			}

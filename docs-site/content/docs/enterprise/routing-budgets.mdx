@@ -27,6 +27,7 @@ routing:
 - `allow` also binds a request that is not routed: its own model must be one of the allowed models.
 - `match` keys: `groups`, `users`, `connectors`, `agents`, `categories`, `severity_at_least`. Keys combine with AND, values of one key with OR.
 - Groups and users match only a verified caller, with the same proof rules as profile assignments. On a managed device, when DefenseClaw cannot confirm a fact, a constraining rule applies and a deny rule refuses.
+- One AD group is one name on every OS: `eng@example.com` and `EXAMPLE\eng` select the same group on Linux, macOS and Windows, so a group budget written either way pools the spend of all of them. A group of another domain never matches. `defenseclaw config validate` and `defenseclaw doctor` warn (`routing_admin_group_unmatched`) about a rule or group budget whose group the host knows by no spelling: its deny never acts there.
 - While the classifier is down, every category rule applies on a managed device, so their `allow` lists must share a model.
 - Route-only connectors run no guardrail scan, so severity rules never apply to them.
 

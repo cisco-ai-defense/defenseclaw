@@ -292,6 +292,12 @@ type trustedActionRequest struct {
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
 	evidenceCWD string
+	// cwdPlacedRoot is the folder the hook ran a simple command of the call
+	// from, when the walk read the command in another folder (after a cd):
+	// the owners that place a path by the working folder itself
+	// (cwdPlacedRule: the active .git/hooks of the project) place it by this
+	// folder, as they do when the whole call is read (rel-1-0-10:GAP-1083).
+	cwdPlacedRoot string
 	// parentPatch is the whole shell call of a simple-command child. A stage
 	// such as the apply_patch of @'...'@ | apply_patch reads an envelope that
 	// only the whole text shows: when every apply_patch of that text reads a
@@ -854,9 +860,13 @@ func dispatchTrustedAction(
 	// places (a home form the tool does not expand, a drive-relative path, a
 	// device path) writes a file no path rule can name: it is judged at the
 	// unknown tier of the pack at least, never a clean allow
-	// (rel-1-0-10:GAP-1052, GAP-0947).
-	if facts.Parse.Status == actionfacts.StatusInvalid &&
-		actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) {
+	// (rel-1-0-10:GAP-1052, GAP-0947). Whatever the parse status: the placed
+	// headers of the same envelope are facts the rules judge, and a block they
+	// prove stays a block (rel-1-0-10:GAP-1055). The same envelope fed to
+	// apply_patch by a shell here-document is judged as the tool's is
+	// (rel-1-0-10:GAP-1077).
+	if actionfacts.PatchNamesUnplacedTarget(request.Input.Tool, request.Input.Args) ||
+		actionfacts.CommandPatchNamesUnplacedTarget(facts) {
 		defer func() {
 			findings = withUnknownFinding(findings, unknownReasonFinding(unplacedPatchTargetTitle,
 				actionfacts.UnplacedPatchTargetReason, request.EnforcementCapable))
@@ -931,6 +941,18 @@ func dispatchTrustedAction(
 	defer func() {
 		findings = withUnreadPowerShellFloor(findings, request, facts)
 	}()
+	// A bash here-string (CMD <<< WORD) is a syntax error to the POSIX
+	// analysis, so the call has no facts: it is judged as its twin
+	// printf '%s\n' WORD | CMD as well, by every rule, and the twin's
+	// findings are kept (rel-1-0-10:GAP-1083: cd X, then a here-string,
+	// then a write in X).
+	if twin, ok := hereStringReadingTwinRequest(request, facts); ok {
+		defer func() {
+			// The twin is the call as typed without the bashism: every
+			// finding of it is one of the call, an alert as well as a block.
+			findings = withSimpleCommandFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
 	for _, twin := range windowsTwins {
 		defer func() {
@@ -976,6 +998,13 @@ func dispatchTrustedAction(
 		if input, ok := protectedHomeCWDPlacedInput(request); ok {
 			analyzed := actionfacts.Analyze(input)
 			placed = placedReading{facts: &analyzed}
+		} else if request.cwdPlacedRoot != "" {
+			// A simple command the walk read in the folder a cd moved it
+			// to: its paths stay where they resolve there, and the
+			// cwdPlacedRule owners read the project from the hook folder.
+			rooted := facts
+			rooted.CWD = request.cwdPlacedRoot
+			placed = placedReading{facts: &rooted}
 		}
 	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
@@ -1197,6 +1226,10 @@ func dispatchTrustedActionWith(
 						filepath.VolumeName(simple.CWD) != "" && !strings.EqualFold(filepath.Clean(simple.CWD), filepath.Clean(request.Input.CWD))
 				if evidenceCWDs != nil {
 					child.evidenceCWD = evidenceCWDs[index]
+				}
+				if filepath.IsAbs(child.Input.CWD) && filepath.IsAbs(request.Input.CWD) &&
+					filepath.Clean(child.Input.CWD) != filepath.Clean(request.Input.CWD) {
+					child.cwdPlacedRoot = request.Input.CWD
 				}
 				// The managed hook has already walked a static cd. Its write
 				// targets are keyed in that physical directory, which may
@@ -1849,19 +1882,28 @@ func withActiveStateTargetMention(
 				// a pwsh launcher on Linux or macOS that names the state through
 				// a link: the mention scan reads the launcher's words, not the
 				// script, which the PowerShell reading walks (rel-1-0-10:GAP-1134).
+				// A .NET open that may write the state by a mode or path known
+				// only at run time is the unknown tier (rel-1-0-10:GAP-1138).
 				spelled := strings.Contains(strings.ToLower(command), ".defenseclaw")
-				proven := spelled && provenCMDSlashCStateWrite(request) ||
-					(spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) &&
-						provenPowerShellStateWrite(request)
+				proven, unknown := spelled && provenCMDSlashCStateWrite(request), false
+				if !proven && (spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) {
+					proven, unknown = provenPowerShellStateWrite(request)
+				}
+				if unknown {
+					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+				}
 				if !proven {
 					return findings
 				}
 			}
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
-			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
-			!provenPowerShellStateWrite(request) {
-			return findings
+			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
+			if proven, unknown := provenPowerShellStateWrite(request); unknown {
+				return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+			} else if !proven {
+				return findings
+			}
 		}
 	}
 	return withProvenActiveStateMutation(request, findings)

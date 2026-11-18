@@ -257,9 +257,9 @@ func (e *Engine) Gate(d Decision, target GateTarget) *DenyReason {
 }
 
 // NoCredentialMessage is the refusal text of a request whose allowed
-// models have no gateway credential. ruleIDs are the caller own matching
-// rules (AdminVerdict.RuleIDs, the same ids the evaluator hands the plain
-// refusal as BindRuleIDs); otherUnfit says another
+// models have no gateway credential. ruleIDs are the rules proven to match
+// the caller (AdminVerdict.RuleIDs; the plain refusal names
+// AdminVerdict.BindRuleIDs); otherUnfit says another
 // allowed model did not fit the request for a reason that is not a
 // credential.
 func NoCredentialMessage(aliases, ruleIDs []string, otherUnfit bool) string {

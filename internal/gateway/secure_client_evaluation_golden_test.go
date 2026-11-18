@@ -19,6 +19,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -134,6 +135,15 @@ func runSecureClientEvaluation(t *testing.T, src string) []byte {
 	resetConnectorRuleCategories(t)
 	withLocalPatternsRestored(t)
 	restoreRetainJudgeBodies(t)
+	// The fixtures send no user headers. The kernel would name the test
+	// process's own account as the caller and label its records, which
+	// differs per runner OS; end-user attribution has its own tests
+	// (secure_client_user_test.go), so it is held off here.
+	prevCaller := secureClientCallerAccount
+	t.Cleanup(func() { secureClientCallerAccount = prevCaller })
+	secureClientCallerAccount = func(context.Context) (string, error) {
+		return "", errors.New("caller lookup disabled for the evaluation goldens")
+	}
 
 	root := testenv.PrivateTempDir(t)
 	runtimeDir, homeDir := filepath.Join(root, "runtime"), filepath.Join(root, "home")

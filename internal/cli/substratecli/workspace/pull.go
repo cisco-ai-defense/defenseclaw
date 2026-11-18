@@ -149,6 +149,9 @@ var kindWords = map[osw.RiskKind]string{
 	osw.RiskDependencies:   "changes dependencies",
 	osw.RiskPolicy:         "is listed as sensitive by policy",
 	osw.RiskIgnoreRules:    "changes what git ignores",
+	osw.RiskAgentConfig:    "changes agent settings, which can register hooks",
+	osw.RiskMCPServer:      "changes the MCP servers an agent starts",
+	osw.RiskShellRC:        "is a shell startup file",
 	osw.RiskUnreadable:     "could not be read",
 	osw.RiskZeroFilled:     "came back empty (a write the actor lost)",
 }
@@ -165,7 +168,7 @@ type fileInfo struct {
 func buildReview(res *osw.PullResult) *Review {
 	rv := &Review{
 		Summary:   res.Review.SummaryLine(),
-		Sensitive: res.Review.Sensitive(),
+		Sensitive: needsDecision(res),
 		Dropped:   res.Dropped,
 		Blocking:  res.Blocking,
 		Warnings:  res.Review.Warnings,
@@ -365,7 +368,16 @@ type SensitiveError struct {
 
 func (e *SensitiveError) Error() string {
 	return "some changes can run code on this machine (" + strings.Join(firstN(e.Files, 6), ", ") +
-		"); review them and pass --accept-sensitive, or bring them back with --branch or --patch-out FILE"
+		"); nothing was written. Review them, then pass --allow-flagged, or bring them back with --branch NAME or --patch-out FILE"
+}
+
+// needsDecision reports whether the pull holds a change that can run code
+// on this machine (any flag of medium or higher: a CI workflow too) or a
+// secret. Such changes go into the working tree only on an explicit yes:
+// the question answered y, or --allow-flagged; never --yes alone
+// (GAP-0472).
+func needsDecision(pr *osw.PullResult) bool {
+	return pr.Review.Sensitive() || len(pr.Review.HostExecLabels()) > 0
 }
 
 func (e *SensitiveError) Unwrap() error { return osw.ErrSensitiveChanges }
@@ -416,7 +428,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	if err != nil {
 		return nil, cleanErr("bring back "+opts.Name+"'s changes", err)
 	}
-	if pr.Review.Sensitive() && !oo.AcceptSensitive {
+	if needsDecision(pr) && !oo.AcceptSensitive {
 		if mode == osw.ApplyPatch || mode == osw.ApplyBranch && len(pr.Review.SecretPaths()) == 0 {
 			oo.AcceptSensitive = true
 		} else {

@@ -198,10 +198,13 @@ a link, or other untrusted state still refuses the upgrade. Correct the state,
 have the account sign in, and run Setup `/ensure JSON=1` again.
 
 An account with no active Windows session (signed out or disconnected) does not fail a
-managed Windows upgrade because the hooks of an earlier release (up to 1.0.6) still sit in its
-agent configuration. The guardian installs the new hooks only in the account's own session, so
+managed Windows upgrade because the hooks of an earlier release still sit in its agent
+configuration: the hook command render of releases up to 1.0.6, or, from 1.0.9 and earlier, hooks,
+enrollment and runtime that name the hook as `bin\defenseclaw-hook.exe` instead of
+`bin\hooks\<digest>\defenseclaw-hook.exe` (Setup replaces `bin\defenseclaw-hook.exe` in place with
+this release's hook). The guardian installs the new hooks only in the account's own session, so
 when an earlier release's hook lock names the target and a read-only check shows that the only
-difference from this release is the earlier render of the hook command, the connector is
+difference from this release is that earlier render or hook path, the connector is
 pending until the account signs in: `status` and `verify` show it as pending, and the previous
 release's DefenseClaw hook keeps running for that account until it signs in and the guardian
 updates it. That hook runs the same hook binary and arguments, so the gateway still decides its

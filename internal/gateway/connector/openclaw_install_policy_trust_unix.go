@@ -35,7 +35,7 @@ import (
 // account that runs OpenClaw; every parent folder owned by root or that
 // account and not group or world writable unless it is sticky. account is
 // the separate-user OpenClaw account, or "" for this process account.
-func openClawInstallPolicyPathTrusted(command, account string) error {
+func openClawInstallPolicyPathTrusted(command, account, _ string) error {
 	uid := os.Geteuid()
 	if account != "" {
 		u, err := user.Lookup(account)

@@ -18,6 +18,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,7 +101,7 @@ type Config struct {
 type RelayConfig struct {
 	// Listen is the actor ingress port the relay serves.
 	Listen string `json:"listen"`
-	// Connector is the agent the relay starts in its tmux session.
+	// Connector is the agent the relay starts on its PTY.
 	Connector string `json:"connector"`
 	// Interactive is the agent's interactive argv.
 	Interactive []string `json:"interactive"`
@@ -132,6 +134,36 @@ type RelayConfig struct {
 	// group) before the relay ends it with exit 124 (GAP-0273); 0 is
 	// DefaultTaskStall.
 	TaskStallMS int `json:"task_stall_ms,omitempty"`
+	// AgentUser is "UID:GID", the unprivileged user the relay starts the
+	// agent (and every task, exec and file copy) as, when the relay itself
+	// runs as root (GAP-0116). The agent then cannot signal, trace or
+	// replace the relay: gVisor delivers SIGKILL and SIGSTOP from inside the
+	// actor to its PID 1, so being PID 1 alone does not protect the relay.
+	// Empty (images built before 1.0.10): the agent runs as the relay's own
+	// user, and the relay warns that they are not separated.
+	AgentUser string `json:"agent_user,omitempty"`
+	// Protected are the root-owned files of the kit layer that the template
+	// build attests (the connector's managed settings, hook registration and
+	// the kit's own configuration) and the folders that hold them
+	// (ProtectedPaths). The relay refuses the agent when a mount of the
+	// actor is at, above or below one of them, also one that reached its
+	// place through a symlink admission cannot see (substrate-1 GAP-0439).
+	// The build writes it with the relay binary in the same layer.
+	Protected []string `json:"protected,omitempty"`
+}
+
+// AgentIDs parses AgentUser; ok is false when it is empty.
+func (r RelayConfig) AgentIDs() (uid, gid int, ok bool, err error) {
+	if r.AgentUser == "" {
+		return 0, 0, false, nil
+	}
+	u, g, found := strings.Cut(r.AgentUser, ":")
+	uid, uerr := strconv.Atoi(u)
+	gid, gerr := strconv.Atoi(g)
+	if !found || uerr != nil || gerr != nil || uid <= 0 || gid <= 0 {
+		return 0, 0, false, fmt.Errorf("actor kit config: relay.agent_user %q is not a non-root UID:GID", r.AgentUser)
+	}
+	return uid, gid, true, nil
 }
 
 // DefaultTaskStall is the relay's no-progress bound of a --task run: longer
@@ -216,6 +248,9 @@ func LoadConfig(path string) (Config, error) {
 
 // Validate checks a configuration.
 func (c Config) Validate() error {
+	if _, _, _, err := c.Relay.AgentIDs(); err != nil {
+		return err
+	}
 	u, err := url.Parse(c.GatewayURL)
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("actor kit config: gateway_url %q is not a base URL", c.GatewayURL)
@@ -325,4 +360,48 @@ func (c Config) FailModeFor(mode string) string {
 		return "closed"
 	}
 	return c.FailMode
+}
+
+// The capabilities of a kit actor's container (substrate-1 GAP-0458,
+// GAP-0376). A Substrate actor's container gets AUDIT_WRITE, KILL and
+// NET_BIND_SERVICE by default (Substrate v1.0.0, atelet), and a template
+// may add a short list (SETUID and SETGID among them) and drop any. A kit
+// image whose relay runs as root and starts the agent as relay.agent_user
+// needs SETUID and SETGID for that switch and KILL to stop the agent, and
+// nothing else: its template adds the first two and drops the other
+// defaults (the relay listens above 1023). An image whose relay and agent
+// share a user gets no adjustment: an added capability would be the agent's.
+var (
+	RelayCapabilitiesAdd  = []string{"SETUID", "SETGID"}
+	RelayCapabilitiesDrop = []string{"AUDIT_WRITE", "NET_BIND_SERVICE"}
+	// RelayCapabilities are the capabilities the separated relay keeps.
+	RelayCapabilities = []string{"KILL", "SETGID", "SETUID"}
+	// SubstrateDefaultCapabilities are an actor container's capabilities
+	// when its template asks for no adjustment (Substrate v1.0.0).
+	SubstrateDefaultCapabilities = []string{"AUDIT_WRITE", "KILL", "NET_BIND_SERVICE"}
+)
+
+// ActorCapabilities is the capability set Substrate gives an actor
+// container: the default, minus drop ("ALL" clears it), plus add; sorted.
+func ActorCapabilities(add, drop []string) []string {
+	set := map[string]bool{}
+	for _, c := range SubstrateDefaultCapabilities {
+		set[c] = true
+	}
+	for _, d := range drop {
+		if d == "ALL" {
+			set = map[string]bool{}
+			break
+		}
+		delete(set, d)
+	}
+	for _, a := range add {
+		set[a] = true
+	}
+	out := make([]string, 0, len(set))
+	for c := range set {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	return out
 }
