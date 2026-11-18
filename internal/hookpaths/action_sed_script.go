@@ -75,6 +75,8 @@ func sedScriptEffects(words []string) (outputs, commands []string) {
 			command := p.peek()
 			p.i++
 			switch command {
+			case '{', '}':
+				// The next command can start immediately after a brace.
 			case '#':
 				for p.more() && p.peek() != '\n' {
 					p.i++
@@ -103,7 +105,10 @@ func sedScriptEffects(words []string) (outputs, commands []string) {
 				}
 				delim := p.peek()
 				p.i++
-				if !p.part(delim) || !p.part(delim) {
+				if !p.part(delim) {
+					break
+				}
+				if !p.part(delim) {
 					break
 				}
 				for p.more() && p.peek() != ';' && p.peek() != '\n' {
@@ -123,9 +128,7 @@ func sedScriptEffects(words []string) (outputs, commands []string) {
 					p.i++
 				}
 			case 'y':
-				if !p.transliterate() {
-					break
-				}
+				p.transliterate()
 			default:
 				for p.more() && p.peek() != ';' && p.peek() != '\n' {
 					p.i++

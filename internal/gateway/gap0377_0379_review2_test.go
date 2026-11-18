@@ -50,6 +50,7 @@ func TestGAP0377GAP0379Review2FiveTierHookRoute(t *testing.T) {
 				{"0377-sed-attached-e-link", "sed -i -e'w key[9]' ordinary/x", "block"},
 				{"0377-sed-long-e-link", "sed -i --expression='w key[9]' ordinary/x", "block"},
 				{"0377-sed-substitute-w-link", "sed -i -e 's/x/y/w key[9]' ordinary/x", "block"},
+				{"0377-sed-braced-w-link", "sed -i -e '{w key[9]\n}' ordinary/x", "block"},
 				{"0377-sed-execute-link", "sed -i -e 'e touch key[9]' ordinary/x", "block"},
 				{"0377-control", "sed -i -e 's/a/b/' ordinary/x", "allow"},
 				{"0377-text-control", "sed -i -e 'a text; w key[9]' ordinary/x", "allow"},
