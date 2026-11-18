@@ -60,7 +60,22 @@ func TestWorkingFolderResolvesRelativeOperandsAfterACD(t *testing.T) {
 		{"cd or exit", "cd .git/hooks || exit 1; echo x > pre-push", []string{top, hooks}, false},
 		{"if body", "if true; then cd .git/hooks; fi; echo x > pre-push", []string{top, hooks}, false},
 		{"while body moving each pass", "while true; do cd sub; done; echo x > f", []string{"/work/proj/f", "/work/proj/sub/f", "/work/proj/sub/sub/f"}, true},
-		{"function that moves", "f() { cd /srv; }; f; echo x > g", []string{"/work/proj/g"}, true},
+		// A call of a function whose body moves leaves the shell where the
+		// body may (rel-1-0-10:GAP-1144).
+		{"function that moves", "f() { cd /srv; }; f; echo x > g", []string{"/srv/g", "/work/proj/g"}, false},
+		{"function that moves, && after it", "f() { cd /srv || cd /opt; }; f && echo x > g", []string{"/srv/g", "/opt/g"}, false},
+		{"function moving to a variable: unresolved", "f() { cd $X; }; f; echo x > g", []string{"/work/proj/g"}, true},
+		{"function defined twice: unresolved", "f() { cd /srv; }; f() { cd /opt; }; f; echo x > g", []string{"/work/proj/g"}, true},
+		{"function called before its definition: unresolved", "f; f() { cd /srv; }; echo x > g", []string{"/work/proj/g"}, true},
+		{"function defined in another body: unresolved", "h() { g() { cd /srv; }; }; g; echo x > g", []string{"/work/proj/g"}, true},
+		{"mover called in a body defined before it", "h() { f; }; f() { cd /srv; }; h; echo x > g", []string{"/srv/g", "/work/proj/g"}, false},
+		// A definition anywhere the text reaches it defines the mover; one
+		// that may not have run leaves the shell where it was too
+		// (rel-1-0-10:GAP-1229).
+		{"function defined in an && tail", "cd /srv && f() { cd /opt || return; }; f; echo x > g", []string{"/opt/g", "/srv/g", "/work/proj/g"}, false},
+		{"function defined in a branch", "if true; then f() { cd /srv; }; fi; f; echo x > g", []string{"/srv/g", "/work/proj/g"}, false},
+		{"function defined in a body called first", "h() { f() { cd /srv; }; }; h; f; echo x > g", []string{"/srv/g", "/work/proj/g"}, false},
+		{"function defined in a subshell: unresolved", "(f() { cd /srv; }); f; echo x > g", []string{"/work/proj/g"}, true},
 		{"function never called", "f() { cd /srv; }; echo x > g", []string{"/work/proj/g"}, false},
 		{"variable target: unresolved", "cd $X && echo x > pre-push", []string{top}, true},
 		{"command substitution target: unresolved", "cd \"$(cat d)\" && echo x > pre-push", []string{top}, true},
