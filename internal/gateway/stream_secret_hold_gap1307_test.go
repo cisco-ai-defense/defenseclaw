@@ -404,3 +404,63 @@ func TestGAP1307QuietOpenRunReachesClient(t *testing.T) {
 		})
 	}
 }
+
+// TestGAP1320MaskedReleaseSendsNoRawRunStart: end to end through
+// handlePassthrough, a Bedrock ConverseStream whose "p" padding (an
+// alphabet prefix, as Bedrock sends it) ends with the last character of
+// each text, so the frame holding the start of a card number or a token
+// the upstream goes quiet inside carries a padding that ends like the run.
+// In every tier the masked release (GAP-1307 option b) sends no raw byte of
+// the value before its verdict, and the client gets the reply with only the
+// run masked, or the block (review s7-rv1307, GAP-1320).
+func TestGAP1320MaskedReleaseSendsNoRawRunStart(t *testing.T) {
+	alpha := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	f := gap1307Converse
+	f.name = "bedrock-converse-pad"
+	f.delta = func(text string) string {
+		pad := "abc"
+		if n := len(text); n > 0 {
+			if i := strings.IndexByte(alpha, text[n-1]); i >= 0 {
+				pad = alpha[:i+1]
+			}
+		}
+		return gap1307ConverseFrame("contentBlockDelta", map[string]any{"contentBlockIndex": 0, "delta": map[string]any{"text": text}, "p": pad})
+	}
+	path := gap1307Path{name: "passthrough/" + f.name, format: f, text: gap1307ConverseText, masked: true}
+	prose := gap0429Pieces(retestFiller(1500)[:1500], 24, nil)
+	card := gap1091Value("card-visa-spaced", "4111 1111 1111 1111")
+	tok := gap0429Tokens(t)[0]
+	split := func(s gap0429Secret) ([]string, int) {
+		mid := s.body + (s.end-s.body)/2
+		p := append(append([]string(nil), prose...), " "+s.text[:s.body+1], s.text[s.body+1:mid], s.text[mid:]+" and done.\n")
+		return p, len(p) - 1
+	}
+	var rows []gap1265Row
+	for _, tier := range streamTailTiers {
+		cp, ca := split(card)
+		tp, ta := split(tok)
+		rows = append(rows,
+			gap1265Row{name: "card", tier: tier.name, pack: tier.pack, managed: tier.managed, pieces: cp, at: ca, pause: gap1307Pause, secret: card},
+			gap1265Row{name: "token", tier: tier.name, pack: tier.pack, managed: tier.managed, pieces: tp, at: ta, pause: gap1307Pause, secret: tok},
+		)
+	}
+	bound := streamHoldMaxPartialAge + gap1307Slack
+	results, _ := gap1307Serve(t, path, rows)
+	for i, row := range rows {
+		res := results[i]
+		name := fmt.Sprintf("%s/%s/%s", path.name, row.tier, row.name)
+		n := row.secret.end - row.secret.body
+		if res.before > 0 {
+			t.Errorf("%s: %d of %d raw value bytes reached the client before the verdict", name, res.before, n)
+		}
+		if res.blocked && res.final > 0 {
+			t.Errorf("%s: blocked, but %d of %d value bytes reached the client", name, res.final, n)
+		}
+		if res.first < 0 || res.first > bound {
+			t.Errorf("%s: the client got no byte within %s of the upstream going quiet (first after %s)", name, bound, res.first)
+		}
+		if !res.blocked && !gap1307MaskedOnly(res.got, strings.Join(row.pieces, ""), len(strings.Join(row.pieces[:row.at], ""))) {
+			t.Errorf("%s: not blocked, but the client got other text than the reply with the run masked (%d bytes)", name, len(res.got))
+		}
+	}
+}

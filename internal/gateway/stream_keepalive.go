@@ -103,19 +103,25 @@ func (s *passthroughStream) keepAlive(started bool) []byte {
 	return sseKeepAlive
 }
 
-// openRun is the token or digit run still running at the end of one lane.
+// openRun is the token or digit run still running at the end of one lane:
+// lane is the lane's place in the text, key the lane the reader puts it in.
 type openRun struct {
 	lane, start int
+	key         responseLane
 	text        string
 }
 
 // OpenRuns is the open token or digit run of every lane that has one.
 func (r *responseText) OpenRuns() []openRun {
+	keys := make([]responseLane, len(r.lanes))
+	for k, i := range r.index {
+		keys[i] = k
+	}
 	var out []openRun
 	for i, l := range r.lanes {
 		t := l.String()
 		if st := r.secret[i].tokenStart(t); st >= 0 {
-			out = append(out, openRun{lane: i, start: st, text: t[st:]})
+			out = append(out, openRun{lane: i, start: st, key: keys[i], text: t[st:]})
 		}
 	}
 	return out
@@ -135,6 +141,19 @@ func maskRunText(s string) string {
 	return b.String()
 }
 
+// runTextKeys are the keys of the string fields the typed readers of a
+// Bedrock event take (bedrockStreamDelta, bedrockInvokeChunkPieces:
+// anthropicStreamPieces, chatChoicesPieces, Mistral outputs; generation,
+// outputText, completion, text). A run in a typed lane is looked for only
+// in those; a run in the walker's lane (responseFieldOther) only in the
+// other strings the walker reads. The padding of a frame ("p"), its event
+// type or other metadata never holds a typed run: when a padding value
+// ended like the run, it took the match and the start of the run went out
+// raw (rel-1-0-10:GAP-1320).
+var runTextKeys = map[string]bool{"text": true, "thinking": true, "partial_json": true, "input": true,
+	"generation": true, "outputText": true, "completion": true, "content": true, "reasoning_content": true,
+	"refusal": true, "arguments": true}
+
 // runMask is the part of each open run not yet found in the events read
 // back to front.
 type runMask struct {
@@ -151,15 +170,20 @@ func newRunMask(runs []openRun) *runMask {
 }
 
 // mask masks the end of one run in s, a string of an event read back to
-// front: all of s when it is the end of what is left of a run, its end when
-// the run starts inside it.
-func (m *runMask) mask(s string) (string, bool) {
+// front under key: all of s when it is the end of what is left of a run,
+// its end when the run starts inside it. Only a run of the lane kind the
+// key feeds is looked for (runTextKeys).
+func (m *runMask) mask(key, s string) (string, bool) {
 	if s == "" {
+		return s, false
+	}
+	typed := runTextKeys[key]
+	if !typed && walkSkipScalar[normKey(key)] {
 		return s, false
 	}
 	for i, l := range m.left {
 		switch {
-		case l == "":
+		case l == "", (m.runs[i].key.field == responseFieldOther) == typed:
 		case strings.HasSuffix(l, s):
 			m.left[i] = l[:len(l)-len(s)]
 			return maskRunText(s), true
@@ -205,9 +229,10 @@ func jsonStringSpans(b []byte) []jsonSpan {
 }
 
 // maskJSON masks the open runs in the string values of the JSON text b,
-// back to front; a "bytes" value (a Bedrock invoke chunk) is read as the
-// base64 of the JSON event it carries. False: b is not JSON.
-func (m *runMask) maskJSON(b []byte) ([]byte, bool) {
+// back to front. chunk: b is the payload of a Bedrock invoke chunk, whose
+// only text is its "bytes" value, read as the base64 of the JSON event it
+// carries (the reader reads no other string of it). False: b is not JSON.
+func (m *runMask) maskJSON(b []byte, chunk bool) ([]byte, bool) {
 	if !json.Valid(b) {
 		return nil, false
 	}
@@ -228,16 +253,21 @@ func (m *runMask) maskJSON(b []byte) ([]byte, bool) {
 		if i > 0 && spans[i-1].key && string(bytes.TrimSpace(b[spans[i-1].end:sp.start])) == ":" {
 			_ = json.Unmarshal(b[spans[i-1].start:spans[i-1].end], &k)
 		}
-		if inner, err := base64.StdEncoding.DecodeString(s); k == "bytes" && err == nil && json.Valid(inner) {
-			mi, ok := m.maskJSON(inner)
+		switch {
+		case chunk && k == "bytes":
+			inner, err := base64.StdEncoding.DecodeString(s)
+			if err != nil || !json.Valid(inner) {
+				return nil, false
+			}
+			mi, ok := m.maskJSON(inner, false)
 			if !ok {
 				return nil, false
 			}
 			if !bytes.Equal(mi, inner) {
 				repl, changed = base64.StdEncoding.EncodeToString(mi), true
 			}
-		} else {
-			repl, changed = m.mask(s)
+		case !chunk:
+			repl, changed = m.mask(k, s)
 		}
 		if !changed {
 			continue
@@ -266,7 +296,19 @@ func (m *runMask) maskBedrockFrames(raw []byte) ([]byte, bool) {
 	}
 	changed := false
 	for i := len(msgs) - 1; i >= 0; i-- {
-		p, ok := m.maskJSON(msgs[i].Payload)
+		var mtype, etype string
+		for _, h := range msgs[i].Headers {
+			switch h.Name {
+			case ":message-type":
+				mtype = h.Value.String()
+			case ":event-type":
+				etype = h.Value.String()
+			}
+		}
+		if mtype != "event" {
+			continue // the reader takes no text from it (messagePieces)
+		}
+		p, ok := m.maskJSON(msgs[i].Payload, etype == "chunk")
 		if !ok {
 			return nil, false
 		}
@@ -290,22 +332,21 @@ func (m *runMask) maskBedrockFrames(raw []byte) ([]byte, bool) {
 // maskHeld returns the first n events of the queue with the bytes of the
 // open runs masked (option b; Bedrock framing only). Every run must be
 // found whole in the queue, or its start in what an earlier masked release
-// sent (masked: lane to the run start and end it covered); else false and
-// nothing may go out.
+// sent (masked: lane to the run start and end it covered), and the stream's
+// own reader must read the masked events as the held ones with only the
+// runs masked (maskedAsRead); else false and nothing may go out.
 func (s *passthroughStream) maskHeld(queue [][]byte, n int, runs []openRun, masked map[int][2]int) ([][]byte, bool) {
 	if s.bedrock == nil || len(runs) == 0 {
 		return nil, false
 	}
 	m := newRunMask(runs)
-	out := make([][]byte, n)
+	out := make([][]byte, len(queue))
 	for i := len(queue) - 1; i >= 0; i-- {
 		ev, ok := m.maskBedrockFrames(queue[i])
 		if !ok {
 			return nil, false
 		}
-		if i < n {
-			out[i] = ev
-		}
+		out[i] = ev
 	}
 	for i, l := range m.left {
 		if l == "" {
@@ -316,5 +357,101 @@ func (s *passthroughStream) maskHeld(queue [][]byte, n int, runs []openRun, mask
 			return nil, false
 		}
 	}
+	if !s.maskedAsRead(queue, out, runs, masked) {
+		return nil, false
+	}
+	return out[:n:n], true
+}
+
+// bedrockLaneText is the model text of the whole eventstream frames by
+// lane, as the stream's reader takes it (a fresh one with the same value
+// cap). False: the frames do not decode whole.
+func (s *passthroughStream) bedrockLaneText(frames [][]byte) (map[responseLane]string, bool) {
+	rd := newBedrockEventStreamText()
+	rd.maxValues = s.bedrock.maxValues
+	lanes := map[responseLane]*strings.Builder{}
+	for _, f := range frames {
+		for _, p := range rd.Feed(f) {
+			if p.text == "" {
+				continue
+			}
+			if lanes[p.lane] == nil {
+				lanes[p.lane] = &strings.Builder{}
+			}
+			lanes[p.lane].WriteString(p.text)
+		}
+	}
+	if rd.Broken() || rd.PartialLen() != 0 {
+		return nil, false
+	}
+	out := make(map[responseLane]string, len(lanes))
+	for k, b := range lanes {
+		out[k] = b.String()
+	}
 	return out, true
+}
+
+// maskedAsRead reports that the stream's reader takes from the masked
+// frames out the same text as from the held ones, lane by lane, except the
+// part of each open run they hold, which it reads with no letter or digit
+// left; the part of a run before them went out masked before (prior). A
+// run placed in a field of another lane, or a lane that changed otherwise,
+// keeps everything held (rel-1-0-10:GAP-1320). The walker's lane is
+// compared only when a run is open in it: no string of it is masked
+// otherwise (runMask.mask), but which of its strings a typed field holds,
+// and so leaves out of it, changes when that field is masked.
+func (s *passthroughStream) maskedAsRead(held, out [][]byte, runs []openRun, prior map[int][2]int) bool {
+	want, ok := s.bedrockLaneText(held)
+	if !ok {
+		return false
+	}
+	got, ok := s.bedrockLaneText(out)
+	if !ok {
+		return false
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok && k.field != responseFieldOther {
+			return false
+		}
+	}
+	raw := make(map[responseLane]int, len(want)) // bytes at the start of a lane read raw
+	for k, t := range want {
+		raw[k] = len(t)
+	}
+	for _, r := range runs {
+		t := want[r.key]
+		n := min(len(r.text), len(t))
+		if !strings.HasSuffix(t, r.text[len(r.text)-n:]) {
+			return false
+		}
+		if n < len(r.text) {
+			p, ok := prior[r.lane]
+			if !ok || p[0] != r.start || r.start+len(r.text)-n > p[1] {
+				return false
+			}
+		}
+		if n > 0 {
+			raw[r.key] = len(t) - n
+		}
+	}
+	for k, t := range want {
+		if k.field == responseFieldOther && raw[k] == len(t) {
+			continue
+		}
+		g, ok := got[k]
+		if !ok || !strings.HasPrefix(g, t[:raw[k]]) {
+			return false
+		}
+		rest := g[raw[k]:]
+		if raw[k] == len(t) {
+			if rest != "" {
+				return false
+			}
+			continue
+		}
+		if strings.IndexFunc(rest, func(c rune) bool { return unicode.IsLetter(c) || unicode.IsDigit(c) }) >= 0 {
+			return false
+		}
+	}
+	return true
 }
