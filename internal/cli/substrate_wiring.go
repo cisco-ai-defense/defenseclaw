@@ -201,7 +201,8 @@ func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver contro
 		lv.Settings.ActorService, lv.Settings.AdminService = bootSettings.ActorService, bootSettings.AdminService
 		lv.Settings.Audience, lv.Settings.TokenLifetimeSeconds = bootSettings.Audience, bootSettings.TokenLifetimeSeconds
 		// The callout reads substrate.extproc (mcp_hosts) and the gateway the
-		// LLM providers only at helm upgrade or restart: rendering their hosts
+		// LLM providers only at helm upgrade or restart (its config reload
+		// holds llm_providers on Substrate, GAP-0589): rendering their hosts
 		// live would open egress before the callout inspects it (GAP-0306).
 		lv.Settings.MCPHosts, lv.Settings.ProviderHosts = bootSettings.MCPHosts, bootSettings.ProviderHosts
 		return lv
