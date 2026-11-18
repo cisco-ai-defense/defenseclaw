@@ -95,6 +95,7 @@ func TestGAP0643KitSendsFetchFactsForArgvMCPAddAndUnloadedConfigWrite(t *testing
 		{"argv ls", "shell", map[string]any{"command": []any{"ls", "-la"}}},
 		{"Write of another file", "Write", map[string]any{"file_path": filepath.Join(repo, "sub", "notes.json"), "content": doc}},
 		{"Read of an unloaded .mcp.json", "Read", map[string]any{"file_path": filepath.Join(repo, "sub", ".mcp.json")}},
+		{"Edit of an unloaded .mcp.json", "Edit", map[string]any{"file_path": filepath.Join(repo, "sub", ".mcp.json"), "old_string": "a", "new_string": "b"}},
 	} {
 		if _, ok := collect("claudecode", c.tool, c.input)[roleFetchChecked+" "+repo]; ok {
 			t.Errorf("%s: folder facts sent, want none", c.name)

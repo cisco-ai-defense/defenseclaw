@@ -722,9 +722,11 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 	}
 	if !match {
 		// A config the connector does not load (sub/.mcp.json): the gateway
-		// reads the servers from the call itself and decides a fetched one
-		// with the folder's facts, so the kit sends them (GAP-0643).
-		if mcpConfigWriteNames[filepath.Base(target)] && writesContent(in) {
+		// reads the servers of a whole write (its content) from the call
+		// itself and decides a fetched one with the folder's facts, so the
+		// kit sends them (GAP-0643). A partial edit gives the gateway no
+		// server; it needs none.
+		if _, whole := in["content"].(string); whole && mcpConfigWriteNames[filepath.Base(target)] {
 			budget = attachFetchFacts(f, cwd, budget)
 		}
 		return budget
@@ -747,17 +749,6 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 // the same rule).
 var mcpConfigWriteNames = map[string]bool{".mcp.json": true, "mcp.json": true, ".claude.json": true,
 	"settings.json": true, "settings.local.json": true, "config.toml": true}
-
-// writesContent reports a file tool call that carries the text it writes
-// (a Write's content, an edit's new text, a patch), as the gateway reads it.
-func writesContent(in map[string]any) bool {
-	for _, k := range []string{"content", "new_string", "newString", "new_source", "edits", "patch", "input"} {
-		if _, ok := in[k]; ok {
-			return true
-		}
-	}
-	return false
-}
 
 // commandText is a tool call's command as the gateway reads it: the string,
 // or the strings of an argv list joined by spaces.

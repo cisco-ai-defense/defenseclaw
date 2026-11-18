@@ -21,8 +21,8 @@ import (
 // <the project folder>) added by an argv-form "mcp add" (the Codex shell tool)
 // or by a Write of an MCP config the connector does not load, through the
 // files a real actor's kit sends, into the shipped gateway scanner. With the
-// kit's folder facts it is attached and read in the default and strict rule
-// packs, as rel attached it; a folder that resolves the fetcher locally
+// kit's folder facts it is scanned and allowed in the default and strict rule
+// packs, as rel allowed it; a folder that resolves the fetcher locally
 // (.npmrc, node_modules/.bin, a package.json bin) leaves it unscanned, so the
 // fail mode decides (GAP-0573 unchanged).
 func TestGAP0643ShippedGatewayArgvMCPAddAndUnloadedWriteWithKitFacts(t *testing.T) {
@@ -109,8 +109,10 @@ func TestGAP0643ShippedGatewayArgvMCPAddAndUnloadedWriteWithKitFacts(t *testing.
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {
 			for _, pack := range []string{"", "strict"} {
-				if d := run(t, s.connector, s.tool, s.input, nil, pack, false); !d.Attached || d.Block || d.Unreadable {
-					t.Errorf("pack %q: the clean fetched server with the kit's folder facts: %+v, want attached", pack, d)
+				// Read and decided by the config rules (allowed, at most a
+				// warning such as an unpinned package), not unscanned.
+				if d := run(t, s.connector, s.tool, s.input, nil, pack, false); d.Block || d.Unreadable {
+					t.Errorf("pack %q: the clean fetched server with the kit's folder facts: %+v, want scanned and allowed", pack, d)
 				}
 				// Without the folder facts: not known, the fail mode decides.
 				if d := run(t, s.connector, s.tool, s.input, nil, pack, true); !d.Unreadable || d.Block {
