@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -94,11 +95,35 @@ type substrateFollower struct {
 	// are still its); applied the digest in force.
 	boot    *config.Config
 	applied string
+	// guardrail, for a gateway that reads the ConfigMap through the API,
+	// says when an edit reaches its guardrail (substrateGatewayGuardrail).
+	guardrail string
 }
 
 func newSubstrateFollower(w *configwatch.Watcher, role string, out io.Writer, apply func(*config.Config) error) *substrateFollower {
 	boot, d := w.Current()
-	return &substrateFollower{w: w, role: role, out: out, apply: apply, boot: boot, applied: d}
+	f := &substrateFollower{w: w, role: role, out: out, apply: apply, boot: boot, applied: d}
+	if role == "gateway" && w.Fetch != nil {
+		f.guardrail = substrateGatewayGuardrail(w.Path)
+	}
+	return f
+}
+
+// substrateGatewayGuardrail says when a ConfigMap edit the gateway follower
+// has read through the API reaches the gateway's guardrail (hook and /llm
+// modes, rules, profiles). The follower applies only the chain egress action
+// and the create path's settings; the guardrail reloads from the mounted
+// config.yaml (the gateway's config manager), so "in force" at the API read
+// was early (substrate-1:GAP-0590). The kubelet updates a directory mount
+// (a ..data link beside config.yaml, GAP-0579) about a minute after the
+// edit, and never a managed install's subPath mount of the one file.
+func substrateGatewayGuardrail(path string) string {
+	const what = "the guardrail (hook and /llm modes, rules, profiles) applies "
+	if fi, err := os.Lstat(filepath.Join(filepath.Dir(path), "..data")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return what + "when the kubelet updates the mounted config.yaml, about a minute after the edit"
+	}
+	return what + "when this pod restarts: config.yaml is mounted as one file (subPath), which the kubelet never updates " +
+		"(helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/" + substrateRoleDeployment["gateway"] + ")"
 }
 
 // run reads the source every configwatch.DefaultInterval until ctx ends.
@@ -134,6 +159,10 @@ func (f *substrateFollower) step(ctx context.Context) {
 		return
 	}
 	msg := fmt.Sprintf("[substrate] %s: config.yaml %s in force (was %s)", f.role, ch.Digest, prev)
+	if f.guardrail != "" {
+		msg = fmt.Sprintf("[substrate] %s: config.yaml %s seen (was %s): the chain egress action and the create path's settings apply now; %s",
+			f.role, ch.Digest, prev, f.guardrail)
+	}
 	if pending := substrateRestartOnly(f.boot, ch.Config); len(pending) > 0 {
 		msg += "; these keys changed and apply when this pod restarts: " + strings.Join(pending, ", ") +
 			" (helm upgrade rolls the pods; after a direct ConfigMap edit run kubectl rollout restart deploy/" + substrateRoleDeployment[f.role] + ")"
