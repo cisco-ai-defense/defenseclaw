@@ -1315,6 +1315,9 @@ func sandboxAgentHookConfigChange(ctx context.Context, request trustedActionRequ
 			}
 			if registered {
 				if reason := sandboxAgentHookWithoutBefore(format, change, registration); reason != "" {
+					if reason != sandboxAgentHookNoBefore {
+						reason += "; " + sandboxManagedHooksNote
+					}
 					return agentHookConfigDisableRuleID, reason, target
 				}
 				continue
@@ -1581,14 +1584,23 @@ func sandboxAgentHookRegisteredChange(ctx context.Context, format string, change
 		return "settings snapshot is incomplete or conflicting; re-run with a current DefenseClaw kit", true
 	}
 	if len(change.edits) == 0 {
-		after, exists, ok := change.after(func(string) ([]byte, bool) { return before, true })
+		otherSource := false
+		after, exists, ok := change.after(func(name string) ([]byte, bool) {
+			if name != change.path {
+				otherSource = true
+				return nil, false
+			}
+			return before, true
+		})
+		if otherSource {
+			return "cannot judge a patch source using the destination settings snapshot; use Write with a current DefenseClaw kit", true
+		}
 		if !ok {
 			return "", false
 		}
 		if len(after) > sandboxAgentHookDocumentBound {
 			return "exceeds the actor settings document bound: split them", true
 		}
-		judged = true
 		if reason := agentHookConfigTurnsOff(format, before, true, after, exists); reason != "" {
 			return reason, true
 		}
@@ -1619,8 +1631,7 @@ func sandboxAgentHookRegisteredChange(ctx context.Context, format string, change
 			return reason, true
 		}
 	}
-	judged = judged || complete
-	return "", judged
+	return "", complete
 }
 
 // Count matches and prove the resulting size BEFORE strings.Replace can

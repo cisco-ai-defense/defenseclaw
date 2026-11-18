@@ -88,3 +88,15 @@ func TestGAP0602WholeJSONSubstringIsAmbiguous(t *testing.T) {
 		t.Fatalf("unproven whole-document edit allowed: %s %s", rule, note)
 	}
 }
+
+func TestGAP0602PatchMoveNeedsSourceContext(t *testing.T) {
+	source := "/work/plain.json"
+	target := sandboxauth.SandboxHome + "/.claude/settings.json"
+	patch := "*** Begin Patch\n*** Update File: " + source + "\n*** Move to: " + target + "\n@@\n-{}\n+{}\n*** End Patch\n"
+	args, _ := json.Marshal(map[string]any{"input": patch})
+	rule, note, _ := sandboxAgentHookConfigChange(gapNF6Facts(context.Background(), gap0433LaptopSettings), trustedActionRequest{
+		Connector: "claudecode", Input: actionfacts.Input{Tool: "apply_patch", Args: args, ActiveHome: sandboxauth.SandboxHome, CWD: "/work"}})
+	if rule != agentHookConfigDisableRuleID || !strings.Contains(note, "patch source") {
+		t.Fatalf("destination snapshot substituted for unrelated source: rule=%s note=%s", rule, note)
+	}
+}

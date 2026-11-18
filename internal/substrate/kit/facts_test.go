@@ -200,3 +200,40 @@ func TestFactsAgentHookBeforeAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestFactsAgentHookBeforePatchTargets(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(dir, "settings.json")
+	second := filepath.Join(dir, "settings.local.json")
+	for _, target := range []string{first, second} {
+		if err := os.WriteFile(target, []byte("{}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	patch := "*** Begin Patch\n*** Update File: " + first + "\n@@\n-{}\n+{}\n*** Update File: " + second + "\n@@\n-{}\n+{}\n*** End Patch\n"
+	for _, tool := range []string{"apply_patch", "applypatch", "apply-patch", "patch"} {
+		for _, budget := range []int64{2, 4} {
+			payload, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": home, "tool_name": tool,
+				"tool_input": map[string]any{"input": patch, "patch": patch}})
+			facts := CollectFacts("claudecode", "", payload, budget)
+			if facts == nil || len(facts.Files) != 2 {
+				t.Fatalf("%s: lost or duplicate patch targets: %+v", tool, facts)
+			}
+			total := 0
+			for _, f := range facts.Files {
+				total += len(f.Content)
+			}
+			if int64(total) != budget {
+				t.Fatalf("%s: bytes=%d budget=%d", tool, total, budget)
+			}
+			if facts.Files[0].Truncated || facts.Files[1].Truncated != (budget == 2) {
+				t.Fatalf("%s: shared patch budget lost: %+v", tool, facts.Files)
+			}
+		}
+	}
+}

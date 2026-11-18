@@ -119,26 +119,33 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 }
 
 // attachAgentHookBefore supplies exact current settings bytes for semantic
-// native-edit and replacement judgement. One bounded read for Claude settings;
-// unrelated calls attach nothing. No digest pass over an oversized file.
+// native-edit and replacement judgement. One bounded read per settings target;
+// the shared post budget also bounds multi-file patches. Unrelated calls attach
+// nothing, and oversized files receive no digest pass.
 func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) int64 {
 	if connectorName != "claudecode" {
 		return budget
 	}
 	switch strings.ToLower(strings.TrimSpace(tool)) {
 	case "edit", "edit_file", "str_replace", "multiedit", "multi_edit", "multi-edit",
-		"write", "write_file", "writefile", "write-file", "create", "create_file":
+		"write", "write_file", "writefile", "write-file", "create", "create_file",
+		"apply_patch", "applypatch", "apply-patch", "patch":
 	default:
 		return budget
 	}
+	attached := map[string]bool{}
 	for _, pf := range f.Paths {
-		if pf.Field != "tool_input.file_path" && pf.Field != "tool_input.filePath" && pf.Field != "tool_input.path" {
+		if pf.Field != "tool_input.file_path" && pf.Field != "tool_input.filePath" && pf.Field != "tool_input.path" && !strings.HasSuffix(pf.Field, ".patch") {
 			continue
 		}
 		p := filepath.ToSlash(pf.Abs)
 		if !strings.HasSuffix(p, "/.claude/settings.json") && !strings.HasSuffix(p, "/.claude/settings.local.json") {
 			continue
 		}
+		if attached[pf.Abs] {
+			continue
+		}
+		attached[pf.Abs] = true
 		a := AttachedFile{Role: "agent_hook_config_before", Path: pf.Abs, Resolved: pf.Resolved, Size: -1, Truncated: true}
 		limit := budget
 		if limit > 64<<10 {
@@ -174,7 +181,7 @@ func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) i
 			f.Truncated = true
 		}
 		f.Files = append(f.Files, a)
-		return budget - int64(len(a.Content))
+		budget -= int64(len(a.Content))
 	}
 	return budget
 }
