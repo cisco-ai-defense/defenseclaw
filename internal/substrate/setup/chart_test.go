@@ -114,6 +114,7 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"managed no allowed_images": "config.deployment_mode=managed_enterprise",
 		"managed unattested":        "config.deployment_mode=managed_enterprise,config.substrate.require_attested_templates=false,config.substrate.templates.allowed_images={reg.example.com/dc/*}",
 		"unknown value":             "gateway.surprise=1",
+		"bad namespace label":       "metrics.prometheusRule.enabled=true,metrics.prometheusRule.namespaceLabel=k8s.namespace.name",
 	} {
 		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", set}
 		if err := exec.Command(helm, args...).Run(); err == nil {

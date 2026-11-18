@@ -237,7 +237,7 @@ An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenSh
 | `defenseclaw.substrate.idle_suspends` | counter | By the gateway, from the controller: actors suspended for being idle |
 | `defenseclaw.substrate.policy_conflicts` | counter | By the gateway, from the controller: actors entering `policy_conflict` |
 
-The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates. The rules on these metrics read the series your OTLP backend writes to Prometheus, which have no namespace label, so they cover every DefenseClaw cluster that reports there.
+The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates. The rules on these metrics select the release's namespace by the label Prometheus gives the `k8s.namespace.name` resource attribute (`k8s_namespace_name` once your OTLP receiver or collector promotes it; the chart value `metrics.prometheusRule.namespaceLabel`), so releases that share a Prometheus alert only on their own series.
 
 ## What to trust
 
