@@ -156,7 +156,7 @@ type Controller struct {
 	// inUse is the templates of the actors the last pass listed: only
 	// their verdicts count for the unattested-templates gauge, and an
 	// expired verdict of another template is dropped (GAP-0583).
-	inUse map[string]bool
+	inUse     map[string]bool
 	fastUntil time.Time
 	scoped    bool
 	// unlisted are atespaces the last pass could not list: their known
