@@ -87,7 +87,8 @@ func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *tes
 }
 
 func TestEvaluateClaudeCodeHook_StopFailureRetainsNormalizedSubmittedContent(t *testing.T) {
-	const blockMessage = "Blocked by ACME SecOps policy. Contact secops@example.test"
+	const blockMessage = "Access was denied"
+	const normalized = "provider: Access was denied; retry"
 	var requestBody string
 	var requestErr error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -112,19 +113,16 @@ func TestEvaluateClaudeCodeHook_StopFailureRetainsNormalizedSubmittedContent(t *
 
 	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
 		HookEventName: "StopFailure",
-		Error:         "provider failed: " + blockMessage + " retry exhausted",
+		Error:         "provider: Access" + blockMessage + "was denied; retry",
 	})
 	if requestErr != nil {
 		t.Fatal(requestErr)
 	}
-	if strings.Contains(requestBody, blockMessage) {
-		t.Fatalf("AI Defense request retained configured block message: %s", requestBody)
+	if !strings.Contains(requestBody, normalized) {
+		t.Fatalf("AI Defense request did not contain the one-pass normalized StopFailure content: %s", requestBody)
 	}
-	if !strings.Contains(requestBody, "provider failed:   retry exhausted") {
-		t.Fatalf("AI Defense request did not contain normalized StopFailure content: %s", requestBody)
-	}
-	if want := "provider failed:   retry exhausted"; !resp.InspectedContentPresent || resp.InspectedContent != want {
-		t.Fatalf("StopFailure submitted content = (%q, %t), want (%q, true)", resp.InspectedContent, resp.InspectedContentPresent, want)
+	if !resp.InspectedContentPresent || resp.InspectedContent != normalized {
+		t.Fatalf("StopFailure submitted content = (%q, %t), want (%q, true)", resp.InspectedContent, resp.InspectedContentPresent, normalized)
 	}
 }
 
@@ -271,19 +269,21 @@ func TestEvaluateClaudeCodeHook_SubagentStartRetainsOnlyDistinctSubmittedContent
 		name        string
 		payload     map[string]interface{}
 		wantContent string
+		wantCalls   int
 	}{
-		{name: "task matches event", payload: map[string]interface{}{"task": "same task", "task_description": "same task"}},
-		{name: "description matches event", payload: map[string]interface{}{"description": "same description", "task_description": "same description"}},
-		{name: "distinct event", payload: map[string]interface{}{"task": "canonical task", "task_description": "separate detail"}, wantContent: "separate detail"},
-		{name: "lifecycle fallback", payload: map[string]interface{}{"task_description": "event without task"}, wantContent: "event without task"},
-		{name: "task only", payload: map[string]interface{}{"task": "canonical task"}},
+		{name: "task matches event", payload: map[string]interface{}{"task": "same task", "task_description": "same task"}, wantCalls: 1},
+		{name: "description matches event", payload: map[string]interface{}{"description": "same description", "task_description": "same description"}, wantCalls: 1},
+		{name: "distinct event", payload: map[string]interface{}{"task": "canonical task", "task_description": "separate detail"}, wantContent: "separate detail", wantCalls: 2},
+		{name: "lifecycle fallback", payload: map[string]interface{}{"task_description": "event without task"}, wantContent: "event without task", wantCalls: 1},
+		{name: "task only", payload: map[string]interface{}{"task": "canonical task"}, wantCalls: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var calls int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				calls++
-				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
 			}))
 			t.Cleanup(server.Close)
 
@@ -302,13 +302,58 @@ func TestEvaluateClaudeCodeHook_SubagentStartRetainsOnlyDistinctSubmittedContent
 				HookEventName: "SubagentStart",
 				Payload:       test.payload,
 			})
-			if calls != 1 {
-				t.Fatalf("AI Defense calls = %d, want 1", calls)
+			if calls != test.wantCalls {
+				t.Fatalf("AI Defense calls = %d, want %d", calls, test.wantCalls)
 			}
 			if resp.InspectedContent != test.wantContent || resp.InspectedContentPresent != (test.wantContent != "") {
 				t.Fatalf("SubagentStart content = (%q, %t), want (%q, %t)", resp.InspectedContent, resp.InspectedContentPresent, test.wantContent, test.wantContent != "")
 			}
 		})
+	}
+}
+
+func TestEvaluateClaudeCodeHook_SubagentStartInspectsTaskAlongsideMetadata(t *testing.T) {
+	var submitted []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read AI Defense request: %v", err)
+			return
+		}
+		submitted = append(submitted, string(body))
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), "review production credentials") {
+			_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey: "test-key", endpoint: server.URL, client: server.Client(),
+		},
+	}
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "SubagentStart",
+		AgentID:       "child-agent-1",
+		AgentType:     "researcher",
+		Payload:       map[string]interface{}{"task": "review production credentials"},
+	})
+
+	if len(submitted) != 2 {
+		t.Fatalf("AI Defense requests = %d, want metadata and task", len(submitted))
+	}
+	if !strings.Contains(submitted[0], "child-agent-1") || !strings.Contains(submitted[1], "review production credentials") {
+		t.Fatalf("AI Defense requests did not preserve metadata/task order: %v", submitted)
+	}
+	if resp.RawAction != "block" {
+		t.Fatalf("raw action = %q, want task-derived block", resp.RawAction)
 	}
 }
 
@@ -329,24 +374,45 @@ func TestClaudeCodeSubagentPromptSelection(t *testing.T) {
 }
 
 func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "claudecode"
-	api := &APIServer{scannerCfg: cfg}
-
-	for _, req := range []claudeCodeHookRequest{
-		{HookEventName: "UserPromptSubmit", Prompt: "prompt content"},
-		{HookEventName: "UserPromptExpansion", Prompt: "expanded prompt content"},
-		{HookEventName: "MessageDisplay", Delta: "assistant response"},
-		{HookEventName: "SubagentStart", Message: "subagent task"},
-		{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: map[string]interface{}{"file_path": "README.md"}},
-		{HookEventName: "PostToolUse", ToolName: "Read", ToolResponse: "tool result"},
-		{HookEventName: "StopFailure", LastAssistantMessage: "failed response"},
+	for _, test := range []struct {
+		name         string
+		req          claudeCodeHookRequest
+		wantAIDCalls int
+	}{
+		{name: "user prompt", req: claudeCodeHookRequest{HookEventName: "UserPromptSubmit", Prompt: "prompt content"}, wantAIDCalls: 1},
+		{name: "expanded prompt", req: claudeCodeHookRequest{HookEventName: "UserPromptExpansion", Prompt: "expanded prompt content"}, wantAIDCalls: 1},
+		{name: "assistant response", req: claudeCodeHookRequest{HookEventName: "MessageDisplay", Delta: "assistant response"}, wantAIDCalls: 1},
+		{name: "matching subagent task", req: claudeCodeHookRequest{HookEventName: "SubagentStart", Payload: map[string]interface{}{"task": "subagent task", "task_description": "subagent task"}}, wantAIDCalls: 1},
+		{name: "tool call", req: claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: map[string]interface{}{"file_path": "README.md"}}, wantAIDCalls: 1},
+		{name: "tool result", req: claudeCodeHookRequest{HookEventName: "PostToolUse", ToolName: "Read", ToolResponse: "tool result"}, wantAIDCalls: 1},
+		{name: "companion-only stop failure", req: claudeCodeHookRequest{HookEventName: "StopFailure", LastAssistantMessage: "failed response"}},
 	} {
-		resp := api.evaluateClaudeCodeHook(t.Context(), req)
-		if resp.InspectedContentPresent || resp.InspectedContent != "" {
-			t.Fatalf("%s captured duplicate inspected content: %+v", req.HookEventName, resp)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow"}`)
+			}))
+			t.Cleanup(server.Close)
+
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			api := &APIServer{
+				scannerCfg: cfg,
+				ciscoInspector: &CiscoInspectClient{
+					apiKey: "test-key", endpoint: server.URL, client: server.Client(),
+				},
+			}
+			resp := api.evaluateClaudeCodeHook(t.Context(), test.req)
+			if calls != test.wantAIDCalls {
+				t.Fatalf("AI Defense calls = %d, want %d", calls, test.wantAIDCalls)
+			}
+			if resp.InspectedContentPresent || resp.InspectedContent != "" {
+				t.Fatalf("captured duplicate inspected content: %+v", resp)
+			}
+		})
 	}
 }
 

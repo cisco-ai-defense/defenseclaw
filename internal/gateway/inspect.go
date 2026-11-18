@@ -152,6 +152,11 @@ type ToolInspectRequest struct {
 	// of any send tool, whatever the tool is named (trustedActionSendsMessage).
 	// Set only by the message lane, never from the wire.
 	sendDestination bool
+	// blockMessageEchoNormalized marks content whose connector adapter already
+	// removed the configured block-message echo. It prevents a second,
+	// non-idempotent replacement while preserving Direction for policy logic.
+	// Set only by a connector adapter, never from the public inspect wire.
+	blockMessageEchoNormalized bool
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -1987,7 +1992,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		return verdict
 	}
 
-	if req.Direction == "response" || req.Direction == "tool_result" {
+	if !req.blockMessageEchoNormalized && (req.Direction == "response" || req.Direction == "tool_result") {
 		content = withoutBlockMessageEcho(a.decisionConfig(ctx), req.Connector, content)
 	}
 	if content == "" {
