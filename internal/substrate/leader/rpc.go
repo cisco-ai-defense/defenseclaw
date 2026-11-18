@@ -219,11 +219,6 @@ type Server struct {
 	Permit Permissions
 	// Now replaces the clock (tests).
 	Now func() time.Time
-	// OnLeaderCall, when set, runs for every call this replica serves as the
-	// leader (a known method, an allowed peer), before its handler: the
-	// chain state starts its start grace there
-	// (chainstate.Service.LeaderCall, GAP-0601).
-	OnLeaderCall func()
 
 	mu       sync.Mutex
 	handlers map[string]Handler
@@ -307,9 +302,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.IsLeader == nil || !s.IsLeader() {
 		writeWire(w, http.StatusServiceUnavailable, Response{Error: &WireError{Code: CodeNotLeader, Message: "this replica is not the leader"}})
 		return
-	}
-	if s.OnLeaderCall != nil {
-		s.OnLeaderCall()
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil || len(raw) > maxBodyBytes {

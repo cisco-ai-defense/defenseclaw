@@ -30,18 +30,19 @@ import (
 // GAP-0601 (IB5 TST-2593): the first git clone of a fresh actor, about 75 s
 // after a leader restart, got GET info/refs refused chain_unchecked timeout
 // at 256 ms on a healthy leader; later clones took about 1 ms. Cause: the
-// start grace ran from the leader's first clear egress check, not from when
-// the leader started serving, so the first clear check after any restart
-// was answered unavailable (the callout's leader client retried it until
-// the 250 ms send budget ran out), however long after the restart it came.
-// These tests drive the callout's real path: leader.Server with the chain
-// state and another store's method, and the callout's leader client (Retry
-// 1 s) under the 250 ms send budget.
+// start grace ran from the leader's first clear egress check with no bound,
+// so the first clear check after any restart was answered unavailable (the
+// callout's leader client retried it until the 250 ms send budget ran out),
+// however long after the restart it came. These tests drive the callout's
+// real path: leader.Server with the chain state and another store's method,
+// and the callout's leader client (Retry 1 s) under the 250 ms send budget.
+// They use only API that rel has, so they run at rel unchanged.
 
 // coldLeaderBudget is the callout's chain.send_budget (default 250 ms).
 const coldLeaderBudget = 250 * time.Millisecond
 
-// coldLeader is a restarted leader with the production start grace.
+// coldLeader is a restarted leader with the production start grace; its
+// term starts now.
 func coldLeader(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{t: t, dir: t.TempDir(), now: time.Date(2026, 11, 18, 11, 11, 58, 0, time.UTC)}
@@ -52,7 +53,7 @@ func coldLeader(t *testing.T) *harness {
 	ls := &leader.Server{IsLeader: func() bool { return true }}
 	svc.Register(ls)
 	// A read of another store on the same leader: the callout's
-	// registration lookup, the controller's 2 s activity poll.
+	// registration lookup before its chain check.
 	ls.HandleRead(leader.MethodRegistrationGet, func(context.Context, json.RawMessage) (json.RawMessage, error) {
 		return json.RawMessage(`{}`), nil
 	})
@@ -84,10 +85,11 @@ func (h *harness) calloutCheck(in EgressRequest) (EgressVerdict, time.Duration, 
 
 var freshGit = Actor{Atespace: "dc-eng", UID: "caa20383-acf7-4766-954d-b2f9871ed97e"}
 
-// cloneAnswered checks a fresh actor's HTTPS clone (GET info/refs, then
-// POST git-upload-pack): answered clear, at once.
+// cloneAnswered checks a fresh actor's HTTPS clone (its registration
+// lookup, GET info/refs, then POST git-upload-pack): answered clear, at once.
 func (h *harness) cloneAnswered(when string) {
 	h.t.Helper()
+	h.otherCall()
 	for _, m := range []string{"GET", "POST"} {
 		v, took, err := h.calloutCheck(EgressRequest{Actor: freshGit, Name: "p2b-git1", Host: "github.com", Method: m})
 		if err != nil || v.Deny || v.Stale {
@@ -100,13 +102,11 @@ func (h *harness) cloneAnswered(when string) {
 	}
 }
 
-// The leader has served calls since it started (a lookup, the controller's
-// poll); the first clear check comes 75 s later.
+// The first clear check comes 75 s after the leader started.
 func TestFirstCloneLongAfterLeaderStartGAP0601(t *testing.T) {
 	h := coldLeader(t)
-	h.otherCall()
 	h.advance(75 * time.Second)
-	h.cloneAnswered("75 s after the leader's first call")
+	h.cloneAnswered("75 s after the leader started")
 }
 
 // The IB5 sequence: after the restart the leader's only chain traffic is a
@@ -124,16 +124,16 @@ func TestFirstCloneAfterAHitGAP0601(t *testing.T) {
 	h.cloneAnswered("41 s after a hit")
 }
 
-// The S2 property stays: within the grace of the leader's first call a
-// clear send is refused (unchecked), a hit is answered at once; past it a
-// clear send is answered.
-func TestSendWithinTheGraceOfTheFirstCallStillRefusedGAP0601(t *testing.T) {
+// The S2 property stays: a clear send soon after the leader is back is
+// refused (unchecked), a hit is answered at once, and a clear send is
+// answered once the grace is over.
+func TestSendSoonAfterTheLeaderIsBackStillRefusedGAP0601(t *testing.T) {
 	h := coldLeader(t)
 	h.otherCall()
 	h.advance(6 * time.Second)
 	post := EgressRequest{Actor: actorB, Name: "b", Host: "github.com", Method: "POST"}
 	if v, took, err := h.calloutCheck(post); err == nil {
-		t.Fatalf("clear send 6 s after the leader's first call: %+v after %s, want unchecked (refused by the callout)", v, took)
+		t.Fatalf("clear send 6 s after the leader is back: %+v after %s, want unchecked (refused by the callout)", v, took)
 	}
 	h.hook(actorA, "s1", projection(t, guardrail.ToolChainSecretReadThenEgress, 1))
 	h.advance(time.Second)
@@ -142,6 +142,6 @@ func TestSendWithinTheGraceOfTheFirstCallStillRefusedGAP0601(t *testing.T) {
 	}
 	h.advance(15 * time.Second)
 	if v, _, err := h.calloutCheck(post); err != nil || v.Deny {
-		t.Fatalf("clear send 22 s after the leader's first call: %+v %v", v, err)
+		t.Fatalf("clear send 22 s after the leader is back: %+v %v", v, err)
 	}
 }

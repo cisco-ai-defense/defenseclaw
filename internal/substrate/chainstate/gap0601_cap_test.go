@@ -19,54 +19,87 @@ package chainstate
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
 
-// GAP-0601 review round 1: in a quiet cluster nothing calls a new leader
-// until the first actor starts, whose own calls (registration, hooks) then
-// came seconds before its clone. The grace ends startGraceCap after the term
-// began (Leading), so that clone is answered; a first call inside the cap
-// still gets the grace up to the cap.
-func TestQuietClusterFirstCloneGAP0601(t *testing.T) {
-	h := coldLeader(t)
-	h.svc.Leading()
-	// Overnight: the first actor's calls come long after the term began.
-	h.advance(10 * time.Minute)
-	h.otherCall()
-	h.advance(time.Second)
-	h.cloneAnswered("a quiet cluster's first actor, 1 s after its first call")
-
-	// A first call 20 s into the term: the grace lasts to the cap (30 s).
-	h2 := coldLeader(t)
-	h2.svc.Leading()
-	h2.advance(20 * time.Second)
-	h2.otherCall()
-	h2.advance(5 * time.Second)
+// GAP-0601: the start grace runs from the term's first clear check, as in
+// rel, and never past startGraceCap after the term began (Leading, or New
+// without it). Exact boundaries; Leading moves the term start.
+func TestStartGraceCapGAP0601(t *testing.T) {
+	ctx := context.Background()
 	post := EgressRequest{Actor: actorB, Name: "b", Host: "github.com", Method: "POST"}
-	if _, err := h2.svc.Egress(context.Background(), post); !errors.Is(err, errStarting) {
-		t.Fatalf("25 s into the term, 5 s after its first call: want errStarting, got %v", err)
+	refused := func(h *harness, when string) {
+		t.Helper()
+		if _, err := h.svc.Egress(ctx, post); !errors.Is(err, errStarting) {
+			t.Fatalf("%s: want errStarting, got %v", when, err)
+		}
 	}
-	h2.advance(5 * time.Second)
-	if v, err := h2.svc.Egress(context.Background(), post); err != nil || v.Deny {
-		t.Fatalf("at the cap (30 s into the term): %+v %v", v, err)
+	answered := func(h *harness, when string) {
+		t.Helper()
+		if v, err := h.svc.Egress(ctx, post); err != nil || v.Deny {
+			t.Fatalf("%s: want a clear answer, got %+v %v", when, v, err)
+		}
+	}
+	if startGraceCap(15*time.Second) != 30*time.Second {
+		t.Fatalf("cap %s, want 30 s", startGraceCap(15*time.Second))
 	}
 
-	// The cap is twice the grace, and a call early in the term keeps the
-	// full grace (the S2 row: a send 6 s after the leader is back).
-	if startGraceCap(15*time.Second) != 30*time.Second {
-		t.Fatalf("cap %s", startGraceCap(15*time.Second))
+	// An early first check keeps the whole grace, to the nanosecond.
+	h := coldLeader(t)
+	h.advance(5 * time.Second)
+	refused(h, "first check 5 s into the term")
+	h.advance(15*time.Second - time.Nanosecond)
+	refused(h, "just inside the grace of the first check")
+	h.advance(time.Nanosecond)
+	answered(h, "15 s after the first check")
+
+	// A late first check: the grace ends at the cap.
+	h = coldLeader(t)
+	h.advance(20 * time.Second)
+	refused(h, "first check 20 s into the term")
+	h.advance(10*time.Second - time.Nanosecond)
+	refused(h, "just inside the cap")
+	h.advance(time.Nanosecond)
+	answered(h, "at the cap (30 s), 10 s after the first check")
+
+	// Leading moves the term start: New came a lease duration earlier.
+	h = coldLeader(t)
+	h.advance(45 * time.Second)
+	h.svc.Leading()
+	h.advance(2 * time.Second)
+	refused(h, "2 s after Leading, 47 s after New")
+	h.advance(15 * time.Second)
+	answered(h, "15 s after the first check of the term")
+
+	// Quiet cluster: the first actor's clone comes minutes after Leading.
+	h = coldLeader(t)
+	h.svc.Leading()
+	h.advance(10 * time.Minute)
+	h.cloneAnswered("a quiet cluster's first actor")
+
+	// Leading on no service is a no-op.
+	var none *Service
+	none.Leading()
+}
+
+// Leading and the check race on the term fields (go test -race).
+func TestStartGraceTermConcurrentGAP0601(t *testing.T) {
+	h := coldLeader(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				if j%2 == 0 {
+					h.svc.Leading()
+				} else {
+					_ = h.svc.starting()
+				}
+			}
+		}()
 	}
-	h3 := coldLeader(t)
-	h3.svc.Leading()
-	h3.advance(2 * time.Second)
-	h3.otherCall()
-	h3.advance(6 * time.Second)
-	if _, err := h3.svc.Egress(context.Background(), post); !errors.Is(err, errStarting) {
-		t.Fatalf("6 s after the term's first call: want errStarting, got %v", err)
-	}
-	h3.advance(9 * time.Second)
-	if v, err := h3.svc.Egress(context.Background(), post); err != nil || v.Deny {
-		t.Fatalf("15 s after the term's first call: %+v %v", v, err)
-	}
+	wg.Wait()
 }

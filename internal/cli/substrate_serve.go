@@ -672,7 +672,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 		return err
 	}
 	// chains is the leader's chain state, opened below before the elector
-	// runs; a new leader term restarts its start grace (GAP-0601).
+	// runs; becoming the leader starts its start grace term (GAP-0601).
 	var chains *chainstate.Service
 	el := &leader.Elector{
 		API: &leader.KubeLeaseAPI{Server: "https://" + net.JoinHostPort(host, port), Namespace: ns, Name: serveFlags.lease,
@@ -774,10 +774,10 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	return err
 }
 
-// substrateLeaderStarted runs when this replica becomes the leader: a new
-// leader term for the chain start grace, then ready (GAP-0601). The grace
-// then runs from the first call the new leader serves, not from its first
-// clear egress check, which can come minutes later.
+// substrateLeaderStarted runs when this replica becomes the leader: the
+// chain start grace term begins (its 30 s cap runs from here, not from when
+// the chain state was opened, which can be a lease duration earlier), then
+// ready (GAP-0601).
 func substrateLeaderStarted(w io.Writer, pod string, chains *chainstate.Service, ready *atomic.Bool) {
 	fmt.Fprintf(w, "[substrate] %s is the leader\n", pod)
 	chains.Leading()
