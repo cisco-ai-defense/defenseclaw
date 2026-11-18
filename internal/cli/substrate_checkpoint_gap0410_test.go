@@ -46,7 +46,7 @@ func TestGAP0410CheckpointHasTheClusterStoreASnapshot(t *testing.T) {
 			if kept != tc.kept || (err != nil) != tc.wantErr || !strings.Contains(note, tc.note) {
 				t.Fatalf("kept %v note %q err %v", kept, note, err)
 			}
-			if tc.wantErr && (!strings.Contains(err.Error(), "restore point 3 is saved in the agent") || !errors.Is(err, errSubstrateNotKept) || !strings.Contains(err.Error(), "fix-tests-1 may be suspended now")) {
+			if tc.wantErr && (!strings.Contains(err.Error(), "restore point 3 is saved in the agent") || !errors.Is(err, errSubstrateNotKept) || (name == "may be suspended") != strings.Contains(err.Error(), "fix-tests-1 may be suspended now")) {
 				t.Fatalf("error %v does not say the restore point itself is saved", err)
 			}
 			f.mu.Lock()

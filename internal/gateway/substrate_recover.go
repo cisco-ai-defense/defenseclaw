@@ -171,7 +171,9 @@ func (s *SubstrateATEActions) snapshotFailed(ctx context.Context, atespace, name
 		return SubstrateKept{}, fmt.Errorf("suspend: %w (and the actor could not be read again: %v; it may be suspended)", err, gerr)
 	}
 	h := newestSnapshot(a.GetStatus())
-	if a.GetStatus().GetState() != ateapi.ActorStateSuspended || h.GetGeneration() <= before {
+	// Only an actor-owned snapshot can be this call's (a tag's is a
+	// template's); its state is left as it is otherwise.
+	if a.GetStatus().GetState() != ateapi.ActorStateSuspended || h.GetGeneration() <= before || h.GetOwner() != ateapi.SnapshotOwnerActor {
 		return SubstrateKept{Running: a.GetStatus().GetState() == ateapi.ActorStateRunning}, fmt.Errorf("suspend: %w", err)
 	}
 	kept := SubstrateKept{Generation: h.GetGeneration()}
