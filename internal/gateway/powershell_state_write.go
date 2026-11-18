@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"unicode"
@@ -137,21 +138,27 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 	const maxVariants = 256
 	variants := 0
 	for _, form := range forms {
-		if proven(form) {
-			return true, false
-		}
 		// PowerShell takes any unique parameter prefix (-ErrorA, -Verb,
 		// -Fo), and the reader leaves an unknown parameter partial, which
 		// dropped the proof. A mutator's prefixes are resolved; one that
 		// stays unknown or ambiguous is read without it, alone and with
 		// its value, and any reading that writes state is the write
 		// (over-block, checker it15 RV15-2).
-		forms, bounded := psParameterReadings(form)
-		variants += len(forms)
+		// plain is form, or, when a parameter can only take the next word
+		// as its value, form without both (psParameterReadings): the
+		// PowerShell reader skips the unknown parameter and reads its value
+		// as an operand, so mv -t <folder> <file> moved the folder
+		// (rel-1-0-10:GAP-1209). A parameter the cmdlet binds is never
+		// dropped, so -L and -Fi keep the proof (rel-1-0-10:GAP-1232).
+		readings, plain, bounded := psParameterReadings(form)
+		variants += len(readings)
 		if bounded || variants > maxVariants {
 			return true, false
 		}
-		for _, variant := range forms {
+		if proven(plain) {
+			return true, false
+		}
+		for _, variant := range readings {
 			if proven(variant) {
 				return true, false
 			}
@@ -160,8 +167,9 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 		// leaves the statement partial, although it names none of the files
 		// the cmdlet writes: Set-Content -Path <state> -Value @" ... "@ was
 		// allowed in every pack (rel-1-0-10:GAP-0750). Each such word is read
-		// as a plain one.
-		opaque, bounded := psOpaqueValueReadings(form)
+		// as a plain one, in plain: a value bound to a dropped parameter
+		// names no file (rel-1-0-10:GAP-1209).
+		opaque, bounded := psOpaqueValueReadings(plain)
 		variants += len(opaque)
 		if bounded || variants > maxVariants {
 			return true, false
@@ -175,7 +183,7 @@ func powerShellWriteReading(request trustedActionRequest, command string, follow
 		// but ActionFacts keeps New-Item -Value partial (it may name a link
 		// target): the reading without it proves the write of -Path
 		// (rel-1-0-10:GAP-1115).
-		if variant, ok := psContentFreeReading(form); ok && proven(variant) {
+		if variant, ok := psContentFreeReading(plain); ok && proven(variant) {
 			return true, false
 		}
 	}
@@ -325,67 +333,191 @@ func psSpellsAny(text string, spellings []string) bool {
 	return false
 }
 
-// psMutatorCmdlet reports a cmdlet or alias that writes, renames, moves,
-// copies over, empties or removes the item its path parameters name.
-func psMutatorCmdlet(word string) bool {
-	switch strings.ToLower(word) {
-	case "rename-item", "rni", "ren", "move-item", "mi", "mv", "move",
-		"copy-item", "cpi", "cp", "copy", "remove-item", "ri", "rm", "rmdir",
-		"rd", "del", "erase", "clear-content", "clc", "set-content", "sc",
-		"add-content", "ac", "out-file", "new-item", "ni", "clear-item", "cli",
-		"set-item", "si", "tee-object", "tee":
-		return true
+// psParameter is one parameter of a mutator cmdlet as PowerShell binds it:
+// its name and aliases, whether it is a switch (no value of its own), and
+// whether its value names an item the cmdlet writes, moves or removes.
+type psParameter struct {
+	name     string
+	aliases  []string
+	isSwitch bool
+	path     bool
+}
+
+func psValued(name string, aliases ...string) psParameter {
+	return psParameter{name: name, aliases: aliases}
+}
+
+func psSwitch(name string, aliases ...string) psParameter {
+	return psParameter{name: name, aliases: aliases, isSwitch: true}
+}
+
+func psPath(name string, aliases ...string) psParameter {
+	return psParameter{name: name, aliases: aliases, path: true}
+}
+
+// psMutatorParameters are, per mutator cmdlet and alias (one that writes,
+// renames, moves, copies over, empties or removes the item its path
+// parameters name), the parameters it binds in Windows PowerShell 5.1 and
+// PowerShell 7: its own, the FileSystem provider's dynamic ones (Stream,
+// Encoding, NoNewline, AsByteStream), the common parameters and, where it
+// supports them, WhatIf, Confirm and UseTransaction. PowerShell binds a
+// prefix against the parameters of the cmdlet it runs, not of any other
+// (rel-1-0-10:GAP-1232).
+var psMutatorParameters = func() map[string][]psParameter {
+	common := []psParameter{
+		psSwitch("Verbose", "vb"), psSwitch("Debug", "db"),
+		psValued("ErrorAction", "ea"), psValued("WarningAction", "wa"),
+		psValued("InformationAction", "infa"), psValued("ProgressAction", "proga"),
+		psValued("ErrorVariable", "ev"), psValued("WarningVariable", "wv"),
+		psValued("InformationVariable", "iv"), psValued("OutVariable", "ov"),
+		psValued("OutBuffer", "ob"), psValued("PipelineVariable", "pv"),
 	}
-	return false
-}
-
-// psKnownParameters are the full parameter names of the mutator cmdlets
-// and the common parameters, and their aliases; a prefix that matches one
-// of them only is that parameter, as PowerShell binds it.
-var psKnownParameters = []string{
-	"Path", "LiteralPath", "PSPath", "LP", "Destination", "NewName", "Force",
-	"Recurse", "Value", "Encoding", "NoNewline", "PassThru", "Filter",
-	"Include", "Exclude", "Credential", "WhatIf", "Confirm", "Stream",
-	"ItemType", "Type", "Name", "InputObject", "Append", "NoClobber", "Width",
-	"FilePath", "Target", "UseTransaction", "Container", "ToSession",
-	"FromSession", "AsByteStream", "Delimiter", "Wait", "ReadCount",
-	"ErrorAction", "ErrorVariable", "WarningAction", "WarningVariable",
-	"InformationAction", "InformationVariable", "OutVariable", "OutBuffer",
-	"PipelineVariable", "Verbose", "Debug", "ProgressAction", "ea", "ev",
-	"wa", "wv", "infa", "iv", "ov", "ob", "pv", "vb", "db", "proga", "wi", "cf",
-}
-
-// psSwitchParameter reports a known switch parameter (no value of its own).
-func psSwitchParameter(name string) bool {
-	switch strings.ToLower(name) {
-	case "force", "recurse", "nonewline", "passthru", "whatif", "confirm",
-		"append", "noclobber", "usetransaction", "container", "asbytestream",
-		"wait", "verbose", "debug", "wi", "cf", "vb", "db":
-		return true
+	shouldProcess := slices.Concat(common, []psParameter{psSwitch("WhatIf", "wi"), psSwitch("Confirm", "cf")})
+	literal := psPath("LiteralPath", "PSPath", "LP")
+	provider := slices.Concat(shouldProcess, []psParameter{
+		psPath("Path"), literal, psSwitch("Force"), psValued("Credential"),
+		psSwitch("UseTransaction", "usetx"),
+	})
+	filtered := slices.Concat(provider, []psParameter{psValued("Filter"), psValued("Include"), psValued("Exclude")})
+	content := slices.Concat(filtered, []psParameter{
+		psValued("Value"), psSwitch("PassThru"), psValued("Encoding"), psValued("Stream"),
+		psSwitch("NoNewline"), psSwitch("AsByteStream"),
+	})
+	rename := slices.Concat(provider, []psParameter{psPath("NewName"), psSwitch("PassThru")})
+	move := slices.Concat(filtered, []psParameter{psPath("Destination"), psSwitch("PassThru")})
+	copyItem := slices.Concat(move, []psParameter{
+		psSwitch("Container"), psSwitch("Recurse"), psValued("FromSession"), psValued("ToSession"),
+	})
+	remove := slices.Concat(filtered, []psParameter{psSwitch("Recurse"), psValued("Stream")})
+	clearContent := slices.Concat(filtered, []psParameter{psValued("Stream")})
+	setItem := slices.Concat(filtered, []psParameter{psValued("Value"), psSwitch("PassThru")})
+	newItem := slices.Concat(shouldProcess, []psParameter{
+		psPath("Path"), psPath("Name"), psValued("ItemType", "Type"), psValued("Value", "Target"),
+		psSwitch("Force"), psValued("Credential"), psSwitch("UseTransaction", "usetx"),
+	})
+	outFile := slices.Concat(shouldProcess, []psParameter{
+		psPath("FilePath", "Path"), literal, psValued("Encoding"), psSwitch("Append"),
+		psSwitch("Force"), psSwitch("NoClobber", "NoOverwrite"), psValued("Width"),
+		psSwitch("NoNewline"), psValued("InputObject"),
+	})
+	tee := slices.Concat(common, []psParameter{
+		psPath("FilePath", "Path"), literal, psSwitch("Append"), psValued("Variable"),
+		psValued("InputObject"), psValued("Encoding"),
+	})
+	table := map[string][]psParameter{}
+	for _, cmdlet := range []struct {
+		params []psParameter
+		words  []string
+	}{
+		{rename, []string{"rename-item", "rni", "ren"}},
+		{move, []string{"move-item", "mi", "mv", "move"}},
+		{copyItem, []string{"copy-item", "cpi", "cp", "copy"}},
+		{remove, []string{"remove-item", "ri", "rm", "rmdir", "rd", "del", "erase"}},
+		{clearContent, []string{"clear-content", "clc"}},
+		{content, []string{"set-content", "sc", "add-content", "ac"}},
+		{outFile, []string{"out-file"}},
+		{newItem, []string{"new-item", "ni"}},
+		{filtered, []string{"clear-item", "cli"}},
+		{setItem, []string{"set-item", "si"}},
+		{tee, []string{"tee-object", "tee"}},
+	} {
+		for _, word := range cmdlet.words {
+			table[word] = cmdlet.params
+		}
 	}
-	return false
+	return table
+}()
+
+// psAnyMutatorParameters are the parameters of every mutator cmdlet
+// (psMutatorParameters), one per name with the aliases of all.
+var psAnyMutatorParameters = func() []psParameter {
+	var all []psParameter
+	at := map[string]int{}
+	for _, word := range slices.Sorted(maps.Keys(psMutatorParameters)) {
+		for _, param := range psMutatorParameters[word] {
+			k, seen := at[param.name]
+			if !seen {
+				at[param.name] = len(all)
+				param.aliases = slices.Clone(param.aliases)
+				all = append(all, param)
+				continue
+			}
+			for _, alias := range param.aliases {
+				if !slices.Contains(all[k].aliases, alias) {
+					all[k].aliases = append(all[k].aliases, alias)
+				}
+			}
+		}
+	}
+	return all
+}()
+
+// psMatchParameters returns the parameters of params that name binds: the
+// one it spells (a name or an alias), else each one whose name or alias it
+// starts, once.
+func psMatchParameters(params []psParameter, name string) []psParameter {
+	spells := func(text string) bool { return strings.EqualFold(text, name) }
+	starts := func(text string) bool {
+		return len(name) <= len(text) && strings.EqualFold(text[:len(name)], name)
+	}
+	for _, param := range params {
+		if spells(param.name) || slices.ContainsFunc(param.aliases, spells) {
+			return []psParameter{param}
+		}
+	}
+	var matches []psParameter
+	for _, param := range params {
+		if starts(param.name) || slices.ContainsFunc(param.aliases, starts) {
+			matches = append(matches, param)
+		}
+	}
+	return matches
 }
 
-// psParameterReadings returns the readings of a mutator statement with
-// abbreviated parameters: one with every unique prefix spelled out, and,
-// for each parameter that stays unknown or ambiguous, that reading without
-// it and without it and its value. Nothing is returned for a statement
-// whose parameters are all known. bounded reports too many to read.
-func psParameterReadings(form string) ([]string, bool) {
+// psParameterReadings reads the parameters of a mutator statement as its
+// cmdlet binds them (psMutatorParameters). A name, alias or prefix that
+// names one parameter of the cmdlet is that parameter, spelled out: -L and
+// -LP are -LiteralPath, -Fi of Out-File is -FilePath (rel-1-0-10:GAP-1232).
+// PowerShell refuses the statement for any other word, but a parameter the
+// table lacks would bind, so each is read on as the parameters it may stand
+// for: those of the cmdlet it starts, else those of any mutator
+// (psAnyMutatorParameters). When one of them is a switch or names a path,
+// or it starts none, the word is read without it alone and without it and
+// its value, and the form keeps its proof (checker it15 RV15-2). When all
+// of them take a value that names no path (-t of mv: ItemType, Value,
+// ToSession), it binds, if at all, with the next word as its value, and
+// plain is the statement without both: the Windows PowerShell reader skips
+// such a parameter and reads its value as an operand, so mv -t <folder>
+// <file> moved the folder (rel-1-0-10:GAP-1209). A word spelled with its
+// value (-T:x) drops as one word.
+//
+// plain is the statement that stands for form, form itself unless a word
+// was dropped; readings are the others, none for a statement whose
+// parameters all bind as written. bounded reports too many to read.
+func psParameterReadings(form string) (readings []string, plain string, bounded bool) {
 	budget := &psBudget{}
 	words := psWords(form, budget)
 	if budget.over {
-		return nil, true
+		return nil, form, true
 	}
-	if len(words) < 2 || !psMutatorCmdlet(words[0].text) {
-		return nil, false
+	if len(words) < 2 {
+		return nil, form, false
+	}
+	params, mutator := psMutatorParameters[strings.ToLower(words[0].text)]
+	if !mutator {
+		return nil, form, false
 	}
 	texts := make([]string, len(words))
+	// dropped marks the words plain leaves out (a value-only word and its
+	// value); unknown, the words read both ways; joined, words that carry
+	// their value (-Name:value).
+	dropped := make([]bool, len(words))
+	joined := make([]bool, len(words))
 	var unknown []int
 	changed := false
 	for k, word := range words {
 		texts[k] = word.text
-		if k == 0 || word.quoted || len(word.text) < 2 || word.text[0] != '-' {
+		if k == 0 || dropped[k] || word.quoted || len(word.text) < 2 || word.text[0] != '-' {
 			continue
 		}
 		c := word.text[1]
@@ -393,65 +525,71 @@ func psParameterReadings(form string) ([]string, bool) {
 			continue
 		}
 		name, value, hasValue := strings.Cut(word.text[1:], ":")
-		full := ""
-		matches := 0
-		for _, known := range psKnownParameters {
-			if strings.EqualFold(known, name) {
-				full, matches = known, 1
-				break
-			}
-			if len(name) <= len(known) && strings.EqualFold(known[:len(name)], name) {
-				full = known
-				matches++
-			}
-		}
-		switch {
-		case matches == 1 && hasValue:
-			// -Name:value binds as -Name value, and a switch bound to
-			// anything but $true is off; the readers know only the spaced
-			// form, so the colon form dropped the proof (checker it16
-			// RV16-1).
-			texts[k] = "-" + full
-			if psSwitchParameter(full) {
-				if !strings.EqualFold(value, "$true") && value != "1" {
-					texts[k] = ""
+		joined[k] = hasValue
+		matches := psMatchParameters(params, name)
+		if len(matches) == 1 {
+			full := matches[0].name
+			switch {
+			case hasValue:
+				// -Name:value binds as -Name value, and a switch bound to
+				// anything but $true is off; the readers know only the
+				// spaced form, so the colon form dropped the proof (checker
+				// it16 RV16-1).
+				texts[k] = "-" + full
+				if matches[0].isSwitch {
+					if !strings.EqualFold(value, "$true") && value != "1" {
+						texts[k] = ""
+					}
+				} else if value != "" {
+					texts[k] += " " + value
 				}
-			} else if value != "" {
-				texts[k] += " " + value
+				changed = true
+			case !strings.EqualFold(full, name):
+				texts[k] = "-" + full
+				changed = true
 			}
-			changed = true
-		case matches == 1 && strings.EqualFold(full, name):
-		case matches == 1:
-			texts[k] = "-" + full
-			changed = true
-		default:
+			continue
+		}
+		if len(matches) == 0 {
+			matches = psMatchParameters(psAnyMutatorParameters, name)
+		}
+		if len(matches) == 0 || slices.ContainsFunc(matches, func(param psParameter) bool {
+			return param.isSwitch || param.path
+		}) {
 			unknown = append(unknown, k)
+			continue
+		}
+		dropped[k] = true
+		if !hasValue && k+1 < len(words) {
+			dropped[k+1] = true
 		}
 	}
 	const maxUnknown = 8
 	if len(unknown) > maxUnknown {
-		return nil, true
+		return nil, form, true
 	}
-	var readings []string
 	without := func(skip, count int) string {
 		parts := make([]string, 0, len(texts))
 		for k, text := range texts {
-			if text != "" && (k < skip || k >= skip+count) {
+			if text != "" && !dropped[k] && (k < skip || k >= skip+count) {
 				parts = append(parts, text)
 			}
 		}
 		return strings.Join(parts, " ")
 	}
-	if changed {
+	plain = form
+	if slices.Contains(dropped, true) {
+		plain = without(len(texts), 0)
+	} else if changed {
 		readings = append(readings, without(len(texts), 0))
 	}
 	for _, k := range unknown {
 		readings = append(readings, without(k, 1))
-		if k+1 < len(texts) {
+		if !joined[k] && k+1 < len(texts) && !dropped[k+1] {
 			readings = append(readings, without(k, 2))
 		}
 	}
-	return readings, false
+	return readings, plain, false
 }
 
 // psStateScanMaxRunes bounds the text the PowerShell reading copies into
