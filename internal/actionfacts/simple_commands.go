@@ -2750,7 +2750,7 @@ func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, n
 			depth++
 		}
 		if unknown < 0 {
-			if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
+			if program, ok := simpleWrappedProgram(wrapper, argv, childIndex, neutral > 0); ok {
 				return program, false, true, true
 			}
 		}
@@ -2944,16 +2944,19 @@ func simpleEnvSplitString(argv []string) (string, bool) {
 // is read as a nested script instead. The argv is static, so the call is judged as a simple command,
 // where a match can only over-block (GAP-1200, #1189). env NAME=value prog
 // is written as NAME=value prog, so the assignments are judged as the same
-// prefix assignments are.
-func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string, bool) {
+// prefix assignments are. afterNeutral is a chain with a context-neutral
+// wrapper before this one: Analyze reads that call partially, so the program
+// the chain ends in is judged here whatever runs it next (env, sudo, exec,
+// command); nohup x64 env x4 PROGRAM was never judged as PROGRAM, a weaker
+// verdict than the chain truncation of rel (rel-1-0-10:GAP-1207 review r1).
+// chroot and nsenter run the program in another root, so it is not judged
+// alone after them.
+func simpleWrappedProgram(wrapper string, argv []string, childIndex int, afterNeutral bool) (string, bool) {
 	if childIndex <= 0 || childIndex >= len(argv) {
 		return "", false
 	}
 	var assignments []string
-	_, contextNeutral := posixContextNeutralWrappers[wrapper]
-	switch {
-	case contextNeutral:
-	case wrapper == "env":
+	if wrapper == "env" {
 		for _, arg := range argv[1:childIndex] {
 			name, value, found := strings.Cut(arg, "=")
 			if !found || !simpleVariableName(name) {
@@ -2965,9 +2968,11 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string
 			}
 			assignments = append(assignments, name+"="+quoted)
 		}
-		if len(assignments) == 0 {
-			return "", false
-		}
+	}
+	_, contextNeutral := posixContextNeutralWrappers[wrapper]
+	switch {
+	case contextNeutral, len(assignments) > 0:
+	case afterNeutral && wrapper != "chroot" && wrapper != "nsenter":
 	default:
 		return "", false
 	}
