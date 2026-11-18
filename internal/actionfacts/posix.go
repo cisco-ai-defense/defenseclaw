@@ -89,9 +89,10 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		}
 
 		switch typed := node.(type) {
-		case *syntax.Redirect, *syntax.Assign, *syntax.ParamExp:
+		case *syntax.Redirect, *syntax.Assign, *syntax.WordIter, *syntax.ParamExp:
 			// The secret-read chain's evidence: input redirects, variable
-			// values and the variables a word expands (credentialPathRecord).
+			// values (for-loop words too) and the variables a word expands
+			// (credentialPathRecord).
 			captureCredentialPathWord(&out, typed, stack, statementIDs, &credentialArgIndexes)
 		case *syntax.FuncDecl:
 			// A definition is inert until invoked. Do not project its body as

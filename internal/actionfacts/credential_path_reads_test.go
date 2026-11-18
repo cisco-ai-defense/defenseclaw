@@ -118,7 +118,7 @@ func TestGAP1030GlobWildcardNeverMatchesALeadingDot(t *testing.T) {
 		{"*", ".env", false}, {"?env", ".env", false}, {"[.]env", ".env", false}, {".*", ".env", true},
 		{".en?", ".env", true}, {`\.env`, ".env", true}, {"*", "id_rsa", true}, {"id_*", "id_rsa", true},
 	} {
-		if got := credentialGlobSegmentMatches(row.pattern, row.name); got != row.want {
+		if got := credentialGlobSegmentMatches(row.pattern, row.name, false); got != row.want {
 			t.Errorf("%q vs %q: %v, want %v", row.pattern, row.name, got, row.want)
 		}
 	}
