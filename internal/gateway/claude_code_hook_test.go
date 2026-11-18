@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -90,12 +91,20 @@ func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *tes
 func TestEvaluateClaudeCodeHook_StopFailureRetainsNormalizedSubmittedContent(t *testing.T) {
 	const blockMessage = "Access was denied"
 	const normalized = "provider: Access was denied; retry"
-	var requestBody string
+	var submittedContent string
 	var requestErr error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		requestErr = err
-		requestBody = string(body)
+		var payload struct {
+			Messages []map[string]json.RawMessage `json:"messages"`
+		}
+		requestErr = json.NewDecoder(r.Body).Decode(&payload)
+		if requestErr == nil {
+			if len(payload.Messages) != 1 {
+				requestErr = fmt.Errorf("inspection messages = %d, want 1", len(payload.Messages))
+			} else {
+				requestErr = json.Unmarshal(payload.Messages[0]["content"], &submittedContent)
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"is_safe":true,"action":"Allow"}`))
 	}))
@@ -119,8 +128,8 @@ func TestEvaluateClaudeCodeHook_StopFailureRetainsNormalizedSubmittedContent(t *
 	if requestErr != nil {
 		t.Fatal(requestErr)
 	}
-	if !strings.Contains(requestBody, normalized) {
-		t.Fatalf("AI Defense request did not contain the one-pass normalized StopFailure content: %s", requestBody)
+	if submittedContent != normalized {
+		t.Fatalf("AI Defense submitted content = %q, want exact one-pass normalization %q", submittedContent, normalized)
 	}
 	if !resp.InspectedContentPresent || resp.InspectedContent != normalized {
 		t.Fatalf("StopFailure submitted content = (%q, %t), want (%q, true)", resp.InspectedContent, resp.InspectedContentPresent, normalized)
@@ -175,6 +184,8 @@ func TestRedactInspectedAuthorizationCredentials(t *testing.T) {
 	const token = "abc123._~+/=-"
 	redacted := redaction.ForSinkEntity(token)
 	basicCredential := base64.StdEncoding.EncodeToString([]byte("fixture-user:fixture-value"))
+	rawBasicCredential := strings.TrimRight(basicCredential, "=")
+	urlBasicCredential := base64.RawURLEncoding.EncodeToString([]byte("fixture-user:\xfb\xff"))
 	tests := []struct {
 		name    string
 		content string
@@ -216,6 +227,31 @@ func TestRedactInspectedAuthorizationCredentials(t *testing.T) {
 			want:    "request failed with Basic " + redaction.ForSinkEntity(basicCredential),
 		},
 		{
+			name:    "bare basic credential with sentence period",
+			content: "Basic " + basicCredential + ". Continue",
+			want:    "Basic " + redaction.ForSinkEntity(basicCredential) + ". Continue",
+		},
+		{
+			name:    "bare unpadded basic credential",
+			content: "Basic " + rawBasicCredential,
+			want:    "Basic " + redaction.ForSinkEntity(rawBasicCredential),
+		},
+		{
+			name:    "bare URL-safe basic credential",
+			content: "Basic " + urlBasicCredential,
+			want:    "Basic " + redaction.ForSinkEntity(urlBasicCredential),
+		},
+		{
+			name:    "JSON escaped bearer whitespace",
+			content: `{"Authorization":"Bearer\u0020` + token + `"}`,
+			want:    `{"Authorization":"Bearer\u0020` + redacted + `"}`,
+		},
+		{
+			name:    "JSON escaped basic tab",
+			content: `{"Authorization":"Basic\u0009` + basicCredential + `"}`,
+			want:    `{"Authorization":"Basic\u0009` + redaction.ForSinkEntity(basicCredential) + `"}`,
+		},
+		{
 			name:    "ordinary bare basic text",
 			content: "Basic setup complete",
 			want:    "Basic setup complete",
@@ -238,6 +274,15 @@ func TestRedactInspectedAuthorizationCredentials(t *testing.T) {
 				t.Fatalf("redacted content = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRedactInspectedTelemetryCredentialsScrubsSignedURLQueries(t *testing.T) {
+	const signature = "fixture-signed-url-value"
+	content := "approve https://example.test/object?X-Amz-Signature=" + signature + "&safe=value now"
+	want := "approve https://example.test/object?X-Amz-Signature=" + redaction.ForSinkEntity(signature) + "&safe=value now"
+	if got := redactInspectedTelemetryCredentials(content); got != want {
+		t.Fatalf("redacted signed URL = %q, want %q", got, want)
 	}
 }
 
@@ -433,6 +478,10 @@ func TestEvaluateClaudeCodeHook_SubagentPromptKeepsOwnRedactionDirective(t *test
 }
 
 func TestEvaluateClaudeCodeHook_SubagentReasonKeepsPromptRedactionDirective(t *testing.T) {
+	previousManaged := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(previousManaged) })
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -471,9 +520,9 @@ func TestEvaluateClaudeCodeHook_SubagentReasonKeepsPromptRedactionDirective(t *t
 	if !resp.ReasonRedactionPresent || resp.ReasonRedactionEnabled == nil || !*resp.ReasonRedactionEnabled {
 		t.Fatalf("reason directive = (%v, present=%t), want task's explicit true", resp.ReasonRedactionEnabled, resp.ReasonRedactionPresent)
 	}
-	previousManaged := ManagedEnterpriseActive()
-	SetManagedEnterpriseActive(true)
-	t.Cleanup(func() { SetManagedEnterpriseActive(previousManaged) })
+	if strings.Contains(resp.Reason+resp.AdditionalContext+fmt.Sprint(resp.ClaudeCodeOutput), "alice@example.com") {
+		t.Fatalf("connector answer leaked task-derived reason: %+v", resp)
+	}
 	projected := hookSourceReasonForSink(t.Context(), claudeCodeResponseToAgentHookResponse(resp))
 	if strings.Contains(projected, "alice@example.com") || !strings.Contains(projected, "<redacted") {
 		t.Fatalf("projected task reason = %q, want independently redacted reason", projected)

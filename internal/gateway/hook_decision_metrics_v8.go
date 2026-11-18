@@ -131,7 +131,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		if resp.InspectedContentPresent {
 			inspectedContent := resp.InspectedContent
 			if resp.RedactionEnabled == nil {
-				inspectedContent = redactInspectedAuthorizationCredentials(inspectedContent)
+				inspectedContent = redactInspectedTelemetryCredentials(inspectedContent)
 			}
 			messages, _, reported, _, contentOK := hookModelV8InputMessages(
 				inspectedContent,

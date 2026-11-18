@@ -909,6 +909,31 @@ func TestStricterHookRedactionDirective(t *testing.T) {
 	}
 }
 
+func TestEmitHookLLMSpanReturnsCompletionScopedDirective(t *testing.T) {
+	trueValue, falseValue := true, false
+	meta := llmEventMeta{Source: "claudecode", SessionID: "session", PromptID: "prompt"}
+
+	t.Run("cache miss preserves explicit completion directive", func(t *testing.T) {
+		api := &APIServer{}
+		completionCtx := withRedactionDecision(t.Context(), &falseValue)
+		returned := api.emitHookLLMSpan(completionCtx, meta, "response")
+		if got := redactionDecisionFromContext(returned); got == nil || *got {
+			t.Fatalf("returned directive = %v, want explicit false", got)
+		}
+	})
+
+	t.Run("cached prompt does not replace standalone response directive", func(t *testing.T) {
+		api := &APIServer{}
+		promptCtx := withRedactionDecision(t.Context(), &trueValue)
+		api.rememberHookLLMSpanPrompt(promptCtx, meta, "prompt")
+		completionCtx := withRedactionDecision(t.Context(), &falseValue)
+		returned := api.emitHookLLMSpan(completionCtx, meta, "response")
+		if got := redactionDecisionFromContext(returned); got == nil || *got {
+			t.Fatalf("returned directive = %v, want completion's explicit false", got)
+		}
+	})
+}
+
 func TestHookLLMSpanUsageCacheIsExecutionScoped(t *testing.T) {
 	api := &APIServer{}
 	executionA := llmEventMeta{

@@ -2705,22 +2705,28 @@ func (a *APIServer) emitHookLLMSpan(ctx context.Context, meta llmEventMeta, resp
 	if !emit {
 		return ctx
 	}
+	completionDirective := redactionDecisionFromContext(ctx)
+	spanCtx := ctx
 	// A chat span contains both the cached prompt and this completion. Apply the
-	// stricter inspection decision so neither field inherits a less protective
-	// directive from the other event.
-	ctx = withRedactionDecision(ctx, stricterHookRedactionDirective(
-		snapshot.redactionEnabled, redactionDecisionFromContext(ctx),
-	))
+	// stricter inspection decision only when a prompt was cached. A response-only
+	// span keeps the completion decision, and the standalone response log below
+	// receives that same completion-scoped policy after correlation is attached.
+	if snapshot.content != "" {
+		spanCtx = withRedactionDecision(spanCtx, stricterHookRedactionDirective(
+			snapshot.redactionEnabled, completionDirective,
+		))
+	}
 	if emitter := a.observabilityV8RuntimeEmitter(); emitter != nil {
 		// Runtime ownership is sticky. Once config v8 is authoritative, a
 		// missing generated capability, disabled collection, or sampled-out
 		// trace must never resurrect the legacy SDK provider.
 		metricRuntime, _ := emitter.(hookLifecycleMetricV8Runtime)
 		if runtime, ok := emitter.(lifecycleV8Runtime); ok {
-			return a.emitHookLLMSpanV8(ctx, runtime, metricRuntime, snapshot, meta, response)
+			correlated := a.emitHookLLMSpanV8(spanCtx, runtime, metricRuntime, snapshot, meta, response)
+			return withRedactionDecision(correlated, completionDirective)
 		}
 		observation := a.hookModelV8Observation(snapshot, meta, response)
-		a.recordHookModelMetricsV8(ctx, metricRuntime, observation)
+		a.recordHookModelMetricsV8(spanCtx, metricRuntime, observation)
 		return ctx
 	}
 	_ = a.takeHookLLMSpanUsage(meta)

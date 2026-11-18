@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -150,7 +151,7 @@ type claudeCodeHookResponse struct {
 	laneVerdict bool
 }
 
-var inspectedAuthorizationCredential = regexp.MustCompile(`(?i)((?:\bauthorization["']?[ \t]*[:=][ \t]*["']?)?\b(?:bearer|basic)[ \t]+)([A-Za-z0-9._~+/=-]+)`)
+var inspectedAuthorizationCredential = regexp.MustCompile(`(?i)((?:\bauthorization["']?[ \t]*[:=][ \t]*["']?)?\b(?:bearer|basic)(?:[ \t]+|\\(?:u0020|u0009|t)))([A-Za-z0-9._~+/=-]+)`)
 
 // redactInspectedAuthorizationCredentials removes Basic and Bearer values from the telemetry
 // copy of submitted event content when AI Defense supplied no redaction
@@ -167,14 +168,35 @@ func redactInspectedAuthorizationCredentials(content string) string {
 		// Explicit Authorization headers are credentials even when malformed,
 		// and Bearer values are opaque by definition. A bare Basic phrase is
 		// only a credential when it decodes to the RFC 7617 user:password form.
+		token := credential
 		if !strings.Contains(lowerPrefix, "authorization") && strings.Contains(lowerPrefix, "basic") {
-			decoded, err := base64.StdEncoding.DecodeString(credential)
-			if err != nil || !strings.Contains(string(decoded), ":") {
+			// Sentence punctuation is not part of a bare Basic value. Accept the
+			// standard/raw and URL-safe encodings seen in connector text.
+			token = strings.TrimRight(credential, ".")
+			decoded, ok := decodeInspectedBasicCredential(token)
+			if !ok || !strings.Contains(string(decoded), ":") {
 				return match
 			}
 		}
-		return prefix + redaction.ForSinkEntity(credential) + match[parts[5]:]
+		return prefix + redaction.ForSinkEntity(token) + credential[len(token):] + match[parts[5]:]
 	})
+}
+
+func decodeInspectedBasicCredential(token string) ([]byte, bool) {
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding,
+	} {
+		decoded, err := encoding.DecodeString(token)
+		if err == nil {
+			return decoded, true
+		}
+	}
+	return nil, false
+}
+
+func redactInspectedTelemetryCredentials(content string) string {
+	content = redactInspectedAuthorizationCredentials(content)
+	return observabilityredaction.RedactURLQueryCredentialsForCompatibility(content)
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -488,6 +510,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// the generic hook path. Secure Client keeps the verdict reason (issue
 	// #1092).
 	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
+	if reasonRedactionPresent && ManagedEnterpriseActive() {
+		policy = managedSinkPolicy(reasonRedactionEnabled)
+	}
 	if !a.managedAIDOnly() {
 		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
 			evalCtx.RuleIDs, policy)
