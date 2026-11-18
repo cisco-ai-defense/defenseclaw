@@ -163,14 +163,17 @@ func TestHermesBytecodeTheScanDidNotSeeIsScannedAtAScannerChange(t *testing.T) {
 			f.w.runRescanCycle(ctx)
 			tc.change(t, path)
 			if !tc.refused {
-				// A cycle without a scanner change keeps the stored scan
-				// and records no bytecode for it.
+				// A cycle without a scanner change records no bytecode for
+				// the stored scan. (A change the content hash covers, such
+				// as a folder named __PYCACHE__ on a case-sensitive file
+				// system, is admitted here.)
 				f.w.runRescanCycle(ctx)
 			}
+			before := f.scan.scans(path)
 			f.scannerChanged(path)
 			f.w.runRescanCycle(ctx)
-			if n := f.scan.scans(path); n != 2 {
-				t.Fatalf("scans after %s and a scanner change = %d, want 2", tc.name, n)
+			if n := f.scan.scans(path); n != before+1 {
+				t.Fatalf("scans after %s and a scanner change = %d, want %d", tc.name, n, before+1)
 			}
 			if tc.refused {
 				f.refused(path)
@@ -216,7 +219,11 @@ func TestHermesBytecodeScanOnceKeepsSecureClientAndUngatedRescans(t *testing.T) 
 		t.Run(map[bool]string{true: "secure client", false: "gating off"}[secureClient], func(t *testing.T) {
 			f := newHermesPluginFixture(t)
 			if secureClient {
+				f.cfg.DeploymentMode = "managed_enterprise"
 				f.cfg.Enterprise.Profile = "secure_client"
+				if !f.w.secureClientActive() {
+					t.Fatal("the Secure Client profile is not active")
+				}
 			} else {
 				f.cfg.Watch.RescanContentGated = false
 			}
