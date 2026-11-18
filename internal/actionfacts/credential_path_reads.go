@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
@@ -34,8 +35,9 @@ import (
 //
 // The resolve is bounded by the one bound rule (rel-1-0-10:GAP-1029): the
 // candidates it checks (bounded.Items), its work units (bounded.Time: the
-// bytes the shape match reads and the probe comparisons) and its filesystem
-// lookups (bounded.Paths) are capped. A cap hit stops the resolve, keeps what
+// bytes the shape match reads and the probe comparisons) and the folders its
+// recursive searches name (bounded.Paths; the walk under each has its own
+// bounds, credentialPathWalk) are capped. A cap hit stops the resolve, keeps what
 // was read before it and is TRUNCATED in the record's CapSet, which the
 // gateway judges at the unknown tier of the pack (withBoundedTruncation). A
 // glob is compared with each probe on the probe's own trailing segments
@@ -56,10 +58,26 @@ const (
 	maxCredentialPathCandidates = 4096
 	maxCredentialPathWork       = 1 << 20
 	maxCredentialPathLookups    = 1024
-	// maxCredentialPathWalkFolders bounds the folders a recursive search's
-	// walk reads (substrate-1:GAP-0344). A larger tree is TRUNCATED: at least
-	// the unknown tier, and what the walk found before the cap still counts.
+)
+
+// The bounds of a recursive search's walk (substrate-1:GAP-0344): the
+// folders it reads, the entries it reads in them (in batches, so one huge
+// folder costs no more than its share) and the files it looks up. A walk
+// cut at a bound is not a cap of the resolve, so it is no verdict on the
+// search: the walk adds the chain's file-unknown read (Value ""), the
+// unknown tier of the secret-read chain only (a later upload joins it), and
+// what it found before the cut still counts. Exact numbers are kept in
+// TestGAP0344WalkCut.
+const (
 	maxCredentialPathWalkFolders = 4096
+	maxCredentialPathWalkEntries = 1 << 16
+	maxCredentialPathWalkLookups = 1024
+	credentialPathWalkBatch      = 512
+	// The analyses of one hook evaluation (the call, its twins and its
+	// result event) reuse a walk of the same folder made within
+	// credentialPathWalkReuse: one walk per call. A later call walks again.
+	credentialPathWalkReuse   = time.Second
+	maxCredentialPathWalkMemo = 64
 )
 
 // MaxCredentialPathCandidates is the candidate cap of the resolve
@@ -67,14 +85,13 @@ const (
 const MaxCredentialPathCandidates = maxCredentialPathCandidates
 
 type credentialPathLimits struct {
-	candidates, work, lookups, folders int
+	candidates, work, lookups int
 }
 
 var defaultCredentialPathLimits = credentialPathLimits{
 	candidates: maxCredentialPathCandidates,
 	work:       maxCredentialPathWork,
 	lookups:    maxCredentialPathLookups,
-	folders:    maxCredentialPathWalkFolders,
 }
 
 // CredentialPathReads is a copy of the private record: the credentials files
@@ -433,7 +450,6 @@ type credentialPathResolver struct {
 	candidates bounded.Counter
 	work       bounded.Counter
 	lookups    bounded.Counter
-	folders    bounded.Counter
 	cwd, home  string
 	commands   []CommandFact
 	held       map[credentialHeldRead]bool
@@ -487,9 +503,8 @@ func resolveCredentialPathReadsWithin(
 	r.candidates = bounded.NewCounter(&r.trunc, bounded.Items, limits.candidates)
 	r.work = bounded.NewCounter(&r.trunc, bounded.Time, limits.work)
 	r.lookups = bounded.NewCounter(&r.trunc, bounded.Paths, limits.lookups)
-	r.folders = bounded.NewCounter(&r.trunc, bounded.Paths, limits.folders)
 	r.resolve(words)
-	caps := r.trunc.Set(&r.candidates, &r.work, &r.lookups, &r.folders)
+	caps := r.trunc.Set(&r.candidates, &r.work, &r.lookups)
 	if len(r.reads) == 0 && !caps.Any() {
 		return nil
 	}
@@ -710,18 +725,22 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 			operands = operands[1:]
 		}
 		recursive := credentialSearchRecursive(argv, program)
+		// grep -r reads every file under the folder; ripgrep skips hidden
+		// (dot-named) files and folders unless told otherwise
+		// (substrate-1:GAP-0344).
+		hidden := program != "rg" || rgSearchesHidden(argv)
 		for _, index := range operands {
 			argument := command.Arguments[index]
 			r.argument(command.ID, argument, false)
 			if recursive && !argument.Expands && argument.Value != "" {
-				r.searchFolder(command.ID, argument.Value)
+				r.searchFolder(command.ID, argument.Value, hidden)
 			}
 		}
 		if recursive && len(operands) == 0 && !(program == "rg" && r.pipedStdin(command)) {
 			// No folder operand: grep -r and rg search the working folder
 			// (an rg fed by a pipe searches its input instead,
 			// substrate-1:GAP-0344).
-			r.searchFolder(command.ID, ".")
+			r.searchFolder(command.ID, ".", hidden)
 		}
 		return operands
 	case credentialReadsSources:
@@ -1173,13 +1192,14 @@ var credentialWalkSkips = map[string]bool{
 }
 
 // searchFolder resolves the credentials files under the folder a recursive
-// search reads, in it and in every folder below it (substrate-1:GAP-0344):
-// a bounded walk, breadth first, reads each folder once, and each entry
-// named as the first segment of a probe is looked up; only a regular file
-// that is there counts (T6 scope ruling: an ordinary repository search
-// starts no chain). Symbolic links to folders are not followed, as grep -r
-// does not. A tree over maxCredentialPathWalkFolders is TRUNCATED.
-func (r *credentialPathResolver) searchFolder(id int64, folder string) {
+// search reads, in it and in every folder below it (substrate-1:GAP-0344,
+// credentialPathWalk); with hidden false (ripgrep's default), not in a
+// dot-named file or folder. Only a regular file that is there counts (T6
+// scope ruling: an ordinary repository search starts no chain). A walk cut
+// at its bounds adds the file-unknown read: the chain's unknown tier, never
+// a cap of the resolve, so the search itself is judged as it was before the
+// walk (T6 ruling 2026-11-18).
+func (r *credentialPathResolver) searchFolder(id int64, folder string, hidden bool) {
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
@@ -1196,37 +1216,237 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string) {
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return
 	}
-	groups := credentialProbeFirstSegments()
-	queue := []string{dir}
-	for len(queue) > 0 {
-		if r.stopped() || !r.folders.Take() {
+	walk := credentialPathWalkOf(filepath.Clean(dir), hidden)
+	for _, file := range walk.found {
+		if r.stopped() {
 			return
 		}
+		r.candidate(id, file, false, false)
+	}
+	if walk.cut {
+		r.add(id, "", true)
+	}
+}
+
+// credentialPathWalkResult is one walk: the credentials files it found and
+// whether a bound cut it.
+type credentialPathWalkResult struct {
+	found []string
+	cut   bool
+	at    time.Time
+}
+
+type credentialPathWalkKey struct {
+	dir    string
+	hidden bool
+}
+
+// credentialPathWalks holds the walks of the last credentialPathWalkReuse
+// (at most maxCredentialPathWalkMemo folders): every analysis of one hook
+// call walks a folder once. A result is shared read-only.
+var credentialPathWalks struct {
+	sync.Mutex
+	walks map[credentialPathWalkKey]credentialPathWalkResult
+}
+
+func credentialPathWalkOf(dir string, hidden bool) credentialPathWalkResult {
+	key := credentialPathWalkKey{dir, hidden}
+	now := time.Now()
+	credentialPathWalks.Lock()
+	walk, ok := credentialPathWalks.walks[key]
+	credentialPathWalks.Unlock()
+	if ok && !now.Before(walk.at) && now.Sub(walk.at) < credentialPathWalkReuse {
+		return walk
+	}
+	walk = credentialPathWalk(dir, hidden)
+	walk.at = now
+	credentialPathWalks.Lock()
+	defer credentialPathWalks.Unlock()
+	if credentialPathWalks.walks == nil || len(credentialPathWalks.walks) >= maxCredentialPathWalkMemo {
+		fresh := make(map[credentialPathWalkKey]credentialPathWalkResult)
+		for other, kept := range credentialPathWalks.walks {
+			if now.Sub(kept.at) < credentialPathWalkReuse && len(fresh) < maxCredentialPathWalkMemo/2 {
+				fresh[other] = kept
+			}
+		}
+		credentialPathWalks.walks = fresh
+	}
+	credentialPathWalks.walks[key] = walk
+	return walk
+}
+
+// credentialPathWalk walks dir breadth first and reads each folder once,
+// in batches of credentialPathWalkBatch entries; each entry named as the
+// first segment of a credentials probe is looked up. It does not enter
+// credentialWalkSkips or follow a symbolic link to a folder, as grep -r does
+// not. With hidden false it neither counts nor enters a dot-named entry, and
+// skips a probe with a dot-named segment, as ripgrep without --hidden. A
+// bound (folders, entries, lookups) cuts it: what it found stays, and cut
+// is set.
+func credentialPathWalk(dir string, hidden bool) (walk credentialPathWalkResult) {
+	groups := credentialProbeFirstSegments()
+	folders, entries, lookups := 0, 0, 0
+	// The folder searched may itself be the first segment of a probe
+	// (rg KEY .aws, grep -r KEY ~/.aws): its own files are looked up
+	// under it. It is read whatever its name, as the command names it.
+	for _, probe := range groups[filepath.Base(dir)] {
+		if len(probe.segments) < 2 {
+			continue
+		}
+		rest := strings.Join(probe.segments[1:], "/")
+		if !hidden && (strings.HasPrefix(rest, ".") || strings.Contains(rest, "/.")) {
+			continue
+		}
+		if lookups == maxCredentialPathWalkLookups {
+			walk.cut = true
+			return walk
+		}
+		lookups++
+		file := filepath.Join(dir, filepath.FromSlash(rest))
+		if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+			walk.found = append(walk.found, file)
+		}
+	}
+	queue := []string{dir}
+	for len(queue) > 0 {
+		if folders == maxCredentialPathWalkFolders {
+			walk.cut = true
+			return walk
+		}
+		folders++
 		current := queue[0]
 		queue = queue[1:]
-		entries, err := os.ReadDir(current)
+		f, err := os.Open(current)
 		if err != nil {
 			continue
 		}
-		for _, entry := range entries {
-			if r.stopped() {
-				return
-			}
-			name := entry.Name()
-			for _, probe := range groups[name] {
-				if !r.lookups.Take() {
-					return
+		for {
+			batch, err := f.ReadDir(credentialPathWalkBatch)
+			for _, entry := range batch {
+				if entries == maxCredentialPathWalkEntries {
+					_ = f.Close()
+					walk.cut = true
+					return walk
 				}
-				file := filepath.Join(current, filepath.FromSlash(probe.value))
-				if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
-					r.candidate(id, file, false, false)
+				entries++
+				name := entry.Name()
+				if !hidden && strings.HasPrefix(name, ".") {
+					continue
+				}
+				for _, probe := range groups[name] {
+					if !hidden && strings.Contains(probe.value, "/.") {
+						continue
+					}
+					if lookups == maxCredentialPathWalkLookups {
+						_ = f.Close()
+						walk.cut = true
+						return walk
+					}
+					lookups++
+					file := filepath.Join(current, filepath.FromSlash(probe.value))
+					if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+						walk.found = append(walk.found, file)
+					}
+				}
+				if entry.IsDir() && !credentialWalkSkips[name] {
+					queue = append(queue, filepath.Join(current, name))
 				}
 			}
-			if entry.IsDir() && !credentialWalkSkips[name] {
-				queue = append(queue, filepath.Join(current, name))
+			if err != nil {
+				break // io.EOF, or a folder that cannot be read on
+			}
+		}
+		_ = f.Close()
+	}
+	return walk
+}
+
+// rgSearchesHidden reports an rg that reads hidden (dot-named) files and
+// folders. ripgrep's documented default skips them (and .gitignore'd
+// paths, which are not modelled: a non-hidden file counts as read);
+// --hidden (-.), --unrestricted twice (-uu, -uuu) and a --glob or --iglob
+// override that may match a dot-named credentials file (globs override
+// every other ignore rule) read them. --no-ignore-hidden counts as well;
+// --no-hidden turns --hidden off again. A file or folder the command names
+// is read whatever its name (credentialPathResolver.argument).
+func rgSearchesHidden(argv []string) bool {
+	hidden, unrestricted, glob := false, 0, false
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		value := ""
+		switch {
+		case arg == "--":
+			return hidden || unrestricted >= 2 || glob
+		case arg == "--hidden" || arg == "--no-ignore-hidden":
+			hidden = true
+		case arg == "--no-hidden":
+			hidden = false
+		case arg == "--unrestricted":
+			unrestricted++
+		case arg == "--glob" || arg == "--iglob":
+			if i+1 < len(argv) {
+				i++
+				value = argv[i]
+			}
+		case strings.HasPrefix(arg, "--glob=") || strings.HasPrefix(arg, "--iglob="):
+			value = arg[strings.IndexByte(arg, '=')+1:]
+		case strings.HasPrefix(arg, "--"):
+			if searchOptionConsumesValue("rg", arg) {
+				i++
+			}
+		case strings.HasPrefix(arg, "-") && len(arg) > 1:
+		letters:
+			for j, letter := range arg[1:] {
+				switch {
+				case letter == '.':
+					hidden = true
+				case letter == 'u':
+					unrestricted++
+				case strings.ContainsRune("ABCEefgjMmrtTd", letter):
+					// The option's value is the rest of the word, or the next.
+					rest := arg[2+j:]
+					if rest == "" && i+1 < len(argv) {
+						i++
+						rest = argv[i]
+					}
+					if letter == 'g' {
+						value = rest
+					}
+					break letters
+				}
+			}
+		}
+		if value != "" && rgGlobMayMatchHidden(value) {
+			glob = true
+		}
+	}
+	return hidden || unrestricted >= 2 || glob
+}
+
+// rgGlobMayMatchHidden reports an rg include glob that may match a
+// dot-named segment of a credentials probe (an exclude glob, !..., never
+// adds a read). A glob with alternation or classes path.Match does not
+// read counts.
+func rgGlobMayMatchHidden(glob string) bool {
+	if strings.HasPrefix(glob, "!") {
+		return false
+	}
+	glob = strings.ToLower(glob)
+	if strings.ContainsAny(glob, "{}") {
+		return true
+	}
+	last := glob[strings.LastIndexByte(glob, '/')+1:]
+	for _, probe := range credentialProbes() {
+		for _, segment := range probe.segments {
+			if !strings.HasPrefix(segment, ".") {
+				continue
+			}
+			if ok, err := path.Match(last, segment); ok || err != nil {
+				return true
 			}
 		}
 	}
+	return false
 }
 
 func (r *credentialPathResolver) add(id int64, value string, unknown bool) {
