@@ -1061,8 +1061,10 @@ In `managed_enterprise`, the managed inventory carries every skill the agents lo
 | `state`, `first_seen`, `last_seen` | `new`, `changed`, `unchanged` or `removed` since the last publish, from state the endpoint keeps, and when the skill was first and last seen |
 | `scope` | `user`, `project`, `bundled` (shipped by the agent vendor), `managed` (an admin folder outside every home) or `plugin` |
 | `location` | The skill folder below the user's home, as `~/.claude/skills/pdf`. The account name and the absolute path stay on the endpoint; a project or managed skill sends none |
-| `agents` | Every agent that reads the folder. Each agent still gets its own record and component id, with the same hash |
+| `agents` | Every agent that reads the folder. Each agent still gets its own record and component id, with the same hash. The record's `defenseclaw.ai.component.vendor` is that agent's vendor from the discovery catalog (Anthropic, OpenAI, Anysphere, GitHub, …) |
 | `publisher`, `publisher_source` | Who published the skill and how that is known: `declared` (the SKILL.md author), `plugin_manifest`, `vendor_bundled` or `unknown` |
+| `version` | The version the SKILL.md frontmatter declares (top level or under `metadata`), one line of at most 64 bytes. The description it declares goes in `defenseclaw.inventory.item.description`, folded to one line of at most 512 bytes. Both are the skill author's own claims and content fields, so the destination's redaction profile masks a secret in them |
+| `manifest_size` | Size of the SKILL.md in bytes, with its `manifest_hash` |
 | `plugin`, `plugin_version`, `plugin_enabled` | For a skill a Claude Code, Codex, Cursor or Copilot CLI plugin ships: the plugin (`name@marketplace`), its version and whether it is on. Cursor and Copilot CLI record no enabled state |
 | `manifest`, `manifest_hash`, `manifest_part`, `manifest_parts` | The SKILL.md text, its SHA-256 and the part numbers, with `ai_discovery.include_skill_manifests` on (below) |
 

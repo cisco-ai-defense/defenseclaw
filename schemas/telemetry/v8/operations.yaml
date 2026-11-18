@@ -767,7 +767,7 @@ attributes:
   normalization:
     id: bounded-v1
     overrides: {max_utf8_bytes: 256}
-    notes: Catalog or detector-produced vendor label
+    notes: Catalog or detector-produced vendor label. On a skill or plugin entry of the endpoint inventory, the vendor of the agent whose folder holds it; the skill's publisher is defenseclaw.inventory.skill.publisher
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.ai.component.product
   type: string
@@ -1984,7 +1984,7 @@ attributes:
   normalization:
     id: bounded-v1
     overrides: {max_utf8_bytes: 512}
-    notes: Free-form connector or plugin catalog description; control characters are rejected by the producer
+    notes: Free-form connector or plugin catalog description, or the description a skill's SKILL.md frontmatter declares (folded to one line); control characters are rejected by the producer
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.connector.source
   type: string
@@ -2353,6 +2353,33 @@ attributes:
   normalization:
     id: numeric-range-v1
     overrides: {min: 1, max: 128}
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.version
+  type: string
+  brief: Version the skill's SKILL.md declares
+  examples: [2.3.0]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 256}
+    notes: The skill's own unverified claim, top-level or under metadata in the frontmatter; one line of at most 64 bytes, control characters rejected by the producer. Content class so the destination's redaction profile sees it; the byte limit leaves room for a redaction marker
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.inventory.skill.manifest_size
+  type: int64
+  brief: Size of the skill's SKILL.md file in bytes
+  examples: [4096]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 33554432}
   introduced_in: telemetry-registry-v3
 - id: defenseclaw.inventory.connector.identifiers
   type: array
@@ -9029,6 +9056,10 @@ groups:
   - ref: defenseclaw.inventory.skill.manifest_part
     requirement_level: optional
   - ref: defenseclaw.inventory.skill.manifest_parts
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.version
+    requirement_level: optional
+  - ref: defenseclaw.inventory.skill.manifest_size
     requirement_level: optional
   - ref: defenseclaw.ai.model.provenance.publisher
     requirement_level: recommended

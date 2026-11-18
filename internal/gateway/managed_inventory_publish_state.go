@@ -465,6 +465,9 @@ func managedInventoryComponentsDigest(key string, components []endpointInventory
 			component.skillPlugin,
 			component.skillPluginVersion,
 			managedInventoryOptionalBool(component.skillPluginEnabled),
+			component.vendor,
+			component.skillVersion,
+			strconv.FormatInt(component.skillManifestSize, 10),
 		}, managedInventoryFieldSeparator))
 	}
 	return managedInventoryDigest(key, rows)

@@ -147,7 +147,7 @@ func TestHashSkillFolderLimits(t *testing.T) {
 	}
 }
 
-func TestSkillAuthor(t *testing.T) {
+func TestSkillFrontMatterAuthor(t *testing.T) {
 	for manifest, want := range map[string]string{
 		"---\nname: a\nauthor: Acme Corp\n---\n":               "Acme Corp",
 		"---\nname: a\nauthor: \"Acme # Labs\"\n---\n":         "Acme # Labs",
@@ -159,8 +159,35 @@ func TestSkillAuthor(t *testing.T) {
 		"---\nauthor: bad\x07bell\n---\n":                      "",
 		"---\nauthor: " + strings.Repeat("é", 100) + "\n---\n": strings.Repeat("é", maxSkillAuthorBytes/2),
 	} {
-		if got := skillAuthor([]byte(manifest)); got != want {
-			t.Errorf("skillAuthor(%q) = %q, want %q", manifest, got, want)
+		if got := parseSkillFrontMatter([]byte(manifest)).author; got != want {
+			t.Errorf("author of %q = %q, want %q", manifest, got, want)
+		}
+	}
+}
+
+func TestSkillFrontMatterDescriptionAndVersion(t *testing.T) {
+	long := strings.Repeat("word ", 200)
+	for _, tc := range []struct {
+		manifest, description, version string
+	}{
+		{"---\nname: a\ndescription: Review a pull request. Use before merge.\nversion: 2.3.0\n---\n", "Review a pull request. Use before merge.", "2.3.0"},
+		{"---\nname: a\nmetadata:\n  version: \"1.4\" # pinned\n  description: not top level\n---\n", "", "1.4"},
+		{"---\ndescription: >-\n  Folded over\n  two lines.\n\n  And a second paragraph.\nversion: 3\n---\n", "Folded over two lines. And a second paragraph.", "3"},
+		{"---\ndescription: |\n  keep # this\n  literal\nname: a\n---\n", "keep # this literal", ""},
+		{"---\ndescription: A plain value\n  wrapped onto a second line # not a comment\nname: a\n---\n", "A plain value wrapped onto a second line # not a comment", ""},
+		{"---\ndescription: \"A quoted value\n  that wraps\"\n---\n", "A quoted value that wraps", ""},
+		{"---\ndescription: first\ndescription: second\n---\n", "first", ""},
+		{"---\ndescription:\n  nested: map\n---\n", "", ""},
+		{"---\ndescription: tab\there\n---\n", "tab here", ""},
+		{"---\ndescription: bad\x07bell\nversion: 1\x1b[0m\n---\n", "", ""},
+		{"---\ndescription: " + long + "\n---\n", strings.TrimSpace(long[:maxSkillDescriptionBytes]), ""},
+		{"---\nversion: " + strings.Repeat("9", 100) + "\n---\n", "", strings.Repeat("9", maxSkillVersionBytes)},
+		{"---\nname: a\n---\ndescription: after the frontmatter\n", "", ""},
+		{"\ufeff---\r\ndescription: CRLF\r\n  wrapped\r\nversion: 1.0\r\n---\r\n", "CRLF wrapped", "1.0"},
+	} {
+		got := parseSkillFrontMatter([]byte(tc.manifest))
+		if got.description != tc.description || got.version != tc.version {
+			t.Errorf("front matter of %q = (%q, %q), want (%q, %q)", tc.manifest, got.description, got.version, tc.description, tc.version)
 		}
 	}
 }
@@ -168,7 +195,7 @@ func TestSkillAuthor(t *testing.T) {
 func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	home := t.TempDir()
 	writeSkillFiles(t, filepath.Join(home, ".agents", "skills", "pdf"), map[string]string{
-		"SKILL.md": "---\nname: pdf\n---\n",
+		"SKILL.md": "---\nname: pdf\ndescription: Fill PDF forms\nversion: 1.2\n---\n",
 	})
 	catalog := []AISignature{
 		{ID: "codex", Vendor: "OpenAI", Category: SignalSupportedConnector, SupportedConnector: "codex", SkillPaths: []string{"~/.agents/skills"}},
@@ -192,7 +219,8 @@ func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	}
 	want := AISkillFacts{
 		ContentHash: mustHashSkill(t, filepath.Join(home, ".agents", "skills", "pdf")), ContentStatus: SkillContentOK,
-		Scope: SkillScopeUser, Location: "~/.agents/skills/pdf", ManifestHash: skillManifestHash([]byte("---\nname: pdf\n---\n")),
+		Scope: SkillScopeUser, Location: "~/.agents/skills/pdf", Description: "Fill PDF forms", Version: "1.2",
+		ManifestHash: skillManifestHash([]byte("---\nname: pdf\ndescription: Fill PDF forms\nversion: 1.2\n---\n")), ManifestSize: 59,
 	}
 	if *facts[0] != want || *facts[1] != want {
 		t.Fatalf("facts = %+v / %+v, want %+v", *facts[0], *facts[1], want)

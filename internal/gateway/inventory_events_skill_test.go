@@ -11,6 +11,8 @@
 package gateway
 
 import (
+	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 )
 
 func skillReportSignal(signature, connector, parentHash string, skills ...inventory.AIEvidence) inventory.AISignal {
@@ -155,5 +158,96 @@ func TestSkillInventoryRecordsNameTheBestPublisherEvidence(t *testing.T) {
 	}
 	if field("declared", "plugin") != nil {
 		t.Error("a skill no plugin ships has no plugin field")
+	}
+}
+
+func TestSkillInventoryRecordsCarryTheDeclaredFactsAndAgentVendor(t *testing.T) {
+	hash := "sha256:" + strings.Repeat("2", 64)
+	signal := skillReportSignal("claudecode", "claudecode", "sha256:"+strings.Repeat("1", 64),
+		inventory.AIEvidence{Type: "skill_entry", Basename: "code-review", Skill: &inventory.AISkillFacts{
+			ContentHash: hash, ContentStatus: inventory.SkillContentOK, Scope: inventory.SkillScopeUser,
+			Author: "Platform Engineering", Description: "Review a pull request the way the platform team does.",
+			Version: "2.3.0", ManifestHash: "sha256:" + strings.Repeat("3", 64), ManifestSize: 1834,
+		}},
+		inventory.AIEvidence{Type: "skill_entry", Basename: "bare", Skill: &inventory.AISkillFacts{
+			ContentStatus: inventory.SkillContentTooLarge, Scope: inventory.SkillScopeUser,
+			Description: "bad\x07bell", Version: "1\x1b[0m",
+		}},
+	)
+	signal.Vendor = "Anthropic"
+	bodies := skillRecordBodies(t, discoveredEntriesFromReport(
+		inventory.AIDiscoveryReport{Signals: []inventory.AISignal{signal}}, inventory.SignalSkill, "skill"))
+	review, bare := bodies["code-review/claudecode"], bodies["bare/claudecode"]
+	for key, want := range map[string]any{
+		"defenseclaw.inventory.item.description":    "Review a pull request the way the platform team does.",
+		"defenseclaw.inventory.skill.version":       "2.3.0",
+		"defenseclaw.inventory.skill.manifest_size": int64(1834),
+		"defenseclaw.ai.component.vendor":           "Anthropic",
+		"defenseclaw.inventory.skill.publisher":     "Platform Engineering",
+	} {
+		if got := review[key]; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s = %v (%T), want %v", key, got, got, want)
+		}
+	}
+	for _, key := range []string{"defenseclaw.inventory.item.description", "defenseclaw.inventory.skill.version", "defenseclaw.inventory.skill.manifest_size"} {
+		if got, ok := bare[key]; ok {
+			t.Errorf("a skill without printable facts or a hashed SKILL.md has %s = %v", key, got)
+		}
+	}
+	if bare["defenseclaw.ai.component.vendor"] != "Anthropic" {
+		t.Errorf("every entry names the agent vendor, got %v", bare["defenseclaw.ai.component.vendor"])
+	}
+}
+
+// The SKILL.md frontmatter is the skill author's text, so the managed AI
+// Defense destination's profile masks a secret in it like in the SKILL.md.
+func TestSkillDeclaredFactsAreRedactedForTheManagedDestination(t *testing.T) {
+	// AWS's documented example key, built at run time so the source holds no key-shaped literal.
+	secret := "AKIA" + "IOSFODNN7EXAMPLE"
+	signal := skillReportSignal("claudecode", "claudecode", "sha256:"+strings.Repeat("1", 64),
+		inventory.AIEvidence{Type: "skill_entry", Basename: "deploy", Skill: &inventory.AISkillFacts{
+			ContentStatus: inventory.SkillContentTooLarge, Scope: inventory.SkillScopeUser,
+			Description: "Deploy with aws_access_key_id " + secret + " to staging", Version: secret,
+		}},
+	)
+	capture := &endpointInventoryCapture{}
+	if err := emitEndpointInventorySnapshot(
+		t.Context(), capture, "endpoint_skill_inventory",
+		discoveredEntriesFromReport(inventory.AIDiscoveryReport{Signals: []inventory.AISignal{signal}}, inventory.SignalSkill, "skill"),
+		false, config.ObservabilityV8ManagedSkillInventoryAction, endpointInventoryCycle{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := redaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, ok := redaction.BuiltInProfile(redaction.ProfileSensitive)
+	if !ok {
+		t.Fatal("no sensitive profile")
+	}
+	checked := 0
+	for _, record := range capture.snapshot() {
+		if record.EventName() != "ai_component.observed" {
+			continue
+		}
+		projection, _, err := engine.Project(record, profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := projection.Bytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(payload), secret) {
+			t.Fatalf("the managed projection leaks the key: %s", payload)
+		}
+		if !strings.Contains(string(payload), "to staging") {
+			t.Errorf("the description around the key is gone: %s", payload)
+		}
+		checked++
+	}
+	if checked != 1 {
+		t.Fatalf("checked %d records, want 1", checked)
 	}
 }
