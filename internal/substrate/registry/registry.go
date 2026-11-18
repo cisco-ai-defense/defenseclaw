@@ -40,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 )
 
@@ -110,6 +111,15 @@ type Registration struct {
 
 // Version is the record version.
 const Version = 1
+
+// namePattern is an atespace or actor name: printable, bounded, no
+// separators, so a name can't smuggle a path segment into a key or a
+// refusal.
+var namePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+
+// ValidName reports whether s is a well-formed atespace or actor name (the
+// segments of an actor's SPIFFE ID the callout accepts).
+func ValidName(s string) bool { return namePattern.MatchString(s) }
 
 // Validate checks the identity fields and fills Key.
 func (r *Registration) Validate() error {
