@@ -3691,7 +3691,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// check, or (full false) the check of a hold due by age only
 	// (inspectStreamText). False: it blocked; the stream is cut.
 	scanMid := func(full bool) bool {
-		midVerdict := p.inspectStreamText(llmCtx, accumulated.String(), aliasModel, mode, full)
+		midVerdict, ranFull := p.inspectStreamText(llmCtx, accumulated.String(), aliasModel, mode, full)
 		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",
@@ -3704,7 +3704,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return false
 		}
 		lastScanLen = accumulated.Len()
-		if full {
+		if ranFull {
 			lastFullScanLen = lastScanLen
 		}
 		return true
@@ -3843,7 +3843,11 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			switch {
 			case streamBlocked:
 			case !initialBufFlushed:
-				sendInitial()
+				// Asked again: a reload may have made the final check
+				// decide more (a judge strategy); then the buffer waits.
+				if earlyInitial = p.initialEarlyRelease(); earlyInitial {
+					sendInitial()
+				}
 			default:
 				releaseHeld(false)
 			}

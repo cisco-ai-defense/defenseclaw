@@ -1136,21 +1136,24 @@ func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, co
 	return verdict
 }
 
-// InspectMidStreamLocal is the mid-stream check of a stream hold that is due
-// by age only (rel-1-0-10:GAP-0625, proxy_stream_tail.go): InspectMidStream
-// without the AI Defense call and without spans, so the local rules and the
-// policy decide as they do with scanner_mode local. A held byte waits at
-// most streamHoldMaxAge for a check, so a slow stream runs this one about
-// every 100 ms; the full check (AI Defense with scanner_mode remote or both,
-// one span) still runs every 500 bytes of text, as before the hold, and the
-// final check reads the whole reply.
-func (g *GuardrailInspector) InspectMidStreamLocal(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+// InspectMidStreamAgeDue is the mid-stream check of a stream hold that is due
+// by age only (rel-1-0-10:GAP-0625, proxy_stream_tail.go). A held byte waits
+// at most streamHoldMaxAge for a check, so a slow stream runs this one about
+// every 100 ms. With scanner_mode remote or both and an AI Defense client,
+// it is the full check (InspectMidStream: AI Defense reads every byte before
+// it is sent, as before the age bound; full true). Otherwise it is the
+// local rules and the policy, as scanner_mode local decides, with no span
+// (full false): the span per tick is the cost it saves.
+func (g *GuardrailInspector) InspectMidStreamAgeDue(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) (*ScanVerdict, bool) {
+	if sm := g.scannerMode; (sm == "remote" || sm == "both") && !g.managedMode && g.currentCiscoInspector() != nil {
+		return g.InspectMidStream(ctx, direction, content, messages, model, mode), true
+	}
 	if g.managedMode {
 		// As InspectMidStream: the managed install's mid-stream check is
 		// the AI Defense check of the full completion after the stream.
-		return allowVerdict("ai-defense")
+		return allowVerdict("ai-defense"), false
 	}
-	return g.inspectRegexOnlyRemote(context.WithValue(ctx, guardrailNoSpansKey{}, true), direction, content, messages, model, mode, false)
+	return g.inspectRegexOnlyRemote(context.WithValue(ctx, guardrailNoSpansKey{}, true), direction, content, messages, model, mode, false), false
 }
 
 // MidStreamDecidesAsFinal reports that the mid-stream check of a completion
@@ -1164,7 +1167,7 @@ func (g *GuardrailInspector) MidStreamDecidesAsFinal() bool {
 }
 
 // guardrailNoSpansKey marks a check that opens no phase span
-// (InspectMidStreamLocal).
+// (InspectMidStreamAgeDue).
 type guardrailNoSpansKey struct{}
 
 // inspectRegexOnly is the original flow: regex patterns produce verdicts,
@@ -1174,7 +1177,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 }
 
 // inspectRegexOnlyRemote is inspectRegexOnly; remote false leaves AI
-// Defense out whatever the scanner mode (InspectMidStreamLocal).
+// Defense out whatever the scanner mode (InspectMidStreamAgeDue).
 func (g *GuardrailInspector) inspectRegexOnlyRemote(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string, remote bool) *ScanVerdict {
 	ciscoClient := g.currentCiscoInspector()
 	var localResult *ScanVerdict

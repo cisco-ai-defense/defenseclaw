@@ -1784,7 +1784,7 @@
    "TestGAP0621R4UnreadableRootResolvedTarget": 2.1,
    "TestGAP0621R6SelectionDecisionsWithCallerFacts": 4.3,
    "TestGAP0621R9PrivateSkillAsLinkedRoot": 2.9,
-   "TestGAP0625AgeDueChecksStayLocal": 10.9,
+   "TestGAP0625AgeDueChecksKeepTheirScanner": 10.9,
    "TestGAP0628InitialBufferIsTimeBounded": 19.8,
    "TestGAP0632BrokenCustomPackLoadsBuiltinPack": 11.8,
    "TestGAP0632InvalidContentIsConfigErrorAndBuiltinFallback": 8.9,
