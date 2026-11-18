@@ -68,6 +68,12 @@ func NestedBodiesOverBudget(command string) bool {
 // MaxNestedBodyBytes defines it. The measure stops once the weight passes
 // MaxNestedBodyBytes, so the result is exact up to that bound.
 func NestedBodyWeight(command string) int {
+	return nestedBodyWeight(command, mayHoldBody)
+}
+
+// nestedBodyWeight is NestedBodyWeight that parses a nested body only when
+// mayDescend holds for its text (the command itself is always parsed).
+func nestedBodyWeight(command string, mayDescend func(body string) bool) int {
 	if len(command) < nestedBodyMinCommand {
 		return 0
 	}
@@ -80,7 +86,7 @@ func NestedBodyWeight(command string) int {
 				return true
 			}
 		}
-		if depth >= nestedBodyMaxDepth || nestingBound(text) != "" {
+		if depth >= nestedBodyMaxDepth || depth > 0 && !mayDescend(text) || nestingBound(text) != "" {
 			return false
 		}
 		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
@@ -112,6 +118,18 @@ func NestedBodyWeight(command string) int {
 	}
 	visit(command, 0)
 	return work
+}
+
+// mayHoldBody reports whether a body may hold a body of its own. A nested
+// body is a static word whose value has a blank or a shell operator
+// (staticBodyWord), or a static here-document. The value of an unquoted,
+// unescaped literal has no blank or operator but a lone $, so such a word
+// needs a quote, a backslash or a $, and a here-document needs <<. A body
+// with none of them has no body to descend into and is not parsed: a 1 MiB
+// here-document of plain text was parsed as a shell program here, about
+// 30 MiB, to find none (rel-1-0-10:GAP-0299).
+func mayHoldBody(text string) bool {
+	return strings.ContainsAny(text, "'\"\\$") || strings.Contains(text, "<<")
 }
 
 // staticBodyWord is the shell value of a word made only of literal and
