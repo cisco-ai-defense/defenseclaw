@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -47,6 +48,7 @@ func appendTrustedPrivateKeyReaderFinding(
 			proved = true
 		}
 	}
+	var keyGlobCut bounded.CapSet
 	if !proved {
 		command := request.Input.Command
 		if command == "" {
@@ -59,8 +61,8 @@ func appendTrustedPrivateKeyReaderFinding(
 		case strings.EqualFold(request.Input.Tool, "PowerShell"):
 			dialect = actionfacts.DialectPowerShell
 		}
-		proved = hookpaths.ActionPrivateKeyReadWithDialect(command, request.Input.CWD, request.Input.ActiveHome, dialect) ||
-			hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
+		proved, keyGlobCut = hookpaths.ActionPrivateKeyReadBounded(command, request.Input.CWD, request.Input.ActiveHome, dialect)
+		proved = proved || hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
 		if proved && (trustedActionPrivateKeyOnlyCopiedInHome(request.Input, facts) && !trustedActionCallOpensAccess(request) ||
 			trustedActionOwnSSHFolderCopy(request, request.Input)) {
 			// Every command copies inside the home and nothing in the call
@@ -78,7 +80,10 @@ func appendTrustedPrivateKeyReaderFinding(
 		proved = true
 	}
 	if !proved {
-		return findings
+		// A pattern the reader expanded only up to its cap, with no key among
+		// the matches read before it, is TRUNCATED: at least the unknown tier,
+		// beside what was read (the one bound rule, rel-1-0-10:GAP-1066).
+		return withBoundedTruncation(findings, keyGlobCut, request)
 	}
 	return withProvedPrivateKeyRead(findings, generation, request)
 }

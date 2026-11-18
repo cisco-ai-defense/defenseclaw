@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -131,7 +132,11 @@ type agentHookConfigGuard struct {
 
 // shellMentionsRegistryPath is a cheap prefilter. Every component comes from
 // the active registration registry, including enclosing hook directories.
+// Many files share components (.claude, settings.json, the project folders),
+// so each distinct component is searched for once: a 1 MiB command was
+// read once per component of every file (rel-1-0-10:GAP-0299).
 func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
+	searched := make(map[string]bool, 4*len(g.files))
 	for _, file := range g.files {
 		path := file.Path
 		if relative, ok := strings.CutPrefix(path, g.home+string(filepath.Separator)); ok && g.home != "" {
@@ -140,7 +145,15 @@ func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
 			path = relative
 		}
 		for _, component := range strings.Split(filepath.ToSlash(path), "/") {
-			if len(component) > 2 && strings.Contains(text, strings.ToLower(component)) {
+			if len(component) <= 2 {
+				continue
+			}
+			component = strings.ToLower(component)
+			if searched[component] {
+				continue
+			}
+			searched[component] = true
+			if strings.Contains(text, component) {
 				return true
 			}
 		}
@@ -1071,10 +1084,11 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
 			if hookpaths.RegistrationWriteCandidate(part.Command) {
-				owned, _ := agentHookConfigReachedPaths(part, guard, agentHookConfigRegistrationPaths(guard))
+				owned, _, truncated := agentHookConfigReachedPaths(part, guard, agentHookConfigRegistrationPaths(guard))
 				for _, path := range owned {
 					add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
 				}
+				out = withBoundedTruncation(out, truncated, request)
 			}
 			facts := []actionfacts.Facts{actionfacts.Analyze(actionfacts.Input{
 				Tool: "Bash", Command: part.Command, CWD: part.Dir, ActiveHome: request.Input.ActiveHome,
@@ -1190,13 +1204,14 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		}
 		if hookpaths.RegistrationWriteCandidate(part.Command) {
 			registered := agentHookConfigRegistrationPaths(partGuard)
-			owned, other := agentHookConfigReachedPaths(part, partGuard, registered)
+			owned, other, truncated := agentHookConfigReachedPaths(part, partGuard, registered)
 			for _, path := range owned {
 				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
 			}
 			for _, path := range other {
 				add(agentHookConfigWriteRuleID, "", path)
 			}
+			out = withBoundedTruncation(out, truncated, request)
 			if folder := hookpaths.RegistrationArchivePossibleReach(part.Command, part.Dir, guard.home, registered); folder != "" {
 				add(agentHookConfigWriteRuleID, "archive may replace a registered hook file", folder)
 			}
@@ -1796,9 +1811,13 @@ func agentHookConfigShellWriteOperands(command, dir, home string) []string {
 // split into installed DefenseClaw artifacts (and the folders that hold them)
 // and the other registration documents. The set is narrowed by halves in one
 // reader, so only a statement that reaches it pays more than one read,
-// whatever spelling (brace, glob, loop, find) names the path.
-func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string) {
-	for _, path := range hookpaths.RegistrationWriteReached(part.Command, part.Dir, guard.home, registered) {
+// whatever spelling (brace, glob, loop, find) names the path. truncated
+// names the caps a pattern expansion the reader decided on hit with no
+// registered file among the matches read before them (the one bound rule,
+// rel-1-0-10:GAP-1468).
+func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string, truncated bounded.CapSet) {
+	reached, truncated := hookpaths.RegistrationWriteReachedBounded(part.Command, part.Dir, guard.home, registered)
+	for _, path := range reached {
 		if guard.ownedFile(path) || guard.ownedFolder(path) {
 			owned = append(owned, path)
 		} else {
@@ -1826,7 +1845,7 @@ func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHoo
 			}
 		}
 	}
-	return owned, other
+	return owned, other, truncated
 }
 
 // agentHookConfigBindsValues reports whether a command can carry a name in a

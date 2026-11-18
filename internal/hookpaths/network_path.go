@@ -6,10 +6,12 @@ package hookpaths
 import (
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -161,11 +164,18 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
+	// globCut holds the caps the pattern expansions of the private-key and
+	// registration readers hit (globCutOf).
+	globCut bounded.CapSet
 	// memo holds what the call has read of the file system: the paths it
 	// resolved and the protected set of each home (targets).
 	memo *TargetMemo
 	// stats are the answers of callStat, by path.
 	stats map[string]statAnswer
+	// scripts are the script bodies the call has read (readActionScriptWith),
+	// scriptBytes their size in all.
+	scripts     map[scriptReadKey]string
+	scriptBytes int
 }
 
 type statAnswer struct {
@@ -198,7 +208,7 @@ func callStat(name string) (os.FileInfo, error) {
 // is run by one goroutine, so it needs no lock of its own.
 func (call *hookCall) targets() *TargetMemo {
 	if call.memo == nil {
-		call.memo = NewTargetMemo()
+		call.memo = newTargetMemo()
 	}
 	return call.memo
 }
@@ -679,6 +689,17 @@ func noteBodyCut(cut shareReadCut) {
 	}
 }
 
+// noteGlobCut records on the hook call the caps a pattern expansion of the
+// private-key or a registration reader hit (globCutOf).
+func noteGlobCut(truncated bounded.CapSet) {
+	if !truncated.Any() {
+		return
+	}
+	if call := currentHookCall(); call != nil {
+		call.globCut = call.globCut.Union(truncated)
+	}
+}
+
 // pathBodyUnanswered is networkPathRead for the script a relative name reaches
 // below a folder already walked: a name that spells folder links of its own
 // is walked on from that folder, and a path past the links the system opens
@@ -716,6 +737,61 @@ func noteBodyLinkLimit(err error) {
 func pathReadDir(name string) ([]os.DirEntry, error) {
 	entries, _, err := readGated("readdir", name, os.ReadDir, nil)
 	return entries, err
+}
+
+// pathReadDirChunk is how many entries pathReadDirLimit reads at a time past
+// its first n.
+const pathReadDirChunk = 1024
+
+// pathReadDirLimit is pathReadDir for a walk that examines at most n-1
+// entries of a directory in name order: it returns the n entries of the
+// whole directory that sort first by name, which is how the sorted read of
+// pathReadDir begins (a directory of fewer names reads as pathReadDir reads
+// it). A directory of more names is still read to its end, as pathReadDir
+// read it, keeping at most 2n entries at a time, so the walk examines the
+// entries rel examined whatever order the file system lists them in: the
+// first n in directory order made a key link that sorts early drop out of a
+// directory past the cap (rel-1-0-10:GAP-1468).
+func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
+	if networkPathUnanswered(name) {
+		return nil, networkShareError("readdir", name)
+	}
+	dir, err := os.Open(fixturefs.Map(name))
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(n)
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	byName := func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) }
+	slices.SortFunc(entries, byName)
+	if err != nil || n <= 0 || len(entries) < n {
+		return entries, err
+	}
+	for {
+		more, err := dir.ReadDir(pathReadDirChunk)
+		done := errors.Is(err, io.EOF) || len(more) == 0
+		if err != nil && !done {
+			return nil, err
+		}
+		// entries[:n] is sorted: a name past entries[n-1] is not among the
+		// first n (the names of a directory are distinct).
+		bound := entries[n-1].Name()
+		for _, entry := range more {
+			if entry.Name() < bound {
+				entries = append(entries, entry)
+			}
+		}
+		if done || len(entries) >= 2*n {
+			slices.SortFunc(entries, byName)
+			entries = entries[:n]
+		}
+		if done {
+			return entries, nil
+		}
+	}
 }
 
 func pathReadlink(name string) (string, error) {
