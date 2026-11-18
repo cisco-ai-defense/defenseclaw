@@ -443,7 +443,7 @@ func (s *passthroughStream) run() {
 			}
 			return true
 		}
-		if !scanText() {
+		if !scanText(true) {
 			return false
 		}
 		runs := accumulated.OpenRuns()
