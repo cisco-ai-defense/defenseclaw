@@ -5,10 +5,13 @@ package scanner
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // rel-1-0-10:GAP-1152: CG-EXEC-001 read RegExp.prototype.exec on a name the
@@ -309,6 +312,152 @@ func TestCodeGuardExecRegExpProofReviewRows(t *testing.T) {
 	} {
 		if fires("src/parse.js", tc.content) || fires("src/parse.ts", tc.content) {
 			t.Errorf("%s: CG-EXEC-001 fired on RegExp matching", tc.name)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-1271: the whole-file proof read whether RegExp is the
+// builtin once per RegExp(...) initializer, over the whole file, and climbed
+// every enclosing bracket for each use of a proven name, so CodeGuard on one
+// Write or Edit of a JavaScript file took time quadratic in its size, inline
+// on the hook path (4,000 RegExp heads, 107 KB: 25 s; 16,000: 6 min; rel
+// 0.1 s). Each fact is now read once per file or once per bracket pair; the
+// findings are the same.
+func TestCodeGuardExecRegExpProofIsLinear(t *testing.T) {
+	if raceDetector {
+		t.Skip("timing bounds are for the plain build; -race runs this code about 20 times slower")
+	}
+	s := &CodeGuardScanner{}
+	shapes := []struct {
+		name  string
+		build func(n int) string
+		fires bool
+	}{
+		{"RegExp heads", func(n int) string {
+			var b strings.Builder
+			for i := 0; i < n; i++ {
+				fmt.Fprintf(&b, "const r%d = RegExp(\"a%d+\");\n", i, i)
+			}
+			b.WriteString("r0.exec(s);\n")
+			return b.String()
+		}, false},
+		{"RegExp heads, RegExp assigned at the end", func(n int) string {
+			var b strings.Builder
+			for i := 0; i < n; i++ {
+				fmt.Fprintf(&b, "const r%d = new RegExp(\"a%d+\", \"g\");\n", i, i)
+			}
+			b.WriteString("r0.exec(s);\nRegExp = cp.exec;\n")
+			return b.String()
+		}, true},
+		{"nested RegExp heads", func(n int) string {
+			var b strings.Builder
+			b.WriteString("const re = /x/;\n")
+			for i := 0; i < n; i++ {
+				fmt.Fprintf(&b, "const r%d = RegExp(f(() => {\n", i)
+			}
+			b.WriteString(strings.Repeat("}));\n", n))
+			b.WriteString("re.exec(s);\n")
+			return b.String()
+		}, false},
+		{"value uses in nested blocks", func(n int) string {
+			return "const re = /x/;\n" + strings.Repeat("{\n", n) + strings.Repeat("x = re;\n", n) +
+				strings.Repeat("}\n", n) + "re.exec(s);\n"
+		}, false},
+		{"value uses after closed parens", func(n int) string {
+			return "const re = /x/;\nconst v = " + strings.Repeat("f(", n) + "0" + strings.Repeat(")", n) + ";\n" +
+				strings.Repeat("x = re;\n", n) + "re.exec(s);\n"
+		}, false},
+		{"uses in a group after a long comment", func(n int) string {
+			return "const re = /x/;\ng(1)/*" + strings.Repeat(" ", 16*n) + "*/(\n" + strings.Repeat("re,\n", n) +
+				"0);\nre.exec(s);\n"
+		}, false},
+	}
+	scan := func(build func(int) string, n int) (time.Duration, bool) {
+		content := build(n)
+		start := time.Now()
+		fires := false
+		for _, f := range s.ScanContent("src/patterns.js", content) {
+			fires = fires || f.RuleID == codeGuardExecRuleID
+		}
+		return time.Since(start), fires
+	}
+	for _, shape := range shapes {
+		small, fires := scan(shape.build, 4000)
+		if fires != shape.fires {
+			t.Errorf("%s: CG-EXEC-001 fired=%v, want %v", shape.name, fires, shape.fires)
+		}
+		large, _ := scan(shape.build, 16000)
+		t.Logf("%s: 4,000 %s, 16,000 %s", shape.name, small, large)
+		// rel takes 0.1 s on 4,000 RegExp heads and the quadratic proof 25 s:
+		// the bounds leave room for a slow or -race run, not for x16 growth.
+		if small > 2*time.Second {
+			t.Errorf("%s: 4,000 took %s, want under 2 s", shape.name, small)
+		}
+		if large > 10*small+time.Second {
+			t.Errorf("%s: 16,000 took %s, 4,000 %s: not linear", shape.name, large, small)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-1271: innermost and block read the bracket pairs through
+// binary searches and the innermost { } of each pair; they give what walking
+// up the parents of the pair that opened last gives.
+func TestJSGroupsInnermostMatchesTheParentWalk(t *testing.T) {
+	walkInnermost := func(g *jsGroups, pos int) int {
+		i := -1
+		for k := range g.list {
+			if g.list[k].open < pos {
+				i = k
+			}
+		}
+		for i >= 0 && g.list[i].close < pos {
+			i = g.list[i].parent
+		}
+		return i
+	}
+	walkBlock := func(g *jsGroups, pos int) (int, int) {
+		for i := walkInnermost(g, pos); i >= 0; i = g.list[i].parent {
+			if g.kind(i) == '{' {
+				return g.list[i].open, g.list[i].close + 1
+			}
+		}
+		return 0, len(g.code)
+	}
+	r := rand.New(rand.NewSource(1271))
+	opens, fillers := "([{", []string{"a", " ", "\n", ";"}
+	for iter := 0; iter < 20000; iter++ {
+		var b strings.Builder
+		var open []byte
+		for n := r.Intn(40); n >= 0; n-- {
+			switch k := r.Intn(3); {
+			case k == 0:
+				c := opens[r.Intn(len(opens))]
+				open = append(open, c)
+				b.WriteByte(c)
+			case k == 1 && len(open) > 0:
+				b.WriteByte(jsCloses[open[len(open)-1]])
+				open = open[:len(open)-1]
+			default:
+				b.WriteString(fillers[r.Intn(len(fillers))])
+			}
+		}
+		for len(open) > 0 {
+			b.WriteByte(jsCloses[open[len(open)-1]])
+			open = open[:len(open)-1]
+		}
+		g, ok := jsGroupsOf(b.String())
+		if !ok {
+			t.Fatalf("%q: brackets do not pair", b.String())
+		}
+		for pos := 0; pos <= len(g.code); pos++ {
+			if got, want := g.innermost(pos), walkInnermost(g, pos); got != want {
+				t.Fatalf("%q at %d: innermost %d, parent walk %d", g.code, pos, got, want)
+			}
+			gs, ge := g.block(pos)
+			ws, we := walkBlock(g, pos)
+			if gs != ws || ge != we {
+				t.Fatalf("%q at %d: block [%d,%d), parent walk [%d,%d)", g.code, pos, gs, ge, ws, we)
+			}
 		}
 	}
 }

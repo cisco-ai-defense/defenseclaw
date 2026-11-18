@@ -6,6 +6,7 @@ package scanner
 import (
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -283,10 +284,15 @@ func jsProvenRegExpNames(source string) map[string]bool {
 	if !ok {
 		return nil
 	}
+	// Whether RegExp is the builtin constructor is one reading of the whole
+	// file, the same for every RegExp(...) initializer: it runs once, on the
+	// first one, so the proof stays linear in the size of the file
+	// (rel-1-0-10:GAP-1271).
+	constructorIntact := sync.OnceValue(func() bool { return jsRegExpConstructorIntact(code) })
 	type declaration struct{ name, blockStart, blockEnd int }
 	declared := map[string][]declaration{}
 	for _, head := range jsConstHead.FindAllStringSubmatchIndex(code, -1) {
-		end, whole := jsWholeRegExpInitializer(code, head[1], literalEnd)
+		end, whole := jsWholeRegExpInitializer(code, head[1], literalEnd, groups, constructorIntact)
 		if !whole || !jsStatementEnds(code, end) {
 			continue
 		}
@@ -502,16 +508,39 @@ func jsSlashStartsRegExp(prevByte byte, prevWord string) bool {
 }
 
 // jsGroup is one bracket pair of the masked code: (), [] or {}. parent is
-// the index of the pair that holds it (-1 at the top level).
+// the index of the pair that holds it (-1 at the top level), brace the
+// index of the innermost { } that holds or is it (-1 at the top level).
 type jsGroup struct {
-	open, close, parent int
+	open, close, parent, brace int
 }
 
 // jsGroups are the bracket pairs of the masked code, in the order they
-// open.
+// open, and closed, their indexes in the order they close. Each use of a
+// name reads its groups through binary searches and facts read once per
+// group (memo), so the whole proof stays linear in the size of the file
+// (rel-1-0-10:GAP-1271).
 type jsGroups struct {
-	code string
-	list []jsGroup
+	code   string
+	list   []jsGroup
+	closed []int
+	memo   []jsGroupFacts
+}
+
+// jsGroupFacts are the facts of one group read so far: 0 not read yet, 1
+// false, 2 true.
+type jsGroupFacts struct {
+	parameters, forHead, computedMember, objectLiteral, pattern int8
+}
+
+// jsFact is the fact in slot, read once.
+func jsFact(slot *int8, read func() bool) bool {
+	if *slot == 0 {
+		*slot = 1
+		if read() {
+			*slot = 2
+		}
+	}
+	return *slot == 2
 }
 
 // jsCloses maps each opening bracket to its closing one.
@@ -525,11 +554,15 @@ func jsGroupsOf(code string) (*jsGroups, bool) {
 	for i := 0; i < len(code); i++ {
 		switch c := code[i]; c {
 		case '(', '[', '{':
-			parent := -1
+			parent, brace := -1, -1
 			if len(open) > 0 {
 				parent = open[len(open)-1]
+				brace = groups.list[parent].brace
 			}
-			groups.list = append(groups.list, jsGroup{open: i, close: -1, parent: parent})
+			if c == '{' {
+				brace = len(groups.list)
+			}
+			groups.list = append(groups.list, jsGroup{open: i, close: -1, parent: parent, brace: brace})
 			open = append(open, len(groups.list)-1)
 		case ')', ']', '}':
 			if len(open) == 0 {
@@ -540,31 +573,45 @@ func jsGroupsOf(code string) (*jsGroups, bool) {
 				return nil, false
 			}
 			groups.list[top].close = i
+			groups.closed = append(groups.closed, top)
 			open = open[:len(open)-1]
 		}
 	}
+	groups.memo = make([]jsGroupFacts, len(groups.list))
 	return groups, len(open) == 0
+}
+
+// closeAfter is the position just after the bracket that closes the one
+// opening at open. ok is false when no group opens there.
+func (g *jsGroups) closeAfter(open int) (int, bool) {
+	i := sort.Search(len(g.list), func(k int) bool { return g.list[k].open >= open })
+	if i == len(g.list) || g.list[i].open != open {
+		return 0, false
+	}
+	return g.list[i].close + 1, true
 }
 
 // kind is the opening bracket of group i.
 func (g *jsGroups) kind(i int) byte { return g.code[g.list[i].open] }
 
 // innermost is the index of the innermost group that holds pos (-1 at the
-// top level).
+// top level): the group that opened last before pos if no bracket closed
+// after it, else the parent of the group that closed last before pos.
 func (g *jsGroups) innermost(pos int) int {
-	i := sort.Search(len(g.list), func(k int) bool { return g.list[k].open >= pos }) - 1
-	for i >= 0 && g.list[i].close < pos {
-		i = g.list[i].parent
+	opened := sort.Search(len(g.list), func(k int) bool { return g.list[k].open >= pos }) - 1
+	closed := sort.Search(len(g.closed), func(k int) bool { return g.list[g.closed[k]].close >= pos }) - 1
+	if closed < 0 || opened >= 0 && g.list[opened].open > g.list[g.closed[closed]].close {
+		return opened
 	}
-	return i
+	return g.list[g.closed[closed]].parent
 }
 
 // block is the span of the innermost { } holding pos (the whole file at
 // the top level).
 func (g *jsGroups) block(pos int) (int, int) {
-	for i := g.innermost(pos); i >= 0; i = g.list[i].parent {
-		if g.kind(i) == '{' {
-			return g.list[i].open, g.list[i].close + 1
+	if i := g.innermost(pos); i >= 0 {
+		if b := g.list[i].brace; b >= 0 {
+			return g.list[b].open, g.list[b].close + 1
 		}
 	}
 	return 0, len(g.code)
@@ -632,6 +679,10 @@ func (g *jsGroups) use(start, end int) jsUse {
 // parameters reports a ( ) group that is a parameter list: of a catch, a
 // function, a method or an arrow (its ) followed by {, => or a type).
 func (g *jsGroups) parameters(i int) bool {
+	return jsFact(&g.memo[i].parameters, func() bool { return g.readParameters(i) })
+}
+
+func (g *jsGroups) readParameters(i int) bool {
 	before, at := jsTokenBefore(g.code, g.list[i].open)
 	switch before {
 	case "catch", "function":
@@ -650,6 +701,10 @@ func (g *jsGroups) parameters(i int) bool {
 
 // forHead reports the ( ) of a for statement.
 func (g *jsGroups) forHead(i int) bool {
+	return jsFact(&g.memo[i].forHead, func() bool { return g.readForHead(i) })
+}
+
+func (g *jsGroups) readForHead(i int) bool {
 	before, at := jsTokenBefore(g.code, g.list[i].open)
 	if before == "await" {
 		before, _ = jsTokenBefore(g.code, at)
@@ -659,6 +714,10 @@ func (g *jsGroups) forHead(i int) bool {
 
 // computedMember reports a [ ] that follows an operand: obj[key].
 func (g *jsGroups) computedMember(i int) bool {
+	return jsFact(&g.memo[i].computedMember, func() bool { return g.readComputedMember(i) })
+}
+
+func (g *jsGroups) readComputedMember(i int) bool {
 	before, _ := jsTokenBefore(g.code, g.list[i].open)
 	switch {
 	case before == ")" || before == "]" || before == "?." || before == `"` || before == "'" || before == "`":
@@ -671,6 +730,10 @@ func (g *jsGroups) computedMember(i int) bool {
 
 // objectLiteral reports a { } that starts an object literal, not a block.
 func (g *jsGroups) objectLiteral(i int) bool {
+	return jsFact(&g.memo[i].objectLiteral, func() bool { return g.readObjectLiteral(i) })
+}
+
+func (g *jsGroups) readObjectLiteral(i int) bool {
 	before, _ := jsTokenBefore(g.code, g.list[i].open)
 	return jsObjectLiteralAfter[before]
 }
@@ -679,6 +742,10 @@ func (g *jsGroups) objectLiteral(i int) bool {
 // declaration or assignment, an import list, a for-in or for-of target, or
 // one inside a parameter list or another pattern.
 func (g *jsGroups) pattern(i int) bool {
+	return jsFact(&g.memo[i].pattern, func() bool { return g.readPattern(i) })
+}
+
+func (g *jsGroups) readPattern(i int) bool {
 	group := g.list[i]
 	if before, _ := jsTokenBefore(g.code, group.open); before == "const" || before == "let" || before == "var" {
 		return true
@@ -744,27 +811,17 @@ func jsTokenAfter(code string, i int) string {
 
 // jsWholeRegExpInitializer reports an initializer at pos that is one
 // regular expression literal or one RegExp(...) call, and where it ends.
-func jsWholeRegExpInitializer(code string, pos int, literalEnd map[int]int) (int, bool) {
+// constructorIntact is jsRegExpConstructorIntact of the code, read once per
+// file; the call ends at the ) the bracket pairs give its (.
+func jsWholeRegExpInitializer(code string, pos int, literalEnd map[int]int, groups *jsGroups, constructorIntact func() bool) (int, bool) {
 	if end, ok := literalEnd[pos]; ok {
 		return end, true
 	}
 	head := jsRegExpCall.FindStringIndex(code[pos:])
-	if head == nil || !jsRegExpConstructorIntact(code) {
+	if head == nil || !constructorIntact() {
 		return 0, false
 	}
-	depth := 0
-	for i := pos + head[1] - 1; i < len(code); i++ {
-		switch code[i] {
-		case '(':
-			depth++
-		case ')':
-			depth--
-			if depth == 0 {
-				return i + 1, true
-			}
-		}
-	}
-	return 0, false
+	return groups.closeAfter(pos + head[1] - 1)
 }
 
 // jsDeclaringWords declare the name that follows them.
