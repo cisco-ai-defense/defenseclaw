@@ -1366,6 +1366,15 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				receipt.conflicts_with_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_cursors AS cursor
 				WHERE cursor.last_semantic_event_id=event.semantic_event_id)
+			-- A tool-call chain event holds its semantic event (ON DELETE RESTRICT) and
+			-- has its received time (tool_chain_state.go reads it from this row), so this
+			-- is a point lookup on idx_guardrail_chain_events_received. Without it a
+			-- size-capped cutoff, which moves into the live window, met a chain event
+			-- its own stage had not reached yet and the whole run failed on the foreign
+			-- key (substrate-1:GAP-0570). The chain stage deletes it, then this one.
+			AND NOT EXISTS (SELECT 1 FROM guardrail_chain_events AS chain
+				WHERE chain.received_time_unix_nano=event.received_time_unix_nano
+				AND chain.semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE
 				operation.start_semantic_event_id=event.semantic_event_id)
 			AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS operation WHERE

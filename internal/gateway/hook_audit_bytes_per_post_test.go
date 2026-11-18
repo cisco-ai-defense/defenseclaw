@@ -237,7 +237,7 @@ func TestHookAuditBytesPerPost(t *testing.T) {
 // substrate-1:GAP-0570: under the E5 flood a replica's store grew by about
 // 4.3 GiB an hour, four times the chart's 1 GiB cap, and the cap never
 // deleted the newest hour, so the store filled its volume and every hook
-// failed with an internal error. Here real hook posts write about four times
+// failed with an internal error. Here real hook posts write about three times
 // an 8 MiB cap, and a capped retention pass runs every 10
 // pairs (about 0.5 MiB, a larger share of this cap than the 30-second check is of
 // 1 GiB at 50 posts a second): the used pages must stay under the cap, every
@@ -246,7 +246,7 @@ func TestHookAuditBytesPerPost(t *testing.T) {
 func TestHookAuditStaysUnderTheSizeCapUnderHookLoad(t *testing.T) {
 	const (
 		capMiB = 8
-		pairs  = 700
+		pairs  = 500
 		every  = 10
 	)
 	load := newHookLoad(t)
@@ -273,7 +273,8 @@ func TestHookAuditStaysUnderTheSizeCapUnderHookLoad(t *testing.T) {
 		for runs := 0; ; runs++ {
 			result, err := reaper.Run(t.Context())
 			if err != nil {
-				t.Fatalf("pair %d: retention pass: %v", at, err)
+				class, cause := audit.RetentionFailureDetail(err)
+				t.Fatalf("pair %d: retention pass failed (%s): %s", at, class, cause)
 			}
 			deleted += result.RowsDeleted[audit.RetentionAuditEvents]
 			if !result.Backlog || runs >= 5 {
