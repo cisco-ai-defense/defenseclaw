@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"math"
 	"path"
 	"slices"
 	"strings"
@@ -36,9 +37,11 @@ type CommandPathWord struct {
 	// code this reading does not see (source, a dynamic program or body),
 	// or moves, links or removes a path the word lies under (mv a keylink
 	// && cat keylink reads the moved file); a change inside a loop counts
-	// from the loop's start, and a word in a function body runs when the
-	// function is called, after any statement of the command (f() { cat
-	// keylink; }; cd /tmp; f), so every change counts for it. A word that
+	// from the loop's start. A word in a function body runs when the
+	// function is first called: a change after the body that ends before
+	// that call counts for it too (f() { cat keylink; }; cd /tmp; f), and
+	// its own statement, a later statement of the body and a change after
+	// the call do not (f() { cp /tmp/x keylink; }; f; cd /tmp). A word that
 	// its own call reads in another folder or root (env -C, tar -C, chroot,
 	// ssh) is unplaced too.
 	Unplaced   bool
@@ -47,13 +50,29 @@ type CommandPathWord struct {
 }
 
 // commandPathScan collects the path words of a command, the statements that
-// change where later words lie, and the byte ranges of its loops and of its
-// function bodies.
+// change where later words lie, the byte ranges of its loops, its function
+// definitions and the calls that may run them.
 type commandPathScan struct {
 	words     []CommandPathWord
 	changes   []commandPathChange
 	loops     [][2]int
-	functions [][2]int
+	functions []commandPathFunction
+	calls     []commandPathCall
+}
+
+// commandPathFunction is a function definition: its name and the byte range
+// of its body.
+type commandPathFunction struct {
+	name string
+	body [2]int
+}
+
+// commandPathCall is a simple command at byte start that may run a function
+// of the command: its program word is the function's name, or (name "") a
+// word this reading cannot name (a dynamic program, eval, source).
+type commandPathCall struct {
+	name  string
+	start int
 }
 
 // commandPathChange is a statement ending at byte end that changes where the
@@ -91,18 +110,26 @@ func CommandPathWords(command, home string) []CommandPathWord {
 			}
 		}
 	}
+	firstCalls := scan.functionFirstCalls()
 	for index := range words {
 		word := &words[index]
-		// A function body runs where the function is called, which may
-		// come after any statement of the command (rel-1-0-10:GAP-1286).
-		called := slices.ContainsFunc(scan.functions, func(body [2]int) bool {
-			return body[0] <= word.start && word.start < body[1]
-		})
+		// A function body runs when the function is first called: a change
+		// after the body that ends before that call moves its words too
+		// (rel-1-0-10:GAP-1286). The word's own statement, a later statement
+		// of the body and a change after the call do not (rel-1-0-10:GAP-1308).
+		body, calledAt := [2]int{}, -1
+		if function := scan.functionAt(word.start); function >= 0 {
+			body, calledAt = scan.functions[function].body, firstCalls[function]
+			if calledAt < 0 {
+				// No call is seen: every change after the body counts.
+				calledAt = math.MaxInt
+			}
+		}
 		for _, change := range scan.changes {
 			if word.Unplaced {
 				break
 			}
-			if change.end > word.start && !called {
+			if change.end > word.start && (change.end <= body[1] || change.end > calledAt) {
 				continue
 			}
 			if change.all {
@@ -118,6 +145,79 @@ func CommandPathWords(command, home string) []CommandPathWord {
 		}
 	}
 	return words
+}
+
+// functionAt is the index of the innermost function whose body holds byte
+// at, or -1.
+func (scan *commandPathScan) functionAt(at int) int {
+	found := -1
+	for index, function := range scan.functions {
+		if function.body[0] <= at && at < function.body[1] &&
+			(found < 0 || function.body[0] > scan.functions[found].body[0]) {
+			found = index
+		}
+	}
+	return found
+}
+
+// functionFirstCalls returns, for each function of the scan, the byte offset
+// of the first call after its body that runs it, or -1 when none is seen: a
+// call by its name, else (when there is none) a call this reading cannot
+// name. A call inside another function's body runs when that function is
+// first called; a function that reaches itself adds no call.
+func (scan *commandPathScan) functionFirstCalls() []int {
+	outer := make([]int, len(scan.calls))
+	for index, call := range scan.calls {
+		outer[index] = scan.functionAt(call.start)
+	}
+	first := make([]int, len(scan.functions))
+	const (
+		unread = iota
+		reading
+		read
+	)
+	state := make([]int, len(scan.functions))
+	var firstCall func(function int) int
+	firstCall = func(function int) int {
+		switch state[function] {
+		case reading:
+			return -1
+		case read:
+			return first[function]
+		}
+		state[function] = reading
+		named, unnamed := -1, -1
+		for index, call := range scan.calls {
+			if call.name != "" && call.name != scan.functions[function].name {
+				continue
+			}
+			start := call.start
+			if outer[index] >= 0 {
+				if start = firstCall(outer[index]); start < 0 {
+					continue
+				}
+			}
+			if start < scan.functions[function].body[1] {
+				continue
+			}
+			if call.name == "" {
+				if unnamed < 0 || start < unnamed {
+					unnamed = start
+				}
+			} else if named < 0 || start < named {
+				named = start
+			}
+		}
+		if named < 0 {
+			named = unnamed
+		}
+		first[function], state[function] = named, read
+		return named
+	}
+	for function := range scan.functions {
+		firstCall(function)
+	}
+	return first
 }
 
 // commandPathUnder reports a word value that lies under the changed path
@@ -187,8 +287,12 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 			scan.loops = append(scan.loops, [2]int{base + int(node.Pos().Offset()), base + int(node.End().Offset())})
 		case *syntax.FuncDecl:
 			if node.Body != nil {
-				scan.functions = append(scan.functions,
-					[2]int{base + int(node.Body.Pos().Offset()), base + int(node.Body.End().Offset())})
+				name := ""
+				if node.Name != nil {
+					name = node.Name.Value
+				}
+				scan.functions = append(scan.functions, commandPathFunction{name: name,
+					body: [2]int{base + int(node.Body.Pos().Offset()), base + int(node.Body.End().Offset())}})
 			}
 		case *syntax.Stmt:
 			for _, redirect := range node.Redirs {
@@ -212,6 +316,15 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 			values, static := make([]string, len(node.Args)), make([]bool, len(node.Args))
 			for index, arg := range node.Args {
 				values[index], static[index] = StaticWord(arg, home)
+			}
+			if len(node.Args) > 0 {
+				start := base + int(node.Args[0].Pos().Offset())
+				switch {
+				case !static[0] || values[0] == "eval" || values[0] == "source" || values[0] == ".":
+					scan.calls = append(scan.calls, commandPathCall{start: start})
+				case values[0] != "" && !strings.Contains(values[0], "/"):
+					scan.calls = append(scan.calls, commandPathCall{name: values[0], start: start})
+				}
 			}
 			run, wrapped := actionfacts.StaticPrefixWrapperChild(values, static)
 			child := 0
