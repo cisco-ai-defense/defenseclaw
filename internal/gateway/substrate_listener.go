@@ -722,6 +722,19 @@ func substrateFailMode(cfg SubstrateConfig, reg registry.Registration) string {
 	return "open"
 }
 
+// substrateRouteName is the closed route name of an actor request (llm,
+// relay or the route class). The auth-refusal audit row and its window key
+// use it; caller text never does.
+func substrateRouteName(r substrateActorRoute) string {
+	switch {
+	case r.llm:
+		return "llm"
+	case r.relay:
+		return "relay"
+	}
+	return string(r.class)
+}
+
 // substrateActorScope puts the sandbox scope, the verified actor's person
 // and profile on the request, as the OpenShell ingress does for a binding.
 func (a *APIServer) substrateActorScope(st *substrateState, next http.Handler) http.Handler {
