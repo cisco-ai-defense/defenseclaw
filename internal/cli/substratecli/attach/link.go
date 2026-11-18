@@ -173,9 +173,17 @@ func (p *parker) reset() {
 	p.r.reset()
 }
 
-// wait sleeps once for re (ErrClusterFull or ErrStarting).
+// wait sleeps once for re (ErrClusterFull or ErrStarting). An agent that
+// cannot come back by waiting (Health: it crashed) ends the wait with
+// Health's answer instead of "the cluster is full" (GAP-0410).
 func (p *parker) wait(ctx context.Context, re *RouteError) error {
 	o := p.l.o
+	if o.Health != nil {
+		if err := o.Health(ctx); err != nil {
+			p.l.endLine()
+			return err
+		}
+	}
 	now := o.Now()
 	if p.start.IsZero() {
 		p.start = now

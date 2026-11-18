@@ -151,6 +151,16 @@ type RelayConfig struct {
 	// place through a symlink admission cannot see (substrate-1 GAP-0439).
 	// The build writes it with the relay binary in the same layer.
 	Protected []string `json:"protected,omitempty"`
+	// ClaudeStateFile is Claude Code's state file (~/.claude.json). Before
+	// it starts Claude Code, the relay records there that the start folder
+	// and each folder between it and Workdir are trusted
+	// (projects[<path>].hasTrustDialogAccepted). The actor is the sandbox,
+	// and the image already trusts Workdir. But Claude Code stops carrying
+	// a parent's trust at a git repository's root, and the copy of a git
+	// project is one (/work/<folder>/.git), so without this every run from
+	// macOS or Linux opened on "Is this a project you trust?" with "No,
+	// exit" selected (substrate-1 GAP-0446). "" records nothing.
+	ClaudeStateFile string `json:"claude_state_file,omitempty"`
 }
 
 // AgentIDs parses AgentUser; ok is false when it is empty.
@@ -277,6 +287,9 @@ func (c Config) Validate() error {
 	}
 	if c.Relay.TaskStallMS < 0 || (c.Relay.TaskStallMS > 0 && (c.Relay.TaskStallMS < MinTaskStallMS || c.Relay.TaskStallMS > MaxTaskStallMS)) {
 		return fmt.Errorf("actor kit config: relay.task_stall_ms must be 0 (the default, 10m) or %d to %d (1m to 24h)", MinTaskStallMS, MaxTaskStallMS)
+	}
+	if f := c.Relay.ClaudeStateFile; f != "" && !strings.HasPrefix(f, "/") {
+		return fmt.Errorf("actor kit config: relay.claude_state_file %q is not an absolute path", f)
 	}
 	if c.MaxAttachBytes < 0 || c.MaxAttachBytes > MaxAttachBytes {
 		return fmt.Errorf("actor kit config: max_attach_bytes must be 0..%d", MaxAttachBytes)

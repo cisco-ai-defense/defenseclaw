@@ -92,6 +92,9 @@ func (a *APIServer) substrateListAsks(st *substrateState) http.HandlerFunc {
 		for _, x := range list {
 			out = append(out, askView(x))
 		}
+		if in.All {
+			a.substrateAuditAdminRead(st, r, "asks", len(out), "")
+		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"asks": out})
 	}
 }
@@ -176,6 +179,9 @@ func (a *APIServer) substrateDecisions(st *substrateState) http.HandlerFunc {
 			}
 			out = append(out, m)
 		}
+		if in.All {
+			a.substrateAuditAdminRead(st, r, "decisions", len(out), "")
+		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"decisions": out})
 	}
 }
@@ -208,6 +214,7 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		a.substrateAuditAdminTarget(st, r, reg, "policy explain", "INFO")
 		out := map[string]any{
 			"actor": reg.Atespace + "/" + reg.Name, "uid": reg.UID, "profile": reg.Profile, "connector": reg.Connector,
 			"template": reg.Template, "mode": substrateMode(reg), "fail_mode": substrateFailMode(st.cfg, reg),

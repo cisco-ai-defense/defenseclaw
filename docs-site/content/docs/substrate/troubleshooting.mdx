@@ -26,6 +26,10 @@ Start with `defenseclaw substrate doctor`. It checks your computer and your sign
 
 ![defenseclaw substrate doctor when the cluster cannot be reached: ok for context and token_store (the sign-in is kept in a file because DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file), fail for admin_address (cannot connect, connection refused), skip for sign_in, ok for sign_in_server, fail for agent_entrance, then not ready: 2 problem(s) with one fix line for each failed check](/images/substrate/oss/doctor-not-ready.png)
 
+### "no network route to the cluster address" on macOS
+
+The launcher's connection got "no route to host". If `nc` or `curl` reach the same address from the same session, macOS Local Network privacy refused the launcher: it gives that error to a program it has not allowed to reach a private address, and Apple's own tools are exempt. This happens when the launcher runs from a session with no terminal app to ask for it, for example under `launchctl asuser` or a background job. Run it once from Terminal and allow it, or allow the app you run it from in **System Settings > Privacy & Security > Local Network**.
+
 ### No free worker for a new agent
 
 ```text
@@ -189,7 +193,7 @@ The template was built before 1.0.10: the relay and the agent run as one user, s
 
 ### An agent that uses WebSockets can't connect (Amp)
 
-Substrate 1.0.0 refuses every HTTP/1.1 WebSocket upgrade on an inspected or `http` rule, even to a host in the allow list. The agent gets `403 Forbidden` with the body `WebSocket egress is not supported`, and Amp keeps saying "Reconnecting". The workaround is to add the host to `substrate.allow_passthrough_for` (for Amp, `ampcode.com`). That host is then forwarded without inspection: DefenseClaw doesn't check its requests and doesn't inject a secret there, so the agent's key or sign-in has to be in the actor. An open-source install warns about that, and a managed install refuses agents that hold their own sign-in.
+Substrate 1.0.0 refuses every HTTP/1.1 WebSocket upgrade on an inspected or `http` rule, even to a host in the allow list. The agent gets `403 Forbidden` with the body `WebSocket egress is not supported`, and Amp keeps saying "Reconnecting". The workaround is to add the host to `substrate.allow_passthrough_for` (for Amp, `ampcode.com`). That host is then forwarded without inspection: DefenseClaw doesn't check its requests and doesn't inject a secret there, so the agent's key or sign-in has to be in the actor. An open-source install warns about that, and a managed install refuses agents that hold their own sign-in. The refused upgrade is answered by Substrate's egress gateway before DefenseClaw's callout sees the request, so it leaves no DefenseClaw audit row; read the egress gateway's access log for it.
 
 ### An MCP call is refused with `body_uninspectable` or `path_ambiguous`
 
@@ -205,7 +209,7 @@ The callout's refusal is a JSON body with `error: egress_blocked`, a `message` t
 
 The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it.
 
-If a tool's output shows the real value instead, the secret is bound to a host that echoes requests. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `hosts` list ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)), rotate the value, and see [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
+If a tool's output shows the real value instead, the secret is bound to a host that echoes requests (for example `httpbin.org` or `postman-echo.com`): egress swapped it in and the service sent it back. The callout never reads responses, so it can't mask the value on the way back. Remove that host from the secret's `inject.hosts` ([Bind a secret to hosts](/docs/substrate/secrets#bind-a-secret-to-hosts)) and rotate the value; the gateway's start-up warning names every secret bound to a well-known echo host. See [Hosts that echo tokens](/docs/substrate/secrets#things-to-know).
 
 ### Credential injection returns 403 "atespace not permitted"
 

@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -202,6 +203,9 @@ type SubstrateConfig struct {
 	SecretStore SubstrateSecretStore
 	// OnRateLimited counts defenseclaw.substrate.rate_limited.
 	OnRateLimited func(scope ratelimit.Scope, route string)
+	// OnAuthRefused counts defenseclaw.substrate.auth_refused: a refused
+	// token on the actor or admin listener, by closed reason (GAP-0408).
+	OnAuthRefused func(listener, reason string)
 	// Chains is the leader's chain and intent state (lane A13): a verified
 	// actor's tool-chain windows and the judge's session intent live there,
 	// so every replica sees the same. Nil turns the chain lane off for
@@ -245,6 +249,12 @@ type substrateState struct {
 	// refusals bounds refusal log lines: a flood of bad tokens is still
 	// refused, not logged line by line.
 	refusals *rate.Limiter
+	// audit writes a substrate audit row through the API server's logger
+	// (none while it has no logger).
+	audit func(ctx context.Context, severity, summary string, details map[string]any)
+	// logOut is the gateway log (stderr); now is the clock. Tests set both.
+	logOut io.Writer
+	now    func() time.Time
 
 	// receiptKey signs skill scan receipts (substrate_skills.go);
 	// receiptShared says every replica has it.
@@ -307,10 +317,13 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 			return fmt.Errorf("substrate: skill receipt key: %w", err)
 		}
 	}
-	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {
+	st.audit = func(ctx context.Context, severity, summary string, details map[string]any) {
 		if a.logger != nil {
 			_ = a.logger.LogAlertCtx(ctx, "substrate", severity, summary, details)
 		}
+	}
+	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {
+		st.audit(ctx, severity, summary, details)
 		st.logRefusal("%s: %v", summary, details["folder"])
 	}
 	a.substrateMu.Lock()
@@ -606,6 +619,7 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			r.Header.Del(h)
 		}
 		if tok == "" {
+			st.authRefused(r, substrateListenerActor, identity.ReasonMissing)
 			writeSubstrateRefusal(w, http.StatusUnauthorized, string(identity.ReasonMissing))
 			return
 		}
@@ -616,8 +630,7 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			if identity.Unavailable(err) {
 				status = http.StatusServiceUnavailable
 			}
-			// The message names the check, never token bytes (identity.Error).
-			st.logRefusal("actor token refused: %s (%v)", reason, err)
+			st.authRefused(r, substrateListenerActor, reason)
 			st.tokens.refused(reason, time.Now())
 			writeSubstrateRefusal(w, status, string(reason))
 			return
@@ -856,7 +869,7 @@ func (st *substrateState) logRefusal(format string, args ...any) {
 	if st == nil || st.refusals == nil || !st.refusals.Allow() {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "[substrate] "+format+"\n", args...)
+	st.logLine(format, args...)
 }
 
 // substrateLLMMaxBody is the guardrail proxy's passthrough body cap, which

@@ -689,6 +689,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "redactionProfile": {
+          "type": "string",
+          "minLength": 1
+        },
         "local": {
           "type": "object",
           "additionalProperties": false,

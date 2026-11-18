@@ -87,6 +87,14 @@ func (f ActorLookupFunc) LookupActor(ctx context.Context, atespace, name string)
 	return f(ctx, atespace, name)
 }
 
+// ActorLister is an ActorLookup that can also read every live actor of an
+// atespace in a few paged calls (GAP-0427: one call per actor made a list
+// of 2,100 agents take longer than the launcher waits). The map is keyed by
+// actor name.
+type ActorLister interface {
+	ListLiveActors(ctx context.Context, atespace string) (map[string]LiveActor, error)
+}
+
 // ErrActorNotFound is what an ActorLookup returns for a missing actor.
 var ErrActorNotFound = errors.New("actor not found")
 

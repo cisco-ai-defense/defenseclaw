@@ -54,3 +54,37 @@ func TestATEAPILookup(t *testing.T) {
 		t.Fatalf("missing actor: %v", err)
 	}
 }
+
+// GAP-0427: one atespace's live actors in paged list calls.
+func TestATEAPIListLiveActorsGAP0427(t *testing.T) {
+	fake := ateapifake.New()
+	want := map[string]string{}
+	for i := range 3 {
+		name := "agent-" + string(rune('a'+i))
+		a := fake.PutActor(&ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "team-a", Name: name}})
+		want[name] = a.GetMetadata().GetUid()
+	}
+	fake.PutActor(&ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "team-b", Name: "other"}})
+	if err := fake.SetState(ateapi.Ref("team-a", "agent-a"), ateapi.ActorStateRunning); err != nil {
+		t.Fatal(err)
+	}
+	lister, ok := ATEAPILookup(fake).(identity.ActorLister)
+	if !ok {
+		t.Fatal("the control API lookup cannot list")
+	}
+	got, err := lister.ListLiveActors(context.Background(), "team-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("listed %d actors, want %d: %+v", len(got), len(want), got)
+	}
+	for name, uid := range want {
+		if got[name].UID != uid {
+			t.Errorf("%s: uid %q, want %q", name, got[name].UID, uid)
+		}
+	}
+	if got["agent-a"].State != identity.ActorRunning {
+		t.Errorf("agent-a state %q", got["agent-a"].State)
+	}
+}

@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
@@ -109,7 +111,7 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 			return -1, ctx.Err()
 		}
 		if id != "" {
-			return l.follow(ctx, id, cursor, emit)
+			return l.follow(ctx, id, cursor, emit, nil)
 		}
 		st := relayStatus(err)
 		if st == http.StatusConflict {
@@ -169,10 +171,43 @@ func FollowTask(ctx context.Context, o Options, id string, emit func(relay.TaskE
 	if emit == nil {
 		emit = TextEmitter(o.Out, o.Err)
 	}
-	return l.follow(ctx, id, 0, emit)
+	return l.follow(ctx, id, 0, emit, nil)
 }
 
-func (l *link) follow(ctx context.Context, id string, cursor uint64, emit func(relay.TaskEvent)) (int, error) {
+// ErrTaskStillRunning ends a SnapshotTask whose task has not exited yet.
+var ErrTaskStillRunning = errors.New("the task is still running")
+
+// Quiet bounds a snapshot read of a task log (`logs` without -f): it ends
+// once the open log stream has sent nothing for First before its first
+// event, or for Then after one.
+type Quiet struct{ First, Then time.Duration }
+
+// SnapshotTask prints what a task has logged so far and returns its exit
+// code, or ErrTaskStillRunning when the log went quiet before the exit.
+// Only the open stream is timed: waiting for the attach route and for the
+// agent to wake does not count, so a finished task's log is never cut off
+// before it is read (GAP-0406).
+func SnapshotTask(ctx context.Context, o Options, id string, q Quiet, emit func(relay.TaskEvent)) (int, error) {
+	if strings.TrimSpace(id) == "" {
+		return -1, errors.New("no task id")
+	}
+	if err := o.normalize(); err != nil {
+		return -1, err
+	}
+	l, err := newLink(ctx, o)
+	if err != nil {
+		return -1, err
+	}
+	defer l.close()
+	if emit == nil {
+		emit = TextEmitter(o.Out, o.Err)
+	}
+	return l.follow(ctx, id, 0, emit, &q)
+}
+
+// follow streams the task log from cursor until the exit event. With q it
+// returns ErrTaskStillRunning once an open stream stays quiet for q.
+func (l *link) follow(ctx context.Context, id string, cursor uint64, emit func(relay.TaskEvent), q *Quiet) (int, error) {
 	o := l.o
 	rec := newRetry(o.Backoff)
 	failures := 0
@@ -199,16 +234,28 @@ func (l *link) follow(ctx context.Context, id string, cursor uint64, emit func(r
 			return -1, err
 		default:
 			progressed := false
+			var quiet *time.Timer
+			var wentQuiet atomic.Bool
+			if q != nil {
+				body := resp.Body
+				quiet = time.AfterFunc(q.First, func() { wentQuiet.Store(true); body.Close() })
+			}
 			br := bufio.NewReaderSize(resp.Body, 64<<10)
 			for {
 				line, rerr := br.ReadBytes('\n')
 				if len(line) > 0 && line[len(line)-1] == '\n' {
 					cursor += uint64(4 + len(line))
 					progressed = true
+					if quiet != nil {
+						quiet.Reset(q.Then)
+					}
 					var e relay.TaskEvent
 					if json.Unmarshal(line, &e) == nil {
 						emit(e)
 						if e.Type == "exit" && e.Code != nil {
+							if quiet != nil {
+								quiet.Stop()
+							}
 							resp.Body.Close()
 							return *e.Code, nil
 						}
@@ -218,7 +265,13 @@ func (l *link) follow(ctx context.Context, id string, cursor uint64, emit func(r
 					break
 				}
 			}
+			if quiet != nil {
+				quiet.Stop()
+			}
 			resp.Body.Close()
+			if wentQuiet.Load() {
+				return -1, ErrTaskStillRunning
+			}
 			if progressed {
 				rec.reset()
 				failures = 0

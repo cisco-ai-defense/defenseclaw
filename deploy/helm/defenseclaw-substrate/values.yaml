@@ -372,6 +372,16 @@ metrics:
 # config.observability.destinations instead (docs: Agent Substrate,
 # Reference, "Turn on OTLP export").
 observability:
+  # The redaction profile of every record the gateway keeps (its audit
+  # store) and sends, unless config.observability.defaults.redaction_profile
+  # names one (GAP-0426). The cluster gateway holds every person's prompts,
+  # model answers and tool results, so the chart detects and replaces
+  # credentials, secrets and PII in them (sensitive) where a laptop keeps
+  # its own user's history whole (none). Set none only when the audit store
+  # and every destination share an approved trust boundary; content and
+  # strict remove more, and a custom profile in
+  # config.observability.redaction_profiles works too.
+  redactionProfile: sensitive
   local:
     enabled: false
     image: otel/opentelemetry-collector-contrib:0.139.0

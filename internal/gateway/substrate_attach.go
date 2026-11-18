@@ -18,11 +18,9 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -159,7 +157,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotFound, "not_found")
 			return
 		}
-		reg, status, reason := a.substrateFind(st, r, r.PathValue("atespace"), r.PathValue("name"))
+		reg, status, reason := a.substrateFindSession(st, r, r.PathValue("atespace"), r.PathValue("name"))
 		if status != http.StatusOK {
 			writeSubstrateJSONError(w, status, reason)
 			return
@@ -169,9 +167,6 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
-		}
-		if reg.Person.ID() != ownerOf(c.person).ID() {
-			fmt.Fprintf(os.Stderr, "[substrate] administrator attach to another person's actor %s/%s\n", reg.Atespace, reg.Name)
 		}
 		if st.cfg.Activity != nil {
 			st.cfg.Activity.ObserveActivity(SubstrateActivityRelay, reg.Atespace, reg.UID, time.Now())

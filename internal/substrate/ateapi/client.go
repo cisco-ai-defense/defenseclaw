@@ -452,6 +452,23 @@ func (c *GRPCClient) SuspendActor(ctx context.Context, actor *ObjectRef) (*Actor
 	return resp.GetActor(), nil
 }
 
+// Reverter is a Client that can also revert an actor: a CRASHED (or
+// RUNNING) actor goes back to SUSPENDED at its last durable snapshot, as
+// kubectl ate revert actor does. The launcher's undo brings a crashed actor
+// back with it (GAP-0410).
+type Reverter interface {
+	RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error)
+}
+
+// RevertActor implements Reverter.
+func (c *GRPCClient) RevertActor(ctx context.Context, actor *ObjectRef) (*Actor, error) {
+	resp, err := c.ctl.RevertActor(ctx, &pb.RevertActorRequest{Actor: actor})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetActor(), nil
+}
+
 func (c *GRPCClient) CreateActor(ctx context.Context, actor *Actor) (*Actor, error) {
 	if actor.GetMetadata().GetAtespace() == "" || actor.GetMetadata().GetName() == "" || actor.GetActorTemplate().GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "ateapi: CreateActor needs the atespace, name and template")
