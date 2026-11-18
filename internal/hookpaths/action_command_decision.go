@@ -1818,7 +1818,53 @@ func readActionScript(script, cwd string) (string, bool) {
 	return readActionScriptWith(script, cwd, scriptRead)
 }
 
+// readActionScriptWith is readActionScript with the size rule lim. A hook call
+// reads the body of a script it names once: every rule and reading of the
+// call that meets the script (the write operands, the command decision, the
+// protected-write proofs, the Windows readings) asks for the same body, and
+// each read walked the name again, folder links and share check included. A
+// Codex call on Windows that sourced a script behind the system's link bound
+// asked for it 26 times, 1.0 s of its 1.8 s answer, and 114 times with one
+// unreadable statement before it (rel-1-0-10:GAP-0447). The body of one name
+// is the same body for the whole decision, as every path is (callStat), and
+// the call keeps it where it keeps its other reads (memoHookCall). Only a body
+// that was read is kept: a read that failed is made again, so a share that
+// answers later in the call is still read, and the notes a failed read leaves
+// on the call (ShareBodyUnread) stay as they were.
 func readActionScriptWith(script, cwd string, lim indirectRead) (string, bool) {
+	call := memoHookCall()
+	key := scriptReadKey{script: script, cwd: cwd, lim: lim}
+	if call != nil {
+		if content, ok := call.scripts[key]; ok {
+			return content, true
+		}
+	}
+	content, read := readActionScriptFrom(script, cwd, lim)
+	if read && call != nil && call.scriptBytes+len(content) <= maxCallScriptBytes {
+		if call.scripts == nil {
+			call.scripts = make(map[scriptReadKey]string)
+		}
+		call.scripts[key] = content
+		call.scriptBytes += len(content)
+	}
+	return content, read
+}
+
+// scriptReadKey is one read of a script body: the name as the command spells
+// it, the folder it is read from and the size rule of the read.
+type scriptReadKey struct {
+	script, cwd string
+	lim         indirectRead
+}
+
+// maxCallScriptBytes bounds the script bodies one hook call keeps: sixteen
+// AWK programs at their bound (awkprog.MaxProgramBytes), far more shell
+// scripts at theirs (maxIndirectSourceBytes). A body past it is read again
+// when it is asked for again.
+const maxCallScriptBytes = 1 << 20
+
+// readActionScriptFrom reads the body from the file system (readActionScript).
+func readActionScriptFrom(script, cwd string, lim indirectRead) (string, bool) {
 	if actionScriptInsideCWD(script, cwd) {
 		if content, read := readIndirectSourceWith(script, cwd, lim); read {
 			return content, true
