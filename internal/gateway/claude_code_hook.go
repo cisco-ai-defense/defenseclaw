@@ -328,13 +328,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "StopFailure":
 		// StopFailure's inspected error/error_details are distinct from the
 		// optional last_assistant_message emitted as a model.response companion.
-		// Retain the exact submitted error content on hook_decision so a failure
+		// Retain the normalized submitted error content on hook_decision so a failure
 		// without an assistant message does not lose its inspection input.
 		inspectedContent = claudeCodeToolOutput(req)
 		if !a.managedAIDOnly() {
 			inspectedContent = withoutBlockMessageEcho(cfg, "claudecode", inspectedContent)
 		}
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: inspectedContent, Direction: "tool_result", Connector: "claudecode"})
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
+			Tool: "message", Content: inspectedContent, Direction: "tool_result", Connector: "claudecode",
+			blockMessageEchoNormalized: !a.managedAIDOnly(),
+		})
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -358,11 +361,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// so any nonempty connector event text is distinct.
 		eventContent := claudeCodeEventContent(req)
 		canonicalPrompt := claudeCodeSubagentPrompt(req, "")
-		content := eventContent
-		if strings.TrimSpace(content) == "" {
-			content = canonicalPrompt
+		if strings.TrimSpace(eventContent) == "" {
+			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(canonicalPrompt, "prompt"))
+		} else {
+			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(eventContent, "prompt"))
+			if strings.TrimSpace(canonicalPrompt) != "" &&
+				strings.TrimSpace(canonicalPrompt) != strings.TrimSpace(eventContent) {
+				promptVerdict := a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(canonicalPrompt, "prompt"))
+				verdict = mergeCodexToolResultVerdicts(verdict, promptVerdict)
+			}
 		}
-		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(content, "prompt"))
 		if strings.TrimSpace(eventContent) != "" && strings.TrimSpace(eventContent) != strings.TrimSpace(canonicalPrompt) {
 			inspectedContent = eventContent
 		}
