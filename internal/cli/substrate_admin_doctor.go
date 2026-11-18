@@ -64,6 +64,9 @@ type substrateDoctorReport struct {
 	Context  string           `json:"context,omitempty"`
 	Problems int              `json:"problems"`
 	Checks   []substrateCheck `json:"checks"`
+	// componentsChecked is true when the cluster.components row ran
+	// (--install-file): only then does the last line say "ready for agents".
+	componentsChecked bool
 }
 
 // Seams for tests.
@@ -110,7 +113,9 @@ Administrators add the cluster's own checks (version, issuer, snapshot bucket, a
 clients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with
 kubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.
 
-The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each failed check says how to fix
+The last line is "ready for agents" when no check failed and the cluster components (gateway, leader, controller,
+callout) were checked, which needs --install-file. Without it the last line says that the checks on this computer pass
+and that the cluster components were not checked. Otherwise it is "not ready" and each failed check says how to fix
 it, and the exit code is 1.`,
 		Example: "defenseclaw substrate doctor\ndefenseclaw substrate doctor --cluster --json",
 		Args:    cobra.NoArgs,
@@ -198,6 +203,9 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 		if c.Status == doctorFail {
 			rep.Problems++
 		}
+		if c.ID == doctorComponentsID {
+			rep.componentsChecked = true
+		}
 	}
 	rep.OK = rep.Problems == 0
 
@@ -231,7 +239,13 @@ func printSubstrateDoctor(w io.Writer, rep substrateDoctorReport) {
 		}
 	}
 	if rep.OK {
-		fmt.Fprintln(w, "ready for agents")
+		if rep.componentsChecked {
+			fmt.Fprintln(w, "ready for agents")
+			return
+		}
+		// A user's doctor cannot read the cluster's components: say what
+		// it checked instead of "ready for agents" (GAP-0593).
+		fmt.Fprintln(w, doctorUserSummary)
 		return
 	}
 	fmt.Fprintf(w, "not ready: %d problem(s)\n", rep.Problems)
@@ -559,7 +573,53 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags, tokenGroup
 			rows[i].Fix = fleet.CalloutFix(o)
 		}
 	}
+	rows = append(rows, doctorComponents(r.Health, o.Namespace))
 	return rows
+}
+
+// doctorComponentsID is the row that reads the components' ready pods.
+const doctorComponentsID = "cluster.components"
+
+// doctorUserSummary is the last line of a doctor without --install-file
+// when no check failed.
+const doctorUserSummary = "your sign-in, token store and attach checks pass; the cluster components were not checked " +
+	"(an administrator runs defenseclaw substrate doctor --install-file FILE)"
+
+// doctorComponents fails, naming each component, when a component the chart
+// runs (desired > 0) has no ready pod: with the callout down every agent's
+// egress is refused, so the cluster is not ready for agents (GAP-0593).
+func doctorComponents(h fleet.Health, ns string) substrateCheck {
+	comps := []struct {
+		name           string
+		desired, ready int
+	}{
+		{"gateway", h.Gateway.Desired, h.Gateway.Ready},
+		{"leader", h.Leader.Desired, 0},
+		{"controller", h.Controller.Desired, h.Controller.Ready},
+		{"callout", h.Callout.Desired, h.Callout.Ready},
+	}
+	if h.Leader.Ready {
+		comps[1].ready = 1
+	}
+	var down, up []string
+	for _, c := range comps {
+		switch {
+		case c.desired > 0 && c.ready == 0:
+			down = append(down, fmt.Sprintf("%s has 0 of %d pods ready", c.name, c.desired))
+		case c.desired > 0:
+			up = append(up, fmt.Sprintf("%s %d/%d", c.name, c.ready, c.desired))
+		}
+	}
+	if len(down) > 0 {
+		return substrateCheck{ID: doctorComponentsID, Status: doctorFail, Summary: strings.Join(down, "; "),
+			Fix: "kubectl -n " + ns + " get deployments,statefulsets shows the component; kubectl -n " + ns +
+				" describe pods and kubectl -n " + ns + " logs say why it is not ready"}
+	}
+	if len(up) == 0 {
+		return substrateCheck{ID: doctorComponentsID, Status: doctorWarn, Summary: "no DefenseClaw component found in namespace " + ns,
+			Fix: "check --namespace (the chart's release namespace) and helm status"}
+	}
+	return substrateCheck{ID: doctorComponentsID, Status: doctorOK, Summary: "ready pods: " + strings.Join(up, ", ")}
 }
 
 func fleetCheckFix(id string) string {
