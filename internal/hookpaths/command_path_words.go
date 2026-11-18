@@ -36,19 +36,24 @@ type CommandPathWord struct {
 	// code this reading does not see (source, a dynamic program or body),
 	// or moves, links or removes a path the word lies under (mv a keylink
 	// && cat keylink reads the moved file); a change inside a loop counts
-	// from the loop's start. A word that its own call reads in another
-	// folder or root (env -C, tar -C, chroot, ssh) is unplaced too.
+	// from the loop's start, and a word in a function body runs when the
+	// function is called, after any statement of the command (f() { cat
+	// keylink; }; cd /tmp; f), so every change counts for it. A word that
+	// its own call reads in another folder or root (env -C, tar -C, chroot,
+	// ssh) is unplaced too.
 	Unplaced   bool
 	start, end int  // the byte offsets of Text in the command
 	quote      byte // 0 at the top level; ' or " inside a quoted body
 }
 
 // commandPathScan collects the path words of a command, the statements that
-// change where later words lie, and the byte ranges of its loops.
+// change where later words lie, and the byte ranges of its loops and of its
+// function bodies.
 type commandPathScan struct {
-	words   []CommandPathWord
-	changes []commandPathChange
-	loops   [][2]int
+	words     []CommandPathWord
+	changes   []commandPathChange
+	loops     [][2]int
+	functions [][2]int
 }
 
 // commandPathChange is a statement ending at byte end that changes where the
@@ -88,11 +93,16 @@ func CommandPathWords(command, home string) []CommandPathWord {
 	}
 	for index := range words {
 		word := &words[index]
+		// A function body runs where the function is called, which may
+		// come after any statement of the command (rel-1-0-10:GAP-1286).
+		called := slices.ContainsFunc(scan.functions, func(body [2]int) bool {
+			return body[0] <= word.start && word.start < body[1]
+		})
 		for _, change := range scan.changes {
 			if word.Unplaced {
 				break
 			}
-			if change.end > word.start {
+			if change.end > word.start && !called {
 				continue
 			}
 			if change.all {
@@ -175,6 +185,11 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 		switch node := node.(type) {
 		case *syntax.ForClause, *syntax.WhileClause:
 			scan.loops = append(scan.loops, [2]int{base + int(node.Pos().Offset()), base + int(node.End().Offset())})
+		case *syntax.FuncDecl:
+			if node.Body != nil {
+				scan.functions = append(scan.functions,
+					[2]int{base + int(node.Body.Pos().Offset()), base + int(node.Body.End().Offset())})
+			}
 		case *syntax.Stmt:
 			for _, redirect := range node.Redirs {
 				switch redirect.Op {
@@ -203,17 +218,22 @@ func commandPathWordsIn(text string, base int, quote byte, depth int, home strin
 			if wrapped {
 				child = run.Index
 			}
+			child = builtinChild(values, static, child)
 			follows := commandFollowsOperandLinks(program, node.Args, home)
-			if wrapped && child < len(node.Args) {
+			replaced := commandReplacedOperand(program, node.Args, home)
+			if child > 0 && child < len(node.Args) {
 				childProgram := ""
 				if static[child] {
 					childProgram = programBase(values[child])
 				}
 				follows = commandFollowsOperandLinks(childProgram, node.Args[child:], home)
+				if replaced = commandReplacedOperand(childProgram, node.Args[child:], home); replaced > 0 {
+					replaced += child
+				}
 			}
 			change, elsewhere := commandCallPathChange(values, static, run, wrapped, node.Args, home)
 			for index, arg := range node.Args {
-				add(arg, index == 0 || follows, index == 0 || index == child, index >= elsewhere)
+				add(arg, index == 0 || follows && index != replaced, index == 0 || index == child, index >= elsewhere)
 			}
 			if change.all || len(change.paths) != 0 {
 				change.end = base + int(node.End().Offset())
@@ -244,6 +264,7 @@ func commandCallPathChange(values []string, static []bool, run actionfacts.Prefi
 			elsewhere = at
 		}
 	}
+	at = builtinChild(values, static, at)
 	if at >= len(values) {
 		return commandPathChange{}, elsewhere
 	}
@@ -355,6 +376,17 @@ func commandCallPathChange(values []string, static []bool, run actionfacts.Prefi
 	return commandPathChange{}, elsewhere
 }
 
+// builtinChild skips the builtin words at index at of a simple command
+// (values and static as for StaticPrefixWrapperChild): builtin NAME runs the
+// shell builtin NAME, so builtin cd is cd (rel-1-0-10:GAP-1286). A builtin
+// with no word after it is left as the program.
+func builtinChild(values []string, static []bool, at int) int {
+	for at+1 < len(values) && static[at] && programBase(values[at]) == "builtin" {
+		at++
+	}
+	return at
+}
+
 // commandRunsElsewhere reports a program that runs the words after it in
 // another root, namespace or host, where this file system gives no place.
 func commandRunsElsewhere(program string) bool {
@@ -422,6 +454,31 @@ func commandFollowsOperandLinks(program string, args []*syntax.Word, home string
 		return commandHasFlag(args, home, 'h', "--dereference")
 	}
 	return true
+}
+
+// commandReplacedOperand is the index in args (args[0] the program) of the
+// operand a program replaces as a name and does not open through its link,
+// or -1. GNU install writes the destination file as a new file in
+// place of the name: a link there is replaced and the file it reaches is
+// left alone, while its source operands are read through their links
+// (rel-1-0-10:GAP-1286). With -d every operand is a folder to make, and
+// with -t the folder is the option's value: no operand is replaced.
+func commandReplacedOperand(program string, args []*syntax.Word, home string) int {
+	switch program {
+	case "install", "ginstall":
+	default:
+		return -1
+	}
+	if len(args) < 3 || commandHasFlag(args, home, 'd', "--directory") ||
+		commandHasFlag(args, home, 't', "--target-directory") || commandHasLongPrefix(args, home, "--target-directory=") {
+		return -1
+	}
+	last := len(args) - 1
+	value, static := StaticWord(args[last], home)
+	if !static || value == "" || strings.HasPrefix(value, "-") {
+		return -1
+	}
+	return last
 }
 
 // commandHasFlag reports a short flag in a bundle (-rP) or the long option.
