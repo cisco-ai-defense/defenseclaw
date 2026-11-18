@@ -139,7 +139,8 @@ const walBoundedSettleRounds = 2
 // calls/s) cannot restart the log inside any hold: every bounded catch-up
 // reached its cap, and each held the hooks for the full 470 ms emergency hold
 // for nothing, which set their p95. After walCappedHoldsBeforeBackoff such
-// holds in a row, a pass over the limit gives the writer a rest: the next
+// holds since the log last restarted or was under the limit (noteWALGuardPass),
+// a pass over the limit gives the writer a rest: the next
 // hold waits walHoldBackoffBase, doubled for each further capped hold up to
 // walHoldBackoffMax. Passes in between copy off the writer and take nothing
 // from the hooks. A restart, or a log back under the limit, ends the rest.
@@ -236,6 +237,11 @@ type WALCheckpoint struct {
 	// because its last holds reached their cap without restarting the log
 	// (walCappedHoldsBeforeBackoff).
 	HoldBackoff bool
+	// OverLimit is the store's record of the log after the pass
+	// (WALOverLimit): true while it is over the limit and not restarted. A
+	// pass that found another checkpoint busy or failed before measuring the
+	// log keeps the previous pass's record.
+	OverLimit bool
 }
 
 // CheckpointWALIfLarge copies the write-ahead log and attempts to restart it
@@ -307,6 +313,14 @@ type WALCheckpoint struct {
 // the limit; while it is, background writers (retention, planner statistics)
 // wait for it (awaitWALHeadroom). Hook writes are never held back by this.
 func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writerBudget time.Duration) (result WALCheckpoint, err error) {
+	// A pass that ends before it records its outcome (noteWALGuardPass,
+	// below) reports the store's record of the log as it was.
+	noted := false
+	defer func() {
+		if s != nil && !noted {
+			result.OverLimit = s.walPressure.Load()
+		}
+	}()
 	if ctx == nil {
 		return result, fmt.Errorf("audit: WAL checkpoint context is required")
 	}
@@ -328,7 +342,10 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	// measured it. The pass's outcome is recorded however the pass ends, at
 	// its deadline too (noteWALGuardPass).
 	logBytes := int64(-1)
-	defer func() { s.noteWALGuardPass(result, err, logBytes, limitBytes) }()
+	defer func() {
+		noted = true
+		result.OverLimit = s.noteWALGuardPass(result, err, logBytes, limitBytes)
+	}()
 	var ckpt walCopy
 	var copyBegan time.Time
 	for pass := 0; pass < walCopyPasses; pass++ {
@@ -404,6 +421,14 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	if _, err = s.settleWAL(ctx, db, &result, &ckpt, &logBytes, math.MaxInt64, walBoundedSettleRounds, &copyBegan); err != nil || ckpt.busy != 0 || result.Restarted {
 		return result, err
 	}
+	if result.Syncs == 0 {
+		// The copies left no time for even one sync of audit.db: a hold now
+		// would copy and sync the whole unsynced backlog under the writer
+		// (GAP-1153) and very likely reach its cap for nothing. The writer
+		// is left to the next pass.
+		result.WriterDeferred = true
+		return result, nil
+	}
 	policy := s.boundedCatchUpPolicy(writerBudget)
 	if logBytes >= WALEmergencyArmBytes {
 		policy.hold = walEmergencyCatchUpCap
@@ -414,15 +439,21 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 }
 
 // settleWAL runs at most rounds settle rounds (see walSettledSpan) from the
-// copy that began at *copyBegan, and reports whether the last round's span
-// was within walSettledSpan. Every round starts with a sync of the database
-// file, and the rounds end only after one. It updates ckpt, logBytes and
+// copy that began at *copyBegan, fewer when the pass's deadline leaves no
+// time for another (walRoundOutrunsPass; before the first round that can mean
+// none at all), and reports whether the last round's span was within
+// walSettledSpan. Every round starts with a sync of the database file, and
+// the rounds, once begun, end only after one. It updates ckpt, logBytes and
 // copyBegan with each copy; a copy that another checkpoint kept busy, that
 // brought the log to its end (result.Restarted) or that found the log over
 // stopAbove ends the rounds unsettled.
 func (s *Store) settleWAL(ctx context.Context, db *sql.DB, result *WALCheckpoint, ckpt *walCopy, logBytes *int64, stopAbove int64, rounds int, copyBegan *time.Time) (bool, error) {
 	var previous time.Duration
 	stalls := 0
+	if walRoundOutrunsPass(ctx, walClock().Sub(*copyBegan)) {
+		// The copies used up the pass: no time for even one sync.
+		return false, nil
+	}
 	for round := 0; ; round++ {
 		syncBegan := walClock()
 		if walSyncPhaseHook != nil {
@@ -446,6 +477,13 @@ func (s *Store) settleWAL(ctx context.Context, db *sql.DB, result *WALCheckpoint
 		if round == rounds || stalls == walSettleStalls {
 			return false, nil
 		}
+		if walRoundOutrunsPass(ctx, span) {
+			// Another round would leave the pass too little time for its
+			// writer phase: end the rounds unsettled (over the limit the
+			// pass then takes the writer; under it, it leaves the writer to
+			// the next pass).
+			return false, nil
+		}
 		previous = span
 		*copyBegan = walClock()
 		next, err := s.copyWAL(ctx, db, walCopyPhaseHook)
@@ -466,6 +504,27 @@ func (s *Store) settleWAL(ctx context.Context, db *sql.DB, result *WALCheckpoint
 			return false, nil
 		}
 	}
+}
+
+// walPassReserve is the time a pass keeps for its writer phase: the first
+// wait for a free writer and the emergency hold. Before each settle round, a
+// pass with a deadline checks that one more round, as long as the last one
+// (before the first: as long as the copy before it), still leaves it that much
+// (walRoundOutrunsPass): on a disk whose syncs took 8-26 s each, the rounds
+// could otherwise use up the pass before its writer phase (G-flood-wal round
+// 3, rel-1-0-10:GAP-1153 review). The wait for the writer can escalate past
+// walBoundedAcquireWait after misses (boundedCatchUpPolicy); the pass's
+// deadline cuts that wait short, so the reserve covers the first one only.
+// The deadline is read against walClock, which is time.Now outside tests.
+func walPassReserve() time.Duration {
+	return walBoundedAcquireWait + walEmergencyCatchUpCap
+}
+
+// walRoundOutrunsPass reports whether a settle round as long as lastSpan
+// would leave ctx's pass less than walPassReserve().
+func walRoundOutrunsPass(ctx context.Context, lastSpan time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	return ok && deadline.Sub(walClock()) < lastSpan+walPassReserve()
 }
 
 // walCatchUpPolicy is how a catch-up takes and holds the writer connection:
@@ -491,10 +550,19 @@ func (s *Store) boundedCatchUpPolicy(writerBudget time.Duration) walCatchUpPolic
 // is over when the pass did not restart it and its last copy found it over
 // limitBytes; a pass that never measured it (logBytes < 0) keeps the last
 // pass's record. Over marks the store for background writers
-// (awaitWALHeadroom). A log that is not over resets the misses; an over-limit
-// miss or failed pass increases only the next acquisition wait.
-func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limitBytes int64) {
-	over := !result.Restarted && logBytes > limitBytes
+// (awaitWALHeadroom). A log that is not over resets the misses and the
+// capped holds; an over-limit miss or failed pass increases only the next
+// acquisition wait, and a bounded hold that reached its cap counts toward the
+// hold backoff, as does one whose lock wait used up the hold. A hold under its
+// cap that did not restart the log neither adds to the count nor resets it:
+// it did not get SQLite's write lock (another process held it), its copy
+// stopped short at a reader on an older snapshot, or its copy failed. None of
+// those says the disk caught up. It returns whether the log is over.
+func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limitBytes int64) (over bool) {
+	// A checkpoint that cannot copy the log into a full volume
+	// (substrate-1:GAP-0554).
+	s.NoteWriteError("WAL checkpoint", err)
+	over = !result.Restarted && logBytes > limitBytes
 	if logBytes < 0 {
 		over = s.walPressure.Load()
 	}
@@ -516,6 +584,7 @@ func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limi
 			s.walHoldResume = walClock().Add(walEscalated(walHoldBackoffBase, walHoldBackoffMax, rest))
 		}
 	}
+	return over
 }
 
 // walHoldBackoff reports whether a pass over the limit should leave the
@@ -826,8 +895,12 @@ func (s *Store) syncDatabaseFile() error {
 	if s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
 		return nil
 	}
-	return syncDatabaseFileData(s.dbPathGuard.pinned)
+	return walSyncDatabaseFile(s.dbPathGuard.pinned)
 }
+
+// walSyncDatabaseFile is syncDatabaseFileData; a variable so tests can see
+// that a settle round really syncs the database file.
+var walSyncDatabaseFile = syncDatabaseFileData
 
 // walBackgroundWait bounds how long a background writer waits for the WAL
 // to come back under its limit; walBackgroundPoll is how often it looks.

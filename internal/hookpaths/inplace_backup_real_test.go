@@ -128,9 +128,7 @@ func TestSedFollowedBackupMatchesTheRealSed(t *testing.T) {
 			for name, to := range map[string]string{
 				"lnk": "target", "sub/up": "../target", "abs": filepath.Join(cwd, "sub", "t2"), "chain": "lnk", "dotted": "sub/../target",
 			} {
-				if err := os.Symlink(to, filepath.Join(cwd, name)); err != nil {
-					t.Fatal(err)
-				}
+				testSymlink(t, to, filepath.Join(cwd, name))
 			}
 			before := realBackupWalk(root)
 			cmd := exec.Command("sed", "--follow-symlinks", "-i"+suffix, "s/a/b/", link)

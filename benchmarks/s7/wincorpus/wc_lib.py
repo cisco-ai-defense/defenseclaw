@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import re
 
 REVISION = "rel-1-0-10-2026-11-13"
@@ -245,6 +246,47 @@ def load_denylist(path: str) -> int:
         rx = re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(v).replace("\\\\", r"\\+") for v in vals) + r")(?![A-Za-z0-9])", re.I)
         _deny.append((rx, ents))
     return len(ents)
+
+
+OWNER_FP_ENV = "DC_OWNER_FINGERPRINTS"
+
+
+def load_owner_fingerprints(path: str | None = None) -> dict | None:
+    """The owner trace set's fingerprint file (GAP-1238), kept outside git: {"sha256": {<hex>: <corpus name>}, "names": [<corpus name>...]}. Only hashes and
+    corpus names, never content. `path` defaults to $DC_OWNER_FINGERPRINTS. Returns None when no path is set or the file does not exist (the caller must report
+    "skipped", never pass silently); a file that exists but is not a fingerprint file raises ValueError."""
+    path = path or os.environ.get(OWNER_FP_ENV) or ""
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        doc = json.load(f)
+    shas, names = doc.get("sha256"), doc.get("names")
+    if not isinstance(shas, dict) or not isinstance(names, list) or not shas:
+        raise ValueError("not an owner fingerprint file (need a non-empty sha256 map and a names list)")
+    return {"sha256": {k.lower(): v for k, v in shas.items()}, "names": sorted({str(n).lower() for n in names if n})}
+
+
+def owner_trace_hits(relpath: str, sha256: str, fp: dict) -> list[str]:
+    """Reasons a file is the owner trace set or derived from it: its sha256 is a registered owner-corpus digest, or a path component is an owner corpus name
+    (the part before the first dot equals a name or starts with `<name>-`, so `agent-transcripts-000.cases.jsonl` matches `agent-transcripts`). The reasons
+    carry the corpus name only."""
+    hits = []
+    if sha256.lower() in fp["sha256"]:
+        hits.append("owner-trace:sha256:" + fp["sha256"][sha256.lower()])
+    for comp in relpath.replace("\\", "/").lower().split("/"):
+        stem = comp.split(".")[0]
+        for n in fp["names"]:
+            if stem == n or stem.startswith(n + "-"):
+                hits.append("owner-trace:name:" + n)
+    return sorted(set(hits))
+
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for b in iter(lambda: fh.read(1 << 22), b""):
+            h.update(b)
+    return h.hexdigest()
 
 
 def _deny_sub(m: re.Match, ents: dict) -> str:

@@ -211,31 +211,45 @@ var (
 	windowsShippedRulePacksRootMu       sync.Mutex
 	windowsShippedRulePacksRootRead     bool
 	windowsShippedRulePacksRootResolved string
+	windowsShippedRulePacksRootErr      error
 	windowsShippedRulePacksRootOverride *string
 )
+
+// errWindowsShippedRulePacksRootForTest is the read failure a test's empty
+// root stands for (SetWindowsShippedRulePacksRootForTest("")).
+var errWindowsShippedRulePacksRootForTest = errors.New("the trusted ProgramData registration cannot be read: none is set (test)")
 
 // windowsShippedRulePacksRoot is managed.StandaloneWindowsShippedRulePacksDir,
 // read once per process from the protected registration, a failed read
 // included: the decision and threshold paths resolve rule packs for every
-// hook call. "" where it cannot be read (off Windows).
-func windowsShippedRulePacksRoot() string {
+// hook call. "" where it cannot be read: off Windows, where there is none,
+// with a nil error; on Windows with the error of the read (GAP-0085).
+func windowsShippedRulePacksRoot() (string, error) {
 	windowsShippedRulePacksRootMu.Lock()
 	defer windowsShippedRulePacksRootMu.Unlock()
 	if windowsShippedRulePacksRootOverride != nil {
-		return *windowsShippedRulePacksRootOverride
+		if *windowsShippedRulePacksRootOverride == "" {
+			return "", errWindowsShippedRulePacksRootForTest
+		}
+		return *windowsShippedRulePacksRootOverride, nil
 	}
 	if !windowsShippedRulePacksRootRead {
 		windowsShippedRulePacksRootRead = true
-		if dir, err := managed.StandaloneWindowsShippedRulePacksDir(); err == nil {
+		dir, err := managed.StandaloneWindowsShippedRulePacksDir()
+		switch {
+		case err == nil:
 			windowsShippedRulePacksRootResolved = dir
+		case runtime.GOOS == "windows":
+			windowsShippedRulePacksRootErr = fmt.Errorf("the trusted ProgramData registration cannot be read: %w", err)
 		}
 	}
-	return windowsShippedRulePacksRootResolved
+	return windowsShippedRulePacksRootResolved, windowsShippedRulePacksRootErr
 }
 
 // SetWindowsShippedRulePacksRootForTest makes every config resolve the
-// shipped rule packs of a managed Windows install under root ("" for none)
-// until the returned function runs. For tests only.
+// shipped rule packs of a managed Windows install under root until the
+// returned function runs; "" is a root whose trusted registration cannot be
+// read. For tests only.
 func SetWindowsShippedRulePacksRootForTest(root string) func() {
 	windowsShippedRulePacksRootMu.Lock()
 	previous := windowsShippedRulePacksRootOverride
@@ -251,12 +265,55 @@ func SetWindowsShippedRulePacksRootForTest(root string) func() {
 // WindowsShippedRulePacksFolder is the folder that holds this binary's copy
 // of the shipped packs, <root>\<digest16>; "" where the root cannot be read.
 func WindowsShippedRulePacksFolder() string {
-	root := windowsShippedRulePacksRoot()
+	root, _ := windowsShippedRulePacksRoot()
 	name, err := policyassets.ShippedRulePackFolderName()
 	if root == "" || err != nil {
 		return ""
 	}
 	return filepath.Join(root, name)
+}
+
+// windowsShippedRulePacksStandIn is the shipped pack folder a probe copy of
+// a config (WindowsShippedRulePacksUnreadable) resolves to while the real
+// root cannot be read: it only tells which settings select a shipped pack.
+const windowsShippedRulePacksStandIn = `\\?\DefenseClaw-unresolved-shipped-rule-packs`
+
+// WindowsShippedRulePackRootError is why the folder a managed Windows
+// standalone install ships the built-in pack name in cannot be found: the
+// trusted ProgramData registration the root is read from cannot be read.
+// Nil for any other name or install, and when the root was read (GAP-0085:
+// strict then resolved to no folder and was refused as "policy_dir is not
+// set").
+func (c *Config) WindowsShippedRulePackRootError(name string) error {
+	if c == nil || !policyassets.IsShippedRulePack(c.BuiltinRulePackFor(name)) || !c.windowsStandaloneConfig() {
+		return nil
+	}
+	_, err := windowsShippedRulePacksRoot()
+	return err
+}
+
+// WindowsShippedRulePacksUnreadable is, for a managed Windows standalone
+// config, the shipped pack (strict or permissive) one of its settings loads
+// from the folder Setup ships it in, and why that folder cannot be found,
+// while the trusted ProgramData registration cannot be read; "" and nil when
+// the root was read, or when no setting selects a shipped pack (GAP-0085).
+func (c *Config) WindowsShippedRulePacksUnreadable() (string, error) {
+	if c == nil || !c.windowsStandaloneConfig() {
+		return "", nil
+	}
+	_, err := windowsShippedRulePacksRoot()
+	if err == nil {
+		return "", nil
+	}
+	probe := *c
+	probe.shippedRulePacksStandIn = true
+	dirs := probe.ReferencedRulePackDirs()
+	for _, label := range RulePackCheckOrder(dirs) {
+		if name := probe.WindowsShippedRulePackName(dirs[label]); name != "" {
+			return name, err
+		}
+	}
+	return "", nil
 }
 
 // WindowsShippedRulePackDir is the folder a managed Windows standalone
@@ -270,6 +327,9 @@ func (c *Config) WindowsShippedRulePackDir(name string) string {
 		return ""
 	}
 	folder := WindowsShippedRulePacksFolder()
+	if folder == "" && c.shippedRulePacksStandIn {
+		folder = windowsShippedRulePacksStandIn
+	}
 	if folder == "" {
 		return ""
 	}

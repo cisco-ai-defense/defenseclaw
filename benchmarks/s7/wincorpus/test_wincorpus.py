@@ -346,5 +346,112 @@ class ProtectedWriteTests(unittest.TestCase):
                 self.assertEqual(r["truth"]["expected_disposition"], "block")
 
 
+class OwnerTraceGuardTests(unittest.TestCase):
+    """GAP-1238: the owner trace set (and files derived from it) must never be tracked under benchmarks/. Synthetic fingerprints only."""
+
+    SECRET_BYTES = b"synthetic owner trace row 1\n"
+
+    def _fp(self, d, **extra):
+        import hashlib
+        doc = {"schema": 1, "names": ["agent-transcripts", "ot149"], "sha256": {hashlib.sha256(self.SECRET_BYTES).hexdigest(): "synthetic-owner-corpus"}}
+        doc.update(extra)
+        p = Path(d) / "fp.json"
+        p.write_text(json.dumps(doc))
+        return p
+
+    def _run(self, files, args=("leakscan-repo",), fp=True, env_fp=True, extra=()):
+        import os
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True)
+            for rel, data in files.items():
+                p = Path(d) / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(data)
+            subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+            deny = Path(d) / "deny.jsonl"
+            deny.write_text(json.dumps({"cat": "hostalias", "v": "dc-zebra9-win"}) + "\n")
+            env = {k: v for k, v in os.environ.items() if k != L.OWNER_FP_ENV}
+            if fp and env_fp:
+                env[L.OWNER_FP_ENV] = str(self._fp(d))
+            cmd = [sys.executable, str(HERE / "build.py"), *args]
+            if args[0] == "leakscan-repo":
+                cmd += ["--denylist", str(deny)]
+            if fp and not env_fp:
+                cmd += ["--fingerprints", str(self._fp(d))]
+            return subprocess.run(cmd + list(extra), cwd=d, capture_output=True, text=True, env=env)
+
+    def test_unset_fingerprint_file_says_skipped_and_does_not_pass_silently(self):
+        r = self._run({"benchmarks/doc.md": b"clean\n"}, fp=False)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("owner-trace guard: skipped: no fingerprint file", r.stdout)
+
+    def test_required_fingerprints_fail_when_the_file_is_missing(self):
+        r = self._run({"benchmarks/doc.md": b"clean\n"}, fp=False, extra=("--require-owner-fingerprints",))
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("skipped: no fingerprint file", r.stdout)
+        r = self._run({"benchmarks/doc.md": b"clean\n"}, args=("owner-check",), fp=False, extra=("--require",))
+        self.assertEqual(r.returncode, 1, r.stdout)
+
+    def test_clean_tree_passes_with_fingerprints(self):
+        r = self._run({"benchmarks/doc.md": b"clean\n", "benchmarks/s7/other.cases.jsonl": b"{}\n"})
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("owner-trace guard: checked 2 files against 1 fingerprints and 2 corpus names; hits 0", r.stdout)
+
+    def test_a_tracked_file_with_an_owner_sha_fails_under_any_name_without_printing_the_hash(self):
+        import hashlib
+        r = self._run({"benchmarks/innocent-name.txt": self.SECRET_BYTES})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("benchmarks/innocent-name.txt: owner-trace:sha256:synthetic-owner-corpus", r.stdout)
+        self.assertNotIn(hashlib.sha256(self.SECRET_BYTES).hexdigest(), r.stdout + r.stderr)
+        self.assertNotIn("synthetic owner trace row", r.stdout + r.stderr)
+
+    def test_a_tracked_file_with_an_owner_corpus_name_fails_even_with_other_bytes(self):
+        for rel in ("benchmarks/s7/agent-transcripts-000.cases.jsonl", "benchmarks/ot149/cases.jsonl", "benchmarks/x/ot149.meta.jsonl"):
+            r = self._run({rel: b"{}\n"})
+            self.assertEqual(r.returncode, 1, rel)
+            self.assertIn("owner-trace:name:", r.stdout, rel)
+
+    def test_similar_looking_names_are_not_hits(self):
+        r = self._run({"benchmarks/agent-transcript-notes.md": b"x\n", "benchmarks/ot1499.json": b"x\n", "benchmarks/s7/my-agent-transcripts.md": b"x\n"})
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_files_outside_benchmarks_are_not_in_scope(self):
+        r = self._run({"docs/ot149.md": b"x\n", "benchmarks/doc.md": b"x\n"})
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_the_corpus_file_under_test_is_checked_too(self):
+        import os
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True)
+            (Path(d) / "benchmarks").mkdir()
+            (Path(d) / "benchmarks" / "doc.md").write_text("clean\n")
+            subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+            (Path(d) / "deny.jsonl").write_text(json.dumps({"cat": "hostalias", "v": "dc-zebra9-win"}) + "\n")
+            (Path(d) / "built.jsonl").write_bytes(self.SECRET_BYTES)
+            env = dict(os.environ, **{L.OWNER_FP_ENV: str(self._fp(d))})
+            r = subprocess.run([sys.executable, str(HERE / "build.py"), "leakscan-repo", "--denylist", str(Path(d) / "deny.jsonl")],
+                               cwd=d, capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 0, r.stdout)
+            r = subprocess.run([sys.executable, str(HERE / "build.py"), "owner-check", str(Path(d) / "built.jsonl")], cwd=d, capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 1, r.stdout)
+            self.assertIn("built.jsonl: owner-trace:sha256:synthetic-owner-corpus", r.stdout)
+
+    def test_fingerprints_flag_instead_of_the_env_var(self):
+        r = self._run({"benchmarks/doc.md": b"clean\n"}, args=("owner-check",), env_fp=False)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("hits 0", r.stdout)
+
+    def test_a_malformed_fingerprint_file_is_an_error_not_a_pass(self):
+        with tempfile.TemporaryDirectory() as d:
+            bad = Path(d) / "fp.json"
+            bad.write_text(json.dumps({"names": [], "sha256": {}}))
+            with self.assertRaises(ValueError):
+                L.load_owner_fingerprints(str(bad))
+            self.assertIsNone(L.load_owner_fingerprints(str(Path(d) / "missing.json")))
+            self.assertIsNone(L.load_owner_fingerprints(""))
+
+
 if __name__ == "__main__":
     unittest.main()

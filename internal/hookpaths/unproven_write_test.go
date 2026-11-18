@@ -59,9 +59,7 @@ func TestUnprovenProtectedWriteEvidence(t *testing.T) {
 		filepath.Join(cwd, "aliasdir"):                filepath.Join(home, ".ssh"),
 		filepath.Join(home, ".ssh", "sub", "out.txt"): "../authorized_keys",
 	} {
-		if err := os.Symlink(target, name); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, name)
 	}
 	t.Setenv("HOME", home)
 	if err := os.WriteFile(filepath.Join(cwd, "writer.sh"), []byte("echo marker >> alias\n"), 0o600); err != nil {

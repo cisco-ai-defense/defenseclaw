@@ -46,8 +46,11 @@ const (
 	childFilesPut = "files-put" // DIR LIMIT, tar on stdin, JSON result on stdout
 	childFilesGet = "files-get" // PATH, tar on stdout; exit childNotFound when absent
 	childStateDir = "state-dir" // HOME WORKDIR, the state root on stdout
-	childNotFound = 3
-	childDenied   = 4 // files-get: the agent's user may not read a part of PATH
+	// FILE ROOT DIR: record DIR (and each folder up to ROOT) as trusted in
+	// Claude Code's state file FILE (GAP-0446).
+	childClaudeTrust = "claude-trust"
+	childNotFound    = 3
+	childDenied      = 4 // files-get: the agent's user may not read a part of PATH
 )
 
 // IsChildCommand reports whether args name one of the relay's child commands.
@@ -56,7 +59,7 @@ func IsChildCommand(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case childFilesPut, childFilesGet, childStateDir:
+	case childFilesPut, childFilesGet, childStateDir, childClaudeTrust:
 		return true
 	}
 	return false
@@ -115,6 +118,12 @@ func runChild(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	case args[0] == childStateDir && len(args) == 3:
 		fmt.Fprintln(stdout, makeStateRoot(args[1], args[2]))
+		return 0
+	case args[0] == childClaudeTrust && len(args) == 4:
+		if err := claudeTrust(args[1], args[2], args[3]); err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return 1
+		}
 		return 0
 	}
 	fmt.Fprintf(stderr, "relay %s: bad arguments\n", args[0])
@@ -219,6 +228,20 @@ func (sp *separation) stateDir(home, work string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// claudeTrust is claudeTrust run as the agent's user (the relay's
+// claude-trust child): Claude Code's state file is in the agent's home, so
+// a root relay neither leaves it root-owned nor reads it through a link the
+// agent planted (GAP-0446 on a GAP-0116 relay).
+func (sp *separation) claudeTrust(file, root, dir string) error {
+	cmd := sp.child(context.Background(), childClaudeTrust, file, root, dir)
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("claude trust as the agent's user: %w: %s", err, strings.TrimSpace(errb.String()))
+	}
+	return nil
 }
 
 // makeStateRoot makes the state root below home (stateRoot) and returns it,

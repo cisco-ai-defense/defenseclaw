@@ -194,13 +194,13 @@ func (l *chainLimiter) done(key string, s *actorSlots) {
 	}
 }
 
-// checkChain runs the synchronous egress-chain check under the budget. A
+// checkChain runs the synchronous egress-chain check under budget. A
 // miss is clear; a stale answer is chainStale, for the caller to resolve
 // the actor again. An actor with no registration, an error, a panic, the
 // deadline or the actor's in-flight cap is unchecked, with the reason: the
 // caller applies the chain failure mode, because on the hook path an
 // egress chain only alerts and the callout is where it blocks (GAP-0090).
-func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, int, string) {
+func (e *Engine) checkChain(ctx context.Context, step ChainStep, budget time.Duration) (ChainVerdict, int, string) {
 	if e.checker == nil {
 		return ChainVerdict{}, chainClear, ""
 	}
@@ -211,7 +211,7 @@ func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, 
 	// The budget covers the wait for a slot and the check. The slot is
 	// released when the check returns, not at the deadline, so a slow
 	// leader keeps counting against the actor that sent it.
-	ctx, cancel := context.WithTimeout(ctx, e.cfg.Chain.CheckBudget)
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	if !e.chainLimit.acquire(ctx, key) {
 		cancel()
 		return ChainVerdict{}, chainUnchecked, uncheckedBusy
@@ -263,7 +263,9 @@ func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, 
 // chainFailClosed reports whether an unchecked chain step refuses: always
 // with chain.failure_mode closed, never with open (refused at load on a
 // managed install), and with auto (the default) on a managed install (D8)
-// or for an unattended actor, since nobody watches its alerts.
+// or for an unattended actor, since nobody watches its alerts. Where it
+// allows, only GET and HEAD go through: a request that can carry data out
+// is refused in every mode (carriesData, GAP-0601).
 func (e *Engine) chainFailClosed(pol *Policy) bool {
 	switch e.cfg.Chain.FailureMode {
 	case FailureClosed:

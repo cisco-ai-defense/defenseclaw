@@ -260,6 +260,9 @@ func substrateAPIMessage(e *api.Error) string {
 	case e.Status == 403 && e.Reason == "template_not_attested":
 		return "the template is not attested (" + orWord(safetext.Line(e.Detail), "no valid attestation") +
 			"), so a managed cluster starts nothing from it; ask your administrator to rebuild and publish it with defenseclaw substrate template build"
+	case e.Status == 403 && e.Reason == "sandbox_class_unavailable":
+		return "the cluster has no worker of the sandbox class this agent must run in (" + orWord(e.Message, "sandbox class unavailable") +
+			"); nothing was started. Run a template published for that class (template publish --class, or --worker-label of a pool of that class), or ask your administrator"
 	case e.Status == 403 && e.Reason == "template_connector_unlabeled":
 		return "the template's attestation names no agent connector, so a managed cluster starts nothing from it; ask your administrator to rebuild it with defenseclaw substrate template build"
 	case e.Status == 403:

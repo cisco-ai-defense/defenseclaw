@@ -253,8 +253,11 @@ def _windows_package_times(files: list[Path]) -> dict[str, float]:
 def _ended_and_cut_off(files: list[Path], module: str) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """The top-level tests of files that ran to an end, and those a -timeout
     cut off, by package. go_test_report.py writes a test still running when
-    the stream ended (the -timeout panic) as a fail after the end event of
-    its package: its Elapsed is the time it had run, a lower bound."""
+    the stream ended as a fail marked "CutOff": its Elapsed is the time it
+    had run, a lower bound. The mark is what counts: a job killed before go
+    test's own -timeout leaves no package end event before those records
+    (GAP-1033). A fail after the end event of its package is a cut-off too
+    (the files written before the mark)."""
     ended: dict[str, set[str]] = {}
     cut_off: dict[str, set[str]] = {}
     for file in files:
@@ -268,7 +271,8 @@ def _ended_and_cut_off(files: list[Path], module: str) -> tuple[dict[str, set[st
                     closed.discard(package)
                 continue
             if action in ("pass", "fail", "skip") and "/" not in name:
-                into = cut_off if action == "fail" and package in closed else ended
+                cut = action == "fail" and (event.get("CutOff") is True or package in closed)
+                into = cut_off if cut else ended
                 into.setdefault(_rel(package, module), set()).add(name)
     return ended, cut_off
 

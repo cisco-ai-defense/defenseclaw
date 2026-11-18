@@ -142,7 +142,9 @@ func CurrentProcessSID() (string, error) {
 // (LocalSystem, internal/managed/peerbroker) calls verifyLoopbackTCPPeer;
 // the managed gateway reads only the client row (loopbackTCPClientOwner)
 // and asks the broker (S1 Q7 lead ruling: no SeDebugPrivilege for the
-// gateway, no in-process fallback).
+// gateway, no in-process fallback). The Secure Client caller account
+// (LoopbackTCPPeerAccount) is the one in-process reader, with the same
+// PID-reuse rule (ownerSIDLookup.account).
 func loopbackTCPClientOwner(local, remote *net.TCPAddr) (TCPConnOwner, error) {
 	return ownerSIDLookup{rows: tcpOwnerRows}.clientOwner(local, remote)
 }
@@ -161,6 +163,13 @@ func openPeerProcess(pid uint32) (peerProcess, error) {
 		// The broker never answers for itself.
 		return nil, errors.New("peercred: the loopback client is the asking process")
 	}
+	return openProcess(pid)
+}
+
+// openProcess opens pid for its creation time and token user: the Secure
+// Client caller account lookup (LoopbackTCPPeerAccount), which also names
+// this process when it is its own client.
+func openProcess(pid uint32) (peerProcess, error) {
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return nil, fmt.Errorf("peercred: open the client process: %w", err)

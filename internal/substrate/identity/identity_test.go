@@ -541,6 +541,53 @@ func TestPersonVerifier(t *testing.T) {
 	wantReason(t, err, ReasonIssuer)
 }
 
+// GAP-0390: an email the issuer has not verified (a Keycloak local user)
+// is not the person's principal; the user name stands in. An absent
+// email_verified claim (Entra ID) keeps the email.
+func TestPersonVerifierUnverifiedEmailIsNotThePrincipal(t *testing.T) {
+	p := newIDP(t)
+	key := p.addKey(t, "p1", "RS256")
+	now := time.Unix(1_800_000_000, 0)
+	clock := func() time.Time { return now }
+	ks, err := NewKeySet(KeySetOptions{Issuer: p.srv.URL, HTTPClient: p.srv.Client(), Now: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := NewPersonVerifier([]PersonIssuer{{KeySet: ks, Audience: "dc-launcher"}}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := map[string]any{"typ": "JWT", "alg": "RS256", "kid": "p1"}
+	for _, tc := range []struct {
+		name     string
+		verified any // nil: no email_verified claim
+		user     string
+		want     string
+	}{
+		{"unverified falls back to the user name", false, "kc-unverified", "kc-unverified"},
+		{"unverified as a string", "false", "kc-unverified", "kc-unverified"},
+		{"unverified and no other name", false, "", ""},
+		{"verified", true, "kc-verified", "alice@example.com"},
+		{"no claim", nil, "kc-user", "alice@example.com"},
+	} {
+		c := map[string]any{"iss": p.srv.URL, "sub": "00u1", "aud": "dc-launcher", "exp": now.Unix() + 600,
+			"iat": now.Unix(), "email": "alice@example.com"}
+		if tc.verified != nil {
+			c["email_verified"] = tc.verified
+		}
+		if tc.user != "" {
+			c["preferred_username"] = tc.user
+		}
+		got, err := v.Verify(context.Background(), sign(t, key, hdr, c))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got.Principal != tc.want || got.Subject != "00u1" || got.Kind != PersonHuman {
+			t.Errorf("%s: principal %q, want %q (person %+v)", tc.name, got.Principal, tc.want, got)
+		}
+	}
+}
+
 // A Keycloak device-flow access token: aud names DefenseClaw's API audience
 // (an audience mapper), azp the launcher client.
 func TestPersonVerifierAPIAudience(t *testing.T) {

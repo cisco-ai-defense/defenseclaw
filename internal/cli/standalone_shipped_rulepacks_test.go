@@ -135,3 +135,22 @@ func TestShippedRulePacksWriteRequired(t *testing.T) {
 		t.Error("strict from the administrator's policy_dir needs no shipped folder")
 	}
 }
+
+// rel-1-0-10:GAP-0085: a failed write of the shipped packs because their
+// root cannot be resolved fails the lifecycle when the config selects strict
+// or permissive (it was a warning that the deployment does not use them).
+func TestShippedRulePacksWriteIsRequiredForStrictWhenTheRootCannotBeRead(t *testing.T) {
+	defer config.SetWindowsShippedRulePacksRootForTest("")()
+	for _, pack := range []string{"strict", "permissive"} {
+		cfg := shippedRulePackTestConfig("standalone", pack)
+		if got := configSelectsShippedRulePack(cfg); got != pack {
+			t.Errorf("%s with an unreadable root: selects %q", pack, got)
+		}
+		if !shippedRulePacksWriteRequired(cfg, nil) {
+			t.Errorf("%s with an unreadable root: the failed write is only a warning", pack)
+		}
+	}
+	if shippedRulePacksWriteRequired(shippedRulePackTestConfig("standalone", "default"), nil) {
+		t.Error("default with an unreadable root: the failed write fails the run")
+	}
+}

@@ -254,18 +254,29 @@ func (a *APIServer) serveSubstrateRelayVerify(st *substrateState, w http.Respons
 		writeSubstrateRefusal(w, http.StatusBadRequest, "token_required")
 		return
 	}
+	target := actor.Atespace + "/" + actor.Name
 	s, err := st.cfg.Sessions.Verify(in.Token)
 	if err != nil {
+		// No verified person: the row names the actor only (GAP-0434).
+		a.substrateAuditRelayDenied(st, r, "MEDIUM", "session_refused", target, "")
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_refused")
 		return
 	}
 	if s.Actor.Atespace != actor.Atespace || s.Actor.Name != actor.Name || s.ActorUID != actor.UID {
+		// The session token names the person who tried (GAP-0434).
+		a.substrateAuditRelayDenied(st, r, "MEDIUM", "session_for_another_actor", s.ActorRef, s.Person)
 		writeSubstrateRefusal(w, http.StatusForbidden, "session_for_another_actor")
 		return
 	}
-	// Who may attach was decided when the token was issued: the admin
-	// listener issues one only to the actor's own person or to an
-	// administrator, and audits it (E2).
+	// A session is the actor's own person's only (GAP-0435): a token for
+	// this actor that names anyone else, however it was minted, is refused.
+	if reg, ok := substrateRegistrationFrom(r.Context()); !ok || reg.Person.Subject == "" || s.Person != reg.Person.ID() {
+		a.substrateAuditRelayDenied(st, r, "HIGH", "session_not_owner", target, s.Person)
+		writeSubstrateRefusal(w, http.StatusForbidden, "session_not_owner")
+		return
+	}
+	// The admin listener issues a session only to the actor's own person,
+	// and the check above holds a token minted any other way to that too.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	out := map[string]any{

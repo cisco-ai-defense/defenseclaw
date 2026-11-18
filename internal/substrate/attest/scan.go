@@ -211,7 +211,13 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 			}
 			res, err = o.Skill.Scan(ctx, local)
 		}
-		if err != nil || res == nil {
+		switch {
+		case err != nil && scanner.Unavailable(err):
+			// No scan ran here (no scanner, or a host that refuses the
+			// scanner's containment): the item still blocks, and says that
+			// this is no verdict on the skill (GAP-0521).
+			res = failedScan(o.Skill.Name(), dir, fmt.Errorf("no verdict: the skill scanner cannot run on this host: %w", err))
+		case err != nil || res == nil:
 			res = failedScan(o.Skill.Name(), dir, err)
 		}
 		if len(skipped) > 0 {

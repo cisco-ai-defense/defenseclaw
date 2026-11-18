@@ -34,6 +34,9 @@ type Agent struct {
 	// sep runs the agent as its own user (GAP-0116); nil runs it as the
 	// relay's user.
 	sep *separation
+	// BeforeStart, when set, runs before each start of the agent with the
+	// folder it starts in (Claude Code's workspace trust, GAP-0446).
+	BeforeStart func(dir string)
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -90,6 +93,9 @@ func (a *Agent) UseDir(dir string) {
 func (a *Agent) start(cols, rows uint16) error {
 	if len(a.Argv) == 0 {
 		return errors.New("relay: no agent command configured")
+	}
+	if a.BeforeStart != nil {
+		a.BeforeStart(a.Dir)
 	}
 	cmd := exec.Command(a.Argv[0], a.Argv[1:]...)
 	cmd.Dir = a.Dir

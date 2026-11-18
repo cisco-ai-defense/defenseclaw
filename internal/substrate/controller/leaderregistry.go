@@ -38,9 +38,10 @@ type LeaderRegistry struct {
 }
 
 var (
-	_ Registry      = (*LeaderRegistry)(nil)
-	_ FreshRegistry = (*LeaderRegistry)(nil)
-	_ Tombstoner    = (*LeaderRegistry)(nil)
+	_ Registry       = (*LeaderRegistry)(nil)
+	_ FreshRegistry  = (*LeaderRegistry)(nil)
+	_ Tombstoner     = (*LeaderRegistry)(nil)
+	_ ConflictMarker = (*LeaderRegistry)(nil)
 )
 
 // Get implements Registry.
@@ -76,7 +77,7 @@ func fromLeader(r registry.Registration) Registration {
 		Task: r.Unattended, BatchID: r.BatchID, ParentUID: r.ParentUID, ForkedBy: r.ForkedBy,
 		Approved: slices.Clone(r.Approved), Source: SourceLauncher,
 		Connector: r.Connector, AgentVersion: r.HarnessVersion, HookContract: r.HookContract,
-		KitVersion: r.KitVersion, TemplateDigest: r.TemplateDigest}
+		KitVersion: r.KitVersion, TemplateDigest: r.TemplateDigest, PolicyConflict: r.PolicyConflict != nil}
 	switch {
 	case r.ParentUID != "":
 		out.Source = SourceFork
@@ -117,20 +118,8 @@ func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 		Connector: in.Connector, HarnessVersion: in.AgentVersion, HookContract: in.HookContract,
 		KitVersion: in.KitVersion, TemplateDigest: in.TemplateDigest,
 		Approved: slices.Clone(in.Approved), Attributed: true, CreatedAt: now().UTC()}
-	// Only a fork DefenseClaw made keeps the parent's person (and with it
-	// per-person secrets); a fork made outside DefenseClaw is attributed
-	// to its atespace (GAP-0082).
-	if in.Source == SourceFork && in.ParentUID != "" && in.ForkedBy == ForkedByDefenseClaw {
-		parent, pok, perr := l.Store.Get(ctx, in.Atespace, in.ParentUID)
-		if perr != nil {
-			return perr
-		}
-		if pok && !parent.Attributed && !parent.Deleted {
-			reg.Attributed = false
-			reg.Person, reg.Connector, reg.KitVersion, reg.HookContract = parent.Person, parent.Connector, parent.KitVersion, parent.HookContract
-			reg.HarnessVersion, reg.TemplateDigest, reg.Secrets = parent.HarnessVersion, parent.TemplateDigest, slices.Clone(parent.Secrets)
-		}
-	}
+	// A fork is attributed: DefenseClaw makes none, so it never keeps the
+	// parent's person or per-person secrets (GAP-0082, GAP-0425).
 	return l.Store.Put(ctx, reg)
 }
 
@@ -143,5 +132,29 @@ func (l *LeaderRegistry) MarkDeleted(ctx context.Context, atespace, uid string) 
 		return err
 	}
 	cur.Deleted = true
+	return l.Store.Put(ctx, cur)
+}
+
+// latestStore is a store that can read past its whole cache
+// (registry.Remote).
+type latestStore interface {
+	GetLatest(ctx context.Context, atespace, uid string) (registry.Registration, bool, error)
+}
+
+// MarkConflict implements ConflictMarker: it sets (c non-nil) or clears the
+// actor's policy_conflict mark on its registration, which is what the
+// gateway shows in list, status, policy explain and doctor (GAP-0398). The
+// record is read past the cache so the write keeps every newer field. No
+// registration, or a tombstone, needs nothing.
+func (l *LeaderRegistry) MarkConflict(ctx context.Context, atespace, uid string, c *registry.PolicyConflict) error {
+	get := l.Store.Get
+	if ls, ok := l.Store.(latestStore); ok {
+		get = ls.GetLatest
+	}
+	cur, ok, err := get(ctx, atespace, uid)
+	if err != nil || !ok || cur.Deleted || (cur.PolicyConflict == nil) == (c == nil) {
+		return err
+	}
+	cur.PolicyConflict = c
 	return l.Store.Put(ctx, cur)
 }

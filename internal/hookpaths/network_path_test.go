@@ -51,6 +51,35 @@ func fakeNetworkShare(t *testing.T, prefix string, wait, deadAfter time.Duration
 	return &probes
 }
 
+// silentShareGuard is how long returnsWhileSharesAreSilent lets a read wait
+// for shares that never answer before it makes them answer, so a read that
+// waits for the answer fails its test instead of hanging it.
+const silentShareGuard = time.Minute
+
+// returnsWhileSharesAreSilent runs read on the calling goroutine (its hook
+// call, if any) while every fake share probe waits for answer, and reports
+// whether read came back before the shares answered. A read bounded by its
+// answer wait or by its call's share wait comes back on any box, however
+// loaded; one that waits for the share itself is let go by answer after
+// silentShareGuard and reported (rel-1-0-10:GAP-0586 substrate-1: wall-clock
+// budgets of 400 ms and 1 s failed on a loaded -race box).
+func returnsWhileSharesAreSilent(t *testing.T, answer func(), read func()) bool {
+	t.Helper()
+	done := make(chan struct{})
+	var waited atomic.Bool
+	go func() {
+		select {
+		case <-done:
+		case <-time.After(silentShareGuard):
+			waited.Store(true)
+			answer()
+		}
+	}()
+	read()
+	close(done)
+	return !waited.Load()
+}
+
 // A share that does not answer holds no call past the answer wait, is asked
 // once for all the calls that name it, and is not asked again while quiet
 // (rel-1-0-6 GAP-0127: a stat of //host/x took about 21 s on Windows).

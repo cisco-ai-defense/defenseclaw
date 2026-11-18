@@ -92,6 +92,9 @@ func (a *APIServer) substrateListAsks(st *substrateState) http.HandlerFunc {
 		for _, x := range list {
 			out = append(out, askView(x))
 		}
+		if in.All {
+			a.substrateAuditAdminRead(st, r, "asks", len(out), "")
+		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"asks": out})
 	}
 }
@@ -176,6 +179,9 @@ func (a *APIServer) substrateDecisions(st *substrateState) http.HandlerFunc {
 			}
 			out = append(out, m)
 		}
+		if in.All {
+			a.substrateAuditAdminRead(st, r, "decisions", len(out), "")
+		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"decisions": out})
 	}
 }
@@ -208,6 +214,7 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			writeSubstrateJSONError(w, status, reason)
 			return
 		}
+		a.substrateAuditAdminTarget(st, r, reg, "policy explain", "INFO")
 		out := map[string]any{
 			"actor": reg.Atespace + "/" + reg.Name, "uid": reg.UID, "profile": reg.Profile, "connector": reg.Connector,
 			"template": reg.Template, "mode": substrateMode(reg), "fail_mode": substrateFailMode(st.cfg, reg),
@@ -224,8 +231,16 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			default:
 				rules, all := substratePolicyRules(pol)
 				hosts = all
-				out["egress"] = map[string]any{"policy": "in force", "version": pol.GetMetadata().GetVersion(), "rules": rules}
+				eg := map[string]any{"policy": "in force", "version": pol.GetMetadata().GetVersion(), "rules": rules}
+				if reg.PolicyConflict != nil {
+					eg["policy"] = "deny-only (policy_conflict)"
+					eg["note"] = "foreign changes to the policy were reverted until the controller stopped: only the DefenseClaw rule is in force; an administrator clears it with policy reset"
+				}
+				out["egress"] = eg
 			}
+		}
+		if pc := substratePolicyConflictView(reg); pc != nil {
+			out["policy_conflict"] = pc
 		}
 		if host := strings.ToLower(strings.TrimSpace(q.Get("host"))); host != "" {
 			allowed := slices.ContainsFunc(hosts, func(p string) bool { return substrateHostMatches(p, host) })

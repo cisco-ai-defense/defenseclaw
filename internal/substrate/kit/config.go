@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,6 +151,16 @@ type RelayConfig struct {
 	// place through a symlink admission cannot see (substrate-1 GAP-0439).
 	// The build writes it with the relay binary in the same layer.
 	Protected []string `json:"protected,omitempty"`
+	// ClaudeStateFile is Claude Code's state file (~/.claude.json). Before
+	// it starts Claude Code, the relay records there that the start folder
+	// and each folder between it and Workdir are trusted
+	// (projects[<path>].hasTrustDialogAccepted). The actor is the sandbox,
+	// and the image already trusts Workdir. But Claude Code stops carrying
+	// a parent's trust at a git repository's root, and the copy of a git
+	// project is one (/work/<folder>/.git), so without this every run from
+	// macOS or Linux opened on "Is this a project you trust?" with "No,
+	// exit" selected (substrate-1 GAP-0446). "" records nothing.
+	ClaudeStateFile string `json:"claude_state_file,omitempty"`
 }
 
 // AgentIDs parses AgentUser; ok is false when it is empty.
@@ -277,6 +288,9 @@ func (c Config) Validate() error {
 	if c.Relay.TaskStallMS < 0 || (c.Relay.TaskStallMS > 0 && (c.Relay.TaskStallMS < MinTaskStallMS || c.Relay.TaskStallMS > MaxTaskStallMS)) {
 		return fmt.Errorf("actor kit config: relay.task_stall_ms must be 0 (the default, 10m) or %d to %d (1m to 24h)", MinTaskStallMS, MaxTaskStallMS)
 	}
+	if f := c.Relay.ClaudeStateFile; f != "" && !strings.HasPrefix(f, "/") {
+		return fmt.Errorf("actor kit config: relay.claude_state_file %q is not an absolute path", f)
+	}
 	if c.MaxAttachBytes < 0 || c.MaxAttachBytes > MaxAttachBytes {
 		return fmt.Errorf("actor kit config: max_attach_bytes must be 0..%d", MaxAttachBytes)
 	}
@@ -380,6 +394,39 @@ var (
 	// when its template asks for no adjustment (Substrate v1.0.0).
 	SubstrateDefaultCapabilities = []string{"AUDIT_WRITE", "KILL", "NET_BIND_SERVICE"}
 )
+
+// SystemDirs are the folders a data mount never goes in (GAP-0441):
+// admission refuses a mount path in one (a WORKDIR there admits no data
+// mount).
+var SystemDirs = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/proc", "/sys", "/dev",
+	"/run", "/boot", "/var/run"}
+
+// LoadDirs are the system folders whose files programs load, run or read
+// at start (libraries, binaries, /etc/ld.so.preload, profiles): the relay
+// refuses a data mount that resolves into one through a symlink in the
+// image or an image volume, which admission cannot see (GAP-0576). /proc,
+// /sys, /dev and /run hold the runtime's and the host's own mounts (the
+// actor's /run/ate, a host's /run and /boot/efi in the relay's tests), so
+// the relay leaves them, and /boot, to admission. RuntimeMountFiles are
+// the files a container runtime binds into /etc.
+var (
+	LoadDirs          = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc"}
+	RuntimeMountFiles = []string{"/etc/hosts", "/etc/resolv.conf", "/etc/hostname"}
+)
+
+// InLoadDir reports whether the clean mount point p is in one of LoadDirs
+// and is not a file the runtime binds.
+func InLoadDir(p string) bool {
+	if slices.Contains(RuntimeMountFiles, p) {
+		return false
+	}
+	for _, d := range LoadDirs {
+		if p == d || strings.HasPrefix(p, d+"/") {
+			return true
+		}
+	}
+	return false
+}
 
 // ActorCapabilities is the capability set Substrate gives an actor
 // container: the default, minus drop ("ALL" clears it), plus add; sorted.

@@ -19,9 +19,23 @@ func TestGAP0339UnrecordedStepRefusedWhereUncheckedIs(t *testing.T) {
 	why := "the actor's hook contract routes no tool-call lifecycle event \"preToolUse\""
 	checker := fakeChecker{v: ChainVerdict{Unrecorded: why}}
 	attended := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = checker })
-	v := attended.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/"))
+	v := attended.eng.DecideHeaders(ctx, req("x", "GET", "example.com", "/"))
 	if !v.Allow || !v.Alert || !slices.ContainsFunc(v.Findings, func(f string) bool { return strings.HasPrefix(f, "chain_unrecorded:") }) {
-		t.Fatalf("attended open source actor: %+v, want allowed with a chain_unrecorded alert", v)
+		t.Fatalf("attended open source actor, GET: %+v, want allowed with a chain_unrecorded alert", v)
+	}
+	// A send is refused in every mode (GAP-0601).
+	for _, mode := range []string{"", FailureOpen} {
+		h := newHarness(t, func(c *Config, o *Options) {
+			o.ChainChecker = checker
+			if mode != "" {
+				c.Chain.FailureMode = mode
+			}
+		})
+		v = h.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/"))
+		if v.Allow || v.Category != CategoryChainUnchecked || v.Rule != uncheckedUnrecorded || !v.Retryable ||
+			!strings.Contains(v.Reason, why) || !strings.Contains(v.Reason, "carry data out") {
+			t.Fatalf("attended open source actor, POST, mode %q: %+v, want refused chain_unchecked/unrecorded_step", mode, v)
+		}
 	}
 	closed := newHarness(t, func(c *Config, o *Options) { o.ChainChecker = checker; c.Chain.FailureMode = FailureClosed })
 	v = closed.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/"))

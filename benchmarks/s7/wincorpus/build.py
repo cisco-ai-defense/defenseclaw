@@ -490,6 +490,48 @@ def cmd_leakscan(a):
     return 0 if not cats else 1
 
 
+def owner_trace_check(items, fp_path=None, require=False) -> int:
+    """GAP-1238 guard: fail when any of `items` ((display path, file path) pairs) is a file of the owner trace set or derived from it, by sha256 or by corpus name,
+    against the fingerprint file outside git ($DC_OWNER_FINGERPRINTS or `fp_path`). With no fingerprint file it prints "skipped: no fingerprint file" and counts as a
+    failure only under `require`. Prints the path and the corpus name of a hit, never a hash or any content. Returns the number of hits."""
+    fp = L.load_owner_fingerprints(fp_path)
+    if fp is None:
+        print(f"owner-trace guard: skipped: no fingerprint file (set {L.OWNER_FP_ENV}){' -> FAIL (required)' if require else ''}")
+        return 1 if require else 0
+    bad = 0
+    for shown, path in items:
+        try:
+            digest = L.sha256_file(path)
+        except OSError:
+            continue
+        for h in L.owner_trace_hits(shown, digest, fp):
+            print(f"  {shown}: {h}")
+            bad += 1
+    print(f"owner-trace guard: checked {len(items)} files against {len(fp['sha256'])} fingerprints and {len(fp['names'])} corpus names; hits {bad}")
+    return bad
+
+
+def _tracked_benchmarks() -> tuple[str, list[str]]:
+    import subprocess
+    root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
+    files = subprocess.run(["git", "-C", root, "ls-files", "-z", "benchmarks/"], capture_output=True, text=True, check=True).stdout.split("\0")
+    return root, [f for f in files if f]
+
+
+def cmd_owner_check(a):
+    """Only the owner-trace guard: the tracked files under benchmarks/ (the git index, so anything staged counts) plus any PATH given (a file, or a directory walked
+    recursively). Exit 1 on a hit; exit 1 with no fingerprint file only under --require."""
+    root, files = _tracked_benchmarks()
+    items = [(f, os.path.join(root, f)) for f in files]
+    for p in a.path or []:
+        if os.path.isdir(p):
+            for dp, _, fn in os.walk(p):
+                items += [(os.path.relpath(os.path.join(dp, f), p), os.path.join(dp, f)) for f in fn]
+        else:
+            items.append((os.path.basename(p), p))
+    return 1 if owner_trace_check(items, a.fingerprints, a.require) else 0
+
+
 def cmd_leakscan_repo(a):
     """The pre-READY gate: no real lab value in any tracked file under benchmarks/ (as a whole word OR as a substring: inside an identifier, a regex alternation or a split string, case-insensitive), none in the given corpus files. Exit 1 on any hit; prints file:line and the
     category only. Corpus files get the pattern categories as well; --allow-cat names documented public-dataset categories (default: none)."""
@@ -523,6 +565,8 @@ def cmd_leakscan_repo(a):
                     print(f"  {c}: {r['id']}: {h}")
                     bad += 1
     print(f"scanned {len(files)} tracked files under benchmarks/ and {len(a.corpus or [])} corpus files; hits {bad}")
+    # GAP-1238: the owner trace set (and files derived from it) must never be tracked here, nor be the corpus file under test
+    bad += owner_trace_check([(f, os.path.join(root, f)) for f in files] + [(os.path.basename(c), c) for c in a.corpus or []], a.fingerprints, a.require_owner_fingerprints)
     return 0 if not bad else 1
 
 
@@ -603,6 +647,12 @@ def main():
     g.add_argument("--denylist", required=True)
     g.add_argument("--corpus", action="append")
     g.add_argument("--allow-cat", action="append")
+    g.add_argument("--fingerprints", help=f"owner trace set fingerprint file (default ${L.OWNER_FP_ENV}); without one the owner-trace guard prints 'skipped' and does not fail")
+    g.add_argument("--require-owner-fingerprints", action="store_true", help="fail instead of skipping when there is no fingerprint file")
+    o = sub.add_parser("owner-check")
+    o.add_argument("path", nargs="*", help="extra files or directories to check besides the tracked files under benchmarks/")
+    o.add_argument("--fingerprints", help=f"fingerprint file (default ${L.OWNER_FP_ENV})")
+    o.add_argument("--require", action="store_true", help="fail instead of skipping when there is no fingerprint file")
     k = sub.add_parser("leakscan")
     k.add_argument("corpus")
     k.add_argument("--denylist")
@@ -613,7 +663,7 @@ def main():
     u.add_argument("--seed", type=int, default=20261114)
     u.add_argument("--width", type=int, default=240)
     a = ap.parse_args()
-    return {"build": cmd_build, "stats": cmd_stats, "audit-sample": cmd_audit_sample, "leakscan": cmd_leakscan, "leakscan-repo": cmd_leakscan_repo}[a.cmd](a)
+    return {"build": cmd_build, "stats": cmd_stats, "audit-sample": cmd_audit_sample, "leakscan": cmd_leakscan, "leakscan-repo": cmd_leakscan_repo, "owner-check": cmd_owner_check}[a.cmd](a)
 
 
 if __name__ == "__main__":

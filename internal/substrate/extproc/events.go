@@ -28,6 +28,10 @@ import (
 const (
 	EventEgressAllowed = "log.egress.allowed"
 	EventEgressBlocked = "log.egress.blocked"
+	// EventSecretInjected is a request Substrate's egress adds a bound
+	// secret to: the secret's name, the host and the actor, never a value,
+	// a prefix or the placeholder (GAP-0452).
+	EventSecretInjected = "log.secret.injected"
 )
 
 // Event is one decided request as telemetry sees it. It never carries a
@@ -51,6 +55,7 @@ type Event struct {
 	Rule          string            `json:"rule,omitempty"`
 	Reason        string            `json:"reason,omitempty"`
 	Feed          string            `json:"feed,omitempty"`
+	Secret        string            `json:"secret,omitempty"`
 	AskID         string            `json:"ask_id,omitempty"`
 	Findings      []string          `json:"findings,omitempty"`
 	BodyInspected bool              `json:"body_inspected"`
@@ -109,8 +114,21 @@ func (e *Engine) Finish(req *Request, v Verdict) {
 	if e.cfg.LogHeaders {
 		ev.Headers = e.red.Headers(req.Headers)
 	}
-	func() {
-		defer func() { _ = recover() }()
-		e.events.EgressEvent(ev)
-	}()
+	e.emit(ev)
+	if !v.Allow || v.OwnHost || req.IdentityErr != nil {
+		return
+	}
+	for _, b := range injectedSecrets(e.bindings, req.Host, v.Profile) {
+		e.emit(Event{
+			Time: ev.Time, Event: EventSecretInjected, Decision: "inject", RequestID: req.ID,
+			Atespace: req.Actor.Atespace, Actor: req.Actor.Name, ActorUID: req.Actor.UID, Profile: v.Profile,
+			Host: req.Host, Method: ev.Method, Secret: b.name,
+		})
+	}
+}
+
+// emit hands ev to the sink; a sink that panics never fails the request.
+func (e *Engine) emit(ev Event) {
+	defer func() { _ = recover() }()
+	e.events.EgressEvent(ev)
 }

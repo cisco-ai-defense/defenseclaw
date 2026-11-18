@@ -1470,6 +1470,12 @@ form) leaves one enrolled profile's own configs unconverted: the SID must be an 
 (target `hook-image-retire-skip`: who, when, the SID and its files), is listed in `skipped_profiles`, and
 `enterprise windows status` and `verify` report it as `hook_image_profile_not_retired` until none of its files
 names a launch folder.
+`--skip-profile` is refused when `retire` does not run as LocalSystem and every file that holds that profile back is
+one it was denied (access denied): run `retire` as LocalSystem, which reads it. A `status` that is denied a skipped
+profile's files reports `hook_image_profile_unverified` for it instead (run it as LocalSystem to check). `retire` writes
+`bin\hooks\.retired` when it starts, since that marker is what makes every writer name `bin\defenseclaw-hook.exe`,
+and it stays while `retire` is pending; it records how the last `retire` ended, and `status` and `verify` warn
+`hook_image_retire_pending` instead of `hook_image_retired` until a `retire` ends `ok`.
 
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
 arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.

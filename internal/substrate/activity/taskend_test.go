@@ -27,7 +27,7 @@ func TestTaskEndIsNotActivity(t *testing.T) {
 	if _, ok := snap.Ended["u2"]; ok {
 		t.Fatal("u2 has no task end")
 	}
-	src := &Source{Now: func() time.Time { return now }, snap: snap, at: now}
+	src := &Source{Now: func() time.Time { return now }, snap: snap, at: now, got: now}
 	if got, ok := src.TaskEnded("u1"); !ok || !got.Equal(now.Add(-time.Minute)) {
 		t.Fatalf("TaskEnded %v %v", got, ok)
 	}

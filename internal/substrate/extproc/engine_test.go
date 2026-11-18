@@ -45,12 +45,24 @@ type fakeUIDs struct {
 	live       bool
 	err        error
 	calls      int
+	// delay is how long a lookup takes, as on a slow leader (GAP-0601).
+	delay time.Duration
 }
 
-func (f *fakeUIDs) ResolveActor(context.Context, string, string) (ActorRecord, bool, error) {
+func (f *fakeUIDs) ResolveActor(ctx context.Context, _, _ string) (ActorRecord, bool, error) {
+	f.mu.Lock()
+	f.calls++
+	delay := f.delay
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ActorRecord{}, false, ctx.Err()
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls++
 	return ActorRecord{UID: f.uid, Profile: f.profile, Unattended: f.unattended}, f.live, f.err
 }
 
@@ -425,16 +437,35 @@ func TestChainCheckBudget(t *testing.T) {
 	slow := newHarness(t, func(_ *Config, o *Options) {
 		o.ChainChecker = fakeChecker{v: ChainVerdict{Deny: true}, delay: 200 * time.Millisecond}
 	})
+	// A check that misses its budget is unchecked. An attended GET on a
+	// registration resolved for it waits check_budget (20 ms), and its miss
+	// goes through with an alert (GAP-0601).
 	start := time.Now()
-	if v := slow.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); !v.Allow {
-		t.Fatalf("slow chain check refused: %+v", v)
+	if v := slow.eng.DecideHeaders(ctx, req("x", "GET", "example.com", "/")); !v.Allow || !v.Alert {
+		t.Fatalf("slow chain check, GET: %+v", v)
 	}
 	if d := time.Since(start); d > 150*time.Millisecond {
 		t.Fatalf("chain check took %s, budget 20ms", d)
 	}
+	// A POST, which a miss refuses in every mode, waits chain.send_budget
+	// (250 ms): a 100 ms leader's hit is answered and refuses as
+	// chain_egress.
+	slower := newHarness(t, func(_ *Config, o *Options) {
+		o.ChainChecker = fakeChecker{v: ChainVerdict{Deny: true}, delay: 100 * time.Millisecond}
+	})
+	start = time.Now()
+	if v := slower.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); v.Allow || v.Category != CategoryChainEgress {
+		t.Fatalf("slow chain check, POST: %+v", v)
+	}
+	if d := time.Since(start); d < 100*time.Millisecond || d > 600*time.Millisecond {
+		t.Fatalf("send chain check took %s, want the leader's 100ms within the 250ms budget", d)
+	}
 	errc := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = fakeChecker{err: errors.New("leader down")} })
-	if v := errc.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); !v.Allow {
-		t.Fatalf("chain error refused: %+v", v)
+	if v := errc.eng.DecideHeaders(ctx, req("x", "GET", "example.com", "/")); !v.Allow {
+		t.Fatalf("chain error, GET refused: %+v", v)
+	}
+	if v := errc.eng.DecideHeaders(ctx, req("x", "POST", "example.com", "/")); v.Allow || v.Rule != uncheckedError {
+		t.Fatalf("chain error, POST allowed: %+v", v)
 	}
 }
 

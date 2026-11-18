@@ -17,8 +17,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
-// pinnedBaseEnv is the image environment of openshell.DefaultBaseImage
-// (TestPinnedBaseEnvIsTheOpenShellRecord keeps the two the same).
+// pinnedBaseEnv is the image environment (ENV) of openshell.DefaultBaseImage,
+// the same on every platform of it, from the image config: a new pin
+// updates it (GAP-0447).
 var pinnedBaseEnv = map[string]string{
 	"PATH":                    "/sandbox/.venv/bin:/usr/local/bin:/usr/bin:/bin",
 	"DEBIAN_FRONTEND":         "noninteractive",

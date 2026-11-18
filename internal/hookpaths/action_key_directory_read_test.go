@@ -27,9 +27,7 @@ func TestActionRecursiveReadOfTheKeyDirectoryIsAKeyRead(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, "sshlink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, "sshlink"))
 	for _, command := range []string{
 		"grep -r . ~/.ssh", "grep -r . ~/.ssh/", "grep -R . ~/.ssh", "grep --recursive . ~/.ssh",
 		"grep -d recurse . ~/.ssh", "grep --directories=recurse . ~/.ssh", "grep -rI BEGIN ~/.ssh",

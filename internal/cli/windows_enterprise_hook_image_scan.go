@@ -294,7 +294,9 @@ func windowsHookImageVendorFiles(programData, dir string, depth int, vfs windows
 // windowsHookImageConfigScan is the result of one scan.
 type windowsHookImageConfigScan struct {
 	// Named maps a launch folder name (16 lowercase hex digits) to the files
-	// that name an image of this install's bin in it.
+	// that name an image of this install's bin in it, and
+	// windowsHookImageUnknownFolder to the account files whose PowerShell
+	// script could not be decoded (they may name any folder).
 	Named map[string][]string
 	// UserFiles are the files of Named that are an account's own.
 	UserFiles map[string]bool
@@ -324,6 +326,10 @@ type windowsHookImageConfigScan struct {
 type windowsHookImageUnverifiedFile struct {
 	File windowsHookImageConfigFile
 	Err  string
+	// Denied marks a file the caller's token was refused (access denied):
+	// an elevated administrator is denied some account folders that
+	// LocalSystem reads (windowsHookImageAccessDenied).
+	Denied bool
 }
 
 // Line is the "<file>: <error>" line of u.
@@ -386,7 +392,7 @@ func expandWindowsHookImageConfigFiles(
 	var unverified []windowsHookImageUnverifiedFile
 	refuse := func(entry windowsHookImageConfigFile, err error) {
 		if entry.User {
-			unverified = append(unverified, windowsHookImageUnverifiedFile{File: entry, Err: err.Error()})
+			unverified = append(unverified, windowsHookImageUnverifiedFile{File: entry, Err: err.Error(), Denied: windowsHookImageAccessDenied(err)})
 		} else {
 			incomplete = append(incomplete, entry.line(err))
 		}
@@ -491,7 +497,7 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 		}
 		if err != nil {
 			if file.User {
-				scan.Unverified = append(scan.Unverified, windowsHookImageUnverifiedFile{File: file, Err: err.Error()})
+				scan.Unverified = append(scan.Unverified, windowsHookImageUnverifiedFile{File: file, Err: err.Error(), Denied: windowsHookImageAccessDenied(err)})
 			} else {
 				scan.Incomplete = append(scan.Incomplete, file.line(err))
 			}
@@ -581,8 +587,8 @@ func windowsHookImageFoldersNamedIn(body []byte, bin string) []string {
 	sort.Strings(out)
 	if undecodable {
 		// A script that cannot be read may name any folder (GAP-0794
-		// review F4): unknown keeps retire pending; prune keeps what it
-		// keeps for an unreadable file.
+		// review F4): unknown keeps retire pending, and prune keeps every
+		// superseded folder (windowsHookImageRetainReason, GAP-0904).
 		out = append(out, windowsHookImageUnknownFolder)
 	}
 	return out
@@ -746,6 +752,14 @@ func windowsHookImageRetainReason(name string, staged map[string]time.Time, poli
 	// the folders its Hermes files still named).
 	if len(policy.Scan.Unverified) > 0 {
 		return "unverified_account_file:" + policy.Scan.Unverified[0].File.Path
+	}
+	// An account file whose PowerShell -EncodedCommand could not be decoded
+	// is recorded under windowsHookImageUnknownFolder: it may name any
+	// folder, so it keeps every superseded one like an unverified file
+	// (rel-1-0-10 GAP-0904: only the folder names were matched, and prune
+	// could remove the folder such a file named).
+	if files := policy.Scan.Named[windowsHookImageUnknownFolder]; len(files) > 0 {
+		return "undecodable_account_file:" + files[0]
 	}
 	if files := policy.Scan.Named[name]; len(files) > 0 {
 		return "named_by:" + files[0]

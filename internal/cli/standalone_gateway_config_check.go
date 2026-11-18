@@ -531,7 +531,10 @@ func useBinaryShippedRulePacks(cfg *config.Config) (string, func(), error) {
 
 // configSelectsShippedRulePack is the shipped pack (strict or permissive) a
 // setting of cfg loads from the folder a managed Windows Setup ships it in
-// (config.WindowsShippedRulePackDir), "" when no setting does.
+// (config.WindowsShippedRulePackDir), "" when no setting does. A setting
+// that selects one while the root of that folder cannot be read selects it
+// too (GAP-0085: the failed write was then a warning that the deployment
+// does not use the packs).
 func configSelectsShippedRulePack(cfg *config.Config) string {
 	if cfg == nil {
 		return ""
@@ -541,7 +544,8 @@ func configSelectsShippedRulePack(cfg *config.Config) string {
 			return name
 		}
 	}
-	return ""
+	name, _ := cfg.WindowsShippedRulePacksUnreadable()
+	return name
 }
 
 // shippedRulePacksWriteRequired reports whether a failed write of the

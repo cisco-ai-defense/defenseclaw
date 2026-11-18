@@ -29,9 +29,14 @@ import (
 //   - a guarded HOME folder (Antigravity's ~/.gemini): a mount above one
 //     (HOME itself) hides it as surely as one on it.
 //
+// A mount in a folder whose files programs load (kit.LoadDirs: /usr, /etc,
+// /lib, /bin, /sbin), other than a file the runtime binds
+// (kit.RuntimeMountFiles), is refused as well.
+//
 // The root mount is the image itself. A table without it is not the
 // actor's mount table: errNoRootMount (GAP-0443), and the relay refuses as
-// for an unreadable one.
+// for an unreadable one. A second mount at / hides the whole image and is
+// refused as a mount over every protected path ("/", GAP-0510).
 func kitMountRefusal(mountinfo []byte, protected, guarded []string) (string, error) {
 	paths := []string{kit.LibDir, path.Dir(kit.ConfigPath)}
 	for _, p := range append(append([]string{}, protected...), guarded...) {
@@ -50,6 +55,12 @@ func kitMountRefusal(mountinfo []byte, protected, guarded []string) (string, err
 		}
 		mp := path.Clean(unescapeMount(f[4]))
 		if mp == "/" {
+			// The first root mount is the image. Another one at / (an image
+			// volume reached through a symlink to /) lies over the image and
+			// every path in it (GAP-0510).
+			if root && hidden == "" {
+				hidden = "/"
+			}
 			root = true
 			continue
 		}
@@ -57,6 +68,13 @@ func kitMountRefusal(mountinfo []byte, protected, guarded []string) (string, err
 			if hidden == "" && (pathWithin(mp, k) || pathWithin(k, mp)) {
 				hidden = k
 			}
+		}
+		// A data mount that lands in a system folder (an image symlink
+		// below WORKDIR into /usr/lib/x86_64-linux-gnu, or onto
+		// /etc/ld.so.preload) changes what every program loads; admission
+		// sees only the mount path (GAP-0441, GAP-0576).
+		if hidden == "" && kit.InLoadDir(mp) {
+			hidden = mp
 		}
 	}
 	if err := sc.Err(); err != nil {

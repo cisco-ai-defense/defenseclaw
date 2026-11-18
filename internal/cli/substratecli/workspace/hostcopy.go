@@ -951,6 +951,11 @@ func hostApplyBranch(ctx context.Context, rec *hostRecord, opts ApplyOptions, pa
 	if opts.Force {
 		bflag = "-B"
 	}
+	// GAP-0393: a repository with no commit has no HEAD to branch from, and
+	// git said only "invalid reference: HEAD".
+	if _, err := hostGit(ctx, toplevel, nil, nil, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"); err != nil {
+		return errors.New("--branch needs a first commit in this repository to branch from; commit once (git commit --allow-empty -m init), or use --apply or --patch-out FILE")
+	}
 	if _, err := hostGit(ctx, toplevel, nil, nil, "worktree", "add", "--quiet", bflag, opts.Branch, tmp, "HEAD"); err != nil {
 		return err
 	}

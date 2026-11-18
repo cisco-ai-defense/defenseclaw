@@ -124,7 +124,8 @@ func TestImageAllowLists(t *testing.T) {
 func TestForkDropsApprovalsAndForeignPerson(t *testing.T) {
 	r := newRig(t, nil)
 	ctx := context.Background()
-	// Launcher atespace: DefenseClaw forked it; the person stays, asks go.
+	// Launcher atespace: made outside DefenseClaw, refused and never
+	// registered with the person (GAP-0425).
 	p := r.actor("eng-web", "alice-1", ateapi.ActorStateSuspended, "sub-alice")
 	reg, _, _ := r.reg.Get(ctx, "eng-web", p.GetMetadata().GetUid())
 	reg.Approved = []string{"api.example.org"}
@@ -135,9 +136,8 @@ func TestForkDropsApprovalsAndForeignPerson(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pass()
-	cr, _, _ := r.reg.Get(ctx, "eng-web", c.GetMetadata().GetUid())
-	if cr.Person != "sub-alice" || len(cr.Approved) != 0 {
-		t.Fatalf("launcher fork = %+v", cr)
+	if cr, ok, _ := r.reg.Get(ctx, "eng-web", c.GetMetadata().GetUid()); ok || r.api.Policy(ateapi.RefOf(c.GetMetadata())) != nil {
+		t.Fatalf("launcher fork = %+v (registered %v)", cr, ok)
 	}
 	// Elsewhere: forked_by unknown, no person.
 	p2 := r.actor("ci-runs", "job-1", ateapi.ActorStateSuspended, "")

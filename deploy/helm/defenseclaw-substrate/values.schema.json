@@ -223,7 +223,8 @@
           "minLength": 1
         },
         "dataSizeLimit": {
-          "type": "string"
+          "type": "string",
+          "pattern": "^[0-9]+(Mi|Gi)$"
         }
       }
     },
@@ -688,6 +689,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "redactionProfile": {
+          "type": "string",
+          "minLength": 1
+        },
         "local": {
           "type": "object",
           "additionalProperties": false,
@@ -720,6 +725,10 @@
     "homeSizeLimit": {
       "type": "string",
       "pattern": "^[0-9]+(Mi|Gi)$"
+    },
+    "homeMedium": {
+      "type": "string",
+      "enum": ["", "Memory"]
     },
     "bundles": {
       "type": "object",

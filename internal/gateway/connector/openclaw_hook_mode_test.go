@@ -19,8 +19,21 @@ package connector
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+// requireSymlinksForLinuxSetup skips a test that runs the Linux OpenClaw
+// setup (shims as symbolic links) where this account cannot create a link:
+// a standard Windows account without the create-symbolic-link right
+// (rel-1-0-10:GAP-1171). Every other host runs it.
+func requireSymlinksForLinuxSetup(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Symlink("target", filepath.Join(dir, "probe")); err != nil {
+		t.Skipf("this account cannot create a symbolic link, which the pinned Linux setup writes for its shims: %v", err)
+	}
+}
 
 func TestResolveOpenClawHookMode(t *testing.T) {
 	prev := openClawHooksGOOS
@@ -45,6 +58,10 @@ func TestResolveOpenClawHookMode(t *testing.T) {
 // Setup writes config.hookMode for the native hooks and teardown takes it out
 // again; the proxy mode leaves a 1.0.9 openclaw.json as it was.
 func TestOpenClawSetupWritesAndRemovesHookMode(t *testing.T) {
+	// The Linux setup this test pins writes its PATH shims as symbolic links
+	// (ncat -> nc); a standard Windows account may not create one (native
+	// Windows OpenClaw has no shims: TestOpenClawWindowsNativeSetupInstallsPluginWithoutShims).
+	requireSymlinksForLinuxSetup(t)
 	prev := openClawHooksGOOS
 	openClawHooksGOOS = "linux"
 	t.Cleanup(func() { openClawHooksGOOS = prev })

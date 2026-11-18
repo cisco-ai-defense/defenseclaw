@@ -35,6 +35,7 @@ RELEASES: tuple[tuple[str, str, str], ...] = (
     ("0.22.7", "v0.22.7", "b200f5bc60e31588ba2cb60e288029c4a54ba5fa"),
     ("0.23.0", "v0.23.0", "2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19"),
     ("0.23.1", "v0.23.1", "3b421578588243f920886e6fe79a6faa87ea026e"),
+    ("0.23.2", "v0.23.2", "ae2a81ccc00e9b7c06301523e5bb09608397149c"),
 )
 
 # The shipped plugins of the newest release.

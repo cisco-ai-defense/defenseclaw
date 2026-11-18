@@ -117,19 +117,35 @@ type UIDConfig struct {
 type ChainConfig struct {
 	// CheckBudget bounds the synchronous egress-chain check. Default 20 ms.
 	CheckBudget time.Duration `yaml:"check_budget"`
+	// SendBudget bounds a check whose miss refuses the request (one that can
+	// carry data out: a body, or any method but GET and HEAD; any request
+	// whose policy refuses unchecked egress; one on a cached registration,
+	// which the check confirms), and the registration refresh that confirms
+	// such a pass instead (a cached refusal waits CheckBudget for its
+	// refresh, GAP-0243). A slow but healthy leader (GAP-0564) gets that long
+	// before a git fetch or push is refused (GAP-0601). Default 250 ms, at
+	// most 500 ms, never shorter than CheckBudget. An ask is raised after the
+	// check, within MessageBudget: the defaults (250 ms and Ask.Hold 1.5 s)
+	// fit when the check answers; a check that misses, and the refresh that
+	// may follow the ask, shorten the hold. The wait for one of the actor's
+	// chainPerActorInflight slots counts against the budget, so an actor
+	// with more checks in flight on a slow leader gets refusals sooner.
+	SendBudget time.Duration `yaml:"send_budget"`
 	// QueueSize bounds the observed_egress queue; a full queue drops.
 	QueueSize int `yaml:"queue_size"`
 	// FailureMode decides a request whose chain check could not answer (an
 	// error, the budget, the actor's in-flight cap): auto (default) refuses
 	// for unattended actors and alerts for the rest, closed always refuses
-	// (managed installs), open always alerts.
+	// (managed installs), open always alerts. An alert covers GET and HEAD
+	// only: a request with a body or any other method is refused whatever
+	// the mode (GAP-0601).
 	FailureMode string `yaml:"failure_mode"`
 }
 
 // AskConfig configures ask-required hosts.
 type AskConfig struct {
 	// Hold is how long a request waits for an ask's outcome, at most
-	// MessageBudget.
+	// MessageBudget, which also covers the chain check before the ask.
 	Hold time.Duration `yaml:"hold"`
 }
 
@@ -157,6 +173,9 @@ type SecretBinding struct {
 	Hosts       []string `yaml:"hosts"`
 	Header      string   `yaml:"header"`
 	Placeholder string   `yaml:"placeholder"`
+	// Profiles are the profile names or globs the secret is rendered for
+	// (substrate.secrets[].profiles); none means every profile.
+	Profiles []string `yaml:"profiles,omitempty"`
 }
 
 // ProfileConfig is the egress part of a profile.
@@ -202,6 +221,7 @@ const (
 	defaultCacheTTL     = 60 * time.Second
 	defaultStaleMax     = 60 * time.Second
 	defaultCheckBudget  = 20 * time.Millisecond
+	defaultSendBudget   = 250 * time.Millisecond
 	defaultQueueSize    = 4096
 	defaultAskHold      = 1500 * time.Millisecond
 	defaultJudgeTimeout = 1500 * time.Millisecond
@@ -329,6 +349,7 @@ func (c *Config) normalize() error {
 		{&c.UID.CacheTTL, defaultCacheTTL, 10 * time.Minute, "uid.cache_ttl"},
 		{&c.UID.StaleMax, defaultStaleMax, 10 * time.Minute, "uid.stale_max"},
 		{&c.Chain.CheckBudget, defaultCheckBudget, 500 * time.Millisecond, "chain.check_budget"},
+		{&c.Chain.SendBudget, defaultSendBudget, 500 * time.Millisecond, "chain.send_budget"},
 		{&c.Ask.Hold, defaultAskHold, MessageBudget, "ask.hold"},
 		{&c.Judge.Timeout, defaultJudgeTimeout, MessageBudget, "judge.timeout"},
 	} {
@@ -336,6 +357,8 @@ func (c *Config) normalize() error {
 			return err
 		}
 	}
+	// A check whose miss refuses waits at least as long as any other.
+	c.Chain.SendBudget = max(c.Chain.SendBudget, c.Chain.CheckBudget)
 	switch c.Chain.FailureMode = strings.ToLower(strings.TrimSpace(c.Chain.FailureMode)); c.Chain.FailureMode {
 	case "":
 		c.Chain.FailureMode = ChainAuto
