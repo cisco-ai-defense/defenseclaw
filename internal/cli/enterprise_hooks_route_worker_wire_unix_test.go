@@ -167,7 +167,7 @@ func jsonUnencodableFields(typ reflect.Type, path string, seen map[reflect.Type]
 	case reflect.Map:
 		var bad []string
 		key := typ.Key()
-		if key.Kind() != reflect.String && !(key.Kind() >= reflect.Int && key.Kind() <= reflect.Uintptr) &&
+		if key.Kind() != reflect.String && (key.Kind() < reflect.Int || key.Kind() > reflect.Uintptr) &&
 			!key.Implements(textMarshalerType) {
 			bad = append(bad, path+" (map key "+key.String()+")")
 		}
