@@ -257,6 +257,20 @@ type workFolderTracker struct {
 	// tracking is in.
 	depth, inBody int
 	calls         *int
+	// defined holds the definedAt answers of the scan (shared with the
+	// trackers of the mover bodies it reads), so each is worked out once
+	// (rel-1-0-10:GAP-1292).
+	defined map[workFolderDefinedKey]bool
+}
+
+// workFolderDefinedKey is everything a definedAt answer depends on beyond
+// the scan: the definition, the call, the depth of the climb and whether
+// the tracking is in a function body.
+type workFolderDefinedKey struct {
+	decl   *syntax.FuncDecl
+	call   *syntax.CallExpr
+	depth  int
+	inBody bool
 }
 
 // workFolderDef is where the text defines a mover. topLevel: a statement of
@@ -292,7 +306,7 @@ const (
 func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 	tracker := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: map[string]bool{},
 		decls: map[string]*syntax.FuncDecl{}, defs: map[*syntax.FuncDecl]workFolderDef{},
-		callsOf: map[string][]*syntax.CallExpr{}, calls: new(int)}
+		callsOf: map[string][]*syntax.CallExpr{}, calls: new(int), defined: map[workFolderDefinedKey]bool{}}
 	if file == nil {
 		return tracker
 	}
@@ -376,8 +390,22 @@ func newWorkFolderTracker(file *syntax.File) *workFolderTracker {
 // the text, after it (a call in a function body runs when that body runs).
 // A definition in a function body has run only after a call of that body:
 // a function defined in the body of a function the text never calls is not
-// defined (rel-1-0-10:GAP-1144, the envelope rows).
+// defined (rel-1-0-10:GAP-1144, the envelope rows). Each answer is worked
+// out once per scan: the climb asks the same (outer definition, outer call)
+// for every call of the inner one, which made nested definitions with many
+// calls of each outer function cost the product of those counts
+// (rel-1-0-10:GAP-1292).
 func (t *workFolderTracker) definedAt(decl *syntax.FuncDecl, call *syntax.CallExpr, depth int) bool {
+	key := workFolderDefinedKey{decl: decl, call: call, depth: depth, inBody: t.inBody != 0}
+	if defined, seen := t.defined[key]; seen {
+		return defined
+	}
+	defined := t.definedAtUncached(decl, call, depth)
+	t.defined[key] = defined
+	return defined
+}
+
+func (t *workFolderTracker) definedAtUncached(decl *syntax.FuncDecl, call *syntax.CallExpr, depth int) bool {
 	def, known := t.defs[decl]
 	at := call.Pos().Offset()
 	if !known || depth > maxWorkFolderCallDepth || slices.ContainsFunc(def.scopes, func(scope workFolderSpan) bool { return !scope.holds(at) }) {
@@ -455,7 +483,7 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// The body statements keep the folders recorded where they are; only
 	// the folders the call leaves are read here.
 	inner := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: t.movers, decls: t.decls,
-		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls}
+		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined}
 	ok, after = inner.stmt(decl.Body, in)
 	if !t.defs[decl].topLevel {
 		// A definition in a list, a branch or a body may not have run: the
