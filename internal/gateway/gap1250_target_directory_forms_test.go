@@ -48,16 +48,39 @@ func TestGAP1250TargetDirectoryForms(t *testing.T) {
 		{`cp -t d "$D/config.yaml" "$D"/x/`, []string{`Copy-Item -LiteralPath 'config.yaml' -Destination 'd\config.yaml'`,
 			`Copy-Item -LiteralPath 'x' -Destination 'd\x'`}, nil},
 		{`mv -t d x"$F"`, nil, []string{`d\config.yaml`, `d\policies`}},
+		// A bracket the reader cannot translate exactly may be any
+		// character (rel-1-0-10:GAP-1282): a POSIX class, a leading ], an
+		// expansion or quote inside, a bracket an expansion may open, a
+		// brace list with an expansion inside.
+		{`mv -t d config.yam[[:alpha:]] config.yam[]l] config.yam[$C] config.yam["l"] $B] config.{y,$X}aml`, nil,
+			[]string{`d\config.yaml`, `d\.env`}},
 	}
 	for _, row := range rows {
 		got, bounded := targetDirectoryForms(row.command, home)
+		landings := gap1250Landings(got)
 		listed := !slices.ContainsFunc(row.unknown, func(landing string) bool {
-			return !slices.Contains(got.unknownLandings, landing)
+			return !slices.Contains(landings, landing)
 		})
-		if bounded || !slices.Equal(got.forms, row.want) || !listed || row.unknown == nil && got.unknownLandings != nil {
-			t.Errorf("%s: forms %q unknown %q bounded %v, want %q unknown %q",
-				row.command, got.forms, got.unknownLandings, bounded, row.want, row.unknown)
+		if bounded || got.unknownBounded || !slices.Equal(got.forms, row.want) || !listed || row.unknown == nil && landings != nil {
+			t.Errorf("%s: forms %q unknown %q bounded %v %v, want %q unknown %q",
+				row.command, got.forms, landings, bounded, got.unknownBounded, row.want, row.unknown)
 		}
+	}
+	// One exact class matches only its own names.
+	if got, _ := targetDirectoryForms(`mv -t d conf[i]g.yaml`, home); !slices.Equal(gap1250Landings(got), []string{`d\config.yaml`}) {
+		t.Errorf("conf[i]g.yaml: unknown %q, want only d\\config.yaml", gap1250Landings(got))
+	}
+	// Landings of sources of unknown name never make the forms bounded:
+	// past the bound of folders they are the unknown tier
+	// (rel-1-0-10:GAP-1283).
+	folders := "true"
+	for index := range maxTargetDirectoryForms + 1 {
+		folders += "; cp -t d" + strconv.Itoa(index) + ` "$F"`
+	}
+	if got, bounded := targetDirectoryForms(folders, home); bounded || !got.unknownBounded ||
+		len(got.unknownLandings) != maxTargetDirectoryForms {
+		t.Errorf("%d folders: bounded %v, unknown bounded %v, %d folders read", maxTargetDirectoryForms+1,
+			bounded, got.unknownBounded, len(got.unknownLandings))
 	}
 	many := "mv -t d"
 	for index := range maxTargetDirectoryForms + 1 {
@@ -66,4 +89,15 @@ func TestGAP1250TargetDirectoryForms(t *testing.T) {
 	if _, bounded := targetDirectoryForms(many, home); !bounded {
 		t.Errorf("%d sources: not bounded", maxTargetDirectoryForms+1)
 	}
+}
+
+// gap1250Landings lists the places DIR\<name> a reading lets a source of
+// unknown name land on.
+func gap1250Landings(reading targetDirectoryReading) (landings []string) {
+	for _, folder := range reading.unknownLandings {
+		for _, name := range folder.names {
+			landings = append(landings, folder.dir+`\`+name)
+		}
+	}
+	return landings
 }
