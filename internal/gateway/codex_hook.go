@@ -111,7 +111,6 @@ type codexHookRequest struct {
 	// guestCWD is a sandbox request's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); CWD is its host mount.
 	guestCWD string
-
 	// activeHome is the trusted home for "~" resolution, set by the handler
 	// from the request context (never decoded from the body).
 	activeHome         string

@@ -69,11 +69,20 @@ func lsaComputerName() string {
 // errProfileGroupUnknown. LookupAccountName does not take .\name, the form
 // Windows tools print for this computer's accounts, so a .\name assignment
 // never got a SID (GAP-0636); it is looked up among this computer's groups.
+// name@domain is also asked as domain\name (profileGroupLSANames), the form
+// Linux lists an SSSD group in (rel-1-0-10:GAP-1124).
 func lsaProfileGroupSID(name string) (string, error) {
 	if rest, local := strings.CutPrefix(strings.TrimSpace(name), `.\`); local {
 		return lsaLocalProfileGroupSID(rest)
 	}
-	return lsaGroupSID(name)
+	var sid string
+	err := errProfileGroupUnknown
+	for _, candidate := range profileGroupLSANames(name) {
+		if sid, err = lsaGroupSID(candidate); !errors.Is(err, errProfileGroupUnknown) {
+			break
+		}
+	}
+	return sid, err
 }
 
 // lsaLocalProfileGroupSID resolves a bare group name among this computer's

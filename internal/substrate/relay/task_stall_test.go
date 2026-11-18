@@ -8,6 +8,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -156,13 +159,35 @@ func TestOutputAndUsageAreProgress(t *testing.T) {
 	}
 }
 
+// stopAfter returns a file a test script writes a background child's PID
+// to (echo $! > file); the child is stopped by that exact PID when the test
+// ends. A task that ends normally leaves its background children running,
+// and the tests left them behind (GAP-0246).
+func stopAfter(t *testing.T) string {
+	t.Helper()
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Cleanup(func() {
+		b, err := os.ReadFile(pidFile)
+		if err != nil {
+			return
+		}
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 1 {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+		}
+	})
+	return pidFile
+}
+
 func TestTaskEndsWhenAChildKeepsItsOutputOpen(t *testing.T) {
 	// The agent exits; a background child holds stdout. The old relay
 	// waited for the pipe to close, so the task never reported its exit.
 	var log eventLog
 	o := HeadlessOptions{Usage: flat}
+	pidFile := stopAfter(t)
 	end := runWithin(t, drainBudget+10*time.Second, func() TaskEnd {
-		return RunHeadless(context.Background(), stallConfig(`sleep 30 & echo bye; exit 4`), TaskRequest{Prompt: "p"}, o, log.emit)
+		return RunHeadless(context.Background(), stallConfig(`sleep 30 & echo $! > `+pidFile+`; echo bye; exit 4`), TaskRequest{Prompt: "p"}, o, log.emit)
 	})
 	if end.ExitCode != 4 || !strings.Contains(log.text("stdout"), "bye") {
 		t.Fatalf("end %+v events %+v", end, log.ev)

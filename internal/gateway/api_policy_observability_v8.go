@@ -257,7 +257,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 			ConditionSecuritySeverityAvailable:  severity.IsPresent(),
 		}
 		caller := auditCallerIdentity(operation.signalCtx)
-		if !ManagedEnterpriseActive() {
+		if v8RecordNamesCaller(operation.signalCtx, caller.ID) {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
@@ -331,7 +331,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 			ConditionSecuritySeverityAvailable: severity.IsPresent(),
 		}
 		caller := auditCallerIdentity(operation.signalCtx)
-		if !ManagedEnterpriseActive() {
+		if v8RecordNamesCaller(operation.signalCtx, caller.ID) {
 			input.UserID = hookV8OptionalIdentifier(caller.ID)
 			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
@@ -490,7 +490,7 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		ConditionTechnicalFailure:           technicalErr != nil,
 	}
 	caller := auditCallerIdentity(ctx)
-	if !ManagedEnterpriseActive() {
+	if v8RecordNamesCaller(ctx, caller.ID) {
 		input.UserID = hookV8OptionalIdentifier(caller.ID)
 		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)

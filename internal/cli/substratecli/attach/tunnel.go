@@ -48,6 +48,9 @@ var (
 	// agents (no router address; HTTP 503 attach_unavailable). Waiting does
 	// not help, so it is final.
 	ErrAttachOff = errors.New("the cluster gateway has no route to agents")
+	// ErrAgentStopped: the agent's relay stopped it for good (HTTP 410, the
+	// hook-folder integrity guard, GAP-0357). Final.
+	ErrAgentStopped = errors.New("the agent was stopped by DefenseClaw's hook-folder integrity guard")
 )
 
 // RouteError is an answer of the gateway's attach route that is not a
@@ -73,6 +76,9 @@ func (e *RouteError) Error() string {
 		return fmt.Sprintf("the agent %s is starting (status %d)", e.Target.Name, e.Status)
 	case ErrNotOffered:
 		return ErrNotOffered.Error() + "; ask your administrator to upgrade DefenseClaw"
+	case ErrAgentStopped:
+		return "the agent " + e.Target.String() + " was stopped by DefenseClaw's hook-folder integrity guard: its hook folder (~/.gemini) was moved or replaced, " +
+			"so it could have run without DefenseClaw's hooks. It cannot be attached again; delete it and start a new one: defenseclaw substrate delete " + e.Target.Name
 	case ErrAttachOff:
 		return "the cluster cannot connect you to agents yet: its gateway has no route to them (attach is not set up). Ask your administrator; defenseclaw substrate doctor shows the check"
 	}
@@ -84,7 +90,8 @@ func (e *RouteError) Unwrap() error { return e.Kind }
 
 // final: a refusal that a retry cannot change.
 func (e *RouteError) final() bool {
-	return e.Kind == ErrNotSignedIn || e.Kind == ErrNotAllowed || e.Kind == ErrNoActor || e.Kind == ErrNotOffered || e.Kind == ErrAttachOff
+	return e.Kind == ErrNotSignedIn || e.Kind == ErrNotAllowed || e.Kind == ErrNoActor || e.Kind == ErrNotOffered || e.Kind == ErrAttachOff ||
+		e.Kind == ErrAgentStopped
 }
 
 // attachOff reports a 503 whose JSON reason is attach_unavailable. It reads
@@ -120,6 +127,8 @@ func routeError(status int, h http.Header, t Target) *RouteError {
 		e.Kind = ErrNoActor
 	case http.StatusNotImplemented:
 		e.Kind = ErrNotOffered
+	case http.StatusGone:
+		e.Kind = ErrAgentStopped
 	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
 		e.Kind = ErrClusterFull
 	case http.StatusBadGateway, http.StatusGatewayTimeout:

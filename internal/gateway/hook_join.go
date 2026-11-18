@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 )
 
@@ -122,6 +123,6 @@ func hookShellCommand(connectorName string, req agentHookRequest) string {
 		}
 	}
 	// agy run_command names its command CommandLine.
-	command, _ := trustedShellCommandArgument(projected)
+	command, _ := actionfacts.ShellCommandArgument(projected)
 	return command
 }

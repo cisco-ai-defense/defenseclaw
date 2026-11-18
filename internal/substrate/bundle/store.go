@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	eb "github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 )
 
 // ConfigMap names and limits.
@@ -135,6 +136,10 @@ type Store struct {
 	AnchorsFile string
 	// Base is config.yaml; bundles are verified as layered over it.
 	Base *config.Config
+	// Live, when set, is config.yaml in force now (the gateway and the
+	// controller follow launcher_atespaces and assignments live, GAP-0276).
+	// It decides which atespaces a stage may name (GAP-0494); nil uses Base.
+	Live func() *config.Config
 	Now  func() time.Time
 }
 
@@ -257,6 +262,41 @@ func normalizeStage(stage string, atespaces []string) (string, []string, error) 
 	return stage, out, nil
 }
 
+// managedBase is the config that decides which atespaces DefenseClaw
+// manages: the live one when the caller follows config.yaml, else Base.
+func (s *Store) managedBase() *config.Config {
+	if s.Live != nil {
+		if c := s.Live(); c != nil {
+			return c
+		}
+	}
+	return s.Base
+}
+
+// unmanagedAtespace returns the first atespace of a named stage that
+// DefenseClaw does not manage (GAP-0438): neither a launcher atespace nor
+// one a match.substrate assignment of config.yaml or of the bundle lists by
+// name (a glob selects only launcher atespaces, E3). The bundle could never
+// reach an actor there, so such a stage would only be a misleading receipt
+// and a slot of the stage cap. The all stage names no atespace.
+func unmanagedAtespace(base *config.Config, pol Policy, stage string, atespaces []string) (string, bool) {
+	if stage == StageAll {
+		return "", false
+	}
+	managed := map[string]bool{}
+	for _, c := range []*config.Config{base, pol.Overlay(base)} {
+		for _, ns := range (&controller.ConfigResolver{Config: c}).ManagedAtespaces() {
+			managed[ns] = true
+		}
+	}
+	for _, a := range atespaces {
+		if !managed[a] {
+			return a, true
+		}
+	}
+	return "", false
+}
+
 // Apply verifies archive and makes it the active bundle of stage. Every
 // outcome, refused or not, is returned as a receipt and recorded; err is
 // the refusal or a storage error.
@@ -313,6 +353,9 @@ func (s *Store) apply(ctx context.Context, archive []byte, stage string, atespac
 	}
 	if err != nil {
 		return err
+	}
+	if a, ok := unmanagedAtespace(s.managedBase(), v.Policy, stage, atespaces); ok {
+		return refuse(CodeStageInvalid, "atespaces", "atespace %s is not managed by DefenseClaw: it is not a launcher atespace and no match.substrate assignment of config.yaml or of this bundle lists it by name", a)
 	}
 	if v.AlreadyApplied && slices.Equal(cur.Atespaces, atespaces) {
 		rc.Result = ResultAlreadyApplied

@@ -5,8 +5,8 @@
 // Agent Substrate actor. Substrate ingress (atenet-router) carries HTTP and
 // WebSocket but no raw TCP, and there is no exec or attach, so the launcher
 // reaches the agent's terminal through this relay: a WebSocket PTY server
-// that holds the agent in a tmux session surviving reconnects, suspends and
-// resumes, with an HTTP long-poll fallback for networks that block WebSocket
+// that holds the agent's PTY itself, so the session survives reconnects,
+// suspends and resumes, with an HTTP long-poll fallback for networks that block WebSocket
 // (E27) and a headless mode for --task runs.
 //
 // Protocol dcrelay/1. A WebSocket client asks for subprotocol "dcrelay.v1".
@@ -65,7 +65,7 @@ const (
 	CtlPing   = "ping"
 	CtlPong   = "pong"
 	// CtlReset tells a long-poll client that output it had not read yet was
-	// dropped; the relay has asked tmux to redraw the screen.
+	// dropped; the relay has asked the agent to redraw the screen.
 	CtlReset = "reset"
 )
 
@@ -85,6 +85,12 @@ type Control struct {
 	// client says how much (substrate-1 GAP-0170).
 	Input    string `json:"input,omitempty"`
 	Received *int64 `json:"received,omitempty"`
+	// Warning (hello) is what the person must know about this agent (the
+	// E9 warning of an open-source agent that signs in to a vendor
+	// account). The relay also puts it at the top of the terminal, but a
+	// full-screen agent clears that at once, so the client shows it where
+	// the agent cannot draw (substrate-1 GAP-0151).
+	Warning string `json:"warning,omitempty"`
 }
 
 // Resize is a RESIZE frame.

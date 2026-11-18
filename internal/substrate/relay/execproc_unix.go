@@ -14,7 +14,10 @@ import (
 // setProcessGroup puts the command in its own process group so a timeout
 // stops what it started too.
 func setProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
 }
 
 func killProcessGroup(cmd *exec.Cmd) error {

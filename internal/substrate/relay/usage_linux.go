@@ -36,6 +36,21 @@ type procTree struct {
 	// rootStart is the agent's start time from the first scan that saw it:
 	// a later process that reuses the PID is not the agent (GAP-0303).
 	rootStart uint64
+	// ioCred, when set, is the agent's user: a separated relay reads the
+	// tree's /proc/<pid>/io with it as its file-system identity.
+	ioCred *syscall.Credential
+}
+
+// asAgent makes the tree read I/O counts as the agent's user (substrate-1
+// GAP-0458): /proc/<pid>/io is readable only by a process that may ptrace
+// the target, and a root relay without CAP_SYS_PTRACE (the container
+// default, and dropped by confine) may not ptrace another user's process.
+// The kernel checks the file-system credentials, so the relay reads as the
+// agent's user without becoming it.
+func (t *procTree) asAgent(sp *separation) {
+	if sp != nil {
+		t.ioCred = sp.cred
+	}
 }
 
 func newProcTree(root int) *procTree {
@@ -125,7 +140,8 @@ func (t *procTree) usage() (Usage, bool) {
 	var u Usage
 	for pid, st := range in {
 		u.CPU += st.cpu
-		u.IO += readProcIO(filepath.Join(t.proc, strconv.Itoa(pid), "io"))
+		p := filepath.Join(t.proc, strconv.Itoa(pid), "io")
+		withFSCred(t.ioCred, func() { u.IO += readProcIO(p) })
 	}
 	return u, true
 }

@@ -80,6 +80,9 @@ type askUI struct {
 	decided      map[string]bool
 	confirm      string
 	confirmUntil time.Time
+	// notice is shown on the row while no ask is (the relay's warning,
+	// GAP-0151).
+	notice string
 }
 
 func newAskUI(src AskSource, t Target, scr *screen, size func() relay.Resize, now func() time.Time, guard func()) *askUI {
@@ -374,8 +377,18 @@ func (u *askUI) rowLocked() string {
 		return rowText(askHead(*a), askFrom(*a)+": the answer was not sent: "+u.errText, askAnnounceEnd, cols)
 	case a != nil:
 		return rowText(askHead(*a), askFrom(*a)+": "+askLabel(*a), askAnnounceEnd, cols)
+	case u.notice != "":
+		return fitWidth(u.notice, max(cols-1, 1))
 	}
 	return ""
+}
+
+// setNotice sets the text the row shows while there is no ask.
+func (u *askUI) setNotice(text string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.notice = text
+	u.drawLocked()
 }
 
 func askHead(a Ask) string { return askHeadLabel + fitWidth(safetext.Line(a.ID), askIDMax) }

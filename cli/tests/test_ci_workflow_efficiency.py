@@ -159,7 +159,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
     assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
     assert "GO_PACKAGE_SHARDS: 19" in workflow
-    assert "GO_TEST_SHARDS: 88" in workflow
+    assert "GO_TEST_SHARDS: 104" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
     # The three Linux jobs, and the six darwin gateway parts, which weigh the
@@ -181,7 +181,7 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     profiles = sum(
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
-    assert profiles == 111
+    assert profiles == 127
     # The frozen-gateway job adds one more profile (it runs the three tests
     # that no longer run in the shards).
     profiles += 1
@@ -370,6 +370,11 @@ LIVE_ONLY_JOBS = {
 LONG_COMPILE_JOBS = {
     ("ci.yml", "go-lint"): 25,
     ("ci.yml", "darwin-gateway-test-binary"): 35,
+    # Not a compile: the Windows upgrade lane installs, upgrades, converges and
+    # removes the standalone services on a hosted runner. On rel/1.0.10
+    # da4177e225 (CI run 44074568058) every step passed and the job was
+    # cancelled at 20m07s inside the last step, Setup /uninstall.
+    ("ci.yml", "enterprise-upgrade-windows"): 30,
 }
 
 

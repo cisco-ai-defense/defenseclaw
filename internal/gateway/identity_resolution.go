@@ -326,7 +326,7 @@ func (set *guardrailProfileSet) groupsState(entries []string, subject *profileSu
 		})
 	}
 	if res.Groups == proofProven || len(res.unconfirmedGroups) > 0 {
-		groups := &subjectGroups{list: proven, sids: set.groupSIDs}
+		groups := &subjectGroups{list: proven, sids: set.groupSIDs, domains: groupDomainsOf(subject)}
 		for _, want := range entries {
 			if groups.has(want) {
 				return matchYes, strings.TrimSpace(want)

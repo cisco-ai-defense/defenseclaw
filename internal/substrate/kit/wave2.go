@@ -56,7 +56,7 @@ func wave2ModelEnv(name, gw string, o OverlayOptions) map[string]string {
 		env["COPILOT_PROVIDER_BASE_URL"] = base
 		env["COPILOT_PROVIDER_TYPE"] = "openai"
 		env["COPILOT_PROVIDER_WIRE_API"] = "responses"
-		env["COPILOT_PROVIDER_API_KEY"] = "placeholder-not-a-secret"
+		env["COPILOT_PROVIDER_API_KEY"] = PlaceholderSecret
 		env["COPILOT_MODEL"] = modelOrDefault(o)
 		env["COPILOT_PROVIDER_MODEL_ID"] = "gpt-5.4"
 		env["COPILOT_PROVIDER_WIRE_MODEL"] = modelOrDefault(o)
@@ -64,7 +64,7 @@ func wave2ModelEnv(name, gw string, o OverlayOptions) map[string]string {
 		env["COPILOT_PKG_CACHE_HOME"] = "/opt/defenseclaw-harness/copilot/cache"
 	case "hermes":
 		env["HERMES_DEFENSECLAW_BASE_URL"] = base
-		env["HERMES_DEFENSECLAW_API_KEY"] = "placeholder-not-a-secret"
+		env["HERMES_DEFENSECLAW_API_KEY"] = PlaceholderSecret
 		env["HERMES_MANAGED_DIR"] = "/etc/hermes"
 		env["HERMES_HOME"] = path.Join(o.Home, ".hermes")
 	case "kiro":
@@ -264,6 +264,19 @@ cmp -s "$canonical" "$dst" || fail "$dst differs from the canonical hooks"
 [ "$(stat -c %u "$dst" 2>/dev/null)" = 0 ] && [ "$(stat -c %u "$dir" 2>/dev/null)" = 0 ] || fail "$dst or its directory is not root-owned"
 exec /usr/local/bin/agy "$@"
 `
+
+// GuardedDirs are the folders below the agent-owned HOME that hold
+// DefenseClaw's root-owned hook registration of connector. They are
+// root-owned, but the agent owns HOME, so it can still rename one away and
+// put its own in its place (GAP-0120: Antigravity 1.2.12 has no managed
+// hooks tier and hot-reloads ~/.gemini/config/hooks.json). The relay watches
+// them and stops the agent when one moves.
+func GuardedDirs(connector, home string) []string {
+	if connector == "antigravity" && home != "" {
+		return []string{path.Join(home, ".gemini")}
+	}
+	return nil
+}
 
 // wave2Harden applies the connector-specific ownership rules: Antigravity's
 // hooks directory is root-owned (see AntigravityStart).

@@ -329,6 +329,11 @@ function formatFindings(findings: Finding[], limit = 15): string[] {
   return lines;
 }
 
+// Why a turn is stopped while the DefenseClaw gateway is down and the saved
+// outage mode is not open (GAP-1192).
+export const GATEWAY_DOWN_PROMPT_REASON =
+  "the DefenseClaw gateway is not running, so model calls are blocked (fail-closed). Run: defenseclaw-gateway start";
+
 export default function (api: DefenseClawPluginHost) {
   // Before any BedrockRuntimeClient: AWS SDK v3 uses HTTP/2 unless
   // AWS_BEDROCK_FORCE_HTTP1=1; we set that plus an optional Smithy patch so
@@ -801,6 +806,23 @@ export default function (api: DefenseClawPluginHost) {
     return failClosedVerdict(reason);
   };
 
+  // With the prompt gate off, a saved closed (or protected) outage mode still
+  // refuses every model call while the gateway is down: the guardrail proxy hop
+  // is refused. OpenClaw shows only its generic "request failed" copy for that
+  // provider error, so the turn is stopped here with the DefenseClaw reason
+  // (rel-1-0-10 GAP-1192). Enforcement is the same as the proxy leg's; an open
+  // tier lets the turn continue with its outage warning.
+  const gatewayDownBlock = async () => {
+    await healthMonitor.refresh();
+    if (!healthMonitor.isGatewayDown || loadOpenClawOutageMode() === "open") return undefined;
+    console.warn(`[defenseclaw] prompt blocked: ${GATEWAY_DOWN_PROMPT_REASON}`);
+    return {
+      outcome: "block" as const,
+      reason: `defenseclaw: ${GATEWAY_DOWN_PROMPT_REASON}`,
+      message: `DefenseClaw blocked this message: ${GATEWAY_DOWN_PROMPT_REASON}`,
+    };
+  };
+
   const MAX_OBSERVED_TEXT = 256 * 1024;
   const sessionOf = (ctx?: { sessionKey?: string; sessionId?: string }) => ctx?.sessionKey ?? ctx?.sessionId;
 
@@ -820,7 +842,7 @@ export default function (api: DefenseClawPluginHost) {
           new Promise<void>((resolve) => setTimeout(resolve, RUNTIME_PROMPT_WAIT_MS).unref?.()),
         ]);
       }
-      if (!promptGateOn()) return;
+      if (!promptGateOn()) return gatewayDownBlock();
       const prompt = typeof event?.prompt === "string" ? event.prompt : "";
       if (!prompt) return;
       const sessionId = sessionOf(ctx);

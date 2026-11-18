@@ -114,6 +114,41 @@ func (a *APIServer) serveSubstrateRelayTask(st *substrateState, w http.ResponseW
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// serveSubstrateRelayTamper takes a relay guard trip (GAP-0120): POST
+// {"connector", "reason"} when the relay stopped the agent because
+// DefenseClaw's hook folder moved. The gateway writes a HIGH audit row, so
+// the trip reaches the alert views and not only the relay's log. The agent
+// shares the actor's token and could post one too; the row says the actor
+// reported it, and the actor listener's rate limit bounds the rows. 204 when
+// taken.
+func (a *APIServer) serveSubstrateRelayTamper(st *substrateState, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeSubstrateRefusal(w, http.StatusMethodNotAllowed, "method")
+		return
+	}
+	actor, ok := substrateActorFrom(r.Context())
+	if !ok {
+		writeSubstrateRefusal(w, http.StatusUnauthorized, "missing_token")
+		return
+	}
+	var in struct {
+		Connector string `json:"connector"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in); err != nil {
+		writeSubstrateRefusal(w, http.StatusBadRequest, "bad_report")
+		return
+	}
+	if st.alert != nil {
+		reason, connector := substrateReportText(in.Reason), substrateReportText(in.Connector)
+		st.alert(r.Context(), "HIGH", fmt.Sprintf("hook-folder integrity guard stopped the agent of %s/%s (reported by the actor): %s", actor.Atespace, actor.Name, reason),
+			map[string]any{"event": "relay_guard_tamper", "atespace": actor.Atespace, "actor": actor.Name, "actor_uid": actor.UID,
+				"connector": connector, "reason": reason})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // substrateReportText is an actor-sent reason fit for an audit row: one
 // line of printable text, at most substrateTaskCauseMax runes.
 func substrateReportText(s string) string {

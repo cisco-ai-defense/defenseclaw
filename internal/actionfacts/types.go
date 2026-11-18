@@ -70,6 +70,12 @@ type Input struct {
 	// command then resolve under it (GAP-2473); the whole action keeps its
 	// own reading.
 	MovedWindowsShellCWD bool `json:"-"`
+	// PowerShellLauncherBody is trusted caller context set on the reading of
+	// a script a PowerShell launcher runs (pwsh -Command BODY): under a Linux
+	// or macOS ActiveHome its $HOME and ~ are spelled out as that home, as
+	// pwsh expands them (rel-1-0-10:GAP-1134). A PowerShell tool call of such
+	// a home is read as before, with its bounds.
+	PowerShellLauncherBody bool `json:"-"`
 	// LoopBindsStraightLine is trusted caller context set by a gateway that
 	// judges the call in a tier that blocks only what the shell certainly
 	// runs (the default and permissive tiers). A function that replaces read,
@@ -1119,10 +1125,18 @@ type CommandFact struct {
 	// shell expands, the text the document shows with one "$" for each
 	// expansion. It is not the stdin; only applyPatchStdinText reads it.
 	LiteralStdinView string
-	Operations       []OperationKind
-	Redirects        []RedirectFact
-	Wrappers         []WrapperFact
-	curlCapability   *CurlCapability `json:"-"`
+	// PatchUnplacedTarget is true for an apply_patch fed by a here-document
+	// whose envelope has a header no reader places (a home form the tool
+	// does not expand, a drive-relative or device name), or whose body the
+	// shell expands (an expansion may add a header no reader sees,
+	// rel-1-0-10:GAP-1093): the tool writes a file no path rule can name
+	// (CommandPatchNamesUnplacedTarget, rel-1-0-10:GAP-1077). It is
+	// value-free and not serialized.
+	PatchUnplacedTarget bool `json:"-"`
+	Operations          []OperationKind
+	Redirects           []RedirectFact
+	Wrappers            []WrapperFact
+	curlCapability      *CurlCapability `json:"-"`
 }
 
 // CommandControlFlowOperator is a private, value-free summary of the POSIX

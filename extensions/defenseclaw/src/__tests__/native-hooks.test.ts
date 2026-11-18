@@ -68,6 +68,9 @@ function setup(hookMode?: string) {
   return { listeners, options };
 }
 
+const gatewayRunning = () =>
+  new Response(JSON.stringify({ health: { gateway: { state: "running" } } }), { status: 200 });
+
 const answer = (body: Record<string, unknown>) => ({ status: 200, body: JSON.stringify(body) });
 
 describe("native hooks", () => {
@@ -133,15 +136,78 @@ describe("native hooks", () => {
       config: {}, pluginConfig: { hookMode: "hybrid", promptGate: true },
       on: vi.fn((e: string, h: Handler) => { listeners[e] = h; }), registerService: vi.fn(), registerCommand: vi.fn(),
     });
-    expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(gatewayRunning());
+    try {
+      expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+    }
     expect(mockDaemonClient.postRaw).not.toHaveBeenCalled();
   });
 
   it("does nothing when the prompt gate is off", async () => {
     setRuntimeSettings({ prompt_gate: false, inspect_timeout_ms: 5000 });
     const { listeners } = setup("hybrid");
-    expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(gatewayRunning());
+    try {
+      expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
+    } finally {
+      vi.restoreAllMocks();
+    }
     expect(mockDaemonClient.postRaw).not.toHaveBeenCalled();
+  });
+
+  // rel-1-0-10 GAP-1192: with the prompt gate off and the gateway stopped, the
+  // proxy hop refuses the model call and OpenClaw shows only "request failed".
+  // The turn is stopped at the gate with the DefenseClaw reason instead.
+  describe("gateway down with the prompt gate off (GAP-1192)", () => {
+    const gateOff = () => setRuntimeSettings({ prompt_gate: false, inspect_timeout_ms: 5000 });
+
+    it("blocks the turn with a DefenseClaw reason in a closed tier", async () => {
+      gateOff();
+      const { listeners } = setup("hybrid");
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connect ECONNREFUSED"));
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        const result = await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {});
+        expect(result).toMatchObject({ outcome: "block" });
+        const text = JSON.stringify(result);
+        expect(text).toContain("DefenseClaw blocked this message");
+        expect(text).toContain("model calls are blocked (fail-closed)");
+        expect(text).toContain("defenseclaw-gateway start");
+      } finally {
+        vi.restoreAllMocks();
+      }
+      expect(mockDaemonClient.postRaw).not.toHaveBeenCalled();
+    });
+
+    it("lets the turn continue in an open tier", async () => {
+      gateOff();
+      mockOutageMode.mockReturnValue("open");
+      const { listeners } = setup("hybrid");
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connect ECONNREFUSED"));
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      try {
+        expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it("lets the turn continue once the gateway answers again", async () => {
+      gateOff();
+      const { listeners } = setup("hybrid");
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connect ECONNREFUSED"));
+      try {
+        expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toMatchObject({ outcome: "block" });
+        fetchSpy.mockResolvedValue(gatewayRunning());
+        expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
   });
 
   it("follows the outage mode only when the gateway did not answer", async () => {

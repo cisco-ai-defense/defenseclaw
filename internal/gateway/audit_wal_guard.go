@@ -48,8 +48,9 @@ const (
 	// and auditWALGuardRetryInterval after a pass that needed the writer and
 	// did not get it to the end of the log. At 100 hook calls/s the log grew
 	// by about 55 MiB/s, so a 2 s tick could find it past the trigger, whose
-	// catch-up holds the writer without settling the backlog first, and its
-	// file past the 256 MiB bound (r108 SWEEP-100). Passing sooner keeps it
+	// catch-up takes the writer after only a short settle (audit
+	// walBoundedSettleRounds), and its file past the 256 MiB bound (r108
+	// SWEEP-100). Passing sooner keeps it
 	// in the settled catch-up and its short hold (audit walSettledHoldCap).
 	auditWALGuardBusyInterval  = time.Second
 	auditWALGuardRetryInterval = 250 * time.Millisecond

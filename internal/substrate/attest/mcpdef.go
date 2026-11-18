@@ -204,7 +204,47 @@ var (
 	pyToolCtor      = regexp.MustCompile(`(?s)\bTool\(\s*name\s*=\s*"([^"]+)"\s*,\s*description\s*=\s*"((?:[^"\\]|\\.)*)"`)
 	jsToolCall      = regexp.MustCompile("(?s)\\.(?:tool|registerTool)\\(\\s*[\"'`]([\\w\\-.]+)[\"'`]\\s*,\\s*(?:\\{[^}]*?description\\s*:\\s*)?[\"'`]((?:[^\"'`\\\\]|\\\\.)*)[\"'`]")
 	jsToolObject    = regexp.MustCompile("(?s)name\\s*:\\s*[\"']([\\w\\-.]+)[\"']\\s*,\\s*description\\s*:\\s*[\"'`]((?:[^\"'`\\\\]|\\\\.)*)[\"'`]")
+	// A tools/list answer written out as a literal (a raw JSON-RPC server):
+	// "name": "x", "description": "..." or a module-level string constant
+	// (GAP-0480).
+	quotedToolObject = regexp.MustCompile(`(?s)["']name["']\s*:\s*["']([\w\-.]+)["']\s*,\s*["']description["']\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([A-Za-z_]\w*))`)
+	pyStringLiteral  = regexp.MustCompile(`^\s*(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)')`)
 )
+
+// pyConstant returns the text of a module-level string constant of src
+// (NAME = "..." or NAME = ("..." "...")), "" when there is none.
+func pyConstant(src, name string) string {
+	re, err := regexp.Compile(`(?m)^` + regexp.QuoteMeta(name) + `[ \t]*=[ \t]*`)
+	if err != nil {
+		return ""
+	}
+	loc := re.FindStringIndex(src)
+	if loc == nil {
+		return ""
+	}
+	rest := src[loc[1]:]
+	paren := strings.HasPrefix(rest, "(")
+	if paren {
+		rest = rest[1:]
+	}
+	var b strings.Builder
+	for b.Len() < 6000 {
+		m := pyStringLiteral.FindStringSubmatchIndex(rest)
+		if m == nil {
+			break
+		}
+		if m[2] >= 0 {
+			b.WriteString(rest[m[2]:m[3]])
+		} else {
+			b.WriteString(rest[m[4]:m[5]])
+		}
+		rest = rest[m[1]:]
+		if !paren {
+			break
+		}
+	}
+	return b.String()
+}
 
 // ExtractToolDefs reads tool names and descriptions out of server source
 // text (Python decorators and Tool(...), JavaScript tool calls and objects).
@@ -257,6 +297,13 @@ func ExtractToolDefs(src string) []ToolDef {
 	}
 	for _, m := range jsToolObject.FindAllStringSubmatch(src, -1) {
 		add(m[1], m[2])
+	}
+	for _, m := range quotedToolObject.FindAllStringSubmatch(src, -1) {
+		desc := m[2] + m[3]
+		if m[4] != "" {
+			desc = pyConstant(src, m[4])
+		}
+		add(m[1], desc)
 	}
 	return out
 }

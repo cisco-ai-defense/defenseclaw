@@ -12,5 +12,6 @@ import "syscall"
 type procTree struct{}
 
 func newProcTree(int) *procTree             { return &procTree{} }
+func (*procTree) asAgent(*separation)       {}
 func (*procTree) usage() (Usage, bool)      { return Usage{}, false }
 func (*procTree) signal(sig syscall.Signal) {}

@@ -31,16 +31,17 @@ var rev7Cases = []rev7Case{
 	// command is rejected by pwsh 7 and dropped by 5.1, so it is opaque.
 	{"N01", `pwsh '' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N02", `pwsh ' ' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N03", `pwsh ' -c' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N04", `pwsh '-c ' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	// A padded switch word is the switch (both hosts trim it): a table shape
+	// since rel-1-0-10:GAP-0155, so the script it hides is read.
+	{"N03", `pwsh ' -c' '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
+	{"N04", `pwsh '-c ' '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
 	{"N05", `powershell '' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N06", `pwsh -nop '' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N07", `pwsh ' -nop' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	{"N07", `pwsh ' -nop' -c '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
 	{"N08", `pwsh ' -File' -`, KindPowerShellCommand, false, "", ReasonStdin},
-	// -ec is outside the modeled abbreviations (R6-8), so the padded N09 is opaque like the unpadded form;
-	// N09e is the same shape with the modeled -enc, which must decode.
-	{"N09", `pwsh ' -ec' ` + rev7B64, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N09e", `pwsh ' -enc' ` + rev7B64, KindEncodedCommand, false, "", ReasonHostOption},
+	// N09 and N09e: a padded encoded switch decodes like the unpadded form.
+	{"N09", `pwsh ' -ec' ` + rev7B64, KindEncodedCommand, true, "Write-Output EVIL", ""},
+	{"N09e", `pwsh ' -enc' ` + rev7B64, KindEncodedCommand, true, "Write-Output EVIL", ""},
 	// R7-3: forms pwsh rejects are opaque with a host-option reason, not stdin.
 	{"A06", `pwsh -c:-`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"B03", `pwsh -File:-`, KindPowerShellCommand, false, "", ReasonHostOption},

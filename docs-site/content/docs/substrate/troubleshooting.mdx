@@ -157,6 +157,14 @@ An actor created and resumed outside DefenseClaw, inside one poll interval, gets
 
 The gateway accepts the kit from its own release and the one before. Rebuild the template with `template build`, then `defenseclaw substrate migrate NAME`.
 
+### The agent stopped with "DefenseClaw's hook-folder integrity guard stopped this agent"
+
+Antigravity keeps DefenseClaw's hook registration in `~/.gemini`, a root-owned folder in a home the agent owns. When that folder is renamed, replaced or removed, the relay stops the agent and every process it started, because Antigravity could then load hooks without DefenseClaw's, and writes a HIGH audit row (`relay_guard_tamper`). The agent can't be attached to or given a task again; `connect` says so ("was stopped by DefenseClaw's hook-folder integrity guard"): delete it (`defenseclaw substrate delete NAME`) and start a new one. Pull what you need first. If nobody renamed the folder on purpose, treat it as a prompt-injection attempt and read the session's audit rows. When the folder is missing as the relay starts, the relay refuses to start the agent at all with "DefenseClaw's hook folder is not in place": rebuild the template with `template build`. When the relay cannot watch the folder (inotify limits such as `fs.inotify.max_user_watches` on the node, or a filesystem without inotify), it refuses to start the agent with "the guard cannot watch the hook folder", logs `relay.guard_degraded` and writes the same HIGH audit row; a watch that ends while the agent runs stops the agent like a move. Raise the node's inotify limits, or run the actor on a runtime that supports inotify, and start a new agent.
+
+### The agent did not start: "a volume is mounted at, above or below"
+
+The relay found a mount at, above or below DefenseClaw's files (the kit library under `/usr/local/lib/defenseclaw`, `/etc/defenseclaw`, the connector's managed settings such as `/etc/claude-code` or `/etc/codex`, or a guarded home folder or the home above it), so the agent could run without its hooks. A mount table it cannot read, or one without the root mount, is refused the same way. It refuses to start the agent, logs `relay.mount_refused` and writes a HIGH audit row. Admission normally refuses such a template first (`volume_mounts[N].mount_path is at, above or below a path DefenseClaw attested`); `template build` refuses a symlink in the image that leads there, and the relay catches a mount that reaches those paths through a symlink in an image volume. Mount data volumes at or below the image `WORKDIR` (`/work`), and make sure the image has no symlink there that points into the kit's folders.
+
 ### A task ended with exit code 124
 
 The relay ended a `--task` run that made no progress for 10 minutes: no output except retry notices, and almost no CPU or I/O. `logs NAME` shows the reason and whether the cluster gateway answered at that moment. If it did not, check the gateway Deployments and the `defenseclaw-actor` Service. If it did, the agent was stuck on a connection of its own, typically a model call cut off by a gateway restart: run the task again. The end is also in the audit log: a `substrate` row with `event` `task_end`. See [When a run stops making progress](/docs/substrate/unattended#when-a-run-stops-making-progress).
@@ -167,7 +175,15 @@ The hook retries once, then follows the fail mode. Check that the `defenseclaw-a
 
 ### HTTPS calls from tools inside the actor fail certificate checks
 
-Egress inspects HTTPS, so tools must trust Substrate's bundle. Python needs `SSL_CERT_FILE=/run/ate/egress-trust-bundle/trust-bundle.pem`; the directory form wasn't enough. Set it in the actor's environment (the template) if your tools need it.
+Egress inspects HTTPS, so tools must trust Substrate's bundle. Kit images set `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and `GIT_SSL_CAINFO` to the bundle the template projects (`/run/ate/trust-bundle.pem`); a template may not set them to anything else (the actor allowlist). A tool that ignores all five needs its own setting in the image.
+
+### A template is refused with `env_not_permitted` or "is not the attested entrypoint"
+
+DefenseClaw 1.0.10 admits only the environment and entrypoint that were attested: the kit's own variables (with the kit's value where it fixes one) and ordinary base-image settings, and the image's own entrypoint and arguments. The refusal names the variable or the field (`env`, `command`, `args`). Remove it from the template (or the image), publish again, and recreate the actors. `defenseclaw substrate doctor --cluster` lists every template that fails (`substrate.template_allowlist`). In 1.0.10 a template admitted before the upgrade keeps its running actors with a warning row; its new actors are refused, and the next release refuses the running ones too.
+
+### The relay logs "the agent runs as the relay's own user"
+
+The template was built before 1.0.10: the relay and the agent run as one user, so on gVisor the agent can stop the relay. The controller names such templates once in an audit warning (`sandbox.relay_unseparated`) and `doctor --cluster` lists them (`substrate.relay_separation`). Rebuild the template with `template build`; its image then runs the relay as root and the agent as its own user. "lacks CAP_SETUID, CAP_SETGID or CAP_KILL" (and the golden actor crashes, `GoldenActorCrashed`) means the template's container does not add `SETUID` and `SETGID` to Substrate's default set: publish it again with `defenseclaw substrate template publish ... --template ATESPACE/NAME`, which writes `security_context.capabilities` (`add: [SETUID, SETGID]`, `drop: [AUDIT_WRITE, NET_BIND_SERVICE]`). The relay refuses to start the agent rather than run it as root or leave it unstoppable; admission refuses such a template first. "could not set no_new_privs on every thread" means a relay built with cgo: build it with `CGO_ENABLED=0`, as the release does.
 
 ### An agent that uses WebSockets can't connect (Amp)
 

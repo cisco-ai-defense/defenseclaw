@@ -46,10 +46,23 @@ type Attestation struct {
 	// unreachable): the controller keeps a recent good verdict meanwhile
 	// (GAP-0127).
 	Retryable bool
+	// Allowlist marks a refusal only by the actor environment and
+	// entrypoint allowlist of 1.0.10 (GAP-0354, GAP-0355); every other
+	// field is filled as for an attested template. New actors are refused;
+	// an actor that already had DefenseClaw's policy keeps it with a
+	// warning in 1.0.10 (owner decision; refusing it too comes in the next
+	// release).
+	Allowlist bool
 	// ValidUntil is when the verdict must be checked again (the earliest
 	// attest.Verified.ValidUntil of the template's images); zero = the
 	// controller's own TTL only.
 	ValidUntil time.Time
+	// Unseparated is set when the template's relay runs as the agent's own
+	// user (UnseparatedReason, GAP-0372): the agent can stop the relay. The
+	// template is admitted (images of the previous release are supported);
+	// the controller writes one audit warning per template and doctor names
+	// it (substrate.relay_separation).
+	Unseparated string
 	// SkillDigests are the content digests of the skill folders the attested
 	// build scan admitted (attest.ScanItem.Digest), over all images: the
 	// gateway trusts a folder with one of them without scanning it (GAP-0164).
@@ -208,13 +221,19 @@ const (
 	EventConflictReset      = "sandbox.policy_conflict.reset"
 	EventResumeRecheck      = "sandbox.resume_recheck"
 	EventTemplateUnverified = "sandbox.template_unverified"
-	EventKitRefused         = "sandbox.kit_refused"
-	EventForeignActor       = "sandbox.foreign_actor"
-	EventProfileRefused     = "sandbox.profile_refused"
-	EventFork               = "sandbox.fork"
-	EventIdleSuspend        = "sandbox.idle_suspend"
-	EventTaskEndSuspend     = "sandbox.task_end_suspend"
-	EventWarning            = "sandbox.warning"
+	// EventTemplateAllowlist names a template the 1.0.10 actor allowlist
+	// refuses (GAP-0354, GAP-0355).
+	EventTemplateAllowlist = "sandbox.template_allowlist"
+	// EventRelayUnseparated names a template whose relay runs as the
+	// agent's own user (an image built before 1.0.10; GAP-0372).
+	EventRelayUnseparated = "sandbox.relay_unseparated"
+	EventKitRefused       = "sandbox.kit_refused"
+	EventForeignActor     = "sandbox.foreign_actor"
+	EventProfileRefused   = "sandbox.profile_refused"
+	EventFork             = "sandbox.fork"
+	EventIdleSuspend      = "sandbox.idle_suspend"
+	EventTaskEndSuspend   = "sandbox.task_end_suspend"
+	EventWarning          = "sandbox.warning"
 	// EventConfigReloaded: a config.yaml change is in force (GAP-0276);
 	// EventConfigRefused: a change that does not load was not applied.
 	EventConfigReloaded = "sandbox.config.reloaded"

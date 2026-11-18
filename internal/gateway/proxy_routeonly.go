@@ -560,14 +560,26 @@ func routeOnlyConversationID(h http.Header) string {
 	return ""
 }
 
-// decide asks the router and returns the routed attempt (nil: send the
-// original), the outcome, and whether the admin gate allows the original
-// request as a fallback target.
+// routeOnlyIdentityWait bounds how long a managed route-only model call waits
+// for the first directory lookup of its account when routing.admin or a
+// profile assignment selects by user or group. The hook-sized budget
+// (identityDirectoryBudget, 2 s) is too short when several directory
+// accounts start agents at once: SSSD answered after about 3 s and the first
+// model calls of each session were refused identity_unconfirmed
+// (rel-1-0-10:GAP-1155). A model call has no hook timeout to stay inside,
+// and the deadline of the request (ctx) still ends the wait.
+const routeOnlyIdentityWait = 10 * time.Second
+
 // routeOnlyManagedContext attaches the proved account of a managed
 // route-only request and the guardrail profile it resolves to, so the
 // routing.admin rules (users, groups) and the profile routing overlay match
 // this account, as on the hook and proxy paths (rel-1-0-10:GAP-0764).
+// An account whose facts are not cached yet is waited for first
+// (routeOnlyIdentityWait).
 func routeOnlyManagedContext(ctx context.Context, subject, connector string) context.Context {
+	if identityFactsEnabled.Load() && identityLookupBlocking.Load() {
+		awaitVerifiedIdentityDirectory(ctx, subject, routeOnlyIdentityWait)
+	}
 	ctx = attachVerifiedSubject(ctx, nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer)
 	return withGuardrailProfile(ctx, pinnedProfileSet(ctx), connector)
 }
@@ -587,6 +599,9 @@ func routeOnlyCaller(ctx context.Context, subject string) (engine.Caller, []stri
 	return engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer}, nil
 }
 
+// decide asks the router and returns the routed attempt (nil: send the
+// original), the outcome, and whether the admin gate allows the original
+// request as a fallback target.
 func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte, caller engine.Caller, profiles []string) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
 	if s.router == nil {
 		return nil, SemanticRouteOutcome{}, true
@@ -1158,6 +1173,25 @@ func RouteOnlyRouted(cfg *config.Config, connectorName string) bool {
 
 // routeOnlySetupBase is the rendering without its credential, or nil.
 func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
+	route := routeOnlyShape(cfg, connectorName, apiAddr)
+	if route == nil || !route.GatewaySigning {
+		return route
+	}
+	// The agent skips its own AWS auth only when the gateway can sign now
+	// (one credential fetched); otherwise the agent stays direct.
+	up := cfg.Routing.RouteOnly.Upstreams[connectorName]
+	if err := bedrockRenderReady(cfg, up.Bedrock, up.BaseURL); err != nil {
+		fmt.Fprintf(os.Stderr, "[routing] route-only for %s not rendered: gateway Bedrock signing cannot start: %v\n", connectorName, err)
+		return nil
+	}
+	return route
+}
+
+// routeOnlyShape is the route-only rendering of connectorName from config
+// alone: no credential is fetched and no route token read (GatewaySigning
+// says what the config asks for). routeOnlySetupBase adds the signing
+// check; the park writes it as is (GAP-1133).
+func routeOnlyShape(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
 	if !RouteOnlyRouted(cfg, connectorName) || strings.TrimSpace(apiAddr) == "" {
 		return nil
 	}
@@ -1173,16 +1207,7 @@ func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *conn
 	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName}
 	if up.API == config.RoutingAPIConverse || up.API == config.RoutingAPIInvoke {
 		route.Bedrock = true
-		if bedrockGatewaySigning(up.Bedrock) {
-			// The agent skips its own AWS auth only when the gateway can
-			// sign now (one credential fetched); otherwise the agent stays
-			// direct.
-			if err := bedrockRenderReady(cfg, up.Bedrock, up.BaseURL); err != nil {
-				fmt.Fprintf(os.Stderr, "[routing] route-only for %s not rendered: gateway Bedrock signing cannot start: %v\n", connectorName, err)
-				return nil
-			}
-			route.GatewaySigning = true
-		}
+		route.GatewaySigning = bedrockGatewaySigning(up.Bedrock)
 	}
 	return route
 }
@@ -1235,12 +1260,16 @@ func applyRouteOnlyRender(registry *connector.Registry, cfg *config.Config, name
 	if !ok {
 		return
 	}
-	if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: cfg.DataDir}, route); err != nil {
+	// Parked while this gateway does not hold its API port (GAP-1133).
+	if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: cfg.DataDir}, gatedRouteOnly(cfg, route)); err != nil {
 		fmt.Fprintf(os.Stderr, "[routing] route-only render for %s: %v\n", name, err)
 		return
 	}
 	state := "removed"
-	if route != nil {
+	switch {
+	case route != nil && ossRouteOnlyGateway(cfg) && !ossRouteOnlyGate.Owned():
+		state = "parked (this gateway does not hold its API port)"
+	case route != nil:
 		state = "written"
 	}
 	fmt.Fprintf(os.Stderr, "[routing] route-only config for %s %s; restart the agent to pick it up\n", name, state)
