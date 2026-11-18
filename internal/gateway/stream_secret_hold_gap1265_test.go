@@ -172,7 +172,7 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 		switch path.name {
 		case "llm":
 			prov := &gap0429PausingProvider{chunks: gap0429Chunks(row.pieces), at: row.at, pause: row.pause}
-			proxy, req := newTestProxy(t, prov, w, "action"), chatReq("", row)
+			proxy, req := gap0429Proxy(t, prov, w), chatReq("", row)
 			serve = func() { proxy.handleChatCompletion(rec, req) }
 		case "raw-forward":
 			up := gap1265Upstream(t, streamTailFormat{}, true, row.pieces, row.at, row.pause)
@@ -180,12 +180,12 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 				registerRawForwardProviderDomain(t, up.URL, "openai")
 				registered = true
 			}
-			proxy, req := newTestProxy(t, &mockProvider{}, w, "action"), chatReq(up.URL, row)
+			proxy, req := gap0429Proxy(t, &mockProvider{}, w), chatReq(up.URL, row)
 			serve = func() { proxy.handleChatCompletion(rec, req) }
 		default:
 			f := gap1265Format(t, path.name)
 			up := gap1265Upstream(t, f, false, row.pieces, row.at, row.pause)
-			proxy, req := newTestProxy(t, &mockProvider{}, w, "action"), streamTailWithTier(streamTailRequest(t, f, "", up.URL), row.pack, row.managed)
+			proxy, req := gap0429Proxy(t, &mockProvider{}, w), streamTailWithTier(streamTailRequest(t, f, "", up.URL), row.pack, row.managed)
 			serve = func() { proxy.handlePassthrough(rec, req) }
 		}
 		runs[i] = run{rec: rec, watch: w, serve: serve}

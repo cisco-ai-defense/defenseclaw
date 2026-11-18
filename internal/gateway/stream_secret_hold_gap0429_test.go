@@ -20,11 +20,13 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	privatekeyfixture "github.com/defenseclaw/defenseclaw/internal/secretshape/testfixture"
 )
 
@@ -253,6 +255,33 @@ var gap0429OpenAIChat = streamTailFormat{
 	terminal: "data: [DONE]\n\n", delta: retestOAIFrame,
 }
 
+// gap0429Stores is the one audit store and logger of each test that serves
+// stream rows (gap0429Proxy), keyed by its *testing.T.
+var gap0429Stores sync.Map
+
+type gap0429Store struct {
+	store  *audit.Store
+	logger *audit.Logger
+}
+
+// gap0429Proxy is a new action-mode test proxy for one stream row, on the
+// audit store of t made once for all its rows: a fresh store per row was
+// 73% of the time of the /llm table (a copy of the migrated template, its
+// Init and its read pool), and the stream paths only write audit rows, they
+// never read them. Every row still gets a proxy of its own.
+func gap0429Proxy(t *testing.T, prov LLMProvider, insp ContentInspector) *GuardrailProxy {
+	t.Helper()
+	v, ok := gap0429Stores.Load(t)
+	if !ok {
+		store, logger := testStoreAndLogger(t)
+		v = gap0429Store{store: store, logger: logger}
+		gap0429Stores.Store(t, v)
+		t.Cleanup(func() { gap0429Stores.Delete(t) })
+	}
+	s := v.(gap0429Store)
+	return newTestProxyOnStore(t, prov, insp, "action", s.store, s.logger)
+}
+
 func gap0429LLMRun(t *testing.T, rec *httptest.ResponseRecorder, insp ContentInspector, pack string, pieces []string) {
 	t.Helper()
 	gap0429LLMProvider(t, rec, &mockProvider{streamChunks: gap0429Chunks(pieces)}, insp, pack)
@@ -271,7 +300,7 @@ func gap0429Chunks(pieces []string) []StreamChunk {
 
 func gap0429LLMProvider(t *testing.T, rec *httptest.ResponseRecorder, prov LLMProvider, insp ContentInspector, pack string) {
 	t.Helper()
-	gap0429LLMProxy(t, rec, newTestProxy(t, prov, insp, "action"), pack)
+	gap0429LLMProxy(t, rec, gap0429Proxy(t, prov, insp), pack)
 }
 
 // gap0429LLMProxy is gap0429LLMProvider through proxy.
@@ -318,12 +347,12 @@ func gap0429Passthrough(t *testing.T, f streamTailFormat, rec *httptest.Response
 	orig := providerDomains
 	providerDomains = append([]providerDomainEntry{{domain: "127.0.0.1", name: f.provider}}, orig...)
 	defer func() { providerDomains = orig }()
-	newTestProxy(t, &mockProvider{}, insp, "action").handlePassthrough(rec, req)
+	gap0429Proxy(t, &mockProvider{}, insp).handlePassthrough(rec, req)
 }
 
 func gap0429RawForwardRun(t *testing.T, rec *httptest.ResponseRecorder, insp ContentInspector, pack string, pieces []string) {
 	t.Helper()
-	gap0429RawForward(t, rec, newTestProxy(t, &mockProvider{}, insp, "action"), pack, pieces)
+	gap0429RawForward(t, rec, gap0429Proxy(t, &mockProvider{}, insp), pack, pieces)
 }
 
 // gap0429RawForward is gap0429RawForwardRun through proxy.
