@@ -370,7 +370,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 164 test-only variables">
+<Accordion title="Show the 166 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -435,6 +435,8 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_HTTP_COMMAND_INJECTION_CORPUS`<br/>Default: `unset` (external corpus regression skipped)<br/>Values: `path to a JSONL corpus file`, `unset`<br/>Managed host: `ignore` | Supplies an external public JSONL corpus to the optional ActionFacts HTTP command-injection closed-proof regression.<br/>**Read by:** `internal/actionfacts/http_command_injection_test.go` |
 | `DEFENSECLAW_HTTP_SQLI_CORPUS`<br/>Default: `unset` (external corpus regression skipped)<br/>Values: `path to a JSONL corpus file`, `unset`<br/>Managed host: `ignore` | Supplies an external public JSONL corpus to the optional ActionFacts HTTP SQL-injection closed-proof regression.<br/>**Read by:** `internal/actionfacts/http_sql_injection_test.go` |
 | `DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR`<br/>Default: `unset` (Linux /etc/defenseclaw/managed-runtime.json; macOS /opt/cisco/defenseclaw/etc/managed-runtime.json)<br/>Values: `absolute path`, `unset`<br/>Managed host: `ignore` | Adds a temporary managed runtime descriptor to the ones install.sh checks, so tests can prove the per-user installer refuses to run on a computer whose DefenseClaw is managed by the organization.<br/>**Security:** Test-only. It can only add a descriptor path: install.sh always checks the platform descriptor as well, so setting it never skips the managed-host refusal.<br/>**Read by:** `scripts/install.sh` |
+| `DEFENSECLAW_J43_ACTORS`<br/>Default: 50<br/>Values: `positive integer`<br/>Managed host: `ignore` | Number of simulated actors in the J43 leader load test (substrate-1 GAP-0564).<br/>**Read by:** `internal/substrate/chainstate/gap0564_j43_load_test.go` |
+| `DEFENSECLAW_J43_LOAD`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Opt-in for the wall-clock J43 flood measurement of the gateway hook route (substrate-1 GAP-0565); unset skips it.<br/>**Read by:** `internal/gateway/substrate_gap0565_flood_test.go` |
 | `DEFENSECLAW_JUDGE_BENCHMARK_API_KEY_ENV`<br/>Default: `unset`<br/>Values: `environment-variable name`, `unset`<br/>Managed host: `ignore` | Names the credential environment variable used by the opt-in judge benchmark provider.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
 | `DEFENSECLAW_JUDGE_BENCHMARK_BASE_URL`<br/>Default: `http://127.0.0.1:11434`<br/>Values: `http(s) URL`, `unset`<br/>Managed host: `ignore` | Overrides the local OpenAI-compatible endpoint used by the opt-in judge benchmark.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |
 | `DEFENSECLAW_JUDGE_BENCHMARK_BEDROCK_ACCESS_KEY_ENV`<br/>Default: AWS_ACCESS_KEY_ID<br/>Values: `environment-variable name`, `unset`<br/>Managed host: `ignore` | Names the AWS access-key environment variable for an opt-in Bedrock judge benchmark.<br/>**Read by:** `internal/gateway/llm_judge_corpus_benchmark_test.go` |

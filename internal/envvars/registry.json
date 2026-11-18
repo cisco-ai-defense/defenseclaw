@@ -309,6 +309,45 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_J43_ACTORS",
+      "category": "test_fixture",
+      "purpose": "Number of simulated actors in the J43 leader load test (substrate-1 GAP-0564).",
+      "default": "50",
+      "accepted_values": [
+        "positive integer"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/substrate/chainstate/gap0564_j43_load_test.go",
+          "description": "TestSubstrateGAP0564J43ShapeOnARealLeader"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_J43_LOAD",
+      "category": "test_fixture",
+      "purpose": "Opt-in for the wall-clock J43 flood measurement of the gateway hook route (substrate-1 GAP-0565); unset skips it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/substrate_gap0565_flood_test.go",
+          "description": "TestSubstrateGAP0565FloodingActorKeepsTheOthersFast"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_REAL_FS_TESTS",
       "category": "test_fixture",
       "purpose": "Turns on the Go tests that mount a real, size-limited tmpfs (testenv.RealSmallFilesystem) so a full audit store is a real ENOSPC from the kernel; they also need passwordless sudo for mount and umount, and are skipped otherwise.",
