@@ -22,13 +22,10 @@ from defenseclaw.tui.app import PANELS, _severity_breakdown_markup
 from defenseclaw.tui.command_line import infer_command_risk
 from defenseclaw.tui.models import HintState
 from defenseclaw.tui.panels.audit import AuditPanelModel
-from defenseclaw.tui.panels.setup import SetupPanelModel, SetupWizard, wizard_goals
-from defenseclaw.tui.screens.detail import DetailModalModel
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
 from defenseclaw.tui.services.catalog_state import ToolsPanelModel
 from defenseclaw.tui.widgets import tab_fit
 from defenseclaw.tui.widgets.hint_bar import HintEngine
-from rich.console import Console
 from rich.text import Text
 
 sys.path.insert(0, str(Path(__file__).parent))

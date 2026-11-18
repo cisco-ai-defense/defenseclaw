@@ -1421,7 +1421,7 @@ assemble-parity:
 	@scripts/check-assemble-parity.sh
 
 py-lint: pycli
-	$(RUFF) check cli/defenseclaw/
+	$(RUFF) check cli/defenseclaw/ cli/tests/
 
 go-lint: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast

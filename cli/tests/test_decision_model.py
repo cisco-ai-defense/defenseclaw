@@ -494,9 +494,8 @@ def test_doctor_row_names_the_cascade_per_connector(system_one):
 
 def test_skill_scan_records_advisory_score(home, system_one, tmp_path, monkeypatch):
     pytest.importorskip("skill_scanner")
-    from skill_scanner.core.analyzers.llm_analyzer import LLMAnalyzer
-
     from defenseclaw.scanner.skill import SkillScannerWrapper
+    from skill_scanner.core.analyzers.llm_analyzer import LLMAnalyzer
 
     # A scan installs the judge-answer compatibility patch on the scanner's
     # class; hand the class back as found so later tests see the pinned scanner.

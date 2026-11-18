@@ -317,6 +317,8 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # top-of-file. None of these are bugs and rewriting them all carries
 # no review benefit, so silence the ruff codes there.
 "cli/tests/**" = ["E501", "E402", "E702", "F841", "N801", "N803", "N806", "N812"]
+# ctypes stand-ins that carry the Win32 API names the code under test calls.
+"cli/tests/test_cmd_uninstall_windows_native.py" = ["N802"]
 # The CLI entry module answers the installer identity probe before it imports
 # the command tree, so its remaining imports follow that early exit.
 "cli/defenseclaw/main.py" = ["E402"]
