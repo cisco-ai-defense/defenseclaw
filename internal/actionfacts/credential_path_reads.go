@@ -462,8 +462,11 @@ type credentialPathResolver struct {
 	held       map[credentialHeldRead]bool
 	links      []credentialPathLink
 	walkUsed   credentialPathWalkLimits // the walk budget the searches read
-	seen       map[PathFact]bool
-	reads      []PathFact
+	// rgConfig: the call sets RIPGREP_CONFIG_PATH, so an rg may read
+	// options (--hidden) from a file (substrate-1:GAP-0682).
+	rgConfig bool
+	seen     map[PathFact]bool
+	reads    []PathFact
 }
 
 // resolveCredentialPathReads makes the private record of one call (nil when
@@ -539,6 +542,14 @@ func (r *credentialPathResolver) stopped() bool { return r.trunc.Any() }
 
 func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 	sets := credentialOptionValueSets()
+	r.rgConfig = slices.ContainsFunc(words, func(word credentialPathWord) bool {
+		return word.role == credentialWordAssignment && word.name == "RIPGREP_CONFIG_PATH"
+	}) || slices.ContainsFunc(r.commands, func(command CommandFact) bool {
+		// export, declare, env ... RIPGREP_CONFIG_PATH=FILE
+		return slices.ContainsFunc(command.Argv, func(word string) bool {
+			return strings.HasPrefix(word, "RIPGREP_CONFIG_PATH=")
+		})
+	})
 	for _, command := range r.commands {
 		if !credentialPathCommandReadable(command) {
 			continue
@@ -739,7 +750,7 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 		// grep -r reads every file under the folder; ripgrep skips hidden
 		// (dot-named) files and folders unless told otherwise
 		// (substrate-1:GAP-0344).
-		hidden := program != "rg" || rgSearchesHidden(argv)
+		hidden := program != "rg" || r.rgConfig || rgSearchesHidden(command, argv)
 		for _, index := range operands {
 			argument := command.Arguments[index]
 			r.argument(command.ID, argument, false)
@@ -1522,32 +1533,6 @@ func (b *credentialPathWalkBudget) scan(folder string, hidden bool, groups map[s
 			return s // the end of the folder, or a folder that cannot be read on
 		}
 	}
-}
-
-// rgGlobMayMatchHidden reports an rg include glob that may match a
-// dot-named segment of a credentials probe (an exclude glob, !..., never
-// adds a read). A glob with alternation or classes path.Match does not
-// read counts.
-func rgGlobMayMatchHidden(glob string) bool {
-	if strings.HasPrefix(glob, "!") {
-		return false
-	}
-	glob = strings.ToLower(glob)
-	if strings.ContainsAny(glob, "{}") {
-		return true
-	}
-	last := glob[strings.LastIndexByte(glob, '/')+1:]
-	for _, probe := range credentialProbes() {
-		for _, segment := range probe.segments {
-			if !strings.HasPrefix(segment, ".") {
-				continue
-			}
-			if ok, err := path.Match(last, segment); ok || err != nil {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func (r *credentialPathResolver) add(id int64, value string, unknown bool) {

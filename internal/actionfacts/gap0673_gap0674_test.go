@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -149,7 +148,7 @@ var g0673Rows = []struct {
 	{"--type-add 'e:*.go' --type-add 'e:*.env' -te KEY", []string{".env", "sub/.env"}, "P3-1 (1.0.11): a glob or type turns every hidden read on"},
 	{"--type-add 'e:*' -te KEY", []string{".env", ".npmrc", "sub/.env"}, "P3-1 (1.0.11): a type glob never whitelists a hidden folder"},
 	{"--type-add 'e:*.env' -tgo -te KEY", []string{".env", "sub/.env"}, "P3-1 (1.0.11): a glob or type turns every hidden read on"},
-	{"--type-add 'g:*.go' -tg KEY", []string{}, ""},
+	{"--type-add 'g:*.go' -tg KEY", []string{}, "count when unsure (GAP-0681): a type glob that starts with * may match a dot name"},
 	{"-te --type-add 'e:*.env' KEY", []string{".env", "sub/.env"}, "P3-1 (1.0.11): a glob or type turns every hidden read on"},
 	{"-tgo KEY", []string{}, ""},
 	{"-L KEY", []string{}, ""},
@@ -273,23 +272,16 @@ func TestGAP0673RgGroundTruth(t *testing.T) {
 	}
 }
 
+// g0673RgVersion is the ripgrep every rg table row was recorded with
+// (g0673Rows, g0679Rows ...). The live checks run only that version: with
+// another rg, or none (CI installs none), they skip and say so, and with
+// DEFENSECLAW_RG_REQUIRED=1 (the local gates) they fail.
+const g0673RgVersion = "ripgrep 14.1.0"
+
 // TestGAP0673RgGroundTruthLive checks g0673Rows against a real ripgrep
-// 14.1 (DEFENSECLAW_RG, else rg on PATH). With DEFENSECLAW_RG_REQUIRED=1 a
-// missing or other rg fails the test instead of skipping it.
+// 14.1.0 (DEFENSECLAW_RG, else rg on PATH; g0679LiveRG).
 func TestGAP0673RgGroundTruthLive(t *testing.T) {
-	need := os.Getenv("DEFENSECLAW_RG_REQUIRED") == "1"
-	rg := os.Getenv("DEFENSECLAW_RG")
-	if rg == "" {
-		rg, _ = exec.LookPath("rg")
-	}
-	sh, _ := exec.LookPath("sh")
-	version, _ := exec.Command(rg, "--version").Output()
-	if rg == "" || sh == "" || runtime.GOOS == "windows" || !strings.HasPrefix(string(version), "ripgrep 14.1.") {
-		if need {
-			t.Fatalf("no ripgrep 14.1 and sh to check the table with (rg %q, version %q)", rg, version)
-		}
-		t.Skip("no ripgrep 14.1")
-	}
+	rg, sh := g0679LiveRG(t)
 	dir := g0673Folder(t)
 	home := t.TempDir()
 	for _, row := range g0673Rows {

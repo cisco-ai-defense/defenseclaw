@@ -70,53 +70,72 @@ type rgOption struct {
 	name, value string
 }
 
-// rgCommandLine is an rg argv parsed: its options in order, and the argv
-// indexes of its positional words (the pattern, unless -e or -f gives it,
-// then the paths). "-" (standard input) is no positional word: stdin
-// says it was given.
+// rgCommandLine is an rg argv parsed: its options in order, the argv
+// index of each option word, and the argv indexes of its positional words
+// (the pattern, unless -e or -f gives it, then the paths). rg reads a
+// path "-" as standard input; stdin says one was given, and it is no
+// operand. A "-" where the pattern goes is the pattern
+// (substrate-1:GAP-0679): rg --hidden - . searches . for "-".
+// literal is the index of the first word after "--" (len(argv) when there
+// is none): no word from there on is an option.
 type rgCommandLine struct {
-	options  []rgOption
-	operands []int
-	stdin    bool
+	options     []rgOption
+	optionWords []int
+	operands    []int
+	stdin       bool
+	literal     int
 }
 
 func parseRgCommandLine(argv []string) rgCommandLine {
-	var line rgCommandLine
+	line := rgCommandLine{literal: len(argv)}
+	var positionals []int
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
-		switch {
-		case arg == "--":
+		if arg == "--" {
+			line.literal = i + 1
 			for j := i + 1; j < len(argv); j++ {
-				line.operands = append(line.operands, j)
+				positionals = append(positionals, j)
 			}
-			return line
-		case arg == "-":
-			line.stdin = true
-		case strings.HasPrefix(arg, "--"):
+			break
+		}
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			positionals = append(positionals, i)
+			continue
+		}
+		line.optionWords = append(line.optionWords, i)
+		if strings.HasPrefix(arg, "--") {
 			name, value, attached := strings.Cut(arg[2:], "=")
 			if rgValueOptions[name] && !attached && i+1 < len(argv) {
 				i++
 				value = argv[i]
 			}
 			line.options = append(line.options, rgOption{name, value})
-		case strings.HasPrefix(arg, "-"):
-			for j := 1; j < len(arg); j++ {
-				name := rgShortOptions[arg[j]]
-				if !rgValueOptions[name] {
-					line.options = append(line.options, rgOption{name: name})
-					continue
-				}
-				value := strings.TrimPrefix(arg[j+1:], "=")
-				if j+1 == len(arg) && i+1 < len(argv) {
-					i++
-					value = argv[i]
-				}
-				line.options = append(line.options, rgOption{name, value})
-				break
-			}
-		default:
-			line.operands = append(line.operands, i)
+			continue
 		}
+		for j := 1; j < len(arg); j++ {
+			name := rgShortOptions[arg[j]]
+			if !rgValueOptions[name] {
+				line.options = append(line.options, rgOption{name: name})
+				continue
+			}
+			value := strings.TrimPrefix(arg[j+1:], "=")
+			if j+1 == len(arg) && i+1 < len(argv) {
+				i++
+				value = argv[i]
+			}
+			line.options = append(line.options, rgOption{name, value})
+			break
+		}
+	}
+	// rg takes the pattern from -e or -f wherever they stand, else from
+	// the first positional word; every other positional is a path.
+	fromOption, _ := line.patternOptions()
+	for k, index := range positionals {
+		if argv[index] == "-" && (fromOption || k > 0) {
+			line.stdin = true
+			continue
+		}
+		line.operands = append(line.operands, index)
 	}
 	return line
 }
@@ -173,13 +192,15 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 }
 
 // rgSearchesHidden reports an rg that may read hidden (dot-named) files
-// and folders, in ripgrep 14.1's order of the options. Its documented
-// default skips them (and .gitignore'd paths, which are not modelled: a
-// non-hidden file counts as read). They are read with:
+// and folders, in ripgrep 14.1's order of the options. argv is
+// rgArgvWords(command). Its documented default skips them (and
+// .gitignore'd paths, which are not modelled: a non-hidden file counts as
+// read). They are read with:
 //   - --hidden (-.), until a later --no-hidden; and the second
 //     --unrestricted (-uu), which turns --hidden on where it stands;
-//   - a --glob or --iglob include that may match a dot-named credentials
-//     name (an override glob whitelists past every ignore rule);
+//   - a --glob or --iglob include that may match a dot-named file or
+//     folder (an override glob whitelists past every ignore rule), by
+//     rgGlobMayMatchHidden;
 //   - a file type selected with -t or --type whose globs may match one
 //     (substrate-1:GAP-0671): --type-add NAME:GLOB,... adds globs, and
 //     NAME:include:TYPE,... copies the globs those types have then;
@@ -189,16 +210,30 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 //     (substrate-1:GAP-0673). No built-in rg type names a credentials
 //     file, so only --type-add globs count. -T (--type-not) only excludes;
 //   - an --ignore-file, unless --no-ignore-files: its "!" lines can
-//     whitelist a hidden file (its contents are not read here).
+//     whitelist a hidden file (its contents are not read here);
+//   - a word known only when it runs where rg may read it as an option
+//     (rgWordMayBeOption: rg $F, rg -$X, rg --hidden$E), and a --type-add
+//     or -t value known only then.
 //
 // A file or folder the command names is read whatever its name
 // (credentialPathResolver.argument).
-func rgSearchesHidden(argv []string) bool {
+func rgSearchesHidden(command CommandFact, argv []string) bool {
+	line := parseRgCommandLine(argv)
+	for _, index := range line.optionWords {
+		if index < len(command.Arguments) && rgWordMayBeOption(command.Arguments[index]) {
+			return true
+		}
+	}
+	for _, index := range line.operands {
+		if index < line.literal && index < len(command.Arguments) && rgWordMayBeOption(command.Arguments[index]) {
+			return true
+		}
+	}
 	hidden, unrestricted, glob := false, 0, false
 	ignoreFile, ignoreFiles := false, true
 	types := make(map[string][]string)
 	var selected []string
-	for _, option := range parseRgCommandLine(argv).options {
+	for _, option := range line.options {
 		switch option.name {
 		case "hidden":
 			hidden = true
@@ -218,7 +253,9 @@ func rgSearchesHidden(argv []string) bool {
 		case "ignore-files":
 			ignoreFiles = true
 		case "type":
-			if option.value != "all" {
+			// A value rgArgvWords made from a word known only when it
+			// runs ends in "*": it may be all.
+			if option.value != "all" && !strings.Contains(option.value, "*") {
 				selected = append(selected, option.value)
 				break
 			}
@@ -226,7 +263,13 @@ func rgSearchesHidden(argv []string) bool {
 				selected = append(selected, name)
 			}
 		case "type-add":
-			name, globs, _ := strings.Cut(option.value, ":")
+			name, globs, ok := strings.Cut(option.value, ":")
+			if !ok || strings.Contains(name, "*") {
+				// rg refuses a literal NAME with no ":"; a value known only
+				// when it runs may define any type.
+				glob = true
+				break
+			}
 			if included, ok := strings.CutPrefix(globs, "include:"); ok {
 				for _, other := range strings.Split(included, ",") {
 					types[name] = append(types[name], types[other]...)
@@ -244,4 +287,82 @@ func rgSearchesHidden(argv []string) bool {
 		}
 	}
 	return hidden || glob || ignoreFile && ignoreFiles
+}
+
+// rgWordMayBeOption reports a word of an rg argv known only when it runs
+// that rg may read as an option word, or that may finish one: a word with
+// no static start ("$F", "$(printf %s --hidden)"), "-" and option letters
+// that each take no value ("-$X", "-l$X"), or "--" and a name with no "="
+// ("--hidden$E"). Such a word may be --hidden, so the rg counts as
+// searching hidden files (count when unsure). A word after "--", or the
+// value of a value option, is never an option.
+func rgWordMayBeOption(argument ArgumentFact) bool {
+	if !argument.Expands || argument.StaticGlob != "" {
+		return false
+	}
+	prefix := argument.staticPrefix
+	switch {
+	case prefix == "":
+		return true
+	case strings.HasPrefix(prefix, "--"):
+		return !strings.Contains(prefix, "=")
+	case strings.HasPrefix(prefix, "-"):
+		for j := 1; j < len(prefix); j++ {
+			if rgValueOptions[rgShortOptions[prefix[j]]] {
+				return false // the rest of the word is that option's value
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// rgGlobMayMatchHidden reports an rg include glob (--glob, --iglob, or a
+// --type-add glob) that may match a dot-named file or folder. It counts
+// when unsure (substrate-1:GAP-0680, GAP-0681): rg's glob engine is not
+// modelled, and a glob counts unless it provably cannot match a dot-named
+// path segment. That is: every segment, split at each "/", starts with a
+// literal character that is not a dot (rgGlobLiteralStart), and the glob
+// has no alternation ({...}), no "**", and no class that may match "/"
+// (a negated class, [!x] or [^x], or one with a range or an escape:
+// rg's classes match "/", so sub[!x].env matches sub/.env). A folder glob
+// (".aws/", "*/") is such a segment too: it lets rg enter the folder, where
+// any other include glob may then match. An exclude glob (!...) never adds
+// a read, and "" and "/" name no segment.
+func rgGlobMayMatchHidden(glob string) bool {
+	if strings.HasPrefix(glob, "!") {
+		return false
+	}
+	if strings.ContainsAny(glob, "{}") || strings.Contains(glob, "**") {
+		return true
+	}
+	for i := 0; i < len(glob); i++ {
+		if glob[i] != '[' {
+			continue
+		}
+		body := glob[i+1:]
+		if body == "" || body[0] == '!' || body[0] == '^' {
+			return true
+		}
+		end := strings.IndexByte(body[1:], ']')
+		if end < 0 || strings.ContainsAny(body[:end+1], "-/\\") {
+			return true
+		}
+		i += end + 1
+	}
+	for _, segment := range strings.Split(glob, "/") {
+		if segment != "" && !rgGlobLiteralStart(segment[0]) {
+			return true
+		}
+	}
+	return false
+}
+
+// rgGlobLiteralStart reports a first byte of a glob segment that matches
+// only itself, and is no dot: a letter, a digit, one of _-+@%~=,:# or a
+// byte of a non-ASCII character. Every other byte (".", "*", "?", "[",
+// "\\", "!" ...) may start a dot-named match, or is not modelled.
+func rgGlobLiteralStart(b byte) bool {
+	return b >= 0x80 || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9' ||
+		strings.IndexByte("_-+@%~=,:#", b) >= 0
 }
