@@ -169,12 +169,12 @@ func gap1265Serve(t *testing.T, path gap0429Path, rows []gap1265Row) ([]gap1265R
 		}
 		w := &gap0429Watch{GuardrailInspector: retestInspector(), secret: secret, rec: rec}
 		var serve func()
-		switch {
-		case path.name == "llm":
+		switch path.name {
+		case "llm":
 			prov := &gap0429PausingProvider{chunks: gap0429Chunks(row.pieces), at: row.at, pause: row.pause}
 			proxy, req := newTestProxy(t, prov, w, "action"), chatReq("", row)
 			serve = func() { proxy.handleChatCompletion(rec, req) }
-		case path.name == "raw-forward":
+		case "raw-forward":
 			up := gap1265Upstream(t, streamTailFormat{}, true, row.pieces, row.at, row.pause)
 			if !registered {
 				registerRawForwardProviderDomain(t, up.URL, "openai")
