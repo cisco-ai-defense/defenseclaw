@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -100,6 +101,76 @@ type RegistryToken struct {
 // (/usr for a distribution node), so the kit names this file in
 // npm_config_globalconfig (GAP-0529).
 const NPMGlobalConfig = "/usr/local/etc/npmrc"
+
+// NPMBaseConfigs are the global npm configurations a base image may carry,
+// by the npm it ships: npm's global file is <prefix>/etc/npmrc, and the
+// prefix is the folder above node's bin folder (/usr/local for the node
+// images, /usr for a distribution node). The first npm the image has wins.
+var NPMBaseConfigs = []struct{ NPM, Config string }{
+	{"/usr/local/bin/npm", "/usr/local/etc/npmrc"},
+	{"/usr/bin/npm", "/usr/etc/npmrc"},
+}
+
+// npmEnvReference is an npmrc value that only names an environment
+// variable (${NPM_TOKEN}): no value is in the file.
+var npmEnvReference = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\}$`)
+
+// npmCredentialKey reports whether an npmrc key (also a //registry/:key)
+// holds a credential or a client key.
+func npmCredentialKey(k string) bool {
+	k = strings.ToLower(strings.TrimSpace(k))
+	if i := strings.LastIndex(k, ":"); i >= 0 {
+		k = k[i+1:]
+	}
+	switch k {
+	case "_authtoken", "_auth", "_password", "password", "otp", "cert", "key", "certfile", "keyfile":
+		return true
+	}
+	return false
+}
+
+// WithBaseNPMConfig is the kit's npmrc (kitData) with the settings of the
+// base image's global npmrc (base, read from path) before the kit's own.
+// npm_config_globalconfig makes npm read the kit's file instead of the
+// base's (GAP-0529), so the base's registry, scope registries, cafile,
+// strict-ssl and proxy settings would be lost (GAP-0576); the kit's lines
+// come after them and win. A base global npmrc that holds a credential is
+// refused: an actor holds no secret value (D14), and egress injects
+// registry credentials (substrate.secrets). A value that only names an
+// environment variable is not a credential.
+func WithBaseNPMConfig(kitData, base []byte, path string) ([]byte, error) {
+	var keep []string
+	for _, raw := range strings.Split(string(base), "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		k, v, _ := strings.Cut(line, "=")
+		k, v = strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`)
+		if strings.EqualFold(k, "globalconfig") {
+			continue
+		}
+		if npmCredentialKey(k) && !npmEnvReference.MatchString(v) {
+			return nil, fmt.Errorf("the base image's npm configuration %s sets %s, a credential: remove it from the image and bind the registry's credential in substrate.secrets (egress injects it)", path, k)
+		}
+		keep = append(keep, line)
+	}
+	if len(keep) == 0 {
+		return kitData, nil
+	}
+	s := string(kitData)
+	i := 0
+	for i < len(s) && s[i] == '#' {
+		j := strings.IndexByte(s[i:], '\n')
+		if j < 0 {
+			i = len(s)
+			break
+		}
+		i += j + 1
+	}
+	block := "# From the base image's " + path + " (npm reads this file instead):\n" + strings.Join(keep, "\n") + "\n# The kit's settings:\n"
+	return []byte(s[:i] + block + s[i:]), nil
+}
 
 // SubstrateIngress is the remote ingress of cfg's gateway URL.
 func SubstrateIngress(cfg Config) (connector.SandboxIngress, error) {

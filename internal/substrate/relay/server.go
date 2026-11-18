@@ -226,7 +226,7 @@ func (s *Server) init() error {
 			return
 		}
 		if hidden != "" {
-			s.refuseAtStart("relay.mount_refused", "a volume is mounted at, above or below "+hidden+", which holds DefenseClaw's hooks, so the agent could run without them; refusing to start the agent (mount data folders below the working directory)")
+			s.refuseAtStart("relay.mount_refused", "a volume is mounted at, above or below "+hidden+", which holds DefenseClaw's hooks or the image's system files, so the agent could run without its hooks or with other system files; refusing to start the agent (mount data folders below the working directory)")
 			return
 		}
 		if err := watchGuardedAs(s.taskCtx, guard, s.guardBroken, s.opts.sep.agentCred()); err != nil {

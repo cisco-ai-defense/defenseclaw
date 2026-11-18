@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // KitSpec is the actor kit layer to add: the files, the paths of the base
@@ -194,7 +195,11 @@ func Build(ctx context.Context, o BuildOptions) (*BuildResult, error) {
 			whiteouts = append(whiteouts, p)
 		}
 	}
-	layer, err := BuildLayer(o.Kit.Files, whiteouts, o.Kit.HomeOwners, func(p string) bool { _, ok := fsys.Lookup(p); return ok })
+	kitFiles, err := withBaseNPMConfig(fsys, o.Kit.Files)
+	if err != nil {
+		return nil, fmt.Errorf("build: %w", err)
+	}
+	layer, err := BuildLayer(kitFiles, whiteouts, o.Kit.HomeOwners, func(p string) bool { _, ok := fsys.Lookup(p); return ok })
 	if err != nil {
 		return nil, err
 	}
@@ -386,6 +391,43 @@ func ScanOnly(ctx context.Context, reg *Registry, image string, platform Platfor
 	defer fsys.Close()
 	rep, err := ScanImage(ctx, fsys, img.Config, o)
 	return rep, img.Digest, err
+}
+
+// withBaseNPMConfig carries the settings of the base image's global npmrc
+// into the kit's (kit.WithBaseNPMConfig, GAP-0576): the kit's file replaces
+// it for npm. The base's file is the one of the first npm it ships
+// (kit.NPMBaseConfigs); files is returned as is when the kit has no npmrc
+// or the base none.
+func withBaseNPMConfig(fsys *ImageFS, files []LayerFile) ([]LayerFile, error) {
+	at := -1
+	for i, f := range files {
+		if f.Path == kit.NPMGlobalConfig {
+			at = i
+		}
+	}
+	if at < 0 {
+		return files, nil
+	}
+	for _, c := range kit.NPMBaseConfigs {
+		if _, ok := fsys.Lookup(c.NPM); !ok {
+			continue
+		}
+		if _, ok := fsys.Lookup(c.Config); !ok {
+			return files, nil
+		}
+		data, err := fsys.Read(c.Config)
+		if err != nil {
+			return nil, fmt.Errorf("read the base image's npm configuration %s: %w", c.Config, err)
+		}
+		merged, err := kit.WithBaseNPMConfig(files[at].Data, data, c.Config)
+		if err != nil {
+			return nil, err
+		}
+		out := append([]LayerFile(nil), files...)
+		out[at].Data = merged
+		return out, nil
+	}
+	return files, nil
 }
 
 // PublishOptions configure Publish.

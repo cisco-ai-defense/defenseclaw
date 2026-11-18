@@ -310,7 +310,7 @@ func MountRefusal(c *ateapi.Container, vols []*ateapi.Volume, v *attest.Verified
 			return field + ".mount_path is outside the image WORKDIR; DefenseClaw admits data mounts only at or below the WORKDIR"
 		}
 		// Not over a system folder either, whatever the WORKDIR (GAP-0441).
-		for _, d := range systemDirs {
+		for _, d := range kit.SystemDirs {
 			if pathWithin(p, d) {
 				return field + ".mount_path is in a system folder; DefenseClaw admits data mounts only below a project WORKDIR"
 			}
@@ -318,11 +318,6 @@ func MountRefusal(c *ateapi.Container, vols []*ateapi.Volume, v *attest.Verified
 	}
 	return ""
 }
-
-// systemDirs are the folders a data mount never goes in (GAP-0441): a
-// WORKDIR there (WORKDIR /usr/bin) admits no data mount.
-var systemDirs = []string{"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/proc", "/sys", "/dev",
-	"/run", "/boot", "/var/run"}
 
 // attestedPaths are the paths a mount must not touch (MountRefusal).
 func attestedPaths(v *attest.Verified) []string {
