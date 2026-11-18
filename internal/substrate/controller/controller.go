@@ -153,6 +153,10 @@ type Controller struct {
 	mu        sync.Mutex
 	actors    map[string]*actorState // by actor UID
 	templates map[string]cachedTemplate
+	// inUse is the templates of the actors the last pass listed: only
+	// their verdicts count for the unattested-templates gauge, and an
+	// expired verdict of another template is dropped (GAP-0583).
+	inUse map[string]bool
 	fastUntil time.Time
 	scoped    bool
 	// unlisted are atespaces the last pass could not list: their known
@@ -384,10 +388,20 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	seen := make(map[string]bool, len(actors))
 	var urgent, rest []*ateapi.Actor
 	var recreated []recreatedActor
+	inUse := map[string]bool{}
 	c.mu.Lock()
+	for k := range c.inUse {
+		// An atespace this pass could not list keeps its templates.
+		if ns, _, _ := strings.Cut(k, "/"); c.unlisted[ns] {
+			inUse[k] = true
+		}
+	}
 	for _, a := range actors {
 		uid := a.GetMetadata().GetUid()
 		seen[uid] = true
+		if t := a.GetActorTemplate(); t != nil {
+			inUse[ateapi.Key(t)] = true
+		}
 		_, known := c.actors[uid]
 		if !known {
 			key := ateapi.Key(ateapi.RefOf(a.GetMetadata()))
@@ -405,6 +419,12 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 			c.fastUntil = now.Add(c.o.FastWindow)
 		} else {
 			rest = append(rest, a)
+		}
+	}
+	c.inUse = inUse
+	for k, ct := range c.templates {
+		if !inUse[k] && now.Sub(ct.at) >= templateCacheTTL {
+			delete(c.templates, k)
 		}
 	}
 	var gone []*actorState
