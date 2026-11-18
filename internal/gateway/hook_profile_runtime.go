@@ -175,6 +175,8 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		RedactionEnabled:          resp.RedactionEnabled,
 		CompanionRedactionEnabled: resp.CompanionRedactionEnabled,
 		CompanionRedactionPresent: resp.CompanionRedactionPresent,
+		ReasonRedactionEnabled:    resp.ReasonRedactionEnabled,
+		ReasonRedactionPresent:    resp.ReasonRedactionPresent,
 		InspectedContent:          resp.InspectedContent,
 		InspectedContentPresent:   resp.InspectedContentPresent,
 		SourceReason:              resp.SourceReason,
