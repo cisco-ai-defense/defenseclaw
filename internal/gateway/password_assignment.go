@@ -59,24 +59,54 @@ const (
 // (changeme123456, dummy_password_2024) is read by the placeholder helper
 // SEC-SECRET-ASSIGN uses, credentialPlaceholderValue, not by a second list.
 func acceptedPasswordAssignment(text, match string, start int) bool {
+	return readPasswordAssignment(text, match, start) == passwordReadAsPassword
+}
+
+// passwordReading is what the value of a SEC-PASSWORD-ASSIGN match is.
+type passwordReading uint8
+
+const (
+	// passwordReadAsNone: not a password. A reference, slot, path, code, a
+	// mask (********, xxxxxxxxxx), a well-known documentation placeholder
+	// (changeme, placeholder, example: obviousCredentialPlaceholder) or text
+	// about a password (a rule list, a regex, a fill-in naming its key).
+	passwordReadAsNone passwordReading = iota
+	// passwordReadAsWeak: a literal password, but a stand-in made of
+	// placeholder words or a bare word (password123, changeme123,
+	// dummysecret, examplepass). The rule does not report it: in a prompt or
+	// a tool result such values are sample configs and test fixtures
+	// (rel-1-0-10:GAP-0522). The proxy content check still alerts on the
+	// bare password assignment of one (weakPasswordAssignmentFindings), as
+	// rel always did: a weak default is often the credential an operator
+	// most needs to see in a model response.
+	passwordReadAsWeak
+	// passwordReadAsPassword: a password; the rule reports it.
+	passwordReadAsPassword
+)
+
+// readPasswordAssignment reads the value of a SEC-PASSWORD-ASSIGN match
+// found at start in text. acceptedPasswordAssignment reports only
+// passwordReadAsPassword; the strong reading is the one the rule always had.
+func readPasswordAssignment(text, match string, start int) passwordReading {
 	if start > 0 && start <= len(text) && (text[start-1] == '/' || text[start-1] == '\\') {
 		// The key is a path name (/etc/passwd:...), not a key.
-		return false
+		return passwordReadAsNone
 	}
 	key, value, quoted, ok := passwordAssignmentValue(match)
 	if !ok || len(value) < 8 {
-		return false
+		return passwordReadAsNone
 	}
-	if credentialReference(value) || pathLikeValue(value) || credentialPlaceholderValue(value) {
-		return false
+	if credentialReference(value) || pathLikeValue(value) ||
+		obviousCredentialPlaceholder(value) || maskedCredentialValue(value) {
+		return passwordReadAsNone
 	}
 	if !quoted && unquotedCodeValue(value) {
-		return false
+		return passwordReadAsNone
 	}
 	if templateSlotValue(value) || decoratedWordValue(value) || ruleListValue(value) ||
 		regexValue(value) || schemeReferenceValue(value) || relativePathValue(value) ||
 		valueNamesItsKey(key, value) {
-		return false
+		return passwordReadAsNone
 	}
 	letter, digitOrSymbol := false, false
 	for _, r := range value {
@@ -87,7 +117,31 @@ func acceptedPasswordAssignment(text, match string, start int) bool {
 			digitOrSymbol = true
 		}
 	}
-	return letter && digitOrSymbol
+	switch {
+	case !letter:
+		return passwordReadAsNone
+	case !digitOrSymbol || secretAssignmentPlaceholderValue(value):
+		return passwordReadAsWeak
+	}
+	return passwordReadAsPassword
+}
+
+// bareWeakPasswordAssignment reports a match whose value is a weak password
+// (passwordReadAsWeak) assigned to a bare password key: an unquoted key of
+// one word (password, PASSWORD, pwd, passwd, as in password=, --password=,
+// pwd: ). That is the reach of rel's proxy password regex, which the proxy
+// content check keeps (rel-1-0-10:GAP-0210 review r1); a prefixed key
+// (DB_PASSWORD) or a quoted field ("password": ...) with a weak value was
+// never reported there and is not now.
+func bareWeakPasswordAssignment(text, match string, start int) bool {
+	key, _, _, ok := passwordAssignmentValue(match)
+	if !ok || len(key) == len(match) || len(identifierWords(key)) != 1 {
+		return false
+	}
+	if c := match[len(key)]; c == '"' || c == '\'' || c == '\\' {
+		return false
+	}
+	return readPasswordAssignment(text, match, start) == passwordReadAsWeak
 }
 
 // passwordAssignmentValue splits a match of key, separator and value: the

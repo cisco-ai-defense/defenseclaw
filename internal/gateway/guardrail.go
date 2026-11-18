@@ -1890,9 +1890,11 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 // spliced into a word, or a Latin letter swapped for a Cyrillic one, reads the
 // same to a model and must not read differently to the rules. The hook path
 // does the same (messageRuleFindings); the Secure Client generation keeps its
-// single pass.
+// single pass. One reading is the proxy's own: a weak password assigned to a
+// bare password key (weakPasswordAssignmentFindings).
 func scanUntrustedContentRules(generation *compiledRulePackCategories, content string) []RuleFinding {
 	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
+	findings = unionRuleFindings(findings, weakPasswordAssignmentFindings(generation, content))
 	if secureClientGeneration() {
 		return findings
 	}
@@ -1926,6 +1928,76 @@ func withZeroWidthSecretFindings(generation *compiledRulePackCategories, finding
 	return unionRuleFindings(findings, scanRuleGeneration(generation, invisible, toolName, ruleScanOptions{
 		contentScope: scope, onlyCategory: "secret",
 	}))
+}
+
+// weakPasswordAssignmentFindings is the proxy content check's reading of a
+// weak password assigned to a bare password key (bareWeakPasswordAssignment:
+// a stand-in or a bare word such as changeme123 or examplepass after
+// password=), reported as the pack's SEC-PASSWORD-ASSIGN with its title and
+// severity. rel found these in a prompt or a completion on the proxy with its
+// own password regex, removed with the other proxy-only secret regexes
+// (rel-1-0-10:GAP-0210); without this reading such a model response was
+// allowed where rel alerted (GAP-0210 review r1). The hook path does not
+// report them (GAP-0522: in a prompt or a tool result they are sample
+// configs), and a documentation placeholder, a mask or a template is not a
+// weak password (passwordReadAsNone, GAP-0213). The key names are the rule's
+// pattern, so a pack that disables or replaces SEC-PASSWORD-ASSIGN turns this
+// off or changes them. The text without its invisible characters
+// (credentialVisibleText) is read too, as rel read its normalized text.
+func weakPasswordAssignmentFindings(generation *compiledRulePackCategories, content string) []RuleFinding {
+	if generation == nil {
+		return nil
+	}
+	if len(generation.members) > 0 {
+		var out []RuleFinding
+		for i, member := range generation.members {
+			findings := weakPasswordAssignmentFindings(member, content)
+			if i < len(generation.memberNames) {
+				for j := range findings {
+					findings[j].profile = generation.memberNames[i]
+				}
+			}
+			out = append(out, findings...)
+		}
+		return out
+	}
+	options := ruleScanOptions{contentScope: ruleContentScopeUntrusted, onlyCategory: "secret"}
+	texts := []string{content}
+	if visible := credentialVisibleText(content); visible != content {
+		texts = append(texts, visible)
+	}
+	for categoryIndex := range generation.categories {
+		cat := &generation.categories[categoryIndex]
+		for ruleIndex := range cat.Rules {
+			rule := &cat.Rules[ruleIndex]
+			if rule.ID != passwordAssignRuleID || rule.Pattern == nil || !ruleScanEligible(options, cat, rule) {
+				continue
+			}
+			for _, text := range texts {
+				if !(&ruleScanText{text: text}).mayMatch(rule.Pattern) {
+					continue
+				}
+				for _, loc := range rule.Pattern.FindAllStringIndex(text, -1) {
+					if !bareWeakPasswordAssignment(text, text[loc[0]:loc[1]], loc[0]) {
+						continue
+					}
+					finding := RuleFinding{
+						RuleID:     rule.ID,
+						Title:      rule.Title,
+						Severity:   rule.Severity,
+						Confidence: rule.Confidence,
+						Evidence:   sanitizeEvidence(text[loc[0]:minInt(loc[1], loc[0]+80)]),
+						Tags:       rule.Tags,
+					}
+					if text == content {
+						finding.LineNumber = lineNumberAtOffset(text, loc[0])
+					}
+					return []RuleFinding{finding}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // credentialVisibleText is content without the characters that render as
@@ -2069,7 +2141,9 @@ func scanLocalPatternsWithActivation(
 	// The proxy used to add its own secret regexes here, so a completion and a
 	// tool result holding the same text were decided by different detectors: a
 	// documentation placeholder alerted only in a response
-	// (rel-1-0-10:GAP-0210, GAP-0213).
+	// (rel-1-0-10:GAP-0210, GAP-0213). The one reading the proxy keeps of its
+	// own is a weak password on a bare password key, as rel had it
+	// (weakPasswordAssignmentFindings, in scanUntrustedContentRules).
 
 	// Content scanning retains trust, credential, and PII rules. Literal
 	// commands, paths, cognitive files, and C2 indicators are action categories
