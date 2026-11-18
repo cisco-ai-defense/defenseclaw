@@ -150,6 +150,10 @@ type hookCall struct {
 	memo *TargetMemo
 	// stats are the answers of callStat, by path.
 	stats map[string]statAnswer
+	// scripts are the script bodies the call has read (readActionScriptWith),
+	// scriptBytes their size in all.
+	scripts     map[scriptReadKey]string
+	scriptBytes int
 }
 
 type statAnswer struct {
@@ -182,7 +186,7 @@ func callStat(name string) (os.FileInfo, error) {
 // is run by one goroutine, so it needs no lock of its own.
 func (call *hookCall) targets() *TargetMemo {
 	if call.memo == nil {
-		call.memo = NewTargetMemo()
+		call.memo = newTargetMemo()
 	}
 	return call.memo
 }

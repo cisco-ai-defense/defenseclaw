@@ -2462,7 +2462,7 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	// Its directory is followed and its name kept, so mv a.txt /ext/y/
 	// config.yaml with y -> ~/.defenseclaw names the entry when config.yaml
 	// links out of the tree, as it does when config.yaml is a file (GAP-2560).
-	differ, missing := actionStateEntryMayDiffer(value)
+	differ, missing := home.memo.stateEntryMayDiffer(value)
 	if differ {
 		if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
 			if parent, ok := home.memo.resolveWriteTarget(filepath.Dir(value)); ok {
