@@ -128,7 +128,9 @@ var (
 	windowsHolderMaxCloses = 64
 	// windowsHolderRescans is how many times a pass looks again, at once,
 	// when every handle it tried had been closed or replaced by its owner
-	// since the scan (a holder that rotates its handle).
+	// since the scan, or when the scan found no holder because a handle it
+	// listed was gone by its probe while the hook is still refused (a holder
+	// that rotates its handle).
 	windowsHolderRescans = 2
 	// windowsHolderCommitWait is how much longer the guardian waits for a
 	// close that has begun (the worker is past its last check, about to
@@ -248,6 +250,11 @@ type windowsHolderSystem interface {
 // windowsHolderSys is the system the scan reads; tests replace it.
 var windowsHolderSys windowsHolderSystem = windowsNativeHolderSystem{}
 
+// windowsHolderSelf is the guardian's own process id: the scan never counts
+// its handles. Tests that inject a handle table set it to 0, so that a fake
+// process whose id happens to be the test's own is still seen.
+var windowsHolderSelf = uint32(os.Getpid())
+
 // windowsHolderScan is what one pass found.
 type windowsHolderScan struct {
 	Identity windowsHookHolderIdentity
@@ -256,6 +263,7 @@ type windowsHolderScan struct {
 	Entries  int      // handles in the system table
 	Probed   int      // handles duplicated and inspected
 	Hung     int      // probes abandoned in this pass
+	Gone     int      // listed handles whose probe found no handle (ERROR_INVALID_HANDLE): closed since the snapshot (a holder that rotates its handle, GAP-0068)
 	Unopened []uint32 // processes with a data handle that could not be opened (protected)
 	Limited  string   // why the pass stopped early, or ""
 	Elapsed  time.Duration
@@ -513,7 +521,17 @@ func scanWindowsHolders(sys windowsHolderSystem, target string, self uint32) (*w
 				scan.Hung++
 				continue
 			}
-			if err != nil || !disk || id != scan.Identity {
+			if err != nil {
+				// Only a value that is no longer a handle is gone: its owner
+				// closed it after the snapshot (DuplicateHandle fails with
+				// ERROR_INVALID_HANDLE). Another failure (access denied)
+				// says nothing about a rotation and costs no rescan.
+				if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+					scan.Gone++
+				}
+				continue
+			}
+			if !disk || id != scan.Identity {
 				continue
 			}
 			scan.Holders = append(scan.Holders, windowsHolderHandle{Process: proc.Facts(), Handle: entry.HandleValue, Object: entry.Object, Access: entry.GrantedAccess, Attributes: entry.HandleAttributes, proc: proc})
@@ -1256,10 +1274,17 @@ func endWindowsExclusiveHoldOn(gate *windowsHolderState, target string, probes w
 	}
 	gate.streakLast = now
 	if now.Before(gate.nextScan) {
-		// The backoff skips the scan, not the hold: the users seen so far
-		// stay one continuous hold, so a refused holder is named again at the
-		// next scan instead of waiting two checks once more.
-		gate.seenAt = now
+		// The backoff skips the scan, not the hold: the users the last scan
+		// saw stay one continuous hold, so a refused holder is named again at
+		// the next scan instead of waiting two checks once more. Users the
+		// last scan did not see (it found nobody while the hook stayed
+		// refused, emptySince) are not kept by it: they age out in observe
+		// three checks after they were last seen, so a hold the scan cannot
+		// see (a protected process) never keeps them, and their first
+		// sighting after it starts their checks over (bound (a), GAP-0068).
+		if gate.emptySince.IsZero() {
+			gate.seenAt = now
+		}
 		return 0, gate.lastErr
 	}
 	for attempt := 0; ; attempt++ {
@@ -1272,19 +1297,34 @@ func endWindowsExclusiveHoldOn(gate *windowsHolderState, target string, probes w
 
 // pass is one look at who holds the hook, and the close. again is true when
 // every handle it tried had been closed or replaced by its owner since the
-// scan, which is what a holder that rotates its handle looks like: the
-// caller looks again at once (a few times) instead of backing off. last is
-// true on the final look, which then ends as any other failed close.
+// scan, or when the scan found nobody because a listed handle was gone by its
+// probe and the hook is still refused, which is what a holder that rotates
+// its handle looks like: the caller looks again at once (a few times) instead
+// of backing off. last is true on the final look, which then ends as any
+// other failed close.
 func (gate *windowsHolderState) pass(target string, probes windowsHolderProbes, now time.Time, last bool) (closed int, again bool, err error) {
-	scan, err := scanWindowsHolders(windowsHolderSys, target, uint32(os.Getpid()))
+	scan, err := scanWindowsHolders(windowsHolderSys, target, windowsHolderSelf)
 	if err != nil {
 		return 0, false, gate.refuse(now, fmt.Errorf("the guardian could not list who holds the hook: %w", err))
 	}
 	defer scan.close()
-	persistent := gate.observe(now, scan.Identity, scan.Holders)
 	if len(scan.Holders) == 0 {
 		// A hold that ended between the start-style open and the scan is
-		// not a finding; one that stays unseen across two checks is.
+		// not a finding; one that stays unseen across two checks is. While
+		// the hook still refuses the start the scan missed the hold, it did
+		// not see it end (GAP-0068): a listed handle that was gone by its
+		// probe is a holder that rotated its handle in between, so the pass
+		// looks again at once, and the users seen so far are kept (they
+		// still age out three checks after they were last seen, see observe;
+		// the backoff does not keep them) instead of starting their checks
+		// over.
+		refused := probes.startRefused(target)
+		if refused && scan.Gone > 0 && !last {
+			return 0, true, nil
+		}
+		if !refused {
+			gate.observe(now, scan.Identity, nil)
+		}
 		if gate.emptySince.IsZero() {
 			gate.emptySince = now
 			return 0, false, nil
@@ -1295,6 +1335,7 @@ func (gate *windowsHolderState) pass(target string, probes windowsHolderProbes, 
 		return 0, false, gate.refuse(now, fmt.Errorf("the guardian found no handle of a user process on it%s", scan.limits()))
 	}
 	gate.emptySince = time.Time{}
+	persistent := gate.observe(now, scan.Identity, scan.Holders)
 	if len(persistent) == 0 {
 		if scan.Hung > 0 || scan.Elapsed > windowsHolderSlowScan {
 			// A scan that is slow (hung probes, a huge table) is not repeated

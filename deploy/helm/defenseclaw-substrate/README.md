@@ -59,7 +59,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `gateway.authDelegatorBinding` | "" | name of the one cluster-wide object: the gateway's ClusterRoleBinding to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer); "" is `defenseclaw-auth-delegator-<namespace>-<release>` |
 | `callout.actorSecrets.secretName` | "" | exposed `actor_secrets` values for exact-value DLP, mounted read-only in the callout (egress) and the gateway (/llm); sets `config.substrate.extproc.actor_secrets_dir` |
 | `networkPolicy.adminFrom`, `networkPolicy.metricsFrom` | [] | extra peers for the admin and metrics ports |
-| `deploymentMode` | "" | sets `config.deployment_mode`; `managed_enterprise` mounts `config.yaml` as one read-only file and gives each pod a data volume owned by the gateway account (`0700`, set by an init container running as root with only `CHOWN` and `FOWNER`), as the managed trust checks require. `managed.serviceAccountName` names that account (`nonroot`). |
+| `deploymentMode` | "" | sets `config.deployment_mode`; `managed_enterprise` mounts `config.yaml` as one read-only file and gives each pod a data volume (`managed.dataSizeLimit`, `4Gi`, sized as `homeSizeLimit`) owned by the gateway account (`0700`, set by an init container running as root with only `CHOWN` and `FOWNER`), as the managed trust checks require. `managed.serviceAccountName` names that account (`nonroot`). |
 | `admin.expose.type` | `ClusterIP` | how laptops reach the admin listener (TLS): `ClusterIP` (in-cluster only), `LoadBalancer` (needs `admin.expose.loadBalancer.sourceRanges`, also enforced by the NetworkPolicy) or `Ingress` (needs `host` and `tlsSecretName`; re-encrypt to the HTTPS backend). The actor listener is never exposed. |
 | `admin.url` | Ingress host, or the in-cluster admin Service | the https URL laptops use, published in ConfigMap `defenseclaw-launcher-endpoint` (key `admin_url`) that every authenticated user may read; `login --kube` sends a Kubernetes credential only to this URL. Required for `LoadBalancer`. |
 | `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |
@@ -76,9 +76,37 @@ Every value is checked by `values.schema.json`. The main ones:
 | `substrate.router.relayPort` | `8080` | the relay port inside the actor |
 | `networkPolicy.egress.*` | on, OTLP 4317/4318 | egress limits for the gateway, leader and callout (DNS, Kubernetes and Substrate APIs, the release, OTLP; providers on 443 for gateway and leader) |
 | `metrics.prometheusRule.enabled` | false | alert rules |
-| `homeSizeLimit` | `256Mi` | the memory `emptyDir` each pod keeps its local audit database in. It is lost when the pod is replaced, and each gateway replica holds only what it handled; the durable audit record is an export destination under `config.observability.destinations` |
+| `homeSizeLimit` | `4Gi` | the disk `emptyDir` each pod keeps `DEFENSECLAW_HOME` in outside managed mode: the local audit database (`audit.db` and its write-ahead log) and local state. An init container gives it to the gateway account (`0700`, as root with only `CHOWN` and `FOWNER`), as the audit store's directory trust check requires. It must hold `config.observability.local.max_store_mb` twice over plus 256 MiB for the write-ahead log; the chart refuses a smaller one. On this disk volume the kubelet evicts the pod at once when the volume passes `homeSizeLimit`: the local store is lost and no `ALERT audit_store_full` is logged (that alert comes from a write that finds no space: a memory volume, or a full node disk). The pods set no `ephemeral-storage` request, so the scheduler does not count this volume: leave room for `homeSizeLimit` per DefenseClaw pod on the nodes' disks. It is lost when the pod is replaced, and each gateway replica holds only what it handled; the durable audit record is an export destination under `config.observability.destinations` |
+| `homeMedium` | "" | `""` is the disk volume above; `Memory` makes it a memory `emptyDir` (tmpfs) with no init container, for a namespace whose policy refuses a root init container. A tmpfs counts against the memory limit of the container that writes it, so the chart refuses `Memory` unless every DefenseClaw pod (`gateway`, `leader`, `controller`, `callout`) sets `resources.limits.memory` and `resources.requests.memory` with the limit at least `homeSizeLimit` plus the request (the request is the process headroom); otherwise the store would grow into an OOM kill instead of a full store. The defaults (`4Gi`, a `1024` MiB cap, limits of 512Mi to 2Gi) do not fit; see [A memory home volume](#a-memory-home-volume) |
+| `config.observability.local.max_store_mb` | `1024` | the local audit store size cap (MiB): retention deletes the oldest audit history above it (never the last hour), checked every 10 minutes. Required: without a cap the store can outgrow its volume. On the default disk volume the pod is then evicted and its local store lost; on a memory volume (or a full node disk) audit writes fail, every hook that needs an audit record fails closed, and the gateway log says `ALERT audit_store_full` |
+| `observability.redactionProfile` | `sensitive` | the redaction profile of every record the gateway keeps in its audit store and sends, unless `config.observability.defaults.redaction_profile` names one: credentials, secrets and PII in prompts, model answers and tool results are replaced before they are written (GAP-0426). `none` keeps them whole; use it only when the store and every destination share an approved trust boundary |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart (debug exporter), and an otlp destination `chart-collector` to it in `config.observability.destinations` unless one with that name is set. For a real backend, add your own destination under `config.observability.destinations` |
 | `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |
+
+### A memory home volume
+
+For a namespace that refuses the root init container (Pod Security `restricted`), size the volume, the cap and the limits together. `homeSizeLimit` must be at least twice `max_store_mb` plus 256 MiB, and each pod's memory limit at least `homeSizeLimit` plus its memory request:
+
+```yaml
+homeMedium: Memory
+homeSizeLimit: 512Mi            # 2 x 128 + 256
+config:
+  observability:
+    local:
+      max_store_mb: 128
+# gateway (request 256Mi, limit 1Gi) and leader (512Mi, 2Gi) fit as they are;
+# controller and callout (request 128Mi) need 512Mi + 128Mi = 640Mi or more.
+controller:
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 768Mi}
+callout:
+  resources:
+    requests: {cpu: 250m, memory: 128Mi}
+    limits: {memory: 768Mi}
+```
+
+`helm template` and `helm install` refuse a memory volume that a pod's limit can't hold, naming the values to change.
 
 ## Private template registries
 
@@ -142,6 +170,10 @@ Known limits in 1.0.10:
 - `helm upgrade` checks the new config, refuses a skipped minor (N-1 to N only) and rolls under the PDBs. The leader
   migrates the store at start after a backup.
 - `helm rollback` to a release with an older store schema is refused, naming the backup.
+- Outside managed mode every pod (gateway, leader, controller, callout) runs a root init container, `substrate-datadir`,
+  with only `CHOWN` and `FOWNER`. A namespace that enforces the Pod Security `restricted` level, or OpenShift's
+  `restricted` SCC, refuses those pods: on an upgrade from a chart without it, `helm upgrade` stalls with the old pods
+  still running. There, set `homeMedium: Memory` (no init container) and size it as that row says before you upgrade.
 - `helm uninstall` first stops the controller (it would write the policies again), then removes every egress policy
   DefenseClaw wrote (actors fall back to deny-all), looks again after a poll interval, and revokes every credential
   provider grant of the secrets namespace. It fails while any policy remains, and then scales the controller back so

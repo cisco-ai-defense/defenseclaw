@@ -57,6 +57,7 @@ func healthyCluster() Observed {
 		ActorRoutes:     []string{"/api/v1/substrate/hook/{connector}", "/api/v1/substrate/notify/{connector}", "/api/v1/substrate/inspect/{connector}", "/llm/{provider}", "/v1/logs", "/v1/metrics", "/v1/traces"},
 		NamespaceLabels: map[string]string{APIAccessLabel: "true"},
 		SignInIssuer:    "https://kc.cluster-a.example/realms/dc", SignInRead: true,
+		Conflicts: &Conflicts{Agents: []ConflictAgent{}},
 	}
 }
 
@@ -131,6 +132,10 @@ func TestMembersMatchTheSchemas(t *testing.T) {
 		"substrate-status.schema.json#/$defs/inventory":                    reflect.TypeOf(Inventory{}),
 		"substrate-status.schema.json#/$defs/check":                        reflect.TypeOf(Check{}),
 		"substrate-verify.schema.json#/$defs/check":                        reflect.TypeOf(Check{}),
+		"substrate-status.schema.json#/$defs/policy_conflicts":             reflect.TypeOf(PolicyConflicts{}),
+		"substrate-verify.schema.json#/$defs/policy_conflicts":             reflect.TypeOf(PolicyConflicts{}),
+		"substrate-status.schema.json#/$defs/atespace_conflicts":           reflect.TypeOf(AtespaceConflicts{}),
+		"substrate-verify.schema.json#/$defs/atespace_conflicts":           reflect.TypeOf(AtespaceConflicts{}),
 	} {
 		contracttest.RequireMembers(t, name, typ)
 	}

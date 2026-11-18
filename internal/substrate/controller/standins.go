@@ -35,9 +35,9 @@ func (NoAttestor) Attest(context.Context, *ateapi.ActorTemplate) (Attestation, e
 	return Attestation{Reason: "this gateway has no template attestation verifier"}, nil
 }
 
-// NoActivity reports no hook, model, relay or egress activity and no asks,
-// until the gateway feeds the controller; idle suspend then rests on running
-// time and CPU alone.
+// NoActivity reports no hook, model, relay or egress activity and no asks:
+// the create path's controller, which has no activity feed. A controller
+// with NoActivity suspends nothing for idleness.
 type NoActivity struct{}
 
 func (NoActivity) LastActivity(string) (time.Time, bool) { return time.Time{}, false }

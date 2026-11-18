@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"bytes"
 	"maps"
 	"path"
 	"path/filepath"
@@ -407,6 +408,16 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		pieces = new(simplePieces)
 	}
 	result := simpleCommandsOfCall(input, facts, pieces)
+	if facts.Parse.Dialect == DialectPOSIX && facts.Parse.Status != StatusInvalid {
+		source := input.Command
+		if source == "" && bytes.Contains(input.Args, []byte("<<")) {
+			_, capture := analyzeWithRedirectTargets(input, "")
+			source = capture.source
+		}
+		if strings.Contains(source, "<<") && len(source) <= maxCommandBytes {
+			result = append(result, simpleTopLevelHereDocBodies(source, input)...)
+		}
+	}
 	if argsOnly && slices.ContainsFunc(result, isSyntaxTailUnread) {
 		// A text with a syntax error (syntaxTailCommands): its readings are
 		// all of the call that was read, a cap they stopped at included.
@@ -429,6 +440,171 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		}
 	}
 	return result
+}
+
+// simpleTopLevelHereDocBodies gives a parsed here-document to the same
+// consumer reader used after a syntax error, for the openers whose stdin no
+// other reader judges (rel-1-0-10:GAP-1183): a shell outside the ordinary
+// shell set (yash), a shell behind a launcher the stdin-code reader does not
+// unwrap, and the launchers of unknown stdin semantics with a possible state
+// write (topLevelHereDocUnknownStateConsumer). An opener the ordinary
+// readers already judge (topLevelHereDocReadElsewhere) adds nothing, so
+// their reading stays the only one: the cap-floor here-document reader
+// (GAP-0691: bash script.sh <<X is data for the script), the stdin-code
+// reader of privilege wrappers and schedulers (sudo sh <<X, crontab - <<X)
+// and the shell twin of a piped document with its unquoted body
+// (heredocScriptText, rel-1-0-10:GAP-1137, GAP-1193).
+func simpleTopLevelHereDocBodies(source string, input Input) []SimpleCommand {
+	file, ok := shellparse.Parse(source)
+	if !ok || file == nil {
+		return nil
+	}
+	var result []SimpleCommand
+	for _, stmt := range file.Stmts {
+		// A definition or control construct is not itself a consumer. The
+		// ordinary command walk decides when its body can run.
+		switch stmt.Cmd.(type) {
+		case *syntax.CallExpr, *syntax.BinaryCmd:
+		default:
+			continue
+		}
+		var consumer strings.Builder
+		if syntax.NewPrinter().Print(&consumer, stmt.Cmd) != nil {
+			continue
+		}
+		reading := syntaxTailHereDocConsumer(consumer.String())
+		if reading == hereDocData || reading == hereDocRunsCode && topLevelHereDocReadElsewhere(stmt.Cmd) {
+			continue
+		}
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			if len(result) >= maxSimpleEvaluations {
+				return false
+			}
+			redirection, isRedirect := node.(*syntax.Redirect)
+			if !isRedirect || redirection.Op != syntax.Hdoc && redirection.Op != syntax.DashHdoc {
+				return true
+			}
+			if redirection.Hdoc == nil {
+				// An empty here-document: the consumer gets no input.
+				return false
+			}
+			// The body as the shell that runs it reads it: the literal body,
+			// or an unquoted body that expands only parameters, as written
+			// (heredocScriptText, the reading of the shell twin).
+			body, known := heredocScriptText(redirection.Hdoc)
+			if reading == hereDocUnknown {
+				// A valid here-document fed to an ordinary program is data
+				// even when the closed syntax-tail reader cannot prove the
+				// stdin semantics of that program. Only the GAP-1183 launcher
+				// forms with a possible state write need the unknown tier. A
+				// body the twin cannot read (a command substitution) shows no
+				// state write here, as on the lane branch.
+				if topLevelHereDocUnknownStateConsumer(stmt.Cmd) && hereDocBodyMayWriteState(body, input) {
+					result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
+				}
+				return false
+			}
+			if !known || len(body) > maxScalarBytes || strings.ContainsRune(body, 0) {
+				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
+				return false
+			}
+			result = append(result, SimpleCommand{Text: body, CWD: input.CWD})
+			return false
+		})
+		if len(result) >= maxSimpleEvaluations {
+			return []SimpleCommand{{EvaluationFailure: "limit"}}
+		}
+	}
+	return result
+}
+
+// topLevelHereDocReadElsewhere reports an opener whose every command that
+// runs its standard input as code (hereDocArgvConsumer) is one the
+// stdin-code reader names on its own: static words, a command word that is
+// a trusted program, no assignment that changes which program runs, and
+// posixStdinCodeTarget (a POSIX shell without -c, also behind env or
+// command, a privilege wrapper or a scheduler). The ordinary readers judge
+// that body already, and a second reading here differs from theirs only
+// where it is wrong: posixStdinCodeTarget names bash script.sh, whose
+// script file gets the document as data (GAP-0691), crontab - installs a
+// table, not a script, and an unquoted body they read became an unread one
+// (the FU9 reds of TestCapFloorHeredocConsumer, TestStdinCodeWrapper* and
+// TestHeredocPipedToAShellIsJudgedAsTheScriptItCarries).
+func topLevelHereDocReadElsewhere(cmd syntax.Command) bool {
+	elsewhere := true
+	syntax.Walk(cmd, func(node syntax.Node) bool {
+		call, isCall := node.(*syntax.CallExpr)
+		if !elsewhere || !isCall || len(call.Args) == 0 {
+			return elsewhere
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for index, arg := range call.Args {
+			words[index], static[index] = simpleStaticWord(arg, nil)
+		}
+		if hereDocArgvConsumer(words, static, nil, 0) != hereDocRunsCode {
+			return true
+		}
+		elsewhere = allStatic(static) && commandProgram(words[0]) != "" && posixStdinCodeTarget(words)
+		for _, assign := range call.Assigns {
+			if assign.Name != nil && resolutionVariable(assign.Name.Value) {
+				elsewhere = false
+			}
+		}
+		return elsewhere
+	})
+	return elsewhere
+}
+
+// topLevelHereDocUnknownStateConsumer is the small set of valid opener
+// shapes in GAP-1183. Other unknown stdin consumers retain their release
+// behavior; the syntax-error tail has its separate conservative contract.
+func topLevelHereDocUnknownStateConsumer(cmd syntax.Command) bool {
+	call, ok := cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	for _, assign := range call.Assigns {
+		if assign.Name != nil && assign.Name.Value == "PATH" {
+			return true
+		}
+	}
+	first, known := simpleStaticWord(call.Args[0], nil)
+	if !known {
+		return false
+	}
+	if commandProgram(first) == "newgrp" {
+		return true
+	}
+	if commandProgram(first) != "" || len(call.Args) < 2 {
+		return false
+	}
+	for _, arg := range call.Args[1:] {
+		word, known := simpleStaticWord(arg, nil)
+		if known && (posixShellProgram(commandProgram(word)) || hereDocExtraShells[commandProgram(word)]) {
+			return true
+		}
+	}
+	return false
+}
+
+func hereDocBodyMayWriteState(body string, input Input) bool {
+	lower := strings.ToLower(strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(body))
+	if !strings.Contains(lower, "defense") && !strings.Contains(lower, "claw") {
+		return false
+	}
+	piece := input
+	piece.Command, piece.Args, piece.Argv = body, nil, nil
+	for _, target := range Analyze(piece).Paths {
+		if target.Access != PathAccessWrite && target.Access != PathAccessAppend && target.Access != PathAccessDelete {
+			continue
+		}
+		name := strings.ToLower(target.Value)
+		if strings.Contains(name, "defense") || strings.Contains(name, "claw") {
+			return true
+		}
+	}
+	return false
 }
 
 func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []SimpleCommand {
@@ -2940,6 +3116,13 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			}
 			childIndex = simpleEnvChildIndex(argv)
 		default:
+			static := make([]bool, len(argv))
+			for index := range static {
+				static[index] = true
+			}
+			if childIndex = WrapperChildIndex(argv, static); childIndex > 0 {
+				break
+			}
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
 			if uncertain {
 				if simplePotentialShellScript(args, vars) {
@@ -2958,6 +3141,17 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
 			return program, false, true, true
 		}
+		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
+	}
+	// The other static program wrappers use the same child index as the
+	// protected-target reader. Their child shell body gets the ordinary
+	// nested-command checks, including a literal -c operand.
+	argv := make([]string, len(args))
+	fixedWords := make([]bool, len(args))
+	for index, arg := range args {
+		argv[index], fixedWords[index] = simpleStaticScriptWord(arg, vars)
+	}
+	if childIndex := WrapperChildIndex(argv, fixedWords); childIndex > 0 {
 		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
 	}
 	shellProgram := filepath.Base(program)

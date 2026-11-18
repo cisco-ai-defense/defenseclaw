@@ -40,6 +40,7 @@ refused here as for extproc.failure_mode (GAP-0063, GAP-0090). */ -}}
 {{- range ($sub.secrets | default list) -}}
 {{- $s := dict "name" .name "hosts" (.inject.hosts | default list) "header" .inject.header -}}
 {{- with .inject.placeholder }}{{ $_ := set $s "placeholder" . }}{{ end -}}
+{{- with .profiles }}{{ $_ := set $s "profiles" . }}{{ end -}}
 {{- $secrets = append $secrets $s -}}
 {{- end -}}
 {{- if $secrets }}{{ $_ := set $c "secrets" $secrets }}{{ end -}}

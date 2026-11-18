@@ -309,6 +309,30 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_REAL_FS_TESTS",
+      "category": "test_fixture",
+      "purpose": "Turns on the Go tests that mount a real, size-limited tmpfs (testenv.RealSmallFilesystem) so a full audit store is a real ENOSPC from the kernel; they also need passwordless sudo for mount and umount, and are skipped otherwise.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/testenv/fullfs_linux.go",
+          "description": "RealSmallFilesystem skips its test unless the variable is 1 and sudo -n mount works"
+        },
+        {
+          "location": "internal/testenv/fullfs_other.go",
+          "description": "Declares the same name on other systems, where the real-filesystem tests are skipped"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_JUDGE_PRIORITY_DELAY",
       "category": "test_fixture",
       "purpose": "Sets the per-call delay of the stand-in judge model in the tool-judge priority latency test (#1395), so a manual run can measure a slower model. The tool deadline scales with it.",

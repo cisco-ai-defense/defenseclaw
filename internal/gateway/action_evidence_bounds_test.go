@@ -43,13 +43,30 @@ func (f b36ManagedHookFixture) strict(t *testing.T) b36ManagedHookFixture {
 
 func newB36ManagedHookFixture(t *testing.T) b36ManagedHookFixture {
 	t.Helper()
+	return newB36ManagedHookFixtureIn(t, "")
+}
+
+// newB36ManagedHookFixtureIn is newB36ManagedHookFixture in a new folder
+// under parent, or in t.TempDir() when parent is empty. t.TempDir() is not
+// under TMPDIR when GOTMPDIR is set (the gate boxes set it), so a caller
+// that needs the fixture at a given depth names the parent.
+func newB36ManagedHookFixtureIn(t *testing.T, parent string) b36ManagedHookFixture {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX managed hook evidence")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root can search a mode 0 directory")
 	}
-	root := t.TempDir()
+	root := parent
+	if root == "" {
+		root = t.TempDir()
+	} else {
+		var err error
+		if root, err = os.MkdirTemp(parent, "b36"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	f := b36ManagedHookFixture{homes: filepath.Join(root, "homes")}
 	f.home = filepath.Join(f.homes, "alice")
 	f.project = filepath.Join(f.home, "project")

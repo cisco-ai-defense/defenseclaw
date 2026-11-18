@@ -97,11 +97,25 @@ type Registration struct {
 	// Approved are the hosts asks approved for this actor (the controller
 	// adds them to its policy).
 	Approved []string `json:"approved,omitempty"`
-	// ForkedBy is defenseclaw or unknown for a fork (ParentUID set).
+	// ForkedBy is unknown for a fork (ParentUID set): DefenseClaw makes none.
 	ForkedBy  string    `json:"forked_by,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// Deleted is a tombstone: the actor was deleted (E10).
 	Deleted bool `json:"deleted,omitempty"`
+	// PolicyConflict is set by the controller while the actor is in
+	// policy_conflict (repeated foreign changes to its egress policy; it
+	// keeps only the DefenseClaw rule until an admin resets it), so list,
+	// status, policy explain and doctor show it (GAP-0398). Nil otherwise.
+	PolicyConflict *PolicyConflict `json:"policy_conflict,omitempty"`
+}
+
+// PolicyConflict is the controller's policy_conflict mark on a registration.
+type PolicyConflict struct {
+	// Since is when the controller marked the conflict.
+	Since time.Time `json:"since"`
+	// Reverts is how many foreign changes it reverted in the conflict
+	// window before it marked the conflict.
+	Reverts int `json:"reverts"`
 }
 
 // Version is the record version.

@@ -42,3 +42,43 @@ leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- /* GAP-0402: the volume of the local audit store (the managed data volume,
+else the home volume) holds the store's size cap twice over (retention never
+deletes the last hour) plus 256 MiB, the audit write-ahead log's flood
+ceiling. A 256 MiB volume filled under about 15 actors, and every hook then
+failed closed. */ -}}
+{{- $capMB := int (dig "observability" "local" "max_store_mb" 0 $cfg) -}}
+{{- $sizeKey := ternary "managed.dataSizeLimit" "homeSizeLimit" (not (empty (include "dc.managed" .))) -}}
+{{- $size := toString (ternary .Values.managed.dataSizeLimit .Values.homeSizeLimit (not (empty (include "dc.managed" .)))) -}}
+{{- $sizeMB := atoi (include "dc.mib" (list $size $sizeKey "up")) -}}
+{{- if le $capMB 0 -}}
+{{- fail "config.observability.local.max_store_mb must be set (64 or more): without a size cap the local audit store can fill its volume, and every hook then fails closed (GAP-0402)" -}}
+{{- end -}}
+{{- if lt $sizeMB (add (mul $capMB 2) 256) -}}
+{{- fail (printf "%s %s is too small for config.observability.local.max_store_mb %d: it must be at least %dMi (twice the cap plus 256 MiB for the audit write-ahead log), or the audit store fills it and every hook fails closed (GAP-0402)" $sizeKey $size $capMB (add (mul $capMB 2) 256)) -}}
+{{- end -}}
+{{- /* GAP-0537: a memory home volume (homeMedium Memory) is a tmpfs whose
+pages count against the memory limit of the container that writes them, so
+the store would grow into an OOM kill (and the tmpfs outlives the restart: a
+crash loop) instead of a full store. Every pod that mounts it (gateway,
+leader, controller, callout) needs a memory limit that holds the whole
+volume plus the process: limits.memory >= homeSizeLimit + requests.memory,
+the container's own declared need being the process headroom. The managed
+data volume is always a disk volume. */ -}}
+{{- if and (empty (include "dc.managed" .)) (empty (include "dc.homeOnDisk" .)) -}}
+{{- range $pod := list "gateway" "leader" "controller" "callout" -}}
+{{- $res := (index $.Values $pod).resources | default dict -}}
+{{- $lim := toString (dig "limits" "memory" "" $res) -}}
+{{- $req := toString (dig "requests" "memory" "" $res) -}}
+{{- if or (not $lim) (not $req) -}}
+{{- fail (printf "homeMedium Memory needs %s.resources.limits.memory and %s.resources.requests.memory: a memory home volume counts against the container's memory limit, which must hold homeSizeLimit plus the memory request (the process); without them the audit store grows into an OOM kill (GAP-0537)" $pod $pod) -}}
+{{- end -}}
+{{- $limMB := atoi (include "dc.mib" (list $lim (printf "%s.resources.limits.memory" $pod) "down")) -}}
+{{- $reqMB := atoi (include "dc.mib" (list $req (printf "%s.resources.requests.memory" $pod) "up")) -}}
+{{- if lt $limMB (add $sizeMB $reqMB) -}}
+{{- $fitCap := div (sub (sub $limMB $reqMB) 256) 2 -}}
+{{- $fit := ternary (printf ", or lower homeSizeLimit to at most %dMi with config.observability.local.max_store_mb at most %d" (sub $limMB $reqMB) $fitCap) "" (ge $fitCap 64) -}}
+{{- fail (printf "%s.resources.limits.memory %s is too small for homeMedium Memory with homeSizeLimit %s: a memory home volume counts against the container's memory limit, so the limit must be at least %dMi (homeSizeLimit plus %s.resources.requests.memory %s for the process), or the audit store grows into an OOM kill instead of a full store (GAP-0537). Raise %s.resources.limits.memory to %dMi%s, or use the disk volume (homeMedium \"\")" $pod $lim $size (add $sizeMB $reqMB) $pod $req $pod (add $sizeMB $reqMB) $fit) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

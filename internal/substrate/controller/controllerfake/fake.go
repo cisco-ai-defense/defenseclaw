@@ -57,18 +57,19 @@ func (a *Attestor) Attest(_ context.Context, t *ateapi.ActorTemplate) (controlle
 
 // Activity is a settable ActivitySource.
 type Activity struct {
-	mu    sync.Mutex
-	ended map[string]time.Time
-	last  map[string]time.Time
-	asks  map[string]bool
-	cpu   map[string]float64
-	cpuAt map[string]time.Time
+	mu       sync.Mutex
+	ended    map[string]time.Time
+	attached map[string]time.Time
+	last     map[string]time.Time
+	asks     map[string]bool
+	cpu      map[string]float64
+	cpuAt    map[string]time.Time
 }
 
 func (f *Activity) init() {
 	if f.last == nil {
 		f.last, f.asks, f.cpu, f.cpuAt = map[string]time.Time{}, map[string]bool{}, map[string]float64{}, map[string]time.Time{}
-		f.ended = map[string]time.Time{}
+		f.ended, f.attached = map[string]time.Time{}, map[string]time.Time{}
 	}
 }
 
@@ -93,6 +94,22 @@ func (f *Activity) TaskEnded(uid string) (time.Time, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	t, ok := f.ended[uid]
+	return t, ok
+}
+
+// Attach records an open terminal attachment at t.
+func (f *Activity) Attach(uid string, t time.Time) {
+	f.mu.Lock()
+	f.init()
+	f.attached[uid] = t
+	f.mu.Unlock()
+}
+
+// Attached implements controller.AttachSource.
+func (f *Activity) Attached(uid string) (time.Time, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t, ok := f.attached[uid]
 	return t, ok
 }
 

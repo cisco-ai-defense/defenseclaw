@@ -38,9 +38,7 @@ func TestResolveListsTheLinkTextOfALinkIntoAClosedDirectory(t *testing.T) {
 		"chain-link":    filepath.Join(project, "closed-link"),
 	}
 	for name, target := range links {
-		if err := os.Symlink(target, filepath.Join(project, name)); err != nil {
-			t.Fatal(err)
-		}
+		testSymlink(t, target, filepath.Join(project, name))
 	}
 	if err := os.Chmod(closed, 0); err != nil {
 		t.Fatal(err)

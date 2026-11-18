@@ -65,7 +65,9 @@ def shipped_plugin_coverage(raw_version: str | None) -> ShippedPluginCoverage:
             COVERED,
             version,
             f"Hermes {version} is a release DefenseClaw ships plugin digests for ({span}): "
-            "its unchanged shipped plugins are vendor content and are not scanned; an edited one is scanned",
+            "its unchanged shipped plugins are vendor content and are not scanned; one that holds Python bytecode "
+            "Hermes wrote is scanned once for that bytecode, not again for a scanner change while that bytecode "
+            "is unchanged; an edited one is scanned",
         )
     dates = [_key(v) for v in _covered_versions() if _date_form(v)]
     if _date_form(version):

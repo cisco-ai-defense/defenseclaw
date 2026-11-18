@@ -8018,6 +8018,11 @@
         "idle_suspend_after": {
           "$ref": "#/$defs/duration"
         },
+        "idle_suspend_without_cpu": {
+          "description": "Opt-in: when the controller has no CPU feed (no --usage-listen), silence alone is idle, an attached actor's too. Off (default), such a controller never suspends an actor with a terminal attached (GAP-0534).",
+          "type": "boolean",
+          "default": false
+        },
         "chain_egress_action": {
           "description": "What a request that leaves the cluster after a secret read gets at the egress callout: block (default, every mode) or alert (opt-in). The leader answers the callout's chain check with it (GAP-0250).",
           "type": "string",
@@ -8186,6 +8191,9 @@
               "additionalProperties": false,
               "properties": {
                 "check_budget": {
+                  "$ref": "#/$defs/duration"
+                },
+                "send_budget": {
                   "$ref": "#/$defs/duration"
                 },
                 "queue_size": {

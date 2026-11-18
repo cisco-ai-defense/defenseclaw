@@ -232,7 +232,9 @@ type signInHealth struct {
 	since time.Time
 }
 
-func (h *signInHealth) record(d identity.IssuerDiagnosis, now time.Time) {
+// record keeps d and reports the cause it replaced when the cause changed
+// (a check that never ran counts as passing).
+func (h *signInHealth) record(d identity.IssuerDiagnosis, now time.Time) (before string, changed bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	switch {
@@ -241,7 +243,9 @@ func (h *signInHealth) record(d identity.IssuerDiagnosis, now time.Time) {
 	case h.last.Cause != d.Cause || h.since.IsZero():
 		h.since = now
 	}
+	before, changed = h.last.Cause, h.last.Cause != d.Cause
 	h.last, h.at = d, now
+	return before, changed
 }
 
 // failing is the cause of the last check ("" when it passed or never ran).
@@ -269,21 +273,12 @@ func (h *signInHealth) report() (SignInServerState, bool) {
 	return SignInServerState{State: "failing", Reason: h.last.Cause, Since: h.since.UTC().Format(time.RFC3339)}, true
 }
 
-// watchSignIn checks the sign-in server now and every signInCheckEvery,
-// and logs a change of cause.
+// watchSignIn checks the sign-in server now and every signInCheckEvery.
 func (st *substrateState) watchSignIn(ctx context.Context) {
 	t := time.NewTicker(signInCheckEvery)
 	defer t.Stop()
 	for {
-		before := st.signIn.failing()
-		c := st.checkSignIn(ctx)
-		if after := st.signIn.failing(); after != before {
-			if after == "" {
-				fmt.Fprintf(os.Stderr, "[substrate] %s: %s\n", c.ID, c.Detail)
-			} else {
-				fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", c.ID, c.Detail, c.Fix)
-			}
-		}
+		st.checkSignIn(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -307,8 +302,34 @@ func (st *substrateState) checkSignIn(ctx context.Context) SubstrateCheck {
 		}
 		d = st.cfg.SignInServer.DiagnoseIssuer(ctx)
 	}
-	st.signIn.record(d, time.Now())
-	return SignInServerCheck(d)
+	c := SignInServerCheck(d)
+	if before, changed := st.signIn.record(d, time.Now()); changed {
+		st.signInChanged(ctx, before, d, c)
+	}
+	return c
+}
+
+// signInChanged logs a change of the sign-in server's cause and writes it as
+// an audit alert, so an audit export shows when sign-in broke and when it
+// came back, as doctor and status do (substrate-1 GAP-0463). A failure that
+// goes on for the same cause writes nothing more.
+func (st *substrateState) signInChanged(ctx context.Context, before string, d identity.IssuerDiagnosis, c SubstrateCheck) {
+	details := map[string]any{"event": "sign_in_server", "check": c.ID, "issuer": d.Issuer}
+	severity, summary := "INFO", "the sign-in server answers again: "+c.Detail
+	if d.Cause == "" {
+		fmt.Fprintf(os.Stderr, "[substrate] %s: %s\n", c.ID, c.Detail)
+		details["state"], details["previous_cause"] = "restored", before
+	} else {
+		fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", c.ID, c.Detail, c.Fix)
+		severity, summary = "HIGH", "sign-in server failing ("+d.Cause+"): "+c.Detail
+		details["state"], details["cause"], details["fix"] = "failing", d.Cause, c.Fix
+		if s, ok := st.signIn.report(); ok {
+			details["since"] = s.Since
+		}
+	}
+	if st.alert != nil {
+		st.alert(ctx, severity, summary, details)
+	}
 }
 
 // SignInServerCheck is the doctor row for a sign-in server check, with a

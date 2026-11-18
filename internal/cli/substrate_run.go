@@ -134,8 +134,34 @@ func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor
 	if !noAsks {
 		o.Asks = substrateAsks{s.Client}
 	}
+	o.Health = substrateCrashCheck(s.Client, a)
 	return o, nil
 }
+
+// substrateCrashedErr says a crashed agent cannot be reached and how to get
+// it back (GAP-0410): its worker went away, and waiting does not bring it
+// back.
+func substrateCrashedErr(a api.Actor) error {
+	return fmt.Errorf("the agent %s/%s crashed (its worker went away) and is not running. "+
+		"Bring it back to its last saved state with: defenseclaw substrate undo %s", a.Atespace, a.Name, a.Name)
+}
+
+// substrateCrashCheck is the attach wait's health check: a crashed agent
+// ends the wait with substrateCrashedErr instead of "the cluster is full".
+func substrateCrashCheck(cl *api.Client, a api.Actor) func(context.Context) error {
+	return func(ctx context.Context) error {
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		now, err := cl.Get(cctx, a.Atespace, a.Name)
+		if err == nil && now.State == substrateStateCrashed {
+			return substrateCrashedErr(a)
+		}
+		return nil
+	}
+}
+
+// substrateStateCrashed is the state the gateway shows for a crashed actor.
+const substrateStateCrashed = "crashed"
 
 // --- connect ----------------------------------------------------------------
 
@@ -149,6 +175,9 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	a, err := resolveSubstrateActor(ctx, s.Client, ref)
 	if err != nil {
 		return substrateFail(err)
+	}
+	if a.State == substrateStateCrashed {
+		return substrateFail(substrateCrashedErr(a))
 	}
 	o, err := substrateAttachOptions(cmd, s, a, f.transport, f.noAsks)
 	if err != nil {

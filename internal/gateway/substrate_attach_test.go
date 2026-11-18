@@ -80,11 +80,14 @@ func TestSubstrateAttachThroughTheAdminListener(t *testing.T) {
 	if c := get("p-bob", "/api/v1/substrate/actors/eng-web/alice-1/attach/status"); c != http.StatusNotFound {
 		t.Fatalf("bob attaches to alice's actor: %d", c)
 	}
-	if c := get("p-admin", "/api/v1/substrate/actors/eng-web/alice-1/attach/status"); c != 200 {
+	// An administrator gets no session on another person's agent
+	// (GAP-0435), and the relay never sees the attempt.
+	before := len(seen)
+	if c := get("p-admin", "/api/v1/substrate/actors/eng-web/alice-1/attach/status"); c != http.StatusForbidden {
 		t.Fatalf("admin attach %d", c)
 	}
-	if !strings.Contains(seen[len(seen)-1], admin.ID()) {
-		t.Fatalf("admin attach not as themselves: %v", seen)
+	if len(seen) != before {
+		t.Fatalf("an admin attach reached the relay: %v", seen)
 	}
 	if c := get("p-alice", "/api/v1/substrate/actors/eng-web/alice-1/attach/readyz"); c != http.StatusNotFound {
 		t.Fatalf("unlisted relay path %d", c)

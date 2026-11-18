@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
@@ -166,12 +167,27 @@ func TestVerifyReadsTheAccessPolicies(t *testing.T) {
 		}
 		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckGrants], fleet.Fail, "1 other editor or owner")
 	})
-	t.Run("the gateway may not read them", func(t *testing.T) {
+	// GAP-0384: the read runs as the gateway's own ServiceAccount, so a
+	// refusal is the reading "the gateway lost its grant": red, with the fix.
+	t.Run("the gateway may not read them fails", func(t *testing.T) {
 		fakeKubectl(t, nil)
 		substrateClusterAPI = func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
 			return deniedReader{}, nil
 		}
-		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckGrants], fleet.Warn, "it needs the global viewer grant")
+		c := verifyChecks(t, fleetInstallOK)[fleet.CheckGrants]
+		wantCheck(t, c, fleet.Fail, "it needs the global viewer grant")
+		wantCheck(t, c, fleet.Fail, "setup --print-access-policies")
+		out, _, err := runSubstrate(t, newSubstrateVerifyCmd(), "--install-file", writeInstall(t, fleetInstallOK))
+		if cliusage.ExitCode(err) != 1 || !strings.Contains(out, "not verified") {
+			t.Errorf("verify = exit %d %q, want exit 1 and not verified", cliusage.ExitCode(err), out)
+		}
+	})
+	t.Run("an unauthenticated read warns", func(t *testing.T) {
+		fakeKubectl(t, nil)
+		substrateClusterAPI = func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
+			return unauthenticatedReader{}, nil
+		}
+		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckGrants], fleet.Warn, "could not read the access policies")
 	})
 	t.Run("no token or no port-forward is a warning with the reason", func(t *testing.T) {
 		fakeKubectl(t, nil)
@@ -194,6 +210,14 @@ func (deniedReader) Templates(context.Context) (int, error) {
 	return 0, status.Error(codes.PermissionDenied, "not a viewer")
 }
 func (deniedReader) Close() error { return nil }
+
+// unauthenticatedReader is a token the API server did not take: not a
+// reading of the grants.
+type unauthenticatedReader struct{ deniedReader }
+
+func (unauthenticatedReader) GetAccessPolicy(context.Context, string) (*setup.AccessPolicy, error) {
+	return nil, status.Error(codes.Unauthenticated, "token expired")
+}
 
 func TestVerifyProbesTheActorListener(t *testing.T) {
 	t.Run("only actor routes", func(t *testing.T) {

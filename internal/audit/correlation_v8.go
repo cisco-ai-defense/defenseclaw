@@ -2077,9 +2077,15 @@ func (tx *CorrelationTx) Commit() error {
 	}
 	err := tx.tx.Commit()
 	tx.finish()
+	var store *Store
+	if tx.repo != nil {
+		store = tx.repo.store
+	}
 	if err != nil {
+		store.NoteWriteError("correlation commit", err)
 		return fmt.Errorf("audit: commit correlation transaction: %w", err)
 	}
+	store.noteWriteOK()
 	return nil
 }
 

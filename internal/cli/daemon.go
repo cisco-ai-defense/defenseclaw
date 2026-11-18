@@ -356,6 +356,25 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	}
 
 	if !rotationTransaction {
+		if heldPID, ok := gatewayOutOfReach(cfg); ok {
+			// GAP-1212: this account's gateway runs where this shell cannot
+			// open it (elevated in another logon session). It is running:
+			// say so and change nothing, as for any running gateway.
+			if !coldStart {
+				// An explicit start of a running gateway still ends a stop.
+				clearGatewayColdStartState(config.DefaultDataPath())
+			}
+			Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d), elevated or in another Windows logon session", heldPID))
+			fmt.Println(gatewayOutOfReachFix("status") + " to check its health")
+			if requireEveryConnectorRequested(cmd) {
+				return cliusage.WithExitCode(errors.New("the gateway runs elevated or in another logon session, so no connector is proven guarded from this shell"),
+					gatewayStartAdmissionRefusedExitCode)
+			}
+			return nil
+		}
+	}
+
+	if !rotationTransaction {
 		// No gateway of this account runs: park the route a crash, a forced
 		// stop or a logoff left in place before anything else, so a start
 		// refused because another process holds the port leaves the agents
@@ -491,7 +510,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		requirements,
 	)
 	if errors.Is(err, errGatewayStillStarting) {
-		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+		return reportGatewayStillStarting(pid, d.LogFile(), cfg, cfgErr, startedAsUnitExecStart())
 	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -642,6 +661,16 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		}
 	} else {
 		running, pid = d.IsRunning()
+		if !running {
+			if heldPID, ok := gatewayOutOfReach(cfg); ok {
+				// GAP-1212: this shell cannot open, so cannot stop, this
+				// account's gateway that runs elevated in another logon
+				// session. Refuse with nothing changed (the watchdog, the
+				// stop marker, the token and the agents' routes stay), never
+				// "not running" with exit 0.
+				return gatewayOutOfReachLifecycleError("stop", heldPID)
+			}
+		}
 	}
 
 	watchdogWasRunning := false
@@ -865,6 +894,12 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "restart"); err != nil {
 		return err
 	}
+	if running, _ := d.IsRunning(); !running {
+		if heldPID, ok := gatewayOutOfReach(cfg); ok {
+			// GAP-1212: as stop, before anything is stopped.
+			return gatewayOutOfReachLifecycleError("restart", heldPID)
+		}
+	}
 	var cfgErr error
 	client, err := gatewayPeerClientForURL(cfg, sidecarStatusURL(cfg), defaultReadinessHTTPTimeout)
 	if err != nil {
@@ -921,7 +956,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		requirements,
 	)
 	if errors.Is(err, errGatewayStillStarting) {
-		return reportGatewayStillStarting(err, pid, d.LogFile(), cfg, cfgErr)
+		return reportGatewayStillStarting(pid, d.LogFile(), cfg, cfgErr, false)
 	}
 	if err != nil {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
@@ -1147,9 +1182,9 @@ type daemonReadinessRequirements struct {
 	// step extend the readiness timeout up to startReadinessProgressCap.
 	reportProgress func(elapsed time.Duration, step string)
 
-	// keepSlowStart leaves the launched gateway running when an interactive
-	// start or restart reaches the readiness deadline while that process is
-	// still alive (GAP-2022). Stopping it left no gateway and no watchdog on
+	// keepSlowStart leaves the launched gateway running when a start or
+	// restart reaches the readiness deadline while that process is still
+	// alive (GAP-2022). Stopping it left no gateway and no watchdog on
 	// a loaded host where it would have answered moments later.
 	keepSlowStart bool
 }

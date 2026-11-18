@@ -62,9 +62,7 @@ func TestR104RoundNReviewPatchBodyPathMention(t *testing.T) {
 // command or a startup file) does.
 func TestR104RoundNReviewGlobLeadingDot(t *testing.T) {
 	_, home, cwd := globFactsFixture(t, false)
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(cwd, ".private")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, filepath.Join(home, ".ssh"), filepath.Join(cwd, ".private"))
 	allowed := []string{
 		`git add */*`,
 		`cp payload */authorized_keys`,

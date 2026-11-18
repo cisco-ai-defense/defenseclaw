@@ -45,7 +45,7 @@ const (
 	guardSelfMask   = unix.IN_MOVE_SELF | unix.IN_DELETE_SELF
 )
 
-// watchGuarded watches folders below the agent's HOME that hold DefenseClaw's
+// watchGuardedAs watches folders below the agent's HOME that hold DefenseClaw's
 // root-owned hook registration (Antigravity's ~/.gemini, GAP-0120). The agent
 // owns HOME, so it can rename such a folder away and make its own in its
 // place. The relay trips on the watch event itself (substrate-1 GAP-0356): a
@@ -61,15 +61,12 @@ const (
 // *guardDegraded for a watch. A watch that ends while the agent runs (a read
 // error, a watch the kernel dropped) is a trip whose reason starts with
 // guardWatchEnded.
-func watchGuarded(ctx context.Context, dirs []string, broken func(reason string)) error {
-	return watchGuardedAs(ctx, dirs, broken, nil)
-}
-
-// watchGuardedAs is watchGuarded looking at the folders with cred as the
-// file-system identity (a separated relay: the agent's user, GAP-0458). A
-// root relay that keeps only SETUID, SETGID and KILL is not exempt from
-// file modes, and the guarded folders lie in the agent's HOME, whose mode
-// the base image picks (0700 is common).
+//
+// It looks at the folders with cred as the file-system identity (a separated
+// relay: the agent's user, GAP-0458; nil: the relay's own). A root relay
+// that keeps only SETUID, SETGID and KILL is not exempt from file modes, and
+// the guarded folders lie in the agent's HOME, whose mode the base image
+// picks (0700 is common).
 func watchGuardedAs(ctx context.Context, dirs []string, broken func(reason string), cred agentCred) error {
 	if len(dirs) == 0 {
 		return nil

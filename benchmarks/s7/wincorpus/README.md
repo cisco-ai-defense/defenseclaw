@@ -60,3 +60,10 @@ categories `computername hostalias labdomain netbios labuser domuser upn labfqdn
 values, plus every row of the corpus file(s) for both pattern categories and denylist values. It exits 1 on any hit and prints `file:line` or the case id with the category,
 never the value. The public dataset handles named in `DATASET_BY_SRC` are provenance and are skipped in files; `--allow-cat` names any further documented public-dataset
 category (default: none).
+
+**Owner trace set guard (GAP-1238):** the owner's own agent traces and every file derived from them are private by design: held out, never published, outside git, on the dev and S7 bench
+boxes only. `leakscan-repo` therefore also fails when a tracked file under `benchmarks/` (the git index, so anything staged counts) or a `--corpus` file is one of those files, by
+sha256 or by corpus name (`agent-transcripts*`, `chainbench`, `e2e-hold*`, `ot149`, `prompt-real`, `response-owner`, `tool-result-owner*`, `sysone*`, `pfrev`, `labelfix`, `nfrev-w32`, the
+`s7i` sets). The fingerprints (sha256 values and corpus names only, no content) live in a file outside git named by `$DC_OWNER_FINGERPRINTS` (or `--fingerprints`); with no file the guard
+prints `skipped: no fingerprint file` and the gate does not fail, unless `--require-owner-fingerprints` is given (the pre-READY run on the dev host passes it). `build.py owner-check [PATH ...]`
+runs only this check, on the tracked files plus any files or directories given.

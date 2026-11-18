@@ -166,6 +166,12 @@ func rulePackValidateCommand(cfg *config.Config, goos string) string {
 
 func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s rulePackScope, scope string) (*guardrail.RulePack, error) {
 	if s.ref.Name != "" && s.dir == "" && !cfg.EmbeddedRulePack(s.ref) {
+		if rootErr := cfg.WindowsShippedRulePackRootError(s.ref.Name); rootErr != nil {
+			// A managed Windows install ships the pack under the trusted
+			// ProgramData root: name that, not policy_dir (GAP-0085).
+			return nil, fmt.Errorf("%s rule pack %q: the folder this release ships it in cannot be found because %v; run %s as LocalSystem or from an elevated PowerShell prompt to register and write it again (%s)",
+				scope, s.ref.Name, rootErr, managed.WindowsSetupCommand("/repair"), managed.WindowsSetupSource)
+		}
 		if config.IsBuiltinRulePack(s.ref.Name) {
 			return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set", scope, s.ref.Name)
 		}

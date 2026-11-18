@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/configwatch"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/egressspec"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity/ateactors"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
@@ -180,6 +181,12 @@ var substrateRateLimited = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Actor requests refused by the fair-share limits (defenseclaw.substrate.rate_limited).",
 }, []string{"scope", "route"})
 
+// substrateAuthRefused is defenseclaw.substrate.auth_refused (GAP-0408).
+var substrateAuthRefused = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "defenseclaw_substrate_auth_refused_total",
+	Help: "Tokens refused on the Substrate actor or admin listener, by listener and closed reason (defenseclaw.substrate.auth_refused).",
+}, []string{"listener", "reason"})
+
 func runServe(cmd *cobra.Command, args []string) error {
 	if !serveFlags.substrate {
 		return errors.New("serve runs only on Agent Substrate: pass --substrate")
@@ -191,7 +198,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return errors.New("serve: --plain-http is for tests outside a cluster; use --actor-plain-http to serve only the actor listener without TLS")
 	}
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(substrateRateLimited)
+	reg.MustRegister(substrateRateLimited, substrateAuthRefused)
 	var ready atomic.Bool
 	go serveSubstrateMetrics(reg, &ready)
 	switch serveFlags.role {
@@ -570,6 +577,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			OnRateLimited: func(scope ratelimit.Scope, route string) {
 				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
 			},
+			OnAuthRefused: func(listener, reason string) {
+				substrateAuthRefused.WithLabelValues(listener, reason).Inc()
+			},
 		}
 		out.PolicyReset = substratePolicyResetter()
 		if people != nil {
@@ -926,6 +936,9 @@ func substrateStartupChecks(c *config.Config) {
 	if line := substrateAuditExportWarning(c); line != "" {
 		fmt.Fprintln(os.Stderr, line)
 	}
+	for _, line := range substrateEchoHostWarnings(c.Substrate.Secrets) {
+		fmt.Fprintln(os.Stderr, line)
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -935,6 +948,33 @@ func substrateStartupChecks(c *config.Config) {
 			fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", chk.ID, chk.Detail, chk.Fix)
 		}
 	}()
+}
+
+// substrateEchoHostWarnings says, once at start, which secrets are bound to
+// a host that echoes or publishes requests (GAP-0405): egress injects the
+// real value there, and the answer hands it back to the agent and its
+// model. A warning, not a refusal: a test binding is legitimate, and no
+// list covers every echoing service.
+func substrateEchoHostWarnings(secrets []config.SubstrateSecret) []string {
+	var out []string
+	for _, sec := range secrets {
+		seen := map[string]bool{}
+		var hits []string
+		for _, h := range sec.Inject.Hosts {
+			for _, e := range egressspec.EchoHostsCovered(h) {
+				if !seen[e] {
+					seen[e] = true
+					hits = append(hits, e)
+				}
+			}
+		}
+		if len(hits) > 0 {
+			out = append(out, fmt.Sprintf("[substrate] warning: secret %s is injected on %s, which return the request they get: "+
+				"the real value comes back to the agent and its model. Bind the secret only to the API that needs it "+
+				"(docs: Substrate secrets, hosts that echo tokens).", sec.Name, strings.Join(hits, ", ")))
+		}
+	}
+	return out
 }
 
 // substrateAuditExportWarning says, once at start, that a gateway pod keeps
@@ -1028,7 +1068,8 @@ func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) boo
 }
 
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
-// crashed or deleted event the actor's pending asks are closed.
+// crashed, reverted or deleted event the actor's pending asks are closed
+// (a revert drops the held request with the run it belonged to, GAP-0415).
 func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
 	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
@@ -1042,6 +1083,8 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 		switch ev.Event {
 		case chainstate.LifecycleCrashed:
 			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
+		case chainstate.LifecycleReverted:
+			asksStore.CloseActor(ev.Actor.UID, "the actor was reverted to a snapshot")
 		case chainstate.LifecycleDeleted:
 			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
 		}
@@ -1113,8 +1156,15 @@ func leaderChainOptions(cfg *config.Config, store registry.Store, dir string, re
 	opts := substrateChainRegistrations(store)
 	action, source := leaderChainEgressAction(cfg)
 	opts.Dir, opts.EgressAction, opts.Retention = dir, action, retention
+	opts.StartGrace = leaderChainStartGrace
 	return opts, source
 }
+
+// leaderChainStartGrace covers a gateway's note of a tool step it could not
+// record during a leader outage: retried every 5 s with a 2 s timeout
+// (internal/gateway substrateNotes), so 15 s holds two tries of a small
+// backlog (GAP-0601).
+const leaderChainStartGrace = 15 * time.Second
 
 // gatewayRoleChainEgressAction is the chain egress action the gateway role
 // hands to gateway.SetSubstrateChainEgressAction: the verified actor's hook

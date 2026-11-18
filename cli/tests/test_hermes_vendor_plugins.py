@@ -38,6 +38,8 @@ def test_installed_release_is_covered():
         coverage = shipped_plugin_coverage(raw)
         assert coverage.state == COVERED, raw
         assert "not scanned" in coverage.detail and "an edited one is scanned" in coverage.detail
+        # rel-1-0-10:GAP-0765: a plugin Hermes wrote bytecode for is scanned once, not per scanner change.
+        assert "scanned once for that bytecode, not again for a scanner change" in coverage.detail
 
 
 def test_hermes_newer_than_every_release_says_what_happens_and_what_to_do():
@@ -100,7 +102,7 @@ def test_vendor_skill_with_planted_bytecode_is_not_bundled(tmp_path, monkeypatch
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_bytes((fixture / "media" / "songsee" / "SKILL.md").read_bytes())
     clean = hermes_skills._tree_sha256(str(skill))
-    assert clean == hermes_skills.VENDOR_DIGESTS["media/songsee"]
+    assert clean in hermes_skills.VENDOR_DIGESTS["media/songsee"]
     cache = skill / "scripts" / "__pycache__"
     cache.mkdir(parents=True)
     (cache / "tool.cpython-312.pyc").write_bytes(b"planted bytecode")

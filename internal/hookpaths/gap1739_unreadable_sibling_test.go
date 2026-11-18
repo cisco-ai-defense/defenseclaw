@@ -33,9 +33,7 @@ func TestActionGlobUnreadableSiblingOfTheUserHoldsNoMatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(keys, filepath.Join(cwd, "a", "keylink")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, keys, filepath.Join(cwd, "a", "keylink"))
 	if err := os.Chmod(filepath.Join(cwd, "aaa_unread"), 0); err != nil {
 		t.Fatal(err)
 	}

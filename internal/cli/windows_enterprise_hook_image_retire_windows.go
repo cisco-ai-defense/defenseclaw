@@ -27,7 +27,7 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 
-	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -125,13 +125,14 @@ func runWindowsHookImageRetire(skipProfiles []string) windowsHookImageRetireRepo
 		Profiles: func() (map[string]windowsHookImageProfile, error) {
 			return windowsHookImageEnrolledProfiles(roots)
 		},
-		Actor:      windowsHookImageRetireActor,
-		Audit:      postWindowsHookImageRetireSkip,
-		ReadMarker: os.ReadFile,
-		Now:        time.Now,
-		Sleep:      time.Sleep,
-		Wait:       windowsHookImageRetireWait,
-		Poll:       windowsHookImageRetirePoll,
+		Actor:        windowsHookImageRetireActor,
+		CallerSystem: windowsHookImageCallerIsSystem,
+		Audit:        postWindowsHookImageRetireSkip,
+		ReadMarker:   os.ReadFile,
+		Now:          time.Now,
+		Sleep:        time.Sleep,
+		Wait:         windowsHookImageRetireWait,
+		Poll:         windowsHookImageRetirePoll,
 	})
 }
 
@@ -148,9 +149,29 @@ func windowsHookImageEnrolledProfiles(roots winpath.EnterpriseRoots) (map[string
 		if sid == "" || (target.Enabled != nil && !*target.Enabled) {
 			continue
 		}
-		profiles[sid] = windowsHookImageProfile{Account: strings.TrimSpace(target.User), Home: strings.TrimSpace(target.UserHome)}
+		profiles[sid] = windowsHookImageProfile{
+			Account: windowsHookImageProfileAccount(target.User, target.UserHome, func() string { return windowsHookImageSIDAccount(sid) }),
+			Home:    strings.TrimSpace(target.UserHome),
+		}
 	}
 	return profiles, nil
+}
+
+// windowsHookImageSIDAccount is "DOMAIN\name" of sid, or "" when it has
+// no name.
+func windowsHookImageSIDAccount(sid string) string {
+	parsed, err := windows.StringToSid(sid)
+	if err != nil {
+		return ""
+	}
+	account, domain, _, err := parsed.LookupAccount("")
+	if err != nil || account == "" {
+		return ""
+	}
+	if domain != "" {
+		return domain + `\` + account
+	}
+	return account
 }
 
 // windowsHookImageRetireActor names the account that runs retire:
@@ -171,22 +192,17 @@ func windowsHookImageRetireActor() string {
 }
 
 // postWindowsHookImageRetireSkip writes the HIGH audit row of one skipped
-// profile through the managed gateway: who skipped it and when, the SID and
-// the files that still name a launch folder (GAP-0794 review F4). It is an
-// operator mutation of the managed hook state, so the config-update action.
+// profile through the managed gateway (windowsHookImageRetireSkipActivity),
+// with this process's account as the audit actor.
 func postWindowsHookImageRetireSkip(profile windowsHookImageSkippedProfile) error {
 	return writeWindowsEnterpriseAuditRow(func() error {
-		return postWindowsManagedObservability(map[string]any{"kind": "activity", "activity": map[string]any{
-			"actor":       profile.SkippedBy,
-			"action":      string(audit.ActionConfigUpdate),
-			"target_type": "hook-image-retire-skip",
-			"target_id":   profile.SID,
-			"severity":    "HIGH",
-			"before":      map[string]any{"account": profile.Account, "still_named": profile.Files},
-			"after":       map[string]any{"skipped_at": profile.SkippedAt, "retired": false},
-		}})
+		return postWindowsManagedObservability(windowsHookImageRetireSkipActivity(profile, windowsHookImageRetireAuditActor()))
 	})
 }
+
+// windowsHookImageRetireAuditActor is the audit actor of the account that
+// runs retire (os:sid:<SID>:<DOMAIN/name>).
+func windowsHookImageRetireAuditActor() string { return configwrite.CurrentOSActor() }
 
 // windowsHookImageGuardianService is the guardian service beside the
 // install root's gateway service: DefenseClawHookGuardian, or a

@@ -22,9 +22,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -238,10 +240,14 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	if !substrateActorNameRE.MatchString(name) {
 		return SubstrateCreated{}, fmt.Errorf("%w: %q is not a valid actor name", ErrSubstrateActorExists, name)
 	}
+	sel, err := s.classSelector(ctx, tmpl, req.SandboxClass)
+	if err != nil {
+		return SubstrateCreated{}, err
+	}
 	a, err := s.Client.CreateActor(ctx, &ateapi.Actor{
 		Metadata:       &ateapi.ResourceMetadata{Atespace: req.Atespace, Name: name},
 		ActorTemplate:  tref,
-		WorkerSelector: substrateClassSelector(tmpl, req.SandboxClass),
+		WorkerSelector: sel,
 	})
 	if ateapi.IsAlreadyExists(err) {
 		return SubstrateCreated{}, ErrSubstrateActorExists
@@ -257,27 +263,109 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	}, nil
 }
 
-// substrateClassSelector is the worker selector an actor needs to run in
-// class: nil when the template already meets it (its own selector applies),
-// else the template's labels with the class label set (PLAN 7.3,
-// controller.SandboxClassLabel), so the actor lands on a pool of that class
-// and the controller's class check passes.
-func substrateClassSelector(tmpl *ateapi.ActorTemplate, class string) *ateapi.Selector {
+// SubstrateClassUnavailable is a create whose template runs on no worker
+// of the sandbox class the profile requires (substrate.default_sandbox_class
+// or the profile's sandbox_class), and that no pool label narrows to one:
+// nothing is created, rather than an actor no worker can take (GAP-0386).
+type SubstrateClassUnavailable struct {
+	Template string
+	Class    string
+	// Have is the classes of the workers the template selects, "" for none.
+	Have string
+}
+
+func (e *SubstrateClassUnavailable) Error() string {
+	have := e.Have
+	if have == "" {
+		have = "no worker"
+	}
+	return "template " + e.Template + " runs on " + have + "; sandbox_class " + e.Class + " is required"
+}
+
+// maxSelectorLabels is the Substrate bound on a selector's labels.
+const maxSelectorLabels = 10
+
+// classSelector is the worker selector an actor needs to run in class, on
+// top of its template's (the scheduler ANDs the two): nil when the template
+// already lands only on workers of that class, else one pool label that
+// narrows the template's workers to that class. The pool decides the class,
+// so the workers say which class a selector lands on: a template pinned to
+// a microVM pool with --worker-label carries no class label (GAP-0386).
+func (s *SubstrateATEActions) classSelector(ctx context.Context, tmpl *ateapi.ActorTemplate, class string) (*ateapi.Selector, error) {
 	class = strings.ToLower(strings.TrimSpace(class))
 	labels := tmpl.GetWorkerSelector().GetMatchLabels()
-	have := strings.ToLower(labels[controller.SandboxClassLabel])
-	if have == "" {
-		have = config.SubstrateSandboxGVisor // every actor is at least gVisor (D7), as the controller counts it
+	named := strings.ToLower(labels[controller.SandboxClassLabel])
+	if class == "" || config.SandboxClassSatisfies(orDefaultClass(named), class) {
+		// Every actor is at least gVisor (D7), as the controller counts it;
+		// a template built with --class names its class.
+		return nil, nil
 	}
-	if class == "" || config.SandboxClassSatisfies(have, class) {
-		return nil
+	workers, err := ateapi.AllWorkers(ctx, s.Client, 0)
+	if err != nil {
+		return nil, fmt.Errorf("read the workers to place a %s actor: %w", class, err)
 	}
-	out := make(map[string]string, len(labels)+1)
-	for k, v := range labels {
-		out[k] = v
+	have := controller.WorkerClasses(workers, labels)
+	if named == "" && controller.ClassesMeet(have, class) {
+		return nil, nil
 	}
-	out[controller.SandboxClassLabel] = class
-	return &ateapi.Selector{MatchLabels: out}
+	if len(labels) < maxSelectorLabels {
+		for _, extra := range substrateClassLabels(workers, labels, class) {
+			sel := maps.Clone(labels)
+			if sel == nil {
+				sel = map[string]string{}
+			}
+			sel[extra[0]] = extra[1]
+			if controller.ClassesMeet(controller.WorkerClasses(workers, sel), class) {
+				return &ateapi.Selector{MatchLabels: map[string]string{extra[0]: extra[1]}}, nil
+			}
+		}
+	}
+	return nil, &SubstrateClassUnavailable{Template: ateapi.Key(ateapi.RefOf(tmpl.GetMetadata())), Class: class, Have: strings.Join(have, ", ")}
+}
+
+func orDefaultClass(class string) string {
+	if class == "" {
+		return config.SubstrateSandboxGVisor
+	}
+	return class
+}
+
+// substrateClassLabels are the pool labels that may narrow labels to class,
+// each a {key, value} the template does not set: SandboxClassLabel first,
+// then the labels of the workers of that class that labels matches, in
+// order.
+func substrateClassLabels(workers []*ateapi.Worker, labels map[string]string, class string) [][2]string {
+	var out [][2]string
+	seen := map[[2]string]bool{}
+	add := func(k, v string) {
+		if _, set := labels[k]; set || seen[[2]string{k, v}] {
+			return
+		}
+		seen[[2]string{k, v}] = true
+		out = append(out, [2]string{k, v})
+	}
+	add(controller.SandboxClassLabel, class)
+	var more [][2]string
+	for _, w := range workers {
+		// A worker labels selects that reports class (one that has not
+		// reported counts as gvisor here).
+		if !controller.ClassesMeet(controller.WorkerClasses([]*ateapi.Worker{w}, labels), class) {
+			continue
+		}
+		for k, v := range w.GetLabels() {
+			more = append(more, [2]string{k, v})
+		}
+	}
+	slices.SortFunc(more, func(a, b [2]string) int {
+		if c := strings.Compare(a[0], b[0]); c != 0 {
+			return c
+		}
+		return strings.Compare(a[1], b[1])
+	})
+	for _, kv := range more {
+		add(kv[0], kv[1])
+	}
+	return out
 }
 
 // Resume writes the policy, then resumes. It runs after the registration

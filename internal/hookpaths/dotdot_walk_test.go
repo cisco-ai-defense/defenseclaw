@@ -34,9 +34,7 @@ func TestDotDotWalkUnresolvedReadings(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		return // the junction loop is in the gateway test (mklink /J)
 	}
-	if err := os.Symlink("lp", filepath.Join(root, "lp")); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, "lp", filepath.Join(root, "lp"))
 	if !dotDotWalkUnresolved(root + sep + "lp" + sep + ".." + sep + "x") {
 		t.Fatal("a .. after a link loop read as known")
 	}

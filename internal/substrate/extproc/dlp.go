@@ -23,7 +23,9 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -79,13 +81,36 @@ type binding struct {
 	hosts       *hostMatcher
 	header      string
 	placeholder string
+	profiles    []string
 }
 
 func compileBindings(in []SecretBinding) []binding {
 	out := make([]binding, 0, len(in))
 	for _, s := range in {
 		out = append(out, binding{name: s.Name, hosts: mustHostMatcher(s.Hosts),
-			header: strings.ToLower(strings.TrimSpace(s.Header)), placeholder: s.Placeholder})
+			header: strings.ToLower(strings.TrimSpace(s.Header)), placeholder: s.Placeholder, profiles: s.Profiles})
+	}
+	return out
+}
+
+// injectedSecrets names the secrets Substrate's egress adds to an allowed
+// request from an actor of profile to host (GAP-0452): the egress rule of
+// every bound host carries the secret's header, swapped in after the
+// callout ran, so the callout is the last DefenseClaw component that can
+// record it.
+func injectedSecrets(bs []binding, host, profile string) []binding {
+	var out []binding
+	for _, b := range bs {
+		if _, ok := b.hosts.match(host); !ok {
+			continue
+		}
+		if len(b.profiles) > 0 && !slices.ContainsFunc(b.profiles, func(g string) bool {
+			ok, err := path.Match(g, profile)
+			return err == nil && ok
+		}) {
+			continue
+		}
+		out = append(out, b)
 	}
 	return out
 }

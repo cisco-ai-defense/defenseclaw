@@ -800,7 +800,12 @@ func runWindowsReacquiringHolder(t *testing.T, cmd *exec.Cmd) (stop func(), reop
 // snapshot and its probe, which hides the hold from that check (the product
 // limit rel-1-0-10:GAP-0068), and re-opened the file before the test could
 // start the freed hook. A step that finds its handle closed by someone else
-// says so ("lost n") and opens the file again only after allowReopen. state
+// says so ("lost n") and opens the file again only after allowReopen. The
+// handle is lost when its value no longer names this file: a closed value is
+// handed out again by the next handle the process opens (the step's own
+// event, PowerShell's), and DuplicateHandle of it then succeeds, so a
+// successful duplicate alone said "still held" after the guardian had closed
+// the file's handle (rel-1-0-10:GAP-0068, 2 of 4 native runs). state
 // is the latest handle value (-1 while it waits to re-open), how many times
 // it rotated and how many times it lost the handle.
 func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), state func() (handle int64, rotations, lost int), step func(), allowReopen func()) {
@@ -818,11 +823,14 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 		`  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool DuplicateHandle(IntPtr sp, IntPtr sh, IntPtr tp, out IntPtr th, uint acc, bool inh, uint opt);`,
 		`  [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();`,
 		`  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);`,
+		`  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern uint GetFinalPathNameByHandleW(IntPtr h, System.Text.StringBuilder b, uint n, uint f);`,
+		`  public static bool Names(IntPtr h, string leaf) { var b = new System.Text.StringBuilder(32768); uint n = GetFinalPathNameByHandleW(h, b, 32768, 0); return n > 0 && n < 32768 && b.ToString().EndsWith(leaf, StringComparison.OrdinalIgnoreCase); }`,
 		`}`,
 		`'@`,
 		fmt.Sprintf(`$p = '%s'`, strings.ReplaceAll(path, "'", "''")),
 		fmt.Sprintf(`$g = '%s'`, strings.ReplaceAll(gate, "'", "''")),
 		fmt.Sprintf(`$s = '%s'`, strings.ReplaceAll(stepGate, "'", "''")),
+		fmt.Sprintf(`$leaf = '%s'`, strings.ReplaceAll(`\`+filepath.Base(filepath.Dir(path))+`\`+filepath.Base(path), "'", "''")),
 		`$me = [R]::GetCurrentProcess(); $rot = 0; $lost = 0; $keep = @()`,
 		`$h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero)`,
 		`[Console]::Out.WriteLine('ready'); [Console]::Out.Flush()`,
@@ -834,7 +842,7 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 		`  $n = [IntPtr]::Zero`,
 		// -1 is "could not open" (the hook is in use for a moment): try again; it is not a handle to rotate.
 		`  if ($h.ToInt64() -eq -1) { $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero) }`,
-		`  elseif ([R]::DuplicateHandle($me, $h, $me, [ref]$n, 0, $false, 2)) { [void][R]::CloseHandle($h); $h = $n; $rot++ }`,
+		`  elseif ([R]::Names($h, $leaf) -and [R]::DuplicateHandle($me, $h, $me, [ref]$n, 0, $false, 2)) { [void][R]::CloseHandle($h); $h = $n; $rot++ }`,
 		// The handle is gone (closed by the guardian): report it, then wait
 		// for the test to let it open the file again.
 		`  else { $lost++; [Console]::Out.WriteLine('lost ' + $lost); [Console]::Out.Flush()`,
@@ -948,13 +956,22 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	resetWindowsHeldSwapsForTest(t)
 	advance := fakeWindowsHeldSwapClock(t)
 	var rows []windowsHolderAuditRow
-	savedStandalone, savedSys, savedPost := windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost
+	savedStandalone, savedSys, savedPost, savedSlow := windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost, windowsHolderSlowScan
 	windowsHolderStandalone = func() bool { return true }
 	windowsHolderSys = interactiveFactsSystem{windowsNativeHolderSystem{}}
 	windowsHolderAuditPost = func(row windowsHolderAuditRow) error { rows = append(rows, row); return nil }
+	// The checks are on the fake clock, the scans on the real one: a scan
+	// slowed by a loaded runner (over windowsHolderSlowScan) puts the next
+	// scan off like a refused hold and moves the close past the check the
+	// test expects it at (rel-1-0-10:GAP-0068, 1 of 3 runs on both sides).
+	windowsHolderSlowScan = time.Hour
 	resetWindowsHolderOutputForTest()
+	var log strings.Builder
 	t.Cleanup(func() {
-		windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost = savedStandalone, savedSys, savedPost
+		if t.Failed() {
+			t.Logf("guardian said: %s", log.String())
+		}
+		windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost, windowsHolderSlowScan = savedStandalone, savedSys, savedPost, savedSlow
 		resetWindowsHolderOutputForTest()
 	})
 	root := t.TempDir()
@@ -971,7 +988,6 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
 		t.Fatalf("keep copy: restored %q, %v", damage, err)
 	}
-	var log strings.Builder
 	check := func() {
 		t.Helper()
 		if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {

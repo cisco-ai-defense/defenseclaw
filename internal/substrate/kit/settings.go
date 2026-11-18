@@ -10,11 +10,13 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxruntime"
 )
@@ -82,6 +84,92 @@ type OverlayOptions struct {
 	// HarnessVersion is the agent version the image pins (it decides the
 	// Claude Code default model, ClaudeCodeHaiku55MinVersion).
 	HarnessVersion string
+	// RegistryTokens are the npm registry hosts a substrate.secrets entry
+	// injects the Authorization header on, with the placeholder the kit's
+	// npmrc sends there (NPMRegistryTokens, GAP-0529).
+	RegistryTokens []RegistryToken
+}
+
+// RegistryToken is one npm registry host that egress injects a credential
+// on, and the placeholder npm sends it in the credential's place.
+type RegistryToken struct {
+	Host, Placeholder string
+}
+
+// NPMGlobalConfig is the kit's npm configuration. npm reads its global
+// configuration from <prefix>/etc/npmrc, and the prefix is the base image's
+// (/usr for a distribution node), so the kit names this file in
+// npm_config_globalconfig (GAP-0529).
+const NPMGlobalConfig = "/usr/local/etc/npmrc"
+
+// NPMBaseConfigs are the global npm configurations a base image may carry,
+// by the npm it ships: npm's global file is <prefix>/etc/npmrc, and the
+// prefix is the folder above node's bin folder (/usr/local for the node
+// images, /usr for a distribution node). The first npm the image has wins.
+var NPMBaseConfigs = []struct{ NPM, Config string }{
+	{"/usr/local/bin/npm", "/usr/local/etc/npmrc"},
+	{"/usr/bin/npm", "/usr/etc/npmrc"},
+}
+
+// npmEnvReference is an npmrc value that only names an environment
+// variable (${NPM_TOKEN}): no value is in the file.
+var npmEnvReference = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\}$`)
+
+// npmCredentialKey reports whether an npmrc key (also a //registry/:key)
+// holds a credential or a client key.
+func npmCredentialKey(k string) bool {
+	k = strings.ToLower(strings.TrimSpace(k))
+	if i := strings.LastIndex(k, ":"); i >= 0 {
+		k = k[i+1:]
+	}
+	switch k {
+	case "_authtoken", "_auth", "_password", "password", "otp", "cert", "key", "certfile", "keyfile":
+		return true
+	}
+	return false
+}
+
+// WithBaseNPMConfig is the kit's npmrc (kitData) with the settings of the
+// base image's global npmrc (base, read from path) before the kit's own.
+// npm_config_globalconfig makes npm read the kit's file instead of the
+// base's (GAP-0529), so the base's registry, scope registries, cafile,
+// strict-ssl and proxy settings would be lost (GAP-0576); the kit's lines
+// come after them and win. A base global npmrc that holds a credential is
+// refused: an actor holds no secret value (D14), and egress injects
+// registry credentials (substrate.secrets). A value that only names an
+// environment variable is not a credential.
+func WithBaseNPMConfig(kitData, base []byte, path string) ([]byte, error) {
+	var keep []string
+	for _, raw := range strings.Split(string(base), "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		k, v, _ := strings.Cut(line, "=")
+		k, v = strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`)
+		if strings.EqualFold(k, "globalconfig") {
+			continue
+		}
+		if npmCredentialKey(k) && !npmEnvReference.MatchString(v) {
+			return nil, fmt.Errorf("the base image's npm configuration %s sets %s, a credential: remove it from the image and bind the registry's credential in substrate.secrets (egress injects it)", path, k)
+		}
+		keep = append(keep, line)
+	}
+	if len(keep) == 0 {
+		return kitData, nil
+	}
+	s := string(kitData)
+	i := 0
+	for i < len(s) && s[i] == '#' {
+		j := strings.IndexByte(s[i:], '\n')
+		if j < 0 {
+			i = len(s)
+			break
+		}
+		i += j + 1
+	}
+	block := "# From the base image's " + path + " (npm reads this file instead):\n" + strings.Join(keep, "\n") + "\n# The kit's settings:\n"
+	return []byte(s[:i] + block + s[i:]), nil
 }
 
 // SubstrateIngress is the remote ingress of cfg's gateway URL.
@@ -218,6 +306,9 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 		ov.Files = append(ov.Files, ImageFile{Path: f.Path, Mode: f.Mode, User: f.Owner == connector.SandboxOwnerUser, Data: data})
 	}
 	ov.Remove = append(ov.Remove, openShellOnly...)
+	// Golden-snapshot rule (E5): no machine id in the image (an empty
+	// /etc/machine-id below, none in /var/lib/dbus).
+	ov.Remove = append(ov.Remove, "/var/lib/dbus/machine-id")
 	for _, f := range art.Files {
 		if strings.HasPrefix(f.Path, connector.SandboxHookDir+"/") && strings.HasSuffix(f.Path, ".sh") {
 			ov.Remove = append(ov.Remove, f.Path)
@@ -246,6 +337,10 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	if len(cfg.Relay.Env) == 0 {
 		cfg.Relay.Env = wave2RelayEnv[art.Connector]
 	}
+	if art.Connector == "claudecode" && cfg.Relay.ClaudeStateFile == "" {
+		// The harness preseed's ~/.claude.json (GAP-0446).
+		cfg.Relay.ClaudeStateFile = path.Join(o.Home, ".claude.json")
+	}
 	if cfg.LogDir == "" {
 		cfg.LogDir = path.Join(o.Home, ".defenseclaw")
 	}
@@ -253,9 +348,10 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	// of the overlay (relay.protected, GAP-0439).
 	ov.Files = append(ov.Files,
 		ImageFile{Path: ConfigPath, Mode: 0o644},
+		ImageFile{Path: "/etc/machine-id", Mode: 0o444},
 		ImageFile{Path: "/etc/gitconfig", Mode: 0o644, Data: []byte(gitConfig())},
 		ImageFile{Path: CredHelper, Mode: 0o755, Data: []byte(gitCredentialHelper)},
-		ImageFile{Path: "/usr/local/etc/npmrc", Mode: 0o644, Data: []byte(npmrc)},
+		ImageFile{Path: NPMGlobalConfig, Mode: 0o644, Data: []byte(npmConfig(o.RegistryTokens))},
 	)
 	if art.Connector == "codex" {
 		ov.Files = append(ov.Files, ImageFile{Path: path.Join(o.Home, ".codex", "config.toml"), Mode: 0o600, User: true,
@@ -264,7 +360,14 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 
 	ov.Files = append(ov.Files, wave2UserFiles(art.Connector, o)...)
 	wave2Harden(&ov, art.Connector, o)
-	cfg.Relay.Protected = ProtectedPaths(ov.Files, o.Home)
+	// relay.protected names every root-owned file the template build attests
+	// (GAP-0507): the overlay, the hook and relay binaries, and the pinned
+	// agent build the template build adds (AgentReleases).
+	attested := append([]ImageFile{{Path: HookBinary}, {Path: RelayBinary}}, ov.Files...)
+	if r, pinned := AgentReleases[art.Connector]; pinned {
+		attested = append(attested, ImageFile{Path: r.Path})
+	}
+	cfg.Relay.Protected = ProtectedPaths(attested, o.Home)
 	kitJSON, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return Overlay{}, err
@@ -289,6 +392,7 @@ func ActorOverlay(art connector.SandboxArtifacts, o OverlayOptions) (Overlay, er
 	}
 	ov.Env["TMPDIR"] = path.Join(o.Home, ".cache", "tmp")
 	ov.Env["HOME"] = o.Home
+	ov.Env["npm_config_globalconfig"] = NPMGlobalConfig
 	for k, v := range modelEnv(art.Connector, gw, o) {
 		ov.Env[k] = v
 	}
@@ -623,10 +727,45 @@ while IFS= read -r line && [ -n "$line" ]; do :; done
 printf 'username=x-access-token\npassword=placeholder-not-a-secret\n'
 `
 
-const npmrc = `# DefenseClaw actor image (root-owned). Registry tokens are never stored
-# here: a template that binds a registry secret adds a placeholder token for
-# that registry, which Substrate egress swaps on that host only.
-update-notifier=false
-fund=false
-audit=false
-`
+// npmConfig is the kit's npmrc. It holds no token: a registry a
+// substrate.secrets entry is bound to gets the placeholder, which Substrate
+// egress swaps for the real credential on that host only (E8, D14).
+func npmConfig(tokens []RegistryToken) string {
+	var b strings.Builder
+	b.WriteString("# DefenseClaw actor image (root-owned). Registry tokens are placeholders: Substrate\n" +
+		"# egress swaps each for the real credential on its bound host only.\n" +
+		"update-notifier=false\nfund=false\naudit=false\n")
+	for _, t := range tokens {
+		fmt.Fprintf(&b, "//%s/:_authToken=%s\n", t.Host, t.Placeholder)
+	}
+	return b.String()
+}
+
+// NPMRegistryTokens are the registry placeholders for the kit's npmrc: every
+// exact host of a secret injected in the Authorization header (npm sends a
+// registry's _authToken there), with the secret's placeholder (else
+// PlaceholderSecret). A host pattern (*.example.com) cannot name an npm
+// registry and is left out. Sorted by host; the first secret wins a host.
+func NPMRegistryTokens(secrets []config.SubstrateSecret) []RegistryToken {
+	seen := map[string]bool{}
+	var out []RegistryToken
+	for _, s := range secrets {
+		if !strings.EqualFold(strings.TrimSpace(s.Inject.Header), "Authorization") {
+			continue
+		}
+		ph := s.Inject.Placeholder
+		if ph == "" {
+			ph = PlaceholderSecret
+		}
+		for _, h := range s.Inject.Hosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" || seen[h] || strings.ContainsAny(h, "*?[]/ ") {
+				continue
+			}
+			seen[h] = true
+			out = append(out, RegistryToken{Host: h, Placeholder: ph})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Host < out[j].Host })
+	return out
+}

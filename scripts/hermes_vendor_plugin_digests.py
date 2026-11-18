@@ -2,11 +2,14 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regenerate the shipped-plugin digests of every supported Hermes release.
+"""Regenerate the shipped-plugin and bundled-skill digests of every supported Hermes release.
 
-The gateway treats a plugin in hermes-agent/plugins as vendor content (not
-scanned) only while its tree matches the digest of that plugin in a Hermes
-release DefenseClaw ships (internal/watcher/hermes_vendor_plugin_digests.go).
+The gateway treats a plugin in hermes-agent/plugins, and a skill in
+hermes-agent/skills (the library Hermes copies into its skills folder), as
+vendor content (not scanned) only while its tree matches the digest of that
+plugin or skill in a Hermes release DefenseClaw ships
+(internal/watcher/hermes_vendor_plugin_digests.go, internal/hermesskills/
+vendor_digests.go and its Python twin cli/defenseclaw/hermes_vendor_digests.py).
 Run this after a Hermes release or a change to the Hermes hook contracts:
 
     python3 scripts/hermes_vendor_plugin_digests.py
@@ -17,11 +20,12 @@ releases before them) whose version resolves to a hermes-hooks contract in
 cli/defenseclaw/inventory/hook_contracts.json, tested or newer than the
 newest tested one. Each release is checked out from its tag with no newline
 conversion, as the Hermes installer checks it out (core.autocrlf=false), and
-every shipped plugin is listed and hashed by the gateway own code
-(TestGenerateHermesVendorPluginDigests in internal/watcher). The tool writes
-the Go digest table and cli/defenseclaw/hermes_vendor_plugin_releases.py,
-which doctor and status read to say when the installed Hermes is newer than
-every release covered.
+every shipped plugin and bundled skill is listed and hashed by the gateway own
+code (TestGenerateHermesVendorPluginDigests in internal/watcher,
+TestGenerateHermesVendorSkillDigests in internal/hermesskills). The tool writes
+the Go digest tables, the Python skill table, and
+cli/defenseclaw/hermes_vendor_plugin_releases.py, which doctor and status read
+to say when the installed Hermes is newer than every release covered.
 
 Options:
   --hermes-repo PATH  a clone of the Hermes repository with its tags; fetched
@@ -47,6 +51,8 @@ sys.path.insert(0, str(REPO / "cli"))
 HERMES_URL = "https://github.com/NousResearch/hermes-agent"
 GO_OUT = REPO / "internal" / "watcher" / "hermes_vendor_plugin_digests.go"
 PY_OUT = REPO / "cli" / "defenseclaw" / "hermes_vendor_plugin_releases.py"
+SKILL_GO_OUT = REPO / "internal" / "hermesskills" / "vendor_digests.go"
+SKILL_PY_OUT = REPO / "cli" / "defenseclaw" / "hermes_vendor_digests.py"
 # The release tag forms Hermes publishes; rc, canary and backup tags are not releases.
 _SEMVER_TAG = re.compile(r"^v(0|[1-9][0-9]{0,2})\.([0-9]+)\.([0-9]+)$")
 _DATE_TAG = re.compile(r"^v(20[0-9]{2})\.([0-9]{1,2})\.([0-9]{1,2})(?:\.([0-9]+))?$")
@@ -94,7 +100,7 @@ def supported_releases(repo: Path) -> list[tuple[str, str, str]]:
 
 
 def _checkout(repo: Path, tag: str, dest: Path, index: Path) -> None:
-    """Write the plugins folder of tag below dest/hermes-agent, as a checkout does."""
+    """Write the plugins and skills folders of tag below dest/hermes-agent, as a checkout does."""
     work = dest / "hermes-agent"
     work.mkdir(parents=True)
     env = dict(os.environ, GIT_INDEX_FILE=str(index))
@@ -109,34 +115,43 @@ def _checkout(repo: Path, tag: str, dest: Path, index: Path) -> None:
         tag,
         "--",
         "plugins",
+        "skills",
         env=env,
     )
 
 
-def generate(repo: Path, scratch: Path) -> tuple[list[tuple[str, str, str]], dict[str, dict[str, str]]]:
+def generate(
+    repo: Path, scratch: Path
+) -> tuple[list[tuple[str, str, str]], dict[str, dict[str, str]], dict[str, dict[str, str]]]:
     releases = supported_releases(repo)
     if not releases:
         raise SystemExit("no Hermes release resolves to a hermes-hooks contract")
     trees = scratch / "trees"
     for _version, tag, _commit in releases:
         _checkout(repo, tag, trees / tag, scratch / f"index-{tag}")
-    out = scratch / "digests.json"
-    subprocess.run(
-        [
-            "go",
-            "test",
-            "./internal/watcher",
-            "-count=1",
-            "-run",
-            "^TestGenerateHermesVendorPluginDigests$",
-            "-args",
-            f"-hermes-vendor-trees={trees}",
-            f"-hermes-vendor-out={out}",
-        ],
-        check=True,
-        cwd=REPO,
-    )
-    return releases, json.loads(out.read_text(encoding="utf-8"))
+    results = []
+    for package, test in (
+        ("./internal/watcher", "TestGenerateHermesVendorPluginDigests"),
+        ("./internal/hermesskills", "TestGenerateHermesVendorSkillDigests"),
+    ):
+        out = scratch / f"{test}.json"
+        subprocess.run(
+            [
+                "go",
+                "test",
+                package,
+                "-count=1",
+                "-run",
+                f"^{test}$",
+                "-args",
+                f"-hermes-vendor-trees={trees}",
+                f"-hermes-vendor-out={out}",
+            ],
+            check=True,
+            cwd=REPO,
+        )
+        results.append(json.loads(out.read_text(encoding="utf-8")))
+    return releases, results[0], results[1]
 
 
 _HEADER = """// Copyright 2026 Cisco Systems, Inc. and its affiliates
@@ -167,6 +182,63 @@ def render_go(releases: list[tuple[str, str, str]], per_release: dict[str, dict[
         for digest in sorted(digests[name]):
             lines.append(f"\t\t{json.dumps(digest)},")
         lines.append("\t},")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _skill_table(
+    releases: list[tuple[str, str, str]], per_release: dict[str, dict[str, str]]
+) -> dict[str, list[str]]:
+    """Each bundled skill's distinct tree digests across the releases that ship it."""
+    digests: dict[str, set[str]] = {}
+    for _version, tag, _commit in releases:
+        for name, digest in per_release[tag].items():
+            if digest:
+                digests.setdefault(name, set()).add(digest)
+    return {name: sorted(digests[name]) for name in sorted(digests)}
+
+
+def render_skill_go(releases: list[tuple[str, str, str]], per_release: dict[str, dict[str, str]]) -> str:
+    table = _skill_table(releases, per_release)
+    lines = [_HEADER, "package hermesskills", ""]
+    lines.append("// vendorDigests holds, for each skill in the library Hermes copies into its skills")
+    lines.append("// folder (hermes-agent/skills), the digest of its tree (treeSHA256) in each of")
+    lines.append("// these Hermes releases that ships it, one per distinct tree. The Python twin is")
+    lines.append("// cli/defenseclaw/hermes_vendor_digests.py.")
+    lines.append("//")
+    lines.extend(f"//\t{version}\t{tag}\t{commit}" for version, tag, commit in releases)
+    lines.append("//")
+    lines.append(f"// Source: {HERMES_URL}")
+    lines.append("var vendorDigests = map[string][]string{")
+    for name, values in table.items():
+        lines.append(f"\t{json.dumps(name)}: {{")
+        lines.extend(f"\t\t{json.dumps(value)}," for value in values)
+        lines.append("\t},")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def render_skill_py(releases: list[tuple[str, str, str]], per_release: dict[str, dict[str, str]]) -> str:
+    table = _skill_table(releases, per_release)
+    lines = [
+        "# Copyright 2026 Cisco Systems, Inc. and its affiliates",
+        "# SPDX-License-Identifier: Apache-2.0",
+        "",
+        "# Code generated by scripts/hermes_vendor_plugin_digests.py. DO NOT EDIT.",
+        "",
+        '"""Digests of the skills in the library Hermes copies into its skills folder.',
+        "",
+        "For each skill, the digest of its tree in each Hermes release that ships it, one per distinct",
+        "tree. The same releases (hermes_vendor_plugin_releases.py) and digests as",
+        "internal/hermesskills/vendor_digests.go.",
+        '"""',
+    ]
+    lines.append("")
+    lines.append("VENDOR_DIGESTS: dict[str, tuple[str, ...]] = {")
+    for name, values in table.items():
+        lines.append(f"    {json.dumps(name)}: (")
+        lines.extend(f"        {json.dumps(value)}," for value in values)
+        lines.append("    ),")
     lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -212,13 +284,24 @@ def main(argv: list[str] | None = None) -> int:
             subprocess.run(
                 ["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout", HERMES_URL, str(repo)], check=True
             )
-        releases, per_release = generate(repo.resolve(), scratch)
-    outputs = {GO_OUT: render_go(releases, per_release), PY_OUT: render_py(releases, per_release)}
+        releases, per_release, per_release_skills = generate(repo.resolve(), scratch)
+    outputs = {
+        GO_OUT: render_go(releases, per_release),
+        PY_OUT: render_py(releases, per_release),
+        SKILL_GO_OUT: render_skill_go(releases, per_release_skills),
+        SKILL_PY_OUT: render_skill_py(releases, per_release_skills),
+    }
     for version, tag, _commit in releases:
         unverified = sorted(name for name, digest in per_release[tag].items() if not digest)
         print(
             f"{version} ({tag}): {len(per_release[tag]) - len(unverified)} plugins"
             + (f", not verifiable: {unverified}" if unverified else "")
+        )
+        skills = per_release_skills[tag]
+        skipped = sorted(name for name, digest in skills.items() if not digest)
+        print(
+            f"{version} ({tag}): {len(skills) - len(skipped)} skills"
+            + (f", not verifiable: {skipped}" if skipped else "")
         )
     for path, text in outputs.items():
         current = path.read_text(encoding="utf-8") if path.exists() else ""

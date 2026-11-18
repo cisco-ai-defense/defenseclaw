@@ -86,10 +86,30 @@ func fieldRefusal(m protoreflect.Message, at string) string {
 	return why
 }
 
-// capName is a capability name as Substrate takes it: upper case, without
-// the CAP_ prefix.
-func capName(c string) string {
-	return strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(c)), "CAP_")
+// linuxCapabilities are the capability names Substrate takes in
+// security_context.capabilities: upper case, without CAP_.
+var linuxCapabilities = map[string]bool{
+	"CHOWN": true, "DAC_OVERRIDE": true, "DAC_READ_SEARCH": true, "FOWNER": true, "FSETID": true, "KILL": true,
+	"SETGID": true, "SETUID": true, "SETPCAP": true, "LINUX_IMMUTABLE": true, "NET_BIND_SERVICE": true,
+	"NET_BROADCAST": true, "NET_ADMIN": true, "NET_RAW": true, "IPC_LOCK": true, "IPC_OWNER": true,
+	"SYS_MODULE": true, "SYS_RAWIO": true, "SYS_CHROOT": true, "SYS_PTRACE": true, "SYS_PACCT": true,
+	"SYS_ADMIN": true, "SYS_BOOT": true, "SYS_NICE": true, "SYS_RESOURCE": true, "SYS_TIME": true,
+	"SYS_TTY_CONFIG": true, "MKNOD": true, "LEASE": true, "AUDIT_WRITE": true, "AUDIT_CONTROL": true,
+	"SETFCAP": true, "MAC_OVERRIDE": true, "MAC_ADMIN": true, "SYSLOG": true, "WAKE_ALARM": true,
+	"BLOCK_SUSPEND": true, "AUDIT_READ": true, "PERFMON": true, "BPF": true, "CHECKPOINT_RESTORE": true,
+}
+
+// capabilitySpelling says why a capability name of a template is not
+// Substrate's spelling, "" when it is: a known capability, upper case,
+// without CAP_ or padding (ALL in drop). Admission then reads the list as
+// Substrate does: a "cap_setuid" or "all" that admission normalised and
+// Substrate read otherwise would leave the container another set
+// (GAP-0576).
+func capabilitySpelling(field, c string, drop bool) string {
+	if linuxCapabilities[c] || (drop && c == "ALL") {
+		return ""
+	}
+	return fmt.Sprintf("security_context.capabilities.%s names %q, which is not a capability as Substrate spells it (upper case, no CAP_ prefix, for example SETUID)", field, c)
 }
 
 // securityContextRefusal says why a container's security_context does not
@@ -97,21 +117,26 @@ func capName(c string) string {
 // gives an actor container its default capabilities minus drop plus add
 // (kit.ActorCapabilities).
 //   - An image whose root relay starts the agent as its own user must end
-//     with SETUID, SETGID and KILL (the relay refuses to start without them)
-//     and may add only those (template publish adds SETUID and SETGID and
-//     drops the other defaults: kit.RelayCapabilitiesAdd and Drop).
+//     with exactly SETUID, SETGID and KILL (the relay refuses to start
+//     without them, and needs no other; GAP-0509) and may add only those
+//     (template publish adds SETUID and SETGID and drops the other defaults:
+//     kit.RelayCapabilitiesAdd and Drop).
 //   - Any other image may add nothing: its agent runs as the relay's user,
 //     so a capability added to the container would be the agent's.
 //
 // Dropping capabilities is hardening and is admitted otherwise.
 func securityContextRefusal(c *ateapi.Container, v *attest.Verified) string {
 	caps := c.GetSecurityContext().GetCapabilities()
-	var add, drop []string
-	for _, a := range caps.GetAdd() {
-		add = append(add, capName(a))
+	add, drop := caps.GetAdd(), caps.GetDrop()
+	for _, a := range add {
+		if why := capabilitySpelling("add", a, false); why != "" {
+			return why
+		}
 	}
-	for _, d := range caps.GetDrop() {
-		drop = append(drop, capName(d))
+	for _, d := range drop {
+		if why := capabilitySpelling("drop", d, true); why != "" {
+			return why
+		}
 	}
 	if !v.RelaySeparated() {
 		if len(add) > 0 {
@@ -128,6 +153,13 @@ func securityContextRefusal(c *ateapi.Container, v *attest.Verified) string {
 	for _, need := range kit.RelayCapabilities {
 		if !slices.Contains(got, need) {
 			return "security_context.capabilities does not give the container " + need + ", which DefenseClaw's relay needs to start the agent as its own user and to stop it; publish the template with defenseclaw substrate template publish (it adds SETUID and SETGID)"
+		}
+	}
+	for _, c := range got {
+		if !slices.Contains(kit.RelayCapabilities, c) {
+			// A Substrate default the relay does not need, kept by a template
+			// that adds SETUID and SETGID without the drop (GAP-0509).
+			return "security_context.capabilities leaves the container " + c + ", which DefenseClaw's relay does not need; drop it (template publish drops " + strings.Join(kit.RelayCapabilitiesDrop, " and ") + ")"
 		}
 	}
 	return ""

@@ -208,6 +208,37 @@ def test_a_refresh_weighs_the_test_a_timeout_cut_off_at_least_its_recorded_time(
     }
 
 
+def test_a_refresh_reads_the_cut_off_mark_when_the_job_died_before_the_package_ended(tmp_path: Path) -> None:
+    # A job killed before go test's own -timeout (the step or job timeout)
+    # ends the stream with no package end event: go_test_report.py still
+    # writes the test that was running as a fail, marked "CutOff", with the
+    # time it had run. Read by its place it looked like a test that ended,
+    # and its lower bound replaced the recorded time (GAP-1033).
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package a\n\nfunc TestCut(t *testing.T) {}\n\nfunc TestEnded(t *testing.T) {}\n",
+        encoding="utf-8",
+    )
+    run = tmp_path / "run"
+    run.mkdir()
+    # Another shard of the package ended normally; the killed one did not.
+    (run / "ended.json").write_text(_event("pass", "pkg/a", 700.0), encoding="utf-8")
+    cut = json.loads(_event("fail", "pkg/a", 21.0, "TestCut"))
+    cut["CutOff"] = True
+    (run / "killed.json").write_text(
+        "\n".join([_event("pass", "pkg/a", 5.0, "TestEnded"), json.dumps(cut)]), encoding="utf-8"
+    )
+    runs = runs_of([run])
+    files = runs[0]
+    old = {"tests": {"pkg/a": {"TestCut": 116.6, "TestEnded": 90.0, "*": 0.2}}}
+
+    data = keep_unreached_go_tests(old, go_timings(files, MODULE, runs), files, MODULE, root=tmp_path)
+
+    assert data["tests"]["pkg/a"]["TestCut"] == 116.6
+    assert data["tests"]["pkg/a"]["TestEnded"] == 5.0
+
+
 HEAVY_PART_SECONDS = (180.492, 164.289, 244.576)
 
 
