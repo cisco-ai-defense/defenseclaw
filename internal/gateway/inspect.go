@@ -801,6 +801,9 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 				Severity: aid.Severity,
 				Tags:     []string{strings.TrimSuffix(findingTag, ":")},
 			}
+			if i < len(aid.findingNames) && aid.findingNames[i] != "" {
+				rf.Title = aid.findingNames[i]
+			}
 			if s := aid.findingSeverity[f]; s != "" {
 				rf.Severity = s
 			}

@@ -29,12 +29,14 @@ const (
 // test, with the caller lookup and the directory replaced.
 func withSecureClientUserAttribution(t *testing.T, account func(context.Context) (string, error), upn string) {
 	t.Helper()
+	prevFacts := identityFactsEnabled.Load()
 	prevFlag := secureClientUserAttribution.Load()
 	prevManaged := ManagedEnterpriseActive()
 	prevAccount := secureClientCallerAccount
 	prevDirectory := secureClientDirectoryFacts
 	prevSupported := secureClientUPNSupported
 	t.Cleanup(func() {
+		setIdentityFactsEnabled(prevFacts)
 		setSecureClientUserAttribution(prevFlag)
 		SetManagedEnterpriseActive(prevManaged)
 		secureClientCallerAccount = prevAccount
@@ -45,6 +47,7 @@ func withSecureClientUserAttribution(t *testing.T, account func(context.Context)
 			return true
 		})
 	})
+	setIdentityFactsEnabled(false)
 	setSecureClientUserAttribution(true)
 	SetManagedEnterpriseActive(true)
 	secureClientCallerAccount = account
