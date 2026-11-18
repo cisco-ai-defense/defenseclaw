@@ -31,8 +31,11 @@ import (
 // access denied and the CLI dropped that scan; the Windows-native run saw it
 // as a flaky "rename agent_discovery.json.tmp: Access is denied". Every
 // rename over the cache succeeds while it is being read, and every read
-// sees a whole version, or none, never a torn one. (On other platforms a
-// rename never waits for readers; the test passes there either way.)
+// sees a whole version, or none, never a torn one. The rename is the one
+// discovery makes (replaceLikeDiscovery): on Windows a MoveFileExW (os.Rename)
+// is refused while any handle has the cache open, whatever it shares, so no
+// reader could let that one through. (On other platforms a rename never waits
+// for readers; the test passes there either way.)
 func TestCachedAgentVersionReadsDoNotBlockAReplaceOfTheCache(t *testing.T) {
 	dir := t.TempDir()
 	cache := filepath.Join(dir, "agent_discovery.json")
@@ -42,7 +45,7 @@ func TestCachedAgentVersionReadsDoNotBlockAReplaceOfTheCache(t *testing.T) {
 		if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
 			return err
 		}
-		return os.Rename(tmp, cache)
+		return replaceLikeDiscovery(tmp, cache)
 	}
 	if err := write(0); err != nil {
 		t.Fatal(err)
