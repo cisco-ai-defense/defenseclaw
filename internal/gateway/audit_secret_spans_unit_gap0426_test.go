@@ -40,6 +40,14 @@ func TestGuardrailSecretSpansCoverWhatTheHookFlagsGAP0426(t *testing.T) {
 	if spans := guardrailSecretSpans("see commit " + gap0426SHA + " in rel"); len(spans) != 0 {
 		t.Fatalf("plain text flagged: %v", spans)
 	}
+	// One value matched by several rules (SEC-HEX-SECRET, SEC-SECRET-ASSIGN)
+	// is one span, so it costs one match of the field budget.
+	if spans := guardrailSecretSpans("SERVICE_API_TOKEN=" + gap0426Hex); len(spans) != 1 {
+		t.Fatalf("one value, spans %v", spans)
+	}
+	if got := mergeAuditSecretSpans([][2]int{{5, 9}, {0, 4}, {3, 6}, {9, 12}}); len(got) != 2 || got[0] != [2]int{0, 9} || got[1] != [2]int{9, 12} {
+		t.Fatalf("merge = %v", got)
+	}
 }
 
 func gap0426HasRule(findings []RuleFinding, id string) bool {

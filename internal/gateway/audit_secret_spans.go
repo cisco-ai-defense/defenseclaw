@@ -3,7 +3,10 @@
 
 package gateway
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // guardrailSecretSpans is the redaction engine's secret classifier
 // (GAP-0426): the byte ranges of text that a rule of the secret category of
@@ -19,6 +22,7 @@ func guardrailSecretSpans(text string) [][2]int {
 		return nil
 	}
 	var spans [][2]int
+	seen := make(map[string]struct{})
 	for _, generation := range auditSecretRuleGenerations() {
 		for categoryIndex := range generation.categories {
 			category := &generation.categories[categoryIndex]
@@ -27,9 +31,17 @@ func guardrailSecretSpans(text string) [][2]int {
 			}
 			for ruleIndex := range category.Rules {
 				rule := &category.Rules[ruleIndex]
-				if rule.Pattern == nil || strings.EqualFold(rule.Severity, "INFO") {
+				// A tool-call-only rule judges what a call does, not a value
+				// in text; the hook never runs it on prompts or results.
+				if rule.Pattern == nil || rule.ToolCallOnly || strings.EqualFold(rule.Severity, "INFO") {
 					continue
 				}
+				// The same rule in several packs runs once.
+				identity := rule.ID + "\x00" + rule.Pattern.String()
+				if _, done := seen[identity]; done {
+					continue
+				}
+				seen[identity] = struct{}{}
 				for _, loc := range rule.Pattern.FindAllStringIndex(text, maxEntityMatchesPerRule) {
 					if loc[1] <= loc[0] || !acceptedRuleMatchAt(rule.ID, text, text[loc[0]:loc[1]], loc[0], loc[1]) {
 						continue
@@ -39,7 +51,33 @@ func guardrailSecretSpans(text string) [][2]int {
 			}
 		}
 	}
-	return spans
+	return mergeAuditSecretSpans(spans)
+}
+
+// mergeAuditSecretSpans sorts spans and merges the overlapping ones, so one
+// value matched by several rules costs one match of the field's budget.
+func mergeAuditSecretSpans(spans [][2]int) [][2]int {
+	if len(spans) < 2 {
+		return spans
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i][0] != spans[j][0] {
+			return spans[i][0] < spans[j][0]
+		}
+		return spans[i][1] > spans[j][1]
+	})
+	merged := spans[:1]
+	for _, span := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if span[0] < last[1] {
+			if span[1] > last[1] {
+				last[1] = span[1]
+			}
+			continue
+		}
+		merged = append(merged, span)
+	}
+	return merged
 }
 
 // auditSecretRuleGenerations is the process rule generation and every

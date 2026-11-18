@@ -32,6 +32,9 @@ func TestCredentialContextKeepsBenignTextGAP0426(t *testing.T) {
 		`"token_type": "bearer"`,
 		"SERVICE_API_TOKEN=<redacted type=secrets.assignment v=1>",
 		"password_min_length: 12",
+		"token: Optional[str] = None",
+		`{"token": "Hello", "logprob": -0.1}`,
+		`{\"token\": \"world\"}`,
 	} {
 		for _, found := range [][]candidate{recognizeInlineCredentials(input), recognizeCredentialKeys(input)} {
 			for _, item := range found {

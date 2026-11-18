@@ -19,7 +19,7 @@ import (
 // they never saw, so nothing they redacted is kept.
 
 var (
-	inlineAuthorizationRE = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_-])(?:proxy-)?authorization["']?[\t ]*[:=][\t ]*["']?(?:bearer|basic|digest|token|apikey)[\t ]+([^\s"'\\<>]+)`)
+	inlineAuthorizationRE = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_-])(?:proxy-)?authorization(?:\\*["'])?[\t ]*[:=][\t ]*(?:\\*["'])?(?:bearer|basic|digest|token|apikey)[\t ]+([^\s"'\\<>]+)`)
 	bareBearerRE          = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_-])bearer[\t ]+([A-Za-z0-9._~+/=-]{8,})`)
 	// credentialKeyWordRE finds a credential word; longer words come first
 	// so secret_key wins over secret at the same position.
@@ -97,13 +97,20 @@ func recognizeCredentialKeys(input string) []candidate {
 			overlapsAnyRange(wordStart, wordEnd, uris) {
 			continue // a URI query key secrets.url_query redacts
 		}
-		if keyStart == wordStart && assignmentKeyRE.FindString(input[wordStart:wordEnd]) == input[wordStart:wordEnd] {
+		// A key inside an escaped JSON string (a tool result that holds
+		// stringified JSON, double-encoded arguments): \"KEY\":\"value\".
+		escaped := escapedQuoteBefore(input, keyStart)
+		if keyStart == wordStart && escaped == 0 &&
+			assignmentKeyRE.FindString(input[wordStart:wordEnd]) == input[wordStart:wordEnd] {
 			continue // a v1 whole key: recognizeAssignments owns it
 		}
 		position := wordEnd
-		if keyStart > 0 && position < len(input) && (input[keyStart-1] == '"' || input[keyStart-1] == '\'') &&
-			input[position] == input[keyStart-1] {
-			position++
+		if keyStart > 0 && position < len(input) && (input[keyStart-1] == '"' || input[keyStart-1] == '\'') {
+			if escaped > 0 {
+				position += escapedQuoteLen(input, position)
+			} else if input[position] == input[keyStart-1] {
+				position++
+			}
 		}
 		position = skipOWS(input, position)
 		if position >= len(input) || (input[position] != '=' && input[position] != ':') {
@@ -118,12 +125,24 @@ func recognizeCredentialKeys(input string) []candidate {
 			position++ // 'password' => 'value'
 		}
 		position = skipOWS(input, position+1)
-		start, end, valid := parseAssignmentValue(input, position, false)
+		var start, end int
+		var valid, quoted bool
+		if n := escapedQuoteLen(input, position); n > 0 {
+			start, quoted = position+n, true
+			if closing := strings.Index(input[start:], input[position:position+n]); closing >= 0 {
+				end, valid = start+closing, closing > 0
+			} else {
+				_, end, valid = parseAssignmentValue(input, start, false)
+			}
+		} else {
+			start, end, valid = parseAssignmentValue(input, position, false)
+			quoted = position < len(input) && input[position] == '"'
+		}
 		if end <= start {
 			continue
 		}
-		decoded, quoted := input[start:end], position < len(input) && input[position] == '"'
-		if valid && quoted {
+		decoded := input[start:end]
+		if valid && quoted && input[position] == '"' {
 			var value string
 			if json.Unmarshal([]byte(input[position:end+1]), &value) != nil {
 				valid = false
@@ -137,6 +156,13 @@ func recognizeCredentialKeys(input string) []candidate {
 		}
 		if valid && strings.HasSuffix(word, "token") && allDigits(decoded) && len(decoded) <= 7 {
 			valid = false // a count (last_token: 4096)
+		}
+		if valid && word == "token" && keyStart == wordStart && len(decoded) < 16 &&
+			!byteAny(decoded, func(c byte) bool { return !isASCIIUpper(c) && !isASCIILower(c) }) {
+			valid = false // a bare token key holding a word ({"token": "Hello"}, tokenizer output)
+		}
+		if valid && !quoted && strings.ContainsAny(decoded, "[]") {
+			valid = false // a type annotation (token: Optional[str] = None)
 		}
 		if valid && !quoted && keyStart == wordStart && input[separator] == ':' &&
 			!byteAny(decoded, func(c byte) bool { return !isASCIIUpper(c) && !isASCIILower(c) }) {
@@ -173,4 +199,30 @@ func overlapsCandidates(start, end int, candidates []candidate) bool {
 		}
 	}
 	return false
+}
+
+// escapedQuoteLen is the length of an escaped quote at position (one or more
+// backslashes and a quote), or 0.
+func escapedQuoteLen(input string, position int) int {
+	end := position
+	for end < len(input) && input[end] == '\\' {
+		end++
+	}
+	if end > position && end < len(input) && (input[end] == '"' || input[end] == '\'') {
+		return end - position + 1
+	}
+	return 0
+}
+
+// escapedQuoteBefore is the number of backslashes escaping the quote just
+// before keyStart, or 0 when there is no quote or it is not escaped.
+func escapedQuoteBefore(input string, keyStart int) int {
+	if keyStart == 0 || (input[keyStart-1] != '"' && input[keyStart-1] != '\'') {
+		return 0
+	}
+	slash := keyStart - 2
+	for slash >= 0 && input[slash] == '\\' {
+		slash--
+	}
+	return keyStart - 2 - slash
 }

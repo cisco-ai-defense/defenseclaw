@@ -46,6 +46,12 @@ func TestCredentialContextIsRedactedGAP0426(t *testing.T) {
 		{"token=" + opaque + "&x=1", opaque},
 		{"https://api.example.test/v1?auth_token=" + opaque + "&x=1", opaque},
 		{"https://api.example.test/v1?token=" + opaque, opaque},
+		// Escaped JSON inside a string (a tool result holding stringified
+		// JSON, double-encoded arguments).
+		{`{\"CANARY_BEARER\":\"t6audbearerprobe4e8b1d\"}`, "t6audbearerprobe4e8b1d"},
+		{`{"command":"echo '{\"SERVICE_API_TOKEN\":\"opaque-v4lue\"}' > c.json"}`, "opaque-v4lue"},
+		{`{\"password\": \"` + opaque + `\"}`, opaque},
+		{`{\"headers\": {\"Authorization\": \"Bearer ` + opaque + `\"}}`, opaque},
 	} {
 		for _, class := range []observability.FieldClass{observability.FieldClassContent, observability.FieldClassEvidence} {
 			result, err := DetectAndRedact(c.input, class, groups, key, nil)
