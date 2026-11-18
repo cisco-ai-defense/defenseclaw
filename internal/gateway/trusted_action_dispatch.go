@@ -228,6 +228,9 @@ type trustedActionRequest struct {
 	// hook client map, the answer of the reading
 	// (hookpaths.ReadingTargetPrefix) decides (GAP-2477).
 	staticOperandReading bool
+	// localLinkTwin marks the reading of a shell call with the words a link
+	// moves spelled as their places (localCommandLinkTwinRequest).
+	localLinkTwin bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.

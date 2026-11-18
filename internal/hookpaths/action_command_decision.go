@@ -760,6 +760,20 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		}
 		return actionPrivateKeyReadWords(words[index:], cwd, home, mode, depth+1)
 	}
+	if !windows {
+		// A static prefix wrapper (command, builtin, exec, nice, nohup,
+		// timeout, stdbuf, setsid, ...) runs its child with the argv the
+		// shell expanded, so the child reads what it reads plain: nice cat
+		// key-link reads the key cat key-link reads (rel-1-0-10:GAP-1243).
+		if run, wrapped := actionfacts.StaticPrefixWrapperChild(words, makeStatic(len(words))); wrapped &&
+			!run.DirUnknown && run.Index < len(words) {
+			dir := cwd
+			if run.Dir != "" {
+				dir = OperandPath(run.Dir, cwd)
+			}
+			return actionPrivateKeyReadWords(words[run.Index:], dir, home, mode, depth+1)
+		}
+	}
 	if posixShellProgram(program) {
 		if body, known := shellCommandBodyIndex(words); known && body < len(words) {
 			// The -c body runs in the child shell. On Windows, losing the
