@@ -118,7 +118,7 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.unattended.asks` | `deny` | What an unattended run does with an ask: `deny` or `queue` |
 | `substrate.unattended.ask_timeout` | `30m` | How long a queued ask waits for a person |
 | `substrate.unattended.telemetry_sampling` | `1.0` | Fraction of routine events kept for `--task` runs. Blocks and lifecycle records are never sampled |
-| `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits. Over budget answers `429` with `Retry-After` |
+| `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits of each actor and each atespace on the actor Service, whatever the number of gateway replicas: every second the replicas count their requests through the leader, and each holds an actor to its share of the budget, in proportion to the requests it gets. Over budget answers `429` with `Retry-After`. In the first second of a flood, and on a replica that has not reached the leader for 3 seconds, each replica applies the whole budget. One actor also has at most 16 requests open at a time on each replica. Requests to hosts in an actor's allow list (the egress callout) are not counted |
 | `substrate.extproc.enabled` | `true` | The egress callout |
 | `substrate.extproc.failure_mode` | `closed` | What the egress gateway does when the callout fails. Managed installs are always `closed` |
 | `substrate.extproc.body_inspection` | `auto` | Read bodies of POSTs to MCP and listed hosts when Substrate supports it. `on` says it does; `off` checks headers only. In managed enterprise, `auto` refuses requests to listed MCP servers until the callout has received a body |
@@ -189,7 +189,7 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `bootstrap.ownerTokenSecret` | A Substrate global owner's token for the one-time access-policy bootstrap |
 | `managedAtespaces` | Other atespaces DefenseClaw writes policy in |
 | `substrate.namespace`, `substrate.apiAddress` | Where Substrate runs |
-| `gateway.hpa.*`, `gateway.pdb.*` | Scaling and disruption budget of the gateway |
+| `gateway.hpa.*`, `gateway.pdb.*` | Scaling and disruption budget of the gateway. The gateway and callout autoscalers scale on CPU, so they need the Kubernetes metrics API (for example metrics-server): without it `kubectl get hpa` shows `cpu: <unknown>` and they stay at their minimum replicas, and a busy atespace slows every actor's hooks instead of adding replicas |
 | `gateway.relaySessionSecret` | The Secret holding the relay session key pair (`private.pem` signs attach tokens, `public.pem` goes into agent images). The relay-session hook creates it when absent, never replaces it, and uninstall keeps it. Default `defenseclaw-relay-session` |
 | `gateway.llmCredentialsSecret` | The Secret with one model key per provider (`anthropic`, `openai`, `bedrock`, `gemini`). Default `defenseclaw-llm` |
 | `gateway.authDelegatorBinding` | Name of the ClusterRoleBinding of the gateway to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer). Default `defenseclaw-auth-delegator-<namespace>-<release>` |

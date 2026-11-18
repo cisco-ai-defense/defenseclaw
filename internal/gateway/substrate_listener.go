@@ -207,9 +207,6 @@ type SubstrateConfig struct {
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
 	SecretStore SubstrateSecretStore
-	// OnRateLimited is told of each refusal by the fair-share limits; the
-	// gateway itself records defenseclaw.substrate.rate_limited (GAP-0401).
-	OnRateLimited func(scope ratelimit.Scope, route string)
 	// Chains is the leader's chain and intent state (lane A13): a verified
 	// actor's tool-chain windows and the judge's session intent live there,
 	// so every replica sees the same. Nil turns the chain lane off for
@@ -308,6 +305,11 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 		}
 		if cfg.Limiter == nil {
 			cfg.Limiter = ratelimit.New(ratelimit.Config{})
+		}
+		if cfg.Chains != nil {
+			// The fair-share budgets are the actor's across the gateway
+			// replicas, counted through the leader (GAP-0566).
+			cfg.Limiter.ShareThrough(cfg.Chains.RateShare)
 		}
 	}
 	if cfg.AdminAddr != "" && (cfg.People == nil || cfg.Registrations == nil) {
@@ -660,9 +662,6 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		if lerr != nil {
 			scope, _ := ratelimit.IsLimited(lerr)
 			a.recordSubstrateRateLimited()
-			if st.cfg.OnRateLimited != nil {
-				st.cfg.OnRateLimited(scope, substrateRouteName(route))
-			}
 			writeHookRateLimited(w, "substrate_"+string(scope), "this actor is over its request budget; retry shortly")
 			return
 		}
@@ -721,16 +720,6 @@ func substrateFailMode(cfg SubstrateConfig, reg registry.Registration) string {
 		return "closed"
 	}
 	return "open"
-}
-
-func substrateRouteName(r substrateActorRoute) string {
-	switch {
-	case r.llm:
-		return "llm"
-	case r.relay:
-		return "relay"
-	}
-	return string(r.class)
 }
 
 // substrateActorScope puts the sandbox scope, the verified actor's person

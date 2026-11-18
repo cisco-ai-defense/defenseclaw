@@ -11,6 +11,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 )
 
 // Client is the gateway replicas', the callout's and the controller's side
@@ -160,6 +161,14 @@ func (c *Client) Uncleared(ctx context.Context, actor Actor, why string) error {
 // PutTask registers the --task text of an actor (the launcher, at create).
 func (c *Client) PutTask(ctx context.Context, actor Actor, text string) error {
 	return c.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: actor, Op: IntentTask, Text: text}, nil)
+}
+
+// RateShare sends a replica's request counts for the fair-share limits
+// and returns the cluster's (GAP-0566).
+func (c *Client) RateShare(ctx context.Context, in ratelimit.ShareReport) (ratelimit.ShareAnswer, error) {
+	var out ratelimit.ShareAnswer
+	err := c.call(ctx, ratelimit.MethodShare, in, &out)
+	return out, err
 }
 
 // CheckEgress records one observed egress step in the actor window and

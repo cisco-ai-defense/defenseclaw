@@ -142,6 +142,10 @@ type ActorVerifier struct {
 
 	mu   sync.Mutex
 	live map[string]liveEntry
+
+	// tokens are the checks of tokens already verified (verified.go).
+	tokMu  sync.Mutex
+	tokens map[[32]byte]verifiedToken
 }
 
 type liveEntry struct {
@@ -205,6 +209,18 @@ type actorObject struct {
 // is live (RESUMING or RUNNING). It returns the verified actor, or an
 // *Error whose Reason says why not.
 func (v *ActorVerifier) Verify(ctx context.Context, token string) (Actor, error) {
+	key := tokenKey(token)
+	if e, ok := v.verified(key); ok {
+		if err := e.times(v.now(), v.skew); err != nil {
+			v.forgetToken(key)
+			return Actor{}, err
+		}
+		if err := v.checkLive(ctx, e.actor); err != nil {
+			return Actor{}, err
+		}
+		return e.actor, nil
+	}
+	gen, _ := v.keys.generation()
 	t, err := parseJWS(token)
 	if err != nil {
 		return Actor{}, err
@@ -247,6 +263,14 @@ func (v *ActorVerifier) Verify(ctx context.Context, token string) (Actor, error)
 		Issuer: c.Issuer, Subject: c.Subject,
 		Atespace: c.Actor.Atespace, Name: c.Actor.Name, UID: c.Actor.UID, TokenID: c.ID,
 		Expires: time.Unix(*c.Expiry, 0), IssuedAt: time.Unix(*c.IssuedAt, 0),
+	}
+	// Kept only when the key set did not change during the check.
+	if now, fresh := v.keys.generation(); fresh && now == gen {
+		e := verifiedToken{actor: a, exp: *c.Expiry, iat: *c.IssuedAt, gen: gen}
+		if c.NotBefore != nil {
+			e.nbf, e.hasNbf = *c.NotBefore, true
+		}
+		v.rememberToken(key, e)
 	}
 	if err := v.checkLive(ctx, a); err != nil {
 		return Actor{}, err

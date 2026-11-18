@@ -111,6 +111,7 @@ type KeySet struct {
 	mu      sync.RWMutex
 	keys    map[string]publicKey
 	fetched time.Time // last successful fetch
+	gen     uint64    // successful fetches: an ActorVerifier's cached token checks name theirs
 	tried   time.Time // last fetch attempt
 	fetches int
 	lastErr error
@@ -306,6 +307,7 @@ func (ks *KeySet) refresh(ctx context.Context) error {
 		return ks.lastErr
 	}
 	ks.keys, ks.fetched, ks.lastErr = keys, ks.now(), nil
+	ks.gen++
 	return nil
 }
 

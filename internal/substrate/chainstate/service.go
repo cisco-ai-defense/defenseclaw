@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/historystore"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 )
 
 // Egress actions for a detected secret-read-then-egress chain.
@@ -182,6 +183,12 @@ type Service struct {
 	// calls are the tool calls this leader prepared or resolved, for a
 	// further result of a call (GAP-0348, GAP-0345, GAP-0350; calls.go).
 	calls *callTable
+	// seed is the migrated store a new actor's store is copied from
+	// (seed.go, GAP-0564).
+	seed storeSeed
+	// shares are the gateway replicas' request counts for the fair-share
+	// limits (GAP-0566).
+	shares ratelimit.Shares
 	// diskHook, set by tests only, runs before every disk operation on an
 	// actor's files: a store open or access (storeOf), a state file write
 	// and a purge's removals. A test blocks it to stand for a disk that does
@@ -419,6 +426,22 @@ func (s *Service) Register(srv *leader.Server) {
 	srv.Handle(MethodHistoryRecord, s.logged(MethodHistoryRecord, leader.Typed(s.HistoryRecord)))
 	srv.Handle(MethodCopilotJoinRecord, s.logged(MethodCopilotJoinRecord, leader.Typed(s.CopilotJoinRecord)))
 	srv.Handle(MethodCopilotJoinTake, s.logged(MethodCopilotJoinTake, leader.Typed(s.CopilotJoinTake)))
+	// A read: the newest report of each replica replaces its last one, so
+	// a retry is harmless and its answer is not kept for replay.
+	srv.HandleRead(ratelimit.MethodShare, leader.Typed(s.rateShare))
+}
+
+// rateShare is the fair-share limits' exchange of the gateway replicas
+// (ratelimit.Shares, GAP-0566).
+func (s *Service) rateShare(ctx context.Context, in ratelimit.ShareReport) (ratelimit.ShareAnswer, error) {
+	out, err := s.shares.Share(ctx, in)
+	switch {
+	case errors.Is(err, ratelimit.ErrBadShare):
+		return out, bad(err)
+	case err != nil:
+		return out, &leader.WireError{Code: leader.CodeUnavailable, Message: err.Error()}
+	}
+	return out, nil
 }
 
 // logged logs the errors a handler returns that the transport reports only
@@ -448,6 +471,7 @@ func (s *Service) warnf(format string, args ...any) {
 func (s *Service) Close() error {
 	s.egress.stop()
 	s.runPurges()
+	s.removeSeed()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
@@ -757,6 +781,10 @@ func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, aud
 	fresh := errors.Is(statErr, os.ErrNotExist)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, "", err
+	}
+	if fresh {
+		// A copy of the migrated seed, not every migration again (GAP-0564).
+		s.seedStore(path)
 	}
 	// A per-actor store is one of up to MaxOpenStores: a small page cache
 	// and no read pool, or each holds up to 100 MB outside the Go heap as it
