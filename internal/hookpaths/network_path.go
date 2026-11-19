@@ -918,3 +918,31 @@ func ObserveRemoteShareReadsForTest(note func(name string)) (restore func()) {
 func NotExist(err error) bool {
 	return os.IsNotExist(err) || errors.Is(err, errNetworkShareUnanswered)
 }
+
+// CallState is what the hook call of the goroutine has spent of its budgets
+// and set of its causes so far: the share answer wait, the script bytes, the
+// bodies left unread, the pattern caps hit. Its caches (stats, the target
+// memo, the bodies read) are left out: they answer a repeat as the first
+// read. A dispatch that leaves it as it found it spent nothing a repeat of
+// the same request would find spent (the gateway's dispatch memo,
+// rel-1-0-10:GAP-1472). The zero value: no call open.
+type CallState struct {
+	open                                 bool
+	waitLeft, tail                       time.Duration
+	bodyUnread, bodyLinks, linksUnproven bool
+	globCut                              bounded.CapSet
+	scriptBytes, scripts                 int
+}
+
+// HookCallState is the CallState of the hook call the goroutine runs.
+func HookCallState() CallState {
+	call := currentHookCall()
+	if call == nil {
+		return CallState{}
+	}
+	return CallState{
+		open: true, waitLeft: call.waitLeft, tail: call.tail,
+		bodyUnread: call.bodyUnread, bodyLinks: call.bodyLinks, linksUnproven: call.linksUnproven,
+		globCut: call.globCut, scriptBytes: call.scriptBytes, scripts: len(call.scripts),
+	}
+}

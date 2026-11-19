@@ -466,7 +466,9 @@ func (t trustedActionTelemetry) empty() bool {
 		t.ParserUncertaintyShadowFindingCount == 0
 }
 
-func dispatchTrustedAction(
+// dispatchTrustedActionOnce judges request; dispatchTrustedAction is it
+// through the hook call's memo (trustedDispatchMemo).
+func dispatchTrustedActionOnce(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
