@@ -1765,11 +1765,13 @@ func installWindowsClaudeManagedPolicyUnlocked(
 				if renderErr != nil {
 					return "", nil, renderErr
 				}
-				// An earlier release's form (the direct command, the 1.0.9
-				// guard texts) is this deployment's drop-in, upgraded below
-				// (rel-1-0-10 GAP-1495).
+				// Any recorded form (the current one, the direct command, the
+				// 1.0.9 guard texts) is this deployment's drop-in, rewritten
+				// below in the form this process writes (rel-1-0-10
+				// GAP-1495; while the launch folders are retired that is the
+				// 1.0.9 form, GAP-1540).
 				recognized := bytes.Equal(policySnapshot.data, current)
-				for _, form := range windowsClaudeRecordedForms[1:] {
+				for _, form := range windowsClaudeRecordedForms {
 					if recognized {
 						break
 					}

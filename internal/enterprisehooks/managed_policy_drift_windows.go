@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -196,8 +197,9 @@ const (
 	// guard parent.
 	windowsClaudeFormDirect
 	// windowsClaudeFormGuard109 is the guard wrapper with the texts 1.0.9
-	// Setup wrote (rel-1-0-10 GAP-0119, GAP-1495). Remove when 1.0.9 stops
-	// being a supported upgrade source.
+	// Setup wrote (rel-1-0-10 GAP-0119, GAP-1495), and the form written
+	// while the launch folders are retired (GAP-1540). Remove when 1.0.9
+	// stops being a supported upgrade source and rollback target.
 	windowsClaudeFormGuard109
 )
 
@@ -206,13 +208,45 @@ var windowsClaudeRecordedForms = []windowsClaudeRecordedForm{
 	windowsClaudeFormCurrent, windowsClaudeFormDirect, windowsClaudeFormGuard109,
 }
 
+// windowsClaudeLaunchFoldersRetired reports whether hookExecutable is the
+// transition image of an install whose launch folders an administrator
+// retired (bin\hooks\.retired, written by `enterprise windows hook-image
+// retire`). Retire is the step before a rollback with the 1.0.9 Setup
+// /upgrade, whose guardian recognizes its drop-in only by rendering it again
+// in its own form and refuses any other one as "an unrecognized registered
+// command": its startup reconcile then published no state and the rollback
+// ended 1603 after 93 seconds (rel-1-0-10 GAP-1540). While the folders are
+// retired the drop-in is therefore written in the form 1.0.9 renders (the
+// 1.0.9 guard texts; the hook matrix is the same), and the next Setup of
+// this release removes the marker and writes the current form again.
+var windowsClaudeLaunchFoldersRetired = func(hookExecutable string) bool {
+	hook := filepath.Clean(hookExecutable)
+	if !strings.EqualFold(filepath.Base(hook), winpath.EnterpriseHookImageName) {
+		return false
+	}
+	image := winpath.ResolveEnterpriseHookLaunchSet(filepath.Dir(hook))
+	return image.State == winpath.EnterpriseHookImageRetired && sameWindowsEnterprisePath(image.Hook, hook)
+}
+
+// windowsClaudeWrittenForm is the form this process writes for a drop-in
+// that names hookExecutable: the current one, or the 1.0.9 form while the
+// launch folders are retired (GAP-1540). Secure Client has no guard wrapper
+// and no retire.
+func windowsClaudeWrittenForm(hookExecutable string) windowsClaudeRecordedForm {
+	if windowsEnterpriseStandaloneProcess() && windowsClaudeLaunchFoldersRetired(hookExecutable) {
+		return windowsClaudeFormGuard109
+	}
+	return windowsClaudeFormCurrent
+}
+
 // renderWindowsClaudeRecordedPolicy renders the drop-in for the record's hook
 // executable and gateway under contract, with or without the
-// managed-hooks-only lock, in form (this release's when none is given). The
-// earlier forms remain readable so an ownership record an earlier release
-// wrote can still be restored and upgraded.
+// managed-hooks-only lock, in form (the one this process writes,
+// windowsClaudeWrittenForm, when none is given). The earlier forms remain
+// readable so an ownership record an earlier release wrote can still be
+// restored and upgraded.
 func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool, form ...windowsClaudeRecordedForm) ([]byte, error) {
-	recorded := windowsClaudeFormCurrent
+	recorded := windowsClaudeWrittenForm(record.HookExecutable)
 	if len(form) > 0 {
 		recorded = form[0]
 	}
