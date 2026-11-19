@@ -3,6 +3,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,8 +81,14 @@ func TestManagedRunnerPrefixWritesWhatTheWrappedCallWrites(t *testing.T) {
 			payload := f.payload(t, r.cmd)
 			header := f.clientHeader(t, payload)
 			got := f.post(t, conn, payload, header)
-			if got != r.want {
-				t.Errorf("%s %s %q: got %s, want %s", conn, r.id, r.cmd, got, r.want)
+			want := r.want
+			if want == "block" && strings.Contains(r.cmd, ".defenseclaw/") {
+				// A proven DefenseClaw state write is a HIGH alert on the
+				// default pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				want = "alert"
+			}
+			if got != want {
+				t.Errorf("%s %s %q: got %s, want %s", conn, r.id, r.cmd, got, want)
 			}
 		}
 	}

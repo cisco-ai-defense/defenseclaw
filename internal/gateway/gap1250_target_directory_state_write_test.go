@@ -75,8 +75,12 @@ func TestGAP1250TargetDirectoryStateWrite(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), request)
 				verdict := buildVerdict(findings, "tool_call")
 				ids := findingIDs(findings)
-				if row.block && (verdict.Action != "block" || !slices.Contains(ids, "tamper.detector_state_write")) {
-					t.Errorf("%s %s %s: action %q %v, want block by tamper.detector_state_write", row.id, profile, tool, verdict.Action, ids)
+				// A proven state write blocks in the strict profile and is a HIGH
+				// alert in the default one (GAP-0747 owner tiering
+				// 2026-11-15T15:20Z).
+				wantAction := gap0747WantAction(profile == "strict")
+				if row.block && (verdict.Action != wantAction || !slices.Contains(ids, "tamper.detector_state_write")) {
+					t.Errorf("%s %s %s: action %q %v, want %s by tamper.detector_state_write", row.id, profile, tool, verdict.Action, ids, wantAction)
 				}
 				if !row.block && verdict.Action != "allow" {
 					t.Errorf("%s %s %s: action %q %v, want allow", row.id, profile, tool, verdict.Action, ids)

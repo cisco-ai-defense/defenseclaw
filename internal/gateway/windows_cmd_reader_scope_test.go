@@ -70,7 +70,9 @@ func TestR105WindowsCMDReaderSkipsCommandsWithoutCMD(t *testing.T) {
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
-			got := buildVerdict(findings, "tool_call").Action == "block"
+			// A proven state write is a HIGH alert on the default pack (GAP-0747
+			// owner tiering 2026-11-15T15:20Z).
+			got := gap0747DefaultTierCheck(findings, true) == ""
 			if !tc.block {
 				// Past the action analysis depth bound a call is the unknown
 				// tier of the pack whatever it names (rel-1-0-10:GAP-0688, the

@@ -93,8 +93,14 @@ func runSedBackupTierRows(t *testing.T, env boundedEnv, keys string, cases []str
 			got := boundedParse(action)
 			switch tc.want {
 			case block:
-				if got != bounded.Block {
-					t.Errorf("%s in tier %s: action = %q, want block", tc.id, tier.name, action)
+				// A proven DefenseClaw state write is a HIGH alert outside
+				// strict (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				wantAction := bounded.Block
+				if strings.HasPrefix(tc.id, "STATE") {
+					wantAction = gap0747StateWriteAction(tier.tier)
+				}
+				if got != wantAction {
+					t.Errorf("%s in tier %s: action = %q, want %v", tc.id, tier.name, action, wantAction)
 				}
 			case unresolved:
 				if got < floor {

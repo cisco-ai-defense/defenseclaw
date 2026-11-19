@@ -27,7 +27,6 @@ func TestManagedPowerShellBoundWriteThroughAClientPlacedLinkIsProven(t *testing.
 	write := `$p='` + linked + `'; [System.IO.File]::WriteAllText($p,'x')`
 	placed := map[string]string{hookpaths.CWDKey: project, linked: state}
 	itself := map[string]string{hookpaths.CWDKey: project, linked: linked}
-	api := &APIServer{}
 	for _, tc := range []struct {
 		name, command string
 		targets       map[string]string
@@ -47,8 +46,10 @@ func TestManagedPowerShellBoundWriteThroughAClientPlacedLinkIsProven(t *testing.
 				EnforcementCapable: true, ProtectedHomeHook: true, ResolvedWriteTargets: tc.targets,
 			})
 			verdict := buildVerdict(findings, "tool_call")
-			if got := verdict.Action == "block" && api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
-				t.Fatalf("observe-mode hard block=%t, want %t (action %q, findings %v)", got, tc.block, verdict.Action, findingIDs(findings))
+			// A proven state write is a HIGH alert on the default pack
+			// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			if msg := gap0747DefaultTierCheck(findings, tc.block); msg != "" {
+				t.Fatalf("%s (action %q, findings %v)", msg, verdict.Action, findingIDs(findings))
 			}
 		})
 	}

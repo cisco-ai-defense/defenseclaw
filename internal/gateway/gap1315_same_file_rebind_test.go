@@ -52,8 +52,8 @@ func TestGAP1315SameFileRebinds(t *testing.T) {
 						problem = "want allow with no protected-write rule"
 					}
 				case row.same:
-					if !hit(got, target.rules) || action == "allow" || target.name == "DefenseClaw state" && action != "block" {
-						problem = fmt.Sprintf("want the rel rule tier %v (the state blocked)", target.rules)
+					if !hit(got, target.rules) || action == "allow" || target.name == "DefenseClaw state" && action != gap0747WantAction(pack == "strict") {
+						problem = fmt.Sprintf("want the rel rule tier %v (the state blocked in strict, a HIGH alert elsewhere: GAP-0747 owner tiering 2026-11-15T15:20Z)", target.rules)
 					}
 				default:
 					if action == "allow" || !strings.Contains(got, evaluationLimitRuleID) || hit(got, hookRules) {

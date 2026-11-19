@@ -129,6 +129,11 @@ func TestGAP1240GAP1241ReviewRowsOnClaudeHook(t *testing.T) {
 					want, rule = "allow", ""
 				}
 			}
+			if want == "block" && rule == gap0747StateRule && pack.pack != "strict" {
+				// A proven state write is a HIGH alert outside strict (GAP-0747
+				// owner tiering 2026-11-15T15:20Z).
+				want = "alert"
+			}
 			if want == "not-allow" && out["action"] == "allow" ||
 				want != "not-allow" && out["action"] != want ||
 				rule != "" && !gap0526Names(out, rule) {

@@ -87,6 +87,12 @@ func judgeR106HookRows(t *testing.T, rows []r106HookRow, prepare func(t *testing
 				want := "allow"
 				if row.block {
 					want = "block"
+					if strings.Contains(command, ".defenseclaw/") {
+						// A proven DefenseClaw state write is a HIGH alert on
+						// the default pack (GAP-0747 owner tiering
+						// 2026-11-15T15:20Z).
+						want = "alert"
+					}
 				}
 				if row.warn {
 					want = "alert"

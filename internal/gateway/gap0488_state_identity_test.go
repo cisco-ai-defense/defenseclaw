@@ -91,10 +91,10 @@ func TestG622bEveryActiveStateFileIsProtectedUnderAnyNameForNativePatches(t *tes
 		}
 		for _, pack := range []string{"", "strict"} {
 			for _, c := range connectors {
-				if got := c.judge(t, home, pack, c.body(filepath.Base(hard))); got.action != "block" || !got.rules["tamper.detector_state_write"] {
+				if got := c.judge(t, home, pack, c.body(filepath.Base(hard))); got.action != gap0747WantAction(pack == "strict") || !got.rules["tamper.detector_state_write"] {
 					t.Errorf("pack %q %s: hard link to state %s = %s, want block by the state rule", pack, c.name, s.name, got)
 				}
-				if got := c.judge(t, home, pack, c.body(filepath.Base(soft))); got.action != "block" {
+				if got := c.judge(t, home, pack, c.body(filepath.Base(soft))); got.action != gap0747WantAction(pack == "strict") {
 					t.Errorf("pack %q %s: symlink to state %s = %s, want block", pack, c.name, s.name, got)
 				}
 			}

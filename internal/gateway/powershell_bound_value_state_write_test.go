@@ -455,11 +455,13 @@ func TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily(t *testi
 					Input: input, LegacyText: string(args), Connector: connectorName,
 					EnforcementCapable: true, ResolvedWriteTargets: targets, ProtectedHomeHook: managed,
 				})
-				verdict := buildVerdict(findings, "tool_call")
-				// A proven state write is a HIGH alert on the default pack
-				// (GAP-0747 owner tiering 2026-11-15T15:20Z).
-				if msg := gap0747DefaultTierCheck(findings, tc.block); msg != "" {
-					t.Fatalf("%s (action %q, findings %v)", msg, verdict.Action, findingIDs(findings))
+				// A ninety-alternative chain is TRUNCATED at the compound cap
+				// (rel-1-0-10:GAP-0589); what decides here is the proof beside
+				// that floor. A proven state write is a HIGH alert on the
+				// default pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				judged, _ := withoutBoundedTruncation(findings)
+				if msg := gap0747DefaultTierCheck(judged, tc.block); msg != "" {
+					t.Fatalf("%s (action %q, findings %v)", msg, buildVerdict(judged, "tool_call").Action, findingIDs(findings))
 				}
 			})
 		}

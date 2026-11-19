@@ -181,3 +181,12 @@ func gap0747HookBlocked(got, pack string) bool {
 	}
 	return pack != "strict" && strings.HasPrefix(got, `{"action":"alert"`) && strings.Contains(got, gap0747StateRule)
 }
+
+// gap0747HookBlockedAnyMode is gap0747HookBlocked for a test that runs the
+// default pack in observe and action mode: a proven DefenseClaw state write
+// is a HIGH alert in action mode and an allow that carries the state finding
+// in observe mode (GAP-0747 owner tiering 2026-11-15T15:20Z).
+func gap0747HookBlockedAnyMode(got string) bool {
+	return gap0747HookBlocked(got, "") ||
+		strings.HasPrefix(got, `{"action":"allow"`) && strings.Contains(got, gap0747StateRule)
+}
