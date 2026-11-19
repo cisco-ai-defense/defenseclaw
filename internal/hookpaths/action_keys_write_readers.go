@@ -461,7 +461,7 @@ func actionClientMutationCall(call *syntax.CallExpr, values actionValues, cwd, h
 func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected protectedFiles, ssh string) bool {
 	var roots []string
 	name := ""
-	deletes := false
+	deletes, fold := false, false
 	for i := 1; i < len(call.Args); i++ {
 		value, known := StaticWord(call.Args[i], home)
 		if !known {
@@ -471,6 +471,7 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 		case "-delete":
 			deletes = true
 		case "-name", "-iname":
+			fold = value == "-iname"
 			i++
 			if i >= len(call.Args) {
 				return false
@@ -505,13 +506,13 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 			if target.path != absoluteRoot && !strings.HasPrefix(target.path, absoluteRoot+string(filepath.Separator)) {
 				continue
 			}
-			// The walk deletes only the entries it finds: a name test does
-			// not reach a protected file that does not exist, so
+			// The walk deletes only the entries it finds: a wildcard name
+			// test does not reach a protected file that does not exist, so
 			// find . -name '*' -delete in a project with no hook file
-			// deletes none (rel-1-0-10:GAP-1555; registrationFindReach
-			// reads -delete so since GAP-1196). A target whose state is
-			// unknown counts.
-			if target.info == nil && !target.unknown {
+			// deletes none (rel-1-0-10:GAP-1555). A test that spells the
+			// file's name reaches it either way (findPatternSpellsName), and
+			// a target whose state is unknown counts.
+			if target.info == nil && !target.unknown && !findPatternSpellsName(name, target.path, fold) {
 				continue
 			}
 			if matches, _ := filepath.Match(name, filepath.Base(target.path)); matches &&
