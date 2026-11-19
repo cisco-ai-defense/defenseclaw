@@ -24,6 +24,7 @@ from scripts.go_test_shards import (
     shard_regex,
     shard_timeout_seconds,
 )
+from scripts.go_test_shards import test_weigher as weigher_of
 
 
 def test_go_test_file_shards_are_deterministic_and_exhaustive(tmp_path: Path) -> None:
@@ -739,3 +740,29 @@ def test_built_files_keeps_the_test_files_go_list_builds(goos: str, monkeypatch:
     assert any(name.endswith(f"_{goos}_test.go") for name in built)
     # Without --built-files every file stays (the connector parts).
     assert len(discovered) > len(built)
+
+
+def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
+    # GAP-1546: gwN runs shard N of the gateway package, then shard N of the
+    # connector package, inside its 20-minute job; job set-up and the two go
+    # test builds take about 5 minutes. On Windows Native CI 44412520021 the
+    # 20 jobs averaged 17 minutes and gw15 (770 s of gateway tests) was
+    # cancelled in its connector part. Planned on the recorded times, every
+    # job keeps at most 660 s of tests and the jobs average at most 540 s,
+    # room for the gateway tests no Windows run has timed yet.
+    import json
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    shard_count = int(re.search(r"\$nativeTestShardCount = (\d+)", workflow).group(1))
+    matrix = re.findall(r"\{ shard: gw(\d+), kind: gateway, index: (\d+) \}", workflow)
+    assert [(int(name), int(index)) for name, index in matrix] == [(index, index) for index in range(shard_count)]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))["tests"]
+    jobs = [0.0] * shard_count
+    for package in ("internal/gateway", "internal/gateway/connector"):
+        tests = timings[package]
+        weigh = weigher_of(tests)
+        for index, names in enumerate(partition_test_files(discover_test_files(root / package), shard_count, tests)):
+            jobs[index] += sum(weigh(name) for name in names)
+    assert max(jobs) <= 660, [round(seconds) for seconds in jobs]
+    assert sum(jobs) / shard_count <= 540, round(sum(jobs) / shard_count)
