@@ -26,7 +26,10 @@ func TestEveryHelmTestRunsInTheChartJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := ciJob(t, string(ci), "substrate-chart")
+	// A Windows checkout (core.autocrlf, as on the GitHub runners) ends the
+	// workflow's lines with CRLF; ciJob finds jobs by "\n  name:\n"
+	// (rel-1-0-10:GAP-1544).
+	job := ciJob(t, strings.ReplaceAll(string(ci), "\r\n", "\n"), "substrate-chart")
 	if !strings.Contains(job, `DEFENSECLAW_HELM_REQUIRED: "1"`) {
 		t.Fatal("the CI job substrate-chart does not set DEFENSECLAW_HELM_REQUIRED: a missing helm would skip")
 	}
