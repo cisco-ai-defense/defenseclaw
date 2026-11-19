@@ -52,9 +52,28 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 		}
 	}
 	if command, ok := connector.ShellCommandArgs(connectorName, toolName, args); ok {
-		return command, actionTool
+		return command, shellCommandJudgeTool(connectorName, toolName, actionTool)
 	}
 	return nil, ""
+}
+
+// shellCommandJudgeTool is the tool a shell call's command alone is judged
+// as: the PowerShell tool for Copilot's powershell tool, whose commands
+// Copilot runs in PowerShell, else actionTool. On Windows the call itself is
+// judged as shell (agentHookTrustedActionTool), in the dialect its text
+// infers, and a launcher line inferred as POSIX loses the backslashes of an
+// unquoted Windows path: pwsh -wd C:\Users\a\.defenseclaw -Command
+// "Set-Content config.yaml ..." moved to a folder that does not exist, so the
+// write was allowed while the same move spelled Set-Location blocked
+// (rel-1-0-10:GAP-0198). As for Codex (codexPowerShellCommand), the command
+// alone is also judged as PowerShell, the launcher reading of the PowerShell
+// tool; that reading only adds to the call's verdict.
+func shellCommandJudgeTool(connectorName, toolName, actionTool string) string {
+	if strings.EqualFold(strings.TrimSpace(connectorName), "copilot") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "powershell") {
+		return "powershell"
+	}
+	return actionTool
 }
 
 // inspectSandboxShellToolPolicyCtx is inspectTrustedToolPolicyCtx for a

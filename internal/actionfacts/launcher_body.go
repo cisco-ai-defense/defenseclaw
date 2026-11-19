@@ -242,18 +242,38 @@ func powerShellOptionIs(option, full string, min int) bool {
 	return len(name) >= min && strings.HasPrefix(full, name)
 }
 
+// powerShellLauncherBody is the script a powershell or pwsh argv runs. A
+// -WorkingDirectory (-wd) with one value before the script is the move the
+// script runs after: the body starts with `Set-Location -LiteralPath
+// '<value>'; `, as the launcher reading of the same call as one command line
+// (launcherWorkingDirectory) and of its argv (argvWorkingDirectory) read it,
+// so the Codex shell argv ["pwsh", "-wd", <folder>, "-Command", <script>] is
+// read as the string is (rel-1-0-10:GAP-0198); any other spelling of it has
+// no body, as before.
 func powerShellLauncherBody(argv []string) (string, bool) {
+	location := ""
+	join := func(words []string) (string, bool) {
+		body, ok := joinPowerShellBody(words)
+		return location + body, ok
+	}
 	for i := 1; i < len(argv); i++ {
 		word := argv[i]
 		if word == "" {
 			return "", false
 		}
 		if word[0] != '-' && word[0] != '/' {
-			return joinPowerShellBody(argv[i:])
+			return join(argv[i:])
 		}
 		switch {
+		case workingDirectoryWord(word):
+			move, ok := workingDirectoryMove(argv, i)
+			if !ok || location != "" {
+				return "", false
+			}
+			location = move
+			i++
 		case powerShellOptionIs(word, "command", 1):
-			return joinPowerShellBody(argv[i+1:])
+			return join(argv[i+1:])
 		case powerShellOptionIs(word, "noprofile", 3),
 			powerShellOptionIs(word, "nologo", 3),
 			powerShellOptionIs(word, "noninteractive", 4),
@@ -270,8 +290,8 @@ func powerShellLauncherBody(argv []string) (string, bool) {
 				return "", false
 			}
 		default:
-			// -File, -EncodedCommand, -WorkingDirectory, -Version and every
-			// option not listed: the body is not one fixed text.
+			// -File, -EncodedCommand, -Version and every option not listed:
+			// the body is not one fixed text.
 			return "", false
 		}
 	}

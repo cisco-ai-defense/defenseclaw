@@ -595,7 +595,7 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 // words carry one -WorkingDirectory (or -wd, or an abbreviation) with one
 // value before the script; ok is false for any other spelling of it.
 func argvWorkingDirectory(argv []string) (location string, ok bool) {
-	value, found, started := "", false, false
+	location, started := "", false
 	for i := 1; i < len(argv); i++ {
 		word := strings.TrimSpace(argv[i])
 		if !workingDirectoryWord(word) {
@@ -604,17 +604,27 @@ func argvWorkingDirectory(argv []string) (location string, ok bool) {
 			}
 			continue
 		}
-		if started || found || strings.Contains(word, ":") || i+1 >= len(argv) ||
-			strings.TrimSpace(argv[i+1]) == "" || strings.HasPrefix(strings.TrimSpace(argv[i+1]), "-") {
+		move, readable := workingDirectoryMove(argv, i)
+		if started || location != "" || !readable {
 			return "", false
 		}
-		value, found = argv[i+1], true
+		location = move
 		i++
 	}
-	if !found {
-		return "", true
+	return location, true
+}
+
+// workingDirectoryMove is the move the -WorkingDirectory word argv[i] makes,
+// `Set-Location -LiteralPath '<value>'; `: ok is false for the colon form, no
+// value, a blank value or a value that is a switch.
+func workingDirectoryMove(argv []string, i int) (string, bool) {
+	if strings.Contains(argv[i], ":") || i+1 >= len(argv) {
+		return "", false
 	}
-	return "Set-Location -LiteralPath " + managed.PowerShellLiteral(value) + "; ", true
+	if value := strings.TrimSpace(argv[i+1]); value == "" || strings.HasPrefix(value, "-") {
+		return "", false
+	}
+	return "Set-Location -LiteralPath " + managed.PowerShellLiteral(argv[i+1]) + "; ", true
 }
 
 func workingDirectoryWord(word string) bool {
