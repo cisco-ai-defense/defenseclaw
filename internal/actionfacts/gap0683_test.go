@@ -172,9 +172,12 @@ func g0683Check(t *testing.T, rows []g0679Row) {
 func TestGAP0683RgIncludeGlobs(t *testing.T) { g0683Check(t, g0683Rows) }
 
 // TestGAP0683RgSymbolicCwd: rg drops its physical working folder from a
-// path; the hook's working folder may be a symbolic link to it. An anchored
-// "!" glob then excludes a file under an absolute folder only if it matches
-// the path both ways, so the read is never missed.
+// path before it matches an override glob, and walks a folder as the
+// command names it. With the hook's working folder a symbolic link to the
+// project, an absolute folder named through the link keeps the link in
+// rg's paths, so an anchored glob matches nothing there (real rg 14.1.0
+// run in the link reads deploy/id_ed25519 for the first row and nothing
+// for the third).
 func TestGAP0683RgSymbolicCwd(t *testing.T) {
 	phys := g0683Folder(t)
 	link := filepath.Join(t.TempDir(), "proj")
@@ -183,24 +186,18 @@ func TestGAP0683RgSymbolicCwd(t *testing.T) {
 	}
 	for _, row := range []struct {
 		cmd  string
-		want []string
+		read bool
 	}{
-		// Real rg running in link does not drop link from the path, so
-		// the anchored exclude matches nothing and it reads the file.
-		{"rg -g '!/deploy' KEY " + link, []string{"deploy/id_ed25519"}},
-		{"rg -g '!deploy/' KEY " + link, []string{}},
-		// Over by design: an include matches either form (real rg reads
-		// nothing here).
-		{"rg -g 'deploy/**' KEY " + link, []string{"deploy/id_ed25519"}},
+		{"rg -g '!/deploy' KEY " + link, true},
+		{"rg -g '!deploy/' KEY " + link, false},
+		{"rg -g 'deploy/**' KEY " + link, false},
+		{"rg -g 'deploy/**' KEY " + phys, true},
+		{"rg -g '!/deploy' KEY " + phys, false},
 	} {
-		got := g0683Rel(link, g0679Named(Analyze(Input{Tool: "exec", Command: row.cmd, CWD: link, ActiveHome: t.TempDir()})))
-		for _, file := range row.want {
-			if !slices.Contains(got, file) {
-				t.Errorf("%s: the resolve names %v, misses %s", row.cmd, got, file)
-			}
-		}
-		if len(row.want) == 0 && slices.Contains(got, "deploy/id_ed25519") {
-			t.Errorf("%s: an unanchored folder exclude still names deploy/id_ed25519 (%v)", row.cmd, got)
+		named := g0679Named(Analyze(Input{Tool: "exec", Command: row.cmd, CWD: link, ActiveHome: t.TempDir()}))
+		got := slices.ContainsFunc(named, func(v string) bool { return strings.HasSuffix(filepath.ToSlash(v), "deploy/id_ed25519") })
+		if got != row.read {
+			t.Errorf("%s (cwd a link): deploy/id_ed25519 named = %v, real rg reads it = %v (named %v)", row.cmd, got, row.read, named)
 		}
 	}
 }

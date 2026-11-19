@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -106,24 +107,10 @@ func (f *rgFilter) override(p string, dir bool) int {
 	if len(f.globs) == 0 {
 		return 0
 	}
-	short, long := f.strip(p)
+	p = f.strip(p)
 	for i := len(f.globs) - 1; i >= 0; i-- {
 		g := f.globs[i]
-		if g.onlyDir && !dir {
-			continue
-		}
-		// rg drops its physical working folder; the hook's may name it
-		// through a symbolic link. Where the two forms differ, an include
-		// matches either and a "!" glob must match both.
-		matched := g.matches(short)
-		if short != long {
-			if g.exclude {
-				matched = matched && g.matches(long)
-			} else {
-				matched = matched || g.matches(long)
-			}
-		}
-		if !matched {
+		if g.onlyDir && !dir || !g.matches(p) {
 			continue
 		}
 		if g.exclude {
@@ -193,18 +180,31 @@ func (f *rgFilter) admits(parent string, segments []string) bool {
 // strip is the path an override glob is matched against: the walker's
 // path with a leading "./" dropped (Ignore::matched), then again and with
 // rg's working folder dropped from its start, byte by byte
-// (Gitignore::strip, whose root is rg's working folder). long is the path
-// before the working folder is dropped.
-func (f *rgFilter) strip(p string) (short, long string) {
+// (Gitignore::strip, whose root is rg's working folder: the physical one,
+// rgPhysicalFolder).
+func (f *rgFilter) strip(p string) string {
 	p = strings.TrimPrefix(p, "./")
 	p = strings.TrimPrefix(p, "./")
-	short = p
 	if f.cwd != "" && f.cwd != "." && strings.Contains(p, "/") {
 		if rest, ok := strings.CutPrefix(p, f.cwd); ok {
-			short = strings.TrimPrefix(rest, "/")
+			p = strings.TrimPrefix(rest, "/")
 		}
 	}
-	return short, p
+	return p
+}
+
+// rgPhysicalFolder is rg's working folder for a hook working folder: rg
+// takes it from getcwd, with every symbolic link resolved, while the path
+// it walks keeps the folder as the command names it. A folder that cannot
+// be resolved stays as given.
+func rgPhysicalFolder(cwd string) string {
+	if cwd == "" {
+		return cwd
+	}
+	if physical, err := filepath.EvalSymlinks(filepath.FromSlash(cwd)); err == nil {
+		return filepath.ToSlash(physical)
+	}
+	return cwd
 }
 
 // rgJoin is Rust's Path::join of a folder and a name: no "/" is added

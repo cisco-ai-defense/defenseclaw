@@ -250,7 +250,7 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 		argument := command.Arguments[option.word]
 		return argument.Expands && argument.StaticGlob == ""
 	}
-	f := &rgFilter{cwd: cwd}
+	f := &rgFilter{}
 	unrestricted, fold := 0, false
 	ignoreFile, ignoreFiles := false, true
 	var globs, iglobs []rgOption
@@ -341,8 +341,11 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 	if ignoreFile && ignoreFiles {
 		f.hidden = true
 	}
+	if len(globs)+len(iglobs) > 0 {
+		f.cwd = rgPhysicalFolder(cwd) // only an override glob reads it
+	}
 	var key strings.Builder
-	key.WriteString(strconv.FormatBool(f.hidden) + "\x00" + cwd)
+	key.WriteString(strconv.FormatBool(f.hidden) + "\x00" + f.cwd)
 	add := func(option rgOption, fold bool) {
 		g := rgGlob{exclude: strings.HasPrefix(option.value, "!")}
 		if !runTime(option) {
