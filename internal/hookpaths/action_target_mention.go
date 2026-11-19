@@ -5996,7 +5996,8 @@ func actionPathHasDotComponent(word string) bool {
 // content into a named file, which keeps its block. named also accepts a sink
 // the call names (cat KEYS > /tmp/keys.bak): the unknown tier, whose
 // redirect words the scan judges as write targets of their own
-// (rel-1-0-10:GAP-0843).
+// (rel-1-0-10:GAP-0843); ActionMentionsNoKnownWrite keeps a sink in the
+// home's .ssh or state folder out of it.
 func actionReaderToSink(stmt *syntax.Stmt, home string, named bool) bool {
 	if len(stmt.Redirs) == 0 {
 		return false
@@ -6017,6 +6018,39 @@ func actionReaderToSink(stmt *syntax.Stmt, home string, named bool) bool {
 	bare := *stmt
 	bare.Redirs = nil
 	return actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{&bare}}, home, 0, true)
+}
+
+// actionPathOutsideProtectedFolders reports whether a fixed word, placed in
+// cwd when relative, lies as spelled and as resolved outside the home's .ssh
+// and DefenseClaw state folders. A word the scan cannot place (a relative
+// word with no known cwd, a path it cannot resolve) is not outside.
+func actionPathOutsideProtectedFolders(value, cwd, home string) bool {
+	if !filepath.IsAbs(value) {
+		if !filepath.IsAbs(cwd) {
+			return false
+		}
+		value = filepath.Join(cwd, value)
+	}
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	value = filepath.Clean(value)
+	resolved, ok := ResolveWriteTarget(value)
+	if !ok {
+		return false
+	}
+	for _, folder := range [...]string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw")} {
+		forms := []string{folder}
+		if physical, ok := ResolveWriteTarget(folder); ok && physical != folder {
+			forms = append(forms, physical)
+		}
+		for _, form := range forms {
+			if pathAtOrUnder(value, form) || pathAtOrUnder(resolved, form) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // actionPipelineStages returns the stages of every pipeline that is a top level

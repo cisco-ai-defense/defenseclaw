@@ -302,6 +302,12 @@ type trustedActionRequest struct {
 	// default or permissive install (ActionMentionsNoWriteRole): the finding
 	// alerts, it does not block (rel-1-0-10:GAP-0018).
 	nonWriteMention *bool
+	// unknownMention, when set, is told that the target scan held the call
+	// only on words of reader statements beside a program, pipe stage or
+	// named sink it has no write model of (ActionMentionsNoKnownWrite): the
+	// key finding alerts and the shared unknown-tier finding decides
+	// (rel-1-0-10:GAP-0843).
+	unknownMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.

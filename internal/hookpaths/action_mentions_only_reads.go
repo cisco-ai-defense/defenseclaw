@@ -3,7 +3,14 @@
 
 package hookpaths
 
-import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
+import (
+	"path/filepath"
+	"slices"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"mvdan.cc/sh/v3/syntax"
+)
 
 // ActionMentionsNoWriteRole reports a command the target scan holds as a
 // protected-target only because of words in statements that read a protected
@@ -35,9 +42,39 @@ func ActionMentionsNoWriteRole(command, cwd, home string, dialect actionfacts.Di
 // No word of it is a write target that reaches the file; a program the scan
 // cannot read could write it as well without the mention, so the mention is
 // no proof. $_ and a rebound reader name still hand the name on and keep the
-// block (actionCallKeepsMentions).
+// block (actionCallKeepsMentions). A POSIX call only: any fixed word of it,
+// other than a protected key file it reads, in the home's .ssh or state
+// folder (cat KEYS > ~/.ssh/k.new, cd ~/.ssh, $TOOL > ~/.ssh/rc.d/x) keeps
+// the verdict rel gives it.
 func ActionMentionsNoKnownWrite(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) bool {
-	if ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) != "protected-target" {
+	if dialect != "" && dialect != actionfacts.DialectPOSIX ||
+		ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) != "protected-target" {
+		return false
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	keys := ProtectedAuthorizedKeysPaths(home)
+	near := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		word, isWord := node.(*syntax.Word)
+		if near || !isWord {
+			return !near
+		}
+		value, static := StaticWord(word, home)
+		if !static || !strings.ContainsAny(value, "/.") && !strings.Contains(cwd, ".ssh") && !strings.Contains(cwd, ".defenseclaw") {
+			return true
+		}
+		if !filepath.IsAbs(value) {
+			value = filepath.Join(cwd, value)
+		}
+		if !slices.Contains(keys, filepath.Clean(value)) && !actionPathOutsideProtectedFolders(value, cwd, home) {
+			near = true
+		}
+		return !near
+	})
+	if near {
 		return false
 	}
 	memo := NewTargetMemo()
