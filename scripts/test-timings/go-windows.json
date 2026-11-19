@@ -307,6 +307,7 @@
    "TestGAP0254RefusedTurnNeverReachesTheUpstream": 2.4,
    "TestGAP0265RefusedTurnOnEveryWireAndBlock": 10.0,
    "TestGAP0272SubstrateGatewayStartsWithAnInClusterOTLPDestination": 2.3,
+   "TestGAP0277DeliveredManagedCallKeepsItsAuditRowAfterTheEarlierDeadline": 5.1,
    "TestGAP0318StatementBudgetOnEveryDialectRoute": 2.7,
    "TestGAP0331PowerShellPrefixDoesNotHideTheBudget": 27.4,
    "TestGAP0396WindowsCodexProjectGlobCopy": 5.7,
