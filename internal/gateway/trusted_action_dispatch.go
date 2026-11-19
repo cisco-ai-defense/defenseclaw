@@ -377,7 +377,11 @@ type trustedActionRequest struct {
 	// reading of the call itself judges the shell script of the here-string
 	// once, the probe asks only whether the script reaches state, and the
 	// reading of its pipe twin was the same script judged a second time
-	// (rel-1-0-10:GAP-1088).
+	// (rel-1-0-10:GAP-1088). The here-string reading twin sets it when the
+	// call has a run-time shell reading of its own: printf WORD | bash -c
+	// TEXT judged the script that bash -c TEXT judges already, and
+	// bash <<< 'defenseclaw-gateway stop' cost about 12 times ls
+	// (rel-1-0-10:GAP-1472).
 	skipRunTimeShellTwin bool
 }
 
@@ -1022,6 +1026,11 @@ func dispatchTrustedAction(
 	// findings are kept (rel-1-0-10:GAP-1083: cd X, then a here-string,
 	// then a write in X).
 	if twin, ok := hereStringReadingTwinRequest(request, facts); ok {
+		// The run-time shell reading of the call judges the script of a
+		// shell that reads the here-string (bash <<< TEXT is bash -c TEXT):
+		// the twin's own run-time shell reading (printf WORD | bash -c TEXT)
+		// judged it a second time (rel-1-0-10:GAP-1472).
+		twin.skipRunTimeShellTwin = twin.skipRunTimeShellTwin || shellTwinOK
 		defer func() {
 			// The twin is the call as typed without the bashism: every
 			// finding of it is one of the call, an alert as well as a block.
