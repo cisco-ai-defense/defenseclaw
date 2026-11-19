@@ -85,6 +85,31 @@ type Program struct {
 	Malformed bool
 	// channelText: the text holds system, getline, a pipe or an @ directive.
 	channelText bool
+	// Outputs are the files a print or printf statement redirects into
+	// (print ... > "file", >> "file") when the target is a string literal or
+	// a concatenation of literals. Awk opens the file itself, so the call
+	// writes it as a shell redirect would (rel-1-0-10:GAP-1239). A target
+	// built from anything else is not listed.
+	Outputs []Output
+}
+
+// Output is a file a print or printf statement redirects into.
+type Output struct {
+	// Target is the file name as awk opens it: no ~ or variable expansion.
+	Target string
+	// Append is the >> form; > truncates the file when awk first opens it.
+	Append bool
+}
+
+// Redirect is the shell command that writes Target as the print redirect
+// does: the null command with the same redirection, the target single-quoted
+// so the shell reads it as the literal awk opens.
+func (o Output) Redirect() string {
+	operator := ">"
+	if o.Append {
+		operator = ">>"
+	}
+	return ": " + operator + " '" + strings.ReplaceAll(o.Target, "'", `'\''`) + "'"
 }
 
 // RunsCommand reports a program with a command channel, a directive that
@@ -543,7 +568,8 @@ func staticOrDynamic(kind Kind, value string, ok bool) Channel {
 
 // addPrintPipe reads the statement a print or printf at tokens[i] starts: a
 // pipe outside parentheses sends the output to the command that follows it,
-// to the end of the statement.
+// to the end of the statement, and a > or >> outside parentheses sends it to
+// the file that follows (Outputs; inside parentheses > is a comparison).
 func (p *Program) addPrintPipe(tokens []token, match []int, i int) {
 	depth := 0
 	for j := i + 1; j < len(tokens); j++ {
@@ -573,6 +599,15 @@ func (p *Program) addPrintPipe(tokens []token, match []int, i int) {
 			}
 			value, _, ok := literalConcat(tokens, match, j+1, end)
 			p.Channels = append(p.Channels, staticOrDynamic(PrintPipe, value, ok))
+			return
+		case depth == 0 && (t.text == ">" || t.text == ">>"):
+			end := j + 1
+			for end < len(tokens) && !statementEnd(tokens[end]) {
+				end++
+			}
+			if value, _, ok := literalConcat(tokens, match, j+1, end); ok && value != "" {
+				p.Outputs = append(p.Outputs, Output{Target: value, Append: t.text == ">>"})
+			}
 			return
 		}
 	}

@@ -1727,7 +1727,27 @@ func matchesAnyHomeKubeConfig(facts actionfacts.Facts, candidate actionfacts.Pat
 
 func matchesAnyHomePackageCredentialFile(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
 	return matchesActivePackageCredentialFile(facts, candidate) ||
-		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFilePackageRegistry, "")
+		otherHomeCredentialFile(facts, candidate, actionfacts.CredentialFilePackageRegistry, "") ||
+		matchesRuntimeContainerAuthFile(semanticPathValue(candidate))
+}
+
+// matchesRuntimeContainerAuthFile reports podman's Linux login file in an
+// account's runtime folder, ${XDG_RUNTIME_DIR}/containers/auth.json
+// (/run/user/<uid>/containers/auth.json): the account's own registry login,
+// outside its home (rel-1-0-10:GAP-1179;
+// https://docs.podman.io/en/latest/markdown/podman-login.1.html).
+func matchesRuntimeContainerAuthFile(value string) bool {
+	parts := strings.Split(strings.TrimPrefix(canonicalSemanticPath(value), "/"), "/")
+	if len(parts) != 5 || parts[0] != "run" || parts[1] != "user" ||
+		parts[3] != "containers" || parts[4] != "auth.json" || parts[2] == "" {
+		return false
+	}
+	for _, character := range parts[2] {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func matchesAnyHomeGitCredentialFile(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {

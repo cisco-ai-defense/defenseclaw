@@ -620,7 +620,7 @@ var credentialDirectoryNames = func() []string {
 		}
 	}
 	for _, row := range credentialFileShapes {
-		if row.relative != "" {
+		if row.relative != "" && !row.notFolder {
 			add(path.Dir(row.relative))
 		}
 		add(row.dir)
