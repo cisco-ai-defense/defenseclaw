@@ -331,6 +331,7 @@ func parseSkillFrontMatter(manifest []byte) skillFrontMatter {
 		// A block scalar, or a plain one wrapped onto more-indented lines,
 		// continues until a line indented no deeper than its key.
 		if block || (!quoted && value != "") {
+			var folded strings.Builder
 			for i+1 < len(lines) {
 				next := strings.TrimRight(lines[i+1], "\r")
 				nextTrimmed := strings.TrimSpace(next)
@@ -344,8 +345,15 @@ func parseSkillFrontMatter(manifest []byte) skillFrontMatter {
 				if len(next)-len(strings.TrimLeft(next, " \t")) <= indent || nextTrimmed == "---" || nextTrimmed == "..." {
 					break
 				}
-				value += " " + nextTrimmed
+				if folded.Len() == 0 {
+					folded.WriteString(value)
+				}
+				folded.WriteByte(' ')
+				folded.WriteString(nextTrimmed)
 				i++
+			}
+			if folded.Len() > 0 {
+				value = folded.String()
 			}
 			// A quoted value may wrap too.
 			if !block && len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
