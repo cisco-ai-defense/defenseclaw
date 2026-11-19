@@ -105,6 +105,14 @@ func g0344Rows() []g0344Row {
 		{"C15b rg -g '*.yml' with a .env", "rg -g '*.yml' TODO", []string{".env", ".github/workflows/ci.yml"}, false},
 		{"C15c rg -g '*.toml' with a .env", "rg -g '*.toml' TODO", []string{".env", "pyproject.toml"}, false},
 		{"C15d rg -g '*.key' with a .env", "rg -g '*.key' TODO", []string{".env", "src/a.go"}, false},
+		// substrate-1:GAP-0689: a mover body that may return before its cd
+		// leaves rg in the hook's folder too, so the glob is not anchored at
+		// the cd's folder alone.
+		{"G0689a mover may return before cd /", "f(){ test -e .env && return; cd /; }; f && rg -g '/.env' KEY @P", []string{".env", "src/a.go"}, true},
+		{"G0689b return 0 before cd /tmp", "f(){ [ -e .env ] && return 0; cd /tmp; }; f && rg -g '/.env' KEY @P", []string{".env", "src/a.go"}, true},
+		{"G0689c a .git test, deploy glob", "f(){ test -d .git && return; cd /; }; f && rg -g 'deploy/*' KEY @P", []string{".git/HEAD", "deploy/id_ed25519"}, true},
+		{"G0689d bare return first", "f(){ return; cd /; }; f && rg -g '/.env' KEY @P", []string{".env", "src/a.go"}, true},
+		{"C0689 return 1 cannot pass the &&", "f(){ test -e .nope && return 1; cd @P/src; }; f && rg -g '/.env' KEY @P/src", []string{".env", "src/a.go"}, false},
 		{"C15e rg -g '*.json' with a .env", "rg -g '*.json' TODO", []string{".env", "package.json"}, false},
 		{"C15f rg -g '*.{ts,tsx}' with a .env", "rg -g '*.{ts,tsx}' TODO", []string{".env", "web/app.tsx"}, false},
 		{"C15g rg -g 'src/**' with a .env", "rg -g 'src/**' TODO", []string{".env", "src/a.go"}, false},

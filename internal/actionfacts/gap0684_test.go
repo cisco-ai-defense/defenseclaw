@@ -81,6 +81,16 @@ var g0684Rows = []g0684Row{
 	{true, "cd @P/lnk/.. && rg -g '/.env' KEY @P", []string{".env"}, g0684Unsure},
 	{true, "cd -P @P/lnk/.. && rg -g '/.env' KEY @P", []string{}, g0684Unsure},
 	// No move: the hook's folder, as before.
+	// A mover body that may return before its cd leaves rg where the
+	// return ran too: never one exact folder (substrate-1:GAP-0689, the
+	// FU12 merge of rel-1-0-10:GAP-1144 and GAP-0684).
+	{false, "f(){ test -e .env && return; cd /; }; f && rg -g '/.env' KEY @P", []string{".env"}, g0684Unsure},
+	{false, "f(){ [ -e .env ] && return 0; cd /tmp; }; f && rg -g '/.env' KEY @P", []string{".env"}, g0684Unsure},
+	{false, "f(){ return; cd /; }; f && rg -g '/.env' KEY @P", []string{".env"}, g0684Unsure},
+	{false, "f(){ test -e .env && builtin return; cd /; }; f && rg -g 'deploy/*' KEY @P", []string{"deploy/id_ed25519"}, g0684Unsure},
+	{false, "f(){ if test -e .env; then return; fi; cd /; }; f && rg -g '/.env' KEY @P", []string{".env"}, g0684Unsure},
+	// A return that cannot pass the && keeps the folder exact.
+	{false, "f(){ test -e .nope && return 1; cd @P/sub; }; f && rg -g '/.env' KEY @P/sub", []string{"sub/.env"}, ""},
 	{false, "rg -g 'deploy/*' KEY @P", []string{"deploy/id_ed25519"}, ""},
 	{false, "rg -g '/.env' KEY @P", []string{".env"}, ""},
 }
