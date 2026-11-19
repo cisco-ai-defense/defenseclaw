@@ -45,7 +45,8 @@ func TestGAP1183TopLevelHereDocConsumerOnClaudeHook(t *testing.T) {
 		{"newgrp", "newgrp", "'EOF'", false, false},
 		{"newgrp unquoted", "newgrp", "EOF", false, false},
 		{"untrusted wrapper", "/tmp/x/wrap sh", "'EOF'", false, false},
-		{"assigned PATH", "PATH=/tmp/x:$PATH cat", "'EOF'", false, true},
+		{"assigned PATH", "PATH=/tmp/x:$PATH cat", "'EOF'", false, false},
+		{"exported PATH", "export PATH=/tmp/x:$PATH; cat", "'EOF'", false, true},
 		{"assigned PATH newgrp", "PATH=/tmp/x:$PATH newgrp", "'EOF'", false, false},
 		{"yash", "yash", "'EOF'", true, false},
 		// An unquoted body is read as the shell twin reads it

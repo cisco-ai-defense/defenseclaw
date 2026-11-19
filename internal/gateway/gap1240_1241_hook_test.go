@@ -33,14 +33,15 @@ func TestGAP1240GAP1241ReviewRowsOnClaudeHook(t *testing.T) {
 	// strict and managed-strict (unknownTierAction).
 	const unknown = "unknown"
 	// strictOnly: allow in default, permissive and managed, the unknown tier
-	// (a block) in strict and managed-strict: a data program after a PATH
-	// change (rel-1-0-10:GAP-1481).
+	// (a block) in strict and managed-strict: a data program after an earlier
+	// statement changed PATH (rel-1-0-10:GAP-1481). PATH assigned on the
+	// call (D08, D11, H04) stays the unknown tier: release alerted on it.
 	const strictOnly = "strict-only"
 	rows := []row{
 		{"H01", "tmp", hd("newgrp", stateWrite), unknown, evaluationLimitRuleID},
 		{"H02", "tmp", hd("true && newgrp", stateWrite), unknown, evaluationLimitRuleID},
 		{"H03", "tmp", hd("cd /tmp && /tmp/x/wrap sh", stateWrite), unknown, evaluationLimitRuleID},
-		{"H04", "tmp", hd("true && PATH=/tmp/x:$PATH cat", stateWrite), strictOnly, evaluationLimitRuleID},
+		{"H04", "tmp", hd("true && PATH=/tmp/x:$PATH cat", stateWrite), unknown, evaluationLimitRuleID},
 		{"H05b", "tmp", "newgrp <<'EOF' | cat\n" + stateWrite + "\nEOF", unknown, evaluationLimitRuleID},
 		{"H06", "tmp", "{ " + hd("newgrp", stateWrite) + "\n}", unknown, evaluationLimitRuleID},
 		{"H07", "tmp", "if true; then " + hd("newgrp", stateWrite) + "\nfi", unknown, evaluationLimitRuleID},
@@ -89,10 +90,10 @@ func TestGAP1240GAP1241ReviewRowsOnClaudeHook(t *testing.T) {
 		{"D05", hd("PATH=$HOME/go/bin:$PATH cat", "ordinary text"), "allow", ""},
 		{"D06", hd("sh", "echo hi"), "allow", ""},
 		{"D07", hd("bash", "sudo apt-get install -y jq"), "allow", ""},
-		{"D08", hd("PATH=/usr/local/go/bin:$PATH go run ./cmd", stateWrite), strictOnly, evaluationLimitRuleID},
+		{"D08", hd("PATH=/usr/local/go/bin:$PATH go run ./cmd", stateWrite), unknown, evaluationLimitRuleID},
 		{"D09", hd("tee README.md", "To reset, run: rm -rf ~/.defenseclaw"), "allow", ""},
 		{"D10", hd("cat > ~/.defenseclaw/notes.txt", "x"), "allow", ""},
-		{"D11", hd("PATH=$HOME/.local/bin:$PATH cat > notes.md", "echo x >> ~/.defenseclaw/config.yaml"), strictOnly, evaluationLimitRuleID},
+		{"D11", hd("PATH=$HOME/.local/bin:$PATH cat > notes.md", "echo x >> ~/.defenseclaw/config.yaml"), unknown, evaluationLimitRuleID},
 		{"D12", hd("kubectl apply -f -", "kind: ConfigMap"), "allow", ""},
 		{"D13", hd("/usr/bin/env bash", "echo hi"), "allow", ""},
 		{"D14", hd("cat", stateWrite) + "\nexport PATH=/tmp/x:$PATH", "allow", ""},

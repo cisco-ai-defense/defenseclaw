@@ -39,8 +39,9 @@ func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 		{"cat", "'EOF'", "none"},
 		{"yash", "'EOF'", "body"}, {"yash", "EOF", "body"}, {"nohup yash", "EOF", "body"},
 		{"newgrp", "'EOF'", "unknown"}, {"newgrp", "EOF", "unknown"},
-		{"/tmp/x/wrap sh", "'EOF'", "unknown"}, {"PATH=/tmp/x:$PATH cat", "'EOF'", "strict"},
-		{"export PATH=/tmp/x:$PATH; cat > t.sh", "'EOF'", "strict"}, {"env PATH=/tmp/x cat", "'EOF'", "strict"},
+		{"/tmp/x/wrap sh", "'EOF'", "unknown"}, {"PATH=/tmp/x:$PATH cat", "'EOF'", "unknown"},
+		{"export PATH=/tmp/x:$PATH; cat > t.sh", "'EOF'", "strict"}, {"env PATH=/tmp/x cat", "'EOF'", "unknown"},
+		{"PATH=/tmp/x:$PATH; cat", "'EOF'", "strict"}, {"export PATH=/tmp/x:$PATH; PATH=/tmp/y cat", "'EOF'", "unknown"},
 		{"export PATH=/tmp/x:$PATH; newgrp", "'EOF'", "unknown"}, {"PATH=/tmp/x:$PATH newgrp", "'EOF'", "unknown"},
 		{"export PATH=/tmp/x:$PATH; /tmp/x/wrap sh", "'EOF'", "unknown"},
 	} {

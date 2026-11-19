@@ -115,10 +115,13 @@ const EvaluationFailureUnknownStdinConsumer = "unknown-stdin-consumer"
 
 // EvaluationFailureUnknownStdinConsumerStrict is the EvaluationFailure of
 // the same here-document fed to a program that is no shell and no newgrp,
-// only after PATH changed (PATH=dir:$PATH cat <<E, export PATH=...; cat >
+// after an earlier statement changed PATH (export PATH=~/bin:$PATH; cat >
 // script <<E): the program is most likely the data program it names, so the
 // gateway judges it in the strict tiers only (the unknown tier there, a
 // block) and allows it in the others, as release did (rel-1-0-10:GAP-1481).
+// PATH assigned on the call itself (PATH=dir:$PATH cat <<E, env PATH=...)
+// stays EvaluationFailureUnknownStdinConsumer: release alerted on it in
+// every tier (ACTION-PARSE-FAILURE).
 const EvaluationFailureUnknownStdinConsumerStrict = "unknown-stdin-consumer-strict"
 
 func isSyntaxTailUnread(simple SimpleCommand) bool {
@@ -670,7 +673,7 @@ const (
 	// reading does not know: the unknown tier of every pack.
 	hereDocConsumerUnknown
 	// hereDocConsumerStrictOnly: a program that is no shell and no newgrp,
-	// after a PATH change before it or on it: the strict tiers only
+	// after an earlier statement changed PATH: the strict tiers only
 	// (rel-1-0-10:GAP-1481).
 	hereDocConsumerStrictOnly
 )
@@ -678,23 +681,23 @@ const (
 // topLevelHereDocUnknownStateConsumer is the small set of valid opener
 // shapes in GAP-1183. Other unknown stdin consumers retain their release
 // behavior; the syntax-error tail has its separate conservative contract.
-// newgrp and a shell behind a wrapper are the unknown tier; a changed PATH
-// alone, before a program that names no shell (export PATH=~/bin:$PATH;
-// cat > script <<E), is the strict tiers only: the PATH most often adds a
-// tool folder and the program stays the data program it names
-// (rel-1-0-10:GAP-1481).
+// newgrp, a shell behind a wrapper and PATH assigned on the call (PATH=dir
+// prog <<E, env PATH=dir prog <<E; release alerted on these) are the unknown
+// tier. PATH changed by an earlier statement, before a program that names no
+// shell (export PATH=~/bin:$PATH; cat > script <<E), is the strict tiers
+// only: such a PATH most often adds a tool folder and the program stays the
+// data program it names; release allowed it (rel-1-0-10:GAP-1481).
 func topLevelHereDocUnknownStateConsumer(call *syntax.CallExpr, bindings *hereDocBindings) hereDocConsumerTier {
 	if len(call.Args) == 0 {
 		return hereDocConsumerKnown
 	}
-	pathChanged := bindings != nil && bindings.resolution
 	for _, assign := range call.Assigns {
 		if assign.Name != nil && assign.Name.Value == "PATH" {
-			pathChanged = true
+			return hereDocConsumerUnknown
 		}
 	}
 	changed := hereDocConsumerKnown
-	if pathChanged {
+	if bindings != nil && bindings.resolution {
 		changed = hereDocConsumerStrictOnly
 	}
 	words := make([]string, len(call.Args))
@@ -704,7 +707,7 @@ func topLevelHereDocUnknownStateConsumer(call *syntax.CallExpr, bindings *hereDo
 	}
 	if run, ok := StaticPrefixWrapperChild(words, static); ok {
 		if run.ChangesResolution {
-			changed = hereDocConsumerStrictOnly
+			return hereDocConsumerUnknown
 		}
 		words, static = words[run.Index:], static[run.Index:]
 	}
