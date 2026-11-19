@@ -1184,10 +1184,16 @@ func (f Facts) withWorkFoldersOf(original Facts, windowsShellCWD bool) Facts {
 // simplePartWorkFolders are, for each statement of a split call
 // (sequenceStatementDetails of source), the resolved folders the working
 // folder tracking says it may run in (the hook's own folder included: a
-// background cd moves nothing); none where cwd is not known.
+// background cd moves nothing); none where cwd is not known. A Windows hook
+// folder (C:\Users\alice, the folder Git Bash runs a POSIX call in) is
+// known: path.IsAbs alone left every statement of such a call read only
+// where the walk moved, so after `[ -e .bashrc ] || cd /tmp` or a mover
+// call that may return, a write was never read in the hook's folder on a
+// Windows gateway (substrate-1:GAP-0696). resolveWorkFolder reads a step
+// from it as it does from a POSIX folder, and gives up on a relative one.
 func simplePartWorkFolders(source string, parts []sequenceStatement, cwd, home string) [][]string {
 	out := make([][]string, len(parts))
-	if !path.IsAbs(cwd) || len(parts) == 0 {
+	if !simplePathAbs(cwd) || len(parts) == 0 {
 		return out
 	}
 	file, ok := shellparse.Parse(source)

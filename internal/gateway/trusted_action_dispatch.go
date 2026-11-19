@@ -1203,6 +1203,7 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			checkedLocalOrdinary := false
 			localOrdinary := false
+			checkedSplitGapWrites := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := withCappedWindowsReadings(request, request.simpleMemo.commands(request.Input, facts))
 			if len(simples) == 0 && wholeCommandKnown &&
@@ -1272,8 +1273,16 @@ func dispatchTrustedActionWith(
 						continue
 					}
 					if simple.EvaluationFailure != "limit" {
-						// A parser gap is already represented by the whole-action
-						// evaluation. It is not itself an enforcement finding.
+						// A parser gap is left to the whole-action evaluation
+						// and is not itself an enforcement finding. That
+						// reading does not judge the writes of a partial call,
+						// so the files the call writes are judged as their
+						// plain writes (withSplitGapWrites,
+						// substrate-1:GAP-0693, GAP-0694, GAP-0695).
+						if simple.EvaluationFailure == "parse" && wholeCommandKnown && !checkedSplitGapWrites {
+							checkedSplitGapWrites = true
+							findings = withSplitGapWrites(ctx, request, generation, budget, facts, wholeCommand, findings)
+						}
 						continue
 					}
 					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
