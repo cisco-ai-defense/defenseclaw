@@ -80,7 +80,11 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 			parsed.GatewayServiceName != gatewayServiceName {
 			return errors.New("enterprise hooks: Claude machine policy belongs to another protected gateway deployment")
 		}
+		// The guard texts follow the recorded executable, not the caller's:
+		// during a retire the caller names the transition image while the
+		// drop-in can still name a launch folder (rel-1-0-10 GAP-1567).
 		setup.HookExecutable = parsed.HookExecutable
+		setup = withWindowsClaudeManagedHooksOnly(setup)
 		if err := provider.VerifyManagedHookPolicy(policy.data, setup); err != nil {
 			// The policy was rendered for the enrolled Claude version's hook
 			// contract (for example with DirectoryAdded from 2.1.219), which
@@ -90,7 +94,8 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 			// and gateway, with or without the managed-hooks-only lock: a
 			// policy an older release published without the lock still
 			// belongs to this deployment, and the guardian's canonical check
-			// re-renders it.
+			// re-renders it. So is the drop-in in the other guard texts (the
+			// 1.0.9 form a retire writes, or the current one), GAP-1567.
 			if !claudeManagedPolicyMatchesKnownContract(provider, policy.data, setup) {
 				return fmt.Errorf("enterprise hooks: verify current Claude managed policy identity: %w", err)
 			}
@@ -106,15 +111,21 @@ func claudeManagedPolicyMatchesKnownContract(
 ) bool {
 	for _, contractID := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{setup.ClaudeAllowManagedHooksOnly, !setup.ClaudeAllowManagedHooksOnly} {
-			pinned := setup
-			pinned.HookContractID = contractID
-			pinned.ClaudeAllowManagedHooksOnly = lock
-			if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
-				return true
+			for _, texts109 := range []bool{setup.ClaudeManagedGuardTexts109, !setup.ClaudeManagedGuardTexts109} {
+				pinned := setup
+				pinned.HookContractID = contractID
+				pinned.ClaudeAllowManagedHooksOnly = lock
+				pinned.ClaudeManagedGuardTexts109 = texts109
+				if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
+					return true
+				}
 			}
 			// An authenticated standalone policy from the earlier direct
 			// delivery form remains this deployment's policy during upgrade.
 			if !setup.SecureClientHookDelivery {
+				pinned := setup
+				pinned.HookContractID = contractID
+				pinned.ClaudeAllowManagedHooksOnly = lock
 				pinned.SecureClientHookDelivery = true
 				if provider.VerifyManagedHookPolicy(policy, pinned) == nil {
 					return true
