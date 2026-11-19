@@ -70,6 +70,9 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 
 // stateWrapperValueOptions are the transparent wrappers whose program word
 // follows their options, and the options of each that take the next word.
+// setsid only starts the program in a new session (its -c, -f and -w take
+// no value), so setsid rm -rf ~ removes what rm -rf ~ removes
+// (rel-1-0-10:GAP-0762).
 var stateWrapperValueOptions = map[string]map[string]bool{
 	"sudo": {"-u": true, "-g": true, "-U": true, "-C": true, "-D": true, "-h": true,
 		"-p": true, "-r": true, "-t": true, "-T": true, "-R": true},
@@ -79,6 +82,7 @@ var stateWrapperValueOptions = map[string]map[string]bool{
 	"timeout": {"-s": true, "-k": true},
 	"stdbuf":  {"-i": true, "-o": true, "-e": true},
 	"nohup":   {},
+	"setsid":  {},
 	"time":    {},
 	"command": {},
 	"exec":    {"-a": true},

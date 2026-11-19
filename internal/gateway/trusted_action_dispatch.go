@@ -235,6 +235,13 @@ type trustedActionRequest struct {
 	// localLinkTwin marks the reading of a shell call with the words a link
 	// moves spelled as their places (localCommandLinkTwinRequest).
 	localLinkTwin bool
+	// hereStringPipeReading marks the printf WORD | CMD reading of a bash
+	// here-string (hereStringStateMutation). The call it reads got its own
+	// any-program wrapper twin, which is read the same way; inside this
+	// reading a read that the walk left as a pipe binds in a subshell, so
+	// unwrapping a call next to it (command echo IFS=x) would prove a write
+	// through the value the read replaces (rel-1-0-10:GAP-1083, GAP-1246).
+	hereStringPipeReading bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -826,13 +833,30 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
-	// A file writer run through nohup, nice, time, timeout, env NAME=value,
-	// command, sudo or exec (or after a word that may expand to nothing)
-	// writes what the plain call writes (GAP-2512); the plain reading is
-	// judged, and only its block counts.
-	if twin, ok := wrapperUnwrapTwinRequest(request); ok {
+	// A file writer or a shell run through any static prefix wrapper
+	// (nohup, nice, setsid, stdbuf, ionice, sudo, ...; or after a word that
+	// may expand to nothing) writes what the plain call does (GAP-2512,
+	// GAP-2519); the plain reading is judged, and only its block counts.
+	writerTwin, writerTwinOK := wrapperUnwrapTwinRequest(request, false)
+	if writerTwinOK {
 		defer func() {
-			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, writerTwin))
+		}()
+	}
+	// Any other program run that way writes or removes what the plain call
+	// does too (find -delete, truncate, rm of the state behind setsid or
+	// "$(echo nice)", rel-1-0-10:GAP-1186, GAP-1246), but the wrapped form
+	// keeps its own verdict for every other rule: sudo curl stays outside the
+	// exact curl sink grammar, command printf skips a function named printf,
+	// and a leading "$X" or time would turn every rule of the call into a
+	// second reading of it. Only a state-mutation block of that reading
+	// counts.
+	if twin, ok := wrapperUnwrapTwinRequest(request, true); ok &&
+		(!writerTwinOK || twin.Input.Command != writerTwin.Input.Command) {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return !wrappedStateMutationRule(f.RuleID)
+			}))
 		}()
 	}
 	// A shell named at run time ("$SHELL" -c TEXT, $BASH -ec TEXT, env
@@ -10279,19 +10303,25 @@ func bashReadingRequest(request trustedActionRequest, command, rewritten string)
 	return twin
 }
 
-// wrapperUnwrapTwinRequest returns the request for
-// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. Behind ProtectHome
-// (managed hook peer) the hook client map lists the targets of the same
-// reading (hookpaths), so the wrapped call is judged there too (GAP-2563).
-func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+// wrapperUnwrapTwinRequest returns the request for the reading of a POSIX
+// Bash call by actionfacts.WrapperUnwrapTwin (anyProgram) or
+// WrapperUnwrapWriterTwin. Behind ProtectHome (managed hook peer) the hook
+// client map lists the targets of the wider reading (hookpaths), so the
+// wrapped call is judged there too (GAP-2563). A here-string pipe reading
+// gets no any-program twin (hereStringPipeReading).
+func wrapperUnwrapTwinRequest(request trustedActionRequest, anyProgram bool) (trustedActionRequest, bool) {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return trustedActionRequest{}, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
-	if !known {
+	if !known || anyProgram && request.hereStringPipeReading {
 		return trustedActionRequest{}, false
 	}
-	rewritten, ok := actionfacts.WrapperUnwrapTwin(command)
+	unwrap := actionfacts.WrapperUnwrapWriterTwin
+	if anyProgram {
+		unwrap = actionfacts.WrapperUnwrapTwin
+	}
+	rewritten, ok := unwrap(command)
 	if !ok || rewritten == command {
 		return trustedActionRequest{}, false
 	}
@@ -10305,6 +10335,24 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true
+}
+
+// wrappedStateMutationRules are the rules a call that any program runs
+// through a prefix wrapper is judged by on its plain reading
+// (actionfacts.WrapperUnwrapTwin): a write or delete of the DefenseClaw
+// state and the agent hook files, and a recursive delete of a critical root
+// such as the home (find ~ -delete). The wrapper changes nothing of what the
+// program writes or removes (rel-1-0-10:GAP-1186, GAP-1246).
+var wrappedStateMutationRules = map[string]bool{
+	"TAMPER.DETECTOR_STATE_WRITE":      true,
+	"TAMPER.AGENT_HOOK_CONFIG_WRITE":   true,
+	"TAMPER.AGENT_HOOK_CONFIG_DISABLE": true,
+	"CMD-RM-RF":                        true,
+}
+
+// wrappedStateMutationRule reports a rule of wrappedStateMutationRules.
+func wrappedStateMutationRule(ruleID string) bool {
+	return wrappedStateMutationRules[canonicalTrustedRuleID(ruleID)]
 }
 
 // runTimeShellTwinRequest returns the request for
