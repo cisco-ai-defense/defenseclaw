@@ -45,6 +45,12 @@ func machineLayoutCall(t *testing.T, home, project, tool string, input map[strin
 	if pack == "strict" {
 		want = `{"action":"block"`
 	}
+	if strings.HasPrefix(response, `{"action":"block"`) && strings.Contains(response, "tamper.detector_state_write") &&
+		strings.Contains(response, "persistence.ssh_authorized_keys_command") {
+		// The unresolved-target rule beside the state write blocks in every
+		// tier (the /etc/defenseclaw/../ spelling cannot be resolved).
+		return true, response
+	}
 	return strings.HasPrefix(response, want) && strings.Contains(response, "tamper.detector_state_write"), response
 }
 
