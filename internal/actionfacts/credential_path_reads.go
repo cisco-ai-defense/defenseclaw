@@ -747,22 +747,31 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 			operands = operands[1:]
 		}
 		recursive := credentialSearchRecursive(argv, program)
-		// grep -r reads every file under the folder; ripgrep skips hidden
-		// (dot-named) files and folders unless told otherwise
-		// (substrate-1:GAP-0344).
-		hidden := program != "rg" || r.rgConfig || rgSearchesHidden(command, argv)
+		// grep -r reads every file under the folder (a nil filter);
+		// ripgrep skips hidden (dot-named) files and folders unless told
+		// otherwise (substrate-1:GAP-0344), and searches only what its
+		// globs and types select (substrate-1:GAP-0683). A call that sets
+		// RIPGREP_CONFIG_PATH may give rg any option from a file: every
+		// file counts (substrate-1:GAP-0682).
+		var filter *rgFilter
+		if program == "rg" {
+			filter = rgFilterAll
+			if !r.rgConfig {
+				filter = rgSearchFilterOf(command, argv, filepath.ToSlash(r.cwd))
+			}
+		}
 		for _, index := range operands {
 			argument := command.Arguments[index]
 			r.argument(command.ID, argument, false)
 			if recursive && !argument.Expands && argument.Value != "" {
-				r.searchFolder(command.ID, argument.Value, hidden)
+				r.searchFolder(command.ID, argument.Value, filter)
 			}
 		}
 		if recursive && len(operands) == 0 && !(program == "rg" && (r.pipedStdin(command) || parseRgCommandLine(argv).stdin)) {
 			// No folder operand: grep -r and rg search the working folder
 			// (an rg fed by a pipe, or given -, searches its input instead,
 			// substrate-1:GAP-0344).
-			r.searchFolder(command.ID, ".", hidden)
+			r.searchFolder(command.ID, ".", filter)
 		}
 		return operands
 	case credentialReadsSources:
@@ -1215,8 +1224,8 @@ var credentialWalkSkips = map[string]bool{
 
 // searchFolder resolves the credentials files under the folder a recursive
 // search reads, in it and in every folder below it (substrate-1:GAP-0344,
-// credentialPathWalk); with hidden false (ripgrep's default), not in a
-// dot-named file or folder. Only a regular file that is there counts (T6
+// credentialPathWalk); for ripgrep, only the files and folders its filter
+// admits (rgFilter: its hidden rule, globs and types). Only a regular file that is there counts (T6
 // scope ruling: an ordinary repository search starts no chain). Every walk
 // of one resolve shares one walk budget (substrate-1:GAP-0672): a call
 // naming many folders costs no more than one walk at the bound. A walk cut
@@ -1224,7 +1233,7 @@ var credentialWalkSkips = map[string]bool{
 // file-unknown read: the chain's unknown tier, never a cap of the resolve,
 // so the search itself is judged as it was before the walk (T6 ruling
 // 2026-11-18).
-func (r *credentialPathResolver) searchFolder(id int64, folder string, hidden bool) {
+func (r *credentialPathResolver) searchFolder(id int64, folder string, filter *rgFilter) {
 	dir := folder
 	if strings.HasPrefix(dir, "~/") && r.home != "" {
 		dir = filepath.Join(r.home, dir[2:])
@@ -1246,7 +1255,12 @@ func (r *credentialPathResolver) searchFolder(id int64, folder string, hidden bo
 		r.add(id, "", true)
 		return
 	}
-	walk := credentialPathWalkOf(filepath.Clean(dir), hidden, left)
+	// The folder as rg names its paths: the shell expands ~/.
+	shown := folder
+	if strings.HasPrefix(shown, "~/") && r.home != "" {
+		shown = r.home + shown[1:]
+	}
+	walk := credentialPathWalkOf(filepath.Clean(dir), filepath.ToSlash(shown), filter, left)
 	r.walkUsed = r.walkUsed.plus(walk.used)
 	for _, file := range walk.found {
 		if r.stopped() {
@@ -1296,7 +1310,7 @@ type credentialPathWalkResult struct {
 // call make the same walks with the same budgets left, in the same order.
 type credentialPathWalkKey struct {
 	dir    string
-	hidden bool
+	filter string // the rgFilter key and the folder as rg names it; "" for grep -r
 	limits credentialPathWalkLimits
 }
 
@@ -1313,10 +1327,10 @@ var credentialPathWalks struct {
 	bytes int64 // the stored size of walks, credentialPathWalkSize summed
 }
 
-// credentialPathWalkSize is the stored size of one memo walk: its folder,
-// the paths it found and a fixed cost per walk and per path.
+// credentialPathWalkSize is the stored size of one memo walk: its folder
+// and filter key, the paths it found and a fixed cost per walk and per path.
 func credentialPathWalkSize(key credentialPathWalkKey, walk credentialPathWalkResult) int64 {
-	size := int64(len(key.dir)) + 128
+	size := int64(len(key.dir)+len(key.filter)) + 128
 	for _, file := range walk.found {
 		size += int64(len(file)) + 16
 	}
@@ -1335,8 +1349,11 @@ func credentialPathWalkDrop(key credentialPathWalkKey) {
 	}
 }
 
-func credentialPathWalkOf(dir string, hidden bool, limits credentialPathWalkLimits) credentialPathWalkResult {
-	key := credentialPathWalkKey{dir, hidden, limits}
+func credentialPathWalkOf(dir, shown string, filter *rgFilter, limits credentialPathWalkLimits) credentialPathWalkResult {
+	key := credentialPathWalkKey{dir: dir, limits: limits}
+	if filter != nil {
+		key.filter = filter.key + "\x00" + shown
+	}
 	now := time.Now()
 	credentialPathWalks.Lock()
 	walk, ok := credentialPathWalks.walks[key]
@@ -1348,7 +1365,7 @@ func credentialPathWalkOf(dir string, hidden bool, limits credentialPathWalkLimi
 	if ok {
 		return walk
 	}
-	walk = credentialPathWalk(dir, hidden, limits)
+	walk = credentialPathWalk(dir, shown, filter, limits)
 	walk.at = now
 	credentialPathWalkStore(key, walk, time.Now())
 	return walk
@@ -1394,11 +1411,12 @@ func credentialPathWalkStore(key credentialPathWalkKey, walk credentialPathWalkR
 // in batches of credentialPathWalkBatch entries; each entry named as the
 // first segment of a credentials probe is looked up. It does not enter
 // credentialWalkSkips or follow a symbolic link to a folder, as grep -r does
-// not. With hidden false it neither counts nor enters a dot-named entry, and
-// skips a probe with a dot-named segment, as ripgrep without --hidden. A
-// limit (folders, entries, lookups) cuts it: what it found stays, and cut
+// not. It counts and enters only what filter admits (rgFilter, ripgrep's
+// hidden rule, globs and types, applied to each folder on the way to a
+// probe and to the probe file; nil for grep -r, which admits all); shown
+// is dir as rg names it. A limit (folders, entries, lookups) cuts it: what it found stays, and cut
 // is set.
-func credentialPathWalk(dir string, hidden bool, limits credentialPathWalkLimits) (walk credentialPathWalkResult) {
+func credentialPathWalk(dir, shown string, filter *rgFilter, limits credentialPathWalkLimits) (walk credentialPathWalkResult) {
 	groups := credentialProbeFirstSegments()
 	budget := credentialPathWalkBudget{limits: limits}
 	folders := int64(0)
@@ -1417,10 +1435,10 @@ func credentialPathWalk(dir string, hidden bool, limits credentialPathWalkLimits
 		if len(probe.segments) < 2 {
 			continue
 		}
-		rest := strings.Join(probe.segments[1:], "/")
-		if !hidden && (strings.HasPrefix(rest, ".") || strings.Contains(rest, "/.")) {
+		if !filter.admits(shown, probe.segments[1:]) {
 			continue
 		}
+		rest := strings.Join(probe.segments[1:], "/")
 		if !budget.take(&budget.lookups, limits.lookups) {
 			return walk
 		}
@@ -1433,7 +1451,7 @@ func credentialPathWalk(dir string, hidden bool, limits credentialPathWalkLimits
 	// credentialPathWalkWorkers goroutines (the walk's cost is its system
 	// calls), and merged in order, so an uncut walk finds the same files in
 	// the same order every time.
-	level := []string{dir}
+	level := []credentialWalkFolder{{dir, shown}}
 	for len(level) > 0 && !walk.cut && !budget.stop.Load() {
 		if room := limits.folders - folders; int64(len(level)) > room {
 			level = level[:max(room, 0)]
@@ -1453,7 +1471,7 @@ func credentialPathWalk(dir string, hidden bool, limits credentialPathWalkLimits
 				if i >= len(level) || budget.stop.Load() {
 					return
 				}
-				scans[i] = budget.scan(level[i], hidden, groups)
+				scans[i] = budget.scan(level[i], filter, groups)
 			}
 		}
 		if workers := min(credentialPathWalkWorkers, len(level)); workers <= 1 {
@@ -1493,12 +1511,18 @@ func (b *credentialPathWalkBudget) take(counter *atomic.Int64, limit int64) bool
 // credentialPathFolderScan is one folder of a walk: the credentials files
 // found in it and the folders below it to read next.
 type credentialPathFolderScan struct {
-	found, folders []string
+	found   []string
+	folders []credentialWalkFolder
+}
+
+// credentialWalkFolder is one folder of a walk and its path as rg names it.
+type credentialWalkFolder struct {
+	dir, shown string
 }
 
 // scan reads one folder in batches of credentialPathWalkBatch entries.
-func (b *credentialPathWalkBudget) scan(folder string, hidden bool, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
-	f, err := os.Open(folder)
+func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter *rgFilter, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
+	f, err := os.Open(folder.dir)
 	if err != nil {
 		return s
 	}
@@ -1510,24 +1534,28 @@ func (b *credentialPathWalkBudget) scan(folder string, hidden bool, groups map[s
 				return s
 			}
 			name := entry.Name()
-			if !hidden && strings.HasPrefix(name, ".") {
-				continue
-			}
 			for _, probe := range groups[name] {
-				if !hidden && strings.Contains(probe.value, "/.") {
+				if !filter.admits(folder.shown, probe.segments) {
 					continue
 				}
 				if !b.take(&b.lookups, b.limits.lookups) {
 					return s
 				}
-				file := filepath.Join(folder, filepath.FromSlash(probe.value))
+				file := filepath.Join(folder.dir, filepath.FromSlash(probe.value))
 				if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
 					s.found = append(s.found, file)
 				}
 			}
-			if entry.IsDir() && !credentialWalkSkips[name] {
-				s.folders = append(s.folders, filepath.Join(folder, name))
+			if !entry.IsDir() || credentialWalkSkips[name] {
+				continue
 			}
+			next := credentialWalkFolder{dir: filepath.Join(folder.dir, name)}
+			if filter != nil {
+				if next.shown = rgJoin(folder.shown, name); !filter.enters(next.shown, name) {
+					continue
+				}
+			}
+			s.folders = append(s.folders, next)
 		}
 		if err != nil || len(batch) < credentialPathWalkBatch {
 			return s // the end of the folder, or a folder that cannot be read on

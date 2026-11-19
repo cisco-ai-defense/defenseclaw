@@ -80,7 +80,6 @@ type g0679Row struct {
 const (
 	g0679All   = "count when unsure: a hidden read turns every hidden credentials file on"
 	g0679Words = "count when unsure: a word known only when it runs may be --hidden"
-	g0679Class = "count when unsure: a glob with a class always counts"
 	// rg reads a -f pattern file; rg -l lists only the files it searches.
 	g0679PatternFile = "rg reads the -f pattern file, rg -l does not list it"
 )
@@ -112,21 +111,21 @@ var g0679Rows = []g0679Row{
 // g0680Rows is substrate-1:GAP-0680: a folder glob lets rg enter a hidden
 // folder, where another include glob matches.
 var g0680Rows = []g0679Row{
-	{"rg -g '.aws/' -g credentials KEY", []string{".aws/credentials"}, g0679All},
-	{"rg -g '*/' -g credentials KEY", []string{".aws/credentials"}, g0679All},
-	{"rg -g '**/' -g 'id_*' KEY", []string{".ssh/id_rsa"}, g0679All},
-	{"rg --iglob '.AWS/' --iglob CREDENTIALS KEY", []string{".aws/credentials"}, g0679All},
-	{"rg -g '.aws/' -g '.aws/credentials' KEY", []string{".aws/credentials"}, g0679All},
-	{"rg -g '.ssh/' -g id_rsa KEY", []string{".ssh/id_rsa"}, g0679All},
-	{"rg -g '.aws/' -g 'cred*' KEY", []string{".aws/credentials"}, g0679All},
+	{"rg -g '.aws/' -g credentials KEY", []string{".aws/credentials"}, ""},
+	{"rg -g '*/' -g credentials KEY", []string{".aws/credentials"}, ""},
+	{"rg -g '**/' -g 'id_*' KEY", []string{".ssh/id_rsa"}, ""},
+	{"rg --iglob '.AWS/' --iglob CREDENTIALS KEY", []string{".aws/credentials"}, ""},
+	{"rg -g '.aws/' -g '.aws/credentials' KEY", []string{".aws/credentials"}, ""},
+	{"rg -g '.ssh/' -g id_rsa KEY", []string{".ssh/id_rsa"}, ""},
+	{"rg -g '.aws/' -g 'cred*' KEY", []string{".aws/credentials"}, ""},
 	{"rg -g '.aws/' KEY", []string{}, ""},
-	{"rg -g '.aws/' -g credentials KEY .", []string{".aws/credentials"}, g0679All},
-	{"rg -g '*/' -g 'id_*' KEY .", []string{".ssh/id_rsa"}, g0679All},
-	{"rg -g '/.aws/' -g credentials KEY", []string{".aws/credentials"}, g0679All},
-	{"rg --iglob '*/' --iglob Credentials KEY", []string{".aws/credentials"}, g0679All},
-	{"rg -g '?aws/' -g credentials KEY", []string{".aws/credentials"}, g0679All},
-	{"rg -g 'sub[/].env' KEY", []string{"sub/.env"}, g0679All},
-	{"rg -g 'sub\\/.env' KEY", []string{"sub/.env"}, g0679All},
+	{"rg -g '.aws/' -g credentials KEY .", []string{".aws/credentials"}, ""},
+	{"rg -g '*/' -g 'id_*' KEY .", []string{".ssh/id_rsa"}, ""},
+	{"rg -g '/.aws/' -g credentials KEY", []string{".aws/credentials"}, ""},
+	{"rg --iglob '*/' --iglob Credentials KEY", []string{".aws/credentials"}, ""},
+	{"rg -g '?aws/' -g credentials KEY", []string{".aws/credentials"}, ""},
+	{"rg -g 'sub[/].env' KEY", []string{"sub/.env"}, ""},
+	{"rg -g 'sub\\/.env' KEY", []string{"sub/.env"}, ""},
 	{"rg -g sub KEY", []string{}, ""},
 	{"rg -g 'sub/' KEY", []string{}, ""},
 	{"rg -g 's*b' -g 'cred*' KEY", []string{}, ""},
@@ -139,24 +138,24 @@ var g0680Rows = []g0679Row{
 // class, an escape or a wildcard may match a dot name, and a class may
 // match "/".
 var g0681Rows = []g0679Row{
-	{"rg -g '[!_]env' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g '[!x]npmrc' KEY", []string{".npmrc"}, g0679All},
-	{"rg -g '.[!x]nv' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg --type-add 'e:[!_]env' -te KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g '[^_]env' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g '\\.env' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g '[!_]env' KEY .", []string{".env", "sub/.env"}, g0679All},
-	{"rg --type-add 'e:[!_]env' -te KEY .", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g 'sub[!x].env' KEY", []string{"sub/.env"}, g0679All},
-	{"rg -g '[.]env' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g '[a.]env' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg --iglob '[!_]ENV' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg --type-add 'e:[^_]npmrc' -te KEY", []string{".npmrc"}, g0679All},
-	{"rg --type-add 'e:*.go,[!_]env' -tall KEY", []string{}, g0679All},
-	{"rg -g '?env' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g 'cred[!x]ntials' KEY", []string{}, g0679All},
-	{"rg -g 'cred[e]ntials' KEY", []string{}, g0679Class},
-	{"rg --type-add 'e:id_[r]sa' -te KEY", []string{}, g0679Class},
+	{"rg -g '[!_]env' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg -g '[!x]npmrc' KEY", []string{".npmrc"}, ""},
+	{"rg -g '.[!x]nv' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg --type-add 'e:[!_]env' -te KEY", []string{".env", "sub/.env"}, ""},
+	{"rg -g '[^_]env' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg -g '\\.env' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg -g '[!_]env' KEY .", []string{".env", "sub/.env"}, ""},
+	{"rg --type-add 'e:[!_]env' -te KEY .", []string{".env", "sub/.env"}, ""},
+	{"rg -g 'sub[!x].env' KEY", []string{"sub/.env"}, ""},
+	{"rg -g '[.]env' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg -g '[a.]env' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg --iglob '[!_]ENV' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg --type-add 'e:[^_]npmrc' -te KEY", []string{".npmrc"}, ""},
+	{"rg --type-add 'e:*.go,[!_]env' -tall KEY", []string{}, ""},
+	{"rg -g '?env' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg -g 'cred[!x]ntials' KEY", []string{}, ""},
+	{"rg -g 'cred[e]ntials' KEY", []string{}, ""},
+	{"rg --type-add 'e:id_[r]sa' -te KEY", []string{}, ""},
 }
 
 // g0682Rows is substrate-1:GAP-0682: a word known only when the call runs
@@ -170,7 +169,7 @@ var g0682Rows = []g0679Row{
 	{"L=.; rg -l$L KEY .", g0679Every, ""},
 	{"RIPGREP_CONFIG_PATH=cfg.txt rg KEY .", g0679Every, ""},
 	{"export RIPGREP_CONFIG_PATH=cfg.txt; rg KEY .", g0679Every, ""},
-	{`T=e; rg --type-add 'e:*.env' -t "$T" KEY`, []string{".env", "sub/.env"}, g0679All},
+	{`T=e; rg --type-add 'e:*.env' -t "$T" KEY`, []string{".env", "sub/.env"}, ""},
 	{`A='e:*.env'; rg --type-add "$A" -te KEY`, []string{".env", "sub/.env"}, g0679All},
 	{`P=KEY; rg "$P" .`, []string{}, g0679Words},
 	{`P=KEY; rg -e "$P" .`, []string{}, ""},
@@ -184,8 +183,8 @@ var g0673RV4Rows = []g0679Row{
 	{"rg -tall KEY", []string{}, ""},
 	{"rg -tsh -tconfig -tjson -tyaml KEY", []string{}, ""},
 	{"rg --type-add 'e:*.env' -te --type-clear e --type-add 'e:*.go' KEY", []string{}, ""},
-	{"rg --type-add 'e:*.go' -te --type-add 'e:*.env' KEY", []string{".env", "sub/.env"}, g0679All},
-	{"rg -g '{.aws,credentials}' KEY", []string{".aws/credentials"}, g0679All},
+	{"rg --type-add 'e:*.go' -te --type-add 'e:*.env' KEY", []string{".env", "sub/.env"}, ""},
+	{"rg -g '{.aws,credentials}' KEY", []string{".aws/credentials"}, ""},
 	{"rg -L KEY", []string{}, ""},
 	{"rg -L KEY lnk", []string{}, ""},
 	{"rg --ignore-file .aws/credentials KEY src", []string{}, ""},

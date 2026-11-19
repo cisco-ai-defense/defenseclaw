@@ -17,8 +17,8 @@
 package actionfacts
 
 import (
-	"path"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -66,9 +66,11 @@ var rgValueOptions = map[string]bool{
 }
 
 // rgOption is one option of an rg argv: its long name ("" for an option
-// rg does not know) and its value.
+// rg does not know), its value and the argv index of the word its value
+// is in (the option word itself for a switch or an attached value).
 type rgOption struct {
 	name, value string
+	word        int
 }
 
 // rgCommandLine is an rg argv parsed: its options in order, the argv
@@ -110,13 +112,13 @@ func parseRgCommandLine(argv []string) rgCommandLine {
 				i++
 				value = argv[i]
 			}
-			line.options = append(line.options, rgOption{name, value})
+			line.options = append(line.options, rgOption{name, value, i})
 			continue
 		}
 		for j := 1; j < len(arg); j++ {
 			name := rgShortOptions[arg[j]]
 			if !rgValueOptions[name] {
-				line.options = append(line.options, rgOption{name: name})
+				line.options = append(line.options, rgOption{name: name, word: i})
 				continue
 			}
 			value := strings.TrimPrefix(arg[j+1:], "=")
@@ -124,7 +126,7 @@ func parseRgCommandLine(argv []string) rgCommandLine {
 				i++
 				value = argv[i]
 			}
-			line.options = append(line.options, rgOption{name, value})
+			line.options = append(line.options, rgOption{name, value, i})
 			break
 		}
 	}
@@ -192,101 +194,219 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 	return fromOption, files
 }
 
-// rgSearchesHidden reports an rg that may read hidden (dot-named) files
-// and folders, in ripgrep 14.1's order of the options. argv is
-// rgArgvWords(command). Its documented default skips them (and
-// .gitignore'd paths, which are not modelled: a non-hidden file counts as
-// read). They are read with:
+// rgSearchFilterOf is the rgFilter of an rg command line, in ripgrep
+// 14.1's order of the options (substrate-1:GAP-0683); argv is
+// rgArgvWords(command), cwd the folder it runs in. Its documented default
+// skips hidden (dot-named) files and folders (and .gitignore'd paths,
+// which are not modelled: a non-hidden file counts as read). The filter
+// reads what rg reads:
 //   - --hidden (-.), until a later --no-hidden; and the second
 //     --unrestricted (-uu), which turns --hidden on where it stands;
-//   - --glob and --iglob includes that may whitelist a hidden credentials
-//     file (an override glob whitelists past every ignore rule), by
-//     rgGlobsMayReadHidden;
-//   - a file type selected with -t or --type whose globs may match one
-//     (substrate-1:GAP-0671): --type-add NAME:GLOB,... adds globs, and
-//     NAME:include:TYPE,... copies the globs those types have then;
-//     --type-clear empties a type. A selection is resolved by name once
-//     the whole argv is read, as rg does (-te before --type-add 'e:*.env'
-//     reads .env), and -t all selects every type defined at that point
-//     (substrate-1:GAP-0673). No built-in rg type names a credentials
-//     file, so only --type-add globs count. -T (--type-not) only excludes;
+//   - the --glob globs, then the --iglob globs (rg adds every -g glob
+//     before every --iglob glob, whatever their order on the line), case
+//     folded with --glob-case-insensitive; an include glob whitelists past
+//     the hidden rule;
+//   - the file types -t selects and -T excludes (substrate-1:GAP-0671),
+//     each resolved by name once the whole argv is read, as rg does (-te
+//     before --type-add 'e:*.env' reads .env): --type-add NAME:GLOB adds
+//     one glob (a "," in it is no separator), NAME:include:TYPE,... copies
+//     the globs those types have then, --type-clear empties a type and -t
+//     all selects every type defined at that point (substrate-1:GAP-0673).
+//     A built-in type matches the credentials file names
+//     rgBuiltinTypeProbeNames lists;
 //   - an --ignore-file, unless --no-ignore-files: its "!" lines can
-//     whitelist a hidden file (its contents are not read here);
-//   - a word known only when it runs where rg may read it as an option
-//     (rgWordMayBeOption: rg $F, rg -$X, rg --hidden$E), and a --type-add
-//     or -t value known only then.
+//     whitelist a hidden file or folder past the hidden rule (never past an
+//     override glob or a type; its contents are not read here), so hidden
+//     counts as on.
+//
+// Count when unsure: the filter that reads every file (hidden on, no glob,
+// no type) when a word known only when it runs may be an option word
+// (rgWordMayBeOption: rg $F, rg -$X, rg --hidden$E; it may be --hidden or
+// any glob), or a --type-add value is known only then. A --glob or --iglob
+// value known only then matches every path (an include) or none (one that
+// starts with "!"); a -t value known only then selects every type, a -T or
+// --type-clear one excludes or clears none. A glob this model does not
+// read exactly (rgGlobRegexp) is unsure in the same way.
 //
 // A file or folder the command names is read whatever its name
 // (credentialPathResolver.argument).
-func rgSearchesHidden(command CommandFact, argv []string) bool {
+func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter {
+	all := rgFilterAll
 	line := parseRgCommandLine(argv)
 	for _, index := range line.optionWords {
 		if index < len(command.Arguments) && rgWordMayBeOption(command.Arguments[index]) {
-			return true
+			return all
 		}
 	}
 	for _, index := range line.operands {
 		if index < line.literal && index < len(command.Arguments) && rgWordMayBeOption(command.Arguments[index]) {
-			return true
+			return all
 		}
 	}
-	hidden, unrestricted, unsure := false, 0, false
-	var globs []string
+	runTime := func(option rgOption) bool {
+		if option.word >= len(command.Arguments) {
+			return false
+		}
+		argument := command.Arguments[option.word]
+		return argument.Expands && argument.StaticGlob == ""
+	}
+	f := &rgFilter{cwd: cwd}
+	unrestricted, fold := 0, false
 	ignoreFile, ignoreFiles := false, true
-	types := make(map[string][]string)
-	var selected []string
+	var globs, iglobs []rgOption
+	types := rgBuiltinTypes()
+	type selection struct {
+		name    string
+		exclude bool
+	}
+	var selections []selection
 	for _, option := range line.options {
 		switch option.name {
 		case "hidden":
-			hidden = true
+			f.hidden = true
 		case "no-hidden":
-			hidden = false
+			f.hidden = false
 		case "unrestricted":
 			unrestricted++
 			if unrestricted == 2 {
-				hidden = true
+				f.hidden = true
 			}
-		case "glob", "iglob":
-			globs = append(globs, option.value)
+		case "glob":
+			globs = append(globs, option)
+		case "iglob":
+			iglobs = append(iglobs, option)
+		case "glob-case-insensitive":
+			fold = true
+		case "no-glob-case-insensitive":
+			fold = false
 		case "ignore-file":
 			ignoreFile = true
 		case "no-ignore-files":
 			ignoreFiles = false
 		case "ignore-files":
 			ignoreFiles = true
-		case "type":
-			// A value rgArgvWords made from a word known only when it
-			// runs ends in "*": it may be all.
-			if option.value != "all" && !strings.Contains(option.value, "*") {
-				selected = append(selected, option.value)
+		case "type", "type-not":
+			exclude := option.name == "type-not"
+			if runTime(option) {
+				if exclude {
+					break
+				}
+				option.value = "all"
+			}
+			if option.value != "all" {
+				selections = append(selections, selection{option.value, exclude})
 				break
 			}
+			names := make([]string, 0, len(types))
 			for name := range types {
-				selected = append(selected, name)
+				names = append(names, name)
+			}
+			slices.Sort(names)
+			for _, name := range names {
+				selections = append(selections, selection{name, exclude})
 			}
 		case "type-add":
-			name, globs, ok := strings.Cut(option.value, ":")
-			if !ok || strings.Contains(name, "*") {
-				// rg refuses a literal NAME with no ":"; a value known only
-				// when it runs may define any type.
-				unsure = true
+			if runTime(option) {
+				return all
+			}
+			// rg refuses any other form (it then reads nothing).
+			parts := strings.Split(option.value, ":")
+			if parts[0] == "" || parts[0] == "all" || len(parts) < 2 || len(parts) > 3 || parts[len(parts)-1] == "" ||
+				len(parts) == 3 && parts[1] != "include" {
 				break
 			}
-			if included, ok := strings.CutPrefix(globs, "include:"); ok {
-				for _, other := range strings.Split(included, ",") {
-					types[name] = append(types[name], types[other]...)
+			t := types[parts[0]]
+			if t == nil {
+				t = &rgType{names: map[string]bool{}}
+				types[parts[0]] = t
+			}
+			if len(parts) == 2 {
+				t.globs = append(t.globs, rgTypeGlob(parts[1]))
+				break
+			}
+			for _, other := range strings.Split(parts[2], ",") {
+				if from := types[other]; from != nil && from != t {
+					t.globs = append(slices.Clip(t.globs), from.globs...)
+					for name := range from.names {
+						t.names[name] = true
+					}
 				}
-				break
 			}
-			types[name] = append(types[name], strings.Split(globs, ",")...)
 		case "type-clear":
-			delete(types, option.value)
+			if !runTime(option) {
+				delete(types, option.value)
+			}
 		}
 	}
-	for _, name := range selected {
-		globs = append(globs, types[name]...)
+	if ignoreFile && ignoreFiles {
+		f.hidden = true
 	}
-	return hidden || unsure || rgGlobsMayReadHidden(globs) || ignoreFile && ignoreFiles
+	var key strings.Builder
+	key.WriteString(strconv.FormatBool(f.hidden) + "\x00" + cwd)
+	add := func(option rgOption, fold bool) {
+		g := rgGlob{exclude: strings.HasPrefix(option.value, "!")}
+		if !runTime(option) {
+			var ok bool
+			if g, ok = rgOverrideGlob(option.value, fold); !ok {
+				return
+			}
+		}
+		if !g.exclude {
+			f.includes++
+		}
+		f.globs = append(f.globs, g)
+		key.WriteString("\x00g" + rgGlobKey(g))
+	}
+	for _, option := range globs {
+		add(option, fold)
+	}
+	for _, option := range iglobs {
+		add(option, true)
+	}
+	for _, s := range selections {
+		f.selected = f.selected || !s.exclude
+		t := types[s.name]
+		if t == nil || len(t.globs) == 0 && len(t.names) == 0 {
+			continue // matches no credentials file
+		}
+		f.types = append(f.types, rgTypeSelection{exclude: s.exclude, globs: t.globs, names: t.names})
+		key.WriteString("\x00t" + strconv.FormatBool(s.exclude))
+		for _, g := range t.globs {
+			key.WriteString("\x01" + rgGlobKey(g))
+		}
+		names := make([]string, 0, len(t.names))
+		for name := range t.names {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		key.WriteString("\x01" + strings.Join(names, "\x01"))
+	}
+	key.WriteString("\x00" + strconv.FormatBool(f.selected))
+	f.key = key.String()
+	return f
+}
+
+// rgGlobKey is one glob in a filter's memo key.
+func rgGlobKey(g rgGlob) string {
+	re := "?"
+	if g.re != nil {
+		re = g.re.String()
+	}
+	return strconv.FormatBool(g.exclude) + strconv.FormatBool(g.onlyDir) + re
+}
+
+// rgBuiltinTypes is rg's built-in file types that match a credentials file
+// name (rgBuiltinTypeProbeNames), for one command line to change.
+func rgBuiltinTypes() map[string]*rgType {
+	types := make(map[string]*rgType, len(rgBuiltinTypeProbeNames))
+	for name, files := range rgBuiltinTypeProbeNames {
+		t := &rgType{names: make(map[string]bool, len(files))}
+		for _, file := range files {
+			t.names[file] = true
+		}
+		types[name] = t
+	}
+	return types
 }
 
 // rgWordMayBeOption reports a word of an rg argv known only when it runs
@@ -315,72 +435,4 @@ func rgWordMayBeOption(argument ArgumentFact) bool {
 		return true
 	}
 	return false
-}
-
-// rgGlobsMayReadHidden reports include globs (--glob, --iglob, and the
-// --type-add globs of the selected types) that may make rg read a hidden
-// credentials file (substrate-1:GAP-0680, GAP-0681). rg's glob engine is
-// not modelled; the rule counts when unsure. rg reads a hidden file only
-// when an include glob matches it, and enters a hidden folder only when an
-// include glob matches the folder. So the globs count when:
-//   - one has a part this rule does not read exactly: {...}, "**", a
-//     class [...] (rg's classes match "/": sub[!x].env matches sub/.env)
-//     or an escape "\\";
-//   - one may match a dot-named credentials file name (*.env, .npmrc); or
-//   - one may match a hidden folder name (a segment, split at each "/",
-//     that does not start with a literal non-dot character: .aws/, */, ?aws)
-//     and one may match any credentials file name (credentials, id_*).
-//
-// "May match" is path.Match on one segment of the lowercase glob, exact
-// for globs of literals, * and ? (neither matches "/" in rg's globs, nor
-// in path.Match). -g '*.go' and --type-add 'go:*.go' count nothing: no
-// credentials file name ends in .go. An exclude glob (!...) never adds a
-// read; "" and "/" name nothing.
-func rgGlobsMayReadHidden(globs []string) bool {
-	opensHidden, namesFile, namesDotFile := false, false, false
-	for _, glob := range globs {
-		if glob == "" || strings.HasPrefix(glob, "!") {
-			continue
-		}
-		if strings.ContainsAny(glob, "{}[]\\") || strings.Contains(glob, "**") {
-			return true
-		}
-		glob = strings.ToLower(glob)
-		folderOnly := strings.HasSuffix(glob, "/")
-		var segments []string
-		for _, segment := range strings.Split(glob, "/") {
-			if segment != "" {
-				segments = append(segments, segment)
-			}
-		}
-		if len(segments) == 0 {
-			continue
-		}
-		for _, segment := range segments {
-			opensHidden = opensHidden || !rgGlobLiteralStart(segment[0])
-		}
-		if folderOnly {
-			continue
-		}
-		last := segments[len(segments)-1]
-		for _, probe := range credentialProbes() {
-			name := probe.segments[len(probe.segments)-1]
-			ok, err := path.Match(last, name)
-			if err != nil {
-				return true
-			}
-			namesFile = namesFile || ok
-			namesDotFile = namesDotFile || ok && strings.HasPrefix(name, ".")
-		}
-	}
-	return namesDotFile || opensHidden && namesFile
-}
-
-// rgGlobLiteralStart reports a first byte of a glob segment that matches
-// only itself, and is no dot: a letter, a digit, one of _-+@%~=,:# or a
-// byte of a non-ASCII character. Every other byte (".", "*", "?", "!" ...)
-// may start a dot-named match, or is not modelled.
-func rgGlobLiteralStart(b byte) bool {
-	return b >= 0x80 || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9' ||
-		strings.IndexByte("_-+@%~=,:#", b) >= 0
 }

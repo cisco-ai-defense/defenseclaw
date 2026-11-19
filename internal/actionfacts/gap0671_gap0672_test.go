@@ -73,7 +73,10 @@ func TestGAP0671RgTypeAddReadsHidden(t *testing.T) {
 		{"rg --type-add 'e:*.env' -te KEY", true},
 		{"rg --type-add=e:.env --type e KEY .", true},
 		{"rg --type-add 'e:.npmrc' -t e KEY", true},
-		{"rg --type-add 'e:*.go,*.env' --type=e KEY", true},
+		{"rg --type-add 'e:*.{go,env}' --type=e KEY", true},
+		// One glob per --type-add: "*.go,*.env" is one glob that names
+		// no file (real rg 14.1.0 reads nothing, g0683Rows).
+		{"rg --type-add 'e:*.go,*.env' --type=e KEY", false},
 		{"rg --type-add 'f:*.env' --type-add 'e:include:f' -te KEY", true},
 		{"rg -l --type-add 'e:*.env' -tgo -te KEY src .", true},
 		{"rg --type-add 'g:*.go' -tg KEY", false},

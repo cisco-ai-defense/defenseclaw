@@ -86,6 +86,16 @@ func g0344Rows() []g0344Row {
 		{"C08 rg default skips a hidden folder", "rg TODO .", []string{".aws/credentials", "a.go"}, false},
 		{"C09 rg -u alone still skips hidden files", "rg -u TODO", []string{"src/.env"}, false},
 		{"C15 rg with a glob that cannot match .env", "rg -g '*.go' TODO", []string{"src/.env", "src/a.go"}, false},
+		// GAP-0683: an include glob reads only what it selects (real rg 14.1.0
+		// reads no .env for any of these), in a project with a .env.
+		{"C15b rg -g '*.yml' with a .env", "rg -g '*.yml' TODO", []string{".env", ".github/workflows/ci.yml"}, false},
+		{"C15c rg -g '*.toml' with a .env", "rg -g '*.toml' TODO", []string{".env", "pyproject.toml"}, false},
+		{"C15d rg -g '*.key' with a .env", "rg -g '*.key' TODO", []string{".env", "src/a.go"}, false},
+		{"C15e rg -g '*.json' with a .env", "rg -g '*.json' TODO", []string{".env", "package.json"}, false},
+		{"C15f rg -g '*.{ts,tsx}' with a .env", "rg -g '*.{ts,tsx}' TODO", []string{".env", "web/app.tsx"}, false},
+		{"C15g rg -g 'src/**' with a .env", "rg -g 'src/**' TODO", []string{".env", "src/a.go"}, false},
+		{"C15h rg -g '*.ts' -g '*.json' with a .env", "rg -g '*.ts' -g '*.json' TODO", []string{".env", "package.json", "src/b.ts"}, false},
+		{"P05i rg with a brace glob matching .env", "rg -g '{.env,*.go}' KEY", []string{".env", "src/a.go"}, true},
 		{"C16 rg --no-hidden after --hidden", "rg --hidden --no-hidden TODO", []string{"src/.env"}, false},
 		{"C17 rg --type-add of an ordinary type", "rg --type-add 'g:*.go' -tg KEY", []string{".env", "a.go"}, false},
 		{"C18 rg -T excludes a type, reads nothing hidden", "rg --type-add 'e:*.env' -Te KEY", []string{".env", "a.go"}, false},
