@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A credential copy a Windows shell call runs inside a PowerShell
@@ -81,6 +82,11 @@ func TestWindowsHookNestedCredentialCopyIsJudgedAsTheCopyAlone(t *testing.T) {
 	for _, pack := range gap0437Packs {
 		t.Run(pack.name, func(t *testing.T) {
 			openclaw := gap0437Server(t, pack, "openclaw", "action")
+			// The test judges verdicts, not the hook latency: a $(...) copy
+			// is ~30 ms plain but 215-285 ms under -race at the parent
+			// c8090b1056 too, over the 200 ms exec-route scan budget, whose
+			// timeout answer is not a verdict (rel-1-0-10:GAP-1565).
+			openclaw.inspectToolScanTimeout = 30 * time.Second
 			claudecode := gap0437Server(t, pack, "claudecode", "action")
 			routes := []struct {
 				name  string
