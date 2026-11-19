@@ -15,35 +15,33 @@ import (
 // statement only, so `f() { test -f .bashrc && return; cd /tmp; }; f && echo
 // x >> .bashrc` from the home placed the write in /tmp alone, a clean allow,
 // where rel reads the call as unresolved (substrate-1:GAP-0690). A return
-// that may pass the && adds its folder and leaves the success folder
-// unresolved, as rel does. A return that cannot (`return 1`, a bare return
-// right after a failed ||), a return of another function, an exit and the
-// `;` forms keep the reading exact.
+// that may pass the && adds its folder, exactly. A return that cannot
+// (`return 1`), a return of another function and an exit add none.
 func TestGAP0690MoverBodyThatMayReturnLeavesTheReturnFolder(t *testing.T) {
 	const cwd, home = "/work/proj", "/home/alice"
 	both := []string{"/srv/g", "/work/proj/g"}
 	for _, tc := range []struct {
 		name, cwd, command string
 		want               []string
-		// unresolved: a return may pass the && (the reading rel gives).
+		// unresolved: a write sits in a folder the call does not give.
 		unresolved bool
 	}{
-		{"return behind a test", cwd, "f() { test -d .git && return; cd /srv; }; f && echo x > g", both, true},
-		{"return first", cwd, "f() { return; cd /srv; }; f && echo x > g", both, true},
-		{"return 0", cwd, "f() { [ -e .env ] && return 0; cd /srv; }; f && echo x > g", both, true},
-		{"return 256 is status 0", cwd, "f() { test -d .git && return 256; cd /srv; }; f && echo x > g", both, true},
-		{"builtin return", cwd, "f() { test -d .git && builtin return; cd /srv; }; f && echo x > g", both, true},
-		{"command return", cwd, "f() { test -d .git && command -p return; cd /srv; }; f && echo x > g", both, true},
-		{"eval return", cwd, "f() { test -d .git && eval return; cd /srv; }; f && echo x > g", both, true},
-		{"a command name the tracking does not read", cwd, "f() { test -d .git && $r; cd /srv; }; f && echo x > g", both, true},
-		{"return in an if", cwd, "f() { if test -d .git; then return; fi; cd /srv; }; f && echo x > g", both, true},
-		{"return in a loop", cwd, "f() { for d in a b; do test -d $d && return; done; cd /srv; }; f && echo x > g", both, true},
-		{"return in a case", cwd, "f() { case $1 in x) return ;; esac; cd /srv; }; f && echo x > g", both, true},
-		{"return in a group", cwd, "f() { test -d .git && { echo hi; return; }; cd /srv; }; f && echo x > g", both, true},
-		{"return 0 after a failed ||", cwd, "f() { cd /srv || return 0; }; f && echo x > g", both, true},
+		{"return behind a test", cwd, "f() { test -d .git && return; cd /srv; }; f && echo x > g", both, false},
+		{"return first", cwd, "f() { return; cd /srv; }; f && echo x > g", both, false},
+		{"return 0", cwd, "f() { [ -e .env ] && return 0; cd /srv; }; f && echo x > g", both, false},
+		{"return 256 is status 0", cwd, "f() { test -d .git && return 256; cd /srv; }; f && echo x > g", both, false},
+		{"builtin return", cwd, "f() { test -d .git && builtin return; cd /srv; }; f && echo x > g", both, false},
+		{"command return", cwd, "f() { test -d .git && command -p return; cd /srv; }; f && echo x > g", both, false},
+		{"eval return", cwd, "f() { test -d .git && eval return; cd /srv; }; f && echo x > g", both, false},
+		{"a command name the tracking does not read", cwd, "f() { test -d .git && $r; cd /srv; }; f && echo x > g", both, false},
+		{"return in an if", cwd, "f() { if test -d .git; then return; fi; cd /srv; }; f && echo x > g", both, false},
+		{"return in a loop", cwd, "f() { for d in a b; do test -d $d && return; done; cd /srv; }; f && echo x > g", both, false},
+		{"return in a case", cwd, "f() { case $1 in x) return ;; esac; cd /srv; }; f && echo x > g", both, false},
+		{"return in a group", cwd, "f() { test -d .git && { echo hi; return; }; cd /srv; }; f && echo x > g", both, false},
+		{"return 0 after a failed ||", cwd, "f() { cd /srv || return 0; }; f && echo x > g", both, false},
 		{"bare return after a failed cd (as at FU11)", cwd, "f() { cd /srv || return; }; f && echo x > g", both, false},
-		{"return after a cd", cwd, "f() { cd /opt && test -d .git && return; cd /srv; }; f && echo x > g", []string{"/opt/g", "/srv/g", "/work/proj/g"}, true},
-		{"return through a nested mover", cwd, "g() { test -d .git && return; cd /srv; }; f() { g; }; f && echo x > g", both, true},
+		{"return after a cd", cwd, "f() { cd /opt && test -d .git && return; cd /srv; }; f && echo x > g", []string{"/opt/g", "/srv/g"}, false},
+		{"return through a nested mover", cwd, "g() { test -d .git && return; cd /srv; }; f() { g; }; f && echo x > g", both, false},
 		{"return then ;", cwd, "f() { test -d .git && return 1; cd /srv; }; f; echo x > g", both, false},
 		// Exact: the return cannot pass the &&, ends another function, or
 		// the shell exits.
@@ -53,8 +51,8 @@ func TestGAP0690MoverBodyThatMayReturnLeavesTheReturnFolder(t *testing.T) {
 		{"exit", cwd, "f() { test -d .git && exit; cd /srv; }; f && echo x > g", []string{"/srv/g"}, false},
 		{"no return", cwd, "f() { test -d .git; cd /srv; }; f && echo x > g", []string{"/srv/g"}, false},
 		// The RVM rows (substrate-1:GAP-0690).
-		{"rc-return", home, "f(){ test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc", []string{"/home/alice/.bashrc", "/tmp/.bashrc"}, true},
-		{"hook-return", cwd, "f(){ test -d .git && return; cd /tmp; }; f && echo exit 0 > .git/hooks/pre-push", []string{"/tmp/.git/hooks/pre-push", "/work/proj/.git/hooks/pre-push"}, true},
+		{"rc-return", home, "f(){ test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc", []string{"/home/alice/.bashrc", "/tmp/.bashrc"}, false},
+		{"hook-return", cwd, "f(){ test -d .git && return; cd /tmp; }; f && echo exit 0 > .git/hooks/pre-push", []string{"/tmp/.git/hooks/pre-push", "/work/proj/.git/hooks/pre-push"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "Bash", Command: tc.command, CWD: tc.cwd, ActiveHome: home, DialectHint: DialectPOSIX})

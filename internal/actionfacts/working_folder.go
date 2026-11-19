@@ -278,9 +278,6 @@ type workFolderTracker struct {
 	// (substrate-1:GAP-0690). They are kept per body: a return in the body
 	// of a function defined or called in it ends only that function.
 	returned, returnedOK workFolders
-	// afterFailure is the right side of the || being read: a bare return
-	// there returns the failed status of its left side (`cd X || return`).
-	afterFailure *syntax.Stmt
 }
 
 // workFolderFirstRun is the earliest offset of a call of an outer function
@@ -574,14 +571,15 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 	// `f() { test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc`
 	// may leave the shell where the body returned, with status 0 (the
 	// substrate-1:GAP-0690 rows); the folder of its last cd alone is wrong.
-	// A return that may pass an && also leaves the call's success folder
-	// unresolved, the reading rel gives every mover call: the folders the
-	// tracking names are not all the reading may rest on.
+	// The folders stay exact: an unresolved folder here (rel's reading of
+	// every mover call) drops the block of a protected write the body may
+	// return in (`cd ~/.defenseclaw && f() { cd X || return 0; }; f && echo
+	// m > config.yaml`, rel-1-0-10:GAP-1229).
 	if len(inner.returned) != 0 {
 		after = unionWorkFolders(after, inner.returned)
 	}
 	if len(inner.returnedOK) != 0 {
-		ok = unionWorkFolders(ok, inner.returnedOK, unresolvedWorkFolders)
+		ok = unionWorkFolders(ok, inner.returnedOK)
 	}
 	if !t.defs[decl].topLevel {
 		// A definition in a list, a branch or a body may not have run: the
@@ -636,15 +634,6 @@ func workFolderReturn(call *syntax.CallExpr) (returns, ok bool) {
 		return true, false
 	}
 	return true, true
-}
-
-// workFolderBareReturn reports a `return` with no status.
-func workFolderBareReturn(call *syntax.CallExpr) bool {
-	if len(call.Args) != 1 {
-		return false
-	}
-	name := projectPOSIXWord(call.Args[0])
-	return !name.Expands && name.Value == "return"
 }
 
 // workFolderBodyMoves reports a function body with a folder move in it, or
@@ -712,7 +701,7 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		t.substitutions(cmd, in)
 		if returns, ok := workFolderReturn(cmd); returns {
 			t.returned = t.returned.add(in)
-			if ok && !(stmt == t.afterFailure && !stmt.Negated && workFolderBareReturn(cmd)) {
+			if ok {
 				t.returnedOK = t.returnedOK.add(in)
 			}
 		}
@@ -744,7 +733,6 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 			return rightOK, unionWorkFolders(leftAfter, rightAfter)
 		case syntax.OrStmt:
 			leftOK, leftAfter := t.stmt(cmd.X, in)
-			t.afterFailure = cmd.Y
 			rightOK, rightAfter := t.stmt(cmd.Y, leftAfter)
 			return unionWorkFolders(leftOK, rightOK), unionWorkFolders(leftAfter, rightAfter)
 		default: // a pipe: each member runs in a copy of the shell
