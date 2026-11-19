@@ -130,7 +130,7 @@ func inferRawCommandDialect(source string) (Dialect, bool) {
 		((powerShellAlias(first) || filesystemAlias) &&
 			(windowsPathOperand || powerShellSwitch)) ||
 		(powerShellVariable && recognizedWindowsCommand)
-	cmd := (containsCMDVariable(source) && recognizedWindowsCommand) ||
+	cmd := (ContainsCMDVariable(source) && recognizedWindowsCommand) ||
 		(cmdBuiltin(first) &&
 			(windowsPathOperand ||
 				containsCMDQuotedOperand(source) ||
@@ -453,7 +453,10 @@ func windowsPathCandidateInsideURI(source string, index int) bool {
 	return strings.Contains(source[start:index], "://")
 }
 
-func containsCMDVariable(source string) bool {
+// ContainsCMDVariable reports whether source holds a %NAME% expansion cmd
+// makes: a name of ASCII letters, digits and underscores between two percent
+// signs.
+func ContainsCMDVariable(source string) bool {
 	for start := strings.IndexByte(source, '%'); start >= 0; {
 		rest := source[start+1:]
 		end := strings.IndexByte(rest, '%')

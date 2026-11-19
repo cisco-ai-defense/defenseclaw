@@ -1136,6 +1136,13 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 		// findings (rel-1-0-10:GAP-1243).
 		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
 	}
+	if twin, ok := cmdReadingTwinRequest(action); ok {
+		// The CMD reading of a Windows shell call placed in PowerShell whose
+		// text holds a cmd %NAME% expansion: every reading of the call judges
+		// it, as they judge the spelling with the variable written out
+		// (rel-1-0-10:GAP-0999), and it only adds findings.
+		findings = withOverLimitTwinFindings(findings, trustedToolCallFindingsOf(ctx, twin, mcpServer, secureClient))
+	}
 	return findings
 }
 
