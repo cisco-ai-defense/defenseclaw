@@ -94,6 +94,11 @@ var gap0843Rows = []fu12TierRow{
 	{"C1", "cat k.pub >> ~/.ssh/authorized_keys", fu12BlockAll},
 	{"R1", "cat ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.new", fu12BlockAll},
 	{"R2", "cat ~/.ssh/authorized_keys | python3 -c \"$CODE\" > ~/.ssh/o3o", fu12BlockAll},
+	// S7 lead ruling 2026-11-19: ls KEYS | cpio -pdl d copies the keys file
+	// (a cpio pass-through), the block of c8090b1056 in every tier; a digest
+	// of it into a report is the GAP-1536 unknown tier.
+	{"R3", "ls ~/.ssh/authorized_keys | cpio -pdl d; echo k >> d/notes.txt", fu12BlockAll},
+	{"Q6", "sha256sum ~/.ssh/authorized_keys > keys.sum", fu12UnknownTier},
 }
 
 func TestGAP0571LinkRenameRemoveKeepsTiersClaudeCode(t *testing.T) {

@@ -273,7 +273,7 @@ func TestCascadeUnknownTier(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.posture+"/"+tt.unknown, func(t *testing.T) {
 			cfg := cascadeConfig(t, tt.posture, func(c *config.CascadeConfig) { c.Unknown = tt.unknown })
-			got := guardrailActionForProfileUnknown(truncatedOnly, false,
+			got := guardrailActionForProfileUnknown(truncatedOnly, false, nil,
 				func() string { return cascadeUnknownForConfig(cfg, "claudecode") }, boundedTestActionFor)
 			if got != tt.want {
 				t.Fatalf("truncated-only call: %s, want %s", got, tt.want)
@@ -290,7 +290,7 @@ func TestCascadeUnknownTier(t *testing.T) {
 		})
 	}
 	// A proven block beside the cap still decides.
-	if got := guardrailActionForProfileUnknown(append(truncatedOnly, RuleFinding{RuleID: "X", Severity: "CRITICAL"}), false,
+	if got := guardrailActionForProfileUnknown(append(truncatedOnly, RuleFinding{RuleID: "X", Severity: "CRITICAL"}), false, nil,
 		func() string { return config.CascadeAlert }, boundedTestActionFor); got != "block" {
 		t.Fatalf("proven finding beside the cap: %s", got)
 	}

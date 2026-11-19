@@ -490,10 +490,19 @@ func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor action
 // stateWriteRuleID is the catalog rule that protects DefenseClaw state.
 const stateWriteRuleID = "tamper.detector_state_write"
 
-// stateWriteSeverity is the one severity of a proven write to DefenseClaw
-// state, in every pack: an alert in default and permissive, a block in strict
-// (rel-1-0-10:GAP-0747).
-const stateWriteSeverity = "HIGH"
+// stateWriteSeverityFor is the severity of a proven write to DefenseClaw
+// state, from the request's tier (request.StrictPolicy, the hook and proxy
+// tier; rel-1-0-10:GAP-0747, owner 2026-11-15T15:20Z): CRITICAL in strict
+// and managed-strict, as at c8090b1056; HIGH, a high alert, in the default
+// and permissive tiers, a managed install's default pack included (the ONE
+// BOUND RULE managed tier). The verdict is the profile's
+// (profileClassFloor).
+func stateWriteSeverityFor(request trustedActionRequest) string {
+	if request.StrictPolicy {
+		return "CRITICAL"
+	}
+	return "HIGH"
+}
 
 // caseSensitiveStateHost reports a host whose file system tells .DefenseClaw
 // from .defenseclaw (Linux), the host the path rule must read exactly. macOS
