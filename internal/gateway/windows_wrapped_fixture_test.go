@@ -36,6 +36,10 @@ var windowsStatementWrappers = []struct {
 }{
 	{"cd-prefix", func(c string) string { return `Set-Location C:\Users\alice\proj; ` + c }},
 	{"trailer", func(c string) string { return c + ` ; Write-Output done` }},
+	// The hook's selection places this spelling in no dialect: its POSIX
+	// reading is complete, so only the list without its last statement
+	// reads the attack (windowsListPrefixTwinRequest, rel-1-0-10:GAP-0348).
+	{"echo-trailer", func(c string) string { return c + ` ; echo done` }},
 	{"call-block", func(c string) string { return `& { ` + c + ` }` }},
 }
 
@@ -45,6 +49,20 @@ var windowsStatementWrappers = []struct {
 // statement is no longer that script.
 var windowsWrappedKnownLimit = map[string]string{
 	"windows-uac-eventvwr-autoelevation-hijack": "whole-script owner: an extra statement is not the registry-write-then-launch pair",
+}
+
+// windowsWrappedKnownWrapperLimit lists the (wrapper, fixture) pairs one
+// wrapper is known to hide, with the reason: rel-1-0-10:GAP-1561. The hook's
+// selection places `<statement> ; echo done` in no dialect; the list-prefix
+// reading (windowsListPrefixTwinRequest) reads only a POSIX list whose own
+// reading is complete, and these are a native program the POSIX reading
+// leaves partial or PowerShell grammar the POSIX list parser cannot read.
+var windowsWrappedKnownWrapperLimit = map[string]string{
+	"echo-trailer/windows-procdump-lsass":                  "GAP-1561: own POSIX reading partial",
+	"echo-trailer/windows-usn-journal-delete-powershell":   "GAP-1561: own POSIX reading partial",
+	"echo-trailer/windows-recursive-everyone-full-control": "GAP-1561: own POSIX reading partial",
+	"echo-trailer/windows-disable-amsi-reflection":         "GAP-1561: PowerShell grammar, no POSIX list",
+	"echo-trailer/windows-comsvcs-lsass":                   "GAP-1561: PowerShell grammar, no POSIX list",
 }
 
 // windowsEquivalentRules are rules that name the same action in another
@@ -65,20 +83,34 @@ func windowsRuleOrEquivalent(found, want string) bool {
 // connectors whose label does not name the shell.
 var windowsWrappedTools = []string{"PowerShell", "Bash", "bash", "Shell"}
 
-func windowsToolCallFindings(t *testing.T, connector, tool, command string) []RuleFinding {
+// windowsToolCallFindings judges a shell call as a Windows hook does: the
+// agent and Codex hooks' dialect selection (withWindowsShellDialect) and the
+// Windows readings, or with claudeCode Claude Code's (its Bash tool is Git
+// Bash: claudeCodeWindowsShellDialect).
+func windowsToolCallFindings(t *testing.T, connector, tool, command string, claudeCode bool) []RuleFinding {
 	t.Helper()
 	args, err := json.Marshal(map[string]string{"command": command})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return dispatchTrustedAction(t.Context(), trustedActionRequest{
+	request := trustedActionRequest{
 		Input:      actionfacts.Input{Tool: tool, Args: args, CWD: `C:\work`, ActiveHome: `C:\Users\alice`},
 		LegacyText: string(args), Connector: connector, EnforcementCapable: true,
-	})
+	}
+	if claudeCode {
+		request.Input.DialectHint = claudeCodeWindowsShellDialect(request.Input)
+		request.windowsDialectReadings = true
+	} else {
+		withWindowsShellDialect(&request, true)
+	}
+	return dispatchTrustedAction(t.Context(), request)
 }
 
 // TestWindowsStatementWrappersKeepTheFixtureVerdict wraps every attack fixture
-// that fires as a bare PowerShell tool call and expects the same rule to fire.
+// that fires as a bare PowerShell tool call and expects the same rule to fire
+// under every shell tool label of the Windows hooks. Claude Code's Bash tool is
+// Git Bash, a POSIX shell: there a wrapped fixture must fire wherever the same
+// fixture fires bare on that tool.
 func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 	cases := readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl")
 	for _, pack := range []string{"default", "strict"} {
@@ -98,15 +130,15 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 				if r := test.ProfileRuleIDs[pack]; r != "" {
 					rule = r
 				}
-				fires := func(tool, command string) bool {
-					return slices.ContainsFunc(windowsToolCallFindings(t, "windows-wrapped", tool, command),
+				fires := func(tool, command string, claudeCode bool) bool {
+					return slices.ContainsFunc(windowsToolCallFindings(t, "windows-wrapped", tool, command, claudeCode),
 						func(f RuleFinding) bool {
 							// The strict pack reports the pipe form of a cradle as
 							// curl-to-shell when the statement list is partial.
 							return windowsRuleOrEquivalent(f.RuleID, rule) || rule == "CMD-WIN-IWR-IEX" && f.RuleID == "CMD-PIPE-CURL"
 						})
 				}
-				if !fires("PowerShell", test.Command) {
+				if !fires("PowerShell", test.Command, false) {
 					continue
 				}
 				bare++
@@ -115,8 +147,18 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 				}
 				for _, tool := range windowsWrappedTools {
 					for _, wrapper := range windowsStatementWrappers {
-						if !fires(tool, wrapper.wrap(test.Command)) {
+						if windowsWrappedKnownWrapperLimit[wrapper.name+"/"+test.ID] != "" {
+							continue
+						}
+						if !fires(tool, wrapper.wrap(test.Command), false) {
 							missed[wrapper.name] = append(missed[wrapper.name], tool+"/"+test.ID)
+						}
+					}
+				}
+				if fires("Bash", test.Command, true) {
+					for _, wrapper := range windowsStatementWrappers {
+						if !fires("Bash", wrapper.wrap(test.Command), true) {
+							missed[wrapper.name] = append(missed[wrapper.name], "claude-code-Bash/"+test.ID)
 						}
 					}
 				}
@@ -130,12 +172,6 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 					unique[id[strings.Index(id, "/")+1:]] = true
 				}
 				t.Logf("%s: %s hides %d (tool, fixture) pairs over %d fixtures: %v", pack, wrapper.name, len(missed[wrapper.name]), len(unique), missed[wrapper.name])
-				if wrapper.name == "trailer" {
-					// A trailing statement under a non-PowerShell tool label still
-					// hides the native-program fixtures (git first); logged above,
-					// open in GAP-0348's residual.
-					continue
-				}
 				if len(missed[wrapper.name]) != 0 {
 					t.Errorf("%s: %s hides %d fixtures that fire bare: %v", pack, wrapper.name, len(missed[wrapper.name]), missed[wrapper.name])
 				}
