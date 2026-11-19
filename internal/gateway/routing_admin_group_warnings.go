@@ -50,7 +50,8 @@ var routingAdminAssignmentLabel = regexp.MustCompile(`\bassignment (\d+): `)
 // such a deny budget or rule never acts on this host, and a group budget
 // never pools this host's spend (rel-1-0-10:GAP-1124). config validate and
 // doctor list them. spoolDir is the guardian's identity spool, whose records
-// pair the NetBIOS and DNS names of the domains of this device's accounts.
+// name this device's accounts, whose domains the matcher folds
+// (verifiedGroupDomains).
 // The groups of a per-user install match nobody (CallerFromEngine), which
 // routing rules list already says, so it gets none.
 func RoutingAdminGroupWarnings(ctx context.Context, cfg *config.Config, spoolDir string) []string {
@@ -70,9 +71,8 @@ func RoutingAdminGroupWarnings(ctx context.Context, cfg *config.Config, spoolDir
 	for i, s := range selectors {
 		assignments[i] = config.ProfileAssignment{Match: config.ProfileMatch{Groups: s.groups}}
 	}
-	pairs := verifiedGroupDomains(spoolDir)
-	exists := foldedGroupExists(profileGroupExists, pairs)
-	return routingAdminGroupWarningsFrom(selectors, unknownAssignmentGroups(ctx, assignments, exists, foldedGroupQualify(profileGroupQualifiedName, pairs), bareGroupsDirectorySilent))
+	exists, qualify := matcherFoldedGroupChecks(spoolDir)
+	return routingAdminGroupWarningsFrom(selectors, unknownAssignmentGroups(ctx, assignments, exists, qualify, bareGroupsDirectorySilent))
 }
 
 // routingAdminGroupWarningsFrom names the selectors in the assignment

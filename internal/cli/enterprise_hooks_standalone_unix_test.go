@@ -273,8 +273,8 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		// deadline and grace instead of 3/4 of the request's limit and 2 s.
 		// The parent still kills the worker at the request's limit, so a
 		// worker that does not answer by its own deadline still fails.
-		// TestEnterpriseHookWorkerScanDeadlineLeavesTimeToAnswer checks the
-		// real share.
+		// TestEnterpriseHookWorkerScanShareFitsEveryLimit checks the real
+		// share.
 		enterpriseHookWorkerScanTimeout = func(time.Duration) time.Duration { return time.Second }
 		enterpriseHookWorkerScanGrace = 200 * time.Millisecond
 	}
@@ -291,14 +291,14 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			return out
 		}
 	}
-	if mode == "blocked-private" || mode == "blocked-version" {
+	if mode == "blocked-private" || mode == "blocked-version" || mode == "blocked-version-real-share" {
 		// A file system call that never returns and never observes the
 		// context (GAP-1413: macOS held an open() in the home walk).
 		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string, string) {
 			switch {
 			case connector == "hermes":
 				return "0.21.5", "", ""
-			case connector == "codex" && mode == "blocked-version":
+			case connector == "codex" && mode != "blocked-private":
 				select {}
 			}
 			return "", "not installed", ""
@@ -502,19 +502,6 @@ func TestEnterpriseHookWorkerDiscoverRunsAsTheUser(t *testing.T) {
 	})
 }
 
-// The discover worker's own scan deadline, with the grace after it, ends
-// before the parent's limit, which kills a worker that has not answered: for
-// the default and retry limits and for the limits the two discover tests
-// above ask for with a test-sized scan deadline.
-func TestEnterpriseHookWorkerScanDeadlineLeavesTimeToAnswer(t *testing.T) {
-	for _, limit := range []time.Duration{12 * time.Second, 20 * time.Second, enterpriseHookWorkerTimeout, enterpriseHookWorkerRetryTimeout} {
-		scan := enterpriseHookWorkerScanTimeout(limit)
-		if scan <= 0 || scan+enterpriseHookWorkerScanGrace >= limit {
-			t.Fatalf("limit %s: scan deadline %s + grace %s leaves no time to answer", limit, scan, enterpriseHookWorkerScanGrace)
-		}
-	}
-}
-
 func TestEnterpriseHookWorkerSlowPrivateScanReturnsPartialResponse(t *testing.T) {
 	useEnterpriseHookWorkerHelper(t, "slow-discover")
 	account := selfWorkerAccount(t)
@@ -575,6 +562,53 @@ func TestEnterpriseHookWorkerAnswersWhenDiscoveryBlocks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// GAP-0332: a discovery called near the end of a cycle's budget gives the
+// worker what is left (down to 1 s). With the real scan share and grace, a
+// blocked scan under a 5 s limit still answers with the partial result
+// (GAP-1413) before the parent kills the worker; before, 3.75 s + 2 s ran past
+// the limit and the parent reported a timeout.
+func TestEnterpriseHookWorkerShortLimitBlockedScanStillAnswers(t *testing.T) {
+	useEnterpriseHookWorkerHelper(t, "blocked-version-real-share")
+	response, err := runEnterpriseHookWorker(context.Background(), selfWorkerAccount(t), enterpriseHookWorkerRequest{
+		Operation: enterpriseHookWorkerOpDiscover, Connectors: []string{"codex", "hermes"}, TimeoutSeconds: 5,
+	})
+	if err != nil {
+		t.Fatalf("a blocked discovery under a 5 s limit left the parent without an answer: %v", err)
+	}
+	incomplete := map[string]bool{}
+	for _, install := range response.PrivateInstalls {
+		if install.Incomplete && install.Skipped == enterprisehooks.PrivateInstallSkippedTimedOut {
+			incomplete[install.Connector] = true
+		}
+	}
+	if !incomplete["codex"] || !incomplete["hermes"] {
+		t.Fatalf("private installs = %+v, want codex and hermes scan_timed_out", response.PrivateInstalls)
+	}
+}
+
+// The scan deadline, the grace and a margin of
+// min(enterpriseHookWorkerAnswerMargin, limit/4) fit in every limit a
+// discovery can pass, from 1 s up to the retry limit (GAP-0332).
+func TestEnterpriseHookWorkerScanShareFitsEveryLimit(t *testing.T) {
+	limits := []time.Duration{enterpriseHookWorkerTimeout, enterpriseHookWorkerRetryTimeout}
+	for s := 1; s <= 20; s++ {
+		limits = append(limits, time.Duration(s)*time.Second)
+	}
+	for _, limit := range limits {
+		scan, grace := enterpriseHookWorkerScanShare(limit, 2*time.Second)
+		margin := min(enterpriseHookWorkerAnswerMargin, limit/4)
+		if scan <= 0 || grace <= 0 || scan+grace+margin > limit {
+			t.Fatalf("limit %s: scan %s + grace %s + margin %s runs past the limit", limit, scan, grace, margin)
+		}
+		if enterpriseHookWorkerScanTimeout(limit) != scan {
+			t.Fatalf("limit %s: the worker scan deadline %s is not the share %s", limit, enterpriseHookWorkerScanTimeout(limit), scan)
+		}
+	}
+	if scan, grace := enterpriseHookWorkerScanShare(60*time.Second, 2*time.Second); scan != 45*time.Second || grace != 2*time.Second {
+		t.Fatalf("default limit share = %s, %s, want 45s, 2s", scan, grace)
 	}
 }
 

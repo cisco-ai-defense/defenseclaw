@@ -533,7 +533,8 @@
         "connector": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
         "managed_hook": { "type": "boolean", "description": "The connector runs from administrator machine policy. Absent when the connectors block does not say." },
         "ready": { "type": "boolean", "description": "The readiness check the gateway runs on the connector route (credential, upstream, signing). Absent when the gateway did not report it." },
-        "reason_code": { "enum": ["gateway_did_not_report", "no_readiness_row", "not_ready"], "description": "Why ready is absent or false." }
+        "reason_code": { "enum": ["gateway_did_not_report", "no_readiness_row", "not_ready"], "description": "Why ready is absent or false." },
+        "cause": { "enum": ["route_epoch", "allowed_alias_no_credential", "upstream_not_set", "signing_not_ready", "credential_not_stored", "credential_not_configured", "no_enrolled_account"], "description": "With reason_code not_ready: the closed cause the gateway names for it (route_epoch: the route epoch is not published; credential_not_stored: a credential the policy names is not stored on this host; credential_not_configured: no gateway credential covers the upstream; signing_not_ready: gateway Bedrock signing; upstream_not_set; allowed_alias_no_credential: a rule for every caller allows only models without a gateway credential; no_enrolled_account). Absent for any other problem. Optional, from 1.0.10." }
       }
     },
     "coworkState": {
