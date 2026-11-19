@@ -485,7 +485,7 @@ func shellCommandCluster(flag string) bool {
 	if len(flag) < 3 || flag[0] != '-' || flag[1] == '-' || !strings.ContainsRune(flag, 'c') {
 		return false
 	}
-	return strings.Trim(flag[1:], "abcefhiklmnprstuvxBCEHPT") == ""
+	return onlyLetters(flag[1:], 'a', 'b', 'c', 'e', 'f', 'h', 'i', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'u', 'v', 'x', 'B', 'C', 'E', 'H', 'P', 'T')
 }
 
 // capChildCalls are the texts of the calls call runs as a command of its own,

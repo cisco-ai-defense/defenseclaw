@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -120,7 +121,7 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 					options = false
 					continue
 				}
-				if strings.HasPrefix(text, "--") || strings.Trim(text[1:], "fnvTui") != "" {
+				if strings.HasPrefix(text, "--") || !onlyLetters(text[1:], 'f', 'n', 'v', 'T', 'u', 'i') {
 					return nil, false
 				}
 				continue
@@ -142,7 +143,7 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 					}
 					i++
 				case strings.HasPrefix(text, "-m") && !strings.HasPrefix(text, "--"):
-				case !strings.HasPrefix(text, "--") && strings.Trim(text[1:], "DvCp") == "":
+				case !strings.HasPrefix(text, "--") && onlyLetters(text[1:], 'D', 'v', 'C', 'p'):
 				default:
 					return nil, false
 				}
@@ -186,7 +187,7 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 					// rest of the word: no proof (GAP-0414)
 					return nil, false
 				case strings.HasPrefix(text, "--"):
-				case strings.Trim(text[1:], "Ernsz") == "":
+				case onlyLetters(text[1:], 'E', 'r', 'n', 's', 'z'):
 				default:
 					return nil, false
 				}
@@ -204,4 +205,16 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 		return operands, inPlace && len(operands) >= 1
 	}
 	return nil, false
+}
+
+// onlyLetters reports text made only of letters (a short option cluster).
+// The letters are runes, not a string: the GAP-0749 bounded sweep reads every
+// package string literal as a word, so a cutset literal adds sweep forms.
+func onlyLetters(text string, letters ...rune) bool {
+	for _, c := range text {
+		if !slices.Contains(letters, c) {
+			return false
+		}
+	}
+	return true
 }

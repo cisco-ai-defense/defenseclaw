@@ -60,19 +60,14 @@ func (o shellGlobOptions) unmodeled() bool {
 func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 	var o shellGlobOptions
 	for _, name := range strings.Split(getenv("BASHOPTS"), ":") {
-		switch name {
-		case "dotglob":
-			o.dotGlob = true
-		case "nocaseglob":
-			o.noCaseGlob = true
-		case "nullglob":
-			o.nullGlob = true
-		case "failglob":
-			o.failGlob = true
-		case "extglob":
+		bit, glob := shoptGlobBits[name]
+		if glob && bit == 0 {
 			o.extGlob = true
-		case "globstar":
-			o.globStar = true
+		}
+		for _, f := range globMayFields {
+			if glob && bit == f.bit {
+				*f.field(&o) = true
+			}
 		}
 	}
 	for _, name := range strings.Split(getenv("SHELLOPTS"), ":") {

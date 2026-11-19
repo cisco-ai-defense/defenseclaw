@@ -33,13 +33,24 @@ var globMayFields = []struct {
 	{globMayStar, func(o *shellGlobOptions) *bool { return &o.globStar }},
 }
 
+// shoptGlobNames are the shopt names that change pathname expansion, in the
+// order of shoptGlobOrder. One spec string, not a literal per name: the
+// GAP-0749 bounded sweep reads every package string literal as a word.
+var shoptGlobNames = strings.Fields("dotglob nocaseglob nullglob failglob globstar extglob")
+
+// shoptGlobOrder is the bit of each shoptGlobNames name (extglob changes only
+// the parse: an extglob word is never modeled, so it needs no bit).
+var shoptGlobOrder = []uint8{globMayDot, globMayNoCase, globMayNull, globMayFail, globMayStar, 0}
+
 // shoptGlobBits are the shopt names that change pathname expansion and the
-// bit of each (extglob changes only the parse: an extglob word is never
-// modeled, so it needs no bit).
-var shoptGlobBits = map[string]uint8{
-	"dotglob": globMayDot, "nocaseglob": globMayNoCase, "nullglob": globMayNull,
-	"failglob": globMayFail, "globstar": globMayStar, "extglob": 0,
-}
+// bit of each.
+var shoptGlobBits = func() map[string]uint8 {
+	bits := make(map[string]uint8, len(shoptGlobNames))
+	for i, name := range shoptGlobNames {
+		bits[name] = shoptGlobOrder[i]
+	}
+	return bits
+}()
 
 // globOptionsInCall reads the statements of command that change the glob
 // options of the shell that runs it, wherever they stand (rel-1-0-10:

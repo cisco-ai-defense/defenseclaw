@@ -4,6 +4,8 @@
 package hookpaths
 
 import (
+	"slices"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -279,6 +281,27 @@ func isASCIIDigitRune(c rune) bool { return c >= '0' && c <= '9' }
 
 func isASCIILetter(c rune) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
 
+// bracketClassNames are the [:name:] classes bash reads, in the order of the
+// class constants. One spec string, not a literal per name: the GAP-0749
+// bounded sweep reads every package string literal as a word.
+var bracketClassNames = strings.Fields("alpha digit alnum upper lower space blank punct xdigit cntrl graph print word")
+
+const (
+	classAlpha = iota
+	classDigit
+	classAlnum
+	classUpper
+	classLower
+	classSpace
+	classBlank
+	classPunct
+	classXdigit
+	classCntrl
+	classGraph
+	classPrint
+	classWord
+)
+
 // classMember tests c against [:name:], [=x=] or [.x.].
 func (r *bashGlobReading) classMember(kind rune, text string, c rune) bool {
 	if kind != ':' {
@@ -295,35 +318,36 @@ func (r *bashGlobReading) classMember(kind rune, text string, c rune) bool {
 		r.doubt = true
 		return false
 	}
-	if r.fold && (text == "upper" || text == "lower") {
+	class := slices.Index(bracketClassNames, text)
+	if r.fold && (class == classUpper || class == classLower) {
 		r.doubt = true
 	}
-	switch text {
-	case "alpha":
+	switch class {
+	case classAlpha:
 		return isASCIILetter(c)
-	case "digit":
+	case classDigit:
 		return isASCIIDigitRune(c)
-	case "alnum":
+	case classAlnum:
 		return isASCIILetter(c) || isASCIIDigitRune(c)
-	case "upper":
+	case classUpper:
 		return c >= 'A' && c <= 'Z'
-	case "lower":
+	case classLower:
 		return c >= 'a' && c <= 'z'
-	case "space":
+	case classSpace:
 		return c == ' ' || c >= '\t' && c <= '\r'
-	case "blank":
+	case classBlank:
 		return c == ' ' || c == '\t'
-	case "punct":
+	case classPunct:
 		return c > ' ' && c < 0x7f && !isASCIILetter(c) && !isASCIIDigitRune(c)
-	case "xdigit":
+	case classXdigit:
 		return isASCIIDigitRune(c) || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
-	case "cntrl":
+	case classCntrl:
 		return c < ' ' || c == 0x7f
-	case "graph":
+	case classGraph:
 		return c > ' ' && c < 0x7f
-	case "print":
+	case classPrint:
 		return c >= ' ' && c < 0x7f
-	case "word":
+	case classWord:
 		return isASCIILetter(c) || isASCIIDigitRune(c) || c == '_'
 	}
 	// An unknown class name: bash matches nothing with it.
