@@ -178,11 +178,10 @@ func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, fact
 }
 
 // unresolvedFolderOperand reports a path fact the unknown tier reads: a
-// relative operand that reads, writes or removes a file.
+// relative operand of a path effect (pathEffectTwin: a read, a write, a
+// removal, or a change of the file mode or owner; substrate-1:GAP-0698).
 func unresolvedFolderOperand(candidate actionfacts.PathFact) bool {
-	switch candidate.Access {
-	case actionfacts.PathAccessRead, actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
-	default:
+	if _, _, effect := pathEffectTwin(candidate.Access); !effect {
 		return false
 	}
 	value := candidate.Value
