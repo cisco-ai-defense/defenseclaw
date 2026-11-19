@@ -500,12 +500,14 @@ jobs:
               for ($patternIndex = 0; $patternIndex -lt $shardPatterns.Count; $patternIndex++) {
                 # -timeout stays below the job's 20 minutes so a hung test
                 # fails with Go's goroutine dump, not a cancelled job.
+                # -GoTestEventSummary prints the part's test events whole for
+                # scripts/update_test_timings.py windows-go, a timed-out part too.
                 Invoke-WindowsNativeProcess $go (@(
                   'test', '-vet=off', '-json', '-count=1', '-timeout=11m', '-p=1') + $part.Extra + @(
                   '-skip', $part.Skip, '-run', $shardPatterns[$patternIndex], ('./' + $part.Dir)
                 )) -TimeoutSeconds 840 `
                   -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-$matrixShard-$patternIndex.log")) `
-                  -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+                  -GoTestFailureSummaryPath $goFailureSummary -GoTestEventSummary | Out-Null
               }
             }
             Write-Host "Native Windows Go matrix shard $matrixShard completed its gateway and connector shards."
