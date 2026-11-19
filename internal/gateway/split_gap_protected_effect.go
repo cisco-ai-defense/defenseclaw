@@ -38,44 +38,52 @@ import (
 //     may undo or redo any cd, so `f(){ cd /tmp && "$@"; }; f cd && rm
 //     .aws/credentials`, whose facts place the operand only in /tmp, removes
 //     the home's file (substrate-1:GAP-0702). So its file is a candidate, not
-//     a proof, and a change of a file's mode or owner is judged by the twin
-//     that changes the file, which says only that the file is protected:
-//     neither adds the finding of the file itself (rel-1-0-10:GAP-0871).
+//     a proof, and a change of a file's mode or owner is judged by the call's
+//     own command in that folder (a benign chmod +x of a project's git hook
+//     stays as benign as its plain spelling: substrate-1:GAP-0703): neither
+//     adds the finding of the file itself (rel-1-0-10:GAP-0871);
+//   - many files are judged in a few shared statements per effect, not by a
+//     broader reading of the call's text (substrate-1:GAP-0704).
 // A call whose effects touch only ordinary files stays as the whole-action
 // reading judged it.
 
 // pathEffect is the plain statement that judges one path effect of a call
-// alone: prefix, followed by the file as one shell word.
+// alone, as the pack judges the same effect spelled plainly.
 type pathEffect struct {
+	// prefix: the exact twin of one file, prefix followed by the file as one
+	// shell word: the effect itself (a link a call makes is a write of the
+	// link's name; the file it points at is not touched, actionfacts
+	// classifyPOSIXLink).
 	prefix string
-	// exact: the statement is the effect itself, not only a twin that says
-	// the file is protected against a change (a mode or owner change, chmod,
-	// chown, chgrp: no plain statement is that change of every file). A link
-	// a call makes is a write of the link's name; the file it points at is
-	// not touched (actionfacts classifyPOSIXLink).
-	exact bool
-	// operands: the statement takes any number of files as operands, so the
-	// files whose twin only decides the unknown tier are judged together.
-	operands bool
+	// shared: the same effect as a statement that takes any number of files
+	// as operands (cat -- A B, tee -- A B), the twin of the files whose twin
+	// only decides the unknown tier.
+	shared string
+	// own: no plain statement is the effect on every file (a mode or owner
+	// change, chmod, chown, chgrp: chmod +x of a git hook arms it, chmod 600
+	// of a key guards it), so the twin is the call's own command run in the
+	// folder, beside the same command on an ordinary file (splitGapOwnTwin),
+	// and it only decides the unknown tier.
+	own bool
 }
 
 // pathEffectTwin is the one map from a path-fact effect to its judgment for
-// a call part that was not read: the split-gap twins (splitGapEffectTwins)
+// a call part that was not read: the split-gap twins (splitGapTwinSet)
 // and the unresolved-folder tier (unresolvedFolderOperand) both use it. ok
 // is false for an access that touches no file's content or place (execute,
 // list, connect).
 func pathEffectTwin(access actionfacts.PathAccess) (effect pathEffect, ok bool) {
 	switch access {
 	case actionfacts.PathAccessWrite:
-		return pathEffect{prefix: "echo x > ", exact: true}, true
+		return pathEffect{prefix: "echo x > ", shared: "tee -- "}, true
 	case actionfacts.PathAccessAppend:
-		return pathEffect{prefix: "echo x >> ", exact: true}, true
+		return pathEffect{prefix: "echo x >> ", shared: "tee -a -- "}, true
 	case actionfacts.PathAccessDelete:
-		return pathEffect{prefix: "rm -f -- ", exact: true, operands: true}, true
+		return pathEffect{prefix: "rm -f -- ", shared: "rm -f -- "}, true
 	case actionfacts.PathAccessRead:
-		return pathEffect{prefix: "cat -- ", exact: true, operands: true}, true
+		return pathEffect{prefix: "cat -- ", shared: "cat -- "}, true
 	case actionfacts.PathAccessMetadata:
-		return pathEffect{prefix: "echo x > "}, true
+		return pathEffect{own: true}, true
 	}
 	return pathEffect{}, false
 }
@@ -93,10 +101,19 @@ const (
 	splitGapEffectReason = "split_gap_protected_effect"
 )
 
-// splitGapEffectProbeCap bounds the effect twins judged for one call. A call
-// with more distinct targets is read by its text as well
-// (hookpaths.BoundCallMayNameProtected).
+// splitGapEffectProbeCap bounds the twins judged for one call: at most
+// that many exact twins (past them a file joins the shared twins), at most
+// that many own-command twins, and at most that many times as many files per
+// effect in the shared twins. A call past the bound is read by its text as
+// well (hookpaths.BoundCallMayNameProtected); every call of at most 256 path
+// facts (actionfacts maxPathFacts) in four folders stays inside it.
 const splitGapEffectProbeCap = 32
+
+// splitGapSharedTwinFiles is the most files one shared twin names: half the
+// path facts a statement may hold, so a twin is never cut short, and few
+// statements per effect (judging a twin costs about as much per statement as
+// per file).
+const splitGapSharedTwinFiles = 128
 
 // splitGapEffectTwin is the effect twin of one file a call touches.
 type splitGapEffectTwin struct {
@@ -104,71 +121,165 @@ type splitGapEffectTwin struct {
 	// proof: the twin is the effect itself and the operand names the file
 	// from the root or the home, so its findings are the call's.
 	proof bool
+	// folder: the folder the twin runs in, when it is not the call's own.
+	folder string
+	// neutral: for a command's own twin, the same command on an ordinary
+	// file beside each file it changes (splitGapOwnTwin).
+	neutral string
 }
 
-// splitGapEffectTwins adds to twins the effect twin of each file the facts of
-// a POSIX call touch, in its resolved absolute spelling and, for a relative
-// operand, in every folder of splitGapFolders, and reports whether there
-// were more than splitGapEffectProbeCap of them. The files of an operand twin
-// that only decides the unknown tier share one statement (`cat -- A B`), of
-// at most splitGapEffectProbeCap files as well, so a call that reads many
-// files costs one bounded twin per kind.
-func splitGapEffectTwins(facts actionfacts.Facts, twins []splitGapEffectTwin) (_ []splitGapEffectTwin, over bool) {
-	var shared []string
-	words := map[string][]string{}
+// splitGapTwinSet collects the twins of the files the facts of a POSIX call
+// touch (add), and gives them as statements (statements).
+type splitGapTwinSet struct {
+	exact, own []splitGapEffectTwin
+	shared     []string
+	words      map[string][]string
+	seen       map[[2]string]bool
+	over       bool
+}
+
+// add adds the twins of every path effect of facts, each file in its
+// resolved absolute spelling and, for a relative operand, in every folder of
+// splitGapFolders. A file whose twin only decides the unknown tier joins the
+// shared twin of its effect, so a call that reads or writes many files costs
+// a few bounded statements per effect, never a broader reading of its text.
+func (set *splitGapTwinSet) add(facts actionfacts.Facts) {
 	folders := splitGapFolders(facts)
-paths:
 	for _, candidate := range facts.Paths {
 		effect, ok := pathEffectTwin(candidate.Access)
+		if !ok || effect.own {
+			continue
+		}
+		proof := !candidate.OtherFolderReading() && !candidate.UnresolvedFolder() &&
+			(strings.HasPrefix(candidate.Value, "/") || strings.HasPrefix(candidate.Value, "~"))
+		for _, spelled := range splitGapSpellings(candidate, folders) {
+			word := splitGapShellWord(spelled)
+			if proof && set.addExact(effect.prefix+word) {
+				continue
+			}
+			set.addWord(effect.shared, word)
+		}
+	}
+	for _, command := range facts.Commands {
+		text, neutral, ok := splitGapOwnTwin(facts, command)
 		if !ok {
 			continue
 		}
-		spellings := []string{filepath.ToSlash(candidate.Resolved)}
-		if unresolvedFolderOperand(candidate) {
-			for _, folder := range folders {
-				spellings = append(spellings, path.Join(folder, filepath.ToSlash(candidate.Value)))
-			}
-		}
-		proof := effect.exact && !candidate.OtherFolderReading() && !candidate.UnresolvedFolder() &&
-			(strings.HasPrefix(candidate.Value, "/") || strings.HasPrefix(candidate.Value, "~"))
-		for _, resolved := range spellings {
-			if !strings.HasPrefix(resolved, "/") || strings.HasPrefix(resolved, "/dev/") || strings.ContainsAny(resolved, "$`\n") {
+		for _, folder := range folders {
+			twin := splitGapEffectTwin{text: text, folder: folder, neutral: neutral}
+			if slices.Contains(set.own, twin) {
 				continue
 			}
-			word := splitGapShellWord(resolved)
-			if !proof && effect.operands {
-				if !slices.Contains(shared, effect.prefix) {
-					shared = append(shared, effect.prefix)
-				}
-				if slices.Contains(words[effect.prefix], word) {
-					continue
-				}
-				if len(words[effect.prefix]) == splitGapEffectProbeCap {
-					over = true
-					break paths
-				}
-				words[effect.prefix] = append(words[effect.prefix], word)
-				continue
+			if len(set.own) == splitGapEffectProbeCap {
+				set.over = true
+				return
 			}
-			twin := splitGapEffectTwin{text: effect.prefix + word, proof: proof}
-			if at := slices.IndexFunc(twins, func(seen splitGapEffectTwin) bool { return seen.text == twin.text }); at >= 0 {
-				twins[at].proof = twins[at].proof || twin.proof
-				continue
-			}
-			if len(twins) == splitGapEffectProbeCap {
-				over = true
-				break paths
-			}
-			twins = append(twins, twin)
+			set.own = append(set.own, twin)
 		}
 	}
-	for _, prefix := range shared {
-		if len(twins) == splitGapEffectProbeCap {
-			return twins, true
-		}
-		twins = append(twins, splitGapEffectTwin{text: prefix + strings.Join(words[prefix], " ")})
+}
+
+// addExact adds the exact twin text of a file the operand spells, and
+// reports false when the exact twins are full.
+func (set *splitGapTwinSet) addExact(text string) bool {
+	if at := slices.IndexFunc(set.exact, func(seen splitGapEffectTwin) bool { return seen.text == text }); at >= 0 {
+		return true
 	}
-	return twins, over
+	if len(set.exact) == splitGapEffectProbeCap {
+		return false
+	}
+	set.exact = append(set.exact, splitGapEffectTwin{text: text, proof: true})
+	return true
+}
+
+// addWord adds a file to the shared twin of an effect.
+func (set *splitGapTwinSet) addWord(shared, word string) {
+	if set.words == nil {
+		set.words, set.seen = map[string][]string{}, map[[2]string]bool{}
+	}
+	if set.seen[[2]string{shared, word}] {
+		return
+	}
+	if len(set.words[shared]) == splitGapEffectProbeCap*splitGapEffectProbeCap {
+		set.over = true
+		return
+	}
+	if !slices.Contains(set.shared, shared) {
+		set.shared = append(set.shared, shared)
+	}
+	set.words[shared] = append(set.words[shared], word)
+	set.seen[[2]string{shared, word}] = true
+}
+
+// statements are the twins to judge: the exact and own-command twins, and
+// each shared twin in statements of at most splitGapSharedTwinFiles files.
+func (set *splitGapTwinSet) statements() []splitGapEffectTwin {
+	twins := slices.Concat(set.exact, set.own)
+	for _, shared := range set.shared {
+		for chunk := range slices.Chunk(set.words[shared], splitGapSharedTwinFiles) {
+			twins = append(twins, splitGapEffectTwin{text: shared + strings.Join(chunk, " ")})
+		}
+	}
+	return twins
+}
+
+// splitGapSpellings are the absolute spellings a twin judges a path fact
+// in: its resolved spelling and, for a relative operand, its spelling in
+// each folder. A spelling that is no plain absolute path is not judged.
+func splitGapSpellings(candidate actionfacts.PathFact, folders []string) []string {
+	spellings := []string{filepath.ToSlash(candidate.Resolved)}
+	if unresolvedFolderOperand(candidate) {
+		for _, folder := range folders {
+			spellings = append(spellings, path.Join(folder, filepath.ToSlash(candidate.Value)))
+		}
+	}
+	return slices.DeleteFunc(spellings, func(spelled string) bool { return !splitGapPlainPath(spelled) })
+}
+
+// splitGapPlainPath reports an absolute spelling a twin may judge: not a
+// device, and with no word a shell would expand.
+func splitGapPlainPath(spelled string) bool {
+	return strings.HasPrefix(spelled, "/") && !strings.HasPrefix(spelled, "/dev/") && !strings.ContainsAny(spelled, "$`\n")
+}
+
+// splitGapOwnTwinNeutral is the name of the ordinary file beside a file a
+// command's own twin changes.
+const splitGapOwnTwinNeutral = "split-gap-twin.txt"
+
+// splitGapOwnTwin is the twin of the mode or owner changes (pathEffect.own)
+// a command of the call makes: the command itself, judged in each folder of
+// splitGapFolders as its plain spelling run there is, and neutral, the same
+// command on an ordinary file beside each file it changes. The change is a
+// finding of the file only when the command is one there and its neutral
+// is not: a world-writable mode outside the folder the command runs in
+// (CMD-CHMOD-WORLD on chmod 777 /tmp/x) is one of any file, while chown of
+// a credentials file or chmod 644 of a key is one of that file, and chmod
+// +x of a project's git hook is none (substrate-1:GAP-0703). ok is false
+// for a command that makes no such change or whose words are not all known.
+func splitGapOwnTwin(facts actionfacts.Facts, command actionfacts.CommandFact) (text, neutral string, ok bool) {
+	if !command.ArgvComplete || len(command.Argv) == 0 {
+		return "", "", false
+	}
+	words := make([]string, len(command.Argv))
+	neutrals := make([]string, len(command.Argv))
+	for i, word := range command.Argv {
+		if strings.ContainsAny(word, "\n") {
+			return "", "", false
+		}
+		words[i] = splitGapShellWord(word)
+		neutrals[i] = words[i]
+		if i > 0 && slices.ContainsFunc(facts.Paths, func(candidate actionfacts.PathFact) bool {
+			effect, _ := pathEffectTwin(candidate.Access)
+			return effect.own && candidate.CommandID == command.ID && candidate.Value == word
+		}) {
+			neutrals[i] = splitGapShellWord(path.Join(path.Dir(word), splitGapOwnTwinNeutral))
+			ok = true
+		}
+	}
+	if !ok {
+		return "", "", false
+	}
+	return strings.Join(words, " "), strings.Join(neutrals, " "), true
 }
 
 // splitGapFolders are the folders a relative operand of a call with a parse
@@ -200,9 +311,7 @@ func splitGapFolders(facts actionfacts.Facts) []string {
 // splitGapShellWord is path as one shell word: as it is when it holds only
 // characters a shell reads literally, else single-quoted.
 func splitGapShellWord(path string) string {
-	if strings.IndexFunc(path, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+@%,:=", r))
-	}) < 0 {
+	if strings.IndexFunc(path, func(r rune) bool { return !shellLiteralRune(r, "/._-+@%,:=") }) < 0 {
 		return path
 	}
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
@@ -217,21 +326,26 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 	if facts.Parse.Dialect != actionfacts.DialectPOSIX {
 		return findings
 	}
-	twins, over := splitGapEffectTwins(facts, nil)
-	if !over && (strings.Contains(wholeCommand, "~") || strings.Contains(wholeCommand, "HOME")) {
+	var set splitGapTwinSet
+	set.add(facts)
+	if !set.over && (strings.Contains(wholeCommand, "~") || strings.Contains(wholeCommand, "HOME")) {
 		// The facts of a partial call hold no path of a word spelled from
 		// the home (~/.bashrc, $HOME/.bashrc): the twin that spells it as
 		// the path under the active home does. It may itself be partial, so
 		// it is read only to add findings (actionfacts.HomeSpelledTwin).
 		if spelled, ok := actionfacts.HomeSpelledTwin(request.Input); ok {
-			twins, over = splitGapEffectTwins(spelled, twins)
+			set.add(spelled)
 		}
 	}
-	unknown := over && hookpaths.BoundCallMayNameProtected(wholeCommand, request.Input.CWD, request.Input.ActiveHome)
-	for _, twin := range twins {
+	twins := set.statements()
+	unknown := set.over && hookpaths.BoundCallMayNameProtected(wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+	judge := func(text, folder string) []RuleFinding {
 		child := request
-		child.Input.Command, child.Input.Args, child.Input.Argv = twin.text, nil, nil
-		child.LegacyText = twin.text
+		child.Input.Command, child.Input.Args, child.Input.Argv = text, nil, nil
+		if folder != "" {
+			child.Input.CWD = folder
+		}
+		child.LegacyText = text
 		child.conflictSource = nil
 		child.record, child.recordTelemetry = nil, nil
 		child.simpleCommandPass = true
@@ -239,11 +353,21 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 		parent.Command = wholeCommand
 		child.parentPatch = &parent
 		child.generation, child.budget = generation, budget
-		childFindings := dispatchTrustedAction(ctx, child)
+		return dispatchTrustedAction(ctx, child)
+	}
+	for _, twin := range twins {
+		if unknown && !twin.proof {
+			// The tier is decided; only an exact twin still adds findings.
+			continue
+		}
+		childFindings := judge(twin.text, twin.folder)
 		if twin.proof {
 			findings = withSimpleCommandFindings(findings, childFindings)
 		}
-		unknown = unknown || slices.ContainsFunc(childFindings, splitGapEnforcedFinding)
+		if unknown || !slices.ContainsFunc(childFindings, splitGapEnforcedFinding) {
+			continue
+		}
+		unknown = twin.neutral == "" || !slices.ContainsFunc(judge(twin.neutral, twin.folder), splitGapEnforcedFinding)
 	}
 	if unknown {
 		findings = withUnknownFinding(findings, unknownReasonFinding(splitGapEffectTitle, splitGapEffectReason, request.EnforcementCapable))

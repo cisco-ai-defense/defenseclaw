@@ -193,9 +193,13 @@ func homeRelativeLiteral(below string) bool {
 			return false
 		}
 	}
-	return strings.IndexFunc(below, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("/._-+@%,:", r))
-	}) < 0
+	return strings.IndexFunc(below, func(r rune) bool { return !shellLiteralRune(r, "/._-+@%,:") }) < 0
+}
+
+// shellLiteralRune reports a rune a shell reads literally in a word: an ASCII
+// letter or digit, or one of punct.
+func shellLiteralRune(r rune, punct string) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune(punct, r)
 }
 
 // respellShellWord replaces in text each occurrence of word that stands as a

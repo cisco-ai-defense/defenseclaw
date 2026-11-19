@@ -16,11 +16,12 @@ import (
 )
 
 // gap0698EffectTwin is the plain statement of each access of a file, as
-// pathEffectTwin reads it, kept here so the tests run on rel too. A change of
-// mode, owner or link is judged as a change of the file.
+// pathEffectTwin reads it, kept here so the tests run on rel too. A link is
+// a write of its name. A change of mode or owner has no such statement: it is
+// judged by its own plain spelling.
 var gap0698EffectTwin = map[actionfacts.PathAccess]string{
 	actionfacts.PathAccessRead: "cat -- ", actionfacts.PathAccessWrite: "echo x > ", actionfacts.PathAccessAppend: "echo x >> ",
-	actionfacts.PathAccessDelete: "rm -f -- ", actionfacts.PathAccessMetadata: "echo x > ",
+	actionfacts.PathAccessDelete: "rm -f -- ",
 }
 
 // gap0698PathEffects are the effects on the file T, each with the accesses it
@@ -79,9 +80,10 @@ type gap0698PathEffect struct {
 // .aws/credentials` from the home allowed at FU11 c8090b1056 and t6/fix-0690
 // 8583fa0f61, where rel 740c0de8fd alerts in default and blocks in strict).
 // An effect is protected when the plain statement of its access of the file
-// (gap0698EffectTwin) is a finding the pack enforces. The mover shapes are
-// those of the FIX-0697-RV grid. The same effects on project files and
-// ordinary home files stay an allow.
+// (gap0698EffectTwin; for a mode or owner change, the statement itself) is a
+// finding the pack enforces. The mover shapes are those of the FIX-0697-RV
+// grid. The same effects on project files and ordinary home files stay an
+// allow.
 func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
@@ -132,7 +134,13 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 				plain := decide(home, statement)
 				protected := false
 				for _, access := range effect.access {
-					protected = protected || decide(home, gap0698EffectTwin[access]+resolved) != "allow"
+					if twin, ok := gap0698EffectTwin[access]; ok {
+						protected = protected || decide(home, twin+resolved) != "allow"
+					} else {
+						// A mode or owner change is protected as its own
+						// plain spelling is (substrate-1:GAP-0703).
+						protected = protected || plain != "allow"
+					}
 				}
 				want := "allow"
 				if protected {
@@ -173,9 +181,8 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 				t.Errorf("%s: control %q is %s, want allow", pack, command, got)
 			}
 		}
-		// Past splitGapEffectProbeCap files the call is read by its text as
-		// well (hookpaths.BoundCallMayNameProtected): in a project that is
-		// still an allow.
+		// Many files are judged in shared twins of at most
+		// splitGapSharedTwinFiles files: in a project that is still an allow.
 		if command := `f(){ "$@"; }; f true && cat` + many + `; rm -f` + many; decide(project, command) != "allow" {
 			t.Errorf("%s: control %q in proj is not allow", pack, command)
 		}
