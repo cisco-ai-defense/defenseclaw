@@ -192,6 +192,70 @@ func TestSkillFrontMatterDescriptionAndVersion(t *testing.T) {
 	}
 }
 
+func TestSkillFrontMatterLongValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, header, invalidSuffix string
+	}{
+		{"literal block", "description: |", ""},
+		{"folded block", "description: >-", ""},
+		{"wrapped plain", "description: é x", ""},
+		{"late control", "description: |", "  bad\x07bell\n"},
+		{"late invalid UTF-8", "description: é x", "  bad\xfftext\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := []byte("---\n" + tc.header + "\n" + strings.Repeat("  é x\n", 6000) + tc.invalidSuffix +
+				"description: ignored duplicate\nmetadata:\n  author: Example Author\n  version: 1.2.3\n---\n")
+			want := skillFrontMatter{
+				author: "Example Author", version: "1.2.3",
+				description: strings.TrimSpace(strings.Repeat("é x ", 200)[:maxSkillDescriptionBytes]),
+			}
+			if tc.invalidSuffix != "" {
+				want.description = ""
+			}
+			if got := parseSkillFrontMatter(manifest); got != want {
+				t.Fatalf("long frontmatter = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestSkillFrontMatterLongValueAllocations(t *testing.T) {
+	for name, header := range map[string]string{
+		"block":   "description: |",
+		"wrapped": "description: first",
+	} {
+		t.Run(name, func(t *testing.T) {
+			manifest := []byte("---\n" + header + "\n" + strings.Repeat("  x\n", 16300) + "---\n")
+			// A bounded manifest must not allocate a new growing string for
+			// each line. Leave room for linear buffering and normalization.
+			if allocations := testing.AllocsPerRun(1, func() {
+				_ = parseSkillFrontMatter(manifest)
+			}); allocations > 128 {
+				t.Fatalf("long frontmatter allocated %.0f times, want at most 128", allocations)
+			}
+		})
+	}
+}
+
+func BenchmarkSkillFrontMatterLongValue(b *testing.B) {
+	for _, tc := range []struct {
+		name  string
+		lines int
+	}{
+		{"4KiB", 1024},
+		{"64KiB", 16300},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			manifest := []byte("---\ndescription: |\n" + strings.Repeat("  x\n", tc.lines) + "---\n")
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = parseSkillFrontMatter(manifest)
+			}
+		})
+	}
+}
+
 func TestDetectSkillsAttachesFactsOncePerFolder(t *testing.T) {
 	home := t.TempDir()
 	writeSkillFiles(t, filepath.Join(home, ".agents", "skills", "pdf"), map[string]string{
