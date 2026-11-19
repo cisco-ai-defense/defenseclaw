@@ -24,7 +24,6 @@ import (
 // the helpers that exist at the fix parents (shapeParityNative, ...Envelope,
 // ...Hook, ...Tiers, gap0437Server), so it runs red at each parent.
 
-
 var fu12ParityRank = map[string]int{"allow": 0, "": 0, "alert": 2, "warn": 2, "confirm": 2, "ask": 2, "block": 3}
 
 // fu12ParityCall is one tool call of a connector: its hook event, body and
