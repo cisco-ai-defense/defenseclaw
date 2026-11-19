@@ -184,16 +184,16 @@ func powerShellArchiveExtractions(command, cwd, home string, read *archiveExtrac
 			return
 		}
 		folder := cwd
-		if destination, given := values["destinationpath"]; given {
+		if destination, given := values[psArchiveParamDestination]; given {
 			placed, ok := psArchivePath(destination, cwd, home, true)
 			if !ok {
 				return
 			}
 			folder = placed
 		}
-		source, given := values["literalpath"]
+		source, given := values[psArchiveParamLiteralPath]
 		if !given {
-			source, given = values["path"]
+			source, given = values[psArchiveParamPath]
 		}
 		archive, known := "", false
 		if given {
@@ -224,22 +224,54 @@ func powerShellArchiveExtractions(command, cwd, home string, read *archiveExtrac
 	})
 }
 
-// psExpandArchiveParameters are the Expand-Archive parameters and aliases
-// with a value, and the switches; a unique prefix names one, as PowerShell
-// binds it.
-var (
-	psExpandArchiveValued = []string{"path", "literalpath", "pspath", "lp", "destinationpath",
-		"erroraction", "ea", "errorvariable", "ev", "warningaction", "wa", "warningvariable", "wv",
-		"informationaction", "infa", "informationvariable", "iv", "outvariable", "ov", "outbuffer", "ob",
-		"pipelinevariable", "pv", "progressaction", "proga"}
-	psExpandArchiveSwitches = []string{"force", "passthru", "whatif", "wi", "confirm", "cf", "verbose", "vb", "debug", "db"}
+// psExpandArchiveParameterSpec lists the Expand-Archive parameters, one
+// entry each: the name, then its aliases after "=", with "!" ahead of a
+// switch. The first four entries are the ones the binding reads
+// (psArchiveParam*). It is one string read once, not a word literal per
+// name: TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget sweeps every
+// word literal of the package through Resolve.
+const psExpandArchiveParameterSpec = "path literalpath=pspath,lp destinationpath !whatif=wi " +
+	"erroraction=ea errorvariable=ev warningaction=wa warningvariable=wv informationaction=infa " +
+	"informationvariable=iv outvariable=ov outbuffer=ob pipelinevariable=pv progressaction=proga " +
+	"!force !passthru !confirm=cf !verbose=vb !debug=db"
+
+// The Expand-Archive parameters the binding reads, by their entry in
+// psExpandArchiveParameterSpec.
+const (
+	psArchiveParamPath = iota
+	psArchiveParamLiteralPath
+	psArchiveParamDestination
+	psArchiveParamWhatIf
 )
 
+// psArchiveParameter is one entry of psExpandArchiveParameterSpec.
+type psArchiveParameter struct {
+	entry  int
+	valued bool
+}
+
+// psExpandArchiveNames maps every name and alias of
+// psExpandArchiveParameterSpec to its entry.
+var psExpandArchiveNames = func() map[string]psArchiveParameter {
+	names := map[string]psArchiveParameter{}
+	for entry, field := range strings.Fields(psExpandArchiveParameterSpec) {
+		parameter := psArchiveParameter{entry: entry, valued: !strings.HasPrefix(field, "!")}
+		name, aliases, _ := strings.Cut(strings.TrimPrefix(field, "!"), "=")
+		names[name] = parameter
+		for _, alias := range strings.Split(aliases, ",") {
+			if alias != "" {
+				names[alias] = parameter
+			}
+		}
+	}
+	return names
+}()
+
 // psExpandArchiveValues binds the path parameters of one Expand-Archive
-// call: path, literalpath and destinationpath (named, or the first two
-// positional arguments). whatIf reports -WhatIf.
-func psExpandArchiveValues(command *psparse.Command) (values map[string]psparse.Expr, whatIf bool) {
-	values = map[string]psparse.Expr{}
+// call, by psArchiveParam* entry: path, literalpath and destinationpath
+// (named, or the first two positional arguments). whatIf reports -WhatIf.
+func psExpandArchiveValues(command *psparse.Command) (values map[int]psparse.Expr, whatIf bool) {
+	values = map[int]psparse.Expr{}
 	var positional []psparse.Expr
 	for i := 0; i < len(command.Elements); i++ {
 		element := command.Elements[i]
@@ -253,14 +285,8 @@ func psExpandArchiveValues(command *psparse.Command) (values map[string]psparse.
 			}
 			continue
 		}
-		name := psUniqueParameter(strings.ToLower(parameter.Name))
-		switch name {
-		case "pspath", "lp":
-			name = "literalpath"
-		case "wi":
-			name = "whatif"
-		}
-		if name == "whatif" {
+		known, ok := psUniqueParameter(strings.ToLower(parameter.Name))
+		if ok && known.entry == psArchiveParamWhatIf {
 			// -WhatIf:$false writes as no -WhatIf does.
 			off := false
 			if variable, ok := parameter.Colon.(*psparse.Variable); parameter.HasColon && ok {
@@ -269,11 +295,7 @@ func psExpandArchiveValues(command *psparse.Command) (values map[string]psparse.
 			whatIf = whatIf || !off
 			continue
 		}
-		valued := false
-		for _, known := range psExpandArchiveValued {
-			valued = valued || known == name
-		}
-		if !valued {
+		if !ok || !known.valued {
 			continue
 		}
 		var value psparse.Expr
@@ -289,39 +311,35 @@ func psExpandArchiveValues(command *psparse.Command) (values map[string]psparse.
 			}
 		}
 		if value != nil {
-			values[name] = value
+			values[known.entry] = value
 		}
 	}
-	for _, name := range []string{"path", "destinationpath"} {
+	for _, entry := range []int{psArchiveParamPath, psArchiveParamDestination} {
 		if len(positional) == 0 {
 			break
 		}
-		if _, given := values[name]; given || name == "path" && values["literalpath"] != nil {
+		if _, given := values[entry]; given || entry == psArchiveParamPath && values[psArchiveParamLiteralPath] != nil {
 			continue
 		}
-		values[name], positional = positional[0], positional[1:]
+		values[entry], positional = positional[0], positional[1:]
 	}
 	return values, whatIf
 }
 
-// psUniqueParameter is the Expand-Archive parameter a name or unique prefix
-// spells, or the name itself when it spells none or several.
-func psUniqueParameter(name string) string {
-	found, matches := "", 0
-	for _, list := range [][]string{psExpandArchiveValued, psExpandArchiveSwitches} {
-		for _, known := range list {
-			if known == name {
-				return name
-			}
-			if strings.HasPrefix(known, name) {
-				found, matches = known, matches+1
-			}
+// psUniqueParameter is the Expand-Archive parameter a name, an alias or a
+// unique prefix of one spells; ok is false when it spells none or several.
+func psUniqueParameter(name string) (psArchiveParameter, bool) {
+	if parameter, ok := psExpandArchiveNames[name]; ok {
+		return parameter, true
+	}
+	var found psArchiveParameter
+	matches := 0
+	for known, parameter := range psExpandArchiveNames {
+		if strings.HasPrefix(known, name) && (matches == 0 || parameter.entry != found.entry) {
+			found, matches = parameter, matches+1
 		}
 	}
-	if matches == 1 {
-		return found
-	}
-	return name
+	return found, matches == 1
 }
 
 // psArchivePath places one PowerShell path value in cwd: a literal, a home

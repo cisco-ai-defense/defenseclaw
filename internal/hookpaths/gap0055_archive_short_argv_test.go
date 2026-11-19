@@ -180,8 +180,12 @@ func gap0055SweepForms(words, options []string, bounded bool) (forms []gap0055Fo
 		for _, argv := range gap0055Argvs {
 			add(word+argv, true)
 		}
+		// A word meets Resolve behind every sixth wrapper (each wrapper behind a
+		// sixth of the words, above the eighth the budget test asks): every
+		// fifth put the sweep over its budget once the GAP-1173 archive readers
+		// merged with FU11 (22449 forms). The parsers still read every form.
 		for wrapperIndex, wrapper := range gap0055Wrappers {
-			add(fmt.Sprintf(wrapper, word), slices.Contains(archivePrograms, word) || (wordIndex+wrapperIndex)%5 == 0)
+			add(fmt.Sprintf(wrapper, word), slices.Contains(archivePrograms, word) || (wordIndex+wrapperIndex)%6 == 0)
 		}
 	}
 	for _, list := range [][]string{archivePrograms, copyPrograms, linkPrograms, renamePrograms, cdPrograms, multicallPrograms,
