@@ -114,8 +114,13 @@ type Call struct {
 // Reading is what a call runs through its command channels.
 type Reading struct {
 	// Body is the shell script of the commands the programs run when each is
-	// a literal (ShellBody); empty when no program starts a literal command.
+	// a literal and of the print redirects into literal files (ShellBody,
+	// Output.Redirect); empty when the programs do neither.
 	Body string
+	// Starts reports a program that starts a literal command Body runs
+	// (system, print |, | getline). A print redirect is a file awk opens
+	// itself, not a command it starts (rel-1-0-10:GAP-1566).
+	Starts bool
 	// Dynamic reports a command, program or program file the reading cannot
 	// know: the callers answer it at the unknown tier (DynamicReason).
 	Dynamic bool
@@ -374,16 +379,21 @@ func (c Call) programs() callPrograms {
 // program text that does not scan, a program word or file the reading cannot
 // know, a program past the byte cap).
 func (c Call) Read() Reading {
-	commands, reading := c.commands()
-	body, unreadable := ShellBody(commands)
-	reading.Body = body
+	commands, started, reading := c.commands()
+	texts, kept, unreadable := shellTexts(commands)
+	for _, index := range kept {
+		reading.Starts = reading.Starts || started[index]
+	}
+	reading.Body = joinShellTexts(texts)
 	reading.Dynamic = reading.Dynamic || unreadable
 	return reading
 }
 
-// commands are the literal commands the programs of the call run, with the
-// Reading flags but no Body.
-func (c Call) commands() (commands []string, reading Reading) {
+// commands are the literal commands the programs of the call run and the
+// redirects of their print statements, started marking each that is a
+// command the program starts (not a redirect), with the Reading flags but no
+// Body.
+func (c Call) commands() (commands []string, started []bool, reading Reading) {
 	programs := c.programs()
 	reading = Reading{Dynamic: programs.unknown, Unread: programs.unread, Files: programs.files}
 	for index, text := range programs.texts {
@@ -395,16 +405,20 @@ func (c Call) commands() (commands []string, reading Reading) {
 			// left out.
 			more = slices.DeleteFunc(slices.Clone(more), func(command string) bool { return strings.Contains(command, Hole) })
 		}
+		for range more {
+			started = append(started, true)
+		}
 		for _, output := range program.Outputs {
 			if !slices.Contains(programs.holed, index) || !strings.Contains(output.Target, Hole) {
 				more = append(more, output.Redirect())
+				started = append(started, false)
 			}
 		}
 		commands = append(commands, more...)
 		reading.Dynamic = reading.Dynamic || dynamic
 		reading.Truncated = reading.Truncated || program.Truncated
 	}
-	return commands, reading
+	return commands, started, reading
 }
 
 // ShellBody is the shell script that runs the commands of an awk program as
@@ -415,8 +429,14 @@ func (c Call) commands() (commands []string, reading Reading) {
 // and reported: awk's shell may read it differently from the reader here, so
 // the caller treats it as a command it cannot read.
 func ShellBody(commands []string) (body string, unreadable bool) {
-	var texts []string
-	for _, command := range commands {
+	texts, _, unreadable := shellTexts(commands)
+	return joinShellTexts(texts), unreadable
+}
+
+// shellTexts are the commands ShellBody keeps (not blank, parsed as shell),
+// the index in commands of each, and whether one did not parse.
+func shellTexts(commands []string) (texts []string, kept []int, unreadable bool) {
+	for index, command := range commands {
 		if strings.TrimSpace(command) == "" {
 			continue
 		}
@@ -425,12 +445,19 @@ func ShellBody(commands []string) (body string, unreadable bool) {
 			continue
 		}
 		texts = append(texts, command)
+		kept = append(kept, index)
 	}
+	return texts, kept, unreadable
+}
+
+// joinShellTexts is the ShellBody script of texts: the one command itself,
+// or each in a subshell on its own line.
+func joinShellTexts(texts []string) string {
 	switch len(texts) {
 	case 0:
-		return "", unreadable
+		return ""
 	case 1:
-		return texts[0], unreadable
+		return texts[0]
 	}
 	var b strings.Builder
 	for i, text := range texts {
@@ -439,5 +466,5 @@ func ShellBody(commands []string) (body string, unreadable bool) {
 		}
 		b.WriteString("( " + text + "\n)")
 	}
-	return b.String(), unreadable
+	return b.String()
 }

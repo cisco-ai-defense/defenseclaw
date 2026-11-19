@@ -44,28 +44,31 @@ func TestParseOutputs(t *testing.T) {
 // rel-1-0-10:GAP-1239: the reading of a call writes each print redirect as
 // the shell redirect of the same file, the target single-quoted as the
 // literal awk opens, next to the commands the program starts; a call with no
-// command channel and no literal output has no body.
+// command channel and no literal output has no body. A redirect starts no
+// command (Starts, rel-1-0-10:GAP-1566).
 func TestReadWritesPrintRedirects(t *testing.T) {
 	cases := []struct {
-		words []string
-		body  string
+		words  []string
+		body   string
+		starts bool
 	}{
-		{[]string{"awk", `BEGIN{print "x" > "/s/config.yaml"}`}, `: > '/s/config.yaml'`},
-		{[]string{"awk", `{print >> "~/a'b"}`, "in.txt"}, `: >> '~/a'\''b'`},
-		{[]string{"gawk", "-e", `BEGIN{system("ls"); print 1 > "o"}`}, "( ls\n)\n( : > 'o'\n)"},
-		{[]string{"awk", `{print $1}`, "in.txt"}, ""},
-		{[]string{"awk", `{print > $1}`, "in.txt"}, ""},
+		{[]string{"awk", `BEGIN{print "x" > "/s/config.yaml"}`}, `: > '/s/config.yaml'`, false},
+		{[]string{"awk", `{print >> "~/a'b"}`, "in.txt"}, `: >> '~/a'\''b'`, false},
+		{[]string{"gawk", "-e", `BEGIN{system("ls"); print 1 > "o"}`}, "( ls\n)\n( : > 'o'\n)", true},
+		{[]string{"awk", `BEGIN{print 1 > "o"; print 2 | "sort"}`}, "( sort\n)\n( : > 'o'\n)", true},
+		{[]string{"awk", `{print $1}`, "in.txt"}, "", false},
+		{[]string{"awk", `{print > $1}`, "in.txt"}, "", false},
 	}
 	for _, c := range cases {
-		if got := (Call{Words: c.words}).Read(); got.Body != c.body || got.Dynamic {
-			t.Errorf("%q: body %q dynamic %v, want %q static", c.words, got.Body, got.Dynamic, c.body)
+		if got := (Call{Words: c.words}).Read(); got.Body != c.body || got.Dynamic || got.Starts != c.starts {
+			t.Errorf("%q: body %q dynamic %v starts %v, want %q static starts %v", c.words, got.Body, got.Dynamic, got.Starts, c.body, c.starts)
 		}
 	}
 	// A program with a shell hole: an output whose target holds the hole is
 	// not known and is left out; a literal output is still written.
 	holed := Call{Words: []string{"awk", "x"}, Dynamic: []bool{false, true},
 		Holed: []string{"", `BEGIN{print "x" > "` + Hole + `"; print "y" > "lit"}`}}
-	if got := holed.Read(); got.Body != `: > 'lit'` || !got.Dynamic {
-		t.Errorf("holed program: body %q dynamic %v, want the literal output and dynamic", got.Body, got.Dynamic)
+	if got := holed.Read(); got.Body != `: > 'lit'` || !got.Dynamic || got.Starts {
+		t.Errorf("holed program: body %q dynamic %v starts %v, want the literal output, dynamic, no command", got.Body, got.Dynamic, got.Starts)
 	}
 }
