@@ -3356,13 +3356,13 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int, afterNe
 // (rel-1-0-10:GAP-1474).
 //
 // contextRead reports that the pipeline and list rules read the context of
-// every command the reading cuts: false when one is in a compound command
-// (a brace group, a subshell, if, while, for, case, a function, the time
-// keyword), in a pipeline or && / || list with a compound command among its
-// stages, or when the call has a coproc. Analyze projects no pipeline across
-// a compound stage, so curl and sh in { curl URL; } | sh or coproc curl URL |
-// sh are bare calls that CMD-PIPE-CURL does not read as one pipeline
-// (rel-1-0-10:GAP-1507). Such a reading still adds its findings.
+// every command the reading cuts: false when one is in a pipeline or && / ||
+// list with a compound command (a brace group, a subshell, if, while, for,
+// case) among its stages, or when the call has a coproc. Analyze projects no
+// pipeline across a compound stage, so curl and sh in { curl URL; } | sh or
+// coproc curl URL | sh are bare calls that CMD-PIPE-CURL does not read as one
+// pipeline (rel-1-0-10:GAP-1507); a pipeline inside a compound command is
+// read. Such a reading still adds its findings.
 func simpleNeutralWrapperFreeReading(input Input, source string) (reading SimpleCommand, contextRead, ok bool) {
 	file, parsed := shellparse.Parse(source)
 	if !parsed {
@@ -3414,7 +3414,7 @@ func simpleNeutralWrapperFreeReading(input Input, source string) (reading Simple
 			return true
 		}
 		cuts = append(cuts, cut)
-		if simpleCompoundContext(stack[:len(stack)-1]) {
+		if simpleSplitContext(stack[:len(stack)-1]) {
 			contextRead = false
 		}
 		return true
@@ -3438,22 +3438,14 @@ func simpleNeutralWrapperFreeReading(input Input, source string) (reading Simple
 	return SimpleCommand{Text: text.String(), CWD: input.CWD}, contextRead, true
 }
 
-// simpleCompoundContext reports that the ancestors of a statement put it in a
-// compound command, or in a pipeline or && / || list with a compound command
-// among its operands (simpleNeutralWrapperFreeReading).
-func simpleCompoundContext(ancestors []syntax.Node) bool {
-	for _, node := range ancestors {
-		switch typed := node.(type) {
-		case *syntax.File, *syntax.Stmt:
-		case *syntax.BinaryCmd:
-			if simpleBinaryHasCompound(typed) {
-				return true
-			}
-		default:
-			return true
-		}
-	}
-	return false
+// simpleSplitContext reports that the ancestors of a statement put it in a
+// pipeline or && / || list with a compound command among its operands
+// (simpleNeutralWrapperFreeReading).
+func simpleSplitContext(ancestors []syntax.Node) bool {
+	return slices.ContainsFunc(ancestors, func(node syntax.Node) bool {
+		binary, ok := node.(*syntax.BinaryCmd)
+		return ok && simpleBinaryHasCompound(binary)
+	})
 }
 
 // simpleBinaryHasCompound reports a compound command among the operands of a
@@ -3485,14 +3477,13 @@ type WrapperFreeCalls []CommandFact
 // call has none, or when a top-level call of the reading still starts with a
 // wrapper. Such a call is a chain the reading does not read (a prefix
 // assignment, a redirect before its program word, a word made at run time
-// among its wrapper words,
-// chroot or nsenter in it, the time keyword before it): the program it runs is
-// judged alone by no reader, and a rule on its pipeline or list (CMD-PIPE-CURL
-// for curl URL | sh) is not judged either (rel-1-0-10:GAP-1474). nil too when
-// the pipeline and list rules do not read the context of a call the reading
-// cuts (a compound command around it or among its stages, a coproc): the
-// reading holds the program as a bare call there, but not its pipeline
-// (rel-1-0-10:GAP-1507).
+// among its wrapper words, chroot or nsenter in it, the time keyword before
+// it): the program it runs is judged alone by no reader, and a rule on its
+// pipeline or list (CMD-PIPE-CURL for curl URL | sh) is not judged either
+// (rel-1-0-10:GAP-1474). nil too when the pipeline and list rules do not read
+// the context of a call the reading cuts (a compound command among the stages
+// of its pipeline or list, a coproc): the reading holds the program as a bare
+// call there, but not its pipeline (rel-1-0-10:GAP-1507).
 func NeutralWrapperFreeCalls(input Input, facts Facts) (calls WrapperFreeCalls) {
 	defer func() {
 		if recover() != nil {
