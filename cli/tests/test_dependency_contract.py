@@ -24,12 +24,11 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import tomllib
 from packaging.markers import Marker
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
-
-import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
@@ -160,6 +159,20 @@ def test_dependency_repair_cannot_lower_security_floors() -> None:
         assert Version("8.5.0") not in requirements["importlib-metadata"].specifier
         assert Version("8.7.1") in requirements["importlib-metadata"].specifier
         assert Version("8.8.0") not in requirements["importlib-metadata"].specifier
+
+
+def test_opentelemetry_security_floor_is_runtime_and_lock_is_coherent() -> None:
+    document = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    direct = _requirements(document["project"]["dependencies"])
+    # MCP imports the API at runtime; a dev-only floor does not protect wheels.
+    assert "opentelemetry-api" in direct
+    assert Version("1.45.1") not in direct["opentelemetry-api"].specifier
+    assert Version("1.45.2") in direct["opentelemetry-api"].specifier
+    assert direct["opentelemetry-api"].marker is None
+    locked = {package["name"]: package["version"] for package in tomllib.loads(UV_LOCK.read_text())["package"]}
+    assert Version(locked["opentelemetry-api"]) >= Version("1.45.2")
+    # Upstream SDK metadata requires the API's exact version.
+    assert locked["opentelemetry-sdk"] == locked["opentelemetry-api"]
 
 
 @pytest.mark.parametrize("python_version", ["3.11", "3.12", "3.13"])
@@ -476,6 +489,9 @@ def test_fresh_wheel_metadata_contains_complete_runtime_contract(tmp_path: Path)
     wheel_requirements = _requirements(metadata.get_all("Requires-Dist", []))
     _assert_requirement_contract(wheel_requirements, RUNTIME_CONTRACT)
     _assert_requirement_contract(wheel_requirements, WHEEL_SECURITY_FLOOR_CONTRACT)
+    assert Version("1.45.1") not in wheel_requirements["opentelemetry-api"].specifier
+    assert Version("1.45.2") in wheel_requirements["opentelemetry-api"].specifier
+    assert wheel_requirements["opentelemetry-api"].marker is None
     assert "tomli" not in wheel_requirements
     assert MAGIKA_MINIMUM_VERSION in wheel_requirements["magika"].specifier
     assert Version("1.0.1") not in wheel_requirements["magika"].specifier
