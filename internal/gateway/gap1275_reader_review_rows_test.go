@@ -36,6 +36,10 @@ func gap1275Handlers(t *testing.T, judge func(t *testing.T, pack string, judge f
 				cfg := &config.Config{}
 				cfg.Guardrail.Mode = "action"
 				cfg.Guardrail.Connector = conn
+				// The pack decides the tier: the strict pack blocks a proven
+				// state write that the default one alerts (GAP-0747 owner
+				// tiering 2026-11-15T15:20Z).
+				cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), tier.pack)
 				store, logger := testStoreAndLogger(t)
 				handler := (&APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}).handleAgentHook(conn)
 				judge(t, tier.pack, func(command string) string {

@@ -146,7 +146,7 @@ func TestMachineLayoutShellWritesAreSelfProtection(t *testing.T) {
 				blocked, got := machineLayoutCall(t, home, project, "Bash", map[string]any{"command": row.command, "description": "d"}, managed, pack)
 				switch {
 				case row.protected && !blocked:
-					t.Errorf("managed=%t pack=%q: %s = %.200s, want protected block", managed, pack, row.command, got)
+					t.Errorf("managed=%t pack=%q: %s = %.900s, want protected block", managed, pack, row.command, got)
 				case !row.protected && pack != "strict" && strings.HasPrefix(got, `{"action":"block"`):
 					t.Errorf("managed=%t pack=%q: %s = %.200s, want allow", managed, pack, row.command, got)
 				}

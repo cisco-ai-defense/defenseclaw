@@ -79,8 +79,8 @@ func TestGAP1250TargetDirectoryStateWrite(t *testing.T) {
 				// alert in the default one (GAP-0747 owner tiering
 				// 2026-11-15T15:20Z).
 				wantAction := gap0747WantAction(profile == "strict")
-				if row.block && (verdict.Action != wantAction || !slices.Contains(ids, "tamper.detector_state_write")) {
-					t.Errorf("%s %s %s: action %q %v, want %s by tamper.detector_state_write", row.id, profile, tool, verdict.Action, ids, wantAction)
+				if row.block && (operandBoundTierAction(findings, profile == "strict") != wantAction || !slices.Contains(ids, "tamper.detector_state_write")) {
+					t.Errorf("%s %s %s: action %q %v, want %s by tamper.detector_state_write", row.id, profile, tool, operandBoundTierAction(findings, profile == "strict"), ids, wantAction)
 				}
 				if !row.block && verdict.Action != "allow" {
 					t.Errorf("%s %s %s: action %q %v, want allow", row.id, profile, tool, verdict.Action, ids)

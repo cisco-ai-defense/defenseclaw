@@ -124,7 +124,7 @@ func gap0747OtherTamperFinding(findings []string) bool {
 		if i := strings.IndexByte(f, ':'); i >= 0 {
 			id = f[:i]
 		}
-		if strings.HasPrefix(id, "tamper.") && id != gap0747StateRule {
+		if (strings.HasPrefix(id, "tamper.") || strings.HasPrefix(id, "persistence.")) && id != gap0747StateRule {
 			return true
 		}
 	}

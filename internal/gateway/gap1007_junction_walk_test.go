@@ -34,9 +34,17 @@ var gap1007Tiers = []gap1007Tier{
 // gateway walks the call itself; a managed one gets the peer home and the
 // hook client's map (gap1006ManagedDecide).
 func gap1007Decide(t *testing.T, home, cwd string, tier gap1007Tier, tool, command string) string {
+	action, _ := gap1007DecideFull(t, home, cwd, tier, tool, command)
+	return action
+}
+
+// gap1007DecideFull is gap1007Decide and whether the verdict also carries
+// another tamper or persistence rule beside the state write (it keeps its
+// own block in every tier).
+func gap1007DecideFull(t *testing.T, home, cwd string, tier gap1007Tier, tool, command string) (string, bool) {
 	t.Helper()
 	if tier.managed {
-		return gap1006ManagedDecide(t, home, cwd, tier.posture, tool, command)
+		return gap1006ManagedDecideFull(t, home, cwd, tier.posture, tool, command)
 	}
 	body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": cwd,
 		"tool_name": tool, "tool_input": map[string]any{"command": command}})
@@ -54,7 +62,8 @@ func gap1007Decide(t *testing.T, home, cwd string, tier gap1007Tier, tool, comma
 		t.Fatal(err)
 	}
 	rt := claudeCodeHookProfileRuntime(connector.HookProfile{Name: "claudecode"})
-	return rt.Evaluate(api, context.Background(), agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}, body, payload).Action
+	res := rt.Evaluate(api, context.Background(), agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}, body, payload)
+	return res.Action, gap0747OtherTamperFinding(res.Findings)
 }
 
 // gap1007Spellings are the GAP-1007 spellings of the DefenseClaw config
@@ -100,8 +109,13 @@ func TestGAP1007JunctionDotDotWriteIsStateWriteInEveryTier(t *testing.T) {
 				for _, form := range forms {
 					cells++
 					command := fmt.Sprintf(form.text, target.text)
-					if got := gap1007Decide(t, home, cwd, tier, tool, command); got != gap0747WantAction(tier.posture == "strict") {
-						t.Errorf("%s/%s/%s|%s: action %s, want block in strict, alert elsewhere (the config through the junction)", tier.name, tool, form.id, target.id, got)
+					want := gap0747WantAction(tier.posture == "strict")
+					got, other := gap1007DecideFull(t, home, cwd, tier, tool, command)
+					if other {
+						want = "block" // another rule (SSH authorized keys) blocks in every tier
+					}
+					if got != want {
+						t.Errorf("%s/%s/%s|%s: action %s, want %s (the config through the junction)", tier.name, tool, form.id, target.id, got, want)
 					}
 				}
 			}

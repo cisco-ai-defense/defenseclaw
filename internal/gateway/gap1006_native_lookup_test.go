@@ -64,6 +64,13 @@ func gap1006Fixture(t *testing.T) (home, cwd string) {
 // reads the write targets from the hook client's map, as a managed install
 // does (the peer home, the client map in the context).
 func gap1006ManagedDecide(t *testing.T, home, cwd, posture, tool, command string) string {
+	action, _ := gap1006ManagedDecideFull(t, home, cwd, posture, tool, command)
+	return action
+}
+
+// gap1006ManagedDecideFull is gap1006ManagedDecide and whether the verdict
+// also carries another tamper or persistence rule beside the state write.
+func gap1006ManagedDecideFull(t *testing.T, home, cwd, posture, tool, command string) (string, bool) {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": cwd,
 		"tool_name": tool, "tool_input": map[string]any{"command": command}})
@@ -85,7 +92,8 @@ func gap1006ManagedDecide(t *testing.T, home, cwd, posture, tool, command string
 		t.Fatal(err)
 	}
 	rt := claudeCodeHookProfileRuntime(connector.HookProfile{Name: "claudecode"})
-	return rt.Evaluate(api, ctx, agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}, body, payload).Action
+	res := rt.Evaluate(api, ctx, agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}, body, payload)
+	return res.Action, gap0747OtherTamperFinding(res.Findings)
 }
 
 // TestGAP1006JunctionParentKeepsStateVerdict: a write through a junction

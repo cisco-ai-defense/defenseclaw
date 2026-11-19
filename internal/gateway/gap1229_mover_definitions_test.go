@@ -44,6 +44,9 @@ func TestGAP1229MoverDefinedInAListLeavesTheShellWhereItMayFiveTiers(t *testing.
 			// A proven state write is a HIGH alert outside strict (GAP-0747
 			// owner tiering 2026-11-15T15:20Z).
 			wantAction := gap0747TierWantAction(tier.tier)
+			if r.oracle == key {
+				wantAction = "block" // the SSH authorized-keys rule, not the state write
+			}
 			if want, findings := decide(r.oracle); want != wantAction {
 				t.Errorf("%s %s: the oracle %q is %s (%q), want %s", tier.name, r.id, r.oracle, want, findings, wantAction)
 			}
