@@ -767,7 +767,7 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 				r.searchFolder(command.ID, argument.Value, filter)
 			}
 		}
-		if recursive && len(operands) == 0 && !(program == "rg" && (r.pipedStdin(command) || parseRgCommandLine(argv).stdin)) {
+		if recursive && len(operands) == 0 && (program != "rg" || (!r.pipedStdin(command) && !parseRgCommandLine(argv).stdin)) {
 			// No folder operand: grep -r and rg search the working folder
 			// (an rg fed by a pipe, or given -, searches its input instead,
 			// substrate-1:GAP-0344).

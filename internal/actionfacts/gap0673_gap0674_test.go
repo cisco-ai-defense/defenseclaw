@@ -293,7 +293,7 @@ func TestGAP0673RgGroundTruthLive(t *testing.T) {
 			out, _ := cmd.Output() // rg exits 1 or 2 when it reads nothing
 			read = append(read, strings.Split(string(out), "\n")...)
 		}
-		if got := g0673Rel(dir, read); !slices.Equal(got, row.want) && !(len(got) == 0 && len(row.want) == 0) {
+		if got := g0673Rel(dir, read); !slices.Equal(got, row.want) {
 			t.Errorf("rg %s: real rg reads %v, the table says %v", row.args, got, row.want)
 		}
 	}

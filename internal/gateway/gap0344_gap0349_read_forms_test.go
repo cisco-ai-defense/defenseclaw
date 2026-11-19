@@ -19,6 +19,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -34,17 +35,37 @@ var g0684Files = []string{".env", "sub/.env", "deploy/id_ed25519", "src/a.go", "
 
 // g0344Place is the command of a row in dir and the hook's folder: @P is
 // dir, and a leading "@up " puts the hook in the folder above it.
+//
+// @P is one single-quoted shell word with forward slashes:
+//   - t.TempDir names the folder after the subtest and keeps "(" and ")",
+//     so the C19 folder holds "(GAP-0683_stays_exact)"; unquoted, that is a
+//     shell syntax error, and the row read nothing whatever rg would read;
+//   - an unquoted C:\Users\... word loses its backslashes to a POSIX shell
+//     on Windows (Git Bash, the shell Claude Code runs there): C:Users..., a
+//     folder that is not there, so no side (rel, base or head) read anything.
+//
+// On Linux and macOS ToSlash leaves dir as it is.
 func g0344Place(cmd, dir string) (string, string) {
 	hook := dir
 	if rest, ok := strings.CutPrefix(cmd, "@up "); ok {
 		cmd, hook = rest, filepath.Dir(dir)
 	}
-	return strings.ReplaceAll(cmd, "@P", dir), hook
+	return strings.ReplaceAll(cmd, "@P", "'"+filepath.ToSlash(dir)+"'"), hook
 }
+
+// g0684WindowsUnsure is the read of a row whose rg runs after a cd to a
+// drive folder (C:/...): the working folder tracking places only POSIX
+// folders, so on Windows rg's folder is not known exactly and every glob
+// counts, the base behaviour (rgWorkingFolder); elsewhere the row reads
+// what real rg reads.
+var g0684WindowsUnsure = runtime.GOOS == "windows"
 
 func g0344Folder(t *testing.T, files ...string) string {
 	t.Helper()
 	dir := t.TempDir()
+	if strings.ContainsRune(dir, '\'') {
+		t.Fatalf("%q: a quote in the folder breaks the single-quoted @P", dir)
+	}
 	for _, f := range files {
 		p := filepath.Join(dir, filepath.FromSlash(f))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -134,7 +155,7 @@ func g0344Rows() []g0344Row {
 		{"P06g popd then rg -g '/.env'", "@up pushd @P >/dev/null && pushd / >/dev/null && popd >/dev/null && rg -g '/.env' KEY @P", g0684Files, true},
 		{"P06h cd to a variable then rg -g '/.env'", `@up D=@P; cd "$D" && rg -g '/.env' KEY @P`, g0684Files, true},
 		{"P06i CDPATH then rg -g '/.env'", "@up export CDPATH=@P; cd sub >/dev/null && rg -g '/.env' KEY @P/sub", g0684Files, true},
-		{"C19 cd P then rg -g '*.yml' (GAP-0683 stays exact)", "@up cd @P && rg -g '*.yml' TODO @P", g0684Files, false},
+		{"C19 cd P then rg -g '*.yml' (GAP-0683 stays exact)", "@up cd @P && rg -g '*.yml' TODO @P", g0684Files, g0684WindowsUnsure},
 		// GAP-0349: read forms the record missed.
 		{"Q20 a for-loop variable", `for f in .env; do cat "$f"; done`, []string{".env"}, true},
 		{"Q21 perl -e reading its argument with <>", `perl -e 'print while <>' .env`, []string{".env"}, true},
