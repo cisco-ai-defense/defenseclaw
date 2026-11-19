@@ -358,7 +358,7 @@ func TestKiroRemoveCleansAnOlderCommandFormFromAFileOnlyItsRecordNames(t *testin
 	otherScript := filepath.Join(root, "a", ".defenseclaw", "hooks", kiroHookScriptName)
 	older := []string{
 		"/bin/bash '" + script + "' --hook-surface " + KiroHookSurfaceV3,
-		"/usr/bin/env DEFENSECLAW_TRACE=1 " + script + " --event preToolUse",
+		"/usr/bin/env LC_ALL=C " + script + " --event preToolUse",
 	}
 	keep := []string{"/bin/bash '" + otherScript + "' --hook-surface " + KiroHookSurfaceV3, kiroUserLint}
 	w1Hooks := filepath.Join(w1, ".kiro", "hooks", kiroManagedHooksName)
