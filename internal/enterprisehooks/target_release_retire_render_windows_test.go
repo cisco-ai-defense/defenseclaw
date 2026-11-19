@@ -26,11 +26,12 @@ import (
 // the lock as it is. The upgrade back to this release then found every
 // account with no active session failed: its lock names this release, so the
 // release check said "not from another release" and the read-only proof that
-// accepts the recorded earlier image never ran. A lock this release wrote
-// counts as the earlier render when the protected runtime selector records an
-// earlier trusted image of this install for the SID; any other lock this
-// release wrote stays this release.
-func TestWindowsProtectedTargetFromOtherReleaseTakesThisReleaseRetireRender(t *testing.T) {
+// accepts the recorded earlier image never ran. A lock this release wrote is
+// a retire render when the protected runtime selector records an earlier
+// trusted image of this install for the SID; any other lock this release wrote
+// is not. The release check itself stays as it was (review RV-LENT P2-1): a
+// retire render is never "another release" for the other sign-in waits.
+func TestWindowsProtectedTargetRetireRenderTakesThisReleaseRetireRender(t *testing.T) {
 	gap45AllowMutation(t)
 	sid := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, sid)
@@ -116,17 +117,21 @@ func TestWindowsProtectedTargetFromOtherReleaseTakesThisReleaseRetireRender(t *t
 	}
 
 	opts := InstallOptions{ConnectorName: "codex", UserHome: home, OwnerSID: sid.String()}
-	check := func(label, wantWritten string, wantOther bool) {
+	check := func(label, wantOtherWritten string, wantOther bool, wantRetireWritten string, wantRetire bool) {
 		t.Helper()
 		written, other, err := WindowsProtectedTargetFromOtherRelease(opts)
-		if err != nil || other != wantOther || written != wantWritten {
-			t.Fatalf("%s: written=%q other=%t err=%v; want written=%q other=%t", label, written, other, err, wantWritten, wantOther)
+		if err != nil || other != wantOther || written != wantOtherWritten {
+			t.Fatalf("%s: other release written=%q other=%t err=%v; want written=%q other=%t", label, written, other, err, wantOtherWritten, wantOther)
+		}
+		written, retire, err := WindowsProtectedTargetRetireRender(opts)
+		if err != nil || retire != wantRetire || written != wantRetireWritten {
+			t.Fatalf("%s: retire render written=%q retire=%t err=%v; want written=%q retire=%t", label, written, retire, err, wantRetireWritten, wantRetire)
 		}
 	}
-	check("this release retire render of the transition image", this, true)
+	check("this release retire render of the transition image", "", false, this, true)
 
 	current = transition
-	check("this release render of the image it runs", "", false)
+	check("this release render of the image it runs", "", false, "", false)
 	current = launch
 
 	windowsEnterpriseHookTrustCheck = func(path string) error {
@@ -135,9 +140,9 @@ func TestWindowsProtectedTargetFromOtherReleaseTakesThisReleaseRetireRender(t *t
 		}
 		return nil
 	}
-	check("an untrusted recorded image", "", false)
+	check("an untrusted recorded image", "", false, "", false)
 	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
 
 	saveLock("1.0.9")
-	check("a lock 1.0.9 wrote", "1.0.9", true)
+	check("a lock 1.0.9 wrote", "1.0.9", true, "", false)
 }

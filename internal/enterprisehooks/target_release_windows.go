@@ -105,37 +105,54 @@ func windowsProtectedTargetMachineRegistration(opts InstallOptions, requireClose
 // its account is signed out: an upgrade renders new hooks that only the
 // account's own Windows session can install, so the target waits for that
 // account's next sign-in instead of failing the whole upgrade (GAP-0644).
-// A lock that cannot be read is not from another release, nor is one this
-// release wrote, unless the protected runtime selector records an earlier
-// image of this install for the target (windowsProtectedTargetRecordsEarlierHookImage);
-// such a failure stays a failure. Both profiles: a Secure Client upgrade with
-// a signed-out enrolled account failed the same way.
+// A lock that cannot be read, or one this release wrote, is not from
+// another release; such a failure stays a failure. Both profiles: a Secure
+// Client upgrade with a signed-out enrolled account failed the same way.
 func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, error) {
 	lock, err := windowsProtectedTargetLock(opts)
 	if err != nil {
 		return "", false, err
 	}
 	written := strings.TrimSpace(lock.DefenseClawVersion)
-	if written == "" {
+	if written == "" || written == strings.TrimSpace(version.Current().BinaryVersion) {
 		return "", false, nil
 	}
-	if written != strings.TrimSpace(version.Current().BinaryVersion) || windowsProtectedTargetRecordsEarlierHookImage(opts) {
-		return written, true, nil
+	return written, true, nil
+}
+
+// WindowsProtectedTargetRetireRender reads, without writing, the protected
+// hook-contract lock entry and the protected runtime selector of one managed
+// target, and reports this release as the lock's writer when this release
+// wrote the lock while the selector records, for the target SID, an earlier
+// trusted hook image of this install (windowsPriorReleaseTargetHookImage).
+// That is the render of a hook-image retire: this release rewrote the
+// account's records for the transition image bin\defenseclaw-hook.exe before
+// the administrator went back to 1.0.9, which accepts that render and leaves
+// it and its lock as they are. After the upgrade back the lock names this
+// release, so WindowsProtectedTargetFromOtherRelease says no, and an account
+// with no active session failed instead of waiting for its sign-in (GAP-1096,
+// cert replay on IB4). The guardian asks it only for its read-only proof that
+// accepts the earlier release's render, never for another sign-in wait: the
+// Hermes earlier-matrix wait trusts the account's own config and Secure Client
+// trusts the lock alone, so a retire render must not open them. Any other lock,
+// and any error reading the selector, reads as no.
+func WindowsProtectedTargetRetireRender(opts InstallOptions) (string, bool, error) {
+	lock, err := windowsProtectedTargetLock(opts)
+	if err != nil {
+		return "", false, err
 	}
-	return "", false, nil
+	written := strings.TrimSpace(lock.DefenseClawVersion)
+	if written == "" || written != strings.TrimSpace(version.Current().BinaryVersion) ||
+		!windowsProtectedTargetRecordsEarlierHookImage(opts) {
+		return "", false, nil
+	}
+	return written, true, nil
 }
 
 // windowsProtectedTargetRecordsEarlierHookImage reports that the protected
 // runtime selector records, for the target SID, an earlier trusted hook image
 // of this install than the one this release names
-// (windowsPriorReleaseTargetHookImage). Then this release wrote the target
-// records for the transition image while the launch folders were retired
-// (hook-image retire before going back to 1.0.9). 1.0.9 accepts that render
-// and leaves it, and its lock, as they are, so after the upgrade back the
-// lock names this release although the records are the earlier render: an
-// account with no active session then failed instead of waiting for its
-// sign-in (GAP-1096, cert replay on IB4). The sign-in wait still needs the
-// read-only proof that accepts the earlier render. Any error reads as no.
+// (windowsPriorReleaseTargetHookImage). Any error reads as no.
 func windowsProtectedTargetRecordsEarlierHookImage(opts InstallOptions) bool {
 	_, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
 	if err != nil {
