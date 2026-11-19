@@ -39,7 +39,9 @@ func boundedResolverPathsLane(size int, shape boundedShape) (boundedLaneCall, bo
 	}
 	command := "touch " + filepath.Base(folder) + "/*"
 	if shape.nested {
-		command = "bash -c '" + command + "'"
+		// A launcher and a -c option cluster: the writer is still the
+		// call's writer (rel-1-0-10:GAP-0438).
+		command = "nice -n 5 bash -lc '" + command + "'"
 	}
 	if shape.seen {
 		command = boundedShellSeen + "; " + command

@@ -79,16 +79,23 @@ func forEachWriteOperand(command, cwd, home string, startup ShellStartup, visit 
 // writers (capWriters) and no redirect: the walk that judges a possible write
 // also reads an operand of a program the model does not classify.
 func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth int, capsOnly bool, visit func(resolvedWord) bool) bool {
+	var capWriters map[string]bool
+	if capsOnly {
+		capWriters = capWriterPrograms(capWriterFacts(command, cwd, home))
+	}
+	return walkWriteOperandsOf(command, cwd, home, startup, depth, capsOnly, capWriters, visit)
+}
+
+// walkWriteOperandsOf is walkWriteOperands with the cap writers of command
+// already read (nil unless capsOnly).
+func walkWriteOperandsOf(command, cwd, home string, startup ShellStartup, depth int, capsOnly bool,
+	capWriters map[string]bool, visit func(resolvedWord) bool) bool {
 	file, parsed := parseShell(command)
 	if !parsed {
 		return false
 	}
 	options := shellGlobOptionsForCall(command, startup)
 	_, harmless := callPrograms(command, cwd, home)
-	var capWriters map[string]bool
-	if capsOnly {
-		capWriters = capWriterPrograms(command, cwd, home)
-	}
 	values := actionValues{"HOME": home, "PWD": cwd}
 	stop := false
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -119,7 +126,7 @@ func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth in
 		name := programBase(program)
 		if depth < nestedShellBodyDepth && slices.Contains([]string{"bash", "sh", "dash", "zsh", "ksh"}, name) {
 			for i := 1; i+1 < len(call.Args); i++ {
-				if flag, fixed := StaticWord(call.Args[i], home); fixed && flag == "-c" {
+				if flag, fixed := StaticWord(call.Args[i], home); fixed && (flag == "-c" || capsOnly && shellCommandCluster(flag)) {
 					if body, fixed := StaticWord(call.Args[i+1], home); fixed &&
 						walkWriteOperands(body, cwd, home, startup, depth+1, capsOnly, visit) {
 						stop = true
@@ -128,7 +135,25 @@ func walkWriteOperands(command, cwd, home string, startup ShellStartup, depth in
 				}
 			}
 		}
-		if harmless[name] || capsOnly && !capWriters[name] {
+		if capsOnly && !capWriters[name] {
+			// A launcher, find or xargs the walk reads as harmless may still
+			// run a writer.
+			if children, ok := capChildCalls(command, call, home); ok {
+				for _, child := range children {
+					if depth < nestedShellBodyDepth && walkWriteOperands(child, cwd, home, startup, depth+1, true, visit) {
+						stop = true
+						return false
+					}
+				}
+				return true
+			}
+			// A call the model did not read as its own command (a
+			// function body) is classified by its own text.
+			if text, ok := shellNodeText(command, call); harmless[name] || !ok ||
+				!capWriterPrograms(capWriterFacts(text, cwd, home))[name] {
+				return true
+			}
+		} else if harmless[name] {
 			return true
 		}
 		for _, word := range call.Args[1:] {
@@ -346,10 +371,17 @@ const UnprovenBoundedPaths = "bounded-paths"
 // MaxResolvedCandidates paths). A call that hit one is truncated: the caller
 // judges what was read as before and the bound rule floors it to the unknown
 // tier of the pack (internal/guardrail/bounded). Only an operand of a call the
-// effects model classifies as a writer is read (capWriterPrograms): a read, a
+// effects model classifies as a writer is read (capWriterFact): a read, a
 // listing or a search with a wide glob, and a program the model does not
 // classify, is not a write the bound could hide a protected file from. A
 // command without a character the shell expands cannot hit one.
+//
+// The writer is the one the call runs, wherever it is spelled: behind a
+// launcher (env, nice, timeout, nohup, sudo, setsid, xargs), in a find -exec,
+// a bash -lc or an eval body, or in a function body (capChildCalls). The walk
+// named a call by its first word only, so env touch D/* read env, which the
+// model does not classify, and the bound never hit (rel-1-0-10:GAP-0438, the
+// GAP-0497 spellings).
 func WriteOperandCaps(command, cwd, home string) bounded.CapSet {
 	var set bounded.CapSet
 	if !commandMayExpand(command) {
@@ -358,37 +390,50 @@ func WriteOperandCaps(command, cwd, home string) bounded.CapSet {
 	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
 		return set
 	}
-	walkWriteOperands(command, cwd, home, CurrentShellStartup(), 0, true, func(resolved resolvedWord) bool {
+	startup := CurrentShellStartup()
+	facts := capWriterFacts(command, cwd, home)
+	walkWriteOperandsOf(command, cwd, home, startup, 0, true, capWriterPrograms(facts), func(resolved resolvedWord) bool {
 		set = set.Union(resolved.caps)
 		return false
 	})
 	return set
 }
 
-// capWriterPrograms are the programs of command the effects model reads as a
-// write that is the program's own: a permission or attribute change, a copy, a
-// move, a disk write, a delete, or a write or append that no redirect of the
-// call explains (a redirect makes the model read any program as a writer).
-func capWriterPrograms(command, cwd, home string) map[string]bool {
-	facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home})
+// capWriterFacts are the command facts of command the cap reads its writers
+// from.
+func capWriterFacts(command, cwd, home string) actionfacts.Facts {
+	return actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home})
+}
+
+// capWriterPrograms are the programs of facts the effects model reads as a
+// writer (capWriterFact).
+func capWriterPrograms(facts actionfacts.Facts) map[string]bool {
 	out := map[string]bool{}
 	for _, fact := range facts.Commands {
-		writes := false
-		for _, operation := range fact.Operations {
-			switch operation {
-			case actionfacts.OperationPermissionChange, actionfacts.OperationCopy, actionfacts.OperationMove,
-				actionfacts.OperationDiskWrite, actionfacts.OperationDelete:
-				writes = true
-			case actionfacts.OperationWrite, actionfacts.OperationAppend:
-				writes = writes || len(fact.Redirects) == 0
-			}
-		}
-		if writes {
+		if capWriterFact(fact) {
 			out[programBase(fact.Program)] = true
 			out[programBase(fact.Executable)] = true
 		}
 	}
 	return out
+}
+
+// capWriterFact reports a command the effects model reads as a write that is
+// the program's own: a permission or attribute change, a copy, a move, a disk
+// write, a delete, or a write or append that no redirect of the call explains
+// (a redirect makes the model read any program as a writer).
+func capWriterFact(fact actionfacts.CommandFact) bool {
+	writes := false
+	for _, operation := range fact.Operations {
+		switch operation {
+		case actionfacts.OperationPermissionChange, actionfacts.OperationCopy, actionfacts.OperationMove,
+			actionfacts.OperationDiskWrite, actionfacts.OperationDelete:
+			writes = true
+		case actionfacts.OperationWrite, actionfacts.OperationAppend:
+			writes = writes || len(fact.Redirects) == 0
+		}
+	}
+	return writes
 }
 
 // awkProgramWritesNothing reports an awk call whose one inline program the
@@ -432,4 +477,85 @@ func awkProgramWritesNothing(call *syntax.CallExpr, program, cwd, home string) b
 	}
 	output, unsafe, _ := awkOutputProof(programs[0], cwd, home)
 	return !output && !unsafe
+}
+
+// shellCommandCluster reports a short option cluster of a shell that holds
+// -c (bash -lc, sh -ec, bash -xc BODY): the shell runs the word after it.
+func shellCommandCluster(flag string) bool {
+	if len(flag) < 3 || flag[0] != '-' || flag[1] == '-' || !strings.ContainsRune(flag, 'c') {
+		return false
+	}
+	return strings.Trim(flag[1:], "abcefhiklmnprstuvxBCEHPT") == ""
+}
+
+// capChildCalls are the texts of the calls call runs as a command of its own,
+// for the cap walk: the child of a launcher chain (actionfacts.WrapperChildIndex:
+// env, nice, timeout, nohup, sudo, setsid, xargs, ...), a busybox applet,
+// each find -exec, -execdir, -ok or -okdir program, and an eval body. ok is
+// false for any other call.
+func capChildCalls(command string, call *syntax.CallExpr, home string) ([]string, bool) {
+	args := call.Args
+	values, static := make([]string, len(args)), make([]bool, len(args))
+	for i, word := range args {
+		values[i], static[i] = StaticWord(word, home)
+	}
+	span := func(from, to int) (string, bool) {
+		if from <= 0 || to > len(args) || from >= to {
+			return "", false
+		}
+		start, end := int(args[from].Pos().Offset()), int(args[to-1].End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			return "", false
+		}
+		return command[start:end], true
+	}
+	if index := actionfacts.WrapperChildIndex(values, static); index > 0 {
+		child, ok := span(index, len(args))
+		return []string{child}, ok
+	}
+	switch programBase(values[0]) {
+	case "busybox":
+		// busybox APPLET ARGS runs the applet.
+		if len(args) > 2 && static[1] && !strings.HasPrefix(values[1], "-") {
+			child, ok := span(1, len(args))
+			return []string{child}, ok
+		}
+	case "eval":
+		child, ok := span(1, len(args))
+		if !ok {
+			return nil, false
+		}
+		for i := 1; i < len(args); i++ {
+			if !static[i] {
+				return nil, false
+			}
+		}
+		return []string{strings.Join(values[1:], " ")}, child != ""
+	case "find":
+		var children []string
+		for i := 1; i < len(args); i++ {
+			if !static[i] || values[i] != "-exec" && values[i] != "-execdir" && values[i] != "-ok" && values[i] != "-okdir" {
+				continue
+			}
+			end := i + 1
+			for end < len(args) && !(static[end] && (values[end] == ";" || values[end] == "+")) {
+				end++
+			}
+			if child, ok := span(i+1, end); ok {
+				children = append(children, child)
+			}
+			i = end
+		}
+		return children, len(children) > 0
+	}
+	return nil, false
+}
+
+// shellNodeText is the source text of node in command.
+func shellNodeText(command string, node syntax.Node) (string, bool) {
+	start, end := int(node.Pos().Offset()), int(node.End().Offset())
+	if start < 0 || end > len(command) || start >= end {
+		return "", false
+	}
+	return command[start:end], true
 }

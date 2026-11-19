@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -38,10 +39,11 @@ func TestGAP0438ResolverCapReachesTheCallDecision(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", home)
-	for _, tc := range []struct {
+	type row struct {
 		name, command string
 		hit           bool
-	}{
+	}
+	rows := []row{
 		{"at the bound", "touch fan256/*", false},
 		{"past the bound", "touch fan257/*", true},
 		{"past the bound in a nested shell", "bash -c 'touch fan257/*'", true},
@@ -52,7 +54,24 @@ func TestGAP0438ResolverCapReachesTheCallDecision(t *testing.T) {
 		{"a listing of a wide glob is not a write", "ls fan257/* 2>/dev/null", false},
 		{"a search with a wide glob and a redirect", "find fan257/* -name x 2>/dev/null | head -9", false},
 		{"text without an expansion is not read", "touch fan257", false},
-	} {
+	}
+	// The writer behind a launcher, a find -exec, xargs, eval, a shell -c
+	// cluster or a function is the call's writer: the walk named the call by
+	// its first word, so these never hit the bound (the GAP-0497 spellings).
+	// The same spellings of a read stay no write.
+	for _, spelling := range []string{"env %s", "env -i %s", "command %s", "nice -n 5 %s", "timeout 5 %s",
+		"nohup %s", "exec %s", "time %s", "busybox %s", "ionice -c3 %s", "setsid %s", "sudo -n %s", "doas %s",
+		"bash -lc '%s'", "sh -ec '%s'", "f() { %s; }; f", "eval '%s'", "xargs -0 %s </dev/null",
+		"find . -maxdepth 0 -exec %s \\;"} {
+		for _, writer := range []string{"touch fan257/*", "rm fan257/*"} {
+			command := strings.ReplaceAll(spelling, "%s", writer)
+			rows = append(rows, row{"wrapped writer: " + command, command, true})
+		}
+		command := strings.ReplaceAll(spelling, "%s", "cat fan257/*")
+		rows = append(rows, row{"wrapped read: " + command, command, false})
+	}
+	rows = append(rows, row{"a find -exec read of its names is not a write", "find fan257 -name f1 -exec cat {} \\;", false})
+	for _, tc := range rows {
 		t.Run(tc.name, func(t *testing.T) {
 			caps := WriteOperandCaps(tc.command, project, home)
 			if got := caps.Has(bounded.Paths); got != tc.hit {
