@@ -1901,6 +1901,7 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedInlineAuthorizedKeysWrite(input, facts) ||
 		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
 		trustedCMDAuthorizedKeysWrite(input) ||
+		trustedLauncherRedirectAuthorizedKeysWrite(facts) ||
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||
 		trustedGitBashAuthorizedKeysWrite(input) ||
 		trustedNestedAuthorizedKeysWrite(input, facts)

@@ -110,6 +110,46 @@ func trustedCMDAuthorizedKeysWrite(input actionfacts.Input) bool {
 	return trustedWindowsHomeOperand(body[index+1:], input.ActiveHome, "authorized_keys")
 }
 
+// trustedLauncherRedirectAuthorizedKeysWrite reports a PowerShell or CMD
+// reading whose first statement is a static pwsh, powershell or cmd launcher
+// with a static output redirect to an authorized-keys file, such as
+// `pwsh -Command echo K >> C:\Users\u\.ssh\authorized_keys` or the same
+// line under cmd /c layers (GAP-0974). The outer shell opens the target
+// before the launcher starts, so neither the unread launcher body (the one
+// unsupported construct of the parse) nor a profile it loads can undo the
+// write. The launcher must be the first, unconditional, foreground top-level
+// command, so a statement before it cannot skip it.
+func trustedLauncherRedirectAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+	if facts.Parse.Status != actionfacts.StatusPartial ||
+		(facts.Parse.Dialect != actionfacts.DialectPowerShell && facts.Parse.Dialect != actionfacts.DialectCMD) ||
+		len(facts.Parse.Issues) != 1 || facts.Parse.Issues[0] != actionfacts.IssueUnsupportedConstruct ||
+		len(facts.Commands) == 0 {
+		return false
+	}
+	launcher := facts.Commands[0]
+	switch strings.TrimSuffix(strings.ToLower(launcher.Program), ".exe") {
+	case "pwsh", "powershell", "cmd":
+	default:
+		return false
+	}
+	if launcher.ParentCommandID != 0 || launcher.ControlFlowUncertain || launcher.Background ||
+		launcher.Effect != actionfacts.EffectExecute {
+		return false
+	}
+	for _, redirect := range launcher.Redirects {
+		if redirect.Expands || redirect.Access != actionfacts.PathAccessWrite && redirect.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == launcher.ID && candidate.Value == redirect.Target &&
+				candidate.Access == redirect.Access && matchesAuthorizedKeys(facts, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func trustedCMDPrivateKeyRead(input actionfacts.Input) bool {
 	body, ok := trustedCMDBody(input)
 	if !ok || !strings.HasPrefix(strings.ToLower(body), "type ") {

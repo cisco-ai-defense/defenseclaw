@@ -39,6 +39,9 @@ type parseOutput struct {
 	posixOpenFDs map[int64]string
 	// unread is ParseResult.Unread: markUnread sets it.
 	unread bool
+	// windowsDescriptorCopy records an exact N>&1 in a Windows parse, which
+	// keeps a pipeline partial (windowsValidatePipelineAuthority).
+	windowsDescriptorCopy bool
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {
