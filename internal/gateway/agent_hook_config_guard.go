@@ -1214,7 +1214,14 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	// text; the shared reader resolves the values the command binds, as the
 	// managed route does.
 	namesByVariable := agentHookConfigBindsValues(rawCommand) && hookpaths.RegistrationWriteCandidate(rawCommand)
-	if !guard.shellMentionsRegistryPath(text) && !namesByVariable &&
+	// A find that deletes or hands what it walks to a child names no
+	// registered file in its text when it walks the folder as . (find .
+	// -type f -delete): the shared reader judges the files the walk finds,
+	// as it does for the absolute spelling of the same folder
+	// (rel-1-0-10:GAP-1196).
+	findWalk := strings.Contains(rawCommand, "find") &&
+		slices.ContainsFunc([]string{"-delete", "-exec", "-ok"}, func(action string) bool { return strings.Contains(rawCommand, action) })
+	if !guard.shellMentionsRegistryPath(text) && !namesByVariable && !findWalk &&
 		!slices.ContainsFunc([]string{"git ", "patch ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini ", "npx "},
 			func(name string) bool { return strings.Contains(text, name) }) {
 		return out

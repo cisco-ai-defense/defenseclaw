@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/awkprog"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -565,7 +566,7 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	sawUnquoted := false
 	unquotedExpansion := false
 	prefix, prefixed := "", false
-	for _, part := range word.Parts {
+	for _, part := range posixANSICParts(word.Parts) {
 		rawUnquotedExpansion := posixUnquotedExpansion(part, value.Len() == 0)
 		partValue, partQuote, partExpands := projectPOSIXWordPart(part)
 		if partExpands {
@@ -800,7 +801,11 @@ func projectPOSIXWordPart(part syntax.WordPart) (string, QuoteKind, bool) {
 	case *syntax.Lit:
 		return unquotePOSIXLiteral(part.Value, false), QuoteNone, false
 	case *syntax.SglQuoted:
-		return part.Value, QuoteSingle, part.Dollar
+		if part.Dollar {
+			value, ok := posixANSICValue(part.Value)
+			return value, QuoteSingle, !ok
+		}
+		return part.Value, QuoteSingle, false
 	case *syntax.DblQuoted:
 		var value strings.Builder
 		for _, nested := range part.Parts {
@@ -817,6 +822,56 @@ func projectPOSIXWordPart(part syntax.WordPart) (string, QuoteKind, bool) {
 	default:
 		return "", QuoteNone, true
 	}
+}
+
+// posixANSICParts is parts with each ANSI-C quote marked as one. The POSIX
+// reader parses $'...' as a literal $ before a single-quoted string; bash
+// (the shell of the Bash tool) reads one quote whose escapes it decodes, so
+// the word is that quote: the unescaped $ that ends the literal goes and the
+// quote is read as $'...' (rel-1-0-10:GAP-0351). parts is not changed.
+func posixANSICParts(parts []syntax.WordPart) []syntax.WordPart {
+	var out []syntax.WordPart
+	for index, part := range parts {
+		literal, isLiteral := part.(*syntax.Lit)
+		if !isLiteral || index+1 >= len(parts) || !strings.HasSuffix(literal.Value, "$") {
+			continue
+		}
+		quote, isQuote := parts[index+1].(*syntax.SglQuoted)
+		if !isQuote || quote.Dollar {
+			continue
+		}
+		body := strings.TrimSuffix(literal.Value, "$")
+		if escapes := len(body) - len(strings.TrimRight(body, `\`)); escapes%2 == 1 {
+			continue // \$ is a literal dollar
+		}
+		if out == nil {
+			out = slices.Clone(parts)
+		}
+		out[index] = &syntax.Lit{ValuePos: literal.ValuePos, ValueEnd: literal.ValueEnd, Value: body}
+		out[index+1] = &syntax.SglQuoted{Left: quote.Left, Right: quote.Right, Dollar: true, Value: quote.Value}
+	}
+	if out == nil {
+		return parts
+	}
+	return out
+}
+
+// posixANSICValue is the text the shell makes of an ANSI-C quote ($'...'):
+// its escapes decoded as the shell expander decodes them (expand.Format with
+// no arguments, the hookpaths reading of the same word). A quote whose value
+// is not certain is not static (ok false): one with \c (a control character
+// the expander does not decode) or one that makes a NUL (bash cuts the word
+// there). touch $'\x2eenv' names .env, so the path fact names the file
+// (rel-1-0-10:GAP-0351).
+func posixANSICValue(text string) (string, bool) {
+	if strings.Contains(text, `\c`) {
+		return "", false
+	}
+	value, _, err := expand.Format(nil, text, nil)
+	if err != nil || strings.ContainsRune(value, 0) {
+		return "", false
+	}
+	return value, true
 }
 
 func projectPOSIXDoubleQuotedPart(part syntax.WordPart) (string, bool) {

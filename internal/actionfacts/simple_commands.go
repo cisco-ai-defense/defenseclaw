@@ -264,6 +264,11 @@ type simpleShellState struct {
 	// in both homes (simpleHomeReadings), so a ~ write that blocks in
 	// either still blocks.
 	movedHome string
+	// homeGuess is the folder the walk reads an unproven HOME as, when the
+	// run-time value is one it can place (simpleRunTimeHomeGuess): HOME
+	// stays unproven, and a reading through it of a file that this folder
+	// makes an account's file is marked UnprovenHome (rel-1-0-10:GAP-1022).
+	homeGuess string
 }
 
 // simpleLocal is the caller value of name saved by a local declaration in
@@ -301,7 +306,7 @@ func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
 		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked), folderVars: slices.Clone(s.folderVars),
-		homeUnproven: s.homeUnproven, startHome: s.startHome, movedHome: s.movedHome}
+		homeUnproven: s.homeUnproven, startHome: s.startHome, movedHome: s.movedHome, homeGuess: s.homeGuess}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -316,16 +321,25 @@ func (s *simpleShellState) noteHome(set, known bool) {
 	case set && !known:
 		s.unproveHome()
 	case set:
-		s.homeUnproven = false
+		s.homeUnproven, s.homeGuess = false, ""
+	}
+}
+
+// noteHomeGuess records guess (simpleRunTimeHomeGuessOf) for a HOME that
+// the assignments left unproven.
+func (s *simpleShellState) noteHomeGuess(guess string, set bool) {
+	if set && s.homeUnproven {
+		s.homeGuess = guess
 	}
 }
 
 // unproveHome records that HOME got a value the walk cannot read: HOME is
 // the active home the action started in again; a literal home an earlier
 // statement moved it to stays a second reading (movedHome,
-// rel-1-0-10:GAP-1087).
+// rel-1-0-10:GAP-1087). A guess of the earlier value is dropped
+// (rel-1-0-10:GAP-1022).
 func (s *simpleShellState) unproveHome() {
-	s.homeUnproven = true
+	s.homeUnproven, s.homeGuess = true, ""
 	if home := s.vars["HOME"]; s.startHome != "" && home != s.startHome {
 		if s.movedHome == "" {
 			s.movedHome = home
@@ -375,13 +389,141 @@ func simpleReadsThroughUnprovenHome(input Input, state simpleShellState, source,
 		if _, credential := MatchCredentialFileShape(relative); credential {
 			return true
 		}
+		// HOME=$(cd ~/.aws; pwd); cp ~/credentials reads ~/.aws/credentials
+		// (rel-1-0-10:GAP-1022).
+		if state.homeGuess != "" {
+			if guessed := simplePathClean(state.homeGuess + "/" + relative); strings.HasPrefix(guessed, prefix) {
+				if _, credential := MatchCredentialFileShape(strings.TrimPrefix(guessed, prefix)); credential {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
 
+// simpleRunTimeHomeGuessOf is simpleRunTimeHomeGuess of the last HOME of
+// assigns, read in state before they run; set reports a HOME among them.
+func simpleRunTimeHomeGuessOf(assigns []*syntax.Assign, state simpleShellState) (guess string, set bool) {
+	for _, assign := range assigns {
+		if assign == nil || assign.Name == nil || assign.Name.Value != "HOME" || assign.Index != nil || assign.Array != nil {
+			continue
+		}
+		guess, set = simpleRunTimeHomeGuess(assign.Value, state), true
+	}
+	return guess, set
+}
+
+// simpleRunTimeHomeGuess is the folder a run-time HOME value names when the
+// walk can place it: $(pwd) is the working folder, $(cd D; pwd) and
+// $(cd D && pwd) are D, $(echo W) is W, and a static tail after one of them
+// ($(pwd)/../D) is joined to it. It is "" for any other value, an unknown
+// working folder, or a place that is not absolute. The guess only widens
+// which readings through the unproven home read an account's file
+// (simpleReadsThroughUnprovenHome); HOME itself stays unproven, so a
+// scratch HOME the shell may give another value is never made definite
+// (rel-1-0-10:GAP-1022).
+func simpleRunTimeHomeGuess(word *syntax.Word, state simpleShellState) string {
+	if word == nil || len(word.Parts) == 0 || state.cwdUnknown || !simplePOSIXAbs(state.cwd) {
+		return ""
+	}
+	var subst *syntax.CmdSubst
+	switch first := word.Parts[0].(type) {
+	case *syntax.CmdSubst:
+		subst = first
+	case *syntax.DblQuoted:
+		if !first.Dollar && len(first.Parts) == 1 {
+			subst, _ = first.Parts[0].(*syntax.CmdSubst)
+		}
+	}
+	if subst == nil || subst.TempFile || subst.ReplyVar {
+		return ""
+	}
+	folder, ok := simpleSubstitutionFolder(subst, state)
+	if !ok {
+		return ""
+	}
+	if len(word.Parts) > 1 {
+		tail, static := simpleStaticWord(&syntax.Word{Parts: word.Parts[1:]}, state.vars)
+		if !static || !strings.HasPrefix(tail, "/") {
+			return ""
+		}
+		folder += tail
+	}
+	return simplePathClean(folder)
+}
+
+// simpleSubstitutionFolder is the folder a substitution of
+// simpleRunTimeHomeGuess prints, read in state.
+func simpleSubstitutionFolder(subst *syntax.CmdSubst, state simpleShellState) (string, bool) {
+	words := func(stmt *syntax.Stmt) ([]string, bool) {
+		if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown || len(stmt.Redirs) != 0 {
+			return nil, false
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
+			return nil, false
+		}
+		values := make([]string, 0, len(call.Args))
+		for _, arg := range call.Args {
+			value, static := simpleStaticWord(arg, state.vars)
+			if !static {
+				return nil, false
+			}
+			values = append(values, value)
+		}
+		return values, true
+	}
+	place := func(folder string) (string, bool) {
+		switch {
+		case folder == "":
+			return "", false
+		case simplePOSIXAbs(folder):
+			return folder, true
+		default:
+			return state.cwd + "/" + folder, true
+		}
+	}
+	cdThenPwd := func(cd, pwd *syntax.Stmt) (string, bool) {
+		cdWords, ok := words(cd)
+		if !ok || cdWords[0] != "cd" || len(cdWords) > 2 {
+			return "", false
+		}
+		if pwdWords, ok := words(pwd); !ok || len(pwdWords) != 1 || pwdWords[0] != "pwd" {
+			return "", false
+		}
+		if len(cdWords) == 1 {
+			return place(state.vars["HOME"])
+		}
+		return place(cdWords[1])
+	}
+	switch len(subst.Stmts) {
+	case 1:
+		stmt := subst.Stmts[0]
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && binary.Op == syntax.AndStmt &&
+			!stmt.Negated && !stmt.Background && len(stmt.Redirs) == 0 {
+			return cdThenPwd(binary.X, binary.Y)
+		}
+		values, ok := words(stmt)
+		if !ok {
+			return "", false
+		}
+		switch {
+		case len(values) == 1 && values[0] == "pwd":
+			return state.cwd, true
+		case len(values) == 2 && values[0] == "echo" && !strings.HasPrefix(values[1], "-"):
+			return place(values[1])
+		}
+	case 2:
+		return cdThenPwd(subst.Stmts[0], subst.Stmts[1])
+	}
+	return "", false
+}
+
 // simpleHomeChanged reports whether state holds another HOME than prior.
 func simpleHomeChanged(prior, state simpleShellState) bool {
-	return prior.vars["HOME"] != state.vars["HOME"] || prior.homeUnproven != state.homeUnproven
+	return prior.vars["HOME"] != state.vars["HOME"] || prior.homeUnproven != state.homeUnproven ||
+		prior.homeGuess != state.homeGuess
 }
 
 // simplePieces holds the commands a walk reads from the text of the call as it
@@ -849,9 +991,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			return syntaxTailCommands(input, tail, depth, interpreter, inherited, guess)
 		}
 	}
+	// A ~+ head is the working folder, which only the walk writes
+	// (rel-1-0-10:GAP-1204).
 	if !input.folderUnknown && !strings.ContainsAny(source, ";&|(){}<>\n`$=!") &&
 		!strings.Contains(source, "eval") && !strings.Contains(source, "trap") &&
-		!strings.Contains(source, " -") {
+		!strings.Contains(source, " -") && !strings.Contains(source, "~+") {
 		return nil
 	}
 	parts, reduced, ok := sequenceStatementDetails(source, true, true, input.LoopBindsStraightLine, !input.StraightLineFunctions)
@@ -914,7 +1058,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		// A body that names USER or LOGNAME is read with the values its
 		// caller hands over (inherited).
 		inheritsUser := inherited != nil && (strings.Contains(parts[0].text, "USER") || strings.Contains(parts[0].text, "LOGNAME"))
-		if !prefix && !duplication && !nested && !inheritsUser && !simpleRedirectDefaultExpansion(stmt) {
+		// A current-folder head ($PWD/, ${PWD}/, "$PWD"/, "$PWD/...", ~+/) is
+		// the folder the call runs in: the walk writes it as that folder, as
+		// it does for $(pwd)/ (a statement of its own there), so cat "$PWD"/.env
+		// and cat ~+/.env in a known folder read the file cat .env reads
+		// (rel-1-0-10:GAP-0878, rel-1-0-10:GAP-1204).
+		folderHead := input.CWD != "" && (strings.Contains(parts[0].text, "PWD") || strings.Contains(parts[0].text, "~+"))
+		if !prefix && !duplication && !nested && !inheritsUser && !folderHead && !simpleRedirectDefaultExpansion(stmt) {
 			return nil
 		}
 	}
@@ -1076,7 +1226,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						assigns, folderNames = folderCall.Assigns, names
 					}
 				}
+				guess, guessed := simpleRunTimeHomeGuessOf(assigns, state)
 				state.noteHome(updateSimpleVariables(state.vars, assigns))
+				state.noteHomeGuess(guess, guessed)
 				state.setFolderVars(simpleAssignNames(assigns), folderNames)
 				changed = true
 				nextVariants = append(nextVariants, simpleHomeReadings(state)...)
@@ -1915,7 +2067,7 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 			return previous.cwd == state.cwd && previous.cwdUnknown == state.cwdUnknown &&
 				slices.Equal(previous.dirStack, state.dirStack) && maps.Equal(previous.vars, state.vars) &&
 				slices.Equal(previous.locals, state.locals) && previous.homeUnproven == state.homeUnproven &&
-				slices.Equal(previous.folderVars, state.folderVars)
+				previous.homeGuess == state.homeGuess && slices.Equal(previous.folderVars, state.folderVars)
 		}) {
 			result = append(result, state)
 		}
@@ -2090,7 +2242,9 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 			}
 			continue
 		}
+		guess, guessed := simpleRunTimeHomeGuessOf([]*syntax.Assign{assign}, *state)
 		state.noteHome(updateSimpleVariables(vars, []*syntax.Assign{assign}))
+		state.noteHomeGuess(guess, guessed)
 	}
 }
 

@@ -1412,10 +1412,11 @@ func dispatchTrustedActionWith(
 				}
 				findings = withSimpleCommandFindings(findings, childFindings)
 			}
-			// A find hands its starting points to the program it runs: that
-			// program on each starting point is judged as the statement
-			// alone, for the call and for each of its statements, and the
-			// strictest finding is kept (rel-1-0-10:GAP-1048).
+			// A find hands its starting points to the program it runs, and an
+			// xargs its fixed input: that program on each name is judged as
+			// the statement alone, for the call and for each of its
+			// statements, and the strictest finding is kept
+			// (rel-1-0-10:GAP-1048, GAP-0997).
 			inputs := []actionfacts.Input{request.Input}
 			for _, simple := range simples {
 				if simple.EvaluationFailure == "" && !simple.OpaqueValueAssignment && !simple.LiteralOutputOnly &&
@@ -1430,16 +1431,21 @@ func dispatchTrustedActionWith(
 			}
 			for index, input := range inputs {
 				text, _ := trustedBashCommandInput(input)
-				if !strings.Contains(text, "-exec") && !strings.Contains(text, "-ok") {
-					continue
-				}
-				inputFacts := facts
-				if index != 0 {
-					inputFacts = actionfacts.Analyze(input)
-				}
-				readings, truncated := actionfacts.FindHandedReadings(inputFacts)
-				if truncated {
-					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
+				// An xargs fed fixed names (echo|printf WORDS | xargs CMD) runs
+				// CMD with them: that call is judged as typed too, so a
+				// credential file handed to a copy through xargs gets the
+				// finding of the copy (rel-1-0-10:GAP-0997).
+				readings := xargsStaticInputReadings(text, request.Input.ActiveHome)
+				if strings.Contains(text, "-exec") || strings.Contains(text, "-ok") {
+					inputFacts := facts
+					if index != 0 {
+						inputFacts = actionfacts.Analyze(input)
+					}
+					found, truncated := actionfacts.FindHandedReadings(inputFacts)
+					if truncated {
+						findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
+					}
+					readings = append(readings, found...)
 				}
 				for _, reading := range readings {
 					child := request

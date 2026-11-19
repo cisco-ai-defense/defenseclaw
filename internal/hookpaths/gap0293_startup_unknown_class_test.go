@@ -75,15 +75,14 @@ func TestGAP0293StartupUnknownOnlyRemovesAllowProofs(t *testing.T) {
 		t.Run(startupKind.name, func(t *testing.T) {
 			clearShellStartupEnv(t)
 			t.Setenv(startupKind.variable, startupKind.value)
-			if t.Name() == "TestGAP0293StartupUnknownOnlyRemovesAllowProofs/unrelated-exported-function" {
-				// The touch -h entry proof reads only an exported touch:
-				// an unrelated function leaves it, and so the command
-				// decision, exactly as without one (the GAP-0293 trigger).
+			if strings.HasPrefix(startupKind.name, "unrelated-") {
+				// A proof reads only an exported function a call of the
+				// row runs: an unrelated one (environment-modules' module,
+				// an account's own helpers) leaves every site exactly as
+				// without one (the GAP-0293 touch trigger; rel-1-0-10:GAP-0276
+				// for the variable-target and overwritten-redirect proofs).
 				for _, row := range rows {
 					for _, s := range sites {
-						if !strings.HasPrefix(s.name, "no-dereference-touch") && s.name != "command-decision" {
-							continue
-						}
 						if was, got := base[s.name+"|"+row.name], s.read(row.command); was != got {
 							t.Errorf("%s %s: an unrelated exported function changed %t to %t", s.name, row.name, was, got)
 						}

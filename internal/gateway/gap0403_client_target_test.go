@@ -14,7 +14,24 @@ import (
 // protected name is dead at the write target. Per-user blocks on these rows
 // precede this branch; the regression was carrying them into managed cells.
 func TestGAP0403DeadValuesStayAllowedWithProtectHome(t *testing.T) {
+	gap0403DeadValuesStayAllowed(t, "")
+}
+
+// TestGAP0403DeadValuesStayAllowedWithUnrelatedExportedFunction: the same
+// ordinary writes stay allowed in every managed cell when the shell exports
+// a function none of them runs (environment-modules exports module and ml),
+// as with no export (rel-1-0-10:GAP-0276).
+func TestGAP0403DeadValuesStayAllowedWithUnrelatedExportedFunction(t *testing.T) {
+	gap0403DeadValuesStayAllowed(t, "BASH_FUNC_module%%")
+}
+
+// gap0403DeadValuesStayAllowed runs the GAP-0403 rows; a non-empty export is
+// set, as an exported bash function, after the fixture clears the startup.
+func gap0403DeadValuesStayAllowed(t *testing.T, export string) {
 	f := newB36ManagedHookFixture(t)
+	if export != "" {
+		t.Setenv(export, "() {  :\n}")
+	}
 	for _, name := range []string{"a.txt", "b.txt"} {
 		if err := os.WriteFile(filepath.Join(f.project, name), []byte("x\n"), 0o600); err != nil {
 			t.Fatal(err)
