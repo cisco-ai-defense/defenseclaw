@@ -168,15 +168,23 @@ func TestGAP0453SubstrateRecordsReachTheTelemetryRuntime(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	// And the same families leave over OTLP.
+	// And the same families leave over OTLP. The exporter sends them in
+	// batches, so the wait is for every family the test asserts: it stopped
+	// at three of the five, and approval.resolved, the last record written,
+	// could still be in the next batch (rel-1-0-10:GAP-1325).
+	families := []string{"sandbox.lifecycle", "egress.allowed", "egress.blocked", "approval.requested", "approval.resolved"}
 	otlp := ""
 	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
 		otlp = fmt.Sprint(capture.logSnapshot())
-		if strings.Contains(otlp, "sandbox.lifecycle") && strings.Contains(otlp, "egress.blocked") && strings.Contains(otlp, "approval.requested") {
+		all := true
+		for _, name := range families {
+			all = all && strings.Contains(otlp, name)
+		}
+		if all {
 			break
 		}
 	}
-	for _, name := range []string{"sandbox.lifecycle", "egress.allowed", "egress.blocked", "approval.requested", "approval.resolved"} {
+	for _, name := range families {
 		if !strings.Contains(otlp, name) {
 			t.Errorf("no %s record reached the OTLP destination", name)
 		}
