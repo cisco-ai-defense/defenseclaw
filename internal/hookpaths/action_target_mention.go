@@ -1771,12 +1771,12 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 // shell's own expansion reads that spelling: it is tried before the walk
 // concludes that the name names no directory (GAP-0781 RV7-1).
 func actionGlobOpenDir(dir string) (*os.File, error) {
-	directory, err := pathOpen(dir)
+	directory, err := pathOpenDirectory(dir)
 	if err == nil || !actionGlobInvalidName(err) {
 		return directory, err
 	}
 	if mapped := actionMSYSMappedPath(dir); mapped != dir {
-		if alias, mappedErr := pathOpen(mapped); mappedErr == nil || !errors.Is(mappedErr, fs.ErrNotExist) && !actionGlobInvalidName(mappedErr) {
+		if alias, mappedErr := pathOpenDirectory(mapped); mappedErr == nil || !errors.Is(mappedErr, fs.ErrNotExist) && !actionGlobInvalidName(mappedErr) {
 			return alias, mappedErr
 		}
 	}
