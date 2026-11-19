@@ -254,6 +254,11 @@ func (s *passthroughStream) run() {
 	secretOpen, secretKey := false, false
 	var textAt time.Time
 	textMark := 0
+	// keepAt: when the client last got a keep-alive or a masked release
+	// behind an open token or digit run; maskedRuns: lane to the start and
+	// end of the run a masked release covered (GAP-1307, stream_keepalive.go).
+	var keepAt time.Time
+	maskedRuns := map[int][2]int{}
 
 	writeQueue := func() {
 		if relN == 0 {
@@ -422,6 +427,38 @@ func (s *passthroughStream) run() {
 		if !scanText(full) {
 			return false
 		}
+		writeQueue()
+		return true
+	}
+	// keepHeld is the quiet bound of events held behind an open token or
+	// digit run (GAP-1307): a content-free event of the stream's framing
+	// (option a), else the held events, checked, with the run masked
+	// (option b). The run stays held. False: the check blocked.
+	keepHeld := func() bool {
+		keepAt = time.Now()
+		if ka := s.keepAlive(released > 0); ka != nil {
+			_, _ = w.Write(ka)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return true
+		}
+		if !scanText(true) {
+			return false
+		}
+		runs := accumulated.OpenRuns()
+		masked, ok := s.maskHeld(queue, relN, runs, maskedRuns)
+		if !ok {
+			return true // it cannot be masked: everything stays held
+		}
+		for i, ev := range masked {
+			queueBytes += len(ev) - len(queue[i])
+			queue[i] = ev
+		}
+		for _, run := range runs {
+			maskedRuns[run.lane] = [2]int{run.start, run.start + len(run.text)}
+		}
+		initialFlushed = true
 		writeQueue()
 		return true
 	}
@@ -681,21 +718,27 @@ read:
 		// rules have not decided, still waits for stream_buffer_bytes, so a
 		// block there still replaces the whole reply.
 		var deadline time.Time
+		keepDue := false
 		switch {
 		case !tailHold:
 		case secretKey:
 			// An open private-key block waits for more text at most
 			// streamHoldMaxPartialAge (GAP-0429).
 			deadline = textAt.Add(streamHoldMaxPartialAge)
+		case secretOpen && relN > 0 && (initialFlushed || accumulated.Len() >= streamBufferSize || s.bedrock == nil):
+			// Held behind a token or a digit run, which has no clock: the
+			// next text or the end of the stream decides it (GAP-1265).
+			// After streamKeepAliveAfter of no new text the client gets a
+			// keep-alive (every framing but Bedrock has one before its
+			// first event), or the held events with the run masked once
+			// rel would have sent them (GAP-1307).
+			deadline, keepDue = laterTime(textAt, keepAt).Add(streamKeepAliveAfter), true
 		case !initialFlushed:
 			if earlyInitial && relN > 0 && !callHold && accumulated.Len() > 0 && !secretOpen {
 				deadline = lastRead.Add(streamHoldMaxAge)
 			}
 		case relN > 0 && !secretOpen:
 			deadline = queueAt[0].Add(streamHoldMaxAge)
-		case relN > 0:
-			// Held behind a token or a digit run, which has no clock: the
-			// next text or the end of the stream decides it (GAP-1265).
 		case len(queue) == 0 && unread() > 0 && !stallReported:
 			deadline = lastRead.Add(streamHoldMaxPartialAge)
 		}
@@ -709,6 +752,13 @@ read:
 				// was busy (a long event, a slow check). The read goes
 				// first; a due hold is checked with it.
 			default:
+				if keepDue {
+					if stopped = !keepHeld(); stopped {
+						break read
+					}
+					reportRead()
+					continue
+				}
 				if secretKey {
 					o := accumulated.OpenSecret()
 					secretOpen, secretKey = o.open, o.pem
