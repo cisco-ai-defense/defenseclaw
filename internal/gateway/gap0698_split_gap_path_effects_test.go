@@ -99,6 +99,10 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 		`f(){ test -f .bashrc && $(echo return); cd /tmp; }; f && `,
 		`f(){ eval [ -e .bashrc ]; }; f && `,
 	}
+	many := ""
+	for i := 0; i < 40; i++ {
+		many += " src/f" + strconv.Itoa(i) + ".go"
+	}
 	rank := map[string]int{"allow": 0, "alert": 1, "block": 2}
 	tier := map[string]string{"default": "alert", "strict": "block"}
 	for _, pack := range []string{"default", "strict"} {
@@ -157,6 +161,22 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 		} {
 			if got := decide(home, command); got != "allow" {
 				t.Errorf("%s: control %q is %s, want allow", pack, command, got)
+			}
+		}
+		// Past splitGapEffectProbeCap files the call is read by its text as
+		// well (hookpaths.BoundCallMayNameProtected): in a project that is
+		// still an allow.
+		if command := `f(){ "$@"; }; f true && cat` + many + `; rm -f` + many; decide(project, command) != "allow" {
+			t.Errorf("%s: control %q in proj is not allow", pack, command)
+		}
+		// The files whose twin only decides the tier share one statement:
+		// a protected file among many ordinary ones is still read.
+		for _, command := range []string{
+			`f(){ "$@"; }; f true && cat` + many + ` .aws/credentials`,
+			`f(){ cd /tmp; "$@"; }; f cd && rm -f` + many + ` .aws/credentials`,
+		} {
+			if got := decide(home, command); rank[got] < rank[tier[pack]] {
+				t.Errorf("%s: %q is %s, want at least %s", pack, command, got, tier[pack])
 			}
 		}
 	}
