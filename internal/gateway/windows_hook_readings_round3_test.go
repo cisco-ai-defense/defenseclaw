@@ -137,9 +137,8 @@ func TestWindowsHookCappedReadingIsAtLeastTheUnknownTier(t *testing.T) {
 // TestWindowsHookFixtureRunMoreThanOnceKeepsItsFinding runs the tool-call
 // corpus fixture of rel-1-0-10:GAP-0427 two, three and eight times in one
 // call, one run per line, with and without a further unreadable statement:
-// its rule and verdict stay those of one run. (A call whose statements are
-// joined by ";" is a partial reading by the lexer's own rule and is not
-// proven even once; that is not a repeat effect.)
+// its rule and verdict stay those of one run. (The ";"-joined runs are
+// TestWindowsHookChainJoinedBySemicolonIsProven.)
 func TestWindowsHookFixtureRunMoreThanOnceKeepsItsFinding(t *testing.T) {
 	const id = "windows-uac-eventvwr-autoelevation-hijack"
 	var fixture *toolCallCorpusCase
@@ -186,4 +185,49 @@ func findingIDsHave(ids []string, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestWindowsHookChainJoinedBySemicolonIsProven runs the eventvwr handler
+// chain as one ";"-joined line, once and twice, through the codex hook in
+// every pack: the PowerShell reader leaves a ";"-joined call partial for the
+// separator alone, so before rel-1-0-10:GAP-1231 no reading proved the chain
+// and the call was allowed with no finding while the same chain one statement
+// per line alerted (block in strict). The benign twin (an ordinary handler
+// key and notepad, twice) stays allowed with no finding.
+func TestWindowsHookChainJoinedBySemicolonIsProven(t *testing.T) {
+	previous := windowsHookHost
+	windowsHookHost = func() bool { return true }
+	t.Cleanup(func() { windowsHookHost = previous })
+	const rule = "privilege.windows_uac_autoelevation_hijack"
+	const chain = `New-Item "HKCU:\software\classes\mscfile\shell\open\command" -Force; ` +
+		`Set-ItemProperty "HKCU:\software\classes\mscfile\shell\open\command" -Name "(default)" -Value "C:\Windows\System32\cmd.exe /c echo dccert-block-marker" -Force; ` +
+		`Start-Process "C:\Windows\System32\eventvwr.msc"`
+	const benign = `New-Item "HKCU:\software\classes\myapp\shell\open\command" -Force; Start-Process notepad.exe`
+	cases := []struct {
+		name, command string
+		attack        bool
+	}{
+		{"chain once", chain, true},
+		{"chain twice", chain + "; " + chain, true},
+		{"benign twice", benign + "; " + benign, false},
+	}
+	for _, pack := range gap0437Packs {
+		server := gap0437Server(t, pack, "codex", "action")
+		want := "alert"
+		if pack.pack == "strict" {
+			want = "block"
+		}
+		for _, test := range cases {
+			got := server.evaluateCodexHook(context.Background(), codexHookRequest{
+				HookEventName: "PreToolUse", ToolName: "shell", CWD: `C:\Users\alice\proj`,
+				ToolInput: map[string]interface{}{"command": test.command},
+			})
+			switch {
+			case test.attack && (got.Action != want || !findingIDsHave(got.RuleIDs, rule)):
+				t.Errorf("%s, %s: action %q rules %v, want %q with %s", pack.name, test.name, got.Action, got.RuleIDs, want, rule)
+			case !test.attack && (got.Action != "allow" || len(got.RuleIDs) != 0):
+				t.Errorf("%s, %s: action %q rules %v, want allow with no finding", pack.name, test.name, got.Action, got.RuleIDs)
+			}
+		}
+	}
 }

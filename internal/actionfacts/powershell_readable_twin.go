@@ -21,9 +21,16 @@ import (
 // is one more way the call can run, with the statements the reader cannot
 // place left out; a block proven on it counts, as for the other twins.
 //
+// When every statement is readable the twin is the call with its statements
+// one per line: the reader leaves a call joined by ";" partial for the
+// separator alone, so the eventvwr handler chain on one line was proven by no
+// reading while the same chain one statement per line blocked in strict
+// (rel-1-0-10:GAP-1231).
+//
 // It is not offered when a left-out statement may change what the others do
-// (a location, alias, environment or evaluation statement, an exit), when no
-// statement is left out, or when none is readable. facts must be Analyze(input).
+// (a location, alias, environment or evaluation statement, an exit), when it
+// would be the call itself, or when no statement is readable. facts must be
+// Analyze(input).
 //
 // Its statements and pipeline stages are counted against the reading's own
 // command bound (maxCommands) through trunc, the call's bounded.Truncated (the one bound
@@ -79,12 +86,16 @@ func PowerShellReadableStatementsTwin(input Input, facts Facts, trunc *bounded.T
 			return Input{}, false
 		}
 	}
-	if len(kept) == 0 || len(kept) == len(statements) {
+	if len(kept) == 0 {
 		return Input{}, false
 	}
 	twin = input
 	twin.Args, twin.Argv = nil, nil
 	twin.Command = strings.Join(kept, "\n")
+	if len(kept) == len(statements) && twin.Command == source {
+		// No statement is left out and the twin is the call itself.
+		return Input{}, false
+	}
 	twin.DialectHint = DialectPowerShell
 	return twin, true
 }
