@@ -181,7 +181,7 @@ func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, fact
 // relative operand of a path effect (pathEffectTwin: a read, a write, a
 // removal, or a change of the file mode or owner; substrate-1:GAP-0698).
 func unresolvedFolderOperand(candidate actionfacts.PathFact) bool {
-	if _, _, effect := pathEffectTwin(candidate.Access); !effect {
+	if _, effect := pathEffectTwin(candidate.Access); !effect {
 		return false
 	}
 	value := candidate.Value
