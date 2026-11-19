@@ -45,7 +45,7 @@ func TestGAP1321NeutralWrapperFreeReading(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			input := Input{Tool: "Bash", Command: tc.command, CWD: "/home/alice/project", ActiveHome: "/home/alice"}
-			reading, ok := simpleNeutralWrapperFreeReading(input, tc.command)
+			reading, _, ok := simpleNeutralWrapperFreeReading(input, tc.command)
 			if tc.want == "" {
 				if ok {
 					t.Fatalf("reading %q, want none", reading.Text)

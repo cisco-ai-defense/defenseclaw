@@ -391,7 +391,7 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 			result = append(result, simpleTopLevelHereDocBodies(source, input)...)
 		}
 		if facts.Parse.Status == StatusPartial && len(source) <= maxCommandBytes {
-			if reading, ok := simpleNeutralWrapperFreeReading(input, source); ok &&
+			if reading, _, ok := simpleNeutralWrapperFreeReading(input, source); ok &&
 				!slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.Text == reading.Text }) {
 				result = append(result, reading)
 			}
@@ -3354,16 +3354,35 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int, afterNe
 // and a chain past the bound (TRUNCATED) are not read so; a word made at run
 // time among the program's own arguments is kept as written
 // (rel-1-0-10:GAP-1474).
-func simpleNeutralWrapperFreeReading(input Input, source string) (SimpleCommand, bool) {
+//
+// contextRead reports that the pipeline and list rules read the context of
+// every command the reading cuts: false when one is in a compound command
+// (a brace group, a subshell, if, while, for, case, a function, the time
+// keyword), in a pipeline or && / || list with a compound command among its
+// stages, or when the call has a coproc. Analyze projects no pipeline across
+// a compound stage, so curl and sh in { curl URL; } | sh or coproc curl URL |
+// sh are bare calls that CMD-PIPE-CURL does not read as one pipeline
+// (rel-1-0-10:GAP-1507). Such a reading still adds its findings.
+func simpleNeutralWrapperFreeReading(input Input, source string) (reading SimpleCommand, contextRead, ok bool) {
 	file, parsed := shellparse.Parse(source)
 	if !parsed {
-		return SimpleCommand{}, false
+		return SimpleCommand{}, false, false
 	}
 	home, _ := normalizeActiveHome(input.ActiveHome)
 	vars := map[string]string{"HOME": home}
 	type span struct{ start, end int }
 	var cuts []span
+	contextRead = true
+	var stack []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		if _, coproc := node.(*syntax.CoprocClause); coproc {
+			contextRead = false
+		}
+		stack = append(stack, node)
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok {
 			return true
@@ -3395,26 +3414,66 @@ func simpleNeutralWrapperFreeReading(input Input, source string) (SimpleCommand,
 			return true
 		}
 		cuts = append(cuts, cut)
+		if simpleCompoundContext(stack[:len(stack)-1]) {
+			contextRead = false
+		}
 		return true
 	})
 	var text strings.Builder
 	last := 0
 	for _, cut := range cuts {
 		if cut.start < last || cut.end <= cut.start || cut.end > len(source) {
-			return SimpleCommand{}, false
+			return SimpleCommand{}, false, false
 		}
 		text.WriteString(source[last:cut.start])
 		last = cut.end
 	}
 	if last == 0 {
-		return SimpleCommand{}, false
+		return SimpleCommand{}, false, false
 	}
 	text.WriteString(source[last:])
-	reading := text.String()
-	if strings.TrimSpace(reading) == "" {
-		return SimpleCommand{}, false
+	if strings.TrimSpace(text.String()) == "" {
+		return SimpleCommand{}, false, false
 	}
-	return SimpleCommand{Text: reading, CWD: input.CWD}, true
+	return SimpleCommand{Text: text.String(), CWD: input.CWD}, contextRead, true
+}
+
+// simpleCompoundContext reports that the ancestors of a statement put it in a
+// compound command, or in a pipeline or && / || list with a compound command
+// among its operands (simpleNeutralWrapperFreeReading).
+func simpleCompoundContext(ancestors []syntax.Node) bool {
+	for _, node := range ancestors {
+		switch typed := node.(type) {
+		case *syntax.File, *syntax.Stmt:
+		case *syntax.BinaryCmd:
+			if simpleBinaryHasCompound(typed) {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// simpleBinaryHasCompound reports a compound command among the operands of a
+// pipeline or list, nested ones included.
+func simpleBinaryHasCompound(binary *syntax.BinaryCmd) bool {
+	for _, operand := range []*syntax.Stmt{binary.X, binary.Y} {
+		if operand == nil || operand.Cmd == nil {
+			continue
+		}
+		switch typed := operand.Cmd.(type) {
+		case *syntax.CallExpr:
+		case *syntax.BinaryCmd:
+			if simpleBinaryHasCompound(typed) {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // WrapperFreeCalls is the top-level calls of the wrapper-free reading of a
@@ -3429,7 +3488,11 @@ type WrapperFreeCalls []CommandFact
 // among its wrapper words,
 // chroot or nsenter in it, the time keyword before it): the program it runs is
 // judged alone by no reader, and a rule on its pipeline or list (CMD-PIPE-CURL
-// for curl URL | sh) is not judged either (rel-1-0-10:GAP-1474).
+// for curl URL | sh) is not judged either (rel-1-0-10:GAP-1474). nil too when
+// the pipeline and list rules do not read the context of a call the reading
+// cuts (a compound command around it or among its stages, a coproc): the
+// reading holds the program as a bare call there, but not its pipeline
+// (rel-1-0-10:GAP-1507).
 func NeutralWrapperFreeCalls(input Input, facts Facts) (calls WrapperFreeCalls) {
 	defer func() {
 		if recover() != nil {
@@ -3447,8 +3510,8 @@ func NeutralWrapperFreeCalls(input Input, facts Facts) (calls WrapperFreeCalls) 
 	if len(source) > maxCommandBytes {
 		return nil
 	}
-	reading, ok := simpleNeutralWrapperFreeReading(input, source)
-	if !ok {
+	reading, contextRead, ok := simpleNeutralWrapperFreeReading(input, source)
+	if !ok || !contextRead {
 		return nil
 	}
 	readingInput := input
