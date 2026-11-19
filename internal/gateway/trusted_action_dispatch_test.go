@@ -2251,10 +2251,21 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 		wantEnforce bool
 	}{
 		{
+			// bash decodes an ANSI-C quote to one static word, so $'rm' is
+			// the program rm and the call is rm -rf / as its plain twin
+			// below: the finding enforces (rel-1-0-10:GAP-0351, GAP-1555).
 			name:        "ansi c quoted executable",
 			command:     `$'rm' -rf /`,
 			ruleID:      "CMD-RM-RF",
 			wantFinding: true,
+			wantEnforce: true,
+		},
+		{
+			name:        "plain twin of the ansi c quoted executable",
+			command:     `rm -rf /`,
+			ruleID:      "CMD-RM-RF",
+			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name:        "ansi c quoted executable with dynamic trailing argument",
@@ -2279,6 +2290,14 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 			command:     `X=1 $'r\x6d' -rf /`,
 			ruleID:      "CMD-RM-RF",
 			wantFinding: true,
+			wantEnforce: true,
+		},
+		{
+			name:        "plain twin of the static assignment",
+			command:     `X=1 rm -rf /`,
+			ruleID:      "CMD-RM-RF",
+			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			// A PATH prefix can only pick another rm: the call is also
@@ -2287,6 +2306,14 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 			command:     `PATH=/definitely/missing $'rm' -rf /`,
 			ruleID:      "CMD-RM-RF",
 			wantFinding: true,
+			wantEnforce: true,
+		},
+		{
+			name:        "plain twin of the path assignment",
+			command:     `PATH=/definitely/missing rm -rf /`,
+			ruleID:      "CMD-RM-RF",
+			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name:    "dynamic option before static suffix is not omitted",
