@@ -15,36 +15,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-// TestGAP0698SplitGapJudgesEveryPathEffect: after a call the per-command
-// split cannot flatten, every effect on a protected file (a write, an append,
-// a redirect, a truncate, a delete, a read, a rename or link from or onto it,
-// a mode or owner change) is at least the unknown tier (an alert in default,
-// a block in strict), and an effect spelled from the home is never below its
-// plain statement, in the default and strict packs (substrate-1:GAP-0698:
-// `f(){ cd /tmp; "$@"; }; f cd && rm .aws/credentials` and `... && cat
-// .aws/credentials` from the home allowed at FU11 c8090b1056 and t6/fix-0690
-// 8583fa0f61, where rel 740c0de8fd alerts in default and blocks in strict).
-// An effect is protected when the plain statement of its access of the file
-// (twin, as pathEffectTwin reads it, kept here so the test runs on rel too)
-// is a finding the pack enforces. The mover shapes are those of the FIX-0697-RV grid. The
-// same effects on project files and ordinary home files stay an allow.
-func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
-	installCorrelationHMACForTest(t)
-	home := filepath.Join(t.TempDir(), "home", "alice")
-	project := filepath.Join(home, "proj")
-	for _, name := range []string{
-		"proj/go.mod", "proj/out.txt", "proj/.env.local", "proj/build/out.o", "proj/node_modules/x", "proj/.git/HEAD",
-		".aws/credentials", ".bashrc", ".netrc", ".ssh/id_rsa", "x.txt",
-	} {
-		file := filepath.Join(home, name)
-		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("HOME", home)
+// gap0698EffectTwin is the plain statement of each access of a file, as
+// pathEffectTwin reads it, kept here so the tests run on rel too. A change of
+// mode, owner or link is judged as a change of the file.
+var gap0698EffectTwin = map[actionfacts.PathAccess]string{
+	actionfacts.PathAccessRead: "cat -- ", actionfacts.PathAccessWrite: "echo x > ", actionfacts.PathAccessAppend: "echo x >> ",
+	actionfacts.PathAccessDelete: "rm -f -- ", actionfacts.PathAccessMetadata: "echo x > ",
+}
+
+// gap0698PathEffects are the effects on the file T, each with the accesses it
+// makes of T.
+var gap0698PathEffects = func() []gap0698PathEffect {
 	const (
 		read     = actionfacts.PathAccessRead
 		write    = actionfacts.PathAccessWrite
@@ -52,15 +33,7 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 		remove   = actionfacts.PathAccessDelete
 		change   = actionfacts.PathAccessMetadata
 	)
-	// A change of mode, owner or link is judged as a change of the file.
-	twin := map[actionfacts.PathAccess]string{
-		read: "cat -- ", write: "echo x > ", appendTo: "echo x >> ", remove: "rm -f -- ", change: "echo x > ",
-	}
-	// Each effect on the file T, with the accesses it makes of T.
-	effects := []struct {
-		text   string
-		access []actionfacts.PathAccess
-	}{
+	return []gap0698PathEffect{
 		{"echo x > T", []actionfacts.PathAccess{write}},
 		{"echo x >> T", []actionfacts.PathAccess{appendTo}},
 		{"cat /tmp/x >| T", []actionfacts.PathAccess{write}},
@@ -89,6 +62,43 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 		{"cat T", []actionfacts.PathAccess{read}},
 		{"cp T /tmp/c", []actionfacts.PathAccess{read}},
 	}
+}()
+
+type gap0698PathEffect struct {
+	text   string
+	access []actionfacts.PathAccess
+}
+
+// TestGAP0698SplitGapJudgesEveryPathEffect: after a call the per-command
+// split cannot flatten, every effect on a protected file (a write, an append,
+// a redirect, a truncate, a delete, a read, a rename or link from or onto it,
+// a mode or owner change) is at least the unknown tier (an alert in default,
+// a block in strict), and an effect spelled from the home is never below its
+// plain statement, in the default and strict packs (substrate-1:GAP-0698:
+// `f(){ cd /tmp; "$@"; }; f cd && rm .aws/credentials` and `... && cat
+// .aws/credentials` from the home allowed at FU11 c8090b1056 and t6/fix-0690
+// 8583fa0f61, where rel 740c0de8fd alerts in default and blocks in strict).
+// An effect is protected when the plain statement of its access of the file
+// (gap0698EffectTwin) is a finding the pack enforces. The mover shapes are
+// those of the FIX-0697-RV grid. The same effects on project files and
+// ordinary home files stay an allow.
+func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
+	installCorrelationHMACForTest(t)
+	home := filepath.Join(t.TempDir(), "home", "alice")
+	project := filepath.Join(home, "proj")
+	for _, name := range []string{
+		"proj/go.mod", "proj/out.txt", "proj/.env.local", "proj/build/out.o", "proj/node_modules/x", "proj/.git/HEAD",
+		".aws/credentials", ".bashrc", ".netrc", ".ssh/id_rsa", "x.txt",
+	} {
+		file := filepath.Join(home, name)
+		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
 	// Calls the split cannot flatten, one per kind of gap (FIX-0697-RV S05,
 	// S07, S39: "$@"; S04, S08, FIX-0690-RV M2: $r ~; C01: $y; A11: $(...);
 	// B05: eval [ ... ]). The scratch grid of FIX-0698 ran 15 shapes.
@@ -117,12 +127,12 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 		for _, target := range []string{".aws/credentials", ".bashrc", "~/.aws/credentials"} {
 			resolved := filepath.Join(home, strings.TrimPrefix(target, "~/"))
 			spelled := strings.HasPrefix(target, "~/")
-			for _, effect := range effects {
+			for _, effect := range gap0698PathEffects {
 				statement := strings.ReplaceAll(effect.text, "T", target)
 				plain := decide(home, statement)
 				protected := false
 				for _, access := range effect.access {
-					protected = protected || decide(home, twin[access]+resolved) != "allow"
+					protected = protected || decide(home, gap0698EffectTwin[access]+resolved) != "allow"
 				}
 				want := "allow"
 				if protected {
@@ -141,7 +151,7 @@ func TestGAP0698SplitGapJudgesEveryPathEffect(t *testing.T) {
 		for _, control := range []struct{ cwd, target string }{
 			{project, "out.txt"}, {home, "x.txt"},
 		} {
-			for _, effect := range effects {
+			for _, effect := range gap0698PathEffects {
 				if strings.HasPrefix(effect.text, "ln ") || strings.HasPrefix(effect.text, "chmod 777") {
 					// A link and a world-writable mode are findings of their
 					// own on any file.

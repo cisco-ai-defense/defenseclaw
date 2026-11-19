@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -30,12 +31,16 @@ import (
 //     whatever folder the call is in, so an exact twin's findings are the
 //     call's as well, as they are for the same statement in a call the split
 //     reads;
-//   - a relative operand is read in every folder the walk says the call may
-//     be in, which over-approximates the folders a dynamic command may move
-//     to, so its file is a candidate, not a proof, and a change of a file's
-//     mode or owner is judged by the twin that changes the file, which says
-//     only that the file is protected: neither adds the finding of the file
-//     itself (rel-1-0-10:GAP-0871).
+//   - a relative operand is read in every folder it may land in
+//     (splitGapFolders): the folder the call starts in, the home and every
+//     folder the walk reads one of the call's relative operands in. The
+//     walk's own folder is no proof after a part it did not read: that part
+//     may undo or redo any cd, so `f(){ cd /tmp && "$@"; }; f cd && rm
+//     .aws/credentials`, whose facts place the operand only in /tmp, removes
+//     the home's file (substrate-1:GAP-0702). So its file is a candidate, not
+//     a proof, and a change of a file's mode or owner is judged by the twin
+//     that changes the file, which says only that the file is protected:
+//     neither adds the finding of the file itself (rel-1-0-10:GAP-0871).
 // A call whose effects touch only ordinary files stays as the whole-action
 // reading judged it.
 
@@ -102,50 +107,60 @@ type splitGapEffectTwin struct {
 }
 
 // splitGapEffectTwins adds to twins the effect twin of each file the facts of
-// a POSIX call touch, in its resolved absolute spelling, and reports whether
-// there were more than splitGapEffectProbeCap of them. The files of an
-// operand twin that only decides the unknown tier share one statement
-// (`cat -- A B`), of at most splitGapEffectProbeCap files as well, so a call
-// that reads many files costs one bounded twin per kind.
+// a POSIX call touch, in its resolved absolute spelling and, for a relative
+// operand, in every folder of splitGapFolders, and reports whether there
+// were more than splitGapEffectProbeCap of them. The files of an operand twin
+// that only decides the unknown tier share one statement (`cat -- A B`), of
+// at most splitGapEffectProbeCap files as well, so a call that reads many
+// files costs one bounded twin per kind.
 func splitGapEffectTwins(facts actionfacts.Facts, twins []splitGapEffectTwin) (_ []splitGapEffectTwin, over bool) {
 	var shared []string
 	words := map[string][]string{}
+	folders := splitGapFolders(facts)
+paths:
 	for _, candidate := range facts.Paths {
 		effect, ok := pathEffectTwin(candidate.Access)
 		if !ok {
 			continue
 		}
-		resolved := filepath.ToSlash(candidate.Resolved)
-		if !strings.HasPrefix(resolved, "/") || strings.HasPrefix(resolved, "/dev/") || strings.ContainsAny(resolved, "$`\n") {
-			continue
+		spellings := []string{filepath.ToSlash(candidate.Resolved)}
+		if unresolvedFolderOperand(candidate) {
+			for _, folder := range folders {
+				spellings = append(spellings, path.Join(folder, filepath.ToSlash(candidate.Value)))
+			}
 		}
-		word := splitGapShellWord(resolved)
 		proof := effect.exact && !candidate.OtherFolderReading() && !candidate.UnresolvedFolder() &&
 			(strings.HasPrefix(candidate.Value, "/") || strings.HasPrefix(candidate.Value, "~"))
-		if !proof && effect.operands {
-			if !slices.Contains(shared, effect.prefix) {
-				shared = append(shared, effect.prefix)
-			}
-			if slices.Contains(words[effect.prefix], word) {
+		for _, resolved := range spellings {
+			if !strings.HasPrefix(resolved, "/") || strings.HasPrefix(resolved, "/dev/") || strings.ContainsAny(resolved, "$`\n") {
 				continue
 			}
-			if len(words[effect.prefix]) == splitGapEffectProbeCap {
-				over = true
-				break
+			word := splitGapShellWord(resolved)
+			if !proof && effect.operands {
+				if !slices.Contains(shared, effect.prefix) {
+					shared = append(shared, effect.prefix)
+				}
+				if slices.Contains(words[effect.prefix], word) {
+					continue
+				}
+				if len(words[effect.prefix]) == splitGapEffectProbeCap {
+					over = true
+					break paths
+				}
+				words[effect.prefix] = append(words[effect.prefix], word)
+				continue
 			}
-			words[effect.prefix] = append(words[effect.prefix], word)
-			continue
+			twin := splitGapEffectTwin{text: effect.prefix + word, proof: proof}
+			if at := slices.IndexFunc(twins, func(seen splitGapEffectTwin) bool { return seen.text == twin.text }); at >= 0 {
+				twins[at].proof = twins[at].proof || twin.proof
+				continue
+			}
+			if len(twins) == splitGapEffectProbeCap {
+				over = true
+				break paths
+			}
+			twins = append(twins, twin)
 		}
-		twin := splitGapEffectTwin{text: effect.prefix + word, proof: proof}
-		if at := slices.IndexFunc(twins, func(seen splitGapEffectTwin) bool { return seen.text == twin.text }); at >= 0 {
-			twins[at].proof = twins[at].proof || twin.proof
-			continue
-		}
-		if len(twins) == splitGapEffectProbeCap {
-			over = true
-			break
-		}
-		twins = append(twins, twin)
 	}
 	for _, prefix := range shared {
 		if len(twins) == splitGapEffectProbeCap {
@@ -154,6 +169,32 @@ func splitGapEffectTwins(facts actionfacts.Facts, twins []splitGapEffectTwin) (_
 		twins = append(twins, splitGapEffectTwin{text: prefix + strings.Join(words[prefix], " ")})
 	}
 	return twins, over
+}
+
+// splitGapFolders are the folders a relative operand of a call with a parse
+// gap may land in: the folder the call starts in, the active home, and each
+// folder the walk reads one of the call's relative operands in (a mover's
+// target, the folder after a cd). The part the split did not read may move
+// the shell to any of them before any operand.
+func splitGapFolders(facts actionfacts.Facts) []string {
+	var folders []string
+	add := func(folder string) {
+		if folder = path.Clean(filepath.ToSlash(folder)); path.IsAbs(folder) && !slices.Contains(folders, folder) {
+			folders = append(folders, folder)
+		}
+	}
+	add(facts.CWD)
+	add(facts.ActiveHome)
+	for _, candidate := range facts.Paths {
+		value := path.Clean(filepath.ToSlash(candidate.Value))
+		if !unresolvedFolderOperand(candidate) || value == "." || value == ".." || strings.HasPrefix(value, "../") {
+			continue
+		}
+		if folder, ok := strings.CutSuffix(filepath.ToSlash(candidate.Resolved), "/"+value); ok {
+			add(folder + "/")
+		}
+	}
+	return folders
 }
 
 // splitGapShellWord is path as one shell word: as it is when it holds only
