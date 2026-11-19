@@ -17,35 +17,39 @@ import (
 // gives a "parse" gap: in an action that defines a function, a command whose
 // name is not static, `f(){ $y; }`, `"$@"`, `$r ~`, `$(echo return)`,
 // `eval "$c"`, `eval [ ... ]`) has none of its statements judged alone. The
-// whole-action reading of such a partial call does not judge its writes, so
-// `f(){ cd /tmp; "$@"; }; f cd && echo x >> .bashrc` from the home was a
-// clean allow (substrate-1:GAP-0693, GAP-0694, GAP-0695), though the
-// whole-action facts hold the file it writes. Each file those facts write or
-// append to is judged as its plain write alone (`echo x > FILE`), in the
-// call's folder:
+// whole-action reading of such a partial call does not judge its writes or
+// deletes, so `f(){ cd /tmp; "$@"; }; f cd && echo x >> .bashrc` and
+// `f(){ cd /tmp; "$@"; }; f cd && rm .aws/credentials` from the home were a
+// clean allow (substrate-1:GAP-0693, GAP-0694, GAP-0695, GAP-0698), though the
+// whole-action facts hold the file they change. Each file those facts write
+// or append to is judged as its plain write alone (`echo x > FILE`), and each
+// file they delete (rm, unlink, shred -u, the source of mv) as its plain
+// delete alone (`rm -f -- FILE`), in the call's folder:
 //   - an operand spelled from the root or the home (/x, ~/x) names that file
-//     whatever folder the call is in, so the findings of its plain write are
-//     the call's, as they are for the same statement in a call the split reads;
+//     whatever folder the call is in, so the findings of its plain write or
+//     delete are the call's, as they are for the same statement in a call the
+//     split reads;
 //   - a relative operand is read in every folder the walk says the call may
 //     be in, which over-approximates the folders a dynamic command may move
-//     to, so its file is a candidate, not a proof: a plain write the pack
-//     alerts on or blocks gives the unknown tier (an alert in default, a
+//     to, so its file is a candidate, not a proof: a plain write or delete the
+//     pack alerts on or blocks gives the unknown tier (an alert in default, a
 //     block in strict), never the finding of the file itself.
-// A call that writes only ordinary files stays as the whole-action reading
-// judged it.
+// A call that writes and deletes only ordinary files stays as the
+// whole-action reading judged it.
 
 // splitGapWriteTitle and splitGapWriteReason are that unknown-tier finding.
 const (
-	splitGapWriteTitle  = "Part of this command could not be read on its own, and the command writes a file that may be protected"
+	splitGapWriteTitle  = "Part of this command could not be read on its own, and the command writes or deletes a file that may be protected"
 	splitGapWriteReason = "split_gap_protected_write"
 )
 
-// splitGapWriteProbeCap bounds the plain writes judged for one call. A call
-// with more distinct write targets is read by its text as well
+// splitGapWriteProbeCap bounds the plain writes and deletes judged for one
+// call. A call with more distinct targets is read by its text as well
 // (hookpaths.BoundCallMayNameProtected).
 const splitGapWriteProbeCap = 32
 
-// splitGapWriteTwin is the plain write of one file a call writes.
+// splitGapWriteTwin is the plain write or delete of one file a call writes,
+// appends to or deletes.
 type splitGapWriteTwin struct {
 	text string
 	// spelled: the operand names the file from the root or the home.
@@ -53,16 +57,19 @@ type splitGapWriteTwin struct {
 }
 
 // splitGapWriteTwins adds to twins the plain write of each file the facts
-// of a POSIX call write or append to, in its resolved absolute spelling, and
-// reports whether there were more than splitGapWriteProbeCap of them.
+// of a POSIX call write or append to, and the plain delete of each file they
+// delete, in its resolved absolute spelling, and reports whether there were
+// more than splitGapWriteProbeCap of them.
 func splitGapWriteTwins(facts actionfacts.Facts, twins []splitGapWriteTwin) (_ []splitGapWriteTwin, over bool) {
 	for _, candidate := range facts.Paths {
-		operator := ""
+		plain := ""
 		switch candidate.Access {
 		case actionfacts.PathAccessWrite:
-			operator = " > "
+			plain = "echo x > "
 		case actionfacts.PathAccessAppend:
-			operator = " >> "
+			plain = "echo x >> "
+		case actionfacts.PathAccessDelete:
+			plain = "rm -f -- "
 		default:
 			continue
 		}
@@ -71,7 +78,7 @@ func splitGapWriteTwins(facts actionfacts.Facts, twins []splitGapWriteTwin) (_ [
 			continue
 		}
 		twin := splitGapWriteTwin{
-			text: "echo x" + operator + splitGapShellWord(resolved),
+			text: plain + splitGapShellWord(resolved),
 			spelled: !candidate.OtherFolderReading() && !candidate.UnresolvedFolder() &&
 				(strings.HasPrefix(candidate.Value, "/") || strings.HasPrefix(candidate.Value, "~")),
 		}
@@ -99,9 +106,10 @@ func splitGapShellWord(path string) string {
 }
 
 // withSplitGapWrites adds to findings the judgment of the files a call with a
-// parse gap in its split writes: the findings of the plain write of a file
-// its operand spells, and the unknown tier when the plain write of a file a
-// relative operand may be is a finding the pack enforces.
+// parse gap in its split writes or deletes: the findings of the plain write
+// or delete of a file its operand spells, and the unknown tier when the plain
+// write or delete of a file a relative operand may be is a finding the pack
+// enforces.
 func withSplitGapWrites(ctx context.Context, request trustedActionRequest, generation *compiledRulePackCategories,
 	budget *trustedActionBudget, facts actionfacts.Facts, wholeCommand string, findings []RuleFinding) []RuleFinding {
 	if facts.Parse.Dialect != actionfacts.DialectPOSIX {
@@ -142,8 +150,8 @@ func withSplitGapWrites(ctx context.Context, request trustedActionRequest, gener
 	return findings
 }
 
-// splitGapEnforcedWriteFinding is a finding of a plain write that the pack
-// enforces, other than the evaluation limit, at MEDIUM or above
+// splitGapEnforcedWriteFinding is a finding of a plain write or delete that
+// the pack enforces, other than the evaluation limit, at MEDIUM or above
 // (persistence.shell_profile_write is MEDIUM: an alert in default, a block
 // in strict).
 func splitGapEnforcedWriteFinding(finding RuleFinding) bool {
