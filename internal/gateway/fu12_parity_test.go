@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -221,6 +222,9 @@ func TestFU12GAP0776CodeGuardReadsEveryNativeWriteTool(t *testing.T) {
 // GAP-0780: a system schedule written through a native write tool is read by
 // the path rule, whatever the tool's content key.
 func TestFU12GAP0780SystemScheduleWriteIsReadThroughNativeWriteTools(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("/etc/cron.d is a POSIX path: no system schedule on Windows")
+	}
 	const content = "* * * * * root /tmp/fu12-job.sh\n"
 	shapeParityTiers(t, func(t *testing.T, p gap0437Pack) {
 		h := fu12ParityHandlers(t, p)
