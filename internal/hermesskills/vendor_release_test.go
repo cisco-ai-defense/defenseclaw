@@ -147,7 +147,10 @@ func TestVendorDigestTableMatchesPythonTwin(t *testing.T) {
 	entry := regexp.MustCompile(`(?m)^    "([^"]+)": \(\n((?:        "[0-9a-f]{64}",\n)+)    \),\n`)
 	digest := regexp.MustCompile(`[0-9a-f]{64}`)
 	python := map[string][]string{}
-	for _, match := range entry.FindAllStringSubmatch(string(source), -1) {
+	// A Windows checkout (core.autocrlf, as on the GitHub runners) ends the
+	// twin's lines with CRLF; the table is read line by line
+	// (rel-1-0-10:GAP-1543).
+	for _, match := range entry.FindAllStringSubmatch(strings.ReplaceAll(string(source), "\r\n", "\n"), -1) {
 		python[match[1]] = digest.FindAllString(match[2], -1)
 	}
 	if len(python) != len(vendorDigests) {
