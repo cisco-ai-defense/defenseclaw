@@ -74,7 +74,7 @@ func TestG622bEveryActiveStateFileIsProtectedUnderAnyNameForNativePatches(t *tes
 				t.Errorf("pack %q %s: hard link between two project files = %s, want allow", pack, c.name, got)
 			}
 			for _, s := range states {
-				if got := c.judge(t, home, pack, c.body(s.state)); got.action != "block" {
+				if got := c.judge(t, home, pack, c.body(s.state)); got.action != gap0747WantAction(pack == "strict") {
 					t.Errorf("pack %q %s: state path %s = %s, want block", pack, c.name, s.name, got)
 				}
 			}

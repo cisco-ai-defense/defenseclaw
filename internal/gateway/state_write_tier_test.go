@@ -114,3 +114,53 @@ func gap0747Blocked(findings []RuleFinding, want bool) bool {
 	}
 	return !want
 }
+
+// gap0747OtherTamperFinding reports whether findings (rule id, colon, text)
+// name a tamper rule other than the state write, which still blocks the call
+// for its own rule in every tier.
+func gap0747OtherTamperFinding(findings []string) bool {
+	for _, f := range findings {
+		id := f
+		if i := strings.IndexByte(f, ':'); i >= 0 {
+			id = f[:i]
+		}
+		if strings.HasPrefix(id, "tamper.") && id != gap0747StateRule {
+			return true
+		}
+	}
+	return false
+}
+
+// gap0747StateVerdict maps the action of a hook response body to the old
+// every-tier vocabulary of a test that rotates file-tool shapes: a proven
+// DefenseClaw state write is a HIGH alert outside strict (GAP-0747 owner
+// tiering 2026-11-15T15:20Z) and counts as "block" there when the body names
+// the state rule; in strict the action must itself be a block. Any other
+// action is returned unchanged.
+func gap0747StateVerdict(action, body string, strict bool) string {
+	if !strict && action == "alert" && strings.Contains(body, gap0747StateRule) {
+		return "block"
+	}
+	return action
+}
+
+// gap0747WantAction is the action of a proven DefenseClaw state write in a
+// file-tool or hook cell: a block in strict, a HIGH alert elsewhere.
+func gap0747WantAction(strict bool) string {
+	if strict {
+		return "block"
+	}
+	return "alert"
+}
+
+// gap0747FileToolBlocked is the blocked verdict of a file-tool response body
+// for a write of a protected settings file in the pack (empty is the
+// default). Outside strict such a proven state write is a HIGH alert that
+// names the state rule (GAP-0747 owner tiering 2026-11-15T15:20Z); in strict
+// the body must carry the block prefix.
+func gap0747FileToolBlocked(body, pack string) bool {
+	if strings.HasPrefix(body, fileToolBlockPrefix) {
+		return true
+	}
+	return pack != "strict" && gap0747BodyAction(body) == "alert" && strings.Contains(body, gap0747StateRule)
+}

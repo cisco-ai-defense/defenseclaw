@@ -205,8 +205,8 @@ func TestGAP0376HereStringReadNamesNoStateRule(t *testing.T) {
 					return
 				}
 				for _, row := range writes {
-					if action, findings := judge(cwd, row); action != "block" || !findingStringHasRuleID(findings, "tamper.detector_state_write") {
-						t.Errorf("%q: action %q findings %v, want a state-write block", row, action, findings)
+					if action, findings := judge(cwd, row); action != gap0747WantAction(tier.posture == "strict") || !findingStringHasRuleID(findings, "tamper.detector_state_write") {
+						t.Errorf("%q: action %q findings %v, want a state-write block in strict and a state-write alert elsewhere", row, action, findings)
 					}
 				}
 			})

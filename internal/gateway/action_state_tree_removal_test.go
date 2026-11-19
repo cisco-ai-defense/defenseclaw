@@ -83,7 +83,9 @@ func r105RunStateRowsChecked(t *testing.T, mode, cwd string, rows []r105StateRow
 						action, reason, findings = resp.Action, resp.Reason, resp.Findings
 					}
 					// The default pack alerts a proven state write (HIGH).
-					if action == guardrailActionBlock {
+					// A row that also names another tamper rule (the hook folder
+					// disable rule) still blocks for that rule.
+					if action == guardrailActionBlock && !gap0747OtherTamperFinding(findings) {
 						t.Fatalf("%s: action=%q want no block in the default pack reason=%q findings=%v", r.command, action, reason, findings)
 					}
 					if r.block && !findingStringHasRuleID(findings, "tamper.detector_state_write") {

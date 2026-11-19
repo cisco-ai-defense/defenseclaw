@@ -189,7 +189,7 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 		// (documented limit); strict blocks it.
 		{"state folder removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/.defenseclaw", alertOutsideStrict, true},
 		{"ordinary command over the statement budget", "Bash", over, alertOutsideStrict, true},
-		{"DefenseClaw state write over the statement budget", "Bash", over + "; printf changed >> ~/.defenseclaw/config.yaml", everywhere, false},
+		{"DefenseClaw state write over the statement budget", "Bash", over + "; printf changed >> ~/.defenseclaw/config.yaml", alertOutsideStrict, false},
 		// The documented limit: no target is proven in the call as a whole,
 		// so it is at least an alert outside strict; the cap floor proves the
 		// write on its own statement on a shell route. Strict blocks it and
