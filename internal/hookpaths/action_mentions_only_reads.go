@@ -25,3 +25,22 @@ func ActionMentionsNoWriteRole(command, cwd, home string, dialect actionfacts.Di
 	memo.excuseNonWrites = true
 	return memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) == ""
 }
+
+// ActionMentionsNoKnownWrite is ActionMentionsNoWriteRole for the unknown
+// tier (S7 lead ruling 2026-11-15, rel-1-0-10:GAP-0843): a command that names
+// a protected file only in statements that read it, where another statement
+// runs a program the scan has no model of (wc -l KEYS && $TOOL > /tmp/r), a
+// reader stage hands its output on (cat KEYS | python3 -c "$CODE"), or a
+// reader writes its output to a file the call names (cat KEYS > /tmp/k.bak).
+// No word of it is a write target that reaches the file; a program the scan
+// cannot read could write it as well without the mention, so the mention is
+// no proof. $_ and a rebound reader name still hand the name on and keep the
+// block (actionCallKeepsMentions).
+func ActionMentionsNoKnownWrite(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) bool {
+	if ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) != "protected-target" {
+		return false
+	}
+	memo := NewTargetMemo()
+	memo.excuseNonWrites, memo.excuseUnknownRoles = true, true
+	return memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts) == ""
+}

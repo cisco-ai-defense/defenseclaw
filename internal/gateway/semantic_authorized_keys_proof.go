@@ -1518,7 +1518,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if decision != "" {
 		if request.nonWriteMention != nil && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook &&
 			trustedShellCommandInput(request.Input) &&
-			hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) {
+			(hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) ||
+				hookpaths.ActionMentionsNoKnownWrite(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)) {
 			*request.nonWriteMention = true
 		}
 		return confirmed()
