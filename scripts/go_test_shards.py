@@ -22,7 +22,10 @@ several lines of the same shard, one go test run each.
 refreshed by scripts/update_test_timings.py). Test mode takes it more than
 once: the package's tests weigh the times of the first file that records
 that package, so the macOS gateway parts use go-darwin.json once a refresh
-has recorded them there and the Linux times until then. Tests stay together by file
+has recorded them there and the Linux times until then. A slow test that
+file does not name yet weighs its time in a later file, scaled to the first
+file (package_test_seconds), so a new slow test does not weigh the small
+"*" until the next refresh. Tests stay together by file
 unless a file alone weighs more than half a shard or --split-tests is set.
 A test or package with no recorded time still runs and weighs the mean of the package's
 tests under two seconds ("*"), or the median recorded time. Without
@@ -72,6 +75,17 @@ TIMEOUT_HEADROOM = 1.5
 TIMEOUT_PAD_SECONDS = 60
 TIMEOUT_FLOOR_SECONDS = 240
 TIMEOUT_CAP_SECONDS = 720
+# Test mode with several --timings: a test the first file that records the
+# package does not name weighs a later file's time for it when that time is
+# at least this (a test under it weighs the first file's "*" as before),
+# scaled by the median ratio of the two files over the tests both time at
+# least this, when they share at least FALLBACK_MIN_PAIRS such tests. The
+# macOS gateway parts pass go-darwin.json, then go-linux.json (about 0.22
+# times the Linux race time). Windows Native CI passes go-windows.json alone:
+# its connector tests take about 20 times their Linux time, and many
+# gateway tests that Linux times are not built or are skipped on Windows.
+FALLBACK_MIN_SECONDS = 2.0
+FALLBACK_MIN_PAIRS = 10
 
 
 def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
@@ -116,13 +130,36 @@ def load_timings(path: Path) -> dict:
     return data
 
 
+def _scale(first: dict[str, float], other: dict[str, float]) -> float:
+    """How much faster or slower the first timings run the tests both name
+    at FALLBACK_MIN_SECONDS or more: the median of their ratios, or 1."""
+    ratios = [
+        float(first[name]) / float(seconds)
+        for name, seconds in other.items()
+        if name != "*" and name in first and min(float(first[name]), float(seconds)) >= FALLBACK_MIN_SECONDS
+    ]
+    return statistics.median(ratios) if len(ratios) >= FALLBACK_MIN_PAIRS else 1.0
+
+
 def package_test_seconds(timings: list[dict], key: str) -> dict[str, float] | None:
-    """The per-test times of package key from the first timings that record it."""
-    for data in timings:
-        recorded = data.get("tests", {}).get(key)
-        if recorded:
-            return recorded
-    return None
+    """The per-test times of package key from the first timings that record
+    it. A slow test (FALLBACK_MIN_SECONDS or more) that file does not name
+    weighs its time in a later file that does, scaled by how the two files
+    time the tests both name: a new slow test then weighs about its time
+    instead of the package's "*" (GAP-1547)."""
+    recorded_by = [data.get("tests", {}).get(key) for data in timings]
+    recorded_by = [recorded for recorded in recorded_by if recorded]
+    if not recorded_by:
+        return None
+    first, merged = recorded_by[0], None
+    for other in recorded_by[1:]:
+        scale = _scale(first, other)
+        for name, seconds in other.items():
+            if name == "*" or float(seconds) < FALLBACK_MIN_SECONDS or name in first or (merged and name in merged):
+                continue
+            merged = merged if merged is not None else dict(first)
+            merged[name] = round(float(seconds) * scale, 1)
+    return merged if merged is not None else first
 
 
 def _median(values) -> float:

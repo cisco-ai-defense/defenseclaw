@@ -742,6 +742,34 @@ def test_built_files_keeps_the_test_files_go_list_builds(goos: str, monkeypatch:
     assert len(discovered) > len(built)
 
 
+def test_a_slow_test_the_first_timings_do_not_name_weighs_a_later_file_scaled(tmp_path: Path) -> None:
+    # GAP-1547: darwin gateway part 5 of CI 44412520162 ran 15 new
+    # TestCDFolderJudgesTheStatementsAfterADynamicStep* tests (about 20 s each
+    # on macOS, 0.2 s "*" in go-darwin.json) and hit its 10m timeout. A slow
+    # test go-darwin.json does not name yet weighs its Linux time scaled by
+    # how the two files time the tests both name.
+    shared = {f"TestShared{index}": 10.0 + index for index in range(10)}
+    darwin = {"tests": {"pkg/a": {**shared, "*": 0.2}}}
+    linux = {
+        "tests": {
+            "pkg/a": {
+                **{name: 4 * seconds for name, seconds in shared.items()},
+                "TestNew": 100.0,
+                "TestQuick": 1.0,
+                "*": 0.3,
+            }
+        }
+    }
+    merged = package_test_seconds([darwin, linux], "pkg/a")
+    assert merged["TestNew"] == 25.0
+    assert "TestQuick" not in merged and merged["*"] == 0.2
+    assert {name: merged[name] for name in shared} == shared
+    # Under FALLBACK_MIN_PAIRS shared tests the later time counts as it is.
+    few = {"tests": {"pkg/a": {"TestShared0": 10.0, "*": 0.2}}}
+    assert package_test_seconds([few, linux], "pkg/a")["TestNew"] == 100.0
+    assert package_test_seconds([darwin], "pkg/a") is darwin["tests"]["pkg/a"]
+
+
 def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
     # GAP-1546: gwN runs shard N of the gateway package, then shard N of the
     # connector package, inside its 20-minute job; job set-up and the two go
