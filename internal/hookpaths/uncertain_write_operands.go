@@ -538,7 +538,7 @@ func capChildCalls(command string, call *syntax.CallExpr, home string) ([]string
 				continue
 			}
 			end := i + 1
-			for end < len(args) && !(static[end] && (values[end] == ";" || values[end] == "+")) {
+			for end < len(args) && (!static[end] || (values[end] != ";" && values[end] != "+")) {
 				end++
 			}
 			if child, ok := span(i+1, end); ok {
