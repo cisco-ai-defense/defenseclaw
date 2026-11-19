@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	SkillManifestReceiptPath   = "/api/v1/defenseclaw/skill-manifest-receipts"
+	SkillManifestReceiptPath   = "/api/v1/inspect/defense_claw/skill-manifest-receipts"
 	MaxSkillManifestParts      = 128
 	maxManifestReceiptResponse = 32 << 10
 )
