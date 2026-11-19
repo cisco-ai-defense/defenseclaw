@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 
@@ -22,10 +21,9 @@ import (
 // allowed where cat of the key blocks (PATH-SSH-KEY). Each shape is judged as
 // cat of the full path is, in every pack, through the real Claude Code hook
 // handler. The files exist in a scratch home; a plain file is the control.
+// The hook cwd is the native folder; a folder written into a bash word is
+// spelled with forward slashes, as Git Bash reads it (rel-1-0-10:GAP-1249).
 func TestCurrentFolderTildeReadsGetTheVerdictOfCat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell rows: the fixture folder is a C:\\ path, which bash reads with its backslashes removed, so the cat oracle names another file than $PWD or ~+ (rel-1-0-10:GAP-1249); the Windows working folder is GAP-1535")
-	}
 	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	home := t.TempDir()
@@ -44,9 +42,9 @@ func TestCurrentFolderTildeReadsGetTheVerdictOfCat(t *testing.T) {
 		{home, ".aws/credentials"},
 		{home, ".ssh/id_rsa"},
 		{home, ".kube/config"},
-		{home + "/.ssh", "id_rsa"},
-		{home + "/proj", ".env"},
-		{home + "/proj", "notes.txt"},
+		{filepath.Join(home, ".ssh"), "id_rsa"},
+		{filepath.Join(home, "proj"), ".env"},
+		{filepath.Join(home, "proj"), "notes.txt"},
 	}
 	for _, pack := range []string{"default", "permissive", "strict"} {
 		installDefaultProfileConnector(t, "claudecode")
@@ -68,13 +66,14 @@ func TestCurrentFolderTildeReadsGetTheVerdictOfCat(t *testing.T) {
 			return got.Action, rules
 		}
 		for _, f := range files {
-			full := f.dir + "/" + f.name
+			word := filepath.ToSlash(f.dir)
+			full := word + "/" + f.name
 			oracleAction, oracleRules := verdict(f.dir, "cat "+full)
 			for _, shape := range []string{
 				`cat ~+/` + f.name,
 				`cat ~+/"` + f.name + `"`,
 				`cat ~+/./` + f.name,
-				`cd ` + f.dir + ` && cat ~+/` + f.name,
+				`cd ` + word + ` && cat ~+/` + f.name,
 			} {
 				action, rules := verdict(f.dir, shape)
 				if action != oracleAction || !slices.Equal(rules, oracleRules) {

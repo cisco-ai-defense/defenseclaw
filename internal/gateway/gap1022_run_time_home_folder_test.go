@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -23,11 +22,11 @@ import (
 // only when it climbed out of the home or named a credentials-file path
 // relative to the previous home. It is now judged, not allowed. A scratch
 // home and a project home that read no account file stay allowed, through
-// the real Claude Code hook handler.
+// the real Claude Code hook handler. The hook cwd is the native folder. On
+// native Windows the run-time home guess reads a POSIX working folder only,
+// so a judged row keeps the rel reading there (rel-1-0-10:GAP-1535,
+// hardening 1.0.11); the row runs and is logged, the benign rows still allow.
 func TestRunTimeHomeInAFolderOfTheHomeReadsItsAccountFiles(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell rows: the run-time home guess reads a POSIX working folder; a C:\\ folder keeps the rel reading (rel-1-0-10:GAP-1249, Windows is GAP-1535)")
-	}
 	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	home := t.TempDir()
@@ -46,22 +45,23 @@ func TestRunTimeHomeInAFolderOfTheHomeReadsItsAccountFiles(t *testing.T) {
 		cwd, command string
 		judged       bool
 	}
+	proj := filepath.Join(home, "proj")
 	var rows []row
 	for _, f := range []struct{ dir, base string }{{".aws", "credentials"}, {".kube", "config"}} {
 		rows = append(rows,
-			row{home + "/proj", "cd ~/" + f.dir + " && HOME=$(pwd) && cp ~/" + f.base + " /tmp/n", true},
-			row{home + "/proj", "HOME=$(cd ~/" + f.dir + "; pwd); cp ~/" + f.base + " /tmp/n", true},
-			row{home + "/proj", "HOME=$(cd ~/" + f.dir + " && pwd); cat ~/" + f.base, true},
-			row{home + "/proj", "HOME=$(echo ~/" + f.dir + "); cp ~/" + f.base + " /tmp/n", true},
-			row{home + "/proj", "HOME=$(echo $HOME/" + f.dir + "); cat $HOME/" + f.base, true},
-			row{home + "/proj", "export HOME=$(pwd)/../" + f.dir + "; cp ~/" + f.base + " /tmp/n", true},
-			row{home + "/" + f.dir, `HOME="$(pwd)"; cat ~/` + f.base, true},
+			row{proj, "cd ~/" + f.dir + " && HOME=$(pwd) && cp ~/" + f.base + " /tmp/n", true},
+			row{proj, "HOME=$(cd ~/" + f.dir + "; pwd); cp ~/" + f.base + " /tmp/n", true},
+			row{proj, "HOME=$(cd ~/" + f.dir + " && pwd); cat ~/" + f.base, true},
+			row{proj, "HOME=$(echo ~/" + f.dir + "); cp ~/" + f.base + " /tmp/n", true},
+			row{proj, "HOME=$(echo $HOME/" + f.dir + "); cat $HOME/" + f.base, true},
+			row{proj, "export HOME=$(pwd)/../" + f.dir + "; cp ~/" + f.base + " /tmp/n", true},
+			row{filepath.Join(home, f.dir), `HOME="$(pwd)"; cat ~/` + f.base, true},
 		)
 	}
 	rows = append(rows,
-		row{home + "/proj", "HOME=$(mktemp -d); cat ~/README.md", false},
-		row{home + "/proj", "HOME=$(pwd); cat ~/README.md", false},
-		row{home + "/proj", "HOME=$(cd ~/.aws; pwd); cat ~/notes.txt", false},
+		row{proj, "HOME=$(mktemp -d); cat ~/README.md", false},
+		row{proj, "HOME=$(pwd); cat ~/README.md", false},
+		row{proj, "HOME=$(cd ~/.aws; pwd); cat ~/notes.txt", false},
 	)
 	for _, pack := range []string{"default", "permissive", "strict"} {
 		installDefaultProfileConnector(t, "claudecode")
@@ -78,7 +78,10 @@ func TestRunTimeHomeInAFolderOfTheHomeReadsItsAccountFiles(t *testing.T) {
 			got := callAgentHookForTest(t, handler, ev)
 			judged := got.Action != "allow" || len(got.RuleIDs) != 0
 			if judged != r.judged {
-				t.Errorf("%s: %q (cwd %s) is %s %v, want judged=%v", pack, r.command, r.cwd, got.Action, got.RuleIDs, r.judged)
+				line := fmt.Sprintf("%s: %q (cwd %s) is %s %v, want judged=%v", pack, r.command, r.cwd, got.Action, got.RuleIDs, r.judged)
+				if !gap1535WindowsReading(t, r.judged, got.Action, line) {
+					t.Error(line)
+				}
 			}
 		}
 	}

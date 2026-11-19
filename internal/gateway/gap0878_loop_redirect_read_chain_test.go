@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -83,11 +84,13 @@ func TestLoopRedirectAndWorkingFolderReadsStartTheSecretReadChain(t *testing.T) 
 // is the stdin of a loop or a group (`while read ...; done < FILE`) or is
 // named through the working folder ($(pwd)/NAME, $PWD/NAME, "$PWD"/NAME,
 // ${PWD}/NAME with the cwd known), in every pack, through the real
-// Claude Code hook handler. The files exist in a scratch home.
+// Claude Code hook handler. The files exist in a scratch home. The hook cwd
+// is the native folder; a folder written into a bash word is spelled with
+// forward slashes, as Git Bash (the Bash tool on Windows) reads it: a C:\x
+// word loses its backslashes in bash and names another file
+// (rel-1-0-10:GAP-1249). On native Windows a $(pwd)/ read keeps the rel
+// reading (GAP-1535, hardening 1.0.11); the row runs and is logged.
 func TestLoopRedirectAndWorkingFolderReadsGetTheVerdictOfCat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell rows: the fixture folder is a C:\\ path, which bash reads with its backslashes removed, so the cat oracle names another file than $PWD or ~+ (rel-1-0-10:GAP-1249); the Windows working folder is GAP-1535")
-	}
 	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	home := t.TempDir()
@@ -106,8 +109,8 @@ func TestLoopRedirectAndWorkingFolderReadsGetTheVerdictOfCat(t *testing.T) {
 		{home, ".aws/credentials"},
 		{home, ".ssh/id_rsa"},
 		{home, ".kube/config"},
-		{home + "/.aws", "credentials"},
-		{home + "/proj", ".env"},
+		{filepath.Join(home, ".aws"), "credentials"},
+		{filepath.Join(home, "proj"), ".env"},
 	}
 	for _, pack := range []string{"default", "permissive", "strict"} {
 		installDefaultProfileConnector(t, "claudecode")
@@ -129,7 +132,7 @@ func TestLoopRedirectAndWorkingFolderReadsGetTheVerdictOfCat(t *testing.T) {
 			return got.Action, rules
 		}
 		for _, f := range files {
-			full := f.dir + "/" + f.name
+			full := filepath.ToSlash(f.dir) + "/" + f.name
 			oracleAction, oracleRules := verdict(f.dir, "cat "+full)
 			for _, shape := range []string{
 				`while read l; do echo "$l"; done < ` + full,
@@ -143,9 +146,26 @@ func TestLoopRedirectAndWorkingFolderReadsGetTheVerdictOfCat(t *testing.T) {
 			} {
 				action, rules := verdict(f.dir, shape)
 				if action != oracleAction || !slices.Equal(rules, oracleRules) {
-					t.Errorf("%s: %q (cwd %s) is %s %v, cat %s is %s %v", pack, shape, f.dir, action, rules, full, oracleAction, oracleRules)
+					row := fmt.Sprintf("%s: %q (cwd %s) is %s %v, cat %s is %s %v", pack, shape, f.dir, action, rules, full, oracleAction, oracleRules)
+					if !gap1535WindowsReading(t, strings.HasPrefix(shape, "cat $(pwd)/"), action, row) {
+						t.Error(row)
+					}
 				}
 			}
 		}
 	}
+}
+
+// gap1535WindowsReading reports a row that differs from its reference on
+// native Windows only in the known Windows reading of a POSIX shell working
+// folder ($(pwd), a run-time HOME; rel-1-0-10:GAP-1535, hardening 1.0.11):
+// the call allows, as it does at rel. The row still runs and is logged, so
+// the native run shows every such row; any other difference fails.
+func gap1535WindowsReading(t *testing.T, known bool, action, row string) bool {
+	t.Helper()
+	if runtime.GOOS != "windows" || !known || action != "allow" {
+		return false
+	}
+	t.Logf("GAP-1535 Windows reading (allow, as at rel): %s", row)
+	return true
 }
