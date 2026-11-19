@@ -281,6 +281,10 @@ type hostWord struct {
 	text   string
 	static bool
 	colon  bool // the value of a -Name:value parameter (glued to its switch)
+	// folder is a word that is not static but is one native argv word naming a
+	// folder from the caller's home or environment ($HOME\.ssh, "$env:TEMP\x"):
+	// only a -WorkingDirectory value may be one (folderValueWord).
+	folder bool
 }
 
 func hostWords(c *Command) []hostWord {
@@ -309,7 +313,7 @@ func hostWords(c *Command) []hostWord {
 			}
 		case *Arg:
 			v, ok := nativeWord(e.Value)
-			out = append(out, hostWord{text: v, static: ok})
+			out = append(out, hostWord{text: v, static: ok, folder: !ok && folderValueWord(e.Value)})
 		case Expr:
 			v, ok := nativeWord(e)
 			out = append(out, hostWord{text: v, static: ok})
@@ -319,12 +323,45 @@ func hostWords(c *Command) []hostWord {
 		// word is certain (review 9 R9-4).
 		if prevEnd >= 0 && s0 == prevEnd {
 			for k := prevStart; k < len(out); k++ {
-				out[k].static = false
+				out[k].static, out[k].folder = false, false
 			}
 		}
 		prevStart, prevEnd = start, s1
 	}
 	return out
+}
+
+// folderValueWord reports an expandable string that the caller hands over as
+// one native argv word built only from literal text and the caller's home,
+// current folder or environment variables ($HOME\.ssh, "$env:TEMP\x"): no
+// sub-expression, no splat, no other variable (a variable may hold an array,
+// which becomes several words). It is never a static word; it is only allowed
+// as the value of -WorkingDirectory, which is not part of the script
+// (rel-1-0-10:GAP-0198).
+func folderValueWord(e Expr) bool {
+	v, ok := e.(*StringLit)
+	if !ok || v.Static || v.Fused || v.Kind == StrHereSingle || v.Kind == StrHereDouble || len(v.Parts) == 0 {
+		return false
+	}
+	variable := false
+	for _, part := range v.Parts {
+		switch x := part.Expr.(type) {
+		case nil:
+		case *StringLit:
+			if !x.Static || x.Fused {
+				return false
+			}
+		case *Variable:
+			name := strings.ToLower(x.Name)
+			if x.Splat || !(strings.EqualFold(x.Scope, "env") || x.Scope == "" && (name == "home" || name == "pwd")) {
+				return false
+			}
+			variable = true
+		default:
+			return false
+		}
+	}
+	return variable
 }
 
 // nativeWord returns the one native argv word an argument expression becomes,

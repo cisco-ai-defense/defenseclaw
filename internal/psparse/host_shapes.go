@@ -57,7 +57,16 @@ var psHostOpts = map[string]bool{
 	"-windowstyle": true, "-w": true,
 	"-inputformat": true, "-if": true,
 	"-outputformat": true, "-of": true,
+	// -WorkingDirectory starts the script in another folder; its value is any
+	// one plain word (a reader of the script reads it from that folder,
+	// rel-1-0-10:GAP-0198).
+	"-workingdirectory": true, "-wd": true,
 }
+
+// psFolderOpts are the host switches whose value may also be a folder word
+// built from the caller's home or environment (folderValueWord): the value is
+// not part of the script, so the script stays one static text.
+var psFolderOpts = map[string]bool{"-workingdirectory": true, "-wd": true}
 
 // psOptValues are the values pwsh accepts for the value options above, by
 // lower-case spelling. pwsh 7.7 rejects any other value and runs nothing, so a
@@ -99,8 +108,8 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 	if hostHasStopParse(c, words) {
 		return "", 0, ReasonStopParsing
 	}
-	for _, w := range words {
-		if !w.static {
+	for i, w := range words {
+		if !w.static && !(w.folder && i > 0 && psFolderOpts[strings.ToLower(strings.TrimSpace(words[i-1].text))]) {
 			return "", 0, ReasonNonLiteral
 		}
 		if w.colon {
@@ -124,7 +133,12 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 				return "", 0, ReasonHostShape
 			}
 			v := words[i+1].text
-			if v == "" || v != strings.TrimSpace(v) || dashLed(v) || !psOptValues[lw][strings.ToLower(v)] {
+			if words[i+1].folder && psFolderOpts[lw] {
+				i += 2
+				continue
+			}
+			if values, fixed := psOptValues[lw]; v == "" || v != strings.TrimSpace(v) || dashLed(v) ||
+				fixed && !values[strings.ToLower(v)] {
 				return "", 0, ReasonHostOption
 			}
 			i += 2

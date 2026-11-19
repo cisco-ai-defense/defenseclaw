@@ -237,8 +237,6 @@ var hostShapeNotStatic = []struct {
 	{"Q19", `pwsh -ep /c -c 'Write-Output a'`, ReasonHostOption},
 	{"of-bogus", `pwsh -of bogus -c 'Write-Output a'`, ReasonHostOption},
 	{"w-bogus", `pwsh -w bogus -c 'Write-Output a'`, ReasonHostOption},
-	{"W03", `pwsh -wd /tmp -c 'Remove-Item x'`, ReasonHostOption},
-	{"W04", `pwsh -WorkingDirectory /tmp -command 'Remove-Item x'`, ReasonHostOption},
 	{"P01", `cmd /c rd /s /q 'C:\Program Files\dcx'`, ReasonCmdArgv},
 	{"P02", `cmd /c '"rd /s /q C:\dcx"'`, ReasonCmdArgv},
 	{"P04", `cmd /c echo 'a b' 'c d'`, ReasonCmdArgv},
@@ -289,6 +287,7 @@ type refWord struct {
 	text   string
 	static bool
 	colon  bool
+	folder bool // an expandable string of literal text and $HOME / $PWD / $env: parts
 }
 
 // The reference below is an independent statement of the table in
@@ -298,8 +297,10 @@ type refWord struct {
 // word model that is more generous than the real native argv is caught here.
 var (
 	refNoVal   = []string{"-noprofile", "-nop", "-noninteractive", "-noni", "-nologo", "-nol", "-sta", "-mta"}
-	refWithVal = []string{"-executionpolicy", "-ep", "-exec", "-windowstyle", "-w", "-inputformat", "-if", "-outputformat", "-of"}
-	refValues  = map[string][]string{
+	refWithVal = []string{"-executionpolicy", "-ep", "-exec", "-windowstyle", "-w", "-inputformat", "-if", "-outputformat", "-of", "-workingdirectory", "-wd"}
+	// refFolderSw take any one value word, or a folder word (refWord.folder).
+	refFolderSw = []string{"-workingdirectory", "-wd"}
+	refValues   = map[string][]string{
 		"policy": {"bypass", "unrestricted", "remotesigned", "allsigned", "restricted", "default", "undefined"},
 		"format": {"text", "xml"},
 		"style":  {"normal", "minimized", "maximized", "hidden"},
@@ -329,6 +330,24 @@ func refWordOf(e Expr, colon bool) refWord {
 	if sl, ok := e.(*StringLit); ok && sl.Static && !sl.Fused && sl.Kind != StrHereSingle && sl.Kind != StrHereDouble {
 		return refWord{text: sl.Value, static: true, colon: colon}
 	}
+	if sl, ok := e.(*StringLit); ok && !colon && !sl.Static && !sl.Fused && sl.Kind != StrHereSingle && sl.Kind != StrHereDouble {
+		folder := len(sl.Parts) > 0
+		vars := 0
+		for _, p := range sl.Parts {
+			switch x := p.Expr.(type) {
+			case nil:
+			case *StringLit:
+				folder = folder && x.Static && !x.Fused
+			case *Variable:
+				n := strings.ToLower(x.Name)
+				folder = folder && !x.Splat && (strings.ToLower(x.Scope) == "env" || x.Scope == "" && (n == "home" || n == "pwd"))
+				vars++
+			default:
+				folder = false
+			}
+		}
+		return refWord{folder: folder && vars > 0}
+	}
 	return refWord{colon: colon} // numbers, lists, variables, fused atoms, ...: uncertain
 }
 
@@ -355,7 +374,7 @@ func refArgv(c *Command) []refWord {
 		}
 		if prevEnd >= 0 && s0 == prevEnd {
 			for k := prevStart; k < len(out); k++ {
-				out[k].static = false
+				out[k].static, out[k].folder = false, false
 			}
 		}
 		prevStart, prevEnd = start, s1
@@ -368,7 +387,10 @@ func refPS(words []refWord, stop bool) (text string, ok bool) {
 	if stop {
 		return "", false
 	}
-	for _, w := range words {
+	for k, w := range words {
+		if w.folder && k > 0 && words[k-1].static && refIn(refFolderSw, strings.ToLower(strings.TrimSpace(words[k-1].text))) {
+			continue
+		}
 		if !w.static || w.colon || w.text == "--%" {
 			return "", false
 		}
@@ -388,8 +410,12 @@ func refPS(words []refWord, stop bool) (text string, ok bool) {
 			if i+1 >= len(words) {
 				return "", false
 			}
+			if words[i+1].folder && refIn(refFolderSw, l) {
+				i += 2
+				continue
+			}
 			v := words[i+1].text
-			if v == "" || strings.TrimSpace(v) != v || strings.HasPrefix(v, "-") || !refIn(refValues[refValueSet[l]], strings.ToLower(v)) {
+			if v == "" || strings.TrimSpace(v) != v || strings.HasPrefix(v, "-") || refValueSet[l] != "" && !refIn(refValues[refValueSet[l]], strings.ToLower(v)) {
 				return "", false
 			}
 			i += 2
@@ -533,6 +559,7 @@ var (
 	genHosts   = []string{"pwsh", "powershell", "PowerShell.EXE", "pwsh.exe", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "& pwsh", "& 'powershell.exe'"}
 	genNoVal   = []string{"-NoProfile", "-nop", "-NOP", "-noni", "-NonInteractive", "-NoLogo", "-nol", "-sta", "-mta", "-noexit", "-login", "-l", "-nop:", "-foo", "/nop", "--nop", "\u2013nop", "\u2014nop", "\u2015nop", "\t-nop", "\u00a0-nop"}
 	genWithVal = [][]string{{"-ep", "Bypass"}, {"-ExecutionPolicy", "Bypass"}, {"-w", "hidden"}, {"-WindowStyle", "Hidden"}, {"-Version", "2"}, {"-wd", "/tmp"}, {"-WorkingDirectory", "/tmp"}, {"-if", "text"}, {"-of", "xml"}, {"-File", "x.ps1"}, {"-foo", "bar"}, {"-ep", ""}, {"-ep", " Bypass"}, {"-ep"}, {"-ep", "/c"}, {"-ep", "bypass"}, {"-ep", "Unrestricted"}, {"-if", "bogus"}, {"-of", "bogus"}, {"-of", "Text"}, {"-w", "bogus"}, {"-exec", "RemoteSigned"}}
+	genFolder  = []string{`$HOME\.ssh`, `"$HOME\.defenseclaw"`, `$env:TEMP\x`, `"${env:USERPROFILE}\a b"`, `$PWD`, `$x\y`, `"$(gl)"`, `$HOME`, `@a`, `"$HOME"x`}
 	genCmdSw   = []string{"-c", "-Command", "-command", "-C", "-comm", "-co", "/c", "--command", "\u2013c", "\u2014c", "-cwa", "-c:"}
 	genEncSw   = []string{"-e", "-ec", "-enc", "-EncodedCommand", "-en", "-encodedc", "/e", "-e:", "-ea"}
 	genPayload = []string{"Get-Date", `Remove-Item C:\x`, "Write-Output 'a b'", `Write-Output "x"`, "-", "--%", "", " ", `a\ b\`, "$x", "x;y", "Write-Output a", "-nop", "1e3", "0x10", "1kb", "C:\\Program Files\\x", "say \"hi\"", "ver", "dir", "echo a & echo b", "echo k>>f g", "echo a b", "dir C:\\x y\\"}
@@ -557,8 +584,13 @@ func (g *hostGen) argv() (host string, words []genWord, isCmd bool) {
 			if g.coin(50) {
 				words = append(words, genWord{text: g.pick(genNoVal)})
 			} else {
-				for _, w := range genWithVal[g.r.Intn(len(genWithVal))] {
+				pair := genWithVal[g.r.Intn(len(genWithVal))]
+				for _, w := range pair {
 					words = append(words, genWord{text: w})
+				}
+				if len(pair) == 2 && strings.EqualFold(pair[1], "/tmp") && g.coin(40) {
+					// a -wd value built from the caller's home or environment
+					words[len(words)-1] = genWord{text: g.pick(genFolder), raw: true}
 				}
 			}
 		}

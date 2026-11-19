@@ -152,9 +152,11 @@ func TestHostScriptTwinIsAbsentWhenTheScriptIsNotStatic(t *testing.T) {
 		{"file", `powershell -File C:\tmp\run.ps1`},
 		{"stdin", `powershell -Command -`},
 		{"stop parsing tail", `powershell -Command --% Get-Content C:\tmp\a.txt`},
-		{"working directory", `powershell -WorkingDirectory C:\other -Command "Get-Content a.txt"`},
-		{"working directory abbreviation", `pwsh -wo C:\other -c "Get-Content a.txt"`},
-		{"working directory alias", `pwsh -wd C:\other -c "Get-Content a.txt"`},
+		{"working directory abbreviation outside the host table", `pwsh -wo C:\other -c "Get-Content a.txt"`},
+		{"working directory colon form", `pwsh -wd:C:\other -c "Get-Content a.txt"`},
+		{"working directory twice", `pwsh -wd C:\a -wd C:\b -c "Get-Content a.txt"`},
+		{"quoted working directory switch", `pwsh '-wd' C:\other -c "Get-Content a.txt"`},
+		{"working directory without a value", `pwsh -c "Get-Content a.txt" -wd`},
 		{"empty argument", `pwsh -Command Get-Content ''`},
 		{"colon-glued switch", `pwsh -Command: "Get-Content C:\tmp\a.txt"`},
 		{"number word", `pwsh -Command Get-Content 0x10`},
@@ -280,5 +282,55 @@ func TestHostScriptTwinDropsStatementsAfterExit(t *testing.T) {
 				t.Fatalf("script reading = %q", twin.Command)
 			}
 		})
+	}
+}
+
+// TestGAP0198LauncherWorkingDirectoryIsReadAsAMove pins rel-1-0-10:GAP-0198
+// (cert L74, TST-7717): pwsh -wd <folder> -Command <script> runs the script in
+// <folder>, so a relative Set-Content there writes <folder>\<name>. The
+// launcher had no reading at all (findings=0, allowed in every tier) while the
+// same script after a Set-Location was read. The reading of the launcher is
+// the script after a move to the -WorkingDirectory value, as written, in the
+// psparse spelling, the argv spelling and the list reading; a launcher with
+// no such switch reads as before.
+func TestGAP0198LauncherWorkingDirectoryIsReadAsAMove(t *testing.T) {
+	const script = `Set-Content -Path config.yaml -Value m`
+	for _, test := range []struct {
+		name  string
+		input Input
+		want  string
+	}{
+		{"wd", hookShellInput(t, "PowerShell", `pwsh -NoProfile -wd C:\Users\alice\.defenseclaw -Command "`+script+`"`),
+			`Set-Location -LiteralPath C:\Users\alice\.defenseclaw; ` + script},
+		{"long switch", hookShellInput(t, "PowerShell", `pwsh -NoProfile -WorkingDirectory 'C:\Users\alice\.defenseclaw' -Command '`+script+`'`),
+			`Set-Location -LiteralPath 'C:\Users\alice\.defenseclaw'; ` + script},
+		{"home variable", hookShellInput(t, "PowerShell", `pwsh -NoProfile -wd $HOME\.defenseclaw -Command "`+script+`"`),
+			`Set-Location -LiteralPath $HOME\.defenseclaw; ` + script},
+		{"argv", Input{Tool: "exec", Argv: []string{"pwsh", "-NoProfile", "-wd", `C:\Users\alice\.defenseclaw`, "-Command", script}},
+			`Set-Location -LiteralPath 'C:\Users\alice\.defenseclaw'; ` + script},
+		{"no switch", hookShellInput(t, "PowerShell", `pwsh -NoProfile -Command "`+script+`"`), script},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got []string
+			for _, twin := range HostScriptReadings(test.input, Analyze(test.input), 0, false).Twins {
+				got = append(got, strings.TrimSpace(twin.Command))
+			}
+			if !slices.Contains(got, test.want) {
+				t.Fatalf("readings %q, want %q", got, test.want)
+			}
+		})
+	}
+	// In a statement list the launcher is read alone, so its move does not
+	// carry to the statements after it.
+	input := hookShellInput(t, "PowerShell", `Write-Output x; pwsh -wd C:\x -c "`+script+`"; Set-Content b.txt m`)
+	var got []string
+	for _, twin := range HostScriptReadings(input, Analyze(input), 0, false).Twins {
+		got = append(got, strings.TrimSpace(twin.Command))
+		if strings.Contains(twin.Command, "Set-Location -LiteralPath C:\\x") && strings.Contains(twin.Command, "b.txt") {
+			t.Fatalf("the launcher move carries to the next statement: %q", twin.Command)
+		}
+	}
+	if !slices.Contains(got, `Set-Location -LiteralPath C:\x; `+script) {
+		t.Fatalf("list readings %q have no launcher reading at its folder", got)
 	}
 }

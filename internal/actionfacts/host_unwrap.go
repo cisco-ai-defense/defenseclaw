@@ -45,8 +45,11 @@ import (
 // alert, which the precision gate measures, and can never hide an attack or
 // turn an unknown call into a clean one. Anything psparse cannot resolve to one
 // static script (a variable, a sub-expression, a stdin read, a child argv, a
-// stop-parse tail, quotes the legacy argument passing rewrites, a working
-// directory, an empty or colon-glued word) has no reading at all.
+// stop-parse tail, quotes the legacy argument passing rewrites, an empty or
+// colon-glued word) has no reading at all. A launcher's -WorkingDirectory is
+// read as a Set-Location to its value before the script
+// (launcherWorkingDirectory), so the script's relative paths are read from the
+// folder it runs in.
 
 // withoutUnreachableStatements cuts a PowerShell script after its first
 // top-level exit or return: the statements after it never run, so a rule must
@@ -186,8 +189,12 @@ func unwrapPowerShellOnce(source string) (string, Dialect, bool, bounded.CapSet)
 	whole := len(script.Statements) == 1
 	var wholeDialect Dialect
 	for _, statement := range script.Statements {
-		body, dialect, start, end, ok := powerShellStatementWrapper(source, script, statement)
-		if !ok {
+		body, dialect, start, end, moves, ok := powerShellStatementWrapper(source, script, statement)
+		if !ok || moves && !whole {
+			// A launcher that starts its script in another folder is read
+			// in place only as the whole call: its Set-Location would move
+			// the statements after it too. The statement reading
+			// (powerShellNestedTexts) reads it alone.
 			continue
 		}
 		if !whole && len(body) > maxHostMidListBody {
@@ -228,12 +235,13 @@ func simpleHostBody(body string) bool {
 
 // powerShellStatementWrapper recognizes one top-level statement that only runs
 // a static nested script and returns that script, its grammar and the source
-// range of the statement.
+// range of the statement; moves is a script that starts with the launcher's
+// move to its working directory.
 func powerShellStatementWrapper(
 	source string,
 	script *psparse.Script,
 	statement psparse.Statement,
-) (body string, dialect Dialect, start, end int, ok bool) {
+) (body string, dialect Dialect, start, end int, moves, ok bool) {
 	pipeline, isPipeline := statement.(*psparse.Pipeline)
 	if !isPipeline || pipeline.ChainRHS != nil || pipeline.ChainOp != "" ||
 		pipeline.Background || len(pipeline.Redirs) != 0 || len(pipeline.Elements) != 1 {
@@ -255,7 +263,7 @@ func powerShellStatementWrapper(
 			return
 		}
 		body = source[blockStart+1 : blockEnd-1]
-		return body, DialectPowerShell, start, end, true
+		return body, DialectPowerShell, start, end, false, true
 	}
 	name, named := psparse.LiteralString(command.Name)
 	if !named {
@@ -281,10 +289,14 @@ func powerShellStatementWrapper(
 	switch found.Kind {
 	case psparse.KindPowerShellCommand, psparse.KindEncodedCommand:
 		if !hostLauncherIdentity(name, "powershell") && !hostLauncherIdentity(name, "pwsh") ||
-			commandHasWorkingDirectoryOption(command) || commandHasEmptyWord(command) ||
-			!launcherWordsArePlain(command) {
+			commandHasEmptyWord(command) || !launcherWordsArePlain(command) {
 			return
 		}
+		location, readable := launcherWorkingDirectory(source, command)
+		if !readable {
+			return
+		}
+		found.Text, moves = location+found.Text, location != ""
 		dialect = DialectPowerShell
 	case psparse.KindIEXLiteral:
 		dialect = DialectPowerShell
@@ -304,25 +316,58 @@ func powerShellStatementWrapper(
 	default:
 		return
 	}
-	return found.Text, dialect, start, end, true
+	return found.Text, dialect, start, end, moves, true
 }
 
-// commandHasWorkingDirectoryOption reports a -WorkingDirectory switch (or an
-// abbreviation of it) among the words of a launcher call.
-func commandHasWorkingDirectoryOption(command *psparse.Command) bool {
-	for _, element := range command.Elements {
+// launcherWorkingDirectory is the move a powershell or pwsh launcher call makes
+// before its script: -WorkingDirectory (-wd, or an abbreviation) starts the
+// script in that folder, so the reading of the script starts with
+// `Set-Location -LiteralPath <value>; ` and its relative paths are read from
+// there, not from the caller's folder (rel-1-0-10:GAP-0198). The value is the
+// launcher's own argument as written, so the reading evaluates it as the
+// caller's shell does. location is empty for a call with no such switch; ok is
+// false when the switch is not one switch with one value before the script (a
+// colon form, a quoted switch, no value, twice, or after -Command): that
+// launcher stays unread, as before.
+func launcherWorkingDirectory(source string, command *psparse.Command) (location string, ok bool) {
+	value, started := -1, false
+	for index, element := range command.Elements {
 		switch typed := element.(type) {
 		case *psparse.Parameter:
-			if workingDirectoryWord("-" + typed.Name) {
-				return true
+			if !workingDirectoryWord("-" + typed.Name) {
+				started = started || hostScriptSwitch(typed.Name)
+				continue
 			}
+			if started || value >= 0 || typed.HasColon || typed.Colon != nil || index+1 >= len(command.Elements) {
+				return "", false
+			}
+			if _, isArg := command.Elements[index+1].(*psparse.Arg); !isArg {
+				return "", false
+			}
+			value = index + 1
 		case *psparse.Arg:
 			if text, static := psparse.LiteralString(typed.Value); static && workingDirectoryWord(text) {
-				return true
+				return "", false
 			}
 		}
 	}
-	return false
+	if value < 0 {
+		return "", true
+	}
+	start, end := command.Elements[value].(*psparse.Arg).Span()
+	if start < 0 || end > len(source) || start >= end {
+		return "", false
+	}
+	return "Set-Location -LiteralPath " + source[start:end] + "; ", true
+}
+
+// hostScriptSwitch reports a host switch (without its dash) that starts the
+// script: -Command, -EncodedCommand or -File, or an abbreviation of one. A
+// word after it belongs to the script, not to the host.
+func hostScriptSwitch(name string) bool {
+	name = strings.ToLower(name)
+	return name != "" && (strings.HasPrefix("command", name) || strings.HasPrefix("encodedcommand", name) ||
+		strings.HasPrefix("file", name))
 }
 
 // cmdCommandPayload is the line a `cmd /c <words>` call hands to cmd.exe: the
@@ -510,10 +555,8 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 			return "", DialectNone, false
 		}
 	}
-	if powerShellWorkingDirectoryOption(argv) {
-		// -WorkingDirectory moves the cwd the script's relative paths resolve
-		// against; Facts has no wrapper-local cwd, so the script is not
-		// analyzed against the wrong directory.
+	location, readable := argvWorkingDirectory(argv)
+	if !readable {
 		return "", DialectNone, false
 	}
 	// The call is rendered by the one PowerShell renderer (the launcher as a
@@ -544,18 +587,34 @@ func powerShellHostBody(argv []string) (string, Dialect, bool) {
 	if found == nil || !found.Static || strings.TrimSpace(found.Text) == "" {
 		return "", DialectNone, false
 	}
-	return found.Text, DialectPowerShell, true
+	return location + found.Text, DialectPowerShell, true
 }
 
-// powerShellWorkingDirectoryOption reports a -WorkingDirectory switch (or an
-// abbreviation of it, -wo and longer) among the host words.
-func powerShellWorkingDirectoryOption(argv []string) bool {
-	for _, word := range argv[1:] {
-		if workingDirectoryWord(word) {
-			return true
+// argvWorkingDirectory is launcherWorkingDirectory for a launcher argv: the
+// script is read after `Set-Location -LiteralPath '<value>'; ` when the host
+// words carry one -WorkingDirectory (or -wd, or an abbreviation) with one
+// value before the script; ok is false for any other spelling of it.
+func argvWorkingDirectory(argv []string) (location string, ok bool) {
+	value, found, started := "", false, false
+	for i := 1; i < len(argv); i++ {
+		word := strings.TrimSpace(argv[i])
+		if !workingDirectoryWord(word) {
+			if strings.HasPrefix(word, "-") || strings.HasPrefix(word, "/") {
+				started = started || hostScriptSwitch(strings.TrimLeft(word, "-/"))
+			}
+			continue
 		}
+		if started || found || strings.Contains(word, ":") || i+1 >= len(argv) ||
+			strings.TrimSpace(argv[i+1]) == "" || strings.HasPrefix(strings.TrimSpace(argv[i+1]), "-") {
+			return "", false
+		}
+		value, found = argv[i+1], true
+		i++
 	}
-	return false
+	if !found {
+		return "", true
+	}
+	return "Set-Location -LiteralPath " + managed.PowerShellLiteral(value) + "; ", true
 }
 
 func workingDirectoryWord(word string) bool {
@@ -1217,7 +1276,11 @@ func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bo
 	switch nested.Reason {
 	case psparse.ReasonNonLiteral:
 		if !hostLauncherIdentity(name, "powershell") && !hostLauncherIdentity(name, "pwsh") ||
-			commandHasWorkingDirectoryOption(command) || commandHasEmptyWord(command) {
+			commandHasEmptyWord(command) {
+			return "", false
+		}
+		if _, readable := launcherWorkingDirectory(source, command); !readable {
+			// The caller adds the move to the working directory.
 			return "", false
 		}
 		var block *psparse.ScriptBlockExpr
@@ -1327,10 +1390,14 @@ func powerShellNestedTexts(source string) ([]nestedText, bounded.CapSet) {
 			switch nested.Kind {
 			case psparse.KindPowerShellCommand, psparse.KindEncodedCommand:
 				if !named || !hostLauncherIdentity(name, "powershell") && !hostLauncherIdentity(name, "pwsh") ||
-					commandHasWorkingDirectoryOption(command) || commandHasEmptyWord(command) ||
-					!launcherWordsArePlain(command) {
+					commandHasEmptyWord(command) || !launcherWordsArePlain(command) {
 					continue
 				}
+				location, readable := launcherWorkingDirectory(source, command)
+				if !readable {
+					continue
+				}
+				nested.Text = location + nested.Text
 			case psparse.KindCmdC:
 				if !named || !hostLauncherIdentity(name, "cmd") {
 					continue
