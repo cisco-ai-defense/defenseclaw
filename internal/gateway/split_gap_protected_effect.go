@@ -72,10 +72,8 @@ type pathEffect struct {
 }
 
 // pathEffectTwin is the one map from a path-fact effect to its judgment for
-// a call part that was not read: the split-gap twins (splitGapTwinSet)
-// and the unresolved-folder tier (unresolvedFolderOperand) both use it. ok
-// is false for an access that touches no file's content or place (execute,
-// list, connect).
+// a call part that was not read (splitGapTwinSet). ok is false for an access
+// that touches no file's content or place (execute, list, connect).
 func pathEffectTwin(access actionfacts.PathAccess) (effect pathEffect, ok bool) {
 	switch access {
 	case actionfacts.PathAccessWrite:
@@ -358,7 +356,10 @@ func withSplitGapEffects(ctx context.Context, request trustedActionRequest, gene
 	}
 	if !unknown && moverRead {
 		// rel's reading: an operand after a mover call, in a folder the call
-		// does not give, that may be a named protected file there.
+		// does not give, that may be a named protected file there. It reads
+		// rel's access kinds only (unresolvedFolderOperand); a mode or owner
+		// change was judged by its own twins above, in both readings
+		// (substrate-1:GAP-0714).
 		findings = withUnresolvedFolderTier(findings, request, unread, false)
 	}
 	if unknown {
