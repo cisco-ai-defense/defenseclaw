@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -24,6 +25,9 @@ import (
 // was alert/block at t6/fix-0690 b318c23b43 and allow/allow at rel and FU11
 // c8090b1056).
 func TestGAP0714GuardingModeChangeIsReadAsRel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX home fixture: the plain spelling joins the home with backslashes on Windows (substrate-1:GAP-0716)")
+	}
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	files := []string{".aws/credentials", ".bashrc", ".netrc", ".git-credentials", ".ssh/id_rsa", ".kube/config"}
