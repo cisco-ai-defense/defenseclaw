@@ -22,7 +22,7 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX command matrix")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	hooks := filepath.Join(home, ".defenseclaw", "hooks")
 	if err := os.MkdirAll(hooks, 0o700); err != nil {
 		t.Fatal(err)

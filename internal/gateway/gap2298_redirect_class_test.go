@@ -36,7 +36,7 @@ func TestR105StaticRedirectTargetIsAWriteWhateverTheCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell grammar; the Windows readings have their own rows")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	hooks := filepath.Join(home, ".defenseclaw", "hooks")
 	for _, dir := range []string{hooks, filepath.Join(cwd, "sub")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -120,7 +120,7 @@ func TestGAP0428RedirectIsOpenedBeforeTheCommandBinds(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell grammar; the Windows readings have their own rows")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.MkdirAll(filepath.Join(home, ".defenseclaw"), 0o700); err != nil {
 		t.Fatal(err)
 	}

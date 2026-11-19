@@ -25,7 +25,7 @@ type r105StateRow struct {
 // the saved installer and previous installer, hooks/ and policies/.
 func r105StateFixture(t *testing.T) (home, cwd string) {
 	t.Helper()
-	home, cwd = r104ReviewHome(t)
+	home, cwd = r104ReviewHomeNoAlias(t)
 	state := filepath.Join(home, ".defenseclaw")
 	for _, file := range []string{
 		"config.yaml", "installer/install.sh", "previous/installer/install.sh",

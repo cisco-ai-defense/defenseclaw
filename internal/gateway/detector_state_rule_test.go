@@ -16,7 +16,7 @@ import (
 )
 
 func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	stateDir := filepath.Join(home, ".defenseclaw")
 	if err := os.Mkdir(stateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -245,7 +245,7 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 }
 
 func TestR104ActiveStateMentionRequiresMutation(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	state := filepath.Join(home, ".defenseclaw", "config.yaml")
 	installDefaultProfileConnector(t, "claudecode")
 	dialect := actionfacts.DialectPOSIX

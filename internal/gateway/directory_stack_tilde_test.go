@@ -20,7 +20,7 @@ func TestDirectoryStackTildeKeyReadIsAKeyRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell spellings")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "id_ed25519"), []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

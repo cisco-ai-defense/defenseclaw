@@ -15,7 +15,7 @@ import (
 // beside other work it alerts in the default pack, and a write of the file in
 // the same command still blocks (rel-1-0-10:GAP-0018).
 func TestGAP0018KeyReadersAreNotKeyWrites(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.WriteFile(filepath.Join(cwd, "keys.sum"), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -91,7 +91,7 @@ func TestCapFloorLatencyStaysNearRel(t *testing.T) {
 	if testing.Short() || hookAnswerRaceBuild {
 		t.Skip("a timing guard: not in -short or race builds")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	request := func(connector, command string) trustedActionRequest {
 		return trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home,
 			DialectHint: actionfacts.DialectPOSIX}, Connector: connector, EnforcementCapable: true}
