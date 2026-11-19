@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"context"
-	"path"
 	"slices"
 	"strings"
 
@@ -113,16 +112,13 @@ func withInlineHandoffTier(ctx context.Context, request trustedActionRequest, fi
 	facts := actionfacts.Analyze(request.Input)
 	reading := readInlineState(facts, request)
 	if mentionsArchiveExtractor(command) {
-		_, unknown, caps := hookpaths.ArchiveExtractionUnknown(command, facts.CWD, strings.TrimRight(facts.ActiveHome, "/"))
-		reading.caps = reading.caps.Union(caps)
-		// Members the words do not tell may be a file of the state below the
-		// extraction folder: the unknown tier.
-		if reaches, ok := stateReachFunc(facts, request); ok && !reading.hands {
-			for _, folder := range unknown {
-				if reaches(path.Join(folder, ".defenseclaw")) {
-					reading.hands, reading.access = true, actionfacts.InlineUnknown
-				}
-			}
+		archives := readArchiveState(facts, request)
+		reading.caps = reading.caps.Union(archives.caps)
+		// Members nothing tells (the words name none, the archive cannot be
+		// listed) may be a file of the state below a folder that holds it:
+		// the unknown tier (rel-1-0-10:GAP-0142, GAP-1173).
+		if archives.possible && !archives.writes && !reading.hands {
+			reading.hands, reading.access = true, actionfacts.InlineUnknown
 		}
 	}
 	if reading.caps.Any() {
@@ -161,15 +157,22 @@ func containsInlineInterpreterName(command string) bool {
 	return false
 }
 
-// mentionsArchiveExtractor is the cheap gate of the archive reading.
+// mentionsArchiveExtractor is the cheap gate of the unknown-tier archive
+// reading: the shell extractors, the Python archive modules and the
+// PowerShell extractions (rel-1-0-10:GAP-1173). It reads the text as the
+// shell reads a program word, without quotes and backslashes and in any
+// case, so 'un'zip, t\ar and TAR pass it (rel-1-0-10:GAP-1223).
 func mentionsArchiveExtractor(command string) bool {
-	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto"} {
-		if strings.Contains(command, name) {
+	text := strings.ToLower(archiveGateText.Replace(command))
+	for _, name := range []string{"tar", "unzip", "7z", "cpio", "ditto", "zipfile", "unpack_archive", "expand-archive", "extracttodirectory"} {
+		if strings.Contains(text, name) {
 			return true
 		}
 	}
 	return false
 }
+
+var archiveGateText = strings.NewReplacer(`'`, "", `"`, "", `\`, "", "`", "")
 
 // withFindChildTwins judges each program a find runs (-exec, -execdir, -ok,
 // -okdir) as a call of its own, with the handed entry put as a plain file of

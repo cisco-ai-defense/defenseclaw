@@ -60,6 +60,8 @@ var hostShapeRows = []struct {
 	{"ps-encoded/padded-EncodedCommand", []string{" -EncodedCommand", r6enc("Write-Output a")}},
 	{"ps-encoded/ec-padded", []string{"-ec ", r6enc("Write-Output a")}},
 	{"ps-encoded/padded-nop-padded-enc", []string{"-nop ", " -enc", r6enc("Write-Output a b")}},
+	// a blank-padded base64 word: the host decoder skips the blank (rel-1-0-10:GAP-1197)
+	{"ps-encoded/pad-b64", []string{"-ec", " " + "ZQBjAGgAbwA="}},
 }
 
 // hostShapeSource renders a host argv as PowerShell source with every word in
@@ -98,6 +100,9 @@ func expectedShapeText(argv []string) string {
 }
 
 func decodeUTF16LEBase64(s string) string {
+	// .NET Convert.FromBase64String (the host's decoder) skips space, tab, CR
+	// and LF anywhere in the word (GAP-1197).
+	s = strings.NewReplacer(" ", "", "\t", "", "\r", "", "\n", "").Replace(s)
 	b, err := base64.StdEncoding.DecodeString(s)
 	if err != nil || len(b)%2 != 0 {
 		return ""
@@ -190,7 +195,6 @@ var hostShapeNotStatic = []struct {
 	{"N01", `pwsh '' -c 'Get-Date'`, ReasonHostOption},
 	{"blank", `pwsh ' ' -c 'Get-Date'`, ReasonHostOption},
 	{"pad-value", `pwsh -ep ' Bypass' -c 'Get-Date'`, ReasonHostOption},
-	{"pad-b64", `pwsh -ec ' ` + "ZQBjAGgAbwA=" + `'`, ReasonNonLiteral},
 	{"pad-switch-and-value", `pwsh ' -ec ` + "ZQBjAGgAbwA=" + `'`, ReasonHostOption},
 	// --% tails (S01..S12, C11, cmd)
 	{"S04", `pwsh -c Write-Output --% %DCV%`, ReasonStopParsing},
