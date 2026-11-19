@@ -160,7 +160,7 @@ func TestGAP0684RgWorkingFolderLive(t *testing.T) {
 			out, _ := run.Output()
 			read = append(read, strings.Split(string(out), "\n")...)
 		}
-		if got := g0683Rel(dir, read); !slices.Equal(got, row.want) && !(len(got) == 0 && len(row.want) == 0) {
+		if got := g0683Rel(dir, read); !slices.Equal(got, row.want) {
 			t.Errorf("%s: real rg reads %v, the table says %v", row.cmd, got, row.want)
 		}
 	}

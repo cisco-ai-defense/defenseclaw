@@ -310,7 +310,7 @@ func TestGAP0679RgGroundTruthLive(t *testing.T) {
 	dir := g0679Folder(t)
 	for _, rows := range [][]g0679Row{g0679Rows, g0680Rows, g0681Rows, g0682Rows, g0673RV4Rows} {
 		for _, row := range rows {
-			if got := g0679Real(t, rg, sh, dir, row.cmd); !slices.Equal(got, row.want) && !(len(got) == 0 && len(row.want) == 0) {
+			if got := g0679Real(t, rg, sh, dir, row.cmd); !slices.Equal(got, row.want) {
 				t.Errorf("%s: real rg reads %v, the table says %v", row.cmd, got, row.want)
 			}
 		}
