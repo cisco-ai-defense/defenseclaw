@@ -23,7 +23,7 @@ import (
 // still needs the file unchanged. Every flow runs in one session, on the
 // gateway's own Claude Code hook, in the cwd the agent's shell keeps.
 func TestGAP1180AWriteBetweenTheReadAndTheUploadKeepsTheChain(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)

@@ -17,7 +17,7 @@ import (
 // in the home and in the runtime folder raised nothing at rel, because the
 // table named them by a shorter Relative than the home-relative path.
 func TestGAP1179DeveloperLoginFileReadsRaiseTheirFindingOnTheHookPath(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	rows := []struct{ command, rule string }{
 		{"cat ~/.config/git/credentials", "PATH-GIT-CREDS"},
 		{"cat ~/.vault-token", "PATH-CRED-STORE-USER"},
