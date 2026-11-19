@@ -74,7 +74,6 @@ const (
 	maxCredentialPathWalkFolders = 4096
 	maxCredentialPathWalkEntries = 1 << 16
 	maxCredentialPathWalkLookups = 1024
-	credentialPathWalkBatch      = 512
 	credentialPathWalkWorkers    = 4
 	// The analyses of one hook evaluation (the call, its twins and its
 	// result event) reuse a walk of the same folder made within
@@ -1407,8 +1406,8 @@ func credentialPathWalkStore(key credentialPathWalkKey, walk credentialPathWalkR
 	credentialPathWalks.bytes += size
 }
 
-// credentialPathWalk walks dir breadth first and reads each folder once,
-// in batches of credentialPathWalkBatch entries; each entry named as the
+// credentialPathWalk walks dir breadth first and reads each folder once, a
+// huge one in pieces (readCredentialWalkFolder); each entry named as the
 // first segment of a credentials probe is looked up. It does not enter
 // credentialWalkSkips or follow a symbolic link to a folder, as grep -r does
 // not. It counts and enters only what filter admits (rgFilter, ripgrep's
@@ -1520,50 +1519,41 @@ type credentialWalkFolder struct {
 	dir, shown string
 }
 
-// scan reads one folder in batches of credentialPathWalkBatch entries.
+// scan reads one folder (readCredentialWalkFolder).
 func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter *rgFilter, groups map[string][]credentialProbe) (s credentialPathFolderScan) {
-	f, err := os.Open(folder.dir)
-	if err != nil {
-		return s
-	}
-	defer func() { _ = f.Close() }()
-	for {
-		batch, err := f.ReadDir(credentialPathWalkBatch)
-		for _, entry := range batch {
-			if !b.take(&b.entries, b.limits.entries) {
-				return s
-			}
-			name := entry.Name()
-			for _, probe := range groups[name] {
-				if !filter.admits(folder.shown, probe.segments) {
-					continue
-				}
-				if !b.take(&b.lookups, b.limits.lookups) {
-					return s
-				}
-				file := filepath.Join(folder.dir, filepath.FromSlash(probe.value))
-				if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
-					s.found = append(s.found, file)
-				}
-			}
-			if !entry.IsDir() || credentialWalkSkips[name] {
+	readCredentialWalkFolder(folder.dir, func(name []byte, isDir bool) bool {
+		if !b.take(&b.entries, b.limits.entries) {
+			return false
+		}
+		for _, probe := range groups[string(name)] {
+			if !filter.admits(folder.shown, probe.segments) {
 				continue
 			}
-			next := credentialWalkFolder{dir: filepath.Join(folder.dir, name)}
-			if filter != nil {
-				if len(filter.globs) > 0 { // only a glob reads the path
-					next.shown = rgJoin(folder.shown, name)
-				}
-				if !filter.enters(next.shown, name) {
-					continue
-				}
+			if !b.take(&b.lookups, b.limits.lookups) {
+				return false
 			}
-			s.folders = append(s.folders, next)
+			file := filepath.Join(folder.dir, filepath.FromSlash(probe.value))
+			if info, err := os.Stat(file); err == nil && info.Mode().IsRegular() {
+				s.found = append(s.found, file)
+			}
 		}
-		if err != nil || len(batch) < credentialPathWalkBatch {
-			return s // the end of the folder, or a folder that cannot be read on
+		if !isDir || credentialWalkSkips[string(name)] {
+			return true
 		}
-	}
+		child := string(name)
+		next := credentialWalkFolder{dir: filepath.Join(folder.dir, child)}
+		if filter != nil {
+			if len(filter.globs) > 0 { // only a glob reads the path
+				next.shown = rgJoin(folder.shown, child)
+			}
+			if !filter.enters(next.shown, child) {
+				return true
+			}
+		}
+		s.folders = append(s.folders, next)
+		return true
+	})
+	return s
 }
 
 func (r *credentialPathResolver) add(id int64, value string, unknown bool) {
