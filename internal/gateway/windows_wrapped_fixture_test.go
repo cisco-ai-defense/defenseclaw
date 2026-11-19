@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // windowsStatementWrappers are spellings that wrap one PowerShell statement
@@ -157,7 +158,11 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 				}
 				if fires("Bash", test.Command, true) {
 					for _, wrapper := range windowsStatementWrappers {
-						if !fires("Bash", wrapper.wrap(test.Command), true) {
+						if !fires("Bash", wrapper.wrap(test.Command), true) &&
+							!hookpaths.GitBashReadsAlone(wrapper.wrap(test.Command), `C:\Users\alice`) {
+							// A call Git Bash reads alone (a Windows host) is
+							// placed in POSIX and keeps the POSIX reading, as
+							// on Linux and macOS: rel-1-0-10:GAP-1561.
 							missed[wrapper.name] = append(missed[wrapper.name], "claude-code-Bash/"+test.ID)
 						}
 					}

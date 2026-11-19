@@ -96,7 +96,11 @@ func TestGAP0348TrailingStatementKeepsTheVerdictFiveTiers(t *testing.T) {
 		{"codex", "Bash", "git show --output=.git/config HEAD", "git show --output=.git/config HEAD && echo ok"},
 		{"codex", "Bash", "git -C project show --output=.git/config HEAD", "git -C project show --output=.git/config HEAD ; echo done"},
 		{"codex", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; echo done"},
-		{"claudecode", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; echo done"},
+		// A Bash call Git Bash reads alone is placed in POSIX on a Windows
+		// host (hookpaths.GitBashReadsAlone) and keeps the POSIX reading, as
+		// on Linux and macOS (rel-1-0-10:GAP-1561); a PowerShell spelling in
+		// the trailer keeps the call in no dialect.
+		{"claudecode", "Bash", ":(){ :|:& };:", ":(){ :|:& };: ; Write-Output done"},
 	}
 	benign := []string{
 		"git status; echo done",
