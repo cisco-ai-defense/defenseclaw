@@ -60,7 +60,7 @@ func TestActiveStateMentionAllowedRealWriteBlocked(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if got := buildVerdict(findings, "tool_call").Action == "block"; got != block {
+			if got := gap0747Blocked(findings, block); got != block {
 				t.Errorf("%s %q: blocked=%v, want %v (%v)",
 					connectorName, command, got, block, FindingStrings(findings))
 			}

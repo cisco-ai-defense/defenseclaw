@@ -66,7 +66,7 @@ func TestR105HomeSpelledLinkToStateBlocks(t *testing.T) {
 				command := replacer.Replace(row.command)
 				input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home, DialectHint: hint}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector, EnforcementCapable: true})
-				blocked := buildVerdict(findings, "tool_call").Action == "block"
+				blocked := gap0747Blocked(findings, row.block)
 				if blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v (%s)", connector, hint, row.command, blocked, row.block,
 						strings.Join(FindingStrings(findings), ","))

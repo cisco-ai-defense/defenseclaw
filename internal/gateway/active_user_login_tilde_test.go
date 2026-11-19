@@ -100,8 +100,8 @@ func TestActiveUserLoginTildeTargetIsTheActiveHome(t *testing.T) {
 					findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 						Input: input, Connector: connectorName, EnforcementCapable: true,
 					})
-					if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != want {
-						t.Errorf("%s %q: blocked=%v, want %v (%v)", connectorName, command, blocked, want, FindingStrings(findings))
+					if msg := gap0747DefaultTierCheck(findings, want); msg != "" {
+						t.Errorf("%s %q: %s (state write %v) (%v)", connectorName, command, msg, want, FindingStrings(findings))
 					}
 				}
 				for _, spelling := range tc.spellings {
@@ -197,8 +197,8 @@ func TestActiveUserLoginTildeBehindProtectHomeUsesClientTargets(t *testing.T) {
 			if err := os.Chmod(homes, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != want {
-				t.Errorf("%s %q: blocked=%v, want %v (%v)", connectorName, command, blocked, want, FindingStrings(findings))
+			if msg := gap0747DefaultTierCheck(findings, want); msg != "" {
+				t.Errorf("%s %q: %s (state write %v) (%v)", connectorName, command, msg, want, FindingStrings(findings))
 			}
 		}
 	}

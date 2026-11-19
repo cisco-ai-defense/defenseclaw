@@ -63,7 +63,7 @@ func TestR105WindowsCMDStateWriteThroughNul(t *testing.T) {
 			Input: input, LegacyText: string(args), Connector: connectorName, EnforcementCapable: true,
 		})
 		verdict := buildVerdict(findings, "tool_call")
-		if got := verdict.Action == "block"; got != tc.block {
+		if got := gap0747Blocked(findings, tc.block); got != tc.block {
 			t.Errorf("%s: action %q, want block=%t (findings %v)", tc.command, verdict.Action, tc.block, findings)
 		}
 		if tc.block && !slices.ContainsFunc(findings, func(f RuleFinding) bool {
@@ -187,7 +187,7 @@ func TestR105WindowsCMDSlashCStateWrite(t *testing.T) {
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
 			verdict := buildVerdict(findings, "tool_call")
-			if got := verdict.Action == "block"; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}
@@ -232,7 +232,7 @@ func TestR105WindowsCMDStateDirectoryRemove(t *testing.T) {
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
 			verdict := buildVerdict(findings, "tool_call")
-			if got := verdict.Action == "block"; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}
@@ -315,7 +315,7 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 		}
 		findings, took := judge(size)
 		verdict := buildVerdict(findings, "tool_call")
-		if got := verdict.Action == "block"; got != tc.block {
+		if got := gap0747Blocked(findings, tc.block); got != tc.block {
 			t.Errorf("unit %q tail %q: action %q, want block=%t", tc.unit, tc.tail, verdict.Action, tc.block)
 		}
 		assertLinearReaderTime(t, fmt.Sprintf("unit %q", tc.unit), took, func(full bool) time.Duration {
@@ -486,7 +486,7 @@ func TestR105WindowsCMDMentionsAndManyCalls(t *testing.T) {
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
 			verdict := buildVerdict(findings, "tool_call")
-			if got := verdict.Action == "block"; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Errorf("%s %q (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}
@@ -705,7 +705,7 @@ func TestR105WindowsCMDHeredocSearchArgument(t *testing.T) {
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
 			verdict := buildVerdict(findings, "tool_call")
-			if got := verdict.Action == "block"; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Errorf("%s %q (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}

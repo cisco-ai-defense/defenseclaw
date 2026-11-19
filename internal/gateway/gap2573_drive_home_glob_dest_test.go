@@ -70,7 +70,7 @@ func TestR105GAP2573DriveHomeGlobDestinationIntoState(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+			if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 				t.Errorf("%s %s %q: block=%v, want %v", connectorName, row.id, row.command, blocked, row.block)
 			}
 		}

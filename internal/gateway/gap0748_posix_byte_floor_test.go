@@ -42,8 +42,8 @@ func TestGAP0748POSIXShellOverTheInputBoundIsTruncatedFiveTiers(t *testing.T) {
 		}
 		action, findings = boundedDecideClaudeCode(t, api, env, boundedShellCommand(pad(boundedShellSeen, 1)))
 		t.Logf("ROW %s | claudecode Bash | state write + padding | %s", tier.name, action)
-		if got := boundedParse(action); got != bounded.Block {
-			t.Errorf("%s state write beside padding: action %s, want block; findings %v", tier.name, action, findings)
+		if got := boundedParse(action); got != gap0747StateWriteAction(tier.tier) {
+			t.Errorf("%s state write beside padding: action %s, want %s; findings %v", tier.name, action, gap0747StateWriteAction(tier.tier), findings)
 		}
 	}
 }

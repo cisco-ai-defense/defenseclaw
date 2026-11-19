@@ -74,7 +74,7 @@ func TestR105LinkedDirMoveOntoStateEntryLinkBlocks(t *testing.T) {
 				input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home, DialectHint: hint}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{Input: input, Connector: connector, EnforcementCapable: true})
 				got := strings.Join(FindingStrings(findings), ",")
-				blocked := buildVerdict(findings, "tool_call").Action == "block"
+				blocked := gap0747Blocked(findings, row.block)
 				if blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v (%s)", connector, hint, row.command, blocked, row.block, got)
 				}

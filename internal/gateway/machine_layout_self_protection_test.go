@@ -20,7 +20,8 @@ import (
 // machineLayoutCall posts one PreToolUse call of the Claude Code hook, as
 // the per-user hook or as a managed hook peer of home, under the rule pack
 // ("" is the default pack), and reports whether it is blocked by the
-// DefenseClaw state-write finding.
+// DefenseClaw state-write finding (a block in the strict pack, a HIGH alert in
+// the others).
 func machineLayoutCall(t *testing.T, home, project, tool string, input map[string]any, managed bool, pack string) (blocked bool, response string) {
 	t.Helper()
 	cfg := &config.Config{}
@@ -38,7 +39,13 @@ func machineLayoutCall(t *testing.T, home, project, tool string, input map[strin
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
 	response = recorder.Body.String()
-	return strings.HasPrefix(response, `{"action":"block"`) && strings.Contains(response, "tamper.detector_state_write"), response
+	// GAP-0747 owner tiering 2026-11-15T15:20Z: the state write is a block in
+	// strict and a HIGH alert in the default and permissive packs.
+	want := `{"action":"alert"`
+	if pack == "strict" {
+		want = `{"action":"block"`
+	}
+	return strings.HasPrefix(response, want) && strings.Contains(response, "tamper.detector_state_write"), response
 }
 
 // machineLayoutProtected are files of the machine install and state of a
@@ -196,8 +203,12 @@ func TestMachineLayoutApplyPatchIsSelfProtection(t *testing.T) {
 				for _, file := range machineLayoutProtected {
 					for _, patch := range []string{updatePatch(file), "*** Begin Patch\n*** Add File: " + file + "\n+x\n*** End Patch\n",
 						"*** Begin Patch\n*** Delete File: " + file + "\n*** End Patch\n"} {
-						if got, out := postInstalledApplyPatch(t, f, connectorName, profile, managed, patch); got != "block" || !strings.Contains(out, "tamper.detector_state_write") {
-							t.Errorf("%s/%s managed=%t patch of %s = %s, want protected block: %.300s", profile, connectorName, managed, file, got, out)
+						want := "alert" // GAP-0747: a HIGH alert outside strict
+						if profile == "strict" {
+							want = "block"
+						}
+						if got, out := postInstalledApplyPatch(t, f, connectorName, profile, managed, patch); got != want || !strings.Contains(out, "tamper.detector_state_write") {
+							t.Errorf("%s/%s managed=%t patch of %s = %s, want protected %s: %.300s", profile, connectorName, managed, file, got, want, out)
 						}
 					}
 				}

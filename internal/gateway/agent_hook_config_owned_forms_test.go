@@ -94,6 +94,11 @@ func TestAgentHookConfigOwnedTargetSpellings(t *testing.T) {
 		// state rules.
 		if r.block && (!cell.managed || r.name != "install over hook script" && r.name != "folder holding hook scripts moved") {
 			want = "block"
+			// A proven DefenseClaw state write alerts outside strict
+			// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			if r.name == "folder holding hook scripts moved" && cell.profile != "strict" {
+				want = "alert"
+			}
 		}
 		got := judge(h.project, cell.managed, "Bash", map[string]any{"command": r.command})
 		if action := hookConfigAction(got); action != want {

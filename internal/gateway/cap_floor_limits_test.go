@@ -92,7 +92,7 @@ func TestCapFloorOwnLimitsAreTruncated(t *testing.T) {
 		for _, r := range rows {
 			want := bounded.Unknown(tier.tier)
 			if r.blocks {
-				want = bounded.Block
+				want = gap0747StateWriteAction(tier.tier)
 			}
 			action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(r.command))
 			if got := boundedParse(action); got < want {
@@ -129,8 +129,8 @@ func TestCapFloorHeredocConsumer(t *testing.T) {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		for id, command := range script {
 			action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
-			if boundedParse(action) != bounded.Block {
-				t.Errorf("%s %s: action=%s, want block; findings=%v", tier.name, id, action, findings)
+			if boundedParse(action) != gap0747StateWriteAction(tier.tier) {
+				t.Errorf("%s %s: action=%s, want %s; findings=%v", tier.name, id, action, gap0747StateWriteAction(tier.tier), findings)
 			}
 		}
 		for id, command := range data {
@@ -164,8 +164,8 @@ func TestCapFloorDepthTruncatesEveryCall(t *testing.T) {
 				}
 			}
 			write := strings.Repeat("(", depth) + boundedShellSeen + strings.Repeat(")", depth)
-			if action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(write)); boundedParse(action) != bounded.Block {
-				t.Errorf("%s state-write/%d: action=%s, want block; findings=%v", tier.name, depth, action, findings)
+			if action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(write)); boundedParse(action) != gap0747StateWriteAction(tier.tier) {
+				t.Errorf("%s state-write/%d: action=%s, want %s; findings=%v", tier.name, depth, action, gap0747StateWriteAction(tier.tier), findings)
 			}
 		}
 	}

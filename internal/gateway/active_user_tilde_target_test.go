@@ -75,8 +75,8 @@ func TestActiveUserTildeTargetIsTheActiveHome(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != want {
-				t.Errorf("%s %q: blocked=%v, want %v (%v)", connectorName, command, blocked, want, FindingStrings(findings))
+			if msg := gap0747DefaultTierCheck(findings, want); msg != "" {
+				t.Errorf("%s %q: %s (want state write %v) (%v)", connectorName, command, msg, want, FindingStrings(findings))
 			}
 		}
 		for _, command := range block {

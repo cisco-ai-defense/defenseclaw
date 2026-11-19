@@ -638,7 +638,7 @@ func TestWindowsHomeCdThenRelativeStateWrite(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v", connectorName, hint, row.command, blocked, row.block)
 				}
 			}
@@ -702,7 +702,7 @@ func TestHomeCdRecursiveCopyReadsSourcesInTheNewDirectory(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					t.Errorf("%s hint=%q %q: block=%v, want %v %v", connectorName, hint, row.command, blocked, row.block, FindingStrings(findings))
 				}
 			}

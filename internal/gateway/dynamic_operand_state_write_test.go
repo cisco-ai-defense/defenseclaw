@@ -63,9 +63,10 @@ func judgeHomeStateWriteRows(t *testing.T, rows []homeStateWriteRow) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				blocked := buildVerdict(findings, "tool_call").Action == "block"
-				if blocked != row.block {
-					t.Errorf("%s hint=%q %q: block=%v, want %v", connectorName, hint, row.command, blocked, row.block)
+				// row.block: a proven state write, a HIGH alert in the default
+				// tier (GAP-0747); other blocking rules keep blocking.
+				if msg := gap0747DefaultTierCheck(findings, row.block); msg != "" {
+					t.Errorf("%s hint=%q %q: %s (want %v) %v", connectorName, hint, row.command, msg, row.block, FindingStrings(findings))
 				}
 			}
 		}

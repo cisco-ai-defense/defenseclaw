@@ -47,13 +47,16 @@ func tminHome(t *testing.T) gap0048Home {
 }
 
 // tminWant is the verdict a write of the target gets in a tier. The state is
-// a block everywhere; the hook config is pinned in the default (alert) and
+// a HIGH alert outside strict and a block in strict and managed strict
+// (GAP-0747 owner tiering 2026-11-15T15:20Z); the hook config is pinned in the default (alert) and
 // strict (block) packs; in the other tiers it is what the same file written
 // by truncate gets there (control).
 func tminWant(tier string, state bool, control string) string {
 	switch {
-	case state:
+	case state && (tier == "strict" || tier == "managed strict"):
 		return "block"
+	case state:
+		return "alert"
 	case tier == "default":
 		return "alert"
 	case tier == "strict":

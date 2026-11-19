@@ -57,7 +57,7 @@ func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
 			if got := finding != nil && finding.contributesToEnforcement(); got != tc.block {
 				t.Fatalf("tamper enforcement=%t, want %t; finding=%+v", got, tc.block, finding)
 			}
-			if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Fatalf("tamper verdict block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
 			}
 		})
@@ -282,7 +282,7 @@ func TestR104ActiveStateMentionRequiresMutation(t *testing.T) {
 			if sshFinding != nil && sshFinding.contributesToEnforcement() {
 				t.Fatalf("state command received SSH enforcement: %v", FindingStrings(findings))
 			}
-			if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Fatalf("block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
 			}
 		})

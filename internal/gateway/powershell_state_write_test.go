@@ -208,7 +208,7 @@ func TestR105WindowsPowerShellStateWriteSpellings(t *testing.T) {
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
 			verdict := buildVerdict(findings, "tool_call")
-			if got := verdict.Action == "block"; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}
