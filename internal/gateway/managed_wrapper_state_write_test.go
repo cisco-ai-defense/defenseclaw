@@ -3,7 +3,6 @@ package gateway
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -28,27 +27,27 @@ func TestManagedRunnerPrefixWritesWhatTheWrappedCallWrites(t *testing.T) {
 		}
 	}
 	rows := []struct{ id, cmd, want string }{
-		{"C01", "cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"C02", "nohup cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"C03", "env -C ~ cp project/a.txt .defenseclaw/config.yaml", "block"},
-		{"X01", "setsid cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X02", "stdbuf -o0 cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X03", "ionice -c3 cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X04", "taskset -c 0 cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X05", "doas cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X06", "flock /tmp/zzl cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X17", "caffeinate -i cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X25", "sudo -i cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X26", "sudo -s cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X33", "caffeinate -di cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X34", "setsid -f cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X35", "sudo -Ei cp a.txt ~/.defenseclaw/config.yaml", "block"},
-		{"X36", "setsid -fw cp a.txt ~/.defenseclaw/hooks/t.sh", "block"},
-		{"E01", "env -iC ~ cp project/a.txt .defenseclaw/config.yaml", "block"},
-		{"E02", "env -iC \"$HOME\" cp project/a.txt .defenseclaw/config.yaml", "block"},
-		{"E05", "env -vC ~ cp project/a.txt .defenseclaw/hooks/t.sh", "block"},
-		{"E07", "setsid env -iC ~ mv project/a.txt .defenseclaw/config.yaml", "block"},
-		{"E08", "caffeinate -i env -C ~ cp project/a.txt .defenseclaw/config.yaml", "block"},
+		{"C01", "cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"C02", "nohup cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"C03", "env -C ~ cp project/a.txt .defenseclaw/config.yaml", "alert"},
+		{"X01", "setsid cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X02", "stdbuf -o0 cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X03", "ionice -c3 cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X04", "taskset -c 0 cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X05", "doas cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X06", "flock /tmp/zzl cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X17", "caffeinate -i cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X25", "sudo -i cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X26", "sudo -s cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X33", "caffeinate -di cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X34", "setsid -f cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X35", "sudo -Ei cp a.txt ~/.defenseclaw/config.yaml", "alert"},
+		{"X36", "setsid -fw cp a.txt ~/.defenseclaw/hooks/t.sh", "alert"},
+		{"E01", "env -iC ~ cp project/a.txt .defenseclaw/config.yaml", "alert"},
+		{"E02", "env -iC \"$HOME\" cp project/a.txt .defenseclaw/config.yaml", "alert"},
+		{"E05", "env -vC ~ cp project/a.txt .defenseclaw/hooks/t.sh", "alert"},
+		{"E07", "setsid env -iC ~ mv project/a.txt .defenseclaw/config.yaml", "alert"},
+		{"E08", "caffeinate -i env -C ~ cp project/a.txt .defenseclaw/config.yaml", "alert"},
 		{"B02", "caffeinate -i ls -la", "allow"},
 		{"B03", "setsid ls -la", "allow"},
 		{"B04", "flock /tmp/zzl cp a.txt b.txt", "allow"},
@@ -72,7 +71,7 @@ func TestManagedRunnerPrefixWritesWhatTheWrappedCallWrites(t *testing.T) {
 		{"L04", "caffeinate -i ln -s ../.ssh/authorized_keys k2", "block"},
 		{"L05", "env -C ~/project ln -s ../.ssh/authorized_keys k4", "block"},
 		{"L06", "env -C ~ ln -s .defenseclaw hc; cp a.txt ~/hc/config.yaml", "block"},
-		{"L09", "env -C ~ ln -s .defenseclaw/hooks hk; cp a.txt ~/hk/x.sh", "block"},
+		{"L09", "env -C ~ ln -s .defenseclaw/hooks hk; cp a.txt ~/hk/x.sh", "block+tamper.detector_state_write"},
 		{"L07", "env -iC ~/project ln -s keylink k5; cp a.txt k5", "block"},
 		{"N07", "ionice -c3 rsync -a ordinary/ /tmp/p1c-bk/", "allow"},
 	}
@@ -80,17 +79,12 @@ func TestManagedRunnerPrefixWritesWhatTheWrappedCallWrites(t *testing.T) {
 		for _, r := range rows {
 			payload := f.payload(t, r.cmd)
 			header := f.clientHeader(t, payload)
-			got := f.post(t, conn, payload, header)
-			want := r.want
+			body, _ := f.postBody(t, conn, payload, header)
 			// A proven DefenseClaw state write is a HIGH alert on the default
-			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z). L09 keeps its
-			// block: persistence.ssh_authorized_keys_command fires beside the
-			// state rule, as at c8090b1056.
-			if want == "block" && strings.Contains(r.cmd, ".defenseclaw/") && r.id != "L09" {
-				want = "alert"
-			}
-			if got != want {
-				t.Errorf("%s %s %q: got %s, want %s", conn, r.id, r.cmd, got, want)
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z): the row says
+			// alert and the state rule must be the only blocking-class rule.
+			if msg := gap0747HookBodyCheck(body, r.want); msg != "" {
+				t.Errorf("%s %s %q: %s", conn, r.id, r.cmd, msg)
 			}
 		}
 	}

@@ -211,6 +211,11 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 				if msg := gap0747DefaultTierCheck(judged, tc.block); msg != "" {
 					t.Fatalf("%s (action %q, findings %v)", msg, buildVerdict(judged, "tool_call").Action, findingIDs(findings))
 				}
+				// The proof is the one provenActiveStateMutation reads, and it
+				// holds in every mode: only its action gate (block) is the tier.
+				if got := gap0747StateProven(findings); got != tc.block {
+					t.Fatalf("proven state write=%t, want %t (action %q, findings %v)", got, tc.block, buildVerdict(judged, "tool_call").Action, findingIDs(findings))
+				}
 			})
 		}
 	}
@@ -462,6 +467,9 @@ func TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily(t *testi
 				judged, _ := withoutBoundedTruncation(findings)
 				if msg := gap0747DefaultTierCheck(judged, tc.block); msg != "" {
 					t.Fatalf("%s (action %q, findings %v)", msg, buildVerdict(judged, "tool_call").Action, findingIDs(findings))
+				}
+				if got := gap0747StateProven(findings); got != tc.block {
+					t.Fatalf("proven state write=%t, want %t (action %q, findings %v)", got, tc.block, buildVerdict(judged, "tool_call").Action, findingIDs(findings))
 				}
 			})
 		}

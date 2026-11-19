@@ -3,7 +3,6 @@ package gateway
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -28,15 +27,15 @@ func TestManagedDynamicOperandWordKeepsTheStateWriteJudged(t *testing.T) {
 	}
 	bt := "`"
 	rows := []struct{ id, cmd, want string }{
-		{"U09", "cp a.txt $HOME/.defenseclaw/config.yaml", "block"},
-		{"U01", "cp a.txt $HOME/.defenseclaw/config.yaml $(true)", "block"},
-		{"U02", "cp a.txt $HOME/.defenseclaw/config.yaml " + bt + "true" + bt, "block"},
-		{"U04", "cp a.txt $HOME/.defenseclaw/config.yaml " + bt + "# note" + bt, "block"},
-		{"U05", "cp a.txt ~/.defenseclaw/config.yaml $(true)", "block"},
-		{"U11", "mv a.txt $HOME/.defenseclaw/hooks/u.sh $(true)", "block"},
-		{"U13", "setsid cp a.txt ~/.defenseclaw/config.yaml $(true)", "block"},
-		{"U14", "nohup cp a.txt $HOME/.defenseclaw/config.yaml $(true)", "block"},
-		{"U15", "cp $SRC $HOME/.defenseclaw/config.yaml", "block"},
+		{"U09", "cp a.txt $HOME/.defenseclaw/config.yaml", "alert"},
+		{"U01", "cp a.txt $HOME/.defenseclaw/config.yaml $(true)", "alert"},
+		{"U02", "cp a.txt $HOME/.defenseclaw/config.yaml " + bt + "true" + bt, "alert"},
+		{"U04", "cp a.txt $HOME/.defenseclaw/config.yaml " + bt + "# note" + bt, "alert"},
+		{"U05", "cp a.txt ~/.defenseclaw/config.yaml $(true)", "alert"},
+		{"U11", "mv a.txt $HOME/.defenseclaw/hooks/u.sh $(true)", "alert"},
+		{"U13", "setsid cp a.txt ~/.defenseclaw/config.yaml $(true)", "alert"},
+		{"U14", "nohup cp a.txt $HOME/.defenseclaw/config.yaml $(true)", "alert"},
+		{"U15", "cp $SRC $HOME/.defenseclaw/config.yaml", "alert"},
 		{"K01", "cp a.txt keylink $(true)", "block"},
 		{"K02", "cp $SRC keylink", "block"},
 		{"K03", "mv $SRC keylink", "block"},
@@ -56,15 +55,12 @@ func TestManagedDynamicOperandWordKeepsTheStateWriteJudged(t *testing.T) {
 		for _, r := range rows {
 			payload := f.payload(t, r.cmd)
 			header := f.clientHeader(t, payload)
-			got := f.post(t, conn, payload, header)
-			want := r.want
-			if want == "block" && strings.Contains(r.cmd, ".defenseclaw/") {
-				// A proven DefenseClaw state write is a HIGH alert on the
-				// default pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
-				want = "alert"
-			}
-			if got != want {
-				t.Errorf("%s %s %q: got %s, want %s", conn, r.id, r.cmd, got, want)
+			body, _ := f.postBody(t, conn, payload, header)
+			// A proven DefenseClaw state write is a HIGH alert on the default
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z): the row says
+			// alert and the state rule must be the only blocking-class rule.
+			if msg := gap0747HookBodyCheck(body, r.want); msg != "" {
+				t.Errorf("%s %s %q: %s", conn, r.id, r.cmd, msg)
 			}
 		}
 	}
