@@ -777,7 +777,8 @@ def test_windows_gateway_jobs_plan_inside_their_job_budget() -> None:
     # 20 jobs averaged 17 minutes and gw15 (770 s of gateway tests) was
     # cancelled in its connector part. Planned on the recorded times, every
     # job keeps at most 660 s of tests and the jobs average at most 540 s,
-    # room for the gateway tests no Windows run has timed yet.
+    # room for the tests batches add. With the 62 gateway tests no CI run
+    # had timed now timed (GAP-1295), 28 jobs averaged 576 s; 32 plan 504 s.
     import json
 
     root = Path(__file__).resolve().parents[2]
