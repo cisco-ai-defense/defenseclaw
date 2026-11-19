@@ -170,6 +170,8 @@ type Facts struct {
 	Paths                                    []PathFact
 	Network                                  []NetworkFact
 	DataFlows                                []DataFlowFact
+	// moverCallsUnread: the facts are the reading of WithMoverCallsUnread.
+	moverCallsUnread bool
 	// sendSources are the shell values and argv of a call whose projection
 	// is not complete, for the sender reader (ReadSenders) to read what the
 	// projection did not. Private, in process only.
@@ -1111,15 +1113,19 @@ type CommandFact struct {
 	// workFolders are the folders the command may run in after the cd,
 	// pushd and popd calls before it (working_folder.go); its path facts are
 	// read in each of them.
-	workFolders  workFolders
-	Kind         CommandKind
-	Dialect      Dialect
-	Effect       CommandEffect
-	Executable   string
-	Program      string
-	Argv         []string
-	Arguments    []ArgumentFact
-	ArgvComplete bool
+	workFolders workFolders
+	// moverUnreadFolders are the folders when no mover body is read
+	// (moverUnread: the call reads one; Facts.WithMoverCallsUnread).
+	moverUnreadFolders workFolders
+	moverUnread        bool
+	Kind               CommandKind
+	Dialect            Dialect
+	Effect             CommandEffect
+	Executable         string
+	Program            string
+	Argv               []string
+	Arguments          []ArgumentFact
+	ArgvComplete       bool
 	// LiteralStdin is retained only for one bounded POSIX heredoc (any
 	// delimiter quoting, <<-) whose bytes cannot undergo shell expansion.
 	// It is private in-process evidence and is intentionally not part of
@@ -1361,6 +1367,14 @@ func (f Facts) AtHookFolder() Facts {
 	}
 	f.Paths = paths
 	return f
+}
+
+// moverUnreadOrFolders are the folders of c when no mover body is read.
+func (c CommandFact) moverUnreadOrFolders() workFolders {
+	if c.moverUnread {
+		return c.moverUnreadFolders
+	}
+	return c.workFolders
 }
 
 // OtherFolderReading reports the reading of an operand in another folder its

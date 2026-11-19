@@ -157,6 +157,12 @@ func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, fact
 		input := request.Input
 		input.Command, input.Args, input.Argv = twin, nil, nil
 		twinFacts := actionfacts.Analyze(input)
+		if facts.MoverCallsUnread() {
+			// Each twin is read as the call is (withSplitGapEffects).
+			if unread, ok := twinFacts.WithMoverCallsUnread(input.MovedWindowsShellCWD); ok {
+				twinFacts = unread
+			}
+		}
 		names = names || unresolvedFolderMayNameProtectedFile(twinFacts, noFolder)
 		cappedOperand = cappedOperand || reading.Truncated.Any() && slices.ContainsFunc(twinFacts.Paths, func(candidate actionfacts.PathFact) bool {
 			return (noFolder || candidate.UnresolvedFolder()) && unresolvedFolderOperand(candidate) &&
