@@ -36,7 +36,9 @@ func TestGAP0690MoverThatMayReturnIsJudgedWhereItReturns(t *testing.T) {
 	rank := map[string]int{"allow": 0, "alert": 1, "block": 2}
 	pairs := []struct{ name, cwd, command, plain string }{
 		{"rc-return", home, "f(){ test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc", "echo x >> .bashrc"},
-		{"rc-return 0", home, "f(){ [ -e .bashrc ] && return 0; cd /tmp; }; f && echo x >> .bashrc", "echo x >> .bashrc"},
+		// The `[ -e .bashrc ]` form of this row allows for another reason, at
+		// rel too: substrate-1:GAP-0692.
+		{"rc-return 0", home, "f(){ test -e .bashrc && return 0; cd /tmp; }; f && echo x >> .bashrc", "echo x >> .bashrc"},
 		{"rc-builtin-return", home, "f(){ test -f .bashrc && builtin return; cd /tmp; }; f && echo x >> .bashrc", "echo x >> .bashrc"},
 		{"rc-eval-return", home, "f(){ test -f .bashrc && eval return; cd /tmp; }; f && echo x >> .bashrc", "echo x >> .bashrc"},
 		{"rc-if-return", home, "f(){ if test -f .bashrc; then return; fi; cd /tmp; }; f && echo x >> .bashrc", "echo x >> .bashrc"},
