@@ -42,7 +42,7 @@ func TestManifestReceiptHTTPBindsFreshNonceAndManagedCredentials(t *testing.T) {
 	var nonces []string
 	hash := "sha256:" + strings.Repeat("a", 64)
 	client, resolver := receiptTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != SkillManifestReceiptPath || r.Header.Get("Authorization") != "Bearer receipt-test-token" || r.Header.Get("Cache-Control") != "no-store" || r.Header.Get("Content-Type") != "application/json" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/inspect/defense_claw/skill-manifest-receipts" || r.Header.Get("Authorization") != "Bearer receipt-test-token" || r.Header.Get("Cache-Control") != "no-store" || r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("invalid managed request method/path/headers")
 		}
 		data, _ := io.ReadAll(io.LimitReader(r.Body, 4097))
