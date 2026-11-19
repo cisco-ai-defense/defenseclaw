@@ -276,7 +276,6 @@ class TestJudgeIntentScope(unittest.TestCase):
 
     def test_intent_scope_alert_is_refused_where_it_is_written(self):
         import pytest
-
         from defenseclaw.config import _merge_guardrail
 
         for value in ("", "shadow", "off", "Shadow"):

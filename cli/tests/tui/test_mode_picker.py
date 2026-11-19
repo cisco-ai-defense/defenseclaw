@@ -17,7 +17,6 @@ from defenseclaw.tui.screens.mode_picker import (
     MODE_PICKER_CHOICES,
     ModePickerScreen,
     _choice_action,
-    choice_for_hotkey,
     choice_for_wire,
     normalize_connector,
     preview_for_switch,

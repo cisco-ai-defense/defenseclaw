@@ -666,11 +666,11 @@ def test_installer_cmd_uses_native_launcher_and_uninstall_accepts_upgrade_shim(t
     command = command_dir / "defenseclaw.cmd"
     legacy = tmp_path / ".defenseclaw" / ".venv" / "Scripts" / "defenseclaw.exe"
     for target in (command_dir / "defenseclaw.exe", legacy):
-        command.write_bytes(f'@echo off\r\n"{target}" %*\r\n'.encode("utf-8"))
+        command.write_bytes(f'@echo off\r\n"{target}" %*\r\n'.encode())
         assert windows_uninstall_helper.shim_runs(str(command), str(legacy))
     command.write_bytes(b'@echo off\r\n"C:\\other\\defenseclaw.exe" %*\r\n')
     assert not windows_uninstall_helper.shim_runs(str(command), str(legacy))
-    command.write_bytes(f'@echo off\r\n"{command_dir / "defenseclaw.exe"}" %*\r\nexit /b 0\r\n'.encode("utf-8"))
+    command.write_bytes(f'@echo off\r\n"{command_dir / "defenseclaw.exe"}" %*\r\nexit /b 0\r\n'.encode())
     assert not windows_uninstall_helper.shim_runs(str(command), str(legacy))
 
 
@@ -8851,19 +8851,19 @@ def test_a_rollback_bridge_that_stops_half_built_never_blocks_the_swap_back(tmp_
              "Move-Path", "Remove-Tree", "Invoke-Quietly")
     if stop == "marker-write-fails":
         fault = (
-            "function Set-Content {{ param([string]$LiteralPath, $Value, $Encoding, $ErrorAction)\n"
-            "    if ($LiteralPath -like '*.rollback-hooks-bridge') {{ throw 'disk full' }}\n"
-            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $LiteralPath -Value $Value }}\n"
-            "Save-Live '{hold}'\n"
-        ).format(hold=hold)
+            "function Set-Content { param([string]$LiteralPath, $Value, $Encoding, $ErrorAction)\n"
+            "    if ($LiteralPath -like '*.rollback-hooks-bridge') { throw 'disk full' }\n"
+            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $LiteralPath -Value $Value }\n"
+            f"Save-Live '{hold}'\n"
+        )
     else:
         # A run killed while it built the bridge leaves only what it built
         # under the building name.
         fault = (
-            "Save-Live '{hold}'\n"
+            f"Save-Live '{hold}'\n"
             "Remove-HooksBridge\n"
             "New-Item -ItemType Directory -Path (Join-Path $DataDir '.failed-hooks-bridge') | Out-Null\n"
-        ).format(hold=hold)
+        )
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = '{data}'

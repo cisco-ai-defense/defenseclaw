@@ -16,7 +16,8 @@ import (
 )
 
 // lateOrdinaryProject is a project in a user's home with a link, a hard link
-// and a plain file; HOME points at the home (the scan reads it).
+// and a plain file; HOME and the account database's home point at the home
+// (the scan reads it).
 func lateOrdinaryProject(t *testing.T) string {
 	t.Helper()
 	// The rows must not read the home of the account running the tests (GAP-0277).
@@ -56,6 +57,13 @@ func lateOrdinaryProject(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	// The account database names this home too: the hook client reads the
+	// account's own .defenseclaw (inventory, session facts, failure log) and
+	// ssh names there, and an unset seam opened the real ones of whoever ran
+	// the test (rel-1-0-10:GAP-1225).
+	oldAccountHome := perUserAccountHome
+	perUserAccountHome = func() string { return home }
+	t.Cleanup(func() { perUserAccountHome = oldAccountHome })
 	return project
 }
 
