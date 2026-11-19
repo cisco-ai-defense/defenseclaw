@@ -125,6 +125,26 @@ func (r *argumentReader) statement(s Statement, src string, depth int) []string 
 				}
 			}
 		}
+	case *Block:
+		// A loop runs its header and its body where it stands: the loop is
+		// read as those statements written in its place (one pass stands for
+		// every pass), so each is judged as the same statement sent alone
+		// (rel-1-0-10:GAP-0998); the loop keyword itself left the whole
+		// reading unread. Other blocks (function, trap, data, param, switch,
+		// try) define code or run it on a condition the walk already reads.
+		switch strings.ToLower(v.Keyword) {
+		case "foreach", "for", "while", "do":
+			loop := r.evaluations(v.Conditions, src, depth+1)
+			for _, body := range v.Bodies {
+				if body != nil {
+					loop = append(loop, r.statements(body.Statements, src, depth+1)...)
+				}
+			}
+			if len(loop) != 0 {
+				r.changed = true
+				return loop
+			}
+		}
 	case *Assignment:
 		// Keep assignment semantics; only its argument evaluations move earlier.
 		nested := r.statement(v.RHS, src, depth+1)

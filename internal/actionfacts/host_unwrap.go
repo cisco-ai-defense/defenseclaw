@@ -19,6 +19,7 @@ package actionfacts
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -442,7 +443,13 @@ func unwrapCMDOnce(source string) (string, Dialect, bool) {
 // soleCMDHostCall returns the argv of a cmd.exe source that is exactly one
 // powershell, pwsh or cmd launcher call with static words and no pipe or
 // redirect.
+//
+// A %NAME% reference in the line is read as written: the launched cmd.exe
+// inherits the environment and expands it to the same value, so
+// cmd /c "copy %USERPROFILE%\.git-credentials x" runs the copy its author
+// wrote (rel-1-0-10:GAP-0998). Any other expansion keeps the line unread.
 func soleCMDHostCall(source string) ([]string, bool) {
+	source, names := maskedCMDVariables(source)
 	probe := newParseOutput(DialectCMD, 1)
 	lexemes, ok := windowsLex(source, windowsCMD, &probe)
 	if !ok || probe.status != StatusComplete {
@@ -461,7 +468,44 @@ func soleCMDHostCall(source string) ([]string, bool) {
 			return nil, false
 		}
 	}
-	return windowsWordValues(words), true
+	values := windowsWordValues(words)
+	for i := range values {
+		values[i] = names.Replace(values[i])
+	}
+	return values, true
+}
+
+// maskedCMDVariables is source with each %NAME% reference (a name of
+// letters, digits and _) replaced by a private-use marker the cmd lexer reads
+// as a literal, and the replacer that writes the references back. A source
+// that already holds the marker rune is returned as it is.
+func maskedCMDVariables(source string) (string, *strings.Replacer) {
+	const openMark, closeMark = '\ue000', '\ue001'
+	if !strings.Contains(source, "%") || strings.ContainsRune(source, openMark) {
+		return source, strings.NewReplacer()
+	}
+	var masked strings.Builder
+	var pairs []string
+	for i := 0; i < len(source); i++ {
+		if source[i] == '%' {
+			end := strings.IndexByte(source[i+1:], '%')
+			name := ""
+			if end > 0 {
+				name = source[i+1 : i+1+end]
+			}
+			if name != "" && strings.IndexFunc(name, func(r rune) bool {
+				return !(r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
+			}) < 0 {
+				marker := string(openMark) + strconv.Itoa(len(pairs)/2) + string(closeMark)
+				pairs = append(pairs, marker, source[i:i+end+2])
+				masked.WriteString(marker)
+				i += end + 1
+				continue
+			}
+		}
+		masked.WriteByte(source[i])
+	}
+	return masked.String(), strings.NewReplacer(pairs...)
 }
 
 // hostLauncherIdentity reports that name is the Windows launcher family
@@ -1203,8 +1247,10 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 }
 
 // nonStaticNestedText is the script of a launcher spelling psparse reports as
-// not static but whose text is written out: powershell -Command { block }, and
-// Start-Process powershell -ArgumentList <literal words with -Command>.
+// not static but whose text is written out: powershell -Command { block },
+// powershell -Command "<script>" that expands only $HOME and $env:NAME
+// (psparse.HostCommandChildText, rel-1-0-10:GAP-1226), and Start-Process
+// powershell -ArgumentList <literal words with -Command>.
 func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bool) {
 	command, ok := nested.Source.(*psparse.Command)
 	if !ok {
@@ -1231,7 +1277,10 @@ func nonStaticNestedText(source string, nested psparse.NestedScript) (string, bo
 				}
 			}
 		}
-		if block == nil || len(block.Params) != 0 {
+		if block == nil {
+			return psparse.HostCommandChildText(command)
+		}
+		if len(block.Params) != 0 {
 			return "", false
 		}
 		start, end := block.Span()

@@ -1129,6 +1129,19 @@ func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRe
 // install, which keeps its own tool policy (GAP-0048 adds no finding there).
 func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
 	findings := trustedToolCallFindingsOf(ctx, action, mcpServer, secureClient)
+	for _, nested := range windowsNestedReadings(action) {
+		// A statement the call runs inside a subexpression, an operand, a
+		// loop body or a powershell -c or cmd /c script is judged by the
+		// dispatch inside it; every other reading judges it here, on top of
+		// the call's findings, as it judges the same statement sent alone
+		// (rel-1-0-10:GAP-0998, GAP-1226). A script the dispatch does not
+		// read is judged by every reading, as a script reading of the call.
+		if nested.unjudged {
+			findings = withHostTwinFindings(findings, trustedToolCallFindingsOf(ctx, nested.request, mcpServer, secureClient))
+			continue
+		}
+		findings = trustedToolCallLaneFindings(ctx, nested.request, findings, mcpServer, secureClient)
+	}
 	if twin, ok := localCommandLinkTwinRequest(action); ok {
 		// The shell call as it runs once its links are followed (command
 		// cat key-link, echo x > cfg-link): every reading of the call, the
@@ -1147,7 +1160,14 @@ func trustedToolCallFindings(ctx context.Context, action trustedActionRequest, m
 }
 
 func trustedToolCallFindingsOf(ctx context.Context, action trustedActionRequest, mcpServer string, secureClient bool) []RuleFinding {
-	findings := inspectDispatchTrustedAction(ctx, action)
+	return trustedToolCallLaneFindings(ctx, action, inspectDispatchTrustedAction(ctx, action), mcpServer, secureClient)
+}
+
+// trustedToolCallLaneFindings adds to findings every reading of the call but
+// the rule dispatch: proved high-severity writes, outbound PII, the agent
+// hook configuration targets, the MCP/app and shell tool effects and the
+// DefenseClaw control guard.
+func trustedToolCallLaneFindings(ctx context.Context, action trustedActionRequest, findings []RuleFinding, mcpServer string, secureClient bool) []RuleFinding {
 	findings = provedHighWriteFindings(ctx, action, findings)
 	findings = outboundPIIFindings(action, findings)
 	if !secureClient {
