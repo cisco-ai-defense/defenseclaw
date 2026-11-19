@@ -303,18 +303,22 @@ func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context
 	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
 }
 
-// A receipt-capable per-user call has already offered its answer before its
-// terminal records are written, and only those records hold it (a per-user
-// gateway journals no occurrence, rel-1-0-10 GAP-0088), so give
-// finalization a fresh window after earlier telemetry used the ordinary 10 s
-// window. Writes queued in that window finish after its deadline. This does
-// not extend the hook's answer deadline or Secure Client's path.
+// A receipt-capable call has already offered its answer before its terminal
+// records are written, so give finalization a fresh window after earlier
+// telemetry and the wait for the receipt used the ordinary 10 s window.
+// Writes queued in that window finish after its deadline. On a per-user
+// gateway only those records hold the answer (it journals no occurrence,
+// rel-1-0-10 GAP-0088). On a managed gateway the window also covers the
+// journal update that marks the occurrence decided: without it an overloaded
+// host lost the connector-hook row of a delivered decision (context_done) and
+// left recovery an undecided occurrence (rel-1-0-10 GAP-0277). This does not
+// extend the hook's answer deadline or Secure Client's path.
 func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receiptBacked bool) (context.Context, context.CancelFunc) {
 	if !receiptBacked {
 		return ctx, nil
 	}
 	cfg := a.decisionConfig(ctx)
-	if cfg == nil || cfg.SecureClientIntegration() || !perUserHookInstall(cfg) {
+	if cfg == nil || cfg.SecureClientIntegration() {
 		return ctx, nil
 	}
 	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
