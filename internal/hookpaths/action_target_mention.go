@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"iter"
 	"maps"
 	"math"
 	"net"
@@ -604,9 +605,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		text = actionBlankComments(text, command)
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, span := range actionMentionToken.FindAllStringIndex(text, -1) {
-		token := text[span[0]:span[1]]
-		if actionURLAuthorityToken(text, span[0], token) {
+	for start, end := range actionMentionTokens(text) {
+		token := text[start:end]
+		if actionURLAuthorityToken(text, start, token) {
 			continue
 		}
 		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
@@ -1452,7 +1453,37 @@ func patchCommandResolutionChange(line string) bool {
 // not the home. Writers and redirects keep the conservative home spelling.
 const actionLiteralTilde = "\x1e"
 
-var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+// actionMentionTokenByte reports a byte a mention token is made of: an ASCII
+// letter or digit, or one of _ . / ~ * ? [ ] - and the literal-tilde mark.
+// A byte of a multi-byte character is none of them.
+func actionMentionTokenByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		strings.IndexByte("_./~*?[]-"+actionLiteralTilde, c) >= 0
+}
+
+// actionMentionTokens yields the start and end of each mention token of
+// text: each longest run of actionMentionTokenByte bytes, left to right. The
+// scan is one pass with no allocation; the regexp it replaces built a slice
+// per token, and the target scan of a 1 MiB here-document of text spent
+// about 30 MiB and a fifth of its time there, twice per call
+// (rel-1-0-10:GAP-0299).
+func actionMentionTokens(text string) iter.Seq2[int, int] {
+	return func(yield func(int, int) bool) {
+		for i := 0; i < len(text); i++ {
+			if !actionMentionTokenByte(text[i]) {
+				continue
+			}
+			start := i
+			for i < len(text) && actionMentionTokenByte(text[i]) {
+				i++
+			}
+			if !yield(start, i) {
+				return
+			}
+		}
+	}
+}
+
 var actionWindowsMentionToken = lazyregexp.New(`(?:[A-Za-z]:)?[A-Za-z0-9_./~*?\[\]\x1e-]+`)
 
 // actionURLAuthorityToken reports a mention token that is the //host/... part
@@ -1827,7 +1858,7 @@ func actionMarkLiteralTildes(text string) string {
 	out.Grow(len(text))
 	for i := 0; i < len(text); i++ {
 		if text[i] == '~' && quoted[i] && i+1 < len(text) && text[i+1] == '/' &&
-			(i == 0 || !actionMentionToken.MatchString(text[i-1:i])) {
+			(i == 0 || !actionMentionTokenByte(text[i-1])) {
 			out.WriteString(actionLiteralTilde)
 			continue
 		}
@@ -2462,7 +2493,7 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	// Its directory is followed and its name kept, so mv a.txt /ext/y/
 	// config.yaml with y -> ~/.defenseclaw names the entry when config.yaml
 	// links out of the tree, as it does when config.yaml is a file (GAP-2560).
-	differ, missing := actionStateEntryMayDiffer(value)
+	differ, missing := home.memo.stateEntryMayDiffer(value)
 	if differ {
 		if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
 			if parent, ok := home.memo.resolveWriteTarget(filepath.Dir(value)); ok {

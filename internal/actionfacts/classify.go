@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
 var filesystemFormatterPrograms = []string{
@@ -1717,7 +1719,7 @@ func classifyStructuredPowerShellNewItem(
 		if controls.consume(command, arg) {
 			continue
 		}
-		if arg == "" || arg == "-" || !strings.HasPrefix(arg, "-") {
+		if arg == "" || arg == "-" || !powerShellDashLed(arg) {
 			if !structuredPowerShellStaticOperand(arg) {
 				targetValid = false
 				structuredPowerShellMarkDynamicEffect(command, arg)
@@ -1855,39 +1857,27 @@ func structuredPowerShellBooleanValue(value string) (bool, bool) {
 	}
 }
 
+// canonicalPowerShellNewItemParameter binds a New-Item parameter key (a
+// dash word without a colon part) as PowerShell binds it, through the shared
+// table psparse.NewItemParameters: a name or alias in any case, a prefix of
+// one parameter only, any dash form (rel-1-0-10:GAP-0849). The result is the
+// canonical name with a hyphen. A key that binds to no parameter or to more
+// than one is returned in lower case, so it falls to the reader's
+// unknown-parameter case.
 func canonicalPowerShellNewItemParameter(key string) string {
-	switch strings.ToLower(key) {
-	case "-type":
-		return "-itemtype"
-	case "-target":
-		return "-value"
-	case "-ea":
-		return "-erroraction"
-	case "-ev":
-		return "-errorvariable"
-	case "-infa":
-		return "-informationaction"
-	case "-iv":
-		return "-informationvariable"
-	case "-ob":
-		return "-outbuffer"
-	case "-ov":
-		return "-outvariable"
-	case "-pv":
-		return "-pipelinevariable"
-	case "-proga":
-		return "-progressaction"
-	case "-wa":
-		return "-warningaction"
-	case "-wv":
-		return "-warningvariable"
-	case "-db":
-		return "-debug"
-	case "-vb":
-		return "-verbose"
-	default:
-		return strings.ToLower(key)
+	if name, _, colon, ok := psparse.ParameterWord(key); ok && !colon {
+		if binding, known := psparse.NewItemParameters.Bind(name); known {
+			return "-" + binding.Name
+		}
 	}
+	return strings.ToLower(key)
+}
+
+// powerShellDashLed reports a word PowerShell may read as a parameter: a
+// hyphen first, or an en dash, em dash or horizontal bar before a name.
+func powerShellDashLed(word string) bool {
+	_, _, _, ok := psparse.ParameterWord(word)
+	return ok || strings.HasPrefix(word, "-")
 }
 
 func powerShellNewItemCommonValueAuthoritative(
@@ -3799,37 +3789,7 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
 		return
 	}
-	parsed := parseOwnedPOSIXOptions(
-		command.Argv,
-		exactOptionSet(
-			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
-			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
-			"--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
-			"--suffix", "--chmod", "--chown", "--log-file", "--password-file",
-			"--partial-dir", "--max-size", "--min-size", "--bwlimit", "--timeout",
-			"--port", "--out-format", "--info", "--debug", "--max-delete",
-			"--modify-window", "--compress-level", "--skip-compress", "--usermap",
-			"--groupmap", "--iconv", "--contimeout", "--address",
-		),
-		exactOptionSet(
-			"-a", "-v", "-z", "-r", "-l", "-p", "-t", "-g", "-o", "-D", "-h", "-P",
-			"-u", "-c", "-x", "-H", "-A", "-X", "-S", "-W", "-q", "-i", "-R", "-L",
-			"-k", "-K", "-E", "-m", "-C", "-b", "-I", "-O", "-J", "-U", "-N", "-d",
-			"--archive", "--verbose", "--compress", "--recursive", "--progress",
-			"--partial", "--delete", "--delete-after", "--delete-before",
-			"--delete-during", "--delete-delay", "--delete-excluded", "--human-readable",
-			"--update", "--checksum", "--links", "--perms", "--times", "--group",
-			"--owner", "--devices", "--specials", "--hard-links", "--acls", "--xattrs",
-			"--sparse", "--whole-file", "--quiet", "--itemize-changes", "--relative",
-			"--copy-links", "--stats", "--mkpath", "--inplace", "--append",
-			"--append-verify", "--existing", "--ignore-existing",
-			"--remove-source-files", "--force", "--prune-empty-dirs", "--no-motd",
-			"--safe-links", "--numeric-ids", "--omit-dir-times", "--size-only",
-			"--ignore-times", "--one-file-system", "--backup", "--dirs",
-			"--keep-dirlinks", "--copy-dirlinks", "--executability", "--cvs-exclude",
-		),
-		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
-	)
+	parsed := parseRsyncOptions(command.Argv)
 	if parsed.preview {
 		command.Effect = EffectPreview
 		return
@@ -3885,6 +3845,53 @@ func classifyRsync(out *parseOutput, command *CommandFact) {
 	})
 	out.appendDataFlow(DataFlowFact{ToCommandID: command.ID, From: DataFile, To: DataProcess})
 	out.appendDataFlow(DataFlowFact{FromCommandID: command.ID, From: DataProcess, To: DataNetwork})
+}
+
+// parseRsyncOptions reads an rsync argv (the program word first) with the
+// option grammar classifyRsync owns.
+func parseRsyncOptions(argv []string) ownedPOSIXOptionParse {
+	return parseOwnedPOSIXOptions(
+		argv,
+		exactOptionSet(
+			"-e", "--rsh", "-f", "--filter", "-T", "--temp-dir", "-B", "--block-size",
+			"--rsync-path", "--exclude", "--include", "--exclude-from", "--include-from",
+			"--files-from", "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
+			"--suffix", "--chmod", "--chown", "--log-file", "--password-file",
+			"--partial-dir", "--max-size", "--min-size", "--bwlimit", "--timeout",
+			"--port", "--out-format", "--info", "--debug", "--max-delete",
+			"--modify-window", "--compress-level", "--skip-compress", "--usermap",
+			"--groupmap", "--iconv", "--contimeout", "--address",
+		),
+		exactOptionSet(
+			"-a", "-v", "-z", "-r", "-l", "-p", "-t", "-g", "-o", "-D", "-h", "-P",
+			"-u", "-c", "-x", "-H", "-A", "-X", "-S", "-W", "-q", "-i", "-R", "-L",
+			"-k", "-K", "-E", "-m", "-C", "-b", "-I", "-O", "-J", "-U", "-N", "-d",
+			"--archive", "--verbose", "--compress", "--recursive", "--progress",
+			"--partial", "--delete", "--delete-after", "--delete-before",
+			"--delete-during", "--delete-delay", "--delete-excluded", "--human-readable",
+			"--update", "--checksum", "--links", "--perms", "--times", "--group",
+			"--owner", "--devices", "--specials", "--hard-links", "--acls", "--xattrs",
+			"--sparse", "--whole-file", "--quiet", "--itemize-changes", "--relative",
+			"--copy-links", "--stats", "--mkpath", "--inplace", "--append",
+			"--append-verify", "--existing", "--ignore-existing",
+			"--remove-source-files", "--force", "--prune-empty-dirs", "--no-motd",
+			"--safe-links", "--numeric-ids", "--omit-dir-times", "--size-only",
+			"--ignore-times", "--one-file-system", "--backup", "--dirs",
+			"--keep-dirlinks", "--copy-dirlinks", "--executability", "--cvs-exclude",
+		),
+		exactOptionSet("--help", "--version", "-n", "--dry-run", "--list-only"),
+	)
+}
+
+// RsyncPreview reports an rsync argv (the program word first) that is a dry
+// run or a listing (-n, --dry-run, --list-only) with every option one the
+// rsync grammar knows: it writes nothing. A call wrapped in sudo keeps the
+// wrapper as its command fact, so the gateway reads the wrapped rsync with
+// this (rel-1-0-10:GAP-0104: sudo rsync -anrc --delete x/ ~/.defenseclaw/hooks/).
+// An unknown option (--no-dry-run turns the preview off again) is no preview.
+func RsyncPreview(argv []string) bool {
+	parsed := parseRsyncOptions(argv)
+	return parsed.preview && parsed.complete
 }
 
 // rsyncRemoteHost is the host of a remote rsync operand: [user@]host:path,
@@ -8902,11 +8909,13 @@ func windowsDriveRoot(value string) bool {
 }
 
 type nsenterInvocation struct {
-	paths      []string
-	childIndex int
-	childKnown bool
-	preview    bool
-	complete   bool
+	paths         []string
+	childIndex    int
+	childKnown    bool
+	workDir       string
+	folderUnknown bool
+	preview       bool
+	complete      bool
 }
 
 func parseNSEnterInvocation(argv []string) nsenterInvocation {
@@ -8943,6 +8952,11 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			continue
 		case "-F", "--no-fork":
 			continue
+		case "-w", "--wd", "-r", "--root":
+			// With no attached value, nsenter inherits the target process's
+			// folder or root, which the caller cannot place locally.
+			result.folderUnknown = true
+			continue
 		case "-t", "--target":
 			if i+1 >= len(argv) || argv[i+1] == "" {
 				result.complete = false
@@ -8963,6 +8977,24 @@ func parseNSEnterInvocation(argv []string) nsenterInvocation {
 			} else {
 				target = value
 			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--wd=") {
+			result.workDir = strings.TrimPrefix(arg, "--wd=")
+			if !staticAbsolutePOSIXPath(result.workDir) {
+				result.folderUnknown = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-w") && len(arg) > 2 {
+			result.workDir = arg[2:]
+			if !staticAbsolutePOSIXPath(result.workDir) {
+				result.folderUnknown = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--root=") || strings.HasPrefix(arg, "-r") && len(arg) > 2 {
+			result.folderUnknown = true
 			continue
 		}
 		if strings.HasPrefix(arg, "-t") && len(arg) > 2 {

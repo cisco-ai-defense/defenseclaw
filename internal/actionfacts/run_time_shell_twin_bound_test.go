@@ -37,7 +37,7 @@ func TestRunTimeShellTwinNestedSubstitutionsBounded(t *testing.T) {
 	read := func(t *testing.T, command string) (string, bool, bounded.CapSet) {
 		t.Helper()
 		start := time.Now()
-		twin, ok, caps := RunTimeShellTwin(command)
+		twin, ok, caps, _ := RunTimeShellTwin(command)
 		if elapsed := time.Since(start); elapsed > gap1041Budget {
 			t.Errorf("reading took %v, budget %v", elapsed, gap1041Budget)
 		}
@@ -96,10 +96,10 @@ func TestRunTimeShellWordReadsEachWordOnce(t *testing.T) {
 // maxRunTimeShellWords program words; one more is TRUNCATED cap=nodes.
 func TestRunTimeShellTwinWordBudget(t *testing.T) {
 	statements := func(n int) string { return strings.Repeat("$a; ", n-1) + "\"$SHELL\" -c true" }
-	if _, ok, caps := RunTimeShellTwin(statements(maxRunTimeShellWords)); !ok || caps.Any() {
+	if _, ok, caps, _ := RunTimeShellTwin(statements(maxRunTimeShellWords)); !ok || caps.Any() {
 		t.Errorf("at the budget: ok=%v caps=%v; want a reading and no cap", ok, caps)
 	}
-	if _, _, caps := RunTimeShellTwin(statements(maxRunTimeShellWords + 1)); !caps.Has(bounded.Nodes) {
+	if _, _, caps, _ := RunTimeShellTwin(statements(maxRunTimeShellWords + 1)); !caps.Has(bounded.Nodes) {
 		t.Errorf("past the budget: caps=%v; want TRUNCATED cap=nodes", caps)
 	}
 }

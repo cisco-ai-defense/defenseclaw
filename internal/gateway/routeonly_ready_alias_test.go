@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // rel-1-0-10 GAP-0921: enterprise status said "route-only: codex ready"
@@ -253,6 +255,31 @@ func TestRouteOnlyReadinessNamesNamedNotStoredAndBedrockLoopbackModels(t *testin
 	for _, m := range cfg.Routing.Models {
 		if !routeOnlyAliasWithoutKey(cfg, m, "openai") {
 			t.Fatalf("%s counts as having a key", m.Name)
+		}
+	}
+}
+
+// rel-1-0-10 GAP-1319: an ordinary account of a managed Windows host is
+// pointed at the administrator status command, which names the cause:
+// doctor is refused there. Linux and macOS keep doctor, which runs there.
+func TestPublicRouteOnlyFixNamesAToolThatWorksOnTheManagedHost(t *testing.T) {
+	win := publicRouteOnlyFix("windows")
+	if strings.Contains(win, "defenseclaw doctor") || !strings.Contains(win, "enterprise windows status") || !strings.Contains(win, "administrator") {
+		t.Fatalf("windows fix = %q", win)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if got := publicRouteOnlyFix(goos); !strings.Contains(got, "defenseclaw doctor as an administrator") {
+			t.Fatalf("%s fix = %q", goos, got)
+		}
+	}
+	row := routeOnlyReadiness{Connector: "claudecode", Cause: routeCauseEpoch, Problem: "fixture-problem", Fix: "fixture-fix"}
+	public := publicRouteOnly(row)
+	if public.Fix != publicRouteOnlyFix(runtime.GOOS) || public.Cause != routeCauseEpoch || strings.Contains(public.Problem+public.Fix, "fixture-") {
+		t.Fatalf("public row = %+v", public)
+	}
+	for _, cause := range []string{routeCauseEpoch, routeCauseAliasNoCredential, routeCauseUpstreamNotSet, routeCauseSigning, routeCauseCredentialStored, routeCauseNoCredential, routeCauseNoEnrolled} {
+		if enterprisestatus.RoutingCauseText(cause) == "" {
+			t.Fatalf("status has no text for the gateway cause %q", cause)
 		}
 	}
 }

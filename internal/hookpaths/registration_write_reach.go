@@ -40,12 +40,13 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	}
 	protected := make(protectedFiles, 0, len(names))
 	origin := make([]string, 0, len(names))
+	call := memoHookCall() // once for the names (rel-1-0-10:GAP-1293)
 	for _, name := range names {
 		if !filepath.IsAbs(name) {
 			continue
 		}
-		entry := protectedFile{path: filepath.Clean(name)}
-		if info, err := callStat(entry.path); err == nil {
+		entry := protectedFile{path: filepath.Clean(name), call: call}
+		if info, err := call.stat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
 			entry.unknown = true
@@ -122,7 +123,7 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		registrationFindRsyncReach(file, cwd, home, protected) {
 		return true
 	}
-	if strings.Contains(command, "cd ") || strings.Contains(command, "pushd ") {
+	if ChangesDirectory(command) {
 		if statements, ok := TopLevelStatements(command, cwd, home); ok {
 			for _, statement := range statements {
 				if readOperands(statement.Command, statement.Dir, statement.User) {
@@ -350,7 +351,7 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 					continue
 				}
 				if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-					paths := actionBoundedGlob(OperandPath(value, currentCWD), false)
+					paths, truncated := actionBoundedGlob(OperandPath(value, currentCWD), false)
 					if len(paths) > 64 {
 						continue
 					}
@@ -360,6 +361,9 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 							return false
 						}
 					}
+					// No match read before the cap is registered: the
+					// reading is truncated (RegistrationWriteReachedBounded).
+					noteGlobCut(truncated)
 					continue
 				}
 				if !strings.ContainsAny(value, "*?[") && protectedReachPath(OperandPath(value, currentCWD), protected, "") {
@@ -642,10 +646,13 @@ func registrationItemPaths(word *syntax.Word, command, cwd, home string) []strin
 		return nil
 	}
 	if strings.ContainsAny(value, "*?[") && actionWordHasUnquotedGlob(word, command) {
-		matches := actionBoundedGlob(OperandPath(value, cwd), false)
+		matches, truncated := actionBoundedGlob(OperandPath(value, cwd), false)
 		if len(matches) > 64 {
 			return nil
 		}
+		// The loop reader decides on the matches read before the cap: the
+		// reading is truncated (RegistrationWriteReachedBounded).
+		noteGlobCut(truncated)
 		return matches
 	}
 	return []string{value}

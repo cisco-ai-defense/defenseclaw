@@ -25,7 +25,8 @@ func TestGAP1182WrapperChildShellBodyReadings(t *testing.T) {
 func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 	skipPOSIXPathsOnWindows(t)
 	// want: "body", the body is read here as the script of the consumer;
-	// "unknown", the unknown tier; "none", this reader adds nothing because
+	// "unknown", the unknown tier; "strict", the strict tiers only (a data
+	// program after a PATH change, rel-1-0-10:GAP-1481); "none", this reader adds nothing because
 	// the consumer is data, or the ordinary readers already judge its stdin
 	// (topLevelHereDocReadElsewhere: the gateway rows of
 	// TestGAP1183TopLevelHereDocConsumerOnClaudeHook, TestCapFloorHeredocConsumer
@@ -38,7 +39,10 @@ func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 		{"cat", "'EOF'", "none"},
 		{"yash", "'EOF'", "body"}, {"yash", "EOF", "body"}, {"nohup yash", "EOF", "body"},
 		{"newgrp", "'EOF'", "unknown"}, {"newgrp", "EOF", "unknown"},
-		{"/tmp/x/wrap sh", "'EOF'", "unknown"}, {"PATH=/tmp/x:$PATH cat", "'EOF'", "unknown"},
+		{"/tmp/x/wrap sh", "'EOF'", "unknown"}, {"PATH=/tmp/x:$PATH cat", "'EOF'", "strict"},
+		{"export PATH=/tmp/x:$PATH; cat > t.sh", "'EOF'", "strict"}, {"env PATH=/tmp/x cat", "'EOF'", "strict"},
+		{"export PATH=/tmp/x:$PATH; newgrp", "'EOF'", "unknown"}, {"PATH=/tmp/x:$PATH newgrp", "'EOF'", "unknown"},
+		{"export PATH=/tmp/x:$PATH; /tmp/x/wrap sh", "'EOF'", "unknown"},
 	} {
 		command := row.prefix + " <<" + row.delimiter + "\n: >> ~/.defenseclaw/config.yaml\nEOF"
 		input := Input{Tool: "Bash", Command: command, CWD: "/work", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
@@ -47,10 +51,13 @@ func TestGAP1183TopLevelHereDocBodyReadings(t *testing.T) {
 			return s.Text == ": >> ~/.defenseclaw/config.yaml\n"
 		})
 		unknown := slices.ContainsFunc(got, func(s SimpleCommand) bool {
-			return s.EvaluationFailure == EvaluationFailureUnresolvedBody
+			return s.EvaluationFailure == EvaluationFailureUnknownStdinConsumer
 		})
-		if body != (row.want == "body") || unknown != (row.want == "unknown") {
-			t.Errorf("%q: body=%t unknown=%t, want %s: %+v", command, body, unknown, row.want, got)
+		strict := slices.ContainsFunc(got, func(s SimpleCommand) bool {
+			return s.EvaluationFailure == EvaluationFailureUnknownStdinConsumerStrict
+		})
+		if body != (row.want == "body") || unknown != (row.want == "unknown") || strict != (row.want == "strict") {
+			t.Errorf("%q: body=%t unknown=%t strict=%t, want %s: %+v", command, body, unknown, strict, row.want, got)
 		}
 	}
 	command := "unused() { sh <<'EOF'\n: >> ~/.defenseclaw/config.yaml\nEOF\n}\ntrue"
@@ -107,5 +114,31 @@ func TestGAP1183EmptyHereDocBodyReadsNothing(t *testing.T) {
 		}) {
 			t.Errorf("%q: an empty document is not an unread body: %+v", command, got)
 		}
+	}
+}
+
+func TestGAP1241NestedWrapperChildFolder(t *testing.T) {
+	skipPOSIXPathsOnWindows(t)
+	for _, row := range []struct {
+		name, command, cwd string
+		unknown            bool
+	}{
+		{"chroot root", "chroot / sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
+		{"chroot named root", "chroot /srv/root sh -c ': >> home/u/.defenseclaw/config.yaml'", "/srv/root", false},
+		{"chroot skip chdir", "chroot --skip-chdir / sh -c ': >> .defenseclaw/config.yaml'", "/home/u", false},
+		{"nsenter wd", "nsenter --target=1 --wd=/ sh -c ': >> home/u/.defenseclaw/config.yaml'", "/", false},
+		{"nsenter target wd", "nsenter --target=1 --wd sh -c ': >> .defenseclaw/config.yaml'", "", true},
+		{"nsenter target root", "nsenter --target=1 --root sh -c ': >> .defenseclaw/config.yaml'", "", true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			input := Input{Tool: "Bash", Command: row.command, CWD: "/home/u", ActiveHome: "/home/u", DialectHint: DialectPOSIX}
+			got := SimpleCommands(input, Analyze(input))
+			if !slices.ContainsFunc(got, func(s SimpleCommand) bool {
+				return s.Text == ": >> home/u/.defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown ||
+					s.Text == ": >> .defenseclaw/config.yaml" && s.CWD == row.cwd && s.UnresolvedFolder == row.unknown
+			}) {
+				t.Errorf("child folder want %q unknown=%v: %+v", row.cwd, row.unknown, got)
+			}
+		})
 	}
 }

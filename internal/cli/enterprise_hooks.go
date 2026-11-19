@@ -2164,7 +2164,8 @@ type enterpriseHookVerifyRun struct {
 	// RecordedProtected names the excused signed-out Hermes rows
 	// (enterpriseHookHermesSignedOutRow), own-folder rows
 	// (enterpriseHookSignedOutUntrustedFolderVerifyRow) and the rows failed only by an
-	// enterpriseHookUserFileFault that the guardian last recorded as
+	// enterpriseHookUserFileFault, or route_config_unverified only
+	// (enterpriseHookRouteOnlyUnverified), that the guardian last recorded as
 	// protected; the protected records are compared with them as protected.
 	RecordedProtected map[string]bool
 	AuthorizationErr  error
@@ -2767,6 +2768,7 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 		}
 		token := ""
 		otlpToken := ""
+		routeOnlyUnverified := false
 		if targetErr == nil {
 			token, otlpToken, targetErr = enterpriseHookTargetTokens(cfg.DataDir, target.Connector, resolved.sid, false)
 		}
@@ -2803,7 +2805,7 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 					row.Result = &result
 					row.UserHome = result.UserHome
 					row.Connector = result.Connector
-					targetErr = unverified
+					targetErr, routeOnlyUnverified = unverified, true
 				}
 			}
 			if targetErr == nil {
@@ -2869,11 +2871,16 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 			row.Error = targetErr.Error()
 			run.Failures++
 			var userFile enterpriseHookUserFileFault
-			if errors.As(targetErr, &userFile) && recorded[enterpriseHookProtectedTargetKey(row)].OK {
+			if (errors.As(targetErr, &userFile) || routeOnlyUnverified) && recorded[enterpriseHookProtectedTargetKey(row)].OK {
 				// The row fails on a file in the account's own profile
 				// only, and the guardian, whose readiness reports that
 				// file as a warning, recorded it protected: the records
 				// still describe it, so they are not a second fault.
+				// So does a row whose route-only files this token cannot
+				// read (route_config_unverified, an Administrator's
+				// verify): the guardian, as LocalSystem, verified them, and
+				// comparing its records with this partial verification
+				// reported stale targets that are not (rel-1-0-10 GAP-1256).
 				if run.RecordedProtected == nil {
 					run.RecordedProtected = map[string]bool{}
 				}

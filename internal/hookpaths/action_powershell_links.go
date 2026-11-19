@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 )
 
 // maxPowerShellLinkCommands bounds the commands of a PowerShell call that the
@@ -29,26 +30,30 @@ var powerShellDirectoryChangers = []string{"set-location", "sl", "cd", "chdir", 
 // have as a POSIX link (rel-1-0-10:GAP-0749, the Windows twin of GAP-0571).
 //
 // ok is false, and the call keeps the opaque reading, unless every
-// link-making text of the call is such a New-Item that was read: the link
-// count equals the count of link-making spellings, no other link API,
-// directory change, copy, rename or archive command is in the call, and no
-// operand is dynamic.
+// link-making text of the call is such a New-Item that was read: every
+// -ItemType link text opaqueLink finds is a read link call, every New-Item
+// spelling, the ni alias too, is a read call (a link spelled another way, -Ty
+// or an en dash, is found by its call: rel-1-0-10:GAP-0849), no other link
+// API, directory change, copy, rename or archive command is in the call, and
+// no operand is dynamic.
 func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
-	matches := opaqueLink.FindAllString(command, -1)
-	if len(matches) == 0 {
-		return "", false
-	}
-	for _, match := range matches {
+	plainTexts := 0
+	for _, match := range opaqueLink.FindAllString(command, -1) {
 		if !strings.HasPrefix(strings.ToLower(match), "-itemtype") {
 			return "", false
 		}
+		plainTexts++
+	}
+	spellings := len(newItemSpellingIndexes(command))
+	if plainTexts == 0 && spellings == 0 {
+		return "", false
 	}
 	facts := analyzeAtHookFolder(actionfacts.Input{Tool: "PowerShell", Command: command, DialectHint: actionfacts.DialectPowerShell, CWD: cwd, ActiveHome: home})
 	if facts.Parse.Dialect != actionfacts.DialectPowerShell || len(facts.Commands) == 0 || len(facts.Commands) > maxPowerShellLinkCommands {
 		return "", false
 	}
 	var lines []string
-	links := 0
+	links, plainLinks, newItems := 0, 0, 0
 	for _, command := range facts.Commands {
 		if command.Kind != "" && command.Kind != actionfacts.CommandKindProcess {
 			continue
@@ -62,6 +67,7 @@ func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
 		}
 		switch program {
 		case "new-item", "ni":
+			newItems++
 			flavor, name, target, isLink, read := powerShellNewItemLink(command.Argv[1:])
 			if !read {
 				return "", false
@@ -70,6 +76,9 @@ func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
 				continue
 			}
 			links++
+			if opaqueLink.MatchString(strings.Join(command.Argv, " ")) {
+				plainLinks++
+			}
 			option := "-s"
 			if flavor == "hardlink" {
 				option = ""
@@ -89,7 +98,7 @@ func powerShellLinkTwin(command, cwd, home string) (twin string, ok bool) {
 			}
 		}
 	}
-	if links == 0 || links != len(matches) {
+	if links == 0 || plainLinks != plainTexts || newItems != spellings {
 		return "", false
 	}
 	return strings.Join(lines, "\n"), true
@@ -110,45 +119,60 @@ func powerShellStaticOperand(word string) bool {
 	return true
 }
 
-// powerShellNewItemLink reads the operands of a New-Item call. read is false
-// for an option or operand this reading does not know; isLink is false for a
-// call that makes no link (a file or a folder).
+// powerShellNewItemLink reads the operands of a New-Item call. Its words
+// bind as PowerShell binds them (psparse.NewItemParameters: any unique
+// prefix, any dash form, any case, -Name:value), so every spelling of a link
+// reads as the plain one (rel-1-0-10:GAP-0849). read is false for a
+// parameter that binds to no New-Item parameter or to more than one, or for
+// an operand this reading does not know; isLink is false for a call that
+// makes no link (a file or a folder).
 func powerShellNewItemLink(args []string) (flavor, name, target string, isLink, read bool) {
 	itemType := ""
 	for index := 0; index < len(args); index++ {
-		arg := strings.ToLower(args[index])
+		param, inline, colon, isParameter, known := psparse.NewItemParameters.BindWord(args[index])
+		if !isParameter {
+			if strings.HasPrefix(args[index], "-") || name != "" || !powerShellStaticOperand(args[index]) {
+				return "", "", "", false, false
+			}
+			name = args[index]
+			continue
+		}
+		if !known {
+			return "", "", "", false, false
+		}
 		value := func() (string, bool) {
+			if colon && inline != "" {
+				return inline, true
+			}
 			if index+1 >= len(args) {
 				return "", false
 			}
 			index++
 			return args[index], true
 		}
-		switch {
-		case arg == "-itemtype" || arg == "-type":
+		switch param.Name {
+		case "itemtype":
 			word, ok := value()
 			if !ok || strings.ContainsAny(word, actionWindowsMoveUnsafe) {
 				return "", "", "", false, false
 			}
 			itemType = strings.ToLower(word)
-		case arg == "-path" || arg == "-literalpath":
+		case "path":
 			word, ok := value()
 			if !ok || !powerShellStaticOperand(word) || name != "" {
 				return "", "", "", false, false
 			}
 			name = word
-		case arg == "-target" || arg == "-value":
+		case "value":
 			word, ok := value()
 			if !ok || !powerShellStaticOperand(word) || target != "" {
 				return "", "", "", false, false
 			}
 			target = word
-		case arg == "-force":
-		case !strings.HasPrefix(arg, "-") && name == "":
-			if !powerShellStaticOperand(args[index]) {
+		case "force":
+			if colon {
 				return "", "", "", false, false
 			}
-			name = args[index]
 		default:
 			return "", "", "", false, false
 		}

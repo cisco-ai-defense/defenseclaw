@@ -70,6 +70,9 @@ func globbedStateMutation(facts actionfacts.Facts) bool {
 
 // stateWrapperValueOptions are the transparent wrappers whose program word
 // follows their options, and the options of each that take the next word.
+// setsid only starts the program in a new session (its -c, -f and -w take
+// no value), so setsid rm -rf ~ removes what rm -rf ~ removes
+// (rel-1-0-10:GAP-0762).
 var stateWrapperValueOptions = map[string]map[string]bool{
 	"sudo": {"-u": true, "-g": true, "-U": true, "-C": true, "-D": true, "-h": true,
 		"-p": true, "-r": true, "-t": true, "-T": true, "-R": true},
@@ -79,6 +82,7 @@ var stateWrapperValueOptions = map[string]map[string]bool{
 	"timeout": {"-s": true, "-k": true},
 	"stdbuf":  {"-i": true, "-o": true, "-e": true},
 	"nohup":   {},
+	"setsid":  {},
 	"time":    {},
 	"command": {},
 	"exec":    {"-a": true},
@@ -88,12 +92,14 @@ var stateWrapperValueOptions = map[string]map[string]bool{
 // words (`sudo -u root rm -rf a/*` -> rm, [-rf a/*]); the command itself
 // when it is no such wrapper or its program word is not static.
 func unwrapStateWrapper(command actionfacts.CommandFact, words []string) (actionfacts.CommandFact, []string) {
-	for depth := 0; depth < actionfacts.MaxPrefixWrapperChain; depth++ {
+	var run actionfacts.PrefixWrapperRun
+	for run.ReadsMore() {
 		program := path.Base(command.Program)
 		valueOptions, wrapper := stateWrapperValueOptions[program]
 		if !wrapper {
 			break
 		}
+		run.Count(program)
 		index := 0
 		for index < len(words) {
 			word := words[index]
@@ -243,7 +249,12 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 		// An option value spelled as its own word (`--exclude cache/`) is
 		// not a source.
 		rsyncOperands, rsyncOptions := rsyncStateOperands(words)
-		if len(rsyncOperands) < 2 {
+		// A dry run or a listing writes nothing. A wrapper keeps the call
+		// whole (`sudo rsync -anrc --delete x/ ~/.defenseclaw/hooks/`), so
+		// the preview reading of the rsync fact never applied to it; the
+		// wrapped words are read with the same rsync grammar
+		// (rel-1-0-10:GAP-0104).
+		if len(rsyncOperands) < 2 || actionfacts.RsyncPreview(append([]string{"rsync"}, words...)) {
 			return false
 		}
 		destination := rsyncOperands[len(rsyncOperands)-1]

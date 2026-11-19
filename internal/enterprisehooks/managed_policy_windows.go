@@ -1765,11 +1765,21 @@ func installWindowsClaudeManagedPolicyUnlocked(
 				if renderErr != nil {
 					return "", nil, renderErr
 				}
-				previous, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock, true)
-				if renderErr != nil {
-					return "", nil, renderErr
+				// An earlier release's form (the direct command, the 1.0.9
+				// guard texts) is this deployment's drop-in, upgraded below
+				// (rel-1-0-10 GAP-1495).
+				recognized := bytes.Equal(policySnapshot.data, current)
+				for _, form := range windowsClaudeRecordedForms[1:] {
+					if recognized {
+						break
+					}
+					earlier, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock, form)
+					if renderErr != nil {
+						return "", nil, renderErr
+					}
+					recognized = bytes.Equal(policySnapshot.data, earlier)
 				}
-				if !bytes.Equal(policySnapshot.data, current) && !bytes.Equal(policySnapshot.data, previous) {
+				if !recognized {
 					continue
 				}
 				if moved {
@@ -2004,12 +2014,12 @@ func validateExistingWindowsManagedPolicyOwnership(policy, state windowsManagedF
 
 // windowsClaudeRecordedPolicyDigestMatches reports that digest is the
 // SHA-256 of a policy DefenseClaw renders for record (any recorded contract,
-// with or without the managed-hooks-only lock, current or previous form).
+// with or without the managed-hooks-only lock, in any recorded form).
 func windowsClaudeRecordedPolicyDigestMatches(record windowsClaudeManagedPolicyState, digest string) bool {
 	for _, contract := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{true, false} {
-			for _, previous := range []bool{false, true} {
-				rendered, err := renderWindowsClaudeRecordedPolicy(record, contract, lock, previous)
+			for _, form := range windowsClaudeRecordedForms {
+				rendered, err := renderWindowsClaudeRecordedPolicy(record, contract, lock, form)
 				if err == nil && windowsManagedPolicyDigest(rendered) == digest {
 					return true
 				}

@@ -26,28 +26,47 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
-// WrapperUnwrapTwin returns the POSIX reading of command in which every cp,
-// mv, install, ln, dd, tee, rsync or shell call run through static prefix
-// wrappers (nohup, nice, time, timeout, env, command, builtin, sudo, doas,
-// exec, setsid, stdbuf, ionice, taskset, chrt, flock, caffeinate with
-// their known options), or after a leading word that may expand to nothing
-// ($(true) cp ...), is written as the plain call (GAP-2512, GAP-2519,
-// GAP-2477). A wrapper runs the call with the argv the caller shell
-// expanded, so the call writes what the plain call writes, while the
-// wrapped argv tied no write to it (nohup cp a.txt
-// ~/.defenseclaw/config.yaml was allowed). A wrapper that runs the call in
-// another directory (env -C dir) is written as ( cd dir && call ), so a
-// relative operand is read where the call runs. ok is false when no call
-// was rewritten. A caller counts only a block proven on the reading.
+// WrapperUnwrapTwin returns the POSIX reading of command in which every
+// call run through static prefix wrappers (nohup, nice, time, timeout, env,
+// command, builtin, sudo, doas, exec, setsid, stdbuf, ionice, taskset, chrt,
+// flock, caffeinate with their known options), or after a leading word that
+// may expand to nothing ($(true) cp ...) or a program word with no static
+// spelling ("$(echo nice)" rm ...), is written as the plain call (GAP-2512,
+// GAP-2519, GAP-2477). A wrapper runs the call with the argv the caller
+// shell expanded, so the call writes or removes what the plain call does,
+// while the wrapped argv tied no write to it (nohup cp a.txt
+// ~/.defenseclaw/config.yaml was allowed; setsid, stdbuf, ionice, doas,
+// chrt, taskset and flock rm -rf ~/.defenseclaw were allowed in all five
+// tiers while nohup rm -rf ~/.defenseclaw blocked, rel-1-0-10:GAP-1186; so
+// were find -delete, truncate and git clean of it, rel-1-0-10:GAP-1246). A
+// wrapper that runs the call in another directory (env -C dir) is written as
+// ( cd dir && call ), so a relative operand is read where the call runs. ok
+// is false when no call was rewritten.
+//
+// The reading is a proof aid for what the call writes or removes, nothing
+// more: a caller counts only a block of a state-mutation rule proven on it.
+// WrapperUnwrapWriterTwin is the narrower reading whose every block counts.
 func WrapperUnwrapTwin(command string) (twin string, ok bool) {
-	return wrapperUnwrapTwin(command, 0)
+	return wrapperUnwrapTwin(command, 0, true)
+}
+
+// WrapperUnwrapWriterTwin is WrapperUnwrapTwin limited to the calls of a file
+// writer (cp, mv, install, ln, dd, tee and the other dynamicOperandPrograms,
+// rsync) or a POSIX shell, after leading words that may expand to nothing and
+// static prefix wrappers: the plain reading of those is the call itself, so a
+// caller counts every block proven on it (GAP-2512, GAP-2519). Any other
+// program keeps the verdict of its wrapped form for every rule but the
+// state-mutation ones (a sudo curl stays outside the exact curl sink
+// grammar, a command printf skips a function named printf).
+func WrapperUnwrapWriterTwin(command string) (twin string, ok bool) {
+	return wrapperUnwrapTwin(command, 0, false)
 }
 
 // maxNestedShellStrings bounds how deep wrapperUnwrapTwin reads shell
 // STRINGs inside shell STRINGs.
 const maxNestedShellStrings = 4
 
-func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
+func wrapperUnwrapTwin(command string, depth int, anyProgram bool) (twin string, ok bool) {
 	defer func() {
 		if recover() != nil {
 			twin, ok = "", false
@@ -82,7 +101,7 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 		if value.Expands {
 			return
 		}
-		if body, changed := wrapperUnwrapTwin(value.Value, depth+1); changed && body != value.Value {
+		if body, changed := wrapperUnwrapTwin(value.Value, depth+1, anyProgram); changed && body != value.Value {
 			replace(word.Pos(), word.End(), posixSingleQuoted(body))
 		}
 	}
@@ -93,7 +112,7 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 				return true
 			}
 			if call, isCall := typed.Stmt.Cmd.(*syntax.CallExpr); isCall {
-				if _, writer := wrappedWriterRun(call.Args); writer {
+				if _, writer := wrappedWriterRun(call.Args, anyProgram); writer {
 					replace(typed.Pos(), typed.Stmt.Pos(), "")
 				}
 			}
@@ -104,7 +123,7 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 				nested(typed.Args[command])
 				return true
 			}
-			run, writer := wrappedWriterRun(typed.Args)
+			run, writer := wrappedWriterRun(typed.Args, anyProgram)
 			if !writer {
 				return true
 			}
@@ -377,19 +396,53 @@ type PrefixWrapperRun struct {
 	Dir               string
 	DirUnknown        bool
 	ChangesResolution bool
-	// Length is the number of wrappers the chain holds. A chain longer than
-	// MaxWrapperDepth is more than the action analysis unwraps (a dynamic
-	// word after it stops that reading at the first wrapper): a caller
-	// reports it as a truncation (the bound rule, cap depth), never an
-	// ordinary command (rel-1-0-10:GAP-0689).
-	Length int
+	// Length is the number of wrappers the chain holds, Neutral the number
+	// of them that are context-neutral (posixContextNeutralWrappers). A
+	// chain past PastWrapperBound is more than the action analysis unwraps
+	// (a dynamic word after it stops that reading at the first wrapper): a
+	// caller reports it as a truncation (the bound rule, cap depth), never
+	// an ordinary command (rel-1-0-10:GAP-0689).
+	Length  int
+	Neutral int
 }
 
-// MaxPrefixWrapperChain is the most prefix wrappers (sudo, env, command,
-// nohup, ...) one simple command is unwrapped through. A chain longer than
-// this is no real call; the reading that reaches the bound says so
-// (PrefixWrapperRun.Length past MaxWrapperDepth) instead of treating the next
-// wrapper as the program.
+// PastWrapperBound reports a chain longer than the action analysis reads to
+// the program it runs: more than InlineChainWrappers context-neutral
+// wrappers, or more than MaxWrapperDepth of the others. A context-neutral
+// wrapper only runs the next program, so it spends no wrapper depth
+// (staticPOSIXWrapperDepthCost, substrate-1:GAP-0334): counting it against
+// MaxWrapperDepth cut nohup nice nohup nice nohup PROGRAM at five wrappers
+// (substrate-1:GAP-0478, rel-1-0-10:GAP-0976).
+func (r PrefixWrapperRun) PastWrapperBound() bool {
+	return r.Neutral > InlineChainWrappers || r.Length-r.Neutral > MaxWrapperDepth
+}
+
+// ReadsMore reports that a reader of a wrapper chain that has read run may
+// read one more wrapper: at most MaxPrefixWrapperChain wrappers that are not
+// context-neutral, and one context-neutral wrapper past InlineChainWrappers,
+// so the reading of a chain past the bound shows it (PastWrapperBound). It
+// is the one bound of every wrapper-chain reader, so each reads a chain of
+// context-neutral wrappers as far as the action analysis does
+// (substrate-1:GAP-0478).
+func (r PrefixWrapperRun) ReadsMore() bool {
+	return r.Length-r.Neutral < MaxPrefixWrapperChain && r.Neutral <= InlineChainWrappers
+}
+
+// Count records one more wrapper, program, read into the chain.
+func (r *PrefixWrapperRun) Count(program string) {
+	r.Length++
+	if _, contextNeutral := posixContextNeutralWrappers[program]; contextNeutral {
+		r.Neutral++
+	}
+}
+
+// MaxPrefixWrapperChain is the most prefix wrappers that are not
+// context-neutral (sudo, env, command, ...) one simple command is unwrapped
+// through; context-neutral ones (nice, time, timeout, nohup) are read up to
+// one past InlineChainWrappers on top. A chain longer than this is no real
+// call; the reading that reaches the bound says so
+// (PrefixWrapperRun.PastWrapperBound) instead of treating the next wrapper
+// as the program.
 const MaxPrefixWrapperChain = 32
 
 // StaticPrefixWrapperChild reads words (the static values of the words of
@@ -410,7 +463,7 @@ func StaticPrefixWrapperChild(words []string, static []bool) (PrefixWrapperRun, 
 	}
 	var run PrefixWrapperRun
 	index := 0
-	for depth := 0; depth < MaxPrefixWrapperChain; depth++ {
+	for run.ReadsMore() {
 		name, ok := value(index)
 		if !ok || name == "" {
 			break
@@ -420,7 +473,6 @@ func StaticPrefixWrapperChild(words []string, static []bool) (PrefixWrapperRun, 
 			break
 		}
 		index = next
-		run.Length++
 	}
 	if index == 0 {
 		return PrefixWrapperRun{}, false
@@ -488,12 +540,25 @@ func wrapperProgramName(word string) string {
 	return word
 }
 
-// wrappedWriterRun returns where the program word of a file writer
-// (dynamicOperandPrograms or rsync) or of a POSIX shell is that args run
-// after leading words that may expand to nothing and static prefix
-// wrappers. A shell is the stop too: setsid sh -c STRING runs what
-// sh -c STRING runs (GAP-2519).
-func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
+// wrappedWriterRun returns where the program word is that args run after
+// leading words that may expand to nothing and static prefix wrappers.
+//
+// With anyProgram the program is the first static word that is no prefix
+// wrapper (prefixWrapperPrograms): a wrapper runs it with the argv the caller
+// shell expanded, so it writes or removes what the plain call does whatever
+// the program is. Stopping only at a list of writers, deletes and shells left
+// find -delete, truncate or git clean of the DefenseClaw state behind setsid,
+// stdbuf, ionice, doas, taskset, chrt or flock a clean allow while the plain
+// call blocked (rel-1-0-10:GAP-1246). A program word with no static spelling
+// ("$(echo nice)", "$W") may name a wrapper: when a static program word
+// follows it, the call is read as that program's call too, as a word that
+// may expand to nothing is (rel-1-0-10:GAP-1246).
+//
+// Without it the program is a file writer (dynamicOperandPrograms or rsync)
+// or a POSIX shell, whose wrapped call is read as the plain call for every
+// rule. A shell is a stop either way: setsid sh -c STRING runs what sh -c
+// STRING runs (GAP-2519).
+func wrappedWriterRun(args []*syntax.Word, anyProgram bool) (PrefixWrapperRun, bool) {
 	index := 0
 	for index < len(args) && vanishingWord(args[index]) {
 		index++
@@ -509,13 +574,22 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 		return word.Value, !word.Expands
 	}
 	var run PrefixWrapperRun
-	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
+	for index < len(args) && run.ReadsMore() {
 		word, static := value(index)
-		if !static || word == "" {
+		if !static {
+			if next, ok := value(index + 1); anyProgram && ok && next != "" && !strings.HasPrefix(next, "-") {
+				run.Count("")
+				index++
+				continue
+			}
+			return PrefixWrapperRun{}, false
+		}
+		if word == "" || anyProgram && strings.HasPrefix(word, "-") {
 			return PrefixWrapperRun{}, false
 		}
 		name := wrapperProgramName(word)
-		if dynamicOperandPrograms[name] || name == "rsync" || wrappedShellPrograms[name] {
+		if wrappedShellPrograms[name] || anyProgram && !prefixWrapperPrograms[name] ||
+			!anyProgram && (dynamicOperandPrograms[name] || name == "rsync") {
 			run.Index = index
 			return run, true
 		}
@@ -526,6 +600,15 @@ func wrappedWriterRun(args []*syntax.Word) (PrefixWrapperRun, bool) {
 		index = next
 	}
 	return PrefixWrapperRun{}, false
+}
+
+// prefixWrapperPrograms are the prefix wrappers wrapperChildIndexOf reads
+// (one case each there): a word naming one of them is read as a wrapper,
+// every other static program word as the program the chain runs.
+var prefixWrapperPrograms = map[string]bool{
+	"nohup": true, "nice": true, "time": true, "timeout": true, "env": true, "command": true,
+	"builtin": true, "sudo": true, "doas": true, "exec": true, "setsid": true, "stdbuf": true,
+	"ionice": true, "taskset": true, "chrt": true, "flock": true, "caffeinate": true,
 }
 
 // wrappedShellPrograms are the shells whose wrapped call is read as the
@@ -654,7 +737,7 @@ func flockShellString(args []*syntax.Word) (int, bool) {
 	}
 	var run PrefixWrapperRun
 	index := 0
-	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
+	for index < len(args) && run.ReadsMore() {
 		word, static := value(index)
 		if !static || word == "" {
 			return 0, false
@@ -694,8 +777,16 @@ func (run *PrefixWrapperRun) setDir(dir string) bool {
 // index runs. Every wrapper word must be static; an option that splits a
 // string, starts a shell with no command, acts on a running process or is
 // not known ends the reading. A directory the wrapper sets is recorded in
-// run.
+// run, and so is the wrapper itself (PrefixWrapperRun.Count).
 func wrapperChildIndex(name string, value func(int) (string, bool), count, index int, run *PrefixWrapperRun) (int, bool) {
+	next, known := wrapperChildIndexOf(name, value, count, index, run)
+	if known {
+		run.Count(name)
+	}
+	return next, known
+}
+
+func wrapperChildIndexOf(name string, value func(int) (string, bool), count, index int, run *PrefixWrapperRun) (int, bool) {
 	next := index + 1
 	options := func(switches, valued, prefixes []string, assignments bool) bool {
 		for {

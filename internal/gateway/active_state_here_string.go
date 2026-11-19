@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -25,7 +26,7 @@ const maxHereStringTwinBytes = 16 << 10
 // a state write blocks, and reads and project forms (`xargs cat <<< ...`,
 // `xargs rm -f <<< build/a.o`) stay allowed, as they do in the twin.
 func hereStringStateMutation(facts actionfacts.Facts, request trustedActionRequest) (mutates, judged bool) {
-	if facts.Parse.Status != actionfacts.StatusInvalid || !strings.HasPrefix(facts.ActiveHome, "/") {
+	if facts.Parse.Status != actionfacts.StatusInvalid || !hereStringTwinHome(facts.ActiveHome) {
 		return false, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
@@ -44,6 +45,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	// they had, which no one text can say, so such a command is never judged
 	// here (mixed): the walk of its calls, each with its own state, judges it.
 	seen := map[string]bool{}
+	request.hereStringPipeReading = true
 	for _, split := range []bool{true, false} {
 		twin, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, split, request.Input.LoopBindsStraightLine)
 		if !ok || seen[twin] {
@@ -57,6 +59,16 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 		judged = judged || twinJudged && !mixed
 	}
 	return false, judged
+}
+
+// hereStringTwinHome reports a home the here-string twins are judged
+// under: a POSIX home, and on Windows a drive home (C:\Users\x). Git Bash
+// runs the Bash tool there and reads <<< as bash does, and the twin is
+// judged by the whole dispatcher with its Windows readings. Without it a
+// here-string read of state (cat <<< ~/.defenseclaw/config.yaml) named
+// tamper.detector_state_write on Windows only (rel-1-0-10:GAP-0376).
+func hereStringTwinHome(home string) bool {
+	return strings.HasPrefix(home, "/") || runtime.GOOS == "windows" && actionfacts.DriveLetterPath(home)
 }
 
 // hereStringReadingTwinRequest is the reading twin of a bash call with a

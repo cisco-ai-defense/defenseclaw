@@ -223,6 +223,10 @@ type sequenceStatement struct {
 	// maySkip marks a statement that is the right side of && or ||: it runs
 	// only when the left side lets it.
 	maySkip bool
+	// callStarts are, for a statement of a function body the walk flattened
+	// at a call, the source offsets of the calls that run it, outermost
+	// first: the body runs where those calls are (simplePartWorkFolders).
+	callStarts []int
 	// read is the value a read of one here-string word leaves its variable
 	// (simpleHereStringRead), nil for any other statement.
 	read *simpleReadWord
@@ -403,8 +407,13 @@ func sequenceStatementDetails(source string, compound, allSimple, straight, walk
 		if call, ok := node.(*syntax.CallExpr); ok {
 			read = simpleHereStringRead(call, redirs, order, calling)
 		}
+		var callStarts []int
+		for _, call := range calling {
+			callStarts = append(callStarts, int(call.Pos().Offset()))
+		}
 		statements = append(statements, sequenceStatement{text: statement, scope: scope,
-			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds)})
+			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds),
+			callStarts: callStarts})
 		return true
 	}
 	subshells := 0

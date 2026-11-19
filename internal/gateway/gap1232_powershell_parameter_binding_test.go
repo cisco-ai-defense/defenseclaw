@@ -175,7 +175,7 @@ func TestGAP1232HookConfigWriteThroughABoundPrefix(t *testing.T) {
 		if len(commands) != 1 {
 			t.Fatalf("%s: PowerShell reading commands %d, want 1", row.id, len(commands))
 		}
-		got, unknown := powerShellWriteReading(request, commands[0], follows, proves)
+		got, unknown := powerShellWriteReading(request, commands[0], follows, proves, psProtectedPaths{})
 		if got != row.want || unknown {
 			t.Errorf("%s: proven %v unknown %v, want proven %v unknown false", row.id, got, unknown, row.want)
 		}

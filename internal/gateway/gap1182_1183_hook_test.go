@@ -36,18 +36,22 @@ func TestGAP1183TopLevelHereDocConsumerOnClaudeHook(t *testing.T) {
 	rows := []struct {
 		name, prefix, delimiter string
 		code                    bool
+		// strict: a data program after a PATH change, allowed outside the
+		// strict tiers (rel-1-0-10:GAP-1481).
+		strict bool
 	}{
-		{"shell", "sh", "'EOF'", true},
-		{"shell unquoted", "sh", "EOF", true},
-		{"newgrp", "newgrp", "'EOF'", false},
-		{"newgrp unquoted", "newgrp", "EOF", false},
-		{"untrusted wrapper", "/tmp/x/wrap sh", "'EOF'", false},
-		{"assigned PATH", "PATH=/tmp/x:$PATH cat", "'EOF'", false},
-		{"yash", "yash", "'EOF'", true},
+		{"shell", "sh", "'EOF'", true, false},
+		{"shell unquoted", "sh", "EOF", true, false},
+		{"newgrp", "newgrp", "'EOF'", false, false},
+		{"newgrp unquoted", "newgrp", "EOF", false, false},
+		{"untrusted wrapper", "/tmp/x/wrap sh", "'EOF'", false, false},
+		{"assigned PATH", "PATH=/tmp/x:$PATH cat", "'EOF'", false, true},
+		{"assigned PATH newgrp", "PATH=/tmp/x:$PATH newgrp", "'EOF'", false, false},
+		{"yash", "yash", "'EOF'", true, false},
 		// An unquoted body is read as the shell twin reads it
 		// (heredocScriptText), not left unread.
-		{"yash unquoted", "yash", "EOF", true},
-		{"yash behind nohup", "nohup yash", "EOF", true},
+		{"yash unquoted", "yash", "EOF", true, false},
+		{"yash behind nohup", "nohup yash", "EOF", true, false},
 	}
 	for _, pack := range gap0437Packs {
 		hook := gap0437Server(t, pack, "claudecode", "action")
@@ -58,6 +62,12 @@ func TestGAP1183TopLevelHereDocConsumerOnClaudeHook(t *testing.T) {
 			if row.code {
 				if out["action"] != "block" || !gap0526Names(out, "tamper.detector_state_write") {
 					t.Errorf("%s %s: want state-write block: %v", pack.name, row.name, out)
+				}
+				continue
+			}
+			if row.strict && pack.pack != "strict" {
+				if out["action"] != "allow" {
+					t.Errorf("%s %s: want allow outside strict (GAP-1481): %v", pack.name, row.name, out)
 				}
 				continue
 			}

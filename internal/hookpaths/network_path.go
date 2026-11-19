@@ -4,19 +4,20 @@
 package hookpaths
 
 import (
-	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -143,13 +144,17 @@ var networkShares struct {
 }
 
 // hookCalls are the hook calls in progress, by the goroutine that runs
-// each; a call's wait is read and spent only by that goroutine.
+// each (hookCallKey); a call's wait is read and spent only by that goroutine.
 var hookCalls struct {
 	mu    sync.Mutex
 	calls map[uint64]*hookCall
 }
 
 type hookCall struct {
+	// key is the call's entry in hookCalls: hookCallKey of its goroutine
+	// when the call began, or when it last took a thread back after a wait
+	// (retakeHookCallThread).
+	key uint64
 	// waitLeft is how long the call may still wait for share answers
 	// (networkShareCallShares answer waits and tail at its start); tail is
 	// the part of it that the shares after the full waits share.
@@ -161,11 +166,18 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
+	// globCut holds the caps the pattern expansions of the private-key and
+	// registration readers hit (globCutOf).
+	globCut bounded.CapSet
 	// memo holds what the call has read of the file system: the paths it
 	// resolved and the protected set of each home (targets).
 	memo *TargetMemo
 	// stats are the answers of callStat, by path.
 	stats map[string]statAnswer
+	// scripts are the script bodies the call has read (readActionScriptWith),
+	// scriptBytes their size in all.
+	scripts     map[scriptReadKey]string
+	scriptBytes int
 }
 
 type statAnswer struct {
@@ -179,7 +191,15 @@ type statAnswer struct {
 // is the same file for the whole decision (rel-1-0-10:GAP-0766). A caller
 // that reads a path again to see whether it changed uses pathStat.
 func callStat(name string) (os.FileInfo, error) {
-	call := memoHookCall()
+	return memoHookCall().stat(name)
+}
+
+// stat is callStat for the hook call call (nil: none, pathStat). A loop that
+// stats many paths finds its call once and stats through it: off Windows
+// finding the call is a traceback of the goroutine's stack (goroutineID),
+// and on Windows it was too until hookCallKey, half of a Windows hook
+// decision for the registration names alone (rel-1-0-10:GAP-1293).
+func (call *hookCall) stat(name string) (os.FileInfo, error) {
 	if call == nil {
 		return pathStat(name)
 	}
@@ -198,7 +218,7 @@ func callStat(name string) (os.FileInfo, error) {
 // is run by one goroutine, so it needs no lock of its own.
 func (call *hookCall) targets() *TargetMemo {
 	if call.memo == nil {
-		call.memo = NewTargetMemo()
+		call.memo = newTargetMemo()
 	}
 	return call.memo
 }
@@ -214,24 +234,29 @@ func (call *hookCall) shareWait() time.Duration {
 // networkShareCallShares answer waits and a tail in all. Within a call it begins
 // nothing more, so the gateway's request and the target resolution it runs are one call.
 func HookCall() (end func()) {
-	id := goroutineID()
+	unlock := lockHookCallKey()
+	id := hookCallKey()
 	if id == 0 {
+		unlock()
 		return func() {}
 	}
 	hookCalls.mu.Lock()
 	defer hookCalls.mu.Unlock()
 	if _, open := hookCalls.calls[id]; open {
+		unlock()
 		return func() {}
 	}
 	if hookCalls.calls == nil {
 		hookCalls.calls = make(map[uint64]*hookCall)
 	}
 	tail := networkShareAnswerWait / 2
-	hookCalls.calls[id] = &hookCall{waitLeft: networkShareCallShares*networkShareAnswerWait + tail, tail: tail}
+	call := &hookCall{key: id, waitLeft: networkShareCallShares*networkShareAnswerWait + tail, tail: tail}
+	hookCalls.calls[id] = call
 	return func() {
 		hookCalls.mu.Lock()
-		delete(hookCalls.calls, id)
+		delete(hookCalls.calls, call.key)
 		hookCalls.mu.Unlock()
+		unlock()
 	}
 }
 
@@ -257,30 +282,13 @@ func memoHookCall() *hookCall {
 
 // currentHookCall is the hook call the calling goroutine runs (nil: none).
 func currentHookCall() *hookCall {
-	id := goroutineID()
+	id := hookCallKey()
 	if id == 0 {
 		return nil
 	}
 	hookCalls.mu.Lock()
 	defer hookCalls.mu.Unlock()
 	return hookCalls.calls[id]
-}
-
-// goroutineID is the runtime's number of the calling goroutine (0: not
-// read), from the first line of its stack: "goroutine N [...". Numbers are
-// not reused while the process runs.
-func goroutineID() uint64 {
-	var buf [64]byte
-	line, ok := bytes.CutPrefix(buf[:runtime.Stack(buf[:], false)], []byte("goroutine "))
-	if !ok {
-		return 0
-	}
-	digits, _, _ := bytes.Cut(line, []byte(" "))
-	id, err := strconv.ParseUint(string(digits), 10, 64)
-	if err != nil {
-		return 0
-	}
-	return id
 }
 
 // networkPathUnanswered reports a path below a network share that has not
@@ -679,6 +687,17 @@ func noteBodyCut(cut shareReadCut) {
 	}
 }
 
+// noteGlobCut records on the hook call the caps a pattern expansion of the
+// private-key or a registration reader hit (globCutOf).
+func noteGlobCut(truncated bounded.CapSet) {
+	if !truncated.Any() {
+		return
+	}
+	if call := currentHookCall(); call != nil {
+		call.globCut = call.globCut.Union(truncated)
+	}
+}
+
 // pathBodyUnanswered is networkPathRead for the script a relative name reaches
 // below a folder already walked: a name that spells folder links of its own
 // is walked on from that folder, and a path past the links the system opens
@@ -716,6 +735,61 @@ func noteBodyLinkLimit(err error) {
 func pathReadDir(name string) ([]os.DirEntry, error) {
 	entries, _, err := readGated("readdir", name, os.ReadDir, nil)
 	return entries, err
+}
+
+// pathReadDirChunk is how many entries pathReadDirLimit reads at a time past
+// its first n.
+const pathReadDirChunk = 1024
+
+// pathReadDirLimit is pathReadDir for a walk that examines at most n-1
+// entries of a directory in name order: it returns the n entries of the
+// whole directory that sort first by name, which is how the sorted read of
+// pathReadDir begins (a directory of fewer names reads as pathReadDir reads
+// it). A directory of more names is still read to its end, as pathReadDir
+// read it, keeping at most 2n entries at a time, so the walk examines the
+// entries rel examined whatever order the file system lists them in: the
+// first n in directory order made a key link that sorts early drop out of a
+// directory past the cap (rel-1-0-10:GAP-1468).
+func pathReadDirLimit(name string, n int) ([]os.DirEntry, error) {
+	if networkPathUnanswered(name) {
+		return nil, networkShareError("readdir", name)
+	}
+	dir, err := os.Open(fixturefs.Map(name))
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(n)
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	byName := func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) }
+	slices.SortFunc(entries, byName)
+	if err != nil || n <= 0 || len(entries) < n {
+		return entries, err
+	}
+	for {
+		more, err := dir.ReadDir(pathReadDirChunk)
+		done := errors.Is(err, io.EOF) || len(more) == 0
+		if err != nil && !done {
+			return nil, err
+		}
+		// entries[:n] is sorted: a name past entries[n-1] is not among the
+		// first n (the names of a directory are distinct).
+		bound := entries[n-1].Name()
+		for _, entry := range more {
+			if entry.Name() < bound {
+				entries = append(entries, entry)
+			}
+		}
+		if done || len(entries) >= 2*n {
+			slices.SortFunc(entries, byName)
+			entries = entries[:n]
+		}
+		if done {
+			return entries, nil
+		}
+	}
 }
 
 func pathReadlink(name string) (string, error) {

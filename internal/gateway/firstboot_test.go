@@ -27,7 +27,7 @@ import (
 )
 
 func TestEnsureGatewayToken_GeneratesAndPersists(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testenv.PrivateTempDir(t)
 	dotenv := filepath.Join(tmp, ".env")
 
 	// Process env must not leak into the synthesized value.
@@ -60,7 +60,7 @@ func TestEnsureGatewayToken_GeneratesAndPersists(t *testing.T) {
 }
 
 func TestEnsureGatewayToken_Idempotent(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testenv.PrivateTempDir(t)
 	dotenv := filepath.Join(tmp, ".env")
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
@@ -79,7 +79,7 @@ func TestEnsureGatewayToken_Idempotent(t *testing.T) {
 }
 
 func TestEnsureGatewayToken_PreservesExistingEnvVar(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testenv.PrivateTempDir(t)
 	dotenv := filepath.Join(tmp, ".env")
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "operator-supplied-token-do-not-overwrite")
 
@@ -96,7 +96,7 @@ func TestEnsureGatewayToken_PreservesExistingEnvVar(t *testing.T) {
 }
 
 func TestEnsureGatewayToken_PreservesOtherDotenvLines(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testenv.PrivateTempDir(t)
 	dotenv := filepath.Join(tmp, ".env")
 	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
@@ -142,7 +142,7 @@ func TestEnsureGatewayToken_PreservesOtherDotenvLines(t *testing.T) {
 // order the production code now follows — any future regression that
 // moves SetCredentials back below the probe will fail this test.
 func TestRunGuardrail_OpenClaw_CredentialsBeforeProbe(t *testing.T) {
-	tmp := t.TempDir()
+	tmp := testenv.PrivateTempDir(t)
 	dotenv := filepath.Join(tmp, ".env")
 
 	// Seed the dotenv the way `defenseclaw setup gateway` /
@@ -195,7 +195,7 @@ func TestRunGuardrail_OpenClaw_CredentialsBeforeProbe(t *testing.T) {
 // OpenClaw gateway token. It must never become the gateway token.
 func TestEnsureGatewayToken_IgnoresSecretRefText(t *testing.T) {
 	const stale = "{'source': 'store', 'provider': 'default', 'id': 'OPENCLAW_GATEWAY_TOKEN'}"
-	tmp := t.TempDir()
+	tmp := testenv.PrivateTempDir(t)
 	dotenv := filepath.Join(tmp, ".env")
 	if err := os.WriteFile(dotenv, []byte("OPENCLAW_GATEWAY_TOKEN="+stale+"\n"), 0o600); err != nil {
 		t.Fatal(err)

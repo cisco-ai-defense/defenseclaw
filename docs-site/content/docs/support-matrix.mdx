@@ -220,18 +220,19 @@ On a per-user install on Linux, the gateway answered every tool-call hook within
 
 ## Hook sizing
 
-How many Claude Code tool calls a second one host can check depends on the operating system, the install type and the instance size. Each step ran 120 seconds of steady calls, with one agent session unless noted, on a host with no other DefenseClaw hook running. The first rate column is the highest rate at which every call was answered within its answer budget and no benign call was denied. The second is the highest such rate with a 95th-percentile answer at or under 0.3 seconds. The numbers were measured on the 1.0.10 pre-release build 52df5211d7 (2026-11-14) unless the row names another build. Rows marked "measured at certification" get their numbers from the 1.0.10 release build.
+How many Claude Code tool calls a second one host can check depends on the operating system, the install type and the instance size. These are the measured maximum rates of 1.0.10 on each platform. Each step ran 120 seconds of steady calls through the registered Claude Code hook, with one agent session unless noted, on a host with no other DefenseClaw hook running and a host check (a hook that does nothing) that answered 100 calls a second in time. The first rate column is the highest measured rate at which every call was answered within its answer budget and no benign call was denied. The second is the highest such rate with a 95th-percentile answer at or under 0.3 seconds. The last column is the next step measured above it, so the true maximum lies between the two. All numbers were measured on the 1.0.10 release-candidate build f1ccff5b7a (2026-11-17).
 
-| Install | OS | Instance (vCPU) | Highest rate, all calls answered in time | Highest rate with 95th percentile at or under 0.3 s |
-|---|---|---|---|---|
-| Per-user | RHEL 9 | m6i.xlarge (4) | 85 calls a second, also with 10 sessions | 80 calls a second |
-| Per-user | macOS | mac2.metal, Apple M1 (8) | 100 calls a second (the highest rate tested), also with 10 sessions | measured at certification (at 100 calls a second: 1.1 s, 0.45 s with 10 sessions) |
-| Per-user | Windows Server 2025 | c5a.4xlarge (16) | measured at certification (about 30 calls a second on 1.0.5, with the flood method of [Hook floods on Windows](#hook-floods-on-windows)) | measured at certification |
-| Managed | RHEL 9 | m8i.2xlarge (8) | 66 calls a second | 50 calls a second |
-| Managed | macOS | mac2.metal, Apple M1 (8) | 30 calls a second | measured at certification (at 20 calls a second: 0.48 s) |
-| Managed | Windows Server 2025 | c5a.2xlarge (8) | measured at certification (10 calls a second on the pre-release build 17f58bcec9, before the smaller hook program of 1.0.10) | measured at certification |
+| Install | OS | Instance (vCPU) | Highest rate, all calls answered in time | Highest rate with 95th percentile at or under 0.3 s | Next step measured |
+|---|---|---|---|---|---|
+| Per-user | RHEL 9 | m6i.xlarge (4) | 50 calls a second | 50 calls a second (0.07 s) | 100 calls a second: 98.5% answered in time, 88% with 10 sessions |
+| Per-user | macOS | mac2.metal, Apple M1 (8) | 100 calls a second (the highest rate tested), also with 10 sessions | 25 calls a second (0.05 s) | 50 calls a second: all answered, 95th percentile 0.47 s; 100: 0.45 s, 0.49 s with 10 sessions |
+| Per-user | Windows Server 2025 | c5a.4xlarge (16) | 25 calls a second | not reached at the lowest step measured: 0.73 s at 25 calls a second | 50 calls a second: 1.9% answered in time |
+| Managed | RHEL 9 | m8i.2xlarge (8) | 50 calls a second | 50 calls a second (0.06 s) | 100 calls a second: 50% answered in time, 54% with 10 sessions |
+| Managed | macOS | mac2.metal, Apple M1 (8) | 25 calls a second (next to interactive sessions, on a 1.0.9 audit store upgraded in place) | not reached at the lowest step measured: 0.89 s at 25 calls a second | 100 calls a second: none answered in time |
+| Managed | Windows Server 2025 | c5a.2xlarge (8) | 13 calls a second | 10 calls a second (0.29 s) | 16 calls a second: 21% answered in time |
+| Per-user and managed | Linux, one very large command (not a rate) | c7i.16xlarge (64) | A 1 MiB command takes about 0.75 s and 246 MiB of memory for one hook check | not a rate measurement | Larger commands cost more in proportion; a shared parse that cuts this is planned for 1.0.11 |
 
-The rate grows with the free CPU cores of the host. These rows are measurements, not limits for other instance types: measure a different instance type with your own agents and the counts below.
+**Known limit:** 1.0.10 does not reach 100 tool calls a second on one host. The target applies to Linux with 8 or more vCPU, and a managed RHEL 9 host on 8 vCPU reaches 50. Raising the rate is planned for a later release. The rate grows with the free CPU cores of the host. These rows are measurements, not limits for other instance types: measure a different instance type with your own agents and the counts below.
 
 One interactive agent makes a few tool calls a second at most, so these rates matter for many agents, or agent loops and scripts, on one host. Past its rate a host answers late: a managed hook then blocks the call and says that DefenseClaw is at capacity, not that a policy blocked it; a per-user hook in the default fail mode lets the call run unchecked after its answer budget and records it.
 

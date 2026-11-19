@@ -104,7 +104,7 @@ func TestPowerShellBoundValueFollowsAValueTheMentionScanPlacesInState(t *testing
 		{"bound write", `$p='` + link + `'; [System.IO.File]::WriteAllText($p,'x')`, twin(link), true},
 		{"bound sibling", `$p='C:\Users\Alice\project\lnkDx\config.yaml'; [System.IO.File]::WriteAllText($p,'x')`, twin(`C:\Users\Alice\project\lnkDx\config.yaml`), false},
 	} {
-		forms, _, bounded, ok := powerShellStateWriteForms(tc.command, home, home+`\project`, nil, mentions)
+		forms, _, _, bounded, ok := powerShellStateWriteForms(tc.command, home, home+`\project`, nil, mentions, psProtectedPaths{})
 		if bounded || !ok {
 			t.Fatalf("%s: bounded=%t ok=%t", tc.name, bounded, ok)
 		}

@@ -427,6 +427,13 @@ func claudeManagedGuardPath(launcher string) string {
 // answer. If the guard itself cannot start, cmd.exe gives the same event's
 // documented unavailable answer.
 func claudeManagedGuardWrapperInvocation(event, launcher string, hookArgs []string) (string, []string) {
+	return claudeManagedGuardWrapperInvocationTexts(event, launcher, hookArgs, false)
+}
+
+// claudeManagedGuardWrapperInvocationTexts is claudeManagedGuardWrapperInvocation
+// with the texts 1.0.9 Setup wrote when texts109 is set
+// (SetupOpts.ClaudeManagedGuardTexts109).
+func claudeManagedGuardWrapperInvocationTexts(event, launcher string, hookArgs []string, texts109 bool) (string, []string) {
 	if !slices.Equal(hookArgs, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) ||
 		!hookguard.AbsoluteHookExecutable(launcher) || !claudeWrapperSafe(launcher) {
 		return launcher, hookArgs
@@ -434,6 +441,9 @@ func claudeManagedGuardWrapperInvocation(event, launcher string, hookArgs []stri
 	guard := claudeManagedGuardPath(launcher)
 	if !claudeWrapperSafe(guard) {
 		return launcher, hookArgs
+	}
+	if texts109 {
+		return claudeCodeWindowsCommandProcessor(), claudeManagedGuardWrapperArgs109(guard, launcher, event, hookArgs)
 	}
 	return claudeCodeWindowsCommandProcessor(), claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)
 }
@@ -478,6 +488,11 @@ func claudeManagedGuardWrapperArgs(guard, launcher, event string, hookArgs []str
 	return claudeManagedGuardWrapperArgsWith(claudeManagedGuardMissingWords, claudeManagedGuardStartWords, guard, launcher, event, hookArgs)
 }
 
+// claudeManagedGuardWrapperArgs109 is the wrapper 1.0.9 Setup wrote.
+func claudeManagedGuardWrapperArgs109(guard, launcher, event string, hookArgs []string) []string {
+	return claudeManagedGuardWrapperArgsWith(claudeManagedGuardMissingWords109, claudeManagedGuardStartWords109, guard, launcher, event, hookArgs)
+}
+
 func claudeManagedGuardWrapperArgsWith(missingWords, startWords []string, guard, launcher, event string, hookArgs []string) []string {
 	failCode := "2"
 	if hookguard.NeutralEvent(event) {
@@ -500,7 +515,7 @@ func claudeManagedGuardWrapperArgsWith(missingWords, startWords []string, guard,
 // release renders or the one 1.0.9 Setup wrote.
 func claudeManagedGuardWrapperKnown(args []string, guard, launcher, event string, hookArgs []string) bool {
 	return slices.Equal(args, claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)) ||
-		slices.Equal(args, claudeManagedGuardWrapperArgsWith(claudeManagedGuardMissingWords109, claudeManagedGuardStartWords109, guard, launcher, event, hookArgs))
+		slices.Equal(args, claudeManagedGuardWrapperArgs109(guard, launcher, event, hookArgs))
 }
 
 // ClaudeCodeManagedGuardLauncher reads a managed policy handler that is

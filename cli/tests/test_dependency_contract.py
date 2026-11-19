@@ -24,12 +24,11 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import tomllib
 from packaging.markers import Marker
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
-
-import tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = REPO_ROOT / "pyproject.toml"

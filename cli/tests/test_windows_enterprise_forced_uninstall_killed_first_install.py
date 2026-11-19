@@ -167,7 +167,7 @@ cmd /c rmdir $link | Out-Null
 
 def harness_text() -> str:
     rows = ",\n".join(
-        "    @('{0}', '{1}', ${2})".format(name, reason.replace("'", "''"), "true" if missing else "false")
+        "    @('{}', '{}', ${})".format(name, reason.replace("'", "''"), "true" if missing else "false")
         for name, (reason, missing) in SCENARIOS.items()
     )
     return HARNESS.replace("__ROWS__", rows)

@@ -42,6 +42,14 @@ type tmin2Row struct {
 func tmin2Run(t *testing.T, h gap0048Home, rows []tmin2Row) {
 	t.Helper()
 	logOnly := os.Getenv("TMIN_LOG") != ""
+	// The rows walk /tmp, but the test home is a t.TempDir: with TMPDIR=/tmp
+	// the home is below that find root, and a find whose child may write the
+	// walked tree reaches the state, a block, whatever file the child names
+	// (rel-1-0-10:GAP-1479). The rows walk a private folder beside the home.
+	findRoot := t.TempDir()
+	for index := range rows {
+		rows[index].command = strings.ReplaceAll(rows[index].command, "find /tmp ", "find "+findRoot+" ")
+	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].group != rows[j].group {
 			return rows[i].group < rows[j].group

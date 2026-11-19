@@ -61,7 +61,7 @@ func provenPowerShellStateWriteOf(request trustedActionRequest, command powerShe
 			return false, false
 		}
 	}
-	return powerShellWriteReading(request, command, mentions, provenStateMutationPath)
+	return powerShellWriteReading(request, command, mentions, provenStateMutationPath, psStateProtectedPaths(home))
 }
 
 // powerShellReadingCommand is one command text the PowerShell reading judges
@@ -132,11 +132,28 @@ func powerShellReadingCommands(request trustedActionRequest) []powerShellReading
 // their bounds. unknown reports no proven write but a .NET open that may
 // write a file proves accepts, by a mode or path known only at run time: the
 // caller gives it the unknown tier of the pack (rel-1-0-10:GAP-1138).
+// protected are the files of the class a wildcard path of a write cmdlet may
+// match: each one it can match is such an unknown twin (psWildcardWriteTwins,
+// rel-1-0-10:GAP-1272).
 func powerShellWriteReading(request trustedActionRequest, command powerShellReadingCommand, follows func(string) bool,
-	proves func(actionfacts.Facts, trustedActionRequest) bool) (written, unknown bool) {
-	forms, unknownForms, bounded, ok := powerShellStateWriteForms(command.text, request.Input.ActiveHome, request.Input.CWD, request.ResolvedWriteTargets, follows)
+	proves func(actionfacts.Facts, trustedActionRequest) bool, protected psProtectedPaths) (written, unknown bool) {
+	forms, unknownForms, placed, bounded, ok := powerShellStateWriteForms(command.text, request.Input.ActiveHome, request.Input.CWD, request.ResolvedWriteTargets, follows, protected)
 	if !ok {
 		return false, false
+	}
+	// The files a wildcard pattern the hook client placed may match, at the
+	// folder the client walked to (psWildcardElementTwins).
+	resolved := request.ResolvedWriteTargets
+	if len(placed) > 0 {
+		resolved = make(map[string]string, len(request.ResolvedWriteTargets)+len(placed))
+		for spelling, target := range request.ResolvedWriteTargets {
+			resolved[spelling] = target
+		}
+		for spelling, target := range placed {
+			if _, known := resolved[spelling]; !known {
+				resolved[spelling] = target
+			}
+		}
 	}
 	// Bound the twins a crafted command can ask for and the text the
 	// reading copies; past a bound the state-naming command counts as the
@@ -162,6 +179,7 @@ func powerShellWriteReading(request trustedActionRequest, command powerShellRead
 		}
 		twin := request
 		twin.Input = input
+		twin.ResolvedWriteTargets = resolved
 		return proves(actionfacts.Analyze(input), twin)
 	}
 	const maxVariants = 256
@@ -664,23 +682,31 @@ func newPSScan(runes []rune, budget *psBudget) *psStateScan {
 // reading. mentions, when not nil, also places text in the state (psMerger).
 // unknown are the twins of the files a .NET open may write, by a mode or a
 // path known only at run time: such a twin that proves the write is the
-// unknown tier, not the write (rel-1-0-10:GAP-1138).
-func powerShellStateWriteForms(command, home, cwd string, targets map[string]string, mentions func(string) bool) (forms, unknown []string, bounded, ok bool) {
+// unknown tier, not the write (rel-1-0-10:GAP-1138); so are the twins of the
+// protected files a wildcard path of a write cmdlet may match
+// (rel-1-0-10:GAP-1272). placed are the files of those twins the hook client
+// placed, with the paths it placed them at (psWildcardElementTwins).
+func powerShellStateWriteForms(command, home, cwd string, targets map[string]string, mentions func(string) bool, protected psProtectedPaths) (forms, unknown []string, placed map[string]string, bounded, ok bool) {
 	seen := map[string]bool{}
 	budget := &psBudget{}
 	merge := newPSMerger(home, cwd, targets)
 	merge.mentions = mentions
-	reading := psReading{merge: merge, unknown: &unknown}
+	placed = map[string]string{}
+	reading := psReading{merge: merge, unknown: &unknown, protected: protected, targets: targets, placed: placed}
 	bounded, ok = reading.collect(command, 0, true, seen, &forms, budget)
-	return forms, unknown, bounded, ok
+	return forms, unknown, placed, bounded, ok
 }
 
 // psReading is the user home, working directory and known links a command
-// is read in, and where it adds the twins of the files a .NET open may
-// write.
+// is read in, where it adds the twins of the files a .NET open may write, and
+// the protected files a wildcard path may match, with the hook client's
+// resolved targets and the twin files placed from them.
 type psReading struct {
-	merge   psMerger
-	unknown *[]string
+	merge     psMerger
+	unknown   *[]string
+	protected psProtectedPaths
+	targets   map[string]string
+	placed    map[string]string
 }
 
 // addUnknown adds the twin of a file a .NET open may write, once.
@@ -726,6 +752,13 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 	}
 	for _, piece := range scan.pieces {
 		add(piece)
+		// A write cmdlet writes every item its path pattern matches
+		// (rel-1-0-10:GAP-1272).
+		if reading.merge.namesState(piece) {
+			for _, form := range psWildcardWriteTwins(piece, reading, budget) {
+				reading.addUnknown(form, seen)
+			}
+		}
 		for _, target := range psPatchRunTargets(piece, reading.merge, budget) {
 			add("Set-Content -LiteralPath " + target + " -Value x")
 		}
@@ -767,11 +800,35 @@ func (reading psReading) collect(command string, depth int, bind bool, seen map[
 		} else {
 			reading.addUnknown(form, seen)
 		}
+		// A write of a folder's children (or a DirectoryInfo's) may write
+		// every file it holds (rel-1-0-10:GAP-1257).
+		if open.folder {
+			if folder := psFolderTwin(open.param, reading.merge.home); folder != "" {
+				reading.addUnknown(folder, seen)
+			}
+		}
 	}
 	for _, text := range scan.dynamicPaths {
 		for _, form := range psDynamicPathReadings(text, reading.merge.home, budget) {
 			reading.addUnknown(form, seen)
 		}
+	}
+	if scan.unplaced {
+		// A FileInfo or System.IO write the reader cannot place may write
+		// any file the command spells (rel-1-0-10:GAP-1230), or any file a
+		// folder it spells holds (Get-ChildItem -Recurse f | ForEach-Object
+		// { $_.Delete() }, rel-1-0-10:GAP-1257).
+		for _, form := range psDynamicPathReadings(command, reading.merge.home, budget) {
+			reading.addUnknown(form, seen)
+			if param, ok := strings.CutPrefix(strings.TrimSuffix(form, " -Value x"), "Set-Content "); ok {
+				if folder := psFolderTwin(param, reading.merge.home); folder != "" {
+					reading.addUnknown(folder, seen)
+				}
+			}
+		}
+	}
+	if budget.over {
+		return true, true
 	}
 	return false, true
 }
@@ -1149,12 +1206,35 @@ type psStateScan struct {
 	// text of each path argument known only at run time.
 	opens        []psOpenTarget
 	dynamicPaths []string
-	// The variables bound to a FileInfo or a file stream, by lower-case
-	// name, with the twin parameter of the file.
-	fileInfos, streams map[string]string
+	// The placed bindings of the variables bound to a FileInfo, in
+	// reading order, and the variables bound to a file stream (with the
+	// twin parameter of the file), by lower-case name.
+	fileInfos map[string][]psFileInfo
+	streams   map[string]string
 	// groupClose is the index after the ) of the last (...) group read: a
 	// method called on it is called on what the group evaluates to.
+	// groupCall reports that group as the argument list of a call
+	// ([IO.FileInfo]::new(f).OpenWrite()), whose result is groupFile, the
+	// FileInfo it returns (unplaced for none known).
 	groupOpen, groupClose int
+	groupCall             bool
+	groupFile             psFileInfo
+	// unplaced reports a FileInfo or System.IO write the reader cannot
+	// place (psFileInfoMethod): every file the command spells may be the
+	// one it writes, the unknown tier (rel-1-0-10:GAP-1230).
+	unplaced bool
+	// braces is the depth of the { blocks being read. item is where the
+	// pipeline item ($_) of the ForEach-Object block at depth itemDepth
+	// (0 for none), whose body starts at itemOpen, is placed; itemUses
+	// counts the methods called on it (psStateScan.openBlock).
+	braces, itemDepth, itemOpen, itemUses int
+	item                                  psFileInfo
+	// lower is the command in lower case, read once; uses caches
+	// psVariableUses of it by variable; dynamic caches dynamicVariables
+	// (0 not read, 1 no, 2 yes).
+	lower   string
+	uses    map[string]psVariableCount
+	dynamic int
 }
 
 func (s *psStateScan) overBound() bool { return s.budget.over }
@@ -1193,6 +1273,12 @@ func (s *psStateScan) code(i int, nested bool) int {
 	r := s.runes
 	var cur []rune
 	var last, pipedFrom string
+	// whole reports the pipeline element being read not cut by a group, a
+	// block or a call since it started; lastWhole and pipedWhole are that of
+	// last and pipedFrom, also fed by no pipeline (rel-1-0-10:GAP-1275).
+	whole, lastWhole, pipedWhole := true, false, false
+	// start is the rune index the statement in cur starts at.
+	start := i
 	var statementWordKnown, statementArgumentMode bool
 	firstScanned := 0
 	commentStarts := func(i int) bool {
@@ -1213,7 +1299,9 @@ func (s *psStateScan) code(i int, nested bool) int {
 		text := string(cur)
 		if strings.TrimSpace(text) != "" && s.account(len(cur)) {
 			s.pieces = append(s.pieces, text)
-			s.dotNetStatement(text)
+			// A statement read whole ends at a ; or a line, a block or group
+			// close or the end of the code (copyFileInfo).
+			s.dotNetStatement(text, start, i >= len(r) || strings.ContainsRune("\n;})", r[i]))
 			if pipedFrom != "" {
 				if body, ok := psPipedInvokeBody(pipedFrom, text, s.budget); ok {
 					s.bodies = append(s.bodies, body)
@@ -1228,12 +1316,16 @@ func (s *psStateScan) code(i int, nested bool) int {
 				}
 			}
 		}
-		last, pipedFrom = text, ""
+		last, lastWhole = text, whole && pipedFrom == ""
+		pipedFrom, pipedWhole = "", false
 		cur = cur[:0]
 		statementWordKnown, statementArgumentMode = false, false
 		firstScanned = 0
 	}
 	for i < len(r) && !s.parseError && s.budget.step() {
+		if len(cur) == 0 {
+			start = i
+		}
 		c := r[i]
 		comment := (c == '#' || c == '<' && i+1 < len(r) && r[i+1] == '#') && commentStarts(i)
 		switch {
@@ -1247,20 +1339,36 @@ func (s *psStateScan) code(i int, nested bool) int {
 			// A string piped into Invoke-Expression runs as its body
 			// (checker it16 RV16-2).
 			flush()
+			whole = true
 			if i+1 < len(r) && r[i+1] == '|' {
 				i += 2
 				continue
 			}
-			pipedFrom = last
+			pipedFrom, pipedWhole = last, lastWhole
 			i++
-		case c == '\n' || c == ';' || c == '&' || c == '{' || c == '}':
+		case c == '{':
+			// A ForEach-Object block places its pipeline item at what
+			// feeds it (rel-1-0-10:GAP-1257).
+			s.openBlock(string(cur), pipedFrom, pipedWhole, i)
 			flush()
+			whole = true
+			i++
+		case c == '}':
+			flush()
+			s.closeBlock(i)
+			// What follows the block is still the element it is in.
+			whole = false
+			i++
+		case c == '\n' || c == ';' || c == '&':
+			flush()
+			whole = true
 			i++
 		case c == ')':
 			flush()
 			if nested {
 				return i + 1
 			}
+			whole = false
 			i++
 		case c == '(':
 			tail := cur
@@ -1273,7 +1381,9 @@ func (s *psStateScan) code(i int, nested bool) int {
 			// (Get-Item f)) is called on what the group evaluates to.
 			onGroup := s.groupClose > 0 && s.groupClose < i && r[s.groupClose] == '.' &&
 				strings.TrimSpace(statement) == string(r[s.groupClose:i])
-			groupOpen, groupClose := s.groupOpen, s.groupClose
+			groupOpen, groupClose, groupCall, groupFile := s.groupOpen, s.groupClose, s.groupCall, s.groupFile
+			// A ( glued to a name is the argument list of a call.
+			call := i > 0 && r[i-1] < unicode.MaxASCII && psVariableNameByte(byte(r[i-1]))
 			// A Start-Process statement keeps its (...) and @(...)
 			// argument arrays, so the -ArgumentList it runs is read
 			// (checker it16 RV16-2); the body is still scanned as a piece.
@@ -1281,6 +1391,7 @@ func (s *psStateScan) code(i int, nested bool) int {
 			if !keep {
 				flush()
 			}
+			whole = false
 			end := s.code(i+1, true)
 			if s.overBound() {
 				return len(r)
@@ -1288,12 +1399,15 @@ func (s *psStateScan) code(i int, nested bool) int {
 			if keep && s.account(end-i) {
 				cur = append(cur, r[i:end]...)
 			}
-			receiver := ""
-			if onGroup && s.account(groupClose-groupOpen) {
-				receiver = string(r[groupOpen+1 : groupClose-1])
+			var receiver *psReceiver
+			switch {
+			case onGroup && groupCall:
+				receiver = &psReceiver{file: groupFile, call: true}
+			case onGroup && s.account(groupClose-groupOpen):
+				receiver = &psReceiver{text: string(r[groupOpen+1 : groupClose-1])}
 			}
-			s.dotNetCall(method, statement, receiver, i, end)
-			s.groupOpen, s.groupClose = i, end
+			file := s.dotNetCall(method, statement, receiver, i, end)
+			s.groupOpen, s.groupClose, s.groupCall, s.groupFile = i, end, call, file
 			i = end
 		case c == '#' && comment:
 			for i < len(r) && r[i] != '\n' {

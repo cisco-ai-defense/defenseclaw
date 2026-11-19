@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -127,11 +128,56 @@ type agentHookConfigGuard struct {
 	// do not exist yet when the hook runs). A write operand or a git -C
 	// folder under one of them names its target too (rel-1-0-10:GAP-0718).
 	links hookpaths.Links
+	// identities are the file identities read in the pass in progress
+	// (beginIdentityPass): the owner checks compare each place of a target
+	// with every file of the registration set, and the folder check runs
+	// them for every file again, so a pass read each registered file once
+	// per place and file, each read a share check and a stat on Windows
+	// (rel-1-0-10:GAP-1316). It is nil between passes: a pass never answers
+	// from the reads of another.
+	identities map[string]string
+}
+
+// beginIdentityPass begins a pass of the guard in which the identity of each
+// file is read once, and reports whether it began one (false within a pass
+// already begun); endIdentityPass ends the pass it began. A pass is one
+// evaluation of a target (format, an owner check) or one loop of the lane
+// over the targets of one statement or one call, in which nothing runs.
+func (g *agentHookConfigGuard) beginIdentityPass() (began bool) {
+	if g.identities != nil {
+		return false
+	}
+	g.identities = make(map[string]string)
+	return true
+}
+
+// endIdentityPass ends the pass beginIdentityPass began (began true).
+func (g *agentHookConfigGuard) endIdentityPass(began bool) {
+	if began {
+		g.identities = nil
+	}
+}
+
+// fileIdentity is hookpaths.FileIdentity, read once for each path in a pass.
+func (g *agentHookConfigGuard) fileIdentity(path string) string {
+	if g.identities == nil {
+		return hookpaths.FileIdentity(path)
+	}
+	identity, read := g.identities[path]
+	if !read {
+		identity = hookpaths.FileIdentity(path)
+		g.identities[path] = identity
+	}
+	return identity
 }
 
 // shellMentionsRegistryPath is a cheap prefilter. Every component comes from
 // the active registration registry, including enclosing hook directories.
+// Many files share components (.claude, settings.json, the project folders),
+// so each distinct component is searched for once: a 1 MiB command was
+// read once per component of every file (rel-1-0-10:GAP-0299).
 func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
+	searched := make(map[string]bool, 4*len(g.files))
 	for _, file := range g.files {
 		path := file.Path
 		if relative, ok := strings.CutPrefix(path, g.home+string(filepath.Separator)); ok && g.home != "" {
@@ -140,7 +186,15 @@ func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
 			path = relative
 		}
 		for _, component := range strings.Split(filepath.ToSlash(path), "/") {
-			if len(component) > 2 && strings.Contains(text, strings.ToLower(component)) {
+			if len(component) <= 2 {
+				continue
+			}
+			component = strings.ToLower(component)
+			if searched[component] {
+				continue
+			}
+			searched[component] = true
+			if strings.Contains(text, component) {
 				return true
 			}
 		}
@@ -187,6 +241,7 @@ func newAgentHookConfigGuard(cwd, home string) *agentHookConfigGuard {
 // shellTarget covers both a registration file and a directory operation
 // that replaces or removes one of its enclosing connector directories.
 func (g *agentHookConfigGuard) shellTarget(raw string) bool {
+	defer g.endIdentityPass(g.beginIdentityPass())
 	if g.format(raw) != "" {
 		return true
 	}
@@ -220,6 +275,7 @@ func (g *agentHookConfigGuard) shellTarget(raw string) bool {
 // ownedFile identifies installed DefenseClaw artifacts whose entire content
 // is part of a registered hook. A mutation of one is a Named disable.
 func (g *agentHookConfigGuard) ownedFile(raw string) bool {
+	defer g.endIdentityPass(g.beginIdentityPass())
 	for _, place := range g.places(raw) {
 		if g.format(place) == gatewayconnector.AgentHookConfigBridge ||
 			(filepath.Base(place) == "defenseclaw.json" && g.format(place) != "") {
@@ -238,6 +294,7 @@ func (g *agentHookConfigGuard) ownedFile(raw string) bool {
 }
 
 func (g *agentHookConfigGuard) ownedFolder(raw string) bool {
+	defer g.endIdentityPass(g.beginIdentityPass())
 	for _, place := range g.places(raw) {
 		if place == g.home || place == g.cwd || place == string(filepath.Separator) {
 			continue
@@ -364,6 +421,7 @@ func (g *agentHookConfigGuard) resolvePlaces(raw string) []string {
 
 // format is the hook-file format of a target, "" for any other file.
 func (g *agentHookConfigGuard) format(raw string) string {
+	defer g.endIdentityPass(g.beginIdentityPass())
 	fold := agentHookConfigFoldCase()
 	same := func(left, right string) bool {
 		if fold {
@@ -387,12 +445,12 @@ func (g *agentHookConfigGuard) format(raw string) string {
 	// The instruction-file proof uses the same device/inode identity. It
 	// also covers case and short-name aliases where the host supports them.
 	for _, place := range g.places(raw) {
-		identity := hookpaths.FileIdentity(place)
+		identity := g.fileIdentity(place)
 		if identity == "" {
 			continue
 		}
 		for _, file := range g.files {
-			if identity == hookpaths.FileIdentity(file.Path) {
+			if identity == g.fileIdentity(file.Path) {
 				return file.Format
 			}
 		}
@@ -1063,18 +1121,18 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		// Managed installations keep their own file policy. A literal
 		// configuration change on the launched agent is still a proved
 		// disablement of this call's hooks.
-		parts := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
-		for _, part := range parts {
-			if len(parts) > 1 && part.Command == managedRaw &&
-				(strings.Contains(managedRaw, "cd ") || strings.Contains(managedRaw, "pushd ")) {
+		parts, placed := agentHookConfigPlacedCommands(managedRaw, request.Input.CWD, request.Input.ActiveHome, 0)
+		for index, part := range parts {
+			if placed && index == 0 {
 				continue
 			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
 			if hookpaths.RegistrationWriteCandidate(part.Command) {
-				owned, _ := agentHookConfigReachedPaths(part, guard, agentHookConfigRegistrationPaths(guard))
+				owned, _, truncated := agentHookConfigReachedPaths(part, guard, agentHookConfigRegistrationPaths(guard))
 				for _, path := range owned {
 					add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
 				}
+				out = withBoundedTruncation(out, truncated, request)
 			}
 			facts := []actionfacts.Facts{actionfacts.Analyze(actionfacts.Input{
 				Tool: "Bash", Command: part.Command, CWD: part.Dir, ActiveHome: request.Input.ActiveHome,
@@ -1092,6 +1150,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	guard := newAgentHookConfigGuard(request.Input.CWD, request.Input.ActiveHome)
 	if changes, native := agentHookConfigFileChanges(request.Input.Tool, request.Input.Args); native {
+		defer guard.endIdentityPass(guard.beginIdentityPass())
 		for _, change := range changes {
 			if guard.ownedFile(change.path) {
 				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", change.path)
@@ -1117,7 +1176,9 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	// A shell call: its content is not read, so a write to a hook file is
 	// the write rule. The hook client's resolved targets carry links the
-	// command text does not name.
+	// command text does not name. The loop is one pass over the call's
+	// resolved targets.
+	began := guard.beginIdentityPass()
 	for operand, resolved := range request.ResolvedWriteTargets {
 		if strings.HasPrefix(operand, "\x00") || !filepath.IsAbs(resolved) ||
 			guard.format(resolved) == "" && !guard.ownedFile(resolved) {
@@ -1129,6 +1190,7 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 			add(agentHookConfigWriteRuleID, "", resolved)
 		}
 	}
+	guard.endIdentityPass(began)
 	// A PowerShell call names its write targets in cmdlet parameters and .NET
 	// method arguments, which the POSIX readers below do not read: the shared
 	// PowerShell write reader hands each of them to the same hook-file check
@@ -1159,10 +1221,9 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 	}
 	// The registration set is read by hookpaths' shared shell writer. A
 	// placed statement carries its own directory, including after literal cd.
-	parts := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
-	for _, part := range parts {
-		if len(parts) > 1 && part.Command == rawCommand &&
-			(strings.Contains(rawCommand, "cd ") || strings.Contains(rawCommand, "pushd ")) {
+	parts, placed := agentHookConfigPlacedCommands(rawCommand, guard.cwd, guard.home, 0)
+	for index, part := range parts {
+		if placed && index == 0 {
 			continue
 		}
 		partGuard := guard
@@ -1179,6 +1240,8 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		// directory up to the home, so a write into another project folder,
 		// or one that a cd the walk cannot place (cd $W) leaves in no listed
 		// folder, reached none of it (rel-1-0-10:GAP-0718).
+		// The loop is one pass over the statement's operands.
+		began := guard.beginIdentityPass()
 		for _, operand := range agentHookConfigShellWriteOperands(part.Command, part.Dir, guard.home) {
 			for _, place := range append([]string{operand}, guard.links.AliasTargets(operand, false)...) {
 				if guard.ownedFile(place) {
@@ -1188,15 +1251,17 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 				}
 			}
 		}
+		guard.endIdentityPass(began)
 		if hookpaths.RegistrationWriteCandidate(part.Command) {
 			registered := agentHookConfigRegistrationPaths(partGuard)
-			owned, other := agentHookConfigReachedPaths(part, partGuard, registered)
+			owned, other, truncated := agentHookConfigReachedPaths(part, partGuard, registered)
 			for _, path := range owned {
 				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
 			}
 			for _, path := range other {
 				add(agentHookConfigWriteRuleID, "", path)
 			}
+			out = withBoundedTruncation(out, truncated, request)
 			if folder := hookpaths.RegistrationArchivePossibleReach(part.Command, part.Dir, guard.home, registered); folder != "" {
 				add(agentHookConfigWriteRuleID, "archive may replace a registered hook file", folder)
 			}
@@ -1747,7 +1812,7 @@ func agentHookConfigPowerShellWriteOf(request trustedActionRequest, guard *agent
 				}
 			}
 			return false
-		})
+		}, guard.psProtectedPaths())
 	return written, unknown, place, owned
 }
 
@@ -1796,9 +1861,15 @@ func agentHookConfigShellWriteOperands(command, dir, home string) []string {
 // split into installed DefenseClaw artifacts (and the folders that hold them)
 // and the other registration documents. The set is narrowed by halves in one
 // reader, so only a statement that reaches it pays more than one read,
-// whatever spelling (brace, glob, loop, find) names the path.
-func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string) {
-	for _, path := range hookpaths.RegistrationWriteReached(part.Command, part.Dir, guard.home, registered) {
+// whatever spelling (brace, glob, loop, find) names the path. truncated
+// names the caps a pattern expansion the reader decided on hit with no
+// registered file among the matches read before them (the one bound rule,
+// rel-1-0-10:GAP-1468).
+func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string, truncated bounded.CapSet) {
+	// One pass over the paths the statement reaches (rel-1-0-10:GAP-1316).
+	defer guard.endIdentityPass(guard.beginIdentityPass())
+	reached, truncated := hookpaths.RegistrationWriteReachedBounded(part.Command, part.Dir, guard.home, registered)
+	for _, path := range reached {
 		if guard.ownedFile(path) || guard.ownedFolder(path) {
 			owned = append(owned, path)
 		} else {
@@ -1826,7 +1897,7 @@ func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHoo
 			}
 		}
 	}
-	return owned, other
+	return owned, other, truncated
 }
 
 // agentHookConfigBindsValues reports whether a command can carry a name in a
@@ -1866,21 +1937,31 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 
 // agentHookConfigPlacedCommands keeps each literal shell body and each
 // statement's directory. All shell decisions consume this same placement.
-func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookpaths.PlacedStatement {
+// The first entry is always the whole command read in cwd. The flag reports
+// that TopLevelStatements placed the statements of the command itself, so
+// that every statement is in the list with the folder a directory change
+// leads to and the caller may skip the unplaced whole command. Only then:
+// a nested sh -c body adds entries too, and when the statements were not
+// placed (popd; or a cd inside { ...; } that TopLevelStatements does not
+// read), the whole command is the only reading of the top-level writes
+// (rel-1-0-10:GAP-1014, rv1014).
+func agentHookConfigPlacedCommands(command, cwd, home string, depth int) ([]hookpaths.PlacedStatement, bool) {
 	if depth > 4 || command == "" || len(command) > 8192 {
-		return nil
+		return nil, false
 	}
 	root := hookpaths.PlacedStatement{Command: command, Dir: cwd}
 	out := []hookpaths.PlacedStatement{root}
 	placed := []hookpaths.PlacedStatement{root}
-	if strings.Contains(command, "cd ") || strings.Contains(command, "cd\t") || strings.Contains(command, "pushd ") {
-		if statements, ok := hookpaths.TopLevelStatements(command, cwd, home); ok {
+	topPlaced := false
+	if hookpaths.ChangesDirectory(command) {
+		if statements, ok := hookpaths.TopLevelStatements(command, cwd, home); ok && len(statements) > 0 {
 			placed = statements
 			out = append(out, statements...)
+			topPlaced = true
 		}
 	}
 	if !strings.Contains(command, "sh") {
-		return out
+		return out, topPlaced
 	}
 	for _, statement := range placed {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: statement.Command, CWD: statement.Dir, ActiveHome: home})
@@ -1914,11 +1995,12 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookp
 						return true
 					})
 				}
-				out = append(out, agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)...)
+				nested, _ := agentHookConfigPlacedCommands(body, statement.Dir, home, depth+1)
+				out = append(out, nested...)
 			}
 		}
 	}
-	return out
+	return out, topPlaced
 }
 
 func agentHookConfigExactWords(command actionfacts.CommandFact) []string {

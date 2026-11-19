@@ -1764,7 +1764,7 @@ func appendClaudeCodeHookMatrixForSetup(
 		return err
 	}
 	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups, claudeCodeUnavailableOpen(opts),
-		opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
+		opts.ManagedEnterprise && !opts.SecureClientHookDelivery, opts.ClaudeManagedGuardTexts109)
 	return nil
 }
 
@@ -1773,6 +1773,7 @@ func appendClaudeCodeHookGroups(
 ) {
 	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
+	texts109 := len(unavailableOpen) > 2 && unavailableOpen[2]
 	fallback := false
 	if len(hookArgs) == 7 || len(hookArgs) == 9 {
 		fallback = claudeCodePerUserGuardTarget(
@@ -1783,7 +1784,7 @@ func appendClaudeCodeHookGroups(
 	for _, group := range groups {
 		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs, open)
 		if managedWindows {
-			command, args = claudeManagedGuardWrapperInvocation(group.eventType, hookCommand, hookArgs)
+			command, args = claudeManagedGuardWrapperInvocationTexts(group.eventType, hookCommand, hookArgs, texts109)
 		}
 		handler := map[string]interface{}{
 			"type":    "command",
@@ -3239,7 +3240,7 @@ func verifyClaudeCodeHookMatrixForSetup(
 		return err
 	}
 	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups,
-		claudeCodeUnavailableOpen(opts), opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
+		claudeCodeUnavailableOpen(opts), opts.ManagedEnterprise && !opts.SecureClientHookDelivery, opts.ClaudeManagedGuardTexts109)
 }
 
 // verifyClaudeCodeHookGroups validates the exact DefenseClaw-owned effective
@@ -3257,12 +3258,13 @@ func verifyClaudeCodeHookGroups(
 ) error {
 	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
+	texts109 := len(unavailableOpen) > 2 && unavailableOpen[2]
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
 		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs, open)
 		if managedWindows {
-			expectedCommand, expectedArgs = claudeManagedGuardWrapperInvocation(expected.eventType, expectedCommand, expectedArgs)
+			expectedCommand, expectedArgs = claudeManagedGuardWrapperInvocationTexts(expected.eventType, expectedCommand, expectedArgs, texts109)
 		}
 		locations, err := ownedClaudeCodeHookLocations(
 			hooks[expected.eventType], hooksDir, expectedCommand, expectedArgs,

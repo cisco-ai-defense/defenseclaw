@@ -15,8 +15,8 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_guardrail, cmd_setup
 from defenseclaw.context import AppContext
 
-from tests.test_fail_mode_runtime import _runtime_cfg
 from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
+from tests.test_fail_mode_runtime import _runtime_cfg
 
 
 def _app(cfg) -> AppContext:

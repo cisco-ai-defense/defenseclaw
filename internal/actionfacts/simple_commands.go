@@ -66,10 +66,19 @@ type SimpleCommand struct {
 	// run in, after a cd that may fail (rel-1-0-10:GAP-0869): a reading,
 	// not a further statement of the call.
 	OtherFolder bool
+	// bodyReading marks a reading of a nested body statement in another
+	// folder its call may run in (rel-1-0-10:GAP-1144): it does not count
+	// against the evaluation budget of the statements of the call, which
+	// it would otherwise push into the limit (GAP-1228).
+	bodyReading bool
 	// UnresolvedFolder means the directory of the command is unknown and an
 	// operand of Text depends on it: the gateway reads it in each folder
 	// that holds a protected file (rel-1-0-10:GAP-0871).
 	UnresolvedFolder bool
+	// cappedFolders are, for the UnresolvedFolder reading of a Windows
+	// statement past maxSimpleWindowsOtherReadings, the folders it was not
+	// read in (CappedFolders). A pointer keeps the type comparable.
+	cappedFolders *[]string
 	// AbsoluteOnly means the directory of the command is unknown (an eval,
 	// an unreadable cd) and no operand of Text depends on it: CWD is empty,
 	// and the directory the action starts in judges the command as well as
@@ -103,6 +112,23 @@ const EvaluationFailureSyntax = "syntax"
 // command): what runs is not known; the gateway records it as an unread part
 // (rel-1-0-10:GAP-0535).
 const EvaluationFailureUnresolvedBody = "unresolved-body"
+
+// EvaluationFailureUnknownStdinConsumer is the EvaluationFailure of a
+// here-document with a body that may write DefenseClaw state, fed to a
+// program whose use of its standard input is not known (newgrp, a shell
+// behind an untrusted wrapper, a data program after its PATH changed;
+// simpleTopLevelHereDocBodies): the gateway judges it as the unknown tier of
+// the pack, alert by default and block in strict (rel-1-0-10:GAP-1183,
+// GAP-1240).
+const EvaluationFailureUnknownStdinConsumer = "unknown-stdin-consumer"
+
+// EvaluationFailureUnknownStdinConsumerStrict is the EvaluationFailure of
+// the same here-document fed to a program that is no shell and no newgrp,
+// only after PATH changed (PATH=dir:$PATH cat <<E, export PATH=...; cat >
+// script <<E): the program is most likely the data program it names, so the
+// gateway judges it in the strict tiers only (the unknown tier there, a
+// block) and allows it in the others, as release did (rel-1-0-10:GAP-1481).
+const EvaluationFailureUnknownStdinConsumerStrict = "unknown-stdin-consumer-strict"
 
 func isSyntaxTailUnread(simple SimpleCommand) bool {
 	return simple.EvaluationFailure == EvaluationFailureSyntax
@@ -251,7 +277,25 @@ const (
 	maxSimpleStates      = 32
 	maxSimpleEvaluations = 512
 	maxCompactionCases   = 8
+	// maxSimpleWindowsOtherReadings bounds the readings of a PowerShell or
+	// CMD call in other folders that name the folder: each is a policy
+	// pass of its own, and a padded call past it took the native gateway
+	// past its hook persistence deadline (rel-1-0-10:GAP-1228). It is the
+	// statement budget, so such a call costs at most about three times a
+	// call of the same statements on rel.
+	maxSimpleWindowsOtherReadings = maxStatementsAlone
 )
+
+// CappedFolders are the folders a Windows statement after moves that may
+// fail was not read in because the call reached
+// maxSimpleWindowsOtherReadings (nil for every other reading). Only its
+// UnresolvedFolder reading carries them (rel-1-0-10:GAP-1281).
+func (s SimpleCommand) CappedFolders() []string {
+	if s.cappedFolders == nil {
+		return nil
+	}
+	return *s.cappedFolders
+}
 
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
@@ -383,12 +427,18 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 	result := simpleCommandsOfCall(input, facts, pieces)
 	if facts.Parse.Dialect == DialectPOSIX && facts.Parse.Status != StatusInvalid {
 		source := input.Command
-		if source == "" && bytes.Contains(input.Args, []byte("<<")) {
+		if source == "" && (bytes.Contains(input.Args, []byte("<<")) || facts.Parse.Status == StatusPartial) {
 			_, capture := analyzeWithRedirectTargets(input, "")
 			source = capture.source
 		}
 		if strings.Contains(source, "<<") && len(source) <= maxCommandBytes {
 			result = append(result, simpleTopLevelHereDocBodies(source, input)...)
+		}
+		if facts.Parse.Status == StatusPartial && len(source) <= maxCommandBytes {
+			if reading, _, ok := simpleNeutralWrapperFreeReading(input, source); ok &&
+				!slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.Text == reading.Text }) {
+				result = append(result, reading)
+			}
 		}
 	}
 	if argsOnly && slices.ContainsFunc(result, isSyntaxTailUnread) {
@@ -420,75 +470,131 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 // other reader judges (rel-1-0-10:GAP-1183): a shell outside the ordinary
 // shell set (yash), a shell behind a launcher the stdin-code reader does not
 // unwrap, and the launchers of unknown stdin semantics with a possible state
-// write (topLevelHereDocUnknownStateConsumer). An opener the ordinary
-// readers already judge (topLevelHereDocReadElsewhere) adds nothing, so
-// their reading stays the only one: the cap-floor here-document reader
-// (GAP-0691: bash script.sh <<X is data for the script), the stdin-code
-// reader of privilege wrappers and schedulers (sudo sh <<X, crontab - <<X)
-// and the shell twin of a piped document with its unquoted body
-// (heredocScriptText, rel-1-0-10:GAP-1137, GAP-1193).
+// write (topLevelHereDocUnknownStateConsumer). Each statement of the text is
+// read, also one in a group, a subshell or a control body, and so is every
+// call in it that owns a document, wherever it sits in a list or a pipeline,
+// behind a static prefix wrapper, or after a statement that rebinds PATH
+// (rel-1-0-10:GAP-1240). An opener the ordinary readers already judge
+// (topLevelHereDocReadElsewhere) adds nothing, so their reading stays the
+// only one: the cap-floor here-document reader (GAP-0691: bash script.sh
+// <<X is data for the script), the stdin-code reader of privilege wrappers
+// and schedulers (sudo sh <<X, crontab - <<X) and the shell twin of a piped
+// document with its unquoted body (heredocScriptText, rel-1-0-10:GAP-1137,
+// GAP-1193).
 func simpleTopLevelHereDocBodies(source string, input Input) []SimpleCommand {
 	file, ok := shellparse.Parse(source)
 	if !ok || file == nil {
 		return nil
 	}
 	var result []SimpleCommand
-	for _, stmt := range file.Stmts {
-		// A definition or control construct is not itself a consumer. The
-		// ordinary command walk decides when its body can run.
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if len(result) >= maxSimpleEvaluations {
+			return false
+		}
+		// A function declaration does not run its body in this call.
+		if _, definition := node.(*syntax.FuncDecl); definition {
+			return false
+		}
+		stmt, isStmt := node.(*syntax.Stmt)
+		if !isStmt {
+			return true
+		}
 		switch stmt.Cmd.(type) {
 		case *syntax.CallExpr, *syntax.BinaryCmd:
 		default:
-			continue
+			// A definition or control construct is not itself a consumer:
+			// the statements of its body are read on their own.
+			return true
 		}
-		var consumer strings.Builder
-		if syntax.NewPrinter().Print(&consumer, stmt.Cmd) != nil {
-			continue
+		result = append(result, hereDocStatementBodies(file, stmt, input)...)
+		return false
+	})
+	if len(result) >= maxSimpleEvaluations {
+		return []SimpleCommand{{EvaluationFailure: "limit"}}
+	}
+	return result
+}
+
+// hereDocStatementBodies is the reading of the documents of one statement
+// (a call or a list or pipeline of calls) for simpleTopLevelHereDocBodies.
+func hereDocStatementBodies(file *syntax.File, stmt *syntax.Stmt, input Input) []SimpleCommand {
+	reading := hereDocData
+	var consumer strings.Builder
+	if syntax.NewPrinter().Print(&consumer, stmt.Cmd) == nil {
+		reading = syntaxTailHereDocConsumer(consumer.String())
+	}
+	runsCode := reading == hereDocRunsCode && !topLevelHereDocReadElsewhere(stmt.Cmd)
+	var result []SimpleCommand
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		if len(result) >= maxSimpleEvaluations {
+			return false
 		}
-		reading := syntaxTailHereDocConsumer(consumer.String())
-		if reading == hereDocData || reading == hereDocRunsCode && topLevelHereDocReadElsewhere(stmt.Cmd) {
-			continue
+		if _, definition := node.(*syntax.FuncDecl); definition {
+			return false
 		}
-		syntax.Walk(stmt, func(node syntax.Node) bool {
-			if len(result) >= maxSimpleEvaluations {
-				return false
-			}
-			redirection, isRedirect := node.(*syntax.Redirect)
-			if !isRedirect || redirection.Op != syntax.Hdoc && redirection.Op != syntax.DashHdoc {
-				return true
+		owner, isStmt := node.(*syntax.Stmt)
+		if !isStmt || len(owner.Redirs) == 0 {
+			return true
+		}
+		for _, redirection := range owner.Redirs {
+			if redirection.Op != syntax.Hdoc && redirection.Op != syntax.DashHdoc {
+				continue
 			}
 			if redirection.Hdoc == nil {
 				// An empty here-document: the consumer gets no input.
-				return false
+				continue
 			}
 			// The body as the shell that runs it reads it: the literal body,
 			// or an unquoted body that expands only parameters, as written
-			// (heredocScriptText, the reading of the shell twin).
-			body, known := heredocScriptText(redirection.Hdoc)
-			if reading == hereDocUnknown {
+			// (heredocScriptText, the reading of the shell twin). A body the
+			// twin cannot read (a command substitution) shows no state write
+			// here.
+			body, known := heredocScriptText(redirection)
+			if tier := hereDocOwnerUnknownStateConsumer(file, owner); tier != hereDocConsumerKnown && hereDocBodyMayWriteState(body, input) {
 				// A valid here-document fed to an ordinary program is data
 				// even when the closed syntax-tail reader cannot prove the
 				// stdin semantics of that program. Only the GAP-1183 launcher
-				// forms with a possible state write need the unknown tier. A
-				// body the twin cannot read (a command substitution) shows no
-				// state write here, as on the lane branch.
-				if topLevelHereDocUnknownStateConsumer(stmt.Cmd) && hereDocBodyMayWriteState(body, input) {
-					result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
+				// forms with a possible state write are the unknown tier; a
+				// data program after a PATH change is the strict tiers only
+				// (GAP-1481).
+				failure := EvaluationFailureUnknownStdinConsumer
+				if tier == hereDocConsumerStrictOnly {
+					failure = EvaluationFailureUnknownStdinConsumerStrict
 				}
-				return false
+				result = append(result, SimpleCommand{EvaluationFailure: failure})
+			}
+			if !runsCode {
+				continue
 			}
 			if !known || len(body) > maxScalarBytes || strings.ContainsRune(body, 0) {
 				result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureUnresolvedBody})
-				return false
+				continue
 			}
 			result = append(result, SimpleCommand{Text: body, CWD: input.CWD})
-			return false
-		})
-		if len(result) >= maxSimpleEvaluations {
-			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
-	}
+		return true
+	})
 	return result
+}
+
+// hereDocOwnerUnknownStateConsumer reports a call that owns a document and
+// whose program, as the statements before it may bind it, has unknown stdin
+// semantics and is one of the GAP-1183 opener forms
+// (topLevelHereDocUnknownStateConsumer).
+func hereDocOwnerUnknownStateConsumer(file *syntax.File, owner *syntax.Stmt) hereDocConsumerTier {
+	call, isCall := owner.Cmd.(*syntax.CallExpr)
+	if !isCall {
+		return hereDocConsumerKnown
+	}
+	var consumer strings.Builder
+	if syntax.NewPrinter().Print(&consumer, call) != nil {
+		return hereDocConsumerKnown
+	}
+	bindings := hereDocBindingsBefore(file, owner)
+	if hereDocTextConsumer(consumer.String(), bindings, 0) != hereDocUnknown {
+		return hereDocConsumerKnown
+	}
+	return topLevelHereDocUnknownStateConsumer(call, bindings)
 }
 
 // topLevelHereDocReadElsewhere reports an opener whose every command that
@@ -529,36 +635,133 @@ func topLevelHereDocReadElsewhere(cmd syntax.Command) bool {
 	return elsewhere
 }
 
+// hereDocBindingsBefore uses the syntax-tail binding reader on statements
+// that can run before owner. A later PATH assignment cannot rename an
+// earlier data consumer.
+func hereDocBindingsBefore(file *syntax.File, owner *syntax.Stmt) *hereDocBindings {
+	bindings := &hereDocBindings{names: map[string]bool{}}
+	start := owner.Pos().Offset()
+	var walk func(node syntax.Node) bool
+	walk = func(node syntax.Node) bool {
+		if fn, definition := node.(*syntax.FuncDecl); definition {
+			if fn.End().Offset() <= start && fn.Name != nil {
+				bindings.names[fn.Name.Value] = true
+			}
+			return false
+		}
+		stmt, isStmt := node.(*syntax.Stmt)
+		if !isStmt || stmt.End().Offset() > start {
+			return true
+		}
+		if fn, definition := stmt.Cmd.(*syntax.FuncDecl); definition {
+			if fn.Name != nil {
+				bindings.names[fn.Name.Value] = true
+			}
+			return false
+		}
+		if clause, isIf := stmt.Cmd.(*syntax.IfClause); isIf && hereDocDeadThen(stmt, clause, bindings) {
+			// if false; then ...; fi: the then branch never runs, so only an
+			// else or elif branch can bind.
+			if clause.Else != nil {
+				syntax.Walk(clause.Else, walk)
+			}
+			return false
+		}
+		bindings.read(stmt, 0)
+		return false
+	}
+	syntax.Walk(file, walk)
+	return bindings
+}
+
+// hereDocDeadThen reports an if statement whose condition is the plain
+// builtin false, which bindings do not rename: its then branch never runs.
+func hereDocDeadThen(stmt *syntax.Stmt, clause *syntax.IfClause, bindings *hereDocBindings) bool {
+	if stmt.Negated || stmt.Background || stmt.Coprocess || len(stmt.Redirs) != 0 || len(clause.Cond) != 1 {
+		return false
+	}
+	cond := clause.Cond[0]
+	call, isCall := cond.Cmd.(*syntax.CallExpr)
+	if !isCall || cond.Negated || cond.Background || cond.Coprocess || len(cond.Redirs) != 0 ||
+		len(call.Assigns) != 0 || len(call.Args) != 1 {
+		return false
+	}
+	word, static := simpleStaticWord(call.Args[0], nil)
+	return static && word == "false" && !bindings.renames(word)
+}
+
+// hereDocConsumerTier is how the gateway judges a here-document that may
+// write DefenseClaw state, by the program it is fed to
+// (topLevelHereDocUnknownStateConsumer).
+type hereDocConsumerTier uint8
+
+const (
+	// hereDocConsumerKnown: the document is data, or the ordinary readers
+	// judge it.
+	hereDocConsumerKnown hereDocConsumerTier = iota
+	// hereDocConsumerUnknown: newgrp, or a shell behind a wrapper the
+	// reading does not know: the unknown tier of every pack.
+	hereDocConsumerUnknown
+	// hereDocConsumerStrictOnly: a program that is no shell and no newgrp,
+	// after a PATH change before it or on it: the strict tiers only
+	// (rel-1-0-10:GAP-1481).
+	hereDocConsumerStrictOnly
+)
+
 // topLevelHereDocUnknownStateConsumer is the small set of valid opener
 // shapes in GAP-1183. Other unknown stdin consumers retain their release
 // behavior; the syntax-error tail has its separate conservative contract.
-func topLevelHereDocUnknownStateConsumer(cmd syntax.Command) bool {
-	call, ok := cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) == 0 {
-		return false
+// newgrp and a shell behind a wrapper are the unknown tier; a changed PATH
+// alone, before a program that names no shell (export PATH=~/bin:$PATH;
+// cat > script <<E), is the strict tiers only: the PATH most often adds a
+// tool folder and the program stays the data program it names
+// (rel-1-0-10:GAP-1481).
+func topLevelHereDocUnknownStateConsumer(call *syntax.CallExpr, bindings *hereDocBindings) hereDocConsumerTier {
+	if len(call.Args) == 0 {
+		return hereDocConsumerKnown
 	}
+	pathChanged := bindings != nil && bindings.resolution
 	for _, assign := range call.Assigns {
 		if assign.Name != nil && assign.Name.Value == "PATH" {
-			return true
+			pathChanged = true
 		}
 	}
-	first, known := simpleStaticWord(call.Args[0], nil)
-	if !known {
-		return false
+	changed := hereDocConsumerKnown
+	if pathChanged {
+		changed = hereDocConsumerStrictOnly
 	}
-	if commandProgram(first) == "newgrp" {
-		return true
+	words := make([]string, len(call.Args))
+	static := make([]bool, len(words))
+	for i, arg := range call.Args {
+		words[i], static[i] = simpleStaticWord(arg, nil)
 	}
-	if commandProgram(first) != "" || len(call.Args) < 2 {
-		return false
+	if run, ok := StaticPrefixWrapperChild(words, static); ok {
+		if run.ChangesResolution {
+			changed = hereDocConsumerStrictOnly
+		}
+		words, static = words[run.Index:], static[run.Index:]
 	}
-	for _, arg := range call.Args[1:] {
-		word, known := simpleStaticWord(arg, nil)
-		if known && (posixShellProgram(commandProgram(word)) || hereDocExtraShells[commandProgram(word)]) {
-			return true
+	if len(words) == 0 || !static[0] {
+		return changed
+	}
+	program := commandProgram(words[0])
+	if program == "newgrp" {
+		return hereDocConsumerUnknown
+	}
+	if changed != hereDocConsumerKnown && (posixShellProgram(program) || hereDocExtraShells[program]) {
+		// A shell the changed PATH may rename: what runs the text is not
+		// known.
+		return hereDocConsumerUnknown
+	}
+	if program != "" || len(words) < 2 {
+		return changed
+	}
+	for i, word := range words[1:] {
+		if static[i+1] && (posixShellProgram(commandProgram(word)) || hereDocExtraShells[commandProgram(word)]) {
+			return hereDocConsumerUnknown
 		}
 	}
-	return false
+	return changed
 }
 
 func hereDocBodyMayWriteState(body string, input Input) bool {
@@ -743,6 +946,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		"0": {{cwd: input.CWD, cwdUnknown: input.folderUnknown && input.CWD == "", vars: initialVars, startHome: home}},
 	}
 	result := make([]SimpleCommand, 0, len(parts))
+	// extra counts the readings of result that are body readings in another
+	// folder (bodyReading): the budget of the statements of the call is
+	// len(result)-extra, as on rel, where those readings did not exist.
+	extra := 0
 	changed := reduced || len(parts) != 1 || input.folderUnknown
 	unproven := false
 	// syntaxUnread: a nested body with a syntax error was read only in part
@@ -962,7 +1169,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				result = append(result, command)
 				emitted[command] = true
 				own = append(own, command)
-				if len(result) > maxSimpleEvaluations {
+				if len(result)-extra > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
 			}
@@ -984,7 +1191,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						result = append(result, alone)
 						emitted[alone] = true
 						changed = true
-						if len(result) > maxSimpleEvaluations {
+						if len(result)-extra > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
 						}
 					}
@@ -1039,6 +1246,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					innerInput := input
 					innerInput.Command, innerInput.Args, innerInput.Argv = script, nil, nil
 					innerInput.CWD = state.cwd
+					var wrapperFolderUnknown bool
+					if folder, changed, unknown := simpleNestedChildFolder(nestedCall.Args, nestedVars, state.cwd); changed {
+						innerInput.CWD = folder
+						wrapperFolderUnknown = unknown
+						innerCWDUnknown = innerCWDUnknown || unknown
+					}
 					if innerCWDUnknown {
 						innerInput.CWD = ""
 					}
@@ -1047,7 +1260,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					// the walk does not know: its walk knows that, so a
 					// current-folder head or a relative operand of the body is
 					// read as on the top level (rel-1-0-10:GAP-1042).
-					innerInput.folderUnknown = innerInput.CWD == "" && (state.cwdUnknown || input.CWD == "")
+					innerInput.folderUnknown = innerInput.CWD == "" && (wrapperFolderUnknown || state.cwdUnknown || input.CWD == "")
 					if shared {
 						if resolved, ok := simpleResolvedVariables(script, effective); ok {
 							innerInput.Command = resolved
@@ -1095,8 +1308,92 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 							simpleUnresolvedBoundVariable(child.Text, effective, bound)
 						child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
 						result = append(result, child)
-						if len(result) > maxSimpleEvaluations {
+						if child.bodyReading {
+							extra++
+						}
+						if len(result)-extra > maxSimpleEvaluations {
 							return []SimpleCommand{{EvaluationFailure: "limit"}}
+						}
+					}
+					// The body starts where its caller is. After a cd that
+					// may fail or not run, that is each folder the tracking
+					// gives the call (mayRunIn), not only the one the walk
+					// moved to: `cd X || cd Y && eval "$body"` runs the body
+					// in X or Y, so it is read in each of them as well
+					// (rel-1-0-10:GAP-1144, GAP-0183). A body that starts in
+					// a folder of its own (innerCWDUnknown) has none.
+					//
+					// These readings come on top of the statements of the
+					// call: they never make the call over its budget. Past
+					// maxSimpleEvaluations readings in all, the body is not
+					// read again folder by folder; each statement of it with a
+					// relative operand is kept as a reading in a folder the
+					// walk does not give (UnresolvedFolder), which the gateway
+					// judges by the protected files it may name there, beside
+					// every reading made before (the one bound rule,
+					// rel-1-0-10:GAP-1228).
+					if !innerCWDUnknown && innerInput.CWD != "" {
+						capped := false
+						for _, dir := range mayRunIn[partIndex] {
+							if dir == innerInput.CWD {
+								continue
+							}
+							if len(result) >= maxSimpleEvaluations {
+								capped = true
+								break
+							}
+							otherInput := innerInput
+							otherInput.CWD, otherInput.folderUnknown = dir, false
+							others := simpleCommands(otherInput, Analyze(otherInput), depth+1, innerInterpreter,
+								simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, nil)
+							if len(others) == 0 && strings.TrimSpace(otherInput.Command) != "" {
+								others = []SimpleCommand{{Text: otherInput.Command, CWD: dir}}
+							}
+							for _, child := range others {
+								if isSyntaxTailUnread(child) {
+									syntaxUnread = true
+									continue
+								}
+								if child.EvaluationFailure != "" {
+									unproven = true
+									continue
+								}
+								if !simpleRelativePathOperand(child.Text) {
+									continue // read in its own folder above
+								}
+								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
+									simpleUnresolvedBoundVariable(child.Text, effective, bound)
+								child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+								child.OtherFolder, child.bodyReading = true, true
+								if emitted[child] {
+									continue
+								}
+								if len(result) >= maxSimpleEvaluations {
+									capped = true
+									break
+								}
+								emitted[child] = true
+								result = append(result, child)
+								extra++
+							}
+						}
+						if capped {
+							for _, child := range inner {
+								if child.EvaluationFailure != "" || child.OtherFolder || !simpleRelativePathOperand(child.Text) {
+									continue
+								}
+								child.UnresolvedBoundVariable = child.UnresolvedBoundVariable ||
+									simpleUnresolvedBoundVariable(child.Text, effective, bound)
+								child.UnboundUser = child.UnboundUser || simpleUnboundUser(child.Text, effective, bound)
+								child.CWD, child.AbsoluteOnly = "", false
+								child.OtherFolder, child.UnresolvedFolder, child.bodyReading = true, true, true
+								if emitted[child] {
+									continue
+								}
+								emitted[child] = true
+								result = append(result, child)
+								extra++
+							}
 						}
 					}
 					if shared && !bodyParsed {
@@ -1207,7 +1504,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				emitted[again] = true
 				again.OtherFolder = true
 				result = append(result, again)
-				if len(result) > maxSimpleEvaluations {
+				if len(result)-extra > maxSimpleEvaluations {
 					return []SimpleCommand{{EvaluationFailure: "limit"}}
 				}
 			}
@@ -1284,8 +1581,12 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 	begin := 0
 	result := make([]SimpleCommand, 0, 2)
 	variables := make(map[string]string)
-	state := simpleWindowsState{cwd: input.CWD}
+	state := simpleWindowsState{cwd: input.CWD, trackOthers: windowsSimpleCallFolder(input.CWD)}
 	failed := false
+	// readings counts the readings of a statement in another folder it may
+	// run in (OtherFolder): readings, not statements of the call; placed
+	// counts those that name the folder.
+	readings, placed := 0, 0
 	groupIndex := 0
 	var groups []simpleWindowsGroupSnapshot
 	processGroupEvents := func(before int) {
@@ -1301,7 +1602,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			groupIndex++
 		}
 	}
-	appendPart := func(part string, start, end int) {
+	appendPart := func(part string, start, end int, operator string) {
 		childStart := start
 		for childStart < end && unicode.IsSpace(runes[childStart]) {
 			childStart++
@@ -1312,6 +1613,8 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if dialect == windowsPowerShell {
 			if windowsSimpleLiteralOutput(part) {
 				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, LiteralOutputOnly: true})
+				// It moves nothing; the folders an && skipped come back.
+				state.advance(part, dialect, childInput, variables, operator)
 				processGroupEvents(end)
 				return
 			}
@@ -1322,6 +1625,8 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 					failed = true
 				}
 				result = append(result, SimpleCommand{Text: part, CWD: state.cwd, OpaqueValueAssignment: true})
+				// It moves nothing; the folders an && skipped come back.
+				state.advance(part, dialect, childInput, variables, operator)
 				processGroupEvents(end)
 				return
 			}
@@ -1340,7 +1645,46 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 			failed = true
 		}
 		result = append(result, SimpleCommand{Text: text, CWD: state.cwd})
-		state.next(part, dialect, childInput, variables)
+		if (len(state.others) != 0 || state.othersUnresolved) && windowsSimpleRelativePathOperand(text, facts.Parse.Dialect) {
+			// A relative operand names a file in each folder the
+			// statement may run in (rel-1-0-10:GAP-1150). Those readings
+			// come on top of the statements of the call, which keep the
+			// budget they have on rel. Past maxSimpleWindowsOtherReadings
+			// of them, the statement is read once more as in a folder the
+			// walk does not give (UnresolvedFolder), as past
+			// maxSimpleWindowsFolders, beside every reading made before:
+			// never the whole-call limit (the one bound rule,
+			// rel-1-0-10:GAP-1228).
+			//
+			// The folders past the cap stay on that reading
+			// (CappedFolders): the gateway reads the statement in those
+			// of them where its operand may name a protected file, as
+			// below the cap, so the cap drops only benign readings
+			// (rel-1-0-10:GAP-1281).
+			unresolved := state.othersUnresolved
+			var capped []string
+			if placed+len(state.others) <= maxSimpleWindowsOtherReadings {
+				for _, other := range state.others {
+					result = append(result, SimpleCommand{Text: text, CWD: other.cwd, OtherFolder: true})
+					readings++
+					placed++
+				}
+			} else {
+				unresolved = true
+				for _, other := range state.others {
+					capped = append(capped, other.cwd)
+				}
+			}
+			if unresolved {
+				reading := SimpleCommand{Text: text, OtherFolder: true, UnresolvedFolder: true}
+				if len(capped) != 0 {
+					reading.cappedFolders = &capped
+				}
+				result = append(result, reading)
+				readings++
+			}
+		}
+		state.advance(part, dialect, childInput, variables, operator)
 		processGroupEvents(end)
 	}
 	for _, lexeme := range lexemes {
@@ -1354,14 +1698,18 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		if part == "" {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
-		appendPart(part, begin, lexeme.start)
+		operator := lexeme.operator
+		if lexeme.kind == windowsPipeLexeme {
+			operator = "|"
+		}
+		appendPart(part, begin, lexeme.start, operator)
 		begin = lexeme.end
 		if lexeme.kind == windowsPipeLexeme || lexeme.operator == "&&" || lexeme.operator == "||" {
 			// A pipeline stage has a separate scope; conditional assignments
 			// may not have run. Do not carry either into a later command.
 			clear(variables)
 		}
-		if len(result) >= maxStatementsAlone {
+		if len(result)-readings >= maxStatementsAlone {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}
@@ -1380,7 +1728,7 @@ func windowsSimpleCommands(input Input, facts Facts) []SimpleCommand {
 		}
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
-	appendPart(last, begin, len(runes))
+	appendPart(last, begin, len(runes), "")
 	if failed {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})
 	}
@@ -2867,6 +3215,58 @@ func directoryStackTildeName(name string) bool {
 	return name != "" && strings.Trim(name, "0123456789") == ""
 }
 
+// simpleNestedChildFolder follows the same static wrapper child indexes as
+// simpleNestedScript. A changed root or working directory belongs to the
+// child, not to the caller's later statements.
+func simpleNestedChildFolder(args []*syntax.Word, vars map[string]string, cwd string) (folder string, changed, unknown bool) {
+	words := make([]string, len(args))
+	static := make([]bool, len(args))
+	for i, arg := range args {
+		words[i], static[i] = simpleStaticScriptWord(arg, vars)
+	}
+	folder = cwd
+	for depth := 0; depth < 8 && len(words) > 0 && static[0]; depth++ {
+		var child int
+		switch commandProgram(words[0]) {
+		case "chroot":
+			parsed := parseChrootInvocation(words)
+			if !parsed.complete || parsed.childIndex <= 0 || !static[parsed.childIndex] {
+				return "", true, true
+			}
+			child = parsed.childIndex
+			if !slices.Contains(words[1:child], "--skip-chdir") {
+				if filepath.IsAbs(parsed.root) {
+					folder = filepath.Clean(parsed.root)
+				} else if folder != "" {
+					folder = filepath.Join(folder, parsed.root)
+				} else {
+					return "", true, true
+				}
+				changed = true
+			}
+		case "nsenter":
+			parsed := parseNSEnterInvocation(words)
+			if !parsed.childKnown {
+				return "", true, true
+			}
+			child = parsed.childIndex
+			if parsed.folderUnknown {
+				return "", true, true
+			}
+			if parsed.workDir != "" {
+				folder, changed = filepath.Clean(parsed.workDir), true
+			}
+		default:
+			child = WrapperChildIndex(words, static)
+		}
+		if child <= 0 || child >= len(words) {
+			break
+		}
+		words, static = words[child:], static[child:]
+	}
+	return folder, changed, false
+}
+
 // simpleNestedScript returns a static shell -c or eval body. eval shares the
 // caller's variables and directory; a -c shell starts a child shell.
 func simpleNestedScript(call *syntax.CallExpr, vars map[string]string, cwdUnknown *bool, interpreter *string) (script string, shared, nested, static bool) {
@@ -2877,6 +3277,23 @@ func simpleNestedScript(call *syntax.CallExpr, vars map[string]string, cwdUnknow
 }
 
 func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth int, cwdUnknown *bool, interpreter *string) (script string, shared, nested, static bool) {
+	return simpleNestedScriptRun(args, vars, depth, 0, cwdUnknown, interpreter, nil)
+}
+
+// simpleNestedScriptRun is simpleNestedScriptArgs after neutral
+// context-neutral wrappers (posixContextNeutralWrappers: nice, time, timeout,
+// nohup). Such a wrapper only runs the next program, so it spends no nesting
+// depth, as in the action analysis (staticPOSIXWrapperDepthCost): a run of up
+// to InlineChainWrappers of them is read to the program it runs, whose call
+// is then judged alone as it would be without them (rel-1-0-10:GAP-1207,
+// substrate-1:GAP-0478). One more is not read (nested, not static): the call
+// is judged whole, where the chain is past the wrapper bound (TRUNCATED,
+// PrefixWrapperRun.PastWrapperBound). A programWord that is not nil is set
+// to the last word of args the chain of wrappers reached, the program they
+// run when it is no wrapper itself (simpleNeutralWrapperFreeReading): the
+// wrapper a word made at run time among its own words stopped the chain at,
+// whatever the program's own arguments are.
+func simpleNestedScriptRun(args []*syntax.Word, vars map[string]string, depth, neutral int, cwdUnknown *bool, interpreter *string, programWord **syntax.Word) (script string, shared, nested, static bool) {
 	if depth >= 8 || len(args) == 0 {
 		return "", false, true, false
 	}
@@ -2922,16 +3339,29 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 	}
 	wrapper := filepath.Base(program)
 	if simpleNestedWrapper(wrapper) {
+		// A word the walk cannot resolve in the wrapper's own words or in
+		// the program word it runs leaves the call unread (a possible
+		// shell -c body). One among the program's arguments does not: the
+		// wrapper is read to that program, whose own reading judges the
+		// word (a shell -c body, GAP-0535), as without the wrapper, so
+		// time env GOOS=x go test -c -o "$d/x" is not a possible shell body.
 		argv := make([]string, len(args))
+		unknown := -1
 		for index, arg := range args {
 			value, known := simpleStaticScriptWord(arg, vars)
-			if !known {
-				if simplePotentialShellScript(args, vars) {
-					return "", false, true, false
-				}
-				return "", false, false, false
+			if !known && unknown < 0 {
+				unknown = index
 			}
 			argv[index] = value
+		}
+		unread := func() (string, bool, bool, bool) {
+			if simplePotentialShellScript(args, vars) {
+				return "", false, true, false
+			}
+			return "", false, false, false
+		}
+		if unknown == 0 {
+			return unread()
 		}
 		var childIndex int
 		switch wrapper {
@@ -2945,8 +3375,10 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		case "nice":
 			childIndex = simpleNiceChildIndex(argv)
 		case "env":
-			if split, ok := simpleEnvSplitString(argv); ok {
-				return split, false, true, true
+			if unknown < 0 {
+				if split, ok := simpleEnvSplitString(argv); ok {
+					return split, false, true, true
+				}
 			}
 			childIndex = simpleEnvChildIndex(argv)
 		default:
@@ -2954,28 +3386,55 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			for index := range static {
 				static[index] = true
 			}
-			if childIndex = WrapperChildIndex(argv, static); childIndex > 0 {
+			if childIndex = simpleWrapperChildIndex(argv, static); childIndex > 0 {
 				break
 			}
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
 			if uncertain {
-				if simplePotentialShellScript(args, vars) {
-					return "", false, true, false
-				}
-				return "", false, false, false
+				return unread()
 			}
 			if !found {
+				if unknown >= 0 {
+					return unread()
+				}
 				return "", false, false, false
 			}
 			childIndex = len(argv) - len(child)
 		}
+		if unknown >= 0 && (childIndex <= 0 || unknown <= childIndex) {
+			return unread()
+		}
 		if childIndex <= 0 || childIndex >= len(args) {
 			return "", false, true, false
 		}
-		if program, ok := simpleWrappedProgram(wrapper, argv, childIndex); ok {
-			return program, false, true, true
+		if _, contextNeutral := posixContextNeutralWrappers[wrapper]; contextNeutral {
+			if neutral++; neutral > InlineChainWrappers {
+				return "", false, true, false
+			}
+		} else {
+			depth++
 		}
-		return simpleNestedScriptArgs(args[childIndex:], vars, depth+1, cwdUnknown, interpreter)
+		if programWord != nil {
+			// The word the chain has reached. chroot and nsenter run it in
+			// another root, and a word made at run time among its arguments
+			// is not read here (simpleWrappedProgram): no program word.
+			// A word made at run time among the wrapper words stopped the
+			// chain above (unread) at the wrapper it belongs to, so the
+			// word set here is that wrapper; one among the program's own
+			// arguments leaves the program static and read
+			// (rel-1-0-10:GAP-1474).
+			if wrapper == "chroot" || wrapper == "nsenter" {
+				*programWord, programWord = nil, nil
+			} else {
+				*programWord = args[childIndex]
+			}
+		}
+		if unknown < 0 {
+			if program, ok := simpleWrappedProgram(wrapper, argv, childIndex, neutral > 0); ok {
+				return program, false, true, true
+			}
+		}
+		return simpleNestedScriptRun(args[childIndex:], vars, depth, neutral, cwdUnknown, interpreter, programWord)
 	}
 	// The other static program wrappers use the same child index as the
 	// protected-target reader. Their child shell body gets the ordinary
@@ -3063,9 +3522,58 @@ func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program stri
 	return parsePOSIXShellInvocation(program, argv).noExec
 }
 
+// simpleWrapperChildIndex is the child WrapperChildIndex gives the nested
+// script walk for a nested wrapper without a branch of its own (sudo, exec,
+// command, chroot, nsenter), cut at the first nested wrapper of the chain
+// (simpleNestedWrapper). WrapperChildIndex reads a whole chain of prefix
+// wrappers at once, so for sudo nohup PROGRAM, sudo env NAME=value PROGRAM
+// and nohup sudo env NAME=value PROGRAM it named PROGRAM, past the nohup or
+// env whose own branch of simpleNestedScriptArgs turns PROGRAM into the
+// reading the rules judge (simpleWrappedProgram). That reading was lost and
+// the action was allowed (rel-1-0-10:GAP-1322). Stopping at that wrapper
+// lets its branch read the rest of the chain, one wrapper at a time, as the
+// walk did before; a chain of other prefix wrappers, and chroot, nsenter and
+// xargs by their own grammars, keep the WrapperChildIndex child
+// (rel-1-0-10:GAP-1182).
+func simpleWrapperChildIndex(argv []string, static []bool) int {
+	childIndex := WrapperChildIndex(argv, static)
+	if childIndex <= 0 {
+		return childIndex
+	}
+	value := func(at int) (string, bool) {
+		if at < 0 || at >= len(argv) {
+			return "", false
+		}
+		return argv[at], static[at]
+	}
+	var run PrefixWrapperRun
+	for index := 0; index < childIndex; {
+		name, ok := value(index)
+		if !ok || name == "" {
+			break
+		}
+		next, known := wrapperChildIndex(wrapperProgramName(name), value, len(argv), index, &run)
+		if !known || next <= index || next >= childIndex {
+			break
+		}
+		if wrapperChildProgram(argv, static, next) == next && simpleNestedWrapper(wrapperProgramName(argv[next])) {
+			return next
+		}
+		index = next
+	}
+	return childIndex
+}
+
+// simpleNestedWrapper reports a program the walk reads as a wrapper of the
+// program after it: every context-neutral wrapper (posixContextNeutralWrappers,
+// the external time program included) and the wrappers that change the
+// environment, the user or the root.
 func simpleNestedWrapper(program string) bool {
+	if _, contextNeutral := posixContextNeutralWrappers[program]; contextNeutral {
+		return true
+	}
 	switch program {
-	case "env", "sudo", "exec", "command", "nohup", "timeout", "nice", "nsenter", "chroot":
+	case "env", "sudo", "exec", "command", "nsenter", "chroot":
 		return true
 	default:
 		return false
@@ -3161,20 +3669,27 @@ func simpleEnvSplitString(argv []string) (string, bool) {
 
 // simpleWrappedProgram returns the program call that a static wrapper runs
 // when Analyze does not read it as a command of the action: env with a
-// NAME=value (PATH may change which program runs), nohup and timeout. A
-// shell or another wrapper as the program is read as a nested script
-// instead. The argv is static, so the call is judged as a simple command,
+// NAME=value (PATH may change which program runs) and every context-neutral
+// wrapper (posixContextNeutralWrappers). A wrapper of that set only runs the
+// next program, so the call keeps the verdict the program has alone: nice
+// was missing, so nohup nice PROGRAM and nice PROGRAM were never judged as
+// PROGRAM (rel-1-0-10:GAP-1207). A shell or another wrapper as the program
+// is read as a nested script instead. The argv is static, so the call is judged as a simple command,
 // where a match can only over-block (GAP-1200, #1189). env NAME=value prog
 // is written as NAME=value prog, so the assignments are judged as the same
-// prefix assignments are.
-func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string, bool) {
+// prefix assignments are. afterNeutral is a chain with a context-neutral
+// wrapper before this one: Analyze reads that call partially, so the program
+// the chain ends in is judged here whatever runs it next (env, sudo, exec,
+// command); nohup x64 env x4 PROGRAM was never judged as PROGRAM, a weaker
+// verdict than the chain truncation of rel (rel-1-0-10:GAP-1207 review r1).
+// chroot and nsenter run the program in another root, so it is not judged
+// alone after them.
+func simpleWrappedProgram(wrapper string, argv []string, childIndex int, afterNeutral bool) (string, bool) {
 	if childIndex <= 0 || childIndex >= len(argv) {
 		return "", false
 	}
 	var assignments []string
-	switch wrapper {
-	case "nohup", "timeout":
-	case "env":
+	if wrapper == "env" {
 		for _, arg := range argv[1:childIndex] {
 			name, value, found := strings.Cut(arg, "=")
 			if !found || !simpleVariableName(name) {
@@ -3186,9 +3701,11 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string
 			}
 			assignments = append(assignments, name+"="+quoted)
 		}
-		if len(assignments) == 0 {
-			return "", false
-		}
+	}
+	_, contextNeutral := posixContextNeutralWrappers[wrapper]
+	switch {
+	case contextNeutral, len(assignments) > 0:
+	case afterNeutral && wrapper != "chroot" && wrapper != "nsenter":
 	default:
 		return "", false
 	}
@@ -3205,6 +3722,218 @@ func simpleWrappedProgram(wrapper string, argv []string, childIndex int) (string
 		return "", false
 	}
 	return strings.Join(append(assignments, call), " "), true
+}
+
+// simpleNeutralWrapperFreeReading is the call as written with the wrapper
+// words removed from each command that starts with a context-neutral
+// wrapper (posixContextNeutralWrappers) the walk reads to the program it
+// runs (simpleNestedScriptRun: a run of up to InlineChainWrappers of them,
+// then env, sudo, exec or command; a shell too), so each such program is
+// judged where it runs, in its pipeline and list. Analyze
+// reads a call behind those wrappers only partially, and the walk judges a
+// program alone only when the text may hold more than one command, and a
+// pipeline only stage by stage: a rule on the program (PATH-AWS-CREDS for
+// cat ~/.aws/credentials) or on its pipeline (CMD-PIPE-CURL for curl URL |
+// sh) was not judged behind nohup. rel judged a chain of more than
+// MaxWrapperDepth of them at the truncation floor (an alert in default, a
+// block in strict); reading such a chain whole up to the chain bound
+// (rel-1-0-10:GAP-1207) put it below the program alone, an allow in every
+// tier (rel-1-0-10:GAP-1321, and GAP-1323 for one wrapper). The reading
+// keeps every other word, so the program keeps the verdict it has alone,
+// alert included; like every reading of the walk it only adds findings. A
+// command with a prefix assignment, a redirect before the program word (among
+// the wrapper words or before the first of them: >/dev/null nohup curl URL |
+// sh still runs the script curl fetches, and rel kept the floor on it), a word
+// made at run time among its wrapper words, chroot or nsenter in the chain,
+// and a chain past the bound (TRUNCATED) are not read so; a word made at run
+// time among the program's own arguments is kept as written
+// (rel-1-0-10:GAP-1474).
+//
+// contextRead reports that the pipeline and list rules read the context of
+// every command the reading cuts: false when one is in a pipeline or && / ||
+// list with a compound command (a brace group, a subshell, if, while, for,
+// case) among its stages, or when the call has a coproc. Analyze projects no
+// pipeline across a compound stage, so curl and sh in { curl URL; } | sh or
+// coproc curl URL | sh are bare calls that CMD-PIPE-CURL does not read as one
+// pipeline (rel-1-0-10:GAP-1507); a pipeline inside a compound command is
+// read. Such a reading still adds its findings.
+func simpleNeutralWrapperFreeReading(input Input, source string) (reading SimpleCommand, contextRead, ok bool) {
+	file, parsed := shellparse.Parse(source)
+	if !parsed {
+		return SimpleCommand{}, false, false
+	}
+	home, _ := normalizeActiveHome(input.ActiveHome)
+	vars := map[string]string{"HOME": home}
+	type span struct{ start, end int }
+	var cuts []span
+	contextRead = true
+	var stack []syntax.Node
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		if _, coproc := node.(*syntax.CoprocClause); coproc {
+			contextRead = false
+		}
+		stack = append(stack, node)
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) < 2 {
+			return true
+		}
+		head, known := simpleStaticWord(call.Args[0], vars)
+		if _, neutral := posixContextNeutralWrappers[filepath.Base(head)]; !known || !neutral {
+			return true
+		}
+		var program *syntax.Word
+		simpleNestedScriptRun(call.Args, vars, 0, 0, nil, nil, &program)
+		if program == nil {
+			return true
+		}
+		if name, known := simpleStaticWord(program, vars); !known || simpleNestedWrapper(filepath.Base(name)) {
+			// The chain stopped at a wrapper: past the bound (TRUNCATED), or
+			// a wrapper the walk does not read.
+			return true
+		}
+		cut := span{int(call.Args[0].Pos().Offset()), int(program.Pos().Offset())}
+		// A redirect anywhere before the program word, the first wrapper word
+		// included, is refused: the cut would move it onto the program.
+		if slices.ContainsFunc(stmt.Redirs, func(redirect *syntax.Redirect) bool {
+			return int(redirect.Pos().Offset()) < cut.end
+		}) {
+			return true
+		}
+		cuts = append(cuts, cut)
+		if simpleSplitContext(stack[:len(stack)-1]) {
+			contextRead = false
+		}
+		return true
+	})
+	var text strings.Builder
+	last := 0
+	for _, cut := range cuts {
+		if cut.start < last || cut.end <= cut.start || cut.end > len(source) {
+			return SimpleCommand{}, false, false
+		}
+		text.WriteString(source[last:cut.start])
+		last = cut.end
+	}
+	if last == 0 {
+		return SimpleCommand{}, false, false
+	}
+	text.WriteString(source[last:])
+	if strings.TrimSpace(text.String()) == "" {
+		return SimpleCommand{}, false, false
+	}
+	return SimpleCommand{Text: text.String(), CWD: input.CWD}, contextRead, true
+}
+
+// simpleSplitContext reports that the ancestors of a statement put it in a
+// pipeline or && / || list with a compound command among its operands
+// (simpleNeutralWrapperFreeReading).
+func simpleSplitContext(ancestors []syntax.Node) bool {
+	return slices.ContainsFunc(ancestors, func(node syntax.Node) bool {
+		binary, ok := node.(*syntax.BinaryCmd)
+		return ok && simpleBinaryHasCompound(binary)
+	})
+}
+
+// simpleBinaryHasCompound reports a compound command among the operands of a
+// pipeline or list, nested ones included.
+func simpleBinaryHasCompound(binary *syntax.BinaryCmd) bool {
+	for _, operand := range []*syntax.Stmt{binary.X, binary.Y} {
+		if operand == nil || operand.Cmd == nil {
+			continue
+		}
+		switch typed := operand.Cmd.(type) {
+		case *syntax.CallExpr:
+		case *syntax.BinaryCmd:
+			if simpleBinaryHasCompound(typed) {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+// WrapperFreeCalls is the top-level calls of the wrapper-free reading of a
+// call (simpleNeutralWrapperFreeReading) as Analyze reads them.
+type WrapperFreeCalls []CommandFact
+
+// NeutralWrapperFreeCalls is the top-level calls of the wrapper-free reading
+// SimpleCommands adds for input, the reading judged on its own: nil when the
+// call has none, or when a top-level call of the reading still starts with a
+// wrapper. Such a call is a chain the reading does not read (a prefix
+// assignment, a redirect before its program word, a word made at run time
+// among its wrapper words, chroot or nsenter in it, the time keyword before
+// it): the program it runs is judged alone by no reader, and a rule on its
+// pipeline or list (CMD-PIPE-CURL for curl URL | sh) is not judged either
+// (rel-1-0-10:GAP-1474). nil too when the pipeline and list rules do not read
+// the context of a call the reading cuts (a compound command among the stages
+// of its pipeline or list, a coproc): the reading holds the program as a bare
+// call there, but not its pipeline (rel-1-0-10:GAP-1507).
+func NeutralWrapperFreeCalls(input Input, facts Facts) (calls WrapperFreeCalls) {
+	defer func() {
+		if recover() != nil {
+			calls = nil
+		}
+	}()
+	if facts.Parse.Dialect != DialectPOSIX || facts.Parse.Status != StatusPartial {
+		return nil
+	}
+	source := input.Command
+	if source == "" {
+		_, capture := analyzeWithRedirectTargets(input, "")
+		source = capture.source
+	}
+	if len(source) > maxCommandBytes {
+		return nil
+	}
+	reading, contextRead, ok := simpleNeutralWrapperFreeReading(input, source)
+	if !ok || !contextRead {
+		return nil
+	}
+	readingInput := input
+	readingInput.Command, readingInput.CWD = reading.Text, reading.CWD
+	readingInput.Args, readingInput.Argv = nil, nil
+	for _, command := range Analyze(readingInput).Commands {
+		if command.ParentCommandID != 0 {
+			continue
+		}
+		if len(command.Argv) > 0 && (len(command.Wrappers) > 0 || simpleNestedWrapper(commandProgram(command.Argv[0])) ||
+			WrapperChildIndex(command.Argv, staticArgvWords(command)) >= 0) {
+			return nil
+		}
+		calls = append(calls, command)
+	}
+	return calls
+}
+
+// Runs reports that calls hold program (the argv a chain of prefix wrappers
+// runs, from the child word on) as a bare call, with every redirect of the
+// chain: the program is judged where it runs, at the verdict it has alone.
+func (calls WrapperFreeCalls) Runs(program []string, redirects []RedirectFact) bool {
+	return slices.ContainsFunc(calls, func(call CommandFact) bool {
+		return slices.Equal(call.Argv, program) && !slices.ContainsFunc(redirects, func(redirect RedirectFact) bool {
+			return !slices.Contains(call.Redirects, redirect)
+		})
+	})
+}
+
+// staticArgvWords is the static mask of the argv of command: false for a word
+// the shell makes at run time.
+func staticArgvWords(command CommandFact) []bool {
+	static := make([]bool, len(command.Argv))
+	for i := range static {
+		static[i] = len(command.Arguments) != len(command.Argv) || !command.Arguments[i].Expands
+	}
+	return static
 }
 
 // simpleQuotedArgv writes argv as one shell command line.

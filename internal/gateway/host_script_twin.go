@@ -17,6 +17,9 @@
 package gateway
 
 import (
+	"reflect"
+	"slices"
+
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -43,6 +46,7 @@ func hostScriptTwinRequests(request trustedActionRequest, facts actionfacts.Fact
 		return nil, bounded.CapSet{}
 	}
 	reading := actionfacts.HostScriptReadings(request.Input, facts, request.hostTwinDepth, request.hostTwinListed)
+	callJudged := request.windowsTwinHosts.ofTwin(request)
 	twins := make([]trustedActionRequest, 0, len(reading.Twins))
 	for index, input := range reading.Twins {
 		// A script that only lists proves no write to the paths it names; its
@@ -57,7 +61,81 @@ func hostScriptTwinRequests(request trustedActionRequest, facts actionfacts.Fact
 		twin.record, twin.recordTelemetry = nil, nil
 		twin.hostTwinDepth = reading.Depth
 		twin.hostTwinListed = index < len(reading.Listed) && reading.Listed[index]
+		twin.windowsTwinHosts = nil
+		if callJudged.judges(twin) {
+			continue
+		}
 		twins = append(twins, twin)
 	}
 	return twins, reading.Caps
+}
+
+// judgedHostReadings are the script readings a call judges itself
+// (hostScriptTwinRequests), kept for the Windows reading twins made of it
+// (windowsReadingTwinRequests). The PowerShell reading of a Codex or Copilot
+// shell call placed in no dialect makes the same readings as the call (the
+// list after a Set-Location and each statement of it, read as PowerShell in
+// the hook's folder), and the twin judged each of them a second time: on
+// the Windows gateway that second judgment was a third of the cost of the
+// twin of an ordinary Set-Location call with a dozen appends
+// (rel-1-0-10:GAP-1316, the GAP-1150 reading).
+//
+// Leaving them out of the twin changes no finding of the call. The call's
+// own reading of a script is the same request but for the flags a reading
+// twin turns off (readingTwin, windowsDialectReadings), and those flags only
+// ever add readings to it (cap runs, launcher bodies, readable statements,
+// the POSIX twin, the unread-PowerShell floor): it proves every finding the
+// twin's would, at the same strength or stronger. The call joins it with
+// withHostTwinFindings, before the twin's findings are joined
+// (withTwinProvenBlocks), and both keep, per finding key, the strongest
+// enforcing finding, so the twin's copy of it was never kept. A reading the
+// call does not make with the same input, wrapper depth and list flag is
+// still the twin's own.
+type judgedHostReadings struct {
+	requests []trustedActionRequest
+}
+
+// note adds the script readings the call judges (nil: none kept).
+func (judged *judgedHostReadings) note(twins []trustedActionRequest) {
+	if judged != nil {
+		judged.requests = append(judged.requests, twins...)
+	}
+}
+
+// judges reports a script reading the call judges itself: the same input,
+// placed in a dialect (an unhinted one is placed by the Windows selection,
+// which the flags of the twin change), at the same wrapper depth and with
+// the same list flag.
+func (judged *judgedHostReadings) judges(twin trustedActionRequest) bool {
+	if judged == nil || twin.Input.DialectHint == "" {
+		return false
+	}
+	return slices.ContainsFunc(judged.requests, func(own trustedActionRequest) bool {
+		return own.hostTwinDepth == twin.hostTwinDepth && own.hostTwinListed == twin.hostTwinListed &&
+			reflect.DeepEqual(own.Input, twin.Input)
+	})
+}
+
+// windowsTwinsKeepHostReadings makes every Windows reading twin judge all of
+// its script readings, so a test can compare the answers with and without
+// leaving the call's own out (TestGAP1316WindowsReadingTwinAnswersAreUnchanged).
+// Production code never sets it.
+var windowsTwinsKeepHostReadings bool
+
+// windowsTwinHostReadings is the script readings of the call one Windows
+// reading twin is made of, and that twin's input: only the twin itself
+// leaves them out, not a reading it makes in turn (a statement, a capped
+// run, an argument command).
+type windowsTwinHostReadings struct {
+	call  *judgedHostReadings
+	input actionfacts.Input
+}
+
+// ofTwin returns the call's script readings when request is the twin they
+// are kept for, nil otherwise.
+func (hosts *windowsTwinHostReadings) ofTwin(request trustedActionRequest) *judgedHostReadings {
+	if hosts == nil || !request.readingTwin || request.simpleCommandPass || !reflect.DeepEqual(hosts.input, request.Input) {
+		return nil
+	}
+	return hosts.call
 }

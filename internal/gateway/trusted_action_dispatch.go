@@ -180,6 +180,10 @@ type trustedActionRequest struct {
 	// call's findings with and without it (TestHostScriptTwinOnlyAddsFindings).
 	// Production requests never set it.
 	hostScriptTwinOff bool
+	// windowsTwinHosts, on a Windows reading twin (windowsReadingTwinRequests),
+	// holds the script readings its call judges itself, which the twin leaves
+	// out (judgedHostReadings, rel-1-0-10:GAP-1316).
+	windowsTwinHosts *windowsTwinHostReadings
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -231,6 +235,13 @@ type trustedActionRequest struct {
 	// localLinkTwin marks the reading of a shell call with the words a link
 	// moves spelled as their places (localCommandLinkTwinRequest).
 	localLinkTwin bool
+	// hereStringPipeReading marks the printf WORD | CMD reading of a bash
+	// here-string (hereStringStateMutation). The call it reads got its own
+	// any-program wrapper twin, which is read the same way; inside this
+	// reading a read that the walk left as a pipe binds in a subshell, so
+	// unwrapping a call next to it (command echo IFS=x) would prove a write
+	// through the value the read replaces (rel-1-0-10:GAP-1083, GAP-1246).
+	hereStringPipeReading bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -623,12 +634,20 @@ func dispatchTrustedAction(
 			defer func() { findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable) }()
 		}
 	}
-	if bounded, handled := operandBoundDispatch(parent, request); handled {
+	if boundedFindings, handled := operandBoundDispatch(parent, request); handled {
 		// A call past actionfacts.MaxOperandsPerCall operands is unresolved
 		// (GAP-0943), and a statement of more argv words than the analysis
 		// reads has no path facts (GAP-1069): operandBoundDispatch judges
-		// the bounded readings.
-		return bounded
+		// the bounded readings. They are judged under this call's cap
+		// floor, so the depth cap of the call's own analysis is this
+		// call's: a wrapper chain past the analysis bound in a statement of
+		// many words is TRUNCATED as in a short one, never a clean allow
+		// (rel-1-0-10:GAP-0973). Its item and node caps are what the
+		// bounded readings stand in for, so they are not taken.
+		if !request.simpleCommandPass && capFloorAnalysisCaps(request.Input, actionfacts.Analyze(request.Input)).Has(bounded.Depth) {
+			analyzedCaps = analyzedCaps.Union(bounded.Of(bounded.Depth))
+		}
+		return boundedFindings
 	}
 	var (
 		facts     actionfacts.Facts
@@ -656,7 +675,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
-		analyzedCaps = capFloorAnalysisCaps(facts)
+		analyzedCaps = capFloorAnalysisCaps(request.Input, facts)
 		// A write operand with a .. component whose walk cannot be resolved
 		// has an unknown target: at least the unknown tier of the pack, what
 		// the readers proved still deciding (the one bound rule, cap paths;
@@ -814,23 +833,50 @@ func dispatchTrustedAction(
 			findings = withTwinProvenBlocks(findings, twinFindings)
 		}()
 	}
-	// A file writer run through nohup, nice, time, timeout, env NAME=value,
-	// command, sudo or exec (or after a word that may expand to nothing)
-	// writes what the plain call writes (GAP-2512); the plain reading is
-	// judged, and only its block counts.
-	if twin, ok := wrapperUnwrapTwinRequest(request); ok {
+	// A file writer or a shell run through any static prefix wrapper
+	// (nohup, nice, setsid, stdbuf, ionice, sudo, ...; or after a word that
+	// may expand to nothing) writes what the plain call does (GAP-2512,
+	// GAP-2519); the plain reading is judged, and only its block counts.
+	writerTwin, writerTwinOK := wrapperUnwrapTwinRequest(request, false)
+	if writerTwinOK {
 		defer func() {
-			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, writerTwin))
+		}()
+	}
+	// Any other program run that way writes or removes what the plain call
+	// does too (find -delete, truncate, rm of the state behind setsid or
+	// "$(echo nice)", rel-1-0-10:GAP-1186, GAP-1246), but the wrapped form
+	// keeps its own verdict for every other rule: sudo curl stays outside the
+	// exact curl sink grammar, command printf skips a function named printf,
+	// and a leading "$X" or time would turn every rule of the call into a
+	// second reading of it. Only a state-mutation block of that reading
+	// counts.
+	if twin, ok := wrapperUnwrapTwinRequest(request, true); ok &&
+		(!writerTwinOK || twin.Input.Command != writerTwin.Input.Command) {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return !wrappedStateMutationRule(f.RuleID)
+			}))
 		}()
 	}
 	// A shell named at run time ("$SHELL" -c TEXT, $BASH -ec TEXT, env
 	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
 	// call does: that reading is judged too, and the stricter of the two
 	// readings counts (rel-1-0-10:GAP-0980).
-	shellTwin, shellTwinOK, shellCaps := runTimeShellTwinRequest(request)
+	shellTwin, shellTwinOK, shellCaps, shellUnread := runTimeShellTwinRequest(request)
 	if shellTwinOK {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
+		}()
+	}
+	if shellUnread {
+		// A shell runs here-document or here-string text the reading cannot
+		// know (a body with a command substitution, a document handed on
+		// through a command or a descriptor the reading does not follow):
+		// what it runs is unknown, so the call is at least the unknown tier
+		// (rel-1-0-10:GAP-1147).
+		defer func() {
+			findings = withUnknownFinding(findings, unknownReasonFinding(unreadShellTextTitle, unreadShellTextReason, request.EnforcementCapable))
 		}()
 	}
 	if shellCaps.Any() {
@@ -923,7 +969,7 @@ func dispatchTrustedAction(
 	defer func() {
 		findings = withCradleUnknownTier(findings, request)
 	}()
-	analyzedCaps = capFloorAnalysisCaps(facts)
+	analyzedCaps = capFloorAnalysisCaps(request.Input, facts)
 	// Credential material that reaches a sender whose destination is not read
 	// in full (interpreter code that names a credentials file and a network
 	// capability, a credential-named environment variable piped into an
@@ -970,7 +1016,14 @@ func dispatchTrustedAction(
 		}()
 	}
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
+	var ownHostReadings *judgedHostReadings
+	if len(windowsTwins) != 0 && !windowsTwinsKeepHostReadings {
+		ownHostReadings = &judgedHostReadings{}
+	}
 	for _, twin := range windowsTwins {
+		if ownHostReadings != nil {
+			twin.windowsTwinHosts = &windowsTwinHostReadings{call: ownHostReadings, input: twin.Input}
+		}
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
@@ -1045,6 +1098,10 @@ func dispatchTrustedAction(
 	// launcher itself stays as the tokenizer saw it); the script reading only
 	// ever adds findings (host_script_twin.go).
 	if twins, caps := hostScriptTwinRequests(request, facts); len(twins) != 0 || caps.Any() {
+		// The Windows reading twins registered above are judged after this
+		// call's script readings are made: they leave out the ones it
+		// judges itself (judgedHostReadings).
+		ownHostReadings.note(twins)
 		defer func() {
 			for _, twin := range twins {
 				twinFindings := dispatchTrustedAction(parent, twin)
@@ -1147,7 +1204,7 @@ func dispatchTrustedActionWith(
 			checkedLocalOrdinary := false
 			localOrdinary := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
-			simples := request.simpleMemo.commands(request.Input, facts)
+			simples := withCappedWindowsReadings(request, request.simpleMemo.commands(request.Input, facts))
 			if len(simples) == 0 && wholeCommandKnown &&
 				(facts.Parse.Dialect != actionfacts.DialectPOSIX || facts.Parse.Status == actionfacts.StatusLimitExceeded) &&
 				trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
@@ -1182,6 +1239,20 @@ func dispatchTrustedActionWith(
 						// A nested shell body the walk cannot resolve: what it
 						// runs is unknown (rel-1-0-10:GAP-0535).
 						findings = withSimpleCommandFindings(findings, trustedActionUnresolvedBodyFindings(request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer ||
+						simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumerStrict && request.StrictPolicy {
+						// A here-document that may write DefenseClaw state goes
+						// to a program whose use of its input is not known: the
+						// unknown tier of the pack, a block in strict
+						// (rel-1-0-10:GAP-1183, GAP-1240). A data program after
+						// a PATH change is judged so in the strict tiers only;
+						// the others allow it, as release did (GAP-1481).
+						findings = withUnknownFinding(findings, unknownReasonFinding(unknownStdinConsumerTitle, unknownStdinConsumerReason, request.EnforcementCapable))
+						continue
+					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumerStrict {
 						continue
 					}
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntaxCap {
@@ -1788,6 +1859,21 @@ func dispatchTrustedActionWith(
 	return withTwinProvenBlocks(finalized, twinFindings)
 }
 
+// withoutUnprovenStateWrite drops the state-write findings that do not
+// take part in enforcement from the findings of a bash here-string call
+// whose POSIX twins were judged and write no state (hereStringStateMutation).
+// The POSIX parse rejects `<<<`, so the pack's text match of a state name
+// (python3 - <<< 'print(open("~/.defenseclaw/config.yaml").read())') stayed
+// in the verdict as a CRITICAL tamper.detector_state_write row although the
+// twin proved the call changes no state: an allowed read named a rule the
+// call did not trigger (rel-1-0-10:GAP-0376). A finding that enforces is
+// kept as it is.
+func withoutUnprovenStateWrite(findings []RuleFinding) []RuleFinding {
+	return slices.DeleteFunc(findings, func(f RuleFinding) bool {
+		return f.RuleID == "tamper.detector_state_write" && !f.contributesToEnforcement()
+	})
+}
+
 // The action target check uses a resolved active security-state mention to
 // find candidates, then requires the executing operand's mutation role and
 // physical target before adding a finding. Keep it separate from SSH keys.
@@ -1837,7 +1923,14 @@ func withActiveStateTargetMention(
 	xargsMutates := xargsStaticInputStateMutation(facts, request) ||
 		driven && xargsStaticInputStateMutation(driveFacts, driveRequest)
 	if hereStringJudged && !hereStringMutates && !xargsMutates {
-		return findings
+		if strings.HasPrefix(facts.ActiveHome, "/") {
+			return withoutUnprovenStateWrite(findings)
+		}
+		// Under a Windows drive home the twin only clears the pack's text
+		// match; every later proof (the cmd and PowerShell readings among
+		// them) still runs and adds the gateway's own finding for a write it
+		// proves (rel-1-0-10:GAP-0376).
+		findings = withoutUnprovenStateWrite(findings)
 	}
 	// A managed call whose cwd the gateway cannot see is also judged for
 	// links in the directory the hook client walked its words from
@@ -4054,13 +4147,17 @@ func provenStateMutationPath(facts actionfacts.Facts, request trustedActionReque
 // /missing; cp a.txt ../.defenseclaw/config.yaml had no proof, although the
 // failed pushd leaves the shell where it was and the cp writes the state
 // file (GAP-2574). A statement proven alone that mutates active state is
-// the state write; it only adds this block.
+// the state write; it only adds this block. The reading needs a cd, pushd or
+// popd program word in the call (hookpaths.ChangesDirectory), not those
+// letters anywhere in its text: a home under a folder named 1cd7970ba0a3
+// turned it on and raised the severity of a call with no directory change
+// (rel-1-0-10:GAP-1014).
 func placedStatementStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return false
 	}
 	text, known := trustedBashCommandInput(request.Input)
-	if !known || !strings.Contains(text, "cd") && !strings.Contains(text, "pushd") && !strings.Contains(text, "popd") {
+	if !known || !hookpaths.ChangesDirectory(text) {
 		return false
 	}
 	facts, request = protectedHomePlacedReading(facts, request)
@@ -10230,19 +10327,25 @@ func bashReadingRequest(request trustedActionRequest, command, rewritten string)
 	return twin
 }
 
-// wrapperUnwrapTwinRequest returns the request for
-// actionfacts.WrapperUnwrapTwin of a POSIX Bash call. Behind ProtectHome
-// (managed hook peer) the hook client map lists the targets of the same
-// reading (hookpaths), so the wrapped call is judged there too (GAP-2563).
-func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+// wrapperUnwrapTwinRequest returns the request for the reading of a POSIX
+// Bash call by actionfacts.WrapperUnwrapTwin (anyProgram) or
+// WrapperUnwrapWriterTwin. Behind ProtectHome (managed hook peer) the hook
+// client map lists the targets of the wider reading (hookpaths), so the
+// wrapped call is judged there too (GAP-2563). A here-string pipe reading
+// gets no any-program twin (hereStringPipeReading).
+func wrapperUnwrapTwinRequest(request trustedActionRequest, anyProgram bool) (trustedActionRequest, bool) {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
 		return trustedActionRequest{}, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
-	if !known {
+	if !known || anyProgram && request.hereStringPipeReading {
 		return trustedActionRequest{}, false
 	}
-	rewritten, ok := actionfacts.WrapperUnwrapTwin(command)
+	unwrap := actionfacts.WrapperUnwrapWriterTwin
+	if anyProgram {
+		unwrap = actionfacts.WrapperUnwrapTwin
+	}
+	rewritten, ok := unwrap(command)
 	if !ok || rewritten == command {
 		return trustedActionRequest{}, false
 	}
@@ -10258,26 +10361,46 @@ func wrapperUnwrapTwinRequest(request trustedActionRequest) (trustedActionReques
 	return bashReadingRequest(request, command, rewritten), true
 }
 
+// wrappedStateMutationRules are the rules a call that any program runs
+// through a prefix wrapper is judged by on its plain reading
+// (actionfacts.WrapperUnwrapTwin): a write or delete of the DefenseClaw
+// state and the agent hook files, and a recursive delete of a critical root
+// such as the home (find ~ -delete). The wrapper changes nothing of what the
+// program writes or removes (rel-1-0-10:GAP-1186, GAP-1246).
+var wrappedStateMutationRules = map[string]bool{
+	"TAMPER.DETECTOR_STATE_WRITE":      true,
+	"TAMPER.AGENT_HOOK_CONFIG_WRITE":   true,
+	"TAMPER.AGENT_HOOK_CONFIG_DISABLE": true,
+	"CMD-RM-RF":                        true,
+}
+
+// wrappedStateMutationRule reports a rule of wrappedStateMutationRules.
+func wrappedStateMutationRule(ruleID string) bool {
+	return wrappedStateMutationRules[canonicalTrustedRuleID(ruleID)]
+}
+
 // runTimeShellTwinRequest returns the request for
 // actionfacts.RunTimeShellTwin of a POSIX Bash call: the call read with each
 // program word that names its shell at run time written as that shell.
 // Behind ProtectHome (managed hook peer) the hook client map lists the
 // targets of the same reading (hookpaths), so it is judged there too
 // (rel-1-0-10:GAP-0980). caps is the caps that reading hit
-// (rel-1-0-10:GAP-1041), with or without a twin.
-func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, caps bounded.CapSet) {
+// (rel-1-0-10:GAP-1041), with or without a twin; so is unread, a shell of
+// the call that runs here-document text the reading cannot know
+// (rel-1-0-10:GAP-1147).
+func runTimeShellTwinRequest(request trustedActionRequest) (twin trustedActionRequest, ok bool, caps bounded.CapSet, unread bool) {
 	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
-		return trustedActionRequest{}, false, caps
+		return trustedActionRequest{}, false, caps, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
 	if !known {
-		return trustedActionRequest{}, false, caps
+		return trustedActionRequest{}, false, caps, false
 	}
-	rewritten, ok, caps := actionfacts.RunTimeShellTwin(command)
+	rewritten, ok, caps, unread := actionfacts.RunTimeShellTwin(command)
 	if !ok || rewritten == command {
-		return trustedActionRequest{}, false, caps
+		return trustedActionRequest{}, false, caps, unread
 	}
-	return bashReadingRequest(request, command, rewritten), true, caps
+	return bashReadingRequest(request, command, rewritten), true, caps, unread
 }
 
 // stateGlobTwinRequest returns the request for actionfacts.StateGlobTwin of
@@ -10651,7 +10774,9 @@ func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfac
 	if facts.Parse.Dialect == actionfacts.DialectPOSIX && facts.Parse.Status != actionfacts.StatusLimitExceeded &&
 		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
 			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax ||
-				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody ||
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumer ||
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnknownStdinConsumerStrict
 		}) {
 		// A complete POSIX split already enforced the limit. The extra
 		// count is needed only when the analyzer reached its own bound or
@@ -10950,6 +11075,23 @@ func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding 
 const (
 	runtimeHomeTitle  = "Shell command reads the home folder through a HOME set at run time, judged as unknown"
 	runtimeHomeReason = "home_set_at_run_time"
+)
+
+// unknownStdinConsumerTitle and unknownStdinConsumerReason are the
+// unknown-tier finding of a here-document whose body may write DefenseClaw
+// state, fed to a program whose use of its standard input is not known
+// (actionfacts.EvaluationFailureUnknownStdinConsumer, rel-1-0-10:GAP-1240).
+const (
+	unknownStdinConsumerTitle  = "Here-document that may change DefenseClaw state goes to a program whose use of its input is not known, judged as unknown"
+	unknownStdinConsumerReason = "heredoc_consumer_unknown"
+)
+
+// unreadShellTextTitle and unreadShellTextReason are the unknown-tier finding
+// of a shell that runs here-document or here-string text the reading cannot
+// know (actionfacts.RunTimeShellTwin, rel-1-0-10:GAP-1147).
+const (
+	unreadShellTextTitle  = "Shell runs here-document text that could not be read before it runs, judged as unknown"
+	unreadShellTextReason = "shell_input_not_read"
 )
 
 // shellReadingBound is the reading bound a command is past

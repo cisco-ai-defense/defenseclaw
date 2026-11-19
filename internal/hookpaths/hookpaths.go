@@ -1480,6 +1480,18 @@ type protectedFile struct {
 	path    string
 	info    os.FileInfo
 	unknown bool
+	// call is the hook call whose memory newProtectedFiles read the set
+	// from (nil: none): target stats through it rather than finding the
+	// call again for every target (rel-1-0-10:GAP-1293).
+	call *hookCall
+}
+
+// stat is callStat through the hook call the set was read in.
+func (p protectedFile) stat(name string) (os.FileInfo, error) {
+	if p.call != nil {
+		return p.call.stat(name)
+	}
+	return callStat(name)
 }
 
 type protectedFiles []protectedFile
@@ -1512,7 +1524,11 @@ func newProtectedFiles(home string) protectedFiles {
 	// file path and reads each file (rel-1-0-10:GAP-0766). The files are the
 	// same files for the whole decision.
 	if call := memoHookCall(); call != nil {
-		return call.targets().protectedFiles(home)
+		files := call.targets().protectedFiles(home) // a copy
+		for index := range files {
+			files[index].call = call
+		}
+		return files
 	}
 	return newProtectedFilesWith(home, nil)
 }
@@ -1554,7 +1570,7 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 		}
 		if info == nil {
 			var err error
-			if info, err = callStat(resolved); err != nil || !info.Mode().IsRegular() {
+			if info, err = p.stat(resolved); err != nil || !info.Mode().IsRegular() {
 				return resolved, true
 			}
 		}
@@ -2293,7 +2309,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// reading too (actionfacts.RunTimeShellTwin), and behind
 					// ProtectHome reads its targets only from this map, also
 					// of the call it wraps (rel-1-0-10:GAP-0980).
-					shellTwin, isTwin, shellCaps := actionfacts.RunTimeShellTwin(command)
+					shellTwin, isTwin, shellCaps, _ := actionfacts.RunTimeShellTwin(command)
 					// A program word past the bounds of that reading leaves
 					// the map incomplete (rel-1-0-10:GAP-1041).
 					truncated = truncated || shellCaps.Any()
@@ -4603,7 +4619,10 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	file, parsed := parseShell(command)
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
-		if opaqueLink.MatchString(command) {
+		// PowerShell text rarely parses as shell; its New-Item links are read
+		// however their parameters are spelled (rel-1-0-10:GAP-0849: only the
+		// -ItemType spelling opaqueLink finds was read here).
+		if opaqueLink.MatchString(command) || commandNewItemLinkSpelled(command) {
 			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
 				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
 			}
@@ -4611,7 +4630,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		}
 		return links, false
 	}
-	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) {
+	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) || newItemLinkText(file, command, home) {
 		// A PowerShell New-Item link and Move-Item with static operands are
 		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other
 		// link-making text keeps the opaque reading.
@@ -4669,7 +4688,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	boundPrograms := actionBoundProgramWords(file, home)
 	// A literal shell -c body is read in this directory only when nothing in
 	// the command changes directory first.
-	changesDirectory := tactics.RunsProgram(command, cdPrograms...)
+	changesDirectory := ChangesDirectory(command)
 	sequential := sequentialListCalls(file)
 	pipedCalls := pipedInputCalls(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -5697,6 +5716,19 @@ func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
 	return out, true
 }
 
+// ChangesDirectory reports a command that may run cd, pushd or popd as a
+// program word (tactics.RunsProgram over cdPrograms: past assignments and
+// wrappers, in lists, pipelines, subshells and the scripts handed to sh -c
+// or eval, and fail closed on a word whose program is uncertain). It is the
+// gate of every reading that places the statements of a list in the folder
+// a directory change leads to (TopLevelStatements): the letters cd, pushd or
+// popd inside a path, a hash or another word (a fixture root 1cd7970ba0a3,
+// abcd, xpushd.txt) change no directory and turn no such reading on, so they
+// cannot change a verdict or its severity (rel-1-0-10:GAP-1014).
+func ChangesDirectory(command string) bool {
+	return tactics.RunsProgram(command, cdPrograms...)
+}
+
 // statementLoopReadsActive reports a statement that is a for or select loop
 // over USER or LOGNAME whose list can hold the active login, given the
 // names the statements before it bound.
@@ -5809,6 +5841,23 @@ var dataPrograms = []string{"echo", "printf", "grep", "egrep", "fgrep", "rg", "a
 func opaqueLinkText(file *syntax.File, command, home string) bool {
 	// Skip the automaton over a long command without its literals (GAP-2279).
 	if !rxprefilter.MayMatch(opaqueLink, command) || !opaqueLink.MatchString(command) {
+		return false
+	}
+	for _, stmt := range file.Stmts {
+		if !dataStatement(stmt, home) {
+			return true
+		}
+	}
+	return false
+}
+
+// newItemLinkText reports a New-Item link the command may run that
+// opaqueLinkText does not spell (-Ty, an en dash, -ItemType:): a New-Item
+// call that may make a link however its parameters are spelled, outside a
+// command of data programs alone (rel-1-0-10:GAP-0849). It is read as the
+// -ItemType spelling is: as its twin, else opaque.
+func newItemLinkText(file *syntax.File, command, home string) bool {
+	if !commandNewItemLinkSpelled(command) {
 		return false
 	}
 	for _, stmt := range file.Stmts {
