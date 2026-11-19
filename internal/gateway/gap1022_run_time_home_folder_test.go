@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -24,6 +25,9 @@ import (
 // home and a project home that read no account file stay allowed, through
 // the real Claude Code hook handler.
 func TestRunTimeHomeInAFolderOfTheHomeReadsItsAccountFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell rows: the run-time home guess reads a POSIX working folder; a C:\\ folder keeps the rel reading (rel-1-0-10:GAP-1249, Windows is GAP-1535)")
+	}
 	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	home := t.TempDir()

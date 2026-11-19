@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -84,6 +85,9 @@ func TestLoopRedirectAndWorkingFolderReadsStartTheSecretReadChain(t *testing.T) 
 // ${PWD}/NAME with the cwd known), in every pack, through the real
 // Claude Code hook handler. The files exist in a scratch home.
 func TestLoopRedirectAndWorkingFolderReadsGetTheVerdictOfCat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell rows: the fixture folder is a C:\\ path, which bash reads with its backslashes removed, so the cat oracle names another file than $PWD or ~+ (rel-1-0-10:GAP-1249); the Windows working folder is GAP-1535")
+	}
 	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	home := t.TempDir()
