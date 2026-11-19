@@ -1551,7 +1551,10 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter *rgF
 			}
 			next := credentialWalkFolder{dir: filepath.Join(folder.dir, name)}
 			if filter != nil {
-				if next.shown = rgJoin(folder.shown, name); !filter.enters(next.shown, name) {
+				if len(filter.globs) > 0 { // only a glob reads the path
+					next.shown = rgJoin(folder.shown, name)
+				}
+				if !filter.enters(next.shown, name) {
 					continue
 				}
 			}

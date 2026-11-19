@@ -171,6 +171,40 @@ func g0683Check(t *testing.T, rows []g0679Row) {
 
 func TestGAP0683RgIncludeGlobs(t *testing.T) { g0683Check(t, g0683Rows) }
 
+// TestGAP0683RgSymbolicCwd: rg drops its physical working folder from a
+// path; the hook's working folder may be a symbolic link to it. An anchored
+// "!" glob then excludes a file under an absolute folder only if it matches
+// the path both ways, so the read is never missed.
+func TestGAP0683RgSymbolicCwd(t *testing.T) {
+	phys := g0683Folder(t)
+	link := filepath.Join(t.TempDir(), "proj")
+	if err := os.Symlink(phys, link); err != nil {
+		t.Skipf("no symbolic link here: %v", err)
+	}
+	for _, row := range []struct {
+		cmd  string
+		want []string
+	}{
+		// Real rg running in link does not drop link from the path, so
+		// the anchored exclude matches nothing and it reads the file.
+		{"rg -g '!/deploy' KEY " + link, []string{"deploy/id_ed25519"}},
+		{"rg -g '!deploy/' KEY " + link, []string{}},
+		// Over by design: an include matches either form (real rg reads
+		// nothing here).
+		{"rg -g 'deploy/**' KEY " + link, []string{"deploy/id_ed25519"}},
+	} {
+		got := g0683Rel(link, g0679Named(Analyze(Input{Tool: "exec", Command: row.cmd, CWD: link, ActiveHome: t.TempDir()})))
+		for _, file := range row.want {
+			if !slices.Contains(got, file) {
+				t.Errorf("%s: the resolve names %v, misses %s", row.cmd, got, file)
+			}
+		}
+		if len(row.want) == 0 && slices.Contains(got, "deploy/id_ed25519") {
+			t.Errorf("%s: an unanchored folder exclude still names deploy/id_ed25519 (%v)", row.cmd, got)
+		}
+	}
+}
+
 // g0683Real is the credentials files real rg reads when sh runs cmd in
 // g0683Folder (g0679Real's method).
 func g0683Real(t *testing.T, rg, sh, dir, cmd string) []string {

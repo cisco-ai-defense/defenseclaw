@@ -106,10 +106,24 @@ func (f *rgFilter) override(p string, dir bool) int {
 	if len(f.globs) == 0 {
 		return 0
 	}
-	p = f.strip(p)
+	short, long := f.strip(p)
 	for i := len(f.globs) - 1; i >= 0; i-- {
 		g := f.globs[i]
-		if g.onlyDir && !dir || !g.matches(p) {
+		if g.onlyDir && !dir {
+			continue
+		}
+		// rg drops its physical working folder; the hook's may name it
+		// through a symbolic link. Where the two forms differ, an include
+		// matches either and a "!" glob must match both.
+		matched := g.matches(short)
+		if short != long {
+			if g.exclude {
+				matched = matched && g.matches(long)
+			} else {
+				matched = matched || g.matches(long)
+			}
+		}
+		if !matched {
 			continue
 		}
 		if g.exclude {
@@ -179,16 +193,18 @@ func (f *rgFilter) admits(parent string, segments []string) bool {
 // strip is the path an override glob is matched against: the walker's
 // path with a leading "./" dropped (Ignore::matched), then again and with
 // rg's working folder dropped from its start, byte by byte
-// (Gitignore::strip, whose root is rg's working folder).
-func (f *rgFilter) strip(p string) string {
+// (Gitignore::strip, whose root is rg's working folder). long is the path
+// before the working folder is dropped.
+func (f *rgFilter) strip(p string) (short, long string) {
 	p = strings.TrimPrefix(p, "./")
 	p = strings.TrimPrefix(p, "./")
+	short = p
 	if f.cwd != "" && f.cwd != "." && strings.Contains(p, "/") {
 		if rest, ok := strings.CutPrefix(p, f.cwd); ok {
-			p = strings.TrimPrefix(rest, "/")
+			short = strings.TrimPrefix(rest, "/")
 		}
 	}
-	return p
+	return short, p
 }
 
 // rgJoin is Rust's Path::join of a folder and a name: no "/" is added
