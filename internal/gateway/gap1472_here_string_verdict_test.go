@@ -23,10 +23,10 @@ func TestGAP1472HereStringShellVerdicts(t *testing.T) {
 			t.Errorf("%s: %q is %s (%q), want allow", tier, benign, got, findings)
 		}
 		want := ""
-		switch {
-		case tier == "default/default", tier == "managed/default":
+		switch tier {
+		case "default/default", "managed/default":
 			want = "alert"
-		case tier == "strict/strict", tier == "managed strict/strict":
+		case "strict/strict", "managed strict/strict":
 			want = "block"
 		default:
 			return
