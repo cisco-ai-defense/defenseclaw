@@ -1421,7 +1421,11 @@ assemble-parity:
 	@scripts/check-assemble-parity.sh
 
 py-lint: pycli
-	$(RUFF) check cli/defenseclaw/ cli/tests/
+	@# Two runs, not one with both paths: ruff 0.15 given both roots stops honouring
+	@# .gitignore for the _bundle-data copy under cli/defenseclaw/_data (pycli stages it),
+	@# and reports 2 findings in the copied splunk exporter (GAP-1259).
+	$(RUFF) check cli/defenseclaw/
+	$(RUFF) check cli/tests/
 
 go-lint: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast
