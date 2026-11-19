@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // gap1275Tiers are the five tiers the review rows are judged in: the open
@@ -39,11 +40,14 @@ func gap1275Handlers(t *testing.T, judge func(t *testing.T, pack string, judge f
 				// The pack decides the tier: the strict pack blocks a proven
 				// state write that the default one alerts (GAP-0747 owner
 				// tiering 2026-11-15T15:20Z).
-				// TODO(strict-tier set, TU-0747d): managed-strict still reads
-				// the default tier here; its hook-config rows fail under the
-				// strict pack for reasons outside GAP-0747 (see HANDOFF).
-				if !tier.managed {
-					cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), tier.pack)
+				// Managed tiers read their own pack too: managed-strict is the
+				// strict pack behind the managed standalone gateway, which
+				// does not read the per-user install window (the peer home is
+				// unreadable to it).
+				cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), tier.pack)
+				if tier.managed {
+					cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+					cfg.Enterprise.Profile = managed.ProfileStandalone
 				}
 				store, logger := testStoreAndLogger(t)
 				handler := (&APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}).handleAgentHook(conn)

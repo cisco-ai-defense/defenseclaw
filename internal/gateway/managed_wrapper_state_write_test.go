@@ -82,9 +82,11 @@ func TestManagedRunnerPrefixWritesWhatTheWrappedCallWrites(t *testing.T) {
 			header := f.clientHeader(t, payload)
 			got := f.post(t, conn, payload, header)
 			want := r.want
-			if want == "block" && strings.Contains(r.cmd, ".defenseclaw/") {
-				// A proven DefenseClaw state write is a HIGH alert on the
-				// default pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			// A proven DefenseClaw state write is a HIGH alert on the default
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z). L09 keeps its
+			// block: persistence.ssh_authorized_keys_command fires beside the
+			// state rule, as at c8090b1056.
+			if want == "block" && strings.Contains(r.cmd, ".defenseclaw/") && r.id != "L09" {
 				want = "alert"
 			}
 			if got != want {

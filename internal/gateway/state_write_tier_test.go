@@ -116,15 +116,20 @@ func gap0747Blocked(findings []RuleFinding, want bool) bool {
 }
 
 // gap0747OtherTamperFinding reports whether findings (rule id, colon, text)
-// name a tamper rule other than the state write, which still blocks the call
-// for its own rule in every tier.
+// name a tamper or persistence rule other than the state write and the agent
+// hook config rules (a HIGH alert outside strict too), which still blocks the
+// call for its own rule in every tier.
 func gap0747OtherTamperFinding(findings []string) bool {
 	for _, f := range findings {
 		id := f
 		if i := strings.IndexByte(f, ':'); i >= 0 {
 			id = f[:i]
 		}
-		if (strings.HasPrefix(id, "tamper.") || strings.HasPrefix(id, "persistence.")) && id != gap0747StateRule {
+		switch id {
+		case gap0747StateRule, agentHookConfigWriteRuleID, agentHookConfigDisableRuleID:
+			continue
+		}
+		if strings.HasPrefix(id, "tamper.") || strings.HasPrefix(id, "persistence.") {
 			return true
 		}
 	}
