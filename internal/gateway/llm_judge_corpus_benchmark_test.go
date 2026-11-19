@@ -716,8 +716,10 @@ func TestValidateCorpusJudgeResumeContract(t *testing.T) {
 		t.Fatalf("stale request contract error = %v", err)
 	}
 
+	// A case with no tool name never reaches the judge. An argument-less call
+	// with a name is judged (rel-1-0-10:GAP-1279), so it is no zero-invocation
+	// case.
 	emptyCase := corpusJudgeCase{SchemaVersion: "1", ID: "empty-case", Surface: "action"}
-	emptyCase.Payload.ToolName = "shell"
 	emptyPrior := corpusJudgePrediction{SchemaVersion: "1", CaseID: "empty-case", Model: judge.model}
 	if err := validateCorpusJudgeResumeContract(t.Context(), judge, judge.model, emptyCase, emptyPrior); err != nil {
 		t.Fatalf("legitimate zero-invocation resume rejected: %v", err)
