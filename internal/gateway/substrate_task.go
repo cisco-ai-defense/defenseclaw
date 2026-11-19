@@ -31,11 +31,15 @@ import (
 // marked as repeats), so ends the agent posted first cannot hide the
 // relay's own. The actor listener's per-actor rate limit bounds the rows,
 // as it bounds hook rows. What the agent cannot do is mint alerts at that
-// rate (GAP-0303): a report keeps its severity only while it is one of the
-// first substrateTaskEndLoudRows of its kind (severity, exit code, cause)
-// and the actor has at most substrateTaskEndMaxKinds kinds; any other is
-// written at INFO with the reported severity in the row. So at most
-// 16 x 3 rows per actor and replica are MEDIUM or HIGH. Early ends cost the
+// rate (GAP-0303): a MEDIUM or HIGH report keeps its severity only while
+// it is one of the first substrateTaskEndLoudRows of its kind (severity,
+// exit code, cause) and the actor has at most substrateTaskEndMaxKinds
+// kinds of that severity; any other is written at INFO with the reported
+// severity in the row. Each severity has its own kind budget and INFO
+// reports use none, so finishes or failures the agent posts cannot turn
+// the relay's HIGH end into an INFO row before the actor has HIGH rows in
+// the alert path. So at most 2 x 16 x 3 = 96 rows per actor and replica
+// are MEDIUM or HIGH (48 of each). Early ends cost the
 // agent only its own worker (the controller suspends a task actor that
 // stays quiet after its end). A relay-only credential is the root fix
 // (tracked in GAP-0291).
@@ -43,7 +47,8 @@ import (
 const (
 	// substrateTaskEndMaxActors bounds the per-actor report counts.
 	substrateTaskEndMaxActors = 10000
-	// substrateTaskEndMaxKinds bounds the kinds of end counted per actor.
+	// substrateTaskEndMaxKinds bounds the kinds of end counted per actor
+	// and severity (MEDIUM, HIGH).
 	substrateTaskEndMaxKinds = 16
 	// substrateTaskEndLoudRows is how many reports of a kind keep their severity.
 	substrateTaskEndLoudRows = 3
@@ -51,10 +56,12 @@ const (
 )
 
 // substrateTaskEndCounts is one actor's report counts. Kinds are keyed by a
-// digest, so an entry stays small whatever the agent puts in a cause.
+// digest, so an entry stays small whatever the agent puts in a cause; only
+// MEDIUM and HIGH kinds are kept, at most substrateTaskEndMaxKinds each.
 type substrateTaskEndCounts struct {
-	total int
-	kinds map[[16]byte]int
+	total    int
+	kinds    map[[16]byte]int
+	distinct map[string]int // kinds per severity
 }
 
 // substrateTaskEnds counts the end reports per actor UID.
@@ -64,16 +71,18 @@ type substrateTaskEnds struct {
 }
 
 // substrateTaskEndNumber says how a report is counted: its number among the
-// actor's reports, its number among the reports of its kind (0 when the
-// actor already has substrateTaskEndMaxKinds other kinds), and whether its
+// actor's reports, its number among the reports of its kind (0 for an INFO
+// report, which is not counted by kind, and when the actor already has
+// substrateTaskEndMaxKinds other kinds of its severity), and whether its
 // row keeps the reported severity.
 type substrateTaskEndNumber struct {
 	total, count int
 	keep         bool
 }
 
-// next numbers uid's report of the given kind.
-func (t *substrateTaskEnds) next(uid, kind string) substrateTaskEndNumber {
+// next numbers uid's report of the given severity and kind (the kind
+// includes the severity).
+func (t *substrateTaskEnds) next(uid, severity, kind string) substrateTaskEndNumber {
 	key := sha256.Sum256([]byte(kind))
 	k := [16]byte(key[:16])
 	t.mu.Lock()
@@ -83,13 +92,21 @@ func (t *substrateTaskEnds) next(uid, kind string) substrateTaskEndNumber {
 	}
 	c := t.rows[uid]
 	if c == nil {
-		c = &substrateTaskEndCounts{kinds: map[[16]byte]int{}}
+		c = &substrateTaskEndCounts{kinds: map[[16]byte]int{}, distinct: map[string]int{}}
 		t.rows[uid] = c
 	}
 	c.total++
 	out := substrateTaskEndNumber{total: c.total}
-	if _, seen := c.kinds[k]; !seen && len(c.kinds) >= substrateTaskEndMaxKinds {
+	if severity == "INFO" {
+		// INFO is written at INFO anyway: it uses no kind slot.
+		out.keep = true
 		return out
+	}
+	if _, seen := c.kinds[k]; !seen {
+		if c.distinct[severity] >= substrateTaskEndMaxKinds {
+			return out
+		}
+		c.distinct[severity]++
 	}
 	c.kinds[k]++
 	out.count = c.kinds[k]
@@ -138,7 +155,7 @@ func (a *APIServer) serveSubstrateRelayTask(st *substrateState, w http.ResponseW
 			severity, outcome = "MEDIUM", "failed"
 		}
 		cause := substrateReportText(in.Cause)
-		num := st.taskEnds.next(actor.UID, fmt.Sprintf("%s|%d|%s", severity, in.ExitCode, cause))
+		num := st.taskEnds.next(actor.UID, severity, fmt.Sprintf("%s|%d|%s", severity, in.ExitCode, cause))
 		took := (time.Duration(max(in.DurationMS, 0)) * time.Millisecond).Round(time.Second)
 		summary := fmt.Sprintf("task %s: %s/%s exit %d after %s (reported by the actor)", outcome, actor.Atespace, actor.Name, in.ExitCode, took)
 		if cause != "" {
@@ -151,7 +168,7 @@ func (a *APIServer) serveSubstrateRelayTask(st *substrateState, w http.ResponseW
 		if !num.keep && severity != "INFO" {
 			row = "INFO"
 			if num.count == 0 {
-				summary += fmt.Sprintf(" [reported %s; written at INFO: the actor already reported %d other kinds of end]", severity, substrateTaskEndMaxKinds)
+				summary += fmt.Sprintf(" [reported %s; written at INFO: the actor already reported %d other kinds of %s end]", severity, substrateTaskEndMaxKinds, severity)
 			} else {
 				summary += fmt.Sprintf(" [reported %s; written at INFO: report %d of this kind]", severity, num.count)
 			}

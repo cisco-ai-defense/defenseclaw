@@ -187,21 +187,42 @@ func TestGAP0303TaskEndKindsAreBounded(t *testing.T) {
 	}
 	last := rows(`"report":200,`)
 	if len(last) != 1 || last[0].Severity != "INFO" || !strings.Contains(last[0].Details, `"kind_count":0,`) ||
-		!strings.Contains(last[0].Details, "other kinds of end") {
+		!strings.Contains(last[0].Details, "other kinds of HIGH end") {
 		t.Fatalf("report 200: %+v", last)
 	}
 }
 
-// GAP-0303 review (TST-3008, probes A to D): the agent cannot hide the
-// relay's own end, whatever it posts first. Each case ends with the relay's
-// report, which must be a row of its own with its reported severity.
+// GAP-0303 (RV2): each severity has its own kind budget and INFO uses none,
+// so one actor has at most 2 x 16 x 3 = 96 MEDIUM or HIGH task-end rows.
+func TestGAP0303TaskEndLoudRowsAreBounded(t *testing.T) {
+	f, rows := taskEndFixture(t)
+	for i := range 20 {
+		for range 5 {
+			postTaskEnd(t, f, fmt.Sprintf(`{"exit_code":0,"cause":"BOUNDMARK finish %d"}`, i))
+			postTaskEnd(t, f, fmt.Sprintf(`{"exit_code":1,"cause":"BOUNDMARK fail %d"}`, i))
+			postTaskEnd(t, f, fmt.Sprintf(`{"exit_code":124,"stalled":true,"cause":"BOUNDMARK stall %d"}`, i))
+		}
+	}
+	got := rows("BOUNDMARK")
+	sev := bySeverity(got)
+	if len(got) != 300 || sev["MEDIUM"] != 16*3 || sev["HIGH"] != 16*3 || sev["INFO"] != 300-96 {
+		t.Fatalf("%d rows for 300 reports (%v), want every report a row, 48 MEDIUM, 48 HIGH, the rest INFO", len(got), sev)
+	}
+}
+
+// GAP-0303 review (TST-3008, probes A to D; RV2 TST-3015, probes E and F):
+// the agent cannot hide the relay's own end, whatever it posts first. Each
+// case ends with the relay's report, which must be a row of its own with
+// its reported severity, and which is demoted to INFO only when the actor
+// already has task-end rows of that severity in the alert path.
 func TestGAP0303AgentCannotMaskRelayEnd(t *testing.T) {
 	stall := `"cause":"the task made no progress for 10m0s (no output, CPU or I/O); the cluster gateway answers, so the agent is stuck on a connection of its own. The task is ended with exit code 124."`
 	cases := []struct {
 		name, marker, reported string
 		agent                  func(t *testing.T, f *substrateFixture)
 		relay                  string
-		want                   int // rows that contain marker after the relay's end
+		want                   int  // rows that contain marker after the relay's end
+		keeps                  bool // the relay's row must keep its reported severity
 	}{
 		{
 			// A: 16 junk kinds and 3 more, then the relay's interrupted end.
@@ -253,6 +274,29 @@ func TestGAP0303AgentCannotMaskRelayEnd(t *testing.T) {
 			relay: `{"exit_code":124,"stalled":true,"cause":"DEEPMARK relay stall"}`,
 			want:  1,
 		},
+		{
+			// E (RV2): 16 distinct finishes (INFO rows) must not demote the
+			// relay's HIGH stall.
+			name: "E-info-finishes", marker: "no progress for 10m0s", reported: "HIGH", keeps: true,
+			agent: func(t *testing.T, f *substrateFixture) {
+				for i := range 16 {
+					postTaskEnd(t, f, fmt.Sprintf(`{"exit_code":0,"cause":"done %d"}`, i))
+				}
+			},
+			relay: `{"exit_code":124,"stalled":true,"duration_ms":600000,` + stall + `}`,
+			want:  1,
+		},
+		{
+			// F (RV2): 16 distinct MEDIUM failures must not demote it either.
+			name: "F-medium-failures", marker: "no progress for 10m0s", reported: "HIGH", keeps: true,
+			agent: func(t *testing.T, f *substrateFixture) {
+				for i := range 16 {
+					postTaskEnd(t, f, fmt.Sprintf(`{"exit_code":1,"cause":"failed %d"}`, i))
+				}
+			},
+			relay: `{"exit_code":124,"stalled":true,"duration_ms":600000,` + stall + `}`,
+			want:  1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -276,13 +320,29 @@ func TestGAP0303AgentCannotMaskRelayEnd(t *testing.T) {
 			if got := rows(tc.marker); len(got) != tc.want {
 				t.Fatalf("%d rows with %q, want %d", len(got), tc.marker, tc.want)
 			}
-			if relay := fresh[0]; relay.Severity != tc.reported && !strings.Contains(relay.Details, `"reported_severity":"`+tc.reported+`"`) {
+			relay := fresh[0]
+			if relay.Severity != tc.reported && !strings.Contains(relay.Details, `"reported_severity":"`+tc.reported+`"`) {
 				t.Fatalf("the relay's row lost its severity %s: %s %s", tc.reported, relay.Severity, relay.Details)
 			}
-			// Bound: at most 16 kinds x 3 rows per actor are MEDIUM or HIGH.
+			if tc.keeps && relay.Severity != tc.reported {
+				t.Fatalf("HIDDEN: the relay's %s end is an %s row: %s", tc.reported, relay.Severity, relay.Details)
+			}
+			// A demoted end is never the actor's only alert: the alert path
+			// already holds task-end rows of its reported severity.
+			before := map[string]int{}
+			for _, e := range all {
+				if seen[e.ID] {
+					before[e.Severity]++
+				}
+			}
+			if relay.Severity != tc.reported && before[tc.reported] == 0 {
+				t.Fatalf("HIDDEN: the relay's %s end is %s and the actor has no %s task-end row (%v)", tc.reported, relay.Severity, tc.reported, before)
+			}
+			// Bound: at most 16 kinds x 3 rows per actor and severity are
+			// MEDIUM or HIGH.
 			sev := bySeverity(all)
-			if loud := sev["HIGH"] + sev["MEDIUM"]; loud > 16*3 {
-				t.Fatalf("%d MEDIUM or HIGH rows for one actor (%v)", loud, sev)
+			if sev["HIGH"] > 16*3 || sev["MEDIUM"] > 16*3 {
+				t.Fatalf("too many MEDIUM or HIGH rows for one actor (%v)", sev)
 			}
 		})
 	}
