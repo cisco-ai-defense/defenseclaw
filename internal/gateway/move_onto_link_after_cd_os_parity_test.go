@@ -111,7 +111,7 @@ func judgeMoveOntoLinkParityRows(t *testing.T, rows []moveOntoLinkParityRow) {
 					recorder := httptest.NewRecorder()
 					api.handleAgentHook(connector).ServeHTTP(recorder, req)
 					got := recorder.Body.String()
-					blocked := strings.HasPrefix(got, `{"action":"block"`)
+					blocked := gap0747HookBlocked(got, "")
 					if !blocked && !strings.HasPrefix(got, `{"action":"allow"`) {
 						t.Fatalf("%q: status %d body %.300s", command, recorder.Code, got)
 					}

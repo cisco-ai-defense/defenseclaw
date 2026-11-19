@@ -48,6 +48,20 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 					Payload: map[string]interface{}{"tool_name": "Bash"},
 				})
 				wantBlock := tc.block && (mode == "action" || tc.always)
+				if wantBlock && findingStringHasRuleID(resp.Findings, gap0747StateRule) && !gap0747OtherTamperFinding(resp.Findings) {
+					// A proven DefenseClaw state write is a HIGH alert on the
+					// default pack: an alert in action mode, allowed with the
+					// finding in observe mode (GAP-0747 owner tiering
+					// 2026-11-15T15:20Z).
+					want := "alert"
+					if mode == "observe" {
+						want = "allow"
+					}
+					if resp.Action != want {
+						t.Fatalf("action=%q findings=%v, want the state write %s", resp.Action, resp.Findings, want)
+					}
+					return
+				}
 				if got := resp.Action == "block"; got != wantBlock {
 					t.Fatalf("action=%q findings=%v, want block=%t", resp.Action, resp.Findings, wantBlock)
 				}

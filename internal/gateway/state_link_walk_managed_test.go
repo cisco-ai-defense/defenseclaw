@@ -130,7 +130,7 @@ func TestR105GAP2569ManagedLinkWalkUsesClientEvidence(t *testing.T) {
 			t.Run(connector+"/"+mode, func(t *testing.T) {
 				for _, command := range blocked {
 					got := send(t, connector, mode, command)
-					if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write") {
+					if !gap0747HookBlocked(got, "") || !strings.Contains(got, "tamper.detector_state_write") {
 						t.Errorf("%s = %.400s, want block with tamper.detector_state_write", command, got)
 					}
 				}

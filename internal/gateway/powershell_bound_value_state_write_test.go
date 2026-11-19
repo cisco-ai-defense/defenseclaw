@@ -27,7 +27,6 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 	const state = `C:\Users\Alice\.defenseclaw\config.yaml`
 	const project = `C:\Users\Alice\project\notes.txt`
 	const envelope = "*** Begin Patch`n*** Update File: C:/Users/Alice/.defenseclaw/config.yaml`n@@`n-a`n+b`n*** End Patch"
-	api := &APIServer{}
 	pwsh := func(body string) string {
 		return `"C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command ` + "'" + body + "'"
 	}
@@ -205,12 +204,12 @@ func TestPowerShellBoundValueStateWriteIsProvenInEveryMode(t *testing.T) {
 				// it is TRUNCATED (rel-1-0-10:GAP-0589), and what decides here
 				// is what the reading proves beside that floor.
 				judged, _ := withoutBoundedTruncation(findings)
-				if got := buildVerdict(judged, "tool_call").Action == "block"; got != tc.block {
-					t.Fatalf("action %q, want block=%t (findings %v)", buildVerdict(judged, "tool_call").Action, tc.block, findingIDs(findings))
-				}
-				verdict := buildVerdict(findings, "tool_call")
-				if got := api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
-					t.Fatalf("observe-mode hard block=%t, want %t", got, tc.block)
+				// A proven state write is a HIGH alert on the default pack, and
+				// provenActiveStateMutation is a block-only proof (GAP-0747
+				// owner tiering 2026-11-15T15:20Z); the strict tier is in
+				// gap_fu12_rules_tiers_test.go.
+				if msg := gap0747DefaultTierCheck(judged, tc.block); msg != "" {
+					t.Fatalf("%s (action %q, findings %v)", msg, buildVerdict(judged, "tool_call").Action, findingIDs(findings))
 				}
 			})
 		}
@@ -442,7 +441,6 @@ func TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily(t *testi
 		row{name: "the exact Codex option", command: `$patch = "` + envelope + `"; & 'C:\dc\codex.exe' --codex-run-as-apply-patch $patch`, block: true},
 		row{name: "the exact Codex option behind cmd", command: patch + `'C:\dc\codex.exe --codex-run-as-apply-patch' $patch`, block: true},
 	)
-	api := &APIServer{}
 	for _, tc := range rows {
 		for _, managed := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/managed=%t", tc.name, managed), func(t *testing.T) {
@@ -458,8 +456,10 @@ func TestPowerShellBoundValueMergeKeepsLinksAndReadsEveryOrdinaryFamily(t *testi
 					EnforcementCapable: true, ResolvedWriteTargets: targets, ProtectedHomeHook: managed,
 				})
 				verdict := buildVerdict(findings, "tool_call")
-				if got := verdict.Action == "block" && api.provenActiveStateMutation(t.Context(), verdict); got != tc.block {
-					t.Fatalf("observe-mode hard block=%t, want %t (action %q, findings %v)", got, tc.block, verdict.Action, findingIDs(findings))
+				// A proven state write is a HIGH alert on the default pack
+				// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+				if msg := gap0747DefaultTierCheck(findings, tc.block); msg != "" {
+					t.Fatalf("%s (action %q, findings %v)", msg, verdict.Action, findingIDs(findings))
 				}
 			})
 		}

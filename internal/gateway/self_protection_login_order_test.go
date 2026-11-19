@@ -137,7 +137,7 @@ func TestG235bKnownValueOrderAndIndependentNames(t *testing.T) {
 	g235bRotate(t, rows, []string{"", "strict", "permissive"}, false, func(t *testing.T, cell g235bCell, row g235bRow) {
 		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, false, row.command)
 		if row.protected {
-			if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write") {
+			if !gap0747HookBlocked(got, cell.pack) || !strings.Contains(got, "tamper.detector_state_write") {
 				t.Errorf("%s: %s = %.200s, want block tamper.detector_state_write", row.name, row.command, got)
 			}
 		} else if !strings.HasPrefix(got, `{"action":"allow"`) {

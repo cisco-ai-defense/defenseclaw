@@ -170,3 +170,14 @@ func gap0747FileToolBlocked(body, pack string) bool {
 func gap0747TierWantAction(tier bounded.Tier) string {
 	return gap0747WantAction(tier == bounded.TierStrict)
 }
+
+// gap0747HookBlocked is the blocked verdict of a hook response body in the
+// pack (empty is the default): a block in strict, and outside strict a HIGH
+// alert that names the state rule for a proven DefenseClaw state write
+// (GAP-0747 owner tiering 2026-11-15T15:20Z). Any other body is not blocked.
+func gap0747HookBlocked(got, pack string) bool {
+	if strings.HasPrefix(got, `{"action":"block"`) {
+		return true
+	}
+	return pack != "strict" && strings.HasPrefix(got, `{"action":"alert"`) && strings.Contains(got, gap0747StateRule)
+}

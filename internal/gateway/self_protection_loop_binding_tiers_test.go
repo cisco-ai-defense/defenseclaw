@@ -171,7 +171,7 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 	})
 	for _, j := range judgments {
 		c, got := j.cell, j.got
-		block := strings.HasPrefix(got, `{"action":"block"`)
+		block := gap0747HookBlocked(got, c.pack)
 		if j.want && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 			t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", j.name, c.connector, c.managed, c.pack, got)
 		}
