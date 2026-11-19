@@ -58,11 +58,17 @@ func TestBoundRulePrefixWrapperChain(t *testing.T) {
 	// the first wrapper read). The readers that unwrap further still prove a
 	// block of their own.
 	read := actionfacts.MaxWrapperDepth
+	// A context-neutral wrapper (nohup, timeout, nice, time) spends no
+	// wrapper depth: a run of them is read to actionfacts.InlineChainWrappers
+	// (substrate-1:GAP-0478, rel-1-0-10:GAP-0976).
+	neutral := actionfacts.InlineChainWrappers
 	groups := []struct {
 		wrappers []string
 		readTo   int
+		past     []int
 	}{
-		{[]string{"sudo -n", "command", "env A=1", "nohup", "timeout 5"}, read},
+		{[]string{"sudo -n", "command", "env A=1"}, read, []int{read + 1, 8, max + 1, max + 8}},
+		{[]string{"nohup", "timeout 5", "nice"}, neutral, []int{neutral + 1, neutral + 8}},
 	}
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
@@ -80,7 +86,7 @@ func TestBoundRulePrefixWrapperChain(t *testing.T) {
 						t.Errorf("%s-benign in tier %s: action %q, want allow; findings=%v", id, tier.name, action, findings)
 					}
 				}
-				for _, n := range []int{group.readTo + 1, 8, max + 1, max + 8} {
+				for _, n := range group.past {
 					id := fmt.Sprintf("CW-%s-%d", strings.ReplaceAll(wrapper, " ", "_"), n)
 					for _, tail := range []string{"rm -rf ~", "echo hi", `echo "$HOME"`} {
 						command := strings.Repeat(wrapper+" ", n) + tail

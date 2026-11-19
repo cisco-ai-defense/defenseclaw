@@ -491,7 +491,7 @@ func shellCallProgram(reader *shellWordReader, args []*syntax.Word, zeroIsShell 
 	}
 	var run PrefixWrapperRun
 	index := 0
-	for depth := 0; index < len(args) && depth < MaxPrefixWrapperChain; depth++ {
+	for index < len(args) && run.ReadsMore() {
 		if shell, named := reader.read(args[index], zeroIsShell, lastShell, 0); named {
 			return index, shell, true
 		}

@@ -627,12 +627,20 @@ func dispatchTrustedAction(
 			defer func() { findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable) }()
 		}
 	}
-	if bounded, handled := operandBoundDispatch(parent, request); handled {
+	if boundedFindings, handled := operandBoundDispatch(parent, request); handled {
 		// A call past actionfacts.MaxOperandsPerCall operands is unresolved
 		// (GAP-0943), and a statement of more argv words than the analysis
 		// reads has no path facts (GAP-1069): operandBoundDispatch judges
-		// the bounded readings.
-		return bounded
+		// the bounded readings. They are judged under this call's cap
+		// floor, so the depth cap of the call's own analysis is this
+		// call's: a wrapper chain past the analysis bound in a statement of
+		// many words is TRUNCATED as in a short one, never a clean allow
+		// (rel-1-0-10:GAP-0973). Its item and node caps are what the
+		// bounded readings stand in for, so they are not taken.
+		if !request.simpleCommandPass && capFloorAnalysisCaps(request.Input, actionfacts.Analyze(request.Input)).Has(bounded.Depth) {
+			analyzedCaps = analyzedCaps.Union(bounded.Of(bounded.Depth))
+		}
+		return boundedFindings
 	}
 	var (
 		facts     actionfacts.Facts
@@ -660,7 +668,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
-		analyzedCaps = capFloorAnalysisCaps(facts)
+		analyzedCaps = capFloorAnalysisCaps(request.Input, facts)
 		// A write operand with a .. component whose walk cannot be resolved
 		// has an unknown target: at least the unknown tier of the pack, what
 		// the readers proved still deciding (the one bound rule, cap paths;
@@ -927,7 +935,7 @@ func dispatchTrustedAction(
 	defer func() {
 		findings = withCradleUnknownTier(findings, request)
 	}()
-	analyzedCaps = capFloorAnalysisCaps(facts)
+	analyzedCaps = capFloorAnalysisCaps(request.Input, facts)
 	// Credential material that reaches a sender whose destination is not read
 	// in full (interpreter code that names a credentials file and a network
 	// capability, a credential-named environment variable piped into an
