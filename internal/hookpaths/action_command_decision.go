@@ -510,8 +510,8 @@ func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.
 // its own) and returns the caps the pattern expansions of read hit
 // (noteGlobCut), which the call also keeps.
 func globCutOf(read func()) bounded.CapSet {
-	defer HookCall()()
-	call := currentHookCall()
+	call, end := beginHookCall()
+	defer end()
 	if call == nil {
 		read()
 		return bounded.CapSet{}

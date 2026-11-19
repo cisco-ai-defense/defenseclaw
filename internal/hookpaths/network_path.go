@@ -234,17 +234,28 @@ func (call *hookCall) shareWait() time.Duration {
 // networkShareCallShares answer waits and a tail in all. Within a call it begins
 // nothing more, so the gateway's request and the target resolution it runs are one call.
 func HookCall() (end func()) {
+	_, end = beginHookCall()
+	return end
+}
+
+// beginHookCall is HookCall that also returns the call the goroutine runs
+// from then on (nil: none), the one it began or the one already open, so a
+// caller that uses the call does not read the goroutine's key a second time:
+// off Windows each read is a traceback of the stack (goroutineID), and
+// globCutOf runs on every private-key and pattern reading of a decision
+// (rel-1-0-10:GAP-1472).
+func beginHookCall() (*hookCall, func()) {
 	unlock := lockHookCallKey()
 	id := hookCallKey()
 	if id == 0 {
 		unlock()
-		return func() {}
+		return nil, func() {}
 	}
 	hookCalls.mu.Lock()
 	defer hookCalls.mu.Unlock()
-	if _, open := hookCalls.calls[id]; open {
+	if open := hookCalls.calls[id]; open != nil {
 		unlock()
-		return func() {}
+		return open, func() {}
 	}
 	if hookCalls.calls == nil {
 		hookCalls.calls = make(map[uint64]*hookCall)
@@ -252,7 +263,7 @@ func HookCall() (end func()) {
 	tail := networkShareAnswerWait / 2
 	call := &hookCall{key: id, waitLeft: networkShareCallShares*networkShareAnswerWait + tail, tail: tail}
 	hookCalls.calls[id] = call
-	return func() {
+	return call, func() {
 		hookCalls.mu.Lock()
 		delete(hookCalls.calls, call.key)
 		hookCalls.mu.Unlock()
