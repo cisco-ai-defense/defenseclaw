@@ -493,9 +493,7 @@ func maskedCMDVariables(source string) (string, *strings.Replacer) {
 			if end > 0 {
 				name = source[i+1 : i+1+end]
 			}
-			if name != "" && strings.IndexFunc(name, func(r rune) bool {
-				return !(r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z')
-			}) < 0 {
+			if name != "" && strings.IndexFunc(name, isNotCMDVariableNameRune) < 0 {
 				marker := string(openMark) + strconv.Itoa(len(pairs)/2) + string(closeMark)
 				pairs = append(pairs, marker, source[i:i+end+2])
 				masked.WriteString(marker)
@@ -506,6 +504,12 @@ func maskedCMDVariables(source string) (string, *strings.Replacer) {
 		masked.WriteByte(source[i])
 	}
 	return masked.String(), strings.NewReplacer(pairs...)
+}
+
+// isNotCMDVariableNameRune reports whether r falls outside the ASCII letters,
+// digits and underscore of a %NAME% reference maskedCMDVariables keeps.
+func isNotCMDVariableNameRune(r rune) bool {
+	return r != '_' && (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
 }
 
 // hostLauncherIdentity reports that name is the Windows launcher family
