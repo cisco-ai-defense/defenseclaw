@@ -85,9 +85,6 @@ def _write(path: Path, data: dict) -> None:
     print(f"wrote {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
 
 
-# The mark the Windows Native CI capture puts where it cut a bounded log
-# (scripts/windows-native-ci.ps1 keeps its head and tail).
-TRUNCATED_MARK = "[truncated]"
 TRUNCATED = {"Action": "truncated"}
 # The mark alone on its line, or after the timestamp (and gh run view job
 # and step names) of a CI log line.
