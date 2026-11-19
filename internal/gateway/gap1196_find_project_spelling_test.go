@@ -17,7 +17,9 @@ import (
 // exists), so both spellings allow; a project whose Claude Code settings
 // exist reaches them in both spellings (the hook config write rule); a
 // project that holds the DefenseClaw hook file of an agent reaches it in both
-// (the disable rule). A name filter that matches no hook file reaches none.
+// (the disable rule). A name filter that matches no hook file reaches none,
+// and one that matches every name (-name '*') reaches only the hook files
+// that exist (rel-1-0-10:GAP-1555).
 func TestFindOverTheProjectIsOneVerdictInBothSpellings(t *testing.T) {
 	type layout struct {
 		name  string
@@ -69,6 +71,12 @@ func TestFindOverTheProjectIsOneVerdictInBothSpellings(t *testing.T) {
 						"find " + project + "/ -type f -delete",
 						"find ./ -type f -exec rm {} +",
 						"find " + project + " -type f -exec rm {} +",
+						// A name test that matches every name reaches only the
+						// hook files that exist, as the walk does
+						// (rel-1-0-10:GAP-1555).
+						"find . -name '*' -type f -delete",
+						"find " + project + " -name '*' -type f -delete",
+						"find . -name '*' -exec rm {} +",
 					}
 					var first, firstAction string
 					for i, command := range spellings {
@@ -85,12 +93,27 @@ func TestFindOverTheProjectIsOneVerdictInBothSpellings(t *testing.T) {
 					}
 					for _, command := range []string{
 						"find . -name '*.o' -delete",
+						"find . -name '*.md' -exec rm {} +",
 						"find " + project + " -name '*.o' -delete",
 						"find " + project + "/build -type f -delete",
 					} {
 						got := judge(project, false, "Bash", map[string]any{"command": command})
 						if rule := rules(got); rule != "" {
 							t.Errorf("%s: hook config rule %q, want none: %s", command, rule, strings.TrimSpace(got))
+						}
+					}
+					// A name test for one hook file reaches it when it exists
+					// and nothing when it does not (rel-1-0-10:GAP-1555).
+					for name, rule := range map[string]string{"settings.json": agentHookConfigWriteRuleID, "defenseclaw.json": agentHookConfigDisableRuleID} {
+						want := ""
+						if rule == l.rule {
+							want = rule
+						}
+						for _, command := range []string{"find . -name " + name + " -delete", "find . -name " + name + " -exec rm {} +"} {
+							got := judge(project, false, "Bash", map[string]any{"command": command})
+							if rule := rules(got); rule != want {
+								t.Errorf("%s: hook config rule %q, want %q: %s", command, rule, want, strings.TrimSpace(got))
+							}
 						}
 					}
 				})

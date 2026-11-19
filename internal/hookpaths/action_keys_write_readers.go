@@ -505,6 +505,15 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 			if target.path != absoluteRoot && !strings.HasPrefix(target.path, absoluteRoot+string(filepath.Separator)) {
 				continue
 			}
+			// The walk deletes only the entries it finds: a name test does
+			// not reach a protected file that does not exist, so
+			// find . -name '*' -delete in a project with no hook file
+			// deletes none (rel-1-0-10:GAP-1555; registrationFindReach
+			// reads -delete so since GAP-1196). A target whose state is
+			// unknown counts.
+			if target.info == nil && !target.unknown {
+				continue
+			}
 			if matches, _ := filepath.Match(name, filepath.Base(target.path)); matches &&
 				actionClientProtectedPath(target.path, cwd, protected, ssh) {
 				return true

@@ -962,7 +962,10 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 		path := OperandPath(root, cwd)
 		if info, err := pathStat(path); err == nil && info.IsDir() {
 			for _, target := range protected {
-				if !strings.HasPrefix(target.path, path+string(filepath.Separator)) {
+				// A find hands its child only the entries the walk finds: a
+				// protected file that does not exist below the root is not
+				// handed (rel-1-0-10:GAP-1555). One whose state is unknown is.
+				if !strings.HasPrefix(target.path, path+string(filepath.Separator)) || target.info == nil && !target.unknown {
 					continue
 				}
 				for _, test := range tests {
