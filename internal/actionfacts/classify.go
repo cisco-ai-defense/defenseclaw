@@ -8443,6 +8443,38 @@ func classifyDD(out *parseOutput, command *CommandFact) {
 			addOperation(command, OperationDiskWrite)
 		}
 	}
+	if ddExpandingOutput(command) {
+		addOperation(command, OperationWrite)
+	}
+}
+
+// ddExpandingOutput reports a dd operand that expands (a variable, a command
+// substitution, a glob) and is, or may be, its output: of=$X, of=k[0-9], or a
+// word whose static text shows no key ("$ARGS"). The argv keeps such a word
+// as "", so the values above never see it, and the call has no other write.
+// A reader of the effects model (the hookpaths write operand walk) would read
+// dd as a reader of if= alone and skip the operand that writes. A word whose
+// static key is another one (if=$X, bs=$N) is not an output (rel-1-0-10:
+// GAP-1296; the GAP-0379 attached dd rows).
+func ddExpandingOutput(command *CommandFact) bool {
+	if len(command.Arguments) != len(command.Argv) {
+		for _, arg := range command.Argv[1:] {
+			if arg == "" {
+				return true // a word the parser could not keep: it may be of=
+			}
+		}
+		return false
+	}
+	for _, argument := range command.Arguments[1:] {
+		if !argument.Expands {
+			continue
+		}
+		key, _, keyed := strings.Cut(argument.staticPrefix, "=")
+		if !keyed || key == "of" {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyPOSIXFilesystemFormat(

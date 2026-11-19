@@ -150,7 +150,7 @@ func TestSedInPlaceBackupReading(t *testing.T) {
 		{"SFXREV-B-no-inplace", `sed "s/$A/$B/" "$F"`, sedNone},
 	} {
 		command := strings.NewReplacer("{keys}", keys, "{home}", home).Replace(tc.command)
-		blocked, unresolved := actionSedInPlaceReading(command, proj, home, nil)
+		blocked, unresolved := actionSedInPlaceReading(command, proj, home, nil, false)
 		got := sedNone
 		switch {
 		case blocked:
