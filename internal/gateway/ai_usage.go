@@ -272,6 +272,10 @@ func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// The scan takes no input, but a client may send one ("{}"). Read the
+	// bounded body: a connection closed with unread bytes is reset on
+	// Windows, and the client then loses the answer.
+	_, _ = io.Copy(io.Discard, r.Body)
 	discovery, releaseDiscovery := a.leaseAIDiscovery()
 	defer releaseDiscovery()
 	if discovery == nil {

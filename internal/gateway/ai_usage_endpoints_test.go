@@ -19,6 +19,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -776,4 +777,23 @@ func TestComponentsEndpointGetBypassesCSRF(t *testing.T) {
 		t.Fatalf("status=%d want 200 (GET should bypass CSRF); body=%s",
 			w.Code, w.Body.String())
 	}
+}
+
+func TestAIUsageScanReadsItsRequestBody(t *testing.T) {
+	body := &eofReader{r: strings.NewReader("{}")}
+	(&APIServer{}).handleAIUsageScan(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/ai-usage/scan", body))
+	if !body.eof {
+		t.Fatal("the scan answered with its request body unread")
+	}
+}
+
+type eofReader struct {
+	r   io.Reader
+	eof bool
+}
+
+func (b *eofReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.eof = b.eof || err == io.EOF
+	return n, err
 }
