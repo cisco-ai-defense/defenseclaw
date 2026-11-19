@@ -365,7 +365,9 @@ func TestR105WindowsCMDHeredocDelimiterSearchIsLinear(t *testing.T) {
 			if !want {
 				findings = withoutStatementBudget(findings)
 			}
-			block = buildVerdict(findings, "tool_call").Action == "block"
+			// A proven DefenseClaw state write is a HIGH alert on the default
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			block = gap0747Blocked(findings, want)
 		}
 		return block, best
 	}

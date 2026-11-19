@@ -325,8 +325,10 @@ func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
 				_, d := judge(n)
 				return d
 			}, ceiling)
-			if verdict := buildVerdict(findings, "tool_call"); verdict.Action != "block" {
-				t.Errorf("%s %s: action %q, want block", tc.name, tool, verdict.Action)
+			// A proven DefenseClaw state write is a HIGH alert on the default
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			if problem := gap0747DefaultTierCheck(findings, true); problem != "" {
+				t.Errorf("%s %s: %s", tc.name, tool, problem)
 			}
 		}
 	}
