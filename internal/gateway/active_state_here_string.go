@@ -26,7 +26,7 @@ const maxHereStringTwinBytes = 16 << 10
 // a state write blocks, and reads and project forms (`xargs cat <<< ...`,
 // `xargs rm -f <<< build/a.o`) stay allowed, as they do in the twin.
 func hereStringStateMutation(facts actionfacts.Facts, request trustedActionRequest) (mutates, judged bool) {
-	if facts.Parse.Status != actionfacts.StatusInvalid || !hereStringTwinHome(facts.ActiveHome) {
+	if request.hereStringTwinsJudged || facts.Parse.Status != actionfacts.StatusInvalid || !hereStringTwinHome(facts.ActiveHome) {
 		return false, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
@@ -79,7 +79,7 @@ func hereStringTwinHome(home string) bool {
 // command of a call (the call itself is judged so), a read whose binding
 // differs between its calls, or a twin that does not parse either.
 func hereStringReadingTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
-	if request.readingTwin || request.simpleCommandPass || facts.Parse.Status != actionfacts.StatusInvalid {
+	if request.readingTwin || request.hereStringTwinsJudged || request.simpleCommandPass || facts.Parse.Status != actionfacts.StatusInvalid {
 		return trustedActionRequest{}, false
 	}
 	command, known := trustedBashCommandInput(request.Input)

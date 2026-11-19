@@ -242,6 +242,13 @@ type trustedActionRequest struct {
 	// unwrapping a call next to it (command echo IFS=x) would prove a write
 	// through the value the read replaces (rel-1-0-10:GAP-1083, GAP-1246).
 	hereStringPipeReading bool
+	// hereStringTwinsJudged leaves out the here-string readings
+	// (hereStringReadingTwinRequest, hereStringStateMutation) of a wrapper
+	// twin whose parent has a here-string reading twin: the parent's twin
+	// printf WORD | sudo tee F has the wrapper twin printf WORD | tee F,
+	// which is this twin's here-string reading, so each was judged twice,
+	// and sudo tee F <<< WORD cost about 10 times ls (rel-1-0-10:GAP-1472).
+	hereStringTwinsJudged bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -849,8 +856,12 @@ func dispatchTrustedAction(
 	// (nohup, nice, setsid, stdbuf, ionice, sudo, ...; or after a word that
 	// may expand to nothing) writes what the plain call does (GAP-2512,
 	// GAP-2519); the plain reading is judged, and only its block counts.
+	// The here-string reading twin is asked here, before the wrapper twin is
+	// made; request and facts do not change before it is judged below.
+	hereStringTwin, hereStringTwinOK := hereStringReadingTwinRequest(request, facts)
 	writerTwin, writerTwinOK := wrapperUnwrapTwinRequest(request, false)
 	if writerTwinOK {
+		writerTwin.hereStringTwinsJudged = writerTwin.hereStringTwinsJudged || hereStringTwinOK
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, writerTwin))
 		}()
@@ -1025,7 +1036,7 @@ func dispatchTrustedAction(
 	// printf '%s\n' WORD | CMD as well, by every rule, and the twin's
 	// findings are kept (rel-1-0-10:GAP-1083: cd X, then a here-string,
 	// then a write in X).
-	if twin, ok := hereStringReadingTwinRequest(request, facts); ok {
+	if twin, ok := hereStringTwin, hereStringTwinOK; ok {
 		// The run-time shell reading of the call judges the script of a
 		// shell that reads the here-string (bash <<< TEXT is bash -c TEXT):
 		// the twin's own run-time shell reading (printf WORD | bash -c TEXT)
