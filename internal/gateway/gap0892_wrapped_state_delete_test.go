@@ -43,8 +43,8 @@ func TestGAP0892WrappedStateDeleteIsNeverAClearAllow(t *testing.T) {
 			id := fmt.Sprintf("%s/mix-%d", tier.name, n)
 			action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(gap0892Chain(n)+gap0892StateDelete))
 			got := boundedParse(action)
-			if n == 0 && got != bounded.Block {
-				t.Errorf("%s: action %q, want block; findings=%v", id, action, findings)
+			if n == 0 && got != gap0747StateWriteAction(tier.tier) {
+				t.Errorf("%s: action %q, want %s (alert outside strict); findings=%v", id, action, gap0747StateWriteAction(tier.tier), findings)
 			}
 			if got < floor || got == bounded.Allow {
 				t.Errorf("%s: action %q, want at least %s, never allow; findings=%v", id, action, floor, findings)

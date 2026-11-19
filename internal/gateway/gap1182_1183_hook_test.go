@@ -22,8 +22,8 @@ func TestGAP1182WrappedStateWriteOnClaudeHook(t *testing.T) {
 		for i, form := range forms {
 			command := strings.Replace(form, "%s", ": >> ~/.defenseclaw/config.yaml", 1)
 			out := gap0437Hook(t, hook, cwd, pack.name+string(rune('a'+i)), command)
-			if out["action"] != "block" || !gap0526Names(out, "tamper.detector_state_write") {
-				t.Errorf("%s %q: want state-write block: %v", pack.name, command, out)
+			if out["action"] != gap0747WantAction(pack.pack == "strict") || !gap0526Names(out, "tamper.detector_state_write") {
+				t.Errorf("%s %q: want state-write block (alert outside strict): %v", pack.name, command, out)
 			}
 		}
 	}
@@ -60,8 +60,8 @@ func TestGAP1183TopLevelHereDocConsumerOnClaudeHook(t *testing.T) {
 			command := row.prefix + " <<" + row.delimiter + "\n: >> ~/.defenseclaw/config.yaml\nEOF"
 			out := gap0437Hook(t, hook, cwd, pack.name+row.name, command)
 			if row.code {
-				if out["action"] != "block" || !gap0526Names(out, "tamper.detector_state_write") {
-					t.Errorf("%s %s: want state-write block: %v", pack.name, row.name, out)
+				if out["action"] != gap0747WantAction(pack.pack == "strict") || !gap0526Names(out, "tamper.detector_state_write") {
+					t.Errorf("%s %s: want state-write block (alert outside strict): %v", pack.name, row.name, out)
 				}
 				continue
 			}

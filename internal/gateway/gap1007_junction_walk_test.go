@@ -93,15 +93,15 @@ func TestGAP1007JunctionDotDotWriteIsStateWriteInEveryTier(t *testing.T) {
 	cells := 0
 	for _, tier := range gap1007Tiers {
 		for _, tool := range []string{"Bash", "PowerShell"} {
-			if got := gap1007Decide(t, home, cwd, tier, tool, direct); got != "block" {
-				t.Fatalf("%s/%s: the config named through the junction directly: %s, want block", tier.name, tool, got)
+			if got := gap1007Decide(t, home, cwd, tier, tool, direct); got != gap0747WantAction(tier.posture == "strict") {
+				t.Fatalf("%s/%s: the config named through the junction directly: %s, want block in strict, alert elsewhere", tier.name, tool, got)
 			}
 			for _, target := range targets {
 				for _, form := range forms {
 					cells++
 					command := fmt.Sprintf(form.text, target.text)
-					if got := gap1007Decide(t, home, cwd, tier, tool, command); got != "block" {
-						t.Errorf("%s/%s/%s|%s: action %s, want block (the config through the junction)", tier.name, tool, form.id, target.id, got)
+					if got := gap1007Decide(t, home, cwd, tier, tool, command); got != gap0747WantAction(tier.posture == "strict") {
+						t.Errorf("%s/%s/%s|%s: action %s, want block in strict, alert elsewhere (the config through the junction)", tier.name, tool, form.id, target.id, got)
 					}
 				}
 			}

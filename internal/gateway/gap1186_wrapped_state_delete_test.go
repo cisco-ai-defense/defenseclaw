@@ -57,7 +57,7 @@ func TestStateDeleteBehindAnyPrefixWrapperFiveTiers(t *testing.T) {
 		}
 		for _, plain := range deletes {
 			oracle, _ := verdict(plain)
-			if oracle != "block" {
+			if oracle != gap0747WantAction(p.pack == "strict") {
 				if required[plain] {
 					t.Fatalf("%s: %q is %s, the oracle needs a block", p.name, plain, oracle)
 				}

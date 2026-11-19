@@ -34,12 +34,15 @@ func TestD4RevDrivePrefixClimb(t *testing.T) {
 		actions [5]bounded.Action
 	}
 	allBlock := [5]bounded.Action{bounded.Block, bounded.Block, bounded.Block, bounded.Block, bounded.Block}
+	// A proven DefenseClaw state write is a HIGH alert outside strict and
+	// managed strict (GAP-0747 owner tiering 2026-11-15T15:20Z).
+	stateWrite := [5]bounded.Action{bounded.Alert, bounded.Alert, bounded.Block, bounded.Alert, bounded.Block}
 	cases := []struct {
 		name, value string
 		want        want
 	}{
 		{"drive-fwd-climb-state", "C:/" + up + rel + "/.defenseclaw/config.yaml",
-			want{"tamper.detector_state_write", allBlock}},
+			want{"tamper.detector_state_write", stateWrite}},
 		{"drive-fwd-climb-rc", "C:/" + up + rel + "/.bashrc",
 			want{"persistence.shell_profile_write", [5]bounded.Action{bounded.Alert, bounded.Allow, bounded.Block, bounded.Alert, bounded.Block}}},
 		{"drive-fwd-climb-key", "C:/" + up + rel + "/.ssh/authorized_keys",

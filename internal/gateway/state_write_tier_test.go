@@ -164,3 +164,9 @@ func gap0747FileToolBlocked(body, pack string) bool {
 	}
 	return pack != "strict" && gap0747BodyAction(body) == "alert" && strings.Contains(body, gap0747StateRule)
 }
+
+// gap0747TierWantAction is the action name of a proven DefenseClaw state
+// write in a bounded tier: "block" in strict, "alert" elsewhere.
+func gap0747TierWantAction(tier bounded.Tier) string {
+	return gap0747WantAction(tier == bounded.TierStrict)
+}

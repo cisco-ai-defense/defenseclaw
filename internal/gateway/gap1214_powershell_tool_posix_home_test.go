@@ -156,7 +156,10 @@ func TestGAP1214PowerShellToolPOSIXHomeWritesFiveTiers(t *testing.T) {
 				var want string
 				if target.rules != nil {
 					want = hookConfigAction(judge(t, api, fmt.Sprintf("Set-Content -Path %s -Value zz", spell("abs", target.rel)), tr.pack.managed))
-					if want == "allow" && (tr.mode == "action" || target.name == "state") {
+					// Observe mode on the default pack allows a state write now
+					// that it is a HIGH alert there (GAP-0747 owner tiering
+					// 2026-11-15T15:20Z); observe on strict still blocks it.
+					if want == "allow" && (tr.mode == "action" || target.name == "state" && tr.pack.pack == "strict") {
 						t.Fatalf("%s: the written-out Set-Content reference is allowed", target.name)
 					}
 				}
@@ -169,7 +172,7 @@ func TestGAP1214PowerShellToolPOSIXHomeWritesFiveTiers(t *testing.T) {
 						switch {
 						case target.rules == nil && (action != "allow" || hit(got, allRules)):
 							t.Errorf("%s %s of %s: %s, want allow with no protected-write rule\n%s", form.id, spelling, target.name, action, got)
-						case target.rules != nil && (action != want || want != "allow" && !hit(got, target.rules)):
+						case target.rules != nil && (action != want || (want != "allow" || target.name == "state") && !hit(got, target.rules)):
 							t.Errorf("%s %s of %s: %s, want %s (as the written-out Set-Content) by %v\n%s", form.id, spelling, target.name, action, want, target.rules, got)
 						}
 					}
