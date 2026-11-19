@@ -4127,7 +4127,9 @@ func simpleCommandNextCWD(source string, state *simpleShellState, vars map[strin
 		if argStart >= len(call.Args) {
 			return state.cwd, false
 		}
-		program, known = simpleStaticWord(call.Args[argStart], vars)
+		// command [ ... ] runs the test builtin, as [ ... ] does
+		// (substrate-1:GAP-0692).
+		program, known = simpleStaticProgramWord(call.Args[argStart], vars)
 		if !known {
 			return "", true
 		}
