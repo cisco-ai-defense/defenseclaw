@@ -26,13 +26,13 @@ func TestRunTimeShellTwinReadsShellTextAsTheShellDoes(t *testing.T) {
 		// substitution and a redirect from a process substitution are read.
 		{"cat <<EOF | (sh)\nmake clean\nEOF", "cat <<EOF | (bash -c " + q("make clean\n") + ")\nmake clean\nEOF"},
 		{"cat <<EOF | { bash; }\nmake clean\nEOF", "cat <<EOF | { bash -c " + q("make clean\n") + "; }\nmake clean\nEOF"},
-		{"bash <<< \"$(cat <<EOF\nmake clean\nEOF\n)\"", "bash -c " + q("make clean") + " <<< \"$(cat <<EOF\nmake clean\nEOF\n)\""},
+		{"bash <<< \"$(cat <<EOF\nmake clean\nEOF\n)\"", "bash -c " + q("make clean")}, // the here-string is the -c STRING, not stdin (GAP-1088),
 		{"sh < <(cat <<'EOF'\nmake clean\nEOF\n)", "bash -c " + q("make clean\n") + " < <(cat <<'EOF'\nmake clean\nEOF\n)"},
 		// GAP-1148: \$, \` and \\ lose the backslash and a backslash line end
 		// joins the lines in an unquoted body; any other backslash stays, and a
 		// quoted body is literal.
 		{"cat <<EOF | sh\nmake \\$TARGET\nEOF", "cat <<EOF | bash -c " + q("make $TARGET\n") + "\nmake \\$TARGET\nEOF"},
-		{"sh <<EOF\nls \\`pwd\\`\nEOF", "bash -c " + q("ls `pwd`\n") + " <<EOF\nls \\`pwd\\`\nEOF"},
+		{"sh <<EOF\nls \\`pwd\\`\nEOF", "bash -c " + q("ls `pwd`\n")}, // the here-document is the -c STRING (GAP-1088),
 		{"cat <<EOF | sh\nmake \\\nclean\nEOF", "cat <<EOF | bash -c " + q("make clean\n") + "\nmake \\\nclean\nEOF"},
 		{"cat <<EOF | sh\nprintf a\\\\\\\\b\\tc\nEOF", "cat <<EOF | bash -c " + q("printf a\\\\b\\tc\n") + "\nprintf a\\\\\\\\b\\tc\nEOF"},
 		{"cat <<'EOF' | sh\nmake \\$TARGET\nEOF", "cat <<'EOF' | bash -c " + q("make \\$TARGET\n") + "\nmake \\$TARGET\nEOF"},
