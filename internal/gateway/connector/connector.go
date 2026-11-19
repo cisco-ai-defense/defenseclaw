@@ -353,6 +353,16 @@ type SetupOpts struct {
 	// (rel-1-0-10 GAP-0081). Every other teardown removes it (GAP-1130).
 	SetupRollback bool
 
+	// ClaudeManagedGuardTexts109 renders the managed Windows Claude Code guard
+	// wrapper with the texts 1.0.9 Setup wrote instead of this release's
+	// (rel-1-0-10 GAP-0119). Only the guardian's recorded-policy renders set
+	// it, so a drop-in 1.0.9 published still reads as this deployment's and
+	// an upgrade replaces it with the current form; without it the 1.0.10
+	// guardian refused that drop-in as an unrecognized registered command and
+	// every Setup /ensure upgrade from 1.0.9 ended 1603 (rel-1-0-10
+	// GAP-1495). Remove when 1.0.9 stops being a supported upgrade source.
+	ClaudeManagedGuardTexts109 bool
+
 	// ReclaimOwnHooksOnly is set on the Teardown of a connector that is not
 	// configured (the boot reclaim of an unguarded connector, connector
 	// prune-orphans). The agent files are shared by every DefenseClaw data

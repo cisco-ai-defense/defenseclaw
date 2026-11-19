@@ -164,8 +164,8 @@ func renderRecordedWindowsClaudeManagedPolicy(record windowsClaudeManagedPolicyS
 	}
 	for _, contract := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{true, false} {
-			for _, previousForm := range []bool{false, true} {
-				body, err := renderWindowsClaudeRecordedPolicy(record, contract, lock, previousForm)
+			for _, form := range windowsClaudeRecordedForms {
+				body, err := renderWindowsClaudeRecordedPolicy(record, contract, lock, form)
 				if err == nil && windowsManagedPolicyDigest(body) == record.PolicySHA256 {
 					return body, nil
 				}
@@ -185,16 +185,43 @@ func windowsClaudeRecordedPolicyContracts() []string {
 	return contracts
 }
 
+// windowsClaudeRecordedForm is a form of the drop-in an ownership record may
+// keep: this release's render or one an earlier release published.
+type windowsClaudeRecordedForm int
+
+const (
+	// windowsClaudeFormCurrent is the drop-in this release renders.
+	windowsClaudeFormCurrent windowsClaudeRecordedForm = iota
+	// windowsClaudeFormDirect is the direct hook command written before the
+	// guard parent.
+	windowsClaudeFormDirect
+	// windowsClaudeFormGuard109 is the guard wrapper with the texts 1.0.9
+	// Setup wrote (rel-1-0-10 GAP-0119, GAP-1495). Remove when 1.0.9 stops
+	// being a supported upgrade source.
+	windowsClaudeFormGuard109
+)
+
+// windowsClaudeRecordedForms is every recorded form, this release's first.
+var windowsClaudeRecordedForms = []windowsClaudeRecordedForm{
+	windowsClaudeFormCurrent, windowsClaudeFormDirect, windowsClaudeFormGuard109,
+}
+
 // renderWindowsClaudeRecordedPolicy renders the drop-in for the record's hook
 // executable and gateway under contract, with or without the
-// managed-hooks-only lock. The previous direct command remains readable so
-// an ownership record written before the guard parent can still be restored.
-func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool, previousForm ...bool) ([]byte, error) {
+// managed-hooks-only lock, in form (this release's when none is given). The
+// earlier forms remain readable so an ownership record an earlier release
+// wrote can still be restored and upgraded.
+func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool, form ...windowsClaudeRecordedForm) ([]byte, error) {
+	recorded := windowsClaudeFormCurrent
+	if len(form) > 0 {
+		recorded = form[0]
+	}
 	return connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
 		APIAddr:                     record.GatewayAddr,
 		HookFailMode:                "closed",
 		ManagedEnterprise:           true,
-		SecureClientHookDelivery:    secureClientHookDelivery() || len(previousForm) > 0 && previousForm[0],
+		SecureClientHookDelivery:    secureClientHookDelivery() || recorded == windowsClaudeFormDirect,
+		ClaudeManagedGuardTexts109:  recorded == windowsClaudeFormGuard109,
 		HookExecutable:              record.HookExecutable,
 		HookContractID:              contract,
 		ClaudeAllowManagedHooksOnly: lock,
@@ -259,8 +286,8 @@ func ApplyWindowsClaudeManagedHooksOnlyLock() (bool, error) {
 		var body []byte
 		for _, contract := range windowsClaudeRecordedPolicyContracts() {
 			matches := false
-			for _, previousForm := range []bool{false, true} {
-				current, renderErr := renderWindowsClaudeRecordedPolicy(record, contract, !want, previousForm)
+			for _, form := range windowsClaudeRecordedForms {
+				current, renderErr := renderWindowsClaudeRecordedPolicy(record, contract, !want, form)
 				if renderErr == nil && bytes.Equal(current, policy.data) {
 					matches = true
 					break

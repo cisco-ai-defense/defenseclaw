@@ -46,7 +46,7 @@ func TestStandaloneClaudeEnsureUpgradesAuthenticatedActiveDirectPolicy(t *testin
 				t.Fatal(renderErr)
 			}
 			if bytes.Equal(candidate, current) {
-				previous, err = renderWindowsClaudeRecordedPolicy(record, contract, lock, true)
+				previous, err = renderWindowsClaudeRecordedPolicy(record, contract, lock, windowsClaudeFormDirect)
 				if err != nil {
 					t.Fatal(err)
 				}

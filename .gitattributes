@@ -154,3 +154,5 @@ cmd/defenseclaw-hook/testdata/outage-packs/** -text
 # tests that strconv.Unquote a line (hookpaths fuzzCorpusString); a Windows
 # checkout (core.autocrlf=true) must keep them LF so no line ends in \r.
 internal/**/testdata/fuzz/** text eol=lf
+# The drop-in the published 1.0.9 Windows Setup wrote, compared byte for byte (rel-1-0-10 GAP-1495).
+internal/enterprisehooks/testdata/claude-managed-policy-109-standalone.json -text
