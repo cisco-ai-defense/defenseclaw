@@ -499,7 +499,8 @@ func registrationEditsInPlace(call *syntax.CallExpr, home string) bool {
 // no -e or -f comes before it. GNU sed reads that operand as a file when -e
 // or -f comes anywhere, BSD sed only when one comes before it (its options
 // end at the first operand), so the BSD reading is kept; every other operand
-// is a file sed reads. ok is false for an option this reading does not know (a
+// is a file sed reads. A separate word after short -l counts as a script word
+// too (GNU reads a line length, BSD a script). ok is false for an option this reading does not know (a
 // short letter outside GNU sed's, a long name or an ambiguous prefix of one,
 // sedLongOption), so the caller keeps reading every word.
 func sedScriptWords(args []string) (scripts []string, ok bool) {
@@ -538,14 +539,22 @@ func sedScriptWords(args []string) (scripts []string, ok bool) {
 		cluster:
 			for j := 1; j < len(arg); j++ {
 				switch arg[j] {
-				case 'e', 'f', 'l':
+				case 'l':
+					// GNU -l takes a line length, BSD -l none: a separate
+					// word after it is read both ways, as a script word
+					// that keeps the first-operand slot open
+					// (rel-1-0-10:GAP-1499). An option word after it is an
+					// option (BSD); an attached value is GNU's -lN.
+					if j+1 == len(arg) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+						scripts = append(scripts, next())
+					}
+					break cluster
+				case 'e', 'f':
 					value := arg[j+1:]
 					if value == "" {
 						value = next()
 					}
-					if arg[j] != 'l' {
-						scripts, given = append(scripts, value), true
-					}
+					scripts, given = append(scripts, value), true
 					break cluster
 				case 'i':
 					break cluster

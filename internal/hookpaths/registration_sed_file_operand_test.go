@@ -38,6 +38,15 @@ func TestRegistrationSedFileOperandIsNoScript(t *testing.T) {
 		{"w command onto the hook", "sed -n 'w " + hook + "' /dev/null; echo done", true},
 		{"second expression writes the hook", "sed -e 1p -e 'w " + hook + "' /dev/null; echo done", true},
 		{"in place on the hook", "sed -i s/a/b/ " + hook + "; echo done", true},
+		// BSD sed -l takes no value: the next word is the script, not a line
+		// length (rel-1-0-10:GAP-1499). GNU -l N and -lN keep N out of the
+		// script slot.
+		{"BSD -l before a w script", "sed -l 'w " + hook + "' /dev/null; echo done", true},
+		{"BSD -nl before a w script", "sed -nl 'w " + hook + "' /dev/null; echo done", true},
+		{"BSD -ul before a w script", "sed -ul 'w " + hook + "' /dev/null; echo done", true},
+		{"GNU -l 5 before a w script", "sed -l 5 'w " + hook + "' /dev/null; echo done", true},
+		{"GNU -l5 before a w script", "sed -l5 'w " + hook + "' /dev/null; echo done", true},
+		{"GNU -l 5 then the hook", "sed -n -l 5 1p " + hook + "; echo done", false},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -60,7 +69,13 @@ func TestSedScriptWords(t *testing.T) {
 		{[]string{"-e1p", "-f", "s.sed", "w0e", "e1"}, []string{"1p", "s.sed"}, true},
 		{[]string{"--expr", "1p", "e1"}, []string{"1p"}, true},
 		{[]string{"1p", "e1", "-e", "w0e"}, []string{"1p", "w0e"}, true},
-		{[]string{"-l", "5", "1p", "e1"}, []string{"1p"}, true},
+		{[]string{"-l", "5", "1p", "e1"}, []string{"5", "1p"}, true},
+		{[]string{"-l5", "1p", "e1"}, []string{"1p"}, true},
+		{[]string{"-l", "w x", "f"}, []string{"w x", "f"}, true},
+		{[]string{"-nl", "w x", "f"}, []string{"w x", "f"}, true},
+		{[]string{"-ul", "w x", "f"}, []string{"w x", "f"}, true},
+		{[]string{"-l", "-ew x", "f"}, []string{"w x"}, true},
+		{[]string{"--line-length", "5", "1p", "e1"}, []string{"1p"}, true},
 		{[]string{"--", "w x", "e1"}, []string{"w x"}, true},
 		{[]string{"1p", "e1", "--", "w0e"}, []string{"1p"}, true},
 		{[]string{"-I", ".bak", "1p", "e1"}, nil, false},
@@ -69,11 +84,13 @@ func TestSedScriptWords(t *testing.T) {
 	for _, row := range rows {
 		scripts, ok := sedScriptWords(row.args)
 		if ok != row.ok || ok && len(scripts) != len(row.scripts) {
-			t.Fatalf("sedScriptWords(%q) = %q, %v; want %q, %v", row.args, scripts, ok, row.scripts, row.ok)
+			t.Errorf("sedScriptWords(%q) = %q, %v; want %q, %v", row.args, scripts, ok, row.scripts, row.ok)
+			continue
 		}
 		for i := range scripts {
 			if ok && scripts[i] != row.scripts[i] {
-				t.Fatalf("sedScriptWords(%q) = %q; want %q", row.args, scripts, row.scripts)
+				t.Errorf("sedScriptWords(%q) = %q; want %q", row.args, scripts, row.scripts)
+				break
 			}
 		}
 	}
