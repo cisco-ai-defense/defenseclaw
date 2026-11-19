@@ -604,6 +604,9 @@ func substrateGatewayBuilder(c *config.Config, src *configwatch.Watcher, ready *
 			out.Profiles = func(p identity.Person, requested, connector string, admin bool) (string, string, error) {
 				return gateway.SubstrateLauncherProfiles(live())(p, requested, connector, admin)
 			}
+			out.ProfileWhy = func(p identity.Person, admin bool) gateway.SubstrateProfileWhy {
+				return gateway.SubstrateProfileWhyFor(live())(p, admin)
+			}
 			out.WorkloadEntry = func(subject string) (string, string) {
 				return gateway.SubstrateWorkloadEntry(live(), subject)
 			}

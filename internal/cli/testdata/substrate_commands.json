@@ -651,12 +651,13 @@
   },
   {
     "path": "substrate policy explain",
-    "use": "explain \u003cname\u003e",
-    "short": "Explain the rules and recent decisions for one agent",
+    "use": "explain [name]",
+    "short": "Explain the rules and recent decisions for one agent, or the profile you get",
+    "long": "With an agent name, explains the rules and recent decisions for that agent. With no name, explains the profile you get\nfor a new agent: the profile and where it came from (the profile assignment that selected you, or default_profile when none\ndid), default_profile, and the assignments that were checked first and did not select you (by place and the selector that\nfailed, never another person's group or account).",
     "args": [
       {
         "name": "name",
-        "required": true
+        "required": false
       }
     ],
     "flags": [

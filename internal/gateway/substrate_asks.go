@@ -210,6 +210,14 @@ func (a *APIServer) substratePolicyExplain(st *substrateState) http.HandlerFunc 
 			if err != nil {
 				out = map[string]any{"profile": "", "reason": "no profile with launcher atespaces is assigned to you"}
 			}
+			// GAP-0653: say which assignment gave the profile, or that none
+			// did and default_profile applies, and which assignments were
+			// consulted and did not select the caller.
+			if st.cfg.ProfileWhy != nil {
+				for k, v := range st.cfg.ProfileWhy(c.person, c.admin).View() {
+					out[k] = v
+				}
+			}
 			writeSubstrateJSON(w, http.StatusOK, out)
 			return
 		}
