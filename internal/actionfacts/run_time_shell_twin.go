@@ -453,6 +453,12 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 			// text, which the reading reads or reports as unread
 			// (rel-1-0-10:GAP-1147).
 			body, known, hereText := inputs[call].text, inputs[call].known, fed[call]
+			// source is the here-string or here-document that supplied the
+			// script: the twin hands that text to -c instead, so it is not
+			// stdin of the twin any more and is left out of it (GAP-1088).
+			// Kept, the twin would be judged as a stdin script call again,
+			// which re-derives every reading of the call it was made from.
+			var source *syntax.Redirect
 			if stmt := owners[call]; stmt != nil {
 				for _, redir := range stmt.Redirs {
 					if redir.N != nil && redir.N.Value != "0" {
@@ -462,6 +468,7 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 					case syntax.WordHdoc:
 						body, known = hereStringText(redir.Word)
 						hereText = holdsHereText(redir.Word)
+						source = redir
 					case syntax.Hdoc, syntax.DashHdoc:
 						body, known = heredocScriptText(redir)
 						if known && heredocHasParameters(redir) &&
@@ -470,19 +477,24 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 							known = false
 						}
 						hereText = true
+						source = redir
 					case syntax.RdrIn:
 						// sh < <(cat <<EOF ... EOF) reads what the process
 						// substitution writes.
 						body, known = procSubstOutput(redir.Word)
 						hereText = holdsHereText(redir.Word)
+						source = nil
 					case syntax.DplIn:
 						// bash <&3 after exec 3<<EOF: the reading does not
 						// follow descriptors.
-						body, known = "", false
+						body, known, source = "", false, nil
 						hereText = fileHereText
 					case syntax.RdrInOut:
-						body, known, hereText = "", false, false
+						body, known, hereText, source = "", false, false, nil
 					}
+				}
+				if source != nil && stdinRedirectCount(stmt) != 1 {
+					source = nil
 				}
 			}
 			if known && inputs[call].parameters &&
@@ -500,6 +512,11 @@ func runTimeShellTwin(command string, depth int, zeroIsShell bool, reader *shell
 					}
 				}
 				edits = append(edits, edit{int(call.Args[at].Pos().Offset()), int(call.End().Offset()), "bash -c " + posixSingleQuoted(body)})
+				if source != nil {
+					if start, end, ok := stdinSourceSpan(command, source); ok {
+						edits = append(edits, edit{start: start, end: end, text: ""})
+					}
+				}
 				return false
 			}
 		}
@@ -1337,4 +1354,82 @@ func unescapeHeredocLiteral(text string) string {
 		out.WriteByte(text[index])
 	}
 	return out.String()
+}
+
+// stdinRedirectCount is the number of here-strings and here-documents of stmt.
+func stdinRedirectCount(stmt *syntax.Stmt) int {
+	count := 0
+	for _, redir := range stmt.Redirs {
+		if redir.Op == syntax.WordHdoc || redir.Op == syntax.Hdoc || redir.Op == syntax.DashHdoc {
+			count++
+		}
+	}
+	return count
+}
+
+// stdinSourceSpan returns the bytes of command to remove to leave out the
+// here-string or here-document redirect: the redirect, the white space before
+// it and, for a here-document, its body and delimiter line. ok is false when
+// the span is not exactly that (text after the operator on its line, a
+// delimiter line that is not found): the redirect is then kept as written.
+func stdinSourceSpan(command string, redir *syntax.Redirect) (start, end int, ok bool) {
+	start, end = int(redir.Pos().Offset()), int(redir.End().Offset())
+	if redir.Op == syntax.Hdoc || redir.Op == syntax.DashHdoc {
+		// The operator and its delimiter word end the first line; the body
+		// and the delimiter line follow it.
+		if redir.Word == nil {
+			return 0, 0, false
+		}
+		end = int(redir.Word.End().Offset())
+	}
+	if start < 0 || end <= start || end > len(command) {
+		return 0, 0, false
+	}
+	if redir.Op == syntax.Hdoc || redir.Op == syntax.DashHdoc {
+		rest := command[end:]
+		newline := strings.IndexByte(rest, 10)
+		if newline < 0 || strings.Trim(rest[:newline], " 	") != "" {
+			return 0, 0, false
+		}
+		delimiter := projectPOSIXWord(redir.Word)
+		if delimiter.Expands || delimiter.Value == "" {
+			return 0, 0, false
+		}
+		at := end + newline + 1
+		found := false
+		for at <= len(command) {
+			line := command[at:]
+			next := strings.IndexByte(line, 10)
+			if next >= 0 {
+				line = line[:next]
+			}
+			if redir.Op == syntax.DashHdoc {
+				line = strings.TrimLeft(line, "	")
+			}
+			if line == delimiter.Value {
+				end, found = indexLineEnd(command, at), true
+				break
+			}
+			if next < 0 {
+				break
+			}
+			at += next + 1
+		}
+		if !found {
+			return 0, 0, false
+		}
+	}
+	for start > 0 && (command[start-1] == 32 || command[start-1] == 9) {
+		start--
+	}
+	return start, end, true
+}
+
+// indexLineEnd is the offset of the end of the line of command that starts at
+// at (before its newline, or the end of command).
+func indexLineEnd(command string, at int) int {
+	if next := strings.IndexByte(command[at:], 10); next >= 0 {
+		return at + next
+	}
+	return len(command)
 }
