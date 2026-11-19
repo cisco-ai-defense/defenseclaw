@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -31,7 +32,7 @@ const (
 	maxSkillManifestParts = 128
 )
 
-// managedSkillManifest is how much of one SKILL.md AI Defense has.
+// managedSkillManifest tracks local submission, not durable cloud receipt.
 type managedSkillManifest struct {
 	Sent  int `json:"sent"`
 	Parts int `json:"parts"`
@@ -44,6 +45,7 @@ func (state *managedInventoryPublishState) SetSkillManifestReader(read func(hash
 	}
 	state.mu.Lock()
 	state.readSkillManifest = read
+	state.receiptEpoch++
 	state.mu.Unlock()
 }
 
@@ -62,42 +64,101 @@ func (cycle *managedInventoryPublishCycle) attachSkillManifests(components []end
 	if read == nil {
 		return
 	}
-	next, seen := map[string]managedSkillManifest{}, map[string]bool{}
-	budget := skillManifestCycleBytes
+	next := map[string]managedSkillManifest{}
+	byHash := map[string]int{}
 	for i := range components {
 		c := &components[i]
 		hash := c.skillManifestHash
-		if hash == "" || seen[hash] || c.skillState == skillStateRemoved {
+		if hash == "" || c.skillState == skillStateRemoved {
 			continue
 		}
-		seen[hash] = true
-		progress, known := prior[hash]
-		if known {
+		if _, ok := byHash[hash]; !ok {
+			byHash[hash] = i
+		}
+		if progress, ok := prior[hash]; ok {
 			next[hash] = progress
 		}
-		if known && progress.Sent >= progress.Parts || budget <= 0 {
+	}
+	hashes := make([]string, 0, len(byHash))
+	for hash := range byHash {
+		hashes = append(hashes, hash)
+	}
+	sort.Strings(hashes)
+	cycle.state.mu.Lock()
+	cursor := cycle.state.file.ManifestBodyCursor
+	cycle.state.mu.Unlock()
+	start := sort.SearchStrings(hashes, cursor)
+	if start < len(hashes) && hashes[start] == cursor {
+		start++
+	}
+	if start >= len(hashes) {
+		start = 0
+	}
+	// New initial parts get the aggregate budget before already-submitted repairs.
+	// Rotate within each class so neither large installs nor broken hashes starve.
+	ordered := make([]string, 0, len(hashes))
+	for _, repair := range []bool{false, true} {
+		for step := 0; step < len(hashes); step++ {
+			hash := hashes[(start+step)%len(hashes)]
+			progress, known := prior[hash]
+			if (known && progress.Sent >= progress.Parts) == repair {
+				ordered = append(ordered, hash)
+			}
+		}
+	}
+	budget := skillManifestCycleBytes
+	for _, hash := range ordered {
+		if budget <= 0 {
+			break
+		}
+		c := &components[byHash[hash]]
+		progress, known := prior[hash]
+		receipt := cycle.receipts[hash]
+		if receipt.State == "complete" {
+			next[hash] = managedSkillManifest{Sent: receipt.Parts, Parts: receipt.Parts}
 			continue
+		}
+		if receipt.State == "conflict" || receipt.LastScan != "" && receipt.LastScan == cycle.scanID {
+			continue
+		}
+		selected := progress.Sent + 1
+		if known && progress.Sent >= progress.Parts {
+			selected = cycle.missingManifestPart(hash, progress, receipt)
+			if selected == 0 {
+				continue
+			}
 		}
 		data, ok := read(hash)
 		if !ok {
-			continue // changed since the scan; the next scan has its new hash
+			continue
 		}
 		parts, ok := splitSkillManifest(data)
 		if !ok || len(parts) > maxSkillManifestParts {
-			next[hash] = managedSkillManifest{} // done: sent as its hash only
+			next[hash] = managedSkillManifest{}
 			continue
 		}
-		if progress.Sent >= len(parts) {
+		if selected > len(parts) || selected < 1 {
 			next[hash] = managedSkillManifest{Sent: len(parts), Parts: len(parts)}
 			continue
 		}
-		part := parts[progress.Sent]
+		if receipt.Parts > 0 && receipt.Parts != len(parts) {
+			receipt.State = "conflict"
+			cycle.receipts[hash] = receipt
+			cycle.receiptDirty = true
+			continue
+		}
+		part := parts[selected-1]
 		if len(part) > budget && budget < skillManifestCycleBytes {
 			continue
 		}
 		budget -= len(part)
-		c.skillManifest, c.skillManifestPart, c.skillManifestParts = part, progress.Sent+1, len(parts)
-		next[hash] = managedSkillManifest{Sent: progress.Sent + 1, Parts: len(parts)}
+		c.skillManifest, c.skillManifestPart, c.skillManifestParts = part, selected, len(parts)
+		if selected > progress.Sent {
+			progress.Sent = selected
+		}
+		progress.Parts = len(parts)
+		next[hash] = progress
+		cycle.bodyCursor = hash
 	}
 	cycle.manifests = next
 }
