@@ -15,7 +15,9 @@ import "github.com/defenseclaw/defenseclaw/internal/assetfacts"
 // stays as spelled); that is final for a share that did not answer within its
 // own wait (the owner-accepted bound), but when only the budget of the call
 // ended the wait the share might have answered, and the call records it
-// (SkillLinksUnproven) for the caller to judge by the policy tier. The
+// (SkillLinksUnproven) for the caller to judge by the policy tier. A share on
+// another machine is never asked (rel-1-0-10:GAP-1074) and is recorded the
+// same way. The
 // gateway holds the skill folder check to that: a skill held or denied is
 // refused unproven in the strict tier and allowed with a visible alert in the
 // others, as a script body the budget kept unread is (ShareBodyUnread).
@@ -38,6 +40,12 @@ func shareAnswersForLinks(path string) bool {
 	root := networkShareRootOf(path)
 	if root == "" {
 		return true
+	}
+	if !networkShareOfThisMachine(root) {
+		// Never read (rel-1-0-10:GAP-1074): the skill folder behind it is
+		// unknown, as one whose share the budget left unasked.
+		noteSkillLinksUnproven()
+		return false
 	}
 	unanswered, budgetCut := askNetworkShare(root)
 	if !unanswered {

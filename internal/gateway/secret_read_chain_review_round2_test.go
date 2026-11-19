@@ -136,14 +136,14 @@ var srd2Round2StrictBlock = map[string]bool{
 // Review round 2 probe table (s7-srd2rev2, cases by id), hook path with a
 // reported cwd that does not exist on the host, default and strict.
 func TestSecretReadChainReviewRound2Probes(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2Round2Flows("/work/f5proj", "/tmp/q9"), srdTiersNamed(t, "default", "strict"))
 }
 
 // The same probes with a reported cwd that exists on the host.
 func TestSecretReadChainReviewRound2ProbesLocalCwd(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	cwd := t.TempDir()
 	other := t.TempDir()
@@ -230,13 +230,13 @@ func srd2DerivedUploadFlows(cwd, other string) []srd2Round2Flow {
 }
 
 func TestSecretReadChainReviewDerivedUploadInTheUploadCall(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	srd2Round2Run(t, "nocwd", "/work/f5proj", srd2DerivedUploadFlows("/work/f5proj", "/tmp/q9"), srdTiersNamed(t, "default", "strict"))
 }
 
 func TestSecretReadChainReviewDerivedUploadInTheUploadCallLocalCwd(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	cwd := t.TempDir()
 	other := t.TempDir()

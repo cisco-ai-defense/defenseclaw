@@ -112,6 +112,12 @@ func (s *Sidecar) newSubstrateGuardrailProxy(cfg *config.Config) (*GuardrailProx
 	if judge := s.sharedJudge(); judge != nil {
 		p.SetJudge(judge)
 	}
+	// The same wiring as the sidecar's own proxy (setGuardrailProxy): without
+	// the generation an actor's request read no published rules or profiles,
+	// and the canary key of GAP-0487 reached Bedrock with no finding.
+	s.observabilityV8Mu.Lock()
+	s.bindGuardrailProxyLocked(p)
+	s.observabilityV8Mu.Unlock()
 	return p, nil
 }
 

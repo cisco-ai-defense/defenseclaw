@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/telemetryrelay"
 )
 
 // substrateExtprocFlags are the callout's flags.
@@ -160,7 +161,8 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	opts := extproc.Options{Config: cfg, Events: extproc.NewJSONLogSink(stdout)}
+	jsonEvents := extproc.NewJSONLogSink(stdout)
+	opts := extproc.Options{Config: cfg, Events: jsonEvents}
 	judge, err := extproc.NewVerdictClient(cfg.Judge)
 	if err != nil {
 		return err
@@ -188,6 +190,11 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		}
 		opts.ChainChecker = substrateChainChecker{client: &chainstate.Client{Leader: lc}}
 		opts.UIDs = substrateActorDirectory{regs: &registry.Remote{Client: lc}}
+		// Each decision also reaches the OTLP destinations as log.egress.*,
+		// through the leader and a gateway replica (GAP-0453).
+		relay := &telemetryrelay.Poster{Leader: lc, Method: telemetryrelay.MethodPostEgress}
+		go relay.Run(ctx)
+		opts.Events = substrateRelayEgress{next: jsonEvents, relay: relay}
 	case cfg.Managed:
 		// D8: a managed callout without the leader would check no chain and
 		// know no registration.
@@ -258,4 +265,22 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		g.Stop()
 	}
 	return err
+}
+
+// substrateRelayEgress writes each egress decision to the log and queues it
+// for the leader, which hands it to a gateway replica to export.
+type substrateRelayEgress struct {
+	next  extproc.EventSink
+	relay *telemetryrelay.Poster
+}
+
+func (s substrateRelayEgress) EgressEvent(ev extproc.Event) {
+	s.next.EgressEvent(ev)
+	if ev.Actor == "" || ev.Host == "" {
+		return
+	}
+	s.relay.Add(telemetryrelay.Record{Kind: telemetryrelay.KindEgress, At: ev.Time,
+		Atespace: ev.Atespace, Actor: ev.Actor, UID: ev.ActorUID, Profile: ev.Profile,
+		Host: ev.Host, Path: ev.Path, Decision: ev.Decision, Category: ev.Category, Reason: ev.Reason, Alert: ev.Alert,
+		BodyInspected: ev.BodyInspected, BodyOverCap: ev.BodyOverCap})
 }

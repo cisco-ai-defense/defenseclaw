@@ -167,7 +167,7 @@ func TestSubstrateChainEgressF1ChosenFormsRefuse(t *testing.T) {
 		}
 	}
 	t.Run("host", func(t *testing.T) {
-		installCorrelationHMACForTest()
+		installCorrelationHMACForTest(t)
 		if err := SetSubstrateChainEgressAction(""); err != nil {
 			t.Fatal(err)
 		}
@@ -241,7 +241,7 @@ func substrateEgressReplica(t *testing.T, tier string) (chartReplica, *chainstat
 // wire client the gateway uses to reach it.
 func substrateEgressReplicaWith(t *testing.T, pack string, managed bool, action string) (chartReplica, *chainstate.Service, *chainstate.Client) {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	if err := SetSubstrateChainEgressAction(action); err != nil {
 		t.Fatal(err)

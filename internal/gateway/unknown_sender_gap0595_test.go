@@ -21,7 +21,7 @@ import (
 // and a network API, a credential-named environment variable piped into an
 // upload) is the unknown-tier finding.
 func TestUnknownSenderIsTheUnknownTierGAP0595(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const file = "/work/f5proj/.aws/credentials"
 	chainSenders := map[string]string{

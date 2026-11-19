@@ -374,6 +374,25 @@ func substrateWaitForWorker(ctx context.Context, wait, poll time.Duration, try f
 	}
 }
 
+// A run (and a single --task run) on a full pool waits for room as connect
+// does (GAP-0528): up to substrateRunWorkerWait, trying again every
+// substrateRunWorkerPoll, with connect's message; Ctrl-C stops it, and
+// nothing is left behind. Tests shorten them.
+var (
+	substrateRunWorkerWait = 10 * time.Minute
+	substrateRunWorkerPoll = 5 * time.Second
+)
+
+// substrateRunWaitingForWorker is substrateWaitForWorker for one run: it
+// prints connect's "The cluster is full. Waiting for room (Ctrl-C to
+// stop)..." once, at the first wait. A pool still full at the end returns
+// the no-worker error, which names the person's own agents.
+func substrateRunWaitingForWorker(ctx context.Context, cmd *cobra.Command, try func() (int, error)) (int, error) {
+	return substrateWaitForWorker(ctx, substrateRunWorkerWait, substrateRunWorkerPoll, try, func() {
+		fmt.Fprintln(cmd.ErrOrStderr(), attach.ClusterFullMessage)
+	})
+}
+
 // substrateNoWorkerMessage says the pool is full (GAP-0167), how many of the
 // person's own agents hold a worker, and how to free one.
 func substrateNoWorkerMessage(ctx context.Context, s *substrateSession) string {
@@ -536,10 +555,17 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 	case f.batch != "":
 		return runSubstrateBatch(ctx, cmd, s, t, f, project, agentArgs, asJSON)
 	case f.task != "":
-		_, err := runSubstrateOneTask(ctx, cmd, s, t, f, project, f.task, "", f.name, agentArgs, asJSON)
+		_, err := substrateRunWaitingForWorker(ctx, cmd, func() (int, error) {
+			return runSubstrateOneTask(ctx, cmd, s, t, f, project, f.task, "", f.name, agentArgs, asJSON)
+		})
 		return err
 	}
-	a, err := substrateCreate(ctx, cmd, s, t, f, api.CreateRequest{Name: f.name}, project)
+	var a api.Actor
+	_, err = substrateRunWaitingForWorker(ctx, cmd, func() (int, error) {
+		var cerr error
+		a, cerr = substrateCreate(ctx, cmd, s, t, f, api.CreateRequest{Name: f.name}, project)
+		return 0, cerr
+	})
 	if err != nil {
 		return err
 	}

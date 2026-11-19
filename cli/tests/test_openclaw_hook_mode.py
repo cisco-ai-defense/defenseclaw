@@ -12,6 +12,8 @@ from defenseclaw.openclaw_plugin_config import (
     openclaw_hook_mode_detail,
     openclaw_install_policy_recorded_state,
     openclaw_install_policy_remediation,
+    openclaw_install_policy_stale_remediation,
+    openclaw_install_policy_stale_version,
     openclaw_install_policy_state,
 )
 
@@ -41,6 +43,112 @@ class OpenClawHookModeTest(unittest.TestCase):
     def test_detail_names_the_proxy(self):
         self.assertIn("no guardrail proxy", openclaw_hook_mode_detail("native"))
         self.assertIn("proxy", openclaw_hook_mode_detail("proxy"))
+
+
+class OpenClawInstallPolicyStaleVersionTest(unittest.TestCase):
+    # GAP-1198: setup registered the command under OpenClaw 2026.11.3, then
+    # OpenClaw was reinstalled as 2026.8.35. The state file keeps the version
+    # the policy was registered under; doctor and status compare it with the
+    # cached one so a registered policy cannot read as fine while the version
+    # is too old.
+    def _cfg(self, cached, recorded):
+        data_dir = tempfile.mkdtemp()
+        with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
+            json.dump({"agents": {"openclaw": {"version": cached}}} if cached else {"agents": {}}, f)
+        if recorded is not None:
+            with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+                json.dump({"state": "registered", "openclaw_version": recorded}, f)
+        return SimpleNamespace(data_dir=data_dir)
+
+    def test_table(self):
+        # (platform, cached, recorded, warns). A floor is crossed only when
+        # recorded >= floor > cached; no record says nothing.
+        table = [
+            ("win32", "2026.8.35", "2026.11.3", True),  # the gap: registered under 11.3, reinstalled 8.35
+            ("win32", "2026.7.1", "2026.11.3", True),  # below the hard floor too
+            ("win32", "2026.7.1", "2026.8.35", True),
+            ("linux", "2026.7.1", "2026.8.35", True),
+            ("linux", "2026.8.35", "2026.11.3", False),  # 8.35 runs the command off Windows
+            ("win32", "2026.9.1", "2026.8.35", False),  # both below 11.3: it passed the stricter rule
+            ("win32", "2026.12.1", "2026.11.3", False),  # both at or above what Go accepts
+            ("win32", "2026.11.3", "2026.11.3", False),
+            ("win32", "2026.8.35", "2026.8.35", False),
+            ("win32", "2026.8.35", None, False),  # never-written state: no permanent WARN
+            ("linux", "2026.7.1", None, False),
+            ("win32", "", "2026.11.3", False),  # cached version unknown
+            ("win32", "garbage", "2026.11.3", False),
+        ]
+        for platform, cached, recorded, warns in table:
+            with self.subTest(platform=platform, cached=cached, recorded=recorded):
+                text, _certain = openclaw_install_policy_stale_version(self._cfg(cached, recorded), platform)
+                self.assertEqual(bool(text), warns, text)
+
+    def test_sentences(self):
+        # GAP-1198 review: Python reads no folder ACLs, so the Windows rule
+        # (only below a root with inherit-only entries) is "may be" until the
+        # gateway re-checks it; below 2026.8.35 it is a hard warning anywhere.
+        text, certain = openclaw_install_policy_stale_version(self._cfg("2026.8.35", "2026.11.3"), "win32")
+        self.assertFalse(certain)
+        self.assertIn("OpenClaw 2026.8.35 may be too old for strict install policy on Windows", text)
+        self.assertIn("until the gateway re-checks it", text)
+        self.assertNotIn("is too old", text)
+        self.assertIn("needs 2026.11.3 or later", text)
+        self.assertIn("registered under OpenClaw 2026.11.3", text)
+        text, certain = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.11.3"), "win32")
+        self.assertTrue(certain)
+        self.assertIn("OpenClaw 2026.7.1 has no security.installPolicy (needs 2026.8.35 or later)", text)
+        self.assertNotIn("may be", text)
+        text, certain = openclaw_install_policy_stale_version(self._cfg("2026.7.1", "2026.8.35"), "linux")
+        self.assertTrue(certain)
+        self.assertIn("has no security.installPolicy (needs 2026.8.35 or later)", text)
+        self.assertIn("registered under OpenClaw 2026.8.35", text)
+
+
+class OpenClawInstallPolicyStatusRowTest(unittest.TestCase):
+    # GAP-1198 follow-up: status says "may not be checked" for the Windows
+    # rule the gateway settles and "not checked" for an OpenClaw below
+    # 2026.8.35, from the real stale-version result, not from its wording.
+    def _row(self, cached, recorded, platform):
+        import shutil
+        from unittest.mock import patch
+
+        from defenseclaw.commands import cmd_status
+
+        data_dir, home = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, data_dir, True)
+        self.addCleanup(shutil.rmtree, home, True)
+        with open(os.path.join(data_dir, "agent_discovery.json"), "w", encoding="utf-8") as f:
+            json.dump({"agents": {"openclaw": {"version": cached}}}, f)
+        with open(os.path.join(data_dir, "openclaw-install-policy-state.json"), "w", encoding="utf-8") as f:
+            json.dump({"state": "registered", "openclaw_version": recorded}, f)
+        policy = {
+            "enabled": True,
+            "exec": {"command": "defenseclaw-gateway", "args": ["connector", "openclaw", "install-policy"]},
+        }
+        with open(os.path.join(home, "openclaw.json"), "w", encoding="utf-8") as f:
+            json.dump({"security": {"installPolicy": policy}}, f)
+        cfg = SimpleNamespace(
+            data_dir=data_dir, claw=SimpleNamespace(home_dir=home, config_file=os.path.join(home, "openclaw.json"))
+        )
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_openclaw_install_admission(cfg, platform)
+        self.assertEqual(row.call_count, 1)
+        self.assertEqual(row.call_args.args[0], "OpenClaw installs")
+        return row.call_args.args[1]
+
+    def test_windows_rule_may_not_be_checked(self):
+        text = self._row("2026.8.35", "2026.11.3", "win32")
+        self.assertIn("OpenClaw version changed; may not be checked", text)
+
+    def test_below_the_floor_is_not_checked(self):
+        for platform in ("win32", "linux"):
+            with self.subTest(platform=platform):
+                text = self._row("2026.7.1", "2026.11.3", platform)
+                self.assertIn("OpenClaw version changed; not checked", text)
+                self.assertNotIn("may not be checked", text)
+
+    def test_same_version_is_checked(self):
+        self.assertIn("checked by DefenseClaw", self._row("2026.11.3", "2026.11.3", "win32"))
 
 
 class OpenClawInstallPolicyStateTest(unittest.TestCase):
@@ -201,6 +309,8 @@ class OpenClawInstallPolicyRemediationTest(unittest.TestCase):
             "none", "win32", recorded="not registered: OpenClaw 2026.8.35 is too old for strict install policy on Windows"
         )
         self.assertIn("upgrade OpenClaw to 2026.11.3", text)
+        # One remediation text for a too-old setup and a downgrade.
+        self.assertEqual(text, openclaw_install_policy_stale_remediation())
 
     def test_operator_policy(self):
         self.assertIn("remove your own security.installPolicy", openclaw_install_policy_remediation("operator", "win32"))

@@ -32,6 +32,12 @@ import (
 // every tool call. A config file that cannot be read or parsed is an error,
 // so nothing is removed on a guess.
 func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
+	return orphanedHookConfigPathsFor(runtime.GOOS, conn, opts)
+}
+
+// orphanedHookConfigPathsFor is OrphanedHookConfigPaths with the commands of
+// goos, so the Windows rules are tested on every host.
+func orphanedHookConfigPathsFor(goos string, conn Connector, opts SetupOpts) ([]string, error) {
 	var found []string
 	if plugin, ok := conn.(interface {
 		orphanedPluginArtifact(SetupOpts) (string, error)
@@ -44,8 +50,28 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 			found = append(found, path)
 		}
 	}
-	exact := ownedHookCommandNeedles(opts, conn)
-	scripts := ownedHookScriptPaths(conn, opts)
+	// A connector whose commands do not survive as plain text in its files
+	// (Kiro on Windows wraps them in an -EncodedCommand script, and a data
+	// folder name JSON escapes) names its files itself (GAP-1092, GAP-1174).
+	if owner, ok := conn.(interface {
+		orphanedHookFilesFor(string, SetupOpts) ([]string, error)
+	}); ok {
+		paths, err := owner.orphanedHookFilesFor(goos, opts)
+		if err != nil {
+			return nil, err
+		}
+		// Its own answer is the whole one, on every OS: the files that hold
+		// one of this install's exact commands are the ones its reclaim
+		// (SetupOpts.ReclaimOwnHooksOnly) touches, so a file reported here is
+		// a file the prune changed. The generic match below also takes a
+		// command that only names the script (a wrapped or edited form) the
+		// reclaim leaves alone, and on Windows the raw `hook --connector`
+		// match would take another data folder's entries (an earlier
+		// release's `& '<launcher>'` form holds it in plain text).
+		return append(found, paths...), nil
+	}
+	exact := ownedHookCommandNeedlesFor(goos, opts, conn)
+	scripts := ownedHookScriptPaths(goos, conn, opts)
 	var registrationPrefixes []string
 	if owner, ok := conn.(interface{ orphanedRegistrationKeyPrefixes() []string }); ok {
 		registrationPrefixes = owner.orphanedRegistrationKeyPrefixes()
@@ -78,6 +104,18 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 		}
 	}
 	return found, nil
+}
+
+// InstallHookEntryOwner is a connector that can say, from the decoded entries
+// of the agent files, whether one of them is a hook this install's Setup
+// wrote (never a managed install's, and never another data folder's of the
+// same account: where a command does not name the data folder, as on
+// Windows, that takes proof in the data folder too), or that this install's
+// own teardown of it did not finish (Kiro: a backup record or the hook token
+// it left). The boot reclaim of an unguarded connector uses it as the proof
+// of ownership, with or without the install's hook script.
+type InstallHookEntryOwner interface {
+	InstallOwnsHookEntries(SetupOpts) (bool, error)
 }
 
 // ownedRegistrationKeyPresent checks only the host's registration namespace.
@@ -166,9 +204,9 @@ func managedPluginTokenFile(data []byte) (string, bool) {
 
 // ownedHookScriptPaths lists the absolute paths of conn's Unix hook scripts in
 // opts.DataDir. Windows registers the native launcher instead.
-func ownedHookScriptPaths(conn Connector, opts SetupOpts) []string {
+func ownedHookScriptPaths(goos string, conn Connector, opts SetupOpts) []string {
 	owner, ok := conn.(HookScriptOwner)
-	if !ok || runtime.GOOS == "windows" || strings.TrimSpace(opts.DataDir) == "" {
+	if !ok || goos == "windows" || strings.TrimSpace(opts.DataDir) == "" {
 		return nil
 	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")

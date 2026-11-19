@@ -43,7 +43,7 @@ import (
 // moved in the meantime starts over instead of failing, which dropped the
 // verdict's audit row.
 func TestHookCorrelationSurvivesConcurrentSessionHooks(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	for _, name := range []string{"claudecode", "codex"} {
@@ -127,7 +127,7 @@ func TestHookVerdictKeepsItsAuditRowWhenCorrelationFails(t *testing.T) {
 // its correlation, its hook_decision and its audit row: they used to be
 // written with the request context, which the disconnect had cancelled.
 func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -230,7 +230,7 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 // an enterprise-exempt-user row is written once per account and connector
 // each ten minutes.
 func TestExemptUserCallsAreInTheAuditStore(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -306,7 +306,7 @@ func (history *countingLifecycleHistory) LatestLifecycleProjection(
 // hook read the session's lifecycle history from the audit store, a query over
 // every audit row of the session. The hook path reads it once per session.
 func TestHookPathReadsLifecycleHistoryOncePerSession(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

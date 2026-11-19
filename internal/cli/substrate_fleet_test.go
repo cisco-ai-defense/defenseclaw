@@ -384,6 +384,9 @@ func (fakePolicyReader) Actors(context.Context) ([]fleetActor, error) { return f
 func (fakePolicyReader) Templates(context.Context) (int, error)       { return 2, nil }
 func (fakePolicyReader) Close() error                                 { return nil }
 
+// WorkerDrain: no worker pool roll is in progress (GAP-0449).
+func (fakePolicyReader) WorkerDrain(context.Context) (int, int, error) { return 0, 0, nil }
+
 // fleetHealthyActors are the cluster's actors: three in the launcher
 // atespace eng-web, one in data-team, one in an atespace DefenseClaw does
 // not write in.

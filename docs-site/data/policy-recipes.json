@@ -6410,6 +6410,31 @@
       ]
     },
     {
+      "id": "RECIPE-SEC-HF-TOKEN",
+      "title": "Hugging Face access token",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-HF-TOKEN",
+        "pattern": "\\bhf_[A-Za-z0-9]{34,}\\b",
+        "title": "Hugging Face access token",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "RECIPE-SEC-SLACK-TOKEN",
       "title": "Slack token",
       "kind": "rule:secret",
@@ -6633,7 +6658,7 @@
       "kind": "rule:secret",
       "body": {
         "id": "SEC-PASSWORD-ASSIGN",
-        "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*\\\\*[\"']?[^\\s\"'`\\\\,;]{8,128}",
+        "pattern": "(?i)\\b[a-z0-9_]{0,48}?(?:password|passwd|pwd|passphrase)[0-9]{0,3}\\\\*[\"']?[ \\t]*(?:=>|:=|==|=|:)[ \\t]*(?:\\r?\\n[ \\t]*)?\\\\*[\"'`]?[^\\s\"'`\\\\,;][^\\s\"'`\\\\;]{6,126}[^\\s\"'`\\\\,;]",
         "title": "Password assigned to a password-named key",
         "severity": "MEDIUM",
         "confidence": 0.6,

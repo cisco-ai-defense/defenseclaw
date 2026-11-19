@@ -128,7 +128,7 @@ func TestAgentGatewayRefusesContractViolations(t *testing.T) {
 
 func agentGatewayChainAPI(t *testing.T) http.Handler {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installToolCallCorpusProfileConnector(t, connector.AgentGatewayConnectorName, "strict")
 	store, logger := testStoreAndV8Logger(t)
 	cfg := &config.Config{}

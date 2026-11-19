@@ -57,7 +57,7 @@ func TestGAP0353LaptopPathClaudeCode2_1_323(t *testing.T) {
 		{"control: a read that printed", []map[string]interface{}{pre("read-1", read), post(map[string]interface{}{"stdout": "API_KEY=canary-1", "stderr": "", "interrupted": false, "isImage": false})}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			installToolCallCorpusProfileConnector(t, "claudecode", "strict")
 			store, logger := testStoreAndV8Logger(t)
 			cfg := &config.Config{}

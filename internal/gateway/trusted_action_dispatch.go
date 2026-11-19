@@ -228,6 +228,9 @@ type trustedActionRequest struct {
 	// hook client map, the answer of the reading
 	// (hookpaths.ReadingTargetPrefix) decides (GAP-2477).
 	staticOperandReading bool
+	// localLinkTwin marks the reading of a shell call with the words a link
+	// moves spelled as their places (localCommandLinkTwinRequest).
+	localLinkTwin bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -447,6 +450,11 @@ func dispatchTrustedAction(
 			findings = withPosixDataWordRecord(findings)
 		}
 	}()
+	// A DefenseClaw state write that only a partial reading proves is at
+	// least the unknown tier, never a clean allow: judged after every other
+	// reading and twin, so a proven block keeps its verdict
+	// (rel-1-0-10:GAP-0892).
+	defer func() { findings = withPartialStateWriteFloor(request, findings) }()
 	// One dispatch is one hook call whichever surface carries the action (the
 	// hook request, an ACP frame, a direct evaluation): the file system reads
 	// of its reach scans are remembered for the decision (hookpaths.HookCall;
@@ -711,6 +719,14 @@ func dispatchTrustedAction(
 			// A launcher nested past maxLauncherBodyDepth is not read: TRUNCATED
 			// at the depth cap (the one bound rule, rel-1-0-10:GAP-0806).
 			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Depth), request) }()
+		}
+		if launcher.readingCut {
+			// A wrapper chain with more launcher readings than the reader
+			// judges, or one still open past the words it reads, has a
+			// launcher reading no request judged: TRUNCATED (the one bound
+			// rule, rel-1-0-10:GAP-0971). The readings judged, the last
+			// launcher of the chain among them, still decide.
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
 		}
 		if cut := trustedUndecodedCommandCut(request.Input, facts); cut.Any() {
 			// A command array past the decode bound is read by nothing: the
@@ -1889,7 +1905,15 @@ func withActiveStateTargetMention(
 				if !proven && (spelled || request.ProtectedHomeHook || strings.HasPrefix(request.Input.ActiveHome, "/")) {
 					proven, unknown = provenPowerShellStateWrite(request)
 				}
-				if unknown {
+				// A proven GNU target-directory write (rel-1-0-10:GAP-1250) keeps its
+				// own verdict over the unknown tier of a .NET open; one that moves or
+				// copies a source of unknown name into the state root is the unknown
+				// tier (rel-1-0-10:GAP-1260).
+				if !proven && spelled {
+					written, unknownSource := provenTargetDirectoryStateWrite(request)
+					proven, unknown = written, unknown || unknownSource
+				}
+				if !proven && unknown {
 					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
 				}
 				if !proven {
@@ -1899,10 +1923,15 @@ func withActiveStateTargetMention(
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) {
-			if proven, unknown := provenPowerShellStateWrite(request); unknown {
-				return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
-			} else if !proven {
-				return findings
+			// A proven target-directory write keeps its verdict (GAP-1250); a
+			// source of unknown name in one (GAP-1260) or a .NET open known
+			// only at run time (GAP-1138) is the unknown tier.
+			if written, unknownSource := provenTargetDirectoryStateWrite(request); !written {
+				if proven, unknown := provenPowerShellStateWrite(request); unknown || !proven && unknownSource {
+					return withTrustedActionLimitFinding(findings, request.EnforcementCapable)
+				} else if !proven {
+					return findings
+				}
 			}
 		}
 	}
@@ -7350,6 +7379,12 @@ func filterExactFallbackFindings(
 			finding.enforcement = findingEnforcementAlertOnly
 		} else if contract.detectionOnly || !enforcementCapable || !proven {
 			finding.enforcement = findingEnforcementDetectionOnly
+			// The contract proved its operation on what the analysis read, but
+			// the call was read only in part, so no enforcing reader ran
+			// (rel-1-0-10:GAP-0892). A detection-only contract never denies
+			// itself; the caller may still floor the call at the unknown tier
+			// (withPartialStateWriteFloor).
+			finding.partialReading = matched && !proofBoundary && enforcementCapable && operandGrammarOnlyReading(facts)
 		} else {
 			finding.enforcement = findingEnforcementAllowed
 		}

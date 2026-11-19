@@ -158,6 +158,7 @@ type pendingHookResponse struct {
 	WouldBlock       bool
 	EvaluationID     string
 	RuleIDs          []string
+	RuleNames        []string
 	RedactionEnabled *bool
 	// Reason and SourceReason are the answer's own reasons, an empty one
 	// included, so every write of a verdict is the same as the live one.
@@ -169,7 +170,7 @@ func pendingResponse(resp agentHookResponse) pendingHookResponse {
 	return pendingHookResponse{
 		Action: resp.Action, RawAction: resp.RawAction, Severity: resp.Severity,
 		Mode: resp.Mode, WouldBlock: resp.WouldBlock,
-		EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs,
+		EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs, RuleNames: resp.RuleNames,
 		RedactionEnabled: resp.RedactionEnabled,
 		Reason:           resp.Reason, SourceReason: resp.SourceReason,
 	}
@@ -180,7 +181,7 @@ func (p pendingHookResponse) response() agentHookResponse {
 		Action: p.Action, RawAction: p.RawAction, Severity: p.Severity,
 		Mode: p.Mode, Reason: p.Reason, SourceReason: p.SourceReason,
 		WouldBlock: p.WouldBlock, EvaluationID: p.EvaluationID,
-		RuleIDs: p.RuleIDs, RedactionEnabled: p.RedactionEnabled,
+		RuleIDs: p.RuleIDs, RuleNames: p.RuleNames, RedactionEnabled: p.RedactionEnabled,
 	}
 }
 

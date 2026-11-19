@@ -49,7 +49,8 @@ type readingBoundRow struct {
 // and the row blocks in the default tier (rel-1-0-10:GAP-0435). Each cell is
 // pinned, so a floor regression shows.
 var readingBoundFloorBlocks = map[string][]string{
-	"protected ~/.ssh/authorized_keys": {"codex/default/managed"},
+	"protected ~/.ssh/authorized_keys":     {"codex/default/managed"},
+	"recovered parse, agent settings.json": {"claudecode/default/per-user"},
 }
 
 // readingBoundCells judges each row through the hook client evidence and

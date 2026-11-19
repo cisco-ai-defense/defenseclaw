@@ -51,7 +51,7 @@ func TestParseCorrelationQueryRequiresOneTypedAnchor(t *testing.T) {
 }
 
 func TestCorrelationReadAPIIsNoStoreAndFailClosed(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	profile := server.hookProfileForConnector("codex")

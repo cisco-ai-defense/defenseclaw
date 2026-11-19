@@ -443,7 +443,7 @@ func sandboxPackKey(ref string) string {
 func cloneSandboxAdmin(a SandboxAdminConfig) SandboxAdminConfig {
 	out := a
 	for _, p := range []**bool{&out.AllowYolo, &out.AllowMount, &out.AllowHostPorts, &out.AllowUnblock,
-		&out.AllowLearnMode, &out.Allowed, &out.ProcessTree, &out.AllowUpstreamTelemetry} {
+		&out.AllowLearnMode, &out.Allowed, &out.ProcessTree, &out.AllowUpstreamTelemetry, &out.IdleSuspendTasks} {
 		if *p != nil {
 			v := **p
 			*p = &v
@@ -777,7 +777,7 @@ func sandboxFloorDigest(f SandboxAdminConfig, packDir string) (string, error) {
 	// that adds them keeps its host floor digest (runtimes stays: it gates
 	// host runs).
 	view.Floor.SandboxClass, view.Floor.IdleSuspendAfter, view.Floor.UnattendedAsks, view.Floor.AskTimeout = "", "", "", ""
-	view.Floor.ActorSecrets, view.Floor.AskHosts, view.Floor.URLRules = nil, nil, nil
+	view.Floor.ActorSecrets, view.Floor.AskHosts, view.Floor.URLRules, view.Floor.IdleSuspendTasks = nil, nil, nil, nil
 	for _, s := range []*[]string{&view.Floor.AllowedHarnesses, &view.Floor.EgressBlock, &view.Floor.EgressAllowOnly,
 		&view.Floor.RequireCopyFor, &view.Floor.Locked, &view.Floor.RequiredFor, &view.Floor.AllowedCredentials,
 		&view.Floor.Runtimes, &view.Floor.ActorSecrets} {

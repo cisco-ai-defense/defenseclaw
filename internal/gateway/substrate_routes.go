@@ -92,6 +92,8 @@ type SubstrateCreated struct {
 	HarnessVersion string
 	HookContract   string
 	KitVersion     string
+	// SandboxClass is the class the actor runs in (gvisor or microvm).
+	SandboxClass string
 }
 
 // SubstrateActorActions creates, resumes and deletes actors in launcher
@@ -215,6 +217,19 @@ func writeSubstrateAttestationRefusal(w http.ResponseWriter, code, message, deta
 		body["retryable"] = true
 	}
 	writeSubstrateJSON(w, http.StatusForbidden, body)
+}
+
+// writeSubstrateProfileRefusal answers a create whose profile cannot be
+// used: profile_no_atespace (with the profile in detail) when the caller's
+// profile has nowhere to run (GAP-0541), else profile_not_allowed.
+func writeSubstrateProfileRefusal(w http.ResponseWriter, err error) {
+	var none *ErrSubstrateProfileNoAtespace
+	if errors.As(err, &none) {
+		writeSubstrateJSON(w, http.StatusForbidden, map[string]any{"error": http.StatusText(http.StatusForbidden),
+			"reason": "profile_no_atespace", "detail": none.Profile})
+		return
+	}
+	writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
 }
 
 func writeSubstrateJSONError(w http.ResponseWriter, status int, reason string) {
@@ -357,7 +372,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		resolve := st.cfg.substrateProfiles()
 		profile, atespace, err := resolve(c.person, req.Profile, req.Connector, c.admin)
 		if err != nil {
-			writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
+			writeSubstrateProfileRefusal(w, err)
 			return
 		}
 		if req.Atespace != "" && req.Atespace != atespace {
@@ -412,7 +427,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			// template's, because a profile may be bound to one.
 			req.Connector = tmplConnector
 			if profile, atespace, err = resolve(c.person, req.Profile, req.Connector, c.admin); err != nil {
-				writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
+				writeSubstrateProfileRefusal(w, err)
 				return
 			}
 		}
@@ -428,6 +443,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateSigninRefusal(w, d)
 			return
 		}
+		createStart := time.Now()
 		created, err := st.cfg.Actions.Create(r.Context(), req)
 		var classErr *SubstrateClassUnavailable
 		switch {
@@ -461,7 +477,8 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			Profile: profile, Template: created.Template, TemplateDigest: created.TemplateDigest,
 			KitVersion: created.KitVersion, Connector: created.Connector, HarnessVersion: created.HarnessVersion,
 			HookContract: created.HookContract, BatchID: req.BatchID, Unattended: req.Unattended,
-			Secrets: append([]string(nil), req.Secrets...),
+			SandboxClass: created.SandboxClass,
+			Secrets:      append([]string(nil), req.Secrets...),
 		}
 		if req.Task != "" {
 			sum := sha256.Sum256([]byte(req.Task))
@@ -509,6 +526,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
+		a.recordSubstratePolicyLag(time.Since(createStart))
 		out := st.actorView(reg)
 		if signinDecision.Warn {
 			createWarnings = append(createWarnings, signinDecision.Message)
@@ -569,6 +587,13 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 			// narrowed to their own, and verify and status --cluster count
 			// policy_conflict only over the cluster's (GAP-0398).
 			resp["all"] = true
+		}
+		// GAP-0542: a workload caller learns which workloads entry its
+		// verified subject matched ("" for none), so login --workload can
+		// warn about an entry that never matches.
+		if c.person.Kind == identity.PersonWorkload && st.cfg.WorkloadEntry != nil {
+			entry, profile := st.cfg.WorkloadEntry(c.person.Subject)
+			resp["workload"] = map[string]any{"subject": c.person.Subject, "entry": entry, "profile": profile}
 		}
 		writeSubstrateJSON(w, http.StatusOK, resp)
 	}

@@ -21,7 +21,7 @@ import (
 // (the single-call upload of a credentials file blocks in every pack today, by
 // CMD-CURL-UPLOAD, so only the chain row and the strict block are pinned here).
 func TestNativeReadOfDeveloperTokenFileStartsTheSecretReadChain(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	for _, setup := range []struct {
 		name, pack string

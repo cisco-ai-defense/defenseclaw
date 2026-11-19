@@ -56,7 +56,7 @@ var sandboxActorSecretName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,25
 
 // SandboxSubstrateOnlyKeys are the floor keys only Agent Substrate actors
 // read; openshell.admin refuses them.
-var SandboxSubstrateOnlyKeys = []string{"sandbox_class", "idle_suspend_after", "unattended_asks", "ask_timeout", "actor_secrets",
+var SandboxSubstrateOnlyKeys = []string{"sandbox_class", "idle_suspend_after", "idle_suspend_tasks", "unattended_asks", "ask_timeout", "actor_secrets",
 	"ask_hosts", "url_rules"}
 
 // SandboxHostOnlyKeys are the floor keys only a sandbox on a computer
@@ -142,7 +142,7 @@ func (a *SandboxAdminConfig) substrateScopeError(prefix string) error {
 func (a *SandboxAdminConfig) setSubstrateOnlyKeys() []string {
 	var out []string
 	for key, set := range map[string]bool{
-		"sandbox_class": a.SandboxClass != "", "idle_suspend_after": a.IdleSuspendAfter != "",
+		"sandbox_class": a.SandboxClass != "", "idle_suspend_after": a.IdleSuspendAfter != "", "idle_suspend_tasks": a.IdleSuspendTasks != nil,
 		"unattended_asks": a.UnattendedAsks != "", "ask_timeout": a.AskTimeout != "", "actor_secrets": a.ActorSecrets != nil,
 		"ask_hosts": a.AskHosts != nil, "url_rules": a.URLRules != nil,
 	} {
@@ -191,7 +191,7 @@ func orderedLike(set, order []string) []string {
 // tightenRuntimeKeys combines the runtime keys of overlay into out
 // (TightenSandboxAdmin): runtimes and actor_secrets intersect;
 // sandbox_class microvm wins; unattended_asks deny wins; idle_suspend_after
-// and ask_timeout take the shortest. Runtimes that leave nothing is a
+// and ask_timeout take the shortest; idle_suspend_tasks true wins. Runtimes that leave nothing is a
 // *SandboxPolicyContradictionError; actor_secrets that leave nothing
 // expose no value.
 func tightenRuntimeKeys(out *SandboxAdminConfig, o SandboxAdminConfig) error {
@@ -231,6 +231,10 @@ func tightenRuntimeKeys(out *SandboxAdminConfig, o SandboxAdminConfig) error {
 		out.UnattendedAsks = v
 	}
 	out.IdleSuspendAfter = minGoDuration(out.IdleSuspendAfter, o.IdleSuspendAfter)
+	if o.IdleSuspendTasks != nil && (*o.IdleSuspendTasks || out.IdleSuspendTasks == nil) {
+		v := *o.IdleSuspendTasks
+		out.IdleSuspendTasks = &v
+	}
 	out.AskTimeout = minGoDuration(out.AskTimeout, o.AskTimeout)
 	return nil
 }

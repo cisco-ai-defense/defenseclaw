@@ -115,6 +115,12 @@ type LifecycleSink interface {
 	Lifecycle(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error)
 }
 
+// RunningSink is a LifecycleSink that also takes the controller's report of
+// the actors it saw running (chainstate.Client; substrate-1 GAP-0539).
+type RunningSink interface {
+	Running(ctx context.Context, actors []chainstate.Actor) error
+}
+
 // Attribution sources of a Registration.
 const (
 	SourceLauncher = "launcher" // created by the DefenseClaw launcher for a verified person or workload
@@ -193,6 +199,9 @@ type Resolution struct {
 	// IdleSuspendAfter, when set, replaces Options.IdleSuspendAfter for the
 	// actor (the profile's idle_suspend_after; 0 = off).
 	IdleSuspendAfter *time.Duration
+	// IdleSuspendTasks is the profile's idle_suspend_tasks: a --task or
+	// --batch run of this profile may be idle-suspended (GAP-0498).
+	IdleSuspendTasks bool
 	// Warnings are shown as events (for example a glob on a foreign
 	// atespace, E3).
 	Warnings []string

@@ -175,7 +175,7 @@ func (c *Client) Create(ctx context.Context, r CreateRequest) (Actor, error) {
 
 // List returns the person's actors.
 func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
-	actors, _, err := c.list(ctx, o)
+	actors, _, _, err := c.list(ctx, o)
 	return actors, err
 }
 
@@ -188,7 +188,7 @@ var ErrNotAdministrator = errors.New("the cluster lists only your own agents: yo
 // "all": true only when it did not, so a count over the answer is the
 // cluster's and not the caller's (GAP-0398).
 func (c *Client) ListEveryone(ctx context.Context) ([]Actor, error) {
-	actors, all, err := c.list(ctx, ListOptions{All: true})
+	actors, all, _, err := c.list(ctx, ListOptions{All: true})
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +198,23 @@ func (c *Client) ListEveryone(ctx context.Context) ([]Actor, error) {
 	return actors, nil
 }
 
-func (c *Client) list(ctx context.Context, o ListOptions) ([]Actor, bool, error) {
+// WorkloadMatch is the cluster's answer to a workload caller (GAP-0542):
+// the subject it verified, the match.substrate.workloads entry that
+// subject matched ("" for none) and that entry's profile.
+type WorkloadMatch struct {
+	Subject string `json:"subject"`
+	Entry   string `json:"entry"`
+	Profile string `json:"profile"`
+}
+
+// ListWithWorkload is List plus the workload answer, nil when the caller is
+// a person or the cluster is older and sends none.
+func (c *Client) ListWithWorkload(ctx context.Context, o ListOptions) ([]Actor, *WorkloadMatch, error) {
+	actors, _, workload, err := c.list(ctx, o)
+	return actors, workload, err
+}
+
+func (c *Client) list(ctx context.Context, o ListOptions) ([]Actor, bool, *WorkloadMatch, error) {
 	q := url.Values{}
 	if o.Batch != "" {
 		q.Set("batch", o.Batch)
@@ -207,16 +223,17 @@ func (c *Client) list(ctx context.Context, o ListOptions) ([]Actor, bool, error)
 		q.Set("all", "1")
 	}
 	var out struct {
-		Actors []Actor `json:"actors"`
-		All    bool    `json:"all"`
+		Actors   []Actor        `json:"actors"`
+		All      bool           `json:"all"`
+		Workload *WorkloadMatch `json:"workload"`
 	}
 	if err := c.do(ctx, http.MethodGet, "actors", q, nil, &out); err != nil {
-		return nil, false, err
+		return nil, false, nil, err
 	}
 	for i := range out.Actors {
 		out.Actors[i] = out.Actors[i].shown()
 	}
-	return out.Actors, out.All, nil
+	return out.Actors, out.All, out.Workload, nil
 }
 
 // Get returns one actor.

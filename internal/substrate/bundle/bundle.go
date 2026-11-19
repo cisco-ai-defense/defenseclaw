@@ -42,6 +42,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	eb "github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
 // Platform is the platform a Substrate bundle must target: actors and the
@@ -59,6 +61,15 @@ const (
 	CodeNoPrevious   eb.Code = "no_previous_bundle"
 	CodeStateInvalid eb.Code = "state_invalid"
 )
+
+// modeNotSubstrate is the refusal of a guardrail mode other than action in
+// a Substrate bundle (GAP-0571): actor hooks always run in action mode (the
+// gateway's sandboxHookMode), so observe would change no actor verdict. A
+// mode of action is what actors already do: it applies, as a no-op.
+const modeNotSubstrate = "mode is not a Substrate policy field: Substrate actors always enforce (action mode), whatever guardrail.mode or a profile's mode says; only mode: action (the default) is accepted"
+
+// actionMode reports a mode value that is action, the mode actors enforce.
+func actionMode(m string) bool { return strings.EqualFold(strings.TrimSpace(m), "action") }
 
 func refuse(code eb.Code, path, format string, a ...any) *eb.Error {
 	return &eb.Error{Code: code, Path: path, Detail: fmt.Sprintf(format, a...)}
@@ -253,6 +264,7 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 		ConfigVersion  int    `yaml:"config_version"`
 		DeploymentMode string `yaml:"deployment_mode"`
 		Guardrail      struct {
+			Mode        *string                            `yaml:"mode"`
 			Profiles    map[string]config.GuardrailProfile `yaml:"profiles"`
 			Assignments []config.ProfileAssignment         `yaml:"profile_assignments"`
 		} `yaml:"guardrail"`
@@ -268,16 +280,28 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 	if doc.ConfigVersion != 0 && doc.ConfigVersion != 8 && doc.ConfigVersion != 9 {
 		return bad("config_version", "want 8 or 9")
 	}
+	if m := doc.Guardrail.Mode; m != nil && !actionMode(*m) {
+		return Policy{}, refuse(CodeNotSubstrate, "guardrail.mode", "%s", modeNotSubstrate)
+	}
 	pol := Policy{Profiles: doc.Guardrail.Profiles, Assignments: doc.Guardrail.Assignments}
 	if len(pol.Profiles) == 0 && len(pol.Assignments) == 0 {
 		return bad("guardrail", "the bundle sets no profile and no assignment")
 	}
 	names := slices.Sorted(maps.Keys(pol.Profiles))
+	providers := controller.SettingsFromConfig(base).ProviderHosts
 	for _, name := range names {
 		p := pol.Profiles[name]
+		if path := profileModePath(name, p); path != "" {
+			return Policy{}, refuse(CodeNotSubstrate, path, "%s", modeNotSubstrate)
+		}
+		p = withoutActionMode(p)
+		pol.Profiles[name] = p
 		probe := config.GuardrailProfile{Description: p.Description, Sandbox: p.Sandbox}
 		if !profileEqual(p, probe) {
 			return Policy{}, refuse(CodeNotSubstrate, "guardrail.profiles."+name, "only description and sandbox apply to actors")
+		}
+		if key, host, m := providerHostIn(p.Sandbox, providers); key != "" {
+			return bad("guardrail.profiles."+name+".sandbox."+key, "%s is a model provider host (it matches %s): under the provider-host rule actors reach model providers only through the DefenseClaw guardrail proxy, so the host would be dropped from every actor's egress policy; remove it", bounded(host), m)
 		}
 		if _, err := config.TightenOpenShellAdmin(base.Substrate.Admin, p.Sandbox); err != nil {
 			return bad("guardrail.profiles."+name+".sandbox", "%s", bounded(err.Error()))
@@ -292,6 +316,68 @@ func ParsePolicy(raw []byte, base *config.Config) (Policy, error) {
 		return bad("guardrail", "%s", bounded(err.Error()))
 	}
 	return pol, nil
+}
+
+// providerHostIn finds the first egress_allow_only or ask_hosts entry of sb
+// that reaches a model provider host, by the render's own check
+// (render.ProviderHost), with the provider entry it matches.
+func providerHostIn(sb *config.SandboxAdminConfig, providers []string) (key, host, match string) {
+	if sb == nil {
+		return "", "", ""
+	}
+	for _, l := range []struct {
+		key   string
+		hosts []string
+	}{{"egress_allow_only", sb.EgressAllowOnly}, {"ask_hosts", sb.AskHosts}} {
+		for _, h := range l.hosts {
+			if m, hit := render.ProviderHost(providers, h); hit {
+				return l.key, h, m
+			}
+		}
+	}
+	return "", "", ""
+}
+
+// profileModePath is the path of the first mode other than action that
+// profile p sets (its own, else a connector's, by name), or "".
+func profileModePath(name string, p config.GuardrailProfile) string {
+	if m := strings.TrimSpace(p.Mode); m != "" && !actionMode(m) {
+		return "guardrail.profiles." + name + ".mode"
+	}
+	for _, c := range slices.Sorted(maps.Keys(p.Connectors)) {
+		if m := strings.TrimSpace(p.Connectors[c].Mode); m != "" && !actionMode(m) {
+			return bounded("guardrail.profiles." + name + ".connectors." + c + ".mode")
+		}
+	}
+	return ""
+}
+
+// withoutActionMode drops a mode of action from the profile and its
+// connectors (what actors enforce anyway), and a connector entry left
+// empty by it, so the profile is judged on the fields that apply to
+// actors (GAP-0571: mode: action is accepted, as a no-op).
+func withoutActionMode(p config.GuardrailProfile) config.GuardrailProfile {
+	if actionMode(p.Mode) {
+		p.Mode = ""
+	}
+	if len(p.Connectors) == 0 {
+		return p
+	}
+	cs := make(map[string]config.PerConnectorGuardrailConfig, len(p.Connectors))
+	for k, c := range p.Connectors {
+		if actionMode(c.Mode) {
+			c.Mode = ""
+		}
+		if b, _ := yaml.Marshal(c); strings.TrimSpace(string(b)) == "{}" {
+			continue
+		}
+		cs[k] = c
+	}
+	p.Connectors = cs
+	if len(cs) == 0 {
+		p.Connectors = nil
+	}
+	return p
 }
 
 func profileEqual(a, b config.GuardrailProfile) bool {

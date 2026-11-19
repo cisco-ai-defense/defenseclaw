@@ -252,8 +252,11 @@ func TestGAP0256ModeSwitchReinspects(t *testing.T) {
 					if fwd, _ := rg.post(t, w, c, next, stream); fwd && bytes.Contains(rg.lastBody(), []byte(covMarker)) {
 						t.Errorf("a segment recorded in observe mode reached the upstream in action mode: %s", rg.lastBody())
 					}
-					if n := rg.insp.inspections(covMarker); n != 2 {
-						t.Errorf("the marker was inspected %d times, want 2 (observe, then action)", n)
+					// Observe, then action: at least twice. The action-mode refusal
+					// then attributes by inspection, and since GAP-0308 every blamed
+					// group was inspected, within the 8-call budget (GAP-0309).
+					if n := rg.insp.inspections(covMarker); n < 2 || n > 2+8 {
+						t.Errorf("the marker was inspected %d times, want 2 (observe, then action) plus at most 8 attribution calls", n)
 					}
 				})
 			}

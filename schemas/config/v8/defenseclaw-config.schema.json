@@ -1498,6 +1498,13 @@
           "type": "string",
           "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
         },
+        "idle_suspend_tasks": {
+          "description": "Agent Substrate only: true lets idle suspend apply to a running --task or --batch run, which is exempt by default. true wins.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "unattended_asks": {
           "description": "Agent Substrate only: what an ask of an unattended (--task, --batch) actor does: deny, or queue it for a person (a timeout denies). Deny wins; unset takes substrate.unattended.asks.",
           "type": "string",
@@ -4634,6 +4641,7 @@
         },
         "listen": {
           "type": "string",
+          "description": "A loopback `host:port` (`127.0.0.1`, `[::1]` or `localhost`): the page has no authentication, so another address is refused at load.",
           "minLength": 1,
           "maxLength": 512
         },

@@ -41,7 +41,7 @@ const hookAuditMaxRowBytes = 24 << 10
 // Code hook handler, audit store and v8 runtime with one session, as the
 // T6Z-08 flood did, and measures what each decision adds to audit_events.
 func TestClaudeCodePreToolUseAuditRowsBounded(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

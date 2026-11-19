@@ -36,12 +36,37 @@ var windowsShellHomeAnchors = map[Dialect][]string{
 // path written out was judged (rel-1-0-10:GAP-1134).
 var posixPowerShellHomeAnchors = []string{"${home}", "$home", "~"}
 
+// posixPowerShellScript reports a reading of a script pwsh runs, whose $HOME
+// and ~ name a Linux or macOS ActiveHome: the script of a PowerShell launcher
+// (Input.PowerShellLauncherBody, rel-1-0-10:GAP-1134) or the command of a
+// PowerShell tool (Claude Code's PowerShell tool on Linux or macOS). Such a
+// tool call that wrote $HOME/.defenseclaw/config.yaml was partial with no
+// finding, where the same script in a launcher, or the path written out, was
+// judged (rel-1-0-10:GAP-1214). A Windows ActiveHome never takes this case.
+func posixPowerShellScript(input Input) bool {
+	if input.PowerShellLauncherBody {
+		return true
+	}
+	if input.WindowsHookHost {
+		return false
+	}
+	switch input.DialectHint {
+	case "", DialectNone, DialectPowerShell:
+	default:
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(input.Tool)) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		return true
+	}
+	return false
+}
+
 // rewriteTrustedShellHome replaces each home anchor ($HOME, ~,
 // $env:USERPROFILE, %USERPROFILE%) that starts a word and is followed by a
-// path separator with the trusted Windows ActiveHome, and in the script a
-// PowerShell launcher runs under a Linux or macOS ActiveHome (launcherBody,
-// Input.PowerShellLauncherBody) each of posixPowerShellHomeAnchors with that
-// home. A Windows home made
+// path separator with the trusted Windows ActiveHome, and in a script pwsh
+// runs under a Linux or macOS ActiveHome (posixScript, posixPowerShellScript)
+// each of posixPowerShellHomeAnchors with that home. A Windows home made
 // `echo k >> $HOME\.ssh\authorized_keys` and `Get-Content ~\.ssh\id_rsa`
 // partial with no finding, while the same paths written out were judged
 // (GAP-0912). The caller re-parses the result and keeps it only when that
@@ -50,14 +75,14 @@ var posixPowerShellHomeAnchors = []string{"${home}", "$home", "~"}
 // The rewrite declines source with an escape character, an anchor inside
 // single quotes (PowerShell) or any other mention of HOME or USERPROFILE,
 // which could change what the anchors name before they are expanded.
-func rewriteTrustedShellHome(source, activeHome string, dialect Dialect, launcherBody bool) (string, bool) {
+func rewriteTrustedShellHome(source, activeHome string, dialect Dialect, posixScript bool) (string, bool) {
 	anchors := windowsShellHomeAnchors[dialect]
 	// Written with backslashes, as cmd would otherwise read /Users as a
 	// switch; PowerShell reads both separators.
 	home := strings.ReplaceAll(activeHome, "/", `\`)
 	switch {
 	case trustedWindowsHomeLiteral.MatchString(activeHome):
-	case launcherBody && dialect == DialectPowerShell && trustedUnixPowerShellHome.MatchString(activeHome):
+	case posixScript && dialect == DialectPowerShell && trustedUnixPowerShellHome.MatchString(activeHome):
 		anchors, home = posixPowerShellHomeAnchors, activeHome
 	default:
 		return "", false

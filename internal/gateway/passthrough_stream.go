@@ -191,9 +191,18 @@ func (s *passthroughStream) run() {
 	s.copyHeaders()
 
 	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		// The reply headers carry no model text: the client has them at
+		// once, also while the initial buffer waits (GAP-0628).
+		flusher.Flush()
+	}
 	var accumulated responseText
 	streamResponseModel := ""
 	lastScanLen := 0
+	// lastFullScanLen is the text the last full mid-stream check read: the
+	// scanInterval cadence counts from it, so a check due by age only (the
+	// local one) does not put off AI Defense (GAP-0625).
+	lastFullScanLen := 0
 	const scanInterval = 500
 	const maxInitialBufBytes = 1 << 20 // 1 MiB cap on what the proxy holds back
 	streamBufferSize := 1024
@@ -217,6 +226,9 @@ func (s *passthroughStream) run() {
 	// The tail hold (GAP-0212): in action mode the first relN events are
 	// sent only by a check that has read their text.
 	tailHold := mode == "action"
+	// earlyInitial: the initial buffer may go out once the upstream went
+	// quiet (GAP-0628, initialEarlyRelease).
+	earlyInitial := tailHold && p.initialEarlyRelease()
 	var holdTimer streamHoldTimer
 	defer holdTimer.stop()
 	var lastRead time.Time // when the upstream last sent a byte
@@ -236,6 +248,12 @@ func (s *passthroughStream) run() {
 	ambiguousReported := false
 	streamEnded := false
 	initialFlushed := mode != "action"
+	// secretOpen: the text ended inside an open secret when last read;
+	// secretKey: that secret is a private-key block; textAt is when the text
+	// last grew (GAP-0429).
+	secretOpen, secretKey := false, false
+	var textAt time.Time
+	textMark := 0
 
 	writeQueue := func() {
 		if relN == 0 {
@@ -327,19 +345,20 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TOOL-BLOCK severity=%s %s\n", v.Severity, redaction.Reason(v.Reason))
-		p.enqueueBlockNotification(v, "tool_call", s.model)
+		p.enqueueBlockNotification(ctx, v, "tool_call", s.model)
 		sseBlockMsg = blockMessage(s.customBlockMsg, "tool_call", v.Reason)
 		return true
 	}
 
 	// scanText runs the mid-stream check over the whole text when text
-	// arrived since the last one. False: it blocked.
-	scanText := func() bool {
+	// arrived since the last one: the full check, or (full false) the
+	// check of a hold due by age only (inspectStreamText). False: it
+	// blocked.
+	scanText := func(full bool) bool {
 		if accumulated.Len() <= lastScanLen {
 			return true
 		}
-		midVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
-			[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
+		midVerdict, ranFull := p.inspectStreamText(ctx, accumulated.String(), label, mode, full)
 		p.resolveConfirm(ctx, r, midVerdict, "completion", label, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -349,21 +368,64 @@ func (s *passthroughStream) run() {
 			return false
 		}
 		lastScanLen = accumulated.Len()
-		return true
-	}
-	// checkHeld sends the events the tool-call hold lets out, once a check
-	// has read their text. False: the check blocked and nothing is sent.
-	checkHeld := func() bool {
-		if !scanText() {
-			return false
+		if ranFull {
+			lastFullScanLen = lastScanLen
 		}
-		writeQueue()
 		return true
 	}
 	// boundHit is the verdict of a hold bound: TRUNCATED, the unknown tier
 	// of the request's pack. The caller has checked the text read before the
 	// bound. False: the stream is cut.
-	boundHit := func(c bounded.Cap, why string) bool {
+	var boundHit func(c bounded.Cap, why string) bool
+	// secretBound decides an open secret at a hold bound (GAP-0429): the
+	// text read so far is checked, then boundHit. That secret is not held
+	// any more. False: the stream is cut.
+	secretBound := func(c bounded.Cap, why string) bool {
+		if !scanText(true) {
+			return false
+		}
+		accumulated.ReleaseOpenSecret()
+		secretOpen, secretKey = false, false
+		return boundHit(c, why)
+	}
+	// secretWait reports that nothing may be sent now: the text ends inside
+	// an open secret (rel-1-0-10:GAP-0429, stream_secret_hold.go). ok is
+	// false when a bound on it blocked.
+	secretWait := func() (wait, ok bool) {
+		if !tailHold {
+			return false, true
+		}
+		o := accumulated.OpenSecret()
+		secretOpen, secretKey = o.open, o.pem
+		switch {
+		case !o.open:
+			return false, true
+		case o.overCap:
+			return false, secretBound(bounded.Bytes, fmt.Sprintf("a private-key block in a reply stream over %d bytes", streamSecretMaxPEM))
+		case queueBytes > streamSecretMaxHeld && o.pem:
+			return false, secretBound(bounded.Bytes, fmt.Sprintf("over %d reply stream bytes held behind an open secret", streamSecretMaxHeld))
+		case queueBytes > streamSecretMaxHeld:
+			// Only a token or a digit run is open (GAP-1265): what is held
+			// goes out once the check has read it, with no verdict, and
+			// what comes next is held behind it again.
+			return false, true
+		}
+		return true, true
+	}
+	// checkHeld sends the events the tool-call hold lets out, once a check
+	// (full, or the one due by age) has read their text and it ends inside
+	// no open secret. False: the check blocked and nothing is sent.
+	checkHeld := func(full bool) bool {
+		if wait, ok := secretWait(); !ok || wait {
+			return ok
+		}
+		if !scanText(full) {
+			return false
+		}
+		writeQueue()
+		return true
+	}
+	boundHit = func(c bounded.Cap, why string) bool {
 		tv := p.streamTailTruncatedVerdict(ctx, c, why)
 		p.recordTelemetry(ctx, "completion", label, tv, 0, mode, tv.Action == "block")
 		if tv.Action == "block" {
@@ -380,7 +442,7 @@ func (s *passthroughStream) run() {
 	// checked, then the unknown tier decides.
 	truncateOverText := func() bool {
 		overText = false
-		return scanText() && boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame with over %d bytes of text", streamLineMaxText))
+		return scanText(true) && boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame with over %d bytes of text", streamLineMaxText))
 	}
 	// truncateStalled is the stall bound of an event in progress that got no
 	// new byte for streamHoldMaxPartialAge: the events before it are checked
@@ -391,7 +453,7 @@ func (s *passthroughStream) run() {
 	// rules decide first), or never, when the request or the upstream ends.
 	// Only called with nothing queued.
 	truncateStalled := func() bool {
-		if !checkHeld() || !boundHit(bounded.Time, fmt.Sprintf("a reply stream line or frame unfinished, no new byte for %s", streamHoldMaxPartialAge)) {
+		if !checkHeld(true) || !boundHit(bounded.Time, fmt.Sprintf("a reply stream line or frame unfinished, no new byte for %s", streamHoldMaxPartialAge)) {
 			return false
 		}
 		stallReported = true
@@ -406,7 +468,7 @@ func (s *passthroughStream) run() {
 	// held and checked as before, and the final check is still enforced
 	// (GAP-0313).
 	sseOversize := func() bool {
-		if tailHold && (!scanText() || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", sseEventMax))) {
+		if tailHold && (!scanText(true) || !boundHit(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", sseEventMax))) {
 			return false
 		}
 		if p.uninspectableReply(ctx, label, mode, "the event stream could not be framed") {
@@ -422,6 +484,11 @@ func (s *passthroughStream) run() {
 		if initialFlushed || (relN == 0 && !atEnd) {
 			return true
 		}
+		if !atEnd {
+			if wait, ok := secretWait(); !ok || wait {
+				return ok
+			}
+		}
 		if accumulated.Len() > lastScanLen {
 			initVerdict := p.inspector.InspectMidStream(ctx, "completion", accumulated.String(),
 				[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
@@ -436,6 +503,7 @@ func (s *passthroughStream) run() {
 			}
 		}
 		lastScanLen = accumulated.Len()
+		lastFullScanLen = lastScanLen
 		initialFlushed = true
 		if !atEnd {
 			writeQueue()
@@ -605,14 +673,31 @@ read:
 		// The hold's time bounds, on the events the tool-call hold lets out:
 		// the oldest of them waits at most streamHoldMaxAge for a check; an
 		// event in progress, with nothing queued, is reported once
-		// streamHoldMaxPartialAge after the last byte.
+		// streamHoldMaxPartialAge after the last byte. The initial buffer
+		// (GAP-0628) is checked and sent once the upstream has sent nothing
+		// for streamHoldMaxAge, when it holds reply text and no tool call is
+		// open, and only when the mid-stream check decides as the final one
+		// (initialEarlyRelease): a stream that keeps coming, or a call the
+		// rules have not decided, still waits for stream_buffer_bytes, so a
+		// block there still replaces the whole reply.
 		var deadline time.Time
-		if tailHold && initialFlushed {
-			if relN > 0 {
-				deadline = queueAt[0].Add(streamHoldMaxAge)
-			} else if len(queue) == 0 && unread() > 0 && !stallReported {
-				deadline = lastRead.Add(streamHoldMaxPartialAge)
+		switch {
+		case !tailHold:
+		case secretKey:
+			// An open private-key block waits for more text at most
+			// streamHoldMaxPartialAge (GAP-0429).
+			deadline = textAt.Add(streamHoldMaxPartialAge)
+		case !initialFlushed:
+			if earlyInitial && relN > 0 && !callHold && accumulated.Len() > 0 && !secretOpen {
+				deadline = lastRead.Add(streamHoldMaxAge)
 			}
+		case relN > 0 && !secretOpen:
+			deadline = queueAt[0].Add(streamHoldMaxAge)
+		case relN > 0:
+			// Held behind a token or a digit run, which has no clock: the
+			// next text or the end of the stream decides it (GAP-1265).
+		case len(queue) == 0 && unread() > 0 && !stallReported:
+			deadline = lastRead.Add(streamHoldMaxPartialAge)
 		}
 		var rd streamRead
 		select {
@@ -624,8 +709,27 @@ read:
 				// was busy (a long event, a slow check). The read goes
 				// first; a due hold is checked with it.
 			default:
-				if relN > 0 {
-					stopped = !checkHeld()
+				if secretKey {
+					o := accumulated.OpenSecret()
+					secretOpen, secretKey = o.open, o.pem
+					if o.pem && !secretBound(bounded.Time,
+						fmt.Sprintf("a private-key block in a reply stream unfinished, no new text for %s", streamHoldMaxPartialAge)) {
+						stopped = true
+						break read
+					}
+					if !initialFlushed {
+						stopped = !flushInitial(false)
+					} else if relN > 0 {
+						stopped = !checkHeld(false)
+					}
+				} else if relN > 0 && !initialFlushed {
+					// Asked again: a reload may have made the final check
+					// decide more (a judge strategy); then the buffer waits.
+					if earlyInitial = p.initialEarlyRelease(); earlyInitial {
+						stopped = !flushInitial(false)
+					}
+				} else if relN > 0 {
+					stopped = !checkHeld(false)
 				} else if len(queue) == 0 && unread() > 0 && !stallReported {
 					stopped = !truncateStalled()
 				}
@@ -700,6 +804,15 @@ read:
 				}
 			}
 		}
+		if accumulated.Len() > textMark {
+			textAt, textMark = time.Now(), accumulated.Len()
+			if secretOpen && !initialFlushed {
+				// The text that ends an open secret gives the early release
+				// (GAP-0628) its clock back (GAP-1265).
+				o := accumulated.OpenSecret()
+				secretOpen, secretKey = o.open, o.pem
+			}
+		}
 		if readErr != nil {
 			if encoded && readErr != io.EOF && ctx.Err() == nil {
 				// A corrupt or oversized encoded stream cannot be read to its end.
@@ -745,9 +858,9 @@ read:
 			now := time.Now()
 			if !tailHold {
 				writeQueue()
-			} else if accumulated.Len()-lastScanLen >= scanInterval || queueBytes-heldBytes >= streamHoldMaxBytes ||
-				(relN > 0 && !now.Before(queueAt[0].Add(streamHoldMaxAge))) {
-				if !checkHeld() {
+			} else if full := accumulated.Len()-lastFullScanLen >= scanInterval || queueBytes-heldBytes >= streamHoldMaxBytes; full ||
+				(relN > 0 && !now.Before(queueAt[0].Add(streamHoldMaxAge))) || (secretOpen && relN > 0) {
+				if !checkHeld(full) {
 					stopped = true
 					break read
 				}
@@ -794,7 +907,7 @@ read:
 	}
 	relN = len(queue)
 	heldBytes = 0
-	if !flushInitial(true) || (tailHold && !scanText()) {
+	if !flushInitial(true) || (tailHold && !scanText(true)) {
 		// The initial buffer, or the tail, got the mid-stream check every
 		// byte before it got, and it blocked.
 		if sseBlockMsg != "" {
@@ -806,6 +919,9 @@ read:
 		// Observe mode holds nothing: the final check only records.
 		writeQueue()
 	}
+	// endedInKey: the stream ended inside an open private-key block, which
+	// the checks never had whole (GAP-0429); decided after the final check.
+	endedInKey := tailHold && accumulated.OpenSecret().pem
 
 	// Final post-stream inspection on the full accumulated content, enforced
 	// in action mode: a block withholds the events still held and ends the
@@ -842,6 +958,15 @@ read:
 		if verdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (observe mode: stream delivered %d bytes to client)\n",
 				verdict.Severity, verdict.Reason, accumulated.Len())
+		}
+	}
+	if endedInKey {
+		accumulated.ReleaseOpenSecret()
+		if !boundHit(bounded.Bytes, "a reply stream ended inside a private-key block") {
+			if sseBlockMsg != "" {
+				endBlock()
+			}
+			return
 		}
 	}
 	writeQueue()

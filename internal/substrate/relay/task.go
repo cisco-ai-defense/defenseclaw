@@ -40,6 +40,12 @@ import (
 // progress for the stall bound (the timeout(1) convention).
 const ExitStalled = 124
 
+// ExitInterrupted is the exit code of a task whose agent exited 0 although
+// the cluster gateway did not answer some of its hook calls (GAP-0326):
+// those calls failed closed, so the steps they guarded may not have run.
+// It is EX_TEMPFAIL (sysexits.h): a temporary failure, run it again.
+const ExitInterrupted = 75
+
 // TaskReportPath is the actor listener route a relay reports a task end to.
 const TaskReportPath = "/api/v1/substrate/relay/task"
 
@@ -180,6 +186,15 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, o Headles
 	for k, v := range cfg.Relay.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	// The hooks record here each call the gateway did not answer; set last,
+	// so the template's environment cannot point it elsewhere (GAP-0326).
+	faults := ""
+	if f, ferr := os.CreateTemp("", "defenseclaw-task-faults-*"); ferr == nil {
+		faults = f.Name()
+		f.Close()
+		defer os.Remove(faults)
+		cmd.Env = append(cmd.Env, kit.TaskFaultsEnv+"="+faults)
+	}
 	cmd.Stdin = nil
 	// The agent gets a process group of its own; the watchdog measures and
 	// stops its whole process tree, tools in sessions of their own too
@@ -262,7 +277,30 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, o Headles
 		e.Stalled, e.Cause = true, *c
 		return e
 	}
-	return end(code)
+	e := end(code)
+	if n, first := kit.ReadTaskFaults(faults); n > 0 {
+		e.Cause = interruptedCause(n, first, code)
+		if code == 0 {
+			e.ExitCode = ExitInterrupted
+		}
+		emit(TaskEvent{Type: "error", Data: "defenseclaw: " + e.Cause})
+	}
+	return e
+}
+
+// interruptedCause says why a task whose hooks met a gateway outage is not a
+// success (GAP-0326): the agent's own exit 0 cannot tell.
+func interruptedCause(n int, first kit.TaskFault, code int) string {
+	calls := "1 hook call"
+	if n > 1 {
+		calls = fmt.Sprintf("%d hook calls", n)
+	}
+	cause := fmt.Sprintf("the cluster gateway did not answer %s during the task (the first: %s at %s); "+
+		"they failed closed, so the steps they guarded may not have run", calls, first.Event, first.At)
+	if code == 0 {
+		cause += fmt.Sprintf(". The agent exited 0, but the task is ended with exit code %d: run it again", ExitInterrupted)
+	}
+	return cause
 }
 
 // watch ends the agent when it makes no progress for stall: no output line

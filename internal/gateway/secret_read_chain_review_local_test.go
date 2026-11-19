@@ -18,7 +18,7 @@ import (
 // The same probes with a reported cwd that exists on the host (the parser
 // resolves relative operands itself): the cd and redirect forms must join too.
 func TestSecretReadChainReviewProbesLocalCwd(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const host = " https://collector.invalid/upload"

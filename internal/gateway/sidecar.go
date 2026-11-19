@@ -1053,6 +1053,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// While it runs, report the hook calls that ran fail-open since
 	// (rel-1-0-2 GAP-0446 item 3); no timer on a managed gateway.
 	go s.watchHookFailureCalls(ctx)
+	// A changed cached OpenClaw version re-checks the install policy, and the
+	// retry timers of a failed refresh stop with the gateway (GAP-1198).
+	defer s.startOpenClawInstallPolicyWatch(ctx)()
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
@@ -3670,17 +3673,28 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 		previous.bindObservabilityV8TraceMode(nil, true)
 	}
 	if proxy != nil {
-		lifecycle := s.observabilityV8Lifecycle
-		if s.observabilityV8ConsumersDetached {
-			lifecycle = nil
-		}
-		proxy.bindObservabilityV8TraceMode(lifecycle, true)
-		proxy.generationSource = s.Generation
-		proxy.kernelPeer = s.proxyKernelPeer
+		s.bindGuardrailProxyLocked(proxy)
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
 	s.observabilityV8Mu.Unlock()
+}
+
+// bindGuardrailProxyLocked wires proxy to this sidecar: its observability
+// lifecycle, the configuration generation every request pins (rules, local
+// patterns, guardrail profiles, the policy stamp of its records) and the
+// kernel peer. The caller holds observabilityV8Mu. The sidecar's own proxy
+// and the one a Substrate gateway keeps for actors (substrateLLMProxy) are
+// wired alike: the actor proxy had none of it, so an actor's model calls were
+// inspected without the published generation and its records (GAP-0487).
+func (s *Sidecar) bindGuardrailProxyLocked(proxy *GuardrailProxy) {
+	lifecycle := s.observabilityV8Lifecycle
+	if s.observabilityV8ConsumersDetached {
+		lifecycle = nil
+	}
+	proxy.bindObservabilityV8TraceMode(lifecycle, true)
+	proxy.generationSource = s.Generation
+	proxy.kernelPeer = s.proxyKernelPeer
 }
 
 // setEventRouter is construction-time wiring. Keeping the lifecycle binding in
@@ -4700,12 +4714,6 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				artifacts = append(artifacts, artifact)
 			}
 		}
-		if oc, ok := conn.(interface {
-			SetOpenClawPaths(home, config, external string)
-		}); ok {
-			cfg := s.currentConfig()
-			oc.SetOpenClawPaths(cfg.OpenClawHome(), cfg.OpenClawConfigPath(), cfg.OpenClawExternalPluginDir())
-		}
 		if bundled, ok := conn.(connector.BundledPluginChecker); ok && !bundledSet {
 			bundledSet = true
 			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
@@ -5108,9 +5116,16 @@ func (s *Sidecar) remediateAtOpenClaw(
 	case errors.Is(err, ErrOpenClawRemediationUnavailable):
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: %s %s blocked by DefenseClaw; OpenClaw not told (no operator.admin)\n",
 			kind, r.Event.Name)
+		note := openClawRemediationUnavailableAction + " (scope operator.admin)"
 		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
 			fmt.Sprintf("type=%s verdict=%s %s: blocked and enforced by DefenseClaw; OpenClaw was not told to disable it",
-				kind, r.Verdict, openClawRemediationUnavailableAction+" (scope operator.admin)"))
+				kind, r.Verdict, note))
+		// The INFO row above is not an alert: `defenseclaw alerts` lists
+		// platform-health rows above INFO. The operator must still see here that
+		// OpenClaw has the asset enabled (GAP-0187).
+		_ = s.logger.LogAlert("openclaw-remediation", "HIGH",
+			fmt.Sprintf("%s %s is blocked by DefenseClaw, but OpenClaw was not told to disable it: %s", kind, r.Event.Name, note),
+			map[string]any{"type": kind, "asset": r.Event.Name, "action": openClawRemediationUnavailableAction, "scope": "operator.admin"})
 		return openClawRemediationUnavailableAction
 	default:
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway OpenClaw disable %s %s failed: %v\n", kind, r.Event.Name, err)

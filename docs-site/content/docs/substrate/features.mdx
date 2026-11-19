@@ -17,12 +17,12 @@ Every DefenseClaw feature runs in the cluster gateway, the same code as on a lap
 
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
-| Model request and reply checks | Same, stronger | Every model call goes through the guardrail proxy. The provider is not in the agent's allow list, so nothing bypasses it. The Bedrock event stream passes through unchanged |
+| Model request and reply checks | Same, stronger | Every model call goes through the guardrail proxy. The provider is not in the agent's allow list, so nothing bypasses it. The Bedrock event stream passes through unchanged. The security notice a refusal adds to the next model requests goes only to that agent's own requests, and only to those the same gateway replica serves (best effort: the refusal reply itself stays in the agent's history) |
 | Tool-call checks | Same | Hooks call the cluster gateway; Substrate's egress gateway adds a signed agent identity |
 | Tool chains and intent | Changed | Findings that span several calls (a secret read, then a send) need state across stateless gateway replicas. A single leader holds the state, per verified session and per actor, so rotating session IDs can't empty it. Time spent suspended doesn't count against the 30 minute window. Egress after a secret read is refused by default in every mode, because actors are unattended; `alert` is an opt-in the operator sets with the chain egress action. Host-side hooks keep the balanced default |
 | Several agents per person | Same | Each agent is its own session and its own record |
 | User and group policies | Changed | Groups come from the company sign-in (OIDC) instead of the OS. See [Identity](#identity) |
-| LLM judge, unified LLM key | Changed | The judge runs in the cluster gateway. The key is a Kubernetes Secret, or comes from Substrate's credential provider, and never reaches an agent |
+| LLM judge, unified LLM key | Changed | The judge runs in the cluster gateway. The key is a Kubernetes Secret, or comes from Substrate's credential provider, and never reaches an agent. A managed cluster names it with `enterprise.inspection.llm.credential`: a key of the `defenseclaw-llm` Secret the `/llm` route reads (`bedrock` for the cluster's Bedrock key). An open-source cluster can also set `guardrail.judge.llm.api_key_env` to a variable from `gateway.extraEnv`; a managed one reads no key from the environment |
 | Cisco AI Defense | Changed | The AI Defense key is a Secret. Inspection calls leave from the gateway, not from agents |
 | Fail modes | Same | Interactive agents follow the profile: closed on managed installs, open with a warning on default open-source settings. Unattended runs always fail closed |
 
@@ -30,7 +30,7 @@ Every DefenseClaw feature runs in the cluster gateway, the same code as on a lap
 
 Because every model call passes the guardrail proxy, the model request and reply checks apply to every agent that routes through the gateway, and the caller is the verified actor and person from the signed token, never a header the agent sends.
 
-What is **not** in this release yet: semantic and admin routing rules, budgets (warn, downgrade or deny) and per-call usage and cost records. They belong to the 1.0.10 routing and tokenomics work, which is not merged into the release branch yet. Until it is:
+What is **not** in this release yet: semantic and admin routing rules, budgets (warn, downgrade or deny) and per-call usage and cost records for actors. The gateway's tokenomics store keeps usage per gateway replica and has no batch or actor key, so the cluster does not serve it for actors yet. Until it does:
 
 - `defenseclaw substrate usage` answers "this cluster does not offer that yet; ask your administrator to upgrade DefenseClaw on it". `usage --batch` does too.
 - No budget applies to an actor or a batch.
@@ -55,7 +55,7 @@ What is **not** in this release yet: semantic and admin routing rules, budgets (
 | Scan before use | Changed, stronger | `template build` scans the agent's skills, plugins, MCP servers and agent config inside the image, then signs the result. Agents from unscanned images get no network |
 | Scan at run time | Changed, weaker | skill-scanner does not run in the cluster. A skill that ships in an attested template is trusted by its digest, because the signed attestation lists it. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it and raise an alert; open source allows it and raises an alert |
 | Remote MCP servers | Same, plus network | Allowed MCP servers are named in the allow list. The egress callout reads the body of a call to a listed MCP host (up to 1 MiB) to apply tool rules, and admission decides as usual |
-| MCP servers started inside the actor from the repo | Config checked, tools not scanned | An MCP server the agent adds mid-session (a repository `.mcp.json`, a written MCP config, `mcp add`) is checked by its config: one that downloads and runs code is refused in every tier. Its tools are not scanned in the cluster, so a server with its own source in the folder follows the fail mode: managed installs and the strict tier refuse it, open source allows it and raises an alert. Servers in the image are scanned at build. Tool-call hooks and the egress policy still apply to what the server does |
+| MCP servers started inside the actor from the repo | Config checked, tools not scanned | An MCP server the agent adds mid-session (a repository `.mcp.json`, a written MCP config, `mcp add`) is checked by its config: one that downloads and runs code is refused in every tier. Its tools are not scanned in the cluster, so a server that may run code of the folder follows the fail mode: managed installs and the strict tier refuse it, open source allows it and raises an alert. Only an installed program, a registry package the folder cannot redirect (`npx` or `uvx` of a registry name with no project `bin`, `node_modules` program, `.npmrc`, `pip.conf` or `uv.toml`, and no local `--package`, `--from` or `--spec`), or a container image run with no mount is left to the config check alone. Servers in the image are scanned at build. Tool-call hooks and the egress policy still apply to what the server does |
 | Local MCP servers on your laptop | Not available | An agent in the cluster can't reach your machine |
 | Registries (skill and MCP catalogs) | Same | Clean catalog entries are promoted into admission and, for MCP, into the allow list |
 
@@ -87,7 +87,7 @@ Reading a body needs a Substrate version that lets the callout ask for it. Witho
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
 | Asks in the agent | Same | For agents that can pause (Claude Code, Codex and others) |
-| Asks for sites | Changed | Asked in your terminal session, or answered later with `defenseclaw substrate approvals` while detached. The waiting step pauses; the agent doesn't stop |
+| Asks for sites | Changed | Asked in your terminal session, or answered later with `defenseclaw substrate approvals` while detached. The request is refused at once with the ask's id (the egress gateway holds a request under 2 seconds); the agent doesn't stop, and retries once the ask is approved |
 | Unattended asks | New | Denied by default. A profile can allow a wait of up to `ask_timeout` for a person to answer. See [Unattended runs](/docs/substrate/unattended) |
 | Admin-bounded approvals | Same | The same rules decide whether you can approve, and the same request-access text appears when you can't |
 | Webhooks for approvals | Same | Sent from the gateway |
@@ -107,7 +107,7 @@ Reading a body needs a Substrate version that lets the callout ask for it. Witho
 
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
-| OpenTelemetry events, metrics, traces | Same | Same names and fields, plus the Substrate attributes (`defenseclaw.sandbox.substrate.*`, `ate.actor.uid`) so Substrate's own records line up |
+| OpenTelemetry events, metrics, traces | Same | Same names and fields, plus the Substrate attributes (`defenseclaw.sandbox.substrate.*`, `ate.actor.uid`) so Substrate's own records line up. An agent's hook events carry no turn step number (`step_idx`): each gateway replica sees only some of a session's hooks, so the replicas can't number its turns alike. For an agent that sends no turn id of its own (Claude Code), the turn id (`turn_id`) DefenseClaw gives its hook events is chosen by the replica that sees the turn start and can differ between replicas within one session; `session_id`, `tool_use_id` and the actor attributes are the same on every replica |
 | Local observability stack, Grafana dashboards | Changed | The chart can install a local collector. A [Substrate agents board](/docs/observability/grafana-dashboards) sits next to the existing ones |
 | Agent 360 | Same | Drill-down per agent, with suspend and resume shown in the lifecycle |
 | Sandbox telemetry | Changed | `runtime=substrate`, `driver=gvisor` or `microvm`. See [Sandbox telemetry](/docs/observability/sandbox-telemetry) |

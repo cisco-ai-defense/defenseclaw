@@ -19,10 +19,28 @@
 // target it stats, a link it follows).
 //
 // In every product build it is the identity: Map and Unmap return their
-// argument and inline away. The S7 benchmark harness (build tag s7bench)
+// argument (a test may observe the names, ObserveForTest). The S7 benchmark harness (build tag s7bench)
 // maps the mutable system roots (/tmp, /var/tmp, /dev/shm and their macOS
 // spellings) onto a fixture tree named by S7_FIXTURE_FS_ROOT, so a benchmark
 // verdict never depends on what other processes left in the live /tmp
 // (rel-1-0-10:GAP-0271). The path text the rules see is not changed, only the
 // directory the read goes to.
 package fixturefs
+
+import "sync/atomic"
+
+var observer atomic.Pointer[func(string)]
+
+// ObserveForTest calls note with every name Map hands to a read until
+// restore, so a test sees each path that reaches the file system (a read
+// a share gate refused never calls Map). Tests only.
+func ObserveForTest(note func(name string)) (restore func()) {
+	old := observer.Swap(&note)
+	return func() { observer.Store(old) }
+}
+
+func observe(name string) {
+	if note := observer.Load(); note != nil {
+		(*note)(name)
+	}
+}

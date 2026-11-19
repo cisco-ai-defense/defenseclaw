@@ -867,17 +867,36 @@ _CLAUDE_CHAIN_WARNING = (
 ).split()
 
 
-# The managed standalone wrapper names the missing guard and the repair that
-# can restore it: Setup /repair, the only route that carries the guard payload.
-# Keep it identical to claudeManagedGuardMissingWords in
-# internal/gateway/connector/claudecode_chain.go.
+# The managed standalone wrapper's two unavailable texts: the guard is missing,
+# or it is there but does not run. Each names its own condition, because
+# Claude Code shows the whole registered command beside the hook's own answer
+# (rel-1-0-10 GAP-0119), and both name Setup /repair, the only route that
+# carries the guard payload. Keep them identical to claudeManagedGuardMissingWords
+# and claudeManagedGuardStartWords in internal/gateway/connector/claudecode_chain.go.
 _CLAUDE_MANAGED_GUARD_MISSING = (
-    "DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe "
-    "because it is missing from the install folder. "
-    "Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair "
-    "as an administrator to restore it. "
+    "If defenseclaw-hook-guard.exe is missing from the install folder: "
+    "DefenseClaw cannot check Claude Code until an administrator runs "
+    "DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to restore it. "
     "Setup is not installed on this computer: use the copy in your MDM package or the release download."
 ).split()
+_CLAUDE_MANAGED_GUARD_START = (
+    "If defenseclaw-hook-guard.exe is in the install folder but does not run: "
+    "DefenseClaw cannot check Claude Code until an administrator runs "
+    "DefenseClawSetup-Enterprise-Standalone-x64.exe /repair."
+).split()
+# The texts 1.0.9 Setup wrote: the same branches and answers, so a 1.0.9
+# managed policy still reads as DefenseClaw's until Setup renders it again.
+# Keep while 1.0.9 is a supported upgrade source.
+_CLAUDE_MANAGED_GUARD_TEXTS_1_0_9 = (
+    (
+        "DefenseClaw could not start its Claude Code hook guard defenseclaw-hook-guard.exe "
+        "because it is missing from the install folder. "
+        "Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair "
+        "as an administrator to restore it. "
+        "Setup is not installed on this computer: use the copy in your MDM package or the release download."
+    ).split(),
+    "DefenseClaw could not start its Claude Code hook guard. Run the DefenseClaw installer again to repair it.".split(),
+)
 
 
 def _claude_wrapper_safe(path: str) -> bool:
@@ -971,10 +990,13 @@ def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str]
     return None
 
 
-def _claude_managed_wrapper_words(guard: str, launcher: str, event: str) -> list[str]:
+def _claude_managed_wrapper_words(
+    guard: str, launcher: str, event: str,
+    missing_text: list[str] = _CLAUDE_MANAGED_GUARD_MISSING, start_text: list[str] = _CLAUDE_MANAGED_GUARD_START,
+) -> list[str]:
     fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS else "2"
-    missing = ["echo", *_CLAUDE_MANAGED_GUARD_MISSING, "1>&2", "&", "exit", "/b", fail_code]
-    warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
+    missing = ["echo", *missing_text, "1>&2", "&", "exit", "/b", fail_code]
+    warning = ["echo", *start_text, "1>&2", "&", "exit", "/b", fail_code]
     return [
         "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *missing, ")",
         "else", "(", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher,
@@ -1008,7 +1030,8 @@ def _claude_managed_wrapper_parts(handler: Any) -> tuple[str, list[str]] | None:
         event = args[index + 8]
         if not event or len(event) > 64 or not event.isascii() or not event.isalnum():
             continue
-        if args == _claude_managed_wrapper_words(guard, launcher, event):
+        if args in (_claude_managed_wrapper_words(guard, launcher, event),
+                    _claude_managed_wrapper_words(guard, launcher, event, *_CLAUDE_MANAGED_GUARD_TEXTS_1_0_9)):
             return launcher, ["hook", "--connector", "claudecode", "--enterprise-managed"]
     return None
 

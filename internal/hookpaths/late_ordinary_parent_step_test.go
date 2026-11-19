@@ -76,7 +76,7 @@ func TestLateOrdinaryCallStepsThroughParentFolders(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, connector := range []string{"claudecode", "codex"} {
 				payload := lateBash(t, "Bash", tc.cwd, tc.command)
-				if got := LateOrdinaryCall(connector, payload); got != tc.want {
+				if got := LateOrdinaryCallAt("", connector, payload); got != tc.want {
 					t.Errorf("%s: ordinary=%v, want %v, command=%q in %s", connector, got, tc.want, tc.command, tc.cwd)
 				}
 			}
@@ -114,9 +114,7 @@ func TestLateOrdinaryCallIndexesBothHomes(t *testing.T) {
 		t.Skipf("hard link unavailable: %v", err)
 	}
 	t.Setenv("HOME", scratch)
-	restore := accountHomeDir
-	accountHomeDir = func() (string, error) { return account, nil }
-	t.Cleanup(func() { accountHomeDir = restore })
+	t.Cleanup(SetAccountHomeDirForTest(account))
 	for _, tc := range []struct {
 		name, command string
 		want          bool
@@ -128,7 +126,7 @@ func TestLateOrdinaryCallIndexesBothHomes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			payload := lateBash(t, "Bash", project, tc.command)
-			if got := LateOrdinaryCall("claudecode", payload); got != tc.want {
+			if got := LateOrdinaryCallAt("", "claudecode", payload); got != tc.want {
 				t.Errorf("ordinary=%v, want %v, command=%q", got, tc.want, tc.command)
 			}
 		})

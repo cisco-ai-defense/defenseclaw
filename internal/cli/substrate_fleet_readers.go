@@ -272,6 +272,25 @@ func (r *apiClusterReader) Actors(ctx context.Context) ([]fleetActor, error) {
 	return out, nil
 }
 
+// WorkerDrain counts the DRAINING workers and the actors still RUNNING on
+// them (GAP-0449).
+func (r *apiClusterReader) WorkerDrain(ctx context.Context) (draining, runningOn int, err error) {
+	d, err := ateapi.DrainingWorkers(ctx, r.Client)
+	if err != nil || d.Empty() {
+		return 0, 0, err
+	}
+	actors, err := ateapi.AllActors(ctx, r.Client, "", ateapi.MaxPageSize)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, a := range actors {
+		if _, on := d.Hosts(a); on && a.GetStatus().GetState() == ateapi.ActorStateRunning {
+			runningOn++
+		}
+	}
+	return max(len(d.Names), len(d.Pods)), runningOn, nil
+}
+
 func (r *apiClusterReader) Templates(ctx context.Context) (int, error) {
 	t, err := ateapi.AllActorTemplates(ctx, r.Client, "", ateapi.MaxPageSize)
 	return len(t), err
@@ -394,6 +413,7 @@ func readInventory(ctx context.Context, r *fleet.Report, launcher, writable []st
 	}
 	for _, a := range actors {
 		inv.States[a.State]++
+		r.ActorAtespaces = append(r.ActorAtespaces, a.Atespace)
 		if sp, ok := spaces[a.Atespace]; ok {
 			sp.Actors++
 			sp.States[a.State]++
@@ -402,6 +422,32 @@ func readInventory(ctx context.Context, r *fleet.Report, launcher, writable []st
 	r.Inventory = inv
 	for _, a := range writable {
 		r.Atespaces = append(r.Atespaces, *spaces[a])
+	}
+}
+
+// workerDrainReader is a cluster reader that can read the workers; the
+// ate-api-server one can (apiClusterReader).
+type workerDrainReader interface {
+	WorkerDrain(ctx context.Context) (draining, runningOn int, err error)
+}
+
+// readWorkerDrain fills o.WorkerDrain: a worker pool roll in progress with
+// actors still running on the old workers (GAP-0449).
+func readWorkerDrain(ctx context.Context, o *fleet.Observed, api clusterAPIReader, apiErr error) {
+	w := &fleet.WorkerDrain{}
+	o.WorkerDrain = w
+	if apiErr != nil {
+		w.Note = firstLineOf(apiErr.Error())
+		return
+	}
+	r, ok := api.(workerDrainReader)
+	if !ok {
+		w.Note = "this reader cannot list workers"
+		return
+	}
+	var err error
+	if w.Draining, w.RunningOn, err = r.WorkerDrain(ctx); err != nil {
+		w.Note = policyErrWords(err)
 	}
 }
 

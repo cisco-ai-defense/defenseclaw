@@ -2265,6 +2265,7 @@ class SandboxAdminConfig:
     runtimes: list[str] | None = None  # openshell | substrate (unset = both)
     sandbox_class: str = ""  # gvisor | microvm (microvm wins)
     idle_suspend_after: str = ""  # Go duration, >= 1m (the shortest wins)
+    idle_suspend_tasks: bool | None = None  # true opts --task runs into idle suspend (true wins)
     unattended_asks: str = ""  # deny | queue (deny wins)
     ask_timeout: str = ""  # Go duration, 1m to 24h (the shortest wins)
     actor_secrets: list[str] | None = None  # exposed values (unset = none)
@@ -2298,6 +2299,7 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "runtimes",
     "sandbox_class",
     "idle_suspend_after",
+    "idle_suspend_tasks",
     "unattended_asks",
     "ask_timeout",
     "actor_secrets",
@@ -2310,6 +2312,7 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
 _SANDBOX_SUBSTRATE_ONLY_KEYS = (
     "sandbox_class",
     "idle_suspend_after",
+    "idle_suspend_tasks",
     "unattended_asks",
     "ask_timeout",
     "actor_secrets",
@@ -8767,6 +8770,7 @@ def _merge_openshell_admin(raw: Any) -> SandboxAdminConfig:
         runtimes=_openshell_optional_str_list(admin.get("runtimes")),
         sandbox_class=_openshell_str(admin.get("sandbox_class")),
         idle_suspend_after=_openshell_str(admin.get("idle_suspend_after")),
+        idle_suspend_tasks=_openshell_optional_bool(admin.get("idle_suspend_tasks")),
         unattended_asks=_openshell_str(admin.get("unattended_asks")),
         ask_timeout=_openshell_str(admin.get("ask_timeout")),
         actor_secrets=_openshell_optional_str_list(admin.get("actor_secrets")),
