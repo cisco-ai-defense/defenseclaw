@@ -6,6 +6,7 @@ package actionfacts
 import (
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -267,6 +268,15 @@ type workFolderTracker struct {
 	// function compares one offset instead of asking each outer call again
 	// (rel-1-0-10:GAP-1293).
 	firstRun map[workFolderDefinedKey]workFolderFirstRun
+	// returned holds the folders of the calls that may return from the
+	// mover body being read, and returnedOK those whose status may be 0:
+	// a call of the mover may end there, before the rest of its body
+	// (substrate-1:GAP-0690). They are kept per body: a return in the body
+	// of a function defined or called in it ends only that function.
+	returned, returnedOK workFolders
+	// afterFailure is the right side of the || being read: a bare return
+	// there returns the failed status of its left side (`cd X || return`).
+	afterFailure *syntax.Stmt
 }
 
 // workFolderFirstRun is the earliest offset of a call of an outer function
@@ -548,6 +558,18 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined,
 		firstRun: t.firstRun}
 	ok, after = inner.stmt(decl.Body, in)
+	// `f() { test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc`
+	// may leave the shell where the body returned, with status 0 (the
+	// substrate-1:GAP-0690 rows); the folder of its last cd alone is wrong.
+	// A return that may pass an && also leaves the call's success folder
+	// unresolved, the reading rel gives every mover call: the folders the
+	// tracking names are not all the reading may rest on.
+	if len(inner.returned) != 0 {
+		after = unionWorkFolders(after, inner.returned)
+	}
+	if len(inner.returnedOK) != 0 {
+		ok = unionWorkFolders(ok, inner.returnedOK, unresolvedWorkFolders)
+	}
 	if !t.defs[decl].topLevel {
 		// A definition in a list, a branch or a body may not have run: the
 		// call then finds no function, fails and leaves the shell where it
@@ -555,6 +577,61 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 		after = unionWorkFolders(after, in)
 	}
 	return ok, after
+}
+
+// add is s with the folders of in, the hook's own folder for an empty in.
+func (s workFolders) add(in workFolders) workFolders {
+	if len(s) == 0 {
+		return in.orHook()
+	}
+	return unionWorkFolders(s, in)
+}
+
+// workFolderReturn reports a call that may return from the function body it
+// runs in: `return` (also behind builtin or command), eval, or a command
+// whose name the tracking does not read (`$r`); ok when its status may be 0
+// (a static nonzero `return N` cannot pass an &&). An exit leaves the shell and runs nothing after it,
+// and a break or continue only leaves a loop, whose folders the loop
+// reading already keeps.
+func workFolderReturn(call *syntax.CallExpr) (returns, ok bool) {
+	args, prefix := call.Args, false
+	for len(args) > 1 {
+		word := projectPOSIXWord(args[0])
+		if word.Expands {
+			break
+		}
+		if word.Value == "builtin" || word.Value == "command" || prefix && strings.HasPrefix(word.Value, "-") {
+			args, prefix = args[1:], true
+			continue
+		}
+		break
+	}
+	if len(args) == 0 {
+		return false, false
+	}
+	name := projectPOSIXWord(args[0])
+	switch {
+	case name.Expands, name.Value == "eval":
+		return true, true
+	case name.Value != "return":
+		return false, false
+	case len(args) < 2:
+		return true, true
+	}
+	status := projectPOSIXWord(args[1])
+	if n, err := strconv.Atoi(status.Value); !status.Expands && err == nil && n&0xff != 0 {
+		return true, false
+	}
+	return true, true
+}
+
+// workFolderBareReturn reports a `return` with no status.
+func workFolderBareReturn(call *syntax.CallExpr) bool {
+	if len(call.Args) != 1 {
+		return false
+	}
+	name := projectPOSIXWord(call.Args[0])
+	return !name.Expands && name.Value == "return"
 }
 
 // workFolderBodyMoves reports a function body with a folder move in it, or
@@ -620,6 +697,12 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		return in, in
 	case *syntax.CallExpr:
 		t.substitutions(cmd, in)
+		if returns, ok := workFolderReturn(cmd); returns {
+			t.returned = t.returned.add(in)
+			if ok && !(stmt == t.afterFailure && !stmt.Negated && workFolderBareReturn(cmd)) {
+				t.returnedOK = t.returnedOK.add(in)
+			}
+		}
 		if target, isCD := staticWorkFolderMove(cmd); isCD {
 			moved := in.with(target)
 			for _, candidate := range cdPathCandidates(cmd, target) {
@@ -645,6 +728,7 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 			return rightOK, unionWorkFolders(leftAfter, rightAfter)
 		case syntax.OrStmt:
 			leftOK, leftAfter := t.stmt(cmd.X, in)
+			t.afterFailure = cmd.Y
 			rightOK, rightAfter := t.stmt(cmd.Y, leftAfter)
 			return unionWorkFolders(leftOK, rightOK), unionWorkFolders(leftAfter, rightAfter)
 		default: // a pipe: each member runs in a copy of the shell
@@ -682,7 +766,9 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		// The body runs where the function is called; its moves are read at
 		// the call (movers).
 		t.inBody++
+		returned, returnedOK := t.returned, t.returnedOK
 		t.stmt(cmd.Body, in)
+		t.returned, t.returnedOK = returned, returnedOK // its returns end that body only
 		t.inBody--
 		return in, in
 	case *syntax.TimeClause:
