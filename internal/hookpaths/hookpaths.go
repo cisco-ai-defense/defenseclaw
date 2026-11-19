@@ -4619,7 +4619,10 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	file, parsed := parseShell(command)
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
-		if opaqueLink.MatchString(command) {
+		// PowerShell text rarely parses as shell; its New-Item links are read
+		// however their parameters are spelled (rel-1-0-10:GAP-0849: only the
+		// -ItemType spelling opaqueLink finds was read here).
+		if opaqueLink.MatchString(command) || commandNewItemLinkSpelled(command) {
 			if twin, ok := powerShellLinkTwin(command, cwd, home); ok {
 				return commandLinksRead(twin, cwd, home, facts, record, nested, readDisk)
 			}
@@ -4627,7 +4630,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		}
 		return links, false
 	}
-	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) {
+	if opaqueLinkText(file, maskCmdMklinkCalls(file, command, home), home) || newItemLinkText(file, command, home) {
 		// A PowerShell New-Item link and Move-Item with static operands are
 		// read as the ln and mv they are (rel-1-0-10:GAP-0749); every other
 		// link-making text keeps the opaque reading.
@@ -5838,6 +5841,23 @@ var dataPrograms = []string{"echo", "printf", "grep", "egrep", "fgrep", "rg", "a
 func opaqueLinkText(file *syntax.File, command, home string) bool {
 	// Skip the automaton over a long command without its literals (GAP-2279).
 	if !rxprefilter.MayMatch(opaqueLink, command) || !opaqueLink.MatchString(command) {
+		return false
+	}
+	for _, stmt := range file.Stmts {
+		if !dataStatement(stmt, home) {
+			return true
+		}
+	}
+	return false
+}
+
+// newItemLinkText reports a New-Item link the command may run that
+// opaqueLinkText does not spell (-Ty, an en dash, -ItemType:): a New-Item
+// call that may make a link however its parameters are spelled, outside a
+// command of data programs alone (rel-1-0-10:GAP-0849). It is read as the
+// -ItemType spelling is: as its twin, else opaque.
+func newItemLinkText(file *syntax.File, command, home string) bool {
+	if !commandNewItemLinkSpelled(command) {
 		return false
 	}
 	for _, stmt := range file.Stmts {

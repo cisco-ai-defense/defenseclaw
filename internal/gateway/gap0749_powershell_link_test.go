@@ -19,7 +19,8 @@ import (
 
 // powerShellProtectedRoute sends one PowerShell command through the Windows
 // hook route of a connector (Claude Code's PowerShell tool, Codex's shell
-// tool) in one of the five tiers and returns the action and its rule ids.
+// tool, Copilot's powershell tool) in one of the five tiers and returns the
+// action and its rule ids.
 func powerShellProtectedRoute(t *testing.T, home, cwd, connector, posture string, managed bool, command string) (string, []string) {
 	t.Helper()
 	installToolCallCorpusProfileConnector(t, connector, posture)
@@ -37,9 +38,17 @@ func powerShellProtectedRoute(t *testing.T, home, cwd, connector, posture string
 		t.Fatal(err)
 	}
 	req := agentHookRequest{ConnectorName: connector, CWD: cwd, HookEventName: "PreToolUse", ToolArgs: raw}
-	req.ToolName = "shell_command"
-	if connector == "claudecode" {
+	switch connector {
+	case "claudecode":
 		req.ToolName = "PowerShell"
+	case "copilot":
+		// Copilot CLI names its pre-tool event preToolUse (the registered
+		// hook route, TestR104WindowsRegisteredHookNativeRefix3); under
+		// PreToolUse its Windows route answered allow for every row, a
+		// direct write of the keys file too (rel-1-0-10:GAP-0849, native).
+		req.ToolName, req.HookEventName = "powershell", "preToolUse"
+	default:
+		req.ToolName = "shell_command"
 	}
 	resp := api.evaluateAgentHook(ctx, req)
 	var ids []string
