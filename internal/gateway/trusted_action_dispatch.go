@@ -451,6 +451,7 @@ func dispatchTrustedAction(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	request = windowsStatementsOnePerLine(request)
 	// A call judged as the twin of its data word leaves a detection-only
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and

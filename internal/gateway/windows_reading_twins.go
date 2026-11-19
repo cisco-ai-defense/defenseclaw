@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"reflect"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -110,6 +111,42 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 		twin.LegacyText = readable.Command
 	}
 	return append([]trustedActionRequest{twin}, argumentTwins...), bounded.CapSet{}
+}
+
+// windowsStatementsOnePerLine is request read as its statements one per line
+// when it is a Windows hook's PowerShell call joined by ";" whose every
+// statement parses complete alone (actionfacts.PowerShellStatementsOnePerLine):
+// the reader leaves such a call partial for the separator alone, and the
+// selection places the same statements one per line in PowerShell, so the
+// call is judged as that spelling, once, by every reading
+// (rel-1-0-10:GAP-1231). An extra reading twin of it doubled the hook's cost
+// of every ordinary ";"-joined call. The recorded text (LegacyText) stays the
+// call as sent. Any other call is returned as it is.
+func windowsStatementsOnePerLine(request trustedActionRequest) trustedActionRequest {
+	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass {
+		return request
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(command, ";") {
+		return request
+	}
+	input := request.Input
+	var facts actionfacts.Facts
+	switch {
+	case input.DialectHint == "" && request.windowsPowerShellReading != nil:
+		input.DialectHint = actionfacts.DialectPowerShell
+		facts = request.windowsPowerShellReading.factsFor(input)
+	case input.DialectHint == actionfacts.DialectPowerShell:
+		facts = actionfacts.Analyze(input)
+	default:
+		return request
+	}
+	lines, ok := actionfacts.PowerShellStatementsOnePerLine(input, facts)
+	if !ok {
+		return request
+	}
+	request.Input, request.windowsPowerShellReading = lines, nil
+	return request
 }
 
 // windowsHintedReading is the PowerShell reading selectWindowsShellDialectReading
