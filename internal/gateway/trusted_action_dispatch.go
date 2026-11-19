@@ -1203,6 +1203,11 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			checkedLocalOrdinary := false
 			localOrdinary := false
+			// The closed WinDefend sequence proof owns a call with several
+			// WinDefend sc steps: its stop, read alone, does not prove the
+			// disable the sequence does not (rel-1-0-10:GAP-1194). Other
+			// commands keep the findings they prove.
+			winDefendSequenceUnproved := actionfacts.WinDefendSequenceUnproved(facts)
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := withCappedWindowsReadings(request, request.simpleMemo.commands(request.Input, facts))
 			if len(simples) == 0 && wholeCommandKnown &&
@@ -1409,6 +1414,11 @@ func dispatchTrustedActionWith(
 							return f.RuleID == "persistence.ssh_authorized_keys_command"
 						})
 					}
+				}
+				if winDefendSequenceUnproved && actionfacts.ExactWinDefendStopOnly(actionfacts.Analyze(child.Input)) {
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "tamper.endpoint_security_product_disable"
+					})
 				}
 				findings = withSimpleCommandFindings(findings, childFindings)
 			}
