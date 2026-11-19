@@ -23,14 +23,16 @@ import (
 // home file after each such shape is at least the unknown tier, and one
 // spelled from the home is never below its plain statement, with the bar of
 // TestGAP0698SplitGapJudgesEveryPathEffect. The same effects on ordinary
-// files, and ordinary developer commands after the shapes, stay an allow.
+// files, and ordinary developer commands after the shapes and after the
+// split-gap shapes of the FIX-0698-RV controls, stay an allow as at rel
+// (substrate-1:GAP-0703, GAP-0704).
 func TestGAP0702SplitGapJudgesEveryFolder(t *testing.T) {
 	installCorrelationHMACForTest(t)
 	home := filepath.Join(t.TempDir(), "home", "alice")
 	project := filepath.Join(home, "proj")
 	for _, name := range []string{
 		"proj/README.md", "proj/build.sh", "proj/.env", "proj/src/x.go", "proj/out.txt", "proj/build/out.o", "proj/node_modules/x",
-		".aws/credentials", ".bashrc", ".netrc", ".ssh/id_rsa", "x.txt",
+		"proj/.git/HEAD", "proj/.git/hooks/pre-commit", ".aws/credentials", ".bashrc", ".netrc", ".ssh/id_rsa", "x.txt",
 	} {
 		file := filepath.Join(home, name)
 		if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
@@ -39,6 +41,10 @@ func TestGAP0702SplitGapJudgesEveryFolder(t *testing.T) {
 		if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	many := ""
+	for i := 0; i < 40; i++ {
+		many += " a" + strconv.Itoa(i) + ".txt"
 	}
 	t.Setenv("HOME", home)
 	// The mover bodies whose dynamic part follows && (FIX-0698-RV A01-A13).
@@ -93,7 +99,13 @@ func TestGAP0702SplitGapJudgesEveryFolder(t *testing.T) {
 				plain := decide(home, statement)
 				protected := false
 				for _, access := range effect.access {
-					protected = protected || decide(home, gap0698EffectTwin[access]+resolved) != "allow"
+					if twin, ok := gap0698EffectTwin[access]; ok {
+						protected = protected || decide(home, twin+resolved) != "allow"
+					} else {
+						// A mode or owner change is protected as its own
+						// plain spelling is (substrate-1:GAP-0703).
+						protected = protected || plain != "allow"
+					}
 				}
 				want := "allow"
 				if protected {
@@ -142,12 +154,36 @@ func TestGAP0702SplitGapJudgesEveryFolder(t *testing.T) {
 				}
 			}
 		}
+		// Developer commands after an unread call, from the project and from
+		// the home through cd proj, as at rel: a mode change is judged by its
+		// own plain spelling (chmod +x of the project's git hook allows,
+		// substrate-1:GAP-0703), and many files are judged in shared twins,
+		// not by the call's text (substrate-1:GAP-0704).
+		devShapes := []string{
+			shapes[0], `f(){ cd /tmp && "$@"; }; f make && `, `f(){ "$@"; }; f make && `, `f(){ cd /tmp; "$@"; }; f cd && `,
+			`f(){ cd /tmp; $r ~; }; f && `, `f(){ $y; }; f && `, `f(){ eval [ -e .bashrc ]; }; f && `, `cd "$D" && `,
+			`run(){ echo "+ $*"; "$@"; }; run make && `, `cd "$PROJ" && `,
+		}
 		for _, command := range []string{
 			"cat README.md", "chmod +x ./build.sh", "cat .env", "sed -i s/a/b/ src/x.go", "rm -rf node_modules build",
+			"chmod +x .git/hooks/pre-commit", "chown 1000 build.sh", "cat" + many, "rm -f" + many, "chmod 644" + many,
 		} {
-			for _, shape := range []string{shapes[0], `f(){ cd /tmp && "$@"; }; f make && `, `f(){ "$@"; }; f make && `} {
-				if got := decide(project, shape+command); got != "allow" {
-					t.Errorf("%s: control %q in proj is %s, want allow", pack, shape+command, got)
+			for _, shape := range devShapes {
+				for _, call := range []struct{ cwd, text string }{{project, shape + command}, {home, shape + "cd proj && " + command}} {
+					if got := decide(call.cwd, call.text); got != "allow" {
+						t.Errorf("%s: control %q in %s is %s, want allow", pack, call.text, filepath.Base(call.cwd), got)
+					}
+				}
+			}
+		}
+		// A protected file among many ordinary ones is still read.
+		for _, command := range []string{
+			"cat" + many + " .aws/credentials", "rm -f" + many + " .aws/credentials", "cat .aws/credentials" + many,
+			"cat" + many + " ./.aws/credentials", "rm -f" + many + " .bashrc", "chmod 600" + many + " .ssh/id_rsa",
+		} {
+			for _, shape := range []string{shapes[0], `f(){ cd /tmp; "$@"; }; f cd && `, `f(){ $y; }; f && `} {
+				if plain := decide(home, command); plain != "allow" {
+					atLeast(shape+command, tier[pack], plain)
 				}
 			}
 		}
