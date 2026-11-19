@@ -107,14 +107,90 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	if event == "SessionStart" || event == "sessionStart" || (isPre && strings.HasPrefix(view.ToolName, "mcp__")) {
 		budget = attachMCP(f, connector, cwd, budget)
 	} else if isPre {
+		budget = attachAgentHookBefore(f, connector, view.ToolName, budget)
 		// A Write or Edit of one of those configs: its next content.
 		budget = attachMCPWrite(f, connector, cwd, input, budget)
+		// A command that may add an MCP server (claude mcp add, codex mcp
+		// add): what the folder offers a registry fetcher (GAP-0573).
+		if in, ok := input.(map[string]any); ok {
+			if c, ok := in["command"].(string); ok && strings.Contains(strings.ToLower(c), "mcp") {
+				budget = attachFetchFacts(f, cwd, budget)
+			}
+		}
 	}
 	_ = budget
 	if len(f.Paths) == 0 && len(f.Files) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
 	}
 	return f
+}
+
+// attachAgentHookBefore supplies exact current settings bytes for semantic
+// native-edit and replacement judgement. One bounded read per settings target;
+// the shared post budget also bounds multi-file patches. Unrelated calls attach
+// nothing, and oversized files receive no digest pass.
+func attachAgentHookBefore(f *Facts, connectorName, tool string, budget int64) int64 {
+	if connectorName != "claudecode" {
+		return budget
+	}
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "edit", "edit_file", "str_replace", "multiedit", "multi_edit", "multi-edit",
+		"write", "write_file", "writefile", "write-file", "create", "create_file",
+		"apply_patch", "applypatch", "apply-patch", "patch":
+	default:
+		return budget
+	}
+	attached := map[string]bool{}
+	for _, pf := range f.Paths {
+		if pf.Field != "tool_input.file_path" && pf.Field != "tool_input.filePath" && pf.Field != "tool_input.path" && !strings.HasSuffix(pf.Field, ".patch") {
+			continue
+		}
+		p := filepath.ToSlash(pf.Abs)
+		if !strings.HasSuffix(p, "/.claude/settings.json") && !strings.HasSuffix(p, "/.claude/settings.local.json") {
+			continue
+		}
+		if attached[pf.Abs] {
+			continue
+		}
+		attached[pf.Abs] = true
+		a := AttachedFile{Role: "agent_hook_config_before", Path: pf.Abs, Resolved: pf.Resolved, Size: -1, Truncated: true}
+		limit := budget
+		if limit > 64<<10 {
+			limit = 64 << 10
+		}
+		if limit < 0 {
+			limit = 0
+		}
+		file, err := os.Open(pf.Abs)
+		if err == nil {
+			info, statErr := file.Stat()
+			if statErr == nil && info.Mode().IsRegular() {
+				a.Size = info.Size()
+				if info.Size() <= limit {
+					content, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+					if readErr == nil && int64(len(content)) == info.Size() {
+						a.Content = content
+						a.Truncated = false
+						sum := sha256.Sum256(content)
+						a.SHA256 = hex.EncodeToString(sum[:])
+					}
+				}
+			}
+			file.Close()
+		}
+		if os.IsNotExist(err) && pf.Type == "missing" {
+			// A missing file is an exact empty before-state, not a failed read.
+			a.Size, a.Truncated = 0, false
+			sum := sha256.Sum256(nil)
+			a.SHA256 = hex.EncodeToString(sum[:])
+		}
+		if a.Truncated {
+			f.Truncated = true
+		}
+		f.Files = append(f.Files, a)
+		budget -= int64(len(a.Content))
+	}
+	return budget
 }
 
 // walkPaths calls add for every path-valued key and for every file an
@@ -336,14 +412,27 @@ func mcpConfigPaths(connectorName, cwd string) []string {
 	return out
 }
 
+// moduleCandidates are the files of the folder a Python module name runs
+// (python -m a.b runs a/b.py or the package a/b); attest.ModuleCandidates
+// is the gateway's copy of the same rule.
+func moduleCandidates(module string) []string {
+	p := strings.ReplaceAll(strings.TrimSpace(module), ".", "/")
+	if p == "" || strings.HasPrefix(p, "/") || strings.Contains(p, "..") {
+		return nil
+	}
+	return []string{p + ".py", p + "/__main__.py", p + "/__init__.py"}
+}
+
 // attachMCP attaches every MCP config of the connector that exists and the
 // in-repository files its stdio servers start (E20), so the gateway can
 // scan them before the agent starts or calls them.
 func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
+	found := false
 	for _, cfgPath := range mcpConfigPaths(connectorName, cwd) {
 		if _, err := os.Lstat(cfgPath); err != nil {
 			continue
 		}
+		found = true
 		budget = attach(f, "mcp_config", cfgPath, "", budget)
 		var servers []mcpServer
 		switch {
@@ -353,6 +442,29 @@ func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
 			servers = claudeMCPServers(cfgPath, cwd)
 		}
 		for _, s := range servers {
+			// Where a bare command is found, so an installed program is
+			// told from the folder's (GAP-0575).
+			attachCommandPath(f, s.Command)
+			// A Python module the server runs (-m a.b): its file when it is
+			// in the folder, else a record that the kit looked and found
+			// none, so the gateway can tell the image's module from the
+			// folder's (GAP-0556).
+			for i, a := range s.Args {
+				if a != "-m" || i+1 >= len(s.Args) {
+					continue
+				}
+				found := false
+				for _, c := range moduleCandidates(s.Args[i+1]) {
+					p := filepath.Join(cwd, filepath.FromSlash(c))
+					if resolved, err := filepath.EvalSymlinks(p); err == nil && within(resolved, cwd) {
+						budget = attach(f, "mcp_server", p, resolved, budget)
+						found = true
+					}
+				}
+				if !found {
+					f.Files = append(f.Files, AttachedFile{Role: "mcp_module_absent", Path: s.Args[i+1]})
+				}
+			}
 			for _, cand := range append([]string{s.Command}, s.Args...) {
 				if !looksLikePath(cand) {
 					continue
@@ -369,6 +481,11 @@ func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
 				budget = attach(f, "mcp_server", p, resolved, budget)
 			}
 		}
+	}
+	if found {
+		// What the folder offers a registry fetcher (npx, uvx): its own
+		// programs and configs decide what a fetched server runs (GAP-0573).
+		budget = attachFetchFacts(f, cwd, budget)
 	}
 	return budget
 }
@@ -417,7 +534,7 @@ func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64
 		f.Truncated = true
 	}
 	f.Files = append(f.Files, a)
-	return budget - int64(len(content))
+	return attachFetchFacts(f, cwd, budget-int64(len(content)))
 }
 
 func firstString(m map[string]any, keys ...string) string {

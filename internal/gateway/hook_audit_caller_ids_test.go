@@ -59,7 +59,7 @@ func TestHookAuditRecordsKeepTheToolIDWhenCorrelationFails(t *testing.T) {
 // account's replay. A retry from the same account stays a replay
 // (GAP-1028).
 func TestHookReplayReceiptIsScopedToTheVerifiedCaller(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	profile := server.hookProfileForConnector("claudecode")

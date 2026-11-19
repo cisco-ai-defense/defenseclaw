@@ -309,6 +309,83 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_J43_ACTORS",
+      "category": "test_fixture",
+      "purpose": "Number of simulated actors in the J43 leader load test (substrate-1 GAP-0564).",
+      "default": "50",
+      "accepted_values": [
+        "positive integer"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/substrate/chainstate/gap0564_j43_load_test.go",
+          "description": "TestSubstrateGAP0564J43ShapeOnARealLeader"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_J43_LOAD",
+      "category": "test_fixture",
+      "purpose": "Opt-in for the wall-clock J43 flood measurement of the gateway hook route (substrate-1 GAP-0565); unset skips it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/substrate_gap0565_flood_test.go",
+          "description": "TestSubstrateGAP0565FloodingActorKeepsTheOthersFast"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_J43_PHASE_SECS",
+      "category": "test_fixture",
+      "purpose": "Seconds per phase of the opt-in J43 flood measurement of the gateway hook route (substrate-1 GAP-0565).",
+      "default": "6",
+      "accepted_values": [
+        "positive integer"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/substrate_gap0565_flood_test.go",
+          "description": "TestSubstrateGAP0565FloodingActorKeepsTheOthersFast"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_J43_SECS",
+      "category": "test_fixture",
+      "purpose": "Seconds each simulated actor runs in the J43 leader load test (substrate-1 GAP-0564).",
+      "default": "4",
+      "accepted_values": [
+        "positive integer"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/substrate/chainstate/gap0564_j43_load_test.go",
+          "description": "TestSubstrateGAP0564J43ShapeOnARealLeader"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_REAL_FS_TESTS",
       "category": "test_fixture",
       "purpose": "Turns on the Go tests that mount a real, size-limited tmpfs (testenv.RealSmallFilesystem) so a full audit store is a real ENOSPC from the kernel; they also need passwordless sudo for mount and umount, and are skipped otherwise.",
@@ -371,6 +448,26 @@
         }
       ],
       "since": "1.0.6"
+    },
+    {
+      "name": "DEFENSECLAW_TASK_FAULTS",
+      "category": "hook_internal",
+      "purpose": "Path of the fault file the Agent Substrate relay gives a --task run; the actor kit hook adds one line for each hook call the gateway did not answer, so an agent that still exits 0 is not reported as a success (GAP-0326). Set by the relay, not by people.",
+      "default": "unset (no task run)",
+      "accepted_values": [
+        "absolute file path",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/substrate/kit/taskfaults.go",
+          "description": "Written by the relay for a task run and appended to by the kit hook"
+        }
+      ],
+      "since": "1.0.10"
     },
     {
       "name": "DEFENSECLAW_TEST_SIDECAR_HOOK_PRIORITY",
@@ -5842,6 +5939,26 @@
       "since": "1.0.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_ROUTE_WORKER_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the test helper process that stands in for the per-user enterprise hook worker of a route-only render (GAP-1311).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_route_worker_wire_unix_test.go",
+          "description": "TestRouteOnlyWorkerHelperProcess"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
       "name": "DEFENSECLAW_TEST_AWAITED_HOOK_CHILD",
       "category": "test_fixture",
       "purpose": "Selects the test helper process that exits at once with a block when it receives the expected hook argument list, so the Windows PowerShell hook bridge tests can check that a fast-exiting hook keeps its exit code and output.",
@@ -6483,6 +6600,30 @@
         }
       ],
       "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_K8S_CLUSTER_NAME",
+      "category": "telemetry",
+      "purpose": "Cluster name the Agent Substrate chart sets from its clusterName value; the gateway exports it as the k8s.cluster.name resource attribute (Kubernetes has no API that names the cluster).",
+      "default": "unset (no k8s.cluster.name attribute)",
+      "accepted_values": [
+        "cluster name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar_observability_v8_bootstrap.go",
+          "description": "Gateway pod on Agent Substrate reads it for the k8s.* resource attributes"
+        },
+        {
+          "location": "deploy/helm/defenseclaw-substrate/templates/_helpers.tpl",
+          "description": "Chart sets it from .Values.clusterName"
+        }
+      ],
+      "since": "1.0.10"
     },
     {
       "name": "DEFENSECLAW_TRACESTATE",

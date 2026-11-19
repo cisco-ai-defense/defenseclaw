@@ -48,7 +48,9 @@ func withRestoredManagedPosture(t *testing.T) {
 // state a gateway publishes when it boots or reloads (NewSidecar,
 // applyConfigReloadSnapshot): the managed, standalone and hosted posture, the
 // user email setting, the agent identity config, judge body retention and
-// queue, the live generation and profile set, and the run and instance ids.
+// queue, the live generation and profile set, the run and instance ids, and
+// the telemetry HMAC key (NewSidecar seeds it, once per process, and later
+// tests ran with the per-session tool chain armed: rel-1-0-10 GAP-1253).
 // Without it the next test (and every later -count iteration) ran under the
 // last booted gateway: the organization wording of a standalone gateway, the
 // run id of TestStandaloneHookLaneBlocksOnTheLocalEngine (rel-1-0-6
@@ -66,11 +68,14 @@ func restoreGatewayProcessPosture(t *testing.T) {
 	// Secure Client test read no Secure Client user.
 	facts, attribution := identityFactsEnabled.Load(), secureClientUserAttribution.Load()
 	principal, blocking := userPrincipalCollectionEnabled.Load(), identityLookupBlocking.Load()
+	hmacKey := gatewaylog.SwapTelemetryHMACKeyForTest(nil)
+	gatewaylog.SwapTelemetryHMACKeyForTest(hmacKey)
 	t.Cleanup(func() {
 		setIdentityFactsEnabled(facts)
 		setSecureClientUserAttribution(attribution)
 		SetUserPrincipalCollectionEnabled(principal)
 		setIdentityLookupBlocking(blocking)
+		gatewaylog.SwapTelemetryHMACKeyForTest(hmacKey)
 		setManagedEnterpriseRedactionPosture(aidOnly)
 		setStandaloneEnterpriseActive(standalone)
 		setManagedServiceHosted(hosted)

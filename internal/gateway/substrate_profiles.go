@@ -33,6 +33,17 @@ const SubstrateLauncherDefaultProfile = "default"
 // caller's.
 var ErrSubstrateProfileNotAllowed = errors.New("the profile is not assigned to the caller")
 
+// ErrSubstrateProfileNoAtespace is a create whose profile (the caller's,
+// or one an administrator named) has no launcher atespace (GAP-0541).
+type ErrSubstrateProfileNoAtespace struct{ Profile string }
+
+func (e *ErrSubstrateProfileNoAtespace) Error() string {
+	return fmt.Sprintf("%v: profile %q has no launcher atespace", ErrSubstrateProfileNotAllowed, e.Profile)
+}
+
+// Unwrap keeps errors.Is(err, ErrSubstrateProfileNotAllowed) true.
+func (e *ErrSubstrateProfileNoAtespace) Unwrap() error { return ErrSubstrateProfileNotAllowed }
+
 // SubstrateLauncherProfiles resolves a create's profile from the verified
 // caller (GAP-0043): the first guardrail.profile_assignments entry that
 // selects the person (users, groups) or the workload
@@ -58,10 +69,34 @@ func SubstrateLauncherProfiles(cfg *config.Config) SubstrateProfileResolver {
 		}
 		list := spaces[profile]
 		if len(list) == 0 {
-			return "", "", fmt.Errorf("%w: profile %q has no launcher atespace", ErrSubstrateProfileNotAllowed, profile)
+			return "", "", &ErrSubstrateProfileNoAtespace{Profile: profile}
 		}
 		return profile, list[0], nil
 	}
+}
+
+// SubstrateWorkloadEntry is the first match.substrate.workloads entry, in
+// profile_assignments order, that a workload subject matches, and that
+// assignment's profile; "" and "" when no entry matches, so the workload
+// gets an assignment without workloads or guardrail.default_profile. The
+// actor list answers a workload caller with it, so login --workload can
+// warn about an entry written in another form than the token's subject
+// (GAP-0542).
+func SubstrateWorkloadEntry(cfg *config.Config, subject string) (entry, profile string) {
+	if cfg == nil {
+		return "", ""
+	}
+	for _, a := range cfg.Guardrail.ProfileAssignments {
+		if a.Match.Substrate == nil {
+			continue
+		}
+		for _, e := range a.Match.Substrate.Workloads {
+			if substrateWorkloadMatches(e, subject) {
+				return strings.TrimSpace(e), strings.TrimSpace(a.Profile)
+			}
+		}
+	}
+	return "", ""
 }
 
 // substrateCallerProfile is the profile profile_assignments give the
@@ -126,8 +161,6 @@ func substrateUserMatches(entry string, p identity.Person) bool {
 	return strings.EqualFold(entry, p.Principal) || entry == p.Subject
 }
 
-// substrateWorkloadMatches compares a workloads entry (exact, or a prefix
-// with a trailing "*") with a workload subject.
 // substrateWorkloadMatches matches a match.substrate.workloads entry: exact,
 // or a ":*" / "/*" prefix that stops on a segment boundary (GAP-0043, the
 // rule identity.WorkloadSubjectPattern holds); a raw prefix or a bare "*"

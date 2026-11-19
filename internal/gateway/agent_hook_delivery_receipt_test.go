@@ -87,7 +87,7 @@ func newManagedHookAuditFixtureForExportingToInDir(
 	remote delivery.Adapter, off ...observability.Bucket,
 ) managedHookAuditFixture {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, connectorName)
 	fixture := newSidecarRuntimeFixtureExportingToInDir(t, directory, nil, remote, off...)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

@@ -138,6 +138,9 @@ func normalizeFindingString(raw, source, verdictSeverity string) NormalizedFindi
 	// otherwise a directive beginning with TRUST-/LP-/PII- could become its own
 	// persisted RuleID.
 	if localPatternSource {
+		if local, ok := localValueFreeFinding(id, structuredTitle, raw, source, nf.Severity); ok {
+			return local
+		}
 		if activeLocalPatternRuleIdentity(id, structuredTitle) {
 			canonicalID := canonicalIDFromRuleID(id)
 			nf.CanonicalID = canonicalID
@@ -215,6 +218,24 @@ func activeLocalPatternRuleIdentity(ruleID, title string) bool {
 	}
 	ruleCategoriesMu.RUnlock()
 	return present
+}
+
+// localValueFreeFinding reads a value-free legacy secret or PII finding
+// ("<rule id>:<local title>", scanLocalPatternsWithActivation, GAP-1085).
+func localValueFreeFinding(id, title, raw, source, severity string) (NormalizedFinding, bool) {
+	switch title {
+	case localCredentialFindingTitle:
+		// The proxy's own secret regexes are gone (GAP-0210): the operator
+		// literal indicator is the one legacy secret finding left.
+		if id == "LP-SECRET-MATCH" {
+			return normalizedSensitiveLocalFinding(id, CatCredentialLeak, title, raw, source, severity), true
+		}
+	case localPIIFindingTitle:
+		if id == "LP-PII-DATA" {
+			return normalizedSensitiveLocalFinding(id, CatPIIExposure, title, raw, source, severity), true
+		}
+	}
+	return NormalizedFinding{}, false
 }
 
 func normalizeUntrustedLocalPatternFinding(raw, apparentID, source, severity string) NormalizedFinding {
@@ -350,14 +371,21 @@ func normalizeSensitiveLocalPatternFinding(raw, source, severity string) (Normal
 			), true
 		}
 	}
-	for _, detector := range secretPatternDetectors {
-		if detector.pattern == nil || firstAcceptedRegexMatch(detector.pattern, match, func(candidate string) bool {
-			return acceptedLocalSecretMatch(detector.kind, candidate)
-		}) == nil {
-			continue
+	// A raw credential-shaped value is recognised by the rule pack's secret
+	// rules, the detectors every surface uses, so it never becomes a finding
+	// identity of its own. It keeps the canonical id the removed proxy-only
+	// list gave it (LP-SECRET-BEARER for a bearer credential, else
+	// LP-SECRET-ASSIGNMENT), so audit identities stay stable across the upgrade.
+	if secretFindings := scanContentRuleCategoryWithGeneration(snapshotRulePackGeneration(""), match, "", ruleContentScopeUntrusted, "secret"); len(secretFindings) > 0 {
+		canonicalID := "LP-SECRET-ASSIGNMENT"
+		for _, finding := range secretFindings {
+			if strings.HasPrefix(finding.RuleID, "SEC-BEARER") {
+				canonicalID = "LP-SECRET-BEARER"
+				break
+			}
 		}
 		return normalizedSensitiveLocalFinding(
-			detector.canonicalID, CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
+			canonicalID, CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
 		), true
 	}
 

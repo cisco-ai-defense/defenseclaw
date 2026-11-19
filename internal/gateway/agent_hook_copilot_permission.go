@@ -6,17 +6,15 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/copilotjoin"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-)
-
-const (
-	copilotPermissionJoinTTL = 8 * time.Second
-	copilotPermissionJoinMax = 4096
 )
 
 // A native Copilot permissionRequest sometimes omits the call arguments and
@@ -25,22 +23,45 @@ const (
 // join keeps that call (tool and arguments), never its decision: the
 // callback is bound to the call and decided again, now, like any call, so
 // the write targets as they resolve now, the live policy and the live
-// sandbox floor all apply.
+// sandbox floor all apply. What the join keeps and consumes is the
+// copilotjoin state: this gateway's own, or, for a verified Substrate actor,
+// the leader's, since the actor's preToolUse and its callback can land on
+// different gateway replicas (substrate-1 GAP-0269).
 type copilotPermissionJoin struct {
-	mu      sync.Mutex
-	entries map[string]copilotPermissionEntry
+	own copilotjoin.Process
 }
 
-type copilotPermissionEntry struct {
-	at        time.Time
-	ambiguous bool
-	// calls are the calls of one allowed preToolUse (one, or those of a
-	// parallel toolCalls envelope) that one callback tool can stand for.
-	// An argumentless callback cannot say which of them it is for, so it is
-	// bound to all of them and decided again on each (the most restrictive
-	// verdict answers); uses callbacks consume the entry (GAP-1831).
-	calls []copilotargs.NativeCall
-	uses  int
+// substrateCopilotJoin, when set (a gateway replica on Agent Substrate), is
+// the join state of every verified actor's calls.
+var substrateCopilotJoin atomic.Pointer[copilotjoin.Store]
+
+// setSubstrateCopilotJoin sets (nil clears) the shared join state.
+func setSubstrateCopilotJoin(store copilotjoin.Store) {
+	if store == nil {
+		substrateCopilotJoin.Store(nil)
+		return
+	}
+	substrateCopilotJoin.Store(&store)
+}
+
+func (j *copilotPermissionJoin) store(ctx context.Context) copilotjoin.Store {
+	if _, ok := substrateActorFrom(ctx); ok {
+		if shared := substrateCopilotJoin.Load(); shared != nil {
+			return *shared
+		}
+	}
+	return &j.own
+}
+
+var copilotJoinLastWarn atomic.Int64
+
+func copilotJoinWarn(op string, err error) {
+	now := time.Now().UnixNano()
+	last := copilotJoinLastWarn.Load()
+	if now-last < int64(time.Minute) || !copilotJoinLastWarn.CompareAndSwap(last, now) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] warning: the Copilot permission join state could not be %s (%v); an argumentless permission callback keeps its own unparsed decision\n", op, err)
 }
 
 func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
@@ -51,44 +72,8 @@ func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
 	return scope + "\x00" + req.SessionID + "\x00" + req.CWD
 }
 
-// copilotPermissionCallbackTool is the tool name of the permissionRequest
-// a call's callback carries: apply_patch and create calls ask as edit.
-// Entries are kept per callback tool, because a callback can stand only for
-// a call of its own tool: a call of another tool (a read, or a shell command
-// the agent approves itself) never gets this callback, so it can neither be
-// bound to it nor make it ambiguous (GAP-1924). A create callback carries
-// its own arguments; keyed with the patches of its envelope it takes its
-// own use instead of the one an argumentless patch callback needs
-// (GAP-1961).
-func copilotPermissionCallbackTool(tool string) string {
-	tool = strings.TrimSpace(tool)
-	if tool == "apply_patch" || tool == "create" {
-		return "edit"
-	}
-	return tool
-}
-
-// copilotPermissionCallsNeedTheJoin reports whether an argumentless
-// callback can stand for one of the calls: every call but a create or edit,
-// whose callbacks always carry their own arguments.
-func copilotPermissionCallsNeedTheJoin(calls []copilotargs.NativeCall) bool {
-	for _, call := range calls {
-		if name := strings.TrimSpace(call.Name); name != "create" && name != "edit" {
-			return true
-		}
-	}
-	return false
-}
-
-func copilotPermissionToolKey(scope, tool string) string {
-	return scope + "\x00" + copilotPermissionCallbackTool(tool)
-}
-
-// record keeps the calls of an audited preToolUse when allowed is true, one
-// entry per callback tool. Any other preToolUse in the same scope within
-// the lifetime, allowed or not, leaves the next callback of the same tool
-// ambiguous; a preToolUse whose calls cannot be read leaves every callback
-// of the scope ambiguous.
+// record keeps the calls of an audited preToolUse when allowed is true
+// (copilotjoin.Process.Record has the rules).
 func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest, allowed bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "preToolUse" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
@@ -109,58 +94,8 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 		calls = []copilotargs.NativeCall{{Name: req.ToolName, Args: req.ToolArgs}}
 		allowed = allowed && !req.ToolArgsProjectionUncertain && len(req.ToolArgs) > 0
 	}
-	now := time.Now()
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.entries == nil {
-		j.entries = make(map[string]copilotPermissionEntry)
-	}
-	if !readable {
-		for key, prior := range j.entries {
-			if strings.HasPrefix(key, scope+"\x00") && now.Sub(prior.at) <= copilotPermissionJoinTTL {
-				prior.ambiguous = true
-				prior.at = now
-				j.entries[key] = prior
-			}
-		}
-		return
-	}
-	byKey := make(map[string][]copilotargs.NativeCall)
-	var keys []string
-	for _, call := range calls {
-		key := copilotPermissionToolKey(scope, call.Name)
-		if _, seen := byKey[key]; !seen {
-			keys = append(keys, key)
-		}
-		byKey[key] = append(byKey[key], copilotargs.NativeCall{Name: call.Name, Args: append(json.RawMessage(nil), call.Args...)})
-	}
-	for _, key := range keys {
-		if prior, exists := j.entries[key]; exists && now.Sub(prior.at) <= copilotPermissionJoinTTL {
-			prior.ambiguous = true
-			prior.at = now
-			j.entries[key] = prior
-			continue
-		}
-		// A call whose own callback carries its arguments (create and edit
-		// ask with {file_path, diff}) never needs the join, so it is not
-		// kept: when its callback does not arrive, it cannot make the next
-		// patch's argumentless callback ambiguous (GAP-2012). It still makes
-		// a live entry of its tool ambiguous (above), and inside an envelope
-		// with a patch it still counts as a use (GAP-1961).
-		if !allowed || !copilotPermissionCallsNeedTheJoin(byKey[key]) {
-			continue
-		}
-		if len(j.entries) >= copilotPermissionJoinMax {
-			for old, entry := range j.entries {
-				if now.Sub(entry.at) > copilotPermissionJoinTTL {
-					delete(j.entries, old)
-				}
-			}
-			if len(j.entries) >= copilotPermissionJoinMax {
-				continue
-			}
-		}
-		j.entries[key] = copilotPermissionEntry{calls: byKey[key], uses: len(byKey[key]), at: now}
+	if err := j.store(ctx).Record(ctx, scope, readable, allowed, calls); err != nil {
+		copilotJoinWarn("written", err)
 	}
 }
 
@@ -193,42 +128,21 @@ func (j *copilotPermissionJoin) bind(ctx context.Context, req agentHookRequest, 
 	if scope == "" {
 		return nil, false
 	}
-	key := copilotPermissionToolKey(scope, req.ToolName)
-	j.mu.Lock()
-	entry, exists := j.entries[key]
-	if exists && time.Since(entry.at) > copilotPermissionJoinTTL {
-		delete(j.entries, key)
-		exists = false
+	// The callback consumes its tool's prior calls even when it is not
+	// bound to them (copilotjoin.Process.Take). A state that cannot be read
+	// binds nothing: the callback keeps its own unparsed decision.
+	entry, exists, err := j.store(ctx).Take(ctx, scope, req.ToolName)
+	if err != nil {
+		copilotJoinWarn("read", err)
+		return nil, false
 	}
-	if exists {
-		// This callback consumes one use of the prior calls of its tool
-		// even if its argument shape differs. Another callback cannot
-		// bind to it.
-		if entry.uses > 1 {
-			kept := entry
-			kept.uses--
-			j.entries[key] = kept
-		} else {
-			delete(j.entries, key)
-		}
-	} else {
-		// A callback no preToolUse of its tool announced means the join
-		// lost track of the session's calls: it consumes every prior call
-		// of the scope, so none is bound to a later callback.
-		for other := range j.entries {
-			if strings.HasPrefix(other, scope+"\x00") {
-				delete(j.entries, other)
-			}
-		}
-	}
-	j.mu.Unlock()
-	if !exists || entry.ambiguous || req.toolCallShapeUnparsed ||
+	if !exists || entry.Ambiguous || req.toolCallShapeUnparsed ||
 		!hookToolCallJSONUnambiguous(req.ConnectorName, raw) ||
 		!copilotEmptyPermissionArgs(req.Payload) {
 		return nil, false
 	}
 	var bound []copilotargs.NativeCall
-	for _, call := range entry.calls {
+	for _, call := range entry.Calls {
 		if copilotPermissionToolMatches(call.Name, req.ToolName) {
 			bound = append(bound, copilotargs.NativeCall{Name: call.Name, Args: append(json.RawMessage(nil), call.Args...)})
 		}

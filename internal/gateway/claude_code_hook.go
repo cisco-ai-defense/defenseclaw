@@ -114,7 +114,8 @@ type claudeCodeHookResponse struct {
 	// RuleIDs are the top detection rule_ids that drove this
 	// verdict (capped at 8). Lets operators correlate a block
 	// without joining against scan_findings. Additive.
-	RuleIDs []string `json:"rule_ids,omitempty"`
+	RuleIDs   []string `json:"rule_ids,omitempty"`
+	RuleNames []string `json:"-"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHookAnswer can honor it on the hook_decision event +
@@ -234,6 +235,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Args:                                     actionArgs,
 			CWD:                                      req.CWD,
 			ActiveHome:                               hookActiveHome(ctx),
+			WindowsHookHost:                          windowsHookHost() && !isSandboxHookRequest(ctx),
 			CurrentWindowsDrive:                      reportedWindowsDrive(req.reportedCWD),
 			ToolResourceIdentity:                     resourceIdentity,
 			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
@@ -419,6 +421,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// both see them without a second pass.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
+	resp.RuleNames = hookResponseRuleNames(resp.RuleIDs, evalCtx)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
@@ -1127,12 +1130,16 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 		}
 		result = results[0]
 	} else {
-		resolved, err := filepath.EvalSymlinks(target)
+		// The payload names the file; it is read as the hook path reads an
+		// operand, so a file on another machine's share (or behind a link
+		// into one) is never opened: the event is then judged by its text
+		// (rel-1-0-10:GAP-1074).
+		resolved, err := hookpaths.EvalSymlinks(target)
 		if err != nil {
 			return nil
 		}
 		target = resolved
-		info, err := os.Stat(target)
+		info, err := hookpaths.Stat(target)
 		if err != nil || info.IsDir() {
 			return nil
 		}

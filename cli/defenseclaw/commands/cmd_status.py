@@ -946,6 +946,41 @@ def _guardrail_turned_off(gc) -> bool:
     return getattr(gc, "enabled", True) is False
 
 
+def _print_openclaw_install_admission(cfg, platform: str | None = None) -> None:
+    """The "OpenClaw installs" row for an OpenClaw whose install_policy is on."""
+    from defenseclaw.openclaw_plugin_config import (
+        openclaw_install_policy_recorded_state,
+        openclaw_install_policy_stale_version,
+        openclaw_install_policy_state,
+    )
+
+    if openclaw_install_policy_state(cfg) == "ours":
+        stale, certain = openclaw_install_policy_stale_version(cfg, platform)
+        if stale:
+            # Not certain: the Windows ACL rule is the gateway's to settle
+            # (GAP-1198).
+            checked = "not checked" if certain else "may not be checked"
+            _status_row(
+                "OpenClaw installs",
+                ux._style(f"OpenClaw version changed; {checked} (defenseclaw doctor)", fg="yellow"),
+            )
+        else:
+            _status_row("OpenClaw installs", "checked by DefenseClaw before OpenClaw installs them")
+        return
+    recorded = openclaw_install_policy_recorded_state(cfg)
+    _status_row(
+        "OpenClaw installs",
+        ux._style(
+            (
+                recorded.split(":", 2)[1].strip()[:60] + "... (defenseclaw doctor)"
+                if recorded.startswith("not registered:")
+                else "not registered (run defenseclaw doctor)"
+            ),
+            fg="yellow",
+        ),
+    )
+
+
 def _print_agents(
     cfg,
     *,
@@ -1088,8 +1123,6 @@ def _print_agents(
             hook_mode, hook_detail, _seen = openclaw_plugin_evidence(cfg, None if sidecar_down else health)
             _status_row("OpenClaw hooks", f"{hook_mode} ({hook_detail})")
             from defenseclaw.openclaw_plugin_config import (
-                openclaw_install_policy_recorded_state,
-                openclaw_install_policy_state,
                 openclaw_install_policy_wanted,
                 openclaw_operator_admin_off,
             )
@@ -1097,21 +1130,7 @@ def _print_agents(
             if openclaw_operator_admin_off():
                 _status_row("OpenClaw remediation", "off (no operator.admin)")
             if openclaw_install_policy_wanted(cfg):
-                if openclaw_install_policy_state(cfg) == "ours":
-                    _status_row("OpenClaw installs", "checked by DefenseClaw before OpenClaw installs them")
-                else:
-                    recorded = openclaw_install_policy_recorded_state(cfg)
-                    _status_row(
-                        "OpenClaw installs",
-                        ux._style(
-                            (
-                                recorded.split(":", 2)[1].strip()[:60] + "... (defenseclaw doctor)"
-                                if recorded.startswith("not registered:")
-                                else "not registered (run defenseclaw doctor)"
-                            ),
-                            fg="yellow",
-                        ),
-                    )
+                _print_openclaw_install_admission(cfg)
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:

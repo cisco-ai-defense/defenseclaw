@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // S7Engine is one booted gateway generation and its hook handler.
@@ -479,6 +480,28 @@ func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResul
 	}
 	if !cut && acc.Len() >= s7StreamBufSize {
 		res.UncheckedTail = acc.Len() - lastScan
+	}
+	if !cut {
+		// A reply that ends inside an open private-key block is TRUNCATED: the
+		// proxy's open-secret hold gives it the unknown tier of the pack
+		// (rel-1-0-10:GAP-0429, stream_secret_hold.go).
+		var rt responseText
+		rt.Add(answerPiece(0, acc.String()))
+		if rt.OpenSecret().pem {
+			var trunc bounded.Truncated
+			trunc.Hit(bounded.Bytes)
+			set := trunc.Set()
+			tier := bounded.TierOf(e.sc.currentConfig().HookPolicyTierForConnector(""))
+			finding := []string{evaluationLimitRuleID + ":" + boundedTruncatedTitle + " (" + set.Reason() + ")"}
+			switch bounded.Floor(bounded.Allow, set, tier) {
+			case bounded.Block:
+				res.Action, res.Severity, res.Findings, res.BlockedAt = "block", "HIGH", finding, acc.Len()
+			default:
+				if res.Action == "allow" {
+					res.Action, res.Severity, res.Findings = "alert", "MEDIUM", finding
+				}
+			}
+		}
 	}
 	if acc.Len() > 0 {
 		fv := e.insp.Inspect(ctx, "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, "s7bench", "action")

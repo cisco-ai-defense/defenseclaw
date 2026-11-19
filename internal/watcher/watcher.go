@@ -1551,14 +1551,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if err != nil {
-			w.setRootCoverage(kind, dir, err)
-			if errors.Is(err, errWatchDirNotCreated) {
+			if errors.Is(err, errWatchRootAbsent) {
+				// An absent root holds nothing to scan, so it is not a
+				// coverage gap: health stays running and start reports
+				// ready. It is watched, and what it holds admitted, once
+				// it exists (GAP-1251).
+				fmt.Fprintf(os.Stderr, "[watch] warning: %s root %s is not scanned until it exists: %v; watching it once it is created\n", kind, dir, err)
 				missingDirs = append(missingDirs, [2]string{dir, kind})
 				return false
 			}
-			if !w.secureClientActive() {
+			w.setRootCoverage(kind, dir, err)
+			if errors.Is(err, errWatchDirNotCreated) || !w.secureClientActive() {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
-				return false
 			}
 			return false
 		}
@@ -5358,6 +5362,14 @@ func underVendorSystemRoot(absolute string) bool {
 // missing root (for example under a parent only an administrator may write).
 var errWatchDirNotCreated = errors.New("create dir")
 
+// errWatchRootAbsent marks a root that does not exist and that the watcher
+// did not create: its nearest existing folder belongs to another account
+// (the OpenClaw account of the separate-user layout), or creating it failed.
+var errWatchRootAbsent = errors.New("the root does not exist and the watcher does not create it")
+
+// anotherAccountOwns is ownedByAnotherAccount; tests substitute it.
+var anotherAccountOwns = ownedByAnotherAccount
+
 // ensureAndWatch creates and watches an asset root after validating any
 // account-owned links in its existing path. It returns folders it created.
 func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
@@ -5399,9 +5411,11 @@ func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool)
 			return nil, err
 		}
 	}
+	existing := ""
 	if current, err := filepath.Abs(dir); err == nil {
 		for {
 			if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
+				existing = current
 				break
 			}
 			created = append(created, current)
@@ -5412,7 +5426,16 @@ func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool)
 			current = parent
 		}
 	}
+	if checkLinks && len(created) > 0 && existing != "" && anotherAccountOwns(existing) {
+		// The watcher never creates folders in another account's tree
+		// (GAP-1251): the separate-user layout watches the OpenClaw
+		// account's claw.home_dir, which the gateway account may not write.
+		return nil, fmt.Errorf("%w: %w: %s belongs to another account", errWatchDirNotCreated, errWatchRootAbsent, existing)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		if len(created) > 0 {
+			return nil, fmt.Errorf("%w: %w: %w", errWatchDirNotCreated, errWatchRootAbsent, err)
+		}
 		return nil, fmt.Errorf("%w: %w", errWatchDirNotCreated, err)
 	}
 	if checkLinks {

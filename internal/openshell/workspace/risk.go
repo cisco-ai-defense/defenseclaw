@@ -92,6 +92,13 @@ func classifyChanges(changes []TreeChange, content contentFunc, sensitive []stri
 				// write through the link land there.
 				if r, ok := classifyLinkName(tgt); ok {
 					add(Flag{Path: rel, Label: rel, Kind: r.kind, Severity: r.severity, Detail: r.detail + " (a symbolic link to " + t + ", which is " + tgt + ")"})
+				} else if underHeavyDir(tgt + "/x") {
+					// A link into a dependency or cache folder (node_modules)
+					// that git ignores: its content is never in the diff, so an
+					// agent config there would surface through the link with
+					// no review (GAP-0556).
+					add(Flag{Path: rel, Label: rel, Kind: RiskAutoExec, Severity: SeverityHigh,
+						Detail: "a symbolic link to " + t + ", a dependency or cache folder the review does not read: agent settings or scripts there appear at " + rel})
 				}
 			}
 			if _, ok := isSecretName(rel); ok {

@@ -55,7 +55,7 @@ func readClaudeCodeAgentToolFixture(t *testing.T) []map[string]interface{} {
 // profile, as the hook handler does, and returns the correlated requests.
 func correlateClaudeCodeFixture(t *testing.T, profile connector.HookProfile, events []map[string]interface{}) []agentHookRequest {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	t.Cleanup(func() { _ = store.Close() })
 	out := make([]agentHookRequest, 0, len(events))
@@ -131,7 +131,7 @@ func TestClaudeCodeAgentlessHooksKeepTheMainAgent(t *testing.T) {
 // session id (GAP-0232).
 func TestClaudeCodeAgentlessHooksStayPerUser(t *testing.T) {
 	agentIdentityTestSetup(t)
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
 	t.Cleanup(func() { _ = store.Close() })
 	profile := (&APIServer{}).hookProfileForConnector("claudecode")

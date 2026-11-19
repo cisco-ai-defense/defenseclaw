@@ -17,7 +17,7 @@ import (
 const claudeCorrelationDocsRevision = "docs-sha256-30703875ce62463eda4f0efe92dd7f9d57207424f990f39fc72c77c06fb96190"
 
 func TestClaudeSourceBackedToolUseIDJoinsHookAndNativeOTLP(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	fixture := newCodexNativeOTLPFixture(t)
 	api := &APIServer{store: fixture.store}
 	api.bindOTLPObservabilityRuntime(fixture.runtime)

@@ -70,6 +70,8 @@ late policy only delays access.
 
 **Hook.** Agent hook, resident hook binary, egress (adds the token), actor listener. The gateway verifies the token and the live UID,
 finds the registration and profile, and runs the hook engine with surface `substrate`. Stateful steps go to the leader.
+Actor hooks always enforce (action mode): `guardrail.mode` and a profile's `mode` are not applied to actors, and a policy bundle
+that sets one other than `action` is refused (`not_substrate_policy`); `mode: action` is accepted as a no-op. The profile's thresholds and rule pack apply.
 
 **Model.** `/llm/<provider>` on the actor Service resolves the caller from the token, applies routing and the guardrails, adds the key,
 forwards, checks the response and records usage.
@@ -143,7 +145,7 @@ Registry version 4 of the v8 telemetry registry (no v9). All additions are liste
 - the `defenseclaw.sandbox.substrate.*` group and `ate.actor.uid` in `correlation.sandbox`;
 - resource attributes `k8s.cluster.name` and `k8s.namespace.name` (the pinned OpenTelemetry snapshot was refreshed for exactly these);
 - `defenseclaw.network.body_inspected` and `defenseclaw.network.body_over_cap` on egress records;
-- `log.secret.injected`, and nine `defenseclaw.substrate.*` metrics with no identity labels (`auth_refused` counts refused actor and person tokens by listener and reason);
+- `log.secret.injected`, and eight `defenseclaw.substrate.*` metrics with no identity labels (refused actor and person tokens are counted in their `auth_refused` audit rows, not by a metric);
 - the Grafana board `defenseclaw-substrate` and the chart's alert rules.
 
 Not yet in the registry (owned elsewhere): `log.model.usage` and `defenseclaw.model.cost` from the tokenomics stream, and the tool-chain

@@ -150,7 +150,7 @@ func TestSensitiveSQLiteReadDeletePolicyAnchorIsDetectionOnly(t *testing.T) {
 }
 
 func TestAuthenticatedSensitiveSQLiteReadDeletePreActionPosture(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	tests := []struct {
 		name          string

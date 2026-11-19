@@ -37,7 +37,7 @@ func TestGAP0347AttributedActorStep(t *testing.T) {
 		{"attested-template", "claudecode", version, contract, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			installDefaultProfileConnector(t, "claudecode")
 			_, chains := newTestChainLeaderServiceWith(t, "")
 			mine, err := registry.OpenFileStore(t.TempDir())
@@ -65,7 +65,7 @@ func TestGAP0347AttributedActorStep(t *testing.T) {
 			if marked != tc.unrecorded || got.Action == guardrailActionBlock || got.WouldBlock {
 				t.Fatalf("hook %q %v would_block=%v, callout %+v: want unrecorded=%v and not blocked", got.Action, got.RuleIDs, got.WouldBlock, v, tc.unrecorded)
 			}
-			if tc.unrecorded && !strings.Contains(v.Unrecorded, "registration names no connector") {
+			if tc.unrecorded && !strings.Contains(v.Unrecorded, "no attested connector is recorded") {
 				t.Fatalf("callout %+v: want the reason (no connector) kept for the egress check", v)
 			}
 			if !tc.unrecorded && (got.Action != "allow" || v.Unrecorded != "") {

@@ -375,19 +375,46 @@ func lateOrdinaryLook(opts Options) bool {
 		bothLateScansOrdinary(opts)
 }
 
-// bothLateScansOrdinary reports a per-user call that both late-call scans find
-// ordinary: the shared protected-reach reader (OrdinaryNoAnswerPayload) and
-// the word-by-word link-hop scan of the restart window
-// (hookpaths.LateOrdinaryCall, GAP-0518), which also reads a path out of a
-// key=value word, a sed write and a dash-named link target. The open tier
-// applies only when neither names a protected file, so a call that one of
-// them reaches stays closed. The link-hop scan is written for POSIX paths and
-// answers false for every call on Windows, where the shared reader (with the
-// Windows lexer) is the one scan.
+// LateOrdinaryBothScans is the late-ordinary rule on Linux and macOS: it
+// reports a per-user Claude Code or Codex tool-gate call (event) that both
+// late-call scans find ordinary, the word-by-word link-hop scan
+// (hookpaths.LateOrdinaryCallAt, GAP-0518), which also reads a path out of a
+// key=value word, a sed write and a dash-named link target, and the shared
+// protected-reach reader (lateOrdinaryNoAnswerPayloadAt), which also reads the
+// PermissionRequest, cd chain (a cd at any step) and relative Codex workdir shapes the
+// link-hop scan reads. Only such a call may follow the open outage tier when
+// its gateway took it and gave no answer; a call that either scan reaches
+// stays closed. Both scans tell the protected files against home, the account
+// the call runs for ("" is the home of the process). The native hook asks it
+// on every no-answer path (bothLateScansOrdinary, lateOrdinaryCheck) and the
+// shell hook helper (defenseclaw-hook-post) asks it too, so the two answer the
+// same payload alike (rel-1-0-10 GAP-1188). The link-hop scan is written for
+// POSIX paths and answers false on Windows, so this does too; there the
+// native hook's bothLateScansOrdinary reads the shared reader alone, as
+// OrdinaryNoAnswerPayload reads it.
+func LateOrdinaryBothScans(home, connector, event string, payload []byte) bool {
+	return lateScansOrdinary(home, connector, event, payload, true)
+}
+
+// lateScansOrdinary is LateOrdinaryBothScans; linkHop false leaves out the
+// link-hop scan and reads the shared reader as OrdinaryNoAnswerPayload does
+// (the Windows no-answer path of bothLateScansOrdinary).
+func lateScansOrdinary(home, connector, event string, payload []byte, linkHop bool) bool {
+	sharedReader := ordinaryNoAnswerPayloadAt
+	if linkHop {
+		sharedReader = lateOrdinaryNoAnswerPayloadAt
+	}
+	return toolGateEvent(connector, event) && lateOrdinaryConnector(connector) &&
+		(!linkHop || hookpaths.LateOrdinaryCallAt(home, connector, payload)) &&
+		sharedReader(home, payload)
+}
+
+// bothLateScansOrdinary is LateOrdinaryBothScans for the call of opts, read
+// at the deadline (lateOrdinaryLook) and by the watchdog (startOrdinaryLook).
+// On Windows the shared reader (with the Windows lexer) is the one scan
+// there.
 func bothLateScansOrdinary(opts Options) bool {
-	return toolGateEvent(opts.Connector, opts.Event) && lateOrdinaryConnector(opts.Connector) &&
-		(runtime.GOOS == "windows" || hookpaths.LateOrdinaryCall(opts.Connector, opts.failurePayload)) &&
-		OrdinaryNoAnswerPayload(opts.failurePayload)
+	return lateScansOrdinary("", opts.Connector, opts.Event, opts.failurePayload, runtime.GOOS != "windows")
 }
 
 // lateOrdinaryConnector reports a connector whose ordinary late calls may
@@ -405,19 +432,21 @@ func lateOrdinaryConnector(connector string) bool {
 }
 
 // lateOrdinaryCheck is the scan of a per-user tool call that the verified
-// gateway takes and does not answer by the deadline: it reports a call that
-// plainly names nothing a protected file could be reached through
-// (hookpaths.LateOrdinaryCall). Such a call follows the account's outage mode
-// instead of the closed no-answer answer, since a gateway that is up but slow
-// under a burst is not a reason to deny ordinary work. nil for managed,
-// socket and Secure Client calls and for events that are not a tool gate.
+// gateway takes and does not answer by the deadline, on the restart-window
+// and unanswered-listener paths: it reports a call that plainly names nothing
+// a protected file could be reached through (LateOrdinaryBothScans, the rule
+// of every other no-answer path, GAP-1188). Such a call follows the account's
+// outage mode instead of the closed no-answer answer, since a gateway that is
+// up but slow under a burst is not a reason to deny ordinary work. nil for
+// managed, socket and Secure Client calls and for events that are not a tool
+// gate.
 func lateOrdinaryCheck(opts Options, payload []byte) func() bool {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient ||
 		!toolGateEvent(opts.Connector, opts.Event) {
 		return nil
 	}
-	connector := opts.Connector
-	return func() bool { return hookpaths.LateOrdinaryCall(connector, payload) }
+	connector, event := opts.Connector, opts.Event
+	return func() bool { return LateOrdinaryBothScans("", connector, event, payload) }
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {

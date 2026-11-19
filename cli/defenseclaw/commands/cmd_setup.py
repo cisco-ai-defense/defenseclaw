@@ -22259,11 +22259,18 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         raise click.ClickException(_ROUTING_UNSUPPORTED_ON_WINDOWS)
 
     if enable:
+        from defenseclaw.commands.cmd_routing import DEFAULT_CLASSIFIER, routing_classifier  # noqa: PLC0415
+
+        classifier = routing_classifier(app.cfg.routing)
+        # rules and systemone run inside the gateway: no router container,
+        # so no Docker, version or port (GAP-1284).
+        in_process = classifier != DEFAULT_CLASSIFIER
         app.cfg.routing.enabled = True
-        if not app.cfg.routing.version:
-            app.cfg.routing.version = "0.3.0"
-        if not app.cfg.routing.port:
-            app.cfg.routing.port = 8080
+        if not in_process:
+            if not app.cfg.routing.version:
+                app.cfg.routing.version = "0.3.0"
+            if not app.cfg.routing.port:
+                app.cfg.routing.port = 8080
 
         _validate_routing_setup_models(app.cfg.routing.models)
 
@@ -22274,8 +22281,10 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         click.echo("  Configuring semantic model routing...")
         click.echo()
 
+        if in_process:
+            ux.echo(f"  ✓ {classifier} classifier runs in the gateway (no Docker needed)")
         # Remote routers are operator-owned and do not require local Docker.
-        if not remote_endpoint:
+        elif not remote_endpoint:
             docker = shutil.which("docker")
             if docker is None:
                 raise click.ClickException("Docker is required for managed routing but was not found")
@@ -22305,12 +22314,16 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
             raise click.ClickException(f"failed to save config: {exc}") from exc
         click.echo()
         ux.echo("  ✓ Semantic routing configured")
-        click.echo(f"    Mode:       {mode}")
-        if not remote_endpoint:
-            click.echo(f"    Version:    {app.cfg.routing.version}")
-            click.echo(f"    Router API: http://127.0.0.1:{app.cfg.routing.port}")
-        click.echo(f"    Models:     {len(app.cfg.routing.models)}")
-        click.echo("    Scope:      proxy-mode OpenAI chat-completions traffic")
+        if in_process:
+            click.echo(f"    Classifier: {classifier} (in process, no router container)")
+            click.echo(f"    Models:     {len(app.cfg.routing.models)}")
+        else:
+            click.echo(f"    Mode:       {mode}")
+            if not remote_endpoint:
+                click.echo(f"    Version:    {app.cfg.routing.version}")
+                click.echo(f"    Router API: http://127.0.0.1:{app.cfg.routing.port}")
+            click.echo(f"    Models:     {len(app.cfg.routing.models)}")
+            click.echo("    Scope:      proxy-mode OpenAI chat-completions traffic")
         click.echo()
         click.echo("  Activation: gateway restart required")
         click.echo("  Restart with: defenseclaw-gateway restart")
@@ -22334,7 +22347,9 @@ def setup_routing(app: AppContext, enable: bool, disable: bool, status: bool, ye
         _log_setup_action(
             app,
             ACTION_SETUP_ROUTING,
-            f"enabled=True version={app.cfg.routing.version} port={app.cfg.routing.port}",
+            f"enabled=True classifier={classifier}"
+            if in_process
+            else f"enabled=True version={app.cfg.routing.version} port={app.cfg.routing.port}",
             allow_offline=True,
         )
 
@@ -22386,6 +22401,18 @@ def _print_routing_status(app: AppContext) -> None:
         click.echo("    Enable with: defenseclaw setup routing --enable")
         return
     click.echo("    Configured: enabled")
+    from defenseclaw.commands.cmd_routing import DEFAULT_CLASSIFIER, routing_classifier  # noqa: PLC0415
+
+    classifier = routing_classifier(app.cfg.routing)
+    if classifier != DEFAULT_CLASSIFIER:
+        # rules and systemone run inside the gateway: there is no router
+        # container or API to probe, so ask the gateway (GAP-1252).
+        click.echo(f"    Classifier: {classifier} (in process, no router container)")
+        click.echo(f"    Models:     {len(app.cfg.routing.models)}")
+        click.echo(f"    Runtime:    {_inprocess_routing_runtime(app)}")
+        click.echo("    Changes require a gateway restart.")
+        click.echo()
+        return
     version = app.cfg.routing.version or "0.3.0 (default)"
     port = app.cfg.routing.port or 8080
     remote_endpoint = str(app.cfg.routing.remote.get("endpoint") or "").strip()
@@ -22420,6 +22447,23 @@ def _validate_routing_setup_models(models: list[dict[str, Any]]) -> None:
         if alias in aliases:
             raise click.ClickException(f"routing model alias is duplicated: {alias}")
         aliases.add(alias)
+
+
+def _inprocess_routing_runtime(app: AppContext) -> str:
+    """Routing state from the running gateway's /health, the same source
+    `defenseclaw routing status` reads."""
+    from defenseclaw.commands.cmd_routing import _health_routing  # noqa: PLC0415
+
+    live = _health_routing(app)
+    state = str(live.get("state") or "").strip().lower()
+    if state == "unreachable":
+        return "gateway not reachable (start it with: defenseclaw-gateway start)"
+    if state == "error":
+        cause = " ".join(str(live.get("last_error") or "").split())[:200]
+        return f"error: {cause}" if cause else "error"
+    if not state:
+        return "not reported by the gateway (restart it with: defenseclaw-gateway restart)"
+    return state
 
 
 def _routing_health_status(endpoint: str) -> str:

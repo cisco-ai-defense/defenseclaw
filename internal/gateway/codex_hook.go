@@ -151,6 +151,7 @@ type codexHookResponse struct {
 	// connector hook scripts ignore the fields.
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	RuleNames    []string `json:"-"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHookAnswer can honor it on the hook_decision event +
@@ -318,6 +319,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Args:                     toolArgs,
 			CWD:                      toolCWD,
 			ActiveHome:               hookActiveHome(ctx),
+			WindowsHookHost:          windowsHookHost() && !isSandboxHookRequest(ctx),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
@@ -470,6 +472,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	}
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
+	resp.RuleNames = hookResponseRuleNames(resp.RuleIDs, evalCtx)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
@@ -1974,11 +1977,11 @@ func codexObserveGitDiffPathspecs(
 		if !ok || !codexObserveSourceRelativePath(relative) {
 			return nil, false
 		}
-		realCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+		realCWD, err := hookpaths.EvalSymlinks(filepath.Clean(cwd))
 		if err != nil || !filepath.IsAbs(realCWD) {
 			return nil, false
 		}
-		info, err := os.Lstat(filepath.Join(realCWD, relative))
+		info, err := hookpaths.Lstat(filepath.Join(realCWD, relative))
 		if err != nil || !info.Mode().IsRegular() && !info.IsDir() {
 			return nil, false
 		}
@@ -3405,12 +3408,12 @@ func trustedFixtureOrGuardrailSourceTarget(path, cwd string, allowDirectory bool
 	if !ok || !fixtureOrGuardrailSourceRelativePath(relative) {
 		return false
 	}
-	realCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+	realCWD, err := hookpaths.EvalSymlinks(filepath.Clean(cwd))
 	if err != nil || !filepath.IsAbs(realCWD) {
 		return false
 	}
 	target := filepath.Join(realCWD, relative)
-	info, err := os.Lstat(target)
+	info, err := hookpaths.Lstat(target)
 	if err != nil {
 		return false
 	}
@@ -3452,12 +3455,12 @@ func trustedObserveWorkspaceSourceTarget(path, cwd string, allowDirectory bool) 
 	if !ok || !observeWorkspaceSourceRelativePath(relative) {
 		return false
 	}
-	realCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+	realCWD, err := hookpaths.EvalSymlinks(filepath.Clean(cwd))
 	if err != nil || !filepath.IsAbs(realCWD) {
 		return false
 	}
 	target := filepath.Join(realCWD, relative)
-	info, err := os.Lstat(target)
+	info, err := hookpaths.Lstat(target)
 	if err != nil {
 		return false
 	}
@@ -3649,11 +3652,14 @@ func trustedPhysicalWorkspaceRelativePath(path, cwd string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	realCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+	// Read as the hook path reads an operand: a working folder on another
+	// machine's share is never opened, and its paths are not trusted
+	// (rel-1-0-10:GAP-1074).
+	realCWD, err := hookpaths.EvalSymlinks(filepath.Clean(cwd))
 	if err != nil || !filepath.IsAbs(realCWD) {
 		return "", false
 	}
-	realPath, err := filepath.EvalSymlinks(filepath.Join(filepath.Clean(cwd), relative))
+	realPath, err := hookpaths.EvalSymlinks(filepath.Join(filepath.Clean(cwd), relative))
 	if err != nil || !filepath.IsAbs(realPath) {
 		return "", false
 	}

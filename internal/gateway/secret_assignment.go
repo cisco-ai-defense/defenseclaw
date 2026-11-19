@@ -79,13 +79,20 @@ var secretAssignmentFillerTokens = map[string]bool{
 	"me": true, "change": true, "not": true, "real": true, "new": true, "old": true,
 }
 
+// maskedCredentialValue reports a value that masks a credential with a run
+// of x (xxxxxxxx, xxxx-xxxx-1234): the shape of a redacted value, not one.
+func maskedCredentialValue(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "xxxx") && strings.Trim(lower, "x0123456789_-.") == ""
+}
+
 // secretAssignmentPlaceholderValue reports a value made only of placeholder
 // and filler words, with at least one placeholder word, or of a run of x.
 func secretAssignmentPlaceholderValue(value string) bool {
-	lower := strings.ToLower(value)
-	if strings.Contains(lower, "xxxx") && strings.Trim(lower, "x0123456789_-.") == "" {
+	if maskedCredentialValue(value) {
 		return true
 	}
+	lower := strings.ToLower(value)
 	tokens := strings.FieldsFunc(lower, func(r rune) bool { return r == '_' || r == '-' || r == '.' })
 	sawPlaceholder := false
 	for i := 0; i < len(tokens); i++ {

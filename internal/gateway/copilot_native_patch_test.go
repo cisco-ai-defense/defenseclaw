@@ -16,11 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
+	"github.com/defenseclaw/defenseclaw/internal/copilotjoin"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -208,12 +208,15 @@ func TestCopilotPermissionJoinCapacityStillInvalidatesPrior(t *testing.T) {
 	if scope == "" {
 		t.Fatal("expected verified per-user scope")
 	}
-	join := copilotPermissionJoin{entries: map[string]copilotPermissionEntry{
-		copilotPermissionToolKey(scope, "apply_patch"): {calls: []copilotargs.NativeCall{{Name: "apply_patch",
-			Args: json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`)}}, uses: 1, at: time.Now()},
-	}}
-	for i := 1; i < copilotPermissionJoinMax; i++ {
-		join.entries["other"+strconv.Itoa(i)] = copilotPermissionEntry{at: time.Now()}
+	var join copilotPermissionJoin
+	allowedPre := pre
+	allowedPre.ToolArgs = json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`)
+	join.record(ctx, allowedPre, true)
+	for i := 1; i < copilotjoin.Max; i++ {
+		if err := join.own.Record(ctx, "other"+strconv.Itoa(i), true, true,
+			[]copilotargs.NativeCall{{Name: "view", Args: json.RawMessage(`{"path":"/tmp/p"}`)}}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	join.record(ctx, pre, false)
 	permission := agentHookRequest{ConnectorName: "copilot", HookEventName: "permissionRequest",

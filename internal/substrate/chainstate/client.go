@@ -6,16 +6,21 @@ package chainstate
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 )
 
 // Client is the gateway replicas', the callout's and the controller's side
 // of the leader's chain state.
 type Client struct {
 	Leader *leader.Client
+	// ObserveLatency, when set, is told how long each tool-chain step took
+	// at the leader, answer or error (defenseclaw.substrate.leader_observe_latency).
+	ObserveLatency func(time.Duration)
 }
 
 func (c *Client) call(ctx context.Context, method string, in, out any) error {
@@ -77,7 +82,12 @@ func (b *Binding) op(ctx context.Context, op Op, semantic audit.SemanticEventID,
 			SessionDigest: b.session}
 	}
 	var resp ObserveResponse
-	if err := b.client.call(ctx, leader.MethodChainObserve, req, &resp); err != nil {
+	start := time.Now()
+	err = b.client.call(ctx, leader.MethodChainObserve, req, &resp)
+	if b.client.ObserveLatency != nil {
+		b.client.ObserveLatency(time.Since(start))
+	}
+	if err != nil {
 		return err
 	}
 	return decodeGob(resp.Result, out)
@@ -131,6 +141,11 @@ func (c *Client) Lifecycle(ctx context.Context, ev LifecycleEvent) (LifecycleRes
 	return out, err
 }
 
+// Running reports the actors the controller saw running (GAP-0539).
+func (c *Client) Running(ctx context.Context, actors []Actor) error {
+	return c.call(ctx, MethodChainRunning, RunningRequest{Actors: actors}, nil)
+}
+
 // Unrecorded tells the leader that a tool step of the actor is not in its
 // chain window (GAP-0339).
 func (c *Client) Unrecorded(ctx context.Context, actor Actor, why string) error {
@@ -146,6 +161,14 @@ func (c *Client) Uncleared(ctx context.Context, actor Actor, why string) error {
 // PutTask registers the --task text of an actor (the launcher, at create).
 func (c *Client) PutTask(ctx context.Context, actor Actor, text string) error {
 	return c.call(ctx, leader.MethodIntentPut, IntentRequest{Actor: actor, Op: IntentTask, Text: text}, nil)
+}
+
+// RateShare sends a replica's request counts for the fair-share limits
+// and returns the cluster's (GAP-0566).
+func (c *Client) RateShare(ctx context.Context, in ratelimit.ShareReport) (ratelimit.ShareAnswer, error) {
+	var out ratelimit.ShareAnswer
+	err := c.call(ctx, ratelimit.MethodShare, in, &out)
+	return out, err
 }
 
 // CheckEgress records one observed egress step in the actor window and

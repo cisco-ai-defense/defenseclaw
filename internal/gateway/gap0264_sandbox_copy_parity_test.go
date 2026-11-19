@@ -7,6 +7,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -46,6 +48,29 @@ func gap0264Expand(value any, project, home string) any {
 		return out
 	}
 	return value
+}
+
+// gap0264KitFacts are the facts the actor's kit sends with a Claude Write
+// or Edit of a settings file (attachAgentHookBefore,
+// internal/substrate/kit/facts.go): an exact before of every home or project
+// .claude/settings.json and .claude/settings.local.json the call names, a
+// missing file as an exact empty one. The guest file does not exist, as the
+// laptop file does not. Without these facts the gateway cannot prove a
+// copy-mode settings write leaves DefenseClaw's hooks and blocks it
+// (substrate-1:GAP-0612); a laptop-parity row must send what a real actor
+// sends (substrate-1:NF2-0264).
+func gap0264KitFacts(ctx context.Context, probe gap0264Probe, input map[string]any) context.Context {
+	if probe.tool != "Write" && probe.tool != "Edit" {
+		return ctx
+	}
+	target, _ := input["file_path"].(string)
+	if !strings.HasSuffix(target, "/.claude/settings.json") && !strings.HasSuffix(target, "/.claude/settings.local.json") {
+		return ctx
+	}
+	sum := sha256.Sum256(nil)
+	return context.WithValue(ctx, substrateEnvelopeKey{}, substrateEnvelope{Facts: &SubstrateFacts{Files: []SubstrateAttachedFile{{
+		Role: "agent_hook_config_before", Path: target, SHA256: hex.EncodeToString(sum[:]),
+	}}}})
 }
 
 // gap0264ActorWorkdir is the working directory of a Substrate actor
@@ -244,7 +269,15 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 			laptopInput := gap0264Expand(probe.input, project, home).(map[string]any)
 			actorInput := gap0264Expand(probe.input, gap0264ActorWorkdir, sandboxauth.SandboxHome).(map[string]any)
 			laptopAction, laptopRules := gap0264Verdict(t, api, context.Background(), laptopCWD, probe, laptopInput)
-			copyAction, copyRules := gap0264Verdict(t, api, actor(false), actorCWD, probe, actorInput)
+			copyAction, copyRules := gap0264Verdict(t, api, gap0264KitFacts(actor(false), probe, actorInput), actorCWD, probe, actorInput)
+			if gap0264KitFacts(context.Background(), probe, actorInput) != context.Background() {
+				// An old kit sends no settings snapshot: the copy-mode write of a
+				// settings file stays blocked (substrate-1:GAP-0612).
+				bareAction, bareRules := gap0264Verdict(t, api, actor(false), actorCWD, probe, actorInput)
+				if bareAction != "block" || !slices.Contains(bareRules, agentHookConfigDisableRuleID) {
+					t.Errorf("copy-mode settings write without the kit snapshot: %s %v, want block %s", bareAction, bareRules, agentHookConfigDisableRuleID)
+				}
+			}
 			mountAction, mountRules := gap0264Verdict(t, api, actor(true), actorCWD, probe, actorInput)
 			t.Logf("PARITY %-38s laptop=%s %v copy=%s %v mount=%s %v", probe.name,
 				laptopAction, laptopRules, copyAction, copyRules, mountAction, mountRules)

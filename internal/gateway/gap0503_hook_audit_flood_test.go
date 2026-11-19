@@ -42,7 +42,7 @@ func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 	grace := agentHookDisconnectGrace
 	agentHookDisconnectGrace = 0
 	t.Cleanup(func() { agentHookDisconnectGrace = grace })
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
@@ -140,7 +140,7 @@ func TestGAP0503HandlerHeldSQLiteReportsDroppedToolRows(t *testing.T) {
 	grace := agentHookDisconnectGrace
 	agentHookDisconnectGrace = 0
 	t.Cleanup(func() { agentHookDisconnectGrace = grace })
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	signer := &heldWriterSigner{entered: make(chan struct{}), release: make(chan struct{})}
 	fixture := newSidecarRuntimeFixtureWithSigner(t, true, signer)

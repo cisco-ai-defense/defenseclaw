@@ -135,6 +135,8 @@ defenseclaw setup routing --status
 docker ps --filter label=com.defenseclaw.component=semantic-router
 ```
 
+The `docker ps` check applies to `vllm_sr` only: `rules` and `systemone` run inside the gateway and have no container, and `--status` names the classifier and the state the gateway reports.
+
 A routed response carries these headers:
 
 ```text

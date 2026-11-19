@@ -35,8 +35,24 @@ import (
 // no proof), and, outside Windows, one of the files it patches names this
 // install's own hook command, so the hooks of another DefenseClaw data
 // directory on the account stay. Windows commands name the per-account
-// launcher, not a data directory. Its own Teardown removes only what
-// DefenseClaw wrote, then the hook script goes and its hook token is
+// launcher, not a data directory.
+//
+// A rollback's data swap drops the hook script and leaves the entries
+// running a script that is not there (rel-1-0-10 GAP-1092). A connector that
+// can prove from its decoded entries that one is this install's own
+// (connector.InstallHookEntryOwner: the command is exactly one this install's
+// Setup writes, never a managed install's, and on Windows, where the command
+// names the account's launcher, this data folder also holds the live hook
+// script or a backup record of the connector) qualifies with or without the
+// script, by that proof alone. That proof also reads the files only this
+// install's backup records name (a workspace file from before
+// claw.workspace_dir changed, a custom default agent the user switched away
+// from), and VerifyClean reports their entries too, so residue only a record
+// names starts the reclaim; so does an unfinished teardown (a record or the
+// hook token it left), whose reclaim finishes it. When ownership cannot be
+// proven, the entries stay and the boot says so. Its own Teardown, in reclaim mode
+// (SetupOpts.ReclaimOwnHooksOnly), removes only what this install wrote and
+// leaves another install's entries in the shared files, then the hook script goes and its hook token is
 // revoked as for a removed connector, so the next boot finds nothing to do.
 // A managed install leaves it to the hook guardian. A failure is logged and
 // never fails a boot.
@@ -80,22 +96,41 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 		if !ok {
 			continue
 		}
-		if _, hooked := conn.(connector.HookEndpoint); !hooked || !installWroteHookScript(conn, opts) {
+		if _, hooked := conn.(connector.HookEndpoint); !hooked {
+			continue
+		}
+		owner, decoded := conn.(connector.InstallHookEntryOwner)
+		if !decoded && !installWroteHookScript(conn, opts) {
 			continue
 		}
 		if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "teardown incomplete") {
 			continue
 		}
-		if !connector.PatchedFilesNameOwnHook(opts, conn) {
+		if decoded {
+			if owns, err := owner.InstallOwnsHookEntries(opts); err != nil || !owns {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s is not guarded and DefenseClaw hook entries remain, but this install cannot prove they are its own; left in place\n", name)
+				continue
+			}
+		} else if !connector.PatchedFilesNameOwnHook(opts, conn) {
 			continue
 		}
 		result := "removed"
-		if err := conn.Teardown(ctx, opts); err != nil {
+		reclaim := opts
+		reclaim.ReclaimOwnHooksOnly = true
+		teardownErr := conn.Teardown(ctx, reclaim)
+		var verifyErr error
+		if teardownErr == nil && !decoded {
+			// A connector that proves ownership from its decoded entries
+			// checks its own reclaim in Teardown: another install's entries in
+			// the shared files stay, which VerifyClean would report.
+			verifyErr = conn.VerifyClean(opts)
+		}
+		if teardownErr != nil {
 			result = "failed"
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded but its DefenseClaw hooks could not be removed: %v\n", name, err)
-		} else if err := conn.VerifyClean(opts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded but its DefenseClaw hooks could not be removed: %v\n", name, teardownErr)
+		} else if verifyErr != nil {
 			result = "incomplete"
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded and its DefenseClaw hooks are not all gone: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded and its DefenseClaw hooks are not all gone: %v\n", name, verifyErr)
 		} else {
 			if err := removeTeardownHookFiles(registry, conn, cfg.ActiveConnectors(), opts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s hook script and token were not removed: %v\n", name, err)

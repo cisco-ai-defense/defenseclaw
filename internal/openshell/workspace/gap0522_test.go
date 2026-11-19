@@ -90,3 +90,54 @@ func TestGAP0523LinkIsFlaggedByItsResolvedTarget(t *testing.T) {
 		t.Error("a link to README.md got a high flag")
 	}
 }
+
+// GAP-0552: a directory link standing for a middle segment of a rule
+// (.kiro/settings -> ../kcfg makes .kiro/settings/mcp.json appear, as does
+// .gemini/config -> ../gc for .gemini/config/hooks.json, at any depth) was
+// info-only. It is flagged by any rule a path below it would match, by its
+// own path and by its resolved target.
+func TestGAP0552MiddleSegmentDirectoryLinkIsFlagged(t *testing.T) {
+	links := map[string]string{".kiro/settings": "../kcfg", ".gemini/config": "../gc", "a/.kiro/settings": "../../kc",
+		"tools/cfg": "../.kiro/settings", "docs/img": "../assets"}
+	var changes []TreeChange
+	for p := range links {
+		changes = append(changes, TreeChange{Path: p, Status: "A", NewMode: modeSymlink})
+	}
+	content := func(c TreeChange, after bool) ([]byte, bool) { return []byte(links[c.Path]), after }
+	high := map[string]bool{}
+	for _, f := range classifyChanges(changes, content, nil) {
+		if f.Severity == SeverityHigh {
+			high[f.Path] = true
+		}
+	}
+	for _, p := range []string{".kiro/settings", ".gemini/config", "a/.kiro/settings", "tools/cfg"} {
+		if !high[p] {
+			t.Errorf("%s (link to %s) has no high flag", p, links[p])
+		}
+	}
+	if high["docs/img"] {
+		t.Error("an ordinary directory link got a high flag")
+	}
+}
+
+// GAP-0556: a tracked link into a dependency folder git ignores
+// (pkg -> node_modules/evil) surfaces whatever is there, an agent config
+// included, with no review of that content. It is flagged high; a link to
+// an ordinary folder is not.
+func TestGAP0556LinkIntoIgnoredDependencyFolderIsFlagged(t *testing.T) {
+	links := map[string]string{"pkg": "node_modules/evil", "docs/img": "../assets"}
+	var changes []TreeChange
+	for p := range links {
+		changes = append(changes, TreeChange{Path: p, Status: "A", NewMode: modeSymlink})
+	}
+	content := func(c TreeChange, after bool) ([]byte, bool) { return []byte(links[c.Path]), after }
+	high := map[string]bool{}
+	for _, f := range classifyChanges(changes, content, nil) {
+		if f.Severity == SeverityHigh {
+			high[f.Path] = true
+		}
+	}
+	if !high["pkg"] || high["docs/img"] {
+		t.Errorf("high flags = %v, want pkg only", high)
+	}
+}

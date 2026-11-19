@@ -24,7 +24,7 @@ import (
 
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
 // The ext_proc attribute that carries the actor identity: Envoy's
@@ -46,9 +46,9 @@ const (
 // identity, or one that does not parse.
 var ErrNoIdentity = errors.New("extproc: no actor identity")
 
-// Atespace and actor names: printable, bounded, no separators, so a name
-// can't smuggle a path segment into a key or a refusal.
-var actorNamePattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+// validActorName checks an atespace or actor name (registry.ValidName,
+// shared with the leader's telemetry relay).
+var validActorName = registry.ValidName
 
 // actorFromAttributes reads the actor identity from the first message's
 // attributes.
@@ -87,7 +87,7 @@ func ParseActorSPIFFE(id, trustDomain string) (ActorRef, error) {
 	if len(parts) != 3 || parts[0] != workerForActorSegment {
 		return ActorRef{}, fmt.Errorf("%w: path is not /%s/<atespace>/<name>", ErrNoIdentity, workerForActorSegment)
 	}
-	if !actorNamePattern.MatchString(parts[1]) || !actorNamePattern.MatchString(parts[2]) {
+	if !validActorName(parts[1]) || !validActorName(parts[2]) {
 		return ActorRef{}, fmt.Errorf("%w: invalid atespace or actor name", ErrNoIdentity)
 	}
 	return ActorRef{Atespace: parts[1], Name: parts[2]}, nil

@@ -105,11 +105,18 @@ func recordGatewayLoginPath(dataDir string) {
 		strings.TrimSpace(string(existing)) == path {
 		return
 	}
-	tmp, err := os.CreateTemp(dataDir, gatewayLoginPathName+".*.tmp")
+	writePrivateDataDirFile(dataDir, gatewayLoginPathName, path+"\n")
+}
+
+// writePrivateDataDirFile replaces dataDir/name with body, owner-only.
+// Best effort: a failed write leaves no temporary file behind.
+func writePrivateDataDirFile(dataDir, name, body string) {
+	target := filepath.Join(dataDir, name)
+	tmp, err := os.CreateTemp(dataDir, name+".*.tmp")
 	if err != nil {
 		return
 	}
-	_, err = tmp.WriteString(path + "\n")
+	_, err = tmp.WriteString(body)
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}

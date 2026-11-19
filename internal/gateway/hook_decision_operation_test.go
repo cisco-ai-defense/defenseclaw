@@ -130,7 +130,7 @@ func TestHookDeliveryPhaseSnapshotNeverBorrowsAnotherToolCallsOperation(t *testi
 // real handler and audit store. Every connector-hook decision row links to a
 // distinct operation, the one of its own tool call.
 func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	remote := newHookRemoteRecorder()
 	fixture := newSidecarRuntimeFixtureExportingTo(t, nil, remote)

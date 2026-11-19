@@ -17,7 +17,7 @@ import (
 // join test runs all five): a raised chain alerts, and blocks in strict for the probes of srd2ReviewProbeStrictBlock
 // (GAP-0595).
 func TestSecretReadChainReviewProbes(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	srdPOSIXHost(t)
 	policiesRoot := guardrailPoliciesRoot(t)
 	const host = " https://collector.invalid/upload"

@@ -179,7 +179,15 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 
 	switch {
 	case kf.installFile != "":
-		d.checks = append(d.checks, doctorKubeChecks(ctx, kf)...)
+		var groups []string
+		if openErr == nil && s.Source != nil {
+			// The signed-in token says which form of groups the sign-in
+			// server sends (GAP-0568).
+			if tok, err := s.Source.Current(ctx); err == nil {
+				groups = tok.Groups
+			}
+		}
+		d.checks = append(d.checks, doctorKubeChecks(ctx, kf, groups...)...)
 	case clusterFlag:
 		d.add("cluster", doctorSkip, "the cluster checks read the cluster with kubectl: give --install-file FILE (the "+
 			"SubstrateInstall file you gave ate-setup)", "")
@@ -217,9 +225,9 @@ func printSubstrateDoctor(w io.Writer, rep substrateDoctorReport) {
 		width = max(width, len(c.ID))
 	}
 	for _, c := range rep.Checks {
-		fmt.Fprintf(w, "  %-4s  %-*s  %s\n", c.Status, width, c.ID, c.Summary)
+		fmt.Fprintf(w, "  %-4s  %-*s  %s\n", c.Status, width, c.ID, safetext.Line(c.Summary))
 		if c.Status == doctorWarn && c.Fix != "" {
-			fmt.Fprintf(w, "        %-*s  to fix: %s\n", width, "", c.Fix)
+			fmt.Fprintf(w, "        %-*s  to fix: %s\n", width, "", safetext.Line(c.Fix))
 		}
 	}
 	if rep.OK {
@@ -522,7 +530,7 @@ func doctorConvertFleet(checks []fleet.Check) []substrateCheck {
 }
 
 // doctorKubeChecks reads the cluster with kubectl and runs the fleet checks.
-func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags) []substrateCheck {
+func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags, tokenGroups ...string) []substrateCheck {
 	o, r, err := collectFleet(ctx, kf)
 	if err != nil {
 		return []substrateCheck{{ID: "cluster", Status: doctorFail, Summary: doctorFirstLine(err), Fix: "check your kubectl access and the --install-file path, then run doctor again"}}
@@ -531,7 +539,23 @@ func doctorKubeChecks(ctx context.Context, kf *substrateClusterFlags) []substrat
 	// with the same sign-in: the fleet check would only say "not read".
 	checks := fleet.BuildVerify(o, r.ProductVersion, r.Now).Checks
 	checks = slices.DeleteFunc(checks, func(c fleet.Check) bool { return c.ID == fleet.CheckPolicyConflicts })
-	return doctorConvertFleet(checks)
+	rows := doctorConvertFleet(checks)
+	for _, g := range r.GlobOverlaps {
+		rows = append(rows, substrateCheck{ID: "cluster.atespace_globs", Status: doctorWarn, Summary: g,
+			Fix: "list the atespace by name in match.substrate.atespaces, or delete it"})
+	}
+	for _, g := range fleet.GroupFormMismatches(r.AssignmentGroups, tokenGroups) {
+		rows = append(rows, substrateCheck{ID: "cluster.group_forms", Status: doctorWarn, Summary: g,
+			Fix: "write the profile's match.groups in the form the sign-in server sends (a signed-in token's groups claim shows it)"})
+	}
+	for i := range rows {
+		if rows[i].ID == "cluster."+fleet.CheckCallout && rows[i].Fix != "" {
+			// The fix depends on what holds the slot (GAP-0496): setup
+			// refuses while another callout is in the install file.
+			rows[i].Fix = fleet.CalloutFix(o)
+		}
+	}
+	return rows
 }
 
 func fleetCheckFix(id string) string {

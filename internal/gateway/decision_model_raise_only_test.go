@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -164,10 +165,13 @@ func TestRaiseOnlyAcrossLayers(t *testing.T) {
 							t.Errorf("%s/%s/S1 %s/judge %s call %d: rules+S1+judge %s lowered %s %s (%s)",
 								tier.name, connector, name, jname, i, c3[i].Action, layer, floor.Action, c3[i].Reason)
 						}
-						// Rule 1: no judge answer, exactly cascade 2 (the hook
-						// fail mode's refusal of an escalated CRITICAL finding
-						// is the only raise a missing judge makes).
-						refused := slices.Contains(c3[i].Findings, escalatedJudgeUnavailableFinding)
+						// Rule 1: no judge answer, exactly cascade 2. The only
+						// raises a missing judge makes are refusals: the hook
+						// fail mode's refusal of an escalated CRITICAL finding,
+						// and under the strict policy the refusal of any judged
+						// call (GAP-0559, option b).
+						refused := slices.Contains(c3[i].Findings, escalatedJudgeUnavailableFinding) ||
+							(tier.posture == "strict" && slices.ContainsFunc(c3[i].Findings, func(f string) bool { return strings.Contains(f, judgeUnavailableFinding) }))
 						if jname != "clean" && !refused && (c3[i].Action != c2[i].Action || c3[i].Severity != c2[i].Severity) {
 							t.Errorf("%s/%s/S1 %s/judge %s call %d: no judge answer gave %s %s, want cascade 2's %s %s",
 								tier.name, connector, name, jname, i, c3[i].Action, c3[i].Severity, c2[i].Action, c2[i].Severity)

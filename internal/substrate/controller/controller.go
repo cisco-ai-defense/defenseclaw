@@ -166,6 +166,14 @@ type Controller struct {
 	mu        sync.Mutex
 	actors    map[string]*actorState // by actor UID
 	templates map[string]cachedTemplate
+	// inUse is, by template, the atespaces of the actors the last pass
+	// listed that use it: only these templates' verdicts count for the
+	// unattested-templates gauge, and an expired verdict of another
+	// template is dropped (GAP-0583). An actor's template reference names
+	// its own atespace, which can be another than the actor's, so an
+	// atespace the pass could not list keeps its actors' templates by the
+	// actors' atespace.
+	inUse     map[string]map[string]bool
 	fastUntil time.Time
 	scoped    bool
 	// unlisted are atespaces the last pass could not list: their known
@@ -189,6 +197,63 @@ type Controller struct {
 	// unseparated are the templates whose relay runs as the agent's user,
 	// already named in an audit warning (GAP-0372).
 	unseparated map[string]bool
+	// runningAt is when the running report last went to the leader;
+	// runningWarned is set while it fails (GAP-0539).
+	runningAt     time.Time
+	runningWarned bool
+	// draining is the draining workers of the pass in progress, and
+	// workersWarned says the listing failed once (GAP-0449).
+	draining      ateapi.Draining
+	workersWarned bool
+}
+
+// runningReportInterval is how often the controller tells the leader which
+// actors it sees running. Well under chainstate.ActiveGap, so a quiet actor
+// that runs keeps its running-time clock going between two reports and a
+// missed report or two costs nothing (GAP-0539).
+const runningReportInterval = time.Minute
+
+// runningReportTimeout bounds one running report, so a leader outage does
+// not hold the pass.
+const runningReportTimeout = 5 * time.Second
+
+// reportRunning tells the leader which listed actors are in state RUNNING,
+// at most once per runningReportInterval. Wall time while an actor runs is
+// its chain window's running time, also when it makes no request: a quiet
+// actor's secret read ages out after 30 minutes of running, as documented
+// (how-it-works, the secret-read chain; GAP-0539). Only RUNNING is reported:
+// an actor in any other or an unknown state, a pass that did not list it,
+// and a failed report leave its clock paused, so a window lasts longer,
+// never shorter.
+func (c *Controller) reportRunning(ctx context.Context, actors []*ateapi.Actor, now time.Time) {
+	rs, ok := c.o.Lifecycle.(RunningSink)
+	if !ok || now.Sub(c.runningAt) < runningReportInterval {
+		return
+	}
+	c.runningAt = now
+	var running []chainstate.Actor
+	for _, a := range actors {
+		if a.GetStatus().GetState() == ateapi.ActorStateRunning {
+			md := a.GetMetadata()
+			running = append(running, chainstate.Actor{Atespace: md.GetAtespace(), UID: md.GetUid()})
+		}
+	}
+	var err error
+	for len(running) > 0 && err == nil {
+		n := min(len(running), chainstate.MaxRunningActors)
+		rctx, cancel := context.WithTimeout(ctx, runningReportTimeout)
+		err = rs.Running(rctx, running[:n])
+		cancel()
+		running = running[n:]
+	}
+	switch {
+	case err != nil && !c.runningWarned:
+		c.runningWarned = true
+		c.emit(Event{Type: EventWarning, Severity: SeverityWarn,
+			Message: "the leader did not take the report of running actors (their chain windows' running time is paused until it does): " + err.Error()})
+	case err == nil:
+		c.runningWarned = false
+	}
 }
 
 type recreatedActor struct {
@@ -252,6 +317,9 @@ type actorState struct {
 	regOK    bool
 	regAt    time.Time
 	regState ateapi.ActorState
+	// kitFillWarned is set once a later attribution of the actor's attested
+	// kit could not be written (GAP-0351), so it warns once, not every pass.
+	kitFillWarned bool
 	// regStaleWarned is set while a leader outage keeps the last good
 	// registration in use (one warning per outage).
 	regStaleWarned bool
@@ -265,8 +333,11 @@ type actorState struct {
 	rid     restoreID
 	written bool
 	// deleteDenied is set while the access policies refuse the delete of the
-	// actor's policy; the alert is sent once (GAP-0481).
+	// actor's policy; the alert is sent once (GAP-0481). deleteRetry is when
+	// the delete is tried again, deleteWait the current backoff (GAP-0531).
 	deleteDenied bool
+	deleteRetry  time.Time
+	deleteWait   time.Duration
 	// foreignTemplateRead is set once the template of a foreign actor was
 	// read and, if unattested, reported (GAP-0495).
 	foreignTemplateRead bool
@@ -275,6 +346,10 @@ type actorState struct {
 	// while it does not). policy_lag_ms of a write is measured from
 	// staleSince, not from when the actor was first seen (GAP-0392).
 	syncedAt, staleSince time.Time
+	// drainResume: this controller suspended the actor off a draining
+	// worker and resumes it (GAP-0449); drainFrom is that worker's pod.
+	drainResume, drainResumeWarned bool
+	drainFrom                      string
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -367,14 +442,37 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	draining := c.drainingWorkers(ctx)
+	c.mu.Lock()
+	c.draining = draining
+	c.mu.Unlock()
 	now := c.o.Now()
 	seen := make(map[string]bool, len(actors))
 	var urgent, rest []*ateapi.Actor
 	var recreated []recreatedActor
+	inUse := map[string]map[string]bool{}
+	use := func(tmpl, ns string) {
+		if inUse[tmpl] == nil {
+			inUse[tmpl] = map[string]bool{}
+		}
+		inUse[tmpl][ns] = true
+	}
 	c.mu.Lock()
+	for k, by := range c.inUse {
+		for ns := range by {
+			// An atespace this pass could not list keeps its actors'
+			// templates.
+			if c.unlisted[ns] {
+				use(k, ns)
+			}
+		}
+	}
 	for _, a := range actors {
 		uid := a.GetMetadata().GetUid()
 		seen[uid] = true
+		if t := a.GetActorTemplate(); t != nil {
+			use(ateapi.Key(t), a.GetMetadata().GetAtespace())
+		}
 		_, known := c.actors[uid]
 		if !known {
 			key := ateapi.Key(ateapi.RefOf(a.GetMetadata()))
@@ -392,6 +490,12 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 			c.fastUntil = now.Add(c.o.FastWindow)
 		} else {
 			rest = append(rest, a)
+		}
+	}
+	c.inUse = inUse
+	for k, ct := range c.templates {
+		if len(inUse[k]) == 0 && now.Sub(ct.at) >= templateCacheTTL {
+			delete(c.templates, k)
 		}
 	}
 	var gone []*actorState
@@ -444,6 +548,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 			}
 		})
 	}
+	c.reportRunning(ctx, actors, now)
 	if len(errs) > 0 {
 		return fmt.Errorf("%d actors failed, first: %w", len(errs), errs[0])
 	}
@@ -864,6 +969,12 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor, seenAt
 				// (GAP-0430).
 				c.recheck(st, a, base, "policy in force")
 			}
+			// The profile opts --task runs into idle suspend (GAP-0498); the
+			// registration only records that the actor is a task.
+			reg.IdleSuspendTask = reg.IdleSuspendTask || res.IdleSuspendTasks
+			if moved, err := c.drain(ctx, a, st, reg, base); moved || err != nil {
+				return err
+			}
 			return c.idle(ctx, a, st, reg, base, res.idleAfter(lv.IdleSuspendAfter))
 		}
 	}
@@ -988,6 +1099,8 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 		if err := c.o.Registry.Put(ctx, reg); err != nil {
 			return Registration{}, "", fmt.Errorf("%s: registry: %w", st.key, err)
 		}
+	} else if reg.Source == SourceAtespace && reg.Connector == "" {
+		c.fillKit(ctx, a, st, base, &reg)
 	}
 	reg.Template = ateapi.Key(a.GetActorTemplate())
 	st.reg, st.regOK, st.regAt, st.regState = reg, true, now, a.GetStatus().GetState()
@@ -1008,6 +1121,11 @@ func (c *Controller) foreignTemplate(ctx context.Context, a *ateapi.Actor, st *a
 	ref := a.GetActorTemplate()
 	_, att, err := c.template(ctx, ref, false)
 	if err != nil {
+		if ateapi.IsNotFound(err) {
+			// The template is gone: there is nothing to name, and reading it
+			// again every pass would only cost (GAP-0531).
+			st.foreignTemplateRead = true
+		}
 		return
 	}
 	st.foreignTemplateRead = true
@@ -1027,21 +1145,59 @@ func (c *Controller) foreignTemplate(ctx context.Context, a *ateapi.Actor, st *a
 }
 
 // attributeKit puts what the actor's attested template names (connector,
-// agent version, hook contract, kit version, digest) in the new registration
-// of an actor made outside DefenseClaw (GAP-0347). Without them the gateway
+// agent version, hook contract, kit version, digest) in the registration of
+// an actor made outside DefenseClaw (GAP-0347). Without them the gateway
 // knows no connector for the actor, resolves no hook profile, and reports
 // every tool step as unrecorded (GAP-0339); a launched actor gets them from
 // the create route (GAP-0201). An unattested template, or one that can't be
 // read now, records none: admission decides about the actor, and its steps
-// are reported, never skipped. A registration is written once, so a later
-// pass does not add them.
-func (c *Controller) attributeKit(ctx context.Context, a *ateapi.Actor, reg *Registration) {
-	_, att, err := c.template(ctx, a.GetActorTemplate(), false)
+// are reported, never skipped. It returns the template it read (nil when it
+// recorded nothing).
+func (c *Controller) attributeKit(ctx context.Context, a *ateapi.Actor, reg *Registration) *ateapi.ActorTemplate {
+	tmpl, att, err := c.template(ctx, a.GetActorTemplate(), false)
 	if err != nil || !att.Attested {
-		return
+		return nil
 	}
 	reg.Connector, reg.AgentVersion, reg.HookContract = att.Connector, att.AgentVersion, att.HookContract
 	reg.KitVersion, reg.TemplateDigest = att.KitVersion, att.Digest
+	return tmpl
+}
+
+// fillKit attributes the kit again for an attributed registration that names
+// no connector: a template read error or an attestation that could not be
+// checked (an ATE API blip, a registry outage) at the first attribution must
+// not leave the actor without a connector for its life (GAP-0351). Until it
+// is recorded, the actor's tool steps are reported unrecorded (fail closed).
+// The kit is recorded only from a template that attests now and was not
+// edited after the actor was created, so it is the one the actor booted
+// (GAP-0053); the registry takes the kit fields once, into a record that has
+// none. It runs when the registration is read again (registrationTTL).
+func (c *Controller) fillKit(ctx context.Context, a *ateapi.Actor, st *actorState, base Event, reg *Registration) {
+	filled := *reg
+	tmpl := c.attributeKit(ctx, a, &filled)
+	if tmpl == nil || filled.Connector == "" {
+		return
+	}
+	edited, created := tmpl.GetMetadata().GetUpdateTime(), a.GetMetadata().GetCreateTime()
+	if edited == nil || created == nil || edited.AsTime().After(created.AsTime()) {
+		return
+	}
+	if err := c.o.Registry.Put(ctx, filled); err != nil {
+		if !st.kitFillWarned {
+			st.kitFillWarned = true
+			ev := base
+			ev.Type, ev.Severity = EventWarning, SeverityWarn
+			ev.Message = "the actor's attested connector could not be recorded (its tool steps stay reported unrecorded): " + err.Error()
+			c.emit(ev)
+		}
+		return
+	}
+	*reg = filled
+	ev := base
+	ev.Type, ev.Severity = EventWarning, SeverityInfo
+	ev.Message = "the actor's attested connector is recorded on a later pass (its template could not be attested at the first one)"
+	ev.Detail = map[string]any{"connector": filled.Connector, "template_digest": filled.TemplateDigest}
+	c.emit(ev)
 }
 
 func (c *Controller) parentRegistration(ctx context.Context, tag *ateapi.ObjectRef) (Registration, error) {
@@ -1415,17 +1571,31 @@ func (c *Controller) removePolicy(ctx context.Context, a *ateapi.Actor, st *acto
 	if err != nil {
 		return fmt.Errorf("%s: get policy: %w", st.key, err)
 	}
+	if c.deleteBackingOff(st) {
+		return nil
+	}
 	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
 		if c.deleteRefused(st, base, err) {
 			return nil
 		}
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
-	st.written, st.ourVersion, st.deleteDenied = false, 0, false
+	st.written, st.ourVersion, st.deleteDenied, st.deleteRetry = false, 0, false, time.Time{}
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: the actor is refused ("+st.refused+")"
 	c.emit(ev)
 	return nil
+}
+
+// The backoff of a policy delete the access policies refuse (GAP-0531).
+const (
+	deleteRetryMin = time.Minute
+	deleteRetryMax = 30 * time.Minute
+)
+
+// deleteBackingOff reports that a refused delete is not due again yet.
+func (c *Controller) deleteBackingOff(st *actorState) bool {
+	return st.deleteDenied && c.o.Now().Before(st.deleteRetry)
 }
 
 // deleteRefused handles a policy delete the access policies refuse
@@ -1438,6 +1608,11 @@ func (c *Controller) deleteRefused(st *actorState, base Event, err error) bool {
 	if status.Code(err) != codes.PermissionDenied {
 		return false
 	}
+	// Try again after a backoff that doubles, 1 minute up to 30, so a
+	// refused delete costs a GET and a DELETE now and then, not every pass
+	// (GAP-0531).
+	st.deleteWait = min(max(2*st.deleteWait, deleteRetryMin), deleteRetryMax)
+	st.deleteRetry = c.o.Now().Add(st.deleteWait)
 	if !st.deleteDenied {
 		st.deleteDenied = true
 		ev := base
@@ -1756,6 +1931,9 @@ func (c *Controller) unmanaged(ctx context.Context, a *ateapi.Actor, st *actorSt
 		st.unmanagedChecked = true
 		return nil
 	}
+	if c.deleteBackingOff(st) {
+		return nil
+	}
 	if _, err := c.o.Client.DeleteActorEgressPolicy(ctx, ref, &ateapi.DeleteOptions{Uid: cur.GetMetadata().GetUid(), Version: cur.GetMetadata().GetVersion()}); err != nil && !ateapi.IsNotFound(err) {
 		if c.deleteRefused(st, base, err) {
 			return nil
@@ -1763,6 +1941,7 @@ func (c *Controller) unmanaged(ctx context.Context, a *ateapi.Actor, st *actorSt
 		return fmt.Errorf("%s: remove policy: %w", st.key, err)
 	}
 	st.unmanagedChecked, st.written, st.ourVersion, st.conflict, st.reverts, st.deleteDenied = true, false, 0, false, nil, false
+	st.deleteRetry = time.Time{}
 	ev := base
 	ev.Type, ev.Severity, ev.Message = EventPolicyRemoved, SeverityWarn, "egress policy removed: DefenseClaw no longer manages the actor"
 	c.emit(ev)
@@ -1789,7 +1968,8 @@ const maxPendingLifecycle = 64
 // lifecycleOf is the lifecycle event of a state change, "" for none. Every
 // way into SUSPENDED is suspended (a revert or a crash ends SUSPENDED too):
 // the leader's retention of suspended actors. The leader's running-time
-// clock needs no event (GAP-0292).
+// clock needs no event (GAP-0292): it runs from the actor's requests and
+// the running report (reportRunning, GAP-0539).
 func lifecycleOf(prev, cur ateapi.ActorState) string {
 	if prev == cur {
 		return ""

@@ -165,7 +165,7 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.destinations[].routes[].selector.min_severity` | string |  | `INFO, LOW, MEDIUM, HIGH, CRITICAL` |  |
 | `observability.destinations[].routes[].action` | string | `"send"` | `send, drop` |  |
 | `observability.destinations[].routes[].redaction_profile` | constraint |  |  |  |
-| `observability.destinations[].listen` | string |  |  | Required. |
+| `observability.destinations[].listen` | string |  |  | Required. A loopback `host:port` (`127.0.0.1`, `[::1]` or `localhost`): the page has no authentication, so another address is refused at load. |
 | `observability.destinations[].endpoint` | string |  |  | Required. |
 | `observability.destinations[].token_env` | string |  |  | Required unless token_credential is set. |
 | `observability.destinations[].token_credential` | string |  |  | Protected credential of a standalone enterprise deployment, stored with enterprise secret set. It resolves only in that profile. |

@@ -145,8 +145,7 @@ func cdFoldSessions(prefix string) func() string {
 // CI shard under -race (a route in all five packs took 290-350 s there).
 func cdFoldDynamicStepRows(t *testing.T, r cdFoldRoute, packs ...gap0437Pack) {
 	t.Helper()
-	// The key the running gateway has, whatever ran before in this binary.
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	home, project := cdFirstFixture(t)
 	for _, dir := range []string{filepath.Join(home, ".cache", "d"), filepath.Join(project, "src")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -217,7 +216,7 @@ func TestCDPATHFolderCurrentFolderHeadIsThePlainOneInspect(t *testing.T) {
 // cdPathHeadRows are the rows of the CDPATH tests on one route.
 func cdPathHeadRows(t *testing.T, r cdFoldRoute) {
 	t.Helper()
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	_, project := cdFirstFixture(t)
 	dot := "."
 	operands := []string{dot + "ssh/id_rsa", dot + "aws/credentials"}

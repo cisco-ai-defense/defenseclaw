@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -41,6 +42,50 @@ type hookEvaluationContext struct {
 	// RuleIDs are the top detection rule_ids that drove this
 	// evaluation, capped so SIEM queries don't explode.
 	RuleIDs []string
+	// RuleNames are bounded display labels index-aligned with RuleIDs.
+	RuleNames []string
+}
+
+func topRuleIDsAndNames(findings []scanner.InspectFinding, n int) ([]string, []string) {
+	if n <= 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, n)
+	ids := make([]string, 0, n)
+	names := make([]string, 0, n)
+	for i := range findings {
+		id := strings.TrimSpace(findings[i].RuleID)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		name := strings.TrimSpace(findings[i].Title)
+		if name == "" {
+			name = id
+		}
+		name = boundedRuleDisplayName(name, 256)
+		ids = append(ids, id)
+		names = append(names, name)
+		if len(ids) == n {
+			break
+		}
+	}
+	return ids, names
+}
+
+func boundedRuleDisplayName(value string, maxBytes int) string {
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }
 
 // emitHookRuleFindings fans the verdict's DetailedFindings through the audit
@@ -115,7 +160,7 @@ func (a *APIServer) emitInspectVerdictFindings(
 		Findings:   inspectFindings,
 	}
 
-	ruleIDs := scanner.TopRuleIDs(inspectFindings, 8)
+	ruleIDs, ruleNames := topRuleIDsAndNames(inspectFindings, 8)
 	if a.logger == nil {
 		return hookEvaluationContext{RuleIDs: ruleIDs}
 	}
@@ -133,6 +178,7 @@ func (a *APIServer) emitInspectVerdictFindings(
 		EvaluationID: evalID,
 		ScanID:       scanID,
 		RuleIDs:      ruleIDs,
+		RuleNames:    ruleNames,
 	}
 }
 

@@ -324,6 +324,10 @@ type Options struct {
 	// Event is the agent hook event used for deadlines and failure logs. Claude
 	// Code supplies it in the payload when the CLI flag is omitted.
 	Event string
+	// eventBound is set when the registered command named Event (Run): the
+	// agent runs that registration for that event only. An event read from
+	// the payload may be a duplicated key the agent reads otherwise.
+	eventBound bool
 	// gatewayRefusal is what a per-user hook the gateway refused with an
 	// error status shows in the agent (perUserRefusalText); doRequest sets it.
 	gatewayRefusal string
@@ -560,6 +564,7 @@ type Options struct {
 // by synchronous PreToolUse stdout {"decision":"deny"}; no Antigravity
 // behavior relies on a non-zero process exit code.
 func Run(ctx context.Context, opts Options) int {
+	opts.eventBound = strings.TrimSpace(opts.Event) != ""
 	if watchdog := opts.AnswerWatchdog; watchdog != nil {
 		// The hook command armed the watchdog before it resolved the
 		// runtime (GAP-0155): every answer of the call, the early ones
@@ -1028,6 +1033,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	opts.answerBy = gatewayAnswerDeadline(opts, opts.StartedAt, time.Now())
 	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
+	// A per-user prompt, tool result or stop event has no answer deadline: a
+	// probe tells a frozen gateway from a busy one (GAP-1107).
+	ctx, stopFrozenWatch, releaseFrozenWatch := watchPerUserFrozenGateway(ctx, opts)
 	// Reuse the account, session, asset facts and resolved write paths on
 	// every retry of this call.
 	// A try that must have its connection within the restart budget
@@ -1039,6 +1047,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		}
 		releaseWatch()
 		releaseAnswer()
+		releaseFrozenWatch()
 	}
 	handedOff := false
 	defer func() {
@@ -1112,6 +1121,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		case wait.outlasted && outage, perUserRestartUnanswered(ctx, opts, wait):
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
+	}
+	stopFrozenWatch()
+	if err != nil && perUserGatewayFrozen(ctx) {
+		// The gateway took the call, and a probe of its verified listener
+		// got no answer either: it is frozen, an outage, as a frozen gateway
+		// that accepts nothing is (GAP-1107).
+		return failPerUserListenerUnanswered(opts, sp, failMode)
 	}
 	// A managed gateway that is restarting refuses the connection, or drops
 	// one it accepted as it exits: send the call again, to the gateway that
@@ -3034,7 +3050,19 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 		// call, which every Claude Code surface shows (cowork-1-0-8 GAP-0040).
 		events = []string{"UserPromptSubmit", "PreToolUse"}
 	case sp.connector == "codex":
-		events = []string{"SessionStart", "PreToolUse"}
+		// Codex shows a UserPromptSubmit systemMessage too ("surfaced as a
+		// warning", Codex hooks reference; user-prompt-submit.command.output
+		// of codex-cli 0.169). A session that was running when the gateway
+		// stopped and whose next turn is a prompt with no tool call got no
+		// warning at all: its model request then failed on the stopped
+		// route with only Codex's own "Reconnecting" (rel-1-0-10 GAP-1168).
+		// The once-per-session marker keeps a new session at one warning
+		// (its SessionStart takes it). Secure Client keeps its established
+		// events, as its shell render keeps its pinned bytes.
+		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
+		if opts.SecureClient {
+			events = []string{"SessionStart", "PreToolUse"}
+		}
 	case copilotCLIOutageNotice(sp):
 		events, field = []string{"postToolUse"}, "additionalContext"
 	default:
@@ -4265,6 +4293,20 @@ func emitManagedClaudeBlock(opts Options, reason string) int {
 		fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s}\n", encoded)
 	case "PreToolUse":
 		fmt.Fprintf(opts.Stdout, "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":%s}}\n", encoded)
+	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
+		if !opts.eventBound {
+			// The event came from the payload, where a duplicated key can
+			// name another event than the one Claude Code runs: only exit 2
+			// blocks every event.
+			fmt.Fprintln(opts.Stderr, reason)
+			return blockExit
+		}
+		// The block a policy verdict gives these events. An exit-2 block
+		// made Claude Code print the whole registered command before the
+		// reason: on Windows the cmd.exe hook-guard line with its paths
+		// (GAP-1107). The reason reaches the model; the user sees only
+		// systemMessage (GAP-0605).
+		fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s,\"systemMessage\":%s}\n", encoded, encoded)
 	default:
 		fmt.Fprintln(opts.Stderr, reason)
 		return blockExit

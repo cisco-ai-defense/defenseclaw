@@ -13,10 +13,12 @@ import (
 
 // projectSkillFileLinkCount is how many names the file at path has.
 func projectSkillFileLinkCount(path string) (uint64, error) {
-	if networkPathUnanswered(path) {
+	read, release, ok := gatedPath(path)
+	if !ok {
 		return 0, networkShareError("stat", path)
 	}
-	name, err := windows.UTF16PtrFromString(path)
+	defer release()
+	name, err := windows.UTF16PtrFromString(read)
 	if err != nil {
 		return 0, &os.PathError{Op: "stat", Path: path, Err: err}
 	}

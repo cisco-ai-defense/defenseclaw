@@ -584,7 +584,7 @@ var windowsHookImageSelfTestNotStarted = []string{
 	hookguard.CannotStartMessage,
 	hookguard.NonBlockingExitMessage,
 	hookguard.OpenExitMessage,
-	"could not start its Claude Code hook guard",
+	connector.ClaudeCodeManagedGuardUnavailableText,
 }
 
 // windowsHookImageSelfTestProblem judges the self test's answer: status 0 or

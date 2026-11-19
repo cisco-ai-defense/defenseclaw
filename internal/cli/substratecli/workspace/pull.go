@@ -464,7 +464,10 @@ func flaggedPaths(pr *osw.PullResult) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, f := range pr.Review.Flags {
-		if !seen[f.Path] {
+		// Only the flags that gate the apply (medium or higher): an
+		// info-only change (an in-project link) is not one that can run
+		// code (GAP-0575).
+		if !seen[f.Path] && severityRank[f.Severity] >= severityRank[osw.SeverityMedium] {
 			seen[f.Path] = true
 			out = append(out, f.Path)
 		}

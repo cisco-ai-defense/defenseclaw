@@ -22,6 +22,34 @@ gateway ServiceAccount is bound to system:auth-delegator by the cluster-wide
 ClusterRoleBinding {{ include "dc.authDelegatorBinding" . }}.
 {{- end }}
 
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- with .Values.metrics.prometheusRule.namespaceLabel }}
+
+The policy alerts select {{ . }}="{{ $.Release.Namespace }}" on the
+defenseclaw_substrate_* series. They never fire unless your OTLP receiver or
+collector promotes the k8s.namespace.name resource attribute to that label
+(Prometheus otlp.promote_resource_attributes, or the collector's
+resource_to_telemetry_conversion).
+{{- else }}
+
+The policy alerts read every release's defenseclaw_substrate_* series in that
+Prometheus. To scope them to this release, promote the k8s.namespace.name
+resource attribute and set metrics.prometheusRule.namespaceLabel
+(k8s_namespace_name).
+{{- end }}
+{{- end }}
+
+{{- $g := .Values.config.guardrail | default dict }}
+{{- $modes := list (toString ($g.mode | default "")) }}
+{{- range $name, $p := ($g.profiles | default dict) }}
+{{- $modes = append $modes (toString ((($p | default dict).mode) | default "")) }}
+{{- end }}
+{{- if has "observe" $modes }}
+
+guardrail.mode or a profile's mode is observe: actors always enforce, so it
+changes no actor verdict (docs/SUBSTRATE.md, Hook).
+{{- end }}
+
 Uninstall removes DefenseClaw-written egress policies first (actors fall back
 to deny-all), then run `defenseclaw substrate setup --remove` to take the
 callout out of Substrate. Snapshots stay in the Substrate bucket: the

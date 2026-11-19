@@ -40,8 +40,8 @@
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 11,
-      "maxItems": 11
+      "minItems": 12,
+      "maxItems": 12
     }
   },
   "$defs": {
@@ -101,7 +101,8 @@
             "ingress_clients",
             "actor_service_routes",
             "api_access_label",
-            "policy_conflict"
+            "policy_conflict",
+            "worker_drain"
           ]
         },
         "status": {

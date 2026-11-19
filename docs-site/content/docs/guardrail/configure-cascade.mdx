@@ -38,7 +38,7 @@ System One and the judge only ever **raise** the rules' verdict. The Rego policy
 
 Turning on a later layer never lowers what an earlier layer gives on its own:
 
-- **A judge that does not answer changes nothing.** A timeout, an error, a late answer, no free judge slot or the judge turned off: the call keeps exactly what rules and System One give without the judge, a System One ask or alert included.
+- **A judge that does not answer changes nothing, except where the call fails closed.** A timeout, an error, a late answer, no free judge slot or the judge turned off: the call keeps exactly what rules and System One give without the judge, a System One ask or alert included. The exceptions are refusals, never allows: an unattended Agent Substrate run (closed in every tier) and the strict policy refuse a call the judge was asked about and gave no verdict on (`JUDGE-UNAVAILABLE`, its reason names how the judge failed; a confident System One block stands as it is), and under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is refused (`JUDGE-UNAVAILABLE-ESCALATED`). Every other call, on managed installs too, keeps the rules' verdict. Every judge that gives no verdict is reported, in every tier: a `[guardrail] ALERT judge_unavailable` line in the gateway log, `judge_fallback` with its reason on the audit row, the judge fallback counter, and the gateway health that `status` shows and `doctor` warns on while every recent judge call fails.
 - **An unsure System One answer has no verdict of its own.** When the judge does answer, its answer settles the call, but never below the rules' verdict. A confident System One block is never lowered: it blocks with the judge on as it does without it, and the judge can only add.
 
 ## Settings

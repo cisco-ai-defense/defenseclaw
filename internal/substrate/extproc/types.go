@@ -89,6 +89,11 @@ type AskResult struct {
 	Outcome AskOutcome
 	ID      string
 	Reason  string
+	// Unattended and Expires describe a pending ask an unattended run
+	// queued (unattended_asks: queue): nobody watches the run, so the
+	// refusal tells the agent to wait and retry until Expires (GAP-0387).
+	Unattended bool
+	Expires    time.Time
 }
 
 // AskSink raises an ask, or finds the one already open or decided for the

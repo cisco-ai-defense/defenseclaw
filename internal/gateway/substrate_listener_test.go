@@ -87,7 +87,6 @@ type substrateFixture struct {
 	sessions *identity.SessionSigner
 	live     map[string]identity.LiveActor
 	activity []string
-	limited  []ratelimit.Scope
 	mu       sync.Mutex
 }
 
@@ -162,11 +161,6 @@ func newSubstrateFixture(t *testing.T, mutate ...func(*SubstrateConfig)) *substr
 			f.activity = append(f.activity, kind+":"+uid)
 			f.mu.Unlock()
 		}),
-		OnRateLimited: func(s ratelimit.Scope, _ string) {
-			f.mu.Lock()
-			f.limited = append(f.limited, s)
-			f.mu.Unlock()
-		},
 	}
 	for _, m := range mutate {
 		m(&sc)
@@ -382,10 +376,15 @@ func TestSubstrateActorRateLimit(t *testing.T) {
 		c.Limiter = ratelimit.New(ratelimit.Config{PerActorRPS: 2, PerAtespaceRPS: 1000})
 	})
 	path := "/api/v1/substrate/hook/claudecode"
-	codes := map[int]int{}
+	codes, reasons := map[int]int{}, map[string]int{}
 	for i := 0; i < 10; i++ {
 		rec := f.do(t, f.actor, http.MethodGet, path, "tok-alice", "", substrateWarmHeader, "1")
 		codes[rec.Code]++
+		if rec.Code == http.StatusTooManyRequests {
+			var body struct{ Reason string }
+			_ = json.Unmarshal(rec.Body.Bytes(), &body)
+			reasons[body.Reason]++
+		}
 	}
 	if codes[http.StatusNoContent] != 4 || codes[http.StatusTooManyRequests] != 6 {
 		t.Fatalf("codes %v", codes)
@@ -394,8 +393,9 @@ func TestSubstrateActorRateLimit(t *testing.T) {
 	if rec := f.do(t, f.actor, http.MethodGet, "/api/v1/substrate/hook/codex", "tok-bob", "", substrateWarmHeader, "1"); rec.Code != http.StatusNoContent {
 		t.Fatalf("other actor %d", rec.Code)
 	}
-	if len(f.limited) != 6 || f.limited[0] != ratelimit.ScopeActor {
-		t.Fatalf("metric %v", f.limited)
+	// The refusal names the budget that refused it.
+	if reasons["substrate_"+string(ratelimit.ScopeActor)] != 6 {
+		t.Fatalf("refusal reasons %v", reasons)
 	}
 }
 

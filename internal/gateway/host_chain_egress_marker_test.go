@@ -19,7 +19,7 @@ import (
 // stays a detection-only alert in every pack, whether the read was resolved
 // (an exact credentials file) or joined only through the file-unknown marker.
 func TestHostHookSecretReadChainStaysAlertWithFileUnknownMarker(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	if err := SetSubstrateChainEgressAction(""); err != nil {
 		t.Fatal(err)
 	}
