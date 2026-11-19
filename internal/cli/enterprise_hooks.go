@@ -1098,7 +1098,10 @@ func enterpriseHookRepairAfterVerifyFailure(
 		// hook fail mode change alone made fail, waits for the sign-in (a
 		// change to closed is rendered now when Windows gives a logon for
 		// it). One this release protected that no longer verifies
-		// was changed while its account was signed out, and stays a failure,
+		// was changed while its account was signed out, and stays a failure
+		// (a lock this release wrote for an earlier image of this install,
+		// under a hook-image retire, counts as the other release one:
+		// enterprisehooks.WindowsProtectedTargetFromOtherRelease, GAP-1096),
 		// unless on Secure Client a committed non-purge uninstall retired it:
 		// a reinstall over the retained StateRoot then found every
 		// signed-out account's target drifted and failed with 1603. With no
