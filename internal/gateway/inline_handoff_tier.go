@@ -98,9 +98,8 @@ const inlineUnknownStateTitle = "Inline code that may write DefenseClaw security
 //     default and permissive packs (a managed install's included) and a block
 //     in strict, unless the call already carries an enforcing state finding.
 //
-// The finding is alert-only outside strict, so the self-protection floor of
-// profileClassFloor (which blocks an enforcing tamper.detector_state_write in
-// every profile) does not apply to a possible write.
+// The finding is alert-only outside strict: a possible write never blocks
+// where a proven one alerts.
 func withInlineHandoffTier(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	if !trustedShellCommandInput(request.Input) {
 		return findings

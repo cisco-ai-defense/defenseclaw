@@ -76,9 +76,13 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 // selfProtectionRules are the rules that protect DefenseClaw itself: a
 // write, append, delete or metadata change of its state, configuration,
 // hooks, policies, receipts and registries (tamper.detector_state_write and
-// the active-state owners that report it). An enforcing finding of these
-// rules blocks in every profile, permissive included, per-user and managed
-// (rel-1-0-6:GAP-0675 review 1 M3a).
+// the active-state owners that report it). An enforcing finding is HIGH in
+// every pack (stateWriteSeverity): a high alert in the default and
+// permissive packs, a managed install's default pack included, and a block
+// in strict and managed-strict (owner, 2026-11-15T15:20Z,
+// rel-1-0-10:GAP-0747). It replaces the every-profile block of
+// rel-1-0-6:GAP-0675 review 1 M3a. The floor keeps it at least an alert in
+// every pack, so a pack that relabels the rule cannot allow it silently.
 var selfProtectionRules = map[string]bool{
 	"TAMPER.DETECTOR_STATE_WRITE": true,
 }
@@ -86,14 +90,17 @@ var selfProtectionRules = map[string]bool{
 // profileClassFloor is the one place a rule pack is kept from allowing what
 // the profiles must never allow silently (rel-1-0-6:GAP-0675). It returns the
 // least action the findings get whatever the thresholds say:
-//   - a self-protection finding that could block: block, in every profile;
+//   - a finding of a call the reader could not evaluate (evaluationFault):
+//     block, in every profile;
+//   - a self-protection finding that could block: at least an alert, in
+//     every profile;
 //   - a shell-command protected-file finding that could block: at least an
 //     alert, so the permissive profile shows the finding and records it
 //     instead of allowing the command without a trace.
 //
 // A finding that could not block (detection-only, alert-only, allowed) sets no
-// floor. The Secure Client integration is unchanged: Cisco AI Defense decides
-// there.
+// floor. The floor never blocks DefenseClaw's own state (selfProtectionRules).
+// The Secure Client integration is unchanged: Cisco AI Defense decides there.
 func profileClassFloor(findings []RuleFinding, secureClient bool) string {
 	floor := guardrailActionAllow
 	if secureClient {
@@ -103,9 +110,9 @@ func profileClassFloor(findings []RuleFinding, secureClient bool) string {
 		if !finding.contributesToEnforcement() {
 			continue
 		}
-		if selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] || finding.evaluationFault {
+		if finding.evaluationFault {
 			floor = guardrailActionBlock
-		} else if finding.shellProtectedFile {
+		} else if finding.shellProtectedFile || selfProtectionRules[canonicalTrustedRuleID(finding.RuleID)] {
 			floor = strongerGuardrailAction(floor, guardrailActionAlert)
 		}
 	}

@@ -16,7 +16,7 @@ import (
 // The DefenseClaw self-protection rules (GAP-0596, claim C4). A tool call
 // that runs the DefenseClaw CLI or gateway to turn the guardrail off, or a
 // service manager or kill to stop its services, has the effect of the file
-// write tamper.detector_state_write already blocks. Both rules are code-owned
+// write tamper.detector_state_write already reports. Both rules are code-owned
 // (their pack pattern is inert): the proof is the parse
 // (actionfacts.DefenseClawControl), the tiers are the packs' severities.
 //

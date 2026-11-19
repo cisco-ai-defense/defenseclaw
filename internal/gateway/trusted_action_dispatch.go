@@ -2044,15 +2044,20 @@ func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedA
 
 // withProvenActiveStateMutation adds (or upgrades) the
 // tamper.detector_state_write finding of a proven mutation of the active
-// state: the one finding observe mode still blocks on
-// (provenActiveStateMutation).
+// state: the one finding observe mode still blocks on where the pack blocks
+// it (provenActiveStateMutation).
 func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
 	// This protection belongs to the gateway. A selected pack may omit or
-	// relabel the rule, but a proved mutation of active state still blocks.
+	// relabel the rule, but a proved mutation of active state is always
+	// reported, at one severity: HIGH, a high alert in the default and
+	// permissive packs (a managed install's default pack included) and a
+	// block in strict (owner, 2026-11-15T15:20Z, rel-1-0-10:GAP-0747; the
+	// tiering of tamper.agent_hook_config_write). profileClassFloor keeps it
+	// at least an alert in every pack.
 	index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
 	canonical := RuleFinding{
-		RuleID: ruleID, Title: "DefenseClaw security state mutation", Severity: "CRITICAL",
+		RuleID: ruleID, Title: "DefenseClaw security state mutation", Severity: stateWriteSeverity,
 		Confidence: 0.98, Tags: []string{"cognitive-tampering", "tampering", "security-state"},
 		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
 	}
@@ -2061,7 +2066,7 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 		(findings[index].proof.kind == findingProofActionFactsSemantic ||
 			findings[index].proof.kind == findingProofActionFactsSubgraph) {
 		// Keep the stronger ActionFacts proof of an actual state mutation.
-		findings[index].Severity = "CRITICAL"
+		findings[index].Severity = stateWriteSeverity
 		findings[index].Title = canonical.Title
 		findings[index].Tags = canonical.Tags
 		return findings
@@ -2075,8 +2080,8 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
 	// The selected pack's posture and severity may differ, but a proved
-	// mutation of DefenseClaw state has one enforcement level in every pack.
-	finding.Severity = "CRITICAL"
+	// mutation of DefenseClaw state has one severity in every pack.
+	finding.Severity = stateWriteSeverity
 	finding.Title = canonical.Title
 	finding.Tags = canonical.Tags
 	finding.enforcement = findingEnforcementDetectionOnly

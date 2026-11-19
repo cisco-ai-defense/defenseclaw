@@ -106,7 +106,11 @@ rules:
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA]))
     pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\]\.defenseclaw[/\\](?:\.env|config\.yaml|confidence_policy\.yaml|guardrail_runtime\.json|device\.key|picked_connector|custom-providers\.json|(?:audit|judge|judge_bodies)\.db(?:-(?:wal|shm))?|(?:cache|hooks|installer|policies|previous[/\\]installer|quarantine|receipts|registries)[/\\][^;\s]+)\b'
     title: "DefenseClaw security state mutation"
-    severity: CRITICAL
+    # HIGH in every pack (owner, 2026-11-15T15:20Z, rel-1-0-10:GAP-0747): a
+    # proven write to DefenseClaw's own state is a high alert in the default
+    # and permissive packs and a block in strict, the tiering of
+    # tamper.agent_hook_config_write.
+    severity: HIGH
     confidence: 0.98
     tags: [cognitive-tampering, tampering, security-state]
   - id: tamper.agent_hook_config_disable
