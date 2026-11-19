@@ -196,7 +196,9 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 
 // rgSearchFilterOf is the rgFilter of an rg command line, in ripgrep
 // 14.1's order of the options (substrate-1:GAP-0683); argv is
-// rgArgvWords(command), cwd the folder it runs in. Its documented default
+// rgArgvWords(command), cwd the folder it runs in (rgWorkingFolder; ""
+// when it is not known exactly: every glob is then unsure, see below, and
+// types and the hidden rule, which read only a name, stay exact). Its documented default
 // skips hidden (dot-named) files and folders (and .gitignore'd paths,
 // which are not modelled: a non-hidden file counts as read). The filter
 // reads what rg reads:
@@ -226,7 +228,8 @@ func (l rgCommandLine) patternOptions() (bool, []string) {
 // value known only then matches every path (an include) or none (one that
 // starts with "!"); a -t value known only then selects every type, a -T or
 // --type-clear one excludes or clears none. A glob this model does not
-// read exactly (rgGlobRegexp) is unsure in the same way.
+// read exactly (rgGlobRegexp) is unsure in the same way, and so is every
+// glob of an rg whose working folder is not known exactly (cwd "").
 //
 // A file or folder the command names is read whatever its name
 // (credentialPathResolver.argument).
@@ -353,6 +356,13 @@ func rgSearchFilterOf(command CommandFact, argv []string, cwd string) *rgFilter 
 			if g, ok = rgOverrideGlob(option.value, fold); !ok {
 				return
 			}
+		}
+		if f.cwd == "" {
+			// rg's working folder is not known exactly: what any glob
+			// matches may depend on it (Gitignore::strip drops it from the
+			// path byte by byte, even inside a file name), so the glob is
+			// unsure (substrate-1:GAP-0684).
+			g.re = nil
 		}
 		if !g.exclude {
 			f.includes++

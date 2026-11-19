@@ -757,7 +757,7 @@ func (r *credentialPathResolver) readCommand(command CommandFact, form credentia
 		if program == "rg" {
 			filter = rgFilterAll
 			if !r.rgConfig {
-				filter = rgSearchFilterOf(command, argv, filepath.ToSlash(r.cwd))
+				filter = rgSearchFilterOf(command, argv, r.rgWorkingFolder(command))
 			}
 		}
 		for _, index := range operands {

@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -28,6 +29,19 @@ import (
 )
 
 // g0344Folder is a work folder with the given files.
+// g0684Files is the project of the GAP-0684 rows.
+var g0684Files = []string{".env", "sub/.env", "deploy/id_ed25519", "src/a.go", ".github/workflows/ci.yml"}
+
+// g0344Place is the command of a row in dir and the hook's folder: @P is
+// dir, and a leading "@up " puts the hook in the folder above it.
+func g0344Place(cmd, dir string) (string, string) {
+	hook := dir
+	if rest, ok := strings.CutPrefix(cmd, "@up "); ok {
+		cmd, hook = rest, filepath.Dir(dir)
+	}
+	return strings.ReplaceAll(cmd, "@P", dir), hook
+}
+
 func g0344Folder(t *testing.T, files ...string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -99,6 +113,20 @@ func g0344Rows() []g0344Row {
 		{"C16 rg --no-hidden after --hidden", "rg --hidden --no-hidden TODO", []string{"src/.env"}, false},
 		{"C17 rg --type-add of an ordinary type", "rg --type-add 'g:*.go' -tg KEY", []string{".env", "a.go"}, false},
 		{"C18 rg -T excludes a type, reads nothing hidden", "rg --type-add 'e:*.env' -Te KEY", []string{".env", "a.go"}, false},
+		// GAP-0684: rg matches its globs from the folder a cd, pushd or popd
+		// moved it to (real rg 14.1.0 reads the file in every read row,
+		// actionfacts TestGAP0684RgWorkingFolderLive). In cmd, @P is the
+		// project; "@up " runs the call with the hook in the folder above it.
+		{"P06a cd P/sub then rg -g '/.env'", "cd @P/sub && rg -g '/.env' KEY @P/sub", g0684Files, true},
+		{"P06b cd P then rg -g '/.env'", "@up cd @P && rg -g '/.env' KEY @P", g0684Files, true},
+		{"P06c cd P then rg -g 'deploy/*'", "@up cd @P && rg -g 'deploy/*' KEY @P", g0684Files, true},
+		{"P06d pushd P then rg -g 'deploy/*'", "@up pushd @P >/dev/null && rg -g 'deploy/*' KEY @P", g0684Files, true},
+		{"P06e a subshell cd then rg -g '/deploy/**'", "@up (cd @P && rg -g '/deploy/**' KEY @P)", g0684Files, true},
+		{"P06f cd - then rg -g '/.env'", "@up cd @P && cd / && cd - >/dev/null && rg -g '/.env' KEY @P", g0684Files, true},
+		{"P06g popd then rg -g '/.env'", "@up pushd @P >/dev/null && pushd / >/dev/null && popd >/dev/null && rg -g '/.env' KEY @P", g0684Files, true},
+		{"P06h cd to a variable then rg -g '/.env'", `@up D=@P; cd "$D" && rg -g '/.env' KEY @P`, g0684Files, true},
+		{"P06i CDPATH then rg -g '/.env'", "@up export CDPATH=@P; cd sub >/dev/null && rg -g '/.env' KEY @P/sub", g0684Files, true},
+		{"C19 cd P then rg -g '*.yml' (GAP-0683 stays exact)", "@up cd @P && rg -g '*.yml' TODO @P", g0684Files, false},
 		// GAP-0349: read forms the record missed.
 		{"Q20 a for-loop variable", `for f in .env; do cat "$f"; done`, []string{".env"}, true},
 		{"Q21 perl -e reading its argument with <>", `perl -e 'print while <>' .env`, []string{".env"}, true},
@@ -119,8 +147,8 @@ func g0344Rows() []g0344Row {
 func TestGAP0344GAP0349CredentialReadForms(t *testing.T) {
 	for _, row := range g0344Rows() {
 		t.Run(row.id, func(t *testing.T) {
-			dir := g0344Folder(t, row.files...)
-			facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: row.cmd, CWD: dir, ActiveHome: t.TempDir()})
+			cmd, hook := g0344Place(row.cmd, g0344Folder(t, row.files...))
+			facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: cmd, CWD: hook, ActiveHome: t.TempDir()})
 			if got := credentialFileContentRead(facts); got != row.read {
 				t.Fatalf("%q in %v: credentials read = %v, want %v (status %s, private %v)",
 					row.cmd, row.files, got, row.read, facts.Parse.Status, facts.CredentialPathReads())
@@ -140,9 +168,9 @@ func TestGAP0344GAP0349ChainOnTheHook(t *testing.T) {
 	handler := hostClaudeHookHandlerForTest(t, "default")
 	for i, row := range g0344Rows() {
 		t.Run(row.id, func(t *testing.T) {
-			dir := g0344Folder(t, row.files...)
+			cmd, dir := g0344Place(row.cmd, g0344Folder(t, row.files...))
 			session := "g0344-" + strconv.Itoa(i)
-			ev := claudeToolEvent("PreToolUse", session, "read", row.cmd)
+			ev := claudeToolEvent("PreToolUse", session, "read", cmd)
 			ev["cwd"] = dir
 			callAgentHookForTest(t, handler, ev)
 			res := claudeToolResult("PostToolUse", session, "read")

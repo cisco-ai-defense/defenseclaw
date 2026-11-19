@@ -17,8 +17,10 @@
 package actionfacts
 
 import (
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -193,10 +195,10 @@ func (f *rgFilter) strip(p string) string {
 	return p
 }
 
-// rgPhysicalFolder is rg's working folder for a hook working folder: rg
-// takes it from getcwd, with every symbolic link resolved, while the path
-// it walks keeps the folder as the command names it. A folder that cannot
-// be resolved stays as given.
+// rgPhysicalFolder is rg's working folder for the folder it runs in
+// (rgWorkingFolder): rg takes it from getcwd, with every symbolic link
+// resolved, while the path it walks keeps the folder as the command names
+// it. A folder that cannot be resolved stays as given.
 func rgPhysicalFolder(cwd string) string {
 	if cwd == "" {
 		return cwd
@@ -205,6 +207,90 @@ func rgPhysicalFolder(cwd string) string {
 		return filepath.ToSlash(physical)
 	}
 	return cwd
+}
+
+// rgWorkingFolder is the folder an rg command runs in, the root its
+// override globs match from (substrate-1:GAP-0684): the hook's folder when
+// no cd, pushd or popd of the call moves it (the working folder tracking,
+// working_folder.go), else the one folder the moves reach, physical (every
+// link resolved, as rg's getcwd gives it). It is "" (not known exactly:
+// every glob is then unsure, rgSearchFilterOf) when
+//   - the hook gives no folder;
+//   - the command may run in more than one folder (`cd P; rg`, where the
+//     cd may have failed) or in an unresolved one (a variable, a command
+//     substitution, `cd -`, popd, a function that shadows cd, a loop);
+//   - a move goes to the home (~, a bare cd: the call may set HOME) or to a
+//     bare relative name (`cd sub`: a CDPATH, set by the call or inherited,
+//     may send it elsewhere);
+//   - a ".." step reads differently with and without symbolic links (cd -L
+//     and cd -P), the folder is not there, or the lookups are spent;
+//   - a PowerShell or CMD call moves (those moves are not resolved here);
+//   - the command runs inside one (a wrapper, a nested shell) whose folder
+//     moved while its own did not.
+func (r *credentialPathResolver) rgWorkingFolder(command CommandFact) string {
+	cwd := filepath.ToSlash(r.cwd)
+	if cwd == "" {
+		return ""
+	}
+	if command.Dialect != DialectPOSIX {
+		if windowsWorkFolders(r.commands)[command.ID].moved() {
+			return ""
+		}
+		return cwd
+	}
+	folders := command.workFolders
+	if !folders.moved() {
+		// Bounded: a chain of outer commands deeper than 32 is unsure.
+		parent := command.ParentCommandID
+		for depth := 0; parent != 0; depth++ {
+			if depth == 32 {
+				return ""
+			}
+			index := slices.IndexFunc(r.commands, func(c CommandFact) bool { return c.ID == parent })
+			if index < 0 {
+				return ""
+			}
+			if r.commands[index].workFolders.moved() {
+				return ""
+			}
+			parent = r.commands[index].ParentCommandID
+		}
+		return cwd
+	}
+	if len(folders) != 1 || !path.IsAbs(cwd) {
+		return ""
+	}
+	raw, dotdot := cwd, false
+	for _, step := range folders[0].steps {
+		switch {
+		case strings.HasPrefix(step, "/"):
+			raw = step
+		case step == "." || step == ".." || strings.HasPrefix(step, "./") || strings.HasPrefix(step, "../"):
+			raw += "/" + step
+		default:
+			return ""
+		}
+		dotdot = dotdot || slices.Contains(strings.Split(step, "/"), "..")
+	}
+	logical, ok := resolveWorkFolder(cwd, "", folders[0])
+	if !ok || !r.lookups.Take() {
+		return ""
+	}
+	physical, err := filepath.EvalSymlinks(filepath.FromSlash(logical))
+	if err != nil {
+		return ""
+	}
+	if dotdot {
+		// cd -P takes each ".." from the physical folder, cd -L from the
+		// path as written: the folder is known only when both agree.
+		if !r.lookups.Take() {
+			return ""
+		}
+		if other, err := filepath.EvalSymlinks(filepath.FromSlash(raw)); err != nil || other != physical {
+			return ""
+		}
+	}
+	return filepath.ToSlash(physical)
 }
 
 // rgJoin is Rust's Path::join of a folder and a name: no "/" is added

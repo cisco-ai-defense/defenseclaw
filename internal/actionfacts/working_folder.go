@@ -242,6 +242,10 @@ type workFolderTracker struct {
 	folders map[*syntax.Stmt]workFolders
 	// movers are the functions of the text whose body may move the folder.
 	movers map[string]bool
+	// shadowed: the text defines a function named cd, chdir, pushd, popd,
+	// builtin or command, so a call of that name may run it instead of the
+	// builtin: every move goes to an unresolved folder (substrate-1:GAP-0684).
+	shadowed bool
 }
 
 // posixWorkFolders returns, for every statement of file, the folders its
@@ -252,7 +256,15 @@ func posixWorkFolders(file *syntax.File) map[*syntax.Stmt]workFolders {
 		return tracker.folders
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil && decl.Body != nil && workFolderBodyMoves(decl.Body) {
+		decl, ok := node.(*syntax.FuncDecl)
+		if !ok || decl.Name == nil {
+			return true
+		}
+		switch decl.Name.Value {
+		case "cd", "chdir", "pushd", "popd", "builtin", "command":
+			tracker.shadowed = true
+		}
+		if decl.Body != nil && workFolderBodyMoves(decl.Body) {
 			tracker.movers[decl.Name.Value] = true
 		}
 		return true
@@ -320,6 +332,9 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 	case *syntax.CallExpr:
 		t.substitutions(cmd, in)
 		if target, isCD := staticWorkFolderMove(cmd); isCD {
+			if t.shadowed {
+				target = "\x00"
+			}
 			moved := in.with(target)
 			for _, candidate := range cdPathCandidates(cmd, target) {
 				moved = unionWorkFolders(moved, in.with(candidate))
