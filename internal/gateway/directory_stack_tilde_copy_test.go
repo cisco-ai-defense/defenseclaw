@@ -63,7 +63,7 @@ func TestDirectoryStackTildeCopyIsNotAKeysWrite(t *testing.T) {
 				ToolName: "Bash", ToolInput: map[string]interface{}{"command": row.command},
 				Payload: map[string]interface{}{"tool_name": "Bash"},
 			})
-			if blocked := resp.Action == "block"; blocked != row.block {
+			if blocked := gap0747ActionBlocked(resp.Action, fmt.Sprint(resp.Findings), row.block, false); blocked != row.block {
 				t.Errorf("%s %q: block=%t, want %t: %v", mode, row.command, blocked, row.block, resp.Findings)
 			}
 		}

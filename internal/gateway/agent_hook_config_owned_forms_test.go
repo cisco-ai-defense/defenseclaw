@@ -96,7 +96,7 @@ func TestAgentHookConfigOwnedTargetSpellings(t *testing.T) {
 			want = "block"
 			// A proven DefenseClaw state write alerts outside strict
 			// (GAP-0747 owner tiering 2026-11-15T15:20Z).
-			if r.name == "folder holding hook scripts moved" && cell.profile != "strict" {
+			if strings.Contains(r.command, "~/.defenseclaw") && cell.profile != "strict" {
 				want = "alert"
 			}
 		}

@@ -68,6 +68,40 @@ func gap0747StateWriteAction(tier bounded.Tier) bounded.Action {
 	return bounded.Alert
 }
 
+// gap0747BodyAction is the action of a hook or file-tool response body.
+func gap0747BodyAction(body string) string {
+	const key = `"action":"`
+	i := strings.Index(body, key)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(key):]
+	if j := strings.IndexByte(rest, '"'); j >= 0 {
+		return rest[:j]
+	}
+	return ""
+}
+
+// gap0747BodyBlocked is the blocked verdict of a hook response body for a row
+// whose old expectation is want (true: a proven DefenseClaw state write that
+// blocked in every tier). Outside strict (strict false) such a write is a
+// HIGH alert that names the state rule and does not block (GAP-0747 owner
+// tiering 2026-11-15T15:20Z), so that body counts as the expected verdict;
+// in strict the body must still block.
+func gap0747BodyBlocked(body string, want, strict bool) bool {
+	return gap0747ActionBlocked(gap0747BodyAction(body), body, want, strict)
+}
+
+// gap0747ActionBlocked is gap0747BodyBlocked for a verdict that has the action
+// and a text that names the rules (the findings or the whole response).
+func gap0747ActionBlocked(action, text string, want, strict bool) bool {
+	blocked := action == "block"
+	if want && !strict && !blocked && strings.Contains(text, gap0747StateRule) {
+		return true
+	}
+	return blocked
+}
+
 // gap0747Blocked is the blocked verdict of findings for a row whose old
 // expectation is want (true: a proven DefenseClaw state write, which blocked
 // in every tier). In a pack that is not strict the write is a HIGH alert
