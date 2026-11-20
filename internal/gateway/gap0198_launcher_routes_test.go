@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,12 +20,16 @@ import (
 
 // GAP-0198 on the routes the string reading did not reach: a pwsh launcher's
 // -WorkingDirectory is the folder its script writes in, so a relative write
-// of the DefenseClaw config behind -wd <state folder> blocks in all five
-// tiers on the Codex shell route as an argv (the launcher body reading had no
-// body for -wd) and on Copilot's powershell tool (judged as shell, the launcher
+// of the DefenseClaw config behind -wd <state folder> is a proven state write
+// on the Codex shell route as an argv (the launcher body reading had no body
+// for -wd) and on Copilot's powershell tool (judged as shell, the launcher
 // line read as POSIX lost the folder's backslashes), as the same move spelled
-// Set-Location already did. The same launchers writing a project file,
-// reading the config or running git stay allowed.
+// Set-Location already was. It carries tamper.detector_state_write in all
+// five tiers with the GAP-0747 owner tiering (2026-11-15T15:20Z): a HIGH
+// alert in default, permissive and managed default, a block in strict and
+// managed strict (a write that also names another tamper or persistence rule
+// keeps that block; gap1173WantFor). The same launchers writing a project
+// file, reading the config or running git stay allowed.
 func TestGAP0198WorkingDirectoryOnTheArgvAndCopilotRoutes(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows hook dialect readings and path resolution")
@@ -67,17 +72,24 @@ func TestGAP0198WorkingDirectoryOnTheArgvAndCopilotRoutes(t *testing.T) {
 			if servers[r.route] == nil {
 				servers[r.route] = gap0437Server(t, p, r.route, "action")
 			}
-			action := gap0198RoutePost(t, servers[r.route], r.route, r.cwd, r.command, home, p.managed)
-			if blocked := action == "block"; blocked != r.block {
-				t.Errorf("%s %s: action %q, want block=%v", p.name, r.name, action, r.block)
+			action, rules := gap0198RoutePost(t, servers[r.route], r.route, r.cwd, r.command, home, p.managed)
+			if !r.block {
+				if action == "block" {
+					t.Errorf("%s %s: action %q rules %v, want no block", p.name, r.name, action, rules)
+				}
+				continue
+			}
+			if want := gap1173WantFor("write", p.name, action, rules); action != want || !slices.Contains(rules, gap0747StateRule) {
+				t.Errorf("%s %s: action %q rules %v, want %q with %s", p.name, r.name, action, rules, want, gap0747StateRule)
 			}
 		}
 	}
 }
 
-// gap0198RoutePost posts one PreToolUse call to the connector's hook route:
-// Codex's shell tool, or Copilot's powershell tool.
-func gap0198RoutePost(t *testing.T, a *APIServer, route, cwd string, command any, home string, managed bool) string {
+// gap0198RoutePost posts one PreToolUse call to the connector's hook route
+// (Codex's shell tool, or Copilot's powershell tool) and returns the answer's
+// action and rule ids.
+func gap0198RoutePost(t *testing.T, a *APIServer, route, cwd string, command any, home string, managed bool) (string, []string) {
 	t.Helper()
 	event, body := "PreToolUse", map[string]any{"hook_event_name": "PreToolUse", "session_id": "gap0198", "cwd": cwd,
 		"tool_name": "shell", "tool_use_id": "tu-gap0198", "tool_input": map[string]any{"command": command}}
@@ -102,12 +114,14 @@ func gap0198RoutePost(t *testing.T, a *APIServer, route, cwd string, command any
 	}
 	w := httptest.NewRecorder()
 	a.handleAgentHook(route).ServeHTTP(w, req)
-	var out map[string]any
+	var out struct {
+		Action  string   `json:"action"`
+		RuleIDs []string `json:"rule_ids"`
+	}
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("%s: %d %q", route, w.Code, w.Body.String())
 	}
-	action, _ := out["action"].(string)
-	return action
+	return out.Action, out.RuleIDs
 }
 
 // The command of Copilot's powershell tool is judged alone as the PowerShell
