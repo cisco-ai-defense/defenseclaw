@@ -1162,9 +1162,12 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
 		}
 	}
+	// mark is the call's cut count when the walk began: a state read after
+	// the budget cut a share wait short is not kept (rel-1-0-10:GAP-1606).
+	mark := memo.cutMark()
 	fail := func() (string, []string, int, bool) {
 		if memo != nil {
-			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true})
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true}, mark)
 		}
 		return "", nil, linkDepth, false
 	}
@@ -1242,7 +1245,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 			}
 		}
 		if memo != nil {
-			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth})
+			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth}, mark)
 		}
 	}
 	return filepath.Clean(current), forms, linkDepth, true
@@ -1302,9 +1305,12 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
 		}
 	}
+	// mark is the call's cut count when the walk began: a state read after
+	// the budget cut a share wait short is not kept (rel-1-0-10:GAP-1606).
+	mark := memo.cutMark()
 	fail := func() (string, []string, int, bool) {
 		if memo != nil {
-			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true})
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true}, mark)
 		}
 		return "", nil, linkDepth, false
 	}
@@ -1374,7 +1380,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 			}
 		}
 		if memo != nil {
-			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth})
+			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth}, mark)
 		}
 	}
 	return filepath.Clean(current), forms, linkDepth, true

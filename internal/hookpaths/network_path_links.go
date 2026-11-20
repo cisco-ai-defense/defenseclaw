@@ -382,8 +382,15 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	retakeHookCallThread(released)
 	call := currentHookCall()
 	wait := networkShareAnswerWait
+	// budgetCut is set when the call's share wait, not the answer wait,
+	// bounds this read: a read not back then is cut by the budget, not
+	// unanswered, and is counted as such (noteBudgetCut), so the call's
+	// memory keeps no walk it failed (rel-1-0-10:GAP-1606).
+	budgetCut := false
 	if call != nil {
-		wait = min(wait, call.shareWait())
+		if left := call.shareWait(); left < wait {
+			wait, budgetCut = left, true
+		}
 	}
 	if wait -= time.Since(start); wait > 0 {
 		timer.Reset(wait)
@@ -396,6 +403,7 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	if call != nil {
 		call.waitLeft -= time.Since(start)
 	}
+	call.noteBudgetCut(budgetCut)
 	forgetPlainFolders()
 	return false, false
 }

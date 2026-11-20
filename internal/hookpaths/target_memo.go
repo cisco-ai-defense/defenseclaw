@@ -65,6 +65,12 @@ type TargetMemo struct {
 	// call is the memory of the hook call the memo was made in, when the call
 	// keeps one (memoHookCall): the memo resolves its write targets there.
 	call *TargetMemo
+	// owner is the hook call whose memory this memo is (hookCall.targets,
+	// nil for the memo of one evaluation). It outlives each evaluation, so
+	// it keeps no answer read while the call's budget cut a share wait
+	// short (hookCall.keepsSince): the share may answer later in the call,
+	// and an evaluation after that reads it (rel-1-0-10:GAP-1606).
+	owner *hookCall
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not
@@ -114,10 +120,13 @@ func (m *TargetMemo) protectedFiles(home string) protectedFiles {
 	files, ok := m.files[home]
 	m.mu.Unlock()
 	if !ok {
+		mark := m.cutMark()
 		files = newProtectedFilesWith(home, m)
-		m.mu.Lock()
-		m.files[home] = files
-		m.mu.Unlock()
+		if m.keepsSince(mark) {
+			m.mu.Lock()
+			m.files[home] = files
+			m.mu.Unlock()
+		}
 	}
 	return slices.Clone(files)
 }
@@ -132,10 +141,13 @@ func (m *TargetMemo) ProtectedAuthorizedKeysPaths(home string) []string {
 	paths, ok := m.keys[home]
 	m.mu.Unlock()
 	if !ok {
+		mark := m.cutMark()
 		paths = protectedAuthorizedKeysPaths(home, m)
-		m.mu.Lock()
-		m.keys[home] = paths
-		m.mu.Unlock()
+		if m.keepsSince(mark) {
+			m.mu.Lock()
+			m.keys[home] = paths
+			m.mu.Unlock()
+		}
 	}
 	return slices.Clone(paths)
 }
@@ -201,7 +213,12 @@ func (m *TargetMemo) prefix(key string) (walkState, bool) {
 	return state, ok
 }
 
-func (m *TargetMemo) storePrefix(key string, state walkState) {
+// storePrefix keeps the walk state after the prefix key, unless the budget
+// cut a share wait of the call short since the walk began (mark: cutMark).
+func (m *TargetMemo) storePrefix(key string, state walkState, mark uint64) {
+	if !m.keepsSince(mark) {
+		return
+	}
 	state.crossed = append([]bool(nil), state.crossed...)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -209,6 +226,29 @@ func (m *TargetMemo) storePrefix(key string, state walkState) {
 		m.prefixes[key] = state
 	}
 }
+
+// cutCall is the hook call whose budget cuts decide what m keeps: the call
+// whose memory m is, or the call an evaluation memo was made in (nil: none,
+// m keeps every answer for its one evaluation, as off Windows).
+func (m *TargetMemo) cutCall() *hookCall {
+	switch {
+	case m == nil:
+		return nil
+	case m.owner != nil:
+		return m.owner
+	case m.call != nil:
+		return m.call.owner
+	}
+	return nil
+}
+
+// cutMark is hookCall.cutMark of cutCall.
+func (m *TargetMemo) cutMark() uint64 { return m.cutCall().cutMark() }
+
+// keepsSince reports whether m keeps an answer read since mark: only when
+// the budget of its call cut no share wait short meanwhile
+// (hookCall.keepsSince).
+func (m *TargetMemo) keepsSince(mark uint64) bool { return m.cutCall().keepsSince(mark) }
 
 func (m *TargetMemo) word(key memoWordKey) (answer, ok bool) {
 	if m == nil {
@@ -243,8 +283,12 @@ func (m *TargetMemo) stateHome(home string) *actionStateHome {
 	if ok {
 		return state
 	}
+	mark := m.cutMark()
 	state = &actionStateHome{home: home, memo: m, done: true}
 	state.resolved, state.ok = m.resolveWriteTarget(home)
+	if !m.keepsSince(mark) {
+		return state
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if earlier, ok := m.homes[home]; ok {
@@ -275,7 +319,14 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 	if found {
 		return known.path, known.ok
 	}
+	mark := m.cutMark()
 	resolved, _, _, ok := walkWritePathMemo("", path, 0, false, false, m)
+	if !m.keepsSince(mark) {
+		// A share on the way did not answer only because the call's
+		// budget cut its wait short: the next ask may read it
+		// (rel-1-0-10:GAP-1606).
+		return resolved, ok
+	}
 	m.mu.Lock()
 	if len(m.resolved) < maxTargetMemoEntries {
 		m.resolved[path] = resolvedTarget{path: resolved, ok: ok}
@@ -306,7 +357,11 @@ func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
 	if found {
 		return known.differ, known.missing
 	}
+	mark := m.cutMark()
 	differ, missing = actionStateEntryMayDiffer(value)
+	if !m.keepsSince(mark) {
+		return differ, missing
+	}
 	m.mu.Lock()
 	if len(m.entries) < maxTargetMemoEntries {
 		m.entries[value] = stateEntry{differ: differ, missing: missing}
