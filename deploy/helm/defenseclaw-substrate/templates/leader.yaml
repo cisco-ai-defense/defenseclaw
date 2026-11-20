@@ -129,6 +129,3 @@ spec:
   - name: leader
     port: {{ .Values.leader.port }}
     targetPort: leader
-  - name: metrics
-    port: {{ .Values.gateway.ports.metrics }}
-    targetPort: metrics

@@ -139,6 +139,9 @@ gateway:
     # README, Known limits). The NetworkPolicy admits only atenet-egress.
     actor: 8080
     admin: 9443
+    # The liveness and readiness probes (/healthz, /readyz) of the gateway
+    # and leader pods. No /metrics page: the defenseclaw.substrate.*
+    # metrics go to config.observability.destinations over OTLP.
     metrics: 9464
   # Secrets the gateway and leader mount when they exist (optional): the
   # relay session signing key (keys private.pem, public.pem), the provider
@@ -292,8 +295,6 @@ networkPolicy:
   # namespace always may. Add the ingress controller here, for example
   #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}
   adminFrom: []
-  # Peers that may scrape the metrics ports.
-  metricsFrom: []
   # Egress limits for the pods that hold keys or dial out (gateway, leader,
   # callout, controller):
   # DNS, the Kubernetes and Substrate APIs, the release's own Services,

@@ -204,21 +204,6 @@ spec:
   - name: https
     port: 443
     targetPort: admin
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: defenseclaw-gateway-metrics
-  labels:
-    {{- include "dc.componentLabels" $sel | nindent 4 }}
-spec:
-  type: ClusterIP
-  selector:
-    {{- include "dc.selector" $sel | nindent 4 }}
-  ports:
-  - name: metrics
-    port: {{ .Values.gateway.ports.metrics }}
-    targetPort: metrics
 {{- if .Values.gateway.hpa.enabled }}
 ---
 apiVersion: autoscaling/v2

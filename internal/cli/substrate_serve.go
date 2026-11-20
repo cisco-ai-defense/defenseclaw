@@ -136,7 +136,7 @@ func init() {
 	f.StringVar(&serveFlags.role, "substrate-role", "gateway", "gateway or leader")
 	f.StringVar(&serveFlags.actorListen, "actor-listen", ":8443", "actor listener address (gateway)")
 	f.StringVar(&serveFlags.adminListen, "admin-listen", ":9443", "admin listener address (gateway)")
-	f.StringVar(&serveFlags.metricsListen, "metrics-listen", ":9464", "health and metrics address")
+	f.StringVar(&serveFlags.metricsListen, "metrics-listen", ":9464", "liveness and readiness probe address (/healthz, /readyz); the metrics go over OTLP")
 	f.StringVar(&serveFlags.leaderAddress, "leader-address", "", "leader host:port (gateway)")
 	f.StringVar(&serveFlags.leaderListen, "leader-listen", ":7443", "leader RPC address (leader)")
 	f.StringVar(&serveFlags.lease, "lease", "defenseclaw-leader", "Lease name (leader)")
