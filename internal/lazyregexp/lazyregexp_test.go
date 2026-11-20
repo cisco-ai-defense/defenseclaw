@@ -17,6 +17,7 @@
 package lazyregexp
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -120,11 +121,25 @@ func TestEveryModulePatternCompiles(t *testing.T) {
 	pkgs := map[string]*pkgFiles{} // by import path
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// Tests of other packages may run in parallel in this
+			// checkout and remove their own scratch folders (for
+			// example enterprisehooks' .m4-test-* folders) between
+			// the listing and the visit. A path that is gone holds no
+			// pattern to check.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case "vendor", "node_modules", "testdata", ".git":
+			case "vendor", "node_modules", "testdata":
+				return filepath.SkipDir
+			}
+			// The go tool ignores folders whose names start with "."
+			// (".git", ".github", test scratch folders), so no package
+			// of the module lives there.
+			if path != root && strings.HasPrefix(d.Name(), ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -133,6 +148,9 @@ func TestEveryModulePatternCompiles(t *testing.T) {
 			return nil
 		}
 		file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // removed by a parallel test after the listing
+		}
 		if err != nil {
 			return err
 		}
