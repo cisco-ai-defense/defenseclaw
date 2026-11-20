@@ -242,6 +242,13 @@ type trustedActionRequest struct {
 	// unwrapping a call next to it (command echo IFS=x) would prove a write
 	// through the value the read replaces (rel-1-0-10:GAP-1083, GAP-1246).
 	hereStringPipeReading bool
+	// hereStringTwinsJudged leaves out the here-string readings
+	// (hereStringReadingTwinRequest, hereStringStateMutation) of a wrapper
+	// twin whose parent has a here-string reading twin: the parent's twin
+	// printf WORD | sudo tee F has the wrapper twin printf WORD | tee F,
+	// which is this twin's here-string reading, so each was judged twice,
+	// and sudo tee F <<< WORD cost about 10 times ls (rel-1-0-10:GAP-1472).
+	hereStringTwinsJudged bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -371,6 +378,18 @@ type trustedActionRequest struct {
 	// only the outermost call applies the inline hand-off tier
 	// (withInlineHandoffTier).
 	inlineTierNested bool
+	// skipRunTimeShellTwin leaves out the run-time shell reading
+	// (runTimeShellTwinRequest) of this request and the requests derived from
+	// it. The here-string probe of the state mutation proof sets it: the
+	// reading of the call itself judges the shell script of the here-string
+	// once, the probe asks only whether the script reaches state, and the
+	// reading of its pipe twin was the same script judged a second time
+	// (rel-1-0-10:GAP-1088). The here-string reading twin sets it when the
+	// call has a run-time shell reading of its own: printf WORD | bash -c
+	// TEXT judged the script that bash -c TEXT judges already, and
+	// bash <<< 'defenseclaw-gateway stop' cost about 12 times ls
+	// (rel-1-0-10:GAP-1472).
+	skipRunTimeShellTwin bool
 }
 
 // trustedSimpleMemo holds the first simple-command split asked of it.
@@ -447,7 +466,9 @@ func (t trustedActionTelemetry) empty() bool {
 		t.ParserUncertaintyShadowFindingCount == 0
 }
 
-func dispatchTrustedAction(
+// dispatchTrustedActionOnce judges request; dispatchTrustedAction is it
+// through the hook call's memo (trustedDispatchMemo).
+func dispatchTrustedActionOnce(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
@@ -837,8 +858,12 @@ func dispatchTrustedAction(
 	// (nohup, nice, setsid, stdbuf, ionice, sudo, ...; or after a word that
 	// may expand to nothing) writes what the plain call does (GAP-2512,
 	// GAP-2519); the plain reading is judged, and only its block counts.
+	// The here-string reading twin is asked here, before the wrapper twin is
+	// made; request and facts do not change before it is judged below.
+	hereStringTwin, hereStringTwinOK := hereStringReadingTwinRequest(request, facts)
 	writerTwin, writerTwinOK := wrapperUnwrapTwinRequest(request, false)
 	if writerTwinOK {
+		writerTwin.hereStringTwinsJudged = writerTwin.hereStringTwinsJudged || hereStringTwinOK
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, writerTwin))
 		}()
@@ -863,7 +888,12 @@ func dispatchTrustedAction(
 	// "$SHELL" -c TEXT, "$SHELL" <<< TEXT) runs TEXT as the literal shell
 	// call does: that reading is judged too, and the stricter of the two
 	// readings counts (rel-1-0-10:GAP-0980).
-	shellTwin, shellTwinOK, shellCaps, shellUnread := runTimeShellTwinRequest(request)
+	var shellTwin trustedActionRequest
+	var shellTwinOK, shellUnread bool
+	var shellCaps bounded.CapSet
+	if !request.skipRunTimeShellTwin {
+		shellTwin, shellTwinOK, shellCaps, shellUnread = runTimeShellTwinRequest(request)
+	}
 	if shellTwinOK {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, shellTwin))
@@ -1008,7 +1038,12 @@ func dispatchTrustedAction(
 	// printf '%s\n' WORD | CMD as well, by every rule, and the twin's
 	// findings are kept (rel-1-0-10:GAP-1083: cd X, then a here-string,
 	// then a write in X).
-	if twin, ok := hereStringReadingTwinRequest(request, facts); ok {
+	if twin, ok := hereStringTwin, hereStringTwinOK; ok {
+		// The run-time shell reading of the call judges the script of a
+		// shell that reads the here-string (bash <<< TEXT is bash -c TEXT):
+		// the twin's own run-time shell reading (printf WORD | bash -c TEXT)
+		// judged it a second time (rel-1-0-10:GAP-1472).
+		twin.skipRunTimeShellTwin = twin.skipRunTimeShellTwin || shellTwinOK
 		defer func() {
 			// The twin is the call as typed without the bashism: every
 			// finding of it is one of the call, an alert as well as a block.

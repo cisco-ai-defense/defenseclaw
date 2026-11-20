@@ -1043,8 +1043,20 @@ func webhookRuleIDs(ruleIDs []string) string {
 	return strings.Join(ids, ",")
 }
 
+// connectorName reads the two connector fields of the live configuration.
+// It copies nothing: on a server with no sidecar snapshot,
+// runtimeConfigSnapshot copies the whole configuration through JSON, and an
+// inspect call asks for the name three times (rel-1-0-10:GAP-1472).
 func (a *APIServer) connectorName() string {
-	return connectorNameForConfig(a.runtimeConfigSnapshot())
+	if a == nil {
+		return connectorNameForConfig(nil)
+	}
+	if a.configSnapshot != nil {
+		return connectorNameForConfig(a.configSnapshot())
+	}
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return connectorNameForConfig(a.scannerCfg)
 }
 
 func connectorNameForConfig(cfg *config.Config) string {

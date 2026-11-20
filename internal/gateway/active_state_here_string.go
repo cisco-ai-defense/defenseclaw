@@ -26,7 +26,7 @@ const maxHereStringTwinBytes = 16 << 10
 // a state write blocks, and reads and project forms (`xargs cat <<< ...`,
 // `xargs rm -f <<< build/a.o`) stay allowed, as they do in the twin.
 func hereStringStateMutation(facts actionfacts.Facts, request trustedActionRequest) (mutates, judged bool) {
-	if facts.Parse.Status != actionfacts.StatusInvalid || !hereStringTwinHome(facts.ActiveHome) {
+	if request.hereStringTwinsJudged || facts.Parse.Status != actionfacts.StatusInvalid || !hereStringTwinHome(facts.ActiveHome) {
 		return false, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
@@ -44,6 +44,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	// blocks when it reaches state. The calls that do not bind keep the value
 	// they had, which no one text can say, so such a command is never judged
 	// here (mixed): the walk of its calls, each with its own state, judges it.
+	request.skipRunTimeShellTwin = true
 	seen := map[string]bool{}
 	request.hereStringPipeReading = true
 	for _, split := range []bool{true, false} {
@@ -78,7 +79,7 @@ func hereStringTwinHome(home string) bool {
 // command of a call (the call itself is judged so), a read whose binding
 // differs between its calls, or a twin that does not parse either.
 func hereStringReadingTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
-	if request.readingTwin || request.simpleCommandPass || facts.Parse.Status != actionfacts.StatusInvalid {
+	if request.readingTwin || request.hereStringTwinsJudged || request.simpleCommandPass || facts.Parse.Status != actionfacts.StatusInvalid {
 		return trustedActionRequest{}, false
 	}
 	command, known := trustedBashCommandInput(request.Input)

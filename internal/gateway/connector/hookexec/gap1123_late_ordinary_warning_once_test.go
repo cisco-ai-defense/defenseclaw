@@ -5,6 +5,7 @@ package hookexec
 
 import (
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -102,17 +103,32 @@ func TestGAP1123LateOrdinaryAllowWarnsOncePerSession(t *testing.T) {
 				t.Fatalf("%d warnings over two calls of one session, want 1", warnings)
 			}
 		})
-		for _, tc := range []struct {
+		rows := []struct {
 			name, command, tier string
 			install             bool
 		}{
-			{"keys file, open tier", "cat .ssh/authorized_keys", "open", false},
+			// The keys file of the home the scans read (the account's): the
+			// shared reader names it on every system (rel-1-0-10:GAP-1545).
+			{"home keys file, open tier", "cat ~/.ssh/authorized_keys", "open", false},
 			{"ordinary call, closed tier", "git status", "closed", false},
 			// rel-1-0-10 GAP-1187: an install that took the lock during the
 			// call closes the ordinary answer, also of a call whose gateway
 			// owes its decision.
 			{"ordinary call, install window", "git status", "open", true},
-		} {
+		}
+		if runtime.GOOS != "windows" {
+			// A keys path below the call's folder, which is not the home: on
+			// Linux and macOS the link-hop scan reads it as a place a link
+			// may turn into the account's keys file. Windows runs the shared
+			// reader only (bothLateScansOrdinary), which resolves the path
+			// from the folder the call is in, outside the home .ssh
+			// (rel-1-0-10:GAP-1545).
+			rows = append(rows, struct {
+				name, command, tier string
+				install             bool
+			}{"keys file below the call's folder, open tier", "cat .ssh/authorized_keys", "open", false})
+		}
+		for _, tc := range rows {
 			t.Run(name+tc.name+" stays blocked", func(t *testing.T) {
 				callHome := home
 				if tc.install {

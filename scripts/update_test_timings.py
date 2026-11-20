@@ -29,7 +29,10 @@ weighs an estimate. Refresh after a large test change:
   windows-go  Windows Native CI job logs of the windows-go parts -> go-windows.json:
          package times from the packages parts ("[go-package-time] <package>
          <result> <seconds>") and the gateway, connector, and hookexec test
-         times from the go test -json events their parts print
+         times from the go test -json events their parts print. A gateway
+         or connector part prints its whole stream's test events as
+         "[go-test-event] <event>" lines (its console copy keeps only the
+         head and tail of 1 MiB); those lines win for their package
            gh run view <run> --log > win.log; scripts/update_test_timings.py windows-go win.log
 
 A directory input is one run (every file under it); the files named
@@ -69,6 +72,9 @@ OUT_DIR = ROOT / "scripts" / "test-timings"
 # Packages whose tests the CI splits by test name (go_test_shards.py test
 # mode and the split parts of package mode); only their per-test times are kept.
 PER_TEST_MIN_SECONDS = 60.0
+# A test still running when its package ended weighs the time it ran when
+# it ran at least this long.
+CUT_OFF_MIN_SECONDS = 2.0
 # A top-level test function, as go_test_shards.py discovers them.
 TEST_FUNCTION_RE = re.compile(r"^func\s+((?:Test|Fuzz|Example)[A-Za-z0-9_]*)\s*\(", re.MULTILINE)
 
@@ -79,20 +85,53 @@ def _write(path: Path, data: dict) -> None:
     print(f"wrote {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
 
 
+TRUNCATED = {"Action": "truncated"}
+# The mark alone on its line, or after the timestamp (and gh run view job
+# and step names) of a CI log line.
+TRUNCATED_RE = re.compile(r"(?:^|\s)\[truncated\]\s*$")
+# The tag of the events a Windows Native CI gateway part prints from its
+# whole go test -json stream (Invoke-WindowsNativeProcess -GoTestEventSummary):
+# every package event and top-level test event but output.
+EVENT_TAG = "[go-test-event] "
+
+
+def _json_event(line: str, start: int) -> dict | None:
+    try:
+        event = json.loads(line[start:])
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
 def _go_events(files: list[Path]):
-    """The go test -json events of files, in order."""
+    """The go test -json events of files, in order. Where a bounded log was
+    cut it yields TRUNCATED: the events between the two parts are lost. A
+    package with tagged events (EVENT_TAG) in a file weighs only those: its
+    untagged events there are the bounded console copy of the same run."""
     for file in files:
-        for line in file.read_text(encoding="utf-8", errors="replace").splitlines():
+        lines = file.read_text(encoding="utf-8", errors="replace").splitlines()
+        tagged: set[str] = set()
+        for line in lines:
+            tag = line.find(EVENT_TAG)
+            if tag >= 0 and (event := _json_event(line, tag + len(EVENT_TAG))) is not None:
+                tagged.add(str(event.get("Package", "")))
+        for line in lines:
+            if TRUNCATED_RE.search(line) and '{"' not in line:
+                yield TRUNCATED
+                continue
+            tag = line.find(EVENT_TAG)
+            if tag >= 0:
+                event = _json_event(line, tag + len(EVENT_TAG))
+                if event is not None:
+                    yield event
+                continue
             # A CI log puts a timestamp (and gh run view the job and step
             # names) before each event.
             start = line.find('{"')
             if start < 0:
                 continue
-            try:
-                event = json.loads(line[start:])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict):
+            event = _json_event(line, start)
+            if event is not None and str(event.get("Package", "")) not in tagged:
                 yield event
 
 
@@ -141,6 +180,14 @@ def _go_run_times(files: list[Path], module: str) -> tuple[dict[str, float], dic
         shares = TopLevelShares()
         timed: set[tuple[str, str]] = set()
         for event in _go_events([file]):
+            if event is TRUNCATED:
+                # The cut lost the events of the tests running across it:
+                # their clocks would run on and split the later tests' time
+                # with them (gw8 of Windows Native CI 44412520021 weighed
+                # each 94 s decoy-header test 47 s). Start a new clock; a
+                # test that ends after the cut weighs its Elapsed.
+                shares, timed = TopLevelShares(), set()
+                continue
             package = event.get("Package", "")
             name = event.get("Test")
             action = event.get("Action")
@@ -154,6 +201,16 @@ def _go_run_times(files: list[Path], module: str) -> tuple[dict[str, float], dic
             if name is None:
                 # Shards of one package each report its elapsed time: sum them.
                 packages[package] = packages.get(package, 0.0) + elapsed
+                # A test still running when its package ended (go test's
+                # -timeout panic ends no test) weighs the time it had run, a
+                # lower bound (_ended_and_cut_off counts it as cut off). One
+                # that never ran past CUT_OFF_MIN_SECONDS, such as a
+                # t.Parallel test still waiting, is left unreached.
+                for running in sorted(test for owner, test in timed if owner == package):
+                    share = shares.seconds(package, running)
+                    if share is not None and share >= CUT_OFF_MIN_SECONDS:
+                        tests.setdefault(_rel(package, module), {})[running] = share
+                timed = {(owner, test) for owner, test in timed if owner != package}
             elif "/" not in name:
                 share = shares.seconds(package, name)
                 if (package, name) in timed and when is not None and share is not None:
@@ -257,20 +314,33 @@ def _ended_and_cut_off(files: list[Path], module: str) -> tuple[dict[str, set[st
     had run, a lower bound. The mark is what counts: a job killed before go
     test's own -timeout leaves no package end event before those records
     (GAP-1033). A fail after the end event of its package is a cut-off too
-    (the files written before the mark)."""
+    (the files written before the mark), and so is a test that ran and had
+    no end when its package ended: go test's own -timeout panic ends the
+    package and no test (Windows Native CI gateway parts, GAP-1295)."""
     ended: dict[str, set[str]] = {}
     cut_off: dict[str, set[str]] = {}
     for file in files:
         closed: set[str] = set()
+        started: set[tuple[str, str]] = set()
         for event in _go_events([file]):
+            if event is TRUNCATED:
+                started = set()
+                continue
             package, name, action = event.get("Package", ""), event.get("Test"), event.get("Action")
             if name is None:
                 if action in ("pass", "fail"):
                     closed.add(package)
+                    for owner, test in sorted(started):
+                        if owner == package:
+                            cut_off.setdefault(_rel(package, module), set()).add(test)
+                    started = {(owner, test) for owner, test in started if owner != package}
                 elif action == "start":
                     closed.discard(package)
                 continue
+            if action == "run" and "/" not in name:
+                started.add((package, name))
             if action in ("pass", "fail", "skip") and "/" not in name:
+                started.discard((package, name))
                 cut = action == "fail" and (event.get("CutOff") is True or package in closed)
                 into = cut_off if cut else ended
                 into.setdefault(_rel(package, module), set()).add(name)
@@ -388,10 +458,13 @@ def main() -> int:
     if args.kind != "python" and out.is_file():
         old = json.loads(out.read_text(encoding="utf-8"))
         data = keep_unreached_go_tests(old, data, files, module)
-        if args.kind == "windows-go":
-            data = keep_unreached_windows_packages(old, data, module)
+        # --update before the unreached Windows packages: those count as
+        # measured in merge_go_timings and dropped the per-test times of
+        # internal/hookpaths when only the gateway parts were read.
         if args.update:
             data = merge_go_timings(old, data, module)
+        if args.kind == "windows-go":
+            data = keep_unreached_windows_packages(old, data, module)
     if args.kind != "python":
         data = prune_retired(data, module)
     _write(out, data)

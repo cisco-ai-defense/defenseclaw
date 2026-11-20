@@ -35,6 +35,11 @@ var managedWindowsBareCommandAllowed = map[string][]string{
 	// The per-user stable hook launcher (LocalAppData\DefenseClaw\HookRuntime);
 	// managed hooks run from the machine hook runtime instead.
 	"internal/hookruntime/unavailable_windows.go": {"Run `defenseclaw doctor`"},
+	// This account's own per-user gateway, started elevated or in another
+	// logon session (GAP-1212): gatewayOutOfReach answers nothing for a
+	// managed or standalone-enterprise deployment, whose gateway is the
+	// machine service (rel-1-0-10:GAP-1486).
+	"internal/cli/gateway_out_of_reach.go": {"Run defenseclaw-gateway "},
 }
 
 // managedWindowsSetupAllowance lets one source name a Setup action in plain
@@ -279,7 +284,7 @@ func checkManagedWindowsFile(file *ast.File, rel string, windowsOnly bool, used 
 				}
 			}
 			if joined, parts, ok := managedWindowsFormatted(n); ok {
-				for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly) {
+				for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly, used) {
 					report(n.Pos(), fmt.Sprintf("%s: %q", strings.Replace(problem, "in the joined sentence", "in the formatted text", 1), joined))
 				}
 			}
@@ -297,7 +302,7 @@ func checkManagedWindowsFile(file *ast.File, rel string, windowsOnly bool, used 
 		case *ast.BinaryExpr:
 			if n.Op == token.ADD && !chained[n] {
 				joined, parts := managedWindowsSentence(n, chained)
-				for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly) {
+				for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly, used) {
 					report(n.Pos(), fmt.Sprintf("%s: %q", problem, joined))
 				}
 			}
@@ -617,7 +622,7 @@ func managedWindowsSentence(sum *ast.BinaryExpr, chained map[*ast.BinaryExpr]boo
 
 // managedWindowsSentenceProblems lists the problems of a joined sentence
 // (managedWindowsSentence) that none of its literals has alone.
-func managedWindowsSentenceProblems(rel, joined string, parts []string, windowsOnly bool) []string {
+func managedWindowsSentenceProblems(rel, joined string, parts []string, windowsOnly bool, used map[string]bool) []string {
 	if len(parts) < 2 {
 		return nil
 	}
@@ -628,7 +633,9 @@ func managedWindowsSentenceProblems(rel, joined string, parts []string, windowsO
 		}
 	}
 	var problems []string
-	for _, problem := range managedWindowsLiteralProblems(rel, joined, windowsOnly, map[string]bool{}) {
+	// The joined sentence marks the allowances it needs: one that only a
+	// sentence built with + names is in use (rel-1-0-10:GAP-1486).
+	for _, problem := range managedWindowsLiteralProblems(rel, joined, windowsOnly, used) {
 		if !alone[problem] {
 			problems = append(problems, "in the joined sentence, "+problem)
 		}
@@ -737,7 +744,7 @@ func TestManagedWindowsSentenceProblems(t *testing.T) {
 			t.Fatalf("%s: not a sum", row.name)
 		}
 		joined, parts := managedWindowsSentence(sum, map[*ast.BinaryExpr]bool{})
-		if got := len(managedWindowsSentenceProblems("internal/cli/x.go", joined, parts, row.windowsOnly)); got != row.want {
+		if got := len(managedWindowsSentenceProblems("internal/cli/x.go", joined, parts, row.windowsOnly, map[string]bool{})); got != row.want {
 			t.Errorf("%s: %d problems in %q, want %d", row.name, got, joined, row.want)
 		}
 	}

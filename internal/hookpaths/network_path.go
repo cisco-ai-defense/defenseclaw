@@ -234,17 +234,28 @@ func (call *hookCall) shareWait() time.Duration {
 // networkShareCallShares answer waits and a tail in all. Within a call it begins
 // nothing more, so the gateway's request and the target resolution it runs are one call.
 func HookCall() (end func()) {
+	_, end = beginHookCall()
+	return end
+}
+
+// beginHookCall is HookCall that also returns the call the goroutine runs
+// from then on (nil: none), the one it began or the one already open, so a
+// caller that uses the call does not read the goroutine's key a second time:
+// off Windows each read is a traceback of the stack (goroutineID), and
+// globCutOf runs on every private-key and pattern reading of a decision
+// (rel-1-0-10:GAP-1472).
+func beginHookCall() (*hookCall, func()) {
 	unlock := lockHookCallKey()
 	id := hookCallKey()
 	if id == 0 {
 		unlock()
-		return func() {}
+		return nil, func() {}
 	}
 	hookCalls.mu.Lock()
 	defer hookCalls.mu.Unlock()
-	if _, open := hookCalls.calls[id]; open {
+	if open := hookCalls.calls[id]; open != nil {
 		unlock()
-		return func() {}
+		return open, func() {}
 	}
 	if hookCalls.calls == nil {
 		hookCalls.calls = make(map[uint64]*hookCall)
@@ -252,7 +263,7 @@ func HookCall() (end func()) {
 	tail := networkShareAnswerWait / 2
 	call := &hookCall{key: id, waitLeft: networkShareCallShares*networkShareAnswerWait + tail, tail: tail}
 	hookCalls.calls[id] = call
-	return func() {
+	return call, func() {
 		hookCalls.mu.Lock()
 		delete(hookCalls.calls, call.key)
 		hookCalls.mu.Unlock()
@@ -906,4 +917,32 @@ func ObserveRemoteShareReadsForTest(note func(name string)) (restore func()) {
 // before, without the wait its hook cannot afford.
 func NotExist(err error) bool {
 	return os.IsNotExist(err) || errors.Is(err, errNetworkShareUnanswered)
+}
+
+// CallState is what the hook call of the goroutine has spent of its budgets
+// and set of its causes so far: the share answer wait, the script bytes, the
+// bodies left unread, the pattern caps hit. Its caches (stats, the target
+// memo, the bodies read) are left out: they answer a repeat as the first
+// read. A dispatch that leaves it as it found it spent nothing a repeat of
+// the same request would find spent (the gateway's dispatch memo,
+// rel-1-0-10:GAP-1472). The zero value: no call open.
+type CallState struct {
+	open                                 bool
+	waitLeft, tail                       time.Duration
+	bodyUnread, bodyLinks, linksUnproven bool
+	globCut                              bounded.CapSet
+	scriptBytes, scripts                 int
+}
+
+// HookCallState is the CallState of the hook call the goroutine runs.
+func HookCallState() CallState {
+	call := currentHookCall()
+	if call == nil {
+		return CallState{}
+	}
+	return CallState{
+		open: true, waitLeft: call.waitLeft, tail: call.tail,
+		bodyUnread: call.bodyUnread, bodyLinks: call.bodyLinks, linksUnproven: call.linksUnproven,
+		globCut: call.globCut, scriptBytes: call.scriptBytes, scripts: len(call.scripts),
+	}
 }

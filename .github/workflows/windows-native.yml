@@ -60,9 +60,14 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.windows_go != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 20
-    # Each part has its own runner: gwN runs shard N of 20 of the gateway
-    # package and shard N of 20 of the connector package, both balanced on
-    # recorded Windows test times (scripts/test-timings/go-windows.json);
+    # Each part has its own runner: gwN runs shard N of 32 of the gateway
+    # package and shard N of 32 of the connector package, both balanced on
+    # recorded Windows test times (scripts/test-timings/go-windows.json).
+    # 32, not 20: the two packages carry about 16,100 s of recorded Windows
+    # test time (Windows Native CI 44412520021 on PR #1457, 740c0de8fd, plus
+    # one native run of the 62 gateway tests no CI run had timed); 20 jobs
+    # averaged 17 of their 20 minutes and gw15 was cancelled at the job
+    # budget (GAP-1546, GAP-1295);
     # pkN one of fifteen timing-balanced parts of the remaining packages and hxN
     # one of six test-level parts of hookexec (still -p=1 within each part).
     # The checks part runs DACL, redaction, isolated connector tests, vet, and
@@ -95,6 +100,18 @@ jobs:
           - { shard: gw17, kind: gateway, index: 17 }
           - { shard: gw18, kind: gateway, index: 18 }
           - { shard: gw19, kind: gateway, index: 19 }
+          - { shard: gw20, kind: gateway, index: 20 }
+          - { shard: gw21, kind: gateway, index: 21 }
+          - { shard: gw22, kind: gateway, index: 22 }
+          - { shard: gw23, kind: gateway, index: 23 }
+          - { shard: gw24, kind: gateway, index: 24 }
+          - { shard: gw25, kind: gateway, index: 25 }
+          - { shard: gw26, kind: gateway, index: 26 }
+          - { shard: gw27, kind: gateway, index: 27 }
+          - { shard: gw28, kind: gateway, index: 28 }
+          - { shard: gw29, kind: gateway, index: 29 }
+          - { shard: gw30, kind: gateway, index: 30 }
+          - { shard: gw31, kind: gateway, index: 31 }
           - { shard: pk0, kind: packages, index: 0 }
           - { shard: pk1, kind: packages, index: 1 }
           - { shard: pk2, kind: packages, index: 2 }
@@ -340,7 +357,7 @@ jobs:
           # and selector-compilation memory.
           $suiteKind = [string]$env:GO_SUITE_KIND
           $matrixShard = [int]$env:GO_SUITE_INDEX
-          $nativeTestShardCount = 20
+          $nativeTestShardCount = 32
           $remainingPackageShardCount = 15
           $hookexecTestShardCount = 6
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
@@ -500,12 +517,14 @@ jobs:
               for ($patternIndex = 0; $patternIndex -lt $shardPatterns.Count; $patternIndex++) {
                 # -timeout stays below the job's 20 minutes so a hung test
                 # fails with Go's goroutine dump, not a cancelled job.
+                # -GoTestEventSummary prints the part's test events whole for
+                # scripts/update_test_timings.py windows-go, a timed-out part too.
                 Invoke-WindowsNativeProcess $go (@(
                   'test', '-vet=off', '-json', '-count=1', '-timeout=11m', '-p=1') + $part.Extra + @(
                   '-skip', $part.Skip, '-run', $shardPatterns[$patternIndex], ('./' + $part.Dir)
                 )) -TimeoutSeconds 840 `
                   -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-$matrixShard-$patternIndex.log")) `
-                  -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+                  -GoTestFailureSummaryPath $goFailureSummary -GoTestEventSummary | Out-Null
               }
             }
             Write-Host "Native Windows Go matrix shard $matrixShard completed its gateway and connector shards."

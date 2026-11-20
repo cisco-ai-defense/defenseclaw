@@ -37,7 +37,9 @@ func TestRunTimeShellTwinHeredocParametersAsTheHoldingShellExpands(t *testing.T)
 			command, prefix := form(row.body)
 			want := prefix + q(row.script) + "\n" + row.body + "\nEOF"
 			if prefix == "bash -c " {
-				want = prefix + q(row.script) + " <<EOF\n" + row.body + "\nEOF"
+				// The here-document that supplies the script is the -c
+				// STRING of the twin and not its stdin (rel-1-0-10:GAP-1088).
+				want = prefix + q(row.script)
 			}
 			got, ok, _, unread := RunTimeShellTwin(command)
 			if !ok || got != want || unread {
