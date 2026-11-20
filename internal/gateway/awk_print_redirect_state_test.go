@@ -10,8 +10,11 @@ import (
 
 // rel-1-0-10:GAP-1239: an awk program that redirects print or printf into
 // active DefenseClaw state writes the file as the shell redirect does, so on
-// the Claude Code hook route it gets the shell redirect's verdict (block,
-// tamper.detector_state_write) bare and behind env and sudo, in every pack.
+// the Claude Code hook route it gets the shell redirect's verdict, with
+// tamper.detector_state_write, bare and behind env and sudo, in every pack.
+// That verdict is the GAP-0747 owner tiering (2026-11-15T15:20Z) of a proven
+// state write: a HIGH alert in the default pack, a block in strict (a shell
+// form that also names another tamper or persistence rule keeps its block).
 // The redirect fixtures of TestActiveStateMentionAllowedRealWriteBlocked are
 // written as the awk program here; a print into a project file, to standard
 // error, a comparison and a computed target stay allowed.
@@ -64,18 +67,31 @@ func TestGAP1239AwkPrintRedirectIntoStateIsTheShellRedirect(t *testing.T) {
 			event["cwd"] = cwd
 			return callAgentHookForTest(t, handler, event)
 		}
+		writeAction := gap0747WantAction(pack == "strict")
 		for i, s := range shapes {
 			shell := ask(fmt.Sprintf("s%d", i), s.shell)
-			if got := shell.Action == "block"; got != s.block {
-				t.Fatalf("%s %q (shell form): blocked=%v, want %v (%v)", pack, s.shell, got, s.block, shell.RuleIDs)
+			if s.block {
+				want := writeAction
+				if shell.Action == "block" && gap0747OtherTamperFinding(shell.RuleIDs) {
+					want = "block"
+				}
+				if shell.Action != want || !containsString(shell.RuleIDs, stateWriteRuleID) {
+					t.Fatalf("%s %q (shell form): action %q rules %v, want %q with %s", pack, s.shell, shell.Action, shell.RuleIDs, want, stateWriteRuleID)
+				}
+			} else if shell.Action == "block" {
+				t.Fatalf("%s %q (shell form): blocked, want no block (%v)", pack, s.shell, shell.RuleIDs)
 			}
 			for w, wrapper := range []string{"", "env ", "sudo "} {
 				awk := ask(fmt.Sprintf("a%d-%d", i, w), wrapper+s.awk)
-				if got := awk.Action == "block"; got != s.block {
-					t.Errorf("%s %q: blocked=%v, want %v as the shell form %q (%v)", pack, wrapper+s.awk, got, s.block, s.shell, awk.RuleIDs)
-				}
-				if s.block && !containsString(awk.RuleIDs, stateWriteRuleID) {
-					t.Errorf("%s %q: rules %v, want %s", pack, wrapper+s.awk, awk.RuleIDs, stateWriteRuleID)
+				if s.block {
+					if awk.Action != shell.Action {
+						t.Errorf("%s %q: action %q, want %q as the shell form %q (%v)", pack, wrapper+s.awk, awk.Action, shell.Action, s.shell, awk.RuleIDs)
+					}
+					if !containsString(awk.RuleIDs, stateWriteRuleID) {
+						t.Errorf("%s %q: rules %v, want %s", pack, wrapper+s.awk, awk.RuleIDs, stateWriteRuleID)
+					}
+				} else if awk.Action == "block" {
+					t.Errorf("%s %q: blocked, want no block as the shell form %q (%v)", pack, wrapper+s.awk, s.shell, awk.RuleIDs)
 				}
 			}
 		}
