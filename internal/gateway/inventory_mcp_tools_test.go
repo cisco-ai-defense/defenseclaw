@@ -49,6 +49,26 @@ type coordinatedAdvertisedStore struct {
 	writes       []audit.MCPAdvertisedToolSnapshot
 }
 
+type retryingObservedStore struct {
+	testMCPObservedToolStore
+	betweenAttempts func()
+}
+
+func (s *retryingObservedStore) UpsertMCPObservedToolIf(_ context.Context, tool audit.MCPObservedTool, stillCurrent func() bool) error {
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
+	}
+	if s.betweenAttempts != nil {
+		s.betweenAttempts()
+	}
+	if stillCurrent != nil && !stillCurrent() {
+		return nil
+	}
+	s.observedWrite = tool
+	s.upsertCalls++
+	return nil
+}
+
 func (s *coordinatedAdvertisedStore) ReplaceMCPAdvertisedToolsIf(_ context.Context, snapshot audit.MCPAdvertisedToolSnapshot, stillCurrent func() bool) error {
 	s.mu.Lock()
 	s.calls++
@@ -167,6 +187,7 @@ func TestMCPToolAmbiguousAliasRetainsLastAdvertisedListing(t *testing.T) {
 		parent, {id: "server-b", itemName: "notes", agentConnector: "codex"},
 	})
 	tools.recordAdvertised("codex", "notes", []string{"delete"}, time.Now())
+	tools.recordListingFailure("codex", "notes")
 	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "advertised")
 	if partial || len(rows) != 1 || rows[0].itemName != "search" {
 		t.Fatalf("blocked alias did not retain last valid listing: rows=%+v partial=%v", rows, partial)
@@ -189,14 +210,76 @@ func TestMCPToolPendingObservationKeepsMaximumTimestamp(t *testing.T) {
 		t.Fatal("newer pending write rejected")
 	}
 	pending, ok := tools.beginObservedWrite("codex", "notes", "search", parent.id, older)
-	if !ok || !pending.at.Equal(newer) {
-		t.Fatalf("pending timestamp=%v ok=%v, want %v", pending.at, ok, newer)
+	if !ok || !pending.firstAt.Equal(older) || !pending.lastAt.Equal(newer) {
+		t.Fatalf("pending bounds=(%v,%v) ok=%v, want (%v,%v)", pending.firstAt, pending.lastAt, ok, older, newer)
 	}
 	if err := tools.flushPendingObserved(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if !store.observedWrite.LastObservedAt.Equal(newer) {
-		t.Fatalf("durable timestamp=%v, want %v", store.observedWrite.LastObservedAt, newer)
+	if !store.observedWrite.FirstObservedAt.Equal(older) || !store.observedWrite.LastObservedAt.Equal(newer) {
+		t.Fatalf("durable bounds=(%v,%v), want (%v,%v)", store.observedWrite.FirstObservedAt, store.observedWrite.LastObservedAt, older, newer)
+	}
+}
+
+func TestMCPToolObservationIsQueuedBeforeItBecomesVisible(t *testing.T) {
+	tools := &mcpToolInventory{store: &testMCPObservedToolStore{}}
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	pending, recorded, queued := tools.recordObservedAndBeginWrite("codex", "notes", "search", time.Now())
+	if !recorded || !queued || pending.version == 0 {
+		t.Fatalf("atomic observation recorded=%v queued=%v pending=%+v", recorded, queued, pending)
+	}
+	key := mcpToolServerKey("codex", "notes")
+	tools.mu.Lock()
+	_, visible := tools.observed[key]["search"]
+	current := tools.pendingObserved[key]["search"]
+	tools.mu.Unlock()
+	if !visible || current.version != pending.version {
+		t.Fatalf("visible=%v pending=%+v want version=%d", visible, current, pending.version)
+	}
+}
+
+func TestMCPToolFullPersistenceQueueDoesNotExposeObservation(t *testing.T) {
+	tools := &mcpToolInventory{store: &testMCPObservedToolStore{}}
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	for index := range maxMCPToolObservations {
+		tool := fmt.Sprintf("queued-%03d", index)
+		if _, ok := tools.beginObservedWrite("codex", "notes", tool, parent.id, time.Now()); !ok {
+			t.Fatalf("fill pending queue at %d", index)
+		}
+	}
+	if _, recorded, queued := tools.recordObservedAndBeginWrite("codex", "notes", "not-durable", time.Now()); !recorded || queued {
+		t.Fatalf("full queue recorded=%v queued=%v", recorded, queued)
+	}
+	key := mcpToolServerKey("codex", "notes")
+	if _, visible := tools.observed[key]["not-durable"]; visible {
+		t.Fatal("observation became visible without a pending durable write")
+	}
+}
+
+func TestMCPToolFinalSkippedAttemptRemainsPending(t *testing.T) {
+	store := &retryingObservedStore{}
+	tools := &mcpToolInventory{store: store}
+	store.betweenAttempts = func() {
+		key := mcpToolServerKey("codex", "notes")
+		tools.mu.Lock()
+		tools.blockedObserved[key] = true
+		tools.mu.Unlock()
+	}
+	api := &APIServer{mcpTools: tools}
+	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
+	tools.refreshParents([]endpointInventoryComponent{parent})
+	req := agentHookRequest{
+		ConnectorName: "codex", ConnectorInstanceID: syntheticToolResourceConnectorID,
+		ToolName: "mcp__notes__search", Payload: map[string]interface{}{"mcp_server_name": "notes"},
+	}
+	ctx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "codex"), req,
+		[]byte(`{"tool_name":"mcp__notes__search","mcp_server_name":"notes"}`))
+	api.recordObservedMCPTool(ctx, req, time.Now())
+	key := mcpToolServerKey("codex", "notes")
+	if len(tools.pendingObserved[key]) != 1 || store.upsertCalls != 0 {
+		t.Fatalf("final guarded retry settled pending=%+v writes=%d", tools.pendingObserved[key], store.upsertCalls)
 	}
 }
 
@@ -317,10 +400,14 @@ func TestObservedMCPToolExactReplayDoesNotAdvanceTimestamp(t *testing.T) {
 	}
 	// A suppressed event with no correlation evidence is not a proven replay and
 	// remains eligible for observation.
-	req.CorrelationUnavailable = true
-	api.recordObservedMCPToolIfManaged(ctx, req)
+	unavailable := req
+	unavailable.ToolName = "mcp__notes__read"
+	unavailable.CorrelationUnavailable = true
+	unavailableCtx := withAuthenticatedToolResource(withAuthenticatedHookConnector(context.Background(), "claudecode"), unavailable,
+		[]byte(`{"tool_name":"mcp__notes__read","mcp_server_name":"notes"}`))
+	api.recordObservedMCPToolIfManaged(unavailableCtx, unavailable)
 	rows, _ = tools.components([]endpointInventoryComponent{parent}, false, "observed")
-	if len(rows) != 1 || rows[0].mcpToolObservedAt < first {
+	if len(rows) != 2 || rows[0].itemName != "read" && rows[1].itemName != "read" {
 		t.Fatalf("correlation-unavailable event was lost: first=%q rows=%+v", first, rows)
 	}
 }
@@ -1279,6 +1366,59 @@ func TestMCPToolInventoryRefreshesOnlyCompleteConnectors(t *testing.T) {
 	}, map[string]struct{}{"codex": {}})
 	if parent, recorded := tools.recordObserved("claudecode", "notes", "read", time.Now()); recorded || parent != "" {
 		t.Fatalf("ambiguous complete alias accepted an observation: parent=%q recorded=%v", parent, recorded)
+	}
+}
+
+func TestMCPToolInventoryStagesRestoredEvidenceWhileAliasIsAmbiguous(t *testing.T) {
+	var tools mcpToolInventory
+	first := time.Date(2026, 11, 18, 3, 0, 0, 0, time.UTC)
+	tools.restoreObserved([]audit.MCPObservedTool{{
+		ParentComponentID: "parent-a", Connector: "codex", ServerName: "notes",
+		ToolName: "search", FirstObservedAt: first, LastObservedAt: first,
+	}})
+	tools.restoreAdvertised([]audit.MCPAdvertisedToolSnapshot{{
+		ParentComponentID: "parent-a", Connector: "codex", ServerName: "notes",
+		ToolNames: []string{"read"}, ListedAt: first,
+	}})
+	ambiguous := []endpointInventoryComponent{
+		{id: "parent-a", itemName: "notes", agentConnector: "codex"},
+		{id: "parent-b", itemName: "notes", agentConnector: "codex"},
+	}
+	if removed := tools.refreshParents(ambiguous); len(removed) != 0 {
+		t.Fatalf("ambiguous candidates were retired: %v", removed)
+	}
+	key := mcpToolServerKey("codex", "notes")
+	if tools.aliases[key].state != mcpToolAliasAmbiguous || len(tools.restored[key]) != 1 ||
+		len(tools.restoredAdvertised[key]) != 1 || len(tools.pendingRemoval) != 0 {
+		t.Fatalf("ambiguous restore was not staged: alias=%+v observed=%+v advertised=%+v removals=%+v",
+			tools.aliases[key], tools.restored[key], tools.restoredAdvertised[key], tools.pendingRemoval)
+	}
+	parent := ambiguous[0]
+	if removed := tools.refreshParents([]endpointInventoryComponent{parent}); len(removed) != 0 {
+		t.Fatalf("confirmed restored parent was retired: %v", removed)
+	}
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false)
+	if partial || len(rows) != 2 || len(tools.restored) != 0 || len(tools.restoredAdvertised) != 0 {
+		t.Fatalf("confirmed restore rows=%+v partial=%v observed=%+v advertised=%+v",
+			rows, partial, tools.restored, tools.restoredAdvertised)
+	}
+}
+
+func TestMCPToolBlockedListingsUseAcceptedMetricLabels(t *testing.T) {
+	var got [][3]string
+	tools := mcpToolInventory{metric: func(_ context.Context, stage, outcome, reason string) {
+		got = append(got, [3]string{stage, outcome, reason})
+	}}
+	parents := []endpointInventoryComponent{
+		{id: "parent-a", itemName: "notes", agentConnector: "codex"},
+		{id: "parent-b", itemName: "notes", agentConnector: "codex"},
+	}
+	tools.refreshParents(parents)
+	tools.recordAdvertisedContext(t.Context(), "codex", "notes", []string{"search"}, time.Now())
+	tools.recordListingFailureContext(t.Context(), "codex", "notes")
+	want := [3]string{"list", "partial", "incomplete"}
+	if len(got) != 2 || got[0] != want || got[1] != want {
+		t.Fatalf("blocked listing metrics=%v want=%v twice", got, want)
 	}
 }
 

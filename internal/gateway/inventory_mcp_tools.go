@@ -32,8 +32,22 @@ type pendingMCPObservedTool struct {
 	connector string
 	server    string
 	tool      string
-	at        time.Time
+	firstAt   time.Time
+	lastAt    time.Time
 	version   uint64
+}
+
+type mcpToolAliasState uint8
+
+const (
+	mcpToolAliasUnavailable mcpToolAliasState = iota
+	mcpToolAliasUnique
+	mcpToolAliasAmbiguous
+)
+
+type mcpToolAliasResolution struct {
+	configured string
+	state      mcpToolAliasState
 }
 
 type mcpObservedToolStore interface {
@@ -64,6 +78,7 @@ type mcpToolInventory struct {
 	observedPartial             map[string]bool
 	parents                     map[string]string
 	blockedObserved             map[string]bool
+	aliases                     map[string]mcpToolAliasResolution
 	restored                    map[string]map[string][]audit.MCPObservedTool
 	restoredAdvertised          map[string]map[string]audit.MCPAdvertisedToolSnapshot
 	pendingRemoval              map[string]struct{}
@@ -185,12 +200,19 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 		}
 	}
 	m.parents = next
+	m.rebuildAliasIndexLocked()
 	// Reconcile every durable candidate only after an authoritative connector
 	// read identifies the current parent. This removes stale pre-restart parent
 	// generations without allowing map iteration order to choose a winner.
 	for key, parents := range m.restored {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete {
+			continue
+		}
+		if counts[key] > 1 {
+			// Ambiguous is not absent. Keep every durable candidate staged
+			// without attribution until a complete read identifies one current
+			// parent or confirms that all candidates are gone.
 			continue
 		}
 		current := m.parents[key]
@@ -208,6 +230,9 @@ func (m *mcpToolInventory) refreshCompleteParents(servers []endpointInventoryCom
 	for key, parents := range m.restoredAdvertised {
 		connector, _, _ := strings.Cut(key, "\x00")
 		if _, incomplete := incompleteConnectors[connector]; incomplete {
+			continue
+		}
+		if counts[key] > 1 {
 			continue
 		}
 		current := m.parents[key]
@@ -288,14 +313,13 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 			return
 		}
 		server = configuredServer
-		parentID, recorded := a.mcpTools.recordObserved(projection.connector, server, tool, at)
-		if !recorded {
-			a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
-			return
-		}
 		if a.mcpTools.store != nil {
-			pending, ok := a.mcpTools.beginObservedWrite(projection.connector, server, tool, parentID, at)
-			if !ok {
+			pending, recorded, queued := a.mcpTools.recordObservedAndBeginWrite(projection.connector, server, tool, at)
+			if !recorded {
+				a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
+				return
+			}
+			if !queued {
 				a.mcpTools.recordMetric(ctx, "observe", "partial", "persistence_queue_full")
 				return
 			}
@@ -308,17 +332,18 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 				Connector:         pending.connector,
 				ServerName:        pending.server,
 				ToolName:          pending.tool,
-				LastObservedAt:    pending.at,
+				FirstObservedAt:   pending.firstAt,
+				LastObservedAt:    pending.lastAt,
 			}, func() bool {
 				current := a.mcpTools.observedWriteIsCurrent(pending)
-				if current {
-					attempted.Store(true)
-				}
+				attempted.Store(current)
 				return current
 			})
 			if report == nil || !report.Deferred() {
 				a.mcpTools.settleObservedWrite(pending, err, attempted.Load())
 			}
+		} else if _, recorded := a.mcpTools.recordObserved(projection.connector, server, tool, at); !recorded {
+			a.mcpTools.recordMetric(ctx, "observe", "partial", "parent_unavailable")
 		}
 	}
 }
@@ -334,18 +359,38 @@ func (m *mcpToolInventory) resolveConfiguredServer(connector, toolServer string)
 	connector = canonicalConnectorRulePackKey(connector)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	matched := ""
-	for key, parentID := range m.parents {
-		owner, configured, ok := strings.Cut(key, "\x00")
-		if !ok || owner != connector || parentID == "" || !config.SameMCPToolServer(connector, configured, toolServer) {
+	resolution := m.aliases[mcpToolServerKey(connector, strings.TrimSpace(toolServer))]
+	return resolution.configured, resolution.state == mcpToolAliasUnique
+}
+
+func (m *mcpToolInventory) rebuildAliasIndexLocked() {
+	m.aliases = make(map[string]mcpToolAliasResolution, len(m.parents)*2)
+	for key, blocked := range m.blockedObserved {
+		connector, configured, ok := strings.Cut(key, "\x00")
+		if !blocked || !ok {
 			continue
 		}
-		if m.blockedObserved[key] || matched != "" && matched != configured {
-			return "", false
+		for _, spelling := range []string{configured, config.MCPToolServerName(connector, configured)} {
+			m.aliases[mcpToolServerKey(connector, spelling)] = mcpToolAliasResolution{state: mcpToolAliasAmbiguous}
 		}
-		matched = configured
 	}
-	return matched, matched != ""
+	for key, parentID := range m.parents {
+		connector, configured, ok := strings.Cut(key, "\x00")
+		if !ok || parentID == "" {
+			continue
+		}
+		spellings := []string{configured, config.MCPToolServerName(connector, configured)}
+		for _, spelling := range spellings {
+			aliasKey := mcpToolServerKey(connector, spelling)
+			current := m.aliases[aliasKey]
+			if m.blockedObserved[key] || current.state == mcpToolAliasAmbiguous ||
+				current.state == mcpToolAliasUnique && current.configured != configured {
+				m.aliases[aliasKey] = mcpToolAliasResolution{state: mcpToolAliasAmbiguous}
+				continue
+			}
+			m.aliases[aliasKey] = mcpToolAliasResolution{configured: configured, state: mcpToolAliasUnique}
+		}
+	}
 }
 
 func (m *mcpToolInventory) beginObservedWrite(connector, server, tool, parentID string, at time.Time) (pendingMCPObservedTool, bool) {
@@ -355,6 +400,10 @@ func (m *mcpToolInventory) beginObservedWrite(connector, server, tool, parentID 
 	key := mcpToolServerKey(connector, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.beginObservedWriteLocked(key, connector, server, tool, parentID, at)
+}
+
+func (m *mcpToolInventory) beginObservedWriteLocked(key, connector, server, tool, parentID string, at time.Time) (pendingMCPObservedTool, bool) {
 	if m.parents[key] != parentID || m.blockedObserved[key] {
 		return pendingMCPObservedTool{}, false
 	}
@@ -367,13 +416,19 @@ func (m *mcpToolInventory) beginObservedWrite(connector, server, tool, parentID 
 	if _, exists := m.pendingObserved[key][tool]; !exists && len(m.pendingObserved[key]) >= maxMCPToolObservations {
 		return pendingMCPObservedTool{}, false
 	}
-	if current, exists := m.pendingObserved[key][tool]; exists && current.parentID == parentID && current.at.After(at) {
-		at = current.at
+	firstAt, lastAt := at.UTC(), at.UTC()
+	if current, exists := m.pendingObserved[key][tool]; exists && current.parentID == parentID {
+		if current.firstAt.Before(firstAt) {
+			firstAt = current.firstAt
+		}
+		if current.lastAt.After(lastAt) {
+			lastAt = current.lastAt
+		}
 	}
 	m.observedVersion++
 	pending := pendingMCPObservedTool{
 		parentID: parentID, connector: connector, server: server, tool: tool,
-		at: at.UTC(), version: m.observedVersion,
+		firstAt: firstAt, lastAt: lastAt, version: m.observedVersion,
 	}
 	m.pendingObserved[key][tool] = pending
 	return pending, true
@@ -437,12 +492,11 @@ func (m *mcpToolInventory) flushPendingObserved(ctx context.Context) error {
 			Connector:         pending.connector,
 			ServerName:        pending.server,
 			ToolName:          pending.tool,
-			LastObservedAt:    pending.at,
+			FirstObservedAt:   pending.firstAt,
+			LastObservedAt:    pending.lastAt,
 		}, func() bool {
 			current := m.observedWriteIsCurrent(pending)
-			if current {
-				attempted.Store(true)
-			}
+			attempted.Store(current)
 			return current
 		})
 		m.settleObservedWrite(pending, err, attempted.Load())
@@ -486,7 +540,7 @@ func (m *mcpToolInventory) recordAdvertisedContext(ctx context.Context, connecto
 	m.mu.Lock()
 	if m.blockedObserved[key] {
 		m.mu.Unlock()
-		m.recordMetric(ctx, "listing", "partial", "ambiguous_parent")
+		m.recordMetric(ctx, "list", "partial", "incomplete")
 		return
 	}
 	parentID := m.parents[key]
@@ -543,9 +597,7 @@ func (m *mcpToolInventory) persistAdvertisedSnapshot(ctx context.Context, key st
 	var attempted atomic.Bool
 	err := m.store.ReplaceMCPAdvertisedToolsIf(ctx, snapshot, func() bool {
 		current := m.advertisedWriteIsCurrent(key, snapshot.ParentComponentID, version)
-		if current {
-			attempted.Store(true)
-		}
+		attempted.Store(current)
 		return current
 	})
 	if err != nil || !attempted.Load() {
@@ -609,6 +661,11 @@ func (m *mcpToolInventory) recordListingFailureContext(ctx context.Context, conn
 	}
 	key := mcpToolServerKey(connector, server)
 	m.mu.Lock()
+	if m.blockedObserved[key] {
+		m.mu.Unlock()
+		m.recordMetric(ctx, "list", "partial", "incomplete")
+		return
+	}
 	if m.partial == nil {
 		m.partial = make(map[string]bool)
 	}
@@ -657,6 +714,33 @@ func (m *mcpToolInventory) recordObserved(connector, server, rawName string, at 
 	key := mcpToolServerKey(connector, server)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.recordObservedLocked(key, name, at)
+}
+
+func (m *mcpToolInventory) recordObservedAndBeginWrite(connector, server, rawName string, at time.Time) (pendingMCPObservedTool, bool, bool) {
+	if m == nil || connector == "" || server == "" {
+		return pendingMCPObservedTool{}, false, false
+	}
+	name := inventorySafeItemName(rawName, 256)
+	if name == "" || name != rawName {
+		return pendingMCPObservedTool{}, false, false
+	}
+	key := mcpToolServerKey(connector, server)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	parentID := m.parents[key]
+	if parentID == "" || m.blockedObserved[key] {
+		return pendingMCPObservedTool{}, false, false
+	}
+	pending, queued := m.beginObservedWriteLocked(key, connector, server, name, parentID, at)
+	if !queued {
+		return pendingMCPObservedTool{}, true, false
+	}
+	_, recorded := m.recordObservedLocked(key, name, at)
+	return pending, recorded, true
+}
+
+func (m *mcpToolInventory) recordObservedLocked(key, name string, at time.Time) (string, bool) {
 	parentID := m.parents[key]
 	if parentID == "" || m.blockedObserved[key] {
 		return "", false

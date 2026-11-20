@@ -1047,8 +1047,12 @@ redacted inventory diagnostic and keeps the last complete managed snapshot;
 it does not report the missing entries as removals. A complete scan can publish
 a genuinely empty inventory when servers have been removed, but only after
 every connector configuration read completes successfully. The partial
-summary contains a source and counts; any observed component rows stay on the
-local diagnostic route and are not exported as managed inventory.
+summary contains a source and counts; component rows owned by the unreadable
+connector stay on the local diagnostic route and are not exported as managed
+inventory. Complete sibling connectors can still submit their server records
+individually. Those submissions are additive observations, not an authoritative
+endpoint snapshot, and do not tell AI Defense to remove rows belonging to the
+unreadable connector.
 On Windows, a LocalSystem gateway cannot read configured user-profile MCP
 files. That collection remains partial until a per-user source provides them;
 the gateway does not replace the last complete cloud snapshot with an empty one.
