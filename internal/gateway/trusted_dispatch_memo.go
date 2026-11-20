@@ -60,14 +60,17 @@ type trustedDispatchMemoRefs struct {
 	windowsPowerShell *windowsHintedReading
 	// outs records which out-parameters are asked for (non-nil): a nil one
 	// may change what the readers do.
-	outs [5]bool
+	outs [6]bool
 }
 
 // trustedDispatchOuts is what a run told the request's out-parameters.
 type trustedDispatchOuts struct {
 	overBudgetOmission, unresolvedTarget, resolvedTarget, nonWriteMention bool
-	unprovenTarget                                                        unprovenWrite
-	unprovenSet                                                           bool
+	// unknownMention is the GAP-0843 out-parameter: like nonWriteMention, the
+	// readers only test it for nil and set it to true, never read it.
+	unknownMention bool
+	unprovenTarget unprovenWrite
+	unprovenSet    bool
 }
 
 // trustedDispatchState is the hook-call state a run may spend or set.
@@ -144,6 +147,7 @@ func (memo *trustedDispatchMemo) dispatch(ctx context.Context, request trustedAc
 	run.unresolvedTarget = freshOut(request.unresolvedTarget, &outs.unresolvedTarget)
 	run.resolvedTarget = freshOut(request.resolvedTarget, &outs.resolvedTarget)
 	run.nonWriteMention = freshOut(request.nonWriteMention, &outs.nonWriteMention)
+	run.unknownMention = freshOut(request.unknownMention, &outs.unknownMention)
 	if request.unprovenTarget != nil {
 		run.unprovenTarget = &outs.unprovenTarget
 	}
@@ -200,16 +204,16 @@ func trustedDispatchMemoKeyOf(request trustedActionRequest) (trustedActionReques
 		budget: request.budget, capFloor: request.capFloor, generation: request.generation,
 		targetMemo: request.targetMemo, windowsTwinHosts: request.windowsTwinHosts,
 		windowsPowerShell: request.windowsPowerShellReading,
-		outs: [5]bool{
+		outs: [6]bool{
 			request.overBudgetOmission != nil, request.unresolvedTarget != nil, request.resolvedTarget != nil,
-			request.nonWriteMention != nil, request.unprovenTarget != nil,
+			request.nonWriteMention != nil, request.unprovenTarget != nil, request.unknownMention != nil,
 		},
 	}
 	key := request
 	key.budget, key.capFloor, key.generation, key.targetMemo = nil, nil, nil, nil
 	key.windowsTwinHosts, key.windowsPowerShellReading, key.simpleMemo = nil, nil, nil
 	key.overBudgetOmission, key.unresolvedTarget, key.resolvedTarget, key.nonWriteMention = nil, nil, nil, nil
-	key.unprovenTarget = nil
+	key.unprovenTarget, key.unknownMention = nil, nil
 	return key, refs
 }
 
@@ -246,6 +250,7 @@ func (outs trustedDispatchOuts) replay(request trustedActionRequest) {
 		{request.unresolvedTarget, outs.unresolvedTarget},
 		{request.resolvedTarget, outs.resolvedTarget},
 		{request.nonWriteMention, outs.nonWriteMention},
+		{request.unknownMention, outs.unknownMention},
 	} {
 		if out.to != nil && out.set {
 			*out.to = true

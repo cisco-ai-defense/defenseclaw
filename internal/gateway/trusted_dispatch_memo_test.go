@@ -24,7 +24,7 @@ func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity",
 		"simpleMemo":         "cache",
 		"overBudgetOmission": "out", "unresolvedTarget": "out", "resolvedTarget": "out",
-		"nonWriteMention": "out", "unprovenTarget": "out",
+		"nonWriteMention": "out", "unprovenTarget": "out", "unknownMention": "out",
 		"record": "recorder", "recordTelemetry": "recorder", "recordEffectShadow": "recorder",
 	}
 	rt := reflect.TypeOf(trustedActionRequest{})
