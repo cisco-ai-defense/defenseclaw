@@ -19,8 +19,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"io"
-	"os"
 	"strings"
 	"testing"
 
@@ -102,28 +100,14 @@ func TestGAP0559JudgeNoVerdictFailsClosedForUnattendedRunsAndStrict(t *testing.T
 // in every tier, the default one included, where the call keeps the rule
 // verdict. Before, the gateway logged only an [inspect] trace line.
 func TestGAP0559JudgeFallbackWritesAnAlertLine(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved := os.Stderr
-	os.Stderr = w
-	captured := make(chan string, 1)
-	go func() {
-		b, _ := io.ReadAll(r)
-		captured <- string(b)
-	}()
-	restore := func() string {
-		os.Stderr = saved
-		_ = w.Close()
-		return <-captured
-	}
-	a := escalationHookServerWith(t, &mockLLMProvider{err: errors.New("judge provider down")}, "default", func(c *config.Config) {
-		c.Guardrail.Judge.HookTimeout = 0.3
-		c.Guardrail.DetectionStrategy = "judge_first"
+	var resp claudeCodeHookResponse
+	out := captureStderr(t, func() {
+		a := escalationHookServerWith(t, &mockLLMProvider{err: errors.New("judge provider down")}, "default", func(c *config.Config) {
+			c.Guardrail.Judge.HookTimeout = 0.3
+			c.Guardrail.DetectionStrategy = "judge_first"
+		})
+		resp = escalationPreToolUse(t, a, "ls -la")
 	})
-	resp := escalationPreToolUse(t, a, "ls -la")
-	out := restore()
 	if resp.RawAction == guardrailActionBlock {
 		t.Fatalf("the default tier refused a call when the judge gave no verdict: %+v", resp)
 	}
