@@ -520,8 +520,8 @@ func TestRVGXARGRound2(t *testing.T) {
 	judged := map[string]bool{}
 	judgeIn := func(c *cellRun, tool rvgxTool, args map[string]any) string {
 		c.n++
-		_, action, _, _ := rvgxVerdict(c.t, tool.connector, tool.tool, args, c.profile, c.managed, home, project, fmt.Sprintf("gxarg-r2-%d", c.n))
-		return strings.Split(action, "/")[0]
+		_, action, _, body := rvgxVerdict(c.t, tool.connector, tool.tool, args, c.profile, c.managed, home, project, fmt.Sprintf("gxarg-r2-%d", c.n))
+		return gap0747StateVerdict(strings.Split(action, "/")[0], body, c.profile == "strict")
 	}
 	// blocks reports whether the plain write (or read) of the target by
 	// tool blocks in cell c, judging it once per cell.
@@ -723,7 +723,7 @@ func TestRVGXARGPossibleOverflowAndDeclaredLink(t *testing.T) {
 			}
 			for i, row := range cases {
 				_, action, _, body := rvgxVerdict(t, row.connector, row.tool, row.args, cell.profile, cell.managed, home, project, fmt.Sprintf("gxarg-over-%d", i))
-				got := strings.Split(action, "/")[0]
+				got := gap0747StateVerdict(strings.Split(action, "/")[0], body, cell.profile == "strict")
 				if row.named || cell.profile == "strict" {
 					if got != "block" {
 						t.Errorf("%s: %s, want block (%.600s)", row.name, got, body)
@@ -751,8 +751,8 @@ func TestRVGXARGPossibleOverflowAndDeclaredLink(t *testing.T) {
 			}
 			link := filepath.Join(project, "stlink")
 			for i, command := range []string{"printf x > " + link, "export F=" + link + `; printf x > "$F"`} {
-				_, action, _, _ := rvgxVerdict(t, "claudecode", "Bash", map[string]any{"command": command}, cell.profile, cell.managed, home, project, fmt.Sprintf("gxarg-link-%d", i))
-				if got := strings.Split(action, "/")[0]; got != "block" {
+				_, action, _, body := rvgxVerdict(t, "claudecode", "Bash", map[string]any{"command": command}, cell.profile, cell.managed, home, project, fmt.Sprintf("gxarg-link-%d", i))
+				if got := gap0747StateVerdict(strings.Split(action, "/")[0], body, cell.profile == "strict"); got != "block" {
 					t.Errorf("declared link %d: %s", i, got)
 				}
 			}

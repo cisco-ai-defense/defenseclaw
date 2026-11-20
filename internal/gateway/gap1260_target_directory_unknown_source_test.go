@@ -53,6 +53,11 @@ func gap1260Want(want, profile string) string {
 		}
 		return "alert"
 	}
+	if want == "block" && profile != "strict" {
+		// A proven state write is a HIGH alert on the default profile
+		// (GAP-0747 owner tiering 2026-11-15T15:20Z).
+		return "alert"
+	}
 	return want
 }
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,7 +106,11 @@ func TestStateMutationBehindAnyPrefixWrapperFiveTiers(t *testing.T) {
 	for _, route := range routes {
 		for _, plain := range mutations {
 			oracle := route.verdict(plain)
-			if !gap1246Blocks(oracle) {
+			// A proven state mutation is a HIGH alert outside the strict packs
+			// (GAP-0747 owner tiering 2026-11-15T15:20Z); a strict route still
+			// needs the block.
+			stateAlert := required[plain] && oracle == "alert" && !strings.Contains(route.name, "strict")
+			if !gap1246Blocks(oracle) && !stateAlert {
 				if required[plain] {
 					t.Fatalf("%s: %q is %s, the oracle needs a block", route.name, plain, oracle)
 				}

@@ -130,6 +130,7 @@ func guardrailActionForConnectorFindings(
 	confirmable bool,
 ) string {
 	return guardrailActionForProfileUnknown(findings, cfg != nil && cfg.SecureClientIntegration(),
+		func() bool { return cfg.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict },
 		func() string { return cascadeUnknownForConfig(cfg, connector) },
 		func(severity string) string {
 			return guardrailActionForConnector(cfg, connector, severity, confirmable)
@@ -266,13 +267,11 @@ func guardrailActionForGuardrailFindings(
 	// it from cfg.ManagedAIDOnly() (sidecar.go). A managed standalone install
 	// leaves it false, so its proxy limit findings map by the pack like the
 	// hook routes (TestBoundedProxyPathMapsByThePack).
-	return guardrailActionForProfileUnknown(findings, ManagedEnterpriseActive(),
-		func() string {
-			return cascadeUnknownForGuardrail(gc, connector, func() bool {
-				ref := gc.EffectiveRulePackRef(connector)
-				return guardrailPackPosture(gc, ref) == config.HookPolicyTierStrict
-			})
-		},
+	strict := func() bool {
+		return gc != nil && guardrailPackPosture(gc, gc.EffectiveRulePackRef(connector)) == config.HookPolicyTierStrict
+	}
+	return guardrailActionForProfileUnknown(findings, ManagedEnterpriseActive(), strict,
+		func() string { return cascadeUnknownForGuardrail(gc, connector, strict) },
 		func(severity string) string {
 			return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
 		})

@@ -4182,15 +4182,36 @@ func scopedMoveName(name string) bool {
 // or renames is a protected name (rel-1-0-10:GAP-0571). A link text with a
 // separator, a dot or a protected name, an absolute text, and a move of any
 // other shape keep the opaque reading.
-func (l shellLinks) sameFolderNameLinks(ops []renameOp) bool {
+//
+// A link text with an extension (ln -s f.txt lk1) is read the same way when
+// nothing in the command writes through a link (linkEntryOnlyWrites: its only
+// writes are ln, mv and rm, which make, rename and remove the entry itself):
+// the text is then never written, whatever folder it names (GAP-0571 cert
+// L67 row). A command that writes through such a link keeps the opaque
+// reading: a dotted text in an unplaced folder may be a DefenseClaw state or
+// agent hook config file.
+func (l shellLinks) sameFolderNameLinks(ops []renameOp, file *syntax.File, home string) bool {
 	if len(l.aliases) == 0 {
 		return false
 	}
 	plain := func(name string) bool {
 		return !strings.ContainsAny(name, "/\\") && scopedMoveName(name)
 	}
+	entryOnly := -1
 	for _, alias := range l.aliases {
-		if !plain(alias.text) || !plain(filepath.Base(alias.name)) {
+		if !plain(filepath.Base(alias.name)) {
+			return false
+		}
+		if plain(alias.text) {
+			continue
+		}
+		if entryOnly < 0 {
+			entryOnly = 0
+			if linkEntryOnlyWrites(file, home) {
+				entryOnly = 1
+			}
+		}
+		if entryOnly == 0 || !sameFolderLinkText(alias.text) {
 			return false
 		}
 	}
@@ -4205,6 +4226,61 @@ func (l shellLinks) sameFolderNameLinks(ops []renameOp) bool {
 		}
 	}
 	return true
+}
+
+// sameFolderLinkText reports a link text that names a sibling entry of the
+// link under one component: no separator, no leading dot (a dot file of the
+// home such as .bashrc), not a protected name, and with its extension taken
+// off, a name scopedMoveName accepts (rel-1-0-10:GAP-0571).
+func sameFolderLinkText(text string) bool {
+	if text == "" || strings.HasPrefix(text, ".") || strings.ContainsAny(text, "/\\") {
+		return false
+	}
+	for _, protected := range append(AuthorizedKeysFiles[:], SSHControlFiles[:]...) {
+		if strings.EqualFold(text, protected) {
+			return false
+		}
+	}
+	return scopedMoveName(strings.ReplaceAll(text, ".", ""))
+}
+
+// linkEntryOnlyWrites reports a command whose every statement that may write
+// (actionStmtMayWrite) is a static ln, mv or rm call with no redirect, and
+// whose rm operands are plain literal words (no separator: rm -r lk/ would
+// remove what a directory link points at). Those programs act on the entry
+// they name, a link itself included, and never write through it
+// (rel-1-0-10:GAP-0571).
+func linkEntryOnlyWrites(file *syntax.File, home string) bool {
+	if file == nil {
+		return false
+	}
+	only := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !only || !ok || !actionStmtMayWrite(stmt, home) {
+			return only
+		}
+		call, isCall := stmt.Cmd.(*syntax.CallExpr)
+		if !isCall || len(call.Args) == 0 || len(stmt.Redirs) != 0 {
+			only = false
+			return false
+		}
+		program, known := staticProgramWord(call.Args[0], home)
+		switch programBase(program) {
+		case "ln", "mv":
+		case "rm":
+			for _, arg := range call.Args[1:] {
+				if lit := arg.Lit(); lit == "" || strings.ContainsAny(lit, "/\\") {
+					only = false
+				}
+			}
+		default:
+			only = false
+		}
+		only = only && known
+		return only
+	})
+	return only
 }
 
 // dotDotComponent reports a path word with a .. component: the move then
@@ -5235,7 +5311,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// leaves them: they are read as the walk places the direct names
 		// (rel-1-0-10:GAP-0571).
 		if (!stable && !walkFailed || unplacedRelative) && cds && !renames && !wrappedCds && len(findMoves) == 0 &&
-			links.known && !links.opaque && !links.unread && links.sameFolderNameLinks(renameOps) {
+			links.known && !links.opaque && !links.unread && links.sameFolderNameLinks(renameOps, file, home) {
 			stable, unplacedRelative = links.followRenames(renameOps, userView), false
 			if stable && !userView {
 				stable = links.dotDotPastLinksClear(command, cwd, home) && links.aliasesAwayFromState(cwd, home) &&

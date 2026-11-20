@@ -259,7 +259,7 @@ func TestG235bPrintfKeepsKnownHomeSpellingsForSelfProtection(t *testing.T) {
 		if row.protected {
 			// A gateway that cannot read the home at all blocks the state
 			// write under its own rule.
-			if !strings.HasPrefix(got, `{"action":"block"`) ||
+			if !gap0747HookBlocked(got, cell.pack) ||
 				!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
 				t.Errorf("%s: %s = %.200s, want block tamper.detector_state_write", row.name, row.command, got)
 			}
@@ -339,7 +339,7 @@ func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
 	g235bRotate(t, rows, []string{"", "strict", "permissive"}, true, func(t *testing.T, cell g235bCell, row g235bRow) {
 		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, cell.blind, row.command)
 		if row.protected {
-			if !strings.HasPrefix(got, `{"action":"block"`) ||
+			if !gap0747HookBlocked(got, cell.pack) ||
 				!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
 				t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
 			}
@@ -443,7 +443,7 @@ func TestG235bKnownValueBindingsAndLinkedEditorEntries(t *testing.T) {
 						}
 						got := postSelfProtectionPackCell(t, home, project, connector, pack, cell.managed, cell.blind, row.command)
 						if row.protected {
-							if !strings.HasPrefix(got, `{"action":"block"`) ||
+							if !gap0747HookBlocked(got, pack) ||
 								!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
 								t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
 							}

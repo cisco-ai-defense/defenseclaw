@@ -12,7 +12,10 @@ import (
 )
 
 // r105StateRow is one agent shell call against the active DefenseClaw
-// state and whether it must block (with tamper.detector_state_write).
+// state and whether it is a proven state write: it must carry
+// tamper.detector_state_write and, in the default pack the rows run in,
+// alerts without blocking (GAP-0747 owner tiering 2026-11-15T15:20Z; the
+// strict and managed-strict packs block it, see gap_fu12_rules_tiers_test.go).
 type r105StateRow struct {
 	name, command string
 	block         bool
@@ -79,11 +82,14 @@ func r105RunStateRowsChecked(t *testing.T, mode, cwd string, rows []r105StateRow
 						})
 						action, reason, findings = resp.Action, resp.Reason, resp.Findings
 					}
-					if got := action == guardrailActionBlock; got != r.block {
-						t.Fatalf("%s: action=%q want block=%t reason=%q findings=%v", r.command, action, r.block, reason, findings)
+					// The default pack alerts a proven state write (HIGH).
+					// A row that also names another tamper rule (the hook folder
+					// disable rule) still blocks for that rule.
+					if action == guardrailActionBlock && !gap0747OtherTamperFinding(findings) {
+						t.Fatalf("%s: action=%q want no block in the default pack reason=%q findings=%v", r.command, action, reason, findings)
 					}
 					if r.block && !findingStringHasRuleID(findings, "tamper.detector_state_write") {
-						t.Fatalf("%s: blocked without the state tamper finding: %v", r.command, findings)
+						t.Fatalf("%s: proven state write without the state tamper finding: action=%q findings=%v", r.command, action, findings)
 					}
 					if quiet && !r.block && findingStringHasRuleID(findings, "tamper.detector_state_write") {
 						t.Fatalf("%s: allowed row carries the state tamper finding: action=%q findings=%v", r.command, action, findings)

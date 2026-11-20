@@ -302,7 +302,7 @@ func (e *S7Engine) Layers(ctx context.Context, sessionID, toolName, args string,
 	ctx = ContextWithSessionID(ctx, sessionID)
 	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
 	if !eligible {
-		dm.Route, dm.Failure = "ineligible", "args shorter than the judge minimum"
+		dm.Route, dm.Failure = "ineligible", "no tool name"
 		jv.Action = "allow"
 		return dm, jv
 	}

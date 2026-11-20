@@ -172,7 +172,8 @@ func shellProtectedFileEveryRoute(t *testing.T, connectorName string) {
 		{"keys copy onto a link", "cp ~/project/notes.txt ~/project/keyslink", everywhere, keysRule},
 		{"shell profile append", "echo marker >> ~/.bashrc",
 			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, profileRule},
-		{"DefenseClaw state append", "printf changed >> ~/.defenseclaw/config.yaml", everywhere, stateRule},
+		{"DefenseClaw state append", "printf changed >> ~/.defenseclaw/config.yaml",
+			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, stateRule},
 		{"shell profile append after a patch word", "echo apply_patch; echo marker >> ~/.bashrc",
 			map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}, profileRule},
 		{"keys append after a patch header word", "echo '*** Begin Patch'; echo marker >> ~/.ssh/authorized_keys", everywhere, keysRule},
@@ -215,8 +216,9 @@ func shellProtectedFileEveryRoute(t *testing.T, connectorName string) {
 // The profile floor reads only the class mark and the self-protection
 // rules: a native write tool and a rule outside the class set no floor, a
 // finding that could not block sets none either, a class finding is at least
-// an alert and a self-protection finding at least a block in every posture,
-// and the Secure Client integration changes nothing.
+// an alert and a self-protection finding at least an alert in the default
+// and permissive tiers and a block in strict (rel-1-0-10:GAP-0747), and the
+// Secure Client integration changes nothing.
 func TestGAP0675ShellProtectedFileFloorDecision(t *testing.T) {
 	marked := RuleFinding{RuleID: "persistence.shell_profile_write", Severity: "HIGH", shellProtectedFile: true}
 	native := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
@@ -227,18 +229,22 @@ func TestGAP0675ShellProtectedFileFloorDecision(t *testing.T) {
 		name         string
 		findings     []RuleFinding
 		secureClient bool
+		strict       bool
 		floor        string
 	}{
-		{"class", []RuleFinding{marked, native, detection}, false, "alert"},
-		{"class with Secure Client", []RuleFinding{marked}, true, "allow"},
-		{"native tool", []RuleFinding{native}, false, "allow"},
-		{"self-protection", []RuleFinding{state, marked}, false, "block"},
-		{"self-protection with Secure Client", []RuleFinding{state}, true, "allow"},
-		{"detection only sets no floor", []RuleFinding{detection, stateDetection, native}, false, "allow"},
+		{"class", []RuleFinding{marked, native, detection}, false, false, "alert"},
+		{"class with Secure Client", []RuleFinding{marked}, true, false, "allow"},
+		{"native tool", []RuleFinding{native}, false, true, "allow"},
+		{"self-protection", []RuleFinding{state, marked}, false, false, "alert"},
+		{"self-protection strict", []RuleFinding{marked, state, state}, false, true, "block"},
+		{"self-protection with Secure Client", []RuleFinding{state}, true, true, "allow"},
+		{"detection only sets no floor", []RuleFinding{detection, stateDetection, native}, false, true, "allow"},
 	} {
 		before := slices.Clone(tc.findings)
-		if floor := profileClassFloor(tc.findings, tc.secureClient); floor != tc.floor {
-			t.Errorf("%s: floor=%q want %q", tc.name, floor, tc.floor)
+		reads := 0
+		strict := func() bool { reads++; return tc.strict }
+		if floor := profileClassFloor(tc.findings, tc.secureClient, strict); floor != tc.floor || reads > 1 {
+			t.Errorf("%s: floor=%q want %q (tier read %d times, want at most once)", tc.name, floor, tc.floor, reads)
 		}
 		if !reflect.DeepEqual(before, tc.findings) {
 			t.Fatalf("%s: the floor changed the caller findings", tc.name)

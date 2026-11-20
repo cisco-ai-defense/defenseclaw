@@ -1516,10 +1516,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
-		if request.nonWriteMention != nil && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook &&
-			trustedShellCommandInput(request.Input) &&
-			hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) {
-			*request.nonWriteMention = true
+		if request.nonWriteMention != nil && trustedShellCommandInput(request.Input) {
+			readsOnly := hookpaths.ActionMentionsNoWriteRole(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+			switch {
+			case readsOnly && !request.StrictPolicy && !request.ManagedInstall && !request.ProtectedHomeHook:
+				*request.nonWriteMention = true
+			case !readsOnly && request.unknownMention != nil &&
+				hookpaths.ActionMentionsNoKnownWrite(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) &&
+				(!request.ProtectedHomeHook || clientMapClearsKeyFiles(clientTargets, facts.ActiveHome)):
+				// The unknown tier (rel-1-0-10:GAP-0843, ONE BOUND RULE): the
+				// shared unknown-tier finding decides, in every pack. A call
+				// that only reads keeps the GAP-0018 verdict above.
+				*request.unknownMention = true
+			}
 		}
 		return confirmed()
 	}
@@ -2380,4 +2389,26 @@ func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts
 // left to the shell reading.
 func placedByCodexClient(connector, resolved string) bool {
 	return connector == "codex" && resolved != ""
+}
+
+// clientMapClearsKeyFiles reports whether the managed hook client, which
+// resolves write operands as the real user behind ProtectHome, answered the
+// call in full (a present map, neither truncated nor bounded) and placed no
+// write operand in the user's ~/.ssh or DefenseClaw state folder or on a
+// protected key file. targets is the map before connector scoping. The
+// gateway cannot follow a link in that home itself, so without this answer a
+// mention of the keys file keeps its block (rel-1-0-10:GAP-0843).
+func clientMapClearsKeyFiles(targets map[string]string, home string) bool {
+	if targets == nil || !filepath.IsAbs(home) ||
+		targets[hookpaths.TruncatedKey] == "1" || targets[hookpaths.BudgetKey] == "1" {
+		return false
+	}
+	protected := hookpaths.ProtectedAuthorizedKeysPaths(home)
+	for _, physical := range clientResolvedPathTargets(targets) {
+		if pathWithin(physical, filepath.Join(home, ".ssh")) || pathWithin(physical, filepath.Join(home, ".defenseclaw")) ||
+			slices.Contains(protected, physical) {
+			return false
+		}
+	}
+	return true
 }

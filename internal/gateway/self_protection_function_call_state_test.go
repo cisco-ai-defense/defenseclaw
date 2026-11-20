@@ -25,7 +25,7 @@ func checkCallStateRows(t *testing.T, home, project string, rows []callStateRow)
 			for _, managed := range []bool{false, true} {
 				for _, pack := range []string{"", "permissive", "strict"} {
 					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-					block := strings.HasPrefix(got, `{"action":"block"`)
+					block := gap0747HookBlocked(got, pack)
 					if block != row.protected && (row.protected || pack != "strict") {
 						t.Errorf("%s %s managed=%t pack=%q: block=%t, want %t: %.180s", row.name, connector, managed, pack, block, row.protected, got)
 					}

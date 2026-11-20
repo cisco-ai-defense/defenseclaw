@@ -86,7 +86,7 @@ func TestG235bBinderClassKnownValues(t *testing.T) {
 	}
 	g235bRotate(t, rows, []string{"", "strict", "permissive"}, false, func(t *testing.T, cell g235bCell, row g235bRow) {
 		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, false, row.command)
-		block := strings.HasPrefix(got, `{"action":"block"`)
+		block := gap0747HookBlocked(got, cell.pack)
 		t.Logf("R5 %s connector=%s managed=%t pack=%s block=%t protected=%t", row.name, cell.connector, cell.managed, cell.pack, block, row.protected)
 		if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 			t.Errorf("%s %s managed=%t pack=%s: %s = %.200s, want protected block", row.name, cell.connector, cell.managed, cell.pack, row.command, got)

@@ -31,7 +31,7 @@ func gap1041ProgramWord(seed string, levels int) string {
 // word nests command substitutions is decided in time at every depth and in
 // every tier, as TRUNCATED: the evaluation-limit finding and at least the
 // unknown tier of the pack. A shell named at the innermost level still runs
-// the -c text as the literal shell, so the seen write blocks in every tier
+// the -c text as the literal shell, so the seen write is a state write (alert, block in strict)
 // up to the reader bound (rel-1-0-10:GAP-1041, GAP-0980).
 func TestGAP1041NestedSubstitutionsDecideInTime(t *testing.T) {
 	env := boundedLaneEnv(t)
@@ -64,8 +64,8 @@ func TestGAP1041NestedSubstitutionsDecideInTime(t *testing.T) {
 					if got, floor := boundedParse(action), bounded.Unknown(tier.tier); bounded.Stricter(got, floor) != got {
 						t.Errorf("%s: action %s below the unknown tier %s", name, action, floor)
 					}
-					if body.seen && seed == "bash" && levels <= 64 && action != "block" {
-						t.Errorf("%s: action %s; the seen write must block", name, action)
+					if body.seen && seed == "bash" && levels <= 64 && boundedParse(action) != gap0747StateWriteAction(tier.tier) {
+						t.Errorf("%s: action %s; the seen write must be %s", name, action, gap0747StateWriteAction(tier.tier))
 					}
 				}
 			}

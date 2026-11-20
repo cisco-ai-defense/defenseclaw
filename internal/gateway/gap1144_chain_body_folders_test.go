@@ -63,8 +63,8 @@ func TestChainBodyWritesAreJudgedInEveryFolderTheChainMayLeave(t *testing.T) {
 		}
 		check := func(command, oracle string) {
 			want, wantFindings := decide(oracle)
-			if want != "block" {
-				t.Errorf("%s: the oracle %q is %s (%q), want block", tier.name, oracle, want, wantFindings)
+			if want != gap0747TierWantAction(tier.tier) {
+				t.Errorf("%s: the oracle %q is %s (%q), want block in strict, alert elsewhere", tier.name, oracle, want, wantFindings)
 			}
 			if got, findings := decide(command); gap1144Rank[got] < gap1144Rank[want] {
 				t.Errorf("%s: %q is %s (%q), its form in the state folder is %s", tier.name, command, got, findings, want)

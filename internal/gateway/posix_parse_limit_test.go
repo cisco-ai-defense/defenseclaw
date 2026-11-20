@@ -97,9 +97,10 @@ func TestPosixInputBytesAreTruncatedInEveryTier(t *testing.T) {
 					t.Errorf("%s/%s: action %s is below the unknown tier %s", tier.name, r.id, action, floor)
 				}
 			case isWrite:
-				// A proven write beside a data word still blocks, in every tier.
-				if boundedParse(action) != bounded.Block {
-					t.Errorf("%s/%s: a proven write beside a data word must block, got %s", tier.name, r.id, action)
+				// A proven write beside a data word keeps its tier verdict
+				// (alert, block in strict).
+				if boundedParse(action) != gap0747StateWriteAction(tier.tier) {
+					t.Errorf("%s/%s: a proven write beside a data word must be %s, got %s", tier.name, r.id, gap0747StateWriteAction(tier.tier), action)
 				}
 			default:
 				if strings.HasPrefix(r.id, "data-") && boundedParse(action) != bounded.Allow &&
@@ -110,8 +111,8 @@ func TestPosixInputBytesAreTruncatedInEveryTier(t *testing.T) {
 					t.Errorf("%s/%s: a word under the bound is read in full (%v)", tier.name, r.id, findings)
 				}
 			}
-			if r.id == "code-word-over-before-seen-write" && boundedParse(action) != bounded.Block {
-				t.Errorf("%s/%s: a proven write before the bound must still block, got %s", tier.name, r.id, action)
+			if r.id == "code-word-over-before-seen-write" && boundedParse(action) != gap0747StateWriteAction(tier.tier) {
+				t.Errorf("%s/%s: a proven write before the bound must keep its verdict %s, got %s", tier.name, r.id, gap0747StateWriteAction(tier.tier), action)
 			}
 		}
 	}

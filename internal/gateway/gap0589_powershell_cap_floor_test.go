@@ -262,8 +262,8 @@ func TestGAP0589POSIXOverCapControl(t *testing.T) {
 		}
 		action, findings = boundedDecideClaudeCode(t, api, env, boundedShellCommand(benign+"\n"+boundedShellSeen))
 		t.Logf("ROW %s | claudecode Bash | posix over-cap | 50 lines + state write | %s", tier.name, action)
-		if boundedParse(action) != bounded.Block {
-			t.Errorf("%s POSIX over-cap + state write: action %s, want block: %v", tier.name, action, findings)
+		if boundedParse(action) != gap0747StateWriteAction(tier.tier) {
+			t.Errorf("%s POSIX over-cap + state write: action %s, want %s: %v", tier.name, action, gap0747StateWriteAction(tier.tier), findings)
 		}
 	}
 }

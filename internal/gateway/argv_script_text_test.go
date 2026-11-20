@@ -50,7 +50,7 @@ func argvScriptRows() []struct {
 // so the argv form equals the text form in all 5 tiers, on the Claude Code
 // shell tool and the Codex shell tool: an ordinary script is allowed, and a
 // script whose text form is truncated (a code word past 4 KiB) keeps that
-// floor. A state write after the script still blocks.
+// floor. A state write after the script keeps its tier verdict (alert, block in strict).
 func TestArgvShellScriptIsReadAsItsText(t *testing.T) {
 	env := boundedLaneEnv(t)
 	for _, tier := range boundedTestTiers {
@@ -81,8 +81,8 @@ func TestArgvShellScriptIsReadAsItsText(t *testing.T) {
 				t.Errorf("%s/%s codex argv: action %s, the text form %s; %v", tier.name, row.id, action, text, findings)
 			}
 			seen := []any{"bash", "-lc", row.script + "\n" + boundedShellSeen}
-			if action, findings := codexDecide(seen); boundedParse(action) != bounded.Block {
-				t.Errorf("%s/%s codex argv with the state write after it: action %s, want block; %v", tier.name, row.id, action, findings)
+			if action, findings := codexDecide(seen); boundedParse(action) != gap0747StateWriteAction(tier.tier) {
+				t.Errorf("%s/%s codex argv with the state write after it: action %s, want %s; %v", tier.name, row.id, action, gap0747StateWriteAction(tier.tier), findings)
 			}
 		}
 	}

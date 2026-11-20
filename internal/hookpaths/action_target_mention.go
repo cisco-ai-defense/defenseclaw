@@ -260,7 +260,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		callKeeps := func() bool {
 			if !callKeepsRead {
 				callKeepsRead = true
-				callKeepsValue = memo.nonWritesExcused() && !stateOnly && actionCallKeepsMentions(file, home)
+				callKeepsValue = memo.nonWritesExcused() && !stateOnly &&
+					actionCallKeepsMentions(file, home, !memo.unknownRolesExcused())
 			}
 			return callKeepsValue
 		}
@@ -269,6 +270,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// to the terminal: its statements read like a direct reader does.
 			for stmt := range actionReadOnlyPipelines(file, home) {
 				direct[stmt] = true
+			}
+			if memo.unknownRolesExcused() {
+				// The unknown tier: a reader stage hands its output to the next
+				// stage, not a write of the file it names (cat KEYS | python3
+				// -c "$CODE"). The other stages keep their own reading.
+				for stmt := range actionPipelineStages(file) {
+					direct[stmt] = true
+				}
 			}
 		}
 		checkWord := func(word *syntax.Word) bool {
@@ -433,7 +442,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					// (a variable-named file): the effect is UNCERTAIN, not a known
 					// copy of the content into a resolved file.
 					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true) ||
-						actionReaderToUnknownSink(stmt, home)
+						actionReaderToSink(stmt, home, memo.unknownRolesExcused())
 				}
 				// The excuse of ActionMentionsNoWriteRole reads a call as a reader
 				// only when the program it runs
@@ -692,7 +701,12 @@ func actionSSHCopyIDToThisHost(call *syntax.CallExpr, home string) bool {
 // a program word that is not static. A reader statement of such a call is no
 // plain read (actionPlainReadStatements), and its mentions are not excused
 // (ActionMentionsNoWriteRole, rel-1-0-10:GAP-0018 under GAP-0570/GAP-0643).
-func actionCallKeepsMentions(file *syntax.File, home string) bool {
+//
+// programs false leaves out the last two reasons (an echo of an expansion, a
+// program word that is not static): the unknown-tier scan
+// (ActionMentionsNoKnownWrite, rel-1-0-10:GAP-0843), where such a program can
+// still run but gets no name from the reader statement.
+func actionCallKeepsMentions(file *syntax.File, home string, programs bool) bool {
 	if actionRebindsReaderNames(file, home) {
 		return true
 	}
@@ -714,7 +728,7 @@ func actionCallKeepsMentions(file *syntax.File, home string) bool {
 				}
 				return false
 			}
-			if len(node.Args) > 0 && !neutral[node] {
+			if programs && len(node.Args) > 0 && !neutral[node] {
 				program, known := staticProgramWord(node.Args[0], home)
 				base := programBase(program)
 				if !known || (base == "echo" || base == "printf") && !actionStatusReport(node.Args[1:], status) {
@@ -746,7 +760,7 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 	if file == nil {
 		return nil
 	}
-	if actionCallKeepsMentions(file, home) {
+	if actionCallKeepsMentions(file, home, true) {
 		return nil
 	}
 	reads := map[*syntax.Stmt]bool{}
@@ -5986,12 +6000,16 @@ func actionPathHasDotComponent(word string) bool {
 	return false
 }
 
-// actionReaderToUnknownSink reports a statement that only reads (the statement
+// actionReaderToSink reports a statement that only reads (the statement
 // without its output redirects is a reader) whose every output redirect names a
 // file the scan cannot resolve (a word with a variable or substitution in it).
 // Such a sink is unknown: the statement is no known copy of the protected
-// content into a named file, which keeps its block.
-func actionReaderToUnknownSink(stmt *syntax.Stmt, home string) bool {
+// content into a named file, which keeps its block. named also accepts a sink
+// the call names (cat KEYS > /tmp/keys.bak): the unknown tier, whose
+// redirect words the scan judges as write targets of their own
+// (rel-1-0-10:GAP-0843); ActionMentionsNoKnownWrite keeps a sink in the
+// home's .ssh or state folder out of it.
+func actionReaderToSink(stmt *syntax.Stmt, home string, named bool) bool {
 	if len(stmt.Redirs) == 0 {
 		return false
 	}
@@ -6004,13 +6022,75 @@ func actionReaderToUnknownSink(stmt *syntax.Stmt, home string) bool {
 		default:
 			return false
 		}
-		if _, static := StaticWord(redir.Word, home); static {
+		if _, static := StaticWord(redir.Word, home); static && !named {
 			return false
 		}
 	}
 	bare := *stmt
 	bare.Redirs = nil
 	return actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{&bare}}, home, 0, true)
+}
+
+// actionPathOutsideProtectedFolders reports whether a fixed word, placed in
+// cwd when relative, lies as spelled and as resolved outside the home's .ssh
+// and DefenseClaw state folders. A word the scan cannot place (a relative
+// word with no known cwd, a path it cannot resolve) is not outside.
+func actionPathOutsideProtectedFolders(value, cwd, home string) bool {
+	if !filepath.IsAbs(value) {
+		if !filepath.IsAbs(cwd) {
+			return false
+		}
+		value = filepath.Join(cwd, value)
+	}
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	value = filepath.Clean(value)
+	resolved, ok := ResolveWriteTarget(value)
+	if !ok {
+		return false
+	}
+	for _, folder := range [...]string{filepath.Join(home, ".ssh"), filepath.Join(home, ".defenseclaw")} {
+		forms := []string{folder}
+		if physical, ok := ResolveWriteTarget(folder); ok && physical != folder {
+			forms = append(forms, physical)
+		}
+		for _, form := range forms {
+			if pathAtOrUnder(value, form) || pathAtOrUnder(resolved, form) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// actionPipelineStages returns the stages of every pipeline that is a top level
+// statement or an operand of && or ||, stage by stage.
+func actionPipelineStages(file *syntax.File) map[*syntax.Stmt]bool {
+	out := map[*syntax.Stmt]bool{}
+	var stages func(stmt *syntax.Stmt, inner bool)
+	stages = func(stmt *syntax.Stmt, inner bool) {
+		if stmt == nil {
+			return
+		}
+		binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+		switch {
+		case ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll):
+			stages(binary.X, true)
+			stages(binary.Y, true)
+		case ok && !inner && (binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt):
+			stages(binary.X, false)
+			stages(binary.Y, false)
+		case inner:
+			out[stmt] = true
+		}
+	}
+	if file != nil {
+		for _, stmt := range file.Stmts {
+			stages(stmt, false)
+		}
+	}
+	return out
 }
 
 // actionReadOnlyPipelines returns the statements of every list operand or top

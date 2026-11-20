@@ -41,9 +41,11 @@ func TestGAP0018KeyReadersAreNotKeyWrites(t *testing.T) {
 		{"B2 dotglob glob reaching the keys file by name", `shopt -s dotglob; cat ~/*/authorized_keys`, true},
 		{"B3 dotglob glob reaching a key file by a name prefix", `shopt -s dotglob; cat ~/*/auth*`, true},
 		{"printed source file, then a key write", `sed -n '2090,2115p' internal/gateway/semantic_authorized_keys_proof.go && echo x >> ~/.ssh/authorized_keys`, true},
-		// A statement with an output redirect is no plain read (owner ruling, GAP-2590):
-		// the copy of the file's content into another file stays a block.
-		{"checksum to a report", `sha256sum ~/.ssh/authorized_keys > keys.sum`, true},
+		// A digest of the keys file into a report writes no copy of its content:
+		// the GAP-1536 unknown tier, an alert in the default pack (strict and
+		// managed-strict block: gap_fu12_rules_tiers_test.go Q6; S7 lead ruling
+		// 2026-11-19); it was the block of the owner ruling GAP-2590 before.
+		{"checksum to a report", `sha256sum ~/.ssh/authorized_keys > keys.sum`, false},
 		// A write in the same command, or any way to write, still blocks.
 		{"checksum then keys write", `sha256sum ~/.ssh/authorized_keys; echo x >> ~/.ssh/authorized_keys`, true},
 		{"remote write", `ssh -n builder 'echo x >> ~/.ssh/authorized_keys'`, true},

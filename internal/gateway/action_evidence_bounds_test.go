@@ -125,6 +125,13 @@ func (f b36ManagedHookFixture) clientHeader(t *testing.T, payload []byte) string
 // post sends the hook request with the user's home hidden from the gateway.
 func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []byte, header string) string {
 	t.Helper()
+	body, code := f.postBody(t, connector, payload, header)
+	return hookBodyVerdict(body, code)
+}
+
+// postBody is post that returns the response body and status.
+func (f b36ManagedHookFixture) postBody(t *testing.T, connector string, payload []byte, header string) (string, int) {
+	t.Helper()
 	if err := os.Chmod(f.homes, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +150,12 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(connector).ServeHTTP(recorder, req)
-	body := recorder.Body.String()
+	return recorder.Body.String(), recorder.Code
+}
+
+// hookBodyVerdict is the action of a hook response body, or the status and
+// the start of the body when it names none.
+func hookBodyVerdict(body string, code int) string {
 	switch {
 	case strings.HasPrefix(body, `{"action":"block"`):
 		return "block"
@@ -152,7 +164,7 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
 	}
-	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
+	return fmt.Sprintf("status %d body %.200s", code, body)
 }
 
 // TestR103B36RealBoundedHeaderKeepsTruncation is the B-36 review proof: the

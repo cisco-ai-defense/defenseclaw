@@ -208,7 +208,7 @@ func TestR105WindowsPowerShellStateWriteSpellings(t *testing.T) {
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
 			verdict := buildVerdict(findings, "tool_call")
-			if got := verdict.Action == "block"; got != tc.block {
+			if got := gap0747Blocked(findings, tc.block); got != tc.block {
 				t.Errorf("%s %s (dialect %q): action %q, want block=%t (findings %v)",
 					tool, tc.command, input.DialectHint, verdict.Action, tc.block, findings)
 			}
@@ -289,6 +289,13 @@ func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
 	body := `powershell -c '` + nested(200, "Get-Content "+state) + `'; `
 	clear := func(n int) string { return nested(n, "Clear-Content "+state) }
 	bodies := func(n int) string { return strings.Repeat(body, n) + "Clear-Content " + state }
+	blockRules := map[string][]string{
+		"T1c-400/Bash":           {gap0747StateRule, gap0747CompoundLimitRule},
+		"T1c-400/shell_command":  {gap0747StateRule, gap0747CompoundLimitRule},
+		"T1d-1500/Bash":          {gap0747StateRule, gap0747CompoundLimitRule},
+		"T1d-1500/shell_command": {gap0747StateRule, gap0747CompoundLimitRule},
+		"T1d-1500/PowerShell":    {gap0747CompoundLimitRule},
+	}
 	for _, tc := range []struct {
 		name  string
 		n     int
@@ -325,8 +332,16 @@ func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
 				_, d := judge(n)
 				return d
 			}, ceiling)
-			if verdict := buildVerdict(findings, "tool_call"); verdict.Action != "block" {
-				t.Errorf("%s %s: action %q, want block", tc.name, tool, verdict.Action)
+			// A proven DefenseClaw state write is a HIGH alert on the default
+			// pack (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			if rules, ok := blockRules[tc.name+"/"+tool]; ok {
+				// A call past the compound limit blocks for that rule beside
+				// the state write (GAP-1563).
+				if problem := gap0747BlockedForRule(findings, rules...); problem != "" {
+					t.Errorf("%s %s: %s", tc.name, tool, problem)
+				}
+			} else if problem := gap0747DefaultTierCheck(findings, true); problem != "" {
+				t.Errorf("%s %s: %s", tc.name, tool, problem)
 			}
 		}
 	}

@@ -309,6 +309,12 @@ type trustedActionRequest struct {
 	// default or permissive install (ActionMentionsNoWriteRole): the finding
 	// alerts, it does not block (rel-1-0-10:GAP-0018).
 	nonWriteMention *bool
+	// unknownMention, when set, is told that the target scan held the call
+	// only on words of reader statements beside a program, pipe stage or
+	// named sink it has no write model of (ActionMentionsNoKnownWrite): the
+	// key finding alerts and the shared unknown-tier finding decides
+	// (rel-1-0-10:GAP-0843).
+	unknownMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -2088,15 +2094,22 @@ func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedA
 
 // withProvenActiveStateMutation adds (or upgrades) the
 // tamper.detector_state_write finding of a proven mutation of the active
-// state: the one finding observe mode still blocks on
-// (provenActiveStateMutation).
+// state: the one finding observe mode still blocks on where the pack blocks
+// it (provenActiveStateMutation).
 func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
 	// This protection belongs to the gateway. A selected pack may omit or
-	// relabel the rule, but a proved mutation of active state still blocks.
+	// relabel the rule, but a proved mutation of active state is always
+	// reported at the severity of the request's tier (stateWriteSeverityFor):
+	// HIGH, a high alert, in the default and permissive tiers (a managed
+	// install's default pack included); CRITICAL, a block in every route,
+	// in strict and managed-strict (owner, 2026-11-15T15:20Z,
+	// rel-1-0-10:GAP-0747). profileClassFloor keeps it at least an alert in
+	// every pack and a block where it is CRITICAL.
+	severity := stateWriteSeverityFor(request)
 	index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
 	canonical := RuleFinding{
-		RuleID: ruleID, Title: "DefenseClaw security state mutation", Severity: "CRITICAL",
+		RuleID: ruleID, Title: "DefenseClaw security state mutation", Severity: severity,
 		Confidence: 0.98, Tags: []string{"cognitive-tampering", "tampering", "security-state"},
 		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
 	}
@@ -2105,7 +2118,7 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 		(findings[index].proof.kind == findingProofActionFactsSemantic ||
 			findings[index].proof.kind == findingProofActionFactsSubgraph) {
 		// Keep the stronger ActionFacts proof of an actual state mutation.
-		findings[index].Severity = "CRITICAL"
+		findings[index].Severity = severity
 		findings[index].Title = canonical.Title
 		findings[index].Tags = canonical.Tags
 		return findings
@@ -2118,9 +2131,9 @@ func withProvenActiveStateMutation(request trustedActionRequest, findings []Rule
 		// by the rule itself: the mutation is proven ($CMD > ~/f, GAP-2225).
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
-	// The selected pack's posture and severity may differ, but a proved
-	// mutation of DefenseClaw state has one enforcement level in every pack.
-	finding.Severity = "CRITICAL"
+	// The selected pack's severity may differ, but a proved mutation of
+	// DefenseClaw state has one severity per tier.
+	finding.Severity = severity
 	finding.Title = canonical.Title
 	finding.Tags = canonical.Tags
 	finding.enforcement = findingEnforcementDetectionOnly

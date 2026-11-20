@@ -55,12 +55,23 @@ func TestR105WindowsCMDReaderSkipsCommandsWithoutCMD(t *testing.T) {
 	for _, tc := range []struct {
 		command string
 		block   bool
+		// rules: per tool, the rules the call blocks for (past the compound
+		// limit beside the state write), not as the HIGH state write alert
+		// (GAP-1563); a tool without an entry is the HIGH alert.
+		rules map[string][]string
 	}{
-		{nest(20, read), false},
-		{nest(40, read), false},
-		{nest(2, cmdWrite), true},
-		{nest(40, cmdWrite), true},
-		{nest(400, cmdWrite), true},
+		{nest(20, read), false, nil},
+		{nest(40, read), false, nil},
+		{nest(2, cmdWrite), true, nil},
+		{nest(40, cmdWrite), true, map[string][]string{
+			"Bash":          {gap0747StateRule, gap0747CompoundLimitRule},
+			"shell_command": {gap0747StateRule, gap0747CompoundLimitRule},
+		}},
+		{nest(400, cmdWrite), true, map[string][]string{
+			"Bash":          {gap0747StateRule, gap0747CompoundLimitRule},
+			"shell_command": {gap0747StateRule, gap0747CompoundLimitRule},
+			"PowerShell":    {gap0747StateRule, gap0747CompoundLimitRule},
+		}},
 	} {
 		for _, tool := range []string{"Bash", "shell_command", "PowerShell"} {
 			args, _ := json.Marshal(map[string]string{"command": tc.command})
@@ -70,7 +81,12 @@ func TestR105WindowsCMDReaderSkipsCommandsWithoutCMD(t *testing.T) {
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
 			})
-			got := buildVerdict(findings, "tool_call").Action == "block"
+			// A proven state write is a HIGH alert on the default pack (GAP-0747
+			// owner tiering 2026-11-15T15:20Z).
+			got := gap0747DefaultTierCheck(findings, true) == ""
+			if rules, ok := tc.rules[tool]; ok {
+				got = gap0747BlockedForRule(findings, rules...) == ""
+			}
 			if !tc.block {
 				// Past the action analysis depth bound a call is the unknown
 				// tier of the pack whatever it names (rel-1-0-10:GAP-0688, the

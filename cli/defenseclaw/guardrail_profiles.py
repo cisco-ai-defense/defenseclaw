@@ -152,6 +152,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/g0210port-r2 on rel da4177e225, rel-1-0-10:GAP-0210, GAP-1267, GAP-1268): SEC-HF-TOKEN and
             # the SEC-PASSWORD-ASSIGN value class (backticks, next line, comma) in secrets.yaml.
             "ca7e62eec5d39e2f6f1f3eeec648c25c5bfd32c19d05380e19aa44aaa1bddf1e",
+            # 1.0.10 (s7/rules-fu12, rel-1-0-10:GAP-1574): cognitive.yaml CRITICAL -> HIGH (87a7927568).
+            "6a7668cde7efc0eb7ec557a04a205a7416a4edd9e6f0f39c0a9d7a8597f4b870",
         }
     ),
     "permissive": frozenset(

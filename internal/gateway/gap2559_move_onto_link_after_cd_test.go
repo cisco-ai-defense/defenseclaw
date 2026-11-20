@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +22,10 @@ type r106HookRow struct {
 	command     string
 	block       bool
 	perUserOnly bool
+	// state: the row writes DefenseClaw state and nothing else blocks it, so
+	// the answer is the HIGH alert that names the state rule on the default
+	// pack (GAP-0747 owner tiering 2026-11-15T15:20Z) in every mode here.
+	state bool
 	// warn: the target stays UNCERTAIN (a link made at run time, a copy the
 	// walk cannot read): the per-user default pack alerts, a managed gateway
 	// with an incomplete client reading blocks (rel-1-0-10:GAP-0018, GAP-0350).
@@ -34,8 +37,15 @@ type r106HookRow struct {
 // gateway, with the real client header when header is set.
 func r106HookVerdict(t *testing.T, f b36ManagedHookFixture, managed bool, connector string, payload []byte, header string) string {
 	t.Helper()
+	body, code := r106HookBody(t, f, managed, connector, payload, header)
+	return hookBodyVerdict(body, code)
+}
+
+// r106HookBody is r106HookVerdict that returns the response body and status.
+func r106HookBody(t *testing.T, f b36ManagedHookFixture, managed bool, connector string, payload []byte, header string) (string, int) {
+	t.Helper()
 	if managed {
-		return f.post(t, connector, payload, header)
+		return f.postBody(t, connector, payload, header)
 	}
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -50,16 +60,7 @@ func r106HookVerdict(t *testing.T, f b36ManagedHookFixture, managed bool, connec
 	}
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(connector).ServeHTTP(recorder, req)
-	body := recorder.Body.String()
-	switch {
-	case strings.HasPrefix(body, `{"action":"block"`):
-		return "block"
-	case strings.HasPrefix(body, `{"action":"allow"`):
-		return "allow"
-	case strings.HasPrefix(body, `{"action":"alert"`):
-		return "alert"
-	}
-	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
+	return recorder.Body.String(), recorder.Code
 }
 
 // judgeR106HookRows runs rows on a fresh project per row, managed and
@@ -87,6 +88,9 @@ func judgeR106HookRows(t *testing.T, rows []r106HookRow, prepare func(t *testing
 				want := "allow"
 				if row.block {
 					want = "block"
+					if row.state {
+						want = "alert"
+					}
 				}
 				if row.warn {
 					want = "alert"
@@ -94,8 +98,14 @@ func judgeR106HookRows(t *testing.T, rows []r106HookRow, prepare func(t *testing
 						want = "block"
 					}
 				}
-				if got := r106HookVerdict(t, f, mode.managed, connector, payload, header); got != want {
+				body, code := r106HookBody(t, f, mode.managed, connector, payload, header)
+				if got := hookBodyVerdict(body, code); got != want {
 					t.Errorf("managed=%v header=%v %s %q: %s, want %s", mode.managed, mode.header, connector, row.command, got, want)
+				} else if row.state {
+					// The state rule must be the only blocking-class rule.
+					if msg := gap0747HookBodyCheck(body, "alert"); msg != "" {
+						t.Errorf("managed=%v header=%v %s %q: %s", mode.managed, mode.header, connector, row.command, msg)
+					}
 				}
 				_ = os.Chmod(f.homes, 0o700)
 			}

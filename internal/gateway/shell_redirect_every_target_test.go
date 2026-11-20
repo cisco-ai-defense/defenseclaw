@@ -105,7 +105,7 @@ func TestR105ShellOpensEveryRedirectTarget(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != block {
+			if blocked := gap0747Blocked(findings, block); blocked != block {
 				t.Errorf("%s %q: blocked=%v, want %v (%v)",
 					connectorName, command, blocked, block, FindingStrings(findings))
 			}
@@ -172,7 +172,7 @@ func TestR105GitBashRedirectTargetOfWindowsHome(t *testing.T) {
 							findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 								Input: input, Connector: connectorName, EnforcementCapable: true,
 							})
-							if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+							if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 								t.Errorf("%s hint=%q %q: blocked=%v, want %v (%v)",
 									connectorName, hint, command, blocked, row.block, FindingStrings(findings))
 							}
@@ -266,7 +266,7 @@ func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != block {
+			if blocked := gap0747Blocked(findings, block); blocked != block {
 				t.Errorf("%s %q: blocked=%v, want %v (%v)",
 					connectorName, command, blocked, block, FindingStrings(findings))
 			}
@@ -359,7 +359,7 @@ func TestR105ProtectedHomeRedirectTargetUsesClientTargets(t *testing.T) {
 				if err := os.Chmod(homes, 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 					t.Errorf("%s %q: blocked=%v, want %v (%v)",
 						connectorName, command, blocked, row.block, FindingStrings(findings))
 				}

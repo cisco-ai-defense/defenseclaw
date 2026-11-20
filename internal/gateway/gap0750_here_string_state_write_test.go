@@ -82,9 +82,10 @@ func TestGAP0750PowerShellHereStringWriteOfTheDefenseClawConfig(t *testing.T) {
 					action := buildVerdict(findings, "tool_call").Action
 					want := guardrailActionAllow
 					if row.block {
-						want = guardrailActionBlock
+						// A proven state write alerts (HIGH) outside strict.
+						want = guardrailActionAlert
 					}
-					if action != want || (row.block && findingWithID(findings, "tamper.detector_state_write") == nil) {
+					if action != want || (row.block && (findingWithID(findings, "tamper.detector_state_write") == nil || gap0747DefaultTierCheck(findings, true) != "")) {
 						t.Fatalf("action=%s findings=%v, want %s (tamper.detector_state_write: %t)", action, findingIDs(findings), want, row.block)
 					}
 				})

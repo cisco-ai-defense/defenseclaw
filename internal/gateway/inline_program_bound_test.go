@@ -91,7 +91,7 @@ func TestBoundRuleInlineProgramPastItsBound(t *testing.T) {
 			want := bounded.Allow
 			switch {
 			case r.proven:
-				want = bounded.Block
+				want = gap0747StateWriteAction(tier.tier)
 			case r.truncated:
 				want = bounded.Unknown(tier.tier)
 			}

@@ -145,7 +145,7 @@ func TestR105StateRedirectSpellingsAreWrites(t *testing.T) {
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, Connector: connectorName, EnforcementCapable: true,
 				})
-				if got := buildVerdict(findings, "tool_call").Action == guardrailActionBlock; got != tc.block {
+				if got := gap0747Blocked(findings, tc.block); got != tc.block {
 					t.Fatalf("block=%t, want %t; findings=%v", got, tc.block, FindingStrings(findings))
 				}
 				if tc.block && findingWithID(findings, "tamper.detector_state_write") == nil {

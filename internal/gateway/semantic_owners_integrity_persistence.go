@@ -1529,10 +1529,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved, resolvedTarget, nonWriteMention := false, false, false, false
+	overBudget, unresolved, resolvedTarget, nonWriteMention, unknownMention := false, false, false, false, false
 	var unprovenTarget unprovenWrite
 	evidence := request
 	evidence.nonWriteMention = &nonWriteMention
+	evidence.unknownMention = &unknownMention
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
@@ -1612,8 +1613,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			// that read the keys file name it, in a per-user default or
 			// permissive install, alerts: reading the file is not writing it
 			// (S7 lead 2026-11-13, rel-1-0-10:GAP-0018). Strict and managed
-			// installs keep the block.
-			readsOnly := nonWriteMention && !unprovenOnly && named.ID == rule.ID
+			// installs keep the block. A mention beside a program the scan
+			// has no write model of is the unknown tier: the finding alerts
+			// and the shared unknown-tier finding below decides in every
+			// pack (rel-1-0-10:GAP-0843).
+			readsOnly := (nonWriteMention || unknownMention) && !unprovenOnly && named.ID == rule.ID
 			if readsOnly {
 				enforcement = findingEnforcementAlertOnly
 			}
@@ -1650,6 +1654,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if named.ID == rule.ID &&
 				(trustedAuthorizedKeysSymlinkWrite(input) || resolvedTarget && !overBudget && !unresolved) {
 				finding = finding.withTrustedActionProof(newResolvedTargetFindingProof(named.ID, true))
+			}
+			if readsOnly && unknownMention {
+				return withUnknownFinding(append(kept, finding),
+					unknownReasonFinding(unknownKeyMentionTitle, unknownKeyMentionReason, request.EnforcementCapable))
 			}
 			return append(kept, finding)
 		}
@@ -1984,6 +1992,14 @@ func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 // nonWriteKeyMentionTitle is the title of the alert for a command whose only
 // statements naming the keys file read it.
 const nonWriteKeyMentionTitle = "A command names an SSH key file only as a read or as data of an unknown program"
+
+// unknownKeyMentionTitle and unknownKeyMentionReason name the unknown-tier
+// finding of a command that names the keys file only in reader statements
+// beside a program the analysis has no write model of (rel-1-0-10:GAP-0843).
+const (
+	unknownKeyMentionTitle  = "A command names an SSH key file beside a program the analysis cannot read"
+	unknownKeyMentionReason = "key_mention_unknown_program"
+)
 
 // unresolvedWriteTargetTitle is the title of the authorized-keys block of a
 // write whose target neither the managed hook client nor the gateway could

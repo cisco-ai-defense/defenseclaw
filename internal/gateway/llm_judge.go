@@ -2577,7 +2577,12 @@ func (j *LLMJudge) prepareToolJudgeSample(ctx context.Context, toolName, args st
 	if !j.cfg.ToolInjection {
 		return "", false
 	}
-	if trimmedArgs := strings.TrimSpace(args); trimmedArgs == "" || len(trimmedArgs) < minJudgeContentLen {
+	// A tool call is judged on its name and arguments, however short: the
+	// minimum length of the content judges does not apply, so a delete_file
+	// {"file_id":"13"} or a GmailSendEmail {} reaches the decision model and
+	// the tool judge and is kept in the session history (rel-1-0-10:GAP-1279).
+	// A call with no tool name has nothing to judge.
+	if strings.TrimSpace(toolName) == "" {
 		return "", false
 	}
 	return j.toolJudgeContextSample(ctx, toolName, args), true

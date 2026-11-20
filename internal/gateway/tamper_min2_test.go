@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // rel-1-0-10:GAP-0657 to GAP-0663 (lane s7-tmin2, review s7-tminrev of
@@ -81,6 +83,11 @@ func tmin2Run(t *testing.T, h gap0048Home, rows []tmin2Row) {
 					continue
 				case tmin2Block:
 					want = "block"
+					// A proven state write alone is a HIGH alert outside
+					// strict (GAP-0747 owner tiering 2026-11-15T15:20Z).
+					if rules == gap0747StateRule && tier.tier != bounded.TierStrict {
+						want = "alert"
+					}
 				case tmin2Tier:
 					switch tier.name {
 					case "default":

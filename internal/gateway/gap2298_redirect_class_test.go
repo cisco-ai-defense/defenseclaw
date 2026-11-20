@@ -97,7 +97,7 @@ func TestR105StaticRedirectTargetIsAWriteWhateverTheCommand(t *testing.T) {
 						findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 							Input: input, Connector: connectorName, EnforcementCapable: true,
 						})
-						blocked := buildVerdict(findings, "tool_call").Action == "block"
+						blocked := gap0747Blocked(findings, row.block)
 						if blocked != row.block {
 							t.Errorf("%s %q: blocked=%v, want %v (%v)",
 								connectorName, command, blocked, row.block, FindingStrings(findings))
@@ -177,7 +177,7 @@ func TestGAP0428RedirectIsOpenedBeforeTheCommandBinds(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+			if blocked := gap0747Blocked(findings, row.block); blocked != row.block {
 				t.Errorf("%s %q: blocked=%v, want %v (%v)",
 					connectorName, row.command, blocked, row.block, FindingStrings(findings))
 			}

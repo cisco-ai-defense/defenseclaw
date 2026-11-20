@@ -514,10 +514,15 @@ func TestGAP0548ProvenFindingSurvivesAParseFailure(t *testing.T) {
 		t.Run(p.name, func(t *testing.T) {
 			hook := gap0437Server(t, p, "claudecode", "action")
 			home := t.TempDir()
+			// A proven state write alerts outside strict (GAP-0747).
+			wantStateWrite := "alert"
+			if p.pack == "strict" {
+				wantStateWrite = "block"
+			}
 			for _, n := range []int{3, 128, 256} {
 				command := boundedShellSeen + "; " + gap0548Filler(n)
-				if out := gap0437Hook(t, hook, home, p.name+"seen"+string(rune('a'+n%26)), command); out["action"] != "block" {
-					t.Errorf("%s state write + filler %d: action %v, want block: %v", p.name, n, out["action"], out["rule_ids"])
+				if out := gap0437Hook(t, hook, home, p.name+"seen"+string(rune('a'+n%26)), command); out["action"] != wantStateWrite {
+					t.Errorf("%s state write + filler %d: action %v, want %s: %v", p.name, n, out["action"], wantStateWrite, out["rule_ids"])
 				}
 			}
 			// The strict and managed raw-text check of the unread part ships

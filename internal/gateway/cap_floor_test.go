@@ -191,8 +191,12 @@ func TestCapFloorKeepsProvenBlocks(t *testing.T) {
 		aloneRules := map[string][]string{}
 		for name, command := range seen {
 			action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
-			if alone[name] = boundedParse(action); alone[name] != bounded.Block {
-				t.Fatalf("%s: the %s write alone is %s, want block", tier.name, name, action)
+			wantAlone := bounded.Block
+			if name == "state" {
+				wantAlone = gap0747StateWriteAction(tier.tier)
+			}
+			if alone[name] = boundedParse(action); alone[name] != wantAlone {
+				t.Fatalf("%s: the %s write alone is %s, want %s", tier.name, name, action, wantAlone)
 			}
 			aloneRules[name] = capFloorRuleIDs(findings)
 		}

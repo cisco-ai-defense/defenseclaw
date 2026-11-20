@@ -233,8 +233,8 @@ func TestGAP0712CodexArgvPastBoundsFiveTiers(t *testing.T) {
 			}
 			seen, findings := decide(append(append([]interface{}{}, launcher...), pad+boundedShellSeen))
 			t.Logf("ROW %s | %v | state write past 4 KiB | %s", tier.name, launcher, seen)
-			if got := boundedParse(seen); got != bounded.Block {
-				t.Errorf("%s/%v state write after padding: action %s, want block; %v", tier.name, launcher, seen, findings)
+			if got := boundedParse(seen); got != gap0747StateWriteAction(tier.tier) {
+				t.Errorf("%s/%v state write after padding: action %s, want %s; %v", tier.name, launcher, seen, gap0747StateWriteAction(tier.tier), findings)
 			}
 		}
 		action, findings := decide(files)

@@ -261,8 +261,8 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 					used[rotation{"cell " + name, "target " + label}] = true
 					reviewed := verdict(call.connector, call.tool, call.args(target))
 					checks = append(checks, func() {
-						if label == "state" && call.tool != "Read" && calls[reviewed].action != "block" {
-							t.Fatalf("%s %s-%d: the reviewed write of DefenseClaw's state is %q, not block", name, call.tool, i, calls[reviewed].action)
+						if label == "state" && call.tool != "Read" && calls[reviewed].action != gap0747WantAction(strings.HasPrefix(name, "strict")) {
+							t.Fatalf("%s %s-%d: the reviewed write of DefenseClaw's state is %q, not block in strict and an alert elsewhere", name, call.tool, i, calls[reviewed].action)
 						}
 					})
 					variants := fileToolUnknownKeyVariants(benign)

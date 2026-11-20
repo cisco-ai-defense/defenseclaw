@@ -53,6 +53,11 @@ func TestActiveUserTildeTargetIsTheActiveHome(t *testing.T) {
 		"HOME=/tmp/h; echo x > ~dcku/.defenseclaw/config.yaml",
 		"echo k >> ~dcku/.ssh/authorized_keys",
 	}
+	blockRules := map[string][]string{
+		"echo k >> ~dcku/.ssh/authorized_keys":                     {gap0747SSHKeysRule},
+		"echo k >> ~/.ssh/authorized_keys":                         {gap0747SSHKeysRule},
+		"source ./env.sh; echo x > ~dcku/.defenseclaw/config.yaml": {gap0747StateRule, gap0747SSHKeysRule},
+	}
 	allow := []string{
 		"cat ~dcku/.defenseclaw/config.yaml",
 		"ls ~dcku/.defenseclaw",
@@ -75,8 +80,16 @@ func TestActiveUserTildeTargetIsTheActiveHome(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: connectorName, EnforcementCapable: true,
 			})
-			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != want {
-				t.Errorf("%s %q: blocked=%v, want %v (%v)", connectorName, command, blocked, want, FindingStrings(findings))
+			if rules, ok := blockRules[command]; ok && want {
+				// The call blocks for rules of its own, not as the HIGH state
+				// write alert (GAP-1563).
+				if msg := gap0747BlockedForRule(findings, rules...); msg != "" {
+					t.Errorf("%s %q: %s (%v)", connectorName, command, msg, FindingStrings(findings))
+				}
+				return
+			}
+			if msg := gap0747DefaultTierCheck(findings, want); msg != "" {
+				t.Errorf("%s %q: %s (want state write %v) (%v)", connectorName, command, msg, want, FindingStrings(findings))
 			}
 		}
 		for _, command := range block {

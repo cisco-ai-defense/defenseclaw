@@ -30,6 +30,9 @@ type TargetMemo struct {
 	// excuseNonWrites makes the mention scan leave a protected name alone when
 	// the statement that holds it only reads (ActionMentionsNoWriteRole).
 	excuseNonWrites bool
+	// excuseUnknownRoles widens that scan to the unknown tier
+	// (ActionMentionsNoKnownWrite): see unknownRolesExcused.
+	excuseUnknownRoles bool
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -312,3 +315,9 @@ func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
 // nonWritesExcused is set for the scan ActionMentionsNoWriteRole runs; a nil memo
 // (a scan that carries none) never excuses.
 func (m *TargetMemo) nonWritesExcused() bool { return m != nil && m.excuseNonWrites }
+
+// unknownRolesExcused is set for the scan ActionMentionsNoKnownWrite runs: a
+// reader statement keeps its excuse beside a program the scan has no model
+// of (a dynamic program word, an echo of an expansion), in a pipeline and with
+// its output redirected to a file the call names (rel-1-0-10:GAP-0843).
+func (m *TargetMemo) unknownRolesExcused() bool { return m != nil && m.excuseUnknownRoles }
