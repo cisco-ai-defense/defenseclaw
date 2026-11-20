@@ -2496,6 +2496,10 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		}
 		s.setSharedJudge(nextJudge)
 		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
+		// The decision model is rebuilt with the judge (judgeNeedsRebuild), so
+		// its calls start a new window too: a fixed or disabled endpoint no
+		// longer reads as failing in status and doctor (GAP-1596).
+		decisionModelHealth.reset()
 		if api := s.apiSnapshot(); api != nil {
 			api.SetHookJudge(nextJudge)
 			api.SetHookDecisionJudge(nextGen.decisionJudge)

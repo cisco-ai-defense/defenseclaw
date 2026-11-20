@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -3773,10 +3774,25 @@ func classifyPOSIXInstall(out *parseOutput, command *CommandFact) {
 	destination := parsed.positionals[len(parsed.positionals)-1]
 	addOperation(command, OperationCopy)
 	appendCommandPath(out, command, PathAccessWrite, destination)
-	if hasMode && dangerousInstallMode(mode) {
+	if hasMode && (dangerousInstallMode(mode) ||
+		ModeOpensRead(mode) && slices.ContainsFunc(parsed.positionals[:len(parsed.positionals)-1], credentialFileValue)) {
+		// A copy of a credentials file installed group or world readable
+		// widens who reads the credential (rel-1-0-10:GAP-0950).
 		addOperation(command, OperationPermissionChange)
 		appendCommandPath(out, command, PathAccessMetadata, destination)
 	}
+}
+
+// ModeOpensRead reports a literal numeric mode (three or four octal digits)
+// that lets the group or other users read the file.
+func ModeOpensRead(mode string) bool {
+	parsed, err := strconv.ParseUint(mode, 8, 16)
+	return err == nil && (len(mode) == 3 || len(mode) == 4) && parsed&0o044 != 0
+}
+
+func credentialFileValue(value string) bool {
+	_, ok := MatchCredentialFileShape(value)
+	return ok
 }
 
 // classifyRsync records the local destination of rsync (the last operand)

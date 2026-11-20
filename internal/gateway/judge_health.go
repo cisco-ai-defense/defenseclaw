@@ -28,8 +28,12 @@ const judgeHealthWindow = 20
 // judgeHealthTracker keeps the outcome of the recent LLM judge calls so the
 // health snapshot can show a failing judge. A judge whose provider rejected
 // every call was invisible outside the audit rows: the hook lane kept the rule
-// verdicts and logged "hook judge unavailable" (GAP-1120, GAP-1288).
+// verdicts and logged "hook judge unavailable" (GAP-1120, GAP-1288). The
+// decision model has its own tracker (prefix decision_model): its outage is
+// not a judge outage (GAP-0604).
 type judgeHealthTracker struct {
+	// prefix names the details keys (<prefix>_state, ...).
+	prefix      string
 	mu          sync.Mutex
 	outcomes    [judgeHealthWindow]bool // true = failed
 	count, next int
@@ -64,7 +68,12 @@ func (t *judgeHealthTracker) recordFallback(connector, reason string, now time.T
 	t.lastFallback, t.lastFallbackReason, t.lastFallbackAt = connector, reason, now
 }
 
-var judgeHealth judgeHealthTracker
+var judgeHealth = judgeHealthTracker{prefix: "judge"}
+
+// decisionModelHealth keeps the recent decision-model (System One) calls. A
+// dead endpoint fails open by design (the judge or the rule verdict decides),
+// and was then shown nowhere but the gateway log (GAP-0604).
+var decisionModelHealth = judgeHealthTracker{prefix: "decision_model"}
 
 // applyJudge starts a new window for the judge the gateway now runs, so the
 // calls of a replaced judge no longer read as this one working, and records
@@ -104,14 +113,15 @@ func (t *judgeHealthTracker) reset() {
 	t.lastFallback, t.lastFallbackReason, t.lastFallbackAt = "", "", time.Time{}
 }
 
-// details returns the judge_* health details, or nil before the first call.
+// details returns the <prefix>_* health details, or nil before the first
+// call.
 func (t *judgeHealthTracker) details() map[string]interface{} {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.unavailable != "" {
 		return map[string]interface{}{
-			"judge_state":              "unavailable",
-			"judge_unavailable_reason": t.unavailable,
+			t.prefix + "_state":              "unavailable",
+			t.prefix + "_unavailable_reason": t.unavailable,
 		}
 	}
 	if t.count == 0 {
@@ -136,20 +146,20 @@ func (t *judgeHealthTracker) details() map[string]interface{} {
 		state = "degraded"
 	}
 	details := map[string]interface{}{
-		"judge_state":        state,
-		"judge_recent_calls": t.count,
-		"judge_failed_calls": failed,
+		t.prefix + "_state":        state,
+		t.prefix + "_recent_calls": t.count,
+		t.prefix + "_failed_calls": failed,
 	}
 	if failed > 0 {
-		details["judge_last_error"] = t.lastError
-		details["judge_last_failure_at"] = t.lastFailure.UTC().Format(time.RFC3339)
+		details[t.prefix+"_last_error"] = t.lastError
+		details[t.prefix+"_last_failure_at"] = t.lastFailure.UTC().Format(time.RFC3339)
 	}
 	t.addFallbackDetailsLocked(details)
 	return details
 }
 
-// addFallbackDetailsLocked adds judge_fallbacks (total),
-// judge_fallbacks_by_connector and the last fallback when there were any.
+// addFallbackDetailsLocked adds <prefix>_fallbacks (total),
+// <prefix>_fallbacks_by_connector and the last fallback when there were any.
 func (t *judgeHealthTracker) addFallbackDetailsLocked(details map[string]interface{}) {
 	if len(t.fallbacks) == 0 {
 		return
@@ -160,24 +170,28 @@ func (t *judgeHealthTracker) addFallbackDetailsLocked(details map[string]interfa
 		total += n
 		byConnector[connector] = n
 	}
-	details["judge_fallbacks"] = total
-	details["judge_fallbacks_by_connector"] = byConnector
-	details["judge_last_fallback"] = t.lastFallbackReason + " (" + t.lastFallback + ")"
-	details["judge_last_fallback_at"] = t.lastFallbackAt.UTC().Format(time.RFC3339)
+	details[t.prefix+"_fallbacks"] = total
+	details[t.prefix+"_fallbacks_by_connector"] = byConnector
+	details[t.prefix+"_last_fallback"] = t.lastFallbackReason + " (" + t.lastFallback + ")"
+	details[t.prefix+"_last_fallback_at"] = t.lastFallbackAt.UTC().Format(time.RFC3339)
 }
 
-// withJudgeHealth returns h with the judge_* details merged into a copy of
-// its details map.
+// withJudgeHealth returns h with the judge_* and decision_model_* details
+// merged into a copy of its details map.
 func withJudgeHealth(h SubsystemHealth) SubsystemHealth {
 	judge := judgeHealth.details()
-	if judge == nil {
+	decision := decisionModelHealth.details()
+	if judge == nil && decision == nil {
 		return h
 	}
-	merged := make(map[string]interface{}, len(h.Details)+len(judge))
+	merged := make(map[string]interface{}, len(h.Details)+len(judge)+len(decision))
 	for k, v := range h.Details {
 		merged[k] = v
 	}
 	for k, v := range judge {
+		merged[k] = v
+	}
+	for k, v := range decision {
 		merged[k] = v
 	}
 	h.Details = merged

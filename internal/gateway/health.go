@@ -489,6 +489,7 @@ func NewSidecarHealth() *SidecarHealth {
 	now := time.Now()
 	// The judge summary covers the calls since this gateway started.
 	judgeHealth.reset()
+	decisionModelHealth.reset()
 	initial := SubsystemHealth{State: StateStarting, Since: now}
 	disabled := SubsystemHealth{State: StateDisabled, Since: now}
 	return &SidecarHealth{

@@ -42,7 +42,12 @@ func hookCallKey() uint64 { return uint64(windows.GetCurrentThreadId()) }
 // runs meanwhile finds no call, as before. A goroutine that holds its thread
 // for more than the call (a LockOSThread of its own) keeps that thread, and
 // the call keeps its key.
+//
+// The key and the map are read on one thread, as in currentHookCall: a
+// goroutine that runs no call and moved off its thread between the two reads
+// would otherwise take another call's key away (rel-1-0-10:GAP-1476).
 func releaseHookCallThread() *hookCall {
+	runtime.LockOSThread()
 	id := hookCallKey()
 	hookCalls.mu.Lock()
 	call := hookCalls.calls[id]
@@ -50,6 +55,7 @@ func releaseHookCallThread() *hookCall {
 		delete(hookCalls.calls, id)
 	}
 	hookCalls.mu.Unlock()
+	runtime.UnlockOSThread()
 	if call != nil {
 		runtime.UnlockOSThread()
 	}

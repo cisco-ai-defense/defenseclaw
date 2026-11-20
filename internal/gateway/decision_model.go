@@ -974,9 +974,13 @@ func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 }
 
 // emitDecisionModel records one decision-model call as a judge event of
-// kind decision_model (the audit judge rows and the judge telemetry). It
-// does not touch the LLM judge's health: a decision-model outage is not a
-// judge outage. v is nil when the call was escalated.
+// kind decision_model (the audit judge rows and the judge telemetry) and in
+// the decision model's own health (decision_model_* details), never the LLM
+// judge's: a decision-model outage is not a judge outage. A dead endpoint
+// fails open, so without it only the gateway log showed one (GAP-0604).
+// Skipped calls (open breaker, capacity, no time) never get here, so the
+// window holds the calls the model was really asked. v is nil when the call
+// was escalated.
 func emitDecisionModel(ctx context.Context, model, toolName, args string, res decisionResult, v *ScanVerdict) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1022,6 +1026,7 @@ func emitDecisionModel(ctx context.Context, model, toolName, args string, res de
 	if js := activeJudgeStore(); js != nil {
 		_ = js.PersistJudgeEvent(ctx, gatewaylog.DirectionPrompt, payload, toolName, "", "", "")
 	}
+	decisionModelHealth.record(res.failure != "", res.failureCause, time.Now())
 }
 
 // decisionRefusalRuleID is the bounded rule id that records a refusal class

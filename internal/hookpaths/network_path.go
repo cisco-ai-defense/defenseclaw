@@ -292,7 +292,14 @@ func memoHookCall() *hookCall {
 }
 
 // currentHookCall is the hook call the calling goroutine runs (nil: none).
+// The key and the map are read on one thread (lockHookCallKey): on Windows
+// the key is the thread, and a goroutine moved off its thread between the two
+// reads could find a call that has since locked that thread
+// (rel-1-0-10:GAP-1476). The goroutine of a call is already locked to its
+// thread; the lock nests, so its reads are unchanged.
 func currentHookCall() *hookCall {
+	unlock := lockHookCallKey()
+	defer unlock()
 	id := hookCallKey()
 	if id == 0 {
 		return nil
