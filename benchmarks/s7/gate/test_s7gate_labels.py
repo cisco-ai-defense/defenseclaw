@@ -88,6 +88,10 @@ class OverlayFiles(Scratch):
         self.overlay_roundtrip("gap0122-llm-labelled-augur.overlay.jsonl", {"excluded": 5, "benign": 1})
         self.assertNotIn("p2/augur-toolcall-labels/4343464127d9e3e0b03a", {r["id"] for r in rows_of(OVERLAYS / "gap0122-llm-labelled-augur.overlay.jsonl")})
 
+    def test_gap0123_extra_public_honeypot_label_is_not_copied_onto_single_calls(self):
+        got = self.overlay_roundtrip("gap0123-extra-public.overlay.jsonl", {"excluded": 3})
+        self.assertTrue(all(i.startswith("x/shellattack/") for i in got if i != "keep/1"))
+
 
 class FoldLabels(Scratch):
     def test_fold_replaces_by_id_appends_new_and_records_the_set(self):
