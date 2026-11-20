@@ -1073,6 +1073,14 @@ func dispatchTrustedActionOnce(
 	if windowsTwinCut.Any() {
 		defer func() { findings = withBoundedTruncation(findings, windowsTwinCut, request) }()
 	}
+	// A complete POSIX list on a Windows hook is also read without its last
+	// statement, so a benign trailer cannot hide what the rest proves
+	// (windowsListPrefixTwinRequest, rel-1-0-10:GAP-0348).
+	if twin, ok := windowsListPrefixTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withHostTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	// A POSIX shell call the analysis stopped reading at a byte bound (one word
 	// past the string bound ends it with no command) is truncated: judged at
 	// the unknown tier of the pack, never a clean allow (rel-1-0-10:GAP-0382).
