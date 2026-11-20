@@ -17,8 +17,8 @@ import (
 // file the system opens for the name, as the user). dynamic reports a command
 // or a program file the call runs that is not fully known; the gateway
 // answers it at the unknown tier (awkprog.DynamicReason). Nil for any other
-// call and for an awk call with no command channel, which is judged as
-// before.
+// call and for an awk call with no command channel and no print redirect
+// into a literal file (rel-1-0-10:GAP-1239), which is judged as before.
 func awkCommandShell(words []string, cwd string, readFiles bool) (shell []string, dynamic bool) {
 	if len(words) < 2 || !awkProgramName(words[0]) {
 		return nil, false

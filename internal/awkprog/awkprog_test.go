@@ -169,7 +169,7 @@ func TestReadIsDynamicForAnUnreadableCommand(t *testing.T) {
 // commandsOf is the static commands the programs of a call run, and whether
 // the call runs a command or a program it cannot read.
 func commandsOf(call Call) (commands []string, dynamic bool) {
-	commands, reading := call.commands()
+	commands, _, reading := call.commands()
 	return commands, reading.Dynamic
 }
 

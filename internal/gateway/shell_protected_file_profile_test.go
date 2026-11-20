@@ -95,10 +95,28 @@ func shellProtectedFileRoute(t *testing.T, home, cwd, connectorName, posture str
 		}
 		return verdict.Action, ids
 	}
+	ruleIDs := func(findings []string) []string {
+		var ids []string
+		for _, finding := range findings {
+			ids = append(ids, strings.SplitN(finding, ":", 2)[0])
+		}
+		return ids
+	}
+	if connectorName == "claudecode" {
+		// A Claude Code hook is judged by its own profile runtime
+		// (claudeCodeHookProfileRuntime: evaluateClaudeCodeHook), not by the
+		// generic evaluateAgentHook. On a Windows host that runtime reads a
+		// Bash call Git Bash reads alone as POSIX (claudeCodeWindowsShellDialect),
+		// where the generic route keeps every Windows reading
+		// (rel-1-0-10:GAP-0967).
+		resp := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", CWD: cwd, ToolName: "Bash",
+			ToolInput: map[string]interface{}{"command": command},
+		})
+		return resp.Action, ruleIDs(resp.Findings)
+	}
 	req := agentHookRequest{ConnectorName: connectorName, CWD: cwd}
 	switch connectorName {
-	case "claudecode":
-		req.HookEventName, req.ToolName, req.ToolArgs = "PreToolUse", "Bash", args("command")
 	case "codex":
 		req.HookEventName, req.ToolName, req.ToolArgs = "PreToolUse", "Bash", args("command")
 	case "copilot":
@@ -111,11 +129,7 @@ func shellProtectedFileRoute(t *testing.T, home, cwd, connectorName, posture str
 		t.Fatalf("no route for %s", connectorName)
 	}
 	resp := api.evaluateAgentHook(ctx, req)
-	var ids []string
-	for _, finding := range resp.Findings {
-		ids = append(ids, strings.SplitN(finding, ":", 2)[0])
-	}
-	return resp.Action, ids
+	return resp.Action, ruleIDs(resp.Findings)
 }
 
 // rel-1-0-6:GAP-0675 (wave-3 steer 2): a protected file or link that a shell

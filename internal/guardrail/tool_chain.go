@@ -152,7 +152,15 @@ type ToolChainDefinition struct {
 	RequiresDistinctResourceJoin bool
 	RequiresTerminalSuccess      bool
 	ArtifactMutationBarrier      bool
-	DetectionOnly                bool
+	// ArtifactMutationBarrierEnforcementOnly keeps the barrier for the
+	// enforcement join only: an intervening write still stops the exact proof
+	// (a strict block), but the chain is still detected (an alert). The
+	// barrier is content-free, so for a chain whose first step is the agent
+	// reading a secret it erased the read on any write anywhere (mv a.txt
+	// b.txt, a restore of the read file) and hid the upload that followed
+	// (rel-1-0-10:GAP-1180).
+	ArtifactMutationBarrierEnforcementOnly bool
+	DetectionOnly                          bool
 	// OutputJoinFromFirst selects a three-step proof whose source action knows
 	// the terminal identity while the middle action knows only the input
 	// artifact. This is used for manifest write -> apply -> named-pod exec.
@@ -206,6 +214,9 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// completes the chain too (substrate-1:GAP-0389).
 		Step2IdentityOwnsParseProof: true,
 		ArtifactMutationBarrier:     true,
+		// A write between the read and the upload keeps the alert; only the
+		// strict block needs the file unchanged (rel-1-0-10:GAP-1180).
+		ArtifactMutationBarrierEnforcementOnly: true,
 		// A proven chain (both steps exact, one file joined) blocks in the
 		// strict tier; the gateway drops its enforcement bits in the other
 		// tiers, which alert (toolChainProjectionForNamedPosture, GAP-0595).
@@ -874,6 +885,7 @@ func MatchToolChains(
 				}
 			}
 			if detectionJoinPossible && definition.ArtifactMutationBarrier &&
+				!definition.ArtifactMutationBarrierEnforcementOnly &&
 				hasArtifactMutationBetween(window, event, final) {
 				detectionJoinPossible = false
 			}

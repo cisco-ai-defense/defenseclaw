@@ -17,9 +17,9 @@ func TestMatchCredentialFileShapeDeveloperToolLogins(t *testing.T) {
 		// notCredential names look-alikes the table must not match.
 		notCredential []string
 	}{
-		{"Claude Code", "/home/alice/.claude/.credentials.json", CredentialFileCloudCLI, ".credentials.json",
+		{"Claude Code", "/home/alice/.claude/.credentials.json", CredentialFileCloudCLI, ".claude/.credentials.json",
 			[]string{"/home/alice/.claude/credentials.json.md", "/home/alice/.claude/settings.json", "/home/alice/.claude/.credentials.json.example"}},
-		{"Claude Code on Windows", `C:\Users\alice\.claude\.credentials.json`, CredentialFileCloudCLI, ".credentials.json",
+		{"Claude Code on Windows", `C:\Users\alice\.claude\.credentials.json`, CredentialFileCloudCLI, ".claude/.credentials.json",
 			[]string{`C:\Users\alice\.claude\credentials.txt`}},
 		{"Claude Code CLAUDE_CONFIG_DIR", "/home/alice/.claude-work/.credentials.json", CredentialFileCloudCLI, ".credentials.json",
 			[]string{"/home/alice/.claude-work/.claude.json"}},
@@ -53,7 +53,7 @@ func TestMatchCredentialFileShapeDeveloperToolLogins(t *testing.T) {
 			[]string{"/home/alice/.cargo/env", "/home/alice/.cargo/registry/credentials-notes"}},
 		{"RubyGems", "/home/alice/.gem/credentials", CredentialFileDeveloperToken, ".gem/credentials",
 			[]string{"/home/alice/.gem/specs", "/work/p/gem/credentials", "/home/alice/.gem/credentials.template"}},
-		{"podman auth", "/home/alice/.config/containers/auth.json", CredentialFilePackageRegistry, "containers/auth.json",
+		{"podman auth", "/home/alice/.config/containers/auth.json", CredentialFilePackageRegistry, ".config/containers/auth.json",
 			[]string{"/home/alice/.config/containers/policy.json", "/home/alice/.config/containers/registries.conf", "/work/p/auth.json"}},
 		{"podman runtime auth", "/run/user/1000/containers/auth.json", CredentialFilePackageRegistry, "containers/auth.json",
 			[]string{"/run/user/1000/containers/storage.conf"}},

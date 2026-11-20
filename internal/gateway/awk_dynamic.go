@@ -108,9 +108,12 @@ func awkDynamicBoundBySimpleCommands(request trustedActionRequest, facts actionf
 // unknown tier when the call as written built its program at run time: the
 // hook client resolved no targets for the commands of the bound reading
 // (TestAwkSpellingRowsReachTheRule A20, A21: P='BEGIN{system(...)}'; awk "$P").
+// A print redirect into a literal file starts no command: the bound reading
+// judges its write and the hook client lists its target (GAP-2197), so it
+// keeps no unknown tier (rel-1-0-10:GAP-1566).
 func awkStartsCommands(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if actionfacts.IsAwkCall(command) && actionfacts.AwkCall(command).Read().Body != "" {
+		if actionfacts.IsAwkCall(command) && actionfacts.AwkCall(command).Read().Starts {
 			return true
 		}
 	}

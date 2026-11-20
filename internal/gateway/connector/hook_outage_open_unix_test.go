@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // oss-outage-open (owner decision 2026-10-23): a per-user shell hook in the
@@ -34,6 +36,11 @@ import (
 // install window block. The real native helper (hook-post) carries every
 // call, as on an installed host.
 func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
+	// The render writes the config record of the account that runs the test
+	// (writePerUserConfigRecord); a box account with its own
+	// ~/.defenseclaw/config.yaml reopened the no-config outage
+	// (rel-1-0-10:GAP-0167).
+	testenv.IsolateAccount(t)
 	type scenario struct {
 		name    string
 		handler http.HandlerFunc // nil: no gateway listens
@@ -157,6 +164,11 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 // A setup-time record cannot override the current policy tier, including a
 // record left by an earlier strict render or a missing legacy record.
 func TestPerUserShellHookOutageIgnoresStaleRecord(t *testing.T) {
+	// The render writes the config record of the account that runs the test
+	// (writePerUserConfigRecord); a box account with its own
+	// ~/.defenseclaw/config.yaml reopened the no-config outage
+	// (rel-1-0-10:GAP-0167).
+	testenv.IsolateAccount(t)
 	for _, tc := range []struct {
 		name   string
 		record string // "" removes the record
@@ -205,6 +217,11 @@ func TestPerUserShellHookOutageIgnoresStaleRecord(t *testing.T) {
 // close the outage, whatever the record says; the default and permissive
 // packs and another connector's strict pack leave it open.
 func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
+	// The render writes the config record of the account that runs the test
+	// (writePerUserConfigRecord); a box account with its own
+	// ~/.defenseclaw/config.yaml reopened the no-config outage
+	// (rel-1-0-10:GAP-0167).
+	testenv.IsolateAccount(t)
 	for _, conn := range []Connector{NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(),
 		NewDevinConnector(), NewKiroConnector(), NewAntigravityConnector(), NewHermesConnector()} {
 		other := "claudecode"
