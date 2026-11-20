@@ -145,6 +145,17 @@ type managedHookLedgerTarget struct {
 	SID       string `json:"sid,omitempty"`
 	Connector string `json:"connector"`
 	OK        bool   `json:"ok"`
+	// Result is what the guardian recorded protecting the target: the agent
+	// version it probed in the account and the hook contract it rendered
+	// (callerAgentContract, GAP-0114).
+	Result *managedHookLedgerResult `json:"result,omitempty"`
+}
+
+// managedHookLedgerResult is the part of a guardian install result the
+// gateway reads.
+type managedHookLedgerResult struct {
+	AgentVersion   string `json:"agent_version,omitempty"`
+	HookContractID string `json:"hook_contract_id,omitempty"`
 }
 
 type managedHookLedger struct {
