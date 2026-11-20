@@ -5674,8 +5674,11 @@ func actionWindowsWordNamesTarget(word, cwd, home string, stateOnly, sshDirector
 			return answer
 		}
 		memo.noteCandidateWork()
+		mark := memo.cutMark()
 		answer := checkOnce(candidate)
-		memo.storeWord(key, answer)
+		if memo.keepsSince(mark) {
+			memo.storeWord(key, answer)
+		}
 		return answer
 	}
 	checkOnce = func(candidate string) bool {

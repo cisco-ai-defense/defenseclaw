@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -166,6 +167,15 @@ type hookCall struct {
 	// linksUnproven is set when the budget cut short the ask of a share the
 	// link walk of a skill folder check needed (SkillLinksUnproven).
 	linksUnproven bool
+	// budgetCuts counts the share waits of the call that its budget cut
+	// short (askNetworkShare). Such a read is not the answer of the file
+	// system: the share may answer a moment later in the same call. The
+	// call's memory (stats, memo) keeps no answer made while it rose
+	// (cutMark, keepsSince), so a later read asks the share again and reads
+	// it once it has answered, as each evaluation did before it shared the
+	// call's memory (rel-1-0-10:GAP-1606). Read by the memo under its own
+	// lock from any goroutine, so it is atomic.
+	budgetCuts atomic.Uint64
 	// globCut holds the caps the pattern expansions of the private-key and
 	// registration readers hit (globCutOf).
 	globCut bounded.CapSet
@@ -206,7 +216,13 @@ func (call *hookCall) stat(name string) (os.FileInfo, error) {
 	if answer, ok := call.stats[name]; ok {
 		return answer.info, answer.err
 	}
+	mark := call.cutMark()
 	info, err := pathStat(name)
+	if !call.keepsSince(mark) {
+		// The budget cut a share wait of this stat short: unknown for now,
+		// not the answer of the file system (rel-1-0-10:GAP-1606).
+		return info, err
+	}
 	if call.stats == nil {
 		call.stats = make(map[string]statAnswer)
 	}
@@ -219,8 +235,27 @@ func (call *hookCall) stat(name string) (os.FileInfo, error) {
 func (call *hookCall) targets() *TargetMemo {
 	if call.memo == nil {
 		call.memo = newTargetMemo()
+		call.memo.owner = call
 	}
 	return call.memo
+}
+
+// cutMark is how many share waits of the call its budget has cut short so
+// far (0 for no call): taken before a read whose answer the call may keep.
+func (call *hookCall) cutMark() uint64 {
+	if call == nil {
+		return 0
+	}
+	return call.budgetCuts.Load()
+}
+
+// keepsSince reports whether an answer read since mark (cutMark) may be kept
+// in the call's memory: the budget cut no share wait of the call short
+// meanwhile. An answer made while the budget cut a share off is unknown for
+// that moment only, never the answer for the rest of the call
+// (rel-1-0-10:GAP-1606). Without a call every answer is kept.
+func (call *hookCall) keepsSince(mark uint64) bool {
+	return call == nil || call.budgetCuts.Load() == mark
 }
 
 // shareWait is how long the call may wait for the next share: a full answer
@@ -492,6 +527,7 @@ func askNetworkShare(root string) (unanswered, budgetCut bool) {
 		case <-probe.done:
 			return probe.took > networkShareDeadAfter, false
 		default:
+			call.noteBudgetCut(budgetCut)
 			return true, budgetCut
 		}
 	}
@@ -504,7 +540,15 @@ func askNetworkShare(root string) (unanswered, budgetCut bool) {
 	case <-probe.done:
 		return probe.took > networkShareDeadAfter, false
 	case <-timer.C:
+		call.noteBudgetCut(budgetCut)
 		return true, budgetCut
+	}
+}
+
+// noteBudgetCut counts a share wait the call's budget cut short (budgetCuts).
+func (call *hookCall) noteBudgetCut(budgetCut bool) {
+	if budgetCut && call != nil {
+		call.budgetCuts.Add(1)
 	}
 }
 
@@ -932,13 +976,16 @@ func NotExist(err error) bool {
 // memo, the bodies read) are left out: they answer a repeat as the first
 // read. A dispatch that leaves it as it found it spent nothing a repeat of
 // the same request would find spent (the gateway's dispatch memo,
-// rel-1-0-10:GAP-1472). The zero value: no call open.
+// rel-1-0-10:GAP-1472). A share wait the budget cut short changes it too
+// (budgetCuts), even one that spent no wait: the answer made then is not kept
+// (rel-1-0-10:GAP-1606). The zero value: no call open.
 type CallState struct {
 	open                                 bool
 	waitLeft, tail                       time.Duration
 	bodyUnread, bodyLinks, linksUnproven bool
 	globCut                              bounded.CapSet
 	scriptBytes, scripts                 int
+	budgetCuts                           uint64
 }
 
 // HookCallState is the CallState of the hook call the goroutine runs.
@@ -951,5 +998,6 @@ func HookCallState() CallState {
 		open: true, waitLeft: call.waitLeft, tail: call.tail,
 		bodyUnread: call.bodyUnread, bodyLinks: call.bodyLinks, linksUnproven: call.linksUnproven,
 		globCut: call.globCut, scriptBytes: call.scriptBytes, scripts: len(call.scripts),
+		budgetCuts: call.budgetCuts.Load(),
 	}
 }

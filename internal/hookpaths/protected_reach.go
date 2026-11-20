@@ -66,6 +66,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 			return answer
 		}
 	}
+	mark := m.cutMark()
 	reached, linkedInProtectedDir, unread := false, false, false
 	lstat := func(path string) (os.FileInfo, error) {
 		if names.hasCandidate(path) {
@@ -98,7 +99,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 	case unread || !ok:
 		answer.grade = GradePossible
 	}
-	if m != nil {
+	if m != nil && m.keepsSince(mark) {
 		m.mu.Lock()
 		if m.reachParents == nil {
 			m.reachParents = make(map[reachParentKey]reachParentAnswer)
@@ -171,6 +172,7 @@ func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
 			return names
 		}
 	}
+	mark := m.cutMark()
 	names := reachNames{}
 	ssh := filepath.Join(home, ".ssh")
 	names.addDirectory(ssh)
@@ -210,7 +212,7 @@ func (m *TargetMemo) protectedReachNames(home string, sshOnly bool) reachNames {
 			names.addDirectory(resolved)
 		}
 	}
-	if m != nil {
+	if m != nil && m.keepsSince(mark) {
 		m.mu.Lock()
 		if m.reachNames == nil {
 			m.reachNames = make(map[string]reachNames)
