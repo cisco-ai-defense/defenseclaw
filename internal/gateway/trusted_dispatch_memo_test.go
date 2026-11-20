@@ -16,10 +16,12 @@ import (
 // refers to state is compared by value or by identity, is a pure cache, an
 // out-parameter the memo replays, or a recorder that turns the memo off
 // (trustedDispatchMemo). A new such field must be placed here first.
+// ShellStartup is a value: the key keeps the pointer and reflect.DeepEqual
+// compares the startup it points at (GAP-1296's client header).
 func TestTrustedDispatchMemoKeyCoversEveryField(t *testing.T) {
 	placed := map[string]string{
 		"conflictSource": "value", "parentPatch": "value",
-		"ResolvedWriteTargets": "value", "ActiveAgentFileIdentities": "value",
+		"ResolvedWriteTargets": "value", "ActiveAgentFileIdentities": "value", "ShellStartup": "value",
 		"budget": "identity", "capFloor": "identity", "generation": "identity", "targetMemo": "identity",
 		"windowsTwinHosts": "identity", "windowsPowerShellReading": "identity",
 		"simpleMemo":         "cache",
