@@ -77,7 +77,7 @@ func checkSelfProtRows(t *testing.T, rows []selfProtRow, connectors ...string) {
 					// 2026-11-15T15:20Z).
 					want = "alert"
 				}
-				if got := selfProtVerdict(t, r, managed, connector); got != want && !(want == "alert" && connector == "codex" && got == "status 200 OK") {
+				if got := selfProtVerdict(t, r, managed, connector); got != want && (want != "alert" || connector != "codex" || got != "status 200 OK") {
 					t.Errorf("%s managed=%v %s: %q = %s, want %s", r.id, managed, connector, r.cmd, got, want)
 				}
 			}
