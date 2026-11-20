@@ -47,8 +47,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from surface import case_surface
 import labelfold
+from surface import case_surface
 
 PACKS = ["default", "permissive", "strict"]
 # The harness drives the claudecode connector with Claude Code tool names (benchmarks/cmd/s7bench mapTool). Other connectors' native tools are
