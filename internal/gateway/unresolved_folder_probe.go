@@ -157,6 +157,12 @@ func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, fact
 		input := request.Input
 		input.Command, input.Args, input.Argv = twin, nil, nil
 		twinFacts := actionfacts.Analyze(input)
+		if facts.MoverCallsUnread() {
+			// Each twin is read as the call is (withSplitGapEffects).
+			if unread, ok := twinFacts.WithMoverCallsUnread(input.MovedWindowsShellCWD); ok {
+				twinFacts = unread
+			}
+		}
 		names = names || unresolvedFolderMayNameProtectedFile(twinFacts, noFolder)
 		cappedOperand = cappedOperand || reading.Truncated.Any() && slices.ContainsFunc(twinFacts.Paths, func(candidate actionfacts.PathFact) bool {
 			return (noFolder || candidate.UnresolvedFolder()) && unresolvedFolderOperand(candidate) &&
@@ -178,7 +184,11 @@ func unresolvedFolderGlobMayNameProtectedFile(request trustedActionRequest, fact
 }
 
 // unresolvedFolderOperand reports a path fact the unknown tier reads: a
-// relative operand that reads, writes or removes a file.
+// relative operand that reads, writes or removes a file. A change of the
+// file's mode or owner is not one: the tier knows only the file's name, and
+// chmod 600 of a key guards it. After a split gap the call's own twins judge
+// that change (withSplitGapEffects); elsewhere it is judged as rel 740c0de8fd
+// judged it (substrate-1:GAP-0714).
 func unresolvedFolderOperand(candidate actionfacts.PathFact) bool {
 	switch candidate.Access {
 	case actionfacts.PathAccessRead, actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:

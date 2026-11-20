@@ -6,6 +6,7 @@ package actionfacts
 import (
 	"path"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -267,6 +268,16 @@ type workFolderTracker struct {
 	// function compares one offset instead of asking each outer call again
 	// (rel-1-0-10:GAP-1293).
 	firstRun map[workFolderDefinedKey]workFolderFirstRun
+	// returned holds the folders of the calls that may return from the
+	// mover body being read, and returnedOK those whose status may be 0:
+	// a call of the mover may end there, before the rest of its body
+	// (substrate-1:GAP-0690). They are kept per body: a return in the body
+	// of a function defined or called in it ends only that function.
+	returned, returnedOK workFolders
+	// unreadMovers: every mover call leaves an unresolved folder, as no
+	// body of one is read (rel 740c0de8fd's reading of every mover call,
+	// posixWorkFolders).
+	unreadMovers bool
 }
 
 // workFolderFirstRun is the earliest offset of a call of an outer function
@@ -493,13 +504,21 @@ func (t *workFolderTracker) outerFirstRun(outer *syntax.FuncDecl, depth int) wor
 }
 
 // posixWorkFolders returns, for every statement of file, the folders its
-// command may run in.
-func posixWorkFolders(file *syntax.File) map[*syntax.Stmt]workFolders {
+// command may run in, and, when the tracking read the body of a mover call,
+// unread: the folders of every statement when no mover body is read, so
+// every mover call leaves an unresolved folder (Facts.WithMoverCallsUnread).
+func posixWorkFolders(file *syntax.File) (folders, unread map[*syntax.Stmt]workFolders) {
 	tracker := newWorkFolderTracker(file)
-	if file != nil {
-		tracker.list(file.Stmts, hookWorkFolders)
+	if file == nil {
+		return tracker.folders, nil
 	}
-	return tracker.folders
+	tracker.list(file.Stmts, hookWorkFolders)
+	if tracker.calls == nil || *tracker.calls == 0 {
+		return tracker.folders, nil // no mover body was read: the readings agree
+	}
+	other := &workFolderTracker{folders: make(map[*syntax.Stmt]workFolders), movers: tracker.movers, unreadMovers: true}
+	other.list(file.Stmts, hookWorkFolders)
+	return tracker.folders, other.folders
 }
 
 // functionBodyWorkFolders returns, for every statement of a function body
@@ -548,6 +567,19 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 		defs: t.defs, callsOf: t.callsOf, depth: t.depth + 1, inBody: t.inBody + 1, calls: t.calls, defined: t.defined,
 		firstRun: t.firstRun}
 	ok, after = inner.stmt(decl.Body, in)
+	// `f() { test -f .bashrc && return; cd /tmp; }; f && echo x >> .bashrc`
+	// may leave the shell where the body returned, with status 0 (the
+	// substrate-1:GAP-0690 rows); the folder of its last cd alone is wrong.
+	// The folders stay exact: an unresolved folder here (rel's reading of
+	// every mover call) drops the block of a protected write the body may
+	// return in (`cd ~/.defenseclaw && f() { cd X || return 0; }; f && echo
+	// m > config.yaml`, rel-1-0-10:GAP-1229).
+	if len(inner.returned) != 0 {
+		after = unionWorkFolders(after, inner.returned)
+	}
+	if len(inner.returnedOK) != 0 {
+		ok = unionWorkFolders(ok, inner.returnedOK)
+	}
 	if !t.defs[decl].topLevel {
 		// A definition in a list, a branch or a body may not have run: the
 		// call then finds no function, fails and leaves the shell where it
@@ -555,6 +587,52 @@ func (t *workFolderTracker) moverCall(name string, call *syntax.CallExpr, in wor
 		after = unionWorkFolders(after, in)
 	}
 	return ok, after
+}
+
+// add is s with the folders of in, the hook's own folder for an empty in.
+func (s workFolders) add(in workFolders) workFolders {
+	if len(s) == 0 {
+		return in.orHook()
+	}
+	return unionWorkFolders(s, in)
+}
+
+// workFolderReturn reports a call that may return from the function body it
+// runs in: `return` (also behind builtin or command), eval, or a command
+// whose name the tracking does not read (`$r`); ok when its status may be 0
+// (a static nonzero `return N` cannot pass an &&). An exit leaves the shell and runs nothing after it,
+// and a break or continue only leaves a loop, whose folders the loop
+// reading already keeps.
+func workFolderReturn(call *syntax.CallExpr) (returns, ok bool) {
+	args, prefix := call.Args, false
+	for len(args) > 1 {
+		word := projectPOSIXWord(args[0])
+		if word.Expands {
+			break
+		}
+		if word.Value == "builtin" || word.Value == "command" || prefix && strings.HasPrefix(word.Value, "-") {
+			args, prefix = args[1:], true
+			continue
+		}
+		break
+	}
+	if len(args) == 0 {
+		return false, false
+	}
+	name := projectPOSIXWord(args[0])
+	switch {
+	case name.Expands, name.Value == "eval":
+		return true, true
+	case name.Value != "return":
+		return false, false
+	case len(args) < 2:
+		return true, true
+	}
+	status := projectPOSIXWord(args[1])
+	if n, err := strconv.Atoi(status.Value); !status.Expands && err == nil && n&0xff != 0 {
+		return true, false
+	}
+	return true, true
 }
 
 // workFolderBodyMoves reports a function body with a folder move in it, or
@@ -620,6 +698,12 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		return in, in
 	case *syntax.CallExpr:
 		t.substitutions(cmd, in)
+		if returns, ok := workFolderReturn(cmd); returns {
+			t.returned = t.returned.add(in)
+			if ok {
+				t.returnedOK = t.returnedOK.add(in)
+			}
+		}
 		if target, isCD := staticWorkFolderMove(cmd); isCD {
 			moved := in.with(target)
 			for _, candidate := range cdPathCandidates(cmd, target) {
@@ -631,6 +715,10 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		}
 		if len(cmd.Args) != 0 && len(t.movers) != 0 {
 			if name := projectPOSIXWord(cmd.Args[0]); !name.Expands && t.movers[name.Value] {
+				if t.unreadMovers {
+					moved := unionWorkFolders(in, unresolvedWorkFolders)
+					return moved, moved
+				}
 				// After `f() { cd X || cd Y; }; f` the shell is in X, Y or
 				// where it was (rel-1-0-10:GAP-1144).
 				return t.moverCall(name.Value, cmd, in)
@@ -682,7 +770,9 @@ func (t *workFolderTracker) command(stmt *syntax.Stmt, in workFolders) (ok, afte
 		// The body runs where the function is called; its moves are read at
 		// the call (movers).
 		t.inBody++
+		returned, returnedOK := t.returned, t.returnedOK
 		t.stmt(cmd.Body, in)
+		t.returned, t.returnedOK = returned, returnedOK // its returns end that body only
 		t.inBody--
 		return in, in
 	case *syntax.TimeClause:
@@ -1075,6 +1165,15 @@ func (f Facts) withWorkFoldersOf(original Facts, windowsShellCWD bool) Facts {
 		}
 		commands[index].workFolders = source.workFolders
 	}
+	// The commands of the twin stay as the twin has them; only its paths
+	// are read in the folders of the action.
+	f.Paths = f.pathsReadIn(commands, windowsShellCWD)
+	return f
+}
+
+// pathsReadIn are the path facts of f, each operand read anew in the
+// folders commands give its command.
+func (f Facts) pathsReadIn(commands []CommandFact, windowsShellCWD bool) []PathFact {
 	paths := make([]PathFact, 0, len(f.Paths))
 	for _, path := range f.Paths {
 		if path.otherFolder {
@@ -1085,19 +1184,50 @@ func (f Facts) withWorkFoldersOf(original Facts, windowsShellCWD bool) Facts {
 		path.atHook, path.unresolvedFolder = nil, false
 		paths = append(paths, path)
 	}
-	// The commands of the twin stay as the twin has them; only its paths
-	// are read in the folders of the action.
-	f.Paths = normalizePathFactsForCommandsInShell(paths, f.CWD, f.ActiveHome, commands, windowsShellCWD)
-	return f
+	return normalizePathFactsForCommandsInShell(paths, f.CWD, f.ActiveHome, commands, windowsShellCWD)
 }
+
+// WithMoverCallsUnread is f read as rel 740c0de8fd read every call of a
+// function whose body moves the folder: the call leaves an unresolved
+// folder (and the one it started in), so a relative operand after it keeps
+// its reading in the folder before the call and is UnresolvedFolder. The
+// tracking reads such a body (rel-1-0-10:GAP-1144), which is right for a
+// call it reads in full; a call with a part the split cannot read may undo
+// any cd of the body (substrate-1:GAP-0702, GAP-0711), so the gateway also
+// judges it by this reading. ok is false when f read no mover body: the two
+// readings are the same. windowsShellCWD is Input.MovedWindowsShellCWD.
+func (f Facts) WithMoverCallsUnread(windowsShellCWD bool) (unread Facts, ok bool) {
+	commands := cloneCommands(f.Commands)
+	for index := range commands {
+		if commands[index].moverUnread {
+			commands[index].workFolders, ok = commands[index].moverUnreadFolders, true
+		}
+	}
+	if !ok {
+		return f, false
+	}
+	f.Paths = f.pathsReadIn(commands, windowsShellCWD)
+	f.Commands, f.moverCallsUnread = commands, true
+	return f, true
+}
+
+// MoverCallsUnread reports facts that are the reading of
+// WithMoverCallsUnread.
+func (f Facts) MoverCallsUnread() bool { return f.moverCallsUnread }
 
 // simplePartWorkFolders are, for each statement of a split call
 // (sequenceStatementDetails of source), the resolved folders the working
 // folder tracking says it may run in (the hook's own folder included: a
-// background cd moves nothing); none where cwd is not known.
+// background cd moves nothing); none where cwd is not known. A Windows hook
+// folder (C:\Users\alice, the folder Git Bash runs a POSIX call in) is
+// known: path.IsAbs alone left every statement of such a call read only
+// where the walk moved, so after `[ -e .bashrc ] || cd /tmp` or a mover
+// call that may return, a write was never read in the hook's folder on a
+// Windows gateway (substrate-1:GAP-0696). resolveWorkFolder reads a step
+// from it as it does from a POSIX folder, and gives up on a relative one.
 func simplePartWorkFolders(source string, parts []sequenceStatement, cwd, home string) [][]string {
 	out := make([][]string, len(parts))
-	if !path.IsAbs(cwd) || len(parts) == 0 {
+	if !simplePathAbs(cwd) || len(parts) == 0 {
 		return out
 	}
 	file, ok := shellparse.Parse(source)
@@ -1113,7 +1243,7 @@ func simplePartWorkFolders(source string, parts []sequenceStatement, cwd, home s
 		}
 		return true
 	})
-	tracked := posixWorkFolders(file)
+	tracked, _ := posixWorkFolders(file)
 	// The call statements, by the offset of their call, and the folders of
 	// function body statements relative to the call that runs the body.
 	var calls map[int]*syntax.Stmt

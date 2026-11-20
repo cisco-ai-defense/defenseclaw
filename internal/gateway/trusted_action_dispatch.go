@@ -1203,6 +1203,7 @@ func dispatchTrustedActionWith(
 			wholeWriteSafe := false
 			checkedLocalOrdinary := false
 			localOrdinary := false
+			checkedSplitGapEffects := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := withCappedWindowsReadings(request, request.simpleMemo.commands(request.Input, facts))
 			if len(simples) == 0 && wholeCommandKnown &&
@@ -1272,8 +1273,16 @@ func dispatchTrustedActionWith(
 						continue
 					}
 					if simple.EvaluationFailure != "limit" {
-						// A parser gap is already represented by the whole-action
-						// evaluation. It is not itself an enforcement finding.
+						// A parser gap is left to the whole-action evaluation
+						// and is not itself an enforcement finding. That
+						// reading does not judge the files a partial call
+						// touches, so each path effect of the call is judged
+						// by its effect twin (withSplitGapEffects,
+						// substrate-1:GAP-0693, GAP-0694, GAP-0695, GAP-0698).
+						if splitGapUnreadPart(simple) && wholeCommandKnown && !checkedSplitGapEffects {
+							checkedSplitGapEffects = true
+							findings = withSplitGapEffects(ctx, request, generation, budget, facts, wholeCommand, findings)
+						}
 						continue
 					}
 					findings = withSimpleCommandFindings(findings, trustedActionLimitFindings(request.EnforcementCapable))
@@ -7572,14 +7581,15 @@ func noRecoverableCommandFacts(facts actionfacts.Facts) bool {
 
 // trustedRuleScanText is the text the legacy rule scan reads for request:
 // the call text without known fixture data and secret-store values, with the
-// active home spelled as the path rules read it.
+// active home, and each relative operand it writes in the home, spelled as
+// the path rules read them.
 func trustedRuleScanText(request trustedActionRequest, facts actionfacts.Facts) string {
 	text := request.LegacyText
 	if trustedFixtureSourceInspectionAction(request.Input, facts) {
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
 	text = neutralizeTrustedSecretStoreValue(request.Input, text)
-	return activeHomeAsTilde(text, request.Input.ActiveHome)
+	return relativeHomeWritesAsTilde(activeHomeAsTilde(text, request.Input.ActiveHome), facts)
 }
 
 // dispatchTrustedFallback judges a call with the legacy scan and the

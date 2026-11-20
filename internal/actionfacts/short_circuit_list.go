@@ -1120,9 +1120,13 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 
 // simpleFunctionCallName resolves literal spellings and the shell builtins
 // that can run a name supplied after them. Their interpretation can differ
-// among shells, so including the body is the conservative policy view.
+// among shells, so including the body is the conservative policy view. The
+// test builtin `[` is a name too (simpleStaticProgramWord): read as a word,
+// its unmatched glob opener is not static, and a `[ ... ]` anywhere in an
+// action that defines a function left the whole action unsplit, so a
+// protected write after it was never judged (substrate-1:GAP-0692).
 func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
-	name, ok := simpleStaticWord(call.Args[0], nil)
+	name, ok := simpleStaticProgramWord(call.Args[0], nil)
 	if !ok {
 		return "", false
 	}
@@ -1135,7 +1139,7 @@ func simpleFunctionCallName(call *syntax.CallExpr) (string, bool) {
 		if index == len(call.Args) {
 			return name, true
 		}
-		return simpleStaticWord(call.Args[index], nil)
+		return simpleStaticProgramWord(call.Args[index], nil)
 	}
 	return name, true
 }
@@ -1212,7 +1216,7 @@ func simpleMayImportExportedFunctions(call *syntax.CallExpr, source string, expo
 	if call == nil || len(call.Args) == 0 {
 		return false
 	}
-	program, known := simpleStaticWord(call.Args[0], nil)
+	program, known := simpleStaticProgramWord(call.Args[0], nil)
 	if known && simpleNonSpawningBuiltins[program] {
 		return false
 	}
