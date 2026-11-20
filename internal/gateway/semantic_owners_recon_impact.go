@@ -258,7 +258,7 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	},
 	"CMD-CHMOD-WORLD": alertOnlyReconImpactOwnerWithAliases(
 		actionfacts.OperationPermissionChange,
-		accessControlMutationDisposition,
+		worldAccessControlDisposition,
 		"CMD-CHOWN-ROOT",
 	),
 	"CMD-DD-IF": {
@@ -846,6 +846,70 @@ func shellProgram(value string) bool {
 	default:
 		return false
 	}
+}
+
+// worldAccessControlDisposition is accessControlMutationDisposition for the
+// alert-only CMD-CHMOD-WORLD rule, which also alerts when the command makes
+// a copy of a credentials file group or world readable: a numeric chmod of
+// the destination a copy of the same call wrote, or install -m of the file
+// (rel-1-0-10:GAP-0950). The copy is a credential of its own; the mode
+// widens who reads it as go+r on it does.
+func worldAccessControlDisposition(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) (bool, bool) {
+	if credentialCopyMadeReadable(facts, command) {
+		return true, true
+	}
+	return accessControlMutationDisposition(facts, command)
+}
+
+func credentialCopyMadeReadable(facts actionfacts.Facts, command actionfacts.CommandFact) bool {
+	switch strings.ToLower(command.Program) {
+	case "chmod":
+		mode, ok := firstPOSIXPermissionOperand(command.Argv)
+		return ok && actionfacts.ModeOpensRead(mode) &&
+			commandOwnsPath(facts, command.ID, actionfacts.PathAccessMetadata, func(target actionfacts.PathFact) bool {
+				return credentialCopyDestination(facts, command.ID, target)
+			})
+	case "install":
+		mode, ok := posixOptionValue(command.Argv, "-m", "--mode")
+		return ok && actionfacts.ModeOpensRead(mode) &&
+			commandOwnsPath(facts, command.ID, actionfacts.PathAccessRead, func(source actionfacts.PathFact) bool {
+				return credentialSourcePath(facts, source)
+			})
+	}
+	return false
+}
+
+// credentialCopyDestination reports a target that an earlier copy of the
+// same call wrote from a credentials file.
+func credentialCopyDestination(facts actionfacts.Facts, before int64, target actionfacts.PathFact) bool {
+	want := canonicalSemanticPath(semanticPathValue(target))
+	if want == "" {
+		return false
+	}
+	for _, copied := range facts.Commands {
+		if copied.ID >= before || !hasOperation(copied, actionfacts.OperationCopy) {
+			continue
+		}
+		if commandOwnsPath(facts, copied.ID, actionfacts.PathAccessRead, func(source actionfacts.PathFact) bool {
+			return credentialSourcePath(facts, source)
+		}) && commandOwnsPath(facts, copied.ID, actionfacts.PathAccessWrite, func(written actionfacts.PathFact) bool {
+			return canonicalSemanticPath(semanticPathValue(written)) == want
+		}) {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialSourcePath(facts actionfacts.Facts, source actionfacts.PathFact) bool {
+	if privateSecurityMaterial(facts, source) {
+		return true
+	}
+	_, ok := actionfacts.MatchCredentialFileShape(canonicalSemanticPath(semanticPathValue(source)))
+	return ok
 }
 
 func accessControlMutationDisposition(
