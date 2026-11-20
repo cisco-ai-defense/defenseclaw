@@ -14240,16 +14240,22 @@ def _llm_identity(llm) -> tuple[str, str, str, str]:
     )
 
 
-def _check_decision_model(cfg, r: _DoctorResult) -> None:
+def _check_decision_model(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """``Decision model`` row: one benign System One request when
     ``decision_model`` is on. Silent while it is off (the default). It names
     the tool-call cascade each active connector runs. An unreachable model
     warns, never fails: tool calls are then decided without it (the rules
-    verdict, and the LLM judge where it runs)."""
+    verdict, and the LLM judge where it runs). Failed calls in the running
+    gateway warn too, even when this one request answers (GAP-0604)."""
     dm = getattr(cfg, "decision_model", None)
     if dm is None or not dm.enabled:
         return
     from defenseclaw import decision_model as dmod
+    from defenseclaw.commands.cmd_status import decision_model_health_note
+
+    gateway_note = decision_model_health_note(live_health)
+    if gateway_note:
+        gateway_note = "; in the gateway it is " + gateway_note
 
     problem = dm.validation_error()
     if problem:
@@ -14268,14 +14274,14 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
         detail = f"{dm.model}: token from the managed credential {dm.credential} (the gateway checks it)"
         if dmod.cascade_lines(cfg):
             detail += "; " + "; ".join(dmod.cascade_lines(cfg))
-        _emit("pass", "Decision model", detail, r=r)
+        _emit("warn" if gateway_note else "pass", "Decision model", detail + gateway_note, r=r)
         return
     result = dmod.ping(dm, cfg.data_dir, send_token=not dmod.managed_host(cfg))
     if not result.ok:
         _emit(
             "warn",
             "Decision model",
-            f"{dm.model}: {result.detail}; tool calls are decided without it until it is reachable",
+            f"{dm.model}: {result.detail}; tool calls are decided without it until it is reachable{gateway_note}",
             r=r,
             remediation="defenseclaw setup decision-model --show --ping",
         )
@@ -14287,7 +14293,17 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
     cascade_names = {dmod.cascade_for(cfg, c) for c in cfg.active_connectors()}
     if cascade_names == {dmod.CASCADE_RULES_ONLY}:
         # Reachable, but it answers no connector's tool calls.
-        _emit("warn", "Decision model", detail + "; " + dmod.judge_note(cfg), r=r)
+        _emit("warn", "Decision model", detail + "; " + dmod.judge_note(cfg) + gateway_note, r=r)
+        return
+    if gateway_note:
+        # This request answered, but the gateway's recent calls failed.
+        _emit(
+            "warn",
+            "Decision model",
+            detail + gateway_note,
+            r=r,
+            remediation="defenseclaw setup decision-model --show --ping",
+        )
         return
     _emit("pass", "Decision model", detail, r=r)
 
@@ -17177,7 +17193,7 @@ def doctor(
     r.set_section("credentials")
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
-    _check_decision_model(cfg, r)
+    _check_decision_model(cfg, r, live_health=sidecar_health)
     _check_guardrail_cascade(cfg, r)
     _check_private_upstream_refusals(cfg, r)
     if not _check_judge_running(sidecar_health, r):

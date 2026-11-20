@@ -489,6 +489,37 @@ def test_doctor_row_names_the_cascade_per_connector(system_one):
     assert r.checks[-1]["status"] == "warn" and "--connectors" in r.checks[-1]["detail"]
 
 
+def test_doctor_and_status_name_failing_decision_model_calls(system_one, capsys):
+    # GAP-0604: a dead endpoint fails open, so the gateway's failed
+    # decision-model calls (guardrail decision_model_* details) are the only
+    # sign of it; doctor and status say so even when doctor's own request answers.
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.commands.cmd_status import _print_decision_model
+
+    cfg = _cascade_cfg(judge_gate=["codex"], dm_gate=["claudecode"])
+    cfg.decision_model.base_url = system_one
+    healthy = {"guardrail": {"details": {"decision_model_state": "ok", "decision_model_recent_calls": 4}}}
+    failing = {"guardrail": {"details": {
+        "decision_model_state": "failing", "decision_model_recent_calls": 3, "decision_model_failed_calls": 3,
+        "decision_model_last_error": "dial tcp 127.0.0.1:9: connect: connection refused",
+    }}}
+    r = cmd_doctor._DoctorResult()
+    cmd_doctor._check_decision_model(cfg, r, live_health=healthy)
+    assert r.checks[-1]["status"] == "pass"
+    cmd_doctor._check_decision_model(cfg, r, live_health=failing)
+    row = r.checks[-1]
+    assert row["label"] == "Decision model" and row["status"] == "warn"
+    assert "all of its last 3 call(s) failed" in row["detail"] and "connection refused" in row["detail"]
+
+    capsys.readouterr()  # the doctor rows
+    _print_decision_model(cfg, healthy)
+    assert "failing" not in capsys.readouterr().out
+    _print_decision_model(cfg, failing)
+    out = capsys.readouterr().out
+    assert "Decision model" in out and "claudecode: rules -> decision model" in out
+    assert "all of its last 3 call(s) failed" in out and "connection refused" in out
+
+
 # --- skill scanner pass-through ------------------------------------------------
 
 

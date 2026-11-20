@@ -533,7 +533,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health, cfg)
-        _print_decision_model(cfg)
+        _print_decision_model(cfg, health)
         _print_alignment_lane(cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, _fleet_status_client(client, health))
@@ -2242,17 +2242,47 @@ def _print_alignment_lane(cfg) -> None:
     _status_row("Alignment check", mode)
 
 
-def _print_decision_model(cfg) -> None:
+def decision_model_health_note(health: dict | None) -> str:
+    """Plain words for the gateway's recent decision-model calls when some
+    failed (guardrail decision_model_* details), or "". A dead endpoint fails
+    open, so it showed nowhere but the gateway log (GAP-0604)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    if not isinstance(details, dict):
+        return ""
+    state = details.get("decision_model_state")
+    if state not in ("failing", "degraded"):
+        return ""
+    total = details.get("decision_model_recent_calls", 0)
+    if state == "failing":
+        note = (
+            f"failing: all of its last {total} call(s) failed, so tool calls are decided without it "
+            "(the LLM judge where it runs, else the rules)"
+        )
+    else:
+        note = f"degraded: {details.get('decision_model_failed_calls', 0)} of its last {total} call(s) failed"
+    last_error = str(details.get("decision_model_last_error") or "").strip()
+    if last_error:
+        note += f"; last error: {last_error}"
+    return note
+
+
+def _print_decision_model(cfg, health: dict | None = None) -> None:
     """One row naming the tool-call cascade per active connector, while the
-    decision model is on (rules only / rules -> decision model / ... -> LLM judge)."""
+    decision model is on (rules only / rules -> decision model / ... -> LLM judge),
+    and whether its recent calls in the gateway failed."""
     from defenseclaw import decision_model as dmod
 
     dm = getattr(cfg, "decision_model", None)
     if dm is None or not dm.active():
         return
-    lines = dmod.cascade_lines(cfg)
-    if lines:
-        _status_row("Decision model", "; ".join(lines))
+    value = "; ".join(dmod.cascade_lines(cfg))
+    note = decision_model_health_note(health)
+    if note:
+        problem = ux._style(note + "; run 'defenseclaw doctor'", fg="yellow")
+        value = f"{value}; {problem}" if value else problem
+    if value:
+        _status_row("Decision model", value)
 
 
 def _print_llm_judge(health: dict | None, cfg=None) -> None:
