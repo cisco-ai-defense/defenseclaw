@@ -353,7 +353,7 @@ func folderValueWord(e Expr) bool {
 			}
 		case *Variable:
 			name := strings.ToLower(x.Name)
-			if x.Splat || !(strings.EqualFold(x.Scope, "env") || x.Scope == "" && (name == "home" || name == "pwd")) {
+			if x.Splat || (!strings.EqualFold(x.Scope, "env") && (x.Scope != "" || name != "home" && name != "pwd")) {
 				return false
 			}
 			variable = true

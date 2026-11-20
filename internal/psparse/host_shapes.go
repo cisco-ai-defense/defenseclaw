@@ -109,7 +109,7 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 		return "", 0, ReasonStopParsing
 	}
 	for i, w := range words {
-		if !w.static && !(w.folder && i > 0 && psFolderOpts[strings.ToLower(strings.TrimSpace(words[i-1].text))]) {
+		if !w.static && (!w.folder || i == 0 || !psFolderOpts[strings.ToLower(strings.TrimSpace(words[i-1].text))]) {
 			return "", 0, ReasonNonLiteral
 		}
 		if w.colon {
