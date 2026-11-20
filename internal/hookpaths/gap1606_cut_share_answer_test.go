@@ -168,3 +168,72 @@ func TestGAP1606AKnownFolderReadTheBudgetCutIsNotKept(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-1606 review P3-2: protectedReach grades a write's parent
+// against the protected names. Names made while the budget cut a share off
+// are not kept, and neither is a parent grade made against them, even when
+// the share has answered by the time the parent is read: a later reach in
+// the same evaluation reads the parent again against the complete names.
+func TestGAP1606AReachParentGradedAgainstCutNamesIsNotKept(t *testing.T) {
+	previous := memoReads
+	memoReads = true
+	t.Cleanup(func() { memoReads = previous })
+	resetPlainFolders(t)
+	dir := linkFreeTempDir(t)
+	share := filepath.Join(dir, "share")
+	inShare := filepath.Join(share, "real")
+	home := filepath.Join(dir, "home")
+	for _, folder := range []string{inShare, filepath.Join(home, ".ssh")} {
+		if err := os.MkdirAll(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The home's key name is a link into the share; the write's parent is a
+	// link to the same folder of the share.
+	if err := os.Symlink(inShare, filepath.Join(home, ".ssh", "authorized_keys")); err != nil {
+		t.Skipf("no symlinks: %v", err)
+	}
+	via := filepath.Join(dir, "via")
+	if err := os.Symlink(inShare, via); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var once sync.Once
+	answer := func() { once.Do(func() { close(release) }) }
+	restore := OverrideNetworkSharesForTest(func(path string) string {
+		if path == share || strings.HasPrefix(path, share+string(filepath.Separator)) {
+			return share
+		}
+		return ""
+	}, func(string) { <-release })
+	t.Cleanup(func() {
+		answer()
+		restore()
+	})
+
+	defer HookCall()()
+	call := currentHookCall()
+	if call == nil {
+		t.Fatal("no hook call")
+	}
+	// The budget is spent: the names are made while the share is cut off.
+	// The share answers at the first read of the write's own path, after the
+	// names and before the parent is read.
+	call.waitLeft = 0
+	old := walkLstat
+	walkLstat = func(name string) (os.FileInfo, error) {
+		if name == via {
+			answer()
+			shareAnswered(t, share)
+		}
+		return os.Lstat(name)
+	}
+	t.Cleanup(func() { walkLstat = old })
+
+	evaluation := NewTargetMemo()
+	target := filepath.Join(via, "new")
+	evaluation.ProtectedReach(target, home)
+	if grade := evaluation.ProtectedReach(target, home); grade != GradeNamed {
+		t.Fatalf("a write through a link to the folder a protected key link reaches = %q, want Named: the parent graded against the cut names was kept", grade.String())
+	}
+}
