@@ -33,7 +33,6 @@ type mockProvider struct {
 	lastRawBody  []byte
 	lastReq      *ChatRequest
 	response     *ChatResponse
-	rawResponse  []byte
 	streamChunks []StreamChunk
 	streamUsage  *ChatUsage
 	err          error
@@ -69,9 +68,6 @@ func (m *mockProvider) ChatCompletion(_ context.Context, req *ChatRequest) (*Cha
 				FinishReason: strPtr("stop"),
 			}},
 		}
-	}
-	if m.rawResponse != nil {
-		resp.RawResponse = m.rawResponse
 	}
 	return resp, nil
 }
@@ -343,66 +339,6 @@ func TestProxyFieldPassThrough(t *testing.T) {
 		}
 		if *resp.Choices[0].FinishReason != "tool_calls" {
 			t.Errorf("finish_reason = %q, want %q", *resp.Choices[0].FinishReason, "tool_calls")
-		}
-	})
-
-	t.Run("response_system_fingerprint_preserved", func(t *testing.T) {
-		rawResp := []byte(`{
-			"id": "chatcmpl-fp",
-			"object": "chat.completion",
-			"created": 1700000000,
-			"model": "gpt-4",
-			"system_fingerprint": "fp_abc123",
-			"service_tier": "default",
-			"choices": [{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],
-			"usage": {"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}
-		}`)
-
-		prov := &mockProvider{
-			response: &ChatResponse{
-				ID:     "chatcmpl-fp",
-				Object: "chat.completion",
-				Model:  "gpt-4",
-				Choices: []ChatChoice{{
-					Index:        0,
-					Message:      &ChatMessage{Role: "assistant", Content: "Hi"},
-					FinishReason: strPtr("stop"),
-				}},
-				Usage: &ChatUsage{PromptTokens: 5, CompletionTokens: 2, TotalTokens: 7},
-			},
-			rawResponse: rawResp,
-		}
-		insp := newMockInspector()
-		proxy := newTestProxy(t, prov, insp, "action")
-
-		reqBody := mustJSON(t, map[string]interface{}{
-			"model":    "gpt-4",
-			"messages": []map[string]interface{}{{"role": "user", "content": "Hi"}},
-		})
-
-		rec := postChat(t, proxy, reqBody)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
-		}
-
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
-			t.Fatalf("decode response: %v", err)
-		}
-
-		if _, ok := raw["system_fingerprint"]; !ok {
-			t.Error("system_fingerprint missing from response")
-		}
-		if _, ok := raw["service_tier"]; !ok {
-			t.Error("service_tier missing from response")
-		}
-
-		var fp string
-		if err := json.Unmarshal(raw["system_fingerprint"], &fp); err != nil {
-			t.Fatalf("unmarshal system_fingerprint: %v", err)
-		}
-		if fp != "fp_abc123" {
-			t.Errorf("system_fingerprint = %q, want %q", fp, "fp_abc123")
 		}
 	})
 
@@ -1403,41 +1339,6 @@ func TestPatchRawBody(t *testing.T) {
 		json.Unmarshal(m["seed"], &seed)
 		if seed != 42 {
 			t.Errorf("seed = %v, want 42", seed)
-		}
-	})
-}
-
-func TestPatchRawResponseModel(t *testing.T) {
-	t.Run("patches_model_preserves_rest", func(t *testing.T) {
-		raw := json.RawMessage(`{
-			"id": "chatcmpl-1",
-			"object": "chat.completion",
-			"model": "gpt-4-0613",
-			"system_fingerprint": "fp_abc",
-			"service_tier": "default",
-			"choices": [{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}]
-		}`)
-
-		patched, err := patchRawResponseModel(raw, "my-alias")
-		if err != nil {
-			t.Fatalf("patchRawResponseModel error: %v", err)
-		}
-
-		var m map[string]json.RawMessage
-		if err := json.Unmarshal(patched, &m); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-
-		var model string
-		json.Unmarshal(m["model"], &model)
-		if model != "my-alias" {
-			t.Errorf("model = %q, want %q", model, "my-alias")
-		}
-
-		for _, field := range []string{"system_fingerprint", "service_tier", "choices"} {
-			if _, ok := m[field]; !ok {
-				t.Errorf("field %q missing after model patch", field)
-			}
 		}
 	})
 }

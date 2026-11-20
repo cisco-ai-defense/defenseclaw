@@ -3551,21 +3551,13 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		p.emitOpenAIToolCallEvents(llmCtx, responseMeta, resp.Choices[0].Message.ToolCalls)
 	}
-	p.emitLLMResponseEventV8(llmCtx, responseMeta, content, string(resp.RawResponse), finishReasons)
+	p.emitLLMResponseEventV8(llmCtx, responseMeta, content, "", finishReasons)
 
 	*traceResult = observedResult
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
-	if len(resp.RawResponse) > 0 {
-		patched, err := patchRawResponseModel(resp.RawResponse, aliasModel)
-		if err == nil {
-			_, _ = w.Write(patched)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "[guardrail] raw response patch failed, falling back to re-encode: %v\n", err)
-	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
@@ -5210,18 +5202,6 @@ func matchWildcardDomain(host, pattern string) bool {
 		}
 	}
 	return true
-}
-
-// patchRawResponseModel overwrites only the "model" field in raw JSON bytes,
-// preserving all other upstream fields (system_fingerprint, service_tier, etc.).
-func patchRawResponseModel(raw json.RawMessage, model string) ([]byte, error) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
-	}
-	modelBytes, _ := json.Marshal(model)
-	m["model"] = modelBytes
-	return json.Marshal(m)
 }
 
 // ---------------------------------------------------------------------------
