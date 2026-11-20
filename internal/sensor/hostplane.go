@@ -460,6 +460,11 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.mu.Unlock()
 		return
 	}
+	if ownProviderConfigRead(event, lineage, match, h.indicators) {
+		// The agent itself loading the config of its model provider at
+		// start (Claude Code on Bedrock, GAP-1189): not credential access.
+		return
+	}
 
 	instance := h.tracker.InstanceOfProcess(event.PID, event.ExecID)
 	h.mu.Lock()
