@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/netip"
 	"os"
 	osuser "os/user"
@@ -7889,6 +7890,13 @@ func boundedRuleExpressionHolds(
 	return false
 }
 
+// exactFallbackContractIDs is the rule id of every exact fallback contract in
+// ascending order. It is read once, after the init functions that add
+// contracts have run.
+var exactFallbackContractIDs = sync.OnceValue(func() []string {
+	return slices.Sorted(maps.Keys(exactFallbackContracts))
+})
+
 // appendTrustedBoundedExactFallbackFindings scans the extracted trusted
 // command, not its JSON serialization, for rules whose code-owned contract
 // proves an exact bounded subgraph. Go's JSON encoder escapes shell redirect
@@ -7907,7 +7915,11 @@ func appendTrustedBoundedExactFallbackFindings(
 	for _, finding := range findings {
 		seen[finding.RuleID] = struct{}{}
 	}
-	for ruleID, contract := range exactFallbackContracts {
+	// By rule id, never in map order: two findings that fire together keep
+	// one order from call to call, so the verdict reason and the audit row
+	// name the same rule (rel-1-0-10:GAP-0514).
+	for _, ruleID := range exactFallbackContractIDs() {
+		contract := exactFallbackContracts[ruleID]
 		if contract.boundedSubgraphProves == nil ||
 			!contract.boundedSubgraphProves(input, facts) {
 			continue
