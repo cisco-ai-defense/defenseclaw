@@ -82,6 +82,12 @@ class OverlayFiles(Scratch):
         got = self.overlay_roundtrip("gap0455-public-surfaces.overlay.jsonl", {"malicious": 2})
         self.assertEqual(set(got) - {"keep/1"}, {"p2/agentdojo/ea3fae06ccfec7938a58", "p2/agentdojo/75573fa64afdf6f27504"})
 
+    def test_gap0122_llm_labelled_augur_prose_and_admin_rows(self):
+        # 9 of 30 sampled positives were wrong: 5 are model prose in the command field (excluded), 4 are user-requested admin calls. Three of those four were
+        # decided again by the later R10 hand review (labels v3.1), which is newer: only the one still open is folded here.
+        self.overlay_roundtrip("gap0122-llm-labelled-augur.overlay.jsonl", {"excluded": 5, "benign": 1})
+        self.assertNotIn("p2/augur-toolcall-labels/4343464127d9e3e0b03a", {r["id"] for r in rows_of(OVERLAYS / "gap0122-llm-labelled-augur.overlay.jsonl")})
+
 
 class FoldLabels(Scratch):
     def test_fold_replaces_by_id_appends_new_and_records_the_set(self):
