@@ -1414,7 +1414,15 @@ func credentialPathWalkStore(key credentialPathWalkKey, walk credentialPathWalkR
 // hidden rule, globs and types, applied to each folder on the way to a
 // probe and to the probe file; nil for grep -r, which admits all); shown
 // is dir as rg names it. A limit (folders, entries, lookups) cuts it: what it found stays, and cut
-// is set.
+// is set. A level of folders that does not fit in the folder bound is not
+// read at all (substrate-1:GAP-0709): the walk is cut there and charged the
+// whole folder bound, as a walk that read the level up to the bound was.
+// Nothing found in that level could change what the chain reads of a cut
+// walk: the cut adds the file-unknown read (searchFolder), with which no
+// read of the call is exact and which joins any later upload, so a file
+// found next to it adds nothing. Reading it was most of the walk's cost: on
+// the hook-cost probe's tree (4,146 folders), 4,031 of the 4,096 folders
+// read, about 7 ms on every grep -r or rg call there.
 func credentialPathWalk(dir, shown string, filter *rgFilter, limits credentialPathWalkLimits) (walk credentialPathWalkResult) {
 	groups := credentialProbeFirstSegments()
 	budget := credentialPathWalkBudget{limits: limits}
@@ -1451,10 +1459,11 @@ func credentialPathWalk(dir, shown string, filter *rgFilter, limits credentialPa
 	// calls), and merged in order, so an uncut walk finds the same files in
 	// the same order every time.
 	level := []credentialWalkFolder{{dir, shown}}
-	for len(level) > 0 && !walk.cut && !budget.stop.Load() {
-		if room := limits.folders - folders; int64(len(level)) > room {
-			level = level[:max(room, 0)]
+	for len(level) > 0 && !budget.stop.Load() {
+		if int64(len(level)) > limits.folders-folders {
+			folders = limits.folders
 			walk.cut = true
+			break
 		}
 		folders += int64(len(level))
 		scans := make([]credentialPathFolderScan, len(level))
