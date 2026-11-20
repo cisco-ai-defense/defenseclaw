@@ -51,15 +51,16 @@ func gap1173WriteArchive(t *testing.T, path string, members ...string) {
 	}
 }
 
-// gap1173Want is the verdict of a row kind in a tier: a state write blocks
-// everywhere; a possible write (the unknown tier) alerts in the default,
-// permissive and managed default packs and blocks in strict; a keep row is
-// allowed with no state finding.
+// gap1173Want is the verdict of a row kind in a tier. A proven state write
+// is a HIGH alert in the default, permissive and managed default packs and a
+// block in strict and managed strict (rel-1-0-10:GAP-0747, owner tiering
+// 2026-11-15T15:20Z); a possible write (the unknown tier) alerts in the
+// default, permissive and managed default packs and blocks in strict; a keep
+// row is allowed with no state finding. Every write and unknown row carries
+// the state finding in every tier.
 func gap1173Want(kind, tier string) string {
 	switch kind {
-	case "write":
-		return "block"
-	case "unknown":
+	case "write", "unknown":
 		if strings.Contains(tier, "strict") {
 			return "block"
 		}
@@ -68,13 +69,25 @@ func gap1173Want(kind, tier string) string {
 	return "allow"
 }
 
-// rel-1-0-10:GAP-1173 (P1, cert110 L74/L75; lead ruling 16:30Z). An
-// extraction whose folder is the DefenseClaw state blocks in every pack; one
-// into a folder that holds the state (the home) blocks when the archive
-// lists a member that lands in the state, takes the unknown tier when the
-// archive is there and cannot be listed (or the call renames its members),
-// and stays allowed when the archive lists none there or is not there to be
-// read (the pinned allow rows of TestTMinArchiveReadsAndOtherFoldersStayAllowed).
+// gap1173WantFor is gap1173Want for a row whose findings are known: a write
+// row that also names another tamper or persistence rule keeps the block of
+// that rule in every tier (gap0747OtherTamperFinding).
+func gap1173WantFor(kind, tier, action string, findings []string) string {
+	if kind == "write" && action == "block" && gap0747OtherTamperFinding(findings) {
+		return "block"
+	}
+	return gap1173Want(kind, tier)
+}
+
+// rel-1-0-10:GAP-1173 (P1, cert110 L74/L75; lead ruling 16:30Z, re-tiered to
+// the GAP-0747 owner tiering 2026-11-15T15:20Z). An extraction whose folder
+// is the DefenseClaw state is a proven state write (a HIGH alert outside
+// strict, a block in strict and managed strict); one into a folder that holds
+// the state (the home) is that write when the archive lists a member that
+// lands in the state, takes the unknown tier when the archive is there and
+// cannot be listed (or the call renames its members), and stays allowed
+// when the archive lists none there or is not there to be read (the pinned
+// allow rows of TestTMinArchiveReadsAndOtherFoldersStayAllowed).
 // Git Bash and POSIX shells: tar, unzip and Python tarfile, zipfile and
 // shutil.unpack_archive; on Windows also the PowerShell tool: Expand-Archive
 // and [IO.Compression.ZipFile]::ExtractToDirectory, directly and through
@@ -133,7 +146,7 @@ func TestGAP1173ArchiveExtractionTiers(t *testing.T) {
 			for _, r := range rows {
 				action, findings := boundedDecideClaudeCode(t, api, boundedEnv{home: home, cwd: cwd},
 					boundedLaneCall{tool: r.tool, input: map[string]any{"command": r.command}})
-				want := gap1173Want(r.kind, tier.name)
+				want := gap1173WantFor(r.kind, tier.name, action, findings)
 				state := findingStringHasRuleID(findings, "tamper.detector_state_write")
 				if action != want || (r.kind == "keep") == state {
 					t.Errorf("%s %s [%s]: action %q state finding %t, want %q: %v", tier.name, r.kind, r.name, action, state, want, findings)

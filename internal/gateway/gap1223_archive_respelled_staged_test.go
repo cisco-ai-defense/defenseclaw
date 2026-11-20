@@ -29,9 +29,12 @@ func gap1223Respell(command, how string) string {
 }
 
 // rel-1-0-10:GAP-1223 (P1, s7-winresrev round 1). An extraction into the
-// DefenseClaw state, or of a named member into it, blocks in every tier
+// DefenseClaw state, or of a named member into it, is the proven state write
 // whatever the spelling of the program word, as on rel: no raw-text gate
-// stands in front of the archive reading.
+// stands in front of the archive reading. The write takes the GAP-0747 owner
+// tiering (2026-11-15T15:20Z): a HIGH alert with the state finding in the
+// default, permissive and managed default packs, a block in strict and
+// managed strict.
 func TestGAP1223RespelledExtractorIntoTheStateBlocks(t *testing.T) {
 	home, cwd := gap1173WindowsStateHome(t)
 	gap1173WriteArchive(t, filepath.Join(cwd, "plain.zip"), "notes.txt", "docs/a.md")
@@ -57,8 +60,9 @@ func TestGAP1223RespelledExtractorIntoTheStateBlocks(t *testing.T) {
 					}
 					action, findings := boundedDecideClaudeCode(t, api, boundedEnv{home: home, cwd: cwd},
 						boundedLaneCall{tool: "Bash", input: map[string]any{"command": call}})
-					if action != "block" || !findingStringHasRuleID(findings, "tamper.detector_state_write") {
-						t.Errorf("%s %s [%s]: action %q, want block with the state finding: %v", tier.name, how, call, action, findings)
+					want := gap1173WantFor("write", tier.name, action, findings)
+					if action != want || !findingStringHasRuleID(findings, "tamper.detector_state_write") {
+						t.Errorf("%s %s [%s]: action %q, want %s with the state finding: %v", tier.name, how, call, action, want, findings)
 					}
 				}
 			}
@@ -96,7 +100,7 @@ func TestGAP1224StagedArchiveIsNotListedAtHookTime(t *testing.T) {
 			for _, r := range rows {
 				action, findings := boundedDecideClaudeCode(t, api, boundedEnv{home: home, cwd: cwd},
 					boundedLaneCall{tool: "Bash", input: map[string]any{"command": r.command}})
-				want := gap1173Want(r.kind, tier.name)
+				want := gap1173WantFor(r.kind, tier.name, action, findings)
 				state := findingStringHasRuleID(findings, "tamper.detector_state_write")
 				if action != want || (r.kind == "keep") == state {
 					t.Errorf("%s %s [%s]: action %q state finding %t, want %q: %v", tier.name, r.kind, r.command, action, state, want, findings)
