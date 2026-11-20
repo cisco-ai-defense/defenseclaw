@@ -46,7 +46,8 @@ import (
 // right before the baseline, between the baseline and the stream, and after the
 // teardown: a spin on its own OS thread got less than openLoopProbeMinShare of a
 // core, or the Linux CPU pressure of the box was openLoopProbeMaxPressure or
-// more); on a box the probe finds quiet it fails,
+// more), and so are the two timing outcomes below (unanswered, over the p95
+// budget) on such a box; on a box the probe finds quiet they fail,
 // because the slow real path is then the gateway's own:
 //   - The baseline. Right before the stream the test makes calls one after the
 //     other through the same real path (the relay, the audit and the journal
@@ -676,8 +677,11 @@ func (p openLoopProbes) String() string {
 // settleOpenLoop ends an open-loop test on its verdict. An INCONCLUSIVE verdict
 // is a skip naming GAP-1456 and the numbers when the box probe found the box
 // short of CPU, and a failure when it did not (the box had CPU to spare, so the
-// real path that could not carry the stream is the gateway's own). Every other
-// verdict but ok fails.
+// real path that could not carry the stream is the gateway's own). The two
+// timing verdicts, unanswered and slow, are measured on the same wall clock
+// and are a skip on a box the probe found short of CPU as well; on a quiet box
+// they fail. A refusal or an explicit failure is not a timing matter and fails
+// on any box.
 func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes, deadline error) {
 	t.Helper()
 	if verdict.kind == "inconclusive" && !probes.starved() {
@@ -690,7 +694,7 @@ func settleOpenLoop(t *testing.T, verdict openLoopVerdict, probes openLoopProbes
 	switch {
 	case verdict.kind == "ok":
 		t.Logf("%s; %s", verdict.detail, probes)
-	case verdict.kind == "inconclusive" && probes.starved():
+	case (verdict.kind == "inconclusive" || verdict.kind == "unanswered" || verdict.kind == "slow") && probes.starved():
 		t.Skipf("GAP-1456 INCONCLUSIVE, box short of CPU (%s): %s", probes, verdict.detail)
 	case verdict.kind == "inconclusive":
 		t.Fatalf("GAP-1456 FAIL, not a skip: the box was not short of CPU (%s), so this is the gateway: %s", probes, verdict.detail)
