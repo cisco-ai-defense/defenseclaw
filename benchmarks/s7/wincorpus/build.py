@@ -441,7 +441,18 @@ def src_authored() -> list[dict]:
 
 
 # --- driver ----------------------------------------------------------------------------------------------------------------
+def refuse_overwrite(out: str, inputs: list[str]) -> None:
+    """The output of a build or a sample is a NEW file: never one of its inputs, never a registered corpus version (rel-1-0-10 GAP-0362: a redaction pass once
+    rewrote the corpus files in place and stripped planted secrets while the labels stayed). The registry check is s7gate's, so both tools agree."""
+    gate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gate")
+    if gate not in sys.path:
+        sys.path.insert(0, gate)
+    import s7gate  # noqa: PLC0415
+    s7gate.refuse_corpus_overwrite(out, inputs)
+
+
 def cmd_build(a):
+    refuse_overwrite(a.out, [a.win_all, a.shell_corpus, a.audit_calls, a.fixture, a.credpaths, a.gapreg, a.schema, a.denylist])
     print(f"denylist: {L.load_denylist(a.denylist)} real lab values loaded (not printed)")
     rows: list[dict] = []
     rows += src_real_owner(a.win_all, a.owner_target, a.seed)
@@ -600,6 +611,7 @@ def cmd_stats(a):
 
 
 def cmd_audit_sample(a):
+    refuse_overwrite(a.out, [a.corpus])
     rows = list(jl(a.corpus))
     rnd = random.Random(a.seed)
     strata = collections.defaultdict(list)

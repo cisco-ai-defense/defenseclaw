@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Label overlays for s7-gate (`s7gate.py score --reviews FILE`). The source corpora are never edited.
+"""Label overlays for s7-gate (`s7gate.py score --labels FILE`; --reviews is the same overlay, explicitly).
+The source corpora are never edited.
 Writes OUT/agentdojo-security-flip.jsonl, OUT/hand-audit-2026-11-13.jsonl, OUT/overlay-all.jsonl, OUT/AUDIT.json.
 usage: build_overlay.py AUDIT_DIR OUT_DIR"""
 import json, sys, os, hashlib, math, collections

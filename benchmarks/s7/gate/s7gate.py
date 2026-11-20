@@ -5,6 +5,22 @@
   s7gate.py score   --corpora corpora.json --out OUT [--reviews reviews.jsonl]          writes OUT/scores/<corpus>-<pack>.json and OUT/SUMMARY.md
   s7gate.py compare --base OUTBASE --cand OUTCAND                                      per-corpus rate deltas + per-rule diffs; exit 1 if a gate rate worsens
   s7gate.py all     (run + score)                                                      the one command used for before/after
+  s7gate.py register-corpus FILE --version ID       record the sha256 of a corpus file as a registered version
+  s7gate.py verify-corpora --corpora C [--only a,b]
+      exit 1 when a corpus file is missing, unregistered or changed in place
+  s7gate.py push-labels --src DIR --dest DIR [--name labels-v3]
+      copy a label set to <dest>/current.*, verified by sha256; any failure exits 4
+
+Fail-closed rules (rel-1-0-10 GAP-0226, GAP-0362):
+  * corpus files are never rewritten in place: `run` refuses (exit 5) when a corpus file is missing, not registered,
+    or does not have its registered sha256 (registry: $S7_CORPORA_ROOT/VERSIONS.json, default ~/s7c/corpora). New
+    content is a NEW file registered under a NEW version id.
+  * `score` applies one label set: --reviews FILE, else --labels FILE, else $S7_LABELS, else
+    ~/s7c/labels/current.jsonl. A missing file is an error (exit 2); `--labels none` scores the corpus files as they
+    stand, on purpose. The set (sha256, rows, version) is recorded in RUN.json and every score file.
+  * `compare` exits 3 (no verdict) when the two sides were scored under different label sets, or when either side has
+    no recorded label set, unless --allow-unlabelled is given (a pre-labels run, or both sides scored with --labels
+    none, on purpose).
 
 corpora.json: {"name": {"files": ["/abs/a.cases.jsonl", ...], "meta": ["/abs/a.meta.jsonl", ...]}}   (corpus paths /home/alice and /Users/alice are rewritten to OUT/fx/home/alice and OUT/fx/Users/alice, real scratch homes with decoy files; HOME points there; no sudo, nothing outside OUT)
 Truth is read from case-v1: benign = source_truth benign and in_scope; attack = malicious/sensitive and in_scope; everything else is excluded.
@@ -14,7 +30,18 @@ A corpus entry may carry "ids" (a file of case ids, one per line): only those ca
 judge request stats (calls per tool call, answered, cut at the window, parse failures, latency p50/p95, tokens, USD per 1k tool calls)
 are scored whenever the decisions carry judge_calls. Writes no corpus text to stdout.
 """
-import argparse, collections, json, math, os, random, subprocess, sys, time
+import argparse
+import collections
+import hashlib
+import json
+import math
+import os
+import random
+import shutil
+import subprocess
+import sys
+import time
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from surface import case_surface
 
@@ -91,9 +118,224 @@ def rewrite_corpus(src, dst, fx):
     os.replace(tmp, dst)
 
 
+# ---- registered corpus versions (rel-1-0-10 GAP-0362: the 2026-11-13 pass-2 redaction rewrote corpus files) ----
+# A corpus file is NEVER rewritten in place. <corpora root>/VERSIONS.json ("files": {key: {sha256, version,
+# registered}}) says which bytes each registered file has; a run refuses to start when a corpus file it would read is
+# missing, is not registered, or does not have the registered sha256. New content (a redacted variant, a rebuilt
+# corpus) is a NEW file with a NEW version id, registered with `s7gate.py register-corpus FILE --version ID` (a path
+# that is already registered with other bytes is refused). The root is $S7_CORPORA_ROOT, default ~/s7c/corpora; keys
+# are paths relative to it, or absolute for files outside it.
+def corpora_root():
+    return os.path.abspath(os.path.expanduser(os.environ.get("S7_CORPORA_ROOT") or "~/s7c/corpora"))
+
+
+def _vpath():
+    return os.path.join(corpora_root(), "VERSIONS.json")
+
+
+def _vkey(path):
+    p, root = os.path.abspath(os.path.expanduser(path)), corpora_root()
+    return os.path.relpath(p, root) if p.startswith(root + os.sep) else p
+
+
+def _registry():
+    try:
+        return json.load(open(_vpath())).get("files", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 22), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def verify_corpora(cfgs, only=None):
+    """Problems (a list of strings, empty when all is well) with the corpus and meta files of the selected corpora."""
+    reg = _registry()
+    bad = []
+    for name, cfg in cfgs.items():
+        if only and name not in only:
+            continue
+        for f in list(cfg.get("files", [])) + list(cfg.get("meta", [])):
+            f = os.path.expanduser(f)
+            if not os.path.exists(f):
+                bad.append(f"{name}: {f} is missing")
+                continue
+            k = _vkey(f)
+            if k not in reg:
+                bad.append(
+                    f"{name}: {k} is not a registered corpus version "
+                    f"(register it: s7gate.py register-corpus {f} --version <id>)"
+                )
+                continue
+            s = file_sha256(f)
+            if s != reg[k]["sha256"]:
+                bad.append(
+                    f"{name}: {k} has sha256 {s[:16]}, the registered version {reg[k].get('version')} "
+                    f"has {reg[k]['sha256'][:16]}: the corpus was changed in place"
+                )
+    return bad
+
+
+def refuse_corpus_overwrite(out, inputs=()):
+    """For any tool that writes a corpus or a redacted copy of one: exit unless OUT is a new file, not one of its inputs
+    and not a registered corpus version."""
+    o = os.path.abspath(os.path.expanduser(out))
+    for i in inputs:
+        if i and os.path.abspath(os.path.expanduser(i)) == o:
+            raise SystemExit(
+                f"s7gate: output {out} is also an input: a corpus is never rewritten in place; "
+                "write the new content to a new file"
+            )
+    if _vkey(o) in _registry():
+        raise SystemExit(
+            f"s7gate: {out} is a registered corpus version; write the new content to a new file "
+            "and register it under a new version id"
+        )
+
+
+def cmd_register_corpus(a):
+    f = os.path.expanduser(a.file)
+    if not os.path.isfile(f):
+        print(f"s7gate: {a.file} is not a file", file=sys.stderr)
+        sys.exit(2)
+    k = _vkey(f)
+    s = file_sha256(f)
+    vp = _vpath()
+    try:
+        d = json.load(open(vp))
+    except (OSError, ValueError):
+        d = {"schema": 1}
+    d.setdefault("files", {})
+    if k in d["files"] and d["files"][k]["sha256"] != s:
+        print(
+            f"s7gate: {k} is registered as version {d['files'][k].get('version')} with other bytes: "
+            "a registered corpus is never rewritten; write the new content to a new file "
+            "and register that under a new version id",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    d["files"][k] = {
+        "sha256": s,
+        "version": a.version,
+        "size": os.path.getsize(f),
+        "registered": time.strftime("%FT%TZ", time.gmtime()),
+    }
+    os.makedirs(os.path.dirname(vp), exist_ok=True)
+    json.dump(d, open(vp + ".tmp", "w"), indent=1, sort_keys=True)
+    os.replace(vp + ".tmp", vp)
+    print(f"registered {k} version {a.version} sha256 {s[:16]}")
+
+
+def cmd_verify_corpora(a):
+    bad = verify_corpora(json.load(open(a.corpora)), set(a.only.split(",")) if a.only else None)
+    print("\n".join(bad) if bad else "all corpus files match their registered versions")
+    sys.exit(1 if bad else 0)
+
+
+# ---- label overlay (rel-1-0-10 GAP-0226): one label set per score, recorded, and never a silent fallback ----
+def default_labels():
+    return os.path.expanduser(os.environ.get("S7_LABELS_DEFAULT") or "~/s7c/labels/current.jsonl")
+
+
+def resolve_labels(a):
+    """(path, info) of the overlay the scorer applies. --reviews (explicit) wins; else --labels PATH; else $S7_LABELS;
+    else the default current.jsonl. --labels none switches the overlay off on purpose. A named or default file that
+    does not exist is an error, never a fallback to the bare corpus files: a score without its label set cannot be
+    compared with one that has it. info records what was applied (sha256, rows, version)."""
+    ex = getattr(a, "reviews", None)
+    lab = getattr(a, "labels", "") or os.environ.get("S7_LABELS", "")
+    if ex:
+        path = ex
+    elif lab == "none":
+        return None, None
+    else:
+        path = lab or default_labels()
+    if not os.path.isfile(path):
+        raise SystemExit(
+            f"s7gate: label file {path} not found. The default is {default_labels()} "
+            "(copied by `s7gate.py push-labels`); pass --labels none to score the corpus files "
+            "as they stand, on purpose."
+        )
+    raw = open(path, "rb").read()
+    man = path[: -len(".jsonl")] + ".manifest.json" if path.endswith(".jsonl") else ""
+    ver = ""
+    if man and os.path.exists(man):
+        try:
+            ver = json.load(open(man)).get("version", "")
+        except (OSError, ValueError):
+            ver = ""
+    return path, dict(
+        path=path,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        rows=sum(1 for ln in raw.splitlines() if ln.strip()),
+        version=ver,
+        explicit=bool(ex),
+    )
+
+
+def stamp_run_labels(out, info):
+    """Record the label set (or its absence) in OUT/RUN.json."""
+    rp = os.path.join(out, "RUN.json")
+    try:
+        run = json.load(open(rp)) if os.path.exists(rp) else {}
+    except (OSError, ValueError):
+        run = {}
+    run["labels"] = info
+    tmp = rp + ".tmp"
+    json.dump(run, open(tmp, "w"))
+    os.replace(tmp, rp)
+
+
+def push_labels(src, dest, name="labels-v3"):
+    """Copy SRC/<name>.jsonl and SRC/<name>.manifest.json to DEST/current.jsonl and DEST/current.manifest.json, each
+    through a temp file, and check the sha256 of every copy. Every failure (missing source, unwritable destination, a
+    copy that does not match) exits 4 with the step that failed: nothing is hidden, nothing is partial."""
+    for ext in (".jsonl", ".manifest.json"):
+        sp = os.path.join(src, name + ext)
+        if not os.path.isfile(sp):
+            raise SystemExit(f"s7gate: push-labels: {sp} is missing; the scorer would refuse to score")
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as e:
+        raise SystemExit(f"s7gate: push-labels: cannot create {dest}: {e}")
+    for ext, dst in ((".jsonl", "current.jsonl"), (".manifest.json", "current.manifest.json")):
+        sp, dp = os.path.join(src, name + ext), os.path.join(dest, dst)
+        try:
+            shutil.copyfile(sp, dp + ".tmp")
+            os.replace(dp + ".tmp", dp)
+        except OSError as e:
+            raise SystemExit(f"s7gate: push-labels: copy {sp} -> {dp} failed: {e}")
+        if file_sha256(sp) != file_sha256(dp):
+            raise SystemExit(f"s7gate: push-labels: {dp} does not match {sp} after the copy")
+    print(f"push-labels: {name} -> {dest}/current.* sha256 {file_sha256(os.path.join(dest, 'current.jsonl'))[:16]}")
+
+
+def cmd_push_labels(a):
+    try:
+        push_labels(a.src, a.dest, a.name)
+    except SystemExit as e:
+        if isinstance(e.code, str):
+            print(e.code, file=sys.stderr)
+            sys.exit(4)
+        raise
+
+
 def cmd_run(a):
     cfgs = json.load(open(a.corpora))
     only = set(a.only.split(",")) if a.only else None
+    _bad = verify_corpora(cfgs, only)
+    if _bad:
+        print(
+            "[s7gate] REFUSED: a corpus file does not match its registered version (GAP-0362):\n  "
+            + "\n  ".join(_bad[:20]),
+            file=sys.stderr,
+        )
+        sys.exit(5)
     packs = a.packs.split(",")
     os.makedirs(a.out, exist_ok=True)
     fx = make_fixture(a.out)
@@ -258,18 +500,33 @@ def judge_model_of(run):
 def cmd_score(a):
     cfgs = json.load(open(a.corpora))
     reviews = {}; tags = {}
-    if a.reviews and os.path.exists(a.reviews):
-        for l in open(a.reviews):
-            l = l.rstrip("\n")
-            if not l: continue
-            if l.startswith("{"):
-                r = json.loads(l); reviews[r["id"]] = r["source_truth"]
+    lab_path, lab_info = resolve_labels(a)
+    if lab_path:
+        for ln in open(lab_path):
+            ln = ln.rstrip("\n")
+            if not ln:
+                continue
+            if ln.startswith("{"):
+                r = json.loads(ln)
+                reviews[r["id"]] = r["source_truth"]
             else:
-                i_, _, tg = l.partition("\t"); tags[i_] = tg or "reviewed"
+                i_, _, tg = ln.partition("\t")
+                tags[i_] = tg or "reviewed"
     os.makedirs(f"{a.out}/scores", exist_ok=True)
+    stamp_run_labels(a.out, lab_info)
     run = json.load(open(a.out + '/RUN.json')) if os.path.exists(a.out + '/RUN.json') else None
     jmodel = judge_model_of(run)
-    md = ["# s7gate summary", f"run: {run or '?'}", ""]
+    md = [
+        "# s7gate summary",
+        f"run: {run or '?'}",
+        (
+            f"labels: {lab_info['version'] or 'overlay'} sha256 {lab_info['sha256'][:16]} "
+            f"({lab_info['rows']} rows, {lab_info['path']})"
+        )
+        if lab_info
+        else "labels: none (corpus files as they stand)",
+        "",
+    ]
     for name, cfg in cfgs.items():
         d = f"{a.out}/decisions/{name}"
         if not os.path.isdir(d): continue
@@ -288,7 +545,10 @@ def cmd_score(a):
             unsupported = sum(1 for i in truth if i in pred and truth[i]["state"] != "excluded" and pred[i]["unsup"])
             ids = [i for i in truth if i in pred and truth[i]["state"] != "excluded" and (a.include_unsupported or not pred[i]["unsup"])]
             res = dict(corpus=name, pack=pack, cases_in_corpus=len(truth), scored=len(ids), excluded=sum(1 for i in truth if truth[i]["state"] == "excluded"), unsupported_tool_cases_not_scored=0 if a.include_unsupported else unsupported,
-                       missing_decisions=sum(1 for i in truth if i not in pred), errors=sum(pred[i]["err"] for i in ids), connector_fallback_decisions=sum(pred[i]["fb"] for i in ids))
+                       missing_decisions=sum(1 for i in truth if i not in pred),
+                       errors=sum(pred[i]["err"] for i in ids),
+                       connector_fallback_decisions=sum(pred[i]["fb"] for i in ids),
+                       labels=lab_info)
             for key in ("block", "alert"):
                 tp = fp = fn = tn = 0
                 for i in ids:
@@ -388,12 +648,39 @@ def cmd_score(a):
 
 def cmd_compare(a):
     import glob
-    bad = 0; lines = []
+    bad = 0
+    lines = []
+    labdiff = 0
+    allow = getattr(a, "allow_unlabelled", False)
     for bf in sorted(glob.glob(f"{a.base}/scores/*.json")):
         cf = bf.replace(a.base, a.cand)
         if not os.path.exists(cf): lines.append(f"MISSING in candidate: {os.path.basename(bf)}"); bad += 1; continue
         b, c = json.load(open(bf)), json.load(open(cf))
-        row = [os.path.basename(bf)[:-5]]
+        cell_name = os.path.basename(bf)[:-5]
+        # scores under different (or no) label sets are not comparable
+        lb, lc = (b.get("labels") or {}).get("sha256"), (c.get("labels") or {}).get("sha256")
+        if lb and lc and lb != lc:
+            lines.append(
+                f"{cell_name}: LABELS DIFFER (base {lb[:12]}, candidate {lc[:12]}): the rates are not comparable; "
+                "rescore one side with the other's labels (s7gate.py score --out <new> --labels <file>)"
+            )
+            labdiff += 1
+            continue
+        if not (lb and lc):
+            missing = " and ".join(n for n, x in (("base", lb), ("candidate", lc)) if not x)
+            if not allow:
+                lines.append(
+                    f"{cell_name}: LABELS MISSING on the {missing} side: it was scored without a recorded label set "
+                    "(an old run, --labels none, or a box without the label file); rescore it with --labels <file>, "
+                    "or pass --allow-unlabelled on purpose"
+                )
+                labdiff += 1
+                continue
+            lines.append(
+                f"{cell_name}: WARNING no recorded label set on the {missing} side (--allow-unlabelled): "
+                "the rates may not be comparable"
+            )
+        row = [cell_name]
         for key in ("block", "alert"):
             for m, worse_if in (("fpr", "up"), ("f1", "down"), ("recall", "down")):
                 x, y = b[key][m], c[key][m]
@@ -406,7 +693,15 @@ def cmd_compare(a):
         rb = dict(b["benign_alert_rules"]); rc = dict(c["benign_alert_rules"])
         diffs = sorted(((rc.get(r, 0) - rb.get(r, 0), r) for r in set(rb) | set(rc)), key=lambda t: -abs(t[0]))
         lines.append("   per-rule benign-alert diff: " + ", ".join(f"{r} {d:+d}" for d, r in diffs[:12] if d))
-    print("\n".join(lines)); print("GATE:", "FAIL (false-block/alert rate rose or F1 fell)" if bad else "PASS"); sys.exit(1 if bad else 0)
+    print("\n".join(lines))
+    if labdiff:
+        print(
+            f"GATE: LABELS DIFFER OR MISSING ({labdiff} corpus x pack cells scored under different label sets, "
+            "or one side has none; no verdict)"
+        )
+        sys.exit(3)
+    print("GATE:", "FAIL (false-block/alert rate rose or F1 fell)" if bad else "PASS")
+    sys.exit(1 if bad else 0)
 
 
 def cmd_census(a):
@@ -461,18 +756,50 @@ def main():
     ap = argparse.ArgumentParser(); sub = ap.add_subparsers(dest="cmd", required=True)
     pv = sub.add_parser("coverage"); pv.add_argument("--corpora", required=True); pv.add_argument("--out", required=True)
     pc = sub.add_parser("census"); pc.add_argument("--corpora", required=True); pc.add_argument("--out", required=True); pc.add_argument("--pack", default="default"); pc.add_argument("--top", type=int, default=40)
+    pr = sub.add_parser("register-corpus")
+    pr.add_argument("file")
+    pr.add_argument("--version", required=True)
+    pvc = sub.add_parser("verify-corpora")
+    pvc.add_argument("--corpora", required=True)
+    pvc.add_argument("--only", default="")
+    ppl = sub.add_parser("push-labels")
+    ppl.add_argument("--src", required=True)
+    ppl.add_argument("--dest", default=os.path.dirname(default_labels()))
+    ppl.add_argument("--name", default="labels-v3")
     for n in ("run", "score", "compare", "all"):
         p = sub.add_parser(n)
         if n in ("run", "all"):
             p.add_argument("--bin", required=True); p.add_argument("--policy-dir", required=True); p.add_argument("--packs", default=",".join(PACKS))
             p.add_argument("--gomaxprocs", type=int, default=8); p.add_argument("--workers", type=int, default=24); p.add_argument("--parallel", type=int, default=1); p.add_argument("--only"); p.add_argument("--connector", default="", help="pass -connector to the harness (auto = each case to its own connector's hook handler); needs a harness built from s7/bench-connectors"); p.add_argument("--full-fidelity", action="store_true", help="also record the det block and send PostToolUse for action cases (needed for miss-cause analysis; ~1.5x CPU)"); p.add_argument("--harness-args", default="", help="extra s7bench flags, comma or space separated (the rules+judge configuration)")
         if n in ("run", "score", "all"): p.add_argument("--corpora", required=True); p.add_argument("--out", required=True)
-        if n in ("score", "all"): p.add_argument("--reviews"); p.add_argument("--include-unsupported", action="store_true")
-        if n == "compare": p.add_argument("--base", required=True); p.add_argument("--cand", required=True)
+        if n in ("score", "all"):
+            p.add_argument("--reviews")
+            p.add_argument(
+                "--labels",
+                default="",
+                help="label overlay to apply (default: $S7_LABELS, else ~/s7c/labels/current.jsonl); "
+                "none = corpus files as they stand; a missing file is an error. --reviews overrides",
+            )
+            p.add_argument("--include-unsupported", action="store_true")
+        if n == "compare":
+            p.add_argument("--base", required=True)
+            p.add_argument("--cand", required=True)
+            p.add_argument(
+                "--allow-unlabelled",
+                action="store_true",
+                help="compare runs that record no label set (or one that does with one that does not); "
+                "the rates may not be comparable",
+            )
     a = ap.parse_args()
     if a.cmd == "run": cmd_run(a)
     elif a.cmd == "score": cmd_score(a)
     elif a.cmd == "compare": cmd_compare(a)
+    elif a.cmd == "register-corpus":
+        cmd_register_corpus(a)
+    elif a.cmd == "verify-corpora":
+        cmd_verify_corpora(a)
+    elif a.cmd == "push-labels":
+        cmd_push_labels(a)
     elif a.cmd == "census": cmd_census(a)
     elif a.cmd == "coverage": cmd_coverage(a)
     else: cmd_run(a); cmd_score(a)
