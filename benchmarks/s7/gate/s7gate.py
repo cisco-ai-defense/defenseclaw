@@ -10,6 +10,10 @@
       exit 1 when a corpus file is missing, unregistered or changed in place
   s7gate.py push-labels --src DIR --dest DIR [--name labels-v3]
       copy a label set to <dest>/current.*, verified by sha256; any failure exits 4
+  s7gate.py fold-labels --base SET --overlay F [--overlay F ...] --out DIR --version V
+      a NEW label set = base + hand-review overlays (benchmarks/s7/gate/labels/); exit 4 on bad input
+  s7gate.py check-labels --labels SET --overlay F [--overlay F ...]
+      exit 1 and the case ids when the set lacks an overlay row or holds another verdict
 
 Fail-closed rules (rel-1-0-10 GAP-0226, GAP-0362):
   * corpus files are never rewritten in place: `run` refuses (exit 5) when a corpus file is missing, not registered,
@@ -43,6 +47,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import labelfold
 from surface import case_surface
 
 PACKS = ["default", "permissive", "strict"]
@@ -766,6 +771,7 @@ def main():
     ppl.add_argument("--src", required=True)
     ppl.add_argument("--dest", default=os.path.dirname(default_labels()))
     ppl.add_argument("--name", default="labels-v3")
+    labelfold.add_parsers(sub)
     for n in ("run", "score", "compare", "all"):
         p = sub.add_parser(n)
         if n in ("run", "all"):
@@ -800,6 +806,10 @@ def main():
         cmd_verify_corpora(a)
     elif a.cmd == "push-labels":
         cmd_push_labels(a)
+    elif a.cmd == "fold-labels":
+        labelfold.cmd_fold(a)
+    elif a.cmd == "check-labels":
+        labelfold.cmd_check(a)
     elif a.cmd == "census": cmd_census(a)
     elif a.cmd == "coverage": cmd_coverage(a)
     else: cmd_run(a); cmd_score(a)
