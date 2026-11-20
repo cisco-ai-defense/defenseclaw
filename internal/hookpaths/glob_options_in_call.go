@@ -66,7 +66,7 @@ var shoptGlobBits = func() map[string]uint8 {
 // set -e, -u, -x, -o pipefail and the shopt names that change no expansion
 // change nothing (rel-1-0-10:GAP-0350).
 func globOptionsInCall(command string, start shellGlobOptions) shellGlobOptions {
-	if !globOptionsChangeText.MatchString(command) {
+	if !globOptionsChangeTextMayMatch(command) || !globOptionsChangeText.MatchString(command) {
 		return start
 	}
 	file, ok := parseShell(command)
@@ -285,4 +285,24 @@ func globReadings(opts shellGlobOptions) []shellGlobOptions {
 		}
 	}
 	return out
+}
+
+// globOptionsChangeLiterals holds a literal of each alternative of
+// globOptionsChangeText; the "." alternative is a dot before a \s character.
+var globOptionsChangeLiterals = []string{
+	"shopt", "GLOBIGNORE", "BASHOPTS", "SHELLOPTS", "set", "eval", "source", "bash",
+	". ", ".\t", ".\n", ".\f", ".\r",
+}
+
+// globOptionsChangeTextMayMatch reports whether command holds one of the
+// literals every match of globOptionsChangeText holds: a command with none
+// of them cannot match, and the scan of the expression over a long call (it
+// has no literal prefix) is left out (rel-1-0-10:GAP-1613).
+func globOptionsChangeTextMayMatch(command string) bool {
+	for _, literal := range globOptionsChangeLiterals {
+		if strings.Contains(command, literal) {
+			return true
+		}
+	}
+	return false
 }
