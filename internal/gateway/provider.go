@@ -174,18 +174,15 @@ type ChatUsage struct {
 }
 
 // ChatResponse is the OpenAI-compatible chat completion response.
-// RawResponse carries the original upstream bytes so the proxy can
-// forward unknown fields (system_fingerprint, service_tier, etc.) verbatim.
 type ChatResponse struct {
-	ID                 string          `json:"id"`
-	Object             string          `json:"object"`
-	Created            int64           `json:"created"`
-	Model              string          `json:"model"`
-	Choices            []ChatChoice    `json:"choices"`
-	Usage              *ChatUsage      `json:"usage,omitempty"`
-	DefenseClawBlocked *bool           `json:"defenseclaw_blocked,omitempty"`
-	DefenseClawReason  string          `json:"defenseclaw_reason,omitempty"`
-	RawResponse        json.RawMessage `json:"-"`
+	ID                 string       `json:"id"`
+	Object             string       `json:"object"`
+	Created            int64        `json:"created"`
+	Model              string       `json:"model"`
+	Choices            []ChatChoice `json:"choices"`
+	Usage              *ChatUsage   `json:"usage,omitempty"`
+	DefenseClawBlocked *bool        `json:"defenseclaw_blocked,omitempty"`
+	DefenseClawReason  string       `json:"defenseclaw_reason,omitempty"`
 }
 
 // StreamChunk is one SSE chunk in OpenAI format.
