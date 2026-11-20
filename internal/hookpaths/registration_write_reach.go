@@ -1109,8 +1109,9 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 	var roots, names []string
 	var paths []findTest
 	deletes, insensitive, follow := false, false, false
-	// regexType is the -regextype in force.
-	regexType := ""
+	// regexType is the -regextype in force; a BSD find -E walk reads its own
+	// extended syntax whatever follows.
+	regexType, bsdExtended := "", false
 	// A walk cut at -maxdepth N reaches nothing deeper than N below a root.
 	// Several limits or one that is not a number leave the walk unbounded.
 	maxDepth, limits := 0, 0
@@ -1151,7 +1152,11 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 			}
 		case "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex":
 			if i+1 < len(words) {
-				test, _ := newFindTest(word, words[i+1], regexType)
+				syntax := regexType
+				if bsdExtended {
+					syntax = findBSDExtended
+				}
+				test, _ := newFindTest(word, words[i+1], syntax)
 				paths = append(paths, test)
 				i++
 			}
@@ -1162,6 +1167,8 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 			}
 		case "-follow", "-H", "-L":
 			follow = true
+		case "-E":
+			bsdExtended = true
 		default:
 			if len(roots) == i-1 && !strings.HasPrefix(word, "-") && word != "!" && word != "(" {
 				roots = append(roots, word)

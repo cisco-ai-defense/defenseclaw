@@ -53,15 +53,18 @@ func (t findTest) matches(text string) (matched, known bool) {
 
 // aimsAt reports a test aimed at the protected file target below a walk root
 // (root as the call spells it, absRoot resolved). A test that matches the
-// file but not a decoy of it, the same name with its stem swapped for a
-// sentinel (zzsentinel.json for settings.json) and, for a whole-path test,
-// in a sentinel folder below the root, is aimed at it: settings.json,
-// settings.jso[n], settings.*, -path '*/.claude/*' and -regex
-// '.*/settings\.json' are aimed at .claude/settings.json, while *, *.json,
-// -path '*' and -regex '.*\.json' match the decoy too and are generic
-// filters (rel-1-0-10:GAP-1572). A test whose pattern spells the name
-// literally is aimed, and so is a regex this reader does not read (the
-// parent reading). An aimed test judges the call on the file whether or not
+// file but not a decoy of it, the same name with its stem spelled in a
+// letter the pattern does not contain (aaaaaaaa.json for settings.json) and,
+// for a whole-path test, in a folder of that letter below the root, is aimed
+// at it: settings.json, settings.jso[n], settings.*, -path '*/.claude/*' and
+// -regex '.*/settings\.json' are aimed at .claude/settings.json, while *,
+// *.json, -path '*' and -regex '.*\.json' match the decoy too and are
+// generic filters (rel-1-0-10:GAP-1572). The decoy letter is not in the
+// pattern, so a union of the name with any decoy the pattern spells
+// ('[sz][ez]*.json', '\(settings\|other\)\.json') cannot match it. A test
+// whose pattern spells the name literally is aimed, and so is a regex this
+// reader does not read and a pattern that holds every letter (the parent
+// reading). An aimed test judges the call on the file whether or not
 // it exists when the hook runs, since an earlier part of the chain or another
 // process may create it before the walk (rel-1-0-10:GAP-1555); a generic one
 // reaches only the files the walk finds. The names are those of the
@@ -75,7 +78,11 @@ func (t findTest) aimsAt(root, absRoot, target string) bool {
 	if strings.Contains(pattern, name) {
 		return true
 	}
-	decoy := findDecoyName(base)
+	letter, found := findDecoyLetter(t.pattern)
+	if !found {
+		return true
+	}
+	decoy := findDecoyName(base, letter)
 	texts, decoys := []string{base}, []string{decoy}
 	if t.whole {
 		rel, err := filepath.Rel(absRoot, target)
@@ -85,7 +92,7 @@ func (t findTest) aimsAt(root, absRoot, target string) bool {
 		texts, decoys = nil, nil
 		for _, start := range []string{root, absRoot} {
 			texts = append(texts, findWalkPath(start, rel))
-			decoys = append(decoys, findWalkPath(start, filepath.Join("zzsentinel", decoy)))
+			decoys = append(decoys, findWalkPath(start, filepath.Join(strings.Repeat(string(letter), 8), decoy)))
 		}
 	}
 	aimed := false
@@ -107,18 +114,31 @@ func (t findTest) aimsAt(root, absRoot, target string) bool {
 	return true
 }
 
-// findDecoyName is base with its stem swapped for a sentinel, a leading dot
-// and the extension kept: zzsentinel.json for settings.json,
-// .zzsentinel for .claude.
-func findDecoyName(base string) string {
+// findDecoyLetter is the first lower-case letter that pattern does not
+// contain in either case; found is false when it holds all of them.
+func findDecoyLetter(pattern string) (letter byte, found bool) {
+	lower := strings.ToLower(pattern)
+	for letter = 'a'; letter <= 'z'; letter++ {
+		if strings.IndexByte(lower, letter) < 0 {
+			return letter, true
+		}
+	}
+	return 0, false
+}
+
+// findDecoyName is base with every letter of its stem swapped for letter, a
+// leading dot and the extension kept: aaaaaaaa.json for settings.json,
+// .aaaaaa for .claude.
+func findDecoyName(base string, letter byte) string {
 	ext := filepath.Ext(base)
 	if ext == base {
 		ext = ""
 	}
-	if strings.HasPrefix(base, ".") {
-		return ".zzsentinel" + ext
+	stem, dot := strings.TrimSuffix(base, ext), ""
+	if strings.HasPrefix(stem, ".") {
+		stem, dot = stem[1:], "."
 	}
-	return "zzsentinel" + ext
+	return dot + strings.Repeat(string(letter), max(len(stem), 1)) + ext
 }
 
 // findWalkPath spells a path below a walk root as find hands it to its
@@ -136,7 +156,8 @@ func findWalkPath(root, rel string) string {
 
 // findRegexp compiles a find regex of regexType (empty: the default, the
 // emacs syntax) to match a whole path, case folded when fold. It returns nil
-// for a type or a construct this reader does not read.
+// for a type or a construct this reader does not read, among them the BSD
+// find -E syntax (findBSDExtended).
 func findRegexp(pattern, regexType string, fold bool) *regexp.Regexp {
 	emacs := false
 	switch regexType {
@@ -160,11 +181,21 @@ func findRegexp(pattern, regexType string, fold bool) *regexp.Regexp {
 	return re
 }
 
+// findBSDExtended is the regex type of a BSD find -E walk.
+const findBSDExtended = "-E"
+
+// findRegexpPlainEscapes are the characters a backslash makes plain in the
+// emacs and the extended syntax alike (and, in the extended one, ( ) |).
+const findRegexpPlainEscapes = `.*+?[]^$\\/-_`
+
 // findRegexpSyntax writes a find regex as an anchored Go expression. In the
 // emacs syntax \( \) \| group and alternate and ( ) | { } are plain; in the
-// extended one they are operators and the escaped forms are plain. A
-// backslash inside a bracket is plain in both. ok is false for a back
-// reference, an escape this reader does not know or an open bracket.
+// extended one they are operators and the escaped forms are plain. \w \W \b
+// \B \` and \' are the GNU operators of the same name. A backslash inside a
+// bracket is plain in both. ok is false for a back reference, an open
+// bracket and any other escape: the GNU word anchors \< \>, the interval
+// escapes \{ \} (an interval in the BSD basic syntax of macOS find) and any
+// escape this reader does not know (rel-1-0-10:GAP-1572).
 func findRegexpSyntax(pattern string, emacs bool) (expr string, ok bool) {
 	var out strings.Builder
 	out.WriteString(`^(?:`)
@@ -187,7 +218,7 @@ func findRegexpSyntax(pattern string, emacs bool) (expr string, ok bool) {
 				out.WriteString(`\A`)
 			case next == '\'':
 				out.WriteString(`\z`)
-			case next < 0x80 && !isASCIIAlnum(next):
+			case strings.IndexByte(findRegexpPlainEscapes, next) >= 0 || !emacs && strings.IndexByte("()|", next) >= 0:
 				out.WriteString(regexp.QuoteMeta(string(next)))
 			default:
 				return "", false
@@ -233,8 +264,4 @@ func findBracketEnd(pattern string, open int) int {
 		}
 	}
 	return -1
-}
-
-func isASCIIAlnum(c byte) bool {
-	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }

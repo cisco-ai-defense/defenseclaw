@@ -36,7 +36,24 @@ func TestFindRegexGlobAndLinkFollowKeepTheHookFileFiveTiers(t *testing.T) {
 		stem, ext := strings.TrimSuffix(f.base, filepath.Ext(f.base)), filepath.Ext(f.base)
 		escaped := strings.ReplaceAll(f.base, ".", `\.`)
 		last := len(f.base) - 1
+		// classed is the name with the last letter of its stem in a bracket
+		// (setting[s]\.json), so no row spells the name literally.
+		classed := stem[:len(stem)-1] + "[" + stem[len(stem)-1:] + "]" + strings.ReplaceAll(ext, ".", `\.`)
+		dir := strings.Split(f.rel, "/")[0]
 		return []string{
+			// GNU word anchors, interval escapes and BSD -E are not read:
+			// the parent reading (rel-1-0-10:GAP-1572).
+			"find @R@ -regex '.*/\\<" + classed + "' -delete",
+			"find @R@ -iregex '.*/\\<" + strings.ToUpper(classed) + "' -delete",
+			"find @R@ -regextype posix-extended -regex '.*/\\<" + classed + "' -delete",
+			"find @R@ -regex '.*/" + stem[:len(stem)-1] + "[" + stem[len(stem)-1:] + "]\\>" + strings.ReplaceAll(ext, ".", `\.`) + "' -delete",
+			"find @R@ -regex '.*/" + stem[:1] + "\\{1\\}" + stem[1:] + strings.ReplaceAll(ext, ".", `\.`) + "' -delete",
+			"find -E @R@ -regex '.*/" + stem[:1] + "{1}" + stem[1:] + strings.ReplaceAll(ext, ".", `\.`) + "' -delete",
+			// Unions of the name with a decoy the pattern spells.
+			"find @R@ -name '[" + stem[:1] + "z][" + stem[1:2] + "z]*" + ext + "' -delete",
+			"find @R@ -regex '.*/\\(" + stem + "\\|zzsentinel\\)" + strings.ReplaceAll(ext, ".", `\.`) + "' -delete",
+			"find @R@ -regextype posix-extended -regex '.*/(" + stem + "|zzsentinel)" + strings.ReplaceAll(ext, ".", `\.`) + "' -delete",
+			"find @R@ -path '*/[.z][" + dir[1:2] + "z]*/[" + stem[:1] + "z]*" + ext + "' -delete",
 			"find @R@ -regex '.*/" + escaped + "' -delete",
 			"find @R@ -iregex '.*/" + strings.ToUpper(escaped) + "' -delete",
 			"find @R@ -regex '@R@/" + f.rel + "' -exec rm {} +",

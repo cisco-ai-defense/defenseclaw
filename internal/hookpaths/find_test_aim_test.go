@@ -47,6 +47,26 @@ func TestFindTestAimsAtAHookFileNotAtItsDecoy(t *testing.T) {
 		{"-regex", `.*\1`, "", ".", true},
 		{"-regex", `.*\.json`, "posix-basic", ".", true},
 		{"-regex", `.*[a`, "", ".", true},
+		// GNU word anchors, interval escapes and the BSD -E syntax are not
+		// read here: aimed (rel-1-0-10:GAP-1572).
+		{"-regex", `.*/\<setting[s]\.json`, "", ".", true},
+		{"-iregex", `.*/\<SETTING[S]\.JSON`, "", ".", true},
+		{"-regex", `.*/\<setting[s]\.json`, "posix-extended", ".", true},
+		{"-regex", `.*/setting[s]\>\.json`, "", ".", true},
+		{"-regex", `.*/se\{1\}ttings\.json`, "", ".", true},
+		{"-regex", `.*/se{1}ttings\.json`, findBSDExtended, ".", true},
+		{"-regex", `.*\.json`, findBSDExtended, ".", true},
+		// A union with a decoy the pattern spells cannot match the decoy,
+		// whose letter the pattern does not contain.
+		{"-name", "[sz][ez][ts]*[sl].json", "", ".", true},
+		{"-regex", `.*/\(settings\|zzsentinel\)\.json`, "", ".", true},
+		{"-regex", `.*/(settings|zzsentinel)\.json`, "posix-extended", ".", true},
+		{"-path", "*/[.z][cz]*/[sz]*.json", "", ".", true},
+		{"-regex", `.*/s[a-z]*\.json`, "", ".", true},
+		{"-iname", "*.JSON", "", ".", false},
+		{"-regex", `.*/[a-z]*\.json`, "", absRoot, false},
+		{"-name", "zzsentinel.json", "", ".", false},
+		{"-name", "[abcdefghijklmnopqrstuvwxyz]*.json", "", ".", true},
 	}
 	for _, row := range rows {
 		test, ok := newFindTest(row.option, row.pattern, row.regexType)
