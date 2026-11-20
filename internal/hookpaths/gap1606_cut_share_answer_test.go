@@ -31,7 +31,7 @@ func TestGAP1606ACutShareAnswerIsNotKeptForTheCall(t *testing.T) {
 	resetPlainFolders(t)
 	dir := linkFreeTempDir(t)
 	share := filepath.Join(dir, "share")
-	if err := os.MkdirAll(share, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(share, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	keys := filepath.Join(dir, "authorized_keys")
@@ -41,6 +41,11 @@ func TestGAP1606ACutShareAnswerIsNotKeptForTheCall(t *testing.T) {
 	link := filepath.Join(share, "alias")
 	if err := os.Symlink(keys, link); err != nil {
 		t.Skipf("no symlinks: %v", err)
+	}
+	// The share is also a home whose key file is a link off the share: the
+	// protected key paths list the file it reaches only once it is read.
+	if err := os.Symlink(keys, filepath.Join(share, ".ssh", "authorized_keys")); err != nil {
+		t.Fatal(err)
 	}
 	release := make(chan struct{})
 	var once sync.Once
@@ -64,11 +69,21 @@ func TestGAP1606ACutShareAnswerIsNotKeptForTheCall(t *testing.T) {
 	// The shares before it spent the call's budget: the wait for this share
 	// is cut short at once, while the share would still answer.
 	call.waitLeft = 0
+	before := HookCallState()
 	if resolved, ok := NewTargetMemo().ResolveWriteTarget(link); ok {
 		t.Fatalf("a write below a share the budget cut off resolved to %s", resolved)
 	}
+	// A cut that spent no wait still changes the call's state, so the
+	// gateway's dispatch memo (GAP-1472) keeps no dispatch that met it.
+	if HookCallState() == before {
+		t.Error("a share wait the budget cut short with no wait left leaves the call's state as it was")
+	}
 	if _, err := callStat(link); err == nil {
 		t.Fatal("a stat below a share the budget cut off answered")
+	}
+	evaluation := NewTargetMemo()
+	if offShare := keyPathsOffShare(evaluation.ProtectedAuthorizedKeysPaths(share), share, keys); offShare != "" {
+		t.Fatalf("the key paths of a home the budget cut off list %s", offShare)
 	}
 
 	answer()
@@ -94,6 +109,27 @@ func TestGAP1606ACutShareAnswerIsNotKeptForTheCall(t *testing.T) {
 	if got, err := callStat(link); err != nil || !os.SameFile(got, want) {
 		t.Errorf("a stat of the link after the share answered: %v; the cut answer was kept", err)
 	}
+	if keyPathsOffShare(evaluation.ProtectedAuthorizedKeysPaths(share), share, keys) == "" {
+		t.Error("the key paths of the home miss the file its key link reaches: the list made during the cut was kept")
+	}
+}
+
+// keyPathsOffShare is the first of paths that is not below share and names
+// the file keys ("" for none).
+func keyPathsOffShare(paths []string, share, keys string) string {
+	want, err := os.Stat(keys)
+	if err != nil {
+		return ""
+	}
+	for _, path := range paths {
+		if pathAtOrUnder(path, share) {
+			continue
+		}
+		if got, err := os.Stat(path); err == nil && os.SameFile(got, want) {
+			return path
+		}
+	}
+	return ""
 }
 
 // shareAnswered waits until the probe of share has returned.
