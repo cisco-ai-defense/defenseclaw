@@ -42,6 +42,12 @@ func TestGAP0528RunWaitsForRoomLikeConnect(t *testing.T) {
 	substrateRunWorkerWait, substrateRunWorkerPoll = time.Minute, 10*time.Millisecond
 
 	var creates, fullFor atomic.Int32
+	// afterRefusal runs inside the fake's handler, once the n-th refusal is
+	// written: the Ctrl-C below is sent from the wait itself, never from a
+	// wall-clock timer (rel-1-0-10 GAP-1452: a 50 ms timer fired before the
+	// first request on a loaded box and the run saw a cancelled context, not
+	// the cluster-full answer it asserts).
+	var afterRefusal atomic.Pointer[func(n int32)]
 	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
 		"POST actors": func(w http.ResponseWriter, r *http.Request) {
 			n := creates.Add(1)
@@ -49,6 +55,9 @@ func TestGAP0528RunWaitsForRoomLikeConnect(t *testing.T) {
 			if n <= fullFor.Load() {
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write([]byte(`{"error":"Service Unavailable","reason":"no_free_worker"}`))
+				if hook := afterRefusal.Load(); hook != nil {
+					(*hook)(n)
+				}
 				return
 			}
 			var req api.CreateRequest
@@ -92,10 +101,21 @@ func TestGAP0528RunWaitsForRoomLikeConnect(t *testing.T) {
 	creates.Store(0)
 	fullFor.Store(1 << 20)
 	ctx, cancel := context.WithCancel(t.Context())
-	time.AfterFunc(50*time.Millisecond, cancel)
+	defer cancel()
+	cancelAfterSecondRefusal := func(n int32) {
+		if n == 2 {
+			cancel()
+		}
+	}
+	afterRefusal.Store(&cancelAfterSecondRefusal)
 	errb.Reset()
-	_, err = substrateRunWaitingForWorker(ctx, cmd, try(ctx, cmd))
+	// The wait watches ctx; the requests keep the test context, so the cancel
+	// is seen between tries and never as a cancelled request.
+	_, err = substrateRunWaitingForWorker(ctx, cmd, try(t.Context(), cmd))
 	if err == nil || !strings.Contains(err.Error(), "no free worker") {
 		t.Fatalf("Ctrl-C during the wait: %v", err)
+	}
+	if creates.Load() != 2 {
+		t.Fatalf("Ctrl-C after the second refusal: %d creates, want 2 (the wait stopped between tries)", creates.Load())
 	}
 }

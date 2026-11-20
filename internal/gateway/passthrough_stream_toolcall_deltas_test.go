@@ -791,9 +791,19 @@ func TestSSEToolCallsIdentityAndNames(t *testing.T) {
 // Late .done texts under 8 names keep nothing per text past a digest
 // (rgw3 M1: 137 MiB retained for 16 MiB in on 353c7eeefd).
 func TestSSEToolCallsLateDoneManyNamesIsBounded(t *testing.T) {
-	runtime.GC()
-	var m0, m1 runtime.MemStats
-	runtime.ReadMemStats(&m0)
+	// The bound is on what sseToolCalls keeps, so it is read as live heap bytes
+	// (HeapAlloc) after two collections, with a retry: the process-wide
+	// HeapInuse of a whole-package run also counts spans other tests' goroutines
+	// hold or have not returned yet (rel-1-0-10 GAP-1470). A real retention of
+	// the 16 MiB fed in stays above the bound on every attempt.
+	liveHeap := func() int64 {
+		var m runtime.MemStats
+		runtime.GC()
+		runtime.GC()
+		runtime.ReadMemStats(&m)
+		return int64(m.HeapAlloc)
+	}
+	base := liveHeap()
 	s := newSSEToolCalls(0)
 	for i := 1; i <= 8; i++ {
 		s.Feed(fmt.Sprintf(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_A","name":"Note%d"}}`, i))
@@ -805,9 +815,14 @@ func TestSSEToolCallsLateDoneManyNamesIsBounded(t *testing.T) {
 		s.Feed(`{"type":"response.function_call_arguments.done","item_id":"fc_A","output_index":0,"arguments":` + jsonText(text) + `}`)
 		s.Take()
 	}
-	runtime.GC()
-	runtime.ReadMemStats(&m1)
-	if kept := int64(m1.HeapInuse) - int64(m0.HeapInuse); kept > 24<<20 {
+	var kept int64
+	for attempt := 0; attempt < 3; attempt++ {
+		kept = liveHeap() - base
+		if kept <= 24<<20 {
+			break
+		}
+	}
+	if kept > 24<<20 {
 		t.Fatalf("16 late .done texts of 1 MiB under 8 names kept %d MiB", kept>>20)
 	}
 	if s.Open() {

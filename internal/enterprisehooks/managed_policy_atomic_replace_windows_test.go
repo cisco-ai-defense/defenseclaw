@@ -28,6 +28,7 @@ import (
 // where Windows refuses the POSIX-semantics rename, as on the CI runner of
 // GAP-2644 (4476 missing reads in 78998).
 func TestWindowsManagedPolicyWriterNeverLeavesTheFileMissing(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	for _, refused := range []bool{false, true} {
 		t.Run(fmt.Sprintf("posix rename refused=%v", refused), func(t *testing.T) {
 			if refused {
@@ -96,6 +97,7 @@ func requireManagedPolicyWriterKeepsTheFile(t *testing.T, refused bool) {
 // A content-stable managed file keeps its file identity while another process
 // has a delete-capable handle open. A changed body still publishes a new file.
 func TestWindowsManagedPolicyWriterKeepsMatchingContentWithSharedDeleteHandle(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter
 	initial := []byte("same body\r\n")
@@ -148,6 +150,7 @@ func managedPolicyTestFileID(t *testing.T, path string) managedPolicyFileID {
 }
 
 func TestWindowsManagedPolicyWriterPublishesChangedContent(t *testing.T) {
+	requireGAP633Elevated(t) // a standard user is refused the managed policy folder (rel-1-0-10 GAP-1519)
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter
 	if err := writeWindowsManagedFile(path, []byte("old\r\n"), true); err != nil {

@@ -43,6 +43,11 @@ func shellProtectedFileHome(t *testing.T) (home, cwd string) {
 		}
 	}
 	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "keyslink")); err != nil {
+		if runtime.GOOS == "windows" {
+			// A standard user holds no symlink privilege (rel-1-0-10 GAP-1552);
+			// the elevated native part and the CI runner still run the test.
+			t.Skipf("symlink unavailable on windows: %v", err)
+		}
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
