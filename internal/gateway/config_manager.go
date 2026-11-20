@@ -1729,7 +1729,8 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		}
 	}
 	hot = len(diff.RestartRequired) == 0
-	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
+	if source.compiledV8 != nil && source.compiledV8.Plan != nil &&
+		(m.observabilityV8PlanChanged(source.compiledV8.Plan) || m.observabilitySourceChanged(next, source.raw)) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
 	// On a standalone managed host only the lifecycle records a new config
@@ -2014,6 +2015,24 @@ func (m *ConfigManager) observabilityV8PlanChanged(candidate *config.Observabili
 		return !candidate.ReloadEquivalent(m.v8Plan)
 	}
 	return candidate.Digest() != m.v8PlanDigest
+}
+
+// observabilitySourceChanged reports whether the observability section of
+// raw digests differently from the one in the bytes the live generation was
+// built from. The effective policy digest takes that section as written
+// (observabilityDigest, GAP-0007) while observabilityV8PlanChanged compares
+// the compiled plan, which folds some written values into their effect: the
+// rejected-record row cap while keep_rejected_records is off, a default
+// written out. Such an edit changed the digest doctor computes but took the
+// unchanged branch, so the gateway kept the previous digest until an
+// unrelated change and doctor reported it stale (rel-1-0-10 GAP-1220).
+// Callers hold mu.
+func (m *ConfigManager) observabilitySourceChanged(next *config.Config, raw []byte) bool {
+	if m == nil || next == nil || m.appliedRaw == nil || bytes.Equal(m.appliedRaw, raw) {
+		return false
+	}
+	scope := newDigestScope(next, "", "")
+	return observabilityDigest(next, m.appliedRaw, scope) != observabilityDigest(next, raw, scope)
 }
 
 func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config, configReloadSource, error) {

@@ -1401,11 +1401,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		// it closes outside Secure Client in every tier and fail mode.
 		if !opts.SecureClient {
 			reason := fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode)
-			if managedStandaloneHook(opts) && gatewayAuditUnavailable(resp.StatusCode, body) {
+			if (managedStandaloneHook(opts) || perUserGatewayHook(opts)) && gatewayAuditUnavailable(resp.StatusCode, body) {
 				// The gateway could not journal the call's audit record
 				// (a full audit disk): say so, not "an answer DefenseClaw
-				// could not use" (rel-1-0-6 GAP-0174).
-				reason = managedAuditUnavailableReason
+				// could not use" (rel-1-0-6 GAP-0174) or a bare "HTTP 503"
+				// (rel-1-0-10:GAP-1222).
+				reason = auditUnavailableReason
 			}
 			return failResponse(opts, sp, answeredFailMode, reason)
 		}
@@ -1606,8 +1607,11 @@ func failAfterErrorStatus(opts Options, sp spec, failMode string, status int) in
 // (GAP-0159; doctor names the fix). Managed hooks keep their own text, and
 // a body that is not the gateway's JSON keeps the generic one.
 func perUserRefusalText(opts Options, status int, body []byte) string {
-	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+	if !perUserGatewayHook(opts) {
 		return ""
+	}
+	if gatewayAuditUnavailable(status, body) {
+		return perUserAuditUnavailableText(opts, gatewayAuditDiskFull(body))
 	}
 	var refusal struct {
 		Error string `json:"error"`
@@ -1704,10 +1708,52 @@ func retryAfterDelay(value string) time.Duration {
 // retryAfterSecond is one second of a Retry-After. A variable for tests.
 var retryAfterSecond = time.Second
 
-// managedAuditUnavailableReason is the hook-failure reason of a managed call
-// the gateway refused because it could not write the call's audit record
-// (gatewayAuditUnavailable).
-const managedAuditUnavailableReason = "gateway could not write the hook audit record (HTTP 503)"
+// auditUnavailableReason is the hook-failure reason of a managed or
+// per-user call the gateway refused because it could not write the call's
+// audit record (gatewayAuditUnavailable).
+const auditUnavailableReason = "gateway could not write the hook audit record (HTTP 503)"
+
+// perUserGatewayHook reports a per-user hook: one that is neither managed nor
+// sent to the managed Unix socket.
+func perUserGatewayHook(opts Options) bool {
+	return !opts.ManagedEnterprise && opts.ManagedUnixSocket == ""
+}
+
+// gatewayAuditDiskFull reports the gateway's audit-unavailable answer for a
+// journal write the disk had no room for ({"cause":"disk_full"},
+// agent_hook.go).
+func gatewayAuditDiskFull(body []byte) bool {
+	var answer struct {
+		Cause string `json:"cause"`
+	}
+	return json.Unmarshal(body, &answer) == nil && strings.TrimSpace(answer.Cause) == HookAuditCauseDiskFull
+}
+
+// HookAuditCauseDiskFull is the cause of the gateway's audit-unavailable 503
+// when the disk that holds the audit store is full.
+const HookAuditCauseDiskFull = "disk_full"
+
+// perUserAuditUnavailableText is the block a per-user hook shows when its
+// gateway could not write the call's audit record. The gateway keeps a
+// durable record of every call before it answers, so the call stays blocked
+// in every fail mode; the text names the full disk, the folder and the step,
+// where it said only "HTTP 503: hook audit is unavailable" and the agent
+// refused every prompt with no hint (rel-1-0-10:GAP-1222).
+func perUserAuditUnavailableText(opts Options, diskFull bool) string {
+	folder := "DefenseClaw's data folder"
+	if home := strings.TrimSpace(opts.Home); home != "" {
+		folder = "DefenseClaw's data folder (" + home + ")"
+	}
+	subject := hookEventSubject(opts.Event)
+	if diskFull {
+		return "DefenseClaw blocked this " + subject + ": the disk that holds " + folder +
+			" is full, so the DefenseClaw gateway could not write the audit record it keeps for every call. " +
+			"Free space on that disk, then try again; `defenseclaw doctor` shows the details."
+	}
+	return "DefenseClaw blocked this " + subject + ": the DefenseClaw gateway could not write the audit record " +
+		"it keeps for every call (HTTP 503: hook audit is unavailable). A full disk under " + folder +
+		" is the usual cause: free space there, then try again; `defenseclaw doctor` shows why."
+}
 
 // gatewayAuditUnavailable reports the gateway's 503 for a call whose audit
 // record it could not journal before answering (agent_hook.go: "hook audit
@@ -4446,7 +4492,7 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case layer == "input":
 		cause, advice = "its hook input names two different events, so DefenseClaw cannot tell what to check",
 			"Try again; if this continues, contact your administrator."
-	case reason == managedAuditUnavailableReason:
+	case reason == auditUnavailableReason:
 		// As the gateway's own audit-failure answer says it (agent_hook.go
 		// hookAuditFailureResponse), with what the administrator checks
 		// (rel-1-0-6 GAP-0174).

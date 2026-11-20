@@ -1475,11 +1475,19 @@ func retentionAuditDeleteStatement(class RetentionTableClass) (string, error) {
 			ORDER BY retention_timestamp_unix_nano ASC, id ASC LIMIT ?
 		)`, nil
 	case RetentionScanResults:
+		// A scan a target_snapshots baseline references stays: the rescan
+		// diffs a target's new scan against it for new findings and severity
+		// escalation, and a target unchanged since its baseline was scanned
+		// otherwise lost it to day or size retention, so its drift was never
+		// computed again (rel-1-0-10:GAP-1177). target_snapshots holds one
+		// row per installed target, so the kept rows are bounded by the
+		// inventory; a replaced or removed baseline's scan ages out as before.
 		return `DELETE FROM scan_results WHERE id IN (
 			SELECT id FROM scan_results
 			WHERE retention_timestamp_unix_nano < ?
 			  AND NOT EXISTS (SELECT 1 FROM scan_findings WHERE scan_id = scan_results.id)
 			  AND NOT EXISTS (SELECT 1 FROM findings WHERE scan_id = scan_results.id)
+			  AND NOT EXISTS (SELECT 1 FROM target_snapshots WHERE scan_id = scan_results.id)
 			ORDER BY retention_timestamp_unix_nano ASC, id ASC LIMIT ?
 		)`, nil
 	default:

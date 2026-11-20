@@ -314,3 +314,242 @@ def test_manifest_sources_are_not_hidden_by_the_installer_rewrite(tmp_path, monk
         manifest["devDependencies"] = sources
         _write(root / "package.json", json.dumps(manifest))
         assert vendor_identity.inspect_official_provider_tree(str(root)) is None, name
+
+
+# --- GAP-1195: OpenClaw 2026.11.3 installs the provider from ClawHub ---------
+
+CLAWHUB = "https://clawhub.ai"
+CLAWHUB_TARBALL = (
+    CLAWHUB + "/api/npm/" + PROVIDER + "/-/openclaw-amazon-bedrock-provider-{version}.tgz"
+)
+
+
+def _clawhub_build(root, version) -> None:
+    """The ClawHub build of a release: other bundler output than the npm archive.
+
+    Shaped like ClawHub's @openclaw/amazon-bedrock-provider 2026.11.3: no
+    region comments, an extra hashed setup chunk and a source map folder, and
+    a manifest without bundledDependencies. Its dist calls RegExp ``exec``,
+    which the ordinary scan reports as SRC-EXEC HIGH.
+    """
+
+    _write(root / "package.json", json.dumps({
+        "name": PROVIDER, "version": version,
+        "dependencies": {"dep": "1.0.0"},
+        "peerDependencies": {"openclaw": ">=" + version},
+        "peerDependenciesMeta": {"openclaw": {"optional": True}},
+        "openclaw": {"install": {
+            "clawhubSpec": "clawhub:" + PROVIDER, "npmSpec": PROVIDER, "defaultChoice": "npm",
+        }},
+    }))
+    _write(root / "openclaw.plugin.json", json.dumps({"id": "amazon-bedrock"}))
+    _write(root / "dist" / "register.sync.runtime.js",
+           "return bedrockRegionRe.exec(baseUrl)?.[1];\n")
+    _write(root / "dist" / ".setup" / "config-compat-DiiAddff.mjs", "// \\0rolldown/runtime.js\n")
+    _write(root / "dist" / ".source-module-urls" / "map.json", json.dumps({"version": 3}))
+
+
+def _npm_build(root, version) -> None:
+    """The npm archive of the same version: same sources, other bundler output."""
+
+    _write(root / "package.json", json.dumps({
+        "name": PROVIDER, "version": version,
+        "dependencies": {"dep": "1.0.0"},
+        "peerDependencies": {"openclaw": ">=" + version},
+        "bundledDependencies": ["dep"],
+    }))
+    _write(root / "openclaw.plugin.json", json.dumps({"id": "amazon-bedrock"}))
+    _write(root / "dist" / "register.sync.runtime.js",
+           "//#region extensions/amazon-bedrock/register.sync.runtime.ts\n"
+           "return bedrockRegionRe.exec(baseUrl)?.[1];\n//#endregion\n")
+    _write(root / "dist" / ".setup" / "config-compat-HlsW2HRS.mjs", "//#region rolldown\n")
+
+
+def _clawhub_install(tmp_path, version):
+    """What ``openclaw plugins install amazon-bedrock`` leaves on 2026.11.3."""
+
+    clawhub, npm = tmp_path / "clawhub-build", tmp_path / "npm-build"
+    _clawhub_build(clawhub, version)
+    _npm_build(npm, version)
+    installed = tmp_path / "extensions" / "amazon-bedrock"
+    shutil.copytree(clawhub, installed)
+    manifest = json.loads((installed / "package.json").read_text(encoding="utf-8"))
+    manifest["devDependencies"] = {"@openclaw/plugin-sdk": "workspace:*"}
+    _write(installed / "package.json", json.dumps(manifest, indent=2))
+    modules = installed / "node_modules"
+    _write(modules / "dep" / "package.json", json.dumps({"name": "dep", "version": "1.0.0"}))
+    _write(modules / "dep" / "index.js", "module.exports = 1;\n")
+    # npm installs the dependencies only; the provider itself has no lock entry.
+    _write(modules / ".package-lock.json", json.dumps({
+        "lockfileVersion": 3,
+        "packages": {"node_modules/dep": {"version": "1.0.0",
+                                          "resolved": "https://registry.npmjs.org/dep/-/dep-1.0.0.tgz"}},
+    }))
+    (modules / "openclaw").symlink_to(_openclaw_peer(tmp_path), target_is_directory=True)
+    return clawhub, npm, installed
+
+
+def _serve_npm_and_clawhub(
+    monkeypatch, version, npm_archive, clawhub_archive, *, listing=None, artifact=None,
+) -> list[str]:
+    """Answer the npm registry and ClawHub as they answer for 2026.11.3."""
+
+    asked: list[str] = []
+    quoted = "%40openclaw%2Famazon-bedrock-provider"
+    npm_metadata = {
+        "name": PROVIDER, "version": version,
+        "dist": {
+            "integrity": "sha512-" + base64.b64encode(hashlib.sha512(npm_archive).digest()).decode(),
+            "tarball": f"https://registry.npmjs.org/{PROVIDER}/-/amazon-bedrock-provider-{version}.tgz",
+        },
+    }
+    clawhub_listing = {
+        "package": {"name": PROVIDER, "channel": "official", "isOfficial": True,
+                    "family": "code-plugin"},
+        "owner": {"handle": "openclaw", "official": True},
+    }
+    clawhub_listing.update(listing or {})
+    clawhub_artifact = {
+        "package": {"name": PROVIDER}, "version": version,
+        "artifact": {
+            "kind": "npm-pack", "format": "tgz",
+            "sha256": hashlib.sha256(clawhub_archive).hexdigest(),
+            "npmIntegrity": "sha512-" + base64.b64encode(
+                hashlib.sha512(clawhub_archive).digest()).decode(),
+            "tarballUrl": CLAWHUB_TARBALL.format(version=version),
+        },
+    }
+    clawhub_artifact["artifact"].update(artifact or {})
+    answers = {
+        f"https://registry.npmjs.org/@openclaw%2Famazon-bedrock-provider/{version}":
+            json.dumps(npm_metadata).encode(),
+        npm_metadata["dist"]["tarball"]: npm_archive,
+        f"{CLAWHUB}/api/v1/packages/{quoted}": json.dumps(clawhub_listing).encode(),
+        f"{CLAWHUB}/api/v1/packages/{quoted}/versions/{version}/artifact":
+            json.dumps(clawhub_artifact).encode(),
+        CLAWHUB_TARBALL.format(version=version): clawhub_archive,
+    }
+
+    def get(url, limit):
+        asked.append(url)
+        if url not in answers:
+            raise ValueError("unexpected request " + url)
+        return answers[url]
+
+    monkeypatch.setattr(vendor_identity, "_registry_get", get)
+    return asked
+
+
+@requires_symlink_privilege
+def test_gap1195_clawhub_install_is_confirmed_against_the_clawhub_artifact(
+    tmp_path, monkeypatch,
+) -> None:
+    version = "2026.11.3"
+    assert (PROVIDER, version) not in vendor_identity.VENDOR_DIGESTS
+    clawhub, npm, installed = _clawhub_install(tmp_path, version)
+    # The two builds of one version differ, so the npm archive cannot vouch.
+    assert vendor_identity._package_digest(str(clawhub)) != vendor_identity._package_digest(str(npm))
+    asked = _serve_npm_and_clawhub(monkeypatch, version, _archive(npm), _archive(clawhub))
+
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) == (
+        vendor_identity.ProviderIdentity(PROVIDER, True)
+    )
+    # npm is asked first; ClawHub only because the npm build did not match.
+    assert asked[0].startswith("https://registry.npmjs.org/")
+    assert CLAWHUB_TARBALL.format(version=version) in asked
+    assert _high_rules(installed) == set()
+    # Strict keeps the ordinary scan.
+    assert "SRC-EXEC" in {f.rule_id for f in scan_plugin(
+        str(installed), PluginScanOptions(profile="strict"),
+    ).findings if f.severity == "HIGH"}
+
+
+@requires_symlink_privilege
+def test_gap1195_clawhub_answer_that_does_not_prove_the_tree_gives_no_identity(
+    tmp_path, monkeypatch,
+) -> None:
+    version = "2026.11.3"
+    clawhub, npm, installed = _clawhub_install(tmp_path, version)
+    npm_archive, clawhub_archive = _archive(npm), _archive(clawhub)
+    other = "sha512-" + base64.b64encode(hashlib.sha512(b"other").digest()).decode()
+    cases = {
+        "community-channel": dict(listing={"package": {
+            "name": PROVIDER, "channel": "community", "isOfficial": True}}),
+        "not-official": dict(listing={"package": {
+            "name": PROVIDER, "channel": "official", "isOfficial": False}}),
+        "other-owner": dict(listing={"owner": {"handle": "openclaw-mirror", "official": True}}),
+        "unofficial-owner": dict(listing={"owner": {"handle": "openclaw", "official": False}}),
+        "integrity-mismatch": dict(artifact={"npmIntegrity": other}),
+        "sha256-mismatch": dict(artifact={"sha256": "0" * 64}),
+        "other-address": dict(artifact={
+            "tarballUrl": "https://example.invalid/openclaw-amazon-bedrock-provider.tgz"}),
+        "other-kind": dict(artifact={"kind": "clawpack"}),
+    }
+    for name, answer in cases.items():
+        vendor_identity._registry_digests.clear()
+        _serve_npm_and_clawhub(monkeypatch, version, npm_archive, clawhub_archive, **answer)
+        assert vendor_identity.inspect_official_provider_tree(str(installed)) is None, name
+        assert "SRC-EXEC" in _high_rules(installed), name
+
+    # A ClawHub archive with other files does not vouch for this tree.
+    vendor_identity._registry_digests.clear()
+    _serve_npm_and_clawhub(
+        monkeypatch, version, npm_archive, _archive(clawhub, extra={"dist/extra.js": b"1"}),
+    )
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is None
+
+    # ClawHub unreachable: no identity, the ordinary verdict.
+    vendor_identity._registry_digests.clear()
+    _serve_npm_and_clawhub(monkeypatch, version, npm_archive, clawhub_archive)
+    served = vendor_identity._registry_get
+
+    def clawhub_down(url, limit):
+        if url.startswith(CLAWHUB):
+            raise OSError("offline")
+        return served(url, limit)
+
+    monkeypatch.setattr(vendor_identity, "_registry_get", clawhub_down)
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is None
+    assert "SRC-EXEC" in _high_rules(installed)
+
+
+@requires_symlink_privilege
+def test_gap1195_tampered_or_spoofed_clawhub_install_keeps_the_ordinary_verdict(
+    tmp_path, monkeypatch,
+) -> None:
+    version = "2026.11.3"
+    clawhub, npm, installed = _clawhub_install(tmp_path, version)
+    npm_archive, clawhub_archive = _archive(npm), _archive(clawhub)
+
+    def fresh(name, edit):
+        root = tmp_path / name / "amazon-bedrock"
+        shutil.copytree(installed, root, symlinks=True)
+        edit(root)
+        vendor_identity._registry_digests.clear()
+        return root, _serve_npm_and_clawhub(monkeypatch, version, npm_archive, clawhub_archive)
+
+    def rename(root, value):
+        manifest = json.loads((root / "package.json").read_text(encoding="utf-8"))
+        manifest["name"] = value
+        _write(root / "package.json", json.dumps(manifest))
+
+    tampered = {
+        "edited-dist": lambda root: _write(
+            root / "dist" / "register.sync.runtime.js",
+            "return bedrockRegionRe.exec(baseUrl)?.[1]; exec(command);\n"),
+        "extra-own-file": lambda root: _write(root / "dist" / "extra.js", "module.exports = 4;\n"),
+        "install-script": lambda root: _write(root / "package.json", json.dumps({
+            **json.loads((root / "package.json").read_text(encoding="utf-8")),
+            "scripts": {"postinstall": "node x.js"}})),
+    }
+    for name, edit in tampered.items():
+        root, _ = fresh(name, edit)
+        assert vendor_identity.inspect_official_provider_tree(str(root)) is None, name
+        assert "SRC-EXEC" in _high_rules(root), name
+
+    # A lookalike name is not an official package: no registry is asked at all.
+    for name in ("amazon-bedrock", "@openclaw-community/amazon-bedrock-provider"):
+        root, asked = fresh("spoof-" + name.replace("/", "_"), lambda r, n=name: rename(r, n))
+        assert vendor_identity.inspect_official_provider_tree(str(root)) is None, name
+        assert asked == [], name
+        assert "SRC-EXEC" in _high_rules(root), name

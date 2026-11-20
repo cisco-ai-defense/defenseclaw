@@ -1233,7 +1233,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				}
 				finalized = true
 				attemptedWrite = true
-				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
+				a.writeJSON(w, http.StatusServiceUnavailable, hookAuditUnavailableBody(journalErr))
 				return
 			}
 		}
@@ -5622,4 +5622,16 @@ func stringifyHookValue(value interface{}) string {
 		}
 		return string(b)
 	}
+}
+
+// hookAuditUnavailableBody is the 503 answer of a call whose delivery journal
+// could not be written. A write the disk had no room for carries
+// cause=disk_full, so a per-user hook can say that the disk is full and what
+// to do (rel-1-0-10:GAP-1222); the call stays refused either way.
+func hookAuditUnavailableBody(err error) map[string]string {
+	body := map[string]string{"error": "hook audit is unavailable"}
+	if audit.IsStoreFullError(err) {
+		body["cause"] = hookexec.HookAuditCauseDiskFull
+	}
+	return body
 }

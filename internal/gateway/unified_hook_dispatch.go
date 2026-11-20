@@ -93,7 +93,13 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 	}
 	agentVersion := connector.LoadCachedAgentVersion(a.configDataDir(), name)
 	lock := connector.LoadHookContractLockEntry(a.configDataDir(), name)
-	contractID := lock.ContractID
+	return a.hookProfileFrom(provider, name, agentVersion, lock.ContractID)
+}
+
+// hookProfileFrom builds name's profile for an agent version and the hook
+// contract its install was rendered with; an empty contract resolves from
+// the version.
+func (a *APIServer) hookProfileFrom(provider connector.HookProfileProvider, name, agentVersion, contractID string) connector.HookProfile {
 	if contractID == "" {
 		contractID = connector.ResolveHookContract(name, agentVersion).Contract.ContractID
 	}
@@ -134,6 +140,14 @@ func (a *APIServer) hookProfileForRequest(ctx context.Context, name string) conn
 func (a *APIServer) hookProfileForRequestBase(ctx context.Context, name string) connector.HookProfile {
 	binding, ok := sandboxauth.FromContext(ctx)
 	if !ok {
+		if provider, found := a.hookProfileProvider(name); found {
+			if version, contractID, recorded := a.callerAgentContract(ctx, name); recorded {
+				// A standalone gateway serves every enrolled account from
+				// the machine data dir, where no agent version is ever
+				// cached: the guardian recorded the caller's (GAP-0114).
+				return a.hookProfileFrom(provider, name, version, contractID)
+			}
+		}
 		return a.hookProfileForConnector(name)
 	}
 	if sandboxauth.CanonicalConnector(name) != binding.Connector {
