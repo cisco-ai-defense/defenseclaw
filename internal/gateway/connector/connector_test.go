@@ -249,7 +249,9 @@ func TestAtomicWriteFile_PreservesSymlinkedDotfile(t *testing.T) {
 	}
 	if info, err := os.Stat(target); err != nil {
 		t.Fatalf("stat target: %v", err)
-	} else if mode := info.Mode().Perm(); mode != 0o600 {
+	} else if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
+		// Windows reports only 0666 or 0444 for Perm(): a POSIX owner-only mode
+		// cannot be asserted there (rel-1-0-10 GAP-1522).
 		t.Fatalf("target mode = %#o, want 0600", mode)
 	}
 }
