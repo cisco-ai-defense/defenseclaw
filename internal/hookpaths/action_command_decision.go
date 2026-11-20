@@ -513,9 +513,66 @@ func ActionPrivateKeyReadWithDialect(command, cwd, home string, dialect actionfa
 // /*/*: the walk of the host's root ran past the inspect scan budget and the
 // route answered 504 (rel-1-0-10:GAP-1066). It runs in the hook call of the
 // calling goroutine, or in one of its own.
+//
+// The call reads each reading once (keyReads). The gateway judges a statement
+// of a call again on its own (one simple-command pass per statement), and a
+// call with a command substitution, head -n1 $(pwd)/w/*/*, has two statements
+// (pwd and itself), so the reader expanded the same capped pattern twice:
+// twice the walk of $PWD/w/*/*, which is one statement, and a route answer
+// near the scan budget on a slow host (rel-1-0-10:GAP-1560). A repeat is
+// answered from the call only where a read would give the same answer: the
+// same reading (command, folder, home, dialect), in a call whose budgets and
+// causes (CallState, the pattern caps aside) the first read left as it found
+// them and the repeat finds in that state. The file system is the same for
+// the whole decision, as for the call's other memories (callStat). The repeat
+// adds the caps the first read hit to the call, as a read would.
 func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.Dialect) (read bool, truncated bounded.CapSet) {
-	truncated = globCutOf(func() { read = ActionPrivateKeyReadWithDialect(command, cwd, home, dialect) })
+	call, end := beginHookCall()
+	defer end()
+	if call == nil {
+		return ActionPrivateKeyReadWithDialect(command, cwd, home, dialect), bounded.CapSet{}
+	}
+	key := keyReadKey{command: command, cwd: cwd, home: home, dialect: dialect}
+	before := call.spent()
+	if answer, ok := call.keyReads[key]; ok && answer.spent == before {
+		call.globCut = call.globCut.Union(answer.truncated)
+		return answer.read, answer.truncated
+	}
+	truncated = call.globCutOf(func() { read = ActionPrivateKeyReadWithDialect(command, cwd, home, dialect) })
+	if call.spent() == before && len(call.keyReads) < maxCallKeyReads {
+		if call.keyReads == nil {
+			call.keyReads = make(map[keyReadKey]keyReadAnswer)
+		}
+		call.keyReads[key] = keyReadAnswer{read: read, truncated: truncated, spent: before}
+	}
 	return read, truncated
+}
+
+// keyReadKey is one reading of the private-key reader
+// (ActionPrivateKeyReadBounded).
+type keyReadKey struct {
+	command, cwd, home string
+	dialect            actionfacts.Dialect
+}
+
+// keyReadAnswer is what a read of a keyReadKey answered, and the call's state
+// (spent) before and after it.
+type keyReadAnswer struct {
+	read      bool
+	truncated bounded.CapSet
+	spent     CallState
+}
+
+// maxCallKeyReads bounds the private-key answers a call keeps: past it, a
+// reading is read and not kept.
+const maxCallKeyReads = 256
+
+// spent is the CallState of call without the pattern caps, which a read only
+// adds to and never reads.
+func (call *hookCall) spent() CallState {
+	state := call.state()
+	state.globCut = bounded.CapSet{}
+	return state
 }
 
 // globCutOf runs read in the hook call of the calling goroutine (or one of
@@ -524,6 +581,11 @@ func ActionPrivateKeyReadBounded(command, cwd, home string, dialect actionfacts.
 func globCutOf(read func()) bounded.CapSet {
 	call, end := beginHookCall()
 	defer end()
+	return call.globCutOf(read)
+}
+
+// globCutOf is globCutOf in call (nil: none, read alone).
+func (call *hookCall) globCutOf(read func()) bounded.CapSet {
 	if call == nil {
 		read()
 		return bounded.CapSet{}

@@ -188,6 +188,9 @@ type hookCall struct {
 	// scriptBytes their size in all.
 	scripts     map[scriptReadKey]string
 	scriptBytes int
+	// keyReads are the answers of the private-key reader, by its reading
+	// (ActionPrivateKeyReadBounded).
+	keyReads map[keyReadKey]keyReadAnswer
 }
 
 type statAnswer struct {
@@ -994,6 +997,11 @@ func HookCallState() CallState {
 	if call == nil {
 		return CallState{}
 	}
+	return call.state()
+}
+
+// state is the CallState of call (not nil).
+func (call *hookCall) state() CallState {
 	return CallState{
 		open: true, waitLeft: call.waitLeft, tail: call.tail,
 		bodyUnread: call.bodyUnread, bodyLinks: call.bodyLinks, linksUnproven: call.linksUnproven,
