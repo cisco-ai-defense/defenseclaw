@@ -154,7 +154,7 @@ func PatchCallNamesProtectedTarget(tool string, args json.RawMessage, command, c
 	}
 	texts := []string{command, string(args)}
 	for _, text := range texts {
-		if patchTextNamesSSH.MatchString(text) {
+		if patchTextNamesSSH.MatchString(jsonLineEscapes.Replace(text)) {
 			return true
 		}
 	}
@@ -211,9 +211,19 @@ func ApplyPatchToolWithoutText(tool string, args json.RawMessage) bool {
 	return true
 }
 
-// patchTextNamesSSH matches an authorized-keys name or a .ssh path component
-// in raw call text (JSON escapes included).
-var patchTextNamesSSH = lazyregexp.New(`(?i)authorized_keys|(?:^|[^A-Za-z0-9_.-])\.ssh(?:$|[^A-Za-z0-9_.-])`)
+// patchTextNamesSSH matches an authorized-keys file name or a .ssh path
+// component in raw call text. Each is a whole name: a longer word that only
+// holds the name (semantic_authorized_keys_proof.go,
+// authorized_keys_symlink_write_test.go, a source or a test named for the
+// feature) names no protected file, so a call that reads such a file is never
+// the SSH rule by its name (rel-1-0-10:GAP-0432). A name that a dot, a dash or
+// a quote ends (authorized_keys.bak, authorized_keys2, ~/.ssh/) still counts.
+var patchTextNamesSSH = lazyregexp.New(`(?i)(?:^|[^A-Za-z0-9_])(?:administrators_)?authorized_keys2?(?:$|[^A-Za-z0-9_])|(?:^|[^A-Za-z0-9_.-])\.ssh(?:$|[^A-Za-z0-9_.-])`)
+
+// jsonLineEscapes reads the line escapes of raw JSON argument text as the
+// separators they stand for, so a name at the start of an escaped line
+// (\nauthorized_keys) is still a whole name.
+var jsonLineEscapes = strings.NewReplacer(`\n`, " ", `\r`, " ", `\t`, " ")
 
 func jsonStringRaw(value string) json.RawMessage {
 	encoded, _ := json.Marshal(value)
