@@ -5354,23 +5354,40 @@ def _is_reparse_path(path: str | os.PathLike[str]) -> bool:
     return link_guard.is_reparse(path)
 
 
+def _readonly_refusal_removed(path: str, function, error: OSError) -> bool:
+    """Whether a ReadOnly entry Windows refused to function() went after all (GAP-1609).
+
+    Only an entry whose ReadOnly attribute is really set is retried, once;
+    the failed delete is not simply repeated. Another remover taking it
+    first counts as removed (GAP-2355).
+    """
+    try:
+        return windows_uninstall_helper.remove_refused_readonly(path, function, error)
+    except FileNotFoundError:
+        return True
+
+
 def _rmtree_gone_ok(path: str) -> None:
     """rmtree that counts a file or folder another remover took first as removed.
 
     Two uninstalls of one account at once (two terminals) walk the same
     trees: each failed with ENOENT on what the other had just deleted and
-    left data behind for a second run (GAP-2355). A ReadOnly file or folder
-    that Windows refused to delete loses the attribute and goes (GAP-1609);
-    rmtree passes only entries of path, and links and junctions themselves.
+    left data behind for a second run (GAP-2355). On Windows a ReadOnly file
+    or folder that Windows refused to delete goes too (GAP-1609); rmtree
+    passes only entries of path, and links and junctions themselves. Off
+    Windows a refusal is raised as it is.
     """
 
     def gone_ok(function, failed_path, exc) -> None:
         error = exc if isinstance(exc, BaseException) else exc[1]
         if isinstance(error, FileNotFoundError):
             return
-        if function in (os.unlink, os.remove, os.rmdir) and isinstance(error, PermissionError):
-            with contextlib.suppress(FileNotFoundError):
-                windows_uninstall_helper.remove_clearing_readonly(failed_path, function)
+        if (
+            sys.platform == "win32"
+            and function in (os.unlink, os.remove, os.rmdir)
+            and isinstance(error, PermissionError)
+            and _readonly_refusal_removed(failed_path, function, error)
+        ):
             return
         raise error
 
