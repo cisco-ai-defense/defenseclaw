@@ -137,7 +137,7 @@ func (f *providerConfigFixture) link(t *testing.T, rel, target string) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, path); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 }
 
@@ -157,6 +157,20 @@ func (f *providerConfigFixture) facts() providerConfigFacts {
 }
 
 func intRef(value int) *int { return &value }
+
+// providerConfigOwnerCheckExists reports whether this platform can name the
+// account that owns a file. Where it cannot (Windows, where files are owned
+// by a SID: hostplane_provider_config_other.go), no read is the agent's own
+// provider config and the GAP-1189 exemption never applies, as at rel.
+func providerConfigOwnerCheckExists(t *testing.T) bool {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "owner-probe")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, ok := fileOwnerUID(path)
+	return ok
+}
 
 // claudeExec is a depth-0 claude process of account uid.
 func claudeExec(pid, uid int, at time.Time) plane.Event {
@@ -211,6 +225,32 @@ func TestGAP1189ClaudeOwnBedrockConfigReadIsNotCredentialAccess(t *testing.T) {
 			fileRead(310, uidDev, fixture.path("home/dev/conf/.aws/config"), base.Add(time.Second))},
 		{"AWS_CONFIG_FILE with ~", claudeExec(311, uidDev, base),
 			fileRead(311, uidDev, fixture.path("home/dev/conf/.aws/config"), base.Add(time.Second))},
+	}
+	if !providerConfigOwnerCheckExists(t) {
+		// No file owner on this platform: nothing is exempt. The same
+		// process reading another account's config (a control) scores 18
+		// where the agent is recognised at all, and each own-config read
+		// must score exactly what its control does.
+		scored := 0
+		for _, tc := range cases {
+			control := tc.read
+			control.Path = fixture.path("home/victim/.aws/config")
+			_, want := providerConfigWeight(t, fixture, base, tc.exec, control)
+			if want != 0 && want != 18 {
+				t.Errorf("%s: control weight %d, want 0 or 18", tc.name, want)
+			}
+			if _, weight := providerConfigWeight(t, fixture, base, tc.exec, tc.read); weight != want {
+				t.Errorf("%s: agent_credential_access weight %d, want %d: no platform file owner, so the own-config exemption must not apply",
+					tc.name, weight, want)
+			}
+			if want == 18 {
+				scored++
+			}
+		}
+		if scored == 0 {
+			t.Error("no own-config read scored 18 without a platform file owner, want the exemption absent")
+		}
+		return
 	}
 	for _, tc := range cases {
 		classified, weight := providerConfigWeight(t, fixture, base, tc.exec, tc.read)
