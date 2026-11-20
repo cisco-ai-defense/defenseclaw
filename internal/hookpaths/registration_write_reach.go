@@ -909,16 +909,13 @@ func registrationFindFileWords(words []*syntax.Word, file, home string) []*synta
 // neither spelled out nor bound is no root and no test, and a negated test
 // selects nothing.
 func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd, home string, protected protectedFiles) []string {
-	type nameTest struct {
-		pattern     string
-		whole, fold bool
-	}
 	var roots []string
-	var tests []nameTest
-	rootsOpen, negated := true, false
+	var tests []findTest
+	rootsOpen, negated, follow := true, false, false
 	for index := 0; index < len(args); index++ {
 		text, fixed := StaticWord(args[index], home)
 		if rootsOpen && (text == "-H" || text == "-L" || text == "-P") {
+			follow = follow || text != "-P"
 			continue
 		}
 		if rootsOpen && (!fixed || !strings.HasPrefix(text, "-") && text != "!" && text != "(") {
@@ -935,10 +932,13 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 		case "!", "-not":
 			negated = !negated
 			continue
+		case "-follow":
+			follow = true
 		case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename":
 			if index+1 < len(args) {
 				if pattern, known := StaticWord(args[index+1], home); known && !negated {
-					tests = append(tests, nameTest{pattern, strings.Contains(text, "path") || strings.Contains(text, "wholename"), strings.HasPrefix(text, "-i")})
+					test, _ := newFindTest(text, pattern, "")
+					tests = append(tests, test)
 				}
 				index++
 			}
@@ -968,19 +968,19 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 					continue
 				}
 				// A find hands its child only the entries the walk finds: a
-				// wildcard test does not hand a protected file that does not
-				// exist below the root (rel-1-0-10:GAP-1555). A test that
-				// spells the file's name hands it either way
-				// (findPatternSpellsName), and so does one whose state is
-				// unknown.
-				absent := target.info == nil && !target.unknown
+				// generic test does not hand a protected file that does not
+				// exist below the root (rel-1-0-10:GAP-1555). A test aimed at
+				// the file hands it either way (findTest.aimsAt), and so does
+				// a walk that follows links (rel-1-0-10:GAP-1572) and a
+				// target whose state is unknown.
+				absent := target.info == nil && !target.unknown && !follow
 				for _, test := range tests {
 					text := filepath.Base(target.path)
 					if test.whole {
 						text = target.path
 					}
 					if registrationGlobMatch(test.pattern, text, test.fold) &&
-						(!absent || findPatternSpellsName(test.pattern, target.path, test.fold)) {
+						(!absent || test.aimsAt(root, path, target.path)) {
 						reached = append(reached, target.path)
 						break
 					}
@@ -991,23 +991,6 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 		}
 	}
 	return reached
-}
-
-// findPatternSpellsName reports a find name or path test whose pattern spells
-// the file name of path literally (in any case when fold): -name
-// settings.json, -path ./.claude/settings.json and -path '*/settings.json'
-// name that hook file, and the call is judged on it whether or not it exists
-// when the hook runs, since an earlier part of the chain or another process
-// may create it before the walk (rel-1-0-10:GAP-1555). A test that matches
-// the name only through a wildcard (*, *.json) is a filter over what the walk
-// finds, and the walk finds only the files that exist. The names are those of
-// the protected set itself, so no list of hook file names is kept here.
-func findPatternSpellsName(pattern, path string, fold bool) bool {
-	pattern, name := strings.ReplaceAll(pattern, `\`, ""), filepath.Base(path)
-	if fold {
-		pattern, name = strings.ToLower(pattern), strings.ToLower(name)
-	}
-	return strings.Contains(pattern, name)
 }
 
 // registrationGlobMatch matches text against a find glob: * and ? also match
@@ -1122,9 +1105,12 @@ func findChildRemovesTree(args []string) bool {
 }
 
 func registrationFindReach(words []string, cwd string, protected, all protectedFiles) bool {
-	// paths are the -path test patterns, which do not filter here.
-	var roots, names, paths []string
-	deletes, insensitive, pathFold := false, false, false
+	// paths are the -path and -regex tests, which do not filter here.
+	var roots, names []string
+	var paths []findTest
+	deletes, insensitive, follow := false, false, false
+	// regexType is the -regextype in force.
+	regexType := ""
 	// A walk cut at -maxdepth N reaches nothing deeper than N below a root.
 	// Several limits or one that is not a number leave the walk unbounded.
 	maxDepth, limits := 0, 0
@@ -1163,12 +1149,19 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 				names = append(names, words[i+1])
 				i++
 			}
-		case "-path", "-ipath", "-wholename", "-iwholename":
+		case "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex":
 			if i+1 < len(words) {
-				pathFold = pathFold || strings.HasPrefix(word, "-i")
-				paths = append(paths, words[i+1])
+				test, _ := newFindTest(word, words[i+1], regexType)
+				paths = append(paths, test)
 				i++
 			}
+		case "-regextype":
+			if i+1 < len(words) {
+				regexType = words[i+1]
+				i++
+			}
+		case "-follow", "-H", "-L":
+			follow = true
 		default:
 			if len(roots) == i-1 && !strings.HasPrefix(word, "-") && word != "!" && word != "(" {
 				roots = append(roots, word)
@@ -1181,19 +1174,27 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
-	spells := func(target protectedFile, patterns []string, fold bool) bool {
-		return slices.ContainsFunc(patterns, func(pattern string) bool { return findPatternSpellsName(pattern, target.path, fold) })
+	nameOption := "-name"
+	if insensitive {
+		nameOption = "-iname"
 	}
-	for _, root := range roots {
-		root = OperandPath(root, cwd)
+	nameTests := make([]findTest, len(names))
+	for i, name := range names {
+		nameTests[i], _ = newFindTest(nameOption, name, "")
+	}
+	for _, written := range roots {
+		root := OperandPath(written, cwd)
 		below := func(target protectedFile) bool {
 			return target.path == root || strings.HasPrefix(target.path, root+string(filepath.Separator))
 		}
-		// A -path test does not filter the walk here. One that spells a
-		// file of the whole registration set below the root by name judges
-		// the walk on every registration file below it, existing or not, as
-		// before GAP-1196 (rel-1-0-10:GAP-1555).
-		pathNamed := slices.ContainsFunc(all, func(target protectedFile) bool { return below(target) && spells(target, paths, pathFold) })
+		aimed := func(target protectedFile, tests []findTest) bool {
+			return slices.ContainsFunc(tests, func(test findTest) bool { return test.aimsAt(written, root, target.path) })
+		}
+		// A -path or -regex test does not filter the walk here. One aimed
+		// at a file of the whole registration set below the root judges the
+		// walk on every registration file below it, existing or not, as
+		// before GAP-1196 (rel-1-0-10:GAP-1555, GAP-1572).
+		pathNamed := slices.ContainsFunc(all, func(target protectedFile) bool { return below(target) && aimed(target, paths) })
 		for _, target := range protected {
 			if !below(target) {
 				continue
@@ -1204,9 +1205,11 @@ func registrationFindReach(words []string, cwd string, protected, all protectedF
 			// targets of their own. A spelling of the root (., ./, the
 			// absolute path) therefore reaches the same files
 			// (rel-1-0-10:GAP-1196). A target whose state is unknown counts,
-			// and so does one a name test spells by name
-			// (rel-1-0-10:GAP-1555).
-			if !target.unknown && (target.info == nil || target.info.IsDir()) && !pathNamed && !spells(target, names, insensitive) {
+			// and so does one a name test is aimed at (rel-1-0-10:GAP-1555)
+			// and, for a walk that follows links, one that does not exist
+			// (rel-1-0-10:GAP-1572).
+			if !target.unknown && (target.info == nil && !follow || target.info != nil && target.info.IsDir()) &&
+				!pathNamed && !aimed(target, nameTests) {
 				continue
 			}
 			if !tree && limits == 1 && maxDepth >= 0 && target.path != root &&
