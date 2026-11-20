@@ -9,8 +9,10 @@ deferred cleanup, which then failed with "cannot be removed by your account
 backups\\rolled-back-*\\substrate\\hostcopies, and the whole data folder
 stayed: .env with the API keys, device.key, the config. Windows refuses to
 delete a ReadOnly file; the account that owns it may clear the attribute.
-Uninstall now clears it on the entries of the trees it removes, never through
-a link or junction.
+Uninstall now deletes a refused ReadOnly entry through one handle that does
+not follow a link or junction and leaves the attribute as it is (a hard link
+shares it with a file outside); before Windows 1809 it clears the attribute on
+the entry itself, never on a file with another name.
 """
 
 from __future__ import annotations
@@ -61,11 +63,18 @@ def _tree(root: Path) -> tuple[Path, Path, Path, Path]:
 
 
 class _FakeReadOnly:
-    """Windows' ReadOnly refusal, off Windows: os.unlink and os.rmdir refuse a path in readonly."""
+    """Windows' ReadOnly refusal, off Windows: os.unlink and os.rmdir refuse a path in readonly.
 
-    def __init__(self, *paths: Path) -> None:
+    handle_delete: Windows 1809+ deletes a ReadOnly entry through its handle
+    without changing the attribute; False is an older Windows, where only
+    clearing the attribute works.
+    """
+
+    def __init__(self, *paths: Path, handle_delete: bool = True) -> None:
         self.readonly = {os.path.normcase(str(path)) for path in paths}
+        self.handle_delete = handle_delete
         self.cleared: list[str] = []
+        self.handle_deleted: list[str] = []
         self._unlink = os.unlink
         self._rmdir = os.rmdir
 
@@ -76,6 +85,24 @@ class _FakeReadOnly:
         self.cleared.append(os.path.normcase(str(path)))
         self.readonly.discard(os.path.normcase(str(path)))
         return True
+
+    def delete_by_handle(self, path: str) -> str:
+        key = os.path.normcase(str(path))
+        if key not in self.readonly:
+            return helper._READONLY_NOT_SET
+        if not self.handle_delete:
+            return helper._READONLY_UNSUPPORTED
+        self.handle_deleted.append(key)
+        if os.path.isdir(path) and not os.path.islink(path):
+            self._rmdir(path)
+        else:
+            self._unlink(path)
+        self.readonly.discard(key)
+        return helper._READONLY_DELETED
+
+    @property
+    def touched(self) -> list[str]:
+        return self.cleared + self.handle_deleted
 
     def unlink(self, path, *args, **kwargs):
         if os.path.normcase(str(path)) in self.readonly:
@@ -91,14 +118,21 @@ class _FakeReadOnly:
         return (
             patch.object(helper, "_file_attributes", side_effect=self.attributes),
             patch.object(helper, "_clear_readonly_attribute", side_effect=self.clear),
+            patch.object(helper, "_delete_readonly_entry", side_effect=self.delete_by_handle),
             patch.object(helper.os, "unlink", side_effect=self.unlink),
             patch.object(helper.os, "rmdir", side_effect=self.rmdir),
         )
 
 
 def _apply(patches):
-    for item in patches:
-        item.start()
+    started = []
+    try:
+        for item in patches:
+            item.start()
+            started.append(item)
+    except BaseException:
+        _stop(started)
+        raise
     return patches
 
 
@@ -107,17 +141,20 @@ def _stop(patches) -> None:
         item.stop()
 
 
-def test_a_refused_readonly_entry_is_cleared_and_removed(tmp_path):
+@pytest.mark.parametrize("handle_delete", [True, False], ids=["handle-delete", "older-windows-clear"])
+def test_a_refused_readonly_entry_is_removed(tmp_path, handle_delete):
     target = tmp_path / "f"
     target.write_text("", encoding="utf-8")
-    fake = _FakeReadOnly(target)
+    fake = _FakeReadOnly(target, handle_delete=handle_delete)
     patches = _apply(fake.patches())
     try:
         helper.remove_clearing_readonly(str(target), os.unlink)
     finally:
         _stop(patches)
     assert not target.exists()
-    assert fake.cleared == [os.path.normcase(str(target))]
+    # Where Windows can, the name goes through its handle and no attribute changes.
+    assert fake.handle_deleted == ([os.path.normcase(str(target))] if handle_delete else [])
+    assert fake.cleared == ([] if handle_delete else [os.path.normcase(str(target))])
 
 
 def test_a_refusal_that_is_not_readonly_is_raised_and_changes_nothing(tmp_path):
@@ -135,7 +172,10 @@ def test_a_refusal_that_is_not_readonly_is_raised_and_changes_nothing(tmp_path):
     def acl_denied(path, *args, **kwargs):
         raise _denied(str(path))
 
-    with patch.object(helper, "_clear_readonly_attribute", side_effect=clear):
+    with (
+        patch.object(helper, "_clear_readonly_attribute", side_effect=clear),
+        patch.object(helper, "_delete_readonly_entry", side_effect=clear),
+    ):
         with patch.object(helper, "_file_attributes", return_value=_READONLY), pytest.raises(PermissionError):
             helper.remove_clearing_readonly(str(target), held)
         # Access denied on an entry that is not ReadOnly (an ACL refusal) is raised as it was.
@@ -170,8 +210,8 @@ def test_the_deferred_cleanup_removes_readonly_entries_and_never_follows_a_link(
     assert not data_dir.exists()
     assert keep.read_text(encoding="utf-8") == "keep"
     outside = os.path.normcase(str(keep.parent))
-    assert not any(path == outside or path.startswith(outside + os.sep) for path in fake.cleared), fake.cleared
-    assert os.path.normcase(str(link)) in fake.cleared  # the link itself, not its target
+    assert not any(path == outside or path.startswith(outside + os.sep) for path in fake.touched), fake.touched
+    assert os.path.normcase(str(link)) in fake.touched  # the link itself, not its target
 
 
 # --- native Windows: the real ReadOnly attribute and a real junction ---------------------------
@@ -248,7 +288,8 @@ def test_native_clear_readonly_on_a_junction_changes_the_junction_not_its_target
 
 
 @windows_only
-def test_native_a_readonly_file_this_account_cannot_clear_is_reported_before_exit(tmp_path):
+@pytest.mark.parametrize("handle_delete", [True, False], ids=["handle-delete", "older-windows-clear"])
+def test_native_a_readonly_file_this_account_cannot_clear_is_reported_before_exit(tmp_path, handle_delete):
     data_dir = tmp_path / ".defenseclaw"
     data_dir.mkdir()
     (data_dir / "config.yaml").write_text("", encoding="utf-8")
@@ -258,13 +299,28 @@ def test_native_a_readonly_file_this_account_cannot_clear_is_reported_before_exi
     locked.write_text("", encoding="utf-8")
     os.chmod(plain, stat.S_IREAD)
     os.chmod(locked, stat.S_IREAD)
-    # The cleanup clears ReadOnly first, so a file whose attributes this account
-    # cannot write cannot go; the console says so before the CLI exits.
+    # Neither clearing ReadOnly nor deleting through the handle works for an
+    # account that cannot write the attributes; the console says so before the CLI exits.
     subprocess.run(["icacls", str(locked), "/deny", "*S-1-1-0:(WA)"], check=True, capture_output=True)
+    patches = (
+        ()
+        if handle_delete
+        else (
+            patch.object(helper, "_delete_readonly_entry", return_value=helper._READONLY_UNSUPPORTED),
+            patch.object(helper, "_readonly_delete_by_handle_expected", return_value=False),
+        )
+    )
+    _apply(patches)
     try:
-        assert helper.denied_entries(str(data_dir)) == [str(locked)]
+        try:
+            assert helper.denied_entries(str(data_dir)) == [str(locked)]
+            with pytest.raises(PermissionError):
+                helper.remove_clearing_readonly(str(locked), os.unlink)
+            assert locked.exists() and _readonly(locked)
+        finally:
+            subprocess.run(["icacls", str(locked), "/remove:d", "*S-1-1-0"], check=False, capture_output=True)
+        assert helper.denied_entries(str(data_dir)) == []
+        helper._remove_tree(str(data_dir), marker_names=helper._OWNERSHIP_MARKERS)
+        assert not data_dir.exists()
     finally:
-        subprocess.run(["icacls", str(locked), "/remove:d", "*S-1-1-0"], check=False, capture_output=True)
-    assert helper.denied_entries(str(data_dir)) == []
-    helper._remove_tree(str(data_dir), marker_names=helper._OWNERSHIP_MARKERS)
-    assert not data_dir.exists()
+        _stop(patches)
