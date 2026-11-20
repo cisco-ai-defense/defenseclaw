@@ -163,6 +163,12 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool, 
 	}
 	options, noDeref := true, false
 	var operands []string
+	// The glob options are a function of the call text and the startup
+	// alone: read once for the call, not once per operand word, which
+	// scanned the whole command again for each of up to 1,024 operands
+	// (rel-1-0-10:GAP-1613).
+	var globOptions shellGlobOptions
+	globOptionsRead := false
 	for _, word := range call.Args[1:] {
 		if options {
 			if option, fixed := StaticWord(word, home); fixed && strings.HasPrefix(option, "-") && option != "-" {
@@ -197,7 +203,10 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool, 
 				if actionWindowsHome(home) && shellWordNeedsResolver(word) {
 					return nil, false
 				}
-				resolved := resolveShellWord(word, values, cwd, shellGlobOptionsForCall(command, startup))
+				if !globOptionsRead {
+					globOptions, globOptionsRead = shellGlobOptionsForCall(command, startup), true
+				}
+				resolved := resolveShellWord(word, values, cwd, globOptions)
 				if resolved.uncertain != "" {
 					return nil, false
 				}
