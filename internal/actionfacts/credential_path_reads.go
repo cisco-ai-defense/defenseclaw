@@ -1422,7 +1422,9 @@ func credentialPathWalkStore(key credentialPathWalkKey, walk credentialPathWalkR
 // read of the call is exact and which joins any later upload, so a file
 // found next to it adds nothing. Reading it was most of the walk's cost: on
 // the hook-cost probe's tree (4,146 folders), 4,031 of the 4,096 folders
-// read, about 7 ms on every grep -r or rg call there.
+// read, about 7 ms on every grep -r or rg call there. A level's folders
+// are named only once it is known to fit (credentialPathFolderScan keeps
+// the names), so a level that does not fit costs no path either.
 func credentialPathWalk(dir, shown string, filter *rgFilter, limits credentialPathWalkLimits) (walk credentialPathWalkResult) {
 	groups := credentialProbeFirstSegments()
 	budget := credentialPathWalkBudget{limits: limits}
@@ -1459,12 +1461,7 @@ func credentialPathWalk(dir, shown string, filter *rgFilter, limits credentialPa
 	// calls), and merged in order, so an uncut walk finds the same files in
 	// the same order every time.
 	level := []credentialWalkFolder{{dir, shown}}
-	for len(level) > 0 && !budget.stop.Load() {
-		if int64(len(level)) > limits.folders-folders {
-			folders = limits.folders
-			walk.cut = true
-			break
-		}
+	for len(level) > 0 {
 		folders += int64(len(level))
 		scans := make([]credentialPathFolderScan, len(level))
 		var next atomic.Int64
@@ -1491,10 +1488,31 @@ func credentialPathWalk(dir, shown string, filter *rgFilter, limits credentialPa
 			}
 			wg.Wait()
 		}
-		level = nil
+		count := 0
 		for _, s := range scans {
 			walk.found = append(walk.found, s.found...)
-			level = append(level, s.folders...)
+			count += len(s.ends)
+		}
+		if budget.stop.Load() {
+			break
+		}
+		if int64(count) > limits.folders-folders {
+			folders = limits.folders
+			walk.cut = true
+			break
+		}
+		above := level
+		level = make([]credentialWalkFolder, 0, count)
+		for i, s := range scans {
+			start := 0
+			for j, end := range s.ends {
+				next := credentialWalkFolder{dir: filepath.Join(above[i].dir, string(s.names[start:end]))}
+				if s.shown != nil {
+					next.shown = s.shown[j]
+				}
+				level = append(level, next)
+				start = end
+			}
 		}
 	}
 	return walk
@@ -1517,10 +1535,14 @@ func (b *credentialPathWalkBudget) take(counter *atomic.Int64, limit int64) bool
 }
 
 // credentialPathFolderScan is one folder of a walk: the credentials files
-// found in it and the folders below it to read next.
+// found in it and the folders below it to read next, by name (names[e:f]
+// for consecutive ends e, f, the first from 0) and, when rg globs read the
+// path, as rg names them (shown).
 type credentialPathFolderScan struct {
-	found   []string
-	folders []credentialWalkFolder
+	found []string
+	names []byte
+	ends  []int
+	shown []string
 }
 
 // credentialWalkFolder is one folder of a walk and its path as rg names it.
@@ -1549,17 +1571,21 @@ func (b *credentialPathWalkBudget) scan(folder credentialWalkFolder, filter *rgF
 		if !isDir || credentialWalkSkips[string(name)] {
 			return true
 		}
-		child := string(name)
-		next := credentialWalkFolder{dir: filepath.Join(folder.dir, child)}
 		if filter != nil {
-			if len(filter.globs) > 0 { // only a glob reads the path
-				next.shown = rgJoin(folder.shown, child)
+			shown := ""
+			globs := len(filter.globs) > 0 // only a glob reads the path
+			if globs {
+				shown = rgJoin(folder.shown, string(name))
 			}
-			if !filter.enters(next.shown, child) {
+			if !filter.enters(shown, string(name)) {
 				return true
 			}
+			if globs {
+				s.shown = append(s.shown, shown)
+			}
 		}
-		s.folders = append(s.folders, next)
+		s.names = append(s.names, name...)
+		s.ends = append(s.ends, len(s.names))
 		return true
 	})
 	return s
