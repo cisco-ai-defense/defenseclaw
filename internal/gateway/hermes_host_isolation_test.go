@@ -18,8 +18,9 @@ import (
 
 func TestMain(m *testing.M) {
 	prepareGatewayTestProcess()
-	// No test swaps os.Stderr (GAP-1591, stderr_tee_test.go).
-	if err := installStderrTee(); err != nil {
+	// No test swaps os.Stderr (GAP-1591, stderr_tee_test.go), except the
+	// capture under -test.v=test2json, where testing.M.Run redirects it.
+	if err := setUpStderrCapture(); err != nil {
 		fmt.Fprintln(os.Stderr, "install the stderr tee:", err)
 		os.Exit(1)
 	}
@@ -51,7 +52,7 @@ func TestMain(m *testing.M) {
 	}
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
-	_ = stderrTeeForTests.flush()
+	flushStderrCapture()
 	restoreChain()
 	restoreHome()
 	removeMigratedAuditTemplate()
