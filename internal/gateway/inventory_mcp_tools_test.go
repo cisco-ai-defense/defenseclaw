@@ -240,12 +240,13 @@ func TestMCPToolObservationIsQueuedBeforeItBecomesVisible(t *testing.T) {
 }
 
 func TestMCPToolFullPersistenceQueueDoesNotExposeObservation(t *testing.T) {
-	tools := &mcpToolInventory{store: &testMCPObservedToolStore{}}
+	store := &testMCPObservedToolStore{}
+	tools := &mcpToolInventory{store: store}
 	parent := endpointInventoryComponent{id: "server-a", itemName: "notes", agentConnector: "codex"}
 	tools.refreshParents([]endpointInventoryComponent{parent})
 	for index := range maxMCPToolObservations {
 		tool := fmt.Sprintf("queued-%03d", index)
-		if _, ok := tools.beginObservedWrite("codex", "notes", tool, parent.id, time.Now()); !ok {
+		if _, recorded, queued := tools.recordObservedAndBeginWrite("codex", "notes", tool, time.Now()); !recorded || !queued {
 			t.Fatalf("fill pending queue at %d", index)
 		}
 	}
@@ -255,6 +256,13 @@ func TestMCPToolFullPersistenceQueueDoesNotExposeObservation(t *testing.T) {
 	key := mcpToolServerKey("codex", "notes")
 	if _, visible := tools.observed[key]["not-durable"]; visible {
 		t.Fatal("observation became visible without a pending durable write")
+	}
+	if err := tools.flushPendingObserved(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := tools.components([]endpointInventoryComponent{parent}, false, "observed")
+	if !partial || len(rows) != maxMCPToolObservations {
+		t.Fatalf("drained queue rows=%d partial=%v, want rows=%d partial=true", len(rows), partial, maxMCPToolObservations)
 	}
 }
 

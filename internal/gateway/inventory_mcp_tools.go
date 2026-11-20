@@ -320,7 +320,7 @@ func (a *APIServer) recordObservedMCPTool(ctx context.Context, req agentHookRequ
 				return
 			}
 			if !queued {
-				a.mcpTools.recordMetric(ctx, "observe", "partial", "persistence_queue_full")
+				a.mcpTools.recordMetric(ctx, "observe", "partial", "incomplete")
 				return
 			}
 			var attempted atomic.Bool
@@ -734,6 +734,10 @@ func (m *mcpToolInventory) recordObservedAndBeginWrite(connector, server, rawNam
 	}
 	pending, queued := m.beginObservedWriteLocked(key, connector, server, name, parentID, at)
 	if !queued {
+		if m.observedPartial == nil {
+			m.observedPartial = make(map[string]bool)
+		}
+		m.observedPartial[key] = true
 		return pendingMCPObservedTool{}, true, false
 	}
 	_, recorded := m.recordObservedLocked(key, name, at)
