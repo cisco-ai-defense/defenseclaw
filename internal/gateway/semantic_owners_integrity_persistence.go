@@ -3619,10 +3619,19 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 	default:
 		return false
 	}
-	start := path.Clean(exactSemanticPathValue(candidate))
+	value := exactSemanticPathValue(candidate)
+	start := path.Clean(value)
 	root := path.Join(path.Clean(facts.ActiveHome), ".defenseclaw")
 	prefix := strings.TrimRight(start, "/") + "/"
-	if !path.IsAbs(start) && !actionfacts.DriveSlashPath(start) || !strings.HasPrefix(root, prefix) {
+	// A Git Bash find from a drive root (find C:/ -delete) cleans to C:,
+	// the drive's current folder, so the start is read as written. A drive
+	// home is compared as Windows compares names, without case (find c:/,
+	// find C:/users; rel-1-0-10:GAP-0945).
+	under := strings.HasPrefix(root, prefix)
+	if actionfacts.DriveSlashPath(root) && actionfacts.DriveSlashPath(prefix) {
+		under = len(root) >= len(prefix) && strings.EqualFold(root[:len(prefix)], prefix)
+	}
+	if !path.IsAbs(start) && !actionfacts.DriveSlashPath(value) || !under {
 		return false
 	}
 	// Above the root a find also reaches every other file of the
@@ -3644,7 +3653,7 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 		return false
 	}
 	// The root is at depth `depth` below the start; its entries one deeper.
-	depth := strings.Count(strings.TrimPrefix(root, prefix), "/") + 1
+	depth := strings.Count(root[len(prefix):], "/") + 1
 	if maxDepth, ok := findMaxDepth(command.Argv); ok &&
 		(maxDepth < depth || maxDepth == depth && findTypeSkipsDirectories(command.Argv)) {
 		return false

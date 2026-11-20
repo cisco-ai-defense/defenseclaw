@@ -37,8 +37,8 @@ func TestGAP0018RoutineWorkIsNotBlocked(t *testing.T) {
 				if runtime.GOOS == "windows" && strings.HasPrefix(tc.command, "find / ") {
 					// In Git Bash / is the Git install folder, not a folder above
 					// a C:/Users home, so find / reaches no DefenseClaw state there
-					// and rel allows it too. A find from the home's drive root is
-					// not judged on rel or here either (rel-1-0-10:GAP-0945).
+					// and rel allows it too. A find from the home's drive root
+					// blocks (TestGAP0945WindowsGitBashFindFromTheDriveRoot).
 					t.Skip("find / is not above the home in Git Bash")
 				}
 				api := activeClaudeCodeTestAPI()

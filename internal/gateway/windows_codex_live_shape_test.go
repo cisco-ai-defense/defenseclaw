@@ -57,6 +57,10 @@ type windowsLiveShapeVerdict struct {
 // postWindowsCodexLiveShape sends command as the Windows Codex hook does and
 // returns the gateway's answer.
 func postWindowsCodexLiveShape(t *testing.T, packDir, command string) windowsLiveShapeVerdict {
+	return postWindowsCodexLiveShapeTier(t, packDir, command, false)
+}
+
+func postWindowsCodexLiveShapeTier(t *testing.T, packDir, command string, managedTier bool) windowsLiveShapeVerdict {
 	t.Helper()
 	installToolCallCorpusPackDirConnector(t, "codex", packDir)
 	cfg := &config.Config{}
@@ -82,6 +86,9 @@ func postWindowsCodexLiveShape(t *testing.T, packDir, command string) windowsLiv
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", strings.NewReader(string(body)))
 	setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	if managedTier {
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: `C:\Users\fixture`}))
+	}
 	recorder := httptest.NewRecorder()
 	(&APIServer{scannerCfg: cfg, health: NewSidecarHealth()}).handleAgentHook("codex").ServeHTTP(recorder, req)
 	var got windowsLiveShapeVerdict
@@ -222,18 +229,58 @@ func TestWindowsCodexLiveShapePaddedHostSwitch(t *testing.T) {
 func TestWindowsCodexLiveShapeClaimedRules(t *testing.T) {
 	root := windowsLiveShapePacks(t)
 	cases := readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl")
+	// TST-7032 cert replay: the multi-line fixture above already fires, but
+	// these two native one-call forms must carry the same finding in each pack.
+	singleLineCases := []struct{ name, command string }{
+		{"ep-sc-exe", `sc.exe stop WinDefend`},
+		{"ep-cmd-sc", `cmd /c sc stop WinDefend`},
+	}
+	ordinaryServiceCalls := []struct{ name, command string }{
+		{"service-status", `sc.exe query WinDefend`},
+		{"unrelated-service", `sc.exe stop Spooler`},
+	}
+	tiers := []struct {
+		name, pack, action string
+		managed            bool
+	}{
+		{"default", "default", "alert", false},
+		{"permissive", "permissive", "alert", false},
+		{"strict", "strict", "block", false},
+		{"managed", "default", "alert", true},
+		{"managed-strict", "strict", "block", true},
+	}
 	checked := map[string]bool{}
-	for _, pack := range toolCallCorpusProfiles {
-		packDir := filepath.Join(root, pack)
+	for _, pack := range tiers {
+		packDir := filepath.Join(root, pack.pack)
+		for _, test := range singleLineCases {
+			t.Run(pack.name+"/"+test.name, func(t *testing.T) {
+				got := postWindowsCodexLiveShapeTier(t, packDir, test.command, pack.managed)
+				if got.Action != pack.action || !slices.Contains(got.RuleIDs, "tamper.endpoint_security_product_disable") {
+					t.Errorf("endpoint finding/action mismatch (want %s): %+v", pack.action, got)
+				}
+			})
+		}
+		for _, test := range ordinaryServiceCalls {
+			t.Run(pack.name+"/"+test.name, func(t *testing.T) {
+				got := postWindowsCodexLiveShapeTier(t, packDir, test.command, pack.managed)
+				if got.Action == "block" || slices.Contains(got.RuleIDs, "tamper.endpoint_security_product_disable") {
+					t.Errorf("ordinary service call gained a block or endpoint finding: %+v", got)
+				}
+			})
+		}
+		if pack.managed {
+			continue
+		}
+		packName := pack.name
 		for _, test := range cases {
 			if !test.IsAttack || test.Command == "" || len(test.OSOverrides) != 0 ||
 				!slices.Contains(windowsNativeFixtureRules, test.RuleID) ||
 				test.Dialect == actionfacts.DialectPOSIX ||
-				test.ProfilePosture == toolCallCorpusStrictOnlyPosture && pack != "strict" {
+				test.ProfilePosture == toolCallCorpusStrictOnlyPosture && packName != "strict" {
 				continue
 			}
 			route := test.ExpectRoute
-			if profileRoute := test.ProfileRoutes[pack]; profileRoute != "" {
+			if profileRoute := test.ProfileRoutes[packName]; profileRoute != "" {
 				route = profileRoute
 			}
 			if route == "none" || windowsFixtureNotNativeInPowerShell[test.ID] {
@@ -244,14 +291,14 @@ func TestWindowsCodexLiveShapeClaimedRules(t *testing.T) {
 				command = "cmd /c " + command
 			}
 			checked[test.RuleID] = true
-			t.Run(pack+"/"+test.ID, func(t *testing.T) {
+			t.Run(packName+"/"+test.ID, func(t *testing.T) {
 				got := postWindowsCodexLiveShape(t, packDir, command)
 				if !slices.Contains(got.RuleIDs, test.RuleID) {
 					t.Errorf("no %s as a Windows Codex shell call: %+v", test.RuleID, got)
 				}
 			})
 		}
-		t.Run(pack+"/single-control maintenance", func(t *testing.T) {
+		t.Run(packName+"/single-control maintenance", func(t *testing.T) {
 			benign := toolCallCorpusCaseByID(t, "windows-defender-single-control-maintenance")
 			if benign.IsAttack {
 				t.Fatal("the maintenance fixture is labelled an attack")

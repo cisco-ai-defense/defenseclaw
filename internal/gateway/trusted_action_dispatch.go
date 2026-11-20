@@ -479,6 +479,7 @@ func dispatchTrustedActionOnce(
 	parent context.Context,
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
+	request = windowsStatementsOnePerLine(request)
 	// A call judged as the twin of its data word leaves a detection-only
 	// record of the word (rel-1-0-10:GAP-0382). It is added last, after every
 	// other defer, so a limit finding any of them raises is kept as it is and
@@ -1254,6 +1255,11 @@ func dispatchTrustedActionWith(
 			checkedLocalOrdinary := false
 			localOrdinary := false
 			checkedSplitGapEffects := false
+			// The closed WinDefend sequence proof owns a call with several
+			// WinDefend sc steps: its stop, read alone, does not prove the
+			// disable the sequence does not (rel-1-0-10:GAP-1194). Other
+			// commands keep the findings they prove.
+			winDefendSequenceUnproved := actionfacts.WinDefendSequenceUnproved(facts)
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := withCappedWindowsReadings(request, request.simpleMemo.commands(request.Input, facts))
 			if len(simples) == 0 && wholeCommandKnown &&
@@ -1468,6 +1474,11 @@ func dispatchTrustedActionWith(
 							return f.RuleID == "persistence.ssh_authorized_keys_command"
 						})
 					}
+				}
+				if winDefendSequenceUnproved && actionfacts.ExactWinDefendStopOnly(actionfacts.Analyze(child.Input)) {
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "tamper.endpoint_security_product_disable"
+					})
 				}
 				findings = withSimpleCommandFindings(findings, childFindings)
 			}
@@ -12876,7 +12887,16 @@ func serviceAccountGatewayFromContext(ctx context.Context) bool {
 	return marked
 }
 
+// sameHostHomeForTest, when set, is the same-host home trustedSameHostHome
+// reports. Only tests set it: a Windows home such as C:\Users\alice is not an
+// absolute path on Linux, so the own-credential rules of a Windows hook call
+// could not be tested off Windows.
+var sameHostHomeForTest string
+
 func trustedSameHostHome() string {
+	if sameHostHomeForTest != "" {
+		return sameHostHomeForTest
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -12940,6 +12960,36 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 		return nil
 	}
 	return cwds
+}
+
+// cmdReadingTwinRequest is the CMD reading of a Windows shell call the hook
+// placed in PowerShell when its text holds a %NAME% expansion cmd makes
+// (actionfacts.ContainsCMDVariable) and its tool does not name PowerShell.
+// PowerShell reads copy %USERPROFILE%\.git-credentials C:\t as a copy of the
+// relative file %USERPROFILE%\.git-credentials, cmd as a copy of the home
+// credential file, and the shell an exec tool runs is not proven: the CMD
+// spelling of a home credential copy was allowed in strict while the same
+// path written out blocked (rel-1-0-10:GAP-0999). It is a reading twin: it
+// records nothing and makes no further readings. trustedToolCallFindings
+// judges it with every reading of the call, as the call with the variable
+// written out is judged, and only adds its findings, so a copy of an ordinary
+// home file stays as it was and the call is never weaker than either reading.
+func cmdReadingTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	if request.readingTwin || request.simpleCommandPass || !request.windowsDialectReadings ||
+		request.Input.DialectHint != actionfacts.DialectPowerShell {
+		return trustedActionRequest{}, false
+	}
+	if tool := strings.ToLower(request.Input.Tool); strings.Contains(tool, "powershell") || strings.Contains(tool, "pwsh") {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !actionfacts.ContainsCMDVariable(command) {
+		return trustedActionRequest{}, false
+	}
+	twin := windowsReadingTwin(request)
+	twin.Input.DialectHint = actionfacts.DialectCMD
+	twin.windowsPowerShellReading, twin.posixReadingTwin = nil, false
+	return twin, true
 }
 
 // posixReadingTwinRequest is the POSIX reading of a call the Windows hook

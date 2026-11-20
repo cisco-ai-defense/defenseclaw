@@ -65,7 +65,7 @@ var inlineWriterNames = map[string]map[string]bool{
 	"python": inlineNameSet("write writelines write_text write_bytes remove unlink rmdir rmtree rename renames " +
 		"truncate ftruncate chmod chown lchown fchmod copy copy2 copyfile copytree copymode move symlink link " +
 		"touch utime makedirs mkdir system popen Popen subprocess spawnl spawnv spawnlp spawnvp execl execle execlp " +
-		"execv execve execvp execvpe check_call check_output sendfile dump"),
+		"execv execve execvp execvpe check_call check_output sendfile dump extract extractall unpack_archive"),
 	"node": inlineNameSet("writeFile writeFileSync appendFile appendFileSync createWriteStream write writeSync " +
 		"unlink unlinkSync rm rmSync rmdir rmdirSync rename renameSync truncate truncateSync ftruncate " +
 		"copyFile copyFileSync cp cpSync chmod chmodSync chown chownSync symlink symlinkSync link linkSync " +

@@ -126,10 +126,11 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 	return "", false
 }
 
-// ExactEndpointSecurityProductDisable proves one of eight source-supported,
+// ExactEndpointSecurityProductDisable proves a source-supported,
 // closed product operations: Falcon Sensor stop+disable, both Carbon Black
 // launch daemons unloaded, Little Snitch unloaded, Sysmon uninstalled, or the
-// exact WinDefend stop+disable sequence followed by its read-only status query,
+// exact WinDefend service stop or stop+disable sequence followed by its
+// read-only status query,
 // or an exact Microsoft Defender for Endpoint real-time protection disable.
 // Every top-level invocation must belong to the selected proof; unrelated
 // commands, dynamic operands, wrappers other than a literal sudo, pipelines,
@@ -164,6 +165,16 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 		return true
 	case slices.Equal(steps, []string{endpointStepSentinelDisable}):
 		return true
+	case slices.Equal(steps, []string{endpointStepWinDefendStop}):
+		// A lone bare sc in Windows PowerShell 5.1 is Set-Content. Keep the
+		// older multi-command fixture's classification, but a single stop
+		// proves the service operation only for sc.exe or CMD's bare sc.
+		for _, command := range facts.Commands {
+			if command.ParentCommandID == 0 {
+				return command.Program == "sc.exe" || command.Dialect == DialectCMD
+			}
+		}
+		return false
 	case slices.Equal(steps, []string{
 		endpointStepWinDefendStop,
 		endpointStepWinDefendDisable,
@@ -173,6 +184,58 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 	default:
 		return false
 	}
+}
+
+// WinDefendSequenceUnproved reports that an action holds more than one
+// top-level WinDefend sc step but the steps are not an exact WinDefend
+// disable. The closed sequence proof owns such a call: a per-command reading
+// of its stop must not prove a disable that the whole sequence does not
+// (rel-1-0-10:GAP-1194).
+func WinDefendSequenceUnproved(facts Facts) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	winDefendSteps := 0
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 {
+			continue
+		}
+		if step, ok := exactEndpointSecurityTopLevelStep(facts, command); ok && isWinDefendStep(step) {
+			winDefendSteps++
+		}
+	}
+	return winDefendSteps > 1 && !ExactEndpointSecurityProductDisable(facts)
+}
+
+// ExactWinDefendStopOnly reports that the action is exactly one WinDefend
+// service stop that ExactEndpointSecurityProductDisable proves.
+func ExactWinDefendStopOnly(facts Facts) bool {
+	if !ExactEndpointSecurityProductDisable(facts) {
+		return false
+	}
+	stopOnly := false
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 {
+			continue
+		}
+		if stopOnly {
+			return false
+		}
+		step, ok := exactEndpointSecurityTopLevelStep(facts, command)
+		if !ok || step != endpointStepWinDefendStop {
+			return false
+		}
+		stopOnly = true
+	}
+	return stopOnly
+}
+
+func isWinDefendStep(step string) bool {
+	switch step {
+	case endpointStepWinDefendStop, endpointStepWinDefendDisable, endpointStepWinDefendQuery:
+		return true
+	}
+	return false
 }
 
 func exactEndpointSecurityTopLevelStep(facts Facts, command CommandFact) (string, bool) {

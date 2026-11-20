@@ -13,6 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
@@ -87,9 +88,7 @@ func TestGAP1409ObserveSelfProtectionHooks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(state, filepath.Join(cwd, "state-alias")); err != nil {
-		t.Fatal(err)
-	}
+	testenv.Symlink(t, state, filepath.Join(cwd, "state-alias"))
 	if err := os.Link(state, filepath.Join(cwd, "state-hardlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -206,9 +205,7 @@ func TestGAP1409ObserveSelfProtectionWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	symlink := filepath.Join(cwd, "state-symlink.yaml")
-	if err := os.Symlink(state, symlink); err != nil {
-		t.Fatalf("create symlink (the Windows lane runs elevated): %v", err)
-	}
+	testenv.Symlink(t, state, symlink)
 	api := instructionProtectionTestAPI(t, "codex", "observe", "HIGH")
 	ctx := withManagedHookPeer(t.Context(), managedHookPeer{Home: home})
 	for _, row := range []struct {
@@ -318,9 +315,7 @@ func TestGAP1409DirectoryEntryOperandsDoNotFollowFinalLink(t *testing.T) {
 		"state-alias": state, "hook-alias": hook,
 		"state-dir": stateDir, "guardrail-dir": guardrailDir,
 	} {
-		if err := os.Symlink(target, filepath.Join(cwd, name)); err != nil {
-			t.Fatal(err)
-		}
+		testenv.Symlink(t, target, filepath.Join(cwd, name))
 	}
 	if err := os.Link(state, filepath.Join(cwd, "state-hardlink")); err != nil {
 		t.Fatal(err)

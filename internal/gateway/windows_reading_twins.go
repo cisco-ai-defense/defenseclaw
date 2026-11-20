@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"reflect"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -110,6 +111,116 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 		twin.LegacyText = readable.Command
 	}
 	return append([]trustedActionRequest{twin}, argumentTwins...), bounded.CapSet{}
+}
+
+// windowsStatementsOnePerLine is request read as its statements one per line
+// when it is a Windows hook's PowerShell call joined by ";" whose every
+// statement parses complete alone (actionfacts.PowerShellStatementsOnePerLine):
+// the reader leaves such a call partial for the separator alone, and the
+// selection places the same statements one per line in PowerShell, so the
+// call is judged as that spelling, once, by every reading
+// (rel-1-0-10:GAP-1231). An extra reading twin of it doubled the hook's cost
+// of every ordinary ";"-joined call. The recorded text (LegacyText) stays the
+// call as sent. Any other call is returned as it is.
+func windowsStatementsOnePerLine(request trustedActionRequest) trustedActionRequest {
+	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass {
+		return request
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(command, ";") {
+		return request
+	}
+	input := request.Input
+	var facts actionfacts.Facts
+	switch {
+	case input.DialectHint == "" && request.windowsPowerShellReading != nil:
+		input.DialectHint = actionfacts.DialectPowerShell
+		facts = request.windowsPowerShellReading.factsFor(input)
+	case input.DialectHint == actionfacts.DialectPowerShell:
+		facts = actionfacts.Analyze(input)
+	default:
+		return request
+	}
+	lines, ok := actionfacts.PowerShellStatementsOnePerLine(input, facts)
+	if !ok {
+		return request
+	}
+	request.Input, request.windowsPowerShellReading = lines, nil
+	return request
+}
+
+// windowsNestedReading is a statement a Windows hook's shell call runs inside
+// another one (windowsNestedReadings). unjudged is a script the rule dispatch
+// of the call does not read: the call was placed in no dialect, so the rules
+// read it as POSIX, where powershell -c "... $HOME\f ..." names no script.
+type windowsNestedReading struct {
+	request  trustedActionRequest
+	unjudged bool
+}
+
+// windowsNestedReadings are the statements a Windows hook's shell call runs
+// inside another one: the argument-command reading of PowerShell
+// subexpressions, parenthesized operands and loop bodies
+// (psparse.ArgumentCommandReading), and the scripts of a powershell -c or
+// cmd /c launcher (actionfacts.HostScriptReadings) but the statements of a
+// list, which the shell tool lane reads one by one itself. The rule dispatch
+// judges them inside the call (windowsReadingTwinRequests,
+// hostScriptTwinRequests), with the bounds it hits; every other reading of
+// the call judges them through these requests (trustedToolCallFindings), so
+// the copy of a credential file in $(...), -and (...), foreach, powershell -c
+// or cmd /c gets the verdict of the copy sent alone (rel-1-0-10:GAP-0998,
+// GAP-1226). Only a call whose text may nest a statement is read again.
+func windowsNestedReadings(request trustedActionRequest) []windowsNestedReading {
+	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass {
+		return nil
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !mayNestStatement(command) {
+		return nil
+	}
+	input := request.Input
+	placedNowhere := input.DialectHint == "" && request.windowsPowerShellReading != nil
+	var facts actionfacts.Facts
+	if placedNowhere {
+		input.DialectHint = actionfacts.DialectPowerShell
+		facts = request.windowsPowerShellReading.factsFor(input)
+	} else {
+		facts = actionfacts.Analyze(input)
+	}
+	if facts.Parse.Status == actionfacts.StatusLimitExceeded {
+		return nil
+	}
+	var nested []windowsNestedReading
+	if facts.Parse.Dialect == actionfacts.DialectPowerShell {
+		if text, changed, cut := psparse.ArgumentCommandReading(command); changed && !cut.Any() {
+			twin := windowsReadingTwin(request)
+			twin.Input = input
+			twin.Input.Args, twin.Input.Argv = nil, nil
+			twin.Input.Command, twin.LegacyText = text, text
+			twin.Input.DialectHint = actionfacts.DialectPowerShell
+			nested = append(nested, windowsNestedReading{request: twin})
+		}
+	}
+	reading := actionfacts.HostScriptReadings(input, facts, 0, false)
+	for index, script := range reading.Twins {
+		if index < len(reading.Listed) && reading.Listed[index] {
+			continue
+		}
+		twin := windowsReadingTwin(request)
+		twin.Input, twin.LegacyText = script, script.Command
+		nested = append(nested, windowsNestedReading{request: twin, unjudged: placedNowhere})
+	}
+	return nested
+}
+
+// mayNestStatement is a call text that may run a statement inside another:
+// a subexpression, operand or block, or a powershell, pwsh or cmd launcher.
+func mayNestStatement(command string) bool {
+	if strings.ContainsAny(command, "({") {
+		return true
+	}
+	lower := strings.ToLower(command)
+	return strings.Contains(lower, "cmd") || strings.Contains(lower, "powershell") || strings.Contains(lower, "pwsh")
 }
 
 // windowsHintedReading is the PowerShell reading selectWindowsShellDialectReading

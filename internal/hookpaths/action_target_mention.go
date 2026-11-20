@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/psparse"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -4155,7 +4156,7 @@ func actionWindowsTargetMentionAs(command, cwd, home string, depth int, stateOnl
 		if !strings.EqualFold(words[i], "-encodedcommand") && !strings.EqualFold(words[i], "-enc") {
 			continue
 		}
-		encoded, err := base64.StdEncoding.DecodeString(words[i+1])
+		encoded, err := base64.StdEncoding.DecodeString(psparse.HostBase64(words[i+1])) // GAP-1197
 		if err != nil || len(encoded) == 0 || len(encoded)%2 != 0 {
 			continue
 		}
