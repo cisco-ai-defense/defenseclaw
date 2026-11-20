@@ -262,11 +262,24 @@ func TestCodexLifecycle_CrossProcessSetupTeardownTransaction(t *testing.T) {
 
 // codexLifecycleHelperStartBound bounds the start of the two helper
 // processes (until both say ready); codexLifecycleBound bounds both
-// lifecycles from the barrier to the helpers' exit.
-const (
-	codexLifecycleHelperStartBound = 60 * time.Second
-	codexLifecycleBound            = 20 * time.Second
-)
+// lifecycles from the barrier to the helpers' exit, and
+// codexLifecycleHelperBound one helper's lifecycle, a little less so that a
+// slow helper reports its own error before the test kills it.
+const codexLifecycleHelperStartBound = 60 * time.Second
+
+var codexLifecycleBound, codexLifecycleHelperBound = codexLifecycleBounds()
+
+// codexLifecycleBounds only turn a hang into a failure; which lifecycle wins
+// does not depend on them. A pair of lifecycles takes under 3 s on a hosted
+// Windows runner, but the runner has stalled to 11-13 s a pair and past 20 s
+// (GAP-1607: run 43222066854 and the 8e58b26846 checks shard), so Windows gets
+// 60 s.
+func codexLifecycleBounds() (lifecycles, helper time.Duration) {
+	if runtime.GOOS == "windows" {
+		return 60 * time.Second, 50 * time.Second
+	}
+	return 20 * time.Second, 15 * time.Second
+}
 
 func codexLifecycleHelperCommand(
 	ctx context.Context,
@@ -317,13 +330,13 @@ func TestCodexLifecycleCrossProcessHelper(t *testing.T) {
 		t.Fatalf("publish helper readiness: %v", err)
 	}
 	// The wait for the barrier includes the other helper's start; the
-	// lifecycle gets its own 15 s from the barrier on.
+	// lifecycle gets its own codexLifecycleHelperBound from the barrier on.
 	barrierCtx, cancelBarrier := context.WithTimeout(context.Background(), codexLifecycleHelperStartBound)
 	defer cancelBarrier()
 	if err := waitForCodexLifecycleFile(barrierCtx, barrier); err != nil {
 		t.Fatalf("wait for lifecycle barrier: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), codexLifecycleHelperBound)
 	defer cancel()
 	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token"}
 	connector := NewCodexConnector()
