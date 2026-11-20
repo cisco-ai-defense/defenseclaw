@@ -497,10 +497,108 @@ def _remove_after_exit(
     return writes_result
 
 
+_FILE_ATTRIBUTE_READONLY = 0x1
+_FILE_ATTRIBUTE_NORMAL = 0x80
+_FILE_READ_ATTRIBUTES = 0x0080
+_FILE_WRITE_ATTRIBUTES = 0x0100
+_FILE_BASIC_INFO_CLASS = 0
+
+
+class _FileBasicInfo(ctypes.Structure):
+    # A time of 0 leaves that time unchanged.
+    _fields_ = [
+        ("CreationTime", ctypes.c_int64),
+        ("LastAccessTime", ctypes.c_int64),
+        ("LastWriteTime", ctypes.c_int64),
+        ("ChangeTime", ctypes.c_int64),
+        ("FileAttributes", wintypes.DWORD),
+    ]
+
+
+def _file_attributes(path: str) -> int:
+    """The Windows attributes of path itself (a link or junction is not followed); 0 off Windows."""
+    try:
+        return int(getattr(os.lstat(path), "st_file_attributes", 0))
+    except OSError:
+        return 0
+
+
+def _clear_readonly_attribute(path: str) -> bool:
+    """Clear ReadOnly on path itself, through a handle that does not follow a link or junction."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.GetFileInformationByHandleEx.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    kernel32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    kernel32.SetFileInformationByHandle.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        path,
+        _FILE_READ_ATTRIBUTES | _FILE_WRITE_ATTRIBUTES,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle is None or handle == _INVALID_HANDLE_VALUE:
+        return False
+    try:
+        info = _FileBasicInfo()
+        size = ctypes.sizeof(info)
+        if not kernel32.GetFileInformationByHandleEx(handle, _FILE_BASIC_INFO_CLASS, ctypes.byref(info), size):
+            return False
+        if not info.FileAttributes & _FILE_ATTRIBUTE_READONLY:
+            return False
+        # Attributes of 0 would mean "unchanged"; NORMAL is the "none" value.
+        cleared = (info.FileAttributes & ~_FILE_ATTRIBUTE_READONLY) or _FILE_ATTRIBUTE_NORMAL
+        info = _FileBasicInfo(0, 0, 0, 0, cleared)
+        return bool(kernel32.SetFileInformationByHandle(handle, _FILE_BASIC_INFO_CLASS, ctypes.byref(info), size))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def clear_readonly(path: str) -> bool:
+    """Clear the ReadOnly attribute of path itself; whether it was set and is cleared now (GAP-1609).
+
+    Windows refuses to delete a ReadOnly file or folder with "Access is
+    denied", which the account that owns it can clear. Git writes its objects
+    ReadOnly, and a rollback keeps git folders under backups, so the deferred
+    cleanup failed on them and the whole data folder stayed (.env with the
+    API keys, device.key). The attribute of a link or junction is cleared on
+    the link itself; its target is never opened. The callers pass only the
+    entries of the trees uninstall removes. Off Windows nothing is set.
+    """
+    if not _file_attributes(path) & _FILE_ATTRIBUTE_READONLY:
+        return False
+    return _clear_readonly_attribute(path)
+
+
+def remove_clearing_readonly(path: str, remove) -> None:
+    """remove(path) (os.unlink or os.rmdir); a ReadOnly path refused that way loses the attribute and goes."""
+    try:
+        remove(path)
+    except PermissionError as error:
+        if getattr(error, "winerror", _ERROR_ACCESS_DENIED) != _ERROR_ACCESS_DENIED or not clear_readonly(path):
+            raise
+        remove(path)
+
+
 def _remove_tree(path: str, *, marker_names: set[str] | None = None, skip: set[str] | None = None) -> None:
     """Remove a tree without traversing a reparse-point entry.
 
     The paths in skip (normalized) stay, and so does each folder above them.
+    A ReadOnly entry loses the attribute first (GAP-1609).
     """
     if _is_reparse(path):
         raise ValueError(f"refusing reparse-point data root: {path}")
@@ -518,16 +616,16 @@ def _remove_tree(path: str, *, marker_names: set[str] | None = None, skip: set[s
                 continue
             if _is_reparse(entry.path):
                 if entry.is_dir(follow_symlinks=False):
-                    os.rmdir(entry.path)
+                    remove_clearing_readonly(entry.path, os.rmdir)
                 else:
-                    os.unlink(entry.path)
+                    remove_clearing_readonly(entry.path, os.unlink)
             elif entry.is_dir(follow_symlinks=False):
                 _remove_tree(entry.path, skip=skip)
             else:
-                os.unlink(entry.path)
+                remove_clearing_readonly(entry.path, os.unlink)
     if any(_contains(_norm(path), kept) for kept in skip):
         return
-    os.rmdir(path)
+    remove_clearing_readonly(path, os.rmdir)
 
 
 def _contains(parent: str, child: str) -> bool:
@@ -659,8 +757,8 @@ def denied_entries(root: str, skip: set[str] | None = None, *, prober=None) -> l
     return sorted(denied)
 
 
-def _open_for_delete_error(path: str) -> int:
-    """Open path for delete with full sharing and close it; 0 or the Windows error."""
+def _open_for_delete_error(path: str, access: int = _DELETE) -> int:
+    """Open path for delete (or access) with full sharing and close it; 0 or the Windows error."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = (
         wintypes.LPCWSTR,
@@ -676,7 +774,7 @@ def _open_for_delete_error(path: str) -> int:
     kernel32.CloseHandle.restype = wintypes.BOOL
     handle = kernel32.CreateFileW(
         path,
-        _DELETE,
+        access,
         _FILE_SHARE_ALL,
         None,
         _OPEN_EXISTING,
@@ -695,8 +793,16 @@ def _folder_held(path: str) -> bool:
 
 
 def _delete_denied(path: str) -> bool:
-    """Whether Windows refuses this account the right to delete path."""
-    return _open_for_delete_error(path) == _ERROR_ACCESS_DENIED
+    """Whether Windows refuses this account the right to delete path.
+
+    A ReadOnly file goes only once its attribute is cleared (GAP-1609), so
+    one whose attributes this account cannot write is denied too.
+    """
+    if _open_for_delete_error(path) == _ERROR_ACCESS_DENIED:
+        return True
+    return bool(_file_attributes(path) & _FILE_ATTRIBUTE_READONLY) and (
+        _open_for_delete_error(path, _FILE_WRITE_ATTRIBUTES) == _ERROR_ACCESS_DENIED
+    )
 
 
 def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) -> str:
@@ -831,7 +937,7 @@ def main() -> int:
             def remove_target(target=target):
                 _validate_plan(targets_plan)
                 _check_not_superseded(data_dir, started_at)
-                os.unlink(target)
+                remove_clearing_readonly(target, os.unlink)
 
             _retry(remove_target, f"remove {target}")
         if bool(plan.get("remove_empty_install_root")) and targets:

@@ -2582,22 +2582,26 @@ def _remove_leftover_dirs(paths: tuple[str, ...], *, platform_name: str = sys.pl
 
 
 def _remove_tree_no_follow(path: str) -> None:
-    """Remove a folder tree; links and junctions inside go without being followed."""
+    """Remove a folder tree; links and junctions inside go without being followed.
+
+    A ReadOnly entry loses the attribute first (Windows; GAP-1609).
+    """
     if _is_reparse_path(path):
         raise OSError(f"refusing link or reparse point {path}")
+    remove = windows_uninstall_helper.remove_clearing_readonly
     with os.scandir(path) as entries:
         children = list(entries)
     for entry in children:
         if _is_reparse_path(entry.path):
             if entry.is_dir(follow_symlinks=False) or (sys.platform == "win32" and os.path.isdir(entry.path)):
-                os.rmdir(entry.path)
+                remove(entry.path, os.rmdir)
             else:
-                os.unlink(entry.path)
+                remove(entry.path, os.unlink)
         elif entry.is_dir(follow_symlinks=False):
             _remove_tree_no_follow(entry.path)
         else:
-            os.unlink(entry.path)
-    os.rmdir(path)
+            remove(entry.path, os.unlink)
+    remove(path, os.rmdir)
 
 
 def _remove_empty_parents(path: str) -> None:
@@ -5355,12 +5359,18 @@ def _rmtree_gone_ok(path: str) -> None:
 
     Two uninstalls of one account at once (two terminals) walk the same
     trees: each failed with ENOENT on what the other had just deleted and
-    left data behind for a second run (GAP-2355).
+    left data behind for a second run (GAP-2355). A ReadOnly file or folder
+    that Windows refused to delete loses the attribute and goes (GAP-1609);
+    rmtree passes only entries of path, and links and junctions themselves.
     """
 
     def gone_ok(function, failed_path, exc) -> None:
         error = exc if isinstance(exc, BaseException) else exc[1]
         if isinstance(error, FileNotFoundError):
+            return
+        if function in (os.unlink, os.remove, os.rmdir) and isinstance(error, PermissionError):
+            with contextlib.suppress(FileNotFoundError):
+                windows_uninstall_helper.remove_clearing_readonly(failed_path, function)
             return
         raise error
 
@@ -5373,16 +5383,17 @@ def _rmtree_gone_ok(path: str) -> None:
 def _remove_tree_entry(entry: os.DirEntry[str]) -> None:
     """Remove one direct child without following symlinks/reparse points."""
     try:
+        remove = windows_uninstall_helper.remove_clearing_readonly
         if _is_reparse_path(entry.path):
             if os.path.isdir(entry.path):
-                os.rmdir(entry.path)
+                remove(entry.path, os.rmdir)
             else:
-                os.unlink(entry.path)
+                remove(entry.path, os.unlink)
             return
         if entry.is_dir(follow_symlinks=False):
             _rmtree_gone_ok(entry.path)
             return
-        os.unlink(entry.path)
+        remove(entry.path, os.unlink)
     except FileNotFoundError:
         return  # another remover took it first: it is gone (GAP-2355)
 
