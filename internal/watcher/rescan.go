@@ -1778,6 +1778,15 @@ func (w *InstallWatcher) findingDrift(baseline *audit.SnapshotRow, current *scan
 	}
 
 	prevScan, err := w.loadScanResult(baseline.ScanID)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Retention before 1.0.10 deleted the scan a baseline referenced
+		// (retention now keeps it), or an evidence purge did. No earlier
+		// findings are left to compare; this scan's findings are reported
+		// as they are and the caller records it as the baseline, so the
+		// line is written once per target (rel-1-0-10:GAP-1177).
+		fmt.Fprintf(os.Stderr, "[rescan] %s: baseline scan %s is no longer in the audit store (removed by audit retention or a purge); finding drift is not compared this time and this scan becomes the baseline\n", baseline.TargetPath, baseline.ScanID)
+		return nil
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] findingDrift: load baseline scan %s: %v\n", baseline.ScanID, err)
 		return nil
