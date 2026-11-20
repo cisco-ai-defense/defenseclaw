@@ -22,7 +22,6 @@ This module is the home for the small set of helpers that map a
 
 * the environment variable holding the matching API key
 * a short alias used as a per-provider proxy name
-* a deterministic master-key derivation rooted at ``device.key``
 
 These primitives are used by ``defenseclaw setup``, ``defenseclaw
 doctor``, the LiteLLM bridge, and the per-connector guardrail
@@ -34,10 +33,7 @@ inheriting the OpenClaw config-patch logic.
 
 from __future__ import annotations
 
-import hashlib
-import os
 import re
-from pathlib import Path
 
 # Well-known key and token shapes. Match the shape, not a bare prefix:
 # ASIA_PACIFIC_KEY and AKIA_ROTATED_KEY are env var names, not keys (GAP-2594).
@@ -143,53 +139,3 @@ def model_to_proxy_name(model: str) -> str:
     ):
         name = name.removeprefix(prefix)
     return name
-
-
-def derive_master_key(device_key_file: str) -> str:
-    """Derive a deterministic master key from the device key file.
-
-    Tries the given path first, then the default
-    ``~/.defenseclaw/device.key``. Raises
-    :class:`RuntimeError` if neither exists — we no longer fall back
-    to a static key because that produces predictable proxy
-    credentials (a credential-stuffing oracle).
-
-    Implementation note: this matches the Go proxy's PBKDF2-SHA256
-    derivation so the gateway can re-issue the same proxy bearer across
-    restarts without falling back to an unstretched device-key digest.
-    """
-    candidates = [device_key_file]
-    default_path = os.path.join(str(Path.home()), ".defenseclaw", "device.key")
-    if _expand(device_key_file) != default_path:
-        candidates.append(default_path)
-
-    for candidate in candidates:
-        path = _expand(candidate)
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-            digest = hashlib.pbkdf2_hmac(
-                "sha256",
-                data,
-                b"defenseclaw-proxy-master-key",
-                100_000,
-                dklen=32,
-            ).hex()
-            return f"sk-dc-{digest}"
-        except OSError:
-            continue
-    raise RuntimeError(
-        f"Device key not found: {device_key_file}\n"
-        f"  Run 'defenseclaw init' to generate a device key."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Internal helper — kept private to avoid divergence from the path
-# expansion contract used elsewhere in the CLI (``connector_paths._expand``).
-# ---------------------------------------------------------------------------
-
-def _expand(p: str) -> str:
-    if p.startswith("~/"):
-        return str(Path.home() / p[2:])
-    return p

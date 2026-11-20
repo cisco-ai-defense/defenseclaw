@@ -52,7 +52,7 @@ func TestSetupConnectorsIsolated_RetriesASlowProbe(t *testing.T) {
 	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	got, err := s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{slow, peer},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
@@ -68,7 +68,7 @@ func TestSetupConnectorsIsolated_RetriesASlowProbe(t *testing.T) {
 	stuck := &slowOnceConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}, slowSetups: 99}
 	got, err = s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{stuck},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil || len(got) != 0 || stuck.setupCalls != connectorProbeTimeoutAttempts || stuck.teardownCalls != 0 {
 		t.Fatalf("stuck probe: survivors=%v err=%v setupCalls=%d teardownCalls=%d", got, err, stuck.setupCalls, stuck.teardownCalls)
@@ -117,7 +117,7 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	got, err := s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{held, peer},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
@@ -135,7 +135,7 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 	started := time.Now()
 	got, _ = s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{stuck},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if len(got) != 0 || stuck.setupCalls < 2 || time.Since(started) > 5*time.Second {
 		t.Fatalf("stuck settings: survivors=%v setupCalls=%d after %s", got, stuck.setupCalls, time.Since(started))
@@ -146,7 +146,7 @@ func TestSetupConnectorsIsolated_RetriesSettingsInUse(t *testing.T) {
 	other.setupErr = errors.New("claudecode settings hooks: parse claude settings: bad json")
 	_, _ = s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{other},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if other.setupCalls != 1 {
 		t.Fatalf("a parse failure was set up %d times, want 1", other.setupCalls)

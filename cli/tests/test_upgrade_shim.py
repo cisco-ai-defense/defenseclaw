@@ -94,6 +94,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.delenv(update_notice.NO_CHECK_ENV, raising=False)
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    # The agents' own settings of this test, never the runner's (GAP-0602).
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "agent" / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "agent" / "codex"))
     for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"):
         monkeypatch.delenv(name, raising=False)
     # A developer's own cosign must not take part; the signature tests add a fake one.
@@ -275,8 +278,7 @@ def test_installer_handoff_keeps_relative_retired_config_paths_bound_to_the_call
     monkeypatch.setattr(
         upgrade_shim.subprocess,
         "Popen",
-        lambda *args, **kwargs: called.update({"env": kwargs["env"], "cwd": kwargs["cwd"]})
-        or _child(lambda: 0),
+        lambda *args, **kwargs: called.update({"env": kwargs["env"], "cwd": kwargs["cwd"]}) or _child(lambda: 0),
     )
 
     assert upgrade_shim._run_installer(str(staged / "install.sh"), [], str(staged), rerun="defenseclaw upgrade") == 0
@@ -393,9 +395,7 @@ def test_explicit_version_may_reinstall_or_go_back(
     assert len(execs) == 1
 
 
-def test_windows_starts_the_installer_detached(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_windows_starts_the_installer_detached(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
     release = tmp_path / "release"
     release.mkdir()
@@ -449,7 +449,7 @@ def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
     err = capsys.readouterr().err
     assert "no desktop (SSH session)" in err and "Nothing was changed." in err
     command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
-    assert command.endswith("install.ps1\" -Rollback -Yes"), command
+    assert command.endswith('install.ps1" -Rollback -Yes'), command
     staged = command.split('"')[1]
     assert os.path.isfile(staged) and staged != str(home / "installer" / "install.ps1")
 
@@ -1120,7 +1120,9 @@ def test_notice_never_creates_the_data_directory(tmp_path: Path, monkeypatch: py
     assert not missing.exists()
 
 
-def test_notice_reads_update_check_from_defenseclaw_config(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_notice_reads_update_check_from_defenseclaw_config(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     external = tmp_path / "elsewhere.yaml"
     external.write_text("config_version: 9\nupdate:\n  check: false\n")
     monkeypatch.setenv("DEFENSECLAW_CONFIG", str(external))
@@ -1217,9 +1219,7 @@ def test_notice_swallows_ctrl_c(monkeypatch: pytest.MonkeyPatch) -> None:
     update_notice.maybe_print(["status"])
 
 
-def test_shim_output_survives_a_console_that_cannot_encode_it(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_shim_output_survives_a_console_that_cannot_encode_it(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import io
 
     stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
@@ -1303,6 +1303,7 @@ def test_a_download_without_cosign_says_the_signature_was_not_checked(
     upgrade_shim._verify_release_signature("cisco-ai-defense/defenseclaw", "1.0.1", None, str(tmp_path), "")
 
     assert "checked against checksums.txt only" in capsys.readouterr().out
+
 
 # ---- managed hosts: per-user upgrades, installs and notices stay out of the way
 
@@ -1430,9 +1431,11 @@ def test_install_sh_environment_cannot_replace_the_platform_descriptor(tmp_path:
     platform = tmp_path / "managed-runtime.json"
     platform.write_text("{}", encoding="utf-8")
     assert "/etc/defenseclaw/managed-runtime.json" in block
-    script = 'die() { echo "DIE: $*"; exit 1; }\nOS=linux\n' + block.replace(
-        "/etc/defenseclaw/managed-runtime.json", str(platform)
-    ) + "\necho proceeded\n"
+    script = (
+        'die() { echo "DIE: $*"; exit 1; }\nOS=linux\n'
+        + block.replace("/etc/defenseclaw/managed-runtime.json", str(platform))
+        + "\necho proceeded\n"
+    )
     for override in (str(tmp_path / "missing.json"), ""):
         completed = subprocess.run(
             ["bash", "-c", script],
@@ -1510,6 +1513,71 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
 
+# rel-1-0-10:GAP-0644: 1.0.9 refuses a 1.0.10 key inside a routing model or a
+# profile too, so a downgrade sets aside each one (with the model's name).
+_NESTED_CONFIG = """config_version: 9
+routing:
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+    - name: deep
+      provider: bedrock
+      model: anthropic.claude-sonnet-5
+      apis: [converse]
+      bedrock:
+        region: us-east-1
+      credential: ROUTE_KEY
+guardrail:
+  profiles:
+    dev:
+      mode: observe
+      routing:
+        allowed_aliases: [fast]
+    ops:
+      mode: action
+"""
+
+
+def test_downgrade_to_1_0_9_sets_aside_keys_inside_models_and_profiles(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_NESTED_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert config["routing"]["models"] == [
+        {"name": "fast", "provider": "openai", "model": "gpt-5-mini"},
+        {"name": "deep", "provider": "bedrock", "model": "anthropic.claude-sonnet-5"},
+    ]
+    assert config["guardrail"]["profiles"] == {"dev": {"mode": "observe"}, "ops": {"mode": "action"}}
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record == {
+        "version": 1,
+        "for": "1.0.9",
+        "keys": {
+            "routing.models[1].apis": ["converse"],
+            "routing.models[1].bedrock": {"region": "us-east-1"},
+            "routing.models[1].credential": "ROUTE_KEY",
+            "guardrail.profiles.dev.routing": {"allowed_aliases": ["fast"]},
+        },
+        "items": {"routing.models[1]": "deep"},
+    }
+
+
+def test_a_newer_key_pattern_names_concrete_keys_only() -> None:
+    assert upgrade_shim.newer_config_key("routing.models[3].bedrock") == ("routing.models[].bedrock", (1, 0, 10))
+    assert upgrade_shim.newer_config_key("guardrail.profiles.dev.routing") == ("guardrail.profiles.*.routing", (1, 0, 10))
+    assert upgrade_shim.newer_config_key("routing.models[].bedrock") is None
+    assert upgrade_shim.newer_config_key("routing.models[0].name") is None
+    assert upgrade_shim.newer_config_key("guardrail.secret_flow") == ("guardrail.secret_flow", (1, 0, 10))
+
 
 # guardrail.chains (1.0.6, root-scope chains, issue #1391): 1.0.5 and 1.0.4
 # refuse the block itself, so a downgrade sets it aside whole.
@@ -1563,7 +1631,6 @@ def test_downgrade_sets_aside_the_connectors_block(
     }
 
 
-
 def test_a_downgrade_that_would_leave_opencode_v2_unguarded_is_refused_before_anything_changes(
     home: Path,
     execs: list[list[str]],
@@ -1576,8 +1643,12 @@ def test_a_downgrade_that_would_leave_opencode_v2_unguarded_is_refused_before_an
 
     seen: list[tuple[str, str]] = []
     monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
-    monkeypatch.setattr(migrations, "_opencode_configured", lambda data_dir: seen.append(("configured", data_dir)) or True)
-    monkeypatch.setattr(migrations, "_installed_opencode", lambda _data_dir: ("opencode v2.2.5", "/u/.npm/bin/opencode"))
+    monkeypatch.setattr(
+        migrations, "_opencode_configured", lambda data_dir: seen.append(("configured", data_dir)) or True
+    )
+    monkeypatch.setattr(
+        migrations, "_installed_opencode", lambda _data_dir: ("opencode v2.2.5", "/u/.npm/bin/opencode")
+    )
     (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
     monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
 
@@ -1610,6 +1681,7 @@ def test_a_downgrade_goes_on_when_the_check_cannot_load(
     assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 0
     assert len(execs) == 1
 
+
 @pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
 def test_upgrade_keeps_keys_the_target_release_has(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str, target: str
@@ -1627,6 +1699,398 @@ def test_upgrade_keeps_keys_the_target_release_has(
 
 # #1390: guardrail.internal_domains is new in 1.0.6; 1.0.5 and 1.0.4 refuse it.
 _DOMAINS_CONFIG = "config_version: 9\nguardrail:\n  internal_domains:\n  - corp.example.com\n"
+
+
+# 1.0.10 keys: 1.0.9's gateway (LoadRuntimeV8File) and every 1.0.9 config
+# write (ValidateCandidate) refuse each one ("additionalProperties"), so a
+# downgrade to 1.0.9 sets them aside (s7-nscfg).
+_KEYS_1_0_10 = (
+    "config_version: 9\n"
+    "guardrail:\n"
+    "  mode: observe\n"
+    "  cascade:\n    lanes:\n      nonshell: \"off\"\n      effects: shadow\n"
+    "  secret_flow:\n    sink_action:\n      strict: alert\n"
+    "  effects_rules_tier: restricted\n"
+    "decision_model:\n  escalate_rule_flagged: true\n"
+    "observability:\n  local:\n    keep_rejected_records: true\n"
+    "routing:\n  min_confidence: 0.5\n"
+)
+
+
+def test_downgrade_to_1_0_9_sets_aside_the_1_0_10_keys(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_KEYS_1_0_10, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    guardrail = config["guardrail"]
+    for key in ("cascade", "secret_flow", "effects_rules_tier"):
+        assert key not in guardrail, key
+    assert guardrail["mode"] == "observe"
+    assert "escalate_rule_flagged" not in (config.get("decision_model") or {})
+    assert "keep_rejected_records" not in ((config.get("observability") or {}).get("local") or {})
+    assert "min_confidence" not in (config.get("routing") or {})
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["for"] == "1.0.9"
+    assert record["keys"] == {
+        "guardrail.cascade": {"lanes": {"nonshell": "off", "effects": "shadow"}},
+        "guardrail.secret_flow": {"sink_action": {"strict": "alert"}},
+        "guardrail.effects_rules_tier": "restricted",
+        "decision_model.escalate_rule_flagged": True,
+        "observability.local.keep_rejected_records": True,
+        "routing.min_confidence": 0.5,
+    }
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CONFIG_KEYS_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.txt"
+
+
+def _schema_key_paths(schema: dict) -> set[str]:
+    """Every key the v8 config schema names (properties, through $ref and *Of), also inside list
+    items (``routing.models[].bedrock``) and map values (``guardrail.profiles.*.routing``):
+    1.0.9 refuses a 1.0.10 key there too (rel-1-0-10:GAP-0644)."""
+
+    defs = schema.get("$defs", {})
+    out: set[str] = set()
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            dotted = f"{prefix}.{key}" if prefix else key
+            out.add(dotted)
+            walk(child, dotted, refs)
+        if isinstance(node.get("items"), dict):
+            walk(node["items"], f"{prefix}[]", refs)
+        for value in [node.get("additionalProperties"), *(node.get("patternProperties") or {}).values()]:
+            if isinstance(value, dict):
+                walk(value, f"{prefix}.*", refs)
+
+    walk(schema, "", ())
+    return out
+
+
+_SCHEMA_1_0_9 = Path(__file__).parent / "fixtures" / "config_keys" / "1.0.9.schema.json"
+
+
+def _missing_from_newer_config_keys(new_paths: set[str], old_paths: set[str]) -> list[str]:
+    """Keys in the new schema, absent from 1.0.9, that NEWER_CONFIG_KEYS (a key or a block above it) does not list.
+    A listed list key holds the keys of its items (``url_rules`` holds ``url_rules[].hosts``): the
+    whole list is set aside."""
+
+    listed = [
+        key
+        for key, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES, *upgrade_shim.NEWER_ITEM_KEYS)
+        if since > (1, 0, 9)
+    ]
+    return sorted(
+        path
+        for path in new_paths - old_paths
+        if not any(path == key or path.startswith((key + ".", key + "[")) for key in listed)
+    )
+
+
+def test_the_frozen_1_0_9_key_list_is_the_published_1_0_9_schema() -> None:
+    # fixtures/config_keys/1.0.9.txt is not typed by hand: it is _schema_key_paths of
+    # fixtures/config_keys/1.0.9.schema.json, a byte copy of the schema 1.0.9 published:
+    #   git show 1.0.9:schemas/config/v8/defenseclaw-config.schema.json > 1.0.9.schema.json
+    # This test regenerates the list from that copy and requires the two to match, so a
+    # hand edit of either one fails here.
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    regenerated = sorted(_schema_key_paths(schema))
+    assert regenerated == _CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split()
+    assert "guardrail.mode" in regenerated
+    assert not {"guardrail.cascade", "guardrail.secret_flow", "guardrail.effects_rules_tier", "routing.min_confidence"} & set(regenerated)
+
+
+def test_every_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
+    # A key the schema adds after 1.0.9 is refused by 1.0.9, so it must be in
+    # NEWER_CONFIG_KEYS (itself or a block that holds it), or a downgrade
+    # leaves a config.yaml 1.0.9 does not start with.
+    old = set(_CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split())
+    schema = json.loads(
+        (_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8")
+    )
+    new = _schema_key_paths(schema)
+    missing = _missing_from_newer_config_keys(new, old)
+    assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS: {missing}"
+
+
+def _schema_enum_values(schema: dict) -> dict[str, set]:
+    """The enum values of every key path (_schema_key_paths naming) that has an enum."""
+
+    defs = schema.get("$defs", {})
+    out: dict[str, set] = {}
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        if prefix and isinstance(node.get("enum"), list):
+            out.setdefault(prefix, set()).update(json.dumps(v) for v in node["enum"])
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            walk(child, f"{prefix}.{key}" if prefix else key, refs)
+        if isinstance(node.get("items"), dict):
+            walk(node["items"], f"{prefix}[]", refs)
+        for value in [node.get("additionalProperties"), *(node.get("patternProperties") or {}).values()]:
+            if isinstance(value, dict):
+                walk(value, f"{prefix}.*", refs)
+
+    walk(schema, "", ())
+    return out
+
+
+# Keys both releases have whose allowed values 1.0.10 widens, and what a downgrade does with a
+# value 1.0.9 refuses (rel-1-0-10:GAP-0767): the decision is set aside whole.
+_WIDENED_SINCE_1_0_9 = {"routing.decisions[].conditions[].type": "decision set aside"}
+
+
+def test_every_value_new_since_1_0_9_is_handled_on_a_downgrade() -> None:
+    # A value 1.0.9 refuses under a key it has is the same failure as a new key (1.0.9 refuses
+    # config.yaml), so every widened enum must be handled by the set-aside.
+    old = _schema_enum_values(json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8")))
+    new = _schema_enum_values(
+        json.loads((_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8"))
+    )
+    widened = sorted(path for path in set(old) & set(new) if new[path] - old[path])
+    assert widened == sorted(_WIDENED_SINCE_1_0_9), f"handle these in upgrade_shim and list them here: {widened}"
+    assert {json.dumps(t) for t in upgrade_shim.OLDER_DECISION_CONDITION_TYPES} | {'"KEYWORD"'} == old[
+        "routing.decisions[].conditions[].type"
+    ]
+
+
+_DECISION_AND_CLASSIFIER_CONFIG = """config_version: 9
+routing:
+  enabled: true
+  classifier: rules
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-5-mini
+  signals:
+    keywords:
+      - name: quick
+        keywords: [quick question]
+  decisions:
+    - name: quick
+      conditions: [{type: keyword, name: quick}]
+      model_refs: [fast]
+    - name: codex-fast
+      conditions: [{type: connector, name: codex}]
+      model_refs: [fast]
+    - name: last
+      conditions: [{type: KEYWORD, name: quick}]
+      model_refs: [fast]
+"""
+
+
+def test_downgrade_to_1_0_9_sets_aside_a_newer_decision_and_switches_routing_off(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_DECISION_AND_CLASSIFIER_CONFIG, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))
+    assert [d["name"] for d in config["routing"]["decisions"]] == ["quick", "last"]
+    assert config["routing"]["enabled"] is False and "classifier" not in config["routing"]
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["keys"] == {"routing.classifier": "rules"}
+    assert record["decisions"] == [
+        {"index": 1, "value": {"name": "codex-fast", "conditions": [{"type": "connector", "name": "codex"}], "model_refs": ["fast"]}}
+    ]
+    assert record["switched"] == {"routing.enabled": True}
+    out = capsys.readouterr().out
+    assert "routing decision codex-fast" in out and "Routing is switched off for 1.0.9" in out
+
+
+# A profile assignment that matches Substrate actors (upgrade_shim.NEWER_ITEM_KEYS): 1.0.9's
+# match is closed, needs one key and ANDs its keys, so the item is set aside whole on a
+# downgrade, never narrowed to its other keys, and migrate puts it back in its place.
+_CI_ONLY = {"profile": "ci", "match": {"substrate": {"atespaces": ["ci-runs"]}}}
+_ENG_GROUPS = {"profile": "eng", "match": {"groups": ["eng"]}}
+_OPS_SUBSTRATE_AND_GROUPS = {"profile": "ops", "match": {"groups": ["ops"], "substrate": {"templates": ["ci-runs/claude"]}}}
+_ENG_USERS = {"profile": "eng", "match": {"users": ["alice"]}}
+
+
+def _assignments_config(assignments: list[dict]) -> str:
+    import yaml
+
+    return yaml.safe_dump(
+        {
+            "config_version": 9,
+            "guardrail": {"profiles": {"ci": {}, "eng": {}, "ops": {}}, "profile_assignments": assignments},
+        },
+        sort_keys=False,
+    )
+
+
+def _downgrade_and_restore(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, assignments: list[dict]
+) -> tuple[dict, dict, dict]:
+    """config.yaml after the downgrade to 1.0.9, the set-aside record, and config.yaml after migrate."""
+    import jsonschema
+    import yaml
+    from defenseclaw import migrations
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    config_path = home / "config.yaml"
+    config_path.write_text(_assignments_config(assignments), encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    downgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    jsonschema.validators.validator_for(schema)(schema).validate(downgraded)  # 1.0.9 starts with it
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    migrations._restore_set_aside_keys(str(home), str(config_path))
+    restored = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert not _set_aside(home).exists()
+    return downgraded, record, restored
+
+
+def test_a_substrate_only_profile_assignment_is_set_aside_and_put_back(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    downgraded, record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, [_CI_ONLY])
+
+    assert "profile_assignments" not in downgraded["guardrail"]
+    assert record["assignments"] == [{"index": 0, "profile": "ci", "value": _CI_ONLY}]
+    assert record["keys"] == {}
+    assert restored["guardrail"]["profile_assignments"] == [_CI_ONLY]
+    assert "the Substrate profile assignment of ci" in capsys.readouterr().out
+
+
+def test_a_substrate_and_groups_profile_assignment_is_set_aside_whole_not_narrowed(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downgraded, record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, [_OPS_SUBSTRATE_AND_GROUPS])
+
+    # Never {"profile": "ops", "match": {"groups": ["ops"]}}: that would give the host
+    # subjects of group ops a profile only Substrate actors had.
+    assert "profile_assignments" not in downgraded["guardrail"]
+    assert record["assignments"] == [{"index": 0, "profile": "ops", "value": _OPS_SUBSTRATE_AND_GROUPS}]
+    assert restored["guardrail"]["profile_assignments"] == [_OPS_SUBSTRATE_AND_GROUPS]
+
+
+def test_a_mixed_profile_assignment_list_keeps_its_order_through_a_downgrade(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = [_CI_ONLY, _ENG_GROUPS, _OPS_SUBSTRATE_AND_GROUPS, _ENG_USERS]
+    downgraded, record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, original)
+
+    assert downgraded["guardrail"]["profile_assignments"] == [_ENG_GROUPS, _ENG_USERS]
+    assert [(a["index"], a["profile"]) for a in record["assignments"]] == [(0, "ci"), (2, "ops")]
+    assert restored["guardrail"]["profile_assignments"] == original
+
+
+def _valid_for_1_0_9(config: dict) -> bool:
+    """config.yaml as 1.0.9's own validator reads it: the schema 1.0.9 published (a byte copy)."""
+    import jsonschema
+
+    schema = json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8"))
+    return jsonschema.validators.validator_for(schema)(schema).is_valid(config)
+
+
+@pytest.mark.parametrize(
+    "assignments",
+    [[_CI_ONLY], [_OPS_SUBSTRATE_AND_GROUPS], [_CI_ONLY, _ENG_GROUPS, _OPS_SUBSTRATE_AND_GROUPS, _ENG_USERS]],
+    ids=["substrate-only", "substrate-and-groups", "mixed"],
+)
+def test_1_0_9_accepts_the_downgraded_profile_assignments_and_refuses_the_others(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, assignments: list[dict]
+) -> None:
+    import yaml
+
+    before = yaml.safe_load(_assignments_config(assignments))
+    # The validator bites: 1.0.9 refuses the config as 1.0.10 wrote it (a substrate match
+    # key), and the match a key-only set-aside would leave on a substrate-only item ({}).
+    assert not _valid_for_1_0_9(before)
+    emptied = yaml.safe_load(_assignments_config([{"profile": "ci", "match": {}}]))
+    assert not _valid_for_1_0_9(emptied)
+    assert _valid_for_1_0_9(yaml.safe_load(_assignments_config([_ENG_GROUPS])))
+
+    downgraded, _record, restored = _downgrade_and_restore(home, tmp_path, monkeypatch, assignments)
+
+    assert _valid_for_1_0_9(downgraded)
+    left = (downgraded.get("guardrail") or {}).get("profile_assignments") or []
+    assert all("substrate" not in a["match"] for a in left)
+    assert [a for a in assignments if "substrate" not in a["match"]] == left
+    assert restored["guardrail"]["profile_assignments"] == assignments
+
+
+def test_an_upgrade_to_1_0_10_keeps_substrate_profile_assignments(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    body = _assignments_config([_CI_ONLY, _ENG_GROUPS])
+    (home / "config.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.10")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.10", "--yes"]) == 0
+
+    assert (home / "config.yaml").read_text(encoding="utf-8") == body
+    assert not _set_aside(home).exists()
+
+
+def test_downgrade_keeps_routing_on_with_the_vllm_classifier(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    body = _DECISION_AND_CLASSIFIER_CONFIG.replace("  classifier: rules\n", "").replace(
+        "    - name: codex-fast\n      conditions: [{type: connector, name: codex}]\n      model_refs: [fast]\n", ""
+    )
+    (home / "config.yaml").write_text(body, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["routing"]["enabled"] is True
+    assert not _set_aside(home).exists()
+
+
+def test_the_downgrade_guard_fails_on_a_key_the_list_does_not_cover() -> None:
+    # The guard above would pass on an empty diff; prove it bites: a key that is in the
+    # 1.0.10 schema, not in the frozen 1.0.9 list and not in NEWER_CONFIG_KEYS is reported,
+    # and a key under a listed block is not.
+    old = set(_CONFIG_KEYS_1_0_9.read_text(encoding="utf-8").split())
+    new = set(old) | {"guardrail.brand_new_switch", "guardrail.secret_flow.sink_action.default"}
+    assert _missing_from_newer_config_keys(new, old) == ["guardrail.brand_new_switch"]
+    assert _missing_from_newer_config_keys(old, old) == []
+    # It sees keys inside list items and map values too (rel-1-0-10:GAP-0644).
+    assert "routing.models[].name" in old and "guardrail.profiles.*.block_at" in old
+    nested = set(old) | {"routing.models[].brand_new", "guardrail.profiles.*.brand_new", "routing.models[].bedrock.region"}
+    assert _missing_from_newer_config_keys(nested, old) == ["guardrail.profiles.*.brand_new", "routing.models[].brand_new"]
 
 
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
@@ -1723,7 +2187,9 @@ def test_a_downgrade_drops_the_hook_helper_this_release_left_and_restarts_the_ga
     restarts: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
     monkeypatch.setattr(upgrade_shim.subprocess, "call", lambda argv, **kw: restarts.append(list(argv)) or 0)
-    monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: pytest.fail("a downgrade must wait for its installer"))
+    monkeypatch.setattr(
+        upgrade_shim.os, "execv", lambda path, argv: pytest.fail("a downgrade must wait for its installer")
+    )
 
     assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 0
 
@@ -1765,7 +2231,9 @@ def test_a_downgrade_keeps_a_hook_helper_it_did_not_leave(
         (home / "hooks" / "_hardening.sh").write_bytes(live)
         (home / "previous" / "data" / "hooks").mkdir(parents=True, exist_ok=True)
         (home / "previous" / "data" / "hooks" / "_hardening.sh").write_bytes(b"v10\n")
-        (home / "previous" / "VERSION").write_text("1.0.4\n" if case == "previous-not-newer" else "1.0.5\n", encoding="utf-8")
+        (home / "previous" / "VERSION").write_text(
+            "1.0.4\n" if case == "previous-not-newer" else "1.0.5\n", encoding="utf-8"
+        )
         return 1 if case == "installer-failed" else 0
 
     monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
@@ -1841,9 +2309,7 @@ def test_rollback_refuses_a_saved_installer_the_install_did_not_save(
 
 
 @pytest.mark.parametrize("platform", ["posix", "nt"])
-def test_rollback_runs_the_recorded_saved_installer(
-    home: Path, monkeypatch: pytest.MonkeyPatch, platform: str
-) -> None:
+def test_rollback_runs_the_recorded_saved_installer(home: Path, monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
     from defenseclaw import __version__
 
     name = "install.ps1" if platform == "nt" else "install.sh"
@@ -1851,7 +2317,9 @@ def test_rollback_runs_the_recorded_saved_installer(
     _record(home, saved)
     ran: list[tuple[str, list[str], bytes]] = []
     monkeypatch.setattr(
-        upgrade_shim, "_run_installer", lambda path, args, workdir, *, rerun: ran.append((path, args, Path(path).read_bytes())) or 0
+        upgrade_shim,
+        "_run_installer",
+        lambda path, args, workdir, *, rerun: ran.append((path, args, Path(path).read_bytes())) or 0,
     )
     monkeypatch.setattr(upgrade_shim.os, "name", platform)
 
@@ -1877,7 +2345,14 @@ def test_rollback_checks_a_previous_installer_only_when_it_was_recorded(home: Pa
 
 @pytest.mark.parametrize(
     "value",
-    ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname", "a/b/c", "owner/na me", "file:///tmp/dc"],
+    [
+        "http://127.0.0.1:8765/defenseclaw",
+        "ftp://mirror.example/dc",
+        "justaname",
+        "a/b/c",
+        "owner/na me",
+        "file:///tmp/dc",
+    ],
 )
 def test_a_bad_defenseclaw_repo_is_refused_with_the_https_requirement(
     home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str
@@ -1911,3 +2386,286 @@ def test_a_good_defenseclaw_repo_is_still_accepted(
 ) -> None:
     monkeypatch.setenv(upgrade_shim.REPO_ENV, value)
     assert upgrade_shim.release_source() == base
+
+
+# GAP-0583: a cascade block under a connector or a profile scope is a 1.0.10
+# key inside a map of named entries. 1.0.9 refuses it as it refuses
+# guardrail.cascade (GAP-0544), so a downgrade sets each one aside by its own
+# dotted key (NEWER_CONFIG_SUBTREES) and keeps everything else of the entry.
+_SCOPED_CASCADE = (
+    "config_version: 9\n"
+    "guardrail:\n"
+    "  mode: action\n"
+    "  connectors:\n"
+    "    codex:\n"
+    "      block_at: HIGH\n"
+    "      cascade:\n        unknown: block\n"
+    "  profiles:\n"
+    "    contractors:\n"
+    "      block_at: MEDIUM\n"
+    "      cascade:\n        judge:\n          max_action: alert\n"
+    "      connectors:\n"
+    "        claudecode:\n"
+    "          mode: observe\n"
+    "          cascade:\n            unknown: confirm\n"
+)
+
+
+def test_downgrade_to_1_0_9_sets_aside_every_scoped_cascade(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_SCOPED_CASCADE, encoding="utf-8")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    assert len(execs) == 1
+    guardrail = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["guardrail"]
+    assert guardrail["connectors"] == {"codex": {"block_at": "HIGH"}}
+    profile = guardrail["profiles"]["contractors"]
+    assert profile == {"block_at": "MEDIUM", "connectors": {"claudecode": {"mode": "observe"}}}
+    record = json.loads(_set_aside(home).read_text(encoding="utf-8"))
+    assert record["for"] == "1.0.9"
+    assert record["keys"] == {
+        "guardrail.connectors.codex.cascade": {"unknown": "block"},
+        "guardrail.profiles.contractors.cascade": {"judge": {"max_action": "alert"}},
+        "guardrail.profiles.contractors.connectors.claudecode.cascade": {"unknown": "confirm"},
+    }
+
+
+def test_upgrade_to_1_0_10_keeps_the_scoped_cascades(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    (home / "config.yaml").write_text(_SCOPED_CASCADE, encoding="utf-8")
+    assert upgrade_shim.newer_config_values({"guardrail": {"connectors": {"codex": {"cascade": {"unknown": "block"}}}}}, (1, 0, 10)) == {}
+    assert upgrade_shim.is_newer_config_key("guardrail.profiles.p.connectors.codex.cascade")
+    assert upgrade_shim.is_newer_config_key("guardrail.connectors.codex.cascade")
+    assert not upgrade_shim.is_newer_config_key("guardrail.connectors.codex.block_at")
+    assert not upgrade_shim.is_newer_config_key("guardrail.profiles.p.connectors.codex")
+
+
+def _schema_key_paths_with_maps(schema: dict) -> set[str]:
+    """_schema_key_paths, plus the keys inside maps of named entries (additionalProperties
+    or patternProperties objects), with "*" for the entry name."""
+
+    defs = schema.get("$defs", {})
+    out: set[str] = set()
+
+    def walk(node: object, prefix: str, refs: tuple[str, ...]) -> None:
+        if not isinstance(node, dict):
+            return
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/") and ref.count("/") == 2:
+            name = ref.rsplit("/", 1)[-1]
+            if name not in refs:
+                walk(defs.get(name), prefix, (*refs, name))
+        for keyword in ("allOf", "anyOf", "oneOf"):
+            for branch in node.get(keyword, []):
+                walk(branch, prefix, refs)
+        for key, child in node.get("properties", {}).items():
+            dotted = f"{prefix}.{key}" if prefix else key
+            out.add(dotted)
+            walk(child, dotted, refs)
+        entries = [node.get("additionalProperties"), *node.get("patternProperties", {}).values()]
+        for child in entries:
+            if isinstance(child, dict) and prefix:
+                walk(child, f"{prefix}.*", refs)
+
+    walk(schema, "", ())
+    return out
+
+
+def _covered_by_newer_keys(path: str) -> bool:
+    parts = path.split(".")
+    for dotted, since in (*upgrade_shim.NEWER_CONFIG_KEYS, *upgrade_shim.NEWER_CONFIG_SUBTREES):
+        if since <= (1, 0, 9):
+            continue
+        pattern = dotted.split(".")
+        if len(parts) >= len(pattern) and all(p in ("*", k) for p, k in zip(pattern, parts)):
+            return True
+    return False
+
+
+def test_every_scoped_key_new_since_1_0_9_is_set_aside_on_a_downgrade() -> None:
+    # The GAP-0544 guard reads properties only, so a key inside a map of named
+    # entries (guardrail.connectors.<c>, guardrail.profiles.<p>) passed it
+    # unseen (GAP-0583). This walks the maps too, on the frozen 1.0.9 schema
+    # and on this release's.
+    old = _schema_key_paths_with_maps(json.loads(_SCHEMA_1_0_9.read_text(encoding="utf-8")))
+    new = _schema_key_paths_with_maps(
+        json.loads((_REPO_ROOT / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json").read_text(encoding="utf-8"))
+    )
+    assert "guardrail.connectors.*.block_at" in old
+    assert "guardrail.profiles.*.connectors.*.cascade" in new
+    missing = sorted(p for p in new - old if not _covered_by_newer_keys(p))
+    assert missing == [], f"add these to upgrade_shim.NEWER_CONFIG_KEYS or NEWER_CONFIG_SUBTREES: {missing}"
+
+
+def test_the_scoped_downgrade_guard_fails_on_an_uncovered_scoped_key() -> None:
+    assert not _covered_by_newer_keys("guardrail.profiles.*.brand_new_switch")
+    assert _covered_by_newer_keys("guardrail.profiles.*.connectors.*.cascade.unknown")
+    assert _covered_by_newer_keys("guardrail.cascade.admin.locked")
+
+
+# rel-1-0-10 GAP-0602: a downgrade to a release without route-only puts the
+# agent model settings back first (asked, gateway stopped), or refuses with
+# the command that does it; a rollback leaves it to the saved installer's
+# prepare-rollback step, which runs after its prompt with the gateway stopped.
+_CLAUDE_ROUTED = '{"env": {"ANTHROPIC_BEDROCK_BASE_URL": "http://127.0.0.1:18970/r/claudecode", "ANTHROPIC_CUSTOM_HEADERS": "X-DC-Route-Auth: dcr1-x", "CLAUDE_CODE_SKIP_BEDROCK_AUTH": "1"}}'
+_CLAUDE_DIRECT = '{"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}'
+
+
+def _routed_claude() -> Path:
+    settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(_CLAUDE_ROUTED, encoding="utf-8")
+    return settings
+
+
+def _fake_gateway(
+    monkeypatch: pytest.MonkeyPatch, settings: Path, *, restores: bool, running: bool = True
+) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def call(argv: list[str], **_kw: object) -> int:
+        calls.append(list(argv[1:]))
+        if argv[1:3] == ["connector", "route-restore"] and restores:
+            settings.write_text(_CLAUDE_DIRECT, encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(upgrade_shim.subprocess, "call", call)
+    monkeypatch.setattr(upgrade_shim, "_gateway_running", lambda _home: running)
+    return calls
+
+
+def _downgrade_to_1_0_9(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int = 0) -> list[list[str]]:
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.10")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.9")))
+    waited: list[list[str]] = []
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", lambda argv: waited.append(list(argv)) or rc)
+    return waited
+
+
+def test_downgrade_puts_the_route_only_settings_back_with_the_gateway_stopped(
+    home: Path,
+    tmp_path: Path,
+    execs: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+    waited = _downgrade_to_1_0_9(tmp_path, monkeypatch)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+
+    # Stopped before the restore, started again (the 1.0.9 gateway) after:
+    # the older installer saw no gateway running and starts none.
+    assert calls == [["stop"], ["connector", "route-restore", "--all"], ["start"]]
+    assert "/r/claudecode" not in settings.read_text(encoding="utf-8")
+    assert len(waited) == 1 and "--yes" in waited[0] and execs == []
+    assert "Put back the claudecode model settings" in capsys.readouterr().out
+
+
+def test_a_failed_downgrade_starts_the_gateway_again(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch, rc=3)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 3
+
+    assert calls[-1] == ["start"]
+
+
+def test_downgrade_refuses_when_the_route_only_settings_stay(
+    home: Path,
+    tmp_path: Path,
+    execs: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=False)
+    waited = _downgrade_to_1_0_9(tmp_path, monkeypatch)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 1
+
+    assert waited == [] and execs == []
+    assert calls[-1] == ["start"]
+    err = capsys.readouterr().err
+    assert "defenseclaw routing disable --connector claudecode" in err and "401" in err and "Nothing was changed" in err
+
+
+def test_a_downgrade_whose_installer_cannot_start_starts_the_gateway_again(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch)
+
+    def broken(argv: list[str]) -> int:
+        raise upgrade_shim.ShimError("could not run bash")
+
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", broken)
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 1
+    assert calls[-1] == ["start"]
+
+
+def test_a_downgrade_with_the_gateway_stopped_leaves_it_stopped(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True, running=False)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+    assert calls == [["connector", "route-restore", "--all"]]
+
+
+def test_downgrade_without_yes_and_no_terminal_changes_nothing(
+    home: Path,
+    tmp_path: Path,
+    execs: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch)
+    monkeypatch.setattr(upgrade_shim.sys.stdin, "isatty", lambda: False, raising=False)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9"]) == 1
+
+    assert calls == [] and execs == []
+    assert "/r/claudecode" in settings.read_text(encoding="utf-8")
+    assert "--yes" in capsys.readouterr().err
+
+
+def test_rollback_leaves_the_route_only_settings_to_the_installer(
+    home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = home / "installer" / "install.sh"
+    saved.parent.mkdir()
+    saved.write_text("#!/bin/bash\n", encoding="utf-8")
+    _record(home, saved)
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+
+    assert upgrade_shim.run(["rollback", "--yes"]) == 0
+
+    # Nothing changes before the installer's own prompt.
+    assert calls == [] and execs[0][2:] == ["--rollback", "--yes"]
+
+
+def test_codex_route_render_is_found(home: Path) -> None:
+    codex = Path(os.environ["CODEX_HOME"])
+    codex.mkdir(parents=True)
+    assert upgrade_shim._route_only_rendered() == []
+    (codex / "config.toml").write_text('model_provider = "defenseclaw_route"\n', encoding="utf-8")
+    assert upgrade_shim._route_only_rendered() == ["codex"]

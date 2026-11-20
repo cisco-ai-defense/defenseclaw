@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -213,7 +214,7 @@ func TestWindowsClaudeMigrationReportsLeftoversWhenNothingIsRemovable(t *testing
 // managed config under the trusted ProgramData, in force only while the
 // trusted managed plugin is installed and named there.
 func TestWindowsOpenCodeMachinePolicyCheckNamesTheManagedConfig(t *testing.T) {
-	layout, _, programData, err := standaloneEnterprisePolicyLayout()
+	layout, _, programData, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		t.Skipf("no standalone layout: %v", err)
 	}
@@ -367,7 +368,7 @@ func TestWindowsCopilotVSCodeUserRemovalWithoutLoadedConfig(t *testing.T) {
 	previous := cfg
 	t.Cleanup(func() { cfg = previous })
 	cfg = nil
-	layout, _, _, err := standaloneEnterprisePolicyLayout()
+	layout, _, _, err := hookcli.StandaloneEnterprisePolicyLayout()
 	if err != nil {
 		t.Fatal(err)
 	}

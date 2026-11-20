@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -367,11 +368,17 @@ func isApplyPatchToolName(tool string) bool {
 // shared by the hook client (ResolveConnector) and the gateway
 // (agentHookTrustedActionTool) so both read the call as the same tool.
 // OpenCode V2 names its native patch tool "patch" and sends the reviewed
-// apply_patch envelope in patchText (GAP-0073). Any other name is returned
-// unchanged.
+// apply_patch envelope in patchText (GAP-0073). agy's send_command_input
+// writes text to the stdin of a command run_command started, and is judged
+// as run_command input (antigravityargs.TrustedShellArgs). Any other name is
+// returned unchanged.
 func ConnectorActionTool(connector, tool string) string {
 	if strings.EqualFold(strings.TrimSpace(connector), "opencode") && tool == "patch" {
 		return "apply_patch"
+	}
+	if strings.EqualFold(strings.TrimSpace(connector), "antigravity") &&
+		strings.EqualFold(strings.TrimSpace(tool), "send_command_input") {
+		return "run_command"
 	}
 	return tool
 }
@@ -565,13 +572,42 @@ func patchShellInvocationsKnown(text string) (known bool, calls int, fedBody []b
 			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
 			continue
 		}
-		count := len(patchProgramWord.FindAllString(line, -1))
+		count := patchProgramWordCount(line)
 		calls += count
 		if count > bound[i] {
 			return false, calls, nil
 		}
 	}
 	return true, calls, fedBody
+}
+
+// patchProgramWordCount counts the apply_patch program names in a shell line,
+// leaving out a name that is part of a file name or a word (applypatch.go,
+// apply_patch.md, my-apply-patch): such a word names a file the line reads,
+// not a call the patch walk must account for (rel-1-0-10:GAP-0018).
+var patchProgramSuffixes = strings.Fields("exe cmd bat ps1 com")
+
+func patchProgramWordCount(line string) int {
+	count := 0
+	for _, at := range patchProgramWord.FindAllStringIndex(line, -1) {
+		start, end := at[0], at[1]
+		if start > 0 && (line[start-1] == '-' || line[start-1] == '.') {
+			continue
+		}
+		if end+1 < len(line) && (line[end] == '.' || line[end] == '-') {
+			rest := line[end+1:]
+			length := 0
+			for length < len(rest) && (rest[length] >= 'a' && rest[length] <= 'z' || rest[length] >= 'A' && rest[length] <= 'Z' || rest[length] >= '0' && rest[length] <= '9') {
+				length++
+			}
+			// A Windows program suffix is still the program.
+			if length > 0 && (line[end] != '.' || !slices.Contains(patchProgramSuffixes, strings.ToLower(rest[:length]))) {
+				continue
+			}
+		}
+		count++
+	}
+	return count
 }
 
 // patchFedLines marks the lines inside every envelope in a shell text that
@@ -772,18 +808,25 @@ func openQuote(text string) byte {
 	return quote
 }
 
+// applyPatchNames are the program names of apply_patch.
+var applyPatchNames = []string{"apply_patch", "applypatch", "apply-patch"}
+
 // invokesApplyPatch reports a shell text that may run apply_patch as a
 // command, also behind a wrapper (env, sudo, nice, nohup, time, exec,
 // command) or in a sh -c script. Its patch then comes from a file or a pipe
 // the hook cannot read. Each line is also read on its own, so a script fed
 // to a shell on stdin (a here-document body) counts too.
 func invokesApplyPatch(text string) bool {
-	names := []string{"apply_patch", "applypatch", "apply-patch"}
-	if tactics.RunsProgram(text, names...) {
+	// A line holds no name the whole text does not (MayNameProgram), so a
+	// text that names none skips the reading of every line.
+	if !tactics.MayNameProgram(text, applyPatchNames...) {
+		return false
+	}
+	if tactics.RunsProgram(text, applyPatchNames...) {
 		return true
 	}
 	for _, line := range strings.Split(text, "\n") {
-		if tactics.RunsProgram(line, names...) {
+		if tactics.RunsProgram(line, applyPatchNames...) {
 			return true
 		}
 	}

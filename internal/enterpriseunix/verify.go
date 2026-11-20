@@ -239,7 +239,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// enables no connector for the eligible users fail verify only;
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
-			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
+			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == enterprisestatus.CodeConfigRejected ||
 				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir || warning.Code == codeLegacySandbox || warning.Code == codeCoworkIncomplete {
 				problems = append(problems, warning.Message)
 			}
@@ -687,8 +687,18 @@ func (l *lifecycle) packageVersionDrift(ctx context.Context, record *Deployment)
 		return ""
 	}
 	cause := ""
-	if failure := env.lastPackageInstallFailure(); failure != "" {
+	last, haveLast := env.readLastPackageResult()
+	if haveLast && last.ProductVersion != "" && last.ProductVersion != version {
+		// The package's own run wrote no result (a full lifecycle
+		// filesystem refused even the file it writes first): the kept result
+		// is an older package's, ok:true or not, and says nothing about
+		// this one (GAP-0057).
+		cause = " (" + lastPackageResultFile + " is from the " + last.ProductVersion + " run, so the package's own run left no result)"
+	} else if failure := last.failure(); failure != "" {
 		cause = " (" + failure + ")"
+	}
+	if full := l.lifecycleDirFull(); full != "" {
+		cause += "; " + full
 	}
 	if duplicates := env.rpmDuplicateRecords(ctx); len(duplicates) > 1 {
 		// A power loss in the middle of an rpm upgrade leaves both versions
@@ -922,16 +932,35 @@ func (l *lifecycle) clearSupersededFailures() {
 // printed only "run verify", and verify then said not_installed without the
 // cause (a missing protected credential) that the result names (GAP-1744).
 func (e *Env) lastPackageInstallFailure() string {
+	last, _ := e.readLastPackageResult()
+	return last.failure()
+}
+
+// packageResult is what the lifecycle reads of last-package-result.json.
+type packageResult struct {
+	OK     bool                       `json:"ok"`
+	Action string                     `json:"action"`
+	Errors []enterprisestatus.Message `json:"errors"`
+	// ProductVersion is the release of the gateway that ran, which tells a
+	// result an older package left from this package's (GAP-0057).
+	ProductVersion string `json:"product_version"`
+}
+
+// readLastPackageResult reads last-package-result.json; false when it is
+// missing or not a JSON result.
+func (e *Env) readLastPackageResult() (packageResult, bool) {
+	var last packageResult
 	raw, err := readBounded(e.P(filepath.Join(e.Layout.LifecycleDir, lastPackageResultFile)), maxInputBytes)
-	if err != nil {
-		return ""
+	if err != nil || json.Unmarshal(raw, &last) != nil {
+		return packageResult{}, false
 	}
-	var last struct {
-		OK     bool                       `json:"ok"`
-		Action string                     `json:"action"`
-		Errors []enterprisestatus.Message `json:"errors"`
-	}
-	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
+	return last, true
+}
+
+// failure is "code: message" of the first error of a failed install run, or
+// "" when the run succeeded or was not an install run.
+func (last packageResult) failure() string {
+	if last.OK || len(last.Errors) == 0 {
 		return ""
 	}
 	switch last.Action {
@@ -1192,7 +1221,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.
-		r.AddWarning(codeConfigRejected, problem)
+		r.AddWarning(enterprisestatus.CodeConfigRejected, problem)
 	}
 	r.ResetCompleteness()
 	for _, service := range []struct {
@@ -1211,6 +1240,12 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		for _, problem := range unpinnable {
 			r.AddWarning(codeMachinePolicyIncomplete, problem)
 		}
+	}
+	if hasMessageCode(r.Warnings, enterprisestatus.CodeConfigRejected) {
+		// The coverage the administrator's config asks for is not in place:
+		// the deployment runs the config it ran before (GAP-1027, as on
+		// Windows).
+		r.MarkCoverageIncomplete(enterprisestatus.CodeConfigRejected)
 	}
 	if !r.Readiness.SensorHelper {
 		r.MarkSecurityIncomplete("the sensor helper is not ready")
@@ -1231,7 +1266,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.MarkSecurityIncomplete("the gateway does not report the installed policy as applied")
 	}
 	l.describeHookContracts(ctx)
-	l.describeUnprotectedAgents()
+	l.describeUnprotectedAgents(record)
 	l.describeChangedGuardianFiles()
 	l.describeGuardianCleanups(ctx)
 	l.describeUnavailableEnrolledHomes()
@@ -1277,7 +1312,7 @@ func (l *lifecycle) describeRunning(ctx context.Context, record *Deployment) {
 	r := l.result
 	before := len(r.Warnings)
 	l.describe(ctx, record, false)
-	r.LabelRunningDeployment(before, codeConfigRejected)
+	r.LabelRunningDeployment(before, enterprisestatus.CodeConfigRejected)
 }
 
 // codeSandboxPackDir warns about a sandbox packs folder other accounts could
@@ -1442,6 +1477,9 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			"lists them only to root on its hook socket, because they name the configured groups and accounts; `%s` shows them",
 			withheld, l.env.lifecycleCommand("profile-explain --user <account>")))
 	}
+	if message, over := enterprisestatus.HookCapacityWarning(body); over {
+		l.result.AddWarning(enterprisestatus.CodeHookOverCapacity, message)
+	}
 	if health.Telemetry.Details.OptionalState == "degraded" {
 		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+
 			"; inspect `"+l.env.gatewayCommand("status")+"` or the gateway /health telemetry details")
@@ -1476,6 +1514,12 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			break
 		}
 		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
+			// An exclude_users entry that matches no account has its own
+			// code (GAP-1111); the gateway starts it with this key.
+			if strings.HasPrefix(warning, enrollmentExcludeWarningPrefix) {
+				l.result.AddWarning(codeEnrollmentExcludeUnmatched, warning)
+				continue
+			}
 			// A warning about a setting ("guardrail: human approval ...")
 			// already names where it is.
 			if !strings.HasPrefix(warning, "guardrail") {
@@ -1530,6 +1574,14 @@ func (e *Env) guardianLogHint() string {
 // another way after an SSSD naming switch), so its members get the default
 // profile (GAP-0704).
 const codeProfileAssignment = "profile_assignment_unmatched"
+
+// codeEnrollmentExcludeUnmatched and enrollmentExcludeWarningPrefix are the
+// code and the gateway's text prefix (gateway.EnrollmentExcludeWarningPrefix)
+// for exclude_users entries that match no account (GAP-1111).
+const (
+	codeEnrollmentExcludeUnmatched = "enrollment_exclude_unmatched"
+	enrollmentExcludeWarningPrefix = "enterprise.enrollment.exclude_users:"
+)
 
 // profileWarningsMax bounds the assignment warnings status and verify list.
 const profileWarningsMax = 20

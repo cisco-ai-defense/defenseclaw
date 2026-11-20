@@ -666,11 +666,11 @@ def test_installer_cmd_uses_native_launcher_and_uninstall_accepts_upgrade_shim(t
     command = command_dir / "defenseclaw.cmd"
     legacy = tmp_path / ".defenseclaw" / ".venv" / "Scripts" / "defenseclaw.exe"
     for target in (command_dir / "defenseclaw.exe", legacy):
-        command.write_bytes(f'@echo off\r\n"{target}" %*\r\n'.encode("utf-8"))
+        command.write_bytes(f'@echo off\r\n"{target}" %*\r\n'.encode())
         assert windows_uninstall_helper.shim_runs(str(command), str(legacy))
     command.write_bytes(b'@echo off\r\n"C:\\other\\defenseclaw.exe" %*\r\n')
     assert not windows_uninstall_helper.shim_runs(str(command), str(legacy))
-    command.write_bytes(f'@echo off\r\n"{command_dir / "defenseclaw.exe"}" %*\r\nexit /b 0\r\n'.encode("utf-8"))
+    command.write_bytes(f'@echo off\r\n"{command_dir / "defenseclaw.exe"}" %*\r\nexit /b 0\r\n'.encode())
     assert not windows_uninstall_helper.shim_runs(str(command), str(legacy))
 
 
@@ -739,7 +739,7 @@ def test_an_unknown_argument_stops_with_exit_2(tmp_path: Path, argument: str, me
 
 
 def test_hook_state_matches_what_the_hook_reads() -> None:
-    # internal/cli/hook_trusted_state_windows.go accepts a PowerShell install's
+    # internal/hookcli/hook_trusted_state_windows.go accepts a PowerShell install's
     # state only with these values; anything else makes the hook fall back to
     # the profile's .defenseclaw and ignore a custom DEFENSECLAW_HOME.
     body = re.search(r"function Write-HookState \{(.*?)\n\}", _text(), re.S)
@@ -748,8 +748,8 @@ def test_hook_state_matches_what_the_hook_reads() -> None:
         assert field in body.group(1)
     for field in ("install_root = $root", "command_dir = $root", "data_root = "):
         assert field in body.group(1)
-    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text(encoding="utf-8")
-    assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
+    go = (ROOT / "internal" / "hookcli" / "hook_trusted_state_windows.go").read_text(encoding="utf-8")
+    assert 'PowerShellHookStateName = "defenseclaw-hook-state.json"' in go
     assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
 
 
@@ -842,7 +842,7 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
     # The DefenseClaw wheel install hit the same hold, so both uv pip steps
     # go through the retry helper.
     start = _text().index("function New-Venv")
-    body = _text()[start : _text().index("function Invoke-UvPipInstall")]
+    body = _text()[start : _text().index("function Repair-DamagedPackages")]
     assert body.count("Invoke-UvPipInstall") == 2
     assert "Invoke-Native $Uv @(\"pip\"" not in body
     # GAP-1941: on a busy host one retry hit the same hold on the next
@@ -8851,19 +8851,19 @@ def test_a_rollback_bridge_that_stops_half_built_never_blocks_the_swap_back(tmp_
              "Move-Path", "Remove-Tree", "Invoke-Quietly")
     if stop == "marker-write-fails":
         fault = (
-            "function Set-Content {{ param([string]$LiteralPath, $Value, $Encoding, $ErrorAction)\n"
-            "    if ($LiteralPath -like '*.rollback-hooks-bridge') {{ throw 'disk full' }}\n"
-            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $LiteralPath -Value $Value }}\n"
-            "Save-Live '{hold}'\n"
-        ).format(hold=hold)
+            "function Set-Content { param([string]$LiteralPath, $Value, $Encoding, $ErrorAction)\n"
+            "    if ($LiteralPath -like '*.rollback-hooks-bridge') { throw 'disk full' }\n"
+            "    Microsoft.PowerShell.Management\\Set-Content -LiteralPath $LiteralPath -Value $Value }\n"
+            f"Save-Live '{hold}'\n"
+        )
     else:
         # A run killed while it built the bridge leaves only what it built
         # under the building name.
         fault = (
-            "Save-Live '{hold}'\n"
+            f"Save-Live '{hold}'\n"
             "Remove-HooksBridge\n"
             "New-Item -ItemType Directory -Path (Join-Path $DataDir '.failed-hooks-bridge') | Out-Null\n"
-        ).format(hold=hold)
+        )
     script = f"""
 $ErrorActionPreference = 'Stop'
 $DataDir = '{data}'

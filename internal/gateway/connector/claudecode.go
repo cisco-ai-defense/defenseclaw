@@ -46,7 +46,6 @@ import (
 // Implements ComponentScanner, StopScanner.
 type ClaudeCodeConnector struct {
 	gatewayToken string
-	masterKey    string
 }
 
 // NewClaudeCodeConnector creates a new Claude Code connector.
@@ -178,6 +177,11 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := c.patchClaudeCodeHooks(opts, hookScript); err != nil {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
+	// Route-only keys come from config.yaml on every setup, repair and
+	// upgrade; a connector no longer routed gets its values back.
+	if err := c.ApplyRouteOnly(opts, opts.RouteOnly); err != nil {
+		return err
+	}
 
 	// Host installs disable native exporters and remove endpoints that an
 	// earlier setup wrote. Native exporters cannot verify who owns a replaced
@@ -275,6 +279,12 @@ func jsonErrorPosition(data []byte, err error) string {
 
 func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	var errs []string
+
+	// The model base URL goes back first: a dead route-only URL would break
+	// every agent turn (DESIGN 7.4).
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		errs = append(errs, fmt.Sprintf("route-only: %v", err))
+	}
 
 	if err := c.restoreClaudeCodeHooks(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("restore hooks: %v", err))
@@ -425,17 +435,8 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
-			return true
-		}
-	}
-
-	// No gateway token configured: trust loopback callers. The masterKey is
-	// an alternative credential for programmatic/remote access — its presence
-	// alone should not revoke loopback trust. The operator opts into requiring
-	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	// No gateway token configured: trust loopback callers. The operator opts
+	// into requiring auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
 	if c.gatewayToken == "" {
 		return isLoopback
 	}
@@ -443,9 +444,8 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 	return false
 }
 
-func (c *ClaudeCodeConnector) SetCredentials(gatewayToken, masterKey string) {
+func (c *ClaudeCodeConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
@@ -494,8 +494,9 @@ func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 //
 // CanBlock=true: PreToolUse/PermissionRequest honour permissionDecision=
 // deny; UserPromptSubmit and other pre-action events honour decision=block;
-// tasks honour continue=false. PostToolUse and PostToolBatch are advisory:
-// their returned bytes are evidence/context, not a typed action request.
+// tasks honour continue=false. PostToolUse honours decision=block: the
+// result was already read, so the block gives the model the reason and the
+// user a systemMessage (GAP-0605). PostToolBatch is advisory.
 // ConfigChange is blockable except for the policy_settings source.
 //
 // CanAskNative=true: PreToolUse renders permissionDecision=ask when a
@@ -514,6 +515,7 @@ func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 			"UserPromptExpansion",
 			"PreToolUse",
 			"PermissionRequest",
+			"PostToolUse",
 			"TaskCreated",
 			"TaskCompleted",
 			"TeammateIdle",
@@ -1465,7 +1467,7 @@ func claudeCodePerUserNativeOwnerHome(hook map[string]interface{}, fallback bool
 // the companion guard binary is unavailable. Both the launcher and hook home
 // must name the same account, and the command must have only Setup's flags.
 func claudeCodePerUserNativeShellOwnerHome(command string) (string, bool) {
-	if runtime.GOOS != "linux" {
+	if !claudeCodeNativePerUserOS() {
 		return "", false
 	}
 	command = claudeCodeUnguardedHookCommand(command)
@@ -1490,14 +1492,23 @@ func claudeCodePerUserNativeShellOwnerHome(command string) (string, bool) {
 	return home, ok && tail == "" && claudeCodeLoopbackGatewayEndpoint("http://"+address)
 }
 
+// claudeCodeNativePerUserOS reports whether per-user Claude Code hooks use
+// the native launcher here: Linux since 1.0.8, macOS since 1.0.10 (its
+// startup was measured on dc-mac: p50 54 ms against 128 ms for the shell
+// hook, and the shell hook fan-out saturated the host at 50 calls a second,
+// rel-1-0-6 GAP-0559, #1384). Windows has its own native registration.
+func claudeCodeNativePerUserOS() bool {
+	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+}
+
 // claudeCodePerUserNativeHook selects the installed native launcher only for
-// per-user Linux hooks in the account's default data directory. macOS keeps
-// the shell hook until its startup path is measured (GAP-0559). A separate
+// per-user Linux and macOS hooks in the default data directory of the
+// account. A separate
 // data root keeps the shell's two-home install-lock checks. Managed and
 // Secure Client registrations keep their existing transport. Source installs
 // without this binary keep the script.
 func claudeCodePerUserNativeHook(opts SetupOpts) string {
-	if runtime.GOOS != "linux" || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
+	if !claudeCodeNativePerUserOS() || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
 		!filepath.IsAbs(opts.DataDir) || filepath.Clean(opts.DataDir) != opts.DataDir ||
 		opts.DataDir != filepath.Join(userHomeDir(), ".defenseclaw") ||
 		strings.ContainsAny(opts.DataDir, "\x00\r\n") ||
@@ -1753,7 +1764,7 @@ func appendClaudeCodeHookMatrixForSetup(
 		return err
 	}
 	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups, claudeCodeUnavailableOpen(opts),
-		opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
+		opts.ManagedEnterprise && !opts.SecureClientHookDelivery, opts.ClaudeManagedGuardTexts109)
 	return nil
 }
 
@@ -1762,6 +1773,7 @@ func appendClaudeCodeHookGroups(
 ) {
 	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
+	texts109 := len(unavailableOpen) > 2 && unavailableOpen[2]
 	fallback := false
 	if len(hookArgs) == 7 || len(hookArgs) == 9 {
 		fallback = claudeCodePerUserGuardTarget(
@@ -1772,7 +1784,7 @@ func appendClaudeCodeHookGroups(
 	for _, group := range groups {
 		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs, open)
 		if managedWindows {
-			command, args = claudeManagedGuardWrapperInvocation(group.eventType, hookCommand, hookArgs)
+			command, args = claudeManagedGuardWrapperInvocationTexts(group.eventType, hookCommand, hookArgs, texts109)
 		}
 		handler := map[string]interface{}{
 			"type":    "command",
@@ -3216,17 +3228,6 @@ func claudeCodeHookInteger(value interface{}) (int, bool) {
 	}
 }
 
-// verifyClaudeCodeHookMatrix validates the default v1 matrix for compatibility
-// with focused helpers. Production setup uses the version-selected variant.
-func verifyClaudeCodeHookMatrix(
-	hooks map[string]interface{},
-	expectedCommand string,
-	expectedArgs []string,
-	hooksDir string,
-) error {
-	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, hookGroups)
-}
-
 func verifyClaudeCodeHookMatrixForSetup(
 	hooks map[string]interface{},
 	expectedCommand string,
@@ -3239,7 +3240,7 @@ func verifyClaudeCodeHookMatrixForSetup(
 		return err
 	}
 	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups,
-		claudeCodeUnavailableOpen(opts), opts.ManagedEnterprise && !opts.SecureClientHookDelivery)
+		claudeCodeUnavailableOpen(opts), opts.ManagedEnterprise && !opts.SecureClientHookDelivery, opts.ClaudeManagedGuardTexts109)
 }
 
 // verifyClaudeCodeHookGroups validates the exact DefenseClaw-owned effective
@@ -3257,12 +3258,13 @@ func verifyClaudeCodeHookGroups(
 ) error {
 	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	managedWindows := len(unavailableOpen) > 1 && unavailableOpen[1] && claudeCodeWindowsHost()
+	texts109 := len(unavailableOpen) > 2 && unavailableOpen[2]
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
 		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs, open)
 		if managedWindows {
-			expectedCommand, expectedArgs = claudeManagedGuardWrapperInvocation(expected.eventType, expectedCommand, expectedArgs)
+			expectedCommand, expectedArgs = claudeManagedGuardWrapperInvocationTexts(expected.eventType, expectedCommand, expectedArgs, texts109)
 		}
 		locations, err := ownedClaudeCodeHookLocations(
 			hooks[expected.eventType], hooksDir, expectedCommand, expectedArgs,

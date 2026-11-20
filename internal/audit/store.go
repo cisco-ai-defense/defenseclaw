@@ -144,6 +144,14 @@ type Event struct {
 	// rides in the structured envelope and the raw column as on main, not in
 	// a path-class record field (issue #1092).
 	RulePackDirInEnvelope bool `json:"-"`
+	// SemanticEventID, LogicalEventID and ConnectorInstanceID name the
+	// correlation event of a hook failure report row: the row of a call
+	// whose audit write failed pairs with the hook_decision record of that
+	// call, so readers count the call once (#1384). Empty on every other
+	// row, whose runtime takes them from the context envelope.
+	SemanticEventID     string `json:"-"`
+	LogicalEventID      string `json:"-"`
+	ConnectorInstanceID string `json:"-"`
 
 	// WorkspaceHostPaths are the folders connected to the Claude Cowork
 	// session of a claudecode hook row. There is no SQLite column: the
@@ -248,6 +256,13 @@ type Store struct {
 	// secureClientSchema keeps the tables, columns and indexes main creates
 	// (WithSecureClientSchema).
 	secureClientSchema bool
+	// pageCacheKiB, when over 0, replaces the 20 MB page cache of every
+	// connection, and noReadPool keeps the reads on the writer
+	// (WithSmallFootprint).
+	pageCacheKiB int
+	noReadPool   bool
+	// hookLoneTracked: the store keeps audit_hook_lone (ensureHookLoneTracking).
+	hookLoneTracked bool
 
 	// fieldClassSets: rows name their field class set (field_class_sets.go);
 	// fieldClassSetCount is the number of sets, for the table bound.
@@ -276,9 +291,10 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
-	// durableDB is a synchronous=FULL connection that makes committed
-	// writes power-loss durable (SyncCommittedWrites). It is opened on
-	// first use under checkpointMu and closed with the store.
+	// durableDB is the synchronous=FULL connection of a Secure Client
+	// store that makes committed writes power-loss durable
+	// (SyncCommittedWrites). It is opened on first use under checkpointMu
+	// and closed with the store; other stores have none (durableBatchConn).
 	durableDB *sql.DB
 	// walGuardMu guards the checkpoint connection's data_version as of the
 	// previous WAL guard pass (CheckpointWALIfLarge).
@@ -289,9 +305,20 @@ type Store struct {
 	// writer back before the log restarted (boundedCatchUpPolicy). Guarded
 	// by walGuardMu.
 	walBoundedMisses int
+	// walCappedHolds counts the bounded catch-ups whose hold reached its cap
+	// since the log last restarted or was last under the limit, and
+	// walHoldResume is when the next one may take the writer again
+	// (walHoldBackoff). Only a restart or a log back under the limit resets
+	// it; which other passes add to it is noteWALGuardPass's comment.
+	// Guarded by walGuardMu.
+	walCappedHolds int
+	walHoldResume  time.Time
 	// walPressure is true while the last WAL guard pass left the log over
 	// its limit; background writers wait for it (awaitWALHeadroom).
 	walPressure atomic.Bool
+	// fullAlert is the one "ALERT audit_store_full" signal of a store whose
+	// volume is full, whichever write hits it (NoteWriteError).
+	fullAlert storeFullAlert
 
 	// plannerStatsRows is the history size at the last ANALYZE
 	// (RefreshPlannerStatistics).
@@ -318,13 +345,15 @@ type Store struct {
 	// durableGroup groups the commits of concurrent writes to the synchronous=FULL
 	// connection into one transaction and one flush (durableGrouped).
 	durableGroup writeGroup
-	// writeBaton orders the transactions of the pool connection and the
-	// durable connection (writeBaton).
+	// writeBaton orders the write transactions of the store (writeBaton).
 	writeBaton writeBaton
 	// dirSyncedWAL is the write-ahead log file whose directory entry the last
 	// folder flush of the durable connection covered (syncDurableDir).
 	dirSyncMu    sync.Mutex
 	dirSyncedWAL os.FileInfo
+	// hookJournalReady is set once this store created the hook delivery
+	// journal table, so later inserts skip the CREATE TABLE (#1384).
+	hookJournalReady atomic.Bool
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -548,6 +577,7 @@ func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
 
 func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
 	hooks.secureClient = secureClientStoreOptions(opts)
+	hooks.pageCacheKiB = pageCacheStoreOption(opts)
 	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
@@ -581,6 +611,47 @@ func (s *Store) SecureClientSchema() bool {
 // opener on such a host sets it.
 func WithSecureClientSchema() StoreOption {
 	return func(s *Store) { s.secureClientSchema = true }
+}
+
+// SmallFootprintPageCacheKiB is the page cache of each connection of a
+// WithSmallFootprint store.
+const SmallFootprintPageCacheKiB = 512
+
+// WithSmallFootprint opens a store one of many in a process keeps open: the
+// Substrate leader's per-actor chain stores (up to chainstate's
+// MaxOpenStores at once). Each connection gets a SmallFootprintPageCacheKiB
+// page cache instead of 20 MB, and the reads stay on the writer instead of
+// a 4-connection read pool. The cache lives outside the Go heap and fills
+// as the store grows: with the gateway's settings every actor's store held
+// up to 5 x 20 MB, about 90 KiB more leader memory per audited tool call
+// and never given back (substrate-1 GAP-0404).
+func WithSmallFootprint() StoreOption {
+	return func(s *Store) { s.pageCacheKiB, s.noReadPool = SmallFootprintPageCacheKiB, true }
+}
+
+func pageCacheStoreOption(opts []StoreOption) int {
+	var probe Store
+	for _, opt := range opts {
+		opt(&probe)
+	}
+	return probe.pageCacheKiB
+}
+
+// auditCacheSizeDSN is the page cache pragma of the DSNs below.
+const auditCacheSizeDSN = "cache_size(-20000)"
+
+// withPageCache is pragmas with a page cache of kib KiB per connection
+// (0 keeps the 20 MB of auditMandatoryIntegerPragmas).
+func withPageCache(pragmas string, kib int) string {
+	if kib <= 0 {
+		return pragmas
+	}
+	return strings.Replace(pragmas, auditCacheSizeDSN, fmt.Sprintf("cache_size(-%d)", kib), 1)
+}
+
+// pragmas is the pragma set of this store's writer-mode connections.
+func (s *Store) pragmas() string {
+	return withPageCache(auditPragmasFor(s.secureClientSchema), s.pageCacheKiB)
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -719,6 +790,9 @@ func (s *Store) execDB(ctx context.Context, op string, query string, args ...any
 		s.noteWriteAttempt(started, execErr, true)
 		return execErr
 	})
+	if err == nil {
+		s.noteWriteOK()
+	}
 	return res, err
 }
 
@@ -2085,6 +2159,10 @@ var migrations = []migration{
 		description: sparseKeyIndexesMigrationDescription,
 		apply:       migrateSparseKeyIndexes,
 	},
+	{
+		description: rejectedRecordsMigrationDescription,
+		apply:       migrateRejectedRecords,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2139,6 +2217,18 @@ var unreadAuditIndexes = []struct{ name, create string }{
 	// (rel-1-0-3 GAP-0320).
 	{"idx_correlation_identifiers_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_identifiers_exact ON correlation_identifiers(connector_instance_id, namespace, identifier_kind, value_digest)`},
 	{"idx_correlation_receipts_source", `CREATE INDEX IF NOT EXISTS idx_correlation_receipts_source ON correlation_receipts(connector_instance_id, source_key_digest)`},
+	// Three more correlation indexes no query needs (S8 R5). The pending
+	// operation's exact key is its primary key; status, the index's last
+	// column, only filters the one row the key finds. The from index leads
+	// with the two columns that lead the unique key of the relationship
+	// (sqlite_autoindex_correlation_relationships_2), so the graph load and
+	// the retention keep tests seek that one instead. No query filters
+	// relationships by status, with or without the last-seen time: retention
+	// orders them by idx_correlation_relationships_seen. A benign hook call
+	// wrote about 300 bytes to these three (TestCorrelationLookupsUseUniqueIndexesAfterTheTrim).
+	{"idx_correlation_pending_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_exact ON correlation_pending_operations(connector_instance_id, operation_namespace, operation_kind, operation_id, operation_type, scope_kind, scope_id, status)`},
+	{"idx_correlation_relationships_from", `CREATE INDEX IF NOT EXISTS idx_correlation_relationships_from ON correlation_relationships(from_kind, from_id, status)`},
+	{"idx_correlation_relationships_status", `CREATE INDEX IF NOT EXISTS idx_correlation_relationships_status ON correlation_relationships(status, last_seen_time_unix_nano)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
@@ -2176,6 +2266,12 @@ var retentionCandidateIndexes = []struct{ name, table, create string }{
 	{"idx_correlation_pending_retention", "correlation_pending_operations", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_retention
 		ON correlation_pending_operations(updated_time_unix_nano, connector_instance_id, operation_id, operation_type)
 		WHERE status<>'active'`},
+	// The open operations, for the same reason: retention also removes an
+	// operation that stayed open for the whole retention window, and must
+	// find it without reading the table (issue #1440).
+	{"idx_correlation_pending_stale", "correlation_pending_operations", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_stale
+		ON correlation_pending_operations(updated_time_unix_nano, connector_instance_id, operation_id, operation_type)
+		WHERE status='active'`},
 }
 
 func (s *Store) indexRetentionCandidates() error {
@@ -2334,6 +2430,12 @@ func (s *Store) Init() error {
 	} else if !present {
 		return fmt.Errorf("audit: mandatory finding lifecycle identity is missing")
 	}
+	// After the mandatory schema checks: its reconcile reads
+	// correlation_observations, so a partial store fails on the missing
+	// table or column, not inside the lone-row reconcile.
+	if err := s.ensureHookLoneTracking(); err != nil {
+		return err
+	}
 	if err := s.verifyMandatoryPragmas(context.Background()); err != nil {
 		return err
 	}
@@ -2345,7 +2447,7 @@ func (s *Store) Init() error {
 	}
 
 	s.prepareStatements(context.Background())
-	if !s.secureClientSchema && s.dbPathGuard != nil && !s.dbPathGuard.inMemory {
+	if !s.secureClientSchema && !s.noReadPool && s.dbPathGuard != nil && !s.dbPathGuard.inMemory {
 		if s.readDB == nil {
 			readDB, readErr := s.openReadPool()
 			if readErr == nil {
@@ -2399,6 +2501,9 @@ func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
 // text (a redaction profile removed it), is empty.
 type StoredHookVerdict struct {
 	Action, Reason string
+	// ReasonRedacted: the row holds a reason that is not text (a redaction
+	// profile transformed it), so Reason is empty and proves nothing.
+	ReasonRedacted bool
 }
 
 // StoredHookVerdict returns the decision the stored hook record id holds.
@@ -2413,12 +2518,16 @@ func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict Store
 			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
 		CASE WHEN json_valid(COALESCE(structured_json,'')) AND json_type(structured_json,'$.reason') = 'text'
 			THEN json_extract(structured_json,'$.reason') ELSE '' END,
+		json_valid(COALESCE(structured_json,'')) AND COALESCE(json_type(structured_json,'$.reason'),'null') NOT IN ('text','null'),
 		CASE WHEN json_valid(COALESCE(projected_record_json,''))
 			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END,
 		CASE WHEN json_valid(COALESCE(projected_record_json,''))
 				AND json_type(projected_record_json,'$.body."defenseclaw.guardrail.reason"') = 'text'
-			THEN json_extract(projected_record_json,'$.body."defenseclaw.guardrail.reason"') ELSE '' END
-		FROM audit_events WHERE id = ?`, id), &envelope.Action, &envelope.Reason, &decision.Action, &decision.Reason)
+			THEN json_extract(projected_record_json,'$.body."defenseclaw.guardrail.reason"') ELSE '' END,
+		json_valid(COALESCE(projected_record_json,'')) AND
+			COALESCE(json_type(projected_record_json,'$.body."defenseclaw.guardrail.reason"'),'null') NOT IN ('text','null')
+		FROM audit_events WHERE id = ?`, id), &envelope.Action, &envelope.Reason, &envelope.ReasonRedacted,
+		&decision.Action, &decision.Reason, &decision.ReasonRedacted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredHookVerdict{}, false, nil
 	}
@@ -2432,7 +2541,7 @@ func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict Store
 }
 
 // LatestHookVerdictOfEvent returns the verdict of the newest hook record
-// (connector-hook or connector-hook-synthetic row, or its decision record)
+// (connector-hook or connector-hook-synthetic row, or a hook_decision record)
 // observed for the semantic event id, so a repeat of that delivery can tell
 // what the audit last recorded for it. found is false when no hook record is
 // linked to the event (GAP-1060).
@@ -2441,11 +2550,13 @@ func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID st
 		return StoredHookVerdict{}, false, errors.New("audit: hook verdict lookup requires a ready store and a semantic event id")
 	}
 	var id string
+	// A benign per-user allow keeps only its hook_decision row (#1384), so
+	// that row kind is a hook record too; both kinds stay readable.
 	err = s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx, `SELECT event.id
 		FROM correlation_observations AS observation JOIN audit_events AS event ON event.id = observation.record_id
-		WHERE observation.semantic_event_id = ? AND event.action IN (?, ?)
+		WHERE observation.semantic_event_id = ? AND event.action IN (?, ?, ?)
 		ORDER BY observation.observed_time_unix_nano DESC, event.timestamp DESC, event.rowid DESC LIMIT 1`,
-		semanticEventID, string(ActionConnectorHook), string(ActionConnectorHookSynthetic)), &id)
+		semanticEventID, string(ActionConnectorHook), string(ActionConnectorHookSynthetic), hookDecisionEventName), &id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return StoredHookVerdict{}, false, nil
 	}
@@ -2453,6 +2564,17 @@ func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID st
 		return StoredHookVerdict{}, false, err
 	}
 	return s.StoredHookVerdict(ctx, id)
+}
+
+// correlationEventExists reports whether the correlation ledger still holds
+// the semantic event id.
+func (s *Store) correlationEventExists(ctx context.Context, id string) bool {
+	if s == nil || !s.Ready() || id == "" {
+		return false
+	}
+	var one int
+	return s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx,
+		`SELECT 1 FROM correlation_events WHERE semantic_event_id = ?`, id), &one) == nil
 }
 
 // DatabaseFileReplaced reports whether the database path no longer names
@@ -2502,6 +2624,9 @@ func (s *Store) verifyMandatoryPragmas(ctx context.Context) error {
 		row := s.db.QueryRowContext(ctx, "PRAGMA "+pragma.name)
 		if err := s.scanRow(ctx, "audit_pragma_"+pragma.name, row, &got); err != nil {
 			return fmt.Errorf("audit: verify SQLite %s pragma: %w", pragma.name, err)
+		}
+		if pragma.name == "cache_size" && s.pageCacheKiB > 0 {
+			pragma.want = -int64(s.pageCacheKiB)
 		}
 		if got != pragma.want && (pragma.name != "busy_timeout" || got != 0 || !s.writeLockHeld()) {
 			return fmt.Errorf("audit: SQLite %s pragma is %d, want %d", pragma.name, got, pragma.want)

@@ -139,7 +139,7 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "prompt", text: "Make `claude` and `codex` run sandboxed automatically? (shell wrapper; undo any time) [y/N] ", reply: "", pauseMs: 800 },
     { type: "prompt", text: "Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n] ", reply: "", pauseMs: 800 },
     { type: "out", text: "  Building the Claude Code image (the first build downloads about 3 GB)…" },
-    { type: "ok", text: "  ✓ Claude Code 2.1.156: defenseclaw/sandbox:claudecode-2d7c00d21fdd8f50-u509, hooks verified (built in 59s)" },
+    { type: "ok", text: "  ✓ Claude Code 2.1.311: defenseclaw/sandbox:claudecode-2d7c00d21fdd8f50-u509, hooks verified (built in 59s)" },
     { type: "prompt", text: "Build the Codex image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run codex` builds it) [Y/n] ", reply: "n", pauseMs: 800 },
     { type: "dim", text: "  the first run of each image uses about 12 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)" },
     { type: "ok", text: "  ✓ the daemon runs the sandbox subsystem (ingress 127.0.0.1:19072, egress proxy 127.0.0.1:19073)" },
@@ -165,7 +165,7 @@ defenseclaw sandbox doctor
   ✓ MicroVM driver             e2fsprogs in /opt/homebrew/opt/e2fsprogs/sbin; …openshell-driver-vm signed for Apple's Hypervisor
   ✓ Gateway compute driver     vm (OpenShell MicroVM; experimental upstream)
   - Project bind mounts        the OpenShell MicroVM (vm) driver mounts no host folders: every run works on a copy
-  ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
+  ✓ Harness images             hook-verified: claudecode 2.1.311, codex 0.146.0
   …
 
   ✓ ready for sandboxes

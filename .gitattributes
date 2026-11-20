@@ -25,6 +25,15 @@ internal/opencodebridge/adapter.js text eol=lf
 internal/gateway/connector/testdata/bridge_host/** text eol=lf
 # Released per-user hook renders the upgrade tests run as they shipped.
 internal/gateway/connector/testdata/released-hooks/** text eol=lf
+# The Copilot VS Code Local hook file DefenseClaw 1.0.9 wrote on dc-ent-win;
+# enterprisepolicy tests compare the 1.0.10 transition render with it byte for byte.
+internal/enterprisepolicy/testdata/copilot-vscode-1.0.9/** text eol=lf
+
+# The Substrate goldens are compared byte for byte by Go tests that also run on Windows runners:
+# the rendered egress policies, the SubstrateInstall overlays, the access policy listing and the chart renders.
+internal/substrate/render/testdata/** text eol=lf
+internal/substrate/setup/testdata/** text eol=lf
+deploy/helm/defenseclaw-substrate/tests/** text eol=lf
 
 # Seeded guardrail rule packs are matched by SHA-256 of their exact bytes
 # (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.
@@ -66,6 +75,16 @@ benchmarks/fixtures/** -text
 # hermes_vendor_digests.py) pin by SHA-256 over exact bytes. A Windows CRLF
 # checkout changed the digest, so the pinned bundle read as a user skill.
 internal/hermesskills/testdata/vendor/** -text
+
+# The Hermes bundled-skill fixtures are git archives of one skill at Hermes
+# release tags; the digest tables beside them pin their bytes, so they are never
+# converted (rel-1-0-10:GAP-0798).
+internal/hermesskills/testdata/vendor-releases/** binary
+
+# The Hermes shipped-plugin fixtures are git archives of plugins at Hermes
+# release tags; internal/watcher/hermes_vendor_plugin_digests.go pins their
+# bytes, so they are never converted (rel-1-0-10:GAP-0765).
+internal/watcher/testdata/hermes-vendor/** binary
 
 # The Secure Client evaluation goldens are compared byte for byte, also on a
 # Windows checkout.
@@ -129,3 +148,11 @@ internal/unixidentity/testdata/dscl-listing/* text eol=lf -whitespace
 # their detached signature over the exact bytes; a Windows CRLF checkout
 # broke the signature (TestClaudeReleaseManifestSignatureAndPlatformChecksum).
 internal/sensor/testdata/** -text
+cmd/defenseclaw-hook/testdata/outage-packs/** -text
+
+# Go fuzz corpus entries ("go test fuzz v1") are read line by line, some by
+# tests that strconv.Unquote a line (hookpaths fuzzCorpusString); a Windows
+# checkout (core.autocrlf=true) must keep them LF so no line ends in \r.
+internal/**/testdata/fuzz/** text eol=lf
+# The drop-in the published 1.0.9 Windows Setup wrote, compared byte for byte (rel-1-0-10 GAP-1495).
+internal/enterprisehooks/testdata/claude-managed-policy-109-standalone.json -text

@@ -1,0 +1,541 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build s7bench
+
+package gateway
+
+// Benchmark-only handle on the real gateway (built only with -tags s7bench).
+// It boots the sidecar exactly as NewSidecar does, wires an API server the
+// way runAPI does, and answers hook payloads through the same unified
+// connector handler a running gateway serves. Layer probes call the hook
+// judge's own context builder, decision model and tool judge, so nothing
+// here re-implements a verdict.
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+)
+
+// S7Engine is one booted gateway generation and its hook handler.
+type S7Engine struct {
+	sc          *Sidecar
+	api         *APIServer
+	hook        http.HandlerFunc
+	hooks       map[string]http.HandlerFunc
+	connector   string
+	profile     string
+	judgeRec    *s7RecordingProvider
+	store       *audit.Store
+	stopGuard   context.CancelFunc
+	guardDone   chan struct{}
+	passes      atomic.Int64
+	peakWAL     atomic.Int64
+	inspOnce    sync.Once
+	insp        *GuardrailInspector
+	scopeShadow *s7ScopeShadow
+}
+
+// S7NewEngine boots the sidecar generation for cfg and returns the
+// connector's hook handler.
+func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
+	return S7NewEngineMulti(cfg, connectorName, nil)
+}
+
+// S7NewEngineMulti boots one generation with the hook handlers of connectorName and of every name in more, so a corpus can
+// send each case to the handler of its own connector.
+func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (*S7Engine, error) {
+	store, err := audit.NewStore(filepath.Join(cfg.DataDir, "audit.db"))
+	if err != nil {
+		return nil, fmt.Errorf("audit store: %w", err)
+	}
+	if err := store.Init(); err != nil {
+		return nil, fmt.Errorf("audit store init: %w", err)
+	}
+	// No audit logger: the hook answers without the v8 audit runtime
+	// (errHookAuditNotConfigured), so an audit fault never shapes a verdict.
+	var logger *audit.Logger
+	sc, err := NewSidecar(cfg, store, logger)
+	if err != nil {
+		return nil, err
+	}
+	api := newAPIServer("127.0.0.1:0", sc.health, sc.client, store, logger, cloneConfig(sc.currentConfig()))
+	api.SetGenerationSource(sc.Generation)
+	if g := sc.Generation(); g != nil {
+		api.setGuardrailProfiles(g.Profiles)
+	} else {
+		api.initGuardrailProfiles(api.scannerCfg)
+	}
+	if j := sc.sharedJudge(); j != nil {
+		api.SetHookJudge(j)
+	}
+	if g := currentGeneration(); g != nil {
+		api.SetHookDecisionJudge(g.decisionJudge)
+	}
+	// The harness has no real user home to follow links through, so the
+	// effect lane uses a lexical resolver: a path resolves to itself. Member
+	// names are still matched lexically (writing ~/.ssh/authorized_keys is
+	// known regardless). Real symlink-through-link attacks are not exercised
+	// here; that is a documented harness limit.
+	effectResolverOverride = func(path string) (string, bool) { return path, true }
+	// The harness reads the effect verdict per case from Deterministic (the
+	// same effectShadowRun core); the hook's async live run is not needed.
+	effectShadowLiveOff = true
+	hooks := map[string]http.HandlerFunc{connectorName: api.handleUnifiedConnectorHook(connectorName)}
+	for _, name := range more {
+		if _, ok := hooks[name]; !ok {
+			hooks[name] = api.handleUnifiedConnectorHook(name)
+		}
+	}
+	e := &S7Engine{
+		sc: sc, api: api, connector: connectorName,
+		hook:    hooks[connectorName],
+		hooks:   hooks,
+		profile: cfg.Guardrail.RulePack,
+		store:   store,
+	}
+	e.startWALGuard()
+	return e, nil
+}
+
+// S7SetSessionStartArrival sets how long a call of a session whose start this process has not seen waits for that start to arrive
+// (the product default is one second). The corpora replay recorded calls and hold no SessionStart event, so under the product wait
+// the first call of every case sat in sessionStartGate.await for the arrival window (about 0.6 s once the hook answer bound is
+// applied) before judging the start in its place: a constant that dominated the latency columns (rel-1-0-10:GAP-0261). The harness
+// runs with zero; a longer value reproduces the product wait. Call it before the first hook.
+func S7SetSessionStartArrival(d time.Duration) { sessionStartArrivalWait = d }
+
+// Hook answers one hook payload through the connector's handler. headers
+// (name, value pairs) are set on the request, e.g. the hook's answer wait.
+func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (code int, out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
+		}
+	}()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+e.connector, bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	rec := httptest.NewRecorder()
+	e.hook(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// HookFor answers one hook payload through the named connector's handler.
+func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (code int, out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
+		}
+	}()
+	h, ok := e.hooks[connectorName]
+	if !ok {
+		h, connectorName = e.hook, e.connector
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+connectorName, bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	if connectorName == "codex" {
+		// Codex hooks are installer-bound: the hook command passes the event and the protected contract id out of band.
+		var probe struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &probe)
+		req.Header.Set("X-DefenseClaw-Hook-Event", probe.Event)
+		req.Header.Set("X-DefenseClaw-Hook-Contract", e.api.hookProfileForRequest(ctx, "codex").ContractID)
+	}
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// HasJudge reports whether the generation wired a hook judge, and whether it
+// carries a decision model.
+func (e *S7Engine) HasJudge() (bool, bool) {
+	j := e.api.hookJudge.Load()
+	return j != nil, j != nil && j.decision != nil
+}
+
+// S7Finding is one rule finding of the trusted-action evaluation.
+type S7Finding struct {
+	RuleID      string  `json:"rule"`
+	Severity    string  `json:"sev"`
+	Confidence  float64 `json:"conf,omitempty"`
+	Disposition string  `json:"disp"`
+	Route       string  `json:"route,omitempty"`
+}
+
+// S7Det is the deterministic evaluation of one tool call: findings with
+// their disposition (enforceable, detect_only, audit, advisory), the parse
+// status and dialect, as the hook's trusted-action dispatch sees the call.
+type S7Det struct {
+	Tool       string      `json:"tool"`
+	Parse      string      `json:"parse"`
+	Dialect    string      `json:"dialect"`
+	Severity   string      `json:"sev"`
+	EnforceSev string      `json:"enforce_sev"`
+	Action     string      `json:"action"`
+	Eligible   bool        `json:"eligible"`
+	Findings   []S7Finding `json:"findings,omitempty"`
+	IssueCodes []string    `json:"issues,omitempty"`
+	// Effect is the effect-model rule lane verdict (guardrail.cascade.lanes.effects
+	// shadow or on), computed beside today's answer for the disagreement
+	// measurement. Nil when the lane is off.
+	Effect     *EffectShadowResult `json:"effect,omitempty"`
+	EffectFull *EffectShadowResult `json:"effect_full,omitempty"`
+}
+
+// Deterministic evaluates the call the way evaluateAgentHook projects it.
+func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json.RawMessage, cwd string) S7Det {
+	return e.DeterministicFor(ctx, e.connector, toolName, args, cwd)
+}
+
+// DeterministicFor is Deterministic for the named connector. It recovers per
+// case so one parser panic cannot abort a run.
+func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName string, args json.RawMessage, cwd string) (det S7Det) {
+	defer func() {
+		if r := recover(); r != nil {
+			det = S7Det{Tool: toolName, Parse: "panic"}
+		}
+	}()
+	actionTool := agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS)
+	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, args)
+	actionTool, trusted = agentHookNativeFileView(actionTool, trusted)
+	if toolCWD == "" {
+		toolCWD = cwd
+	}
+	in := actionfacts.Input{Tool: actionTool, Args: trusted, CWD: toolCWD, ActiveHome: benchActiveHome(toolCWD)}
+	r := EvaluateDeterministicAction(ctx, in, string(args), connectorName, e.profile)
+	out := S7Det{Tool: actionTool, Parse: r.ParseStatus, Dialect: r.Dialect, Severity: r.Severity,
+		EnforceSev: r.EnforceableSeverity, Action: r.Action, Eligible: r.EnforcementEligible, IssueCodes: r.IssueCodes}
+	for _, f := range r.Findings {
+		out.Findings = append(out.Findings, S7Finding{RuleID: f.RuleID, Severity: f.Severity, Confidence: f.Confidence, Disposition: f.Disposition, Route: f.Route})
+	}
+	out.Effect = r.EffectShadow
+	out.EffectFull = r.EffectShadowFull
+	return out
+}
+
+// S7SetDecisionHistoryNonce makes the history section nonce a hash of the
+// history text, so a replay sends the same bytes (bench only; the product
+// draws a fresh random nonce).
+func S7SetDecisionHistoryNonce(deterministic bool) {
+	if !deterministic {
+		return
+	}
+	decisionHistoryNonce = func(body string) string {
+		sum := sha256.Sum256([]byte("s7bench-history-nonce|" + body))
+		return hex.EncodeToString(sum[:8])
+	}
+}
+
+// S7SetDecisionRouting sets the bench-only switches (see decisionBench).
+func S7SetDecisionRouting(noBreaker, mediumAlerts, allowRiskVeto bool) {
+	decisionBench.noBreaker, decisionBench.mediumAlerts, decisionBench.allowRiskVeto = noBreaker, mediumAlerts, allowRiskVeto
+}
+
+// S7DM is one decision-model answer.
+type S7DM struct {
+	Called    bool    `json:"called"`
+	Choice    string  `json:"choice,omitempty"`
+	Risk      float64 `json:"risk"`
+	Route     string  `json:"route"`
+	LatencyMs int64   `json:"latency_ms"`
+	Failure   string  `json:"failure,omitempty"`
+}
+
+// S7Judge is one tool-judge verdict.
+type S7Judge struct {
+	Called     bool     `json:"called"`
+	Action     string   `json:"action,omitempty"`
+	Severity   string   `json:"sev,omitempty"`
+	Findings   []string `json:"findings,omitempty"`
+	Reason     string   `json:"reason,omitempty"`
+	Scanner    string   `json:"scanner,omitempty"`
+	Confidence float64  `json:"conf,omitempty"`
+	LatencyMs  int64    `json:"latency_ms"`
+}
+
+// ObservePrompt records the session's user intent as a UserPromptSubmit does.
+func (e *S7Engine) ObservePrompt(ctx context.Context, sessionID, prompt string) {
+	if j := e.api.hookJudge.Load(); j != nil {
+		j.ObserveSessionPrompt(ContextWithSessionID(ctx, sessionID), prompt)
+	}
+}
+
+// Layers runs the hook judge's own sample builder (session intent plus the
+// last seven calls), then the decision model and the LLM tool judge on that
+// sample, independently, so cascades can be composed from the same answers.
+func (e *S7Engine) Layers(ctx context.Context, sessionID, toolName, args string, wantDM, wantJudge bool) (S7DM, S7Judge) {
+	var dm S7DM
+	var jv S7Judge
+	j := e.api.hookJudge.Load()
+	if j == nil {
+		return dm, jv
+	}
+	ctx = ContextWithSessionID(ctx, sessionID)
+	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
+	if !eligible {
+		dm.Route, dm.Failure = "ineligible", "args shorter than the judge minimum"
+		jv.Action = "allow"
+		return dm, jv
+	}
+	state := j.takeDecisionState(sample, toolName, args)
+	if wantDM && j.decision != nil {
+		res := j.decision.decide(ctx, state)
+		dm = S7DM{Called: !res.skipped, Choice: res.choice, Risk: res.risk, LatencyMs: res.latencyMs, Failure: strings.TrimSpace(string(res.failure) + " " + res.failureCause)}
+		switch res.route {
+		case decisionAllow:
+			dm.Route = "allow"
+		case decisionBlock:
+			dm.Route = "block"
+		default:
+			dm.Route = "escalate"
+		}
+	}
+	if wantJudge {
+		t0 := time.Now()
+		v := j.runToolJudgeLLM(ctx, toolName, args, sample)
+		jv.Called = true
+		jv.LatencyMs = time.Since(t0).Milliseconds()
+		if v != nil {
+			jv.Action, jv.Severity, jv.Findings, jv.Reason, jv.Scanner, jv.Confidence = v.Action, v.Severity, v.Findings, v.Reason, v.Scanner, v.Confidence
+		}
+	}
+	return dm, jv
+}
+
+// startWALGuard runs the product's own audit WAL guard pass (auditWALGuardPass, the one runAuditWALGuard calls every 2 s in a running
+// gateway) in a goroutine. The harness never calls Sidecar.Run, so without this nothing checkpoints and the audit WAL grows without
+// bound under a sustained hook load (7-24 GB per run seen on the build box). The pass runs every 500 ms here because the harness
+// drives far more calls per second than a host does.
+func (e *S7Engine) startWALGuard() {
+	ctx, cancel := context.WithCancel(context.Background())
+	e.stopGuard = cancel
+	e.guardDone = make(chan struct{})
+	go func() {
+		defer close(e.guardDone)
+		var alarm auditWALAlarm
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			auditWALGuardPass(ctx, e.store, &alarm, time.Now(), io.Discard)
+			e.passes.Add(1)
+			if st, err := os.Stat(e.store.DatabasePath() + "-wal"); err == nil && st.Size() > e.peakWAL.Load() {
+				e.peakWAL.Store(st.Size())
+			}
+		}
+	}()
+}
+
+// Close stops the WAL guard.
+func (e *S7Engine) Close() {
+	if e.stopGuard != nil {
+		e.stopGuard()
+		<-e.guardDone
+	}
+}
+
+// S7Stats is the audit store's size and checkpoint settings at the end of a run.
+type S7Stats struct {
+	DBBytes           int64             `json:"audit_db_bytes"`
+	WALBytesFinal     int64             `json:"audit_wal_bytes_final"`
+	WALBytesPeakSeen  int64             `json:"audit_wal_bytes_peak_seen"`
+	GuardPasses       int64             `json:"wal_guard_passes"`
+	Pragmas           map[string]string `json:"pragmas_in_effect_new_connection"`
+	StoreDSNPragmas   string            `json:"store_dsn_pragmas_note"`
+	WALJournalLimit   int64             `json:"journal_size_limit_bytes"`
+	WALHardLimitBytes int64             `json:"wal_hard_limit_bytes"`
+}
+
+// Stats reports the audit database and WAL sizes and the SQLite settings (journal_mode, wal_autocheckpoint, synchronous, journal_size_limit)
+// as a fresh connection sees them; the store's own connection sets journal_mode(WAL) and the pragmas listed in audit.openSQLiteWithPragmas.
+func (e *S7Engine) Stats(ctx context.Context) S7Stats {
+	out := S7Stats{Pragmas: map[string]string{}, GuardPasses: e.passes.Load(), WALBytesPeakSeen: e.peakWAL.Load(), WALJournalLimit: 64 << 20, WALHardLimitBytes: audit.WALHardLimitBytes,
+		StoreDSNPragmas: "journal_mode(WAL) + audit-tier pragmas from audit.openSQLiteWithPragmas; main pool 1 connection; wal_autocheckpoint left at the SQLite default (1000 pages) on the store connection"}
+	path := e.store.DatabasePath()
+	if st, err := os.Stat(path); err == nil {
+		out.DBBytes = st.Size()
+	}
+	if st, err := os.Stat(path + "-wal"); err == nil {
+		out.WALBytesFinal = st.Size()
+	}
+	if db, err := sql.Open("sqlite", "file:"+path+"?mode=ro"); err == nil {
+		defer db.Close()
+		for _, pr := range []string{"journal_mode", "wal_autocheckpoint", "synchronous", "journal_size_limit"} {
+			var v string
+			if err := db.QueryRowContext(ctx, "PRAGMA "+pr).Scan(&v); err == nil {
+				out.Pragmas[pr] = v
+			}
+		}
+	}
+	return out
+}
+
+func (e *S7Engine) ensureInspector() {
+	e.inspOnce.Do(func() {
+		cfg := e.sc.currentConfig()
+		g := NewGuardrailInspector("local", nil, e.sc.sharedJudge())
+		g.SetPosture(e.profile)
+		gr := cfg.Guardrail
+		g.SetDetectionStrategy(gr.DetectionStrategy, gr.DetectionStrategyPrompt, gr.DetectionStrategyCompletion, gr.DetectionStrategyToolCall, gr.JudgeSweep)
+		e.insp = g
+	})
+}
+
+// S7StreamResult is a model response replayed through the proxy's streaming inspection (InspectStream).
+type S7StreamResult struct {
+	Action, Severity string   // the enforced decision: mid-stream block, or the strongest mid-stream alert
+	Findings         []string // findings of the verdict that decided
+	BlockedAt        int      // bytes accumulated when the stream was cut; -1 when it was not
+	Scans            int      // mid-stream scans run
+	UncheckedTail    int      // bytes released after the last mid-stream scan (only the final, non-enforced check sees them); 0 for a blocked or short stream
+	FinalAction      string   // the post-stream check over the whole text; the proxy records it without enforcing it
+	FinalSeverity    string
+	FinalFindings    []string
+}
+
+// Mirrors of handleStreamingChatCompletion's constants (proxy.go): a mid-stream scan every 500 bytes, the first 1024 bytes buffered.
+const (
+	s7StreamScanInterval = 500
+	s7StreamBufSize      = 1024
+	s7StreamChunk        = 32
+)
+
+// InspectStream replays text as a streamed completion the way the proxy inspects one: regex-only InspectMidStream whenever 500 more bytes have accumulated
+// (a block cuts the stream), one more check at the end of a stream shorter than the 1024-byte buffer, and the final Inspect of the whole text, which the proxy
+// enforces since rel-1-0-10:GAP-0212. The decision here is the mid-stream one; the final verdict is returned beside it.
+func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResult {
+	e.ensureInspector()
+	ctx = withPinnedGeneration(ctx, e.sc.Generation())
+	res := S7StreamResult{Action: "allow", Severity: "NONE", BlockedAt: -1}
+	var acc strings.Builder
+	lastScan := 0
+	note := func(v *ScanVerdict) bool { // true: the stream is cut
+		if v == nil {
+			return false
+		}
+		if v.Severity != "NONE" && v.Action == "block" {
+			res.Action, res.Severity, res.Findings, res.BlockedAt = "block", v.Severity, v.Findings, acc.Len()
+			return true
+		}
+		if res.Action == "allow" && (v.Action == "alert" || v.Action == "confirm") {
+			res.Action, res.Severity, res.Findings = "alert", v.Severity, v.Findings
+		}
+		return false
+	}
+	scan := func() bool {
+		res.Scans++
+		return note(e.insp.InspectMidStream(ctx, "completion", acc.String(), []ChatMessage{{Role: "assistant", Content: acc.String()}}, "s7bench", "action"))
+	}
+	cut := false
+	for off := 0; off < len(text) && !cut; {
+		end := off + s7StreamChunk
+		if end > len(text) {
+			end = len(text)
+		}
+		for end < len(text) && !utf8.RuneStart(text[end]) {
+			end++
+		}
+		acc.WriteString(text[off:end])
+		off = end
+		if acc.Len()-lastScan >= s7StreamScanInterval {
+			cut = scan()
+			lastScan = acc.Len()
+		}
+	}
+	if !cut && acc.Len() > 0 && acc.Len() < s7StreamBufSize {
+		cut = scan()
+	}
+	if !cut && acc.Len() >= s7StreamBufSize {
+		res.UncheckedTail = acc.Len() - lastScan
+	}
+	if !cut {
+		// A reply that ends inside an open private-key block is TRUNCATED: the
+		// proxy's open-secret hold gives it the unknown tier of the pack
+		// (rel-1-0-10:GAP-0429, stream_secret_hold.go).
+		var rt responseText
+		rt.Add(answerPiece(0, acc.String()))
+		if rt.OpenSecret().pem {
+			var trunc bounded.Truncated
+			trunc.Hit(bounded.Bytes)
+			set := trunc.Set()
+			tier := bounded.TierOf(e.sc.currentConfig().HookPolicyTierForConnector(""))
+			finding := []string{evaluationLimitRuleID + ":" + boundedTruncatedTitle + " (" + set.Reason() + ")"}
+			switch bounded.Floor(bounded.Allow, set, tier) {
+			case bounded.Block:
+				res.Action, res.Severity, res.Findings, res.BlockedAt = "block", "HIGH", finding, acc.Len()
+			default:
+				if res.Action == "allow" {
+					res.Action, res.Severity, res.Findings = "alert", "MEDIUM", finding
+				}
+			}
+		}
+	}
+	if acc.Len() > 0 {
+		fv := e.insp.Inspect(ctx, "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, "s7bench", "action")
+		if fv != nil {
+			res.FinalAction, res.FinalSeverity, res.FinalFindings = fv.Action, fv.Severity, fv.Findings
+		}
+	}
+	return res
+}
+
+// InspectText runs one text through the /llm proxy's guardrail inspector (direction prompt or completion) with this
+// generation's rule pack, posture thresholds, detection strategy and judge, as handleChatCompletion does for a user turn.
+func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *ScanVerdict {
+	e.ensureInspector()
+	// Pin the generation as the proxy does for every request (proxy.go withPinnedGeneration), so the content rules and
+	// thresholds come from the pack under test, not the process-wide rule set.
+	ctx = withPinnedGeneration(ctx, e.sc.Generation())
+	v := e.insp.Inspect(ctx, direction, text, []ChatMessage{{Role: "user", Content: text}}, "s7bench", "action")
+	if v == nil {
+		v = &ScanVerdict{Action: "allow", Severity: "NONE"}
+	}
+	return v
+}
+
+// benchActiveHome derives the session home from a tool working directory so
+// the effect lane roots its protected sets correctly in the harness. It is
+// the first two path components (/home/<user>), else the cwd, else a default.
+func benchActiveHome(cwd string) string {
+	if cwd == "" {
+		return "/home/bench"
+	}
+	parts := strings.Split(strings.TrimPrefix(cwd, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "home" {
+		return "/home/" + parts[1]
+	}
+	return cwd
+}

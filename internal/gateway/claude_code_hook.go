@@ -158,6 +158,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	cfg := a.decisionConfig(ctx)
+	ctx = withCascadeTrace(ctx, cfg, "claudecode")
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
@@ -181,15 +182,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// event seeds it, as on the generic and Codex paths: an expansion
 		// carries command text the user did not type, so it must not
 		// replace the task. Secure Client keeps the judge input of main.
-		if isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Prompt)
-			}
-			a.observeUserDownloadRequest(ctx, req.Prompt)
-		}
+		intentEvent := isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration())
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))
+		if intentEvent {
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, req.CWD, verdict)
+			a.observeAlignmentTurn(ctx, "claudecode", req.Prompt, verdict)
+		}
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
@@ -235,6 +235,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Args:                                     actionArgs,
 			CWD:                                      req.CWD,
 			ActiveHome:                               hookActiveHome(ctx),
+			WindowsHookHost:                          windowsHookHost() && !isSandboxHookRequest(ctx),
 			CurrentWindowsDrive:                      reportedWindowsDrive(req.reportedCWD),
 			ToolResourceIdentity:                     resourceIdentity,
 			CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
@@ -243,12 +244,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
 			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 		}
-		if a.agentHookWindowsDialectHint(ctx) {
+		windowsReadings := a.agentHookWindowsDialectHint(ctx)
+		if windowsReadings {
 			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
 		}
 		if coworkDialect != "" {
 			// The Cowork shell runs in a Linux VM on every host.
 			actionInput.DialectHint = coworkDialect
+			windowsReadings = false
 		}
 		if coworkDeny != nil {
 			verdict = coworkDeny
@@ -263,10 +266,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: actionArgs}),
 				ActiveAgentFileIdentities:     activeAgentContext.identities,
 				SandboxGuestCWD:               req.guestCWD,
+				windowsDialectReadings:        windowsReadings,
 				record:                        toolChainRecorderFromContext(ctx),
 			}, command, commandTool)
 		}
-		verdict = mergeCoworkPageContentVerdict(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
+		verdict = mergeToolInspectVerdicts(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
 		// Cowork's own workspace shell and fetch are no MCP server the user
 		// configured: no MCP admission or server policy applies to them.
 		if !coworkInspected(cfg) || !claudeCodeCoworkNativeTool(req) {
@@ -329,11 +333,15 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// onto the context so the downstream emit choke points and the OS
 	// toast honor it (managed_enterprise only; no-op otherwise).
 	ctx = withRedactionDecision(ctx, verdict.RedactionEnabled)
+	verdict = a.applyCascadeFinal(ctx, "claudecode", hookCascadeSurface(req.HookEventName), req.HookEventName, claudeCodeToolName(req), verdict)
+	// The alignment check adds its own finding after the pipeline decided
+	// (cascade lane alignment, off by default).
+	verdict = a.applyAlignmentLane(ctx, "claudecode", req.HookEventName, claudeCodeToolName(req), req.ToolUseID, string(claudeCodeToolArgs(req)), req.CWD, verdict)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	stateMutation := a.provenHookActionMustEnforce(ctx, verdict) && claudeCodeCanEnforce(req)
+	stateMutation := a.hookActionMustEnforce(ctx, verdict) && claudeCodeCanEnforce(req)
 	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
 	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
@@ -385,6 +393,18 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		action = decisionConfirmWithoutAsk(verdict, "block")
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	// A tool result cannot be unread. When it carries text aimed at the
+	// agent, the answer (a PostToolUse block in strict, context otherwise)
+	// tells the agent not to follow it (GAP-0605). It is added to the
+	// agent-facing text after the display reason is shaped, which keeps
+	// only the rule names.
+	if gatewayconnector.ToolResultEvent(req.HookEventName) && rawAction != "allow" && verdictHasPromptInjection(verdict) {
+		resp.Reason = gatewayconnector.WithToolResultInjectionGuidance(resp.Reason)
+		if resp.AdditionalContext != "" {
+			resp.AdditionalContext = gatewayconnector.WithToolResultInjectionGuidance(resp.AdditionalContext)
+		}
+		resp.ClaudeCodeOutput = claudeCodeOutput(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+	}
 	// The alert-only SQL rule says so in the chat, as on the Codex and generic
 	// hook paths, so block_at is not read as a way to turn it into a block
 	// (GAP-0914). Secure Client keeps the plain finding line.
@@ -615,8 +635,13 @@ func claudeCodeCanEnforce(req claudeCodeHookRequest) bool {
 		return false
 	}
 
+	// PostToolUse honours decision=block: Claude Code gives the reason to
+	// the model with the result. The result was already read, so the block
+	// tells the agent (and, through systemMessage, the user) instead of
+	// withholding it (GAP-0605).
 	switch req.HookEventName {
 	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
+		"PostToolUse",
 		"TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
 		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
 		return true
@@ -671,6 +696,14 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 				"action":        "decline",
 				"content":       map[string]interface{}{},
 			}}
+		case "PostToolUse":
+			// The model reads the reason with the result it already has; the
+			// user sees only systemMessage (GAP-0605).
+			out := map[string]interface{}{"decision": "block", "reason": reasonOrDefaultClaudeCode(reason)}
+			if notice := gatewayconnector.ToolResultUserNotice(action, reason, additional); notice != "" {
+				out["systemMessage"] = notice
+			}
+			return out
 		default:
 			return map[string]interface{}{"decision": "block", "reason": reasonOrDefaultClaudeCode(reason)}
 		}
@@ -712,10 +745,18 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 	switch event {
 	case "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
 		"PostToolBatch", "SubagentStart", "SubagentStop":
-		return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
+		out := map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":     event,
 			"additionalContext": additional,
 		}}
+		// additionalContext reaches the model only; a result finding also
+		// shows the user a line (GAP-0605).
+		if gatewayconnector.ToolResultEvent(event) {
+			if notice := gatewayconnector.ToolResultUserNotice(action, reason, additional); notice != "" {
+				out["systemMessage"] = notice
+			}
+		}
+		return out
 	default:
 		return map[string]interface{}{"systemMessage": additional}
 	}
@@ -901,6 +942,13 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 	mode string,
 ) *ToolInspectVerdict {
 	content := claudeCodeToolOutput(req)
+	if req.HookEventName == "PostToolUse" {
+		for _, j := range a.hookSessionJudges(ctx) {
+			j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
+		}
+	}
+	// The tool-result judges get the call this output answers (judge_packet.go).
+	ctx = withToolResultCall(ctx, req.ToolName, req.ToolInput)
 	if sandboxToolResultUntrusted(ctx) || req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
 		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
 		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {
@@ -1082,12 +1130,16 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 		}
 		result = results[0]
 	} else {
-		resolved, err := filepath.EvalSymlinks(target)
+		// The payload names the file; it is read as the hook path reads an
+		// operand, so a file on another machine's share (or behind a link
+		// into one) is never opened: the event is then judged by its text
+		// (rel-1-0-10:GAP-1074).
+		resolved, err := hookpaths.EvalSymlinks(target)
 		if err != nil {
 			return nil
 		}
 		target = resolved
-		info, err := os.Stat(target)
+		info, err := hookpaths.Stat(target)
 		if err != nil || info.IsDir() {
 			return nil
 		}

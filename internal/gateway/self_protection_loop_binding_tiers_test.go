@@ -116,22 +116,75 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 		{"for-list-of-other-names", `for u in alice bob; do sed -i s/a/b/ ` + parent + `$u/notes.txt; done`, false, false},
 		{"while-read-of-an-ordinary-name", `echo aliasdirx | while read -r d; do sed -i s/a/b/ ` + home + `/$d/notes.txt; done`, false, false},
 	}
-	for _, connector := range []string{"claudecode", "codex"} {
+	// Each row is judged twice, not in all 12 cells (connector x per-user or
+	// managed x default, permissive or strict), the owner's test budget: once
+	// in the strict tier and once in a default-tier cell (the default or the
+	// permissive pack), on the other connector and on the other side of
+	// per-user and managed. So every row is judged by both connectors, per
+	// user and managed, and in strict and a default tier. The rotation counts
+	// rows per verdict pair (balanced, strict), so each pair walks all the
+	// cells in turn; the check after the loop shows that every cell judged at
+	// least one row that must block and one that must stay allowed.
+	connectors := []string{"claudecode", "codex"}
+	type cell struct {
+		connector, pack string
+		managed         bool
+	}
+	type judgment struct {
+		name, command string
+		cell          cell
+		want          bool
+		got           string
+	}
+	var judgments []judgment
+	judged := map[cell][2]int{}
+	turn := map[[2]bool]int{}
+	for _, row := range rows {
+		k := turn[[2]bool{row.balanced, row.strict}]
+		turn[[2]bool{row.balanced, row.strict}]++
+		strictManaged := (k/2)%2 == 1
+		balancedPack := []string{"", "permissive"}[(k/4)%2]
+		for _, c := range []cell{
+			{connectors[k%2], "strict", strictManaged},
+			{connectors[(k+1)%2], balancedPack, !strictManaged},
+		} {
+			want := row.balanced
+			if c.pack == "strict" {
+				want = row.strict
+			}
+			counts := judged[c]
+			if want {
+				counts[0]++
+			} else {
+				counts[1]++
+			}
+			judged[c] = counts
+			judgments = append(judgments, judgment{name: row.name, command: row.command, cell: c, want: want})
+		}
+	}
+	// Each call builds its own gateway and only reads the fixture, as
+	// concurrent hooks do, so the calls run on every CPU; the checks read
+	// the verdicts in row order.
+	forEachOnEveryCPU(len(judgments), func(i int) {
+		j := &judgments[i]
+		j.got = postSelfProtectionPackCell(t, home, project, j.cell.connector, j.cell.pack, j.cell.managed, false, j.command)
+	})
+	for _, j := range judgments {
+		c, got := j.cell, j.got
+		block := strings.HasPrefix(got, `{"action":"block"`)
+		if j.want && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
+			t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", j.name, c.connector, c.managed, c.pack, got)
+		}
+		if !j.want && block {
+			t.Errorf("%s %s managed=%t pack=%q: = %.200s, want ordinary allow", j.name, c.connector, c.managed, c.pack, got)
+		}
+	}
+	for _, connector := range connectors {
 		for _, managed := range []bool{false, true} {
 			for _, pack := range []string{"", "permissive", "strict"} {
-				for _, row := range rows {
-					want := row.balanced
-					if pack == "strict" {
-						want = row.strict
-					}
-					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-					block := strings.HasPrefix(got, `{"action":"block"`)
-					if want && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
-						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", row.name, connector, managed, pack, got)
-					}
-					if !want && block {
-						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want ordinary allow", row.name, connector, managed, pack, got)
-					}
+				if counts := judged[cell{connector, pack, managed}]; counts[0] == 0 || counts[1] == 0 {
+					t.Errorf("cell %s managed=%t pack=%q judged %d protected and %d ordinary rows; the rotation must give it both",
+						connector, managed, pack, counts[0], counts[1])
 				}
 			}
 		}

@@ -205,8 +205,10 @@ try {
             if ($result.generation -cne 'smoke-generation') {
                 $failures.Add("finished, then covered: $($result.message)")
             }
+            # GAP-0601: a reconcile that finished but whose coverage was not
+            # accepted says so, not that the wait ran out.
             $result = & $run -Name 'finished, not covered' -RecordState 'finished'
-            & $expect $result 0.9 6.0 @('did not publish fresh required coverage within', $log) @('still running')
+            & $expect $result 0.9 6.0 @('finished its first reconcile', 'its coverage was not accepted', $log) @('still running', 'did not publish fresh required coverage within')
 
             # Without a record of this guardian the usual limit stands.
             $result = & $run -Name 'no record' -RecordState ''

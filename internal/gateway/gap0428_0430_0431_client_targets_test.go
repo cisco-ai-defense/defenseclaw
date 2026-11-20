@@ -28,7 +28,11 @@ func checkHP7ClientRows(t *testing.T, f b36ManagedHookFixture, rows []hp7ClientR
 	headers := f.clientHeaders(t, payloads)
 	var calls []*hookCall
 	for i, row := range rows {
-		calls = append(calls, everyMode(row.name, payloads[i], headers[i])...)
+		cells := everyMode(row.name, payloads[i], headers[i])
+		for _, cell := range cells {
+			cell.benignPerUserBlock = row.managedWant == "allow" && row.perUserWant == "block"
+		}
+		calls = append(calls, cells...)
 	}
 	f.answerAll(t, calls)
 	for i, call := range calls {

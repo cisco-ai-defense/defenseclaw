@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -23,7 +24,7 @@ import (
 // say (an elevated shell has no pin; a per-user style data_dir under a
 // profile named another folder).
 func TestWindowsAccountJoinReadsTheGuardianSpoolOfTheLayout(t *testing.T) {
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		t.Fatal(err)
 	}

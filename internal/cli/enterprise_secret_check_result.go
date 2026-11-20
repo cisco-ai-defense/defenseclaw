@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -62,7 +63,7 @@ func printSecretCheck(cmd *cobra.Command, opts *enterpriseSecretOptions, posture
 	}
 	if !res.OK {
 		res.ExitCode = failureExit
-		failure = withExitCode(errors.New(res.Errors[0].Message), res.ExitCode)
+		failure = cliusage.WithExitCode(errors.New(res.Errors[0].Message), res.ExitCode)
 	}
 	if opts.json {
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(res); err != nil {

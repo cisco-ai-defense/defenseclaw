@@ -23,6 +23,7 @@ SMOKE_DIR = ROOT / "packaging" / "windows" / "tests"
 STANDALONE_SMOKES = (
     "enterprise-profile-lifecycle-lock-smoke.ps1",
     "enterprise-profile-deployment-record-smoke.ps1",
+    "enterprise-standalone-approved-policy-repair-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-codex-vendor-folder-smoke.ps1",
     "enterprise-standalone-config-acl-repair-smoke.ps1",
@@ -39,6 +40,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-hook-keep-smoke.ps1",
     "enterprise-standalone-hook-swap-launch-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
+    "enterprise-standalone-lifecycle-lock-inherited-acl-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
     "enterprise-standalone-manifest-adoption-smoke.ps1",
     "enterprise-standalone-mdm-rotation-journal-smoke.ps1",
@@ -49,6 +51,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-recovery-gateway-smoke.ps1",
     "enterprise-standalone-record-recovery-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
+    "enterprise-standalone-route-epoch-render-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-runtime-env-acl-smoke.ps1",
     "enterprise-standalone-w2b-lifecycle-smoke.ps1",

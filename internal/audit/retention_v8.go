@@ -86,6 +86,7 @@ const (
 	RetentionCorrelationPending       RetentionTableClass = "correlation_pending_operations"
 	RetentionCorrelationRelationships RetentionTableClass = "correlation_relationships"
 	RetentionCorrelationEvents        RetentionTableClass = "correlation_events"
+	RetentionRejectedRecords          RetentionTableClass = "rejected_records"
 )
 
 var retentionTableClasses = [...]RetentionTableClass{
@@ -106,6 +107,7 @@ var retentionTableClasses = [...]RetentionTableClass{
 	RetentionCorrelationPending,
 	RetentionCorrelationRelationships,
 	RetentionCorrelationEvents,
+	RetentionRejectedRecords,
 }
 
 // RetentionFailureClass is deliberately bounded and contains no driver error,
@@ -448,6 +450,10 @@ var retentionAuditRegistry = [...]retentionAuditTable{
 	{class: RetentionScanFindings, table: "scan_findings"},
 	{class: RetentionLegacyFindings, table: "findings"},
 	{class: RetentionScanResults, table: "scan_results"},
+	// Kept only while observability.local.keep_rejected_records is on
+	// (#1442); its timestamp column is written natively, so it needs no
+	// retentionTimestampRegistry trigger.
+	{class: RetentionRejectedRecords, table: "rejected_records"},
 }
 
 type retentionTimestampSpec struct {
@@ -494,7 +500,8 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"network_egress_events": retentionOwnedHistory, "sink_health": retentionOwnedHistory,
 	"scan_findings": retentionOwnedHistory, "findings": retentionOwnedHistory,
 	"scan_results": retentionOwnedHistory, "judge_responses": retentionOwnedHistory,
-	"actions": retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
+	"rejected_records": retentionOwnedHistory,
+	"actions":          retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
 	"finding_scopes": retentionOwnedProtected, "finding_states": retentionOwnedProtected,
 	"schema_version": retentionOwnedProtected, "observability_store_readiness": retentionOwnedProtected,
 	"alert_acknowledgement_projection": retentionOwnedProtected,
@@ -506,7 +513,11 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"runtime_asset_state":              retentionOwnedProtected,
 	// Field class sets are named by the rows retention keeps; bounded by
 	// maxFieldClassSets, never pruned (field_class_sets.go).
-	"audit_field_class_sets":             retentionOwnedProtected,
+	"audit_field_class_sets": retentionOwnedProtected,
+	// Lone hook_decision rows (hook_row_tracking.go): an entry goes with its
+	// audit row (trg_audit_hook_lone_delete), so retention never reaps it
+	// itself (rel-1-0-10:GAP-0316).
+	"audit_hook_lone":                    retentionOwnedProtected,
 	"guardrail_chain_deny_receipts":      retentionOwnedGraph,
 	"guardrail_chain_events":             retentionOwnedGraph,
 	"guardrail_chain_partitions":         retentionOwnedGraph,
@@ -636,6 +647,14 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 		}
 	}
 	result.Cutoff = cutoff
+	// Open state (an active cursor, an open tool call) counts as ended only
+	// after the whole day window, never after the shorter size-cap cutoff:
+	// a session waiting on a prompt for an hour is still live (issue #1440).
+	// Days 0 and Secure Client stores keep open state for good.
+	staleActive := time.Unix(0, 0).UTC()
+	if days > 0 && !reaper.secureClient {
+		staleActive = started.Add(-time.Duration(days) * 24 * time.Hour)
+	}
 	judgeSourceKey := ""
 	if runErr == nil {
 		if err := ctx.Err(); err != nil {
@@ -674,7 +693,7 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 		}
 	}
 	if runErr == nil {
-		if err := reaper.drainCorrelationState(ctx, cutoff, started, &result); err != nil {
+		if err := reaper.drainCorrelationState(ctx, cutoff, staleActive, started, &result); err != nil {
 			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
 		}
 	}
@@ -903,6 +922,14 @@ func (reaper *RetentionReaper) drainAuditTable(
 	baselineAt time.Time,
 	result *RetentionRunResult,
 ) error {
+	if spec.class == RetentionRejectedRecords {
+		// A Secure Client store has no rejected_records table (it keeps
+		// main's schema), so there is nothing to reap there.
+		present, err := tableExists(reaper.store.db, spec.table)
+		if err != nil || !present {
+			return err
+		}
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -933,6 +960,7 @@ func (reaper *RetentionReaper) drainAuditTable(
 func (reaper *RetentionReaper) drainCorrelationState(
 	ctx context.Context,
 	cutoff time.Time,
+	staleActive time.Time,
 	now time.Time,
 	result *RetentionRunResult,
 ) error {
@@ -967,9 +995,9 @@ func (reaper *RetentionReaper) drainCorrelationState(
 	}
 	stages = append(stages,
 		correlationStage{RetentionCorrelationReceipts, []any{unixNano(now)}, false},
-		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff)}, false},
-		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff)}, false},
-		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}, false},
+		correlationStage{RetentionCorrelationCursors, []any{unixNano(cutoff), unixNano(staleActive)}, false},
+		correlationStage{RetentionCorrelationPending, []any{unixNano(cutoff), reaper.batchSize(), unixNano(staleActive), reaper.batchSize()}, false},
+		correlationStage{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff), unixNano(staleActive)}, false},
 		correlationStage{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}, false},
 	)
 	deadline := reaper.hooks.now().Add(reaper.correlationBudget())
@@ -1169,16 +1197,40 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				fingerprint_sha256 LIMIT ?
 		)`, nil
 	case RetentionCorrelationCursors:
+		// A cursor still active after the whole day window belongs to a
+		// session that never ended (agent killed, no session end): it is
+		// dead and no longer pins the graph (issue #1440). The second
+		// argument is that stale-active cutoff; the size cap never moves it.
 		return `DELETE FROM correlation_cursors WHERE rowid IN (
 			SELECT rowid FROM correlation_cursors
-			WHERE active=0 AND updated_time_unix_nano < ?
+			WHERE (active=0 AND updated_time_unix_nano < ?) OR (active=1 AND updated_time_unix_nano < ?)
 			ORDER BY updated_time_unix_nano, connector_instance_id, session_id, agent_id LIMIT ?
 		)`, nil
 	case RetentionCorrelationPending:
+		// Two bounded branches, each served by its own partial index
+		// (idx_correlation_pending_retention for ended operations,
+		// idx_correlation_pending_stale for open ones). An operation still
+		// open after the whole day window (never the shorter size-cap cutoff) is dead: its tool call never
+		// reported an end (agent killed). It no longer pins the graph it
+		// points at (issue #1440).
 		return `DELETE FROM correlation_pending_operations WHERE rowid IN (
-			SELECT rowid FROM correlation_pending_operations
-			WHERE status<>'active' AND updated_time_unix_nano < ?
-			ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
+			SELECT rowid FROM (
+				SELECT * FROM (
+					SELECT rowid, updated_time_unix_nano AS updated, connector_instance_id AS connector,
+						operation_id AS operation, operation_type AS kind
+					FROM correlation_pending_operations
+					WHERE status<>'active' AND updated_time_unix_nano < ?
+					ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
+				)
+				UNION ALL
+				SELECT * FROM (
+					SELECT rowid, updated_time_unix_nano AS updated, connector_instance_id AS connector,
+						operation_id AS operation, operation_type AS kind
+					FROM correlation_pending_operations
+					WHERE status='active' AND updated_time_unix_nano < ?
+					ORDER BY updated_time_unix_nano, connector_instance_id, operation_id, operation_type LIMIT ?
+				)
+			) ORDER BY updated, connector, operation, kind LIMIT ?
 		)`, nil
 	case RetentionCorrelationRelationships:
 		// Each protected-node test is one equality lookup on (kind, id), so
@@ -1189,6 +1241,21 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 		// held the writer connection for 86 s at 100% CPU after every gateway
 		// start, and every hook waiting for that connection failed closed
 		// (GAP-1862, GAP-1908).
+		//
+		// protected_nodes keep their edges whatever the age: the events of
+		// unexpired receipts, the last event of an active cursor, and the start
+		// event and operation node of an open pending operation. Nothing that
+		// resumes a session reads a relationship (the hook path reads its
+		// cursor and pending operations, and records again an edge it reports
+		// again), so the session, agent, lifecycle, execution and turn nodes of
+		// live state (live_nodes) keep their edges only inside the day window,
+		// the fourth argument: the size cap's shorter cutoff never takes the
+		// recent graph of a live session, and an edge older than the window
+		// goes even on a session resumed every day, which used to keep its
+		// whole history for as long as it lived (rel-1-0-10:GAP-0034). With
+		// day retention off (0 days) and on a Secure Client store the fourth
+		// argument is the epoch: live state keeps its edges at any age there,
+		// as before.
 		return `DELETE FROM correlation_relationships WHERE rowid IN (
 			WITH protected_nodes(kind, id) AS (
 				SELECT 'semantic_event', semantic_event_id FROM correlation_receipts
@@ -1197,7 +1264,13 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 					WHERE expires_time_unix_nano >= ? AND conflicts_with_semantic_event_id IS NOT NULL
 				UNION SELECT 'semantic_event', last_semantic_event_id FROM correlation_cursors
 					WHERE active=1 AND last_semantic_event_id IS NOT NULL
-				UNION SELECT 'session', session_id FROM correlation_cursors WHERE active=1
+				UNION SELECT 'semantic_event', start_semantic_event_id FROM correlation_pending_operations
+					WHERE status='active'
+				UNION SELECT CASE operation_type WHEN 'model' THEN 'model_request'
+					ELSE 'tool_invocation' END, operation_id FROM correlation_pending_operations
+					WHERE status='active'
+			), live_nodes(kind, id) AS (
+				SELECT 'session', session_id FROM correlation_cursors WHERE active=1
 				UNION SELECT 'agent', agent_id FROM correlation_cursors WHERE active=1
 				UNION SELECT 'lifecycle', lifecycle_id FROM correlation_cursors
 					WHERE active=1 AND lifecycle_id IS NOT NULL
@@ -1205,8 +1278,6 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 					WHERE active=1 AND execution_id IS NOT NULL
 				UNION SELECT 'turn', active_turn_id FROM correlation_cursors
 					WHERE active=1 AND active_turn_id IS NOT NULL
-				UNION SELECT 'semantic_event', start_semantic_event_id FROM correlation_pending_operations
-					WHERE status='active'
 				UNION SELECT 'session', session_id FROM correlation_pending_operations
 					WHERE status='active' AND session_id IS NOT NULL
 				UNION SELECT 'turn', turn_id FROM correlation_pending_operations
@@ -1215,9 +1286,6 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 					WHERE status='active' AND agent_id IS NOT NULL
 				UNION SELECT 'execution', execution_id FROM correlation_pending_operations
 					WHERE status='active' AND execution_id IS NOT NULL
-				UNION SELECT CASE operation_type WHEN 'model' THEN 'model_request'
-					ELSE 'tool_invocation' END, operation_id FROM correlation_pending_operations
-					WHERE status='active'
 			)
 			SELECT relationship.rowid FROM correlation_relationships AS relationship
 			WHERE relationship.last_seen_time_unix_nano < ?
@@ -1231,6 +1299,11 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 				AND EXISTS (SELECT 1 FROM protected_nodes AS node
 					WHERE node.id=evidence.semantic_event_id AND node.kind='semantic_event')
 			)
+			AND (relationship.last_seen_time_unix_nano < ? OR (
+				NOT EXISTS (SELECT 1 FROM live_nodes AS live_node WHERE
+					live_node.kind=relationship.from_kind AND live_node.id=relationship.from_id)
+				AND NOT EXISTS (SELECT 1 FROM live_nodes AS live_node WHERE
+					live_node.kind=relationship.to_kind AND live_node.id=relationship.to_id)))
 			ORDER BY relationship.last_seen_time_unix_nano, relationship.relationship_id LIMIT ?
 		)`, nil
 	case RetentionCorrelationEvents:
@@ -1394,6 +1467,12 @@ func retentionAuditDeleteStatement(class RetentionTableClass) (string, error) {
 			  ON finding.scan_id = scan.id
 			WHERE scan.retention_timestamp_unix_nano < ?
 			ORDER BY scan.retention_timestamp_unix_nano ASC, finding.id ASC LIMIT ?
+		)`, nil
+	case RetentionRejectedRecords:
+		return `DELETE FROM rejected_records WHERE id IN (
+			SELECT id FROM rejected_records INDEXED BY idx_rejected_records_retention
+			WHERE retention_timestamp_unix_nano < ?
+			ORDER BY retention_timestamp_unix_nano ASC, id ASC LIMIT ?
 		)`, nil
 	case RetentionScanResults:
 		return `DELETE FROM scan_results WHERE id IN (

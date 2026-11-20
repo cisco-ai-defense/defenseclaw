@@ -1507,3 +1507,30 @@ func TestSkillDirs_OpenClawReadsJSON5Config(t *testing.T) {
 		})
 	}
 }
+
+// The connector patches claw.config_file, else <claw.home_dir>/openclaw.json;
+// a config_file left at its default follows a moved home_dir.
+func TestOpenClawConfigPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	def := filepath.Join(home, ".openclaw")
+	srv := filepath.Clean("/srv/oc")
+	cases := []struct{ homeDir, configFile, wantHome, wantConfig string }{
+		{"", "", def, filepath.Join(def, "openclaw.json")},
+		{"~/.openclaw", "~/.openclaw/openclaw.json", def, filepath.Join(def, "openclaw.json")},
+		{"/srv/oc", "~/.openclaw/openclaw.json", srv, filepath.Join(srv, "openclaw.json")},
+		{"/srv/oc", "", srv, filepath.Join(srv, "openclaw.json")},
+		{"/srv/oc", "/etc/oc/main.json", srv, filepath.Clean("/etc/oc/main.json")},
+		{"~/.openclaw", "~/custom/openclaw.json", def, filepath.Join(home, "custom", "openclaw.json")},
+	}
+	for _, tc := range cases {
+		cfg := &Config{Claw: ClawConfig{HomeDir: tc.homeDir, ConfigFile: tc.configFile}}
+		if got := cfg.OpenClawHome(); got != tc.wantHome {
+			t.Errorf("OpenClawHome(%q) = %q, want %q", tc.homeDir, got, tc.wantHome)
+		}
+		if got := cfg.OpenClawConfigPath(); got != tc.wantConfig {
+			t.Errorf("OpenClawConfigPath(%q, %q) = %q, want %q", tc.homeDir, tc.configFile, got, tc.wantConfig)
+		}
+	}
+}

@@ -92,7 +92,7 @@ The records the managed computer adds:
 | A network rule that nothing accounts for was removed, its sandbox stopped, or only reported | `log.sandbox.policy.foreign_rule` | The action is `remove`, `stop` or `alert`. |
 | The managed gateway decided a person's ask, unblock or block | `log.sandbox.ask.decided` | Says whether the decision was kept. Always written. |
 | A required agent was started on the host | `log.sandbox.host_run_refused` | Always written. |
-| This computer cannot provide a sandbox for a required agent | `log.sandbox.host_run_unavailable` | The reason is one of `os_unsupported`, `no_docker_group`, `no_docker_access`, `no_kvm`, `no_kvm_group`, `no_kvm_access`, `prerequisite_missing` and similar; the refusal asks the person to quote it. An alert-only case has action `allow`. |
+| This computer cannot provide a sandbox for a required agent | `log.sandbox.host_run_unavailable` | The reason is one of `os_unsupported`, `no_docker_group`, `no_docker_access`, `no_kvm`, `no_kvm_group`, `no_kvm_access`, `prerequisite_missing` and similar; the refusal asks the person to quote it, except while the organization's change of the sandbox setup is still being applied: that refusal says to try again in a few minutes and names no contact. An alert-only case has action `allow`. |
 | A sandbox run refused because another account is using the sandboxes of a single-account computer | `log.sandbox.host_run_unavailable` | The reason is `account_busy` and the action `refuse`. The record carries the refused person's own profile and subject key and names no other account. Repeated attempts are recorded at most once every 5 seconds. |
 | The managed policy refused a destination | `log.sandbox.access_refused` | Names the rule and `server.address`; the rule is the caller's own match only. Always written. |
 | A sandbox or an agent container DefenseClaw did not create | `log.sandbox.foreign_sandbox`, `log.sandbox.foreign_container` | A sandbox is stopped, deleted when it cannot stop, or reported; a container is only reported, with its image in `defenseclaw.sandbox.container.image`. Both carry the account's own profile match and the detected agent connector, including when the account has no registered sandbox. |
@@ -203,6 +203,44 @@ The labels below are the ones the local Prometheus shows. In OTLP they are
 | `defenseclaw.sandbox.active` (gauge) | `connector` | Sandboxes provisioning, starting, ready or stopping, per harness connector. Exported every minute, including `0` after the connector's last sandbox stops. On a managed host, the daemon refreshes the gateway's count on its polls; after a gateway restart a running sandbox counts again within a minute. |
 | `defenseclaw.sandbox.transitions` (counter) | `connector`, phase from and to | One per phase change. |
 | `defenseclaw.egress.events` (counter) | `connector`, `source` (`openshell`, `dc-egress-proxy`), `decision` | One per decision; none for the end of a connection. A refusal that is audited only does not count. |
+
+## Agent Substrate
+
+An [Agent Substrate actor](/docs/substrate) writes the same records as an OpenShell sandbox, with `defenseclaw.sandbox.runtime` set to `substrate` and `defenseclaw.sandbox.driver` set to `gvisor` or `microvm`. `defenseclaw.sandbox.id` is the actor UID. The records carry the sandbox correlation plus these attributes. None of them is ever a metric label.
+
+| Attribute | Meaning |
+| --- | --- |
+| `defenseclaw.sandbox.substrate.atespace`, `.actor` | The atespace and the actor name. They are unique only together |
+| `defenseclaw.sandbox.substrate.actor_uid`, `ate.actor.uid` | The actor UID. The second is the name Substrate uses on its own records, so the two join. A fork has a new UID |
+| `defenseclaw.sandbox.substrate.registered` | On `log.egress.*`: `false` when the leader could not tie the decision to a registration of the actor (a deleted actor, one DefenseClaw never registered, or a registration lookup outage at the callout). The atespace and actor name then come from the egress gateway's verified identity, and the actor UID and guardrail profile are absent |
+| `defenseclaw.sandbox.substrate.template`, `.worker_pool`, `.kit_version` | The template the actor came from, the pool that runs it (absent while suspended) and the DefenseClaw kit release inside |
+| `defenseclaw.sandbox.substrate.batch_id` | The batch an unattended actor belongs to |
+| `defenseclaw.sandbox.substrate.parent_uid` | The actor a fork was made from |
+| `k8s.cluster.name`, `k8s.namespace.name` | Resource attributes of the DefenseClaw component, from the chart. `host.name` is the pod, never the actor |
+| `defenseclaw.user.id_kind=oidc_subject` or `k8s_user` | The person is an OIDC subject, or a Kubernetes user the gateway verified (open-source clusters without OIDC). `defenseclaw.user.identity.source` is `oidc` for a person or `workload_oidc` for CI. `defenseclaw.user.principal.assurance` is `verified` only for a person or workload the gateway verified and bound to a live actor UID; anything the actor says about itself is `claimed` |
+
+**Lifecycle.** `sandbox.lifecycle` records use the actor phases `resuming`, `ready` (Substrate's RUNNING), `suspending`, `suspended`, `crashed`, `deleting` and `reverting`, and these triggers: `attest` (a template was attested or refused), `policy_lag`, `resume_recheck`, `fork`, `drift` (a foreign change to the egress policy was reverted), `policy_conflict`, `idle_suspend` and `migrate`.
+
+**Egress.** `egress.allowed` and `egress.blocked` from the callout add `defenseclaw.network.body_inspected` (the callout read the body of an MCP or listed-host POST) and `defenseclaw.network.body_over_cap` (the body was over the cap and was not read).
+
+**Secrets.** `log.secret.injected` records the secret name, the host, the actor (atespace, name and UID, which join to the person on the agent's registration) and the profile, never a value, a prefix or the placeholder. Substrate's egress swaps the value in after DefenseClaw's callout has allowed the request, so the callout writes the record, one per bound secret on every allowed request to a host the secret is bound to, in its log next to `log.egress.allowed`.
+
+**Metrics.** None has an identity label. The gateway replicas record them and send them to your OTLP destinations with the other `defenseclaw.*` metrics. The controller and the callout have no telemetry runtime: they send their counts and records to the leader, and a gateway replica records each one once. The leader keeps what is waiting in memory, egress decisions apart from lifecycle records and counts so a burst of egress never pushes those out. Each holds up to 50,000 records or 16 MiB, and each text field is cut to 512 bytes. Records past that bound, or not yet handed on when the leader restarts, are lost, and the gateway logs how many.
+
+| Metric | Type | Recorded |
+| --- | --- | --- |
+| `defenseclaw.substrate.policy_lag` | histogram, seconds | By the gateway: a launcher create until the new actor runs with its egress policy. A policy the controller writes again after a change is not counted |
+| `defenseclaw.substrate.hook_rtt` | histogram, ms | By the gateway: an actor's hook call from its arrival on the actor listener to the answer (the network leg from the kit is not included) |
+| `defenseclaw.substrate.leader_observe_latency` | histogram, ms | By the gateway: one tool-chain step sent to the leader, until it answers |
+| `defenseclaw.substrate.rate_limited` | counter | By the gateway: calls refused by the fair-share limit |
+| `defenseclaw.substrate.first_hook_after_resume` | histogram, ms | Not recorded in this release: Substrate resumes a suspended actor on its own when traffic reaches it, and no DefenseClaw component sees that resume when it happens (the controller sees it at its next pass, seconds late), so no honest start time exists to measure from |
+| `defenseclaw.substrate.unattested_templates` | gauge | By the gateway, from the controller: the templates of the actors on the controller's last pass that carry no valid attestation now. A template no actor uses any more stops counting. Every replica reports the same value |
+| `defenseclaw.substrate.idle_suspends` | counter | By the gateway, from the controller: actors suspended for being idle |
+| `defenseclaw.substrate.policy_conflicts` | counter | By the gateway, from the controller: actors entering `policy_conflict` |
+
+**Refused tokens.** A refused actor token (hook, model or relay call) or person token (the launcher on the admin listener) writes one gateway log line, `[substrate] <listener> listener refused a token: <reason> (client <class>, <n> since the last line)`, and one substrate audit row with `event: auth_refused`, `listener`, `reason`, `client` (`loopback`, `private`, `link_local`, `public` or `unknown`, never the address) and `count`, at most once a minute per listener and reason on each replica. The `count` says how many refusals the row stands for, so a flood of bad tokens cannot fill the audit store. No metric counts refused tokens in this release: count them from these rows. No line or row holds token bytes, a claim or the verifier's detail. Made or altered tokens (`malformed`, `algorithm`, `signature`, `issuer`, `audience` and similar) are `MEDIUM`; a missing, expired or stale token is `INFO`.
+
+The [Substrate agents board](/docs/observability/grafana-dashboards#substrate-agents-board) shows them, and the chart can install alert rules for availability, policy lag, conflicts and unattested templates. By default the rules on these metrics read every release's series, so they cover every DefenseClaw cluster that reports to that Prometheus. To scope them to one release, promote the `k8s.namespace.name` resource attribute where your metrics enter Prometheus (`otlp.promote_resource_attributes`, or the collector's `resource_to_telemetry_conversion`) and set the chart value `metrics.prometheusRule.namespaceLabel` to the label it becomes (`k8s_namespace_name`). Without the promotion that label is absent and the scoped rules never fire.
 
 ## What to trust
 

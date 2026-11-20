@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
 func TestHookPostCommandUsesConnectedSameAccountSocket(t *testing.T) {
@@ -33,7 +35,7 @@ func TestHookPostCommandUsesConnectedSameAccountSocket(t *testing.T) {
 	addr := strings.TrimPrefix(server.URL, "http://")
 	input := `{"path":"/api/v1/amp/hook","headers":{"Authorization":"Bearer secret","Content-Type":"application/json"},"body":"{\"tool_name\":\"Bash\"}"}`
 	var output bytes.Buffer
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, false); err != nil {
+	if err := hookcli.PostPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, false); err != nil {
 		t.Fatalf("same-account listener rejected: %v", err)
 	}
 	var reply struct {
@@ -45,24 +47,24 @@ func TestHookPostCommandUsesConnectedSameAccountSocket(t *testing.T) {
 		t.Fatalf("native plugin response = %+v, requests=%d, parse error=%v", reply, seen, err)
 	}
 	output.Reset()
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, true); err != nil ||
+	if err := hookcli.PostPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, true); err != nil ||
 		output.String() != "{\"action\":\"allow\"}\n200" || seen != 2 {
 		t.Fatalf("native shell response = %q, requests=%d, error=%v", output.String(), seen, err)
 	}
 	server.Close()
 	output.Reset()
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, false); err == nil || seen != 2 || output.Len() != 0 {
+	if err := hookcli.PostPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, false); err == nil || seen != 2 || output.Len() != 0 {
 		t.Fatalf("stopped gateway was trusted: requests=%d output=%q error=%v", seen, output.String(), err)
 	}
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(`{"path":"/status"}`), &output, false); err == nil {
+	if err := hookcli.PostPerUserPluginHook(context.Background(), addr, strings.NewReader(`{"path":"/status"}`), &output, false); err == nil {
 		t.Fatal("non-hook endpoint was accepted")
 	}
 }
 
 func TestSecureClientNativePluginPostRefusesAnUnverifiedListener(t *testing.T) {
-	previous := secureClientHost
-	secureClientHost = func() bool { return true }
-	t.Cleanup(func() { secureClientHost = previous })
+	previous := hookcli.SecureClientHost
+	hookcli.SecureClientHost = func() bool { return true }
+	t.Cleanup(func() { hookcli.SecureClientHost = previous })
 	seen := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		seen++
@@ -71,7 +73,7 @@ func TestSecureClientNativePluginPostRefusesAnUnverifiedListener(t *testing.T) {
 	defer server.Close()
 	input := `{"path":"/api/v1/amp/hook","headers":{"Authorization":"Bearer shared-secret"},"body":"private tool event"}`
 	var output bytes.Buffer
-	err := postSecureClientPluginHook(context.Background(), strings.TrimPrefix(server.URL, "http://"), strings.NewReader(input), &output)
+	err := hookcli.PostSecureClientPluginHook(context.Background(), strings.TrimPrefix(server.URL, "http://"), strings.NewReader(input), &output)
 	if err == nil || seen != 0 || output.Len() != 0 {
 		t.Fatalf("Secure Client sent a hook to an unverified listener: requests=%d output=%q error=%v", seen, output.String(), err)
 	}

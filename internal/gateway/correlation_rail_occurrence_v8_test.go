@@ -15,7 +15,7 @@ import (
 )
 
 func TestLLMRailCanonicalEmissionFailureLeavesReceiptRetryable(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	meta := llmEventMeta{
@@ -85,7 +85,7 @@ func correlateOpenClawStream(
 }
 
 func TestLLMStreamRailRestoresExactPromptAcrossRestartWithoutTreatingMessageAsTurn(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	store := newLLMRailCorrelationStore(t, path)
 
@@ -139,18 +139,19 @@ func TestLLMStreamRailRestoresExactPromptAcrossRestartWithoutTreatingMessageAsTu
 	if messageKind != 1 || messageAsTurn != 0 {
 		t.Fatalf("message identifier count=%d message-as-turn=%d", messageKind, messageAsTurn)
 	}
+	// The end found the start's operation (the turn handoff above) and
+	// resolved it, which deletes it (S8 R5).
 	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations
-		WHERE operation_id='prompt-stream-1' AND operation_type='model' AND status='completed'
-		AND turn_id=?`, start.meta.TurnID).Scan(&completed); err != nil {
+		WHERE operation_id='prompt-stream-1' AND operation_type='model'`).Scan(&completed); err != nil {
 		t.Fatal(err)
 	}
-	if completed != 1 {
-		t.Fatalf("completed durable model operation count=%d", completed)
+	if completed != 0 {
+		t.Fatalf("resolved durable model operation count=%d, want 0", completed)
 	}
 }
 
 func TestLLMStreamRailSuppressesAcceptedReplayAndRetainsFingerprintConflict(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	meta := llmEventMeta{
@@ -199,7 +200,7 @@ func TestLLMStreamRailSuppressesAcceptedReplayAndRetainsFingerprintConflict(t *t
 }
 
 func TestLLMRailReceiptsAreScopedByRail(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	defer store.Close() //nolint:errcheck
 	spec := connector.DefaultCorrelationSpec("openclaw")
@@ -242,7 +243,7 @@ func TestLLMRailReceiptsAreScopedByRail(t *testing.T) {
 }
 
 func TestLLMProxyTransportRequestNeverBecomesTurn(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	path := filepath.Join(t.TempDir(), "audit.db")
 	store := newLLMRailCorrelationStore(t, path)
 	defer store.Close() //nolint:errcheck
@@ -277,7 +278,7 @@ func TestLLMProxyTransportRequestNeverBecomesTurn(t *testing.T) {
 }
 
 func TestLLMRailGraphFailureEmitsNothing(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	store := newLLMRailCorrelationStore(t, filepath.Join(t.TempDir(), "audit.db"))
 	capture := &correlationRelationshipRecordCapture{}
 	if err := store.Close(); err != nil {

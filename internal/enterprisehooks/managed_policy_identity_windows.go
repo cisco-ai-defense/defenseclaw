@@ -71,12 +71,16 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 		if !policy.existed {
 			return errors.New("enterprise hooks: Claude managed policy is absent")
 		}
+		// A policy an older launch image of this install wrote belongs to
+		// this deployment (GAP-0751); it is checked as rendered for the
+		// executable it names.
 		if parsed.SchemaVersion != 2 ||
-			!sameWindowsEnterprisePath(parsed.HookExecutable, hookExecutable) ||
+			!sameWindowsManagedHookImage(parsed.HookExecutable, hookExecutable) ||
 			parsed.GatewayAddr != gatewayAddr ||
 			parsed.GatewayServiceName != gatewayServiceName {
 			return errors.New("enterprise hooks: Claude machine policy belongs to another protected gateway deployment")
 		}
+		setup.HookExecutable = parsed.HookExecutable
 		if err := provider.VerifyManagedHookPolicy(policy.data, setup); err != nil {
 			// The policy was rendered for the enrolled Claude version's hook
 			// contract (for example with DirectoryAdded from 2.1.219), which
@@ -152,7 +156,7 @@ func VerifyWindowsCursorManagedPolicyIdentity(
 			return errors.New("enterprise hooks: Cursor managed policy is absent")
 		}
 		state := artifacts.parsed
-		if !sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) ||
+		if !sameWindowsManagedHookImage(state.HookExecutable, hookExecutable) ||
 			state.GatewayAddr != gatewayAddr ||
 			state.GatewayServiceName != gatewayServiceName {
 			return errors.New("enterprise hooks: Cursor machine policy belongs to another protected gateway deployment")

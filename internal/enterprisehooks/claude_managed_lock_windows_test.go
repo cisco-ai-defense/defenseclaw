@@ -30,7 +30,7 @@ func claudeLockTestSetup() connector.SetupOpts {
 func TestWindowsClaudeRecordedPolicyRecognizesPreviousCommandForm(t *testing.T) {
 	setStandaloneProfileForTest(t, true)
 	record := windowsClaudeManagedPolicyState{HookExecutable: claudeLockTestSetup().HookExecutable}
-	previous, err := renderWindowsClaudeRecordedPolicy(record, "", false, true)
+	previous, err := renderWindowsClaudeRecordedPolicy(record, "", false, windowsClaudeFormDirect)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -29,6 +29,10 @@ struct AIRuntimeView: View {
     @State private var unsupported = false
     @State private var activeLoadID: UUID?
     @State private var activeEnableID: UUID?
+    /// `agent discovery runtime permissions` output (the TUI's Permissions
+    /// button, shown while coverage is degraded or partial).
+    @State private var permissionsOutput: String?
+    @State private var permissionsRunning = false
 
     private var loading: Bool { activeLoadID != nil }
     private var enabling: Bool { activeEnableID != nil }
@@ -74,6 +78,21 @@ struct AIRuntimeView: View {
             content
         }
         .padding(16)
+        .sheet(isPresented: Binding(get: { permissionsOutput != nil }, set: { if !$0 { permissionsOutput = nil } })) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("defenseclaw agent discovery runtime permissions").font(.headline)
+                ScrollView {
+                    Text(permissionsOutput ?? "")
+                        .font(.system(.caption, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(minHeight: 260)
+                Button("Close") { permissionsOutput = nil }
+            }
+            .padding(16)
+            .frame(width: 620, height: 400)
+        }
         .task(id: appState.installationGeneration) {
             snapshot = AIRuntimeSnapshot()
             selection = nil
@@ -84,6 +103,8 @@ struct AIRuntimeView: View {
             error = nil
             setupError = nil
             awaitingEnableCoverage = false
+            permissionsOutput = nil
+            permissionsRunning = false
             await load()
         }
         .onChange(of: appState.gatewayReachable) { _, reachable in
@@ -131,6 +152,18 @@ struct AIRuntimeView: View {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .disabled(!appState.gatewayReachable || enabling)
+            // TUI #runtime-permissions: visible while health is degraded or
+            // partial, when a plane may lack a host grant.
+            if loaded, ["degraded", "partial"].contains(snapshot.healthState),
+               appState.runtimeDiscoveryCommands?.contains("permissions") == true {
+                Button {
+                    showPermissions()
+                } label: {
+                    Label("Permissions", systemImage: "lock.shield")
+                }
+                .disabled(enabling || permissionsRunning || permissionsOutput != nil)
+                .help("Show the host grants each plane needs (runtime permissions)")
+            }
             Button {
                 scan()
             } label: {
@@ -158,7 +191,7 @@ struct AIRuntimeView: View {
         if let scannedAt = snapshot.scannedAt {
             parts.append("polled \(scannedAt.formatted(date: .omitted, time: .standard))")
         }
-        if snapshot.degraded { parts.append("DEGRADED") }
+        parts.append(snapshot.healthLabel)
         return parts.joined(separator: " · ")
     }
 
@@ -187,10 +220,13 @@ struct AIRuntimeView: View {
             // Every non-running plane states why, in full, rather than only in
             // a tooltip. A blind plane rendering as a grey dot is the failure
             // mode this whole subsystem exists to prevent.
-            ForEach(snapshot.planesNotRunning) { plane in
+            ForEach(snapshot.planes.filter { !$0.running || !$0.reason.isEmpty }) { plane in
                 Text(plane.summary)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            }
+            ForEach(Array(snapshot.degradedReasons.enumerated()), id: \.offset) { _, reason in
+                Text(reason).font(.caption2).foregroundStyle(.secondary)
             }
             if snapshot.connectionsObserved > 0, snapshot.unattributedShare >= 0.5 {
                 Text("\(Int(snapshot.unattributedShare * 100))% of connections could not be attributed to a process. "
@@ -202,6 +238,8 @@ struct AIRuntimeView: View {
     }
 
     private func planeColor(_ plane: AIRuntimePlane) -> Color {
+        if plane.badge == "off" { return .gray }
+        if plane.badge == "partial" { return .cyan }
         if plane.running { return .green }
         return plane.available ? .yellow : .red
     }
@@ -427,6 +465,24 @@ struct AIRuntimeView: View {
                 return
             }
             await load()
+        }
+    }
+
+    /// Read-only: prints what each plane needs; nothing changes on the host.
+    private func showPermissions() {
+        guard !permissionsRunning, appState.runtimeDiscoveryCommands?.contains("permissions") == true else { return }
+        let generation = appState.installationGeneration
+        permissionsRunning = true
+        Task {
+            let result = await appState.activity.run(
+                title: "Runtime permissions", arguments: ["agent", "discovery", "runtime", "permissions"],
+                mutation: false, category: "runtime", origin: "AI Runtime"
+            )
+            permissionsRunning = false
+            guard generation == appState.installationGeneration else { return }
+            permissionsOutput = result.output.isEmpty
+                ? "The command printed nothing (exit \(result.exitCode)). See Activity for details."
+                : result.output
         }
     }
 

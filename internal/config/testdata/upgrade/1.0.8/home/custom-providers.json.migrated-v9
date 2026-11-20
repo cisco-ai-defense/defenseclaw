@@ -1,0 +1,6 @@
+{"providers": [
+  {"name": "acme", "domains": ["llm.acme.internal"], "env_keys": ["ACME_KEY"],
+   "base_url": "https://llm.acme.internal/v1", "available_models": ["acme-small"]},
+  {"name": "Acme", "domains": ["llm.acme.internal", "eu.llm.acme.internal"], "env_keys": ["ACME_EU_KEY"],
+   "base_url": "https://eu.llm.acme.internal/v1", "allowed_requests": ["chat"]}
+]}

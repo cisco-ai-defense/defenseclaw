@@ -34,6 +34,12 @@ type ChatMessage struct {
 	ToolCallID   string          `json:"tool_call_id,omitempty"`
 	Name         string          `json:"name,omitempty"`
 	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+
+	// textParts are the text blocks of an array content when it has two or
+	// more: Content joins them with a line feed, the model reads them with no
+	// separator, and the prompt rules read both (promptPartsJoinedText,
+	// GAP-0465). Not serialized: RawContent carries the blocks upstream.
+	textParts []string
 }
 
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
@@ -55,6 +61,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	m.ToolCallID = p.ToolCallID
 	m.Name = p.Name
 	m.ExtraContent = p.ExtraContent
+	m.textParts = nil
 
 	if len(p.Content) == 0 {
 		return nil
@@ -76,17 +83,20 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 			return nil
 		}
 		var sb strings.Builder
+		var parts []string
 		for i, b := range blocks {
-			// "text" — Chat Completions / Anthropic
-			// "input_text" / "output_text" — OpenAI Responses API
-			if b.Type == "text" || b.Type == "input_text" || b.Type == "output_text" || b.Type == "" {
+			if isContentTextBlockType(b.Type) {
 				if i > 0 && sb.Len() > 0 {
 					sb.WriteString("\n")
 				}
 				sb.WriteString(b.Text)
+				parts = append(parts, b.Text)
 			}
 		}
 		m.Content = sb.String()
+		if len(parts) > 1 {
+			m.textParts = parts
+		}
 		return nil
 	}
 
@@ -657,8 +667,6 @@ func doProviderRequest(req *http.Request, emit providerEgressEmitter) (*http.Res
 // ResolveAPIKey reads the API key from the named environment variable,
 // optionally loading a .env file first (for daemon contexts where the
 // user's shell env is not inherited).
-// Returns "" immediately when local key resolution has been disabled via
-// DisableLocalKeyResolution (enterprise credential-management mode).
 func ResolveAPIKey(envVar string, dotenvPath string) string {
 	// Enterprise token hydration stores secrets in-memory so they never need
 	// to enter the process environment or an on-disk dotenv file. Keep the
@@ -666,9 +674,6 @@ func ResolveAPIKey(envVar string, dotenvPath string) string {
 	// backends and ordinary gateway providers share one credential source.
 	if v, ok := config.GetKey(envVar); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
-	}
-	if localKeyResolutionDisabled {
-		return ""
 	}
 	if v := os.Getenv(envVar); v != "" {
 		return v

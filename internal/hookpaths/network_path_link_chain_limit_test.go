@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -50,14 +51,16 @@ func TestLocalLinkChainLongerThanTheBoundIntoASilentShareIsAsked(t *testing.T) {
 	for _, tc := range linkedShareReads {
 		t.Run(tc.name, func(t *testing.T) {
 			release := make(chan struct{})
-			defer close(release)
+			var once sync.Once
+			answer := func() { once.Do(func() { close(release) }) }
+			defer answer()
 			probes := fakeNetworkShare(t, share, 20*time.Millisecond, time.Second, func(string) { <-release })
-			start := time.Now()
-			if err := tc.read(through); !errors.Is(err, errNetworkShareUnanswered) || probes.Load() != 1 {
-				t.Fatalf("%s through %d links into a silent share = %v with %d probes, want the share error after one probe", tc.name, networkLinkHopLimit+1, err, probes.Load())
+			var err error
+			if !returnsWhileSharesAreSilent(t, answer, func() { err = tc.read(through) }) {
+				t.Fatalf("%s through %d links into a silent share waited for the share to answer", tc.name, networkLinkHopLimit+1)
 			}
-			if took := time.Since(start); took > time.Second {
-				t.Fatalf("read held the call %v", took)
+			if !errors.Is(err, errNetworkShareUnanswered) || probes.Load() != 1 {
+				t.Fatalf("%s through %d links into a silent share = %v with %d probes, want the share error after one probe", tc.name, networkLinkHopLimit+1, err, probes.Load())
 			}
 		})
 	}

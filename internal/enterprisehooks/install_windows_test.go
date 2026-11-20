@@ -259,7 +259,7 @@ func (c *windowsGenericCodexTestConnector) Authenticate(*http.Request) bool { re
 func (c *windowsGenericCodexTestConnector) Route(*http.Request, []byte) (*connector.ConnectorSignals, error) {
 	return nil, errors.New("test connector has no route")
 }
-func (c *windowsGenericCodexTestConnector) SetCredentials(string, string) {}
+func (c *windowsGenericCodexTestConnector) SetCredentials(string) {}
 func (c *windowsGenericCodexTestConnector) VerifyClean(_ connector.SetupOpts) error {
 	body, err := os.ReadFile(c.configPath)
 	if err != nil {

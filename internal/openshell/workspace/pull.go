@@ -157,7 +157,7 @@ func captureScript(rec *CopyRecord, bundle bool) string {
 		remoteGitPrelude(rec),
 		"B=" + shellQuote(rec.Baseline),
 		"H=" + shellQuote(head),
-		`mkdir -p "$D"`,
+		rec.mkStateDirLine(),
 		`idx="$D/capture.index"; out="$D/result.bundle"`,
 		`rm -f "$idx" "$out"`,
 		`if [ -f "$G/index" ]; then cp "$G/index" "$idx"; fi`,
@@ -167,13 +167,21 @@ func captureScript(rec *CopyRecord, bundle bool) string {
 		// a removed submodule: its files never came into the copy
 		// (GAP-0250).
 		`GIT_INDEX_FILE="$idx" g ls-files -s | while read -r m o s p; do if [ "$m" = 160000 ] && [ ! -e "$W/$p" ]; then mkdir -p -- "$W/$p"; fi; done || true`,
-		`GIT_INDEX_FILE="$idx" g add ` + addArgs + ` -- . ` + strings.Join(excludes, " "),
+		// A folder whose name is .git in another case (.GIT, .Git), an NTFS
+		// form of it (git~1, or .git followed by dots or spaces only, which git's
+		// core.protectNTFS refuses on every platform, GAP-0575) or a
+		// .git folder below the top that is not a repository: git refuses
+		// such a path ("invalid path"), which failed the whole pull, and it
+		// is git metadata the folder must never take (GAP-0530). It is left
+		// out and named in the review; a nested repository stays a gitlink.
+		`gitdirs=$(cd "$W" && find . -mindepth 1 \( -path ./.git -prune \) -o \( \( -iname .git` + ntfsDotGitFind + ` -o -iname 'git~1' \) -prune -print \) 2>/dev/null | while IFS= read -r p; do if [ "$(basename "$p")" != .git ] || ! git --git-dir="$p" rev-parse -q --git-dir >/dev/null 2>&1; then printf '%s,' "${p#./}"; fi; done | head -c 4096)`,
+		`GIT_INDEX_FILE="$idx" g add ` + addArgs + ` -- . ` + strings.Join(excludes, " ") + ` ':(exclude,icase,glob)**/.git' ':(exclude,icase,glob)**/.git/**'` + ntfsDotGitExcludes + ` ':(exclude,icase,glob)**/git~1' ':(exclude,icase,glob)**/git~1/**'`,
 		`tree=$(GIT_INDEX_FILE="$idx" g write-tree)`,
 		`rm -f "$idx"`,
 		`if [ -n "$head" ] && [ "$tree" = "$(g rev-parse "$head^{tree}")" ]; then result=$head`,
 		`elif [ -n "$head" ]; then result=$(g commit-tree "$tree" -p "$head" -m ` + shellQuote("defenseclaw: uncommitted changes in sandbox "+rec.Name) + `)`,
 		`else result=$(g commit-tree "$tree" -m ` + shellQuote("defenseclaw: uncommitted changes in sandbox "+rec.Name) + `); fi`,
-		`printf 'head=%s\nresult=%s\ntree=%s\n' "$head" "$result" "$tree"`,
+		`printf 'head=%s\nresult=%s\ntree=%s\ngitdirs=%s\n' "$head" "$result" "$tree" "$gitdirs"`,
 	}
 	if bundle {
 		lines = append(lines,
@@ -297,6 +305,11 @@ func Pull(ctx context.Context, opts PullOptions) (*PullResult, error) {
 	}
 	rep.Name, rep.Project = rec.Name, rec.Project
 	pr.Review = *rep
+	if dirs := strings.Trim(kv["gitdirs"], ","); dirs != "" {
+		// GAP-0530: left out of the capture, never brought back.
+		pr.Review.Warnings = append(pr.Review.Warnings, "left out, never brought back: git metadata folders the agent made ("+
+			strings.ReplaceAll(dirs, ",", ", ")+"); a folder named .git in any case is git's, not the project's")
+	}
 	for _, f := range rep.Flags {
 		if f.Kind == RiskSubmodule {
 			pr.Blocking = append(pr.Blocking, "submodule change: "+f.Detail)
@@ -375,7 +388,7 @@ func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gi
 	}
 	defer os.RemoveAll(dir)
 	local := filepath.Join(dir, "result.bundle")
-	got, err := receiveBundle(ctx, opts.Exec, rec.Name, local, maxBundle, timeout)
+	got, err := receiveBundle(ctx, opts.Exec, rec.Name, rec.stateDir(), local, maxBundle, timeout)
 	if err != nil {
 		return err
 	}
@@ -411,7 +424,7 @@ func fetchBundle(ctx context.Context, rec *CopyRecord, opts PullOptions, base gi
 // actually receives and stops the transfer past limit, and it never
 // unpacks an archive the agent made. The in-sandbox check only makes the
 // common refusals quick and clear.
-func receiveBundle(ctx context.Context, ex Execer, name, local string, limit int64, timeout time.Duration) (int64, error) {
+func receiveBundle(ctx context.Context, ex Execer, name, stateDir, local string, limit int64, timeout time.Duration) (int64, error) {
 	f, err := os.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
 	if err != nil {
 		return 0, err
@@ -420,7 +433,7 @@ func receiveBundle(ctx context.Context, ex Execer, name, local string, limit int
 	sink := &base64Sink{w: f, limit: limit}
 	script := strings.Join([]string{
 		"set -eu",
-		"f=" + shellQuote(remoteStateDir+"/result.bundle"),
+		"f=" + shellQuote(stateDir+"/result.bundle"),
 		`if [ -h "$f" ] || [ ! -f "$f" ]; then echo "the result bundle is not a regular file" >&2; exit 3; fi`,
 		`n=$(wc -c < "$f" | tr -d ' ')`,
 		`if [ "$n" -gt ` + strconv.FormatInt(limit, 10) + ` ]; then echo "the result bundle has $n bytes" >&2; exit 4; fi`,
@@ -1351,3 +1364,22 @@ func writeFreePatch(ctx context.Context, base gitCmd, from, to, dir, name string
 	}
 	return "", fmt.Errorf("workspace: no free patch file name for %s in %s", name, dir)
 }
+
+// ntfsDotGitForms are the tails of git's is_ntfs_dotgit forms of .git,
+// which git refuses on every platform (core.protectNTFS): .git followed
+// by dots or spaces only, here up to four (GAP-0575). A glob cannot say
+// "only dots or spaces", so the forms are spelled out: .git.bak and
+// .git.orig are ordinary names and are pulled (GAP-0634). A name with
+// more than four still fails the pull with git's message, as before.
+var ntfsDotGitForms = []string{"[. ]", "[. ][. ]", "[. ][. ][. ]", "[. ][. ][. ][. ]"}
+
+// ntfsDotGitFind and ntfsDotGitExcludes are those forms as find -iname
+// alternatives and as git add pathspec excludes.
+var ntfsDotGitFind, ntfsDotGitExcludes = func() (string, string) {
+	var f, x strings.Builder
+	for _, s := range ntfsDotGitForms {
+		f.WriteString(" -o -iname '.git" + s + "'")
+		x.WriteString(" ':(exclude,icase,glob)**/.git" + s + "' ':(exclude,icase,glob)**/.git" + s + "/**'")
+	}
+	return f.String(), x.String()
+}()

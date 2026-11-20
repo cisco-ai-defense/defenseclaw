@@ -24,15 +24,20 @@ from defenseclaw.gateway import GATEWAY_NOT_FOUND_MESSAGE
 
 @click.group("audit")
 def audit() -> None:
-    """Audit trail helpers: export, findings and gateway logs.
+    """Audit trail helpers: export, findings, compact and gateway logs.
 
     \b
     Export the audit log, config changes included (action config.change.applied):
         defenseclaw audit export [--connector X] [--since 1h]
     Report the current distinct skill/MCP/plugin/code scan findings (JSON):
         defenseclaw audit findings [--scanner NAME] [--since 30m]
-    'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
-    same options. Show the newest gateway or watchdog log lines:
+    Give the disk space of deleted history back (stop the gateway first):
+        defenseclaw audit compact [--dry-run]
+    List the records the v8 schema gate refused (JSONL; needs
+    observability.local.keep_rejected_records: true):
+        defenseclaw audit rejected [--since 1h] [--limit 100]
+    'export', 'findings', 'compact' and 'rejected' run 'defenseclaw-gateway audit
+    <command>' with the same options. Show the newest gateway or watchdog log lines:
         defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]
 
     \b
@@ -106,6 +111,36 @@ def audit_findings(gateway_args: tuple[str, ...]) -> None:
     'defenseclaw audit findings --help' for its options.
     """
     run_gateway(("audit", "findings", *gateway_args))
+
+
+@audit.command(
+    "compact",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    add_help_option=False,
+)
+@click.argument("gateway_args", nargs=-1, type=click.UNPROCESSED)
+def audit_compact(gateway_args: tuple[str, ...]) -> None:
+    """Give deleted audit history's disk space back (runs 'defenseclaw-gateway audit compact').
+
+    Every argument goes to 'defenseclaw-gateway audit compact'; see
+    'defenseclaw audit compact --help' for its options.
+    """
+    run_gateway(("audit", "compact", *gateway_args))
+
+
+@audit.command(
+    "rejected",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+    add_help_option=False,
+)
+@click.argument("gateway_args", nargs=-1, type=click.UNPROCESSED)
+def audit_rejected(gateway_args: tuple[str, ...]) -> None:
+    """List the records the v8 schema gate refused (runs 'defenseclaw-gateway audit rejected').
+
+    Every argument goes to 'defenseclaw-gateway audit rejected'; see
+    'defenseclaw audit rejected --help' for its options.
+    """
+    run_gateway(("audit", "rejected", *gateway_args))
 
 
 _LOG_FILES = {"gateway": "gateway.log", "watchdog": "watchdog.log"}

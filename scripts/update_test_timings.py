@@ -15,9 +15,11 @@ weighs an estimate. Refresh after a large test change:
            gh run download <run> --pattern 'go-test-timings-*' --dir t
            scripts/update_test_timings.py go t/*/*.json
          A local run works too (go test -race ... -json ./... > go.json).
-         The darwin connector parts of Unix Standalone Lifecycle upload
-         go-test-timings-darwin-connector-* the same way; --update keeps
-         the other packages of go-darwin.json (internal/enterpriseunix):
+         The darwin connector and gateway parts of Unix Standalone
+         Lifecycle upload go-test-timings-darwin-connector-* and
+         go-test-timings-darwin-gateway-* (the gateway's unix and darwin
+         tests) the same way; --update keeps the other packages of
+         go-darwin.json (internal/enterpriseunix):
            gh run download <run> --pattern 'go-test-timings-darwin-*' --dir t
            scripts/update_test_timings.py go t/*/*.json --update --out scripts/test-timings/go-darwin.json
   python pytest --junitxml reports of the Python suite -> python-linux.json
@@ -29,6 +31,23 @@ weighs an estimate. Refresh after a large test change:
          <result> <seconds>") and the gateway, connector, and hookexec test
          times from the go test -json events their parts print
            gh run view <run> --log > win.log; scripts/update_test_timings.py windows-go win.log
+
+A directory input is one run (every file under it); the files named
+directly form one run together. With several runs a package or test weighs
+the most any run that timed it took (--weigh slowest, the default): the
+hosted pool is bimodal (the slow runners take up to twice as long), and a
+shard planned on fast runs meets its deadline on a slow one. --weigh median
+takes the median run instead; the Windows remaining-package plan uses it,
+because its step room (at most 465 s planned of the 1020 s step,
+test_windows_remaining_package_shards_leave_room_in_their_step) was set on
+median times (GAP-1066). Download each run into its own directory, for example
+  for r in <run1> <run2> <run3>; do gh run download $r --pattern 'go-test-timings-*' --dir t/$r; done
+  scripts/update_test_timings.py go t/<run1> t/<run2> t/<run3>
+A refresh drops the tests this tree does not define: refresh from this
+tree's runs only.
+A top-level test weighs its share of the package wall time
+(go_test_report.TopLevelShares): parallel tests that ran side by side split
+the time they shared, and a test of parallel subtests weighs the time they held.
 """
 
 from __future__ import annotations
@@ -36,9 +55,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import statistics
+import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from go_test_report import TopLevelShares  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "scripts" / "test-timings"
@@ -89,35 +113,63 @@ def _rel(package: str, module: str) -> str:
     return package[len(module) + 1 :] if package.startswith(module + "/") else package
 
 
-def go_timings(files: list[Path], module: str) -> dict:
+def runs_of(inputs: list[Path]) -> list[list[Path]]:
+    """The runs of the inputs: each directory is one run (its files, sorted),
+    and the files named directly are one run together."""
+    files = [path for path in inputs if not path.is_dir()]
+    runs = [sorted(p for p in path.rglob("*") if p.is_file()) for path in inputs if path.is_dir()]
+    return ([files] if files else []) + [run for run in runs if run]
+
+
+WEIGH = {"slowest": max, "median": statistics.median}
+
+
+def _weigh_runs(measured: list[dict[str, float]], weigh: str = "slowest") -> dict[str, float]:
+    keys = sorted({key for one in measured for key in one})
+    return {key: WEIGH[weigh](one[key] for one in measured if key in one) for key in keys}
+
+
+def _go_run_times(files: list[Path], module: str) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+    """One run's package seconds (the shards of a package summed) and
+    top-level test seconds (each test's share of its package wall time when
+    its events carry a Time, else its Elapsed)."""
     tests: dict[str, dict[str, float]] = {}
     packages: dict[str, float] = {}
-    started: dict[tuple[str, str], datetime] = {}
-    for event in _go_events(files):
-        package = event.get("Package", "")
-        name = event.get("Test")
-        when = _event_time(event)
-        if name is not None and when is not None:
-            top = (package, name.split("/", 1)[0])
-            if event.get("Action") == "run" and "/" not in name:
-                started[top] = when
-            else:
-                started.setdefault(top, when)
-        if event.get("Action") not in ("pass", "fail"):
-            continue
-        elapsed = float(event.get("Elapsed", 0))
-        if name is None:
-            # Shards of one package each report its elapsed time: sum them.
-            packages[package] = packages.get(package, 0.0) + elapsed
-        elif "/" not in name:
-            # A test whose subtests call t.Parallel reports the Elapsed of
-            # its own body only (0.01 s for the internal/hookpaths archive
-            # table parts, which take 33 to 41 s on a Windows runner); its
-            # time is from its run event to its end, whichever is longer.
-            first = started.pop((package, name), None)
-            if first is not None and when is not None:
-                elapsed = max(elapsed, (when - first).total_seconds())
-            tests.setdefault(_rel(package, module), {})[name] = elapsed
+    for file in files:
+        # One log or artifact at a time: a package's clock does not run
+        # across the shards of two files.
+        shares = TopLevelShares()
+        timed: set[tuple[str, str]] = set()
+        for event in _go_events([file]):
+            package = event.get("Package", "")
+            name = event.get("Test")
+            action = event.get("Action")
+            when = _event_time(event)
+            shares.event(package, name, action, when)
+            if name is not None and "/" not in name and action in ("run", "cont") and when is not None:
+                timed.add((package, name))
+            if action not in ("pass", "fail"):
+                continue
+            elapsed = float(event.get("Elapsed", 0))
+            if name is None:
+                # Shards of one package each report its elapsed time: sum them.
+                packages[package] = packages.get(package, 0.0) + elapsed
+            elif "/" not in name:
+                share = shares.seconds(package, name)
+                if (package, name) in timed and when is not None and share is not None:
+                    elapsed = share
+                timed.discard((package, name))
+                tests.setdefault(_rel(package, module), {})[name] = elapsed
+    return packages, tests
+
+
+def go_timings(files: list[Path], module: str, runs: list[list[Path]] | None = None, weigh: str = "slowest") -> dict:
+    """The recorded times of runs (default: files as one run), each package
+    and test at the slowest (or median, weigh) run that timed it."""
+    measured = [_go_run_times(run, module) for run in (runs or [files])]
+    packages = _weigh_runs([one[0] for one in measured], weigh)
+    rels = sorted({rel for one in measured for rel in one[1]})
+    tests = {rel: _weigh_runs([one[1][rel] for one in measured if rel in one[1]], weigh) for rel in rels}
     # Per-test times matter only where CI splits a package by test; keep the
     # packages that reach a minute so the file stays reviewable.
     # Tests under two seconds are kept only as their mean ("*"), which is what
@@ -136,7 +188,13 @@ def go_timings(files: list[Path], module: str) -> dict:
     }
 
 
-def python_timings(files: list[Path]) -> dict:
+def python_timings(files: list[Path], runs: list[list[Path]] | None = None, weigh: str = "slowest") -> dict:
+    """Each test file's seconds, at the slowest (or median, weigh) run (default: files as one run)."""
+    seconds = _weigh_runs([_python_run_times(run) for run in (runs or [files])], weigh)
+    return {"files": {path: round(value, 2) for path, value in sorted(seconds.items())}}
+
+
+def _python_run_times(files: list[Path]) -> dict[str, float]:
     seconds: dict[str, float] = {}
     for file in files:
         for case in ET.parse(file).iter("testcase"):
@@ -146,7 +204,7 @@ def python_timings(files: list[Path]) -> dict:
                 if (ROOT / candidate).is_file():
                     seconds[candidate] = seconds.get(candidate, 0.0) + float(case.get("time") or 0)
                     break
-    return {"files": {path: round(value, 2) for path, value in sorted(seconds.items())}}
+    return seconds
 
 
 # The Windows parts run one package at a time (-p=1), so every package also
@@ -165,7 +223,21 @@ WINDOWS_TEST_SHARDED = (
 )
 
 
-def windows_go_timings(files: list[Path], module: str) -> dict:
+def windows_go_timings(
+    files: list[Path], module: str, runs: list[list[Path]] | None = None, weigh: str = "slowest"
+) -> dict:
+    runs = runs or [files]
+    packages = _weigh_runs([_windows_package_times(run) for run in runs], weigh)
+    # The test-level shards balance on their recorded test times.
+    tests = {
+        rel: names
+        for rel, names in go_timings(files, module, runs, weigh)["tests"].items()
+        if rel in WINDOWS_TEST_SHARDED
+    }
+    return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}, "tests": tests}
+
+
+def _windows_package_times(files: list[Path]) -> dict[str, float]:
     pattern = re.compile(r"\[go-package-time\] (\S+) (?:pass|fail|skip) ([0-9.]+)")
     packages: dict[str, float] = {}
     for file in files:
@@ -175,9 +247,34 @@ def windows_go_timings(files: list[Path], module: str) -> dict:
             # go_test_shards.py splits a package by its recorded weight.
             package = match.group(1)
             packages[package] = packages.get(package, 0.0) + float(match.group(2)) + WINDOWS_LINK_SECONDS
-    # The test-level shards balance on their recorded test times.
-    tests = {rel: names for rel, names in go_timings(files, module)["tests"].items() if rel in WINDOWS_TEST_SHARDED}
-    return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}, "tests": tests}
+    return packages
+
+
+def _ended_and_cut_off(files: list[Path], module: str) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """The top-level tests of files that ran to an end, and those a -timeout
+    cut off, by package. go_test_report.py writes a test still running when
+    the stream ended as a fail marked "CutOff": its Elapsed is the time it
+    had run, a lower bound. The mark is what counts: a job killed before go
+    test's own -timeout leaves no package end event before those records
+    (GAP-1033). A fail after the end event of its package is a cut-off too
+    (the files written before the mark)."""
+    ended: dict[str, set[str]] = {}
+    cut_off: dict[str, set[str]] = {}
+    for file in files:
+        closed: set[str] = set()
+        for event in _go_events([file]):
+            package, name, action = event.get("Package", ""), event.get("Test"), event.get("Action")
+            if name is None:
+                if action in ("pass", "fail"):
+                    closed.add(package)
+                elif action == "start":
+                    closed.discard(package)
+                continue
+            if action in ("pass", "fail", "skip") and "/" not in name:
+                cut = action == "fail" and (event.get("CutOff") is True or package in closed)
+                into = cut_off if cut else ended
+                into.setdefault(_rel(package, module), set()).add(name)
+    return ended, cut_off
 
 
 def keep_unreached_go_tests(old: dict, new: dict, files: list[Path], module: str, root: Path = ROOT) -> dict:
@@ -185,18 +282,22 @@ def keep_unreached_go_tests(old: dict, new: dict, files: list[Path], module: str
     that no input ran to an end. The -timeout that ends a shard leaves the
     tests it had not reached without an event; without their old time they
     would weigh as unlisted tests, and the next plan could put them together
-    in one shard."""
-    ended: dict[str, set[str]] = {}
-    for event in _go_events(files):
-        name = event.get("Test")
-        if event.get("Action") in ("pass", "fail", "skip") and name and "/" not in name:
-            ended.setdefault(_rel(event.get("Package", ""), module), set()).add(name)
+    in one shard. The test the -timeout cut off has only the time it had run
+    (a lower bound), so it weighs at least its recorded time. Taken as its
+    time, it moved TestWindowsListedStatementBoundReachesTheCall from 116.6 s
+    to the 21 s it had run when shard 12 of run 43831888457 timed out, and
+    the next plan would crowd that shard again."""
+    ended, cut_off = _ended_and_cut_off(files, module)
     for rel, names in new.get("tests", {}).items():
         defined = set()
         for path in (root / rel).glob("*_test.go"):
             defined.update(TEST_FUNCTION_RE.findall(path.read_text(encoding="utf-8")))
         for name, seconds in old.get("tests", {}).get(rel, {}).items():
-            if name in defined and name not in names and name not in ended.get(rel, set()):
+            if name not in defined or name in ended.get(rel, set()):
+                continue
+            if name in cut_off.get(rel, set()):
+                names[name] = max(names.get(name, 0.0), seconds)
+            elif name not in names:
                 names[name] = seconds
         new["tests"][rel] = dict(sorted(names.items()))
     return new
@@ -228,6 +329,35 @@ def merge_go_timings(old: dict, new: dict, module: str) -> dict:
     return {"packages": dict(sorted(packages.items())), "tests": dict(sorted(tests.items()))}
 
 
+def prune_retired(data: dict, module: str, root: Path = ROOT) -> dict:
+    """data without the packages this tree no longer has (no .go file in
+    their folder) and without the tests a package no longer defines. A
+    refresh that read a run of another branch, or kept an old entry with
+    --update, would otherwise weigh code that is not here."""
+
+    def defined(rel: str) -> set[str] | None:
+        folder = root / rel
+        if not any(folder.glob("*.go")):
+            return None
+        names: set[str] = set()
+        for path in folder.glob("*_test.go"):
+            names.update(TEST_FUNCTION_RE.findall(path.read_text(encoding="utf-8")))
+        return names
+
+    packages = {
+        package: seconds
+        for package, seconds in data.get("packages", {}).items()
+        if defined(_rel(package, module)) is not None
+    }
+    tests: dict[str, dict[str, float]] = {}
+    for rel, names in data.get("tests", {}).items():
+        known = defined(rel)
+        if known is None:
+            continue
+        tests[rel] = {name: seconds for name, seconds in names.items() if name == "*" or name in known}
+    return {**data, "packages": dict(sorted(packages.items())), "tests": dict(sorted(tests.items()))}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("kind", choices=("go", "python", "windows-go"))
@@ -238,22 +368,32 @@ def main() -> int:
         action="store_true",
         help="go: replace only the packages the inputs measured and keep the rest of the output file",
     )
+    parser.add_argument(
+        "--weigh",
+        choices=sorted(WEIGH),
+        default="slowest",
+        help="several runs: weigh each package or test by its slowest run (default) or the median run",
+    )
     args = parser.parse_args()
     module = re.search(r"^module\s+(\S+)", (ROOT / "go.mod").read_text(encoding="utf-8"), re.MULTILINE).group(1)
+    runs = runs_of(args.inputs)
+    files = [file for run in runs for file in run]
     if args.kind == "go":
-        data, default = go_timings(args.inputs, module), "go-linux.json"
+        data, default = go_timings(files, module, runs, args.weigh), "go-linux.json"
     elif args.kind == "python":
-        data, default = python_timings(args.inputs), "python-linux.json"
+        data, default = python_timings(files, runs, args.weigh), "python-linux.json"
     else:
-        data, default = windows_go_timings(args.inputs, module), "go-windows.json"
+        data, default = windows_go_timings(files, module, runs, args.weigh), "go-windows.json"
     out = args.out or OUT_DIR / default
     if args.kind != "python" and out.is_file():
         old = json.loads(out.read_text(encoding="utf-8"))
-        data = keep_unreached_go_tests(old, data, args.inputs, module)
+        data = keep_unreached_go_tests(old, data, files, module)
         if args.kind == "windows-go":
             data = keep_unreached_windows_packages(old, data, module)
         if args.update:
             data = merge_go_timings(old, data, module)
+    if args.kind != "python":
+        data = prune_retired(data, module)
     _write(out, data)
     return 0
 

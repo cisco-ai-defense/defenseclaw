@@ -4,9 +4,13 @@
 package gateway
 
 import (
+	"bytes"
+	"encoding/json"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -22,7 +26,7 @@ const maxHereStringTwinBytes = 16 << 10
 // a state write blocks, and reads and project forms (`xargs cat <<< ...`,
 // `xargs rm -f <<< build/a.o`) stay allowed, as they do in the twin.
 func hereStringStateMutation(facts actionfacts.Facts, request trustedActionRequest) (mutates, judged bool) {
-	if facts.Parse.Status != actionfacts.StatusInvalid || !strings.HasPrefix(facts.ActiveHome, "/") {
+	if facts.Parse.Status != actionfacts.StatusInvalid || !hereStringTwinHome(facts.ActiveHome) {
 		return false, false
 	}
 	command, known := trustedBashCommandInput(request.Input)
@@ -41,6 +45,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	// they had, which no one text can say, so such a command is never judged
 	// here (mixed): the walk of its calls, each with its own state, judges it.
 	seen := map[string]bool{}
+	request.hereStringPipeReading = true
 	for _, split := range []bool{true, false} {
 		twin, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, split, request.Input.LoopBindsStraightLine)
 		if !ok || seen[twin] {
@@ -56,6 +61,86 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	return false, judged
 }
 
+// hereStringTwinHome reports a home the here-string twins are judged
+// under: a POSIX home, and on Windows a drive home (C:\Users\x). Git Bash
+// runs the Bash tool there and reads <<< as bash does, and the twin is
+// judged by the whole dispatcher with its Windows readings. Without it a
+// here-string read of state (cat <<< ~/.defenseclaw/config.yaml) named
+// tamper.detector_state_write on Windows only (rel-1-0-10:GAP-0376).
+func hereStringTwinHome(home string) bool {
+	return strings.HasPrefix(home, "/") || runtime.GOOS == "windows" && actionfacts.DriveLetterPath(home)
+}
+
+// hereStringReadingTwinRequest is the reading twin of a bash call with a
+// here-string the POSIX analysis cannot parse: the call with every
+// CMD <<< WORD written as printf '%s\n' WORD | CMD (hereStringPipeTwin, the
+// word kept whole). None for a call of another shape, a twin, a simple
+// command of a call (the call itself is judged so), a read whose binding
+// differs between its calls, or a twin that does not parse either.
+func hereStringReadingTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
+	if request.readingTwin || request.simpleCommandPass || facts.Parse.Status != actionfacts.StatusInvalid {
+		return trustedActionRequest{}, false
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || len(command) > maxHereStringTwinBytes || !strings.Contains(command, "<<<") {
+		return trustedActionRequest{}, false
+	}
+	text, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, false, request.Input.LoopBindsStraightLine)
+	if !ok || mixed || hereStringTwinPipesIntoReader(text) {
+		return trustedActionRequest{}, false
+	}
+	twin := windowsReadingTwin(request)
+	twin.Input.Tool, twin.Input.Command, twin.Input.Argv = "Bash", text, nil
+	twin.Input.Args = nil
+	if len(bytes.TrimSpace(request.Input.Args)) != 0 {
+		// The rules that read the tool input read the twin's command there,
+		// as the call carries its own.
+		raw, err := json.Marshal(map[string]string{"command": text})
+		if err != nil {
+			return trustedActionRequest{}, false
+		}
+		twin.Input.Command, twin.Input.Args = "", raw
+	}
+	if actionfacts.Analyze(twin.Input).Parse.Status == actionfacts.StatusInvalid {
+		return trustedActionRequest{}, false
+	}
+	twin.LegacyText = text
+	twin.conflictSource = nil
+	return twin, true
+}
+
+// hereStringTwinPipesIntoReader reports a twin with a pipe into read,
+// mapfile or readarray. In a pipe the builtin binds its names in a subshell,
+// so the twin reads them with the values they had before, where the
+// here-string binds them in the shell itself (a read whose binding the walk
+// could not prove stays a pipe in hereStringPipeTwin). Such a twin is no
+// reading of the call: u=$USER; command echo IFS=x; read u <<< w; ... $u
+// read $u as the login and blocked an ordinary write (rel-1-0-10:GAP-1083).
+func hereStringTwinPipesIntoReader(text string) bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(text), "")
+	if err != nil {
+		return true
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		pipe, ok := node.(*syntax.BinaryCmd)
+		if !ok || pipe.Op != syntax.Pipe && pipe.Op != syntax.PipeAll || pipe.Y == nil {
+			return true
+		}
+		if call, ok := pipe.Y.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+			switch call.Args[0].Lit() {
+			case "read", "mapfile", "readarray":
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
 // hereStringPipeTwin rewrites every `CMD <<< WORD` statement of a bash
 // command as `printf '%s\n' WORD | CMD`, keeping CMD's other redirections.
 // With split, an xargs reader of a fixed word is judged as the call it
@@ -65,7 +150,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 // calls of its function only is the assignment name=word, the reading of the
 // calls that bind, and the command is reported as mixed.
 func hereStringPipeTwin(command, home string, split, straight bool) (string, bool, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", false, false
 	}
@@ -98,6 +183,17 @@ func hereStringPipeTwin(command, home string, split, straight bool) (string, boo
 		if stmt.Cmd == nil {
 			refused = true
 			return false
+		}
+		// A folder move reads no stdin and runs in the shell itself, where a
+		// pipe would run it in a copy: the twin drops the word, so the
+		// statements after it are read in the folder it moves to
+		// (rel-1-0-10:GAP-1083).
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) != 0 {
+			switch call.Args[0].Lit() {
+			case "cd", "chdir", "pushd", "popd":
+				stmt.Redirs, changed = rest, true
+				return true
+			}
 		}
 		// xargs runs its program with the here-string word as arguments:
 		// judge that call itself (`xargs rm -rf <<< X` is `rm -rf X`).

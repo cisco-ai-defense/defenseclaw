@@ -17,12 +17,11 @@
 """Guardrail module — back-compat shim re-exporting connector-aware helpers.
 
 This file used to mix three concerns: API-key/model detection,
-master-key derivation, and OpenClaw config patching. S4.4 of the
+master-key derivation (removed in 1.0.10), and OpenClaw config patching. S4.4 of the
 claw-agnostic plan split it into two focused modules:
 
 * :mod:`defenseclaw.llm_keys` — connector-agnostic API-key + model
-  helpers (``detect_api_key_env``, ``model_to_proxy_name``,
-  ``derive_master_key``).
+  helpers (``detect_api_key_env``, ``model_to_proxy_name``).
 * :mod:`defenseclaw.openclaw_guardrail` — OpenClaw-specific config
   patching (``patch_openclaw_config``, ``restore_openclaw_config``,
   ``uninstall_openclaw_plugin``, ``record_pristine_backup``,
@@ -40,9 +39,6 @@ transitive OpenClaw dependency.
 from __future__ import annotations
 
 # Public connector-agnostic surface.
-from defenseclaw.llm_keys import (
-    derive_master_key as _derive_master_key,
-)
 from defenseclaw.llm_keys import (
     detect_api_key_env,
     model_to_proxy_name,
@@ -74,7 +70,6 @@ from defenseclaw.openclaw_guardrail import (  # noqa: F401
 
 __all__ = [
     # Connector-agnostic
-    "_derive_master_key",
     "detect_api_key_env",
     "model_to_proxy_name",
     # OpenClaw-specific

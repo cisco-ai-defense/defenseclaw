@@ -78,7 +78,7 @@ func (*endpointInventoryPluginConnector) Route(
 ) (*connector.ConnectorSignals, error) {
 	return &connector.ConnectorSignals{}, nil
 }
-func (*endpointInventoryPluginConnector) SetCredentials(string, string) {}
+func (*endpointInventoryPluginConnector) SetCredentials(string) {}
 func (*endpointInventoryPluginConnector) VerifyClean(connector.SetupOpts) error {
 	return nil
 }
@@ -1188,6 +1188,7 @@ func TestEndpointConnectorComponentsWindowsExactNativeRoster(t *testing.T) {
 		"devin",
 		"hermes",
 		"kiro",
+		"openclaw",
 		"opencode",
 	}
 	if !reflect.DeepEqual(got, want) {

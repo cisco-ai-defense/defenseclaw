@@ -199,6 +199,16 @@ func TestGAP0456ForwardedChildBoundaryCells(t *testing.T) {
 	}
 }
 
+// gap1214SpelledStateWriters are the TestGAP0448AndGAP0462Round9StateReadings
+// rows whose writer is a statement of its own that spells the state path
+// (Set-Content -Path ~/.defenseclaw/config.yaml).
+var gap1214SpelledStateWriters = map[string]bool{
+	"block comment then writer":                  true,
+	"first block terminator then writer":         true,
+	"first block terminator then newline writer": true,
+	"line comment then writer":                   true,
+}
+
 func TestGAP0448AndGAP0462Round9StateReadings(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("POSIX home fixture requires an unprivileged Unix user")
@@ -273,7 +283,12 @@ func TestGAP0448AndGAP0462Round9StateReadings(t *testing.T) {
 					tool = "PowerShell"
 				}
 				got := gap0568ToolHookAction(t, api, connector, tool, home, cwd, row.command, true, managed)
-				wantBlock := managed && row.hold || row.name == "earlier function"
+				// Per-user, a PowerShell tool call whose writer statement
+				// spells the state path is proven there in observe mode too,
+				// as the same path written out is: PowerShell's ~ names the
+				// home on Linux and macOS (rel-1-0-10:GAP-1214).
+				wantBlock := managed && row.hold || row.name == "earlier function" ||
+					!managed && tool == "PowerShell" && gap1214SpelledStateWriters[row.name]
 				if (got == "block") != wantBlock {
 					t.Errorf("%s managed=%t %s: %s, want block=%t", connector, managed, row.name, got, wantBlock)
 				}
@@ -350,7 +365,11 @@ func TestGAP0458ReadNamesNeedStableBinding(t *testing.T) {
 						t.Cleanup(func() { codexShellRunsPowerShell = previous })
 					}
 					got := gap0568ToolHookAction(t, api, connector, tool, home, cwd, row.command, cell.client, cell.managed)
-					wantBlock := mode == "action" || mode == "observe" && cell.managed && row.hold
+					// The chained Set-Content spells the state path: per-user
+					// it is proven as the path written out is
+					// (rel-1-0-10:GAP-1214).
+					wantBlock := mode == "action" || mode == "observe" && cell.managed && row.hold ||
+						mode == "observe" && tool == "PowerShell" && row.name == "chained writer"
 					if (got == "block") != wantBlock {
 						t.Errorf("%s/%s client=%t managed=%t %s: %s, want block=%t", connector, mode, cell.client, cell.managed, row.name, got, wantBlock)
 					}

@@ -61,43 +61,81 @@ func darwinSocketOwnerPIDs(ctx context.Context, local, remote *net.TCPAddr, stat
 			continue
 		}
 		seen[pid] = true
-		fds, err := darwinProcessFDs(pid)
+		held, err := darwinProcessHoldsSocket(ctx, pid, process.Proc.P_starttime, local, remote, state)
 		if err != nil {
-			if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) ||
-				errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EINVAL) {
-				continue
-			}
-			return nil, fmt.Errorf("inspect gateway process descriptors: %w", err)
+			return nil, err
 		}
-		for _, fd := range fds {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			if fd.kind != darwinProcFDSocket {
-				continue
-			}
-			tuple, err := darwinProcessSocket(pid, fd.number)
-			if err != nil {
-				if errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ESRCH) ||
-					errors.Is(err, syscall.EINVAL) ||
-					errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
-					continue
-				}
-				return nil, fmt.Errorf("inspect gateway socket: %w", err)
-			}
-			if tuple.state == state && darwinTCPAddrEqual(&tuple.local, local) &&
-				(remote == nil || darwinTCPAddrEqual(&tuple.remote, remote)) {
-				current, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-				if err != nil || current == nil || current.Eproc.Ucred.Uid != uint32(os.Geteuid()) ||
-					current.Proc.P_starttime != process.Proc.P_starttime {
-					continue
-				}
-				owners = append(owners, pid)
-				break
-			}
+		if held {
+			owners = append(owners, pid)
 		}
 	}
 	return owners, nil
+}
+
+// darwinProcessHoldsSocket reports whether process pid, started at
+// starttime and still of this account, holds a TCP socket with the exact
+// endpoint tuple and state. A process that is gone or cannot be inspected
+// holds none.
+func darwinProcessHoldsSocket(ctx context.Context, pid int, starttime unix.Timeval, local, remote *net.TCPAddr, state int32) (bool, error) {
+	fds, err := darwinProcessFDs(pid)
+	if err != nil {
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) ||
+			errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EINVAL) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect gateway process descriptors: %w", err)
+	}
+	for _, fd := range fds {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if fd.kind != darwinProcFDSocket {
+			continue
+		}
+		tuple, err := darwinProcessSocket(pid, fd.number)
+		if err != nil {
+			if errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ESRCH) ||
+				errors.Is(err, syscall.EINVAL) ||
+				errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+				continue
+			}
+			return false, fmt.Errorf("inspect gateway socket: %w", err)
+		}
+		if tuple.state == state && darwinTCPAddrEqual(&tuple.local, local) &&
+			(remote == nil || darwinTCPAddrEqual(&tuple.remote, remote)) {
+			current, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+			if err != nil || current == nil || current.Eproc.Ucred.Uid != uint32(os.Geteuid()) ||
+				current.Proc.P_starttime != starttime {
+				return false, nil
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// darwinRecordedGatewayHoldsSocket reports whether the gateway that the
+// gateway record of this account names (still the same live process, of
+// this account) holds the exact accepted socket. It proves what the scan of
+// every process of the account proves, for the one process that answers
+// almost every call, without the descriptors of every other process of the
+// account: at a hundred hook calls a second each call scanned the hundreds
+// of hook processes in flight beside it (#1384).
+func darwinRecordedGatewayHoldsSocket(ctx context.Context, local, remote *net.TCPAddr, state int32) bool {
+	for _, home := range perUserGatewayHomes(ctx) {
+		pid, ok := recordedGatewayPID(home)
+		if !ok {
+			continue
+		}
+		process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+		if err != nil || process == nil || process.Eproc.Ucred.Uid != uint32(os.Geteuid()) {
+			continue
+		}
+		if held, err := darwinProcessHoldsSocket(ctx, pid, process.Proc.P_starttime, local, remote, state); err == nil && held {
+			return true
+		}
+	}
+	return false
 }
 
 func darwinTCPAddrEqual(a, b *net.TCPAddr) bool {

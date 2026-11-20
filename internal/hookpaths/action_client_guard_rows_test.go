@@ -19,35 +19,8 @@ func TestGAP0431ClientProofGuards(t *testing.T) {
 	// /tmp/project is not one on Windows.
 	root := t.TempDir()
 	cwd, home := filepath.Join(root, "project"), filepath.Join(root, "home")
-	var saturated strings.Builder
-	saturated.WriteString("f=a.txt; ")
-	for i := 0; i < 10; i++ {
-		fmt.Fprintf(&saturated, "if [ -z \"$K%d\" ]; then V%d=one; fi; ", i, i)
-	}
-	saturated.WriteString(`echo m >> "$f"`)
-	rows := []struct {
-		name, command string
-		want          bool
-	}{
-		{"ordinary-target", `f=keylink; f=a.txt; echo m >> "$f"`, true},
-		{"M4-home-rebound", `HOME=/tmp/project; f=a.txt; echo m >> "$f"`, false},
-		{"M5-tilde", `f=~+/keylink; f=a.txt; echo m >> "$f"`, false},
-		{"M6-loop-body", `for x in a.txt; do echo ok; done; f=a.txt; echo m >> "$f"`, false},
-		{"M8-nested-target", `f=a.txt; (echo m >> "$f")`, false},
-		{"M11-unquoted-install", `f=a.txt; install b.txt $f`, false},
-		{"M11r-unquoted-rsync", `f=a.txt; rsync b.txt $f`, false},
-		{"M12-cd", `cd /tmp; f=a.txt; echo m >> "$f"`, false},
-		{"M13-printf-v", `f=a.txt; printf -v f %s b.txt; echo m >> "$f"`, false},
-		{"M14-builtin", `f=a.txt; builtin true; echo m >> "$f"`, false},
-		{"M16-no-parameter", `f=a.txt; echo m >> a.txt`, false},
-		{"M17-saturated", saturated.String(), false},
-		{"M18-glob", `f='a*.txt'; echo m >> "$f"`, false},
-		{"printf-attached", `f=a.txt; printf -vf %s keylink; echo m >> "$f"`, false},
-		{"printf-dynamic", `f=a.txt; opt=-vf; printf "$opt" %s keylink; echo m >> "$f"`, false},
-		{"printf-dynamic-own-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"`, true},
-		{"printf-dynamic-later-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"; echo m >> "$f"`, false},
-		{"printf-dynamic-binary", `f=keylink; f=a.txt; printf "$fmt" >> "$f" && echo m >> "$f"`, false},
-	}
+	clearShellStartupEnv(t)
+	rows := gap0431ClientProofGuardRows()
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			got := actionClientProvedSafeVariableTargets(row.command, cwd, home)
@@ -60,6 +33,7 @@ func TestGAP0431ClientProofGuards(t *testing.T) {
 }
 
 func TestGAP0431LoopCopyProofGuards(t *testing.T) {
+	clearShellStartupEnv(t)
 	root := t.TempDir()
 	home, cwd := filepath.Join(root, "home"), filepath.Join(root, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
@@ -233,5 +207,60 @@ func TestGAP0428PrintfAttachedValueTracking(t *testing.T) {
 				t.Error("bound name still has a known value after a nested printf")
 			}
 		})
+	}
+}
+
+// clearShellStartupEnv removes BASH_ENV, ENV and every exported bash
+// function of whoever runs the test: they withhold the client's safe proofs
+// (GAP-0293: the shared dev host exports two helpers). A test that needs a
+// startup sets it after the call.
+func clearShellStartupEnv(t *testing.T) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if name == "BASH_ENV" || name == "ENV" || strings.HasPrefix(name, "BASH_FUNC_") {
+			t.Setenv(name, "")
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatalf("unset %s: %v", name, err)
+			}
+		}
+	}
+}
+
+// gap0431ProofRow is one GAP-0431 client proof row: want is the proof the
+// row must get with no shell startup.
+type gap0431ProofRow struct {
+	name, command string
+	want          bool
+}
+
+// gap0431ClientProofGuardRows are the TestGAP0431ClientProofGuards rows,
+// shared with the GAP-0293 startup class test.
+func gap0431ClientProofGuardRows() []gap0431ProofRow {
+	var saturated strings.Builder
+	saturated.WriteString("f=a.txt; ")
+	for i := 0; i < 10; i++ {
+		fmt.Fprintf(&saturated, "if [ -z \"$K%d\" ]; then V%d=one; fi; ", i, i)
+	}
+	saturated.WriteString(`echo m >> "$f"`)
+	return []gap0431ProofRow{
+		{"ordinary-target", `f=keylink; f=a.txt; echo m >> "$f"`, true},
+		{"M4-home-rebound", `HOME=/tmp/project; f=a.txt; echo m >> "$f"`, false},
+		{"M5-tilde", `f=~+/keylink; f=a.txt; echo m >> "$f"`, false},
+		{"M6-loop-body", `for x in a.txt; do echo ok; done; f=a.txt; echo m >> "$f"`, false},
+		{"M8-nested-target", `f=a.txt; (echo m >> "$f")`, false},
+		{"M11-unquoted-install", `f=a.txt; install b.txt $f`, false},
+		{"M11r-unquoted-rsync", `f=a.txt; rsync b.txt $f`, false},
+		{"M12-cd", `cd /tmp; f=a.txt; echo m >> "$f"`, false},
+		{"M13-printf-v", `f=a.txt; printf -v f %s b.txt; echo m >> "$f"`, false},
+		{"M14-builtin", `f=a.txt; builtin true; echo m >> "$f"`, false},
+		{"M16-no-parameter", `f=a.txt; echo m >> a.txt`, false},
+		{"M17-saturated", saturated.String(), false},
+		{"M18-glob", `f='a*.txt'; echo m >> "$f"`, false},
+		{"printf-attached", `f=a.txt; printf -vf %s keylink; echo m >> "$f"`, false},
+		{"printf-dynamic", `f=a.txt; opt=-vf; printf "$opt" %s keylink; echo m >> "$f"`, false},
+		{"printf-dynamic-own-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"`, true},
+		{"printf-dynamic-later-redirect", `f=keylink; f=a.txt; printf "$fmt" >> "$f"; echo m >> "$f"`, false},
+		{"printf-dynamic-binary", `f=keylink; f=a.txt; printf "$fmt" >> "$f" && echo m >> "$f"`, false},
 	}
 }

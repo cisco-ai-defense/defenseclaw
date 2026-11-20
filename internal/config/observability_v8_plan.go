@@ -70,6 +70,12 @@ type ObservabilityV8EffectiveLocal struct {
 	// MaxStoreMB is omitted at 0, so a config without the key keeps the plan
 	// digest of 1.0.5.
 	MaxStoreMB int `json:"max_store_mb,omitempty"`
+	// KeepRejectedRecords and RejectedRecordsMaxRows are the opt-in
+	// rejected-record store (#1442). Both are omitted while it is off (the
+	// row cap is 0 then), so a config without the keys keeps the plan digest
+	// of 1.0.9.
+	KeepRejectedRecords    bool `json:"keep_rejected_records,omitempty"`
+	RejectedRecordsMaxRows int  `json:"rejected_records_max_rows,omitempty"`
 }
 
 type ObservabilityV8EffectiveTracePolicy struct {

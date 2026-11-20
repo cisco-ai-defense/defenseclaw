@@ -158,6 +158,7 @@ class SetupWizard(IntEnum):
     GUARDRAIL_ACTIONS = 19
     REDACTION = 20
     ACP_GUARD = 21
+    SEMANTIC_ROUTING = 22
 
 
 WIZARD_NAMES: tuple[str, ...] = (
@@ -183,6 +184,7 @@ WIZARD_NAMES: tuple[str, ...] = (
     "Guardrail Actions",
     "Redaction Policy",
     "ACP Guard",
+    "Semantic routing",
 )
 
 WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
@@ -219,6 +221,7 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.GUARDRAIL_ACTIONS: ("guardrail", "status"),
     SetupWizard.REDACTION: ("setup", "redaction"),
     SetupWizard.ACP_GUARD: ("acp", "setup"),
+    SetupWizard.SEMANTIC_ROUTING: ("routing", "setup"),
 }
 
 # First argv words the Setup tasks run ("setup", "keys", "guardrail", "agent"
@@ -297,6 +300,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Turn the guardrail on or off, set fail mode and approvals.",
     "Choose what is hidden from logs and exports.",
     "Protect an ACP agent in Zed or JetBrains.",
+    "Route model calls to the model you choose, by task, user and budget.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
@@ -330,6 +334,7 @@ WIZARD_HOW_TO: tuple[str, ...] = (
         "advanced bucket, profile, destination, and ordered-route setting."
     ),
     "Runs: defenseclaw acp setup. Choose an editor client, ACP agent, profile, and observe or action mode.",
+    "Runs: defenseclaw routing setup --yes --classifier <rules|systemone|vllm_sr>. Uses the models in routing.models.",
 )
 
 OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
@@ -1985,6 +1990,8 @@ def build_setup_sections(
             "Telemetry collection, retention, routing, and per-route redaction policy.",
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
+        _routing_section(cfg),
+        _tokenomics_section(cfg),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
         # The admission defaults had no row since the retired
         # watch.allow_list_bypass_scan row went (GAP-1870).
@@ -2029,13 +2036,17 @@ def build_setup_sections(
                 _field(cfg, "Enabled", "decision_model.enabled", "bool", hint="Off by default. Runs in front of the LLM judge, or alone for the connectors below."),
                 _field(cfg, "Model", "decision_model.model", hint="Model name the System One endpoint serves."),
                 _field(cfg, "Endpoint URL", "decision_model.base_url", hint="https, or http to loopback only."),
+                _field(
+                    cfg, "Protocol", "decision_model.protocol", "choice", ("system-one", "gemini-decisions"),
+                    "system-one (default), or gemini-decisions for Gemini Decision 1.",
+                ),
                 _field(cfg, "Token Env", "decision_model.api_key_env", hint="Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
                 _field(cfg, "Timeout (s)", "decision_model.timeout", hint="Blank = 1. The judge runs when it is late."),
                 _field(cfg, "Allow At", "decision_model.allow_threshold", hint="Risk at or below skips the judge. Blank = 0.30."),
                 _field(cfg, "Block At", "decision_model.block_threshold", hint="Risk at or above is a confident block. Blank = 0.75."),
                 _field(
-                    cfg, "Confident Block", "decision_model.on_confident_block", "choice", ("escalate", "decide"),
-                    "escalate: the judge still checks it (default). decide: it stands.",
+                    cfg, "Block Risk Score", "decision_model.block_risk_score",
+                    hint="A confident block also needs risk score >= this (0-2). Blank = 1.5.",
                 ),
                 _field(
                     cfg, "Answers Alone For", "decision_model.hook_connectors",
@@ -2179,7 +2190,7 @@ def _stored_key_picker(field: WizardFormField, cfg: object | Mapping[str, Any] |
     try:
         reserved = _gateway_token_names(cfg)
     except Exception:  # noqa: BLE001 - a partial config still lists the stored names.
-        reserved = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+        reserved = {"DEFENSECLAW_GATEWAY_TOKEN"}
     names = tuple(sorted(name for name in _dotenv_names(os.path.join(data_dir, ".env")) if name not in reserved))
     if not names:
         return replace(field, hint=f"Name of the entry to delete; nothing is stored in {data_dir}/.env yet.")
@@ -2255,6 +2266,53 @@ def _trusted_paths_wizard_fields() -> tuple[WizardFormField, ...]:
     )
 
 
+def _routing_wizard_fields() -> tuple[WizardFormField, ...]:
+    return (
+        WizardFormField(
+            "Classifier",
+            "choice",
+            "--classifier",
+            value="rules",
+            default="rules",
+            options=("rules", "systemone", "vllm_sr"),
+            required=True,
+            hint="rules is built in; systemone uses a decision model; vllm_sr the vLLM Semantic Router.",
+        ),
+        WizardFormField(
+            "First model",
+            "text",
+            "--model",
+            value="",
+            default="",
+            hint="Optional when routing.models has one: ALIAS=PROVIDER/MODEL, for example fast=anthropic/claude-haiku-4-5.",
+        ),
+    )
+
+
+def _routing_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "rules",
+            "Route by task with built-in rules",
+            summary="Use the models in routing.models and turn routing on, then test one prompt.",
+            presets={"--classifier": "rules"},
+            fields=("Classifier", "First model"),
+        ),
+    )
+
+
+def _build_routing_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    args = ["routing", "setup", "--yes"]
+    classifier = wizard_field_value(fields, "Classifier").strip()
+    if classifier:
+        args.extend(("--classifier", classifier))
+    model = wizard_field_value(fields, "First model").strip()
+    if model:
+        args.extend(("--model", model))
+    return tuple(args)
+
+
 def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
     def managed(values: Mapping[str, str]) -> bool:
         return values.get("managed_enrollment") == "yes"
@@ -2278,7 +2336,7 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
             default="kiro",
             options=ACP_AGENT_IDS,
             required=True,
-            hint="ACP agent DefenseClaw sits in front of and guards.",
+            hint="ACP agent DefenseClaw guards. Hermes runs its own tools: alerts only.",
         ),
         WizardFormField(
             "Profile",
@@ -3271,6 +3329,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
     SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
     SetupWizard.ACP_GUARD: lambda cfg=None: _acp_wizard_fields(),
+    SetupWizard.SEMANTIC_ROUTING: lambda cfg=None: _routing_wizard_fields(),
     SetupWizard.SANDBOX: lambda cfg=None: sandbox_wizard_fields(cfg),
 }
 
@@ -3618,7 +3677,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         WizardGoal(
             "bulk",
             "Choose which agents DefenseClaw protects",
-            summary="Pick every agent to protect in one step; the others are turned off.",
+            summary="Add agents to protect in one step; agents you do not list stay as they are (use Remove a connector to stop one).",
             presets={"@Action": "batch"},
             fields=(
                 "Connectors (CSV)",
@@ -4378,6 +4437,7 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: _guardrail_actions_goals,
     SetupWizard.REDACTION: _redaction_goals,
     SetupWizard.ACP_GUARD: _acp_goals,
+    SetupWizard.SEMANTIC_ROUTING: _routing_goals,
 }
 
 
@@ -5926,6 +5986,7 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda fields: _build_guardrail_actions_args(fields),
     SetupWizard.REDACTION: lambda fields: _build_redaction_args(fields),
     SetupWizard.ACP_GUARD: lambda fields: _build_acp_args(fields),
+    SetupWizard.SEMANTIC_ROUTING: lambda fields: _build_routing_args(fields),
 }
 
 
@@ -6460,7 +6521,7 @@ _CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
 # "Choose which agents DefenseClaw protects" is the batch goal, so the
 # "Batch setup only:" hint prefixes said nothing (GAP-2386).
 _BULK_GOAL_HINTS: dict[str, str] = {
-    "Connectors (CSV)": "Agents to protect, comma-separated (e.g. codex,hermes); the others are turned off.",
+    "Connectors (CSV)": "Agents to add or update, comma-separated (e.g. codex,hermes); the others stay as they are.",
     "Detected Connectors": "Also protect every agent found on this machine.",
     "All Supported Connectors": "Protect every agent DefenseClaw supports.",
 }
@@ -9164,6 +9225,92 @@ def _firewall_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigFiel
         _header("Rules File", "firewall.rules_file", _value(cfg, "firewall.rules_file")),
         _header("Anchor Name", "firewall.anchor_name", _value(cfg, "firewall.anchor_name")),
         _header("How to edit", "firewall.hint", "edit config.yaml directly - these paths bind to system-owned files"),
+    )
+
+
+def _count(cfg: object | Mapping[str, Any] | None, key: str) -> int:
+    value = get_config_value(cfg, key, None)
+    return len(value) if isinstance(value, (list, tuple)) else 0
+
+
+def _routing_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
+    """Model routing (GAP-0630). Only values that cannot make the config
+    unloadable on their own are editable: on_classifier_error, min_confidence,
+    allow_user_override, and the default alias as a choice of the aliases that
+    exist. Turning routing on, the classifier, and the models, rules and
+    budgets have checks of their own (a model must exist, a classifier needs
+    its endpoint), so they are read-only here and changed with the
+    defenseclaw routing commands."""
+    models = get_config_value(cfg, "routing.models", None)
+    aliases = tuple(
+        str(m.get("name")) for m in (models if isinstance(models, (list, tuple)) else ()) if isinstance(m, dict) and m.get("name")
+    )
+    count_rules = _count(cfg, "routing.admin.rules")
+    count_budgets = _count(cfg, "routing.admin.budgets")
+    summary = f"{len(aliases)} model(s), {count_rules} rule(s), {count_budgets} budget(s)"
+    on = "on" if get_config_value(cfg, "routing.enabled", False) else "off"
+    classifier = str(get_config_value(cfg, "routing.classifier", "") or "vllm_sr")
+    cli_hint = "Change it with defenseclaw routing enable, disable and setup."
+    default_alias = (
+        _field(cfg, "Default Alias", "routing.default_alias", "choice", ("", *aliases), "Model used when nothing else is picked.")
+        if aliases
+        else ConfigField("Default Alias", "routing.default_alias", "header", "", "", hint="Add a model first: defenseclaw routing models add.")
+    )
+    return ConfigSection(
+        "Routing",
+        (
+            ConfigField("Routing", "routing.enabled", "header", on, on, hint=cli_hint),
+            ConfigField("Classifier", "routing.classifier", "header", classifier, classifier, hint=cli_hint),
+            default_alias,
+            _field(cfg, "Min Confidence", "routing.min_confidence", hint="0 to 1: a lower classifier confidence counts as no answer."),
+            _field(
+                cfg,
+                "On Classifier Error",
+                "routing.on_classifier_error",
+                "choice",
+                ("original", "rules"),
+                "original: send the request unchanged; rules: ask the built-in rules.",
+            ),
+            _field(cfg, "Allow User Override", "routing.allow_user_override", "bool", hint="A request that names an allowed alias keeps it."),
+            _header(".. Lists (read-only here) .."),
+            ConfigField(
+                "Models, rules, budgets", "routing.summary", "header", summary, summary,
+                hint="Change them with defenseclaw routing models, rules and budgets.",
+            ),
+        ),
+        "Model routing: which model answers which request.",
+        "Turn routing on or off, pick the classifier and edit the lists with defenseclaw routing; see defenseclaw routing status.",
+    )
+
+
+def _tokenomics_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
+    """Tokenomics and pricing (GAP-0630): read-only. Config.save() does not
+    persist observability.tokenomics or observability.pricing, so the editor
+    shows them and names the command that changes them (defenseclaw-tui rule 6)."""
+
+    def shown(key: str, default: Any = "") -> str:
+        value = get_config_value(cfg, key, default)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value) if value not in (None, "") else str(default)
+
+    hint = "Read-only here. Change it with defenseclaw setup tokenomics --enable or --disable, and defenseclaw routing pricing."
+    models = _count(cfg, "observability.pricing.models")
+    return ConfigSection(
+        "Tokenomics",
+        (
+            ConfigField("Enabled", "observability.tokenomics.enabled", "header", shown("observability.tokenomics.enabled", "false"), shown("observability.tokenomics.enabled", "false"), hint=hint),
+            ConfigField("Local store", "observability.tokenomics.local_store_enabled", "header", shown("observability.tokenomics.local_store_enabled", "false"), shown("observability.tokenomics.local_store_enabled", "false"), hint=hint),
+            ConfigField("Retention (days)", "observability.tokenomics.local_store_retention_days", "header", shown("observability.tokenomics.local_store_retention_days", "30"), shown("observability.tokenomics.local_store_retention_days", "30"), hint=hint),
+            ConfigField("Compute cost", "observability.tokenomics.cost_compute", "header", shown("observability.tokenomics.cost_compute", "true"), shown("observability.tokenomics.cost_compute", "true"), hint=hint),
+            ConfigField(
+                "Price table", "observability.pricing.version", "header",
+                (shown("observability.pricing.version", "none") + f", {models} model(s)"), (shown("observability.pricing.version", "none") + f", {models} model(s)"),
+                hint="Change prices with defenseclaw routing pricing set or import.",
+            ),
+        ),
+        "Per-call model usage and cost (off by default).",
+        "Read-only here: see defenseclaw setup tokenomics and Observability > Tokenomics.",
     )
 
 

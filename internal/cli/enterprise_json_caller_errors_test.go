@@ -19,6 +19,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -48,7 +49,7 @@ func TestWindowsDiscoveryJSONCallerErrorsPrintJSON(t *testing.T) {
 		gatewayErr = tc.gateway
 		var text bytes.Buffer
 		err := writeWindowsEnterpriseDiscovery(&text, "nosuchuser", false)
-		if text.Len() != 0 || err == nil || !strings.HasPrefix(err.Error(), tc.text) || commandExitCode(err) != 1 {
+		if text.Len() != 0 || err == nil || !strings.HasPrefix(err.Error(), tc.text) || cliusage.ExitCode(err) != 1 {
 			t.Fatalf("%s text: output %q, error %v", tc.name, text.String(), err)
 		}
 		var out bytes.Buffer
@@ -64,8 +65,8 @@ func TestWindowsDiscoveryJSONCallerErrorsPrintJSON(t *testing.T) {
 		}
 		command := &cobra.Command{}
 		silenceJSONReportedError(command, true, err)
-		if !command.SilenceErrors || commandExitCode(err) != 1 {
-			t.Fatalf("%s --json: the Error line is not silenced (exit %d)", tc.name, commandExitCode(err))
+		if !command.SilenceErrors || cliusage.ExitCode(err) != 1 {
+			t.Fatalf("%s --json: the Error line is not silenced (exit %d)", tc.name, cliusage.ExitCode(err))
 		}
 	}
 }

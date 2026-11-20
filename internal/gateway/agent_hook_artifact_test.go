@@ -205,9 +205,12 @@ func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
 		{"#!/bin/sh\ngrep -n -e acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
 		{"#!/bin/sh\nhead -n 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
 		{"#!/bin/sh\ngrep -e - /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
-		// A program the parse does not model (cut) leaves the script
+		// cut is a modelled file reader since fe9cd739ec (more file readers):
+		// the heredoc beside it counts, as beside cat, grep or head.
+		{"#!/bin/sh\ncut -d - -f 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		// A program the parse does not model (tr) leaves the script
 		// detection-only, heredoc or not.
-		{"#!/bin/sh\ncut -d - -f 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ntr a-z A-Z <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
 		{"#!/bin/sh\ngrep -f - /dev/null > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep -e - /dev/null - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
 		{"#!/bin/sh\ngrep acme > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
@@ -1048,8 +1051,6 @@ func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
 		{fmt.Sprintf("false && bash %q", path), true},
 		{fmt.Sprintf("true || bash %q", path), true},
 		{fmt.Sprintf("cd /tmp && bash %q", path), true},
-		// After a cd the relative name may be another file.
-		{"cd /tmp && bash heredoc.sh", false},
 	} {
 		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: test.command, CWD: dir})
 		findings := promotedArtifactFindings(t.Context(), agentHookRequest{
@@ -1063,6 +1064,14 @@ func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
 		if got := matched.contributesToEnforcement(); got != test.want {
 			t.Errorf("%q: enforced=%t, want %t", test.command, got, test.want)
 		}
+	}
+	// After a cd the relative name is the file of the folder the cd moved the
+	// call to (the working-folder tracking of the facts, GAP-0327): bash reads
+	// /tmp/heredoc.sh, not the artifact of the call's own folder, so the
+	// artifact is not what runs.
+	moved := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: "cd /tmp && bash heredoc.sh", CWD: dir})
+	if findings := promotedArtifactFindings(t.Context(), agentHookRequest{ConnectorName: connectorName}, moved, true, nil); findingWithID(findings, "ACME-OWN-MARKER") != nil {
+		t.Errorf("cd /tmp && bash heredoc.sh names /tmp/heredoc.sh, not the artifact: %v", FindingStrings(findings))
 	}
 }
 
@@ -1117,29 +1126,44 @@ func TestPromotedArtifactObserverFindingDoesNotEnterEnforcingChain(t *testing.T)
 	}
 	keyPath := filepath.Join(home, ".ssh", "id_rsa")
 	readCommand := "cat " + keyPath
-	a := config.GuardrailProfile{Mode: "action"}
-	b := config.GuardrailProfile{Mode: "observe", Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"observer.example"}}}
-	_, ctx := meetVerdictFixture(t, a, b,
-		meetVerdictRule("A-OTHER", "absent-marker", "HIGH"),
-		meetVerdictRule("PATH-SSH-KEY", keyPath, "HIGH"))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "read.sh")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+readCommand+"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	outer := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir})
-	capture := &toolChainHookCapture{}
-	capture.recordTrustedAction(outer, nil)
-	req := agentHookRequest{ConnectorName: "codex", toolChain: capture}
-	findings := promotedArtifactFindings(ctx, req, outer, true, nil)
+	// The read of the key arms the secret-read chain from the artifact's own
+	// ActionFacts (substrate-1:GAP-0210). The observer's PATH-SSH-KEY must
+	// add nothing to that: the chain projections are the same as with an
+	// observer whose rules do not match at all.
+	artifactChains := func(observerRule *PatternRule) ([]guardrail.ToolChainProjection, []RuleFinding) {
+		a := config.GuardrailProfile{Mode: "action"}
+		b := config.GuardrailProfile{Mode: "observe", Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"observer.example"}}}
+		_, ctx := meetVerdictFixture(t, a, b, meetVerdictRule("A-OTHER", "absent-marker", "HIGH"), observerRule)
+		capture := &toolChainHookCapture{}
+		capture.recordTrustedAction(outer, nil)
+		req := agentHookRequest{ConnectorName: "codex", toolChain: capture}
+		findings := promotedArtifactFindings(ctx, req, outer, true, nil)
+		return capture.artifactProjections, findings
+	}
+	withObserver, findings := artifactChains(meetVerdictRule("PATH-SSH-KEY", keyPath, "HIGH"))
 	if found := findingWithID(findings, "PATH-SSH-KEY"); found == nil || found.profile != "b" {
 		t.Fatalf("observer finding missing from artifact audit: %+v", findings)
 	}
+	control, _ := artifactChains(meetVerdictRule("B-OTHER", "absent-marker", "HIGH"))
 	step, _ := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)
-	for _, projection := range capture.artifactProjections {
-		if projection.DetectionStepMask&step != 0 || projection.EnforcementStepMask&step != 0 {
-			t.Fatalf("observer's PATH-SSH-KEY entered an enforcing chain: %+v", projection)
+	mask := func(projections []guardrail.ToolChainProjection) (detection, enforcement uint64) {
+		for _, projection := range projections {
+			detection |= projection.DetectionStepMask & step
+			enforcement |= projection.EnforcementStepMask & step
 		}
+		return detection, enforcement
+	}
+	gotDetection, gotEnforcement := mask(withObserver)
+	wantDetection, wantEnforcement := mask(control)
+	if gotDetection != wantDetection || gotEnforcement != wantEnforcement {
+		t.Fatalf("observer's PATH-SSH-KEY changed the chain: detection %x enforcement %x, without it %x %x",
+			gotDetection, gotEnforcement, wantDetection, wantEnforcement)
 	}
 }
 

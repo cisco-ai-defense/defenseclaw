@@ -27,8 +27,6 @@ from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.inventory.agent_discovery import _SPECS, DISCOVERY_PRECEDENCE
-from defenseclaw.tui.services.catalog_state import friendly_connector_name as catalog_friendly_name
-from defenseclaw.tui.services.overview_state import friendly_connector_name as overview_friendly_name
 
 KNOWN = set(KNOWN_CONNECTORS)
 ACTIVE = KNOWN

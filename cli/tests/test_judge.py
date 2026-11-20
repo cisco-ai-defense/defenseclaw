@@ -258,3 +258,30 @@ class TestCLIFlagParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJudgeIntentScope(unittest.TestCase):
+    def test_default_is_empty(self):
+        from defenseclaw.config import JudgeConfig
+
+        self.assertEqual(JudgeConfig().intent_scope, "")
+
+    def test_from_dict(self):
+        from defenseclaw.config import _merge_guardrail
+
+        gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True, "intent_scope": "shadow"}}, "/tmp/test")
+        self.assertEqual(gc.judge.intent_scope, "shadow")
+        gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
+        self.assertEqual(gc.judge.intent_scope, "")
+
+    def test_intent_scope_alert_is_refused_where_it_is_written(self):
+        import pytest
+        from defenseclaw.config import _merge_guardrail
+
+        for value in ("", "shadow", "off", "Shadow"):
+            gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True, "intent_scope": value}}, "/tmp/test")
+            gc.validate()
+        for value, text in (("alert", "shadow-only"), ("block", "unknown value")):
+            gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True, "intent_scope": value}}, "/tmp/test")
+            with pytest.raises(ValueError, match=text):
+                gc.validate()

@@ -293,6 +293,11 @@ func containsPowerShellCompoundCommand(source string) bool {
 		return false
 	}
 	commands, _, _ := windowsBuildCommands(lexemes, &out)
+	if len(commands) < 2 {
+		// No later statement: a separator alone (#&, a bare ;) builds none,
+		// and slicing past it panicked (found by FuzzShellReadersNeverPanic).
+		return false
+	}
 	for _, command := range commands[1:] {
 		if command.callOperator || len(command.words) == 0 ||
 			command.words[0].expands || command.words[0].quotedOnly {

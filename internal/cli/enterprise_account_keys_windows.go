@@ -8,6 +8,7 @@ package cli
 import (
 	"errors"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/spf13/cobra"
 )
 
@@ -15,7 +16,7 @@ func runEnterpriseAccountKeys(cmd *cobra.Command) error {
 	if !windowsEnterpriseIsElevated() {
 		return secretFailed("not_elevated", windowsSecretExitFailure, errors.New("the account join keys require an elevated administrator prompt"))
 	}
-	layout, err := windowsManagedLayout.standalone()
+	layout, err := hookcli.WindowsManagedLayout.Standalone()
 	if err != nil {
 		return secretFailed("change_failed", windowsSecretExitFailure, err)
 	}

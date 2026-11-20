@@ -763,12 +763,14 @@ func TestGeneratedMetricOTLPSinkExportsEveryCatalogInstrumentShapeOverGRPC(t *te
 			observability.BucketComplianceActivity,
 			observability.BucketAgentLifecycle,
 			observability.BucketPlatformHealth,
+			observability.BucketModelIO,
 		},
 	)
 	destination.Protocol = "grpc"
 	plan := compileGenerationRuntimePlan(t, t.TempDir(), destination)
 	families := []observability.EventName{
 		"defenseclaw.activity.total",
+		"defenseclaw.model.cost",
 		"defenseclaw.audit.sink.circuit.state",
 		"defenseclaw.agent.discovery.installed",
 		"defenseclaw.agent.last_seen",
@@ -787,6 +789,9 @@ func TestGeneratedMetricOTLPSinkExportsEveryCatalogInstrumentShapeOverGRPC(t *te
 			}
 			appendRecord(builder.BuildMetricDefenseClawActivityTotal(
 				observability.MetricDefenseClawActivityTotalInput{Envelope: envelope, Value: 7},
+			))
+			appendRecord(builder.BuildMetricDefenseClawModelCost(
+				observability.MetricDefenseClawModelCostInput{Envelope: envelope, Value: 0.25},
 			))
 			appendRecord(builder.BuildMetricDefenseClawAuditSinkCircuitState(
 				observability.MetricDefenseClawAuditSinkCircuitStateInput{Envelope: envelope, Value: -3},
@@ -834,7 +839,7 @@ func TestGeneratedMetricOTLPSinkExportsEveryCatalogInstrumentShapeOverGRPC(t *te
 		catalogShapes[descriptor.InstrumentType+"/"+descriptor.ValueType] = struct{}{}
 	}
 	wantCatalogShapes := map[string]struct{}{
-		"counter/int64": {}, "updowncounter/int64": {},
+		"counter/int64": {}, "counter/double": {}, "updowncounter/int64": {},
 		"gauge/int64": {}, "gauge/double": {},
 		"histogram/int64": {}, "histogram/double": {},
 	}
@@ -849,6 +854,7 @@ func TestGeneratedMetricOTLPSinkExportsEveryCatalogInstrumentShapeOverGRPC(t *te
 		value          float64
 	}{
 		{name: "defenseclaw.activity.total", instrumentType: "counter", valueType: "int64", value: 7},
+		{name: "defenseclaw.model.cost", instrumentType: "counter", valueType: "double", value: 0.25},
 		{name: "defenseclaw.audit.sink.circuit.state", instrumentType: "updowncounter", valueType: "int64", value: -3},
 		{name: "defenseclaw.agent.discovery.installed", instrumentType: "gauge", valueType: "int64", value: 11},
 		{name: "defenseclaw.agent.last_seen", instrumentType: "gauge", valueType: "double", value: 12.5},

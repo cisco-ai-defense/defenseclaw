@@ -29,6 +29,22 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+describe('Tool judge task scope', () => {
+  const text = () => page('guardrail/index.mdx').split('### Which connectors give the judge your task')[1].split('### Let tool calls go first')[0];
+  it('lists the connectors that keep the task and documents the scope finding', () => {
+    const section = text();
+    assert.match(section, /\*\*Kept:\*\*[^*]*Claude Code[^*]*Devin\./);
+    assert.match(section, /\*\*Kept, but names no destination:\*\* Hermes/);
+    assert.match(section, /\*\*Not kept[^*]*\*\*[^*]*OpenCode[^*]*OpenClaw/);
+    assert.match(section, /`INTENT-SCOPE-SEND`/);
+    assert.match(section, /Naming a mailbox covers that address only; a person you name without an address counts when you also name the domain of the mailbox/);
+    assert.match(section, /In this release the check only records: it writes a judge event of kind `tool_intent_scope_shadow`/);
+    assert.match(section, /`guardrail\.judge\.intent_scope` to `off` to stop the check; `shadow` is the default/);
+    assert.match(section, /never from words in quoted text, a commit message or a here-document/);
+    assert.match(section, /hosts of the git remotes of your working folder count as named/);
+  });
+});
+
 describe('Rollback gateway state', () => {
   it('qualifies automatic startup and names the command for a stopped gateway', () => {
     const text = page('get-started/upgrade.mdx').split('## Rollback')[1].split('## Update notices')[0];
@@ -111,9 +127,12 @@ describe('Cursor observe outage mode', () => {
     for (const stale of ['guardrail/index.mdx', 'reference/setup-commands.mdx', 'segmentation.mdx']) {
       assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
     }
-    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode/i);
+    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode, except an ordinary tool call of a connector the \[gateway outage section\]/i);
     assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Other transport and answer failures block in every tier/i);
     assert.match(perUser, /A verified gateway that accepts the call but gives no final decision before the hook.s fixed deadline blocks in every tier/i);
+    assert.match(perUser, /in an open outage mode .{0,80}an ordinary tool call that plainly names nothing a protected file could be reached through runs with the warning/i);
+    assert.match(page('connectors/capability-matrix.mdx'), /\*\*No answer\*\*.{0,200}with one exception for per-user Claude Code and Codex: a tool call that plainly names nothing a protected file could be reached through runs with the warning/i);
+    assert.match(perUser, /`on-failure=\(gateway down: allow with a warning; no answer: tool calls allow with a warning unless the call may reach a protected file, prompts and tool results allow with a warning when the gateway is frozen and block when a running gateway answers too late; hook or answer error: block; stop and session-end events: never blocked\)`/);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": normalizeHookFailMode\(failMode\) == "closed",/);
     assert.match(page('connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call\. Under Secure Client the flag follows the administrator's resolved fail mode instead: `open`, the default there, lets Cursor run the call when the hook process never answers, and `closed` keeps `failClosed: true`\. The administrator's resolved fail mode decides/i);
@@ -1013,7 +1032,7 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(api, /\| Hook, notify and inspect \| 25\/s \| 100 \| 32 \|\s*\| Delivery receipts \| 25\/s \| 100 \| 32 \|/);
     assert.match(api, /Receipts have the budget of their own above, so a tool\s+call counts once against the hook budget/);
     const managed = page('enterprise/sandboxes.mdx');
-    assert.match(managed, /per-user budget \(40 per second, burst 100 for all of the user's sandboxes together: the rate the managed gateway answers inside the hook's 3\.5 second window\)\. The refusal is immediate and its message names the budget/);
+    assert.match(managed, /per-user budget \(100 per second, burst 200 for all of the user's sandboxes together: the rate the managed gateway answers inside the hook's 3\.5 second window\)\. The refusal is immediate and its message names the budget/);
     assert.match(managed, /Each sandbox also has its own budget at the user's daemon \(25 per second, burst 100\)\. The receipt that confirms an allowed call counts apart/);
   });
 
@@ -1879,8 +1898,13 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["exported in a shell is dropped when the", "The writers keep writing as usual"], lacks: ["where the profile is standalone, the Linux default"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "guardrail/index.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
-  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["18 DefenseClaw dashboards (19 with the Fleet assets)"] },
-  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 18 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
+  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["21 DefenseClaw dashboards (22 with the Fleet assets)"], lacks: ["20 DefenseClaw dashboards"] },
+  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 21 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
+  { gap: "GAP-0388", page: "stories/local-observability.mdx", has: ["21 DefenseClaw dashboards (22 with the Fleet assets)"], lacks: ["20 DefenseClaw dashboards"] },
+  { gap: "GAP-0211", page: "substrate/how-it-works.mdx", has: ["refused by default in every mode", "`alert` is an opt-in the operator chooses"] },
+  { gap: "GAP-0200", page: "substrate/reference.mdx", has: ["There is no `--api`", "### What `verify` needs"], lacks: ["`--api` reads it from the gateway", "or from the gateway with `--api`"] },
+  { gap: "GAP-0461", page: "substrate/how-it-works.mdx", section: "Suspend, resume, undo, fork", has: ["atelet uploads it to the bucket about 5 minutes later (atelet's `--snapshot-upload-delay`)", "a resume or a delete in those minutes skips the upload", "`kubectl ate suspend actor NAME -a ATESPACE --mode sync`"] },
+  { gap: "GAP-0200", page: "substrate/troubleshooting.mdx", has: ["### `verify` cannot read the snapshot bucket", "### `verify` cannot read the access policies or the actor routes"], lacks: ["does not read the bucket yet"] },
   { gap: "GAP-1716", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },
   { gap: "GAP-0922, GAP-0923", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["macOS has no setting that stops a user's sandbox profile", "DefenseClaw does not see or audit its tool calls"], lacks: ["unshare -Urm"] },
@@ -1978,7 +2002,7 @@ const r105Rows: DocRow[] = [
   // pod docs it3 (2026-10-28)
   { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
-  { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine."] },
+  { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["On native Windows `defenseclaw setup routing` says so and refuses `--enable`; `--disable` still turns off a routing block copied from another machine."] },
   { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem, `coverage_complete` is `false`, or `security_complete` is `false` for any reason other than `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace`; a host with only those warnings passes and gets them on standard error). Add `--require-security-complete` to fail on incomplete security too |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |", "a host whose `verify` passes with incomplete security still fails it", "a host whose `verify` passes with only incomplete security passes"] },
   // pod docs r105 loop i1 (2026-10-28)
   { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },
@@ -2397,11 +2421,13 @@ describe('Setup properties and the Windows unknown-flag exit match the code (GAP
     const svc = source('internal/cli/windows_enterprise_service.go');
     assert.ok(svc.includes('cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {\n\t\treturn lifecycleArgumentError(c, action, opts.jsonOutput, flagError(c, err))'), 'Windows lifecycle verbs no longer route flag errors through lifecycleArgumentError: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2493)');
     const unix = source('internal/cli/enterprise_unix.go');
-    assert.ok(unix.includes('return withExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))') && unix.includes('return invalidLifecycleArguments(&delegatedUsageError{msg: usageMessage(c, err), err: err})') && unix.includes('result.AddError("invalid_arguments", message)'), 'lifecycle flag errors no longer exit with the invalid-arguments code or print invalid_arguments with --json (GAP-2493)');
+    assert.ok(unix.includes('return cliusage.WithExitCode(err, enterprisestatus.InvalidArgsExitCode(runtime.GOOS))') && unix.includes('return invalidLifecycleArguments(&cliusage.DelegatedUsageError{Msg: cliusage.UsageMessage(c, err), Err: err})') && unix.includes('result.AddError("invalid_arguments", message)'), 'lifecycle flag errors no longer exit with the invalid-arguments code or print invalid_arguments with --json (GAP-2493)');
   });
   it('keeps the enterprise tree out of the root usage-error mapping', () => {
     const exit = source('internal/cli/exit_code.go');
-    assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && exit.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
+    // The coded-exit helpers moved to internal/cliusage with the slim hook (W1); the default failure result is still 1.
+    const usage = source('internal/cliusage/cliusage.go');
+    assert.ok(exit.includes('var usageFlagErrorExempt = []string{"enterprise", "hook", "notify", "watchdog"}') && usage.includes('func ExitCode(err error) int {') && usage.includes('\treturn 1\n}'), 'unknown-flag exit for enterprise windows changed: re-check enterprise/operations.mdx and enterprise/troubleshooting.mdx (GAP-2171)');
   });
 });
 
@@ -2688,7 +2714,7 @@ describe('saved installer protection matches the rule packs (GAP-1922)', () => {
 // GAP-2289: the setup guardrail connector list matches the CLI's choices per
 // OS: the proxy connectors are refused on native Windows (platform_support.py).
 describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
-  it('lists the hook connectors everywhere and openclaw/zeptoclaw only on Linux and macOS', () => {
+  it('lists the hook connectors and openclaw everywhere and zeptoclaw only on Linux and macOS', () => {
     const setup = source('cli/defenseclaw/commands/cmd_setup.py');
     const fallback = setup.split('_CONNECTOR_NAMES_FALLBACK = [')[1]?.split(']')[0] ?? '';
     const names = [...fallback.matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort();
@@ -2696,14 +2722,15 @@ describe('setup guardrail --connector choices match the CLI (GAP-2289)', () => {
     const support = source('cli/defenseclaw/platform_support.py');
     const windows = support.split('WINDOWS_CONNECTOR_SUPPORT')[1] ?? '';
     const refused = [...windows.matchAll(/"([a-z]+)": ConnectorPlatformSupport\(\s*UNSUPPORTED,/g)].map((m) => m[1]).sort();
-    assert.deepEqual(refused, ['openclaw', 'zeptoclaw']);
+    // OpenClaw runs on native Windows in native hook mode (rel-1-0-10 S2).
+    assert.deepEqual(refused, ['zeptoclaw']);
     const hooks = names.filter((n) => !refused.includes(n));
     const text = page('guardrail/index.mdx');
     const row = text.split('**Which agent framework are you using?**')[1]?.split('| **Enable guardrail?**')[0] ?? '';
     const listed = row.split('; on Linux and macOS also')[0];
     assert.deepEqual([...listed.matchAll(/`([a-z]+)`/g)].map((m) => m[1]).filter((n) => n !== 'connector' && n !== 'agent').sort(), hooks.sort());
-    assert.ok(row.includes('on Linux and macOS also `openclaw` and `zeptoclaw`. Native Windows refuses those two'), 'connector row lost the per-OS split');
-    assert.ok(text.includes('amp or kiro; on Linux and macOS also openclaw or zeptoclaw (native Windows refuses those two: they need the guardrail proxy)'), 'flag table lost the per-OS split');
+    assert.ok(row.includes('on Linux and macOS also `zeptoclaw`. Native Windows runs OpenClaw 2026.8.35 or later in native hook mode, and refuses `zeptoclaw`'), 'connector row lost the per-OS split');
+    assert.ok(text.includes('amp, kiro or openclaw; on Linux and macOS also zeptoclaw (native Windows refuses it: it needs the guardrail proxy'), 'flag table lost the per-OS split');
     assert.ok(!text.includes('`kiro`, `openclaw`, `zeptoclaw`.'), 'old unqualified list is back');
   });
 });

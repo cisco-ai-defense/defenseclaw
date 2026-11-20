@@ -26,7 +26,9 @@ def _setup_connectors(os_name: str) -> dict[str, str]:
 def test_windows_palette_hides_unsupported_connector_setup_commands() -> None:
     commands = _setup_connectors("windows")
 
-    assert {"openclaw", "zeptoclaw", }.isdisjoint(commands)
+    # OpenClaw runs on native Windows in native hook mode (rel-1-0-10).
+    assert {"zeptoclaw"}.isdisjoint(commands)
+    assert "openclaw" in commands
     assert {
         "amp",
         "antigravity",

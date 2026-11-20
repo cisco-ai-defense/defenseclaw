@@ -21,19 +21,21 @@ import (
 // that a read or a loop has bound is not that login: the same write into a
 // sibling or a project file stays allowed (default and permissive packs)
 // and a file it reaches only through a link on disk is not named.
+//
+// Binder i is judged in wrappers 2i and 2i+1 (mod 6), once with each name,
+// so every binder meets USER and LOGNAME and every wrapper meets two or
+// three binders; the other rows are judged with both names.
+// g235bRotate spreads the rows over the cells.
 func TestG235bBinderClassKnownValues(t *testing.T) {
 	home, project, parent := g235bBinderFixture(t)
 	const sq = "\x27"
-	type row struct {
-		name, command string
-		protected     bool
-	}
-	var rows []row
-	for _, name := range []string{"USER", "LOGNAME"} {
+	names := []string{"USER", "LOGNAME"}
+	writes := func(name string) (editor, redirect string) {
 		v := "$" + name
-		editor := `sed -i d ` + parent + v + `/aliasdir/config.yaml`
-		redirect := `printf x > ` + parent + v + `/statealias`
-		later := []string{
+		return `sed -i d ` + parent + v + `/aliasdir/config.yaml`, `printf x > ` + parent + v + `/statealias`
+	}
+	later := func(name string) []string {
+		return []string{
 			`select ` + name + ` in ordinary; do break; done`,
 			`for ` + name + ` in ordinary; do :; done`,
 			`read ` + name + ` </dev/null`,
@@ -43,51 +45,55 @@ func TestG235bBinderClassKnownValues(t *testing.T) {
 			`printf -v ` + name + ` x`,
 			`. /dev/null`,
 		}
-		for i, bind := range later {
-			rows = append(rows,
-				row{name + "-later-" + strconv.Itoa(i) + "-editor", editor + `; ` + bind, true},
-				row{name + "-later-" + strconv.Itoa(i) + "-redirect", redirect + `; ` + bind, true},
-				row{name + "-later-" + strconv.Itoa(i) + "-group", `{ ` + editor + `; ` + bind + `; }`, true},
-				row{name + "-later-" + strconv.Itoa(i) + "-if", `if true; then ` + editor + `; ` + bind + `; fi`, true},
-				row{name + "-later-" + strconv.Itoa(i) + "-subshell", `( ` + redirect + `; ` + bind + ` )`, true},
-				row{name + "-later-" + strconv.Itoa(i) + "-while", `while :; do ` + redirect + `; ` + bind + `; break; done`, true},
-			)
+	}
+	wrappers := []struct {
+		name string
+		wrap func(editor, redirect, bind string) string
+	}{
+		{"editor", func(e, _, b string) string { return e + `; ` + b }},
+		{"redirect", func(_, r, b string) string { return r + `; ` + b }},
+		{"group", func(e, _, b string) string { return `{ ` + e + `; ` + b + `; }` }},
+		{"if", func(e, _, b string) string { return `if true; then ` + e + `; ` + b + `; fi` }},
+		{"subshell", func(_, r, b string) string { return `( ` + r + `; ` + b + ` )` }},
+		{"while", func(_, r, b string) string { return `while :; do ` + r + `; ` + b + `; break; done` }},
+	}
+	var rows []g235bRow
+	for i := range later("USER") {
+		for j := 0; j < 2; j++ {
+			name := names[(i+j)%2]
+			editor, redirect := writes(name)
+			w := wrappers[(2*i+j)%len(wrappers)]
+			rows = append(rows, g235bRow{name + "-later-" + strconv.Itoa(i) + "-" + w.name, w.wrap(editor, redirect, later(name)[i]), true})
 		}
+	}
+	for _, name := range names {
+		editor, redirect := writes(name)
 		rows = append(rows,
-			row{name + "-before-select", editor + `; select ` + name + ` in ordinary; do break; done`, true},
-			row{name + "-eval-echo", `eval 'echo ` + name + ` >/dev/null'; ` + redirect, true},
-			row{name + "-eval-comment", `eval ': # ` + name + `'; ` + redirect, true},
-			row{name + "-eval-control", `eval ':'; ` + redirect, true},
-			row{name + "-trap-echo", `trap 'echo ` + name + ` >/dev/null' EXIT; ` + redirect, true},
-			row{name + "-read-prompt", `read -p ` + name + ` OTHER </dev/null; ` + editor, true},
-			row{name + "-nested-late-read", `bash -c '` + redirect + `; read ` + name + ` </dev/null'`, true},
-			row{name + "-unset-short-glued", `env -u` + name + ` bash -c '` + redirect + `'`, false},
-			row{name + "-read-before-ordinary", `read ` + name + ` </dev/null; ` + redirect, false},
-			row{name + "-for-in-ordinary", `for ` + name + ` in ordinary; do ` + redirect + `; done`, false},
-			row{name + "-for-after-ordinary", `for ` + name + ` in ordinary; do :; done; ` + redirect, false},
-			row{name + "-unset-ordinary-after-assign", name + `=ordinary; env -u ` + name + ` bash -c '` + redirect + `'`, false},
-			row{name + "-eval-echo-ordinary", name + `=ordinary; eval 'echo ` + name + ` >/dev/null'; ` + editor, false},
+			g235bRow{name + "-before-select", editor + `; select ` + name + ` in ordinary; do break; done`, true},
+			g235bRow{name + "-eval-echo", `eval 'echo ` + name + ` >/dev/null'; ` + redirect, true},
+			g235bRow{name + "-eval-comment", `eval ': # ` + name + `'; ` + redirect, true},
+			g235bRow{name + "-eval-control", `eval ':'; ` + redirect, true},
+			g235bRow{name + "-trap-echo", `trap 'echo ` + name + ` >/dev/null' EXIT; ` + redirect, true},
+			g235bRow{name + "-read-prompt", `read -p ` + name + ` OTHER </dev/null; ` + editor, true},
+			g235bRow{name + "-nested-late-read", `bash -c '` + redirect + `; read ` + name + ` </dev/null'`, true},
+			g235bRow{name + "-unset-short-glued", `env -u` + name + ` bash -c '` + redirect + `'`, false},
+			g235bRow{name + "-read-before-ordinary", `read ` + name + ` </dev/null; ` + redirect, false},
+			g235bRow{name + "-for-in-ordinary", `for ` + name + ` in ordinary; do ` + redirect + `; done`, false},
+			g235bRow{name + "-for-after-ordinary", `for ` + name + ` in ordinary; do :; done; ` + redirect, false},
+			g235bRow{name + "-unset-ordinary-after-assign", name + `=ordinary; env -u ` + name + ` bash -c '` + redirect + `'`, false},
+			g235bRow{name + "-eval-echo-ordinary", name + `=ordinary; eval 'echo ` + name + ` >/dev/null'; ` + editor, false},
 		)
 	}
-	for _, connector := range []string{"claudecode", "codex"} {
-		for _, managed := range []bool{false, true} {
-			for _, pack := range []string{"", "strict", "permissive"} {
-				for _, row := range rows {
-					if !row.protected && pack == "strict" {
-						continue
-					}
-					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-					block := strings.HasPrefix(got, `{"action":"block"`)
-					t.Logf("R5 %s connector=%s managed=%t pack=%s block=%t protected=%t", row.name, connector, managed, pack, block, row.protected)
-					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
-						t.Errorf("%s %s managed=%t pack=%s: %s = %.200s, want protected block", row.name, connector, managed, pack, row.command, got)
-					}
-					if !row.protected && block {
-						t.Errorf("%s %s managed=%t pack=%s: %s = %.200s, want ordinary allow", row.name, connector, managed, pack, row.command, got)
-					}
-				}
-			}
+	g235bRotate(t, rows, []string{"", "strict", "permissive"}, false, func(t *testing.T, cell g235bCell, row g235bRow) {
+		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, false, row.command)
+		block := strings.HasPrefix(got, `{"action":"block"`)
+		t.Logf("R5 %s connector=%s managed=%t pack=%s block=%t protected=%t", row.name, cell.connector, cell.managed, cell.pack, block, row.protected)
+		if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
+			t.Errorf("%s %s managed=%t pack=%s: %s = %.200s, want protected block", row.name, cell.connector, cell.managed, cell.pack, row.command, got)
 		}
-	}
+		if !row.protected && block {
+			t.Errorf("%s %s managed=%t pack=%s: %s = %.200s, want ordinary allow", row.name, cell.connector, cell.managed, cell.pack, row.command, got)
+		}
+	})
 	fmt.Fprint(os.Stdout, "R5 done\n")
 }

@@ -1128,7 +1128,13 @@ func TestManagedAIDOnly_NativeHookSelectedAllowAccountsAfterCancellation(t *test
 	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
 	api.scannerCfg.Guardrail.Connector = "hermes"
 	api.SetCiscoInspector(inspector)
+	// The client of this call leaves before its answer, which the hook
+	// capacity counter takes as a managed deadline outcome and exports as its
+	// own metric (S8 DESIGN 18). This test pins the AID fail-open metric, so
+	// the capacity export stays off here; the count itself is asserted below.
+	withHookCapacity(t, time.Now())
 	api.bindObservabilityV8Lifecycle(capture)
+	hookCapacity.setSink(nil)
 
 	request := httptest.NewRequest(
 		http.MethodPost,
@@ -1153,6 +1159,16 @@ func TestManagedAIDOnly_NativeHookSelectedAllowAccountsAfterCancellation(t *test
 	}
 	if len(capture.deadlineRemaining) != 1 || capture.deadlineRemaining[0] <= 0 || capture.deadlineRemaining[0] > time.Second {
 		t.Fatalf("metric deadline remaining=%v, want one live <=1s bound", capture.deadlineRemaining)
+	}
+	// One deadline outcome by the no-answer fail mode of the connector on
+	// this OS (closed: a deadline deny; open, as hermes is on Windows: a late
+	// allow).
+	want := HookCapacityCounts{DeadlineDenies: 1}
+	if api.scannerCfg.EffectiveHookOutageFailModeForConnector("hermes") == "open" {
+		want = HookCapacityCounts{LateAllows: 1}
+	}
+	if got := hookCapacity.snapshot().Window; got != want {
+		t.Fatalf("hook capacity = %+v, want %+v for the call whose client left", got, want)
 	}
 }
 
@@ -2545,7 +2561,7 @@ func TestHookManagedAIDOnly_SecureClientPreToolUseWire(t *testing.T) {
 		},
 	} {
 		t.Run(test.connector, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			var gotBody []byte
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
@@ -2664,7 +2680,7 @@ func TestHookManagedAIDOnly_SecureClientPermissionRequestWithoutArgsStaysText(t 
 		{"codex blank name", "codex", codexHeaders, func(p map[string]interface{}) { p["tool_name"] = "" }, "Tool call: Bash\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			installCorrelationHMACForTest()
+			installCorrelationHMACForTest(t)
 			var gotBody []byte
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
@@ -2746,7 +2762,7 @@ func TestHookManagedAIDOnly_ToolCallFollowsResolvedContract(t *testing.T) {
 				name = test.connector + "/declared"
 			}
 			t.Run(name, func(t *testing.T) {
-				installCorrelationHMACForTest()
+				installCorrelationHMACForTest(t)
 				var gotBody []byte
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					gotBody, _ = io.ReadAll(r.Body)

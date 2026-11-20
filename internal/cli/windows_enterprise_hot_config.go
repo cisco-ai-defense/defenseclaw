@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -176,7 +177,7 @@ func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) 
 // ensure or a no-op ensure and the next Repair over a hand edit was refused
 // (GAP-0854).
 func windowsStandaloneLifecycleLockPath() (string, error) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return "", fmt.Errorf("resolve the lifecycle lock folder: %w", err)
 	}
@@ -357,7 +358,7 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 	if err != nil {
 		return false
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return false
 	}
@@ -456,7 +457,7 @@ func windowsEnterpriseHotConfigApply(
 	if config.NeedsMigrationV9(next) {
 		return unavailable("the staged config needs a config_version migration")
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return unavailable("cannot resolve the trusted enterprise roots: " + err.Error())
 	}
@@ -1572,12 +1573,23 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 // before its report (the authorization directory resolved to a path that
 // does not exist), so no hook proof could pass (GAP-1418).
 func windowsEnterpriseHotConfigReadinessCommand(ctx context.Context, installedGateway string, layout managed.StandaloneLayout) *exec.Cmd {
+	command := exec.CommandContext(ctx, installedGateway, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseGuardianRecordPins(layout, managed.StandaloneWindowsGatewaySvc))
+	return command
+}
+
+// windowsEnterpriseGuardianRecordPins are the service pins plus the two the
+// guardian's protected records need: its authorization directory and the
+// gateway service name. A process that reads or writes those records as the
+// services do (readiness, hook-image retire's Codex requirements reconcile
+// and runtime selector step) carries all seven; without the authorization
+// directory the Codex requirements layout refused with "must be an exact
+// absolute protected path" (rel-1-0-10 GAP-0856, GAP-1418).
+func windowsEnterpriseGuardianRecordPins(layout managed.StandaloneLayout, gatewayService string) map[string]string {
 	pins := windowsEnterpriseServicePins(layout)
 	pins[managed.HookGuardianAuthorizationDirEnv] = layout.GuardianAuthDir
-	pins[gwconnector.WindowsGatewayServiceNameEnv] = managed.StandaloneWindowsGatewaySvc
-	command := exec.CommandContext(ctx, installedGateway, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
-	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), pins)
-	return command
+	pins[gwconnector.WindowsGatewayServiceNameEnv] = gatewayService
+	return pins
 }
 
 // windowsHotConfigUnprovenTargets returns each of targets whose readiness row is
@@ -1786,7 +1798,7 @@ type windowsEnterpriseFreshRewrite struct {
 // trusted again, a transaction is pending (its recovery restores its own
 // preimage), or the lock is busy (the transaction then refuses the file).
 func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrite windowsEnterpriseFreshRewrite) (windowsEnterpriseReplacedFile, error) {
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return windowsEnterpriseReplacedFile{}, nil
 	}
@@ -1881,7 +1893,7 @@ func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (windo
 			sddl: windowsConfigFileSDDL(service.String()), approved: next,
 		})
 	}
-	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	roots, err := hookcli.WindowsManagedLayout.Roots(managed.ProfileStandalone)
 	if err != nil {
 		return windowsEnterpriseReplacedFile{}, nil
 	}

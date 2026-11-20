@@ -1128,6 +1128,9 @@ func simpleExpandPlainWords(commands []SimpleCommand, plain *simplePlainWords) (
 		return commands, true
 	}
 	var expanded []SimpleCommand
+	// The readings of a body in another folder (bodyReading) come on top of
+	// the budget, as in simpleCommands (rel-1-0-10:GAP-1228).
+	readings := 0
 	for _, command := range commands {
 		variants := []SimpleCommand{command}
 		for _, token := range plain.tokens {
@@ -1148,9 +1151,12 @@ func simpleExpandPlainWords(commands []SimpleCommand, plain *simplePlainWords) (
 		for _, variant := range variants {
 			if !slices.Contains(expanded, variant) {
 				expanded = append(expanded, variant)
+				if variant.bodyReading {
+					readings++
+				}
 			}
 		}
-		if len(expanded) > maxSimpleEvaluations {
+		if len(expanded)-readings > maxSimpleEvaluations {
 			return nil, false
 		}
 	}

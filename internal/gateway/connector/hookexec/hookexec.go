@@ -324,6 +324,10 @@ type Options struct {
 	// Event is the agent hook event used for deadlines and failure logs. Claude
 	// Code supplies it in the payload when the CLI flag is omitted.
 	Event string
+	// eventBound is set when the registered command named Event (Run): the
+	// agent runs that registration for that event only. An event read from
+	// the payload may be a duplicated key the agent reads otherwise.
+	eventBound bool
 	// gatewayRefusal is what a per-user hook the gateway refused with an
 	// error status shows in the agent (perUserRefusalText); doRequest sets it.
 	gatewayRefusal string
@@ -334,6 +338,13 @@ type Options struct {
 	// answeredErrorStatus records an HTTP refusal seen before a retry. A
 	// failed retry cannot turn that answered error into an outage allow.
 	answeredErrorStatus int
+	// answeredErrorOverBudget is callerOverBudget as the watchdog answer
+	// for answeredErrorStatus was last rendered with.
+	answeredErrorOverBudget bool
+	// callerOverBudget: the last 429 named this account own budget
+	// (callerBusyReason), not a full gateway. A call that ends in its 429
+	// resends then says the account is over its limit (S8 review P3-8).
+	callerOverBudget bool
 	// managedNoAnswerCode is managedNoAnswerReason read once for a call the
 	// watchdog answers, so its answer and its failure row agree.
 	managedNoAnswerCode string
@@ -556,6 +567,7 @@ type Options struct {
 // by synchronous PreToolUse stdout {"decision":"deny"}; no Antigravity
 // behavior relies on a non-zero process exit code.
 func Run(ctx context.Context, opts Options) int {
+	opts.eventBound = strings.TrimSpace(opts.Event) != ""
 	if watchdog := opts.AnswerWatchdog; watchdog != nil {
 		// The hook command armed the watchdog before it resolved the
 		// runtime (GAP-0155): every answer of the call, the early ones
@@ -1024,6 +1036,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	opts.answerBy = gatewayAnswerDeadline(opts, opts.StartedAt, time.Now())
 	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
+	// A per-user prompt, tool result or stop event has no answer deadline: a
+	// probe tells a frozen gateway from a busy one (GAP-1107).
+	ctx, stopFrozenWatch, releaseFrozenWatch := watchPerUserFrozenGateway(ctx, opts)
 	// Reuse the account, session, asset facts and resolved write paths on
 	// every retry of this call.
 	// A try that must have its connection within the restart budget
@@ -1035,6 +1050,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		}
 		releaseWatch()
 		releaseAnswer()
+		releaseFrozenWatch()
 	}
 	handedOff := false
 	defer func() {
@@ -1109,6 +1125,13 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
 	}
+	stopFrozenWatch()
+	if err != nil && perUserGatewayFrozen(ctx) {
+		// The gateway took the call, and a probe of its verified listener
+		// got no answer either: it is frozen, an outage, as a frozen gateway
+		// that accepts nothing is (GAP-1107).
+		return failPerUserListenerUnanswered(opts, sp, failMode)
+	}
 	// A managed gateway that is restarting refuses the connection, or drops
 	// one it accepted as it exits: send the call again, to the gateway that
 	// starts, until the restart budget ends. Every try verifies the peer
@@ -1158,6 +1181,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if err != nil {
 			return
 		}
+		if resp != nil && resp.StatusCode == http.StatusTooManyRequests && !opts.SecureClient {
+			// Read before the refusal is marked: the watchdog answer is
+			// rendered from this copy of opts, and again when a resend's
+			// 429 changes it (markManagedAnsweredError).
+			opts.callerOverBudget = callerBudgetRefusal(resp)
+		}
 		markManagedAnsweredError(&opts, sp, resp.StatusCode)
 		if resp != nil && !opts.SecureClient &&
 			(resp.StatusCode >= 200 && resp.StatusCode < 300 || managedNativeDecision(opts)) {
@@ -1186,7 +1215,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < retries; retry++ {
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
-		if !opts.answerBy.IsZero() && callerBudgetRefusal(resp) {
+		if !opts.answerBy.IsZero() && opts.callerOverBudget {
 			delay = min(delay, hookCallerBusyRetryDelay)
 		}
 		_ = resp.Body.Close()
@@ -1198,7 +1227,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			if gatewayNoAnswer(ctx) {
 				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
-			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), "gateway busy")
+			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedBusyRefusal(opts))
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -1208,7 +1237,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
 			// The gateway answered 429: it is up, so no outage applies.
-			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), "gateway busy")
+			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedBusyRefusal(opts))
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
@@ -1556,6 +1585,10 @@ func failAfterErrorStatus(opts Options, sp spec, failMode string, status int) in
 		return failNoAnswer(opts, sp, failMode)
 	}
 	if status == http.StatusTooManyRequests {
+		if opts.callerOverBudget {
+			// One account over its own budget, not the computer at capacity.
+			return failUnreachable(opts, sp, "closed", managedCallerOverLimitRefusal)
+		}
 		return failUnreachable(opts, sp, "closed", managedGatewayNoAnswerReason)
 	}
 	reason := fmt.Sprintf("gateway returned HTTP %d", status)
@@ -1612,6 +1645,27 @@ const (
 // evaluation, and a slot of the account frees as soon as one of its calls
 // ends.
 var hookCallerBusyRetryDelay = 250 * time.Millisecond
+
+// managedGatewayBusyRefusal is the recorded reason of a call whose resend
+// after a 429 could not fit its answer budget: the gateway runs and is busy.
+// A managed hook names capacity for it (managedStandaloneFailClosedText).
+const managedGatewayBusyRefusal = "gateway busy"
+
+// managedCallerOverLimitRefusal is the recorded reason and the shown code
+// when the last 429 of the resends named the account own budget: one account
+// over its limit, not the whole computer at capacity (S8 review P3-8). It is
+// the documented code of that refusal, and not outage-shaped: the gateway
+// answered.
+const managedCallerOverLimitRefusal = callerBusyReason
+
+// managedBusyRefusal is the reason of a call whose 429 resends ended before
+// its answer budget did.
+func managedBusyRefusal(opts Options) string {
+	if opts.callerOverBudget {
+		return managedCallerOverLimitRefusal
+	}
+	return managedGatewayBusyRefusal
+}
 
 // callerBusyReason is the reason of a 429 for one caller's own budget
 // (hook_caller_limits.go managedHookReasonRateLimited); a full gateway
@@ -1787,7 +1841,7 @@ func sendHookRequest(
 		// this request's gateway has advertised receipt support. Until then,
 		// the original context still bounds connection and body release.
 		deadlineCtx, cancelDeadline := context.WithDeadline(
-			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait))
+			context.WithoutCancel(req.Context()), opts.answerWatch.ceiling.Add(answerWatchdogLogWait.Load()))
 		transportCtx, cancelWithCause := context.WithCancelCause(deadlineCtx)
 		cancelTransport := func() {
 			cancelWithCause(nil)
@@ -2195,8 +2249,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return 0
 
 	case styleHookDecisionStderr:
-		// Mirror kiro-hook.sh: stdout stays empty, and a hook_output
-		// decision of deny or block is reported on stderr with exit 2.
+		// Mirror kiro-hook.sh: a hook_output decision of deny or block is
+		// reported on stderr with exit 2, and stdout stays empty except for
+		// the v3 prompt note (KiroV3PromptCheckedNote).
 		if output != "" {
 			if d := decodeDecision(output); d == "deny" || d == "block" {
 				if reason := decodeReason(output); reason != "" {
@@ -2204,6 +2259,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 				}
 				return blockExit
 			}
+		}
+		if kiroV3PromptNote(opts) {
+			fmt.Fprintln(opts.Stdout, KiroV3PromptCheckedNote)
 		}
 		return 0
 
@@ -2244,12 +2302,18 @@ func managedNativeDecision(opts Options) bool {
 
 // markManagedAnsweredError makes the first HTTP error decisive for the
 // watchdog and every later failure path. A later valid verdict can still
-// decide the call; a failed retry cannot become a gateway outage.
+// decide the call; a failed retry cannot become a gateway outage. The
+// watchdog answer is rendered again when a resend's 429 changes whether it
+// names the account's own budget: a call that met a full gateway first and
+// then its account's limit (or the reverse) and was answered by the watchdog
+// named the first refusal (GAP-0742 N2). Only the text changes; the answer
+// stays closed.
 func markManagedAnsweredError(opts *Options, sp spec, status int) {
-	if !managedNativeDecision(*opts) || status >= 200 && status < 300 || opts.answeredErrorStatus == status {
+	if !managedNativeDecision(*opts) || status >= 200 && status < 300 ||
+		opts.answeredErrorStatus == status && opts.answeredErrorOverBudget == opts.callerOverBudget {
 		return
 	}
-	opts.answeredErrorStatus = status
+	opts.answeredErrorStatus, opts.answeredErrorOverBudget = status, opts.callerOverBudget
 	opts.answerWatch.closeForAnsweredError(*opts, sp)
 }
 
@@ -2996,7 +3060,19 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 		// call, which every Claude Code surface shows (cowork-1-0-8 GAP-0040).
 		events = []string{"UserPromptSubmit", "PreToolUse"}
 	case sp.connector == "codex":
-		events = []string{"SessionStart", "PreToolUse"}
+		// Codex shows a UserPromptSubmit systemMessage too ("surfaced as a
+		// warning", Codex hooks reference; user-prompt-submit.command.output
+		// of codex-cli 0.169). A session that was running when the gateway
+		// stopped and whose next turn is a prompt with no tool call got no
+		// warning at all: its model request then failed on the stopped
+		// route with only Codex's own "Reconnecting" (rel-1-0-10 GAP-1168).
+		// The once-per-session marker keeps a new session at one warning
+		// (its SessionStart takes it). Secure Client keeps its established
+		// events, as its shell render keeps its pinned bytes.
+		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
+		if opts.SecureClient {
+			events = []string{"SessionStart", "PreToolUse"}
+		}
 	case copilotCLIOutageNotice(sp):
 		events, field = []string{"postToolUse"}, "additionalContext"
 	default:
@@ -4227,6 +4303,20 @@ func emitManagedClaudeBlock(opts Options, reason string) int {
 		fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s}\n", encoded)
 	case "PreToolUse":
 		fmt.Fprintf(opts.Stdout, "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":%s}}\n", encoded)
+	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
+		if !opts.eventBound {
+			// The event came from the payload, where a duplicated key can
+			// name another event than the one Claude Code runs: only exit 2
+			// blocks every event.
+			fmt.Fprintln(opts.Stderr, reason)
+			return blockExit
+		}
+		// The block a policy verdict gives these events. An exit-2 block
+		// made Claude Code print the whole registered command before the
+		// reason: on Windows the cmd.exe hook-guard line with its paths
+		// (GAP-1107). The reason reaches the model; the user sees only
+		// systemMessage (GAP-0605).
+		fmt.Fprintf(opts.Stdout, "{\"decision\":\"block\",\"reason\":%s,\"systemMessage\":%s}\n", encoded, encoded)
 	default:
 		fmt.Fprintln(opts.Stderr, reason)
 		return blockExit
@@ -4379,12 +4469,26 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		cause, advice = "the DefenseClaw gateway is restarting to apply a change on this computer",
 			"Try again in a few seconds; if this continues, contact your administrator."
 		code = reason
-	case reason == managedGatewayNoAnswerReason:
-		// A restart, an upgrade, a repair or a busy host: the gateway gave
-		// no decision within the tool call's answer budget (GAP-0155).
-		cause, advice = "the DefenseClaw gateway did not answer in time (it may be restarting or busy)",
-			"Try again in a few seconds; if this continues, contact your administrator."
-		code = reason
+	case reason == managedGatewayNoAnswerReason || reason == managedGatewayBusyRefusal:
+		// The gateway gave no decision within the answer budget (GAP-0155),
+		// or kept refusing the call with 429. A stopped or restarting
+		// gateway has its own reason above, so this is a gateway that runs
+		// and is at capacity (or hung): say capacity, not policy, and where
+		// the load shows (owner decision on H1, S8 DESIGN 18).
+		cause, advice = "DefenseClaw on this computer is at capacity or not responding, so it could not finish checking this "+
+			hookEventSubject(event)+" in time. This is not a policy decision",
+			"Try again in a few seconds; if this keeps happening, ask your administrator to check DefenseClaw on this computer: `"+
+				managedStatusCommand(runtime.GOOS)+"` shows the recent hook load."
+		code = managedGatewayNoAnswerReason
+	case reason == managedCallerOverLimitRefusal:
+		// One account sent more hook calls than its own budget allows (a
+		// loop, many parallel agents): the gateway kept refusing this call
+		// until its answer budget ended. Other accounts are not affected.
+		cause, advice = "this account sent more agent hook calls than its DefenseClaw limit allows at once, so DefenseClaw could not check this "+
+			hookEventSubject(event)+" in time. This is not a policy decision",
+			"Wait a few seconds or run fewer agents or parallel tool calls at once; if this keeps happening, ask your administrator: `"+
+				managedStatusCommand(runtime.GOOS)+"` shows the recent hook load."
+		code = callerBusyReason
 	case reason == managedGatewayPortHeldReason:
 		cause, advice = "another program is using the DefenseClaw gateway's port on this computer, so DefenseClaw cannot check it",
 			"Ask your administrator to check DefenseClaw on this computer: `"+managedStatusCommand(runtime.GOOS)+"` names the program."

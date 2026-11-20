@@ -31,12 +31,8 @@ func TestTypedReadThroughLinkListsTheFileTheLinkReaches(t *testing.T) {
 		}
 	}
 	linked, ordinaryLink := filepath.Join(project, "lnk-netrc"), filepath.Join(project, "lnk-notes")
-	if err := os.Symlink(secret, linked); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(ordinary, ordinaryLink); err != nil {
-		t.Fatal(err)
-	}
+	testSymlink(t, secret, linked)
+	testSymlink(t, ordinary, ordinaryLink)
 	t.Setenv("HOME", project)
 	for _, tool := range []string{"Read", "read_file"} {
 		targets := resolvedEvidence(t, "claudecode", project, tool, map[string]interface{}{"file_path": linked, "path": linked})

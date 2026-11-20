@@ -152,7 +152,12 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			}
 			name, ok := StaticWord(redirect.Word, home)
 			if !ok {
-				if s.changed && (!s.known || sameShellDirectory(s.physical, filepath.Join(home, ".ssh"))) {
+				// A target spelled from the root (/tmp/check.$$) opens the
+				// same file in every directory: the directory change does not
+				// make it unknown. The readers of dynamic targets judge it as
+				// they do with no directory change (rel-1-0-10:GAP-0839).
+				if s.changed && (!s.known || sameShellDirectory(s.physical, filepath.Join(home, ".ssh"))) &&
+					!rootLiteralWord(redirect.Word) {
 					unknown = true
 				}
 				continue
@@ -174,7 +179,7 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 			ownCopies[literal]++
 		}
 		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
-		facts := actionfacts.Analyze(inner)
+		facts := analyzeAtHookFolder(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
 		for i, redirect := range redirects {
 			occurrence := RedirectOccurrence{Path: redirect}
@@ -738,4 +743,15 @@ func directoryCreationFact(facts actionfacts.Facts, candidate actionfacts.PathFa
 		}
 	}
 	return false
+}
+
+// rootLiteralWord reports a word whose first part is unquoted plain text
+// starting at the root (/), so its expansion names a path from the root
+// whatever the working directory.
+func rootLiteralWord(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	return ok && strings.HasPrefix(lit.Value, "/")
 }

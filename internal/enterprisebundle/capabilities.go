@@ -117,6 +117,7 @@ func capabilitySet(raw []byte) (map[string]bool, error) {
 			}
 		}
 	}
+	routingAdminCapabilities(root, on)
 	on["machine_policy.default"] = !isOff(field("enterprise", "machine_policy", "default", "ownership"))
 	if policy := field("enterprise", "machine_policy"); policy != nil && policy.Kind == yaml.MappingNode {
 		if connectors := nodeAt(policy, "connectors"); connectors != nil && connectors.Kind == yaml.MappingNode {

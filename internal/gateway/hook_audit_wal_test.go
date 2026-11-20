@@ -41,7 +41,7 @@ const hookAuditCommitsPerCall = 5
 // v8 runtime over five sessions and counts the log frames of the measured
 // calls.
 func TestHookCallWALFramesBounded(t *testing.T) {
-	installCorrelationHMACForTest()
+	installCorrelationHMACForTest(t)
 	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixture(t, true)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))

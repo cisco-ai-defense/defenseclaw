@@ -27,6 +27,9 @@ import (
 // them see the same answer. A nil memo reads the file system every time.
 type TargetMemo struct {
 	mu sync.Mutex
+	// excuseNonWrites makes the mention scan leave a protected name alone when
+	// the statement that holds it only reads (ActionMentionsNoWriteRole).
+	excuseNonWrites bool
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -43,6 +46,8 @@ type TargetMemo struct {
 	// resolved are the answers of resolveWriteTarget by the exact path: the
 	// scans of one call ask for the same operands again (GAP-0483).
 	resolved map[string]resolvedTarget
+	// entries are the answers of stateEntryMayDiffer by the exact path.
+	entries map[string]stateEntry
 	// The shared reach reader keeps complete names and per-parent answers.
 	reachNames   map[string]reachNames
 	reachParents map[reachParentKey]reachParentAnswer
@@ -51,14 +56,33 @@ type TargetMemo struct {
 	// Windows candidate checks among them (WorkParts).
 	work       int
 	candidates int
+	// call is the memory of the hook call the memo was made in, when the call
+	// keeps one (memoHookCall): the memo resolves its write targets there.
+	call *TargetMemo
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not
 // kept. A call under the hook payload cap has fewer distinct words.
 const maxTargetMemoEntries = 1 << 16
 
-// NewTargetMemo returns an empty memo for one evaluation.
+// NewTargetMemo returns an empty memo for one evaluation. Made in a hook call
+// that keeps a memory of the file system (memoHookCall), it resolves its write
+// targets and state entries in the call's memory: the gateway and the scans
+// make a memo for each evaluation of the call, and each walked the same paths
+// again. A Codex call on Windows whose command named a script behind the
+// system's link bound walked the 63 links once per memo, 7,000 lstat calls
+// and 0.7 s of its answer (rel-1-0-10:GAP-0447). The answers depend only on
+// the path and the file system, which is the same for the whole decision.
 func NewTargetMemo() *TargetMemo {
+	memo := newTargetMemo()
+	if call := memoHookCall(); call != nil {
+		memo.call = call.targets()
+	}
+	return memo
+}
+
+// newTargetMemo is an empty memo that keeps its own answers.
+func newTargetMemo() *TargetMemo {
 	return &TargetMemo{
 		prefixes: make(map[string]walkState),
 		words:    make(map[memoWordKey]bool),
@@ -66,6 +90,7 @@ func NewTargetMemo() *TargetMemo {
 		keys:     make(map[string][]string),
 		files:    make(map[string]protectedFiles),
 		resolved: make(map[string]resolvedTarget),
+		entries:  make(map[string]stateEntry),
 	}
 }
 
@@ -234,6 +259,9 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 	if m == nil {
 		return ResolveWriteTarget(path)
 	}
+	if m.call != nil {
+		return m.call.resolveWriteTarget(path)
+	}
 	writeTargetWalks.Add(1)
 	m.mu.Lock()
 	known, found := m.resolved[path]
@@ -249,3 +277,38 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 	m.mu.Unlock()
 	return resolved, ok
 }
+
+// stateEntry is one answer of actionStateEntryMayDiffer.
+type stateEntry struct{ differ, missing bool }
+
+// stateEntryMayDiffer is actionStateEntryMayDiffer through the memo. The
+// state scans ask for the entry of the same word in every statement and
+// every reading of the call, and on Windows the Lstat of a name behind folder
+// links first walks each link of it for the share check: a word behind the
+// system's link bound cost a Codex call 77 walks of 63 links, 0.8 s
+// (rel-1-0-10:GAP-0447).
+func (m *TargetMemo) stateEntryMayDiffer(value string) (differ, missing bool) {
+	if m == nil {
+		return actionStateEntryMayDiffer(value)
+	}
+	if m.call != nil {
+		return m.call.stateEntryMayDiffer(value)
+	}
+	m.mu.Lock()
+	known, found := m.entries[value]
+	m.mu.Unlock()
+	if found {
+		return known.differ, known.missing
+	}
+	differ, missing = actionStateEntryMayDiffer(value)
+	m.mu.Lock()
+	if len(m.entries) < maxTargetMemoEntries {
+		m.entries[value] = stateEntry{differ: differ, missing: missing}
+	}
+	m.mu.Unlock()
+	return differ, missing
+}
+
+// nonWritesExcused is set for the scan ActionMentionsNoWriteRole runs; a nil memo
+// (a scan that carries none) never excuses.
+func (m *TargetMemo) nonWritesExcused() bool { return m != nil && m.excuseNonWrites }

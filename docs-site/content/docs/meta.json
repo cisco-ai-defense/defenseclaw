@@ -13,6 +13,7 @@
     "ai-discovery",
     "segmentation",
     "sandboxes",
+    "substrate",
     "acp-guard",
     "hitl",
     "---Integrations---",

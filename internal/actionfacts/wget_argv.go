@@ -104,6 +104,24 @@ type wgetArgvParse struct {
 	convertLinks   bool
 	recursive      bool
 	pageRequisites bool
+	// responseMoved is set by an option that changes the name or the place
+	// of the file wget saves the response to (-P, -x, -c, -E,
+	// --content-disposition); the options of the closed table that leave
+	// that alone (timeouts, tries, headers, user agent, method, ...) keep a
+	// plain upload's response name known (GAP-0768).
+	responseMoved bool
+}
+
+// movesResponse reports an option that changes where or under what name wget
+// saves the response.
+func (spec wgetOptionSpec) movesResponse(flagSet bool) bool {
+	switch spec.name {
+	case "--directory-prefix":
+		return true
+	case "--force-directories", "--continue", "--adjust-extension", "--content-disposition":
+		return flagSet
+	}
+	return false
 }
 
 // provesResponseStdout reports whether the closed argv grammar establishes
@@ -601,6 +619,9 @@ func applyWgetFlag(
 	spec wgetOptionSpec,
 	optionIndex int,
 ) {
+	if spec.movesResponse(spec.flagValue) {
+		parsed.responseMoved = true
+	}
 	switch spec.effect {
 	case wgetEffectPreview:
 		parsed.Preview = spec.flagValue
@@ -648,6 +669,9 @@ func applyWgetValue(
 	optionIndex int,
 	valueIndex int,
 ) {
+	if spec.movesResponse(true) {
+		parsed.responseMoved = true
+	}
 	switch spec.effect {
 	case wgetEffectConfigFile:
 		parsed.ConfigIndirect = true

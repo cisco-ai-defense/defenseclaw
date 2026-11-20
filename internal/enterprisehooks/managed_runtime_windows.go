@@ -240,9 +240,10 @@ func windowsLongPathName(path string) (string, bool) {
 }
 
 // windowsManagedHookExecutableMismatch classifies an invoking executable that
-// differs from the policy executable. When both name the same file once short
-// (8.3) components are expanded, only the invocation path drifted; any other
-// executable is a boundary.
+// differs from the policy executable. When both name the same file, or two
+// images of the same managed hook (GAP-0751), once short (8.3) components are
+// expanded, only the invocation path drifted; any other executable is a
+// boundary.
 func windowsManagedHookExecutableMismatch(
 	result *WindowsManagedHookRuntime,
 	connectorName string,
@@ -259,7 +260,7 @@ func windowsManagedHookExecutableMismatch(
 	)
 	longInvoked, invokedOK := windowsManagedHookLongPath(invoked)
 	longPolicy, policyOK := windowsManagedHookLongPath(policy)
-	if !invokedOK || !policyOK || !sameWindowsEnterprisePath(longInvoked, longPolicy) {
+	if !invokedOK || !policyOK || !sameWindowsManagedHookImage(longInvoked, longPolicy) {
 		return windowsManagedRuntimeBoundaryError(err)
 	}
 	result.FailMode = windowsManagedRuntimeTrustedFailMode(connectorName, targetSID, policyFailMode)
@@ -532,7 +533,7 @@ func resolveWindowsCursorManagedHookRuntime(
 		return result, nil
 	}
 	result.PolicyActive = true
-	if !sameWindowsEnterprisePath(target.hookExecutable, hookExecutable) {
+	if !sameWindowsManagedHookImage(target.hookExecutable, hookExecutable) {
 		return result, windowsManagedHookExecutableMismatch(
 			&result,
 			"cursor",
@@ -618,7 +619,7 @@ func resolveWindowsClaudeManagedHookRuntime(
 	if err := connector.ValidateWindowsManagedGatewayServiceName(target.gatewayServiceName); err != nil {
 		return result, windowsManagedRuntimeBoundaryError(err)
 	}
-	if !sameWindowsEnterprisePath(target.hookExecutable, hookExecutable) {
+	if !sameWindowsManagedHookImage(target.hookExecutable, hookExecutable) {
 		return result, windowsManagedHookExecutableMismatch(
 			&result,
 			"claudecode",

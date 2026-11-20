@@ -138,8 +138,17 @@ func TestCorrelationIDsSurviveARollbackTo103(t *testing.T) {
 			t.Fatalf("late attachment returned %s %+v %s", againIdentifier, againRelationship, againEvidence)
 		}
 	}
+	// The evidence is the source the relationship's from node implies: it is
+	// not stored (S8 R5), and QueryGraph builds it with the 1.0.3 ID.
+	graph, err := repo.QueryGraph(t.Context(), CorrelationGraphQuery{Anchor: CorrelationAnchor{SemanticEventID: semantic}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Evidence) != 1 || graph.Evidence[0].EvidenceID != wantEvidence {
+		t.Fatalf("graph evidence %+v, want the one row %s", graph.Evidence, wantEvidence)
+	}
 	for table, want := range map[string]int{
-		"correlation_identifiers": 1, "correlation_relationships": 1, "correlation_relationship_evidence": 1,
+		"correlation_identifiers": 1, "correlation_relationships": 1, "correlation_relationship_evidence": 0,
 	} {
 		var count int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
@@ -197,6 +206,106 @@ func TestCorrelationLookupsUseUniqueIndexesAfterTheTrim(t *testing.T) {
 		got := plan(check.query)
 		if !strings.Contains(got, check.index) {
 			t.Fatalf("plan %q does not use %s", got, check.index)
+		}
+	}
+}
+
+// TestCorrelationGraphLookupsUseAnIndexAfterTheR5Trim pins that the
+// pending-operation and relationship indexes trimUnreadAuditIndexes drops
+// since S8 R5 are not needed: the graph load, the pending-operation lookups
+// and the retention batches still seek an index of those tables, never read
+// them whole.
+func TestCorrelationGraphLookupsUseAnIndexAfterTheR5Trim(t *testing.T) {
+	store, _ := newCorrelationTestStore(t)
+	for _, name := range []string{
+		"idx_correlation_pending_exact", "idx_correlation_relationships_from", "idx_correlation_relationships_status",
+	} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("index %s kept", name)
+		}
+	}
+	plan := func(query string) string {
+		t.Helper()
+		args := make([]any, strings.Count(query, "?"))
+		for index := range args {
+			args[index] = "x"
+		}
+		rows, err := store.db.Query(`EXPLAIN QUERY PLAN `+query, args...)
+		if err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		defer rows.Close()
+		var lines []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail sql.NullString
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			lines = append(lines, detail.String)
+		}
+		return strings.Join(lines, "; ")
+	}
+	load, _ := correlationRelationshipLoadStatement(CorrelationAnchor{SessionID: "s"},
+		[]SemanticEventID{"e1", "e2"}, []CorrelationObservation{{RecordID: "r"}})
+	checks := []struct {
+		name, query string
+		uses        []string
+		scans       []string
+	}{
+		{"loadRelationships", load,
+			[]string{"sqlite_autoindex_correlation_relationships_2", "idx_correlation_relationships_to"},
+			[]string{"SCAN correlation_relationships"}},
+		{"ResolvePendingOperation", correlationPendingResolveSQL,
+			[]string{"sqlite_autoindex_correlation_pending_operations_1"},
+			[]string{"SCAN correlation_pending_operations", "SCAN other"}},
+		{"ResolvePendingOperation Secure Client", correlationPendingMarkResolvedSQL,
+			[]string{"sqlite_autoindex_correlation_pending_operations_1"},
+			[]string{"SCAN correlation_pending_operations"}},
+		{"SettleReceipt", correlationReceiptSettleSQL, nil,
+			[]string{"SCAN correlation_receipts"}},
+		{"ResolvePendingOperation exact", correlationPendingExactStatusSQL,
+			[]string{"sqlite_autoindex_correlation_pending_operations_1"},
+			[]string{"SCAN correlation_pending_operations"}},
+		{"ResolvePendingOperation other scope", correlationPendingOtherScopeSQL, nil,
+			[]string{"SCAN correlation_pending_operations"}},
+		{"PutPendingOperation collision", correlationPendingSelect + `
+			WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
+			AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=?`,
+			[]string{"sqlite_autoindex_correlation_pending_operations_1"},
+			[]string{"SCAN correlation_pending_operations"}},
+	}
+	for _, class := range []RetentionTableClass{
+		RetentionCorrelationRelationships, RetentionCorrelationEvents, RetentionCorrelationPending,
+	} {
+		statement, err := correlationRetentionDeleteStatement(class)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checks = append(checks, struct {
+			name, query string
+			uses        []string
+			scans       []string
+		}{"retention " + string(class), statement, nil,
+			[]string{"SCAN relationship", "SCAN correlation_relationships", "SCAN operation"}})
+	}
+	for _, check := range checks {
+		got := plan(check.query)
+		for _, index := range check.uses {
+			if !strings.Contains(got, index) {
+				t.Errorf("%s does not use %s: %s", check.name, index, got)
+			}
+		}
+		for _, line := range strings.Split(got, "; ") {
+			for _, scan := range check.scans {
+				if strings.HasPrefix(line, scan+" ") || line == scan {
+					t.Errorf("%s reads its table whole (%q): %s", check.name, line, got)
+				}
+			}
 		}
 	}
 }

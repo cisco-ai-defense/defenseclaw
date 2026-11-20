@@ -308,6 +308,7 @@ Hook setup aliases (`setup codex`, `setup claude-code` and the rest) add or reco
 | `defenseclaw setup registry` | Interactive wizard that registers a skill or MCP catalog; the same as `defenseclaw registry wizard`. See [Registries](#registries). |
 | `defenseclaw setup migrate-llm [--dry-run] [--no-backup]` | Rewrite a `config.yaml` that still carries pre-v5 `inspect_llm`, `default_llm_*` or guardrail LLM fields into the unified `llm:` block, writing `config.yaml.bak` first unless `--no-backup`. On a current config it prints `Config already in v5 shape — nothing to migrate.` |
 | `defenseclaw setup routing --enable\|--disable\|--status` | Configure or inspect semantic model routing for proxy-mode OpenAI Chat Completions traffic. Managed mode requires Docker; all config changes activate on gateway restart. See [Semantic routing](/docs/guardrail/semantic-routing). |
+| `defenseclaw setup tokenomics [--enable\|--disable\|--status\|--seed-pricing] [--json]` | Turn per-call model usage and cost on or off and seed the reviewed default price table when `config.yaml` has none. Off by default. See [Tokenomics](/docs/observability/tokenomics). |
 | `defenseclaw setup llm [--show] [--non-interactive] [--provider P] [--model M] [--api-key-env NAME]` | Write the unified or role-scoped LLM block (`--role unified\|agent\|judge`) in `config.yaml`; the key itself goes to `~/.defenseclaw/.env`. `--show` prints the resolved values and changes nothing. Supports SaaS providers and regional Bedrock / Vertex AI / Azure OpenAI via dedicated `--bedrock-*`, `--vertex-*`, `--azure-*` flags, plus `--instance-name` to bind a custom provider from `llm_providers` (use `--provider custom`) and `--inherit-from` to seed from a sibling component. `--ping` / `--no-ping` sends (or skips) a one-shot reachability probe after saving. See [LLM providers](/docs/guardrail/unified-llm-key). |
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage `llm_providers.custom` entries that route LLM traffic through internal or self-hosted endpoints. `custom-providers.json` is derived from them; never edit it. `add` writes the entry and asks a running gateway to reload its provider registry (`--no-reload` skips); omit `--name` for the wizard. `list` prints the live registry. [`add` flags](#setup-provider-add-flags) are below. |
 | `defenseclaw setup claude-code` | Hook setup alias for Claude Code. Defaults to observe on first setup; a re-run without `--mode` keeps the current mode (on a terminal it asks first; `--yes` skips the questions). Pass `--mode action` to block hook-side. |
@@ -462,6 +463,7 @@ On a managed standalone device these are refused with exit `3`; see [Managed dev
 | [`setup guardrail`](/docs/guardrail/aliases) | Default | `--non-interactive` plus flags | Missing flags fall back to wizard defaults. Hook fail mode and judge fallback models have no flag here. |
 | [`setup <connector>`](/docs/guardrail/aliases) | Yes | Flags plus `--yes` | With other connectors configured the default, also under `--yes`, is to add; `--replace` switches. With `--mode`, a TTY run does not ask for the mode again. |
 | `setup routing` | No | `--enable`, `--disable`, `--status` | Needs Docker. Proxy-mode OpenAI Chat Completions traffic only. |
+| `setup tokenomics` | No | `--enable`, `--disable`, `--status`, `--seed-pricing`, `--json` | Writes `observability.tokenomics` and, when absent, `observability.pricing`. Exit 3 on a managed host. |
 | `keys set` | Hidden prompt without a value | `--value-stdin` (or `--value`, visible in `ps`) | See [Keys](/docs/reference/keys). |
 | `keys fill-missing` | Yes | `--yes` skips the opening confirmation | Prompts for every required key that is unset. |
 | `keys list`, `keys check` | No | Always | `keys check` exits non-zero when a required key is missing. |
@@ -498,7 +500,7 @@ Editor agents that speak the Agent Client Protocol (Zed, JetBrains) are guarded 
 | `defenseclaw acp status` | Show the ACP posture and configured bindings (`--json` for the machine-readable document). |
 | `defenseclaw acp remove --client <client> --agent <agent>` | Remove only the DefenseClaw-owned entry. |
 | `defenseclaw acp verify [--client X] [--agent Y]` | Fail when a managed editor entry or the guarded executable's digest has drifted. With no `--client`/`--agent`, every configured binding is checked. |
-| `defenseclaw acp refresh [--from-sha256 <digest>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). A changed agent binary or editor entry still needs `acp setup`. |
+| `defenseclaw acp refresh [--from-sha256 <digest>] [--agent <agent>]` | Re-pin the upgraded `defenseclaw-acp` guard in configured editor entries (the installer runs it after an upgrade). With `--agent`, re-pin that agent after you updated it in place, at the path setup pinned, once only your account, root or (Windows) SYSTEM, Administrators and TrustedInstaller can change the file and its folder; it records an `acp-agent-repin` audit event. A changed editor entry, a managed enrollment or an agent that fails that check still needs `acp setup`. |
 
 ## Guardrail
 
@@ -758,6 +760,8 @@ These list/inventory verbs read across the full active roster:
 | `defenseclaw-gateway audit export` (or `defenseclaw audit export`, same options) | JSONL export of `audit_events`, oldest first, with `structured` when present. `--limit N` returns the earliest N matches, or with `--newest` the most recent N. `--since` (inclusive) and `--until` (exclusive) take RFC3339 or a duration ago (`30m`, `2h`). `--connector` keeps one connector's rows. `--db PATH` reads another audit database, for example `~/.defenseclaw/previous/data/audit.db` after a rollback. Configuration changes are audit rows with action `config.change.applied`; `structured` names the operation (`defenseclaw.admin.operation`, for example `config-update`) and what changed (`defenseclaw.admin.target_ref`). `--include-activity` also appends rows of the `activity_events` table, which holds only pre-1.0 history. |
 | `defenseclaw audit logs [--source gateway\|watchdog] [-n N] [--grep TEXT]` | Print the newest lines of `~/.defenseclaw/gateway.log` (or `watchdog.log`), the same log the TUI Logs panel shows. `-n` defaults to 50; `--grep` keeps lines that contain the text (case-insensitive). For config changes and operator actions use `defenseclaw audit export --since 1h`: they are audit rows with action `config.change.applied` and others. |
 | `defenseclaw-gateway audit findings [--since RFC3339] [--new-only] [--include-resolved] [--scanner NAME] [--target PATH] [--limit N]` (or `defenseclaw audit findings`, which runs it with the same options) | Report the deduplicated finding lifecycle. Active current findings are the default; `--include-resolved` adds resolved state, while `--since` selects lifecycle changes and `--new-only` narrows that window to fingerprints first observed since the timestamp. JSON reports both the total distinct count and the returned page. |
+| `defenseclaw-gateway audit compact [--dry-run] [--json]` (or `defenseclaw audit compact`) | Give the disk space of deleted audit history back. SQLite keeps `audit.db` at its largest size after retention deletes rows; `compact` rewrites it with the rows that are left, switches it to incremental `auto_vacuum` so later retention passes give their space back on their own, and empties the WAL. Stop the gateway first: it refuses while the gateway or any other program has the database open and names the stop and start commands. It needs free disk space next to `audit.db` of about twice the live data and refuses with the numbers when the disk is short. `--dry-run` shows what it would reclaim and works while the gateway runs. Running it again is safe. On a managed computer an administrator runs it after stopping the gateway service. |
+| `defenseclaw-gateway audit rejected [--since RFC3339\|DURATION] [--limit N]` (or `defenseclaw audit rejected`, which runs it with the same options) | List the records the v8 schema gate refused, newest first, one JSON object per line (reason code, failing field, error and a redacted copy of the fields). Records are kept only while `observability.local.keep_rejected_records` is `true`; otherwise a note on stderr says so. The audit database is opened read-only. On a managed computer run it as root or the service account (Linux, macOS) or from an elevated Administrator prompt (Windows). |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | Tail an optional, explicitly configured `kind: jsonl` destination at that path. It holds only the records routed to that destination; complete local history stays in SQLite, and JSONL is not an implicit mirror. |
 
 ## AI discovery
@@ -1445,6 +1449,33 @@ The standalone profile runs its transaction on PowerShell 7, which must be insta
 | `--purge` | Uninstall: also remove managed state (Secure Client; standalone removes it without `--purge`) and (standalone) each enrolled account's `%USERPROFILE%\.defenseclaw` and DefenseClaw files in `%USERPROFILE%\.local\bin`, with that folder's user `Path` entry once it is empty. The result names each account. A signed-out account keeps its `Path` entry, and the result says so |
 | `--attest-claude-effective-policy` | Install, upgrade, repair: record that an administrator confirmed that Claude Code runs DefenseClaw's managed hooks |
 | `--json` | Print the result as JSON |
+
+Before an older release's Setup, the gateway runs one more step from an elevated prompt:
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows hook-image retire [--skip-profile <SID>]... [--json]`.
+It points every agent hook back at `bin\defenseclaw-hook.exe` and ends `ok` only when no machine file and no
+enrolled account's agent config names a launch folder; otherwise `hook_image_retire_pending` lists each file in
+`still_named`, each machine file with the `cause` that kept it from being rewritten; do not run the older Setup then
+([Roll back](/docs/enterprise/lifecycle#roll-back)). The account files are every connector's hook configs and the
+files its [managed install](/docs/enterprise/managed-commands) writes beside them (the Copilot VS Code Local hook file and plugin hooks, the Hermes
+allowlist, the Kiro `defenseclaw` agent). An account file `retire` could not read or verify (a link on its path below
+the account home, access denied, too large, no answer within 5 seconds, an agent home moved out of the profile, or the
+Hermes home of a signed-out account, whose `HERMES_HOME` cannot be read while it is signed out) also holds it back: it
+is listed with `account: true`, `unreadable: true` and the `cause`. Each account's files are found as the guardian
+finds them; the agent homes the administrator's shell sets (`CODEX_HOME` and the like) are ignored. An elevated administrator is denied some account folders, so run `retire` as
+LocalSystem. An enrolled account that is signed out does not hold back the machine
+files: `retire` drops its launch-folder runtime selections and lists it in `signed_out_profiles`; its own files still
+need its sign-in (the guardian rewrites them) or `--skip-profile`. `--skip-profile <SID>` (repeatable, no blanket
+form) leaves one enrolled profile's own configs unconverted: the SID must be an enrolled profile that still holds
+`retire` back, or `retire` refuses with nothing changed. Each skip writes a HIGH `config-update` audit row
+(target `hook-image-retire-skip`: who, when, the SID and its files), is listed in `skipped_profiles`, and
+`enterprise windows status` and `verify` report it as `hook_image_profile_not_retired` until none of its files
+names a launch folder.
+`--skip-profile` is refused when `retire` does not run as LocalSystem and every file that holds that profile back is
+one it was denied (access denied): run `retire` as LocalSystem, which reads it. A `status` that is denied a skipped
+profile's files reports `hook_image_profile_unverified` for it instead (run it as LocalSystem to check). `retire` writes
+`bin\hooks\.retired` when it starts, since that marker is what makes every writer name `bin\defenseclaw-hook.exe`,
+and it stays while `retire` is pending; it records how the last `retire` ended, and `status` and `verify` warn
+`hook_image_retire_pending` instead of `hook_image_retired` until a `retire` ends `ok`.
 
 Exit codes: standalone `0`, `1603` failure, `1618` busy, `1639` invalid
 arguments, `5` when run from a standard account (`status` and `verify` need an elevated prompt; the JSON error code is `elevation_required`), and `3010` (reserved). Secure Client: `0` and `1603`.

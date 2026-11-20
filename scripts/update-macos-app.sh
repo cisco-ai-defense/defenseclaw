@@ -83,9 +83,10 @@ git -C "${SYNC}" config user.email "defenseclaw@cisco.com"
 copy_path() {
     local source="$1"
     local destination="$2"
+    shift 2
     if [[ -d "${source}" ]]; then
         mkdir -p "${destination}"
-        rsync -a --delete "${source}/" "${destination}/"
+        rsync -a --delete "$@" "${source}/" "${destination}/"
     elif [[ -f "${source}" ]]; then
         mkdir -p "$(dirname "${destination}")"
         cp "${source}" "${destination}"
@@ -99,15 +100,40 @@ maintained_paths=(
     DefenseClawMac
     GatewayAdminHelper
     Tests
-    script/build_and_run.sh
-    script/build_gateway_admin_helper.sh
-    script/test_connector_onboarding.sh
+    script
     tools
     images
     .gitignore
 )
+# Upstream runners Cisco does not take (see UPDATING.md): never copied into
+# the app, and never deleted from the merge tree, so a later upstream change to
+# them merges without a modify/delete conflict. A Cisco runner of the same
+# name stays as it is.
+excluded_runners=(
+    test_dependency_lock_validator.sh
+    test_flat_runtime_packaging.sh
+    test_gateway_admin_packaging.sh
+    test_gateway_signing_contract.sh
+    test_inspector_native_layout.sh
+    test_panel_native_smoke.py
+    test_policy_catalog.sh
+    test_runtime_compat_audit.sh
+    test_runtime_contract_surfaces.sh
+    test_runtime_fresh_install.py
+    test_runtime_install_filesystem.sh
+    test_runtime_protected_artifact.sh
+    test_runtime_ui_compatibility.sh
+    test_supply_chain_safety.sh
+    test_update_checker_safety.sh
+)
+script_excludes=()
+for runner in "${excluded_runners[@]}"; do script_excludes+=(--exclude "/${runner}"); done
+sync_path() {
+    if [[ "$3" == script ]]; then copy_path "$1" "$2" "${script_excludes[@]}"; else copy_path "$1" "$2"; fi
+}
+
 for path in "${maintained_paths[@]}"; do
-    copy_path "${APP_ROOT}/${path}" "${SYNC}/${path}"
+    sync_path "${APP_ROOT}/${path}" "${SYNC}/${path}" "${path}"
 done
 
 git -C "${SYNC}" add --all -- "${maintained_paths[@]}"
@@ -119,7 +145,7 @@ if ! git -C "${SYNC}" merge --no-edit "${NEW_COMMIT}"; then
 fi
 
 for path in "${maintained_paths[@]}"; do
-    copy_path "${SYNC}/${path}" "${APP_ROOT}/${path}"
+    sync_path "${SYNC}/${path}" "${APP_ROOT}/${path}" "${path}"
 done
 
 TITLE="$(git -C "${SYNC}" log -1 --format=%s "${NEW_COMMIT}")"

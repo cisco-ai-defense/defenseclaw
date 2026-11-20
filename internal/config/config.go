@@ -318,6 +318,10 @@ type Config struct {
 	// under the target layout's shipped policy folder to a private copy of
 	// the policies this binary embeds (UseOfflineVendorPolicies).
 	offlineVendorPolicyDir, offlineVendorPolicyRoot string
+	// shippedRulePacksStandIn makes a probe copy resolve the shipped rule
+	// packs of a managed Windows install to a stand-in folder while their
+	// root cannot be read (WindowsShippedRulePacksUnreadable).
+	shippedRulePacksStandIn bool
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
@@ -431,6 +435,10 @@ type Config struct {
 	// Connectors holds settings of connectors that install nothing into an
 	// agent, such as the agent-gateway hook route (trusted_connectors.go).
 	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+
+	// Substrate is substrate: (PLAN §7.1), DefenseClaw on Agent Substrate.
+	// Off by default and read only in the cluster.
+	Substrate SubstrateConfig `mapstructure:"substrate" yaml:"substrate,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -445,6 +453,20 @@ type RoutingConfig struct {
 	Models    []RoutingModelBackend `mapstructure:"models"        yaml:"models,omitempty"`
 	Signals   RoutingSignalConfig   `mapstructure:"signals"       yaml:"signals,omitempty"`
 	Decisions []RoutingDecisionRule `mapstructure:"decisions"     yaml:"decisions,omitempty"`
+
+	// 1.0.10 keys (routing_policy.go). Absent keeps the 1.0.9 meaning.
+	Classifier        string                  `mapstructure:"classifier"          yaml:"classifier,omitempty"`
+	MinConfidence     float64                 `mapstructure:"min_confidence"      yaml:"min_confidence,omitempty"`
+	OnClassifierError string                  `mapstructure:"on_classifier_error" yaml:"on_classifier_error,omitempty"`
+	DefaultAlias      string                  `mapstructure:"default_alias"       yaml:"default_alias,omitempty"`
+	Categories        map[string]string       `mapstructure:"categories"          yaml:"categories,omitempty"`
+	AllowUserOverride bool                    `mapstructure:"allow_user_override" yaml:"allow_user_override,omitempty"`
+	Sensitive         *RoutingSensitiveConfig `mapstructure:"sensitive"           yaml:"sensitive,omitempty"`
+	SystemOne         *RoutingSystemOneConfig `mapstructure:"systemone"           yaml:"systemone,omitempty"`
+	RouteOnly         RoutingRouteOnlyConfig  `mapstructure:"route_only"          yaml:"route_only,omitempty"`
+	Admin             *RoutingAdminConfig     `mapstructure:"admin"               yaml:"admin,omitempty"`
+	// Context is routing.context (routing_context.go); zero is off.
+	Context RoutingContextConfig `mapstructure:"context" yaml:"context,omitempty"`
 }
 
 type RoutingModelBackend struct {
@@ -454,6 +476,15 @@ type RoutingModelBackend struct {
 	BaseURL      string   `mapstructure:"base_url"          yaml:"base_url,omitempty"`
 	APIKeyEnv    string   `mapstructure:"api_key_env"       yaml:"api_key_env,omitempty"`
 	Capabilities []string `mapstructure:"capabilities"      yaml:"capabilities,omitempty"`
+	// APIs lists the API families this backend serves without translation
+	// (routing_policy.go RoutingAPIs); empty uses the provider default.
+	APIs []string `mapstructure:"apis" yaml:"apis,omitempty"`
+	// Credential names the protected credential that holds the key on a
+	// standalone managed host (preferred there; api_key_env still works
+	// for 1.0.9 configs, with a doctor warning).
+	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
+	// Bedrock says how the gateway signs calls to a bedrock backend.
+	Bedrock *RoutingBedrockAuthConfig `mapstructure:"bedrock" yaml:"bedrock,omitempty"`
 }
 
 type RoutingSignalConfig struct {
@@ -1747,6 +1778,12 @@ type HILTConfig struct {
 	MinSeverity string `mapstructure:"min_severity" yaml:"min_severity"`
 }
 
+// DefaultMaxBodyValues is the default of guardrail.max_body_values.
+const DefaultMaxBodyValues = 400000
+
+// DefaultHistorySeenMax is the default of guardrail.history_seen_max.
+const DefaultHistorySeenMax = 2048
+
 type GuardrailConfig struct {
 	Enabled     bool   `mapstructure:"enabled"              yaml:"enabled"`
 	Mode        string `mapstructure:"mode"                 yaml:"mode"`
@@ -1788,6 +1825,17 @@ type GuardrailConfig struct {
 	OriginalModel     string `mapstructure:"original_model"       yaml:"original_model,omitempty"`
 	BlockMessage      string `mapstructure:"block_message"        yaml:"block_message"`
 	StreamBufferBytes int    `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	// MaxBodyValues bounds the JSON values (strings, numbers, objects,
+	// array items) the guardrail proxy reads in one request body or reply
+	// event to inspect it. A larger body is not inspected: managed installs
+	// and the strict tier refuse it, the OSS default forwards it with an
+	// alert. A resource bound, not a policy; 0 means DefaultMaxBodyValues.
+	MaxBodyValues int `mapstructure:"max_body_values"      yaml:"max_body_values"`
+	// HistorySeenMax is the most history segments (earlier turns of a
+	// request) the guardrail proxy remembers as inspected per actor or
+	// session: a remembered segment is not inspected again, any other is.
+	// A resource bound, not a policy; 0 means DefaultHistorySeenMax.
+	HistorySeenMax int `mapstructure:"history_seen_max"     yaml:"history_seen_max"`
 	// RulePackDir is a v8 key: migration input for RulePack/CustomPacks,
 	// rejected in a config_version 9 source.
 	RulePackDir string `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
@@ -1831,7 +1879,18 @@ type GuardrailConfig struct {
 	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
 	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
 	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
-	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
+	// Cascade is guardrail.cascade (cascade.go): what each layer of the
+	// cascade does with its outcome, the unknown tier, lane switches
+	// (cascade.lanes.effects, cascade.lanes.secret_flow, cascade_lanes.go), the
+	// Rego final-decision policy and the administrator's locks. Read through
+	// Config.ResolveCascade.
+	Cascade CascadeConfig `mapstructure:"cascade" yaml:"cascade,omitempty"`
+	// EffectsRulesTier selects how far the effect lane may block: "restricted"
+	// (a listed command on an exact canonical known protected target) or
+	// "full" (any known mutation of a known protected target). Ships
+	// "restricted". It only matters while cascade.lanes.effects is shadow or on.
+	EffectsRulesTier string `mapstructure:"effects_rules_tier"            yaml:"effects_rules_tier,omitempty"`
+	JudgeSweep       bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
 	// RetainJudgeBodies controls whether raw LLM-judge responses are
 	// persisted to the local SQLite audit store for later forensics.
@@ -1969,6 +2028,12 @@ type GuardrailConfig struct {
 	// Chains tunes tool-call chain evaluation (trusted_connectors.go).
 	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
 
+	// SecretFlow configures Secret flow tracking (secret_flow.go). Unset
+	// keeps the shipped defaults (credentials only; the sink action follows the
+	// pack: default alerts, strict blocks). Its live/shadow switch is
+	// cascade.lanes.secret_flow; these are its own settings.
+	SecretFlow SecretFlowConfig `mapstructure:"secret_flow" yaml:"secret_flow,omitempty"`
+
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
 	// connector name. policyOverride layers it over Connectors so a profile
@@ -1984,6 +2049,10 @@ type GuardrailConfig struct {
 	// derived configuration ("" when it inherits). ProfileModeForConnector
 	// reads it. Unexported like profileConnectors.
 	profileMode string
+	// profileCascade and profileName are the profile's own cascade scope and
+	// its name on a derived configuration (ResolveCascade).
+	profileCascade *CascadeScope
+	profileName    string
 	// customPackBase is the directory of the config file that declares
 	// custom_packs: the base of a relative custom_packs path. customRulePackChecks
 	// is each custom_packs entry as the loader checked it, once. Both are
@@ -2035,6 +2104,11 @@ type PerConnectorGuardrailConfig struct {
 	// (mode/hilt/rule_pack_dir) are retained so re-enable restores it
 	// with no re-prompt.
 	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+
+	// Cascade is this scope's guardrail.cascade (cascade.go); nil inherits.
+	// Not supported in the application_protection overlays this struct also
+	// types (ValidateCascade).
+	Cascade *CascadeScope `mapstructure:"cascade" yaml:"cascade,omitempty" json:"Cascade,omitempty"`
 }
 
 // normalizeConnectorKey canonicalizes a connector name for
@@ -2345,6 +2419,11 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
+	// guardrail.cascade (lanes included) is validated by Config.ValidateCascade
+	// at load (an invalid cascade falls back, writers refuse it).
+	if err := g.SecretFlow.Validate(); err != nil {
+		return err
+	}
 	return validateInternalDomains(g.InternalDomains)
 }
 
@@ -2433,6 +2512,43 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 	return "regex_judge"
 }
 
+// Values of guardrail.judge.intent_scope.
+const (
+	IntentScopeAlert  = "alert"
+	IntentScopeShadow = "shadow"
+	IntentScopeOff    = "off"
+)
+
+// IntentScopeMode is the normalized guardrail.judge.intent_scope: the lane of
+// the task-scope floor (INTENT-SCOPE-SEND). The lane is shadow-only in 1.0.10:
+// the built-in default, and the value of any key the loader accepts, is shadow
+// (record the finding, leave the verdict alone) or off. "alert" exists for the
+// tests and the benchmark harness, which set it on the struct; the loader
+// refuses it (ValidateIntentScope). Promotion is the day the default below
+// becomes alert. It moves under guardrail.cascade.lanes with the lane registry
+// of s7/cascade-config.
+func (j JudgeConfig) IntentScopeMode() string {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case IntentScopeAlert:
+		return IntentScopeAlert
+	case IntentScopeOff:
+		return IntentScopeOff
+	}
+	return IntentScopeShadow
+}
+
+// ValidateIntentScope refuses a guardrail.judge.intent_scope value the shadow-only
+// lane does not accept.
+func (j JudgeConfig) ValidateIntentScope() error {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case "", IntentScopeShadow, IntentScopeOff:
+		return nil
+	case IntentScopeAlert:
+		return fmt.Errorf("config: guardrail.judge.intent_scope: %q is not available in 1.0.10: the task-scope lane is shadow-only (rel-1-0-10:GAP-0341, GAP-0372, GAP-0363); use shadow or off", j.IntentScope)
+	}
+	return fmt.Errorf("config: guardrail.judge.intent_scope: unknown value %q (shadow or off)", j.IntentScope)
+}
+
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
@@ -2471,6 +2587,12 @@ type JudgeConfig struct {
 	// scripts abandon the gateway call at curl --max-time 10; the
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
+	// IntentScope is what DefenseClaw does with a tool call that sends data to a
+	// destination the user's task does not name (INTENT-SCOPE-SEND): "shadow"
+	// records the finding in a judge event and a log line and leaves the verdict
+	// alone, "off" does not look. Empty is the built-in default (shadow).
+	IntentScope string `mapstructure:"intent_scope" yaml:"intent_scope,omitempty"`
 
 	// MaxParallel bounds how many judge calls the gateway sends to the
 	// judge model at once; an explicit 0 sets no bound. When omitted,
@@ -2620,6 +2742,16 @@ type GatewayConfig struct {
 	Watcher      GatewayWatcherConfig      `mapstructure:"watcher"           yaml:"watcher"`
 	Watchdog     WatchdogConfig            `mapstructure:"watchdog"          yaml:"watchdog"`
 	ClawHome     string                    `mapstructure:"-"                 yaml:"-"`
+	// OpenClawConfigPath is the openclaw.json the OpenClaw client reads its
+	// gateway token from (Config.OpenClawConfigPath, set at Load). Empty
+	// falls back to <ClawHome>/.openclaw/openclaw.json.
+	OpenClawConfigPath string `mapstructure:"-" yaml:"-"`
+	// OpenClawToken is the credential the OpenClaw WebSocket client presents
+	// (OPENCLAW_GATEWAY_TOKEN from the environment, else <data_dir>/.env,
+	// set at Load). Empty makes the client read openclaw.json
+	// gateway.auth.token. It is never the DefenseClaw gateway token:
+	// ResolvedToken skips a value equal to it.
+	OpenClawToken string `mapstructure:"-" yaml:"-"`
 }
 
 type GatewayConfigReloadConfig struct {
@@ -2656,49 +2788,48 @@ type WatchdogConfig struct {
 // defaultGatewayTokenEnv is the canonical env var for the gateway auth token.
 const defaultGatewayTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
 
-// legacyGatewayTokenEnv is the old env var name, still consulted for
-// backward compatibility with existing .env files.
-const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
-
-// ResolvedToken returns the gateway token, walking the precedence
-// ladder. The order mirrors GatewayConfig.resolved_token in
-// cli/defenseclaw/config.py so the Python CLI and the Go gateway
-// can never disagree on which token is "live".
+// ResolvedToken returns the DefenseClaw gateway token (the master API
+// token), walking the precedence ladder. The order mirrors
+// GatewayConfig.resolved_token in cli/defenseclaw/config.py so the Python
+// CLI and the Go gateway can never disagree on which token is "live".
 //
 // Resolution:
 //
 //  1. g.TokenEnv (operator-supplied override) — if set AND the
-//     named env var is populated, return it.
+//     named env var is populated, return it. A TokenEnv naming
+//     OPENCLAW_GATEWAY_TOKEN is skipped (case-insensitive on Windows).
 //  2. defaultGatewayTokenEnv (DEFENSECLAW_GATEWAY_TOKEN) — the
 //     canonical name EnsureGatewayToken writes on first boot.
-//  3. legacyGatewayTokenEnv (OPENCLAW_GATEWAY_TOKEN) — back-compat
-//     shim for installs that bootstrapped before the rename.
-//  4. g.Token literal — last resort because plaintext secrets in
+//  3. g.Token literal — last resort because plaintext secrets in
 //     config.yaml are discouraged.
 //
-// Why fall through past g.TokenEnv when it's set-but-empty:
-// pre-fix this function had `if/else` semantics — when TokenEnv
-// was set the canonical+legacy checks were SKIPPED entirely.
-// That broke the symmetric Python flow: with the pre-defenseclaw
-// default token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml AND
-// only DEFENSECLAW_GATEWAY_TOKEN in the dotenv (the post-firstboot
-// state), Python found the token via fall-through while Go
-// silently returned g.Token (empty) for every non-sidecar-boot
-// caller (judge LLM init, etc.). The sidecar boot path masked
-// the bug via EnsureGatewayToken's own fallback, so it only
-// surfaced in obscure code paths until investigation.
+// The token never comes from OPENCLAW_GATEWAY_TOKEN (R-TOK): that is the
+// OpenClaw WebSocket credential (g.OpenClawToken), readable by the OpenClaw
+// account, its plugins and agent tools. Before 1.0.10 it was a fallback
+// name here and setup wrote token_env: OPENCLAW_GATEWAY_TOKEN, so the
+// OpenClaw token could allow blocked tools and stop the gateway. A
+// candidate whose value equals g.OpenClawToken is skipped too: a 1.0.9
+// auth repair wrote the OpenClaw token under both names. With nothing
+// left the gateway mints a new DEFENSECLAW_GATEWAY_TOKEN at boot.
+//
+// A set-but-empty g.TokenEnv falls through to the canonical name, so
+// a custom name with no value never hides the token first boot wrote.
 //
 // SecretRef text an earlier build saved as a token is skipped (issue #1404).
 func (g *GatewayConfig) ResolvedToken() string {
-	for _, name := range []string{g.TokenEnv, defaultGatewayTokenEnv, legacyGatewayTokenEnv} {
-		if name == "" {
+	openClaw := strings.TrimSpace(g.OpenClawToken)
+	usable := func(v string) bool {
+		return v != "" && !envvars.IsSecretRefText(v) && (openClaw == "" || strings.TrimSpace(v) != openClaw)
+	}
+	for _, name := range []string{g.TokenEnv, defaultGatewayTokenEnv} {
+		if strings.TrimSpace(name) == "" || IsOpenClawGatewayTokenEnv(name) {
 			continue
 		}
-		if v := os.Getenv(name); v != "" && !envvars.IsSecretRefText(v) {
+		if v := os.Getenv(name); usable(v) {
 			return v
 		}
 	}
-	if envvars.IsSecretRefText(g.Token) {
+	if !usable(g.Token) {
 		return ""
 	}
 	return g.Token
@@ -2815,6 +2946,13 @@ func loadFileSource(configFile string, raw []byte, publishProvenance, enforceMan
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return nil, err
+	}
+	if publishProvenance {
+		// The strict loader (LoadFromFile) runs no schema pass; the gateway's does
+		// and refuses a lane without a value, so refuse it here the same way.
+		if err := checkCascadeLanesSource(document.Plain); err != nil {
+			return nil, err
+		}
 	}
 	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, enforceManagedTrust, checkPolicyInputs)
 	if err != nil {
@@ -3169,6 +3307,9 @@ func loadConfigSourceCheckedWithLayout(
 		}
 	}
 	cfg.Guardrail.Judge.MaxParallelExplicit = viper.InConfig("guardrail.judge.max_parallel")
+	if err := cfg.Guardrail.Judge.ValidateIntentScope(); err != nil {
+		return nil, err
+	}
 	foldV8ScannerKeys(&cfg)
 	cleanCustomPackPaths(&cfg)
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
@@ -3310,7 +3451,21 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	// An invalid guardrail.cascade does not refuse the configuration: the
+	// cascade falls back to the last-known-good one, else the pack defaults,
+	// and doctor, status and the audit log say so. Writers refuse it first
+	// (ValidateCandidate).
+	cfg.loadCascade()
+	if cfg.Guardrail.Cascade.invalid != nil && ReportConfigLoadError != nil {
+		ReportConfigLoadError(context.Background(), "guardrail_cascade_invalid")
+	}
 	if err := cfg.ValidateIdentityChainSettings(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "connectors_invalid")
+		}
+		return nil, err
+	}
+	if err := cfg.ValidateOpenClawConnector(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "connectors_invalid")
 		}
@@ -3332,7 +3487,13 @@ func loadConfigSourceCheckedWithLayout(
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "routing_invalid")
 		}
-		return nil, fmt.Errorf("config: routing: %w", err)
+		return nil, fmt.Errorf("config: %w", &SettingError{Path: "routing", cause: err})
+	}
+	if err := cfg.validateRoutingAdminRules(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "routing_invalid")
+		}
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	if err := cfg.AIDiscovery.ValidateTrustedADChildDomains(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3351,6 +3512,24 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "openshell_invalid")
 		}
 		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
+	}
+	if subErr := cfg.Substrate.Validate(); subErr != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", subErr))
+	}
+	if err := cfg.Substrate.ValidateManaged(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", err))
+	}
+	if err := cfg.validateSubstrateProfiles(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", err)
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI
@@ -3388,6 +3567,8 @@ func loadConfigSourceCheckedWithLayout(
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
 	}
+	cfg.Gateway.OpenClawConfigPath = cfg.OpenClawConfigPath()
+	cfg.Gateway.OpenClawToken = resolveOpenClawGatewayToken(cfg.DataDir)
 
 	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		// Older installs can use OpenClaw only through a remote fleet gateway.
@@ -4095,6 +4276,8 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
+	viper.SetDefault("guardrail.max_body_values", DefaultMaxBodyValues)
+	viper.SetDefault("guardrail.history_seen_max", DefaultHistorySeenMax)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)
@@ -4118,6 +4301,15 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
+	// guardrail.cascade.lanes: an unset lane keeps its registered default
+	// (RegisterCascadeLane), so an empty cascade stays empty.
+	viper.SetDefault("guardrail.effects_rules_tier", "restricted")
+	viper.SetDefault("guardrail.secret_flow.label_sets.credentials", true)
+	viper.SetDefault("guardrail.secret_flow.reencodings", true)
+	viper.SetDefault("guardrail.secret_flow.sink_action.default", "alert")
+	viper.SetDefault("guardrail.secret_flow.sink_action.strict", "block")
+	viper.SetDefault("guardrail.secret_flow.memory.max_labeled_paths", 512)
+	viper.SetDefault("guardrail.secret_flow.memory.max_value_digests", 256)
 	// judge_sweep runs the full LLM judge on content the regex
 	// triager classified as no-signal. Flipped from false to true
 	// in the multi-provider-adapters PR after internal red-team

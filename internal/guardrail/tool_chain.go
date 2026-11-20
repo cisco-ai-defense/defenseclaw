@@ -92,6 +92,18 @@ const (
 	toolChainRelevantH18Projection                  = "h18-system-root-proof-v1"
 )
 
+// ToolChainFileUnknownDigest is the one documented join marker, "the role is
+// proven but the file is not known": a credentials-file read of several
+// files, a copy or a move, or a relative path the hook cannot resolve; an
+// upload whose file is not one exact path. It is a storage ABI value like the
+// step bits. It is valid wherever an enforcement join digest is, equals no
+// path identity, and never counts as a mismatch: MatchToolChains joins a role
+// that carries it with any identity (substrate-1:GAP-0388).
+var ToolChainFileUnknownDigest = func() string {
+	digest := sha256.Sum256([]byte("defenseclaw/tool-chain/file-unknown/v1"))
+	return hex.EncodeToString(digest[:])
+}()
+
 // ToolChainDefinition is the immutable private catalog entry for one bounded
 // ordered behavior. Step bits are stable storage ABI.
 type ToolChainDefinition struct {
@@ -115,6 +127,24 @@ type ToolChainDefinition struct {
 	// establish completeness for its own role even when the generic command
 	// classifier reports an otherwise harmless unknown-operand issue.
 	ValueJoinOwnsParseProof bool
+	// Step1IdentityOwnsParseProof lets the first role of a
+	// RequiresEnforcementJoin chain come from a call whose overall parse is
+	// partial when that call carries an identity for the role in
+	// EnforcementJoinDigests: the projector proved the commands that play the
+	// role complete, and an unknown operand grammar elsewhere in the call (a
+	// pipeline stage, a list member) says nothing about them. The identity is
+	// the exact resource, or a marker that equals no resource; exact unequal
+	// identities still disprove the chain. It never sets an enforcement step,
+	// and the terminal role still needs a complete parse.
+	Step1IdentityOwnsParseProof bool
+	// Step2IdentityOwnsParseProof is the same for the terminal role: the
+	// call that raises the chain may have a partial overall parse (an upload
+	// inside a pipeline or a command list: `cd dir && curl ...`, `curl ... |
+	// tr`) when it carries an identity for the role in
+	// EnforcementJoinDigests, which the projector sets only when every
+	// command that plays the role is argv-complete. It never sets an
+	// enforcement step.
+	Step2IdentityOwnsParseProof bool
 	// RequiresDistinctResourceJoin requires both roles to carry exact, non-empty
 	// trusted resource identities and rejects a same-resource pair. It is
 	// intentionally separate from value equality: the associated value HMACs
@@ -158,13 +188,28 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		DetectionOnly: true,
 	},
 	{
-		ID: ToolChainSecretReadThenEgress, Version: "1.7",
+		// Secret flow tracking (internal/flow, S7) supersedes this entry: when
+		// guardrail.cascade.lanes.secret_flow is on it carries the same credential-read
+		// -> external-egress behavior with a per-session data/value join. This
+		// entry stays while the flow lane ships in shadow so turning the flow
+		// lane off keeps today's answer; it is removed when the flow lane
+		// becomes authoritative by default.
+		ID: ToolChainSecretReadThenEgress, Version: "1.9",
 		Title:       "Secret read followed by external egress",
 		Severity:    "CRITICAL",
-		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "h01-h07-n01-n02-n04-to-data-external-egress-bounded8-v2",
+		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "h01-h07-n01-n02-n04-to-data-external-egress-bounded8-v4-joinproof",
 		RequiresEnforcementJoin: true,
-		ArtifactMutationBarrier: true,
-		DetectionOnly:           true,
+		// A credentials-file read inside a pipeline or a command list
+		// (cat .env | tr ... | grep) starts the chain (substrate-1:GAP-0226).
+		Step1IdentityOwnsParseProof: true,
+		// The upload of the credentials file in a list or a pipeline
+		// completes the chain too (substrate-1:GAP-0389).
+		Step2IdentityOwnsParseProof: true,
+		ArtifactMutationBarrier:     true,
+		// A proven chain (both steps exact, one file joined) blocks in the
+		// strict tier; the gateway drops its enforcement bits in the other
+		// tiers, which alert (toolChainProjectionForNamedPosture, GAP-0595).
+		DetectionOnly: false,
 	},
 	{
 		ID: ToolChainWorkloadIdentityThenLateralExec, Version: "1.7",
@@ -645,6 +690,17 @@ func ToolChainIDs(mask uint32) ([]string, error) {
 	return ids, nil
 }
 
+// ToolChainUnreadSenderDigest is the join digest of a final call whose sender
+// the shared sender reader (actionfacts.ReadSenders) could not read in full: a
+// sender in a function, trap or coprocess, in interpreter code, or one whose
+// destination the shell builds. It is the SHA-256 of the label defenseclaw:tool-chain:unread-sender:v1, not a hash of any
+// input. For chain.secret_read_then_egress it stands for "an egress whose
+// destination is unknown" (the unknown tier of the one bound rule, GAP-0672):
+// it joins any exact credentials read and is never a mismatch, the call may
+// be a partial parse, and with an enforcement predecessor it can block where
+// the tier blocks unknown (the strict pack).
+const ToolChainUnreadSenderDigest = "c33c6d22134f957c4f4a37b06adfd254652ddbc67210c8b0b0a75cc8c0e8bd00"
+
 // ValidateToolChainProjection enforces the persisted projection ABI.
 func ValidateToolChainProjection(projection ToolChainProjection) error {
 	switch projection.ParseStatus {
@@ -768,6 +824,11 @@ func MatchToolChains(
 			}
 			predecessorDigest := event.Projection.EnforcementJoinDigests[i]
 			finalDigest := final.Projection.EnforcementJoinDigests[i]
+			// An egress the sender reader could not read in full is the
+			// unknown tier (GAP-0672): it joins any identity and may be a
+			// partial parse.
+			unreadFinal := definition.ID == ToolChainSecretReadThenEgress &&
+				finalDigest == ToolChainUnreadSenderDigest
 			detectionJoinPossible := true
 			if definition.RequiresValueJoin {
 				detectionJoinPossible =
@@ -791,13 +852,22 @@ func MatchToolChains(
 				detectionJoinPossible = predecessorDigest != "" &&
 					predecessorDigest == finalDigest
 			} else if definition.RequiresEnforcementJoin {
-				if event.Projection.ParseStatus != actionfacts.StatusComplete ||
-					final.Projection.ParseStatus != actionfacts.StatusComplete {
+				eventParseProven := event.Projection.ParseStatus == actionfacts.StatusComplete ||
+					definition.Step1IdentityOwnsParseProof &&
+						event.Projection.ParseStatus == actionfacts.StatusPartial &&
+						predecessorDigest != ""
+				finalParseProven := final.Projection.ParseStatus == actionfacts.StatusComplete ||
+					definition.Step2IdentityOwnsParseProof &&
+						final.Projection.ParseStatus == actionfacts.StatusPartial &&
+						finalDigest != ""
+				if !eventParseProven || (!finalParseProven && !unreadFinal) {
 					// Conditional, dynamic, or unresolved parsing does not create a
 					// new chain alert. Atomic findings retain their own posture.
 					detectionJoinPossible = false
 				} else if predecessorDigest != "" && finalDigest != "" &&
-					predecessorDigest != finalDigest {
+					predecessorDigest != finalDigest &&
+					predecessorDigest != ToolChainFileUnknownDigest &&
+					finalDigest != ToolChainFileUnknownDigest && !unreadFinal {
 					// Exact, unequal identities disprove this chain. Missing identity
 					// on an otherwise complete parse remains detection-only.
 					detectionJoinPossible = false
@@ -838,7 +908,8 @@ func MatchToolChains(
 				joinSafe = joinSafe && predecessorDigest != "" &&
 					predecessorDigest == finalDigest
 			} else if definition.RequiresEnforcementJoin {
-				joinSafe = joinSafe && predecessorDigest != "" && predecessorDigest == finalDigest
+				joinSafe = joinSafe && predecessorDigest != "" &&
+					(predecessorDigest == finalDigest || unreadFinal)
 			}
 			if joinSafe && final.Projection.EnforcementStepMask&definition.Step2Bit != 0 &&
 				event.Projection.EnforcementStepMask&definition.Step1Bit != 0 &&
@@ -1277,4 +1348,25 @@ func toolChainDigest(parts ...string) string {
 		_, _ = hash.Write([]byte(part))
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// ToolChainProjectionStep is projection reduced to one step of one chain:
+// that step's detection and enforcement bits and the chain's join
+// identities, nothing of any other chain. ok is false when projection does
+// not hold the step. The secret-read chain start uses it to keep a read's
+// step 1 alone (substrate-1 GAP-0337, GAP-0338).
+func ToolChainProjectionStep(projection ToolChainProjection, chainID string, step int) (ToolChainProjection, bool) {
+	bit, bitOK := ToolChainStepMask(chainID, step)
+	index, indexOK := ToolChainIndexByID(chainID)
+	if !bitOK || !indexOK || projection.DetectionStepMask&bit == 0 {
+		return ToolChainProjection{}, false
+	}
+	out := ToolChainProjection{
+		ParseStatus:         projection.ParseStatus,
+		DetectionStepMask:   bit,
+		EnforcementStepMask: projection.EnforcementStepMask & bit,
+	}
+	out.EnforcementJoinDigests[index] = projection.EnforcementJoinDigests[index]
+	out.EnforcementOutputJoinDigests[index] = projection.EnforcementOutputJoinDigests[index]
+	return out, true
 }

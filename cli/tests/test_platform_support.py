@@ -53,6 +53,7 @@ from defenseclaw.platform_support import (
     host_os,
     is_proxy_connector,
     supported_connectors,
+    uses_guardrail_proxy,
 )
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES, visible_connector_choices
 from defenseclaw.tui.screens.mode_picker import (
@@ -78,10 +79,11 @@ WINDOWS_SUPPORTED: set[str] = {
     "devin",
     "antigravity",
     "opencode",
+    "openclaw",
 }
 WINDOWS_PREVIEW: set[str] = set()
 WINDOWS_NOT_CERTIFIED: set[str] = set()
-WINDOWS_UNSUPPORTED = {"openclaw", "zeptoclaw"}
+WINDOWS_UNSUPPORTED = {"zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
 
 
@@ -159,6 +161,25 @@ def test_proxy_topology_is_distinct_from_windows_support() -> None:
     assert is_proxy_connector("zeptoclaw")
 
 
+def test_uses_guardrail_proxy_follows_the_openclaw_hook_mode() -> None:
+    # Go connector.UsesGuardrailProxy: native Windows OpenClaw has no proxy;
+    # the family (is_proxy_connector) does not change with the OS.
+    for os_name in ("linux", "darwin"):
+        assert uses_guardrail_proxy("openclaw", os_name) is True
+        assert uses_guardrail_proxy("zeptoclaw", os_name) is True
+    assert uses_guardrail_proxy("openclaw", "windows") is False
+    assert uses_guardrail_proxy("zeptoclaw", "windows") is True
+    assert uses_guardrail_proxy("codex", "linux") is False
+    assert is_proxy_connector("openclaw")
+
+
+def test_openclaw_windows_row_names_the_native_mode_limits() -> None:
+    support = connector_platform_support("openclaw", "windows")
+    assert support.status == SUPPORTED
+    for text in ("2026.8.35", "native plugin hooks", "no guardrail proxy", "managed Windows"):
+        assert text in support.reason
+
+
 def test_windows_statuses_and_availability() -> None:
     for name in WINDOWS_SUPPORTED:
         assert connector_platform_support(name, "windows").status == SUPPORTED
@@ -204,6 +225,7 @@ def test_claude_code_platform_status_stays_supported_gap0552_benign_twin() -> No
 
 def test_supported_connectors_preserves_order_and_available_windows_scope() -> None:
     ordered = [
+        "zeptoclaw",
         "openclaw",
         "cursor",
         "codex",
@@ -212,6 +234,7 @@ def test_supported_connectors_preserves_order_and_available_windows_scope() -> N
         "claudecode",
     ]
     assert supported_connectors(ordered, "windows") == [
+        "openclaw",
         "cursor",
         "codex",
         "opencode",
@@ -298,14 +321,16 @@ def test_discovery_default_preserves_non_windows_and_avoids_unsupported_windows(
     ):
         assert _normalize_connector_arg(None, discover_default=True) == "openclaw"
 
+    # ZeptoClaw needs the guardrail proxy, which native Windows lacks.
+    zepto = SimpleNamespace(agents={"zeptoclaw": SimpleNamespace(installed=True)})
     with (
         patch(
             "defenseclaw.commands.cmd_init.agent_discovery.discover_agents",
-            return_value=discovery,
+            return_value=zepto,
         ),
         patch(
             "defenseclaw.commands.cmd_init.agent_discovery.first_installed",
-            return_value="openclaw",
+            return_value="zeptoclaw",
         ),
         patch(
             "defenseclaw.commands.cmd_init._installed_hook_connectors",
@@ -345,7 +370,7 @@ def test_guardrail_windows_setup_rejects_unsupported_before_mutation() -> None:
                 [
                     "guardrail",
                     "--connector",
-                    "openclaw",
+                    "zeptoclaw",
                     "--non-interactive",
                     "--no-restart",
                 ],
@@ -362,7 +387,7 @@ def test_noninteractive_windows_init_rejects_unsupported_before_bootstrap() -> N
     with patch("defenseclaw.platform_support.host_os", return_value="windows"):
         result = CliRunner().invoke(
             init_cmd,
-            ["--non-interactive", "--yes", "--connector", "openclaw"],
+            ["--non-interactive", "--yes", "--connector", "zeptoclaw"],
             obj=AppContext(),
         )
     assert result.exit_code != 0

@@ -395,7 +395,7 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 				if cursorEnterpriseHookEventRetired(event) {
 					return fmt.Errorf("cursor hooks event %q still has the DefenseClaw entry an earlier release registered; this release no longer registers it and the next publish removes it", event)
 				}
-				return fmt.Errorf("Cursor hooks event %q has an unexpected DefenseClaw entry", event)
+				return fmt.Errorf("Cursor hooks event %q has an unexpected DefenseClaw entry", event) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
 		}
 	}

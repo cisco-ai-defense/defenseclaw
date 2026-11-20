@@ -742,10 +742,13 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		defer release()
-		if r.URL.Path == managedRefusalAuditPath || r.URL.Path == managed.OwnProfileExplainPath || r.URL.Path == managed.OwnStatusPath {
+		if r.URL.Path == managedRefusalAuditPath || r.URL.Path == managed.OwnProfileExplainPath || r.URL.Path == managed.OwnStatusPath ||
+			(strings.HasPrefix(r.URL.Path, routingAPIPrefix) && r.Method == http.MethodGet) {
 			// Any kernel-verified local account may report its own refused
-			// policy write, or read its own guardrail profile or own status; the routes have
-			// no connector to enroll for.
+			// policy write, or read its own guardrail profile, own status or
+			// own routing (decisions and budgets, reads only, as the Windows
+			// own-status pipe; the handlers return the caller own entries only); the routes have no connector to
+			// enroll for.
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -957,6 +960,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	mux.HandleFunc(managed.OwnProfileExplainPath, a.handleOwnProfileExplain)
 	mux.HandleFunc(managed.OwnStatusPath, a.handleOwnStatus)
+	a.registerRoutingRoutes(mux)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
 	mux.HandleFunc(managedGuardianAccountRemovedAuditPath, a.handleManagedGuardianAccountRemovedAudit)
 	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)

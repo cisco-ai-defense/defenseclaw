@@ -714,7 +714,7 @@ func scanSentinels(root string, skip []string) (*sentinelScan, error) {
 			}
 			return nil
 		}
-		if !isSentinelPath(rel) {
+		if !isSentinelPath(rel) && !sentinelLink(rel, d) {
 			return nil
 		}
 		if len(res.files) >= maxSentinels {

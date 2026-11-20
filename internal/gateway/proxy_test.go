@@ -165,6 +165,15 @@ func (m *mockInspector) setVerdict(direction string, v *ScanVerdict) {
 
 func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode string) *GuardrailProxy {
 	t.Helper()
+	// A test proxy has no gateway generation of its own, so guardrail
+	// profiles another test left in liveGuardrailProfiles (NewAPIServer
+	// publishes its set there) are not its profiles: with a default profile
+	// in action mode they turned this proxy's observe mode into action, but
+	// only when such a test ran earlier in the same binary (Windows shard
+	// gw14, push 12). It starts with none; the previous set comes back after.
+	previousProfiles := liveGuardrailProfiles.Load()
+	liveGuardrailProfiles.Store(nil)
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previousProfiles) })
 	cfg := &config.GuardrailConfig{
 		Enabled:   true,
 		Model:     "openai/gpt-4",
@@ -807,7 +816,7 @@ func TestProxyPreCallInspection(t *testing.T) {
 		}
 	})
 
-	t.Run("ordinary_user_keeps_last_user_only", func(t *testing.T) {
+	t.Run("ordinary_user_request_inspects_system_and_last_user", func(t *testing.T) {
 		prov := &mockProvider{}
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
@@ -824,8 +833,10 @@ func TestProxyPreCallInspection(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d", rec.Code)
 		}
-		if insp.lastContent != "What is 2+2?" {
-			t.Errorf("ordinary user request inspected %q, want last user text only", insp.lastContent)
+		// The system text is prompt-side text too (substrate-1 GAP-0196): the
+		// guardrail sees it with the last user turn.
+		if !strings.Contains(insp.lastContent, "What is 2+2?") || !strings.Contains(insp.lastContent, "You are a helpful assistant.") {
+			t.Errorf("ordinary user request inspected %q, want the system text and the last user text", insp.lastContent)
 		}
 		if prov.getLastReq() == nil {
 			t.Error("allowed ordinary user request should be forwarded")
@@ -1231,7 +1242,7 @@ func TestProxyEdgeCases(t *testing.T) {
 		prov := &mockProvider{}
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
-		proxy.masterKey = "secret-key-123"
+		proxy.gatewayToken = "secret-key-123"
 		// This sub-test specifically exercises the auth path, so
 		// undo the test-only bypass that newTestProxy installs.
 		proxy.skipAuthForTest = false
@@ -1265,7 +1276,7 @@ func TestProxyEdgeCases(t *testing.T) {
 		// Correct auth header
 		req3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
 		req3.Header.Set("Content-Type", "application/json")
-		req3.Header.Set("Authorization", "Bearer secret-key-123")
+		req3.Header.Set("X-DC-Auth", "Bearer secret-key-123")
 		rec3 := httptest.NewRecorder()
 		proxy.handleChatCompletion(rec3, req3)
 
@@ -3251,7 +3262,7 @@ func TestEnqueueBlockNotification_PushesToQueue(t *testing.T) {
 		Reason:   "regex matched 'password=hunter2'",
 		Findings: []string{"secret in prompt"},
 	}
-	proxy.enqueueBlockNotification(verdict, "prompt", "gpt-4")
+	proxy.enqueueBlockNotification(context.Background(), verdict, "prompt", "gpt-4")
 
 	sysMsg := q.FormatSystemMessage()
 	if sysMsg == "" {
@@ -3276,11 +3287,11 @@ func TestEnqueueBlockNotification_PushesToQueue(t *testing.T) {
 func TestEnqueueBlockNotification_NilGuards(t *testing.T) {
 	t.Run("nil notify queue", func(t *testing.T) {
 		proxy := &GuardrailProxy{notify: nil}
-		proxy.enqueueBlockNotification(&ScanVerdict{Action: "block", Severity: "HIGH", Reason: "x"}, "prompt", "m")
+		proxy.enqueueBlockNotification(context.Background(), &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "x"}, "prompt", "m")
 	})
 	t.Run("nil verdict", func(t *testing.T) {
 		proxy := &GuardrailProxy{notify: NewNotificationQueue()}
-		proxy.enqueueBlockNotification(nil, "prompt", "m")
+		proxy.enqueueBlockNotification(context.Background(), nil, "prompt", "m")
 		if proxy.notify.FormatSystemMessage() != "" {
 			t.Error("expected queue to remain empty on nil verdict")
 		}
@@ -3891,13 +3902,12 @@ func TestSwitchConnectorLocked_TearsDownOldAndSetsUpNew(t *testing.T) {
 
 	// Start with codex as the active connector.
 	codexConn, _ := reg.Get("codex")
-	codexConn.SetCredentials("tok", "mk")
+	codexConn.SetCredentials("tok")
 
 	p := &GuardrailProxy{
 		connector:    codexConn,
 		registry:     reg,
 		gatewayToken: "tok",
-		masterKey:    "mk",
 		setupOpts: connector.SetupOpts{
 			DataDir:   dir,
 			ProxyAddr: "127.0.0.1:4000",
@@ -3970,13 +3980,12 @@ func TestSwitchConnectorLocked(t *testing.T) {
 	dir := t.TempDir()
 	reg := connector.NewDefaultRegistry()
 	codexConn, _ := reg.Get("codex")
-	codexConn.SetCredentials("tok", "mk")
+	codexConn.SetCredentials("tok")
 
 	p := &GuardrailProxy{
 		connector:    codexConn,
 		registry:     reg,
 		gatewayToken: "tok",
-		masterKey:    "mk",
 		setupOpts: connector.SetupOpts{
 			DataDir:   dir,
 			ProxyAddr: "127.0.0.1:4000",

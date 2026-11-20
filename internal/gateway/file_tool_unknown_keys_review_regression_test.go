@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -416,85 +417,268 @@ func TestRVGXARG(t *testing.T) {
 
 // TestRVGXARGRound2 exercises the review's named and unverifiable classes
 // through the real hook handler in all four policy and deployment cells.
+//
+// Each class is judged twice, per-user and managed, one of the two in the
+// strict profile (in turn), on the tools in turn; the 200 KB description
+// pad is judged once per route (owner TEST BUDGET 2026-11-10: a hook call
+// costs about 120 ms under -race and the tools x classes x cells product
+// ran 3 minutes). As before, a class is judged on a tool only where the
+// tool's plain write (or read) of the target blocks in that cell: a tool
+// that does not block there passes the class to the next tool. A tool that
+// no class reached is then judged with the next class in a strict cell.
+// The plan check fails the test when a class is not judged per-user,
+// managed and in strict, or a tool is never judged. The profile pack is
+// loaded once per profile, not per connector and cell.
 func TestRVGXARGRound2(t *testing.T) {
 	home, project := rvgxSetup(t)
 	state := filepath.Join(home, ".defenseclaw/config.yaml")
 	aws := filepath.Join(home, ".aws/credentials")
 	ordinary := filepath.Join(project, "notes.txt")
-	for _, cell := range rvgxCells {
-		t.Run(cell.profile+fmt.Sprint(cell.managed), func(t *testing.T) {
-			rvgxInstall(t, cell.profile)
-			n := 0
-			judge := func(tool rvgxTool, args map[string]any) string {
-				n++
-				_, action, _, _ := rvgxVerdict(t, tool.connector, tool.tool, args, cell.profile, cell.managed, home, project, fmt.Sprintf("gxarg-r2-%d", n))
-				return strings.Split(action, "/")[0]
+	type check func(tool rvgxTool, target string, judge func(rvgxTool, map[string]any) string) []string
+	mutation := func(add func(map[string]any)) check {
+		return func(tool rvgxTool, target string, judge func(rvgxTool, map[string]any) string) []string {
+			a := rvgxClone(tool.shape(target))
+			add(a)
+			if got := judge(tool, a); got != "block" {
+				return []string{"target " + got}
 			}
-			for _, tool := range rvgxTools() {
-				target := state
-				if strings.EqualFold(tool.tool, "read") {
-					target = aws
-				}
-				base := judge(tool, tool.shape(target))
-				if base != "block" {
+			return nil
+		}
+	}
+	spelled := func(spelling string) check {
+		return func(tool rvgxTool, _ string, judge func(rvgxTool, map[string]any) string) []string {
+			if judge(tool, tool.shape(spelling)) != "block" {
+				return nil
+			}
+			a := tool.shape(spelling)
+			a["description"] = "x"
+			if got := judge(tool, a); got != "block" {
+				return []string{"with extra key: " + got}
+			}
+			return nil
+		}
+	}
+	classes := []struct {
+		name  string
+		named bool // a value named in another field: not for copilot and kiro
+		check check
+	}{
+		{"cwd", false, mutation(func(a map[string]any) { a["cwd"] = "/var/tmp/x" })},
+		{"workdir", false, mutation(func(a map[string]any) { a["workdir"] = "/var/tmp/x" })},
+		{"working_directory", false, mutation(func(a map[string]any) { a["working_directory"] = "/var/tmp/x" })},
+		{"command", false, mutation(func(a map[string]any) {
+			if _, ok := a["command"]; ok {
+				a["cmd"] = "echo hi"
+			} else {
+				a["command"] = "echo hi"
+			}
+		})},
+		{"input", false, mutation(func(a map[string]any) { a["input"] = map[string]any{"file_path": ordinary} })},
+		{"FILE_PATH", false, mutation(func(a map[string]any) { a["FILE_PATH"] = ordinary })},
+		{"other-target-field", false, mutation(func(a map[string]any) {
+			if _, ok := a["path"]; ok {
+				a["file_path"] = ordinary
+			} else {
+				a["path"] = ordinary
+			}
+		})},
+		{"home", false, spelled("$HOME/.defenseclaw/config.yaml")},
+		{"tilde", false, spelled("~/.defenseclaw/config.yaml")},
+		{"relative", false, spelled("../.defenseclaw/config.yaml")},
+		{"named value in input", true, func(tool rvgxTool, _ string, judge func(rvgxTool, map[string]any) string) []string {
+			a := tool.shape(ordinary)
+			a["input"] = map[string]any{"file_path": state}
+			if got := judge(tool, a); got != "block" {
+				return []string{got}
+			}
+			return nil
+		}},
+		{"named value in alternate target field", true, func(tool rvgxTool, _ string, judge func(rvgxTool, map[string]any) string) []string {
+			b := tool.shape(ordinary)
+			if _, ok := b["path"]; ok {
+				b["file_path"] = state
+			} else {
+				b["path"] = state
+			}
+			if got := judge(tool, b); got != "block" {
+				return []string{got}
+			}
+			return nil
+		}},
+	}
+	huge := mutation(func(a map[string]any) { a["description"] = strings.Repeat("x", 200000) })
+	tools := rvgxTools()
+	toolID := func(tool rvgxTool) string { return tool.connector + "/" + tool.tool + "/" + tool.key }
+	// One cell at a time: the profile packs are installed once per cell.
+	type cellRun struct {
+		t       *testing.T
+		profile string
+		managed bool
+		n       int
+		base    map[string]string
+	}
+	judged := map[string]bool{}
+	judgeIn := func(c *cellRun, tool rvgxTool, args map[string]any) string {
+		c.n++
+		_, action, _, _ := rvgxVerdict(c.t, tool.connector, tool.tool, args, c.profile, c.managed, home, project, fmt.Sprintf("gxarg-r2-%d", c.n))
+		return strings.Split(action, "/")[0]
+	}
+	// blocks reports whether the plain write (or read) of the target by
+	// tool blocks in cell c, judging it once per cell.
+	blocks := func(c *cellRun, tool rvgxTool) (string, bool) {
+		target := state
+		if strings.EqualFold(tool.tool, "read") {
+			target = aws
+		}
+		id := toolID(tool)
+		if _, ok := c.base[id]; !ok {
+			c.base[id] = judgeIn(c, tool, tool.shape(target))
+			judged["tool="+id] = true
+		}
+		return target, c.base[id] == "block"
+	}
+	type entry struct {
+		class string
+		named bool
+		check check
+	}
+	plan := make([][]entry, len(rvgxCells)) // cell index -> class entries
+	cellFor := func(perUser, strict bool) int {
+		for i, cell := range rvgxCells {
+			if cell.managed != perUser && (cell.profile == "strict") == strict {
+				return i
+			}
+		}
+		panic("no cell")
+	}
+	for c, class := range classes {
+		plan[cellFor(true, c%2 == 0)] = append(plan[cellFor(true, c%2 == 0)], entry{class.name, class.named, class.check})
+		plan[cellFor(false, c%2 == 1)] = append(plan[cellFor(false, c%2 == 1)], entry{class.name, class.named, class.check})
+	}
+	plan[cellFor(true, false)] = append(plan[cellFor(true, false)], entry{"huge", false, huge})
+	plan[cellFor(false, true)] = append(plan[cellFor(false, true)], entry{"huge", false, huge})
+	cursor := 0
+	reached := map[string]bool{}
+	apply := func(c *cellRun, e entry, start int) bool {
+		for try := 0; try < len(tools); try++ {
+			tool := tools[(start+try)%len(tools)]
+			if e.named && (tool.connector == "copilot" || tool.connector == "kiro") {
+				continue
+			}
+			target, ok := blocks(c, tool)
+			if !ok {
+				continue
+			}
+			for _, problem := range e.check(tool, target, func(tool rvgxTool, args map[string]any) string { return judgeIn(c, tool, args) }) {
+				c.t.Errorf("%s/%s %s: %s", tool.connector, tool.tool, e.class, problem)
+			}
+			judged["class="+e.class+"/managed="+fmt.Sprint(c.managed)] = true
+			judged["class="+e.class+"/"+c.profile] = true
+			reached[toolID(tool)] = true
+			cursor = (start + try + 1) % len(tools)
+			return true
+		}
+		return false
+	}
+	for i, cell := range rvgxCells {
+		// The cells of one profile share its install (rvgxCells lists them
+		// side by side).
+		if i == 0 || rvgxCells[i-1].profile != cell.profile {
+			rvgxInstallProfile(t, cell.profile)
+		}
+		t.Run(cell.profile+fmt.Sprint(cell.managed), func(t *testing.T) {
+			c := &cellRun{t: t, profile: cell.profile, managed: cell.managed, base: map[string]string{}}
+			for _, e := range plan[i] {
+				if e.class == "huge" {
+					// The pad on a tool_input map per-user, on the
+					// Copilot CLI toolArgs string managed.
+					start := 0
+					if cell.managed {
+						start = slices.IndexFunc(tools, func(tool rvgxTool) bool { return tool.connector == "copilot" })
+					}
+					apply(c, e, start)
 					continue
 				}
-				for name, add := range map[string]func(map[string]any){
-					"cwd":               func(a map[string]any) { a["cwd"] = "/var/tmp/x" },
-					"workdir":           func(a map[string]any) { a["workdir"] = "/var/tmp/x" },
-					"working_directory": func(a map[string]any) { a["working_directory"] = "/var/tmp/x" },
-					"command": func(a map[string]any) {
-						if _, ok := a["command"]; ok {
-							a["cmd"] = "echo hi"
-						} else {
-							a["command"] = "echo hi"
-						}
-					},
-					"input":     func(a map[string]any) { a["input"] = map[string]any{"file_path": ordinary} },
-					"FILE_PATH": func(a map[string]any) { a["FILE_PATH"] = ordinary },
-					"other-target-field": func(a map[string]any) {
-						if _, ok := a["path"]; ok {
-							a["file_path"] = ordinary
-						} else {
-							a["path"] = ordinary
-						}
-					},
-					"huge": func(a map[string]any) { a["description"] = strings.Repeat("x", 200000) },
-				} {
-					a := rvgxClone(tool.shape(target))
-					add(a)
-					if got := judge(tool, a); got != "block" {
-						t.Errorf("%s/%s %s: target %s", tool.connector, tool.tool, name, got)
-					}
+				apply(c, e, cursor)
+			}
+			// The strict cells sweep the tools no class reached yet.
+			if cell.profile != "strict" {
+				return
+			}
+			for ti, tool := range tools {
+				if reached[toolID(tool)] {
+					continue
 				}
-				for name, spelling := range map[string]string{"home": "$HOME/.defenseclaw/config.yaml", "tilde": "~/.defenseclaw/config.yaml", "relative": "../.defenseclaw/config.yaml"} {
-					if judge(tool, tool.shape(spelling)) != "block" {
-						continue
-					}
-					a := tool.shape(spelling)
-					a["description"] = "x"
-					if got := judge(tool, a); got != "block" {
-						t.Errorf("%s/%s %s with extra key: %s", tool.connector, tool.tool, name, got)
-					}
+				if _, ok := blocks(c, tool); !ok {
+					continue
 				}
-				if tool.connector != "copilot" && tool.connector != "kiro" {
-					a := tool.shape(ordinary)
-					a["input"] = map[string]any{"file_path": state}
-					if got := judge(tool, a); got != "block" {
-						t.Errorf("%s/%s named value in input: %s", tool.connector, tool.tool, got)
-					}
-					b := tool.shape(ordinary)
-					if _, ok := b["path"]; ok {
-						b["file_path"] = state
-					} else {
-						b["path"] = state
-					}
-					if got := judge(tool, b); got != "block" {
-						t.Errorf("%s/%s named value in alternate target field: %s", tool.connector, tool.tool, got)
-					}
+				k := ti
+				for classes[k%len(classes)].named && (tool.connector == "copilot" || tool.connector == "kiro") {
+					k++
 				}
+				class := classes[k%len(classes)]
+				apply(c, entry{class.name, class.named, class.check}, ti)
 			}
 		})
+	}
+	// The plan check.
+	var missing []string
+	names := []string{"huge"}
+	for _, class := range classes {
+		names = append(names, class.name)
+	}
+	for _, name := range names {
+		for _, key := range []string{"/managed=false", "/managed=true", "/strict"} {
+			if !judged["class="+name+key] {
+				missing = append(missing, name+key)
+			}
+		}
+	}
+	for _, tool := range tools {
+		if !judged["tool="+toolID(tool)] {
+			missing = append(missing, "tool "+toolID(tool))
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("rotation left unjudged: %v", missing)
+	}
+	for _, tool := range tools {
+		if !reached[toolID(tool)] {
+			t.Logf("%s: the plain write blocks in no cell it was judged in, no class judged on it", toolID(tool))
+		}
+	}
+}
+
+// rvgxInstallProfile is rvgxInstall with the profile pack loaded once for
+// all eight connectors: rvgxInstall loads it again for every connector
+// (a pack load, strict YAML decode and CEL compile is ~0.3 s of CPU under
+// -race). Each connector keeps its own compiled categories, and its
+// previous ones come back when t ends.
+func rvgxInstallProfile(t *testing.T, profile string) {
+	t.Helper()
+	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+	for _, c := range []string{"claudecode", "codex", "copilot", "opencode", "cursor", "hermes", "amp", "kiro"} {
+		ruleCategoriesMu.Lock()
+		savedCategories, hadCategories := connectorRuleCategories[c]
+		savedGeneration, hadGeneration := connectorRuleGenerations[c]
+		ruleCategoriesMu.Unlock()
+		t.Cleanup(func() {
+			ruleCategoriesMu.Lock()
+			defer ruleCategoriesMu.Unlock()
+			if hadCategories {
+				connectorRuleCategories[c] = savedCategories
+			} else {
+				delete(connectorRuleCategories, c)
+			}
+			if hadGeneration {
+				connectorRuleGenerations[c] = savedGeneration
+			} else {
+				delete(connectorRuleGenerations, c)
+			}
+		})
+		if err := ApplyConnectorRulePackOverrides(c, pack); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

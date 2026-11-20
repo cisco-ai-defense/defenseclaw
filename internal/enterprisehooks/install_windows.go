@@ -380,6 +380,11 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		return InstallResult{}, fmt.Errorf("enterprise hooks: target SID %s is not registered in the Claude Code managed policy", targetSID)
 	}
 	if !sameWindowsEnterprisePath(state.HookExecutable, hookExecutable) {
+		// An older image of this install (GAP-0751) is not the current one:
+		// verify fails, so the next reconcile rewrites the policy for it.
+		if winpath.SameEnterpriseHookImageFamily(state.HookExecutable, hookExecutable) {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: hook_image_stale: managed policy executable %s is not the current hook image %s; the next reconcile writes it", state.HookExecutable, hookExecutable)
+		}
 		return InstallResult{}, fmt.Errorf("enterprise hooks: managed policy executable %s does not match trusted hook executable %s", state.HookExecutable, hookExecutable)
 	}
 	// Standalone verifies every row against the one deployment-wide body.
@@ -414,6 +419,11 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
+	// Route-only drift (S1 DESIGN 18.3, 21): the guardian repair re-renders.
+	routeOnly, err := verifyWindowsRouteOnly(conn, targetSID, home, dataDir, opts.RouteOnly)
+	if err != nil {
+		return InstallResult{}, err
+	}
 	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID, setupOpts.APIAddr, setupOpts.ProxyAddr)
 	if err != nil {
 		return InstallResult{}, err
@@ -432,7 +442,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		conn.Name(),
 		targetSID,
 		dataDir,
-		hookExecutable,
+		windowsPriorReleaseTargetHookImage(opts, conn.Name(), targetSID, hookExecutable),
 		setupOpts.APIAddr,
 		setupOpts.HookAPIToken,
 		lock.ContractID,
@@ -456,6 +466,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		AgentVersion:    lock.RawAgentVersion,
 		HookContractID:  lock.ContractID,
 		AgentConfig:     otlpReport,
+		RouteOnly:       routeOnly,
 	}, nil
 }
 
@@ -463,9 +474,24 @@ type windowsGenericManagedTarget struct {
 	home           string
 	dataDir        string
 	hookExecutable string
-	sid            *windows.SID
-	conn           connector.Connector
-	setup          connector.SetupOpts
+	// runtimeHookExecutable is the hook image the target records (its
+	// runtime generation, enrollment and agent configs) are checked
+	// against: hookExecutable, or in a verification that accepts an earlier
+	// release render the earlier image they name
+	// (windowsPriorReleaseTargetHookImage, GAP-1096).
+	runtimeHookExecutable string
+	sid                   *windows.SID
+	conn                  connector.Connector
+	setup                 connector.SetupOpts
+}
+
+// recordsHookExecutable is runtimeHookExecutable, or hookExecutable for a
+// target built without it.
+func (t windowsGenericManagedTarget) recordsHookExecutable() string {
+	if t.runtimeHookExecutable != "" {
+		return t.runtimeHookExecutable
+	}
+	return t.hookExecutable
 }
 
 func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericManagedTarget, error) {
@@ -592,13 +618,20 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if err := applyWindowsStandalonePluginOptions(name, &setup); err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
+	runtimeHookExecutable := windowsPriorReleaseTargetHookImage(opts, name, targetSID, hookExecutable)
+	if runtimeHookExecutable != hookExecutable {
+		// The read-only check of an earlier release render compares the
+		// account agent configs with the render for the image they name.
+		setup.HookExecutable = runtimeHookExecutable
+	}
 	return windowsGenericManagedTarget{
-		home:           home,
-		dataDir:        dataDir,
-		hookExecutable: hookExecutable,
-		sid:            targetSID,
-		conn:           conn,
-		setup:          setup,
+		home:                  home,
+		dataDir:               dataDir,
+		hookExecutable:        hookExecutable,
+		runtimeHookExecutable: runtimeHookExecutable,
+		sid:                   targetSID,
+		conn:                  conn,
+		setup:                 setup,
 	}, nil
 }
 
@@ -766,7 +799,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := ensureWindowsManagedOpenCodePort(target.conn.Name(), target.home, target.sid.String(), opts.OpenCodeServicePort, opts.OpenCodeServicePortRequired); err != nil {
 				return err
 			}
-			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
+			target.conn.SetCredentials(target.setup.APIToken)
 			if err := target.conn.Setup(ctx, target.setup); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed under target SID %s: %w", target.conn.Name(), target.sid, err)
 			}
@@ -1916,8 +1949,15 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 		}
 		defer unlock()
 	}
+	// A removed Claude Code or Codex target gets its own agent values back
+	// (route-only render; best effort, as the target) only after its
+	// removal succeeded (restoreWindowsRouteOnlyAfterRemoval).
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
-		return removeWindowsClaudeManagedPolicyTarget(claudeTargetSID)
+		if err := removeWindowsClaudeManagedPolicyTarget(claudeTargetSID); err != nil {
+			return err
+		}
+		restoreWindowsRouteOnlyAfterRemoval(opts)
+		return nil
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "codex") {
 		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
@@ -1939,10 +1979,14 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 			return err
 		}
 		_ = ctx
-		return connector.RemoveWindowsCodexManagedRuntimeTarget(
+		if err := connector.RemoveWindowsCodexManagedRuntimeTarget(
 			machineOpts,
 			targetSID.String(),
-		)
+		); err != nil {
+			return err
+		}
+		restoreWindowsRouteOnlyAfterRemoval(opts)
+		return nil
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
 		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
@@ -2354,12 +2398,22 @@ func requireWindowsEnterpriseAgentVersion(raw string) error {
 	return nil
 }
 
+// defaultWindowsEnterpriseHookExecutable is the hook image every managed
+// hook config of this install names (GAP-0751): the launch image
+// <bin>\hooks\<d16>\defenseclaw-hook.exe of the running gateway's bin once
+// Setup staged it, else the transition image <bin>\defenseclaw-hook.exe (a
+// 1.0.9 layout, Secure Client). A hook process that asks gets its own image
+// path as before, so no hook start reads an image to answer.
 func defaultWindowsEnterpriseHookExecutable() (string, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return "", fmt.Errorf("enterprise hooks: resolve gateway executable: %w", err)
 	}
-	path := filepath.Join(filepath.Dir(executable), "defenseclaw-hook.exe")
+	bin := filepath.Dir(executable)
+	path := filepath.Join(bin, "defenseclaw-hook.exe")
+	if !strings.EqualFold(filepath.Base(executable), winpath.EnterpriseHookImageName) {
+		path = winpath.EnterpriseHookLaunchPath(bin)
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", fmt.Errorf("enterprise hooks: inspect sibling native hook executable %s: %w", path, err)

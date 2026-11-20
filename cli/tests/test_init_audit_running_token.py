@@ -129,21 +129,29 @@ class InitGatewayDefaultsTests(_TokenSwapCase):
         self._run(gateway)
         self.assertEqual(gateway.tokens, [_RUNNING, _RUNNING])
         self.assertEqual(gateway.admitted, ["init-gateway", "install-dep"])
-        self.assertEqual(self.cfg.gateway.token_env, "OPENCLAW_GATEWAY_TOKEN")
-        self.assertEqual(self.cfg.gateway.resolved_token(), _OPENCLAW)
+        # R-TOK: the OpenClaw token is saved as the OpenClaw credential only;
+        # the DefenseClaw master is unchanged.
+        self.assertEqual(self.cfg.gateway.token_env, "DEFENSECLAW_GATEWAY_TOKEN")
+        self.assertEqual(self.cfg.gateway.resolved_token(), _RUNNING)
         self.assertIn(f"OPENCLAW_GATEWAY_TOKEN={_OPENCLAW}", self._saved_token())
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN=", self._saved_token())
 
-    def test_a_stopped_gateway_gets_the_new_token_without_a_rejected_try(self) -> None:
-        gateway = _Gateway(_OPENCLAW)
+    def test_a_stopped_gateway_keeps_the_master(self) -> None:
+        gateway = _Gateway(_RUNNING)
         self._run(gateway)
-        self.assertEqual(gateway.tokens, [_OPENCLAW, _OPENCLAW])
+        self.assertEqual(gateway.tokens, [_RUNNING, _RUNNING])
 
-    def test_the_same_token_changes_nothing(self) -> None:
+    def test_a_master_equal_to_the_openclaw_token_is_replaced(self) -> None:
+        # A 1.0.9 adoption left the OpenClaw token as the master; a gateway
+        # still running on it is audited with it until it restarts.
         _gateway_running(self.cfg.data_dir)
         os.environ["DEFENSECLAW_GATEWAY_TOKEN"] = _OPENCLAW
         gateway = _Gateway(_OPENCLAW)
         self._run(gateway)
         self.assertEqual(gateway.tokens, [_OPENCLAW, _OPENCLAW])
+        master = self.cfg.gateway.resolved_token()
+        self.assertNotIn(master, ("", _OPENCLAW))
+        self.assertIn(f"DEFENSECLAW_GATEWAY_TOKEN={master}", self._saved_token())
 
 
 class BootstrapGatewayDefaultsTests(_TokenSwapCase):

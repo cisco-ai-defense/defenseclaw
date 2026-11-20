@@ -121,10 +121,15 @@ func TestCopyThroughAVariableSetFromAnotherIsBlockedPastTheCommandBound(t *testi
 	copyThroughVariablePadded(t, `p=keylink; f=${p:-out.txt}; p=other.txt; cp a.txt "$f"`, 0, "block")
 }
 
-// TestCopyThroughAVariableSetFromAnOrdinaryNameIsAllowedPastTheCommandBound
-// pins the ordinary twin allowed by the managed Codex hook, padded the same.
-func TestCopyThroughAVariableSetFromAnOrdinaryNameIsAllowedPastTheCommandBound(t *testing.T) {
-	copyThroughVariablePadded(t, `p=out.txt; f=${p:-keylink}; p=other.txt; cp a.txt "$f"`, 2, "allow")
+// TestCopyThroughAVariableSetFromAnOrdinaryNameIsAlertedPastTheCommandBound
+// pins the ordinary twin of the managed Codex hook, padded the same. It
+// proves no finding, but the command is past the input bound, so it is
+// TRUNCATED (cap=bytes, rel-1-0-10:GAP-0611, GAP-0748): the unknown tier of
+// the managed default pack, an alert. Until 1.0.10 it was an allow. The copy
+// itself is read from the bounded twin and names no protected file, so the
+// alert is the only change; the blocked twin above keeps its block.
+func TestCopyThroughAVariableSetFromAnOrdinaryNameIsAlertedPastTheCommandBound(t *testing.T) {
+	copyThroughVariablePadded(t, `p=out.txt; f=${p:-keylink}; p=other.txt; cp a.txt "$f"`, 2, "alert")
 }
 
 // copyThroughVariablePadded judges command padded over the command bound in

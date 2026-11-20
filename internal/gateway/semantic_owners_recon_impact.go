@@ -68,8 +68,11 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     actionfacts.ExactDirectoryCredentialCompromise,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
+	// The non-dump half also owns credentialed NetExec / CrackMapExec domain
+	// service use at the same HIGH (rel-1-0-10:GAP-0014, folded here to keep the
+	// default catalog's semantic headroom; see directoryTicketRequestOrServiceUse).
 	"credential.directory_ticket_request": {
-		prerequisite:     actionfacts.ExactDirectoryCredentialTicketRequest,
+		prerequisite:     directoryTicketRequestOrServiceUse,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
 	"credential.pkcs12_private_key_extract": {
@@ -447,7 +450,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDelete) ||
-			!recursiveForceDeleteFlags(command) {
+			!recursiveForceDeleteFlags(command) && !unrestrictedFindDelete(command) {
 			continue
 		}
 		if commandOwnsPath(
@@ -570,25 +573,17 @@ func cmdRecursiveQuietFlags(argv []string) bool {
 	return recursive && quiet
 }
 
+// deleteTargetIsCriticalScope reports a delete target that is critical scope
+// (criticalDeleteScope): the roots, the system folders, the active home and
+// the children of the system payload folders.
 func deleteTargetIsCriticalScope(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := canonicalSemanticPath(semanticPathValue(candidate))
-	if value == "/" || windowsDriveRoot(value) {
-		return true
-	}
-	switch strings.TrimRight(value, "/") {
-	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
-		"/mnt", "/opt", "/proc", "/root", "/sbin", "/srv", "/sys", "/usr", "/var",
-		"/applications", "/library", "/system", "/users",
-		"c:/program files", "c:/program files (x86)", "c:/programdata",
-		"c:/users", "c:/windows":
-		return true
-	}
-	home := strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
-	return home != "" &&
-		strings.TrimRight(value, "/") == home
+	return criticalDeleteScope(
+		canonicalSemanticPath(semanticPathValue(candidate)),
+		criticalScopeHome(facts),
+	)
 }
 
 func windowsDriveRoot(value string) bool {
@@ -1234,10 +1229,10 @@ func privateSecurityMaterial(
 	}
 	return matchesAuthorizedKeys(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
-		matchesActiveAWSCredentials(facts, candidate) ||
-		matchesActiveKubeConfig(facts, candidate) ||
-		matchesActivePackageCredentialFile(facts, candidate) ||
-		matchesActiveGitCredentialFile(facts, candidate) ||
+		matchesAnyHomeAWSCredentials(facts, candidate) ||
+		matchesAnyHomeKubeConfig(facts, candidate) ||
+		matchesAnyHomePackageCredentialFile(facts, candidate) ||
+		matchesAnyHomeGitCredentialFile(facts, candidate) ||
 		matchesActiveCloudCredentialFile(facts, candidate) ||
 		matchesActiveBrowserSessionStore(facts, candidate)
 }
@@ -2328,18 +2323,7 @@ func forkBombFallbackProof(
 	return false
 }
 
-func canonicalShellForkBomb(value string) bool {
-	var compact strings.Builder
-	for _, character := range strings.TrimSpace(value) {
-		switch character {
-		case ' ', '\t', '\r', '\n':
-			continue
-		default:
-			compact.WriteRune(character)
-		}
-	}
-	return compact.String() == ":(){:|:&};:"
-}
+func canonicalShellForkBomb(value string) bool { return matchesForkBomb(value) }
 
 func exactInterpreterProgram(argv []string, expected string) bool {
 	if len(argv) != 3 || argv[1] != "-e" {
@@ -2385,4 +2369,15 @@ func hasArgumentFold(argv []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+// directoryTicketRequestOrServiceUse is the prerequisite of the built-in HIGH
+// credential.directory_ticket_request rule: a bare Kerberos ticket request, or a
+// complete credentialed NetExec / CrackMapExec domain-service call that is not
+// an NTDS dump (directoryServiceCredentialUsePrerequisite). Both are directory
+// credential use short of a dump or crack, so default alerts and strict blocks.
+// The rule's CEL program list keeps each half on its own programs.
+func directoryTicketRequestOrServiceUse(facts actionfacts.Facts) bool {
+	return actionfacts.ExactDirectoryCredentialTicketRequest(facts) ||
+		directoryServiceCredentialUsePrerequisite(facts)
 }

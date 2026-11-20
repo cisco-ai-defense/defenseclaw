@@ -1125,7 +1125,7 @@ func TestTrustedActionLegacyCommandsAndC2RequireActionFacts(t *testing.T) {
 	}
 }
 
-func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *testing.T) {
+func TestTrustedActionLiteralCarriersRequireExecutionProof(t *testing.T) {
 	const connector = "trusted-action-literal-carrier-execution-test"
 	installDefaultProfileConnector(t, connector)
 	dangerous := "rm -rf " + "/"
@@ -1134,6 +1134,11 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 		name        string
 		command     string
 		wantFinding bool
+		// enforced marks an awk call whose literal commands are judged as the
+		// hook running them directly (s7/awk-command, rel-1-0-10:GAP-0499): the
+		// finding is the one of the direct command and enforces, whatever
+		// else the outer call holds. Every other carrier stays shadow-only.
+		enforced bool
 	}{
 		{
 			name:    "benign ripgrep pattern",
@@ -1178,16 +1183,19 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "awk system call",
 			command:     `awk 'BEGIN { system("` + dangerous + `") }' input.txt`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:        "awk command to getline",
 			command:     `awk 'BEGIN { "` + dangerous + `" | getline line }' input.txt`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:        "awk print to command",
 			command:     `awk 'BEGIN { print "data" | "` + dangerous + `" }' input.txt`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:    "awk data literal is not executable system argument",
@@ -1205,11 +1213,13 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "awk regex hash does not hide later system call",
 			command:     `awk 'BEGIN { if ("#" ~ /#/) print 1; system("` + dangerous + `") }'`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:        "awk operator regex does not hide later system call",
 			command:     `awk 'BEGIN { if (1 && /#/) print 1; system("` + dangerous + `") }'`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:    "benign sed replacement",
@@ -1239,6 +1249,14 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			command:     `sed -e '/fixture/e ` + dangerous + `' input.txt`,
 			wantFinding: true,
 		},
+		// Static stdin is independently parsed as shell text (GAP-0994).
+		// Its proof has the same authority as the literal -c control.
+		{
+			name:        "literal shell control",
+			command:     "bash -c '" + dangerous + "'",
+			wantFinding: true,
+			enforced:    true,
+		},
 		{
 			name:    "benign echo output",
 			command: `echo '` + dangerous + `'`,
@@ -1247,6 +1265,7 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "echo payload to shell",
 			command:     `echo '` + dangerous + `' | bash`,
 			wantFinding: true,
+			enforced:    true,
 		},
 		{
 			name:    "benign printf output",
@@ -1256,6 +1275,7 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 			name:        "printf payload to shell",
 			command:     `printf '%s\n' '` + dangerous + `' | sh`,
 			wantFinding: true,
+			enforced:    true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1283,8 +1303,8 @@ func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *t
 					}),
 				)
 			}
-			if matched != nil && matched.contributesToEnforcement() {
-				t.Fatalf("partial outer carrier became enforceable: %+v", *matched)
+			if matched != nil && matched.contributesToEnforcement() != test.enforced {
+				t.Fatalf("partial outer carrier enforceable=%t, want %t: %+v", matched.contributesToEnforcement(), test.enforced, *matched)
 			}
 		})
 	}
@@ -1782,6 +1802,10 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			wantFinding: true,
 		},
 		{
+			// The here-string call is judged as its POSIX twin
+			// printf '%s\n' harmless | rm -rf /, which runs the delete, so
+			// the finding enforces as the one-step form's does
+			// (rel-1-0-10:GAP-1083).
 			name: "bash here string",
 			input: actionfacts.Input{
 				Tool:    "bash",
@@ -1790,6 +1814,7 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  dangerous + " <<< harmless",
 			wantFinding: true,
+			wantEnforce: true,
 		},
 		{
 			name: "bash arithmetic loop",
@@ -1920,7 +1945,10 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 			},
 			legacyText:  "foreach i (x); " + dangerous + "; end",
 			wantFinding: true,
-			uncertain:   true,
+			// The Bash grammar rejects the zsh loop head; its statement that
+			// parses on its own runs once per item and is judged as the
+			// command it is (rel-1-0-10:GAP-0526): it blocks.
+			wantEnforce: true,
 		},
 		{
 			name: "zsh short select loop",
@@ -2334,7 +2362,7 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 	}
 }
 
-func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testing.T) {
+func TestTrustedActionEmbeddedExecutionRequiresIndependentProof(t *testing.T) {
 	const connector = "trusted-action-embedded-category-test"
 	// The nested reverse-tunnel case exercises a strict-only atomic. The test's
 	// purpose is the incomplete-outer-action shadow boundary.
@@ -2347,6 +2375,11 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 		name    string
 		command string
 		ruleID  string
+		// enforced: an awk call's literal command is judged as the hook
+		// running it directly (s7/awk-command, rel-1-0-10:GAP-0499), so its
+		// finding enforces. A resolved shell script has its own complete proof;
+		// unresolved carriers stay shadow-only.
+		enforced bool
 	}{
 		{
 			name:    "find later exec exact action",
@@ -2359,9 +2392,10 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
 		{
-			name:    "awk system network action",
-			command: `awk 'BEGIN { system("curl ` + webhook + `") }' input.txt`,
-			ruleID:  "C2-WEBHOOK-SITE",
+			name:     "awk system network action",
+			command:  `awk 'BEGIN { system("curl ` + webhook + `") }' input.txt`,
+			ruleID:   "C2-WEBHOOK-SITE",
+			enforced: true,
 		},
 		{
 			name:    "eval sensitive read",
@@ -2369,9 +2403,16 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 			ruleID:  "PATH-ETC-SHADOW",
 		},
 		{
-			name:    "stdin interpreter network action",
-			command: `echo 'curl ` + webhook + `' | bash`,
-			ruleID:  "C2-WEBHOOK-SITE",
+			name:     "literal shell network control",
+			command:  "bash -c 'curl " + webhook + "'",
+			ruleID:   "C2-WEBHOOK-SITE",
+			enforced: true,
+		},
+		{
+			name:     "stdin interpreter network action",
+			command:  `echo 'curl ` + webhook + `' | bash`,
+			ruleID:   "C2-WEBHOOK-SITE",
+			enforced: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2393,9 +2434,11 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 					trustedNestedExecutionActions(input, facts),
 				)
 			}
-			if matched.contributesToEnforcement() {
+			if matched.contributesToEnforcement() != test.enforced {
 				t.Fatalf(
-					"partial outer execution became enforceable: %+v facts=%+v",
+					"partial outer execution enforceable=%t, want %t: %+v facts=%+v",
+					matched.contributesToEnforcement(),
+					test.enforced,
 					*matched,
 					facts,
 				)
@@ -2530,13 +2573,13 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t
 		{
 			name:    "cloud live candidate",
 			path:    "/home/alice/.config/gcloud/application_default_credentials.json",
-			matches: matchesCloudCredentialFile,
+			matches: matchesCredentialFileShape,
 			want:    true,
 		},
 		{
 			name:    "cloud fixture candidate",
 			path:    "/repo/testdata/application_default_credentials.json",
-			matches: matchesCloudCredentialFile,
+			matches: matchesCredentialFileShape,
 		},
 		{
 			name:    "browser live candidate",
@@ -3139,9 +3182,22 @@ func TestInspectMessageAndConnectorBoundary(t *testing.T) {
 	)
 	messageRecorder := httptest.NewRecorder()
 	api.handleInspectTool(messageRecorder, message)
+	// The text of a message call can sit in any string field of its args, so a
+	// message whose empty content leaves the text in args.command is inspected
+	// as outbound text (GAP-0177). Before, only args.content and args.body were
+	// read and this call was allowed unread.
 	if messageRecorder.Code != http.StatusOK ||
-		!bytes.Contains(messageRecorder.Body.Bytes(), []byte(`"action":"allow"`)) {
-		t.Fatalf("empty message entered tool lane: status=%d body=%s", messageRecorder.Code, messageRecorder.Body.String())
+		!bytes.Contains(messageRecorder.Body.Bytes(), []byte(`"action":"block"`)) {
+		t.Fatalf("message with text in args.command was not inspected: status=%d body=%s", messageRecorder.Code, messageRecorder.Body.String())
+	}
+	// With nothing to read at all (no content, no arguments) the call is allowed.
+	empty := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool",
+		bytes.NewBufferString(`{"tool":"message","content":""}`))
+	emptyRecorder := httptest.NewRecorder()
+	api.handleInspectTool(emptyRecorder, empty)
+	if emptyRecorder.Code != http.StatusOK ||
+		!bytes.Contains(emptyRecorder.Body.Bytes(), []byte(`"action":"allow"`)) {
+		t.Fatalf("empty message was not allowed: status=%d body=%s", emptyRecorder.Code, emptyRecorder.Body.String())
 	}
 
 	mismatch := httptest.NewRequest(

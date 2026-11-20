@@ -770,7 +770,9 @@ var windowsMachinePolicyRegisteredSIDs = func(connectorName, hookExecutable stri
 // executable belongs to another deployment and stays for the pending proof to
 // refuse, unless that hook executable is gone: then the deployment was
 // uninstalled without purge, and a reinstall into another folder could never
-// enroll the user over its selection (GAP-0273), so it is retired too. The
+// enroll the user over its selection (GAP-0273), so it is retired too. A
+// selection recorded with an older launch image or the transition image of
+// this install is this deployment's own (GAP-0751). The
 // selection's bundle is retired best effort: without the
 // selection it is unreachable, and generation GC collects what is left.
 // Standalone only; Secure Client keeps its selections as before.
@@ -796,7 +798,7 @@ func RetireWindowsUnregisteredRuntimeSelections() error {
 		var registered map[string]bool
 		read := false
 		for _, entry := range selector.Targets {
-			if entry.HookExecutable != hookExecutable {
+			if !sameWindowsManagedHookImageExact(entry.HookExecutable, hookExecutable) {
 				if windowsRuntimeSelectionHookGone(entry.HookExecutable) {
 					if err := retireWindowsOrphanedRuntimeSelection(name, entry); err != nil {
 						errs = append(errs, fmt.Errorf("%s runtime selection of %s left by %s: %w", name, entry.SID, entry.HookExecutable, err))
@@ -2667,9 +2669,10 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstResolve(
 	entry windowsManagedRuntimeSelectorTarget,
 	opts WindowsManagedRuntimeGenerationResolveOptions,
 ) error {
+	// The invoking hook may be an older launch image of this install (an
+	// agent session that read its command before an upgrade, GAP-0751).
 	if entry.Connector != opts.Connector || entry.SID != opts.TargetSID ||
-		entry.HookExecutable != opts.HookExecutable ||
-		!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+		!sameWindowsManagedHookImageExact(entry.HookExecutable, opts.HookExecutable) {
 		return errors.New(
 			"enterprise hooks: managed runtime selector does not match authenticated primary machine policy",
 		)
@@ -2698,9 +2701,10 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 		// The standalone profile keeps main's refusal: the bulldoze reclaim
 		// below (#1068) is a Secure Client recovery. A selection another
 		// deployment left behind is reported as a mismatched selected
-		// runtime, not silently retired.
-		if entry.HookExecutable != opts.HookExecutable ||
-			!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+		// runtime, not silently retired. A selection recorded with an older
+		// launch image of this install, or its transition image, is this
+		// deployment's (GAP-0751).
+		if !sameWindowsManagedHookImageExact(entry.HookExecutable, opts.HookExecutable) {
 			return errors.New(
 				"enterprise hooks: refusing to remove a managed runtime selector entry owned by another deployment",
 			)

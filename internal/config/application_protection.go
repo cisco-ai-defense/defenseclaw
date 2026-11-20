@@ -352,6 +352,14 @@ func (c *Config) EffectiveGuardrailModeForConnector(connector string) string {
 		return "observe"
 	}
 	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
+		// guardrail.cascade.admin.locked [mode]: the top-level value decides
+		// for an automatically protected connector too. The load strips a
+		// locked overlay mode, and a stripped key inherits the top level; it
+		// is never the observe default of an overlay that sets no mode
+		// (GAP-0580).
+		if !c.SecureClientIntegration() && c.Guardrail.Cascade.Admin.locked("mode") {
+			return c.Guardrail.EffectiveMode(connector)
+		}
 		if m := strings.TrimSpace(pc.Mode); m != "" {
 			return m
 		}

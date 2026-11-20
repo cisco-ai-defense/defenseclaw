@@ -84,6 +84,8 @@ var managedWindowsBareSetupAllowed = []managedWindowsSetupAllowance{
 		reason: "the execution-policy script-block remedy is classified for a Secure Client run only (windowsEnterpriseRunPowerShell, !standalone) and keeps its text"},
 	{path: "internal/cli/windows_enterprise_service.go", words: "run Setup again", exact: true,
 		reason: "windowsEnterpriseStagingRetryStep on Secure Client keeps the text it always had; a standalone run asks for the same command"},
+	{path: "internal/gateway/connector/claudecode_chain.go", words: "Run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair",
+		reason: "claudeManagedGuardMissingWords109 is the text 1.0.9 Setup wrote, kept only so a 1.0.9 managed policy still reads as DefenseClaw's guard (matched against the policy, never printed); remove it with the 1.0.9 upgrade source"},
 }
 
 // managedWindowsCallAllowed lists, by path prefix below the module root,
@@ -109,6 +111,7 @@ var managedWindowsQuoteAllowed = map[string]string{
 	"internal/actionfacts/simple_commands.go":     "re-renders a command with its resolved variables for policy matching",
 	"internal/gateway/trusted_action_dispatch.go": "the gateway's command-line reader for trusted actions",
 	"internal/gateway/powershell_state_write.go":  "re-renders a ${provider:path} variable as a literal for the state-write matcher",
+	"internal/audit/compact.go":                   "a SQLite string literal for PRAGMA temp_store_directory (SQL doubles ' too); no PowerShell",
 }
 
 var (

@@ -1537,8 +1537,8 @@ func parseAtomicTransformV2Candidate(name string) (atomicTransformV2CandidateNam
 		return result, true, fmt.Errorf("malformed reserved V2 CAS owner digest: %s", name)
 	}
 	for _, char := range digest {
-		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') ||
-			(runtime.GOOS == "windows" && char >= 'A' && char <= 'F')) {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') &&
+			(runtime.GOOS != "windows" || char < 'A' || char > 'F') {
 			return result, true, fmt.Errorf("malformed reserved V2 CAS owner digest: %s", name)
 		}
 	}

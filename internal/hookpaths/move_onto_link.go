@@ -296,7 +296,7 @@ func plainMoveDestinationsWithStatements(input actionfacts.Input, facts actionfa
 		}
 		child := input
 		child.Command, child.CWD, child.Args, child.Argv = simple.Text, simple.CWD, nil, nil
-		childFacts := actionfacts.Analyze(child)
+		childFacts := analyzeAtHookFolder(child)
 		count(childFacts)
 		for path := range PlainMoveDestinations(childFacts) {
 			if statements == nil {

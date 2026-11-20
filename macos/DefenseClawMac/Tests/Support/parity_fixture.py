@@ -150,11 +150,21 @@ def serve():
                 "model": {"id": "fixture/model", "status": "loaded", "format": "gguf", "modality": "text", "relevance": "primary", "owner_application": "Fixture Models", "discovery_confidence": 0.96}}]
     sandbox = {"name": "fixture-codex", "harness": "codex", "phase": "ready", "pack": "open", "profile": "open", "workdir_mode": "copy", "project": str(root), "egress": {"blocked": 1, "destinations": 2}, "hooks": {"tool_calls": 3}}
     replies = {
-        "/status": {"policy": {"effective_digest": "fixture-policy-digest", "generation": 9}},
+        "/status": {"policy": {"effective_digest": "fixture-policy-digest", "generation": 1, "config_generation": 9}},
         "/api/v1/guardrail/profiles/resolve": {"profile": "fixture-profile", "effective": {"mode": "observe", "rule_pack": "default", "block_at": "HIGH", "alert_at": "LOW"}},
-        "/health": {"state": "running", "version": "1.0.0", "uptime_ms": 100000, "guardrail": {"state": "running"}, "watcher": {"state": "running"}, "connectors": [{"name": "codex", "state": "running", "requests": 5}]},
+        "/health": {"state": "running", "version": "1.0.5", "uptime_ms": 100000, "gateway": {"state": "disabled"}, "api": {"state": "running"}, "guardrail": {"state": "running"}, "watcher": {"state": "running"}, "connectors": [{"name": "codex", "state": "running", "requests": 5}],
+                    "telemetry": {"state": "degraded", "details": {"destination_count": 2, "destinations": [
+                        {"name": "local-sqlite", "kind": "sqlite", "enabled": True, "state": "healthy", "signals": ["logs"], "counters": {"accepted": 12, "delivered": 12}},
+                        {"name": "local-observability", "kind": "otlp", "enabled": True, "state": "degraded", "signals": ["logs", "traces", "metrics"], "reason": "delivery_failed", "circuit_state": "open",
+                         "counters": {"accepted": 20, "delivered": 2, "dropped": 3, "rejected": 4, "retried": 5},
+                         "queue": {"items": 6, "max_items": 4096, "bytes": 512, "max_bytes": 1048576}}]}}},
         "/api/v1/ai-usage": {"enabled": True, "signals": signals, "summary": {"active_signals": 2, "files_scanned": 10, "scanned_at": now}},
-        "/api/v1/ai-usage/runtime": {"enabled": True, "planes": [{"name": "agent actions", "running": True, "available": True}], "findings": [], "last_poll": now},
+        "/api/v1/ai-usage/runtime": {"enabled": True, "scanned_at": now, "degraded": True,
+            "degraded_reasons": ["shadow egress partially covered: this account only"],
+            "planes": [{"plane": "inference", "name": "inference heartbeat", "running": True, "available": True, "mechanism": "process fixture"},
+                       {"plane": "egress", "name": "shadow egress", "running": True, "available": True, "mechanism": "socket fixture", "reason": "this account only"},
+                       {"plane": "host", "name": "agent actions", "running": False, "available": True, "reason": "not selected in ai_discovery.runtime.planes"}],
+            "findings": [], "last_poll": now},
         "/api/v1/sandbox/status": {"enabled": True, "available": True, "running": 1, "sandboxes": 1, "gateway": {"name": "fixture", "workspace": "default", "version": "0.1.3", "driver": "vm"}},
         "/api/v1/sandbox/sandboxes": {"sandboxes": [sandbox]},
         "/api/v1/sandbox/approvals": {"approvals": [{"id": "fixture-ask", "sandbox": "fixture-codex", "host": "example.invalid", "port": 443, "kind": "egress", "status": "pending"}]},

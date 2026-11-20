@@ -664,6 +664,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		// re-rendered on the next pass.
 		ForeignHookGuardBinary: standaloneForeignHookGuardBinary(enterpriseHookConnector),
 		ManagedHookBinary:      standaloneManagedHookBinary(),
+		RouteOnly:              enterpriseHookWindowsRouteOnly(enterpriseHookConnector, enterpriseHookUser, target.sid, apiAddr, true),
 	}
 	// A single-target install renders the shared machine policy from the
 	// same deployment contract the guardian uses, so the next reconcile does
@@ -1565,10 +1566,10 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			if row.OK || row.Pending {
 				continue
 			}
-			issue := enterpriseHookGuardianFailureIssue(row)
+			issue := enterpriseHookGuardianFailureWording(row)
 			switch {
 			case excusedFailures == 0:
-				report.Errors = append(report.Errors, issue)
+				report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssue(row))
 			case enterpriseHookAwaitingSignInRow(row):
 				report.Warnings = append(report.Warnings, issue)
 			case enterpriseHookAccountLinkRow(row):
@@ -1775,9 +1776,26 @@ func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []st
 	return issues
 }
 
-// enterpriseHookGuardianFailureIssue words one failed row of the last
-// reconcile for status.
+// enterpriseHookGuardianFailureIssue is the status error of one failed row
+// of the last reconcile. Every such line starts "last guardian reconcile
+// failed for <connector>@<account>: ", the one form a Setup before 1.0.10
+// (1.0.9 Test-DefenseClawGuardianReportErrorsAttributable) attributes to a
+// failed row. When an older Setup /upgrade fails, its rollback restores this
+// release and reads this status to accept a degraded reconcile; a signed-out
+// account worded any other way rejected it, and the rollback left every
+// DefenseClaw service stopped and disabled (rel-1-0-10 GAP-0794).
 func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
+	prefix := "last guardian reconcile failed for " + enterpriseHookTargetIssueLabel(row) + ": "
+	wording := enterpriseHookGuardianFailureWording(row)
+	if strings.HasPrefix(wording, prefix) {
+		return wording
+	}
+	return prefix + wording
+}
+
+// enterpriseHookGuardianFailureWording words one failed row of the last
+// reconcile for status; an excused row is a warning in these words.
+func enterpriseHookGuardianFailureWording(row enterpriseHookReconcileRow) string {
 	account := enterpriseHookSignedOutAccount(row)
 	if enterpriseHookAwaitingSignInRow(row) {
 		if account == "" {
@@ -2146,7 +2164,8 @@ type enterpriseHookVerifyRun struct {
 	// RecordedProtected names the excused signed-out Hermes rows
 	// (enterpriseHookHermesSignedOutRow), own-folder rows
 	// (enterpriseHookSignedOutUntrustedFolderVerifyRow) and the rows failed only by an
-	// enterpriseHookUserFileFault that the guardian last recorded as
+	// enterpriseHookUserFileFault, or route_config_unverified only
+	// (enterpriseHookRouteOnlyUnverified), that the guardian last recorded as
 	// protected; the protected records are compared with them as protected.
 	RecordedProtected map[string]bool
 	AuthorizationErr  error
@@ -2550,6 +2569,19 @@ func enterpriseHookLiveTargetVerifier(ctx context.Context, opts enterprisehooks.
 	return enterpriseHookLivePublicVerifier(ctx, opts)
 }
 
+// enterpriseHookRouteOnlyUnverified is the failure of a verified target
+// whose route-only render could not be read (result.RouteOnly unverified,
+// GAP-1111): coded route_config_unverified, so verify and the Windows
+// lifecycle report it as not verified, never as ok and never as
+// route_config_drift. nil for any other result.
+func enterpriseHookRouteOnlyUnverified(result enterprisehooks.InstallResult) error {
+	if result.RouteOnly != enterprisehooks.RouteOnlyUnverified {
+		return nil
+	}
+	return fmt.Errorf("%s: %s route-only settings are not verified: the agent files are read as the account, which only LocalSystem can do; run verify as SYSTEM (the guardian checks them)",
+		enterprisehooks.RouteConfigUnverifiedCode, strings.ToLower(strings.TrimSpace(result.Connector)))
+}
+
 // enterpriseHookManagedEnrollmentVerifier compares the protected enrollment set
 // the Guardian published with the one verify expects.
 var enterpriseHookManagedEnrollmentVerifier = verifyEnterpriseHookManagedEnrollments
@@ -2736,6 +2768,7 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 		}
 		token := ""
 		otlpToken := ""
+		routeOnlyUnverified := false
 		if targetErr == nil {
 			token, otlpToken, targetErr = enterpriseHookTargetTokens(cfg.DataDir, target.Connector, resolved.sid, false)
 		}
@@ -2760,10 +2793,21 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 				ManagedHookBinary:      standaloneManagedHookBinary(),
+				RouteOnly:              enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr, false),
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
 			result, targetErr = enterpriseHookLiveTargetVerifier(ctx, opts, registrationOnly)
+			if targetErr == nil {
+				if unverified := enterpriseHookRouteOnlyUnverified(result); unverified != nil {
+					// Neither ok nor drift: the row keeps its result, with
+					// route_only "unverified", and fails (GAP-1111).
+					row.Result = &result
+					row.UserHome = result.UserHome
+					row.Connector = result.Connector
+					targetErr, routeOnlyUnverified = unverified, true
+				}
+			}
 			if targetErr == nil {
 				row.Result = &result
 				row.UserHome = result.UserHome
@@ -2827,11 +2871,16 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 			row.Error = targetErr.Error()
 			run.Failures++
 			var userFile enterpriseHookUserFileFault
-			if errors.As(targetErr, &userFile) && recorded[enterpriseHookProtectedTargetKey(row)].OK {
+			if (errors.As(targetErr, &userFile) || routeOnlyUnverified) && recorded[enterpriseHookProtectedTargetKey(row)].OK {
 				// The row fails on a file in the account's own profile
 				// only, and the guardian, whose readiness reports that
 				// file as a warning, recorded it protected: the records
 				// still describe it, so they are not a second fault.
+				// So does a row whose route-only files this token cannot
+				// read (route_config_unverified, an Administrator's
+				// verify): the guardian, as LocalSystem, verified them, and
+				// comparing its records with this partial verification
+				// reported stale targets that are not (rel-1-0-10 GAP-1256).
 				if run.RecordedProtected == nil {
 					run.RecordedProtected = map[string]bool{}
 				}
@@ -3378,6 +3427,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				MachinePolicyContractID:     enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 				OpenCodeServicePort:         openCodePorts[strings.ToUpper(resolved.sid)],
 				OpenCodeServicePortRequired: runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && strings.EqualFold(target.Connector, "opencode"),
+				RouteOnly:                   enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr, true),
 			}
 			// Repair the user's objects as root before anything validates them.
 			err = repairEnterpriseHookUserTargetPlatform(target, opts)
@@ -3675,6 +3725,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	defer enterpriseHookGuardianWatching.Store(false)
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
 	startEnterpriseHookQuarantineRemovals(cmd.Context(), cmd.ErrOrStderr())
+	startEnterpriseHookPeerBroker(cmd.Context(), cmd.ErrOrStderr())
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
@@ -6326,20 +6377,12 @@ func loadEnterpriseHookUserScopedTokens(dataDir, connectorName, identity string)
 	return enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity, false)
 }
 
-func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, mint bool) (string, string, error) {
-	connectorName = strings.TrimSpace(connectorName)
-	if connectorName == "" {
-		return "", "", fmt.Errorf("enterprise hooks: connector is required before deriving per-user credentials")
-	}
-	dataDir = strings.TrimSpace(dataDir)
-	if dataDir == "" {
-		return "", "", fmt.Errorf("enterprise hooks: config data_dir is required before deriving per-user credentials")
-	}
-	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok {
-		return "", "", fmt.Errorf("enterprise hooks: per-user credentials need the target's uid or SID")
-	}
+// enterpriseHookUserScopedKey is the per-user credential key targets are
+// rendered from: the staged key while a rotation runs, else the committed
+// one (minted on first use when mint is set).
+func enterpriseHookUserScopedKey(dataDir string, mint bool) (string, error) {
 	if err := validateEnterpriseHookUserTokenKeyLocation(dataDir); err != nil {
-		return "", "", err
+		return "", err
 	}
 	// While a credential rotation has staged the next key, every target is
 	// rendered (and verified) with credentials derived from it; the gateway
@@ -6359,7 +6402,26 @@ func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, 
 		}
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("enterprise hooks: %w", err)
+		return "", fmt.Errorf("enterprise hooks: %w", err)
+	}
+	return key, nil
+}
+
+func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, mint bool) (string, string, error) {
+	connectorName = strings.TrimSpace(connectorName)
+	if connectorName == "" {
+		return "", "", fmt.Errorf("enterprise hooks: connector is required before deriving per-user credentials")
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", "", fmt.Errorf("enterprise hooks: config data_dir is required before deriving per-user credentials")
+	}
+	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok {
+		return "", "", fmt.Errorf("enterprise hooks: per-user credentials need the target's uid or SID")
+	}
+	key, err := enterpriseHookUserScopedKey(dataDir, mint)
+	if err != nil {
+		return "", "", err
 	}
 	hookToken, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
 	if err != nil {

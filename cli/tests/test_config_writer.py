@@ -1373,6 +1373,40 @@ def test_every_policy_source_compiles_a_chosen_quarantine_as_written(tmp_path, m
     assert not failures, "\n".join(failures)
 
 
+@pytest.mark.parametrize("lane", ["effects", "secret_flow"])
+@pytest.mark.parametrize("value", ["on", "ON", " On "])
+def test_shadow_only_cascade_lane_refusal_says_on_is_not_available(tmp_path, monkeypatch, lane, value):
+    # GAP-0546: `config set guardrail.cascade.lanes.effects on` said only "not in the expected
+    # format"; the gateway says "not available in 1.0.10". The CLI names the same reason.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+    key = f"guardrail.cascade.lanes.{lane}"
+    with pytest.raises(V8ConfigError) as refused:
+        config_writer.apply([Change(key, value)], "cli:test", "t", path=path)
+    message = config_writer.plain_error(refused.value, value=value)
+    assert message.startswith(key)
+    assert "not available in 1.0.10" in message
+    assert "off, shadow" in message
+    assert "expected format" not in message
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+    config_writer.apply([Change(key, "shadow")], "cli:test", "t", path=path)
+
+
+@pytest.mark.parametrize("lane", ["effects", "secret_flow", "nonshell"])
+def test_cascade_lane_refusal_of_a_garbage_value_lists_the_allowed_values(tmp_path, monkeypatch, lane):
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    key = f"guardrail.cascade.lanes.{lane}"
+    with pytest.raises(V8ConfigError) as refused:
+        config_writer.apply([Change(key, "garbage")], "cli:test", "t", path=path)
+    message = config_writer.plain_error(refused.value, value="garbage")
+    assert message.startswith(f"{key} must be one of ")
+    assert "expected format" not in message
+    assert ("on, shadow, off" in message) == (lane == "nonshell")
+
+
 @pytest.mark.parametrize("value", ["http://127.0.0.1:8765/defenseclaw", "mirror.example.com/dc", "ftp://mirror.example/dc"])
 def test_update_source_refusal_asks_for_an_https_url(tmp_path, monkeypatch, value):
     # GAP-1065: the refusal said only "not in the expected format". https:// stays accepted.
