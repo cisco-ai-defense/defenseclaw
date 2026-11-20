@@ -2680,7 +2680,7 @@ describe('rendered gateway.toml drift is reported without a pause (GAP-0730)', (
 describe('saved installer protection matches the rule packs (GAP-1922)', () => {
   it('names installer/ and previous/installer/ in tamper.detector_state_write of every pack, for writes and deletes', () => {
     const text = page('policies/deterministic-detection.mdx');
-    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): every rule pack rates a write, truncation or deletion of it HIGH (`tamper.detector_state_write`), like `config.yaml`. The `strict` and `managed-strict` packs block that change in every mode; the default and permissive packs, a managed install's default pack included, raise a HIGH alert and do not block it. Reading or running the saved installer stays allowed.'));
+    assert.ok(text.includes('DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): every rule pack rates a write, truncation or deletion of it HIGH (`tamper.detector_state_write`), like `config.yaml`. The `strict` and `managed-strict` packs block that change in every mode; the default and permissive packs, a managed install\'s default pack included, raise a HIGH alert and do not block it. Reading or running the saved installer stays allowed.'));
     // rel-1-0-10:GAP-0747 (owner, 2026-11-15T15:20Z): the every-pack block is gone.
     assert.ok(!text.includes('is blocked in every mode and with every rule pack'), 'GAP-0747: the every-pack block sentence is back');
     // rel-1-0-6 GAP-0675 review 1 M3a made self-protection block with every
