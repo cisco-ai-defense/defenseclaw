@@ -409,7 +409,6 @@ func TestAssignedEnvChdirAndFlockStringWriteWhatThePlainCallWrites(t *testing.T)
 		{"A=1 env -C / cp HOMEDIR/project/a.txt ~/.defenseclaw/config.yaml", true},
 		{"A=1 env -C / cp HOMEDIR/project/a.txt HOMEDIR/.defenseclaw/config.yaml", true},
 		{"A=1 B=2 env -C HOMEDIR cp project/a.txt .defenseclaw/config.yaml", true},
-		{"A=1 env -C / cp a.txt b.txt; nohup cp a.txt ~/.defenseclaw/config.yaml", true},
 		{`flock /tmp/zzl -c "cp a.txt ~/.defenseclaw/config.yaml"`, true},
 		{`flock -w 5 /tmp/zzl -c "cp a.txt ~/.defenseclaw/hooks/x.sh"`, true},
 		{`flock /tmp/zzl --command "cp a.txt ~/.defenseclaw/config.yaml"`, true},
@@ -417,6 +416,15 @@ func TestAssignedEnvChdirAndFlockStringWriteWhatThePlainCallWrites(t *testing.T)
 		{"A=1 env -C /tmp cp HOMEDIR/project/a.txt .defenseclaw/config.yaml", false},
 		{`flock /tmp/zzl -c "make --version"`, false},
 		{`flock /tmp/zzl -c "cp a.txt b.txt"`, false},
+	})
+	// An env -C call ahead of a later statement is a gap in the call split,
+	// and a flagged effect after a split gap also raises the call to the
+	// evaluation limit (the substrate-1 split-gap readings on rel
+	// 8e58b26846, GAP-0693 to GAP-0704): the state write after it is the
+	// HIGH state write beside ACTION-COMPOUND-LIMIT, which the dispatch
+	// verdict blocks, as rel did (GAP-1563 split oracle, GAP-0747).
+	judgeHomeStateRuleRows(t, []homeStateRuleRow{
+		{"A=1 env -C / cp a.txt b.txt; nohup cp a.txt ~/.defenseclaw/config.yaml", []string{gap0747StateRule, gap0747CompoundLimitRule}},
 	})
 }
 
