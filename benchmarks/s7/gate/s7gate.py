@@ -295,7 +295,7 @@ def push_labels(src, dest, name="labels-v3"):
     """Copy SRC/<name>.jsonl and SRC/<name>.manifest.json to DEST/current.jsonl and DEST/current.manifest.json, each
     through a temp file, and check the sha256 of every copy. Every failure (missing source, unwritable destination, a
     copy that does not match) exits 4 with the step that failed: nothing is hidden, nothing is partial."""
-    for ext, dst in ((".jsonl", "current.jsonl"), (".manifest.json", "current.manifest.json")):
+    for ext in (".jsonl", ".manifest.json"):
         sp = os.path.join(src, name + ext)
         if not os.path.isfile(sp):
             raise SystemExit(f"s7gate: push-labels: {sp} is missing; the scorer would refuse to score")
@@ -327,8 +327,8 @@ def cmd_push_labels(a):
 
 def cmd_run(a):
     cfgs = json.load(open(a.corpora))
-    _only = set(a.only.split(",")) if a.only else None
-    _bad = verify_corpora(cfgs, _only)
+    only = set(a.only.split(",")) if a.only else None
+    _bad = verify_corpora(cfgs, only)
     if _bad:
         print(
             "[s7gate] REFUSED: a corpus file does not match its registered version (GAP-0362):\n  "
@@ -336,7 +336,6 @@ def cmd_run(a):
             file=sys.stderr,
         )
         sys.exit(5)
-    only = set(a.only.split(",")) if a.only else None
     packs = a.packs.split(",")
     os.makedirs(a.out, exist_ok=True)
     fx = make_fixture(a.out)
