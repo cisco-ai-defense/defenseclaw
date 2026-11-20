@@ -129,6 +129,8 @@ func gap0437Server(t *testing.T, p gap0437Pack, connector, mode string) *APIServ
 		cfg.Enterprise.Profile = managed.ProfileStandalone
 	}
 	a := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	// The production deadline, scaled under -race only (raceScanBudgetScale).
+	a.inspectToolScanTimeout = inspectScanTimeout * raceScanBudgetScale
 	prev := liveGeneration.Load()
 	liveGeneration.Store(&Generation{Config: cfg})
 	t.Cleanup(func() { liveGeneration.Store(prev) })
