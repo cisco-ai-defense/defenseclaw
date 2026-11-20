@@ -74,7 +74,6 @@ func nestedCorpus() []string {
 // NotStatic. The gate still fails if psparse is Static and disagrees.
 var nestedUnderStatic = map[string]bool{
 	`cmd /c "del C:\x"`:                                                                          true, // a payload word with a quote or whitespace (review 9 R9-2)
-	`pwsh -wd C:\ -c Get-Date`:                                                                   true, // -wd moves the child's working directory (review 9 R9-1)
 	`cmd /c --% del %TEMP%\x`:                                                                    true,
 	`powershell -Version 2 -c Remove-Item C:\x`:                                                  true,
 	`powershell -v 2 -enc ZQBjAGgAbwAgAGgAaQA=`:                                                  true,

@@ -167,7 +167,7 @@ func windowsValidatePipelineAuthority(
 	if len(edges) == 0 {
 		return
 	}
-	if dialect == windowsPowerShell &&
+	if !out.windowsDescriptorCopy && dialect == windowsPowerShell &&
 		(windowsDirectWebExpressionPipeline(commands, edges) ||
 			windowsDirectProcessStopPipeline(commands, edges) ||
 			windowsDirectACLPipeline(commands, edges) ||
@@ -784,10 +784,17 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				return lexemes, false
 			}
 			if duplicationEnd, ok := windowsFDDuplicationEnd(runes, i); ok {
-				// Descriptor duplication has no file target. Retain the
-				// surrounding command as a non-authoritative positive fact,
-				// but consume the whole construct so "&1" cannot become a
-				// separator followed by a phantom command.
+				// Descriptor duplication has no file target. Consume the
+				// whole construct so "&1" cannot become a separator followed
+				// by a phantom command. An exact N>&1 (2>&1, 3>&1) is valid
+				// in both dialects and only decides whether that stream ends
+				// where stdout does: it names no file, so it leaves the file
+				// facts of the statement (a following >> T) authoritative
+				// (GAP-0974). In a pipeline it would add the stream to the
+				// piped data, so windowsValidatePipelineAuthority keeps such a
+				// pipeline partial. Any other copy (1>&2, >&1) stays partial.
+				exactCopy := wordActive && quoteKind == QuoteNone && windowsAllDigits(value.String()) &&
+					duplicationEnd == i+2 && runes[duplicationEnd] == '1'
 				if wordActive && quoteKind == QuoteNone && windowsAllDigits(value.String()) {
 					value.Reset()
 					quoteKind = QuoteNone
@@ -800,7 +807,11 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				} else if !flush() {
 					return lexemes, false
 				}
-				out.markPartial(IssueUnsupportedConstruct)
+				if exactCopy {
+					out.windowsDescriptorCopy = true
+				} else {
+					out.markPartial(IssueUnsupportedConstruct)
+				}
 				i = duplicationEnd
 				continue
 			}

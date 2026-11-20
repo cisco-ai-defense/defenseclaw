@@ -28,7 +28,7 @@ func TestShellLauncherBody(t *testing.T) {
 		{"-File has no body", []string{"powershell.exe", "-File", "x.ps1"}, "", DialectPowerShell, false},
 		{"-EncodedCommand has no body", []string{"pwsh", "-EncodedCommand", "AAAA"}, "", DialectPowerShell, false},
 		{"-Command - is stdin", []string{"pwsh", "-Command", "-"}, "", DialectPowerShell, false},
-		{"unlisted option", []string{"pwsh", "-WorkingDirectory", "C:\\x", "-Command", body}, "", DialectPowerShell, false},
+		{"unlisted option", []string{"pwsh", "-ConfigurationName", "x", "-Command", body}, "", DialectPowerShell, false},
 		{"empty body word", []string{"pwsh", "-Command", ""}, "", DialectPowerShell, false},
 		{"no body at all", []string{"pwsh", "-NoProfile"}, "", DialectPowerShell, false},
 		{"cmd /c", []string{"cmd", "/c", "dir C:\\"}, "dir C:\\", DialectCMD, true},
@@ -78,5 +78,48 @@ func TestShellLauncherBodyOfText(t *testing.T) {
 		if ok != tc.ok || got != tc.want || (tc.ok && dialect != tc.dialect) {
 			t.Errorf("%s: got (%q, %q, %t), want (%q, %q, %t)", tc.name, got, dialect, ok, tc.want, tc.dialect, tc.ok)
 		}
+	}
+}
+
+// TestGAP0198LauncherBodyReadsTheWorkingDirectory pins rel-1-0-10:GAP-0198 on
+// the launcher body reading (the Codex shell argv route): pwsh -wd <folder>
+// -Command <script> as an argv has the body `Set-Location -LiteralPath
+// '<folder>'; <script>`, the move launcherWorkingDirectory reads in the same
+// call as one command line, where it had no body at all. Any other spelling
+// of the switch still has no body, and a -wd inside the script is script text.
+func TestGAP0198LauncherBodyReadsTheWorkingDirectory(t *testing.T) {
+	const script = `Set-Content -Path config.yaml -Value m`
+	const folder = `C:\Users\alice\.defenseclaw`
+	move := `Set-Location -LiteralPath 'C:\Users\alice\.defenseclaw'; `
+	for _, test := range []struct {
+		name string
+		argv []string
+		want string // "" = no body
+	}{
+		{"wd", []string{"pwsh", "-NoProfile", "-wd", folder, "-Command", script}, move + script},
+		{"long switch", []string{"pwsh.exe", "-WorkingDirectory", folder, "-NoProfile", "-c", script}, move + script},
+		{"abbreviation", []string{"powershell", "-work", folder, "-Command", script}, move + script},
+		{"positional script", []string{"powershell.exe", "-wd", folder, script}, move + script},
+		{"behind a wrapper", []string{"start", `""`, "pwsh", "-wd", folder, "-Command", script}, move + script},
+		{"wd in the script", []string{"pwsh", "-Command", "Write-Output", "-wd", folder}, "Write-Output -wd " + folder},
+		{"no switch", []string{"pwsh", "-NoProfile", "-Command", script}, script},
+		{"colon form", []string{"pwsh", "-wd:" + folder, "-Command", script}, ""},
+		{"twice", []string{"pwsh", "-wd", folder, "-wd", `C:\x`, "-Command", script}, ""},
+		{"no value", []string{"pwsh", "-NoProfile", "-wd"}, ""},
+		{"switch value", []string{"pwsh", "-wd", "-Command", script}, ""},
+		{"blank value", []string{"pwsh", "-wd", " ", "-Command", script}, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls, _ := ShellLauncherCalls(test.argv)
+			got := ""
+			for _, call := range calls {
+				if call.Dialect == DialectPowerShell {
+					got = call.Body
+				}
+			}
+			if got != test.want {
+				t.Fatalf("body %q, want %q", got, test.want)
+			}
+		})
 	}
 }

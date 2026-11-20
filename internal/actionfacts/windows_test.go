@@ -1699,24 +1699,22 @@ func TestPowerShellCommentAfterSeparatorConsumesLine(t *testing.T) {
 func TestWindowsDescriptorDuplicationDoesNotMintCommand(t *testing.T) {
 	t.Parallel()
 
+	// An exact N>&1 names no file and, outside a pipeline, adds no data
+	// flow, so it keeps the statement authoritative (GAP-0974). Any other
+	// copy, or one in a pipeline, stays partial.
 	tests := []struct {
-		name     string
-		parse    func(string, int64, int) parseOutput
-		source   string
-		wantExec string
+		name       string
+		parse      func(string, int64, int) parseOutput
+		source     string
+		wantExec   string
+		wantStatus ParseStatus
 	}{
-		{
-			name:     "PowerShell",
-			parse:    parsePowerShell,
-			source:   `Write-Output safe 2>&1`,
-			wantExec: "write-output",
-		},
-		{
-			name:     "cmd",
-			parse:    parseCMD,
-			source:   `echo safe 2>&1`,
-			wantExec: "echo",
-		},
+		{"PowerShell", parsePowerShell, `Write-Output safe 2>&1`, "write-output", StatusComplete},
+		{"cmd", parseCMD, `echo safe 2>&1`, "echo", StatusComplete},
+		{"PowerShell 3>&1", parsePowerShell, `Write-Output safe 3>&1`, "write-output", StatusComplete},
+		{"cmd 1>&2", parseCMD, `echo safe 1>&2`, "echo", StatusPartial},
+		{"PowerShell 2>&10", parsePowerShell, `Write-Output safe 2>&10`, "write-output", StatusPartial},
+		{"cmd bare >&1", parseCMD, `echo safe >&1`, "echo", StatusPartial},
 	}
 	for _, test := range tests {
 		test := test
@@ -1724,8 +1722,8 @@ func TestWindowsDescriptorDuplicationDoesNotMintCommand(t *testing.T) {
 			t.Parallel()
 			out := test.parse(test.source, 1, 0)
 			classifyOutput(&out)
-			if out.status != StatusPartial {
-				t.Fatalf("status = %q, want %q (issues=%v)", out.status, StatusPartial, out.issues)
+			if out.status != test.wantStatus {
+				t.Fatalf("status = %q, want %q (issues=%v)", out.status, test.wantStatus, out.issues)
 			}
 			if got := commandExecutables(out.commands); !reflect.DeepEqual(got, []string{test.wantExec}) {
 				t.Fatalf("executables = %#v, want only %q", got, test.wantExec)
