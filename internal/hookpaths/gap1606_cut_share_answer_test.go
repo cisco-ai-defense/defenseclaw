@@ -26,7 +26,10 @@ func TestGAP1606ACutShareAnswerIsNotKeptForTheCall(t *testing.T) {
 	memoReads = true
 	t.Cleanup(func() { memoReads = previous })
 
-	dir := t.TempDir()
+	// The walk reads the physical path: a temp folder below a link (macOS
+	// /var) would never name the share the override matches.
+	resetPlainFolders(t)
+	dir := linkFreeTempDir(t)
 	share := filepath.Join(dir, "share")
 	if err := os.MkdirAll(share, 0o700); err != nil {
 		t.Fatal(err)
