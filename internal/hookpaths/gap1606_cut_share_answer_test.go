@@ -109,3 +109,62 @@ func shareAnswered(t *testing.T, share string) {
 		t.Fatal("the share did not answer")
 	}
 }
+
+// rel-1-0-10:GAP-1606 review P3-1: the read of a known folder is bounded by
+// what the call has left of its share wait (stillPlain). When that wait, not
+// the answer wait, ended it, the walk it failed is a budget cut like a share
+// ask the budget cut short, and the call's memory keeps none of it: once the
+// read is back, a later resolve in the same call walks again.
+func TestGAP1606AKnownFolderReadTheBudgetCutIsNotKept(t *testing.T) {
+	previous := memoReads
+	memoReads = true
+	t.Cleanup(func() { memoReads = previous })
+	resetPlainFolders(t)
+	restore := OverrideNetworkSharesForTest(func(string) string { return "" }, func(string) {})
+	t.Cleanup(restore)
+	slot := filepath.Join(linkFreeTempDir(t), "team", "slot")
+	if err := os.MkdirAll(slot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	defer HookCall()()
+	call := currentHookCall()
+	if call == nil {
+		t.Fatal("no hook call")
+	}
+	// The walk now knows slot as a plain folder and reads it once more for
+	// each name below it.
+	readOperands(t, slot, 1)
+	call.waitLeft, call.tail = 20*time.Millisecond, 0
+	release := make(chan struct{})
+	var once sync.Once
+	answer := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(answer)
+	old := walkLstat
+	walkLstat = func(name string) (os.FileInfo, error) {
+		if name == slot {
+			<-release
+		}
+		return os.Lstat(name)
+	}
+	t.Cleanup(func() { walkLstat = old })
+
+	target := filepath.Join(slot, "f1")
+	mark := call.cutMark()
+	if resolved, ok := NewTargetMemo().ResolveWriteTarget(target); ok {
+		t.Fatalf("a write below a folder whose read the budget cut off resolved to %s", resolved)
+	}
+	if call.cutMark() == mark {
+		t.Error("the read of a known folder the call's share wait cut short is not counted as a budget cut")
+	}
+
+	answer()
+	for name, resolve := range map[string]func(string) (string, bool){
+		"evaluation memo": NewTargetMemo().ResolveWriteTarget,
+		"call":            ResolveWriteTarget,
+	} {
+		if resolved, ok := resolve(target); !ok || filepath.Base(resolved) != "f1" {
+			t.Errorf("%s: the write below the folder read again = %q, %v: the cut walk was kept", name, resolved, ok)
+		}
+	}
+}
