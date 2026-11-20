@@ -522,7 +522,7 @@ func plainProgramName(program string) bool {
 	}
 	for i := 0; i < len(program); i++ {
 		c := program[i]
-		if !('a' <= c && c <= 'z' || '0' <= c && c <= '9' || strings.IndexByte("._+-", c) >= 0) {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && strings.IndexByte("._+-", c) < 0 {
 			return false
 		}
 	}

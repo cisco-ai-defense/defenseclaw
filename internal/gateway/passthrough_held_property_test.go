@@ -122,6 +122,21 @@ func covHeldRun(t *testing.T, proxy *GuardrailProxy, path, reqProvider, ctype st
 		defer close(done)
 		proxy.handlePassthrough(rec, hreq)
 	}()
+	// A run that fails (the 60 s waits below, under load) must not leave its
+	// handler running: it reads proxy.streamReadForTest, which the next run on
+	// the same proxy writes (GAP-1591, a DATA RACE in the test only: the
+	// product never writes the seam). Open the gate, then wait for the handler.
+	stopHandler := func() {
+		select {
+		case <-gate:
+		default:
+			close(gate)
+		}
+		select {
+		case <-done:
+		case <-time.After(60 * time.Second):
+		}
+	}
 
 	timeout := time.After(60 * time.Second)
 	select {
@@ -134,13 +149,13 @@ func covHeldRun(t *testing.T, proxy *GuardrailProxy, path, reqProvider, ctype st
 			case <-done:
 				break wait
 			case <-timeout:
-				close(gate)
+				stopHandler()
 				t.Fatalf("the proxy did not read the %d bytes sent (read %d)", sent, read.Load())
 			}
 		}
 	case <-done:
 	case <-timeout:
-		close(gate)
+		stopHandler()
 		t.Fatal("the upstream never sent")
 	}
 	early = rec.bytes()

@@ -17,6 +17,11 @@ import (
 
 func TestMain(m *testing.M) {
 	prepareGatewayTestProcess()
+	// No test swaps os.Stderr (GAP-1591, stderr_tee_test.go).
+	if err := installStderrTee(); err != nil {
+		fmt.Fprintln(os.Stderr, "install the stderr tee:", err)
+		os.Exit(1)
+	}
 	// A call never waits for a start that is not coming; the gate's tests
 	// (TestSessionStartGateCallBeforeItsStart) set the arrival wait.
 	sessionStartArrivalWait = 0
@@ -35,6 +40,7 @@ func TestMain(m *testing.M) {
 	}
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
+	_ = stderrTeeForTests.flush()
 	restoreChain()
 	removeMigratedAuditTemplate()
 	cleanup()
