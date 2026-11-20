@@ -234,7 +234,7 @@ func TestHostChainLaneKeepsTheManagedSwitchGAP0211(t *testing.T) {
 func TestTrustedActionManagedSwitchGAP0211(t *testing.T) {
 	const connector = "r104-gap-0531"
 	installToolCallCorpusProfileConnector(t, connector, "default")
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "id_ed25519"), []byte("test-key"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -19,7 +19,7 @@ func TestActiveStateMentionAllowedRealWriteBlocked(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX home")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	state := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(state, 0o700); err != nil {
 		t.Fatal(err)

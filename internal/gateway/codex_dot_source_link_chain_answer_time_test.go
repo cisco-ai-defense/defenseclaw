@@ -34,7 +34,7 @@ func TestCodexDotSourcedWriterBehindTheLinkBoundBlocksInsideTheHookWindow(t *tes
 	previous := codexShellRunsPowerShell
 	codexShellRunsPowerShell = true
 	t.Cleanup(func() { codexShellRunsPowerShell = previous })
-	home, _ := r104ReviewHome(t)
+	home, _ := r104ReviewHomeNoAlias(t)
 	if runtime.GOOS != "windows" {
 		resolved, err := filepath.EvalSymlinks(home)
 		if err != nil {

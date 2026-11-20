@@ -20,7 +20,7 @@ import (
 // in every tier, below the bound and above it (GAP-0943). An ordinary name in
 // an ordinary folder stays the unresolved remainder that the tier decides.
 func TestSecondNameOfAProtectedFilePastTheOperandBoundBlocks(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.Link(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "hl")); err != nil {
 		t.Skipf("no hard links here: %v", err)
 	}

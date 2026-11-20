@@ -10,7 +10,7 @@ import (
 )
 
 func TestR104PrivateKeyFindingUsesCatalogSeverity(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	request := trustedActionRequest{Input: actionfacts.Input{
 		Tool: "Bash", Command: `cat ~/.ssh/id_ed25519`, CWD: cwd, ActiveHome: home,
 	}, EnforcementCapable: true}

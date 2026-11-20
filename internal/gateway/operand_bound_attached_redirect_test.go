@@ -14,7 +14,7 @@ import (
 )
 
 func TestRedirectsWrittenAgainstAWordCountTowardTheOperandBound(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	defer hookpaths.HookCall()()
 	request := trustedActionRequest{
 		Input: actionfacts.Input{Tool: "Bash", Command: "echo x" + strings.Repeat(">f", 1500),
@@ -34,7 +34,7 @@ func TestRedirectsWrittenAgainstAWordCountTowardTheOperandBound(t *testing.T) {
 // Bash writes the file of >&word and 1>&word, so such targets count toward
 // the call bound like those of > (GAP-2143); descriptor copies do not.
 func TestFileRedirectsOfADescriptorOperatorCountTowardTheOperandBound(t *testing.T) {
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	for _, tc := range []struct {
 		name, command string
 		strict        bool

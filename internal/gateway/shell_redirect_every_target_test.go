@@ -40,7 +40,7 @@ func TestR105ShellOpensEveryRedirectTarget(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX home; the Windows Git Bash rows are TestR105GitBashRedirectTargetOfWindowsHome")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.MkdirAll(filepath.Join(home, ".defenseclaw", "hooks"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +196,7 @@ func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX home")
 	}
-	home, cwd := r104ReviewHome(t)
+	home, cwd := r104ReviewHomeNoAlias(t)
 	if err := os.MkdirAll(filepath.Join(home, ".defenseclaw", "hooks"), 0o700); err != nil {
 		t.Fatal(err)
 	}
