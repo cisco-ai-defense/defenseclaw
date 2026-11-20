@@ -1317,6 +1317,27 @@ def _prefetch_sandbox_report(
     return pool, (binary, pool.submit(sandbox_doctor_report, binary), signature)
 
 
+def _prefetch_audit_db_health(cfg) -> tuple[ThreadPoolExecutor, tuple[str, str, Future]]:
+    """Start the read-only audit database inspection in one worker.
+
+    The integrity walk of a large store is the longest step of a check run
+    (1.8 s of 4.35 s for 590 MiB, rel-1-0-10:GAP-0938). It reads the file
+    only, so it can run while the earlier configuration checks do; the row is
+    still emitted at its usual position, and only ordinary checks prefetch it,
+    because a repair can create or replace the database.
+    """
+    # Import in this thread: a worker never runs a first import of these.
+    from defenseclaw import file_permissions  # noqa: F401
+    from defenseclaw.doctor_recovery import inspect_audit_db
+
+    if os.name == "nt":
+        from defenseclaw import windows_acl  # noqa: F401
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doctor-audit-db")
+    return pool, (db_path, data_dir, pool.submit(inspect_audit_db, db_path, data_dir=data_dir))
+
+
 def _check_sandbox(
     cfg,
     r: _DoctorResult,
@@ -1546,6 +1567,55 @@ def _doctor_secure_client(cfg) -> bool:
     return _enterprise_profile(cfg) == "secure_client"
 
 
+# The config.yaml bytes the validator accepted in this Doctor check run, by
+# path; None outside a check run. See _config_validated_this_run.
+_config_validation_run: dict[str, tuple] | None = None
+
+
+def _begin_config_validation_run() -> None:
+    global _config_validation_run
+    _config_validation_run = {}
+
+
+def _end_config_validation_run() -> None:
+    global _config_validation_run
+    _config_validation_run = None
+
+
+def _config_fingerprint(path: str) -> tuple | None:
+    """The identity and content of config.yaml: path, (dev, ino, size, mtime_ns), sha256."""
+    try:
+        with open(path, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            digest = hashlib.sha256(stream.read()).hexdigest()
+    except OSError:
+        return None
+    return (os.path.abspath(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, digest)
+
+
+def _remember_config_valid(path: str, before: tuple | None) -> None:
+    """Keep a positive decision only when the file did not change while the validator read it."""
+    run = _config_validation_run
+    if run is None or before is None or _config_fingerprint(path) != before:
+        return
+    run[before[0]] = before
+
+
+def _config_validated_this_run(path: str) -> bool:
+    """True when this check run's validator already accepted these exact bytes.
+
+    The repair preflight then needs no second Go helper run (0.34 s each on
+    dc-rhel, rel-1-0-10:GAP-0938). Only a positive decision is kept, only for
+    one check run (never --fix, never on disk), and any change to the file's
+    identity, size, mtime or content runs the validator again.
+    """
+    run = _config_validation_run
+    if not run:
+        return False
+    fingerprint = _config_fingerprint(path)
+    return fingerprint is not None and run.get(fingerprint[0]) == fingerprint
+
+
 def _check_config(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import config_path_for_data_dir
     from defenseclaw.config_inspect import ConfigInspectError, ConfigInspectTimeoutError, inspect_v8_config
@@ -1556,6 +1626,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     if not os.path.isfile(cfg_path):
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
         return
+    fingerprint = _config_fingerprint(cfg_path) if _config_validation_run is not None else None
     try:
         validation = inspect_v8_config("validate", config_path=cfg_path)
     except ConfigInspectTimeoutError as exc:
@@ -1630,6 +1701,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
             remediation="defenseclaw config validate",
         )
         return
+    _remember_config_valid(cfg_path, fingerprint)
     _emit(
         "pass",
         "Config file",
@@ -2583,6 +2655,8 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
     if not os.path.isfile(config_path):
         reason = "config.yaml is missing; run `defenseclaw init` before applying repairs"
         return RepairDecision("blocked", reason, blockers=(reason,))
+    if _config_validated_this_run(str(config_path)):
+        return RepairDecision("noop", f"{config_path}; canonical schema valid")
     try:
         validation = inspect_v8_config("validate", config_path=str(config_path))
     except ConfigInspectError as exc:
@@ -3222,8 +3296,8 @@ def _human_size(num_bytes: int) -> str:
     return f"{mib:.1f} MiB" if mib < 10 else f"{mib:.0f} MiB"
 
 
-def _check_audit_db(cfg, r: _DoctorResult) -> None:
-    _check_audit_db_store(cfg, r)
+def _check_audit_db(cfg, r: _DoctorResult, *, prefetched: tuple[str, str, Future] | None = None) -> None:
+    _check_audit_db_store(cfg, r, prefetched=prefetched)
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
     _check_unread_calls(cfg, r)
 
@@ -4488,7 +4562,7 @@ def _fix_private_state_files(cfg, *, assume_yes: bool, plan_only: bool = False) 
     return ("pass", f"made {names} readable by this account only")
 
 
-def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
+def _check_audit_db_store(cfg, r: _DoctorResult, *, prefetched: tuple[str, str, Future] | None = None) -> None:
     from defenseclaw.doctor_recovery import (
         _AUDIT_INTEGRITY_TIME_BUDGET_SECONDS,
         AuditDBHealthStatus,
@@ -4496,10 +4570,13 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     )
 
     db_path = str(getattr(cfg, "audit_db", "") or "")
-    health = inspect_audit_db(
-        db_path,
-        data_dir=str(getattr(cfg, "data_dir", "") or ""),
-    )
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if prefetched is not None and prefetched[:2] == (db_path, data_dir):
+        # Started at Doctor start (_prefetch_audit_db_health); an exception
+        # from the worker is raised here, as an inline call would raise it.
+        health = prefetched[2].result()
+    else:
+        health = inspect_audit_db(db_path, data_dir=data_dir)
     if health.status is AuditDBHealthStatus.MISSING:
         # A running gateway still writes to the deleted file, and the
         # initialize repair refuses while it runs (GAP-0325).
@@ -16949,6 +17026,15 @@ def doctor(
             )
         )
 
+    if not do_fix and click_ctx is not None:
+        # The repair preflight reuses this run's positive validate decision.
+        _begin_config_validation_run()
+        click_ctx.call_on_close(_end_config_validation_run)
+
+    # The audit database walk only reads; start it now and render its row at
+    # the usual position (rel-1-0-10:GAP-0938). Repairs run it inline.
+    audit_pool, audit_probe = _prefetch_audit_db_health(cfg) if not do_fix else (None, None)
+
     # Sandbox doctor is an independent, read-only subprocess. Start it while
     # the earlier sections run, then render its rows at the usual position.
     # Repairs can change the gateway, so only ordinary checks prefetch it.
@@ -16979,11 +17065,15 @@ def doctor(
         _begin_status_document_run()
 
     r.set_section("configuration")
-    _check_config(cfg, r)
-    _check_ignored_dotenv_keys(cfg, r)
-    _check_sudo_runtime_leftovers(cfg, r)
-    _check_vendor_policy_dirs(cfg, r)
-    _check_audit_db(cfg, r)
+    try:
+        _check_config(cfg, r)
+        _check_ignored_dotenv_keys(cfg, r)
+        _check_sudo_runtime_leftovers(cfg, r)
+        _check_vendor_policy_dirs(cfg, r)
+        _check_audit_db(cfg, r, prefetched=audit_probe)
+    finally:
+        if audit_pool is not None:
+            audit_pool.shutdown(wait=True)
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
     _check_private_file_exposure(cfg, r)

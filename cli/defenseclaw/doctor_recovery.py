@@ -26,6 +26,7 @@ and unattended-use policies.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import hmac
 import ntpath
@@ -33,6 +34,7 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -169,17 +171,83 @@ def _prefetch_audit_db(path: str | os.PathLike[str], deadline: float) -> bool:
     29-47 s on a cloud disk (SWEEP-10), while one sequential read of the same
     file took under a second. Warming the cache first lets the walk finish
     inside the budget. A read error returns True: the walk then reports it.
+
+    On Linux the kernel copies the file to /dev/null with sendfile, so no byte
+    crosses into this process: a warm 618 MiB file took 5 ms instead of 90 ms,
+    and cold it took as long as the buffered read (rel-1-0-10:GAP-0938).
+    Elsewhere, or where the file system cannot splice, it reads into one
+    buffer. Never mmap: an I/O error or a truncation by the gateway's
+    retention would be a SIGBUS crash instead of a row.
     """
 
-    buffer = bytearray(_AUDIT_PREFETCH_CHUNK_BYTES)
     try:
         with open(path, "rb", buffering=0) as handle:
+            offset = _sendfile_prefetch(handle.fileno(), deadline)
+            if offset is None:
+                return True
+            if offset < 0:
+                return False
+            handle.seek(offset)
+            buffer = bytearray(_AUDIT_PREFETCH_CHUNK_BYTES)
             while handle.readinto(buffer):
                 if time.monotonic() >= deadline:
                     return False
     except OSError:
         return True
     return True
+
+
+# sendfile cannot move this file here: read it into a buffer instead.
+_SENDFILE_UNSUPPORTED = frozenset(
+    code
+    for code in (
+        getattr(errno, "EINVAL", None),
+        getattr(errno, "ENOSYS", None),
+        getattr(errno, "EOPNOTSUPP", None),
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EXDEV", None),
+    )
+    if code is not None
+)
+
+
+def _sendfile_prefetch(fd: int, deadline: float) -> int | None:
+    """Warm the page cache through sendfile to /dev/null (Linux only).
+
+    Returns None when the whole file was read, -1 when the deadline passed,
+    and otherwise the offset the caller's buffered read resumes from (0 when
+    sendfile is not used here). A read error raises OSError, which the caller
+    turns into True, as for a buffered read.
+    """
+
+    if not sys.platform.startswith("linux") or not hasattr(os, "sendfile"):
+        return 0
+    try:
+        sink = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return 0
+    offset = 0
+    try:
+        # Without it a cold sendfile reads ahead in pipe-sized steps and took
+        # 2.9 s where a buffered read took 1.9 s; with it both take 1.9 s.
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_SEQUENTIAL)
+        except (AttributeError, OSError):
+            pass
+        while True:
+            try:
+                sent = os.sendfile(sink, fd, offset, _AUDIT_PREFETCH_CHUNK_BYTES)
+            except OSError as exc:
+                if exc.errno in _SENDFILE_UNSUPPORTED:
+                    return offset
+                raise
+            if not sent:
+                return None
+            offset += sent
+            if time.monotonic() >= deadline:
+                return -1
+    finally:
+        os.close(sink)
 
 
 def _bounded_quick_check(connection: sqlite3.Connection, deadline: float) -> tuple[tuple[object, ...], bool]:
