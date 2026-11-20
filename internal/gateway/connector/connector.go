@@ -355,12 +355,15 @@ type SetupOpts struct {
 
 	// ClaudeManagedGuardTexts109 renders the managed Windows Claude Code guard
 	// wrapper with the texts 1.0.9 Setup wrote instead of this release's
-	// (rel-1-0-10 GAP-0119). Only the guardian's recorded-policy renders set
-	// it, so a drop-in 1.0.9 published still reads as this deployment's and
-	// an upgrade replaces it with the current form; without it the 1.0.10
+	// (rel-1-0-10 GAP-0119). The guardian's recorded-policy renders set it,
+	// so a drop-in 1.0.9 published still reads as this deployment's and an
+	// upgrade replaces it with the current form; without it the 1.0.10
 	// guardian refused that drop-in as an unrecognized registered command and
 	// every Setup /ensure upgrade from 1.0.9 ended 1603 (rel-1-0-10
-	// GAP-1495). Remove when 1.0.9 stops being a supported upgrade source.
+	// GAP-1495). The standalone machine policy also sets it while the launch
+	// folders are retired, so the 1.0.9 guardian of a rollback recognizes the
+	// drop-in (GAP-1540). Remove when 1.0.9 stops being a supported upgrade
+	// source and rollback target.
 	ClaudeManagedGuardTexts109 bool
 
 	// ReclaimOwnHooksOnly is set on the Teardown of a connector that is not
