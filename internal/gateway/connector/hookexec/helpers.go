@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -378,13 +379,14 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		if !hookFailureLogFolderReady(opts, home, logDir, eventID) {
 			return
 		}
-		f, err = opts.failureLog.opener()(filepath.Join(logDir, "hook-failures.jsonl"),
+		var openErr error
+		f, openErr = opts.failureLog.opener()(filepath.Join(logDir, "hook-failures.jsonl"),
 			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
+		if openErr != nil {
 			if blocked && !opts.ManagedEnterprise && !opts.SecureClient && appendMarker() {
 				return
 			}
-			fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be opened")
+			fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be opened"+noSpaceDetail(openErr, logDir))
 			noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be opened")
 			return
 		}
@@ -398,7 +400,7 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		return
 	}
 	if err != nil || n != len(line) {
-		fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended")
+		fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended"+noSpaceDetail(err, logDir))
 		noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be written")
 		return
 	}
@@ -410,6 +412,37 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		fmt.Fprintf(opts.Stderr, "defenseclaw: event_id=%s: this refusal is recorded in %s\n",
 			entry.EventID, filepath.Join(logDir, "hook-failures.jsonl"))
 	}
+}
+
+// noSpaceDetail is the end of the line that says a failure record could not
+// be written when the disk had no room for it: the folder and the step, where
+// the line said only that the record could not be appended
+// (rel-1-0-10:GAP-1222). Any other error adds nothing.
+func noSpaceDetail(err error, folder string) string {
+	if !noSpaceError(err) {
+		return ""
+	}
+	return ": the disk that holds " + folder + " is full; free space on it, then try again"
+}
+
+// noSpaceError reports a write the disk had no room for: ENOSPC in the
+// chain, or the Linux, macOS (ENOSPC, EDQUOT) or Windows (ERROR_DISK_FULL)
+// message, as audit.IsStoreFullError reads them; the hook does not link the
+// audit store.
+func noSpaceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	for _, full := range []string{"no space left on device", "disk quota exceeded", "not enough space on the disk"} {
+		if strings.Contains(text, full) {
+			return true
+		}
+	}
+	return false
 }
 
 // hookFailureLogFolderReady makes the logs folder of home for a failure line
