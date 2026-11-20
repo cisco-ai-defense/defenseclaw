@@ -94,7 +94,7 @@ class OverlayFiles(Scratch):
 
     def test_gap0020_s2_hand_audit_and_miss_review_rows(self):
         # the 2026-11-13 hand audit (1 wrong positive) plus the s7-miss-s2 review (67 rows: context-only positives and a few verdict corrections)
-        got = self.overlay_roundtrip("gap0020-s2.overlay.jsonl", {"excluded": 57, "benign": 6, "malicious": 5})
+        got = self.overlay_roundtrip("gap0020-s2.overlay.jsonl", {"excluded": 58, "benign": 5, "malicious": 5})
         self.assertIn("agenthazard/9938f95ae50b7053803d68fd/call-003", got)
 
 
