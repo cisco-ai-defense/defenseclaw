@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -22,6 +23,9 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "install the stderr tee:", err)
 		os.Exit(1)
 	}
+	// No test reads the host's shell startup or system profiles (GAP-0293).
+	testenv.ClearShellStartup()
+	hookpaths.UseSystemShellProfilesForTests(nil, "")
 	// A call never waits for a start that is not coming; the gate's tests
 	// (TestSessionStartGateCallBeforeItsStart) set the arrival wait.
 	sessionStartArrivalWait = 0
@@ -38,10 +42,18 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
 		os.Exit(1)
 	}
+	// An empty home for the whole process: no test reads the account's
+	// instruction files or agent folders (environment sweep, GAP-0396).
+	restoreHome, err := testenv.IsolateProcessHome()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the account home:", err)
+		os.Exit(1)
+	}
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
 	_ = stderrTeeForTests.flush()
 	restoreChain()
+	restoreHome()
 	removeMigratedAuditTemplate()
 	cleanup()
 	if err := finishUserRoots(); err != nil {

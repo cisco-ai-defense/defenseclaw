@@ -586,7 +586,7 @@ func awkTwinTouchesNoLink(twin actionfacts.AwkTwin, cwd, home string) bool {
 
 // clientProtectedDecision is the protected-target decision the hook client
 // reaches for a plain shell command (the one an awk program starts too): a concrete write to a protected file, a
-// variable write a per-user gateway resolves through the user's links, a loop
+// call with a word the shell expands that a per-user gateway resolves, a loop
 // copy destination that is protected, or a no-dereference touch that is not
 // safe.
 func clientProtectedDecision(command, cwd, home string) bool {
@@ -595,10 +595,15 @@ func clientProtectedDecision(command, cwd, home string) bool {
 	if decision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 		decision = false
 	}
-	if !decision && actionClientVariableWriteCandidate(command, home) {
+	if !decision && commandMayExpand(command) {
+		// The carry of the plain call (resolveConnector): every call with a
+		// word the shell expands carries the per-user decision, minus a value
+		// the call proves dead and writers the one resolver proves safe
+		// (rel-1-0-10 GAP-0415, GAP-0326, GAP-0327).
 		decision = ActionCommandDecision(command, cwd, home) != "" &&
 			!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
-			!actionClientProvedOverwrittenRedirect(command, cwd, home)
+			!actionClientProvedOverwrittenRedirect(command, cwd, home) &&
+			!writersAllProvenSafe(command, cwd, home, nil)
 	}
 	if !decision {
 		decision = actionClientLoopCopyDestinationProtected(command, cwd, home)
@@ -2137,19 +2142,41 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
+				// The plain-call decision of this command, read once: the
+				// carry below and the past-the-limits check both ask it, and
+				// a recovered parse of a long call pays a full reading each
+				// time (TestGAP0534RecoveredParseStaysBounded under -race).
+				decidedFor, plainDecision := "", ""
+				commandDecision := func() string {
+					if decidedFor != command || decidedFor == "" {
+						decidedFor, plainDecision = command, ActionCommandDecision(command, cwd, home)
+					}
+					return plainDecision
+				}
+				if !isApplyPatchToolName(tool) && unprovenReason == "" && WriteOperandCaps(command, cwd, home).Any() {
+					unprovenReason = UnprovenBoundedPaths
+				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands) ||
-						actionSedInPlaceWrite(command, cwd, home, nil)
+						actionSedInPlaceDecision(command, cwd, home, nil)
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 						protectedDecision = false
 					}
-					if !protectedDecision && actionClientVariableWriteCandidate(command, home) {
-						// A per-user gateway can resolve a variable write through
-						// the user's links. Carry that positive decision to managed
-						// gateways, excluding an unconditionally overwritten value.
-						protectedDecision = ActionCommandDecision(command, cwd, home) != "" &&
+					if !protectedDecision && !noDereferenceTouchSafe {
+						// A per-user gateway reads the user's links itself; a
+						// managed gateway cannot. The client carries its own
+						// decision for EVERY call with a word the shell expands,
+						// not for a list of verbs or a syntax (rel-1-0-10 GAP-0415,
+						// GAP-0326, GAP-0327): a call of fixed text is judged by
+						// the walk of its operands above, which names what each
+						// verb reads and writes. The carry is minus
+						// a value the call proves dead and a call whose writers
+						// the one resolver proves safe (writersAllProvenSafe).
+						protectedDecision = commandMayExpand(command) &&
+							commandDecision() != "" &&
 							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
-							!actionClientProvedOverwrittenRedirect(command, cwd, home)
+							!actionClientProvedOverwrittenRedirect(command, cwd, home) &&
+							!writersAllProvenSafe(command, cwd, home, nil)
 					}
 					if !protectedDecision {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
@@ -2157,6 +2184,12 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				}
 				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
 					noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(command, cwd, home)
+				}
+				// The replace verbs (mv, install, sed -i) change the entry a
+				// name holds; the same key carries that proof (F7).
+				if !protectedDecision && !noDereferenceTouchSafe && ReplaceVerbShape(command, cwd, home) &&
+					replaceVerbSafe(command, cwd, home) {
+					noDereferenceTouchSafe = true
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -2175,7 +2208,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// (GAP-0151).
 				if !protectedDecision && !isApplyPatchToolName(tool) &&
 					(fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded || callPastArgvBound(command)) {
-					protectedDecision = ActionCommandDecision(command, cwd, home) != ""
+					protectedDecision = commandDecision() != ""
 				}
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
@@ -2228,7 +2261,6 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
-				literalOperands = append(literalOperands, quotedGlobNameWriteOperands(command, cwd, home, facts.Paths)...)
 				if concreteOperands.ready {
 					literalOperands = append(literalOperands, concreteOperands.loop...)
 					literalOperands = append(literalOperands, concreteOperands.sourceGlob...)
@@ -2291,7 +2323,6 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 							literalOperands = append(literalOperands, boundedTwin...)
 						}
 						literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(reading, cwd, home)...)
-						literalOperands = append(literalOperands, quotedGlobNameWriteOperands(reading, cwd, home, twinFacts.Paths)...)
 						literalOperands = append(literalOperands, BoundedLoopCopyDestinations(reading, cwd, home)...)
 						literalOperands = append(literalOperands, CopySourceGlobDestinations(reading, cwd, home, nil)...)
 						literalOperands = append(literalOperands, BoundedGlobLoopCopyDestinations(reading, cwd, home, nil)...)

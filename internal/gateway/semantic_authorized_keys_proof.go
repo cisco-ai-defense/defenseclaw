@@ -1069,7 +1069,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	facts = facts.AtHookFolder()
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
-			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+			request.ResolvedWriteTargets, request.ProtectedHomeHook, request.ShellStartup) {
 		return false
 	}
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
@@ -1928,7 +1928,43 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 	}
+	// No operand is proven protected. An operand whose pathname expansion the
+	// one shell word resolver cannot settle (a glob form it does not model, a
+	// glob option the call may have changed, a directory it cannot read) is
+	// not proven to leave the protected files alone either: it is UNCERTAIN,
+	// and the pack tier decides it (default and permissive alert, strict
+	// blocks; rel-1-0-10:GAP-0350, GAP-0378, GAP-0379, GAP-0380). A variable
+	// or substitution is left to the dynamic operand proofs, a result past
+	// the bound to the bound rule (hookpaths.UncertainGlobWriteReason).
+	//
+	// The agent's shell startup (the client's header) carries its glob
+	// options. A managed gateway behind a protected home (ProtectedHomeHook)
+	// cannot read the user's folders, so its own walk answers every glob word
+	// it would read unresolved: that answer is no evidence, and the client's
+	// evidence above decides the operand, as for every other check of this
+	// proof (rel-1-0-6:GAP-0675). A form or option the resolver does not model
+	// is uncertain before any walk, and stays uncertain there too.
+	//
+	// The client's evidence answers the words of the whole call, under both
+	// readings of every modeled glob option the call changes. Its answer also
+	// covers an isolated statement when that statement's readings are a subset
+	// of the call's readings. An unmodeled change remains unknown (GAP-0415).
+	if input.Command != "" && trustedShellCommandInput(request.Input) {
+		if reason := hookpaths.UncertainGlobWriteReason(input.Command, input.CWD, facts.ActiveHome, request.ShellStartup, request.ProtectedHomeHook); reason != "" &&
+			(!request.ProtectedHomeHook || reason != hookpaths.UnprovenTargetUnresolved || !clientAnswersReading(request, input.Command)) {
+			return unproven(reason, "")
+		}
+	}
 	return false
+}
+
+// clientAnswersReading reports that the hook client's evidence was read for
+// the words of command as this evaluation reads them: command is the call
+// itself, or a statement whose glob-option states were all read by the client
+// (hookpaths.CallGlobOptionsCoverStatement).
+func clientAnswersReading(request trustedActionRequest, command string) bool {
+	return !request.simpleCommandPass || request.parentPatch == nil ||
+		hookpaths.CallGlobOptionsCoverStatement(request.parentPatch.Command, command)
 }
 
 // trustedPOSIXShellCall reports a call a POSIX shell runs (Bash tool,

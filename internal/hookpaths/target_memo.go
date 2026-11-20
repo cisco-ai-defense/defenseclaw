@@ -33,6 +33,9 @@ type TargetMemo struct {
 	// excuseUnknownRoles widens that scan to the unknown tier
 	// (ActionMentionsNoKnownWrite): see unknownRolesExcused.
 	excuseUnknownRoles bool
+	// startup is the agent's shell startup for this evaluation, from the
+	// hook client's header (nil: the process's own).
+	startup *ShellStartup
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -321,3 +324,29 @@ func (m *TargetMemo) nonWritesExcused() bool { return m != nil && m.excuseNonWri
 // of (a dynamic program word, an echo of an expansion), in a pipeline and with
 // its output redirected to a file the call names (rel-1-0-10:GAP-0843).
 func (m *TargetMemo) unknownRolesExcused() bool { return m != nil && m.excuseUnknownRoles }
+
+// WithShellStartup sets the agent's shell startup the evaluation's safe
+// proofs judge against and returns the memo.
+func (m *TargetMemo) WithShellStartup(startup *ShellStartup) *TargetMemo {
+	if m != nil {
+		m.startup = startup
+	}
+	return m
+}
+
+// ShellStartup is the startup set by WithShellStartup (nil: none).
+func (m *TargetMemo) ShellStartup() *ShellStartup {
+	if m == nil {
+		return nil
+	}
+	return m.startup
+}
+
+// shellStartup is the agent's startup the evaluation was given, or this
+// process's own.
+func (m *TargetMemo) shellStartup() ShellStartup {
+	if m != nil && m.startup != nil {
+		return *m.startup
+	}
+	return CurrentShellStartup()
+}
