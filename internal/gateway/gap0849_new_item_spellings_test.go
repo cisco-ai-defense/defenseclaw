@@ -45,7 +45,33 @@ var gap0849ItemTypeSpellings = []struct{ id, newItem, itemType string }{
 // user and as a managed peer, in all five tiers. Every spelling of a row gets
 // the verdict and the rules of the plain spelling; on a Windows host the
 // link rows block and the file and folder rows allow, as on rel.
-func TestGAP0849NewItemSpellingsGetThePlainVerdict(t *testing.T) {
+//
+// Each tier runs as its own test: the whole matrix took 630 s under -race,
+// more than one CI gateway shard holds (440 s planned, 720 s with its
+// headroom; rel-1-0-10:GAP-1603).
+func TestGAP0849NewItemSpellingsGetThePlainVerdictDefault(t *testing.T) {
+	gap0849NewItemSpellingsGetThePlainVerdict(t, "default")
+}
+
+func TestGAP0849NewItemSpellingsGetThePlainVerdictPermissive(t *testing.T) {
+	gap0849NewItemSpellingsGetThePlainVerdict(t, "permissive")
+}
+
+func TestGAP0849NewItemSpellingsGetThePlainVerdictStrict(t *testing.T) {
+	gap0849NewItemSpellingsGetThePlainVerdict(t, "strict")
+}
+
+func TestGAP0849NewItemSpellingsGetThePlainVerdictManaged(t *testing.T) {
+	gap0849NewItemSpellingsGetThePlainVerdict(t, "managed")
+}
+
+func TestGAP0849NewItemSpellingsGetThePlainVerdictManagedStrict(t *testing.T) {
+	gap0849NewItemSpellingsGetThePlainVerdict(t, "managed-strict")
+}
+
+// gap0849NewItemSpellingsGetThePlainVerdict runs every row and spelling
+// through the three connectors in one tier cell.
+func gap0849NewItemSpellingsGetThePlainVerdict(t *testing.T, cell string) {
 	previous := windowsHookHost
 	windowsHookHost = func() bool { return true }
 	t.Cleanup(func() { windowsHookHost = previous })
@@ -93,35 +119,33 @@ func TestGAP0849NewItemSpellingsGetThePlainVerdict(t *testing.T) {
 	spell := func(command string, spelling struct{ id, newItem, itemType string }) string {
 		return strings.ReplaceAll(strings.ReplaceAll(command, "-ItemType ", spelling.itemType), "New-Item ", spelling.newItem)
 	}
+	posture, managed := cell, false
+	switch cell {
+	case "managed":
+		posture, managed = "default", true
+	case "managed-strict":
+		posture, managed = "strict", true
+	}
 	for _, connector := range []string{"claudecode", "codex", "copilot"} {
-		for _, cell := range []string{"default", "permissive", "strict", "managed", "managed-strict"} {
-			posture, managed := cell, false
-			switch cell {
-			case "managed":
-				posture, managed = "default", true
-			case "managed-strict":
-				posture, managed = "strict", true
-			}
-			for _, row := range rows {
-				t.Run(fmt.Sprintf("%s %s %s", connector, cell, row.name), func(t *testing.T) {
-					plainAction, plainRules := powerShellProtectedRoute(t, home, proj, connector, posture, managed, row.command)
-					slices.Sort(plainRules)
-					switch {
-					case row.benign && (plainAction != "allow" || len(plainRules) != 0):
-						t.Fatalf("plain: action %q rules %v, want allow with no rule", plainAction, plainRules)
-					case row.link && windows && (plainAction != "block" || !slices.Contains(plainRules, keysRule)):
-						t.Fatalf("plain: action %q rules %v, want block with %s", plainAction, plainRules, keysRule)
+		for _, row := range rows {
+			t.Run(fmt.Sprintf("%s %s %s", connector, cell, row.name), func(t *testing.T) {
+				plainAction, plainRules := powerShellProtectedRoute(t, home, proj, connector, posture, managed, row.command)
+				slices.Sort(plainRules)
+				switch {
+				case row.benign && (plainAction != "allow" || len(plainRules) != 0):
+					t.Fatalf("plain: action %q rules %v, want allow with no rule", plainAction, plainRules)
+				case row.link && windows && (plainAction != "block" || !slices.Contains(plainRules, keysRule)):
+					t.Fatalf("plain: action %q rules %v, want block with %s", plainAction, plainRules, keysRule)
+				}
+				for _, spelling := range gap0849ItemTypeSpellings {
+					command := spell(row.command, spelling)
+					action, rules := powerShellProtectedRoute(t, home, proj, connector, posture, managed, command)
+					slices.Sort(rules)
+					if action != plainAction || !slices.Equal(rules, plainRules) {
+						t.Errorf("%s: action %q rules %v, want the plain spelling's %q %v", spelling.id, action, rules, plainAction, plainRules)
 					}
-					for _, spelling := range gap0849ItemTypeSpellings {
-						command := spell(row.command, spelling)
-						action, rules := powerShellProtectedRoute(t, home, proj, connector, posture, managed, command)
-						slices.Sort(rules)
-						if action != plainAction || !slices.Equal(rules, plainRules) {
-							t.Errorf("%s: action %q rules %v, want the plain spelling's %q %v", spelling.id, action, rules, plainAction, plainRules)
-						}
-					}
-				})
-			}
+				}
+			})
 		}
 	}
 }
