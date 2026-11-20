@@ -461,7 +461,8 @@ func actionClientMutationCall(call *syntax.CallExpr, values actionValues, cwd, h
 func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected protectedFiles, ssh string) bool {
 	var roots []string
 	name := ""
-	deletes := false
+	var test findTest
+	deletes, follow := false, false
 	for i := 1; i < len(call.Args); i++ {
 		value, known := StaticWord(call.Args[i], home)
 		if !known {
@@ -470,7 +471,10 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 		switch value {
 		case "-delete":
 			deletes = true
+		case "-follow":
+			follow = true
 		case "-name", "-iname":
+			option := value
 			i++
 			if i >= len(call.Args) {
 				return false
@@ -479,6 +483,9 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 			if !known {
 				return false
 			}
+			test, _ = newFindTest(option, name, "")
+		case "-H", "-L":
+			follow = true
 		default:
 			if !strings.HasPrefix(value, "-") && len(roots) == i-1 {
 				roots = append(roots, value)
@@ -503,6 +510,17 @@ func actionClientFindDelete(call *syntax.CallExpr, cwd, home string, protected p
 		absoluteRoot := OperandPath(root, cwd)
 		for _, target := range protected {
 			if target.path != absoluteRoot && !strings.HasPrefix(target.path, absoluteRoot+string(filepath.Separator)) {
+				continue
+			}
+			// The walk deletes only the entries it finds: a generic name
+			// test does not reach a protected file that does not exist, so
+			// find . -name '*' -delete in a project with no hook file
+			// deletes none (rel-1-0-10:GAP-1555). A test aimed at the file
+			// reaches it either way (findTest.aimsAt), and so does a walk
+			// that follows links (-H, -L, -follow): a link it meets may lead
+			// anywhere, whatever exists at the literal path
+			// (rel-1-0-10:GAP-1572). A target whose state is unknown counts.
+			if target.info == nil && !target.unknown && !follow && !test.aimsAt(root, absoluteRoot, target.path) {
 				continue
 			}
 			if matches, _ := filepath.Match(name, filepath.Base(target.path)); matches &&

@@ -57,7 +57,7 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	var reached []string
 	var narrow func(lo, hi int)
 	narrow = func(lo, hi int) {
-		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi]) {
+		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi], protected) {
 			return
 		}
 		if hi-lo == 1 {
@@ -84,7 +84,9 @@ func registrationWriteReachedAs(command, cwd, home string, names []string) []str
 	return merged
 }
 
-func registrationWriteReach(file *syntax.File, command, cwd, home string, protected protectedFiles) bool {
+// registrationWriteReach reports whether the command writes a member of
+// protected, one part of the registration set all the narrowing reads.
+func registrationWriteReach(file *syntax.File, command, cwd, home string, protected, all protectedFiles) bool {
 	fileProtected := make(protectedFiles, 0, len(protected))
 	for _, entry := range protected {
 		if entry.info == nil || !entry.info.IsDir() {
@@ -120,7 +122,7 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		return true
 	}
 	if registrationLoopReach(file, command, cwd, home, protected) ||
-		registrationFindRsyncReach(file, cwd, home, protected) {
+		registrationFindRsyncReach(file, cwd, home, protected, all) {
 		return true
 	}
 	if ChangesDirectory(command) {
@@ -907,16 +909,13 @@ func registrationFindFileWords(words []*syntax.Word, file, home string) []*synta
 // neither spelled out nor bound is no root and no test, and a negated test
 // selects nothing.
 func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd, home string, protected protectedFiles) []string {
-	type nameTest struct {
-		pattern     string
-		whole, fold bool
-	}
 	var roots []string
-	var tests []nameTest
-	rootsOpen, negated := true, false
+	var tests []findTest
+	rootsOpen, negated, follow := true, false, false
 	for index := 0; index < len(args); index++ {
 		text, fixed := StaticWord(args[index], home)
 		if rootsOpen && (text == "-H" || text == "-L" || text == "-P") {
+			follow = follow || text != "-P"
 			continue
 		}
 		if rootsOpen && (!fixed || !strings.HasPrefix(text, "-") && text != "!" && text != "(") {
@@ -933,10 +932,13 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 		case "!", "-not":
 			negated = !negated
 			continue
+		case "-follow":
+			follow = true
 		case "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename":
 			if index+1 < len(args) {
 				if pattern, known := StaticWord(args[index+1], home); known && !negated {
-					tests = append(tests, nameTest{pattern, strings.Contains(text, "path") || strings.Contains(text, "wholename"), strings.HasPrefix(text, "-i")})
+					test, _ := newFindTest(text, pattern, "")
+					tests = append(tests, test)
 				}
 				index++
 			}
@@ -965,12 +967,20 @@ func registrationFindReachedFiles(args []*syntax.Word, values actionValues, cwd,
 				if !strings.HasPrefix(target.path, path+string(filepath.Separator)) {
 					continue
 				}
+				// A find hands its child only the entries the walk finds: a
+				// generic test does not hand a protected file that does not
+				// exist below the root (rel-1-0-10:GAP-1555). A test aimed at
+				// the file hands it either way (findTest.aimsAt), and so does
+				// a walk that follows links (rel-1-0-10:GAP-1572) and a
+				// target whose state is unknown.
+				absent := target.info == nil && !target.unknown && !follow
 				for _, test := range tests {
 					text := filepath.Base(target.path)
 					if test.whole {
 						text = target.path
 					}
-					if registrationGlobMatch(test.pattern, text, test.fold) {
+					if registrationGlobMatch(test.pattern, text, test.fold) &&
+						(!absent || test.aimsAt(root, path, target.path)) {
 						reached = append(reached, target.path)
 						break
 					}
@@ -1041,7 +1051,7 @@ func registrationGlobMatch(pattern, text string, fold bool) bool {
 // registrationFindRsyncReach reads the two tools that empty a folder without
 // naming what they remove: find with -delete or an rm/mv -exec (narrowed by
 // -name or -iname when given), and rsync --delete into a folder.
-func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected protectedFiles) bool {
+func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected, all protectedFiles) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
@@ -1058,7 +1068,7 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected p
 		}
 		switch programBase(words[0]) {
 		case "find":
-			found = registrationFindReach(words, cwd, protected)
+			found = registrationFindReach(words, cwd, protected, all)
 		case "rsync":
 			found = registrationRsyncReach(words, cwd, protected)
 		case "install", "ginstall":
@@ -1094,9 +1104,14 @@ func findChildRemovesTree(args []string) bool {
 	return false
 }
 
-func registrationFindReach(words []string, cwd string, protected protectedFiles) bool {
+func registrationFindReach(words []string, cwd string, protected, all protectedFiles) bool {
+	// paths are the -path and -regex tests, which do not filter here.
 	var roots, names []string
-	deletes, insensitive := false, false
+	var paths []findTest
+	deletes, insensitive, follow := false, false, false
+	// regexType is the -regextype in force; a BSD find -E walk reads its own
+	// extended syntax whatever follows.
+	regexType, bsdExtended := "", false
 	// A walk cut at -maxdepth N reaches nothing deeper than N below a root.
 	// Several limits or one that is not a number leave the walk unbounded.
 	maxDepth, limits := 0, 0
@@ -1135,6 +1150,25 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 				names = append(names, words[i+1])
 				i++
 			}
+		case "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex":
+			if i+1 < len(words) {
+				syntax := regexType
+				if bsdExtended {
+					syntax = findBSDExtended
+				}
+				test, _ := newFindTest(word, words[i+1], syntax)
+				paths = append(paths, test)
+				i++
+			}
+		case "-regextype":
+			if i+1 < len(words) {
+				regexType = words[i+1]
+				i++
+			}
+		case "-follow", "-H", "-L":
+			follow = true
+		case "-E":
+			bsdExtended = true
 		default:
 			if len(roots) == i-1 && !strings.HasPrefix(word, "-") && word != "!" && word != "(" {
 				roots = append(roots, word)
@@ -1147,10 +1181,42 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 	if len(roots) == 0 {
 		roots = []string{"."}
 	}
-	for _, root := range roots {
-		root = OperandPath(root, cwd)
+	nameOption := "-name"
+	if insensitive {
+		nameOption = "-iname"
+	}
+	nameTests := make([]findTest, len(names))
+	for i, name := range names {
+		nameTests[i], _ = newFindTest(nameOption, name, "")
+	}
+	for _, written := range roots {
+		root := OperandPath(written, cwd)
+		below := func(target protectedFile) bool {
+			return target.path == root || strings.HasPrefix(target.path, root+string(filepath.Separator))
+		}
+		aimed := func(target protectedFile, tests []findTest) bool {
+			return slices.ContainsFunc(tests, func(test findTest) bool { return test.aimsAt(written, root, target.path) })
+		}
+		// A -path or -regex test does not filter the walk here. One aimed
+		// at a file of the whole registration set below the root judges the
+		// walk on every registration file below it, existing or not, as
+		// before GAP-1196 (rel-1-0-10:GAP-1555, GAP-1572).
+		pathNamed := slices.ContainsFunc(all, func(target protectedFile) bool { return below(target) && aimed(target, paths) })
 		for _, target := range protected {
-			if target.path != root && !strings.HasPrefix(target.path, root+string(filepath.Separator)) {
+			if !below(target) {
+				continue
+			}
+			// The walk removes only the entries it finds: a registration
+			// file that does not exist is not reached, and a folder is
+			// reached through the registration files it holds, which are
+			// targets of their own. A spelling of the root (., ./, the
+			// absolute path) therefore reaches the same files
+			// (rel-1-0-10:GAP-1196). A target whose state is unknown counts,
+			// and so does one a name test is aimed at (rel-1-0-10:GAP-1555)
+			// and, for a walk that follows links, one that does not exist
+			// (rel-1-0-10:GAP-1572).
+			if !target.unknown && (target.info == nil && !follow || target.info != nil && target.info.IsDir()) &&
+				!pathNamed && !aimed(target, nameTests) {
 				continue
 			}
 			if !tree && limits == 1 && maxDepth >= 0 && target.path != root &&

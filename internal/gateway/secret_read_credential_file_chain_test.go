@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // substrate-1:GAP-0210. A Substrate agent works in /work/<dir>. Before the
@@ -203,10 +204,13 @@ func TestWindowsProjectCredentialFileReadStartsSecretReadChainGAP0210(t *testing
 // chain on the hook path (Claude Code PreToolUse + PostToolUse, then the
 // egress call): a credentials file read inside the project is followed by
 // the same verdict as the home copy, in every pack and on a managed host.
-// On a managed_enterprise gateway the local chain lane is off for an
-// ordinary hook call (the host daemon owns chains there; Substrate actors are
-// the exception, substrate-1:GAP-0211), so there the test pins parity only:
-// a project read gets what the home read gets.
+// The managed tier is the shipping managed posture (managed_enterprise with
+// enterprise.profile standalone), where the local chain runs as in the pack
+// tiers. Under the Secure Client profile (managed_enterprise with no
+// enterprise.profile) AI Defense decides and the local chain is off for an
+// ordinary hook call (Substrate actors are the exception,
+// substrate-1:GAP-0211), so that tier pins parity only: a project read gets
+// what the home read gets (rel-1-0-10:GAP-0664).
 func TestAuthenticatedHookProjectCredentialReadThenEgressGAP0210(t *testing.T) {
 	installCorrelationHMACForTest(t)
 	policiesRoot := guardrailPoliciesRoot(t)
@@ -217,13 +221,14 @@ func TestAuthenticatedHookProjectCredentialReadThenEgressGAP0210(t *testing.T) {
 		readFile string
 	}
 	for _, setup := range []struct {
-		name, pack string
-		managed    bool
+		name, pack            string
+		managed, secureClient bool
 	}{
 		{name: "default", pack: "default"},
 		{name: "permissive", pack: "permissive"},
 		{name: "strict", pack: "strict"},
 		{name: "managed", pack: "default", managed: true},
+		{name: "secure-client", pack: "default", managed: true, secureClient: true},
 	} {
 		t.Run(setup.name, func(t *testing.T) {
 			installDefaultProfileConnector(t, "claudecode")
@@ -234,6 +239,9 @@ func TestAuthenticatedHookProjectCredentialReadThenEgressGAP0210(t *testing.T) {
 			cfg.Guardrail.RulePackDir = filepath.Join(policiesRoot, setup.pack)
 			if setup.managed {
 				cfg.DeploymentMode = "managed_enterprise"
+				if !setup.secureClient {
+					cfg.Enterprise.Profile = managed.ProfileStandalone
+				}
 			}
 			api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 			handler := http.HandlerFunc(api.handleAgentHook("claudecode"))
@@ -255,7 +263,7 @@ func TestAuthenticatedHookProjectCredentialReadThenEgressGAP0210(t *testing.T) {
 				send["cwd"] = "/work/f5proj"
 				return callAgentHookForTest(t, handler, send)
 			}
-			wantChain := !setup.managed
+			wantChain := !setup.secureClient
 			home := run("home-"+setup.name, flow{read: "cat ~/.aws/credentials", send: egress})
 			if slices.Contains(home.RuleIDs, guardrail.ToolChainSecretReadThenEgress) != wantChain {
 				t.Fatalf("home control: chain on egress want %t: %+v", wantChain, home)
