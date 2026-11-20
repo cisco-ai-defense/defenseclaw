@@ -865,12 +865,15 @@ func posixANSICParts(parts []syntax.WordPart) []syntax.WordPart {
 // is not certain is not static (ok false): one with \c (a control character
 // the expander does not decode) or one that makes a NUL (bash cuts the word
 // there). touch $'\x2eenv' names .env, so the path fact names the file
-// (rel-1-0-10:GAP-0351).
+// (rel-1-0-10:GAP-0351). Each call hands expand.Format a config of its own:
+// a nil config makes the expander prepare and use one package-wide config
+// (its string builder included), which concurrent hook calls would share
+// (rel-1-0-10:GAP-0351 data race).
 func posixANSICValue(text string) (string, bool) {
 	if strings.Contains(text, `\c`) {
 		return "", false
 	}
-	value, _, err := expand.Format(nil, text, nil)
+	value, _, err := expand.Format(&expand.Config{}, text, nil)
 	if err != nil || strings.ContainsRune(value, 0) {
 		return "", false
 	}
