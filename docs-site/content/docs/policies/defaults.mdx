@@ -131,7 +131,7 @@ alert that names the rule, an audit record with `decision=alert`, and the LLM ju
 is configured. With the `strict` pack, managed strict included, action mode blocks it. A finding that
 proves a protected target in the same call (a DefenseClaw state write, a file the call names) decides
 on its own in every profile; a write the reader resolves into DefenseClaw's own state folder
-(`~/.defenseclaw`) is self-protection, a HIGH `tamper.detector_state_write` finding in every pack: a block with `strict`, managed strict included, and a HIGH alert with `default` and `permissive`. A call that only mentions the folder name, next to
+(`~/.defenseclaw`) is self-protection (`tamper.detector_state_write`): a block with `strict`, managed strict included, and a HIGH alert with `default` and `permissive`. A call that only mentions the folder name, next to
 a statement the reader cannot analyse, proves no target and is judged like any other limit-only call. **Known limit:** with `default` and `permissive`, a statement the reader
 cannot analyse can hide a write to a protected file in the same call; use `strict` where that
 matters. In observe mode the call raises the alert and runs. Split a long command into several
