@@ -100,8 +100,8 @@ func gap1006ManagedDecideFull(t *testing.T, home, cwd, posture, tool, command st
 // followed by .. reaches the DefenseClaw state, after the same call wrote an
 // ordinary file at the operand's lexically cleaned spelling. The managed
 // gateway looks the operand up by its exact key first and never by a cleaned
-// spelling, so the state write blocks in the managed and managed strict
-// packs, as on rel/1.0.10; the ordinary write alone stays allowed
+// spelling, so the state write is a HIGH alert in the managed default pack and
+// blocks in the managed strict pack (GAP-0747 tiering); the ordinary write alone stays allowed
 // (rel-1-0-10:GAP-1006). The unmanaged tiers read no client map
 // (rel-1-0-10:GAP-1007, a follow-up).
 func TestGAP1006JunctionParentKeepsStateVerdict(t *testing.T) {
@@ -132,8 +132,12 @@ func TestGAP1006JunctionParentKeepsStateVerdict(t *testing.T) {
 					}
 					cells++
 					name := posture + "/" + tg.id + "/" + fm.id + "/" + tool
-					if got := gap1006ManagedDecide(t, home, cwd, posture, tool, fmt.Sprintf(fm.f, tg.path)); got != "block" {
-						t.Errorf("%s: managed state write action %s, want block", name, got)
+					// A proven state write blocks in the strict pack and is a
+					// HIGH alert in the default one (GAP-0747 owner tiering
+					// 2026-11-15T15:20Z).
+					want := gap0747WantAction(posture == "strict")
+					if got := gap1006ManagedDecide(t, home, cwd, posture, tool, fmt.Sprintf(fm.f, tg.path)); got != want {
+						t.Errorf("%s: managed state write action %s, want %s", name, got, want)
 					}
 				}
 			}

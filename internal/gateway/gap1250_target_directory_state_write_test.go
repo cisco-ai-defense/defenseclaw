@@ -93,7 +93,7 @@ func TestGAP1250TargetDirectoryStateWrite(t *testing.T) {
 // TestGAP1250TargetDirectoryHookRoute pins rel-1-0-10:GAP-1250 on the
 // Claude Code hook route of a Windows host, where the home is a drive path:
 // a Bash mv or cp -t into the state root of a state file name is the state
-// write in default and strict, and a new file name stays allowed, as does a
+// write (a HIGH alert in default, a block in strict), and a new file name stays allowed, as does a
 // file moved into the agent settings folder (R17, R18; the GAP-1209 row
 // TestAgentHookConfigRenameOverWithoutClientEvidence).
 func TestGAP1250TargetDirectoryHookRoute(t *testing.T) {
@@ -118,8 +118,12 @@ func TestGAP1250TargetDirectoryHookRoute(t *testing.T) {
 		for _, row := range rows {
 			got := judge(h.project, false, "Bash", map[string]any{"command": row.command})
 			action := hookConfigAction(got)
-			if row.block && (action != "block" && action != "deny" || !strings.Contains(got, "tamper.detector_state_write")) {
-				t.Errorf("%s %s: %s, want block by tamper.detector_state_write", row.id, profile, got)
+			// A proven state write blocks in strict and is a HIGH alert in the
+			// default profile (GAP-0747 owner tiering 2026-11-15T15:20Z).
+			wantAction := gap0747WantAction(profile == "strict")
+			gotWant := action == wantAction || wantAction == "block" && action == "deny"
+			if row.block && (!gotWant || !strings.Contains(got, "tamper.detector_state_write")) {
+				t.Errorf("%s %s: %s, want %s by tamper.detector_state_write", row.id, profile, got, wantAction)
 			}
 			if !row.block && action != "allow" {
 				t.Errorf("%s %s: %s, want allow", row.id, profile, got)
