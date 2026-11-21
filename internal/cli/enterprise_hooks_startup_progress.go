@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // hookGuardianStartupFile is the record, in the data directory, of how far
@@ -37,10 +38,17 @@ const (
 	// hookGuardianStartupTimeFormat keeps to milliseconds, which Windows
 	// PowerShell 5.1 parses.
 	hookGuardianStartupTimeFormat = "2006-01-02T15:04:05.000Z07:00"
+	// hookGuardianStartupErrorMax bounds last_error; Setup ignores a record
+	// over 4096 bytes.
+	hookGuardianStartupErrorMax = 1024
 )
 
 // enterpriseHookGuardianStartup is the startup record. TargetsDone counts
-// the manifest targets the reconcile has finished.
+// the manifest targets the reconcile has finished. LastError is the error of
+// a startup reconcile that failed, on one line: Setup adds it to the error of
+// a coverage wait that ends without fresh coverage, which otherwise named only
+// the earlier guardian's generation (GAP-1506). It is optional, so the record
+// stays version 1 for the Setup of every release.
 type enterpriseHookGuardianStartup struct {
 	Version      int    `json:"version"`
 	PID          int    `json:"pid"`
@@ -49,11 +57,12 @@ type enterpriseHookGuardianStartup struct {
 	UpdatedAt    string `json:"updated_at"`
 	TargetsDone  int    `json:"targets_done"`
 	TargetsTotal int    `json:"targets_total"`
+	LastError    string `json:"last_error,omitempty"`
 }
 
 // enterpriseHookStartupProgress writes the startup record for one startup
 // reconcile: begin before it, target before each manifest target and end
-// after it, also when it failed. Outside begin and end, and where enabled is
+// after it with its error, also when it failed. Outside begin and end, and where enabled is
 // false, it writes nothing, so the one-shot reconcile command and the later
 // passes of the guardian are unchanged.
 type enterpriseHookStartupProgress struct {
@@ -105,7 +114,7 @@ func (p *enterpriseHookStartupProgress) target(stderr io.Writer, done, total int
 	p.publish(stderr)
 }
 
-func (p *enterpriseHookStartupProgress) end(stderr io.Writer) {
+func (p *enterpriseHookStartupProgress) end(stderr io.Writer, reconcileErr error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.active {
@@ -114,7 +123,27 @@ func (p *enterpriseHookStartupProgress) end(stderr io.Writer) {
 	p.active = false
 	p.record.State = hookGuardianStartupFinished
 	p.record.UpdatedAt = p.now().UTC().Format(hookGuardianStartupTimeFormat)
+	if reconcileErr != nil {
+		p.record.LastError = boundedHookGuardianStartupError(reconcileErr.Error())
+	}
 	p.publish(stderr)
+}
+
+// boundedHookGuardianStartupError puts an error on one line of at most
+// hookGuardianStartupErrorMax bytes, cut at a rune boundary.
+func boundedHookGuardianStartupError(message string) string {
+	message = strings.Join(strings.Fields(strings.ToValidUTF8(message, "?")), " ")
+	if message == "" {
+		return "the startup reconcile failed without an error message"
+	}
+	if len(message) <= hookGuardianStartupErrorMax {
+		return message
+	}
+	cut := hookGuardianStartupErrorMax - len("...")
+	for cut > 0 && !utf8.RuneStart(message[cut]) {
+		cut--
+	}
+	return message[:cut] + "..."
 }
 
 // publish writes the record. A failed write is logged once and changes

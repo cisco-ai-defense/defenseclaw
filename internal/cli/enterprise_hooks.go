@@ -4023,7 +4023,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// has come, for the Setup coverage wait (GAP-0401).
 	enterpriseHookStartup.begin(cmd.ErrOrStderr(), cfg.DataDir)
 	_, startupErr := reconcile("startup")
-	enterpriseHookStartup.end(cmd.ErrOrStderr())
+	enterpriseHookStartup.end(cmd.ErrOrStderr(), startupErr)
 	if startupErr != nil {
 		if !managedMode {
 			return startupErr

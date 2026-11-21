@@ -42395,7 +42395,9 @@ function Get-DefenseClawGuardianStartupProgress {
         reconcile of guardian process ProcessId, started after StartedAfter,
         has come. $null when there is no such record (a release that does not
         write it, another process, or a record that cannot be read): the
-        coverage wait then keeps its usual limit.
+        coverage wait then keeps its usual limit. last_error is the error of
+        a startup reconcile that failed ('' when there is none or the release
+        does not write it, GAP-1506).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -42452,12 +42454,18 @@ function Get-DefenseClawGuardianStartupProgress {
         if ($times[0] -lt $StartedAfter.ToUniversalTime()) {
             return $null
         }
+        $lastError = ''
+        $lastErrorProperty = $record.PSObject.Properties['last_error']
+        if ($null -ne $lastErrorProperty -and $lastErrorProperty.Value -is [string]) {
+            $lastError = [string]$lastErrorProperty.Value
+        }
         return [pscustomobject][ordered]@{
             state = [string]$record.state
             started_at = $times[0]
             updated_at = $times[1]
             targets_done = [int64]$record.targets_done
             targets_total = [int64]$record.targets_total
+            last_error = $lastError
         }
     }
     catch {
@@ -43033,6 +43041,25 @@ function Wait-DefenseClawFreshGuardianReconcile {
     }
     $waited = [int][Math]::Round(([DateTime]::UtcNow - $begin).TotalSeconds)
     $guardianLog = "the guardian log is $([string]$Layout.GuardianLogPath)"
+    # GAP-1506: a startup reconcile that failed left the earlier guardian's
+    # status in place, so last_status named only its generation. The startup
+    # record carries that reconcile's error; read it once more, as a guardian
+    # that exits on the error is gone before the loop reads the record.
+    $guardianError = ''
+    if ($guardianProcessId -ne 0) {
+        $final = Get-DefenseClawGuardianStartupProgress `
+            -Layout $Layout `
+            -ProcessId $guardianProcessId `
+            -StartedAfter $startedAfter
+        if ($null -eq $final) {
+            $final = $progress
+        }
+        if ($null -ne $final -and -not [string]::IsNullOrWhiteSpace([string]$final.last_error)) {
+            $guardianError = '; guardian_error=' + (ConvertTo-DefenseClawBoundedDiagnostic `
+                    -Value $final.last_error `
+                    -MaxLength 1024)
+        }
+    }
     # GAP-0977: a program that holds one of the guardian's state files keeps it
     # from publishing, whatever it was doing when the wait ended.
     $guardianHeld = Get-DefenseClawGuardianStateHold -Layout $Layout -Probes 3
@@ -43040,19 +43067,19 @@ function Wait-DefenseClawFreshGuardianReconcile {
         throw (New-DefenseClawGuardianStateHeldMessage -Layout $Layout -Path $guardianHeld -Phase Activation)
     }
     if (-not [string]::IsNullOrEmpty($guardianGone)) {
-        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian process $guardianProcessId $guardianGone during its first reconcile ($waited s after Setup started it); $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian process $guardianProcessId $guardianGone during its first reconcile ($waited s after Setup started it); $guardianLog; last_status=$lastStatus$guardianError"
     }
     if ($null -ne $progress -and $progress.state -ceq 'reconciling') {
         $quiet = [int][Math]::Round(([DateTime]::UtcNow - $progress.updated_at).TotalSeconds)
-        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian's first reconcile is still running after $waited s ($($progress.targets_done) of $($progress.targets_total) targets done, last progress $quiet s ago); $guardianLog; last_status=$lastStatus$guardianError"
     }
     if ($finishedRead) {
         # GAP-0601: the first reconcile finished and published, so this is
         # not a wait that ran out: its coverage is what was refused.
-        throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian finished its first reconcile ($waited s after Setup started it), but its coverage was not accepted; $guardianLog; last_status=$lastStatus$guardianError"
     }
     if ($extended -or $guardianProcessId -ne 0) {
-        throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus"
+        throw "LocalSystem guardian restarted but did not publish fresh required coverage within $([Math]::Max($TimeoutSeconds, $waited)) seconds; $guardianLog; last_status=$lastStatus$guardianError"
     }
     throw "LocalSystem guardian restarted but did not publish fresh required coverage within $TimeoutSeconds seconds; last_status=$lastStatus"
 }
