@@ -65,7 +65,7 @@ defenseclaw sandbox setup
 DefenseClaw sandbox setup
   Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
 Install OpenShell … with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
-Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. [Y/n]
+Run sandboxes in OpenShell MicroVMs? On a Mac, MicroVMs do not start until OpenShell fixes its MicroVM driver; Docker Desktop 29.8 or newer runs sandboxes on the docker driver (the run-time Landlock check decides). [y/N] y
   ✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs
   every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull NAME --apply` brings the changes back
 
@@ -267,11 +267,11 @@ Run `defenseclaw sandbox doctor` first. These are the macOS-only failures it rep
 
 **You see:** the **Landlock** check reports no Landlock, ``no sandbox can start on this gateway: it runs sandboxes on the docker driver``, or ``sandbox "<name>" is in error state`` with ``→ this gateway runs sandboxes on the docker driver``.
 
-**Cause:** the gateway still runs the Docker driver, and Docker Desktop's Linux VM kernel has no Landlock. DefenseClaw refuses this combination before it builds anything.
+**Cause:** the gateway runs the Docker driver, and the kernel of Docker Desktop's Linux VM has no Landlock. Older Docker Desktop releases (kernel 6.12-linuxkit) have none. Docker Desktop 29.8 (kernel 7.0.14-linuxkit) has Landlock ABI 8. DefenseClaw probes the VM kernel and refuses only a VM without Landlock, or one it cannot check, before it builds anything.
 
-**Fix:** run `defenseclaw sandbox setup` (or `sandbox doctor --fix`) and answer yes to the MicroVM question. Sandboxes made on the Docker driver cannot start on MicroVMs: setup lists them first, and after the switch they can only be deleted.
+**Fix:** update Docker Desktop to 29.8 or newer and turn on **Settings → Resources → Network → Enable host networking** (the OpenShell supervisor needs it). With OpenShell 0.1.6, MicroVMs do not start on a Mac ([MicroVM create is refused](/docs/sandboxes/guide#microvm-create-is-refused-on-linux-with-kvm)), so Docker is the way to run sandboxes on a Mac until a fixed OpenShell release is supported. With a fixed OpenShell release, run `defenseclaw sandbox setup` (or `sandbox doctor --fix`) and answer yes to the MicroVM question. Sandboxes made on the Docker driver cannot start on MicroVMs: setup lists them first, and after the switch they can only be deleted.
 
-**Check:** the **Gateway compute driver** row reads `vm`.
+**Check:** the **Gateway compute driver** row reads `docker`, the driver this Mac is configured for. It reads `vm` only after you switch to MicroVMs.
 
 ### Intel Mac
 
