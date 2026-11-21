@@ -14,9 +14,12 @@ import (
 )
 
 var (
-	coworkIDPattern        = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	coworkVendorPattern    = lazyregexp.New(`^[a-z][a-z0-9_-]*$`)
-	coworkCollectorPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$`)
+	coworkIDPattern     = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	coworkVendorPattern = lazyregexp.New(`^[a-z][a-z0-9_-]*$`)
+	// The host starts and ends with a letter or digit, as the VM's install.sh
+	// requires (GAP-1736): a host ending in '-' or '.' would validate here and
+	// then fail every VM start with exit 14.
+	coworkCollectorPattern = lazyregexp.New(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}$`)
 	// Anthropic's v1.7 install-arguments grammar, including the 256-byte cap.
 	coworkArgsPattern = lazyregexp.New(`^[A-Za-z0-9][A-Za-z0-9._:=,-]{0,255}$`)
 )

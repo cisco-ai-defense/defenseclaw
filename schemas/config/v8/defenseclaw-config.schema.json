@@ -6885,7 +6885,7 @@
             "mode": { "type": "string", "enum": ["off", "on"], "default": "off" },
             "tenant": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
             "device": { "type": "string", "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$", "description": "Optional override. When unset each host derives its own ID (macOS IOPlatformUUID, Windows MachineGuid), so one fleet-wide config or signed bundle gives every host a distinct device." },
-            "collector": { "type": "string", "maxLength": 253, "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}$" },
+            "collector": { "type": "string", "maxLength": 253, "pattern": "^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?:[0-9]{1,5}$" },
             "vendor": { "type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9_-]*$" },
             "source_dir": { "type": "string", "maxLength": 4096 },
             "package_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of this machine architecture's archive from the approved release." },
