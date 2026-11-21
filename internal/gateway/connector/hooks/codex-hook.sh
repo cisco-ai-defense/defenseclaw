@@ -229,13 +229,14 @@ defenseclaw_install_held() {
   defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }
-# A failure before the helpers load (a hook path that does not resolve, a
-# missing or broken _hardening.sh, a set -e error) blocks in fail mode
-# closed, under strict availability and while this account's installer holds
-# its data directory, and so does every exit 2, with Codex's own block of
-# the registered event (codex_closed_answer); fail mode open keeps the exit
-# status. The installed mode decides (GAP-0315).
-# defenseclaw_harden_env replaces this trap with the hook's own.
+# A failure (a hook path that does not resolve, a missing or broken
+# _hardening.sh, a set -e error, an unbound variable, before or after the
+# helpers load) blocks in fail mode closed, under strict availability and
+# while this account's installer holds its data directory, and so does every
+# exit 2, with Codex's own block of the registered event
+# (codex_closed_answer); fail mode open keeps the exit status. The installed
+# mode decides (GAP-0315). The exit guard (shell-exit-guard, installed below
+# codex_closed_answer) stays the EXIT trap to the end (GAP-1734).
 _DC_BOOT_FAIL_MODE="{{.FailMode}}"
 defenseclaw_boot_fails_closed() {
   [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
@@ -284,7 +285,7 @@ codex_closed_answer() {
   esac
   exit 0
 }
-trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -eq 2 ] || { [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; }; then codex_closed_answer; fi' EXIT
+{{template "shell-exit-guard" .}}
 {{end}}
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
@@ -324,6 +325,7 @@ _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
 {{if .ManagedShellGuard}}{{template "managed-prologue" .}}
+{{else if and (not .SecureClient) (not .Sandbox)}}{{template "shell-exit-guard" .}}
 {{end}}{{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the
@@ -381,11 +383,7 @@ fi
 command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
-{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_harden_env replaced the EXIT trap with its cleanup: keep it, and
-# answer every block below (exit 2) as Codex reads one for the registered
-# event (codex_closed_answer, GAP-0949).
-trap '_dc_codex_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_codex_rc" -eq 2 ]; then codex_closed_answer; fi' EXIT
-{{end}}{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
+{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
 {{end}}
 # Fail mode governs response-layer failures (4xx, bad JSON, missing
 # action) and transport failures (gateway unreachable / timeout / 5xx).

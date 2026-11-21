@@ -355,9 +355,12 @@ defenseclaw_harden_env() {
   export HOME="$DEFENSECLAW_HOOK_HOME"
   # A managed hook's exit handler maps unexpected exits to the fail mode and
   # runs this cleanup itself; replacing it here would let bash's own exit
-  # status decide the outcome.
+  # status decide the outcome. So does the exit guard of a per-user or
+  # standalone managed hook (_dc_hook_on_exit, GAP-1734).
   if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
     trap '_dc_managed_on_exit' EXIT
+  elif declare -F _dc_hook_on_exit >/dev/null 2>&1; then
+    trap '_dc_hook_on_exit' EXIT
   else
     trap '_defenseclaw_hook_cleanup' EXIT
   fi
