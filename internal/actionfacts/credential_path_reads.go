@@ -1131,6 +1131,17 @@ func credentialSearchFilterOf(command CommandFact, program string) credentialSea
 	// option (--incl, --exclude-f). Such a word switches the name filter off
 	// (every name is read, as on rel) instead of guessing which option it is.
 	abbreviated := false
+	abbreviates := func(name string) bool {
+		if len(name) <= 2 || !strings.HasPrefix(name, "--") || name == "--exclude" {
+			return false
+		}
+		for _, option := range []string{"--include", "--exclude", "--exclude-dir", "--exclude-from"} {
+			if len(name) < len(option) && strings.HasPrefix(option, name) {
+				return true
+			}
+		}
+		return false
+	}
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
 		if arg == "--" {
@@ -1138,26 +1149,32 @@ func credentialSearchFilterOf(command CommandFact, program string) credentialSea
 		}
 		if !spelled(i) {
 			argument := command.Arguments[i]
+			name, _, named := strings.Cut(argument.staticPrefix, "=")
 			switch prefix := argument.staticPrefix; {
 			case strings.HasPrefix(argument.StaticGlob, "--include="):
 				add("--include", strings.TrimPrefix(argument.StaticGlob, "--include="), true)
-			case strings.HasPrefix(prefix, "--include"):
+			case named && abbreviates(name):
+				// --incl="$X", --inc=$X, --exclude-f=$F: as a spelled
+				// abbreviation (rel-1-0-10:GAP-1666).
+				abbreviated = true
+			case strings.HasPrefix(prefix, "--include"), strings.HasPrefix("--include=", prefix):
+				// --include="$X", or a word that may expand to an --include
+				// ("$X", -"$X", --"$X", --inc"$X"): an include of every name
+				// from here on, so an earlier --exclude hides nothing grep
+				// may read (rel-1-0-10:GAP-1666), as rg's unspelled word
+				// turns hidden on.
 				add("--include", "", false)
 			case strings.HasPrefix(prefix, "--exclude-dir"):
 				add("--exclude-dir", "", false)
-			case prefix == "" || strings.HasPrefix(prefix, "-"):
+			case strings.HasPrefix(prefix, "-"):
 				// --exclude="$X", --exclude-from="$F", or a word that may
 				// expand to either: an exclude grep may read in this place.
 				add("--exclude", "", false)
 			}
 			continue
 		}
-		if name, _, _ := strings.Cut(arg, "="); len(name) > 2 && strings.HasPrefix(name, "--") {
-			for _, option := range []string{"--include", "--exclude", "--exclude-dir", "--exclude-from"} {
-				if len(name) < len(option) && strings.HasPrefix(option, name) && name != "--exclude" {
-					abbreviated = true
-				}
-			}
+		if name, _, _ := strings.Cut(arg, "="); abbreviates(name) {
+			abbreviated = true
 		}
 		for _, option := range []string{"--include", "--exclude", "--exclude-dir", "--exclude-from"} {
 			switch {

@@ -81,6 +81,12 @@ func TestCredentialNameInProgramTextIsNoReadOfIt(t *testing.T) {
 		{"Q35", `grep -r --exclude="$X" --include='*.go' KEY .`, true},
 		{"Q35b", "grep -r --exclude-from=ignore.lst --include='*.go' KEY .", true},
 		{"Q35c", "grep -r --exclude='*.env' --incl='.env' KEY .", true},
+		// An abbreviated --include whose value expands, or a word that may
+		// expand to an --include, reads every name from there on, as on rel
+		// (rel-1-0-10:GAP-1666).
+		{"Q36", `grep -r --exclude='*.env' --incl="$X" KEY .`, true},
+		{"Q36b", "grep -r --exclude='*.env' --inc=$X KEY .", true},
+		{"Q36c", `grep -r --exclude='*.env' "$X" KEY .`, true},
 	}
 	installCorrelationHMACForTest(t)
 	for _, r := range rows {
