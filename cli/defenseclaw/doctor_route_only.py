@@ -385,10 +385,10 @@ def passthrough_rows(connector: str, upstream: dict[str, Any]) -> list[Row]:
             Row(
                 "warn",
                 label,
-                "config.yaml records bedrock.auth passthrough, but doctor sees no AWS_BEARER_TOKEN_BEDROCK for Claude Code "
-                "(it may come from another shell, a project settings.local.json or managed settings, which doctor does not "
-                "read). If Claude Code answers HTTP 400 \"a SigV4-signed Bedrock request cannot pass through the gateway\", "
-                "it has no key",
+                "config.yaml records bedrock.auth passthrough, but doctor sees no AWS_BEARER_TOKEN_BEDROCK for "
+                "Claude Code (it may come from another shell, a project settings.local.json or managed settings, "
+                "which doctor does not read). If Claude Code answers HTTP 400 "
+                "\"a SigV4-signed Bedrock request cannot pass through the gateway\", it has no key",
                 fix + ", unless Claude Code gets the key from a source you control",
             )
         ]

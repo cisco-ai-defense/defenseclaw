@@ -63,7 +63,11 @@ def _claude_settings() -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
     # The shell environment as the agent sees it: a key that defenseclaw keys set
     # keeps in ~/.defenseclaw/.env and this process copied into os.environ is
     # not in Claude Code's environment (rel-1-0-10:GAP-1105).
-    env = {k: v for k, v in credential_provenance.child_environ().items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "AWS_"))}
+    env = {
+        k: v
+        for k, v in credential_provenance.child_environ().items()
+        if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "AWS_"))
+    }
     path = os.path.join(claude_config_dir(), "settings.json")
     try:
         with open(path, encoding="utf-8") as fh:
