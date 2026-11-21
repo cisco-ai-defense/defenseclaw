@@ -120,7 +120,7 @@ func newWindowsEnterprisePayloadDirectory() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("resolve the trusted ProgramData directory: %w", err)
 		}
-		sweepWindowsEnterpriseLeftovers(parent)
+		windowsEnterpriseLeftoverSweep(parent)
 		return createProtectedWindowsEnterpriseDirectoryWithFallback(
 			parent,
 			managed.SetupInstallerStagePrefix,

@@ -1696,7 +1696,9 @@ func prepareWindowsEnterprisePowerShellTemp() (string, func() error, error) {
 			remove:         os.Remove,
 			removeAll:      managed.RemoveSetupTree,
 			fallbackParent: managed.SetupStagingFallbackRoot,
-			sweep:          sweepWindowsEnterpriseLeftovers,
+			sweep: func(programData string) {
+				windowsEnterpriseLeftoverSweep(programData)
+			},
 		},
 	)
 }

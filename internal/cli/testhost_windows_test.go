@@ -182,6 +182,8 @@ func pinTestProcessIdentity() {
 	// identity can build, never in the computer's ProgramData. A test of the
 	// ProgramData staging sets useTestTokenForStaging.
 	sandboxSeam("windowsEnterpriseStagingElevated", &windowsEnterpriseStagingElevated, func() bool { return false })
+	// The ProgramData staging of a test never sweeps the computer's own leftovers (GAP-1488).
+	sandboxSeam("windowsEnterpriseLeftoverSweep", &windowsEnterpriseLeftoverSweep, noWindowsEnterpriseLeftoverSweep)
 }
 
 // useTestTokenForStaging makes the lifecycle staging follow the test
@@ -1583,3 +1585,7 @@ func TestTestMachineFolderFingerprintLeavesOutTheFolderSize(t *testing.T) {
 		t.Fatalf("a written entry is not reported:\n%s", changes)
 	}
 }
+
+// noWindowsEnterpriseLeftoverSweep is the sandbox's leftover sweep: the
+// computer's own ProgramData leftovers are none of a test's business.
+func noWindowsEnterpriseLeftoverSweep(string) {}
