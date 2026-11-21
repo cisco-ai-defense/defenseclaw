@@ -73,6 +73,21 @@ class FixtureRootAcrossTheSwitch(unittest.TestCase):
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("FIXTURE ROOTS DIFFER", r.stdout)
 
+    def test_a_rootless_old_run_without_fx_against_the_box_root_gives_no_verdict(self):
+        # s7-gate compare --allow-cross-host copies scores and RUN.json only: an old-scorer side has no root and no fx
+        base = score_dir(self.e.root / "old-copied", {})
+        cand = score_dir(self.e.root / "new", {"fixture_root": str(self.fx)})
+        for b, c in ((base, cand), (cand, base)):
+            r = self.e.run("compare", "--base", b, "--cand", c)
+            self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+            self.assertIn("FIXTURE ROOTS DIFFER", r.stdout)
+
+    def test_two_rootless_old_runs_compare_with_a_warning(self):
+        a, b = score_dir(self.e.root / "old1", {}), score_dir(self.e.root / "old2", {})
+        r = self.e.run("compare", "--base", a, "--cand", b)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("records no fixture root", r.stdout)
+
     def test_two_old_per_run_trees_still_compare(self):
         a, b = self.old_run("old1", "0123456789ab"), self.old_run("old2", "ba9876543210")
         r = self.e.run("compare", "--base", a, "--cand", b)

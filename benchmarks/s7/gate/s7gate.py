@@ -2083,12 +2083,17 @@ def cmd_compare(a):
 
     (fx0, k0), (fx1, k1) = run_fixture_root(a.base), run_fixture_root(a.cand)
     fxs, kinds = [fx0, fx1], [k0, k1]
-    if None in fxs:
+    # A side with no recorded root and no OUT/fx is a run of the per-run-tree scorer (this scorer always records one), e.g.
+    # a cross-host copy (s7-gate compare --allow-cross-host copies scores and RUN.json, not fx): treat it as per-run, so
+    # against the box root it gets no verdict; two such sides are old-vs-old and compare with a warning.
+    missing = [n for n, x in (("base", fxs[0]), ("candidate", fxs[1])) if not x]
+    kinds = [k or "per-run" for k in kinds]
+    if missing:
         lines.append(
-            f"WARNING the {' and '.join(n for n, x in (('base', fxs[0]), ('candidate', fxs[1])) if not x)} side "
-            "records no fixture root and has no OUT/fx: its corpus paths may differ from the other side's (GAP-0495)"
+            f"WARNING the {' and '.join(missing)} side records no fixture root and has no OUT/fx (a run of the older "
+            "per-run-tree scorer, or a cross-host copy): read as a per-run tree (GAP-0495)"
         )
-    elif kinds[0] != kinds[1] or (kinds[0] == "box" and fxs[0] != fxs[1]):
+    if kinds[0] != kinds[1] or (kinds[0] == "box" and fxs[0] != fxs[1]):
         print(
             f"GATE: FIXTURE ROOTS DIFFER (base {fxs[0]} [{kinds[0]}], candidate {fxs[1]} [{kinds[1]}]): the corpora "
             "were rewritten to paths of different length or text (GAP-0666, GAP-0495); rerun one side (no verdict)"
