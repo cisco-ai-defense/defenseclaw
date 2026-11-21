@@ -45,24 +45,44 @@ def read_rows(path, what="label", need_truth=True):
     """Rows of a jsonl label file. Every row must be an object with a string id; source_truth must be a known verdict, and may only be absent in a label
     set (need_truth=False): the dev label sets hold disposition-only rows (a rule that changes expected_disposition and leaves the verdict alone)."""
     try:
-        fh = open(path, encoding="utf-8")
+        with open(path, "rb") as fh:
+            data = fh.read()
     except OSError as e:
         raise LabelError(f"{what} file {path}: cannot read: {e.strerror or e}") from e
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        line = data.count(b"\n", 0, e.start) + 1
+        raise LabelError(f"{what} file {path} line {line}: not UTF-8") from e
     rows = []
-    with fh:
-        for n, line in enumerate(fh, 1):
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except ValueError as e:
-                raise LabelError(f"{what} file {path} line {n}: not JSON ({e.__class__.__name__})") from e
-            if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
-                raise LabelError(f"{what} file {path} line {n}: a row needs a string id")
-            if row.get("source_truth") not in VERDICTS and (need_truth or "source_truth" in row):
-                raise LabelError(f"{what} file {path} line {n}: source_truth must be one of {', '.join(VERDICTS)}")
-            rows.append(row)
+    for n, line in enumerate(text.split("\n"), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line, object_pairs_hook=_no_duplicate_keys)
+        except ValueError as e:
+            raise LabelError(
+                f"{what} file {path} line {n}: not JSON or a duplicated key ({e.__class__.__name__})"
+            ) from e
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            raise LabelError(f"{what} file {path} line {n}: a row needs a string id")
+        if row.get("source_truth") not in VERDICTS and (need_truth or "source_truth" in row):
+            raise LabelError(f"{what} file {path} line {n}: source_truth must be one of {', '.join(VERDICTS)}")
+        rows.append(row)
+    if not rows:
+        # an empty or truncated file must not read as "nothing to fold" or "every row present" (GAP-1583)
+        raise LabelError(f"{what} file {path}: no rows")
     return rows
+
+
+def _no_duplicate_keys(pairs):
+    """json object hook: a key given twice in one row is an error, not a silent last-value-wins (GAP-1583)."""
+    d = {}
+    for k, v in pairs:
+        if k in d:
+            raise ValueError(f"duplicated key {k!r}")
+        d[k] = v
+    return d
 
 
 def load_overlays(paths):
@@ -109,7 +129,10 @@ def fold(base_rows, overlay):
 
 
 def write_set(out_dir, name, version, rows, base_path, overlay_paths, stats):
-    os.makedirs(out_dir, exist_ok=True)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        raise LabelError(f"--out {out_dir}: cannot create: {e.strerror or e}") from e
     lp, mp = os.path.join(out_dir, name + ".jsonl"), os.path.join(out_dir, name + ".manifest.json")
     if os.path.exists(lp) or os.path.exists(mp):
         raise LabelError(
@@ -126,9 +149,12 @@ def write_set(out_dir, name, version, rows, base_path, overlay_paths, stats):
         "fold": stats,
     }
     for path, data in ((lp, body), (mp, (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode())):
-        with open(path + ".tmp", "wb") as f:
-            f.write(data)
-        os.replace(path + ".tmp", path)
+        try:
+            with open(path + ".tmp", "wb") as f:
+                f.write(data)
+            os.replace(path + ".tmp", path)
+        except OSError as e:
+            raise LabelError(f"--out {out_dir}: cannot write {os.path.basename(path)}: {e.strerror or e}") from e
     return manifest
 
 
