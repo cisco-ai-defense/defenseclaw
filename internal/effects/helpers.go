@@ -152,6 +152,16 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 		}
 		// skip leading positionals (DURATION, host, dir).
 		for s := 0; s < spec.posSkip && i < len(words); s++ {
+			if name == "chroot" && s == 0 {
+				// chroot NEWROOT starts the command in / of the new root: the real
+				// / when NEWROOT is /, else a folder the walk cannot place
+				// (rel-1-0-10:GAP-1483: chroot / sh <<E wrote in the caller folder).
+				if words[i].Static && cleanPOSIX(words[i].Value) == "/" {
+					w.spec.chdir, w.spec.chdirSet = "/", true
+				} else {
+					w.spec.cwdDyn = true
+				}
+			}
 			i++
 		}
 	}
