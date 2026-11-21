@@ -18,8 +18,9 @@ import (
 // pattern, and a dotfile a recursive rg or a filtered grep -r does not open
 // are no read of that file: the private record stays empty and a later
 // unrelated upload is no chain.secret_read_then_egress. Every program,
-// substitution and search that does read a credentials file still chains
-// (rel-1-0-10:GAP-1047).
+// substitution and search that does read a credentials file still chains,
+// as on rel: a substitution in an input redirect, an rg glob override, the
+// last matching grep --include or --exclude (rel-1-0-10:GAP-1047).
 func TestCredentialNameInProgramTextIsNoReadOfIt(t *testing.T) {
 	dir := t.TempDir()
 	for _, f := range []string{".env", "main.go", "input.txt", ".gitignore", "show.py", "src/app.go", "src/.env"} {
@@ -59,6 +60,21 @@ func TestCredentialNameInProgramTextIsNoReadOfIt(t *testing.T) {
 		{"Q30", "cat src/*.env", false},
 		{"Q30b", `cat "$(echo .env)"`, true},
 		{"Q31", "rg -uu KEY .", true},
+		// A substitution in an input redirect is read (cat has no operand).
+		{"Q32", `cat < "$(echo .env)"`, true},
+		{"Q32b", `cat <"$(printf %s .env)"`, true},
+		// A glob override can whitelist a dotfile: rg opens it.
+		{"Q33", "rg -g .env KEY .", true},
+		{"Q33b", "rg -g '*' KEY .", true},
+		{"Q33c", "rg '--glob=*.env' KEY .", true},
+		{"Q33d", "rg --iglob .ENV KEY .", true},
+		{"Q33e", "rg --glob=*.env KEY .", true},
+		{"Q33f", "rg -ig .env KEY .", true},
+		// GNU grep: the last matching --include or --exclude wins, and a
+		// name none matches is read unless the first one is --include.
+		{"Q34", "grep -r --exclude='*.env' --include='.env' KEY .", true},
+		{"Q34b", "grep -r --exclude='*.txt' --include='*.go' KEY .", true},
+		{"Q34c", "grep -r --include='.env' --exclude='*.env' KEY .", false},
 	}
 	installCorrelationHMACForTest(t)
 	for _, r := range rows {

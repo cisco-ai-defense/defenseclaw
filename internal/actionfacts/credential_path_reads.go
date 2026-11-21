@@ -539,12 +539,20 @@ func (r *credentialPathResolver) resolve(words []credentialPathWord) {
 			readerParents[command.ParentCommandID] = true
 		}
 	}
-	// A reader's operand built by a substitution (cat "$(echo .env)") reads
-	// what the substituted echo or printf prints, and a find whose -exec runs
-	// a reader reads the files its name tests match: which file, the call
-	// does not say. A substitution in a reader's other words (the pattern of
+	// An input redirect that expands reads what it expands to, whatever
+	// the command: cat < "$(echo .env)" reads the echo's output.
+	for _, word := range words {
+		if word.role == credentialWordInputRedirect && word.argument.Expands {
+			expandingRead[word.commandID] = true
+		}
+	}
+	// A reader's operand or an input redirect built by a substitution
+	// (cat "$(echo .env)", cat < "$(echo .env)") reads what the substituted
+	// echo or printf prints, and a find whose -exec runs a reader reads the
+	// files its name tests match: which file, the call does not say. A
+	// substitution in a reader's other words (the pattern of
 	// grep "$(echo .env)" .gitignore) reads nothing: the reader needs a read
-	// operand that expands.
+	// operand or an input redirect that expands.
 	for _, command := range r.commands {
 		if r.stopped() {
 			return
@@ -1036,32 +1044,55 @@ func credentialProgramNonReadCall(call, rest string) bool {
 
 // credentialSearchFilter keeps, of a recursive search's credentials-file
 // probes, those the search opens (rel-1-0-10:GAP-1047): rg skips hidden
-// files and folders unless --hidden, -. or -uu; grep -r reads only the
-// names its --include globs match, never those its --exclude or
+// files and folders unless --hidden, -. or -uu, or a glob override
+// (-g, --glob, --iglob) could whitelist one; grep -r reads a name as its
+// last matching --include or --exclude says, and never one in a folder its
 // --exclude-dir globs match. The zero filter searches every probe.
 type credentialSearchFilter struct {
 	skipHidden bool
-	// include, exclude and excludeDir are grep's --include, --exclude and
-	// --exclude-dir globs.
-	include, exclude, excludeDir []string
+	// names are grep's --include (include) and --exclude globs in command
+	// order; excludeDir its --exclude-dir globs.
+	names      []credentialSearchGlob
+	excludeDir []string
+}
+
+type credentialSearchGlob struct {
+	glob    string
+	include bool
 }
 
 func credentialSearchFilterOf(command CommandFact, program string) credentialSearchFilter {
 	argv := command.Argv
+	// spelled: the word is the literal argv text (no expansion, no glob).
+	spelled := func(i int) bool {
+		return i >= len(command.Arguments) || !command.Arguments[i].Expands && command.Arguments[i].StaticGlob == ""
+	}
 	var filter credentialSearchFilter
 	if program == "rg" {
 		hidden, unrestricted := false, 0
-		for _, arg := range argv[1:] {
+		for i := 1; i < len(argv); i++ {
+			arg := argv[i]
 			if arg == "--" {
 				break
 			}
+			if !spelled(i) {
+				// A word the call does not spell (an expansion, an unquoted
+				// --glob=*.env) may be a glob override: fail closed.
+				if prefix := command.Arguments[i].staticPrefix; prefix == "" || strings.HasPrefix(prefix, "-") {
+					hidden = true
+				}
+				continue
+			}
 			switch {
-			case arg == "--hidden", arg == "--unrestricted" && unrestricted >= 1:
+			case arg == "--hidden", arg == "--unrestricted" && unrestricted >= 1,
+				// rg matches a glob override before its hidden test, so the
+				// glob can whitelist a dotfile: fail closed, as --hidden.
+				arg == "--glob", arg == "--iglob", strings.HasPrefix(arg, "--glob="), strings.HasPrefix(arg, "--iglob="):
 				hidden = true
 			case arg == "--unrestricted":
 				unrestricted++
 			case strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--"):
-				if strings.Contains(arg[1:], ".") {
+				if strings.ContainsAny(arg[1:], ".g") {
 					hidden = true
 				}
 				unrestricted += strings.Count(arg[1:], "u")
@@ -1070,30 +1101,55 @@ func credentialSearchFilterOf(command CommandFact, program string) credentialSea
 		filter.skipHidden = !hidden && unrestricted < 2
 		return filter
 	}
+	// add records one option's glob. A glob the call does not spell is,
+	// for --include, the unquoted glob itself (a file matching it can only
+	// narrow it) or "*" (any name), and is dropped for --exclude and
+	// --exclude-dir: either way the filter keeps every name it might read.
+	add := func(option, glob string, known bool) {
+		switch option {
+		case "--include":
+			if !known {
+				glob = "*"
+			}
+			filter.names = append(filter.names, credentialSearchGlob{glob, true})
+		case "--exclude":
+			if known {
+				filter.names = append(filter.names, credentialSearchGlob{glob, false})
+			}
+		case "--exclude-dir":
+			if known {
+				filter.excludeDir = append(filter.excludeDir, glob)
+			}
+		}
+	}
 	for i := 1; i < len(argv); i++ {
 		arg := argv[i]
 		if arg == "--" {
 			break
 		}
-		if arg == "" && i < len(command.Arguments) && strings.HasPrefix(command.Arguments[i].StaticGlob, "--include=") {
-			// An unquoted --include=*.go is a glob the shell leaves as it is
-			// when nothing matches it; a match is a name that still ends in
-			// .go, so the filter only narrows. --exclude and --exclude-dir
-			// are taken only from literal words: a matching file could
-			// replace the glob with a narrower exclusion.
-			filter.include = append(filter.include, strings.TrimPrefix(command.Arguments[i].StaticGlob, "--include="))
+		if !spelled(i) {
+			argument := command.Arguments[i]
+			switch {
+			case strings.HasPrefix(argument.StaticGlob, "--include="):
+				add("--include", strings.TrimPrefix(argument.StaticGlob, "--include="), true)
+			case strings.HasPrefix(argument.staticPrefix, "--include"):
+				add("--include", "", false)
+			}
 			continue
 		}
-		for _, option := range []struct {
-			name string
-			list *[]string
-		}{{"--include", &filter.include}, {"--exclude", &filter.exclude}, {"--exclude-dir", &filter.excludeDir}} {
+		for _, option := range []string{"--include", "--exclude", "--exclude-dir"} {
 			switch {
-			case strings.HasPrefix(arg, option.name+"="):
-				*option.list = append(*option.list, strings.TrimPrefix(arg, option.name+"="))
-			case arg == option.name && i+1 < len(argv):
+			case strings.HasPrefix(arg, option+"="):
+				add(option, strings.TrimPrefix(arg, option+"="), true)
+			case arg == option && i+1 < len(argv):
 				i++
-				*option.list = append(*option.list, argv[i])
+				if spelled(i) {
+					add(option, argv[i], true)
+				} else if glob := command.Arguments[i].StaticGlob; glob != "" && option == "--include" {
+					add(option, glob, true)
+				} else {
+					add(option, "", false)
+				}
 			}
 		}
 	}
@@ -1120,8 +1176,18 @@ func (f credentialSearchFilter) searches(rel string) bool {
 		}
 		return false
 	}
-	if len(f.include) > 0 && !matches(f.include, base) || matches(f.exclude, base) {
-		return false
+	if len(f.names) > 0 {
+		// GNU grep: the last --include or --exclude that matches the name
+		// wins; a name none matches is read unless the first is --include.
+		read := !f.names[0].include
+		for _, name := range f.names {
+			if ok, err := path.Match(name.glob, base); err == nil && ok {
+				read = name.include
+			}
+		}
+		if !read {
+			return false
+		}
 	}
 	for _, dir := range segments[:len(segments)-1] {
 		if matches(f.excludeDir, dir) {
