@@ -1474,7 +1474,14 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	if jc := j.rp.PIIJudge(); jc != nil && jc.SystemPrompt != "" {
 		prompt = jc.SystemPrompt
 	}
-	prompt = toolResultJudgeSystem(ctx, prompt, toolResultPIIScope)
+	// A request a remote chat party may have written never widens what the
+	// judge treats as expected data: the output is judged as with an unknown
+	// request (rel-1-0-10:GAP-0714).
+	scope := toolResultPIIScope
+	if toolResultRequestOwnerUnknown(ctx) {
+		scope = ""
+	}
+	prompt = toolResultJudgeSystem(ctx, prompt, scope)
 
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: calling provider (dir=%s, content_len=%d)\n", direction, len(content))
 

@@ -524,6 +524,44 @@ type toolResultCall struct {
 	tool string
 	args string
 	off  bool
+	// remoteParty is set for the output of a call on a connector whose
+	// prompt text can come from a remote chat party (promptMayBeRemoteParty)
+	// when the hook's connector is not in the context (the inspect route).
+	remoteParty bool
+}
+
+// promptMayBeRemoteParty reports a connector whose "user" prompt text can be
+// written by a remote chat party on a messaging platform (Hermes, OpenClaw),
+// not only by the installing user: such text names no scope target and never
+// widens what the PII judge treats as expected data (rel-1-0-10:GAP-0714).
+func promptMayBeRemoteParty(connectorName string) bool {
+	switch canonicalConnectorRulePackKey(connectorName) {
+	case "hermes", "openclaw":
+		return true
+	}
+	return false
+}
+
+// withToolResultRemoteParty marks the call in ctx (withToolResultCall) as one
+// whose turn request may be a remote party's, for connectorName.
+func withToolResultRemoteParty(ctx context.Context, connectorName string) context.Context {
+	call, ok := ctx.Value(toolResultCallKey{}).(toolResultCall)
+	if !ok || call.off || !promptMayBeRemoteParty(connectorName) {
+		return ctx
+	}
+	call.remoteParty = true
+	return context.WithValue(ctx, toolResultCallKey{}, call)
+}
+
+// toolResultRequestOwnerUnknown reports a tool output whose turn request is
+// not known to be the installing user's: the hook's connector, or the call's
+// mark, is one whose prompt a remote chat party can write.
+func toolResultRequestOwnerUnknown(ctx context.Context) bool {
+	if promptMayBeRemoteParty(authenticatedHookConnector(ctx)) {
+		return true
+	}
+	call, _ := ctx.Value(toolResultCallKey{}).(toolResultCall)
+	return call.remoteParty
 }
 
 // withToolResultCall records the call a tool output answers (its tool name
@@ -586,7 +624,18 @@ func (e judgeCallEffects) redacted() judgeCallEffects {
 // redacted, and with the sample's delimiters replaced so it cannot look like
 // the sample's end.
 func toolResultSectionText(value string) string {
-	return toolResultSampleDelims.Replace(redactToolResultCall(value))
+	return neutralizeToolResultMarker(toolResultSampleDelims.Replace(redactToolResultCall(value)))
+}
+
+// toolResultMarkerRe matches the phrase that opens the gateway's own note
+// (toolResultContextNote), in any case and spacing.
+var toolResultMarkerRe = lazyregexp.New(`(?i)context\s+from\s+defenseclaw`)
+
+// neutralizeToolResultMarker rewrites the gateway's marker phrase in session
+// text, as the sample delimiters are, so text the session wrote cannot pose
+// as the gateway's note inside a section (rel-1-0-10:GAP-0714).
+func neutralizeToolResultMarker(value string) string {
+	return toolResultMarkerRe.ReplaceAllString(value, "[quoted: context from defenseclaw]")
 }
 
 var toolResultSampleDelims = strings.NewReplacer("<<<", "‹‹‹", ">>>", "›››")
@@ -601,7 +650,7 @@ func toolResultHeaderValue(value string, maxBytes int) string {
 		return r
 	}, value)
 	value = strings.Join(strings.Fields(value), " ")
-	value = toolResultSampleDelims.Replace(value)
+	value = neutralizeToolResultMarker(toolResultSampleDelims.Replace(value))
 	if len(value) > maxBytes {
 		value = utf8SafePrefix(value, maxBytes) + " [truncated]"
 	}

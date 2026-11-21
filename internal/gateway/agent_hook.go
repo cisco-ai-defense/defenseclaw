@@ -3721,7 +3721,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			// fallback also reads descriptions, tool responses and results, and
 			// Hermes and OpenClaw "user" text can come from a remote chat party.
 			scopeText := req.PromptField
-			if req.ConnectorName == "hermes" || req.ConnectorName == "openclaw" {
+			if promptMayBeRemoteParty(req.ConnectorName) {
 				scopeText = ""
 			}
 			a.observeUserTurn(ctx, req.Content, scopeText, req.CWD, verdict)
@@ -3738,7 +3738,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		if !req.ToolArgsAreHookEnvelope && !req.ToolArgsProjectionUncertain {
 			callArgs = req.ToolArgs
 		}
-		resultCtx := withToolResultCall(ctx, callTool, callArgs)
+		resultCtx := withToolResultRemoteParty(withToolResultCall(ctx, callTool, callArgs), req.ConnectorName)
 		verdict = a.inspectMessageContent(resultCtx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
 		// PostToolUse referencing an unregistered MCP server gets

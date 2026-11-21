@@ -433,7 +433,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		// resolves the process connector via connectorName().
 		judgeCtx := r.Context()
 		if judgeLaneOn(a.decisionConfig(judgeCtx), a.connectorName(), config.CascadeLaneJudgeToolResultContext) {
-			judgeCtx = withToolResultCall(judgeCtx, req.Tool, nil)
+			judgeCtx = withToolResultRemoteParty(withToolResultCall(judgeCtx, req.Tool, nil), a.connectorName())
 		} else {
 			judgeCtx = withoutToolResultCall(judgeCtx)
 		}
