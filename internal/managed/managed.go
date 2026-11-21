@@ -13,6 +13,7 @@ package managed
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -78,7 +79,26 @@ func HookGuardianAuthorizationDir(dataDir string) string {
 	if configured := strings.TrimSpace(os.Getenv(HookGuardianAuthorizationDirEnv)); configured != "" {
 		return filepath.Clean(configured)
 	}
-	return filepath.Clean(strings.TrimSpace(dataDir)) + "-hook-guardian"
+	return hookGuardianAuthorizationDirFor(runtime.GOOS, dataDir)
+}
+
+// hookGuardianAuthorizationDirFor is the authorization directory of dataDir
+// on goos when HookGuardianAuthorizationDirEnv is unset: <data_dir>-hook-guardian,
+// except for the data directory of the macOS standalone layout, whose
+// lifecycle creates the directory as hook-guardian-state beside it (the
+// layout's GuardianAuthDir) and whose launchd services get that path from
+// their plists. An administrator shell has no such variable, so a command
+// run there (config validate) read /opt/cisco/defenseclaw/runtime-hook-guardian,
+// which does not exist, found no guardian identity records and warned that
+// a group budget the gateway applies selects nobody (rel-1-0-10:GAP-1541).
+func hookGuardianAuthorizationDirFor(goos, dataDir string) string {
+	clean := filepath.Clean(strings.TrimSpace(dataDir))
+	if goos == "darwin" {
+		if layout, err := StandaloneLayoutFor(goos); err == nil && clean == layout.DataDir {
+			return layout.GuardianAuthDir
+		}
+	}
+	return clean + "-hook-guardian"
 }
 
 // ForeignHookCleanDirSuffix names the folder next to the data directory in

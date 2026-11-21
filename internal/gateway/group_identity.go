@@ -221,6 +221,14 @@ func verifiedGroupDomains(ctx context.Context, spoolDir string) []groupDomains {
 		if facts.ResolvedAt.IsZero() {
 			continue
 		}
+		// The gateway merges the guardian record into the facts a hook
+		// call of the account carries (mergeSpoolFacts), so the matcher
+		// folds the NetBIOS domain the Mac record names (GAP-0635). A
+		// lookup outside the gateway (config validate) merges none, and a
+		// Mac's Open Directory answer has no NetBIOS domain, so the check
+		// paired nothing there and kept a warning for a group the matcher
+		// selects (rel-1-0-10:GAP-1541).
+		facts = mergeSpoolFacts(facts, record)
 		subject := profileSubjectFromVerified(VerifiedSubject{
 			UserID: record.Key, IDKind: useridentity.KindForID(record.Key), UserName: record.User, Directory: facts,
 		}, false)
